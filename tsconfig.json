@@ -2,7 +2,8 @@
   "compilerOptions": {
     "target": "ES2020",
     "module": "commonjs",
-    "lib": ["ES2020"],
+    "lib": ["ES2020", "DOM"],
+    "jsx": "react",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
@@ -17,7 +18,16 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noImplicitReturns": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+    "moduleResolution": "node",
+    "baseUrl": ".",
+    "paths": {
+      "react-native": ["../retailens-mobile/node_modules/react-native"],
+      "react-native-vision-camera": [
+        "../retailens-mobile/node_modules/react-native-vision-camera"
+      ]
+    },
+    "types": ["react"]
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]
