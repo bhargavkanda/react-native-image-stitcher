@@ -38,12 +38,23 @@ let package = Package(
     .target(
       name: "RetaiLensCaptureSDK",
       path: "Sources/RetaiLensCaptureSDK",
-      // The bridge files import React, which isn't a SwiftPM dep —
-      // exclude them so `swift test` builds clean.  The host app
-      // picks them up via the podspec instead.
+      // Excluded from `swift test` because they depend on either
+      // React (which isn't a SwiftPM dep) or OpenCV (which only
+      // ships as an iOS XCFramework via the podspec — no macOS
+      // build).  The host app's CocoaPods workspace picks them up.
       exclude: [
+        // React-dependent
         "QualityCheckerBridge.swift",
         "QualityCheckerBridge.m",
+        "StitcherBridge.swift",
+        "StitcherBridge.m",
+        // OpenCV-dependent (Phase 2 stitcher)
+        "OpenCVStitcher.h",
+        "OpenCVStitcher.mm",
+        // Stitcher.swift is `#if canImport(UIKit)`-gated so it
+        // compiles to nothing on macOS; including it keeps the
+        // file available to the Pods build without breaking
+        // `swift test`.
       ]
     ),
     .testTarget(

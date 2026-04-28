@@ -1,17 +1,21 @@
 /**
  * stitchFrames — video / frame stitching API.
  *
- * Planned implementation:
- *   - iOS: Swift native module that links OpenCV for iOS and calls
- *     ``cv::Stitcher::stitch(...)``.
- *   - Android: JNI binding using OpenCV for Android (same cv::Stitcher,
- *     different build surface).  Tracked separately on the roadmap —
- *     Android is a "fast-follow" after iOS stabilises.
+ * Implementation status (Phase 2 of #8):
+ *   - iOS: Swift native module that vendors upstream OpenCV's iOS
+ *     framework and calls `cv::Stitcher::SCANS` mode (designed for
+ *     translational shelf captures).  Lives in
+ *     `retailens-capture-sdk/ios/Sources/RetaiLensCaptureSDK/`.
+ *   - Android: deferred to Phase 3 — same OpenCV surface, different
+ *     build (NDK + Gradle).  Until that lands, Android calls hit the
+ *     `StitchNotImplementedError` path below.
  *
- * Today: a deliberate NOT_IMPLEMENTED stub.  Trying to actually stitch
- * in JS would be slow and regress the UX ; we'd rather hard-fail so
- * the host app surfaces the missing capability with an accurate error
- * message instead of silently shipping broken panoramas.
+ * Why fail loudly instead of falling back to JS?
+ *   The cloud-sync pipeline depends on a stitched panorama being
+ *   present.  Silently producing a broken or single-frame "panorama"
+ *   would corrupt downstream SOS computation.  Hard-failing here lets
+ *   the host app surface the unsupported-platform error to the user
+ *   immediately rather than discovering it on the server hours later.
  */
 
 import { NativeModules, Platform } from 'react-native';

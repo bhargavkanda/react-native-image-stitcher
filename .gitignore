@@ -8,3 +8,7 @@ dist/
 ios/.build/
 ios/.swiftpm/
 ios/Package.resolved
+
+# opencv-mobile XCFramework — downloaded by the podspec's prepare_command
+# on pod install.  ~37 MB binary, not git-friendly.
+ios/Vendor/
