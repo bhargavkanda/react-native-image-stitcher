@@ -2,3 +2,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 .DS_Store
+
+# SwiftPM build artefacts (ios/Package.swift produces these under
+# ios/.build/ when running `swift test` or `swift build`).
+ios/.build/
+ios/.swiftpm/
+ios/Package.resolved
