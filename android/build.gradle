@@ -1,0 +1,181 @@
+// SPDX-FileCopyrightText: 2026 Tiger Analytics
+// SPDX-License-Identifier: UNLICENSED
+//
+// Gradle module for the Android side of @retailens/capture-sdk.
+//
+// What lives here:
+//   - RetaiLensQualityChecker.kt — Laplacian-variance blur scoring
+//     and mean-luminance brightness scoring via OpenCV.  Mirror of
+//     the iOS Phase 1 implementation (which used vImage + vDSP).
+//   - RetaiLensStitcher.kt — extractFrames + stitchFrames +
+//     stitchVideo + normaliseImage, mirroring the iOS Phase 2 / 2.5
+//     ObjC++ surface.
+//   - RetaiLensCapturePackage.kt — ReactPackage that surfaces the
+//     two RN modules to the host app via Android autolinking.
+//
+// OpenCV vendor:
+//   We use the `quickbirdstudios/opencv-android` Maven artifact
+//   because it ships a clean AAR with the standard
+//   `org.opencv.*` Java packages, including the stitching module
+//   (which `opencv-mobile` strips on iOS — same trade-off applies
+//   here).  Version pinned to 4.x to match the iOS framework.
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+def reactNativeRoot = rootProject.findProperty("reactNativeRoot") ?: project.file("../../../node_modules/react-native")
+
+// ── OpenCV Android SDK download ──────────────────────────────────────
+//
+// We download the official OpenCV release zip (4.9.0) and unpack it
+// into `vendor/`.  Same idea as the iOS Phase 2 prepare_command —
+// no Maven artifact ships the full module set (most community
+// publications strip `stitching` / `imgcodecs` / `calib3d` to keep
+// the AAR small), but we need stitching, so we vendor it.
+//
+// The download is idempotent: if `vendor/OpenCV-android-sdk/sdk/`
+// exists we skip.  ~80 MB compressed → ~250 MB extracted, gitignored.
+def opencvVersion = '4.5.5'
+def opencvVendorDir = file("$projectDir/vendor")
+def opencvSdkDir = file("$opencvVendorDir/OpenCV-android-sdk/sdk")
+def opencvZipUrl = "https://github.com/opencv/opencv/releases/download/${opencvVersion}/opencv-${opencvVersion}-android-sdk.zip"
+def opencvZipFile = file("$opencvVendorDir/opencv-${opencvVersion}.zip")
+
+// Download at configuration time (before sourceSets evaluate) so
+// the java/src and native/libs paths exist when Gradle reads the
+// android {} block below.  Idempotent: skips if the SDK is already
+// present.
+if (!opencvSdkDir.exists()) {
+    opencvVendorDir.mkdirs()
+    if (!opencvZipFile.exists()) {
+        println "Downloading OpenCV ${opencvVersion} from ${opencvZipUrl}…"
+        new URL(opencvZipUrl).withInputStream { i ->
+            opencvZipFile.withOutputStream { o -> o << i }
+        }
+    }
+    println "Extracting OpenCV ${opencvVersion} to ${opencvVendorDir}…"
+    ant.unzip(src: opencvZipFile, dest: opencvVendorDir, overwrite: true)
+    opencvZipFile.delete()
+}
+
+android {
+    namespace 'com.retailens.capturesdk'
+    compileSdkVersion safeExtGet('compileSdkVersion', 34)
+    // Pin NDK to a known-good install — the host machine has a
+    // broken 27.0.12077973 (missing source.properties) sitting next
+    // to a working 27.1.12297006; without this, Gradle picks the
+    // broken one alphabetically and fails configuration.
+    ndkVersion "27.1.12297006"
+
+    defaultConfig {
+        minSdkVersion safeExtGet('minSdkVersion', 24)
+        targetSdkVersion safeExtGet('targetSdkVersion', 34)
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    // The hand-rolled JNI wrapper for cv::Stitcher (planned for
+    // Android stitching parity with iOS) was removed because
+    // OpenCV's prebuilt Android `libopencv_java4.so` does NOT
+    // contain `cv::Stitcher::create` symbols — the stitching
+    // module is dropped from the binary, not just from the Java
+    // bindings.  Re-enabling Android-side stitching requires
+    // building OpenCV Android from source with `BUILD_opencv_stitching=ON`,
+    // which is a hours-long build job out of scope for the SDK
+    // package itself.  See the Kotlin RetaiLensStitcher for the
+    // current "iOS-only" stitch behaviour.
+
+    sourceSets {
+        main {
+            // OpenCV ships its Java side as plain source files (not
+            // a pre-built JAR) under sdk/java/src/, so we compile it
+            // into our own AAR alongside the Kotlin code.  The
+            // pre-built .so libraries live under sdk/native/libs/
+            // and ride along as jniLibs.
+            java.srcDirs += [
+                "$opencvSdkDir/java/src",
+            ]
+            jniLibs.srcDirs = [
+                "$opencvSdkDir/native/libs",
+            ]
+            // OpenCV references some resources (logos, drawables)
+            // from its old wrapper; pointing res at the SDK keeps
+            // them available without copying.
+            res.srcDirs += [
+                "$opencvSdkDir/java/res",
+            ]
+        }
+    }
+
+    // OpenCV's MatAt.kt uses Kotlin inline-class types (UByte etc.)
+    // that the Kotlin 1.9.x compiler bundled with our toolchain
+    // can't lower.  We don't use the typed-Mat-accessor API anyway.
+    tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+        exclude '**/MatAt.kt'
+    }
+
+    // OpenCV's `org.opencv.android.*` package is the legacy
+    // OpenCV-Manager-service support layer + the camera UI views.
+    // We don't use ANY of it (we load the .so directly via
+    // System.loadLibrary and use vision-camera for camera UI).
+    // Excluding the whole package side-steps a wave of compile
+    // errors caused by missing AIDL-generated symbols and the
+    // missing `org.opencv.R` resource class.
+    tasks.withType(JavaCompile).configureEach {
+        exclude 'org/opencv/android/**'
+        exclude 'org/opencv/engine/**'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+    // OpenCV Android — the QuickBird build is the most up-to-date
+    // Maven artifact with full module set (including stitching).
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+    // React Native — provided by the host app via gradle's
+    // "compileOnly" so we don't pull a duplicate copy when the
+    // SDK is consumed from a hosting RN app.
+    compileOnly "com.facebook.react:react-android"
+
+    // OpenCV is wired in via sourceSets above (java/src compiled
+    // alongside Kotlin, native/libs surfaced as jniLibs).  No
+    // Maven coordinate needed.
+
+    // Kotlin stdlib + coroutines for the background-queue dispatch
+    // pattern that matches the iOS DispatchQueue.global(.userInitiated).
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.22"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
+
+    // ExifInterface for reading rotation metadata from JPEGs taken
+    // by Android cameras (which save in sensor-native landscape
+    // with an EXIF Orientation tag, same pattern as iOS).  The
+    // androidx version supports more file types and stays
+    // up-to-date with platform changes.
+    implementation "androidx.exifinterface:exifinterface:1.3.7"
+}
+
+// Helper from the React Native gradle convention to read host-app
+// SDK versions when present, with a sane default otherwise.
+def safeExtGet(prop, fallback) {
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}

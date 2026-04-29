@@ -12,3 +12,9 @@ ios/Package.resolved
 # opencv-mobile XCFramework — downloaded by the podspec's prepare_command
 # on pod install.  ~37 MB binary, not git-friendly.
 ios/Vendor/
+
+# OpenCV Android SDK — downloaded by build.gradle on first
+# build.  ~250 MB extracted, also not git-friendly.
+android/vendor/
+android/build/
+android/.gradle/

@@ -49,6 +49,7 @@
 
 #import "OpenCVStitcher.h"
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 
 NSString *const RetaiLensStitcherErrorDomain = @"RetaiLensStitcherErrorDomain";
 
@@ -218,6 +219,242 @@ NSError *errorForStitchStatus(cv::Stitcher::Status status) {
                    width:(NSInteger)panorama.cols
                   height:(NSInteger)panorama.rows
               durationMs:durationMs];
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Video → frames (AVFoundation, no OpenCV)
+// ─────────────────────────────────────────────────────────────────────
+
++ (nullable NSArray<NSString *> *)extractFramesFromVideoAtPath:(NSString *)videoPath
+                                                     outputDir:(NSString *)outputDir
+                                                     maxFrames:(NSInteger)maxFrames
+                                                   jpegQuality:(NSInteger)quality
+                                                         error:(NSError **)error {
+  if (maxFrames < 2) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1010
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"maxFrames must be ≥ 2 for the stitcher to have something to align.",
+      }];
+    }
+    return nil;
+  }
+
+  NSString *cleanedVideoPath = normalizeImagePath(videoPath);
+  NSURL *videoURL = [NSURL fileURLWithPath:cleanedVideoPath];
+  if (![[NSFileManager defaultManager] fileExistsAtPath:cleanedVideoPath]) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1011
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Video file not found: %@", videoPath],
+      }];
+    }
+    return nil;
+  }
+
+  // Make sure outputDir exists; the SDK call creates it but be
+  // defensive in case the host wrote a literal path that doesn't.
+  [[NSFileManager defaultManager] createDirectoryAtPath:normalizeImagePath(outputDir)
+                            withIntermediateDirectories:YES
+                                             attributes:nil
+                                                  error:nil];
+
+  AVURLAsset *asset = [AVURLAsset assetWithURL:videoURL];
+  CMTime duration = asset.duration;
+  Float64 totalSeconds = CMTimeGetSeconds(duration);
+  if (!isfinite(totalSeconds) || totalSeconds <= 0) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1012
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Could not read video duration — file may be corrupt or still being written.",
+      }];
+    }
+    return nil;
+  }
+
+  AVAssetImageGenerator *generator =
+      [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];
+  // Honour the camera's recorded orientation — without this, all
+  // frames come out unrotated and stitch into a sideways panorama.
+  generator.appliesPreferredTrackTransform = YES;
+  // Tight tolerances → AVFoundation seeks to the requested timestamp
+  // exactly rather than the nearest keyframe.  Cost: slower extract.
+  // Worth it; nearest-keyframe sampling can give near-duplicate frames
+  // when the keyframe interval lines up with our sample rate.
+  generator.requestedTimeToleranceBefore = kCMTimeZero;
+  generator.requestedTimeToleranceAfter = kCMTimeZero;
+
+  NSInteger clampedQuality = MAX(0, MIN(100, quality));
+  CGFloat compressionQuality = clampedQuality / 100.0;
+
+  NSMutableArray<NSString *> *paths =
+      [NSMutableArray arrayWithCapacity:(NSUInteger)maxFrames];
+  NSString *cleanedOutputDir = normalizeImagePath(outputDir);
+
+  for (NSInteger i = 0; i < maxFrames; i++) {
+    // Even time spacing across [0, duration].  Dividing by
+    // (maxFrames - 1) gives endpoints at exactly 0 and `duration`,
+    // capturing the first and last useful moments.
+    Float64 fraction = (Float64)i / (Float64)(maxFrames - 1);
+    Float64 timeSeconds = fraction * totalSeconds;
+    CMTime cmTime = CMTimeMakeWithSeconds(timeSeconds, 600);
+
+    NSError *frameErr = nil;
+    CGImageRef cgImage =
+        [generator copyCGImageAtTime:cmTime actualTime:NULL error:&frameErr];
+    if (cgImage == NULL) {
+      // Skip an unreadable frame rather than aborting — sometimes
+      // the very-last-millisecond seek fails on short videos.  The
+      // stitcher just gets one fewer frame.
+      continue;
+    }
+
+    UIImage *uiImage = [UIImage imageWithCGImage:cgImage];
+    CGImageRelease(cgImage);
+
+    NSData *jpegData = UIImageJPEGRepresentation(uiImage, compressionQuality);
+    if (jpegData == nil) continue;
+
+    NSString *framePath =
+        [cleanedOutputDir stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"frame_%03ld.jpg", (long)i]];
+    if ([jpegData writeToFile:framePath atomically:YES]) {
+      [paths addObject:framePath];
+    }
+  }
+
+  if (paths.count < 2) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1013
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"Extracted only %lu frames from video — need ≥ 2.  "
+             "The video may be too short or the file unreadable.",
+            (unsigned long)paths.count],
+      }];
+    }
+    return nil;
+  }
+
+  return paths;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Combined pipeline: video → stitched panorama
+// ─────────────────────────────────────────────────────────────────────
+
++ (nullable RetaiLensStitchResult *)stitchVideoAtPath:(NSString *)videoPath
+                                           outputPath:(NSString *)outputPath
+                                            maxFrames:(NSInteger)maxFrames
+                                          jpegQuality:(NSInteger)quality
+                                                error:(NSError **)error {
+  // Tmp dir for extracted frames — UUID'd so concurrent stitches
+  // can't clobber each other's working state.
+  NSString *tmpDir =
+      [NSTemporaryDirectory() stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"RetaiLensStitch-%@",
+              [[NSUUID UUID] UUIDString]]];
+
+  NSError *extractErr = nil;
+  NSArray<NSString *> *frames =
+      [self extractFramesFromVideoAtPath:videoPath
+                              outputDir:tmpDir
+                              maxFrames:maxFrames
+                            jpegQuality:quality
+                                  error:&extractErr];
+  if (!frames) {
+    // Best-effort cleanup — the dir may not exist if extract bailed
+    // before creating it.  Ignore the error.
+    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+    if (error) *error = extractErr;
+    return nil;
+  }
+
+  NSError *stitchErr = nil;
+  RetaiLensStitchResult *result =
+      [self stitchFramePaths:frames
+                  outputPath:outputPath
+                 jpegQuality:quality
+                       error:&stitchErr];
+
+  // Always tear down the tmp dir, success or fail — leaving
+  // hundreds of MB of frame JPEGs in /tmp would balloon the app's
+  // working set across panoramas.
+  [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+
+  if (!result && error) *error = stitchErr;
+  return result;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Photo orientation normalisation
+// ─────────────────────────────────────────────────────────────────────
+// Round-trip through cv::imread / cv::imwrite to bake the EXIF
+// rotation into the pixel buffer, then write a plain JPEG with no
+// orientation metadata.  Cheap (~ms for a typical iPhone JPEG) and
+// idempotent on already-normalised files.
+
++ (NSDictionary<NSString *, NSNumber *> *)normaliseImageAtPath:(NSString *)imagePath
+                                                         error:(NSError **)error {
+  NSString *cleaned = normalizeImagePath(imagePath);
+  if (![[NSFileManager defaultManager] fileExistsAtPath:cleaned]) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1020
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Image not found: %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  std::string nativePath(cleaned.UTF8String);
+  cv::Mat img = cv::imread(nativePath, cv::IMREAD_COLOR);
+  if (img.empty()) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1021
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Could not decode image at %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  std::vector<int> writeParams = {
+    cv::IMWRITE_JPEG_QUALITY, 92,
+  };
+  bool ok = cv::imwrite(nativePath, img, writeParams);
+  if (!ok) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1022
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"Could not rewrite image at %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  return @{
+    @"width":  @((NSInteger)img.cols),
+    @"height": @((NSInteger)img.rows),
+  };
 }
 
 @end

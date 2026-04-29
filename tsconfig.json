@@ -25,7 +25,11 @@
       "react-native": ["../retailens-mobile/node_modules/react-native"],
       "react-native-vision-camera": [
         "../retailens-mobile/node_modules/react-native-vision-camera"
-      ]
+      ],
+      "react-native-sensors": [
+        "../retailens-mobile/node_modules/react-native-sensors"
+      ],
+      "rxjs": ["../retailens-mobile/node_modules/rxjs"]
     },
     "types": ["react"]
   },

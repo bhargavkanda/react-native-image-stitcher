@@ -19,11 +19,15 @@ module.exports = {
         podspecPath: path.join(__dirname, 'RetaiLensCaptureSDK.podspec'),
       },
       android: {
-        // Phase 3 adds Android native code.  The `sourceDir` points
-        // at the conventional location the Gradle module will live
-        // at; until that file ships, RN autolinking treats it as a
-        // "no native code on this platform" signal and skips silently.
-        sourceDir: path.join(__dirname, 'android'),
+        // RELATIVE path on purpose.  RN's autolinking computes
+        // `path.join(root, sourceDir)` where `root` is the package
+        // root in node_modules (a symlink in our case).  An ABSOLUTE
+        // sourceDir gets concatenated by path.join rather than
+        // treated as already-resolved, producing a broken double
+        // path and silently failing detection.  Relative `'android'`
+        // joins cleanly and resolves through the symlink to the
+        // real Android module folder.
+        sourceDir: 'android',
       },
     },
   },

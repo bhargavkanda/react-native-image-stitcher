@@ -48,6 +48,16 @@ export interface CaptureResult {
   compressedUri: string;
   /** Local file path to original image (if retained) */
   originalUri?: string;
+  /**
+   * Image width in pixels, after EXIF orientation correction.
+   * Always populated for tap-photos (from vision-camera) and for
+   * stitched panoramas (from the OpenCV result).  Used by the
+   * SDK's thumbnail/preview components to render at the correct
+   * aspect ratio instead of forcing a square crop.
+   */
+  width: number;
+  /** Image height in pixels, after EXIF orientation correction. */
+  height: number;
   /** Whether this is a stitched panoramic image */
   isStitched: boolean;
   /** Capture timestamp (ISO 8601) */

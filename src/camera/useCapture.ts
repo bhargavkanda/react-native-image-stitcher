@@ -34,6 +34,7 @@ import {
 } from 'react-native-vision-camera';
 
 import { runQualityCheck } from '../quality/runQualityCheck';
+import { normaliseOrientation } from '../quality/normaliseOrientation';
 import type {
   CaptureResult,
   QualityReport,
@@ -100,6 +101,12 @@ function makeCaptureResult(
     // library (react-native-uuid or similar) before persisting.
     deviceUuid: `${capturedAt}-${photo.path.split('/').pop() ?? 'photo'}`,
     compressedUri: `file://${photo.path}`,
+    // vision-camera reports width/height post-orientation-correction,
+    // matching what `<Image>` renders.  Forwarding them lets the
+    // SDK's thumbnail strip / preview modal lay out at the correct
+    // aspect ratio instead of forcing square crops.
+    width: photo.width,
+    height: photo.height,
     isStitched: false,
     capturedAt,
     qualityReport,
@@ -153,11 +160,27 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
           flash,
           ...takePhotoOptions,
         });
+        // Bake EXIF rotation into pixels so the file on disk matches
+        // what the operator just saw on the preview, regardless of
+        // how downstream consumers handle EXIF.  Returns the
+        // post-rotation dimensions; we override the photo's
+        // width/height before constructing the CaptureResult so
+        // the SDK contract reports "what's actually saved".
+        const normalised = await normaliseOrientation(photo.path, {
+          width: photo.width,
+          height: photo.height,
+        });
+        const orientedPhoto: PhotoFile = {
+          ...photo,
+          width: normalised.width || photo.width,
+          height: normalised.height || photo.height,
+        };
+
         let report: QualityReport | undefined;
         if (enableQualityChecks && qualityThresholds) {
-          report = await runQualityCheck(photo.path, qualityThresholds);
+          report = await runQualityCheck(orientedPhoto.path, qualityThresholds);
         }
-        return makeCaptureResult(photo, report);
+        return makeCaptureResult(orientedPhoto, report);
       } finally {
         setIsCapturing(false);
         inFlightRef.current = null;

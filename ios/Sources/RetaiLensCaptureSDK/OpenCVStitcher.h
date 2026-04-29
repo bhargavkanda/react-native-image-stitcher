@@ -54,6 +54,59 @@ extern NSString *const RetaiLensStitcherErrorDomain;
                                          jpegQuality:(NSInteger)quality
                                                error:(NSError **)error;
 
+/// Extract `maxFrames` evenly-spaced frames from the video at
+/// `videoPath`, write each as a JPEG into `outputDir`, return the
+/// list of file paths in capture order.
+///
+/// Used as the first half of the panorama pipeline: the host app
+/// records video while the user holds the shutter, then we sample
+/// it down to N still frames the stitcher can consume.  cv::Stitcher
+/// works best with 5-15 well-spaced frames — much more is redundant
+/// and slow; much less risks gaps in the seam.
+///
+/// Implementation uses AVAssetImageGenerator (Foundation), not
+/// OpenCV, so no C++ touches this path; cheap enough that we can
+/// expose it as a separate primitive too.
++ (nullable NSArray<NSString *> *)extractFramesFromVideoAtPath:(NSString *)videoPath
+                                                     outputDir:(NSString *)outputDir
+                                                     maxFrames:(NSInteger)maxFrames
+                                                   jpegQuality:(NSInteger)quality
+                                                         error:(NSError **)error;
+
+/// One-shot helper: extract frames from `videoPath`, stitch them
+/// into a panorama at `outputPath`, delete the temporary frames,
+/// return the result.  This is what the JS shutter-hold flow calls;
+/// callers don't have to manage their own tmp directory or clean
+/// up partial state on failure.
++ (nullable RetaiLensStitchResult *)stitchVideoAtPath:(NSString *)videoPath
+                                           outputPath:(NSString *)outputPath
+                                            maxFrames:(NSInteger)maxFrames
+                                          jpegQuality:(NSInteger)quality
+                                                error:(NSError **)error;
+
+/// Normalise the EXIF orientation of `imagePath` in place.
+///
+/// vision-camera writes photos with the camera-sensor's native
+/// landscape pixels and an EXIF Orientation tag describing how to
+/// rotate them for display.  Most consumers (iOS UIImage, RN's
+/// <Image>) honour the tag, but Sentry breadcrumbs, share sheets,
+/// downstream image-manipulation libs, and the cv::Stitcher all
+/// read raw pixels and end up sideways.
+///
+/// This method round-trips the file through cv::imread (which
+/// honours EXIF and gives us the post-rotation pixel buffer) and
+/// cv::imwrite (which writes a plain JPEG with NO EXIF), so the
+/// saved file ends up with rotation baked into pixels and no
+/// orientation metadata.  Idempotent on already-normalised images.
+///
+/// Returns `@{ @"width": NSNumber, @"height": NSNumber }` post
+/// rotation so the caller can update its CaptureResult dimensions
+/// to match what's now on disk.  NSDictionary is used (rather than
+/// CGSize) because Swift can't translate `(CGSize) + (NSError**)`
+/// into a throwing API — a nullable reference type is required.
++ (nullable NSDictionary<NSString *, NSNumber *> *)normaliseImageAtPath:(NSString *)imagePath
+                                                                  error:(NSError **)error;
+
 @end
 
 NS_ASSUME_NONNULL_END

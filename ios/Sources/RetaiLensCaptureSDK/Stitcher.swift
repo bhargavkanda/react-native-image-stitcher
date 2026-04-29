@@ -41,6 +41,32 @@ public struct StitchOptions {
   }
 }
 
+public struct StitchVideoOptions {
+  /// Path to the recorded mp4 (with or without `file://` prefix).
+  public let videoPath: String
+  /// Where the resulting panoramic JPEG should be written.
+  public let outputPath: String
+  /// How many frames to sample from the video for stitching.
+  /// 10 is the empirical sweet spot — enough overlap to keep
+  /// homography solid, few enough that stitching stays under 4
+  /// seconds on iPhone 14+ for a typical ~3s pan.
+  public let maxFrames: Int
+  /// JPEG quality [0..100] applied to BOTH the intermediate
+  /// frames AND the final panorama.
+  public let jpegQuality: Int
+  public init(
+    videoPath: String,
+    outputPath: String,
+    maxFrames: Int = 10,
+    jpegQuality: Int = 85
+  ) {
+    self.videoPath = videoPath
+    self.outputPath = outputPath
+    self.maxFrames = maxFrames
+    self.jpegQuality = jpegQuality
+  }
+}
+
 public struct StitchResult: Equatable {
   public let outputPath: String
   public let width: Int
@@ -97,6 +123,52 @@ public enum Stitcher {
       let result = try OpenCVStitcher.stitchFramePaths(
         options.framePaths,
         outputPath: options.outputPath,
+        jpegQuality: options.jpegQuality
+      )
+      return StitchResult(
+        outputPath: result.outputPath,
+        width: result.width,
+        height: result.height,
+        durationMs: result.durationMs
+      )
+    } catch let nsError as NSError {
+      throw StitcherError.fromNSError(nsError)
+    }
+  }
+
+  /// Bake EXIF rotation into pixels for the image at `imagePath`.
+  /// Returns the post-rotation dimensions so the host can keep its
+  /// width/height fields aligned with what's now on disk.
+  ///
+  /// Idempotent on already-normalised files.  Errors mirror the
+  /// existing StitcherError shape so JS can switch on `.code`.
+  public static func normaliseOrientation(
+    imagePath: String
+  ) throws -> (width: Int, height: Int) {
+    do {
+      let dict = try OpenCVStitcher.normaliseImage(atPath: imagePath)
+      let width = dict["width"]?.intValue ?? 0
+      let height = dict["height"]?.intValue ?? 0
+      return (width: width, height: height)
+    } catch let nsError as NSError {
+      throw StitcherError.fromNSError(nsError)
+    }
+  }
+
+  /// Combined pipeline: extract frames from a recorded video,
+  /// stitch them into a panorama, write the result to
+  /// `options.outputPath`.  Used by the host app's tap-and-hold
+  /// shutter — the JS side records video while the user holds the
+  /// button and calls this on release.
+  ///
+  /// All temp frame extraction lives in /tmp and is torn down by
+  /// the ObjC layer regardless of success or failure.
+  public static func stitchVideo(_ options: StitchVideoOptions) throws -> StitchResult {
+    do {
+      let result = try OpenCVStitcher.stitchVideo(
+        atPath: options.videoPath,
+        outputPath: options.outputPath,
+        maxFrames: options.maxFrames,
         jpegQuality: options.jpegQuality
       )
       return StitchResult(

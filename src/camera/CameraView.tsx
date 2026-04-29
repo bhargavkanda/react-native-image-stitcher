@@ -34,6 +34,18 @@ export interface CameraViewProps {
   flash?: 'off' | 'on';
   /** Whether the preview is actively rendering.  Defaults to true. */
   isActive?: boolean;
+  /**
+   * Enable video recording on the underlying camera.  Required for
+   * `useVideoCapture().startRecording()` — vision-camera throws
+   * `capture/video-not-enabled` if you call startRecording without
+   * this flag set.  Defaults to `false` so apps that only take photos
+   * don't pay the video-pipeline allocation cost.
+   *
+   * Photo capture remains enabled regardless of this flag, so a
+   * single `<CameraView video />` can do both tap (photo) and
+   * hold (video → stitch) flows.
+   */
+  video?: boolean;
   /** Optional themed guidance banner.  Renders over the preview at the top. */
   guidance?: string;
   /** Extra style layer applied on top of the default full-screen layout. */
@@ -60,6 +72,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     device,
     flash = 'off',
     isActive = true,
+    video = false,
     guidance,
     style,
     cameraProps,
@@ -86,6 +99,17 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         device={device}
         isActive={isActive}
         photo
+        video={video}
+        // Bake the device orientation into the captured pixels.
+        // Without this, vision-camera writes the file in the camera
+        // sensor's native landscape and relies on EXIF metadata to
+        // tell viewers "rotate me" — but RN's <Image> on iOS often
+        // ignores EXIF, leading to thumbnails / previews appearing
+        // sideways even though the user shot in portrait.  Setting
+        // `outputOrientation="device"` rotates the pixels to match
+        // how the user is holding the phone, so the saved JPEG is
+        // "what you see is what was taken".
+        outputOrientation="device"
         torch={flash === 'on' ? 'on' : 'off'}
         {...cameraProps}
       />
