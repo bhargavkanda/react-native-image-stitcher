@@ -178,7 +178,16 @@ NSError *errorForStitchStatus(cv::Stitcher::Status status) {
   auto t0 = std::chrono::steady_clock::now();
 
   // SCANS mode — see file header for rationale.
-  cv::Ptr<cv::Stitcher> stitcher = cv::Stitcher::create(cv::Stitcher::SCANS);
+  // PANORAMA mode (default) instead of SCANS.  SCANS assumes
+  // pure translational motion over a planar subject, which only
+  // matches one specific shelf-scanning gesture (walking along the
+  // shelf with the camera held perpendicular).  In practice users
+  // pivot in place over 3D scenes — exactly what PANORAMA mode is
+  // built for (rotational camera around the nodal point, spherical
+  // warp).  Phase 5 of #8 will replace this with pose-driven
+  // alignment using cv::detail::* once ARKit/ARCore poses are
+  // available; until then PANORAMA is the better one-mode choice.
+  cv::Ptr<cv::Stitcher> stitcher = cv::Stitcher::create(cv::Stitcher::PANORAMA);
 
   cv::Mat panorama;
   cv::Stitcher::Status status = stitcher->stitch(frames, panorama);
