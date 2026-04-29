@@ -55,6 +55,17 @@ export { LiveFrameStrip } from './camera/LiveFrameStrip';
 export type { LiveFrameStripProps } from './camera/LiveFrameStrip';
 export { useDeviceOrientation } from './camera/useDeviceOrientation';
 export type { DeviceOrientation } from './camera/useDeviceOrientation';
+
+// ── AR (Phase 4) ────────────────────────────────────────────────────────
+// ARKit (iOS) / ARCore (Android) session wrapper.  Foundation for
+// pose-driven stitching (Phase 5), measurement (Phase 6), and
+// detection-then-measure (Phase 7).  See
+// docs/site-content/design/2026-04-29-ar-measurement-and-detection.md.
+export { useARSession, ARTrackingState } from './ar/useARSession';
+export type {
+  UseARSessionReturn,
+  FramePose,
+} from './ar/useARSession';
 export { CapturePreview } from './camera/CapturePreview';
 export type {
   CapturePreviewProps,

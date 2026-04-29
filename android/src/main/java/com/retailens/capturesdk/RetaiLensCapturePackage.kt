@@ -27,6 +27,7 @@ class RetaiLensCapturePackage : ReactPackage {
     ): List<NativeModule> = listOf(
         RetaiLensQualityChecker(reactContext),
         RetaiLensStitcher(reactContext),
+        RetaiLensARSession(reactContext),
     )
 
     override fun createViewManagers(

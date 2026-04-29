@@ -172,6 +172,17 @@ dependencies {
     // androidx version supports more file types and stays
     // up-to-date with platform changes.
     implementation "androidx.exifinterface:exifinterface:1.3.7"
+
+    // ARCore for Phase 4 of the AR-measurement plan: 6DoF pose
+    // tracking from camera + IMU on supported Android devices.
+    // Falls back to "AR not available" when:
+    //   - Device isn't on Google's ARCore-supported list
+    //   - Google Play Services for AR isn't installed / up-to-date
+    // The sample app doesn't require AR, so the dependency adds
+    // ~2 MB to the AAR; the Play Services for AR app is downloaded
+    // on demand (~30 MB) the first time the user opens an AR
+    // capture screen on a supported device.
+    implementation "com.google.ar:core:1.45.0"
 }
 
 // Helper from the React Native gradle convention to read host-app
