@@ -65,6 +65,18 @@ export interface CaptureStatusOverlayProps {
    */
   stitchingMessage?: string;
   /**
+   * If set, the recording-phase banner shows a live countdown
+   * ("REC 4s left") computed against this value.  Set to the
+   * shutter's `maxHoldMs` so the user can see how long they have
+   * left before the auto-stop fires.  Pair with a fresh value
+   * each time recording starts so the timer resets per capture.
+   *
+   * `recordingStartedAt` is the timestamp (Date.now()) when the
+   * recording phase began — required for the countdown math.
+   */
+  countdownMs?: number;
+  recordingStartedAt?: number;
+  /**
    * Top inset to offset the banner below the status bar / notch.
    * Defaults to 0 — host apps using `react-native-safe-area-context`
    * should pass `insets.top` here so the banner doesn't disappear
@@ -80,9 +92,21 @@ export function CaptureStatusOverlay({
   phase,
   recordingMessage = 'Hold steady — pan slowly',
   stitchingMessage = 'Stitching panorama…',
+  countdownMs,
+  recordingStartedAt,
   topInset = 0,
   style,
 }: CaptureStatusOverlayProps): React.JSX.Element | null {
+  // Countdown ticker — re-renders every 250 ms while recording so
+  // the "REC 4s left" text stays current without flooding render
+  // calls.  Disabled (no interval) when not in recording phase or
+  // when countdown isn't configured.
+  const [, setTick] = React.useState(0);
+  React.useEffect(() => {
+    if (phase !== 'recording' || !countdownMs || !recordingStartedAt) return;
+    const id = setInterval(() => setTick((t) => t + 1), 250);
+    return () => clearInterval(id);
+  }, [phase, countdownMs, recordingStartedAt]);
   // Pulse animation for the REC dot.  Driven by a single Animated
   // value that loops 0→1→0.  Cheap (no listeners, runs on the
   // native driver) and only spins up while recording.
@@ -135,8 +159,24 @@ export function CaptureStatusOverlay({
   // releases and we move to stitching the recording is over and a
   // bright red border would be misleading.
   const showBorder = phase === 'recording';
-  const message =
+
+  // Compute remaining seconds for the countdown.  Re-rendered
+  // every 250 ms by the tick interval above.  If countdownMs or
+  // recordingStartedAt are missing we just render the base
+  // message without a "Xs left" suffix.
+  let baseMessage =
     phase === 'recording' ? recordingMessage : stitchingMessage;
+  if (
+    phase === 'recording'
+    && countdownMs
+    && recordingStartedAt
+  ) {
+    const elapsedMs = Date.now() - recordingStartedAt;
+    const remainingMs = Math.max(0, countdownMs - elapsedMs);
+    const remainingSec = Math.ceil(remainingMs / 1000);
+    baseMessage = `${recordingMessage} · ${remainingSec}s left`;
+  }
+  const message = baseMessage;
 
   // Orientation-aware banner placement.  The app is portrait-locked
   // at the OS level, so we re-position via absolute coords + apply

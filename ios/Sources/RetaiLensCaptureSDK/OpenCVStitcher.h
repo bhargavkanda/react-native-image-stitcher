@@ -49,9 +49,27 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 ///
 /// On success returns the result object; on failure populates
 /// `error` (NSError, RetaiLensStitcherErrorDomain) and returns nil.
+/// `warperType`: one of @"plane" / @"cylindrical" / @"spherical".
+///   Pass nil/empty for the default (@"plane").  Different
+///   projections suit different gestures — see the field A/B
+///   testing settings UI for guidance.
+/// `blenderType`: one of @"multiband" / @"feather".  Pass nil for
+///   the default (@"multiband").
+/// `seamFinderType`: one of @"graphcut" / @"skip".  Pass nil for
+///   the default (@"graphcut").
+///   - "graphcut" runs cv::detail::GraphCutSeamFinder over all
+///     warped frames before blending — produces clean seams,
+///     pairs well with MultiBandBlender, but holds all warped
+///     frames in memory simultaneously (higher peak).
+///   - "skip" streams warp+feed in a single pass and never holds
+///     more than one warped frame.  Lower peak memory.  Use on
+///     low-RAM devices or for fastest path with FeatherBlender.
 + (nullable RetaiLensStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
                                           outputPath:(NSString *)outputPath
                                          jpegQuality:(NSInteger)quality
+                                          warperType:(nullable NSString *)warperType
+                                         blenderType:(nullable NSString *)blenderType
+                                      seamFinderType:(nullable NSString *)seamFinderType
                                                error:(NSError **)error;
 
 /// Extract `maxFrames` evenly-spaced frames from the video at
@@ -82,6 +100,9 @@ extern NSString *const RetaiLensStitcherErrorDomain;
                                            outputPath:(NSString *)outputPath
                                             maxFrames:(NSInteger)maxFrames
                                           jpegQuality:(NSInteger)quality
+                                           warperType:(nullable NSString *)warperType
+                                          blenderType:(nullable NSString *)blenderType
+                                       seamFinderType:(nullable NSString *)seamFinderType
                                                 error:(NSError **)error;
 
 /// Normalise the EXIF orientation of `imagePath` in place.

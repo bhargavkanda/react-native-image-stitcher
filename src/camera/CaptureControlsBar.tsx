@@ -59,6 +59,13 @@ export interface CaptureControlsBarProps {
    * recording mid-stitch.
    */
   shutterProcessing?: boolean;
+  /**
+   * Forwards to <CameraShutter maxHoldMs>.  Auto-fires
+   * onShutterHoldComplete when the timer elapses, simulating the
+   * user releasing.  Pair with <CaptureStatusOverlay countdownMs>
+   * so the user sees how long they have left.
+   */
+  shutterMaxHoldMs?: number;
 
   /**
    * Render-prop slot for the host's right-side action.  Typically a
@@ -96,6 +103,7 @@ export function CaptureControlsBar({
   onShutterHoldComplete,
   shutterDisabled = false,
   shutterProcessing = false,
+  shutterMaxHoldMs,
   rightAction = null,
   colors,
   bottomInset = 0,
@@ -134,6 +142,7 @@ export function CaptureControlsBar({
         onTap={onShutterTap}
         onHoldStart={onShutterHoldStart}
         onHoldComplete={onShutterHoldComplete}
+        maxHoldMs={shutterMaxHoldMs}
         disabled={shutterDisabled}
         isProcessing={shutterProcessing}
       />

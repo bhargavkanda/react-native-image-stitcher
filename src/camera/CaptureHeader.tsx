@@ -41,6 +41,12 @@ export interface CaptureHeaderProps {
   /** Custom label for the back button.  Defaults to "‹ Back". */
   backLabel?: string;
   /**
+   * Called when the gear / settings affordance is pressed.  If
+   * omitted, no settings icon is rendered.  Wire this to the
+   * host's PanoramaSettingsModal `visible` state.
+   */
+  onSettingsPress?: () => void;
+  /**
    * Optional second-line guidance text shown below the title row.
    * Renders nothing if absent.
    */
@@ -68,6 +74,7 @@ export function CaptureHeader({
   title,
   onBack,
   backLabel = '‹ Back',
+  onSettingsPress,
   guidance,
   topInset = 0,
   colors,
@@ -105,9 +112,21 @@ export function CaptureHeader({
         >
           {title}
         </Text>
-        {/* Right-side spacer so the centre of the row is the title's
-         *  centre, not the title's start.  Symmetry with backButton. */}
-        <View style={styles.backButton} />
+        {/* Settings gear (right side).  Falls back to a spacer when
+         *  the host doesn't wire a handler — keeps the title centred. */}
+        {onSettingsPress ? (
+          <Pressable
+            onPress={onSettingsPress}
+            hitSlop={12}
+            accessibilityRole="button"
+            accessibilityLabel="Open panorama settings"
+            style={styles.backButton}
+          >
+            <Text style={[styles.gearIcon, { color: accent }]}>⚙</Text>
+          </Pressable>
+        ) : (
+          <View style={styles.backButton} />
+        )}
       </View>
 
       {guidance ? (
@@ -156,5 +175,9 @@ const styles = StyleSheet.create({
   },
   guidanceText: {
     fontSize: 13,
+  },
+  gearIcon: {
+    fontSize: 22,
+    textAlign: 'right',
   },
 });

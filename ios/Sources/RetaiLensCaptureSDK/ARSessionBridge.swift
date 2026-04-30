@@ -85,4 +85,65 @@ public final class RetaiLensARSessionBridge: NSObject {
         RetaiLensARSession.shared.clearPoseLog()
         resolver(nil)
     }
+
+    // MARK: - Phase 5: AR-backed photo + video capture
+
+    /// `options` keys: `path` (required), `quality` (optional, 0-100,
+    /// default 90).  Resolves with `{ path, width, height, isMirrored,
+    /// isRawPhoto }` matching vision-camera's PhotoFile shape.
+    @objc(takePhoto:resolver:rejecter:)
+    public func takePhoto(
+        options: NSDictionary,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        let path = (options["path"] as? String) ?? ""
+        let quality = (options["quality"] as? Int) ?? 90
+        RetaiLensARSession.shared.takePhoto(
+            toPath: path,
+            quality: quality
+        ) { result, error in
+            if let error = error {
+                rejecter("ar-photo-failed", error.localizedDescription, error)
+            } else {
+                resolver(result)
+            }
+        }
+    }
+
+    /// `options` keys: `path` (optional, native generates one in
+    /// NSTemporaryDirectory when omitted).  Resolves with `{ path }`
+    /// once recording is set up (frames begin flowing automatically
+    /// from the ARSession delegate).
+    @objc(startRecording:resolver:rejecter:)
+    public func startRecording(
+        options: NSDictionary,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        let path = (options["path"] as? String) ?? ""
+        RetaiLensARSession.shared.startRecording(toPath: path) { resolvedPath, error in
+            if let error = error {
+                rejecter("ar-recording-failed", error.localizedDescription, error)
+            } else {
+                resolver(["path": resolvedPath ?? ""])
+            }
+        }
+    }
+
+    /// Resolves with `{ path, duration, size, width, height }`
+    /// matching vision-camera's VideoFile shape.
+    @objc(stopRecording:rejecter:)
+    public func stopRecording(
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        RetaiLensARSession.shared.stopRecording { result, error in
+            if let error = error {
+                rejecter("ar-stop-failed", error.localizedDescription, error)
+            } else {
+                resolver(result)
+            }
+        }
+    }
 }

@@ -54,16 +54,32 @@ public struct StitchVideoOptions {
   /// JPEG quality [0..100] applied to BOTH the intermediate
   /// frames AND the final panorama.
   public let jpegQuality: Int
+  /// "plane" / "cylindrical" / "spherical".  See OpenCVStitcher.h
+  /// for guidance.  Default "plane".
+  public let warperType: String
+  /// "multiband" / "feather".  Default "multiband".
+  public let blenderType: String
+  /// "graphcut" / "skip".  Default "graphcut".
+  /// "graphcut" runs cv::detail::GraphCutSeamFinder for clean
+  /// seams (more memory).  "skip" streams warp+feed for low peak
+  /// memory at the cost of less optimal seams.
+  public let seamFinderType: String
   public init(
     videoPath: String,
     outputPath: String,
     maxFrames: Int = 10,
-    jpegQuality: Int = 85
+    jpegQuality: Int = 85,
+    warperType: String = "plane",
+    blenderType: String = "multiband",
+    seamFinderType: String = "graphcut"
   ) {
     self.videoPath = videoPath
     self.outputPath = outputPath
     self.maxFrames = maxFrames
     self.jpegQuality = jpegQuality
+    self.warperType = warperType
+    self.blenderType = blenderType
+    self.seamFinderType = seamFinderType
   }
 }
 
@@ -123,7 +139,10 @@ public enum Stitcher {
       let result = try OpenCVStitcher.stitchFramePaths(
         options.framePaths,
         outputPath: options.outputPath,
-        jpegQuality: options.jpegQuality
+        jpegQuality: options.jpegQuality,
+        warperType: "plane",
+        blenderType: "multiband",
+        seamFinderType: "graphcut"
       )
       return StitchResult(
         outputPath: result.outputPath,
@@ -169,7 +188,10 @@ public enum Stitcher {
         atPath: options.videoPath,
         outputPath: options.outputPath,
         maxFrames: options.maxFrames,
-        jpegQuality: options.jpegQuality
+        jpegQuality: options.jpegQuality,
+        warperType: options.warperType,
+        blenderType: options.blenderType,
+        seamFinderType: options.seamFinderType
       )
       return StitchResult(
         outputPath: result.outputPath,

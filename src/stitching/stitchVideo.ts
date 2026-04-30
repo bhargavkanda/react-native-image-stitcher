@@ -45,6 +45,36 @@ export interface StitchVideoOptions {
    * (extracted from video) AND the final panorama.  Default 85.
    */
   quality?: number;
+  /**
+   * Projection used during the warp step.  See native side for
+   * details.  Default `'plane'` — straight verticals/horizontals,
+   * good for shelf scans + close-up subjects.  Hourglass shape on
+   * partial arcs is handled by the rectangular-crop step.
+   *   - `'plane'`: flat projection.  Best for ≤30° pans.
+   *   - `'cylindrical'`: handles rotational mid-arc pans.
+   *   - `'spherical'`: full 90°+ panoramic captures.
+   */
+  warperType?: 'plane' | 'cylindrical' | 'spherical';
+  /**
+   * Blending strategy across stitched seams.
+   *   - `'multiband'` (default): high-quality seams when alignment
+   *     is good; can produce visible halos when adjacent frames
+   *     have inconsistent exposure.
+   *   - `'feather'`: simple alpha-weighted blend; faster + no
+   *     halo artifacts; slightly more visible seam edge.
+   */
+  blenderType?: 'multiband' | 'feather';
+  /**
+   * Seam finding strategy.
+   *   - `'graphcut'` (default): cv::detail::GraphCutSeamFinder
+   *     finds optimal cuts before blending — pairs beautifully
+   *     with `multiband`, but holds all warped frames in memory
+   *     simultaneously (higher peak).
+   *   - `'skip'`: streams warp+feed in a single pass, never
+   *     holding more than one warped frame.  Lower peak memory.
+   *     Right choice on low-RAM devices or with `feather`.
+   */
+  seamFinderType?: 'graphcut' | 'skip';
 }
 
 
@@ -71,7 +101,21 @@ export async function stitchVideo(
     const fn = (native as {
       stitchVideo: (o: StitchVideoOptions) => Promise<StitchFramesResult>;
     }).stitchVideo;
-    return fn(options);
+    // 60-second hard deadline.  cv::Stitcher::stitch can occasionally
+    // grind for minutes inside bundle adjustment on hard inputs (low
+    // texture, extreme parallax).  A timeout converts those into a
+    // clear UI error rather than letting the stitching banner sit
+    // forever.  Real stitches finish in 2-8 seconds on iPhone with
+    // the tuned PANORAMA settings; 60 s is comfortably above that.
+    return Promise.race([
+      fn(options),
+      new Promise<StitchFramesResult>((_, reject) => {
+        setTimeout(
+          () => reject(new Error('stitch-timeout: stitching took longer than 30 s')),
+          30_000,
+        );
+      }),
+    ]);
   }
 
   throw new StitchNotImplementedError(

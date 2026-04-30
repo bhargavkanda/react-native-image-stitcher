@@ -153,7 +153,15 @@ NSError *errorForStitchStatus(cv::Stitcher::Status status) {
 + (nullable RetaiLensStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
                                           outputPath:(NSString *)outputPath
                                          jpegQuality:(NSInteger)quality
+                                          warperType:(NSString *)warperType
+                                         blenderType:(NSString *)blenderType
+                                      seamFinderType:(NSString *)seamFinderType
                                                error:(NSError **)error {
+  // Defaults if caller passed nil — keeps the old 3-arg call-sites
+  // working until we update them.
+  if (warperType == nil || warperType.length == 0) warperType = @"plane";
+  if (blenderType == nil || blenderType.length == 0) blenderType = @"multiband";
+  if (seamFinderType == nil || seamFinderType.length == 0) seamFinderType = @"graphcut";
   if (framePaths.count < 2) {
     if (error) {
       *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
@@ -177,25 +185,782 @@ NSError *errorForStitchStatus(cv::Stitcher::Status status) {
 
   auto t0 = std::chrono::steady_clock::now();
 
-  // SCANS mode — see file header for rationale.
-  // PANORAMA mode (default) instead of SCANS.  SCANS assumes
-  // pure translational motion over a planar subject, which only
-  // matches one specific shelf-scanning gesture (walking along the
-  // shelf with the camera held perpendicular).  In practice users
-  // pivot in place over 3D scenes — exactly what PANORAMA mode is
-  // built for (rotational camera around the nodal point, spherical
-  // warp).  Phase 5 of #8 will replace this with pose-driven
-  // alignment using cv::detail::* once ARKit/ARCore poses are
-  // available; until then PANORAMA is the better one-mode choice.
-  cv::Ptr<cv::Stitcher> stitcher = cv::Stitcher::create(cv::Stitcher::PANORAMA);
-
+  // ── Hand-rolled stitch via cv::detail::* with CylindricalWarper ────
+  //
+  // The high-level cv::Stitcher::PANORAMA uses SphericalWarper, which
+  // produces the "panorama bowl" shape on short shelf-scan arcs.
+  // Calling setWarper(CylindricalWarper) on the high-level stitcher
+  // crashes (PANORAMA's BundleAdjusterRay's R-matrix outputs are
+  // structured for spherical warp).  So we drive the pipeline
+  // ourselves, replicating PANORAMA's algorithm exactly EXCEPT we
+  // swap the warper at the end.  This is also the same path
+  // Phase 5 will populate with AR-derived poses (skipping
+  // features→matching→BA when poses are known).
+  //
+  // Pipeline:
+  //   1. ORB features per frame
+  //   2. BestOf2NearestMatcher (PANORAMA's default)
+  //   3. HomographyBasedEstimator → camera initial guesses
+  //   4. BundleAdjusterRay (PANORAMA's default) refines cameras
+  //   5. CylindricalWarper warps each frame using cameras
+  //   6. GraphCutSeamFinder + MultiBandBlender produce final panorama
   cv::Mat panorama;
-  cv::Stitcher::Status status = stitcher->stitch(frames, panorama);
-  if (status != cv::Stitcher::OK) {
+  // Breadcrumbs in the device console.  If the next stitch
+  // crashes, the last logged step pinpoints the failure point —
+  // makes debugging without Xcode much faster.  Prefix is
+  // grep-able in Console.app.
+  NSLog(@"[RetaiLensStitcher] start: %lu frames", (unsigned long)frames.size());
+
+  // Wrap the entire stitch in @autoreleasepool.  ObjC autoreleased
+  // temporaries (e.g. NSString objects produced inside the hot
+  // path, intermediate cv::Mat::data wrappers) accumulate until
+  // the runloop's outer pool drains.  Without an explicit pool
+  // here, peak memory during the stitch can be 100+ MB higher
+  // than necessary — exactly the headroom we need to stay under
+  // iOS' foreground jetsam threshold on long pans.
+  @autoreleasepool {
+  try {
+    // Two-stage resolution pipeline (matches cv::Stitcher::PANORAMA):
+    //
+    //   REGISTRATION_MP (0.3): downscale used for features, matching,
+    //   BA, wave-correct.  The expensive optimisation stages run
+    //   here.  cv::Stitcher uses 0.6; we use 0.3 because BA still
+    //   converges reliably on shelf-scan inputs and the smaller
+    //   matrices make BA noticeably faster on iPhone.
+    //
+    //   COMPOSE_MP (1.0): RE-WARP + blend at this larger resolution
+    //   to produce the FINAL panorama.  cv::Stitcher uses ORIG_RESOL
+    //   (full input size) — gorgeous output but iPhones at 12 MP × N
+    //   frames blow past the jetsam threshold.  1.0 MP is the
+    //   sweet spot: ~2× linear sharpness over single-stage 0.3 MP,
+    //   with peak compose memory still under ~120 MB thanks to the
+    //   per-frame release pattern in the blender feed loop below.
+    //
+    // The cylindrical-era sharpness came from cv::Stitcher's
+    // automatic two-stage flow.  When we hand-rolled the pipeline
+    // to use PlaneWarper safely, we collapsed it to a single 0.3 MP
+    // stage — output went from ~1500×800 (cylindrical) to ~700×400
+    // (plane).  This restores the multi-stage structure while
+    // keeping the PlaneWarper that the host app actually wants.
+    constexpr double REGISTRATION_MP = 0.3;
+    constexpr double COMPOSE_MP = 1.0;
+
+    // Capture original size BEFORE downscaling — we need it later
+    // to compute the compose scale relative to full-res input.
+    int origCols = frames[0].cols;
+    int origRows = frames[0].rows;
+    double origMp = (double)origCols * origRows / 1e6;
+
+    // Stage 1: downscale to REGISTRATION_MP for features+matching+BA.
+    std::vector<cv::Mat> workFrames;
+    workFrames.reserve(frames.size());
+    double work_scale = (origMp > REGISTRATION_MP)
+        ? std::sqrt(REGISTRATION_MP / origMp)
+        : 1.0;
+    if (work_scale < 1.0) {
+      for (const auto &f : frames) {
+        cv::Mat scaled;
+        cv::resize(f, scaled, cv::Size(), work_scale, work_scale,
+                   cv::INTER_AREA);
+        workFrames.push_back(scaled);
+      }
+    } else {
+      for (const auto &f : frames) workFrames.push_back(f);
+    }
+
+    NSLog(@"[RetaiLensStitcher] step1: features (work scale %d×%d)",
+          workFrames.empty() ? 0 : workFrames[0].cols,
+          workFrames.empty() ? 0 : workFrames[0].rows);
+    // Step 1: features.  800 ORB features is enough for matching
+    // ~50% overlap between adjacent frames; 1500 was overkill and
+    // doubled the matching work for marginal quality gain.
+    auto featuresFinder = cv::ORB::create(800);
+    std::vector<cv::detail::ImageFeatures> imgFeatures(workFrames.size());
+    for (size_t i = 0; i < workFrames.size(); i++) {
+      cv::detail::computeImageFeatures(featuresFinder, workFrames[i],
+                                        imgFeatures[i]);
+      imgFeatures[i].img_idx = (int)i;
+    }
+
+    // Step 2: pairwise matching.  match_conf=0.65 matches what
+    // cv::Stitcher::PANORAMA uses internally — looser values
+    // (counter-intuitively) hurt BA convergence by letting through
+    // contradictory low-confidence matches that don't fit a
+    // consistent rotation model.  Stick with the proven default.
+    NSLog(@"[RetaiLensStitcher] step2: matching");
+    cv::detail::BestOf2NearestMatcher matcher(false, 0.65f);
+    std::vector<cv::detail::MatchesInfo> pairwise;
+    matcher(imgFeatures, pairwise);
+    matcher.collectGarbage();
+
+    // Step 3: leave-best-of-2 keeps only well-connected images at
+    // confThresh=1.0 — also matches cv::Stitcher::PANORAMA's
+    // default.  Pairs with weaker overlap get dropped before BA.
+    // Pre-check: count how many pairwise matches actually have
+    // non-trivial features matched.  cv::Stitcher's
+    // leaveBiggestComponent / HomographyBasedEstimator fire
+    // CV_Assert internally if no useful pairwise data exists —
+    // and CV_Assert can SIGABRT in our build (signal not caught
+    // by C++ try/catch).  Throwing our own structured error here
+    // is the only way to fail-fast before that abort.
+    int validPairs = 0;
+    for (const auto &m : pairwise) {
+      if (m.confidence > 0.0 && m.matches.size() >= 6) {
+        validPairs++;
+      }
+    }
+    NSLog(@"[RetaiLensStitcher] step2.5: %d valid pairwise matches", validPairs);
+    if (validPairs < 1) {
+      if (error) {
+        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                     code:1004
+                                 userInfo:@{
+          NSLocalizedDescriptionKey:
+            @"Stitcher could not match enough overlapping frames — try recapturing with a slower, more overlapping pan.",
+        }];
+      }
+      return nil;
+    }
+
+    NSLog(@"[RetaiLensStitcher] step3: leave-biggest");
+    // leaveBiggestComponent mutates imgFeatures and pairwise IN
+    // PLACE to drop frames that aren't part of the biggest
+    // connected component.  We MUST also subset workFrames to
+    // match — otherwise cameras.size() (built from the trimmed
+    // imgFeatures) will be smaller than workFrames.size() and the
+    // warp loop reads cameras[i] out of bounds.  That's a likely
+    // root cause of the SIGABRT seen on second-stitch attempts.
+    std::vector<int> indices = cv::detail::leaveBiggestComponent(
+        imgFeatures, pairwise, 1.0f);
+    // Trim BOTH workFrames AND the full-res frames using the same
+    // indices.  workFrames feeds BA below; full-res frames feed the
+    // compose stage further down (re-warped at COMPOSE_MP).  Both
+    // must stay aligned with cameras[i] / imgFeatures[i] post-trim.
+    std::vector<cv::Mat> trimmedWorkFrames;
+    std::vector<cv::Mat> trimmedFrames;
+    trimmedWorkFrames.reserve(indices.size());
+    trimmedFrames.reserve(indices.size());
+    for (int idx : indices) {
+      if (idx >= 0 && idx < (int)workFrames.size()) {
+        trimmedWorkFrames.push_back(workFrames[idx]);
+        trimmedFrames.push_back(frames[idx]);
+      }
+    }
+    workFrames = std::move(trimmedWorkFrames);
+    frames = std::move(trimmedFrames);
+    NSLog(@"[RetaiLensStitcher] step3.5: kept %lu frames in biggest component",
+          (unsigned long)workFrames.size());
+    if (workFrames.size() < 2) {
+      if (error) {
+        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                     code:1004
+                                 userInfo:@{
+          NSLocalizedDescriptionKey:
+            @"Stitcher could not match enough overlapping frames — try recapturing with a slower pan and more overlap.",
+        }];
+      }
+      return nil;
+    }
+
+    // Step 4: estimator
+    NSLog(@"[RetaiLensStitcher] step4: estimator");
+    cv::detail::HomographyBasedEstimator estimator;
+    std::vector<cv::detail::CameraParams> cameras;
+    if (!estimator(imgFeatures, pairwise, cameras)) {
+      if (error) {
+        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                     code:1005
+                                 userInfo:@{
+          NSLocalizedDescriptionKey:
+            @"Stitcher could not estimate camera parameters — frames may be too dissimilar.",
+        }];
+      }
+      return nil;
+    }
+    for (auto &cam : cameras) {
+      cv::Mat R32;
+      cam.R.convertTo(R32, CV_32F);
+      cam.R = R32;
+    }
+
+    // Step 5: bundle adjustment (the slow step).  BundleAdjusterRay
+    // is what cv::Stitcher::PANORAMA uses internally.  confThresh=1.0
+    // matches cv::Stitcher's default — drops weak match-pair
+    // constraints from the optimisation so BA converges reliably.
+    // Cap iterations at 100 (default 1000) so a poorly-conditioned
+    // problem can't run away into a 60s timeout.  BA typically
+    // converges in 20-50 iters on good input; if 100 isn't enough,
+    // the inputs themselves are unstitchable and we want to fail
+    // fast rather than spin.
+    {
+      auto _t = std::chrono::steady_clock::now();
+      double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          _t - t0).count();
+      NSLog(@"[RetaiLensStitcher] step5: bundle adjustment (t+%.0fms)", _ms);
+    }
+    auto adjuster = cv::makePtr<cv::detail::BundleAdjusterRay>();
+    adjuster->setConfThresh(1.0f);
+    adjuster->setTermCriteria(cv::TermCriteria(
+        cv::TermCriteria::EPS + cv::TermCriteria::COUNT,
+        100,
+        DBL_EPSILON));
+    if (!(*adjuster)(imgFeatures, pairwise, cameras)) {
+      if (error) {
+        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                     code:1006
+                                 userInfo:@{
+          NSLocalizedDescriptionKey:
+            @"Stitcher could not refine camera parameters — try recapturing with more overlap.",
+        }];
+      }
+      return nil;
+    }
+
+    // Step 5.5: WAVE CORRECTION.  cv::Stitcher::PANORAMA does
+    // this automatically; my hand-rolled pipeline was missing it.
+    // After BA produces camera rotation matrices, waveCorrect
+    // globally rotates them so all cameras share a consistent
+    // up-vector.  Without this, the cylindrical (or spherical)
+    // projection produces visible "wavy" top / bottom edges where
+    // edge frames hit the projection surface at slightly
+    // different vertical angles.  WAVE_CORRECT_HORIZ assumes the
+    // dominant pan axis is yaw (left-right), which matches the
+    // typical shelf-scan gesture.
+    {
+      auto _t = std::chrono::steady_clock::now();
+      double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          _t - t0).count();
+      NSLog(@"[RetaiLensStitcher] step5.5: wave correction (BA done, t+%.0fms)", _ms);
+    }
+    std::vector<cv::Mat> rmats;
+    rmats.reserve(cameras.size());
+    for (const auto &cam : cameras) {
+      rmats.push_back(cam.R.clone());
+    }
+    try {
+      cv::detail::waveCorrect(rmats, cv::detail::WAVE_CORRECT_HORIZ);
+      for (size_t i = 0; i < cameras.size(); i++) {
+        cameras[i].R = rmats[i];
+      }
+    } catch (const cv::Exception &e) {
+      // Wave correction can fail on degenerate input (only 1-2
+      // cameras with collinear rotations).  Swallow the failure
+      // and continue without correction — the panorama will have
+      // the wave artifact but is still better than aborting.
+      NSLog(@"[RetaiLensStitcher] wave correction skipped: %s", e.what());
+    }
+
+    // Step 6: COMPOSE rescale.  This is the key step that gives us
+    // back the cylindrical-era sharpness.  cv::Stitcher does this
+    // internally as `composePanorama`: rescale camera intrinsics
+    // by (compose_scale / work_scale), recreate the warper at
+    // the new scale, then warp+blend on freshly-resized frames at
+    // COMPOSE_MP.  Without this step, output stays at REGISTRATION_MP
+    // and is visibly blurry.
+    double compose_scale = (origMp > COMPOSE_MP)
+        ? std::sqrt(COMPOSE_MP / origMp)
+        : 1.0;
+    double compose_work_aspect = compose_scale / work_scale;
+    NSLog(@"[RetaiLensStitcher] step6: compose rescale "
+          "(work_scale=%.3f → compose_scale=%.3f, aspect=%.3f)",
+          work_scale, compose_scale, compose_work_aspect);
+    for (auto &cam : cameras) {
+      cam.focal *= compose_work_aspect;
+      cam.ppx  *= compose_work_aspect;
+      cam.ppy  *= compose_work_aspect;
+    }
+
+    // Step 6.5: median focal length determines the warper scale.
+    // Computed AFTER compose rescale so warpedScale is already in
+    // compose units — matches cv::Stitcher's flow.
+    std::vector<double> focals;
+    for (const auto &cam : cameras) focals.push_back(cam.focal);
+    std::sort(focals.begin(), focals.end());
+    float warpedScale =
+        focals.empty() ? 1.0f
+                       : (float)focals[focals.size() / 2];
+
+    // Step 7: PLANE warper.  The crucial swap.
+    //
+    // For close-up shelf scans (~30° pan, mostly translational
+    // gesture across a planar product face), plane projection is
+    // the right choice — it produces a flat output with no
+    // cylindrical curve and no spherical bowl.
+    //
+    // Cylindrical/spherical only buy you something for wider arcs
+    // where the per-frame perspective curves matter.  Below ~45°
+    // arc, plane is empirically the most natural-looking option
+    // and exactly what SCANS mode used (just SCANS coupled it
+    // with affine BA which we just established was the wrong
+    // estimator for our motion).
+    NSLog(@"[RetaiLensStitcher] step7: warper (%s)", warperType.UTF8String);
+    // Plane / Cylindrical / Spherical — runtime-selectable so
+    // the host's settings UI can A/B test which projection looks
+    // best for the operator's actual gesture (close-up planar
+    // subject vs partial-arc rotation vs wide pan).
+    cv::Ptr<cv::WarperCreator> warperCreator;
+    if ([warperType isEqualToString:@"cylindrical"]) {
+      warperCreator = cv::makePtr<cv::CylindricalWarper>();
+    } else if ([warperType isEqualToString:@"spherical"]) {
+      warperCreator = cv::makePtr<cv::SphericalWarper>();
+    } else {
+      // "plane" is the default — straight verticals/horizontals,
+      // good for close-up subjects.  Hourglass shape produced
+      // by partial arcs is removed by the rectangular-crop step
+      // below.
+      warperCreator = cv::makePtr<cv::PlaneWarper>();
+    }
+    cv::Ptr<cv::detail::RotationWarper> warper =
+        warperCreator->create(warpedScale);
+
+    // Step 7.5: build composeFrames at COMPOSE_MP from full-res
+    // input.  Warp + blend run at this resolution to produce the
+    // sharp final output.  Release workFrames first — BA is done,
+    // so we don't need the small set anymore.  Sequential release
+    // ensures the two big arrays never coexist at peak.
+    for (auto &wf : workFrames) wf.release();
+    workFrames.clear();
+
+    std::vector<cv::Mat> composeFrames;
+    composeFrames.reserve(frames.size());
+    for (const auto &f : frames) {
+      cv::Mat scaled;
+      if (std::abs(compose_scale - 1.0) > 1e-3) {
+        cv::resize(f, scaled, cv::Size(), compose_scale, compose_scale,
+                   cv::INTER_AREA);
+      } else {
+        scaled = f.clone();
+      }
+      composeFrames.push_back(scaled);
+    }
+    // Release full-res `frames` now that composeFrames has its
+    // own resized copies.  Frees ~50-100 MB for a typical 8-frame
+    // stitch — a critical part of staying under iOS' jetsam
+    // threshold (the ACTUAL cause of the "u != 0" /
+    // WatchdogTermination crashes we were debugging — Sentry
+    // confirmed those were OOM kills, not OpenCV bugs).
+    for (auto &f : frames) f.release();
+    frames.clear();
+    NSLog(@"[RetaiLensStitcher] step7.5: composeFrames %d×%d "
+          "(compose_scale=%.3f)",
+          composeFrames.empty() ? 0 : composeFrames[0].cols,
+          composeFrames.empty() ? 0 : composeFrames[0].rows,
+          compose_scale);
+
+    // Step 8: warp + (optional) seam finder + blender feed.
+    //
+    // Two paths based on caller's seamFinderType:
+    //
+    //   "graphcut" — BATCH path.  Warp all frames into memory,
+    //     run GraphCutSeamFinder for optimal seams, then feed
+    //     the blender.  Higher peak memory (all warped frames
+    //     coexist during seam finding) but produces clean seams
+    //     that pair beautifully with MultiBandBlender.  Same
+    //     algorithm cv::Stitcher::PANORAMA uses internally.
+    //
+    //   "skip"     — STREAM path.  Warp + feed each frame in the
+    //     same loop, releasing immediately.  Never holds more
+    //     than one warped frame in memory.  ~40-50 MB lower peak
+    //     at 1.0 MP × 8 frames.  Right choice for low-RAM
+    //     devices; the host's per-device defaults pick this
+    //     path on devices with <2 GB physical RAM.
+    //
+    // Both paths feed the SAME blender (selected per caller's
+    // blenderType).  Final blend happens after either path
+    // completes.
+    BOOL useSeam = [seamFinderType isEqualToString:@"graphcut"];
+    NSLog(@"[RetaiLensStitcher] step8: %s",
+          useSeam ? "BATCH (warp-all + seam + feed)"
+                  : "STREAM (warp+feed per frame)");
+
+    // Build the blender once — both paths feed into it.
+    //
+    // The "u != 0" UMat assertion we previously hit when running
+    // MultiBand or GraphCut was a SYMPTOM of iOS jetsam OOM-kill
+    // (confirmed via Sentry's WatchdogTermination signature),
+    // not a bug in MBB / GraphCut.  With the OOM fixes now in
+    // place (autoreleasepool wrapping, camera pause during
+    // stitch, per-frame Mat releases, plus this stream path for
+    // low-mem devices), both should run cleanly.
+    cv::Ptr<cv::detail::Blender> blender;
+    if ([blenderType isEqualToString:@"feather"]) {
+      blender = cv::detail::Blender::createDefault(
+          cv::detail::Blender::FEATHER, false);
+      auto fb = blender.dynamicCast<cv::detail::FeatherBlender>();
+      if (fb) fb->setSharpness(0.02f);
+    } else {
+      // "multiband" — Laplacian pyramids per fed frame.
+      // More memory than Feather but much sharper seams when
+      // paired with GraphCut.
+      blender = cv::detail::Blender::createDefault(
+          cv::detail::Blender::MULTI_BAND, false);
+      auto mbb = blender.dynamicCast<cv::detail::MultiBandBlender>();
+      if (mbb) mbb->setNumBands(5);
+    }
+    NSLog(@"[RetaiLensStitcher] step10: blender = %s",
+          blenderType.UTF8String);
+
+    if (useSeam) {
+      // ── BATCH path ─────────────────────────────────────────────
+      const size_t N = composeFrames.size();
+      std::vector<cv::Point> corners(N);
+      std::vector<cv::Mat> imagesWarped(N);
+      std::vector<cv::Mat> masksWarped(N);
+      std::vector<cv::Size> sizes(N);
+      for (size_t i = 0; i < N; i++) {
+        cv::Mat K;
+        cameras[i].K().convertTo(K, CV_32F);
+        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
+        corners[i] = warper->warp(
+            composeFrames[i], K, cameras[i].R, cv::INTER_LINEAR,
+            cv::BORDER_CONSTANT, imagesWarped[i]);
+        warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
+                     cv::BORDER_CONSTANT, masksWarped[i]);
+        sizes[i] = imagesWarped[i].size();
+      }
+      // composeFrames has done its job — release before we
+      // allocate the float UMat shadow set for seam finding.
+      for (auto &cf : composeFrames) cf.release();
+      composeFrames.clear();
+
+      // Step 9: GraphCutSeamFinder at SEAM_MP (~0.1 MP).
+      //
+      // GraphCut's runtime is roughly quadratic in pixel count
+      // because it solves a max-flow on a per-pixel grid graph.
+      // Running it at compose scale (1.0 MP) takes ~100× longer
+      // than at the ~0.1 MP that cv::Stitcher::PANORAMA uses
+      // internally (`seam_est_resol_ = 0.1`).  At 1.0 MP we
+      // observed >60s stitch-timeouts in JS; at 0.1 MP it
+      // finishes in <1s.  Pattern matches cv::Stitcher's flow:
+      //   1. Downscale imagesWarped + masksWarped + corners to
+      //      seam scale.
+      //   2. Run seam finder on the small images.
+      //   3. Upscale the seam-optimised masks back to compose
+      //      scale.
+      //   4. Bitwise-AND with the original masks so we don't
+      //      include pixels outside each frame's warped region.
+      const double SEAM_MP = 0.1;
+      double seam_scale = std::min(1.0, std::sqrt(SEAM_MP / origMp));
+      // Aspect from compose scale → seam scale (the rescale we
+      // apply to existing compose-scale data, not the original).
+      double seam_compose_aspect = seam_scale / compose_scale;
+      {
+        auto _t = std::chrono::steady_clock::now();
+        double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            _t - t0).count();
+        NSLog(@"[RetaiLensStitcher] step9: graph-cut seam finder "
+              "(compose→seam aspect = %.3f, t+%.0fms)",
+              seam_compose_aspect, _ms);
+      }
+      auto _seamStart = std::chrono::steady_clock::now();
+      std::vector<cv::UMat> imagesWarpedF_seam(N);
+      std::vector<cv::UMat> masksWarpedU_seam(N);
+      std::vector<cv::Point> corners_seam(N);
+      for (size_t i = 0; i < N; i++) {
+        cv::Mat seamImage, seamMask;
+        cv::resize(imagesWarped[i], seamImage, cv::Size(),
+                   seam_compose_aspect, seam_compose_aspect,
+                   cv::INTER_LINEAR);
+        cv::resize(masksWarped[i], seamMask, cv::Size(),
+                   seam_compose_aspect, seam_compose_aspect,
+                   cv::INTER_NEAREST);
+        seamImage.convertTo(imagesWarpedF_seam[i], CV_32F);
+        seamMask.copyTo(masksWarpedU_seam[i]);
+        corners_seam[i] = cv::Point(
+            cvRound(corners[i].x * seam_compose_aspect),
+            cvRound(corners[i].y * seam_compose_aspect));
+      }
+      cv::Ptr<cv::detail::SeamFinder> seamFinder =
+          cv::makePtr<cv::detail::GraphCutSeamFinder>(
+              cv::detail::GraphCutSeamFinder::COST_COLOR);
+      seamFinder->find(imagesWarpedF_seam, corners_seam,
+                       masksWarpedU_seam);
+      {
+        auto _t = std::chrono::steady_clock::now();
+        double _seamMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            _t - _seamStart).count();
+        NSLog(@"[RetaiLensStitcher] step9: graph-cut find took %.0fms", _seamMs);
+      }
+      imagesWarpedF_seam.clear();
+
+      // Upscale seam-optimised masks back to compose scale.
+      //
+      // CRITICAL: dilate each mask before upscaling so adjacent
+      // frames have a small OVERLAP region for the blender to
+      // feather across.  Without this, the seam-cut creates a
+      // strict pixel partition with NO overlap — MultiBand then
+      // has nothing to feather, producing visible HARD seams
+      // (the "cuts" we observed in the output).  cv::Stitcher
+      // does the same dilation step in its compose pipeline.
+      // A 3×3 default kernel at seam scale becomes ~10px of
+      // overlap at compose scale (since seam_aspect_compose ≈
+      // 0.1 → 10× upscale), which is plenty for MultiBand's
+      // Laplacian pyramids to blend smoothly across.
+      //
+      // The bitwise_and with the original mask keeps each frame's
+      // mask within its actual warped region (seam-cut + dilation
+      // can spill past edges, especially after linear upscale).
+      for (size_t i = 0; i < N; i++) {
+        cv::Mat seamMaskCpu, seamMaskDilated, seamMaskFull;
+        masksWarpedU_seam[i].copyTo(seamMaskCpu);
+        cv::dilate(seamMaskCpu, seamMaskDilated, cv::Mat());
+        cv::resize(seamMaskDilated, seamMaskFull,
+                   masksWarped[i].size(), 0, 0, cv::INTER_LINEAR);
+        cv::bitwise_and(seamMaskFull, masksWarped[i], masksWarped[i]);
+      }
+      masksWarpedU_seam.clear();
+
+      // Feed the blender, releasing each frame as we go.
+      blender->prepare(corners, sizes);
+      for (size_t i = 0; i < N; i++) {
+        cv::Mat imgS;
+        imagesWarped[i].convertTo(imgS, CV_16S);
+        blender->feed(imgS, masksWarped[i], corners[i]);
+        imagesWarped[i].release();
+        masksWarped[i].release();
+        imgS.release();
+      }
+      imagesWarped.clear();
+      masksWarped.clear();
+    } else {
+      // ── STREAM path ────────────────────────────────────────────
+      // Pre-pass: warp masks ONLY (single-channel, cheap) to
+      // compute corners + sizes.  blender->prepare() needs both
+      // BEFORE the first feed, so a tiny first pass is unavoidable.
+      const size_t N = composeFrames.size();
+      std::vector<cv::Point> corners(N);
+      std::vector<cv::Size> sizes(N);
+      for (size_t i = 0; i < N; i++) {
+        cv::Mat K;
+        cameras[i].K().convertTo(K, CV_32F);
+        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
+        cv::Mat tmpMaskWarped;
+        corners[i] = warper->warp(
+            mask, K, cameras[i].R, cv::INTER_NEAREST,
+            cv::BORDER_CONSTANT, tmpMaskWarped);
+        sizes[i] = tmpMaskWarped.size();
+      }
+
+      // Main pass: warp + feed + release per frame.  Never holds
+      // more than ONE warped image + ONE warped mask in memory.
+      // ~40-50 MB lower peak vs the BATCH path at 1.0 MP × 8
+      // frames — the difference between staying under iOS' jetsam
+      // threshold on a 2 GB device and getting WatchdogTermination.
+      blender->prepare(corners, sizes);
+      for (size_t i = 0; i < N; i++) {
+        cv::Mat K;
+        cameras[i].K().convertTo(K, CV_32F);
+        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
+        cv::Mat imgWarped, maskWarped;
+        warper->warp(composeFrames[i], K, cameras[i].R,
+                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, imgWarped);
+        warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
+                     cv::BORDER_CONSTANT, maskWarped);
+        cv::Mat imgS;
+        imgWarped.convertTo(imgS, CV_16S);
+        blender->feed(imgS, maskWarped, corners[i]);
+        // Release the input compose frame too — done with it.
+        composeFrames[i].release();
+        // imgS / imgWarped / maskWarped release at scope exit.
+      }
+      composeFrames.clear();
+    }
+
+    cv::Mat panoramaS, panoramaMask;
+    blender->blend(panoramaS, panoramaMask);
+    panoramaS.convertTo(panorama, CV_8U);
+    {
+      auto _t = std::chrono::steady_clock::now();
+      double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          _t - t0).count();
+      NSLog(@"[RetaiLensStitcher] step11: blend complete (output %d×%d, t+%.0fms)",
+            panorama.cols, panorama.rows, _ms);
+    }
+  } catch (const cv::Exception &e) {
     if (error) {
-      *error = errorForStitchStatus(status);
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1100
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"OpenCV exception during stitch: %s", e.what()],
+      }];
     }
     return nil;
+  } catch (const std::exception &e) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1101
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"std exception during stitch: %s", e.what()],
+      }];
+    }
+    return nil;
+  } catch (...) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1102
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Unknown exception during stitch.",
+      }];
+    }
+    return nil;
+  }
+  }  // end @autoreleasepool — drains OpenCV's autoreleased
+     // temporaries before we run the cheap post-stitch work
+     // (crop, JPEG encode) and construct the return value.
+     //
+     // CRITICAL: this brace USED to live at the very bottom of the
+     // function, wrapping the `return [[RetaiLensStitchResult alloc]
+     // init…]` as well.  ARC inserts an autorelease for the return
+     // value, which then registered with this @autoreleasepool;
+     // the pool drained at the closing brace, deallocating the
+     // return object BEFORE the caller could `objc_retain` it.
+     // Caller's first interaction (the implicit retain that ARC
+     // inserts when receiving a returned object) hit freed memory
+     // → EXC_BAD_ACCESS at objc_retain.  Sentry confirmed this
+     // crash signature on the multi-res build.  Pulling the
+     // closing brace UP — so the return statement lives OUTSIDE
+     // the pool — fixes it.
+  if (panorama.empty()) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1003
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Stitcher produced an empty panorama.",
+      }];
+    }
+    return nil;
+  }
+
+  // Crop the panorama to the bounding box of non-black pixels.
+  //
+  // The default SphericalWarper from PANORAMA mode lays the
+  // captured patch into a much larger sphere-shaped canvas.  For
+  // a typical 30-45° shelf-scan arc, that means the actual scene
+  // occupies a small region of a much larger black-bordered
+  // image (the "panorama bowl" effect).  Cropping to the
+  // content's bounding box returns the actual stitched scene
+  // without the surrounding empty bowl.  Algorithm:
+  //   1. Convert to grayscale.
+  //   2. Threshold > 1 to find any non-black pixel.
+  //   3. boundingRect of all non-zero pixels.
+  //   4. Crop the panorama to that rect.
+  //
+  // Wrapped in try/catch so any OpenCV edge case (e.g. fully
+  // black panorama from a failed stitch) falls back to writing
+  // the un-cropped output rather than crashing.
+  cv::Mat finalImage = panorama;
+  try {
+    cv::Mat gray;
+    cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+    cv::Mat mask;
+    cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
+    cv::Rect bbox = cv::boundingRect(mask);
+    if (bbox.width > 0 && bbox.height > 0
+        && bbox.width <= panorama.cols && bbox.height <= panorama.rows) {
+      finalImage = panorama(bbox).clone();
+    }
+
+    // Second pass: rectangular crop.  Find the column range where
+    // ≥95% of rows have content, crop to that × full height.
+    //
+    // Algorithm (column projection — more robust than the per-row
+    // scan I had before):
+    //   1. Build a binary content mask (threshold + erode to drop
+    //      fringe artifacts at the warp edges).
+    //   2. For each column, count how many rows have content at
+    //      that column.  Use cv::reduce(REDUCE_SUM).
+    //   3. A column "qualifies" if its content-row count is at
+    //      least 95% of total rows.  ≥95% (not 100%) tolerates
+    //      the small black artifacts that survive thresholding
+    //      at hourglass corners.
+    //   4. Find leftmost + rightmost qualifying columns.  Crop
+    //      to that range, full height.
+    //
+    // Why column projection is better than the per-row scan:
+    //   The per-row approach computed globalLeft = max(rowLeft)
+    //   across rows.  Bug: even with erosion, antialiasing left
+    //   stray non-zero pixels at edge columns in some rows, so
+    //   globalLeft kept getting reset to 0 by those rows.
+    //   Column projection asks "is this column mostly content?"
+    //   and naturally ignores stray pixels in 1-2 rows.
+    cv::Mat finalGray;
+    cv::cvtColor(finalImage, finalGray, cv::COLOR_BGR2GRAY);
+    cv::Mat finalMask;
+    cv::threshold(finalGray, finalMask, 30, 255, cv::THRESH_BINARY);
+    cv::erode(finalMask, finalMask,
+              cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)),
+              cv::Point(-1, -1), 1);
+
+    int rows = finalMask.rows, cols = finalMask.cols;
+    // Reduce mask to per-column content count.  Mask is 0 or 255,
+    // so column sum / 255 = number of content rows in that column.
+    cv::Mat colSum;
+    cv::reduce(finalMask, colSum, 0, cv::REDUCE_SUM, CV_32S);
+    const int contentThreshold = (int)(0.95 * rows * 255);
+    int cropLeft = -1, cropRight = -1;
+    const int *cs = colSum.ptr<int>(0);
+    for (int c = 0; c < cols; c++) {
+      if (cs[c] >= contentThreshold) {
+        if (cropLeft < 0) cropLeft = c;
+        cropRight = c;
+      }
+    }
+    NSLog(@"[RetaiLensStitcher] rectCrop col-proj: cols=%d rows=%d threshold=%d cropLeft=%d cropRight=%d",
+          cols, rows, contentThreshold, cropLeft, cropRight);
+    // Sanity floor: don't accept a column-projection crop that
+    // shrinks the image to less than 30% of the bbox-cropped width.
+    // Such an aggressive crop usually means the stitch was poorly
+    // aligned and only a tiny vertical band has full multi-frame
+    // coverage — applying it produces the "thin sliver" output
+    // we observed in the field.  Better to show the user the full
+    // bounding-box crop (still trims the all-black borders) than
+    // a sliver that's effectively useless.
+    const int minRectWidth = (int)(cols * 0.30);
+    if (cropLeft >= 0 && cropRight > cropLeft + 10
+        && (cropRight - cropLeft + 1) >= minRectWidth) {
+      cv::Rect rectCrop(cropLeft, 0,
+                        cropRight - cropLeft + 1, rows);
+      finalImage = finalImage(rectCrop).clone();
+      NSLog(@"[RetaiLensStitcher] rectCrop applied: %dx%d → %dx%d",
+            cols, rows, finalImage.cols, finalImage.rows);
+    } else {
+      // No column qualified at 95%, OR the qualifying band is too
+      // narrow to trust.  Try a relaxed 80% before giving up.
+      const int relaxedThreshold = (int)(0.80 * rows * 255);
+      cropLeft = -1;
+      cropRight = -1;
+      for (int c = 0; c < cols; c++) {
+        if (cs[c] >= relaxedThreshold) {
+          if (cropLeft < 0) cropLeft = c;
+          cropRight = c;
+        }
+      }
+      NSLog(@"[RetaiLensStitcher] rectCrop relaxed (80%%): cropLeft=%d cropRight=%d",
+            cropLeft, cropRight);
+      if (cropLeft >= 0 && cropRight > cropLeft + 10
+          && (cropRight - cropLeft + 1) >= minRectWidth) {
+        cv::Rect rectCrop(cropLeft, 0,
+                          cropRight - cropLeft + 1, rows);
+        finalImage = finalImage(rectCrop).clone();
+        NSLog(@"[RetaiLensStitcher] rectCrop relaxed applied: %dx%d → %dx%d",
+              cols, rows, finalImage.cols, finalImage.rows);
+      } else {
+        NSLog(@"[RetaiLensStitcher] rectCrop SKIPPED — best band is "
+              "narrower than 30%% of bbox (%d < %d).  Likely poor "
+              "stitch alignment; keeping bbox crop.",
+              cropRight >= 0 ? (cropRight - cropLeft + 1) : 0,
+              minRectWidth);
+      }
+    }
+  } catch (...) {
+    // Crop failed — fall back to the raw stitched output.
+    finalImage = panorama;
   }
 
   auto t1 = std::chrono::steady_clock::now();
@@ -209,7 +974,7 @@ NSError *errorForStitchStatus(cv::Stitcher::Status status) {
       cv::IMWRITE_JPEG_QUALITY, static_cast<int>(clampedQuality),
   };
   NSString *cleanedOutPath = normalizeImagePath(outputPath);
-  bool wrote = cv::imwrite([cleanedOutPath UTF8String], panorama, params);
+  bool wrote = cv::imwrite([cleanedOutPath UTF8String], finalImage, params);
   if (!wrote) {
     if (error) {
       *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
@@ -225,8 +990,8 @@ NSError *errorForStitchStatus(cv::Stitcher::Status status) {
 
   return [[RetaiLensStitchResult alloc]
       initWithOutputPath:outputPath
-                   width:(NSInteger)panorama.cols
-                  height:(NSInteger)panorama.rows
+                   width:(NSInteger)finalImage.cols
+                  height:(NSInteger)finalImage.rows
               durationMs:durationMs];
 }
 
@@ -366,6 +1131,9 @@ NSError *errorForStitchStatus(cv::Stitcher::Status status) {
                                            outputPath:(NSString *)outputPath
                                             maxFrames:(NSInteger)maxFrames
                                           jpegQuality:(NSInteger)quality
+                                           warperType:(NSString *)warperType
+                                          blenderType:(NSString *)blenderType
+                                       seamFinderType:(NSString *)seamFinderType
                                                 error:(NSError **)error {
   // Tmp dir for extracted frames — UUID'd so concurrent stitches
   // can't clobber each other's working state.
@@ -394,6 +1162,9 @@ NSError *errorForStitchStatus(cv::Stitcher::Status status) {
       [self stitchFramePaths:frames
                   outputPath:outputPath
                  jpegQuality:quality
+                  warperType:warperType
+                 blenderType:blenderType
+              seamFinderType:seamFinderType
                        error:&stitchErr];
 
   // Always tear down the tmp dir, success or fail — leaving

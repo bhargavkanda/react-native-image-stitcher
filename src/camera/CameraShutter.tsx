@@ -62,6 +62,18 @@ export interface CameraShutterProps {
   /** Called on release while in the hold state — recording should stop. */
   onHoldComplete: () => void;
   /**
+   * Maximum hold duration in milliseconds.  When the timer fires
+   * we auto-fire `onHoldComplete` — same behaviour as the user
+   * releasing the button.  Default 8000 ms; keeps recording
+   * within the stitcher's adjacent-frame-overlap budget
+   * (16 frames × 2 fps = 8 s upper bound).  Pass 0 / undefined
+   * to disable the auto-stop.
+   *
+   * Pair with `<CaptureStatusOverlay countdownMs>` so the user
+   * sees how much hold time is left.
+   */
+  maxHoldMs?: number;
+  /**
    * Optional state-driven visual override.  When the host has its own
    * processing indicator (e.g. "Stitching... 70%") set this to true to
    * paint the button in the disabled-while-processing visual.
@@ -86,7 +98,15 @@ export interface CameraShutterHandle {
 
 export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>(
   function CameraShutter(
-    { onTap, onHoldStart, onHoldComplete, isProcessing = false, disabled = false, style },
+    {
+      onTap,
+      onHoldStart,
+      onHoldComplete,
+      maxHoldMs,
+      isProcessing = false,
+      disabled = false,
+      style,
+    },
     ref,
   ) {
     type Phase = 'idle' | 'pressing' | 'holding';
@@ -98,6 +118,9 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
     const [phase, setPhase] = useState<Phase>('idle');
     const phaseRef = useRef<Phase>('idle');
     const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Separate timer for the auto-stop (max hold).  Distinct from
+    // the tap-vs-hold detection timer so each can fire independently.
+    const maxHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const setPhaseBoth = useCallback((next: Phase) => {
       phaseRef.current = next;
@@ -111,17 +134,28 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
       }
     }, []);
 
+    const clearMaxHoldTimer = useCallback(() => {
+      if (maxHoldTimerRef.current !== null) {
+        clearTimeout(maxHoldTimerRef.current);
+        maxHoldTimerRef.current = null;
+      }
+    }, []);
+
     const cancelHold = useCallback(() => {
       clearHoldTimer();
+      clearMaxHoldTimer();
       setPhaseBoth('idle');
-    }, [clearHoldTimer, setPhaseBoth]);
+    }, [clearHoldTimer, clearMaxHoldTimer, setPhaseBoth]);
 
     useImperativeHandle(ref, () => ({ cancelHold }), [cancelHold]);
 
-    // Belt-and-suspenders: clean the timer on unmount so a fast
-    // navigation away from the camera doesn't leave it firing into a
-    // stale closure.
-    useEffect(() => clearHoldTimer, [clearHoldTimer]);
+    // Belt-and-suspenders: clean both timers on unmount so a
+    // fast navigation away from the camera doesn't leave one
+    // firing into a stale closure.
+    useEffect(() => () => {
+      clearHoldTimer();
+      clearMaxHoldTimer();
+    }, [clearHoldTimer, clearMaxHoldTimer]);
 
     const handlePressIn = useCallback(() => {
       if (disabled || isProcessing) return;
@@ -131,14 +165,26 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
         if (phaseRef.current === 'pressing') {
           setPhaseBoth('holding');
           onHoldStart();
+          // Schedule the auto-stop if maxHoldMs is set.  Same
+          // outcome as the user releasing the button manually —
+          // fires onHoldComplete + drops back to idle.
+          if (maxHoldMs && maxHoldMs > 0) {
+            maxHoldTimerRef.current = setTimeout(() => {
+              if (phaseRef.current === 'holding') {
+                setPhaseBoth('idle');
+                onHoldComplete();
+              }
+            }, maxHoldMs);
+          }
         }
       }, HOLD_THRESHOLD_MS);
-    }, [disabled, isProcessing, onHoldStart, setPhaseBoth]);
+    }, [disabled, isProcessing, onHoldStart, onHoldComplete, maxHoldMs, setPhaseBoth]);
 
     const handlePressOut = useCallback(() => {
       if (disabled || isProcessing) return;
       const wasHolding = phaseRef.current === 'holding';
       clearHoldTimer();
+      clearMaxHoldTimer();
       setPhaseBoth('idle');
       if (wasHolding) {
         onHoldComplete();
@@ -146,7 +192,7 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
         // It was a tap (released before the threshold).
         onTap();
       }
-    }, [disabled, isProcessing, onTap, onHoldComplete, clearHoldTimer, setPhaseBoth]);
+    }, [disabled, isProcessing, onTap, onHoldComplete, clearHoldTimer, clearMaxHoldTimer, setPhaseBoth]);
 
     // Visuals.  Three layered circles so the inner colour can swap
     // without animating the outer ring (smoother on lower-end phones).

@@ -26,6 +26,41 @@ public class RetaiLensStitcherBridge: NSObject {
   // blocked during initialisation.
   @objc public static func requiresMainQueueSetup() -> Bool { return false }
 
+  /// Constants exposed to JS at module load time.  Read via
+  /// `NativeModules.RetaiLensStitcher.physicalMemoryBytes`.
+  ///
+  /// Used by the SDK's `DEFAULT_PANORAMA_SETTINGS` to pick
+  /// memory-appropriate defaults: high-quality MultiBand+GraphCut
+  /// on devices with ≥2 GB physical RAM, low-memory Feather+skip
+  /// on devices with <2 GB.  The user can still override either
+  /// way via the panorama settings modal.
+  ///
+  /// CRITICAL: this MUST be a class method (`static`), not an
+  /// instance method.  React Native's bridge gathers constants by
+  /// trying `[ModuleClass respondsToSelector:@selector(constants
+  /// ToExport)]` first; only the class-method form satisfies that
+  /// without forcing module instantiation.  When this was an
+  /// instance method, the module was lazily created on the first
+  /// `stitchVideo` call — so by then JS had already read empty
+  /// constants and our `_isLowMem` check fell back incorrectly.
+  ///
+  /// Reading `ProcessInfo.processInfo.physicalMemory` is thread-
+  /// safe (no UIKit dependency), so the constants gathering can
+  /// happen off main thread; `requiresMainQueueSetup = false`
+  /// stays correct.
+  ///
+  /// Returning `[String: Any]` (not `[AnyHashable: Any]`) so the
+  /// Swift→ObjC bridge produces an `NSDictionary<NSString *, id> *`
+  /// which is exactly what RN's `constantsToExport` declares.
+  @objc public static func constantsToExport() -> [String: Any] {
+    let bytes = ProcessInfo.processInfo.physicalMemory
+    NSLog("[RetaiLensStitcher] constantsToExport: physicalMemoryBytes=%llu",
+          bytes)
+    return [
+      "physicalMemoryBytes": NSNumber(value: bytes),
+    ]
+  }
+
   /// Bridged entry: stitch the frames at `options.framePaths` into a
   /// panorama at `options.outputPath`.  Resolves with
   /// `{ outputPath, width, height, durationMs }` to match the JS
@@ -56,12 +91,18 @@ public class RetaiLensStitcherBridge: NSObject {
     }
     let maxFrames = (options["maxFrames"] as? Int) ?? 10
     let jpegQuality = (options["quality"] as? Int) ?? 85
+    let warperType = (options["warperType"] as? String) ?? "plane"
+    let blenderType = (options["blenderType"] as? String) ?? "multiband"
+    let seamFinderType = (options["seamFinderType"] as? String) ?? "graphcut"
 
     let stitchOpts = StitchVideoOptions(
       videoPath: videoPath,
       outputPath: outputPath,
       maxFrames: maxFrames,
-      jpegQuality: jpegQuality
+      jpegQuality: jpegQuality,
+      warperType: warperType,
+      blenderType: blenderType,
+      seamFinderType: seamFinderType
     )
 
     DispatchQueue.global(qos: .userInitiated).async {

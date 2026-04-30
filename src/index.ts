@@ -27,6 +27,8 @@ export type {
 } from './camera/useCapture';
 export { CameraView } from './camera/CameraView';
 export type { CameraViewProps } from './camera/CameraView';
+export { ARCameraView } from './camera/ARCameraView';
+export type { ARCameraViewProps, ARCameraViewHandle } from './camera/ARCameraView';
 export { CameraShutter } from './camera/CameraShutter';
 export type {
   CameraShutterProps,
@@ -53,6 +55,14 @@ export type {
 } from './camera/PanoramaGuidance';
 export { LiveFrameStrip } from './camera/LiveFrameStrip';
 export type { LiveFrameStripProps } from './camera/LiveFrameStrip';
+export {
+  PanoramaSettingsModal,
+  DEFAULT_PANORAMA_SETTINGS,
+} from './camera/PanoramaSettingsModal';
+export type {
+  PanoramaSettings,
+  PanoramaSettingsModalProps,
+} from './camera/PanoramaSettingsModal';
 export { useDeviceOrientation } from './camera/useDeviceOrientation';
 export type { DeviceOrientation } from './camera/useDeviceOrientation';
 

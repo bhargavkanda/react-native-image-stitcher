@@ -25,7 +25,9 @@
 
 import Foundation
 import ARKit
+import AVFoundation
 import simd
+import UIKit
 
 
 /// Track state mirrors `ARCamera.TrackingState`.  We mirror it
@@ -124,7 +126,13 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     /// Shared instance.  All callers MUST go through this.
     @objc public static let shared = RetaiLensARSession()
 
-    private let arSession = ARSession()
+    /// The underlying ARKit session.  Module-internal (not `private`)
+    /// so RetaiLensARCameraView (same module) can bind its ARSCNView
+    /// to this exact session — sharing is critical so the pose log
+    /// (driven by this object's `ARSessionDelegate` callbacks) stays
+    /// populated while the view renders frames.  Lifecycle is still
+    /// controlled exclusively via `start()` / `stop()`.
+    let arSession = ARSession()
 
     /// Rolling log of poses, keyed by ARFrame timestamp (TimeInterval).
     /// Capped at MAX_POSE_LOG entries to bound memory under long
@@ -141,6 +149,45 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
 
     /// Whether the session is currently running.
     @objc public private(set) var isRunning: Bool = false
+
+    // ──────────────────────────────────────────────────────────────
+    // Phase 5 — AR-backed photo + video capture state
+    // ──────────────────────────────────────────────────────────────
+    //
+    // `takePhoto` / `startRecording` / `stopRecording` make the AR
+    // session a drop-in replacement for vision-camera's `<Camera>`
+    // — same imperative API exposed via ARCameraView's ref, so the
+    // host's existing `useCapture` / `useVideoCapture` hooks work
+    // transparently when AR mode is on.
+    //
+    // The asset writer state below is touched from TWO threads:
+    //   1. The bridge thread (start/stop calls from JS).
+    //   2. The ARSession delegate thread (per-frame callbacks
+    //      that append the latest pixelBuffer to the writer).
+    // We serialise via `captureStateQueue` to prevent the delegate
+    // appending after `finishWriting` has been called.
+
+    /// Active AVAssetWriter while recording; nil when idle.
+    private var assetWriter: AVAssetWriter?
+    /// AVAssetWriterInput owns the encoded video track.  Held
+    /// separately from `assetWriter` so we can call `markAsFinished`
+    /// and check `isReadyForMoreMediaData` without re-querying.
+    private var videoInput: AVAssetWriterInput?
+    /// Adaptor accepts CVPixelBuffer directly — bypasses the
+    /// CMSampleBuffer ceremony that would otherwise be needed for
+    /// each frame.  ARFrame.capturedImage is already a CVPixelBuffer.
+    private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    /// Timestamp of the first frame appended.  Used as the session
+    /// start time so CMTime presentation timestamps remain monotonic
+    /// from zero.
+    private var recordingStartTime: CMTime?
+    /// Serial queue guarding all asset-writer state mutations.
+    /// Must be serial — concurrent finishWriting + append crashes
+    /// AVAssetWriter.
+    private let captureStateQueue = DispatchQueue(
+        label: "com.retailens.arsession.capture",
+        qos: .userInitiated
+    )
 
     private override init() {
         super.init()
@@ -245,6 +292,33 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
                 self.poseLog.removeFirst(drop)
             }
         }
+
+        // If recording is in flight, append this frame to the
+        // asset writer.  We capture the pixelBuffer + timestamp on
+        // the delegate thread, then dispatch the actual append onto
+        // captureStateQueue so it serialises with start/stop calls
+        // from the bridge thread.
+        let pixelBuffer = frame.capturedImage
+        let frameTimestamp = frame.timestamp
+        captureStateQueue.async { [weak self] in
+            guard let self = self,
+                  let writer = self.assetWriter,
+                  let input = self.videoInput,
+                  let adaptor = self.pixelBufferAdaptor,
+                  writer.status == .writing,
+                  input.isReadyForMoreMediaData,
+                  let startTime = self.recordingStartTime else {
+                return
+            }
+            // Compute presentation timestamp relative to recording
+            // start so the resulting mp4's timeline begins at 0.
+            let frameCMTime = CMTime(
+                seconds: frameTimestamp,
+                preferredTimescale: 1_000_000
+            )
+            let pts = CMTimeSubtract(frameCMTime, startTime)
+            adaptor.append(pixelBuffer, withPresentationTime: pts)
+        }
     }
 
     public func session(
@@ -267,7 +341,280 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         isRunning = false
     }
 
+    // MARK: - Phase 5: AR-backed photo + video capture
+
+    /// Capture the current camera frame as a JPEG.  If `rawPath` is
+    /// empty, generates a fresh path inside `NSTemporaryDirectory()`
+    /// — matches vision-camera's API where the path is an OUTPUT,
+    /// not an input.  Completion fires with a result dictionary
+    /// matching vision-camera's PhotoFile shape.
+    @objc public func takePhoto(
+        toPath rawPath: String,
+        quality: Int,
+        completion: @escaping ([String: Any]?, NSError?) -> Void
+    ) {
+        let resolvedPath: String
+        if rawPath.isEmpty {
+            let dir = NSTemporaryDirectory()
+            resolvedPath = (dir as NSString).appendingPathComponent(
+                "RetaiLensAR-\(UUID().uuidString).jpg"
+            )
+        } else {
+            resolvedPath = rawPath
+        }
+        guard let frame = arSession.currentFrame else {
+            completion(nil, NSError(
+                domain: "RetaiLensARCapture",
+                code: 2001,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "AR session has no current frame — start the session first."]
+            ))
+            return
+        }
+        let pixelBuffer = frame.capturedImage
+
+        // ARKit's capturedImage is in landscape sensor orientation
+        // regardless of how the device is held.  Rotate to portrait
+        // (the way the user is holding the phone for shelf audits)
+        // by applying a 90° clockwise CIImage orientation.  Without
+        // this, photos appear sideways in any consumer that doesn't
+        // honour EXIF (RN's <Image>, the OpenCV stitcher).
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            .oriented(.right)
+        let context = CIContext(options: nil)
+        guard let cgImage = context.createCGImage(
+            ciImage,
+            from: ciImage.extent
+        ) else {
+            completion(nil, NSError(
+                domain: "RetaiLensARCapture",
+                code: 2002,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Failed to render AR frame to CGImage."]
+            ))
+            return
+        }
+        let uiImage = UIImage(cgImage: cgImage)
+        let clamped = max(0, min(100, quality))
+        guard let jpegData = uiImage.jpegData(
+            compressionQuality: CGFloat(clamped) / 100.0
+        ) else {
+            completion(nil, NSError(
+                domain: "RetaiLensARCapture",
+                code: 2003,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Failed to encode AR frame as JPEG."]
+            ))
+            return
+        }
+
+        let cleanedPath = Self.normalisePath(resolvedPath)
+        let url = URL(fileURLWithPath: cleanedPath)
+        // Best-effort delete an existing file at the same path —
+        // vision-camera's takePhoto overwrites; we mirror that.
+        try? FileManager.default.removeItem(at: url)
+        do {
+            try jpegData.write(to: url)
+            completion([
+                "path": cleanedPath,
+                "width": cgImage.width,
+                "height": cgImage.height,
+                "isMirrored": false,
+                "isRawPhoto": false,
+            ], nil)
+        } catch {
+            completion(nil, error as NSError)
+        }
+    }
+
+    /// Begin recording AR frames to an mp4 at `path`.  Completion
+    /// fires once the AVAssetWriter is ready to accept frames; the
+    /// per-frame append happens implicitly inside the ARSessionDelegate
+    /// callback above.
+    ///
+    /// No audio: the panorama stitcher only consumes video frames,
+    /// and audio adds AVCaptureSession setup that conflicts with
+    /// ARKit's exclusive camera access.
+    @objc public func startRecording(
+        toPath rawPath: String,
+        completion: @escaping (String?, NSError?) -> Void
+    ) {
+        let resolvedPath: String
+        if rawPath.isEmpty {
+            let dir = NSTemporaryDirectory()
+            resolvedPath = (dir as NSString).appendingPathComponent(
+                "RetaiLensAR-\(UUID().uuidString).mp4"
+            )
+        } else {
+            resolvedPath = rawPath
+        }
+        captureStateQueue.async { [weak self] in
+            guard let self = self else { return }
+            if self.assetWriter != nil {
+                completion(nil, NSError(
+                    domain: "RetaiLensARCapture",
+                    code: 2010,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "A recording is already in progress."]
+                ))
+                return
+            }
+            guard let frame = self.arSession.currentFrame else {
+                completion(nil, NSError(
+                    domain: "RetaiLensARCapture",
+                    code: 2011,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "AR session has no current frame — start the session first."]
+                ))
+                return
+            }
+
+            let pixelBuffer = frame.capturedImage
+            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            let cleanedPath = Self.normalisePath(resolvedPath)
+            let url = URL(fileURLWithPath: cleanedPath)
+            try? FileManager.default.removeItem(at: url)
+
+            do {
+                let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+                // Encode H.264 at sensor dimensions (landscape).
+                // The 90° rotation transform below tells the player
+                // (and AVAssetImageGenerator inside our stitcher's
+                // extractFrames step) to display in portrait without
+                // re-encoding.
+                let videoSettings: [String: Any] = [
+                    AVVideoCodecKey: AVVideoCodecType.h264,
+                    AVVideoWidthKey: width,
+                    AVVideoHeightKey: height,
+                ]
+                let input = AVAssetWriterInput(
+                    mediaType: .video,
+                    outputSettings: videoSettings
+                )
+                input.expectsMediaDataInRealTime = true
+                // Match the rotation vision-camera applies on its
+                // mp4s — ARKit's sensor frames are landscape; the
+                // user holds the phone portrait.  Without this the
+                // stitcher gets a sideways video.
+                input.transform = CGAffineTransform(rotationAngle: .pi / 2)
+
+                // Source-pixel attributes: declare the format the
+                // adapter accepts.  ARKit emits NV12 (YpCbCr 4:2:0
+                // bi-planar) — the adaptor handles this directly
+                // without needing us to convert per frame.
+                let attrs: [String: Any] = [
+                    kCVPixelBufferPixelFormatTypeKey as String:
+                        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                    kCVPixelBufferWidthKey as String: width,
+                    kCVPixelBufferHeightKey as String: height,
+                ]
+                let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+                    assetWriterInput: input,
+                    sourcePixelBufferAttributes: attrs
+                )
+
+                guard writer.canAdd(input) else {
+                    completion(nil, NSError(
+                        domain: "RetaiLensARCapture",
+                        code: 2012,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "AVAssetWriter rejected the video input — codec/format mismatch."]
+                    ))
+                    return
+                }
+                writer.add(input)
+
+                let startTime = CMTime(
+                    seconds: frame.timestamp,
+                    preferredTimescale: 1_000_000
+                )
+                writer.startWriting()
+                writer.startSession(atSourceTime: .zero)
+
+                self.assetWriter = writer
+                self.videoInput = input
+                self.pixelBufferAdaptor = adaptor
+                self.recordingStartTime = startTime
+
+                // Reset the pose log so this recording's frames
+                // correlate with a fresh window of poses; the
+                // stitcher matches video frames to poses by
+                // timestamp from recording start.
+                self.poseLogQueue.async(flags: .barrier) { [weak self] in
+                    self?.poseLog.removeAll(keepingCapacity: true)
+                }
+
+                NSLog("[RetaiLensARCapture] startRecording: %dx%d → %@",
+                      width, height, cleanedPath)
+                completion(cleanedPath, nil)
+            } catch {
+                completion(nil, error as NSError)
+            }
+        }
+    }
+
+    /// Finalise the in-progress recording and resolve with the
+    /// resulting file's metadata (path, duration, size, width,
+    /// height) — shape mirrors vision-camera's VideoFile so JS
+    /// consumers don't branch.
+    @objc public func stopRecording(
+        completion: @escaping ([String: Any]?, NSError?) -> Void
+    ) {
+        captureStateQueue.async { [weak self] in
+            guard let self = self,
+                  let writer = self.assetWriter,
+                  let input = self.videoInput else {
+                completion(nil, NSError(
+                    domain: "RetaiLensARCapture",
+                    code: 2020,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "No active recording to stop."]
+                ))
+                return
+            }
+
+            input.markAsFinished()
+            let outputURL = writer.outputURL
+            writer.finishWriting { [weak self] in
+                guard let self = self else { return }
+                self.captureStateQueue.async {
+                    let path = outputURL.path
+                    let asset = AVAsset(url: outputURL)
+                    let durationSec = CMTimeGetSeconds(asset.duration)
+                    let fileSize = (try? FileManager.default
+                        .attributesOfItem(atPath: path))?[.size] as? Int ?? 0
+                    let track = asset.tracks(withMediaType: .video).first
+                    let naturalSize = track?.naturalSize ?? .zero
+                    NSLog("[RetaiLensARCapture] stopRecording: %.2fs, %lld bytes",
+                          durationSec, Int64(fileSize))
+                    self.assetWriter = nil
+                    self.videoInput = nil
+                    self.pixelBufferAdaptor = nil
+                    self.recordingStartTime = nil
+                    completion([
+                        "path": path,
+                        "duration": durationSec,
+                        "size": fileSize,
+                        "width": Int(naturalSize.width),
+                        "height": Int(naturalSize.height),
+                    ], nil)
+                }
+            }
+        }
+    }
+
     // MARK: - Helpers
+
+    /// Strip a `file://` scheme some callers attach — same logic
+    /// the OpenCV stitcher uses, kept local here so RetaiLensARSession
+    /// stays independent of the OpenCV path.
+    private static func normalisePath(_ path: String) -> String {
+        if path.hasPrefix("file://") {
+            return String(path.dropFirst("file://".count))
+        }
+        return path
+    }
 
     private func makePose(from frame: ARFrame) -> RetaiLensARFramePose {
         // ARKit's transform is a 4x4 matrix; extract translation

@@ -26,4 +26,16 @@ RCT_EXTERN_METHOD(snapshotPoseLog:(RCTPromiseResolveBlock)resolver
 RCT_EXTERN_METHOD(clearPoseLog:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// Phase 5 AR-backed photo + video capture
+RCT_EXTERN_METHOD(takePhoto:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
+RCT_EXTERN_METHOD(startRecording:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
+RCT_EXTERN_METHOD(stopRecording:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 @end

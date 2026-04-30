@@ -116,19 +116,23 @@ export function useVideoCapture(): UseVideoCaptureReturn {
   } | null>(null);
 
   const startRecording = useCallback(
-    (cameraRef: React.RefObject<Camera | null>): Promise<VideoFile> => {
+    async (cameraRef: React.RefObject<Camera | null>): Promise<VideoFile> => {
       if (!cameraRef.current) {
-        return Promise.reject(
-          new Error('useVideoCapture.startRecording: cameraRef is null'),
-        );
+        throw new Error('useVideoCapture.startRecording: cameraRef is null');
       }
       if (recordingFutureRef.current !== null) {
-        return Promise.reject(
-          new Error(
-            'useVideoCapture.startRecording: a recording is already in progress',
-          ),
+        throw new Error(
+          'useVideoCapture.startRecording: a recording is already in progress',
         );
       }
+
+      // Brief settle before kicking off a fresh recording.
+      // vision-camera's AVCaptureSession needs ~100 ms after a
+      // previous stopRecording completes before it can cleanly
+      // start a new one — without this, rapid record→stop→record
+      // cycles (typical when the user does a panorama, then another
+      // panorama right after) can crash the session.
+      await new Promise<void>((r) => setTimeout(r, 150));
 
       return new Promise<VideoFile>((resolve, reject) => {
         recordingFutureRef.current = { resolve, reject };
