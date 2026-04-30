@@ -508,11 +508,29 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
                     outputSettings: videoSettings
                 )
                 input.expectsMediaDataInRealTime = true
-                // Match the rotation vision-camera applies on its
-                // mp4s — ARKit's sensor frames are landscape; the
-                // user holds the phone portrait.  Without this the
-                // stitcher gets a sideways video.
-                input.transform = CGAffineTransform(rotationAngle: .pi / 2)
+                // NO rotation transform on the AR-recorded mp4.
+                //
+                // Phase 5 pose-driven stitching consumes the
+                // ARKit pose's intrinsics (fx, fy, cx, cy) which
+                // describe the SENSOR'S NATIVE LANDSCAPE coordinate
+                // system.  If we apply a 90° rotation transform on
+                // the mp4 and `extractFramesFromVideoAtPath` honours
+                // it via `appliesPreferredTrackTransform=YES`, the
+                // extracted frames come out PORTRAIT — orthogonal
+                // to what the intrinsics describe.  cv::detail::Warper
+                // then projects with mismatched geometry and the
+                // output panorama is visibly rotated/sheared.
+                //
+                // Keeping frames in sensor-native landscape:
+                //   - Intrinsics match the frame data → warp aligns
+                //     correctly.
+                //   - Output panorama comes out in landscape, which
+                //     IS the natural orientation for a horizontal
+                //     pan (wide × short).
+                //
+                // The feature-matched path (vision-camera mp4s) is
+                // unaffected — it estimates intrinsics from features
+                // so any orientation works internally.
 
                 // Source-pixel attributes: declare the format the
                 // adapter accepts.  ARKit emits NV12 (YpCbCr 4:2:0

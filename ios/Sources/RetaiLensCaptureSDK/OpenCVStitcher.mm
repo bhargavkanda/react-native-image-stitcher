@@ -308,7 +308,15 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // (plane).  This restores the multi-stage structure while
     // keeping the PlaneWarper that the host app actually wants.
     constexpr double REGISTRATION_MP = 0.3;
-    constexpr double COMPOSE_MP = 1.0;
+    // 0.6 MP matches cv::Stitcher::PANORAMA's registration_resol
+    // default and is the "safe sharp" setting on Debug builds —
+    // 1.0 MP was visibly sharper but pushed memory peak into iOS
+    // jetsam territory (Sentry caught WatchdogTermination + the
+    // EXC_BAD_ACCESS-during-tear-down variant under the same root
+    // cause).  Release builds free ~200-300 MB of RN baseline
+    // overhead and would tolerate 1.0 MP fine; if/when a Release
+    // build is the test target, bump this back up.
+    constexpr double COMPOSE_MP = 0.6;
 
     // Capture original size BEFORE downscaling — we need it later
     // to compute the compose scale relative to full-res input.
