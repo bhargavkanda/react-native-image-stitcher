@@ -496,9 +496,15 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // up-vector.  Without this, the cylindrical (or spherical)
     // projection produces visible "wavy" top / bottom edges where
     // edge frames hit the projection surface at slightly
-    // different vertical angles.  WAVE_CORRECT_HORIZ assumes the
-    // dominant pan axis is yaw (left-right), which matches the
-    // typical shelf-scan gesture.
+    // different vertical angles.
+    //
+    // Auto-detect the pan axis from the rotation matrices —
+    // operators may pan horizontally (yaw, phone in portrait) OR
+    // vertically (pitch, phone in landscape, top-to-bottom) or
+    // diagonally.  cv::detail::autoDetectWaveCorrectKind looks at
+    // the spread of rotation axes and picks WAVE_CORRECT_HORIZ
+    // or WAVE_CORRECT_VERT.  Hard-coding HORIZ produced visibly
+    // skewed output on vertical scans.
     {
       auto _t = std::chrono::steady_clock::now();
       double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -511,7 +517,8 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       rmats.push_back(cam.R.clone());
     }
     try {
-      cv::detail::waveCorrect(rmats, cv::detail::WAVE_CORRECT_HORIZ);
+      auto waveKind = cv::detail::autoDetectWaveCorrectKind(rmats);
+      cv::detail::waveCorrect(rmats, waveKind);
       for (size_t i = 0; i < cameras.size(); i++) {
         cameras[i].R = rmats[i];
       }
@@ -1404,12 +1411,15 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
     // Optional waveCorrect — gravity-aligned poses should already
     // share an up-vector but the operator's hand may tilt slightly.
-    // Skip if it fails (degenerate input).
+    // Auto-detect pan axis (HORIZ vs VERT) so the same code path
+    // works for any device orientation + pan direction.  Skip if
+    // it fails (degenerate input).
     std::vector<cv::Mat> rmats;
     rmats.reserve(cameras.size());
     for (const auto &cam : cameras) rmats.push_back(cam.R.clone());
     try {
-      cv::detail::waveCorrect(rmats, cv::detail::WAVE_CORRECT_HORIZ);
+      auto waveKind = cv::detail::autoDetectWaveCorrectKind(rmats);
+      cv::detail::waveCorrect(rmats, waveKind);
       for (size_t i = 0; i < cameras.size(); i++) {
         cameras[i].R = rmats[i];
       }
