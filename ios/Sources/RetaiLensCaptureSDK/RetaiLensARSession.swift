@@ -296,26 +296,29 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         // If recording is in flight, append this frame to the
         // asset writer.
         //
-        // CRITICAL: dispatch SYNCHRONOUSLY (not async) onto
-        // captureStateQueue.  ARKit only guarantees frame.capturedImage
-        // is valid for the duration of THIS delegate callback —
-        // pixel buffers are recycled between frames.  An async hop
-        // means the buffer may be freed before adaptor.append() reads
-        // it, and Swift's closure cleanup will then try to `release`
-        // already-freed memory → EXC_BAD_ACCESS at objc_retain
-        // (we hit this in the field; see the Sentry crash with
-        // signature "EXC_BAD_ACCESS: release" at 0x16adb7e10).
-        //
+        // Async dispatch onto captureStateQueue.  Swift's closure
+        // capture retains the CVPixelBuffer (CF type with toll-free
+        // bridging), so it stays alive until the closure runs.
         // adaptor.append() makes its own internal copy before
-        // returning, so the pixelBuffer's lifetime requirement
-        // is just this call frame — sync gives us that guarantee.
-        // Trade-off: blocks the delegate for ~ms while the encoder
-        // ingests the frame.  At 60Hz pose log + 30fps recording,
-        // this is well-tolerated; if the encoder ever lags, we'd
-        // see frame drops (graceful) rather than crashes.
+        // returning.
+        //
+        // We tried `.sync` previously to side-step a suspected
+        // pixel-buffer lifetime issue — but sync from ARKit's
+        // delegate queue blocks the delegate until the encoder
+        // returns.  When the encoder ran slow (or the captureStateQueue
+        // had any prior work in flight), ARKit silently dropped
+        // frames; in the worst case, ZERO frames made it to the mp4,
+        // the resulting file had no valid duration, and stitchVideo
+        // failed with the "Could not read video duration" error
+        // ~50% of the time.  Async restores frame flow.
+        //
+        // Safety against the over-release crash (Sentry: "release"
+        // at 0x16adb7e10) is now provided by the early-clear in
+        // stopRecording — concurrent delegate closures find
+        // assetWriter=nil and skip cleanly.
         let pixelBuffer = frame.capturedImage
         let frameTimestamp = frame.timestamp
-        captureStateQueue.sync { [weak self] in
+        captureStateQueue.async { [weak self] in
             guard let self = self,
                   let writer = self.assetWriter,
                   let input = self.videoInput,

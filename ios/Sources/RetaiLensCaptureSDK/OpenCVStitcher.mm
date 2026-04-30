@@ -1409,37 +1409,24 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         : 1.0;
     double compose_work_aspect = compose_scale;  // work_scale == 1
 
-    // CRITICAL: normalise the cameras' R relative to camera 0
-    // BEFORE waveCorrect / warping.
+    // No camera-0 normalisation in the pose-driven path.
     //
-    // cv::Stitcher's BA produces R values where camera 0 is the
-    // origin of the panorama's "world" frame (R_0 = identity), and
-    // R_i represents the rotation FROM camera 0 TO camera i.  All
-    // downstream steps (autoDetectWaveCorrectKind, the warpers'
-    // panorama-orientation heuristics) assume this convention.
+    // I added one previously thinking it matched cv::Stitcher's BA
+    // convention.  In fact it BROKE the natural orientation: BA
+    // normalises into a frame where camera 0's "up" is the panorama
+    // up; for pose-driven, the cameras already live in ARKit's
+    // gravity-aligned world (Y-up = scene up regardless of phone
+    // orientation), so passing R values in ARKit's world frame is
+    // exactly what cv::detail::SphericalWarper wants — it unwraps
+    // the sphere with world's +Y as up, giving correct orientation
+    // for any phone pose + any pan direction.  Normalising rotated
+    // the panorama 90° (the user's left-to-right pan in portrait
+    // came out with natural-up on the side).
     //
-    // My pose-driven path was passing ABSOLUTE world rotations
-    // (in ARKit's gravity-aligned world frame).  The relative
-    // geometry between cameras was correct — but the warpers
-    // interpreted "up" relative to ARKit's world Y, not relative
-    // to where the operator was actually looking.  Result: panorama
-    // came out oriented as if the user had panned along an
-    // arbitrary world axis instead of relative to their viewpoint.
-    //
-    // Multiplying every R_i on the right by R_0^T:
-    //   - Sets cameras[0].R = R_0 * R_0^T = identity (camera 0
-    //     becomes the panorama's centre/origin).
-    //   - Preserves all relative rotations (R_0->1, R_0->2, …).
-    //   - Brings the data into cv::Stitcher's expected format so
-    //     waveCorrect / warper produce correctly-oriented output.
-    {
-      cv::Mat R0t = cameras[0].R.t();
-      for (auto &cam : cameras) {
-        cam.R = cam.R * R0t;
-      }
-    }
+    // waveCorrect below provides the per-camera fine alignment that
+    // BA would have done in the feature-matched path.
 
-    // Optional waveCorrect — operates on the now-normalised R.
+    // Optional waveCorrect — operates on the (un-normalised) R.
     // Auto-detect pan axis (HORIZ vs VERT) so the same code path
     // works for any device orientation + pan direction.  Skip if
     // it fails (degenerate input).
