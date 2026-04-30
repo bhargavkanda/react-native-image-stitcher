@@ -498,13 +498,19 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // edge frames hit the projection surface at slightly
     // different vertical angles.
     //
-    // Auto-detect the pan axis from the rotation matrices —
-    // operators may pan horizontally (yaw, phone in portrait) OR
-    // vertically (pitch, phone in landscape, top-to-bottom) or
-    // diagonally.  cv::detail::autoDetectWaveCorrectKind looks at
-    // the spread of rotation axes and picks WAVE_CORRECT_HORIZ
-    // or WAVE_CORRECT_VERT.  Hard-coding HORIZ produced visibly
-    // skewed output on vertical scans.
+    // WAVE_CORRECT_HORIZ — this is what was working yesterday for
+    // BOTH portrait+horizontal-pan and landscape+vertical-pan.
+    // Why it works for both: HORIZ aligns each camera's "up" vector
+    // to the world Y axis (gravity).  vision-camera writes mp4s
+    // with `outputOrientation="device"` so the saved frames are
+    // already in the user's view orientation; after BA + waveCorrect
+    // HORIZ, the panorama's vertical axis matches world's vertical
+    // axis regardless of pan direction.
+    //
+    // I briefly switched to autoDetectWaveCorrectKind thinking it'd
+    // handle vertical pans better — it actually picked the wrong
+    // kind for portrait+horizontal pans, breaking yesterday's
+    // working normal-mode capture.  Reverting.
     {
       auto _t = std::chrono::steady_clock::now();
       double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -517,8 +523,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       rmats.push_back(cam.R.clone());
     }
     try {
-      auto waveKind = cv::detail::autoDetectWaveCorrectKind(rmats);
-      cv::detail::waveCorrect(rmats, waveKind);
+      cv::detail::waveCorrect(rmats, cv::detail::WAVE_CORRECT_HORIZ);
       for (size_t i = 0; i < cameras.size(); i++) {
         cameras[i].R = rmats[i];
       }
@@ -1426,16 +1431,17 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // waveCorrect below provides the per-camera fine alignment that
     // BA would have done in the feature-matched path.
 
-    // Optional waveCorrect — operates on the (un-normalised) R.
-    // Auto-detect pan axis (HORIZ vs VERT) so the same code path
-    // works for any device orientation + pan direction.  Skip if
-    // it fails (degenerate input).
+    // Optional waveCorrect — uses HORIZ to match the feature-
+    // matched path.  Operators may pan in any direction; HORIZ
+    // aligns each camera's "up" to the world Y axis (gravity),
+    // which is what we want for both portrait+horizontal and
+    // landscape+vertical pans (assuming the user keeps the phone
+    // oriented to gravity, which is the typical handheld case).
     std::vector<cv::Mat> rmats;
     rmats.reserve(cameras.size());
     for (const auto &cam : cameras) rmats.push_back(cam.R.clone());
     try {
-      auto waveKind = cv::detail::autoDetectWaveCorrectKind(rmats);
-      cv::detail::waveCorrect(rmats, waveKind);
+      cv::detail::waveCorrect(rmats, cv::detail::WAVE_CORRECT_HORIZ);
       for (size_t i = 0; i < cameras.size(); i++) {
         cameras[i].R = rmats[i];
       }
