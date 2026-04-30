@@ -132,3 +132,15 @@ export type {
   MeasurementMode,
   MeasurementOverlayProps,
 } from './measure/MeasurementOverlay';
+
+// ── Phase 7: On-edge packet detection ────────────────────────────────────
+export {
+  runPacketDetection,
+  packetDetectionIsAvailable,
+} from './detect/detect';
+export type {
+  DetectionBBox,
+  DetectedItem,
+  RunPacketDetectionOptions,
+  RunPacketDetectionResult,
+} from './detect/detect';
