@@ -75,6 +75,32 @@ export interface StitchVideoOptions {
    *     Right choice on low-RAM devices or with `feather`.
    */
   seamFinderType?: 'graphcut' | 'skip';
+  /**
+   * Phase 5: pose-driven stitching.  When present and non-empty,
+   * the native stitcher skips features → matching → BundleAdjuster
+   * and builds cv::detail::CameraParams directly from each pose's
+   * intrinsics + quaternion.  Each entry has the shape returned
+   * by `NativeModules.RetaiLensARSession.snapshotPoseLog()`:
+   *
+   *   { tx, ty, tz, qx, qy, qz, qw,
+   *     fx, fy, cx, cy,
+   *     imageWidth, imageHeight,
+   *     timestampMs, trackingState }
+   *
+   * Frames whose closest pose is beyond a 100 ms tolerance are
+   * dropped before stitching; if fewer than 2 remain the call
+   * rejects with `opencv-failed-1032` so the host can fall back
+   * to the feature-matched path (re-call `stitchVideo` without
+   * `poses`).
+   */
+  poses?: Array<{
+    tx: number; ty: number; tz: number;
+    qx: number; qy: number; qz: number; qw: number;
+    fx: number; fy: number; cx: number; cy: number;
+    imageWidth: number; imageHeight: number;
+    timestampMs: number;
+    trackingState: number;
+  }>;
 }
 
 

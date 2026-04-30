@@ -105,6 +105,40 @@ extern NSString *const RetaiLensStitcherErrorDomain;
                                        seamFinderType:(nullable NSString *)seamFinderType
                                                 error:(NSError **)error;
 
+/// Phase 5: pose-driven stitch.  Same end-to-end shape as
+/// `stitchVideoAtPath` but consumes pre-computed camera poses
+/// (from ARKit/ARCore via RetaiLensARSession) and skips the
+/// brittle features → matching → BundleAdjuster steps.  Internally:
+///
+///   1. Extract maxFrames evenly-spaced frames from the video.
+///   2. Compute each frame's timestamp (fraction × totalSeconds).
+///   3. Match each frame to the nearest pose in `poses` (within
+///      a 100 ms tolerance).
+///   4. Build cv::detail::CameraParams directly from the pose's
+///      quaternion + intrinsics — flips coordinate conventions
+///      between ARKit (Y-up, -Z forward) and OpenCV (Y-down,
+///      +Z forward).
+///   5. Hand cameras to the existing warp + seam + blend pipeline.
+///
+/// `poses` is an NSArray of NSDictionary; each entry has the keys
+/// matching `RetaiLensARFramePose.asDictionary()`:
+///   tx, ty, tz, qx, qy, qz, qw, fx, fy, cx, cy,
+///   imageWidth, imageHeight, timestampMs, trackingState
+/// Frames whose closest pose is missing or beyond tolerance fall
+/// back to the feature-matched path frame-by-frame (degraded but
+/// functional).  When ALL poses are missing the method returns
+/// the same NSError code (1030) so the host can opt to retry via
+/// the non-pose path.
++ (nullable RetaiLensStitchResult *)stitchVideoAtPath:(NSString *)videoPath
+                                           outputPath:(NSString *)outputPath
+                                            maxFrames:(NSInteger)maxFrames
+                                          jpegQuality:(NSInteger)quality
+                                           warperType:(nullable NSString *)warperType
+                                          blenderType:(nullable NSString *)blenderType
+                                       seamFinderType:(nullable NSString *)seamFinderType
+                                                poses:(NSArray<NSDictionary *> *)poses
+                                                error:(NSError **)error;
+
 /// Normalise the EXIF orientation of `imagePath` in place.
 ///
 /// vision-camera writes photos with the camera-sensor's native

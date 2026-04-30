@@ -141,6 +141,71 @@ NSError *errorForStitchStatus(cv::Stitcher::Status status) {
                          userInfo:@{NSLocalizedDescriptionKey: message}];
 }
 
+// Phase 5: build a cv::detail::CameraParams from an ARKit pose.
+//
+// ARKit's camera-to-world transform uses a right-handed system
+// with +X right, +Y up, -Z forward (out of the screen).  OpenCV
+// uses +X right, +Y down, +Z forward (into the scene).  Conversion
+// is:
+//
+//   M = diag(1, -1, -1)             // axis-flip from ARKit → OpenCV
+//   R_ar_to_world = quaternion → 3x3 rotation matrix
+//   R_world_to_cv = M * R_ar_to_world.transpose()
+//
+// The transpose is what changes from camera-to-world (what ARKit
+// gives us) to world-to-camera (what cv::detail::CameraParams.R
+// expects).  We don't set CameraParams.t — for panoramic stitching,
+// translation is largely irrelevant (warpers project rays, not
+// world points), and ARKit's metric translations would otherwise
+// throw off cv::detail::SphericalWarper's scale heuristics.
+//
+// Intrinsics come straight from ARFrame.camera.intrinsics —
+// focal length and principal point in pixels at the ARFrame's
+// native resolution.
+cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
+    cv::detail::CameraParams cam;
+
+    double qx = [pose[@"qx"] doubleValue];
+    double qy = [pose[@"qy"] doubleValue];
+    double qz = [pose[@"qz"] doubleValue];
+    double qw = [pose[@"qw"] doubleValue];
+
+    // Quaternion → 3x3 rotation matrix (camera-to-world in ARKit).
+    // Standard formula; assumes the quaternion is unit-length
+    // (ARKit guarantees this).
+    cv::Mat R_ar = (cv::Mat_<double>(3, 3) <<
+        1 - 2*(qy*qy + qz*qz),  2*(qx*qy - qw*qz),      2*(qx*qz + qw*qy),
+        2*(qx*qy + qw*qz),      1 - 2*(qx*qx + qz*qz),  2*(qy*qz - qw*qx),
+        2*(qx*qz - qw*qy),      2*(qy*qz + qw*qx),      1 - 2*(qx*qx + qy*qy)
+    );
+
+    // Axis-flip matrix: ARKit Y-up → OpenCV Y-down, ARKit -Z forward
+    // → OpenCV +Z forward.
+    cv::Mat M = (cv::Mat_<double>(3, 3) <<
+        1, 0, 0,
+        0, -1, 0,
+        0, 0, -1
+    );
+
+    // R_world_to_cv = M * R_ar_to_world.T
+    cv::Mat R_world_to_cv = M * R_ar.t();
+    cv::Mat R_float;
+    R_world_to_cv.convertTo(R_float, CV_32F);
+    cam.R = R_float;
+    cam.t = cv::Mat::zeros(3, 1, CV_32F);
+
+    // Intrinsics — at the pose's native image resolution.  The
+    // compose-rescale step below will adjust these to compose scale.
+    double fx = [pose[@"fx"] doubleValue];
+    double fy = [pose[@"fy"] doubleValue];
+    cam.focal = (fx + fy) / 2.0;
+    cam.aspect = (fx > 0.0) ? (fy / fx) : 1.0;
+    cam.ppx = [pose[@"cx"] doubleValue];
+    cam.ppy = [pose[@"cy"] doubleValue];
+
+    return cam;
+}
+
 }  // namespace
 
 
@@ -1174,6 +1239,431 @@ NSError *errorForStitchStatus(cv::Stitcher::Status status) {
 
   if (!result && error) *error = stitchErr;
   return result;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 5: pose-driven video → panorama (ARKit/ARCore)
+// ─────────────────────────────────────────────────────────────────────
+//
+// Same end-to-end shape as `stitchVideoAtPath` but consumes
+// pre-computed camera poses (from ARKit/ARCore via the host's
+// RetaiLensARSession) and skips the brittle features → matching
+// → BundleAdjuster steps that the feature-matched path runs.
+// The compose stage (warp + seam + blend + crop) is duplicated
+// from `stitchFramePaths` rather than refactored — keeps the
+// hard-won existing pipeline untouched while we field-test the
+// pose path; both paths can be DRY'd into a shared helper once
+// the new code is proven on real shelf captures.
+
++ (nullable RetaiLensStitchResult *)stitchVideoAtPath:(NSString *)videoPath
+                                           outputPath:(NSString *)outputPath
+                                            maxFrames:(NSInteger)maxFrames
+                                          jpegQuality:(NSInteger)quality
+                                           warperType:(NSString *)warperType
+                                          blenderType:(NSString *)blenderType
+                                       seamFinderType:(NSString *)seamFinderType
+                                                poses:(NSArray<NSDictionary *> *)poses
+                                                error:(NSError **)error {
+  if (warperType == nil || warperType.length == 0) warperType = @"plane";
+  if (blenderType == nil || blenderType.length == 0) blenderType = @"multiband";
+  if (seamFinderType == nil || seamFinderType.length == 0) seamFinderType = @"graphcut";
+  if (poses.count < 2) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1030
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Pose-driven stitch needs at least 2 poses; got fewer.",
+      }];
+    }
+    return nil;
+  }
+
+  NSString *tmpDir =
+      [NSTemporaryDirectory() stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"RetaiLensStitchAR-%@",
+              [[NSUUID UUID] UUIDString]]];
+
+  // Extract evenly-spaced frames from the video (same helper the
+  // feature-matched path uses).  Returns paths only; we'll compute
+  // each frame's timestamp ourselves to match against `poses`.
+  NSError *extractErr = nil;
+  NSArray<NSString *> *framePaths =
+      [self extractFramesFromVideoAtPath:videoPath
+                              outputDir:tmpDir
+                              maxFrames:maxFrames
+                            jpegQuality:quality
+                                  error:&extractErr];
+  if (!framePaths) {
+    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+    if (error) *error = extractErr;
+    return nil;
+  }
+
+  // Compute total video duration so frame timestamps match what
+  // the AR session captured.  Pose timestamps are in absolute ms;
+  // we normalise against poses[0] so they align with the mp4
+  // timeline (which AVAssetWriter wrote starting at 0).
+  NSURL *videoURL = [NSURL fileURLWithPath:
+      ([videoPath hasPrefix:@"file://"]
+        ? [videoPath substringFromIndex:[@"file://" length]]
+        : videoPath)];
+  AVURLAsset *asset = [AVURLAsset assetWithURL:videoURL];
+  Float64 totalSeconds = CMTimeGetSeconds(asset.duration);
+  if (!isfinite(totalSeconds) || totalSeconds <= 0) {
+    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1031
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Could not read video duration for pose-time alignment.",
+      }];
+    }
+    return nil;
+  }
+  double baseMs = [poses[0][@"timestampMs"] doubleValue];
+
+  // Match each extracted frame to its closest pose by timestamp.
+  // Tolerance is 100 ms — at 60 Hz pose log + 30 fps frame extract,
+  // worst case is ~17 ms drift, plenty of headroom.
+  NSInteger N = (NSInteger)framePaths.count;
+  std::vector<cv::Mat> frames;
+  std::vector<cv::detail::CameraParams> cameras;
+  frames.reserve(N);
+  cameras.reserve(N);
+  int matched = 0, dropped = 0;
+  for (NSInteger i = 0; i < N; i++) {
+    Float64 fraction = (N == 1) ? 0.0 : ((Float64)i / (Float64)(N - 1));
+    Float64 frameTimeMs = fraction * totalSeconds * 1000.0;
+
+    NSDictionary *bestPose = nil;
+    double bestDelta = INFINITY;
+    for (NSDictionary *pose in poses) {
+      double poseMs = [pose[@"timestampMs"] doubleValue] - baseMs;
+      double delta = fabs(poseMs - frameTimeMs);
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        bestPose = pose;
+      }
+    }
+    if (!bestPose || bestDelta > 100.0) {
+      dropped++;
+      continue;
+    }
+    cv::Mat img = cv::imread([framePaths[i] UTF8String]);
+    if (img.empty()) {
+      dropped++;
+      continue;
+    }
+    frames.push_back(img);
+    cameras.push_back(cameraParamsFromPose(bestPose));
+    matched++;
+  }
+  NSLog(@"[RetaiLensStitcher] pose-driven: matched=%d dropped=%d",
+        matched, dropped);
+
+  if (frames.size() < 2) {
+    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1032
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Fewer than 2 frames matched a pose within tolerance — "
+           "AR tracking may have been lost during the pan.",
+      }];
+    }
+    return nil;
+  }
+
+  auto t0 = std::chrono::steady_clock::now();
+  cv::Mat panorama;
+
+  @autoreleasepool {
+  try {
+    // Pose-driven path: cameras already populated.  intrinsics are
+    // at the source frame's native resolution, so work_scale = 1.0.
+    int origCols = frames[0].cols;
+    int origRows = frames[0].rows;
+    double origMp = (double)origCols * origRows / 1e6;
+    constexpr double COMPOSE_MP = 1.0;
+    double compose_scale = (origMp > COMPOSE_MP)
+        ? std::sqrt(COMPOSE_MP / origMp)
+        : 1.0;
+    double compose_work_aspect = compose_scale;  // work_scale == 1
+
+    // Optional waveCorrect — gravity-aligned poses should already
+    // share an up-vector but the operator's hand may tilt slightly.
+    // Skip if it fails (degenerate input).
+    std::vector<cv::Mat> rmats;
+    rmats.reserve(cameras.size());
+    for (const auto &cam : cameras) rmats.push_back(cam.R.clone());
+    try {
+      cv::detail::waveCorrect(rmats, cv::detail::WAVE_CORRECT_HORIZ);
+      for (size_t i = 0; i < cameras.size(); i++) {
+        cameras[i].R = rmats[i];
+      }
+    } catch (const cv::Exception &e) {
+      NSLog(@"[RetaiLensStitcher] pose: wave correction skipped: %s", e.what());
+    }
+
+    // Rescale intrinsics for compose-scale warping.
+    for (auto &cam : cameras) {
+      cam.focal *= compose_work_aspect;
+      cam.ppx   *= compose_work_aspect;
+      cam.ppy   *= compose_work_aspect;
+    }
+
+    std::vector<double> focals;
+    for (const auto &cam : cameras) focals.push_back(cam.focal);
+    std::sort(focals.begin(), focals.end());
+    float warpedScale = focals.empty() ? 1.0f
+                                       : (float)focals[focals.size() / 2];
+
+    cv::Ptr<cv::WarperCreator> warperCreator;
+    if ([warperType isEqualToString:@"cylindrical"]) {
+      warperCreator = cv::makePtr<cv::CylindricalWarper>();
+    } else if ([warperType isEqualToString:@"spherical"]) {
+      warperCreator = cv::makePtr<cv::SphericalWarper>();
+    } else {
+      warperCreator = cv::makePtr<cv::PlaneWarper>();
+    }
+    cv::Ptr<cv::detail::RotationWarper> warper =
+        warperCreator->create(warpedScale);
+
+    // Build composeFrames at COMPOSE_MP from full-res input.
+    std::vector<cv::Mat> composeFrames;
+    composeFrames.reserve(frames.size());
+    for (const auto &f : frames) {
+      cv::Mat scaled;
+      if (std::abs(compose_scale - 1.0) > 1e-3) {
+        cv::resize(f, scaled, cv::Size(), compose_scale, compose_scale,
+                   cv::INTER_AREA);
+      } else {
+        scaled = f.clone();
+      }
+      composeFrames.push_back(scaled);
+    }
+    for (auto &f : frames) f.release();
+    frames.clear();
+
+    // Build the blender (same selection logic as the feature-matched
+    // path).  The "u != 0" UMat assertion the original feature-matched
+    // builds hit was OOM-induced; with the per-frame Mat releases
+    // and @autoreleasepool from that path's stabilisation, MultiBand
+    // + GraphCut are safe here too.
+    BOOL useSeam = [seamFinderType isEqualToString:@"graphcut"];
+    cv::Ptr<cv::detail::Blender> blender;
+    if ([blenderType isEqualToString:@"feather"]) {
+      blender = cv::detail::Blender::createDefault(
+          cv::detail::Blender::FEATHER, false);
+      auto fb = blender.dynamicCast<cv::detail::FeatherBlender>();
+      if (fb) fb->setSharpness(0.02f);
+    } else {
+      blender = cv::detail::Blender::createDefault(
+          cv::detail::Blender::MULTI_BAND, false);
+      auto mbb = blender.dynamicCast<cv::detail::MultiBandBlender>();
+      if (mbb) mbb->setNumBands(5);
+    }
+
+    if (useSeam) {
+      const size_t M = composeFrames.size();
+      std::vector<cv::Point> corners(M);
+      std::vector<cv::Mat> imagesWarped(M);
+      std::vector<cv::Mat> masksWarped(M);
+      std::vector<cv::Size> sizes(M);
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat K;
+        cameras[i].K().convertTo(K, CV_32F);
+        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
+        corners[i] = warper->warp(
+            composeFrames[i], K, cameras[i].R, cv::INTER_LINEAR,
+            cv::BORDER_CONSTANT, imagesWarped[i]);
+        warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
+                     cv::BORDER_CONSTANT, masksWarped[i]);
+        sizes[i] = imagesWarped[i].size();
+      }
+      for (auto &cf : composeFrames) cf.release();
+      composeFrames.clear();
+
+      // Seam finder at SEAM_MP scale (same downscale-find-upscale
+      // pattern as the feature-matched path).
+      const double SEAM_MP = 0.1;
+      double seam_scale = std::min(1.0, std::sqrt(SEAM_MP / origMp));
+      double seam_compose_aspect = seam_scale / compose_scale;
+      std::vector<cv::UMat> imagesWarpedF_seam(M);
+      std::vector<cv::UMat> masksWarpedU_seam(M);
+      std::vector<cv::Point> corners_seam(M);
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat seamImage, seamMask;
+        cv::resize(imagesWarped[i], seamImage, cv::Size(),
+                   seam_compose_aspect, seam_compose_aspect,
+                   cv::INTER_LINEAR);
+        cv::resize(masksWarped[i], seamMask, cv::Size(),
+                   seam_compose_aspect, seam_compose_aspect,
+                   cv::INTER_NEAREST);
+        seamImage.convertTo(imagesWarpedF_seam[i], CV_32F);
+        seamMask.copyTo(masksWarpedU_seam[i]);
+        corners_seam[i] = cv::Point(
+            cvRound(corners[i].x * seam_compose_aspect),
+            cvRound(corners[i].y * seam_compose_aspect));
+      }
+      cv::Ptr<cv::detail::SeamFinder> seamFinder =
+          cv::makePtr<cv::detail::GraphCutSeamFinder>(
+              cv::detail::GraphCutSeamFinder::COST_COLOR);
+      seamFinder->find(imagesWarpedF_seam, corners_seam, masksWarpedU_seam);
+      imagesWarpedF_seam.clear();
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat seamMaskCpu, seamMaskDilated, seamMaskFull;
+        masksWarpedU_seam[i].copyTo(seamMaskCpu);
+        cv::dilate(seamMaskCpu, seamMaskDilated, cv::Mat());
+        cv::resize(seamMaskDilated, seamMaskFull,
+                   masksWarped[i].size(), 0, 0, cv::INTER_LINEAR);
+        cv::bitwise_and(seamMaskFull, masksWarped[i], masksWarped[i]);
+      }
+      masksWarpedU_seam.clear();
+
+      blender->prepare(corners, sizes);
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat imgS;
+        imagesWarped[i].convertTo(imgS, CV_16S);
+        blender->feed(imgS, masksWarped[i], corners[i]);
+        imagesWarped[i].release();
+        masksWarped[i].release();
+        imgS.release();
+      }
+      imagesWarped.clear();
+      masksWarped.clear();
+    } else {
+      // STREAM path
+      const size_t M = composeFrames.size();
+      std::vector<cv::Point> corners(M);
+      std::vector<cv::Size> sizes(M);
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat K;
+        cameras[i].K().convertTo(K, CV_32F);
+        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
+        cv::Mat tmpMaskWarped;
+        corners[i] = warper->warp(
+            mask, K, cameras[i].R, cv::INTER_NEAREST,
+            cv::BORDER_CONSTANT, tmpMaskWarped);
+        sizes[i] = tmpMaskWarped.size();
+      }
+      blender->prepare(corners, sizes);
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat K;
+        cameras[i].K().convertTo(K, CV_32F);
+        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
+        cv::Mat imgWarped, maskWarped;
+        warper->warp(composeFrames[i], K, cameras[i].R,
+                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, imgWarped);
+        warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
+                     cv::BORDER_CONSTANT, maskWarped);
+        cv::Mat imgS;
+        imgWarped.convertTo(imgS, CV_16S);
+        blender->feed(imgS, maskWarped, corners[i]);
+        composeFrames[i].release();
+      }
+      composeFrames.clear();
+    }
+
+    cv::Mat panoramaS, panoramaMask;
+    blender->blend(panoramaS, panoramaMask);
+    panoramaS.convertTo(panorama, CV_8U);
+  } catch (const cv::Exception &e) {
+    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1100
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"OpenCV exception during pose-driven stitch: %s", e.what()],
+      }];
+    }
+    return nil;
+  } catch (...) {
+    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1102
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Unknown exception during pose-driven stitch.",
+      }];
+    }
+    return nil;
+  }
+  }  // end @autoreleasepool
+
+  if (panorama.empty()) {
+    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1003
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Pose-driven stitch produced an empty panorama.",
+      }];
+    }
+    return nil;
+  }
+
+  // Crop to bounding box (skip the column-projection rect crop —
+  // pose-driven stitches don't have the hourglass shape that
+  // plane-warper feature-matched panoramas produce).
+  cv::Mat finalImage = panorama;
+  try {
+    cv::Mat gray;
+    cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+    cv::Mat mask;
+    cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
+    cv::Rect bbox = cv::boundingRect(mask);
+    if (bbox.width > 0 && bbox.height > 0
+        && bbox.width <= panorama.cols && bbox.height <= panorama.rows) {
+      finalImage = panorama(bbox).clone();
+    }
+  } catch (...) {
+    finalImage = panorama;
+  }
+
+  auto t1 = std::chrono::steady_clock::now();
+  double durationMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+  NSInteger clampedQuality = MAX(0, MIN(100, quality));
+  std::vector<int> params = {
+      cv::IMWRITE_JPEG_QUALITY, static_cast<int>(clampedQuality),
+  };
+  NSString *cleanedOutPath = ([outputPath hasPrefix:@"file://"]
+      ? [outputPath substringFromIndex:[@"file://" length]]
+      : outputPath);
+  bool wrote = cv::imwrite([cleanedOutPath UTF8String], finalImage, params);
+
+  // Cleanup the tmp dir always.
+  [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+
+  if (!wrote) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1002
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"Pose-driven stitch succeeded but could not write JPEG to %@",
+            outputPath],
+      }];
+    }
+    return nil;
+  }
+
+  return [[RetaiLensStitchResult alloc]
+      initWithOutputPath:outputPath
+                   width:(NSInteger)finalImage.cols
+                  height:(NSInteger)finalImage.rows
+              durationMs:durationMs];
 }
 
 
