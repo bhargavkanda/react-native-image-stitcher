@@ -111,3 +111,24 @@ export type {
 } from './stitching/stitchFrames';
 export { stitchVideo } from './stitching/stitchVideo';
 export type { StitchVideoOptions } from './stitching/stitchVideo';
+
+// ── Phase 6: Measurement ─────────────────────────────────────────────────
+export {
+  measureDistance,
+  measureRegion,
+  MeasurementNotAvailableError,
+} from './measure/measure';
+// FramePose is re-exported from useARSession above; the measure
+// module re-uses the same shape so we don't list it again here.
+export type {
+  MeasurementConfidence,
+  MeasureDistanceOptions,
+  MeasureDistanceResult,
+  MeasureRegionOptions,
+  MeasureRegionResult,
+} from './measure/measure';
+export { MeasurementOverlay } from './measure/MeasurementOverlay';
+export type {
+  MeasurementMode,
+  MeasurementOverlayProps,
+} from './measure/MeasurementOverlay';
