@@ -1409,8 +1409,37 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         : 1.0;
     double compose_work_aspect = compose_scale;  // work_scale == 1
 
-    // Optional waveCorrect — gravity-aligned poses should already
-    // share an up-vector but the operator's hand may tilt slightly.
+    // CRITICAL: normalise the cameras' R relative to camera 0
+    // BEFORE waveCorrect / warping.
+    //
+    // cv::Stitcher's BA produces R values where camera 0 is the
+    // origin of the panorama's "world" frame (R_0 = identity), and
+    // R_i represents the rotation FROM camera 0 TO camera i.  All
+    // downstream steps (autoDetectWaveCorrectKind, the warpers'
+    // panorama-orientation heuristics) assume this convention.
+    //
+    // My pose-driven path was passing ABSOLUTE world rotations
+    // (in ARKit's gravity-aligned world frame).  The relative
+    // geometry between cameras was correct — but the warpers
+    // interpreted "up" relative to ARKit's world Y, not relative
+    // to where the operator was actually looking.  Result: panorama
+    // came out oriented as if the user had panned along an
+    // arbitrary world axis instead of relative to their viewpoint.
+    //
+    // Multiplying every R_i on the right by R_0^T:
+    //   - Sets cameras[0].R = R_0 * R_0^T = identity (camera 0
+    //     becomes the panorama's centre/origin).
+    //   - Preserves all relative rotations (R_0->1, R_0->2, …).
+    //   - Brings the data into cv::Stitcher's expected format so
+    //     waveCorrect / warper produce correctly-oriented output.
+    {
+      cv::Mat R0t = cameras[0].R.t();
+      for (auto &cam : cameras) {
+        cam.R = cam.R * R0t;
+      }
+    }
+
+    // Optional waveCorrect — operates on the now-normalised R.
     // Auto-detect pan axis (HORIZ vs VERT) so the same code path
     // works for any device orientation + pan direction.  Skip if
     // it fails (degenerate input).
