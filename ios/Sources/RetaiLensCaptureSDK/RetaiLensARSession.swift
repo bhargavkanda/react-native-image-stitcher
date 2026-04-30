@@ -294,13 +294,28 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         }
 
         // If recording is in flight, append this frame to the
-        // asset writer.  We capture the pixelBuffer + timestamp on
-        // the delegate thread, then dispatch the actual append onto
-        // captureStateQueue so it serialises with start/stop calls
-        // from the bridge thread.
+        // asset writer.
+        //
+        // CRITICAL: dispatch SYNCHRONOUSLY (not async) onto
+        // captureStateQueue.  ARKit only guarantees frame.capturedImage
+        // is valid for the duration of THIS delegate callback —
+        // pixel buffers are recycled between frames.  An async hop
+        // means the buffer may be freed before adaptor.append() reads
+        // it, and Swift's closure cleanup will then try to `release`
+        // already-freed memory → EXC_BAD_ACCESS at objc_retain
+        // (we hit this in the field; see the Sentry crash with
+        // signature "EXC_BAD_ACCESS: release" at 0x16adb7e10).
+        //
+        // adaptor.append() makes its own internal copy before
+        // returning, so the pixelBuffer's lifetime requirement
+        // is just this call frame — sync gives us that guarantee.
+        // Trade-off: blocks the delegate for ~ms while the encoder
+        // ingests the frame.  At 60Hz pose log + 30fps recording,
+        // this is well-tolerated; if the encoder ever lags, we'd
+        // see frame drops (graceful) rather than crashes.
         let pixelBuffer = frame.capturedImage
         let frameTimestamp = frame.timestamp
-        captureStateQueue.async { [weak self] in
+        captureStateQueue.sync { [weak self] in
             guard let self = self,
                   let writer = self.assetWriter,
                   let input = self.videoInput,
@@ -574,6 +589,19 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
                 return
             }
 
+            // CRITICAL: clear the in-flight writer state BEFORE
+            // markAsFinished/finishWriting.  Any concurrent delegate
+            // sync block (queued + waiting on captureStateQueue
+            // behind us) will then find assetWriter=nil and skip
+            // its append, instead of trying to feed a marked-as-
+            // finished input.  The strong references we keep below
+            // (`writer`, `input`) keep the objects alive long enough
+            // to finalise.
+            self.assetWriter = nil
+            self.videoInput = nil
+            self.pixelBufferAdaptor = nil
+            self.recordingStartTime = nil
+
             input.markAsFinished()
             let outputURL = writer.outputURL
             writer.finishWriting { [weak self] in
@@ -588,10 +616,6 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
                     let naturalSize = track?.naturalSize ?? .zero
                     NSLog("[RetaiLensARCapture] stopRecording: %.2fs, %lld bytes",
                           durationSec, Int64(fileSize))
-                    self.assetWriter = nil
-                    self.videoInput = nil
-                    self.pixelBufferAdaptor = nil
-                    self.recordingStartTime = nil
                     completion([
                         "path": path,
                         "duration": durationSec,
