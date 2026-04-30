@@ -6,7 +6,11 @@
 
 #import <React/RCTBridgeModule.h>
 
-@interface RCT_EXTERN_MODULE(RetaiLensPacketDetector, NSObject)
+// REMAP — the Swift detector class `RetaiLensPacketDetector` already
+// takes the @objc name "RetaiLensPacketDetector"; the bridge is
+// `RetaiLensPacketDetectorBridge`.  Same fix + rationale as
+// ARSessionBridge.m / MeasureBridge.m.
+@interface RCT_EXTERN_REMAP_MODULE(RetaiLensPacketDetector, RetaiLensPacketDetectorBridge, NSObject)
 
 RCT_EXTERN_METHOD(isAvailable:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
