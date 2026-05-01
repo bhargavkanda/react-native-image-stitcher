@@ -291,19 +291,30 @@ constexpr double kHomDetMax = 1.4;
                       0,      fy * s, cy * s,
                       0,      0,      1);
 
-        // V8: bind the cylindrical warper to the actual focal length
-        // (= cylinder radius in compose pixels).  This is the scale
-        // that maps angular extent on the cylinder to canvas pixels.
+        // Bind cylindrical warper to the focal length (cylinder radius
+        // in compose pixels).
         float focalCompose = (float)(fx * s);
         _warper = cv::CylindricalWarper().create(focalCompose);
 
-        // V8 first-frame placement on the cylindrical canvas.  Warp
-        // the first frame with R = identity to find its cylindrical
-        // pixel corner; place that corner near the canvas centre so
-        // subsequent frames can extend in either direction.
-        cv::Mat K32f;
+        // V8.1 BUG-FIX: R for CylindricalWarper must be gravity-aligned
+        // world-to-camera, not first-frame-relative.  The warper
+        // assumes cylinder axis = world +Y (gravity).  Passing R
+        // expressed in the first camera's local frame put the cylinder
+        // axis sideways for portrait phones — every frame collapsed
+        // to the same cylindrical-pixel position and only the first
+        // showed up.
+        //
+        //   R_warper = M · R_arkit⁻¹     (world-to-cam, OpenCV basis)
+        //
+        // where R_arkit is the camera-to-world from ARKit.  ARKit's
+        // world is already gravity-aligned (+Y up), which is exactly
+        // what CylindricalWarper assumes.
+        cv::Mat R_first_world_to_cam = _M_arkitToCv * _firstRotationArkit.t();
+
+        cv::Mat K32f, R32f;
         _K_compose.convertTo(K32f, CV_32F);
-        cv::Mat R32f = cv::Mat::eye(3, 3, CV_32F);
+        R_first_world_to_cam.convertTo(R32f, CV_32F);
+
         cv::Mat warpedFirst, warpedFirstMask;
         cv::Point firstCorner = _warper->warp(
             frameBGR, K32f, R32f,
@@ -316,18 +327,14 @@ constexpr double kHomDetMax = 1.4;
         int dstX = (_canvas.cols - warpedFirst.cols) / 2;
         int dstY = (_canvas.rows - warpedFirst.rows) / 2;
         cv::Rect roi(dstX, dstY, warpedFirst.cols, warpedFirst.rows);
-        // Clip if warped is bigger than canvas (defensive).
         roi &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
         cv::Rect srcRoi(0, 0, roi.width, roi.height);
         warpedFirst(srcRoi).copyTo(_canvas(roi), warpedFirstMask(srcRoi));
         warpedFirstMask(srcRoi).copyTo(_canvasMask(roi),
                                         warpedFirstMask(srcRoi));
 
-        // Track where (0, 0) on the cylinder lives within the canvas.
-        // The first frame's cylindrical corner = firstCorner.
-        // We placed it at canvas pixel (dstX, dstY).
-        // So canvas (0, 0) corresponds to cylinder pixel
-        //   (firstCorner.x - dstX, firstCorner.y - dstY).
+        // Cylinder origin tracking unchanged: canvas (0, 0) ↔
+        // cylinder pixel (firstCorner.x - dstX, firstCorner.y - dstY).
         _cylinderCanvasOrigin = cv::Point(firstCorner.x - dstX,
                                           firstCorner.y - dstY);
 
@@ -362,27 +369,15 @@ constexpr double kHomDetMax = 1.4;
         return tele;
     }
 
-    // ── V8 cylindrical pose-driven warp + per-pair graph-cut seam +
-    //    multi-band blend + exposure compensation ──────────────────
+    // V8 cylindrical pipeline.  Per-frame rotation for the warper
+    // is gravity-aligned world-to-camera in OpenCV basis:
     //
-    // Replaces v7's planar `H = K · R · K⁻¹` warpPerspective + hard
-    // midline seam.  Each accepted frame is:
-    //   1. Warped onto the cylindrical canvas via CylindricalWarper
-    //      (geometrically correct for rotational pans — no edge
-    //      stretch like planar)
-    //   2. Exposure-matched against the existing canvas overlap
-    //      (BlocksGainCompensator)
-    //   3. Seam-cut against the existing canvas overlap with
-    //      GraphCutSeamFinder (places the seam along scene gradients
-    //      where misalignment is invisible)
-    //   4. Blended via MultiBandBlender across 5 frequency bands
-    //      (smooths any residual seam discontinuity)
+    //   R_warper = M · R_arkit⁻¹
     //
-    // R for the warper: world (= first-frame coords) → camera
-    // rotation.  In our convention R_rel_cv maps new-cam to first-cam,
-    // so the world→new-cam rotation is R_rel_cv.t().
-    cv::Mat R_relCv = _M_arkitToCv * _firstRotationArkit.t() * R_new * _M_arkitToCv;
-    cv::Mat R_world_to_new = R_relCv.t();
+    // (NOT first-frame-relative — cv::detail::CylindricalWarper
+    // assumes cylinder axis = world +Y which is exactly ARKit's
+    // gravity convention).  Same formula as the first-frame branch.
+    cv::Mat R_world_to_new = _M_arkitToCv * R_new.t();
 
     BOOL placed = [self cylindricalWarpAndBlend:frameBGR
                                     rWorldToCam:R_world_to_new];
