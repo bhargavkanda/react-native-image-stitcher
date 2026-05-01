@@ -132,25 +132,18 @@ constexpr double kHomDetMax = 1.4;
     cv::Mat _canvas;       // CV_8UC3 BGR — the running panorama
     cv::Mat _canvasMask;   // CV_8UC1 — 255 where canvas has been written
 
-    /// V6 pose-driven state.  Replaces the v5 feature-matching state
-    /// (lastKeypoints/Descriptors/FrameToWorld + ORB + matcher).
-    /// On the first accepted frame we capture the camera's ARKit-frame
-    /// rotation and intrinsics and use those as the reference for all
-    /// subsequent frames' pose-derived homographies.
+    /// V7 pose-driven state — sensor-native compute path.  No rotation
+    /// chain (the v6 bug).  We store the first frame's ARKit rotation
+    /// and a compose-resolution intrinsic matrix; every subsequent
+    /// frame's homography is computed directly as
+    /// `H = T · K · M · R_first⁻¹ · R_new · M · K⁻¹` in compose
+    /// pixel coordinates.  No R2S/S2R, no scaleSensorToCompose
+    /// ceremony — clean math, ~1/3 the matrix multiplications, and
+    /// no orientation conflict with the canvas shape.
     cv::Mat _firstRotationArkit;  // 3x3 CV_64F, ARKit camera-to-world
-    cv::Mat _K_sensor;            // 3x3 CV_64F, sensor-resolution intrinsics
+    cv::Mat _K_compose;           // 3x3 CV_64F, intrinsics scaled to compose dims
     cv::Mat _M_arkitToCv;         // diag(1, -1, -1) basis flip
-    NSInteger _firstSensorWidth;
-    NSInteger _firstSensorHeight;
-    /// Cached scale factor + per-frame compose dims captured at first
-    /// frame so subsequent frames warp into the same compose-space.
-    double _scaleSensorToCompose;
-    NSInteger _firstFrameComposeWidth;
-    NSInteger _firstFrameComposeHeight;
-    /// Canvas-placement translation: places the first frame's
-    /// top-left corner at (canvas_center - first_frame_center) so the
-    /// pan can extend in either direction symmetrically.
-    cv::Mat _T_canvas;
+    cv::Mat _T_canvas;            // first-frame placement on canvas
 
     double _lastAcceptedYaw;
     double _lastAcceptedPitch;
@@ -174,23 +167,23 @@ constexpr double kHomDetMax = 1.4;
               frameRotationDegrees:(NSInteger)frameRotationDegrees
 {
     if (self = [super init]) {
-        // Frame rotation determines the post-rotate aspect, which in
-        // turn drives the compose-dim default.  Caller can override.
+        // V7: frameRotationDegrees is now an OUTPUT-ONLY rotation —
+        // it's applied at snapshot/finalize time to orient the saved
+        // JPEG for display.  The compute pipeline always works in
+        // sensor-native landscape compose space.
         _frameRotationDegrees = frameRotationDegrees;
-        BOOL portraitRotation = (frameRotationDegrees == 90 || frameRotationDegrees == 270);
-        // Default compose dims preserve the post-rotation aspect of
-        // a 4:3 sensor: portrait rotations → 720x960 (3:4), landscape
-        // → 960x720 (4:3).  Either way, it's a uniform scale —
-        // never a non-uniform stretch that would distort matching.
-        _composeWidth  = composeWidth  > 0 ? composeWidth
-                          : (portraitRotation ? 720 : 960);
-        _composeHeight = composeHeight > 0 ? composeHeight
-                          : (portraitRotation ? 960 : 720);
-        // Canvas defaults: shelf pans grow horizontally (left-right
-        // operator motion in portrait phone) → wide canvas.  4800
-        // wide handles ~3 frame-widths of pan; 2200 tall fits one
-        // frame-height plus ~150% extension for hand-held pitch
-        // wobble + the occasional "lift to read top shelf" gesture.
+        // Default compose dims preserve the 4:3 sensor aspect
+        // (1920x1440 → 960x720 at scale 0.5).  Always landscape
+        // because we no longer rotate input; the canvas geometry
+        // matches the sensor's pixel-shift direction for either
+        // yaw or pitch pan, in either device orientation.
+        _composeWidth  = composeWidth  > 0 ? composeWidth  : 960;
+        _composeHeight = composeHeight > 0 ? composeHeight : 720;
+        // Canvas: wide-landscape because for the typical shelf-scan
+        // use case (portrait phone, left-right yaw pan), the sensor
+        // sees content shifting along its X axis (the wide 1920
+        // axis).  Canvas-X covers ~3 frame-widths of pan; canvas-Y
+        // covers one frame plus pitch-wobble headroom.
         _canvasWidth   = canvasWidth   > 0 ? canvasWidth   : 4800;
         _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 2200;
         _featherPx     = featherPx     > 0 ? featherPx     : 20;
@@ -214,13 +207,8 @@ constexpr double kHomDetMax = 1.4;
     _canvas = cv::Mat::zeros((int)_canvasHeight, (int)_canvasWidth, CV_8UC3);
     _canvasMask = cv::Mat::zeros((int)_canvasHeight, (int)_canvasWidth, CV_8UC1);
     _firstRotationArkit = cv::Mat();
-    _K_sensor = cv::Mat();
+    _K_compose = cv::Mat();
     _T_canvas = cv::Mat::eye(3, 3, CV_64F);
-    _firstSensorWidth = 0;
-    _firstSensorHeight = 0;
-    _scaleSensorToCompose = 1.0;
-    _firstFrameComposeWidth = 0;
-    _firstFrameComposeHeight = 0;
     _lastAcceptedYaw = 0.0;
     _lastAcceptedPitch = 0.0;
     _hasFirstFrame = false;
@@ -277,22 +265,21 @@ constexpr double kHomDetMax = 1.4;
     // frame.
     if (!_hasFirstFrame) {
         _firstRotationArkit = R_new.clone();
-        _firstSensorWidth = imageWidth;
-        _firstSensorHeight = imageHeight;
-        _firstFrameComposeWidth = frameBGR.cols;
-        _firstFrameComposeHeight = frameBGR.rows;
-        // Sensor-resolution K (full intrinsics as ARKit reported).
-        _K_sensor = (cv::Mat_<double>(3, 3) <<
-                     fx, 0,  cx,
-                     0,  fy, cy,
-                     0,  0,  1);
-        // Scale that takes us from sensor pixels (post-frame-rotation)
-        // to compose pixels.  For 90/270 rotation the rotated frame
-        // size is (sensorH, sensorW); scale = composeWidth / sensorH.
-        // For 0/180, scale = composeWidth / sensorW.
-        BOOL portraitRot = (_frameRotationDegrees == 90 || _frameRotationDegrees == 270);
-        double rotatedW = portraitRot ? (double)imageHeight : (double)imageWidth;
-        _scaleSensorToCompose = (double)frameBGR.cols / rotatedW;
+        // V7: K is in COMPOSE pixel coordinates.  Sensor intrinsics
+        // (fx, fy, cx, cy in sensor pixels) get scaled by the same
+        // factor we used to downscale the frame from sensor to
+        // compose, so the pinhole projection K · ray → pixel
+        // produces the right pixel in compose space directly.  No
+        // R2S/S chain needed downstream.
+        double sx = (double)frameBGR.cols / std::max((NSInteger)1, imageWidth);
+        double sy = (double)frameBGR.rows / std::max((NSInteger)1, imageHeight);
+        // The downsample is uniform (preserved aspect), so sx == sy
+        // in practice.  Use the average defensively.
+        double s = 0.5 * (sx + sy);
+        _K_compose = (cv::Mat_<double>(3, 3) <<
+                      fx * s, 0,      cx * s,
+                      0,      fy * s, cy * s,
+                      0,      0,      1);
 
         // Place first frame at canvas centre.
         int ox = (int)(_canvas.cols - frameBGR.cols) / 2;
@@ -336,39 +323,22 @@ constexpr double kHomDetMax = 1.4;
         return tele;
     }
 
-    // ── Pose-driven homography ──────────────────────────────────
+    // ── V7 pose-driven homography (sensor-native compose space) ─
     //
-    //   R_rel_cv = M · R_first_arkit⁻¹ · R_new_arkit · M
-    //   H_sensor = K · R_rel_cv · K⁻¹
-    //   H_compose = (S⁻¹ · S2R) · H_sensor · (R2S · S)
+    //   R_rel_cv = M · R_first⁻¹ · R_new · M
+    //   H_compose = K · R_rel_cv · K⁻¹       (K is in compose pixels)
     //   H_canvas = T_canvas · H_compose
     //
     // where M = diag(1, -1, -1) flips ARKit's (Y-up, -Z forward)
-    // camera frame to OpenCV's (Y-down, +Z forward); R2S maps a
-    // post-rotation pixel to a sensor-native pixel; S maps a
-    // compose pixel to a post-rotation pixel (just inverse scale).
-    // The chain composes in 3x3 cv::Mat multiplications — plenty
-    // fast (~5 ms total) and produces a perspective-correct warp
-    // for arbitrary 3D camera rotations.
-
+    // camera frame to OpenCV's (Y-down, +Z forward).  No R2S/S
+    // chain — the v6 bug was applying an input rotation in the
+    // compute pipeline, which forced the output direction to flip
+    // through the chain.  V7 keeps frames in sensor-native compose
+    // space (just downscaled) and lets the canvas extend in the
+    // natural pan direction.  Output rotation for display happens
+    // at snapshot/finalize time only.
     cv::Mat R_relCv = _M_arkitToCv * _firstRotationArkit.t() * R_new * _M_arkitToCv;
-    cv::Mat H_sensor = _K_sensor * R_relCv * _K_sensor.inv();
-
-    cv::Mat R2S = sensorRotationMatrix(_frameRotationDegrees,
-                                        (int)_firstSensorWidth,
-                                        (int)_firstSensorHeight);
-    cv::Mat S2R = R2S.inv();
-    double s = _scaleSensorToCompose;
-    cv::Mat S = (cv::Mat_<double>(3, 3) <<
-                 1.0/s, 0,    0,
-                 0,    1.0/s, 0,
-                 0,    0,    1);
-    cv::Mat S_inv = (cv::Mat_<double>(3, 3) <<
-                     s, 0, 0,
-                     0, s, 0,
-                     0, 0, 1);
-
-    cv::Mat H_compose = S_inv * S2R * H_sensor * R2S * S;
+    cv::Mat H_compose = _K_compose * R_relCv * _K_compose.inv();
     cv::Mat H_canvas  = _T_canvas * H_compose;
 
     // Sanity: reject the frame if the homography places the new
@@ -479,7 +449,7 @@ constexpr double kHomDetMax = 1.4;
         return nil;
     }
 
-    cv::Mat out;
+    cv::Mat cropped;
     cv::Rect cropRect(0, 0, _canvas.cols, _canvas.rows);
     if (tightCrop) {
         // Tight-crop to the bounding box of the canvas mask.  This
@@ -490,7 +460,24 @@ constexpr double kHomDetMax = 1.4;
             cropRect = cv::Rect(0, 0, _canvas.cols, _canvas.rows);
         }
     }
-    out = _canvas(cropRect).clone();
+    cropped = _canvas(cropRect).clone();
+
+    // V7 OUTPUT-ONLY ROTATION.  Compute pipeline keeps everything in
+    // sensor-native landscape; rotate the JPEG at write time so it
+    // displays correctly for the user's device orientation.
+    //   portrait phone (frameRotationDegrees=90)  → rotate 90° CW
+    //   portrait-upside-down (270)                → rotate 90° CCW
+    //   landscape (0)                             → no rotation
+    cv::Mat out;
+    if (_frameRotationDegrees == 90) {
+        cv::rotate(cropped, out, cv::ROTATE_90_CLOCKWISE);
+    } else if (_frameRotationDegrees == 180) {
+        cv::rotate(cropped, out, cv::ROTATE_180);
+    } else if (_frameRotationDegrees == 270) {
+        cv::rotate(cropped, out, cv::ROTATE_90_COUNTERCLOCKWISE);
+    } else {
+        out = cropped;
+    }
 
     int q = (int)std::clamp((long long)quality, 0LL, 100LL);
     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, q};
@@ -535,36 +522,10 @@ static cv::Mat quaternionToRotationMat(double qx, double qy, double qz, double q
         2*(qx*qz - qw*qy),     2*(qy*qz + qw*qx),     1 - 2*(qx*qx + qy*qy));
 }
 
-/// Build the 3x3 homography that maps a post-rotation pixel back to
-/// its corresponding sensor-native pixel for a given image rotation.
-/// `sensorW`/`sensorH` are the sensor's pre-rotation dimensions.
-///
-/// Convention:
-///   R2S * (u_rot, v_rot, 1)ᵀ = (u_sensor, v_sensor, 1)ᵀ
-///
-/// 90° CW: u_s = v_r,         v_s = sensorH - 1 - u_r
-/// 180°  : u_s = sensorW - 1 - u_r, v_s = sensorH - 1 - v_r
-/// 270°  : u_s = sensorW - 1 - v_r, v_s = u_r
-/// 0°    : identity
-static cv::Mat sensorRotationMatrix(int rotationDegrees, int sensorW, int sensorH) {
-    if (rotationDegrees == 90) {
-        return (cv::Mat_<double>(3, 3) <<
-            0, 1, 0,
-           -1, 0, sensorH - 1,
-            0, 0, 1);
-    } else if (rotationDegrees == 180) {
-        return (cv::Mat_<double>(3, 3) <<
-           -1, 0, sensorW - 1,
-            0, -1, sensorH - 1,
-            0, 0, 1);
-    } else if (rotationDegrees == 270) {
-        return (cv::Mat_<double>(3, 3) <<
-            0, -1, sensorW - 1,
-            1, 0, 0,
-            0, 0, 1);
-    }
-    return cv::Mat::eye(3, 3, CV_64F);
-}
+// `sensorRotationMatrix` was removed in V7 — the rotation chain it
+// powered is no longer in the homography path.  See the v7 commit
+// for the architectural fix that replaced it with sensor-native
+// compute + output-only rotation.
 
 /// Compute fractional overlap between consecutive frames assuming the
 /// camera is rotated about its centre by (deltaYaw, deltaPitch) in
@@ -646,43 +607,33 @@ static double computeOverlapPct(double deltaYaw,
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
     if (!ok) return NO;
 
-    // ARKit delivers landscape sensor pixels regardless of device
-    // orientation.  Rotation matches the device orientation reported
-    // by JS (`useDeviceOrientation`):
-    //   portrait        → 90° CW: panorama grows horizontally for
-    //                     the user's left↔right pan
-    //   portrait-upside-down → 90° CCW
-    //   landscape (L/R) → no rotation: sensor is already aligned
-    //                     with the user's pan direction
-    cv::Mat rotated;
-    if (_frameRotationDegrees == 90) {
-        cv::rotate(frame, rotated, cv::ROTATE_90_CLOCKWISE);
-    } else if (_frameRotationDegrees == 180) {
-        cv::rotate(frame, rotated, cv::ROTATE_180);
-    } else if (_frameRotationDegrees == 270) {
-        cv::rotate(frame, rotated, cv::ROTATE_90_COUNTERCLOCKWISE);
-    } else {
-        rotated = frame;
-    }
-
-    // Uniform-scale downsample preserving the rotated frame's aspect
-    // ratio.  Pick the scale factor from whichever input dimension
-    // hits its compose target first; the OTHER dimension comes out
-    // proportional.  Using the engine's compose dims as a budget
-    // keeps the compute predictable while never introducing the
-    // non-uniform stretch that the v1/v2 force-resize did.
+    // V7: NO input rotation.  ARKit delivers sensor-native landscape
+    // pixels and we keep them that way through the entire compute
+    // pipeline.  This is the architectural fix that resolves the
+    // v6 rotation-vs-canvas mismatch — we no longer need an `R2S`
+    // chain in the homography to undo a rotation we shouldn't have
+    // applied in the first place.
+    //
+    // The sensor's native orientation is what the ARKit pose +
+    // intrinsics describe.  Working directly in that frame keeps
+    // `H = K · R_rel · K⁻¹` clean and bug-free.  Output rotation
+    // for display happens AT SNAPSHOT/FINALIZE time only.
+    //
+    // Uniform-scale downsample preserves the 4:3 sensor aspect ratio
+    // (no non-uniform stretch).  Picks whichever dimension hits the
+    // compose budget first; the other comes out proportional.
     double scale = std::min(
-        (double)_composeWidth  / (double)rotated.cols,
-        (double)_composeHeight / (double)rotated.rows
+        (double)_composeWidth  / (double)frame.cols,
+        (double)_composeHeight / (double)frame.rows
     );
     if (scale > 1.0) scale = 1.0;  // never upscale
-    int outW = std::max(1, (int)std::round(rotated.cols * scale));
-    int outH = std::max(1, (int)std::round(rotated.rows * scale));
+    int outW = std::max(1, (int)std::round(frame.cols * scale));
+    int outH = std::max(1, (int)std::round(frame.rows * scale));
     cv::Size target(outW, outH);
-    if (rotated.cols == outW && rotated.rows == outH) {
-        outBGR = rotated;
+    if (frame.cols == outW && frame.rows == outH) {
+        outBGR = frame;
     } else {
-        cv::resize(rotated, outBGR, target, 0, 0, cv::INTER_AREA);
+        cv::resize(frame, outBGR, target, 0, 0, cv::INTER_AREA);
     }
     return YES;
 }

@@ -131,19 +131,15 @@ class RetaiLensIncrementalStitcher(
         }
         try {
             ensureOpenCv()
-            // Per-frame rotation — JS picks based on device
-            // orientation.  Default 90° CW = portrait phone (the
-            // dominant shelf-scan use case).
+            // V7: frameRotationDegrees is now an OUTPUT-ONLY rotation
+            // applied at snapshot/finalize time.  Compute pipeline
+            // always works in sensor-native landscape compose space.
             val rotation = options.getIntOrDefault("frameRotationDegrees", 90)
-            val portraitRotation = (rotation == 90 || rotation == 270)
             engine = IncrementalEngine(
-                // Compose-dim defaults preserve post-rotation aspect
-                // (uniform scale, no stretch).  Portrait → 720x960
-                // (3:4), landscape → 960x720 (4:3).
-                composeWidth  = options.getIntOrDefault("composeWidth",
-                    if (portraitRotation) 720 else 960),
-                composeHeight = options.getIntOrDefault("composeHeight",
-                    if (portraitRotation) 960 else 720),
+                // Compose dims are always landscape (4:3 sensor aspect)
+                // because we no longer rotate input.  Default 960x720.
+                composeWidth  = options.getIntOrDefault("composeWidth",  960),
+                composeHeight = options.getIntOrDefault("composeHeight", 720),
                 canvasWidth   = options.getIntOrDefault("canvasWidth",   4800),
                 canvasHeight  = options.getIntOrDefault("canvasHeight",  2200),
                 featherPx     = options.getIntOrDefault("featherPx",     20),
@@ -437,19 +433,15 @@ internal class IncrementalEngine(
     private val canvas: Mat = Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC3)
     private val canvasMask: Mat = Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC1)
 
-    /// V6 pose-driven state.  Mirrors iOS — see OpenCVIncrementalStitcher.mm
-    /// for the full algorithm derivation.
+    /// V7 pose-driven state — sensor-native compute path.  Mirrors iOS.
     private var firstRotationArkit: Mat = Mat()
-    private var kSensor: Mat = Mat()
+    private var kCompose: Mat = Mat()
     private var tCanvas: Mat = Mat.eye(3, 3, CvType.CV_64F)
     private val mArkitToCv: Mat = Mat(3, 3, CvType.CV_64F).apply {
         // diag(1, -1, -1) — ARKit/ARCore (Y-up, -Z forward) → OpenCV.
         setTo(Scalar(0.0))
         put(0, 0, 1.0); put(1, 1, -1.0); put(2, 2, -1.0)
     }
-    private var firstSensorWidth: Int = 0
-    private var firstSensorHeight: Int = 0
-    private var scaleSensorToCompose: Double = 1.0
 
     private var lastAcceptedYaw: Double = 0.0
     private var lastAcceptedPitch: Double = 0.0
@@ -499,40 +491,32 @@ internal class IncrementalEngine(
                 msSince(t0),
             )
         }
-        // Rotate per the engine's frame-rotation policy + uniform-
-        // scale to compose budget.  ARCore on Android (and the JS
-        // gyro fallback) deliver landscape-native pixels regardless
-        // of how the user holds the phone.  Rotation only happens
-        // for portrait orientations; landscape gets passed through.
-        val rotated = if (frameRotationDegrees == 90) {
-            Mat().also { Core.rotate(srcRaw, it, Core.ROTATE_90_CLOCKWISE) }
-        } else if (frameRotationDegrees == 180) {
-            Mat().also { Core.rotate(srcRaw, it, Core.ROTATE_180) }
-        } else if (frameRotationDegrees == 270) {
-            Mat().also { Core.rotate(srcRaw, it, Core.ROTATE_90_COUNTERCLOCKWISE) }
-        } else {
-            srcRaw.clone()
-        }
-        srcRaw.release()
-        val frame = downsampleToCompose(rotated)
-        if (frame !== rotated) rotated.release()
+        // V7: NO input rotation.  ARCore (and the JS gyro fallback)
+        // deliver sensor-native landscape frames; we keep them in
+        // that frame through the entire compute pipeline.  Output
+        // rotation for display happens at snapshot/finalize time.
+        // See iOS' equivalent fix for the architectural rationale.
+        val frame = downsampleToCompose(srcRaw)
+        if (frame !== srcRaw) srcRaw.release()
 
         // Build R_new from quaternion.
         val rNew = quaternionToRotationMat(qx, qy, qz, qw)
 
         if (!hasFirstFrame) {
             firstRotationArkit = rNew.clone()
-            firstSensorWidth = imageWidth
-            firstSensorHeight = imageHeight
-            kSensor = Mat(3, 3, CvType.CV_64F).apply {
+            // V7: K is in COMPOSE pixel coordinates.  Sensor intrinsics
+            // get scaled by the same uniform factor we used to downsample
+            // the frame, so K · ray → pixel produces the right pixel
+            // in compose space directly.  No rotation chain needed.
+            val sx = frame.cols().toDouble() / maxOf(1, imageWidth)
+            val sy = frame.rows().toDouble() / maxOf(1, imageHeight)
+            val s = 0.5 * (sx + sy)
+            kCompose = Mat(3, 3, CvType.CV_64F).apply {
                 setTo(Scalar(0.0))
-                put(0, 0, fx); put(0, 2, cx)
-                put(1, 1, fy); put(1, 2, cy)
+                put(0, 0, fx * s); put(0, 2, cx * s)
+                put(1, 1, fy * s); put(1, 2, cy * s)
                 put(2, 2, 1.0)
             }
-            val portraitRot = (frameRotationDegrees == 90 || frameRotationDegrees == 270)
-            val rotatedW = if (portraitRot) imageHeight.toDouble() else imageWidth.toDouble()
-            scaleSensorToCompose = frame.cols().toDouble() / rotatedW
 
             // Place first frame at canvas centre.
             val ox = (canvas.cols() - frame.cols()) / 2
@@ -571,11 +555,13 @@ internal class IncrementalEngine(
             )
         }
 
-        // Pose-driven homography:
+        // V7 pose-driven homography (sensor-native compose space):
         //   R_rel_cv = M · R_first⁻¹ · R_new · M
-        //   H_sensor = K · R_rel_cv · K⁻¹
-        //   H_compose = (S⁻¹ · S2R) · H_sensor · (R2S · S)
+        //   H_compose = K_compose · R_rel_cv · K_compose⁻¹
         //   H_canvas = T_canvas · H_compose
+        // No R2S/S chain — the v6 bug was applying input rotation
+        // and undoing it via the chain; v7 keeps everything in
+        // sensor-native compose space and rotates only at output.
         val firstInv = Mat()
         Core.transpose(firstRotationArkit, firstInv)
         val tmp1 = Mat(); Core.gemm(mArkitToCv, firstInv, 1.0, Mat(), 0.0, tmp1)
@@ -583,26 +569,10 @@ internal class IncrementalEngine(
         val rRelCv = Mat(); Core.gemm(tmp2, mArkitToCv, 1.0, Mat(), 0.0, rRelCv)
         firstInv.release(); tmp1.release(); tmp2.release()
 
-        val kInv = kSensor.inv()
-        val hsTmp = Mat(); Core.gemm(kSensor, rRelCv, 1.0, Mat(), 0.0, hsTmp)
-        val hSensor = Mat(); Core.gemm(hsTmp, kInv, 1.0, Mat(), 0.0, hSensor)
-        kInv.release(); hsTmp.release(); rRelCv.release(); rNew.release()
-
-        val r2s = sensorRotationMatrix(frameRotationDegrees, firstSensorWidth, firstSensorHeight)
-        val s2r = r2s.inv()
-        val s = Mat.eye(3, 3, CvType.CV_64F)
-        s.put(0, 0, 1.0 / scaleSensorToCompose)
-        s.put(1, 1, 1.0 / scaleSensorToCompose)
-        val sInv = Mat.eye(3, 3, CvType.CV_64F)
-        sInv.put(0, 0, scaleSensorToCompose)
-        sInv.put(1, 1, scaleSensorToCompose)
-
-        val rs = Mat(); Core.gemm(r2s, s, 1.0, Mat(), 0.0, rs)
-        val sis2r = Mat(); Core.gemm(sInv, s2r, 1.0, Mat(), 0.0, sis2r)
-        val hcTmp = Mat(); Core.gemm(sis2r, hSensor, 1.0, Mat(), 0.0, hcTmp)
-        val hCompose = Mat(); Core.gemm(hcTmp, rs, 1.0, Mat(), 0.0, hCompose)
-        r2s.release(); s2r.release(); s.release(); sInv.release()
-        rs.release(); sis2r.release(); hcTmp.release(); hSensor.release()
+        val kInv = kCompose.inv()
+        val hcTmp = Mat(); Core.gemm(kCompose, rRelCv, 1.0, Mat(), 0.0, hcTmp)
+        val hCompose = Mat(); Core.gemm(hcTmp, kInv, 1.0, Mat(), 0.0, hCompose)
+        kInv.release(); hcTmp.release(); rRelCv.release(); rNew.release()
 
         val hCanvas = Mat(); Core.gemm(tCanvas, hCompose, 1.0, Mat(), 0.0, hCanvas)
         hCompose.release()
@@ -686,7 +656,7 @@ internal class IncrementalEngine(
         canvas.release()
         canvasMask.release()
         firstRotationArkit.release()
-        kSensor.release()
+        kCompose.release()
         tCanvas.release()
         mArkitToCv.release()
     }
@@ -806,15 +776,27 @@ internal class IncrementalEngine(
             }
             nonZero.release()
         }
-        val out = Mat(canvas, crop)
+        val cropped = Mat(canvas, crop)
+        // V7 OUTPUT-ONLY ROTATION.  Compute pipeline kept frames in
+        // sensor-native landscape; rotate the output JPEG so it
+        // displays correctly for the user's device orientation.
+        val out = when (frameRotationDegrees) {
+            90  -> Mat().also { Core.rotate(cropped, it, Core.ROTATE_90_CLOCKWISE) }
+            180 -> Mat().also { Core.rotate(cropped, it, Core.ROTATE_180) }
+            270 -> Mat().also { Core.rotate(cropped, it, Core.ROTATE_90_COUNTERCLOCKWISE) }
+            else -> cropped
+        }
+        val outW = out.cols()
+        val outH = out.rows()
         val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, quality)
         val ok = Imgcodecs.imwrite(outputPath, out, params)
-        out.release()
+        if (out !== cropped) out.release()
+        cropped.release()
         if (!ok) return null
         return StitcherSnapshot(
             panoramaPath = outputPath,
-            width = crop.width,
-            height = crop.height,
+            width = outW,
+            height = outH,
             acceptedCount = acceptedCount,
         )
     }
@@ -911,31 +893,5 @@ internal fun quaternionToRotationMat(qx0: Double, qy0: Double, qz0: Double, qw0:
 }
 
 
-/// Sensor-rotation-to-original-pixel homography, mirrors iOS
-/// `sensorRotationMatrix`.  Maps a post-rotation pixel to a
-/// sensor-native pixel for the given image rotation.
-internal fun sensorRotationMatrix(rotationDegrees: Int, sensorW: Int, sensorH: Int): Mat {
-    val m = Mat.eye(3, 3, CvType.CV_64F)
-    when (rotationDegrees) {
-        90 -> {
-            m.setTo(Scalar(0.0))
-            m.put(0, 1, 1.0)
-            m.put(1, 0, -1.0); m.put(1, 2, (sensorH - 1).toDouble())
-            m.put(2, 2, 1.0)
-        }
-        180 -> {
-            m.setTo(Scalar(0.0))
-            m.put(0, 0, -1.0); m.put(0, 2, (sensorW - 1).toDouble())
-            m.put(1, 1, -1.0); m.put(1, 2, (sensorH - 1).toDouble())
-            m.put(2, 2, 1.0)
-        }
-        270 -> {
-            m.setTo(Scalar(0.0))
-            m.put(0, 1, -1.0); m.put(0, 2, (sensorW - 1).toDouble())
-            m.put(1, 0, 1.0)
-            m.put(2, 2, 1.0)
-        }
-        // 0 → identity (already set by Mat.eye)
-    }
-    return m
-}
+// `sensorRotationMatrix` was removed in V7 — the rotation chain it
+// powered is no longer in the homography path.  See iOS' equivalent.
