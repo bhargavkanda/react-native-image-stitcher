@@ -61,11 +61,16 @@ export interface UseIncrementalAndroidDriverOptions {
   /**
    * Approximate horizontal FoV of the device camera.  Drives the
    * overlap-percent calculation in the native engine.  Default 65°
-   * is a reasonable mid-tier smartphone average; if you have access
-   * to the device's actual intrinsics, pass them through for more
-   * accurate gating.
+   * is a reasonable mid-tier smartphone average.
    */
   fovHorizDegrees?: number;
+  /**
+   * Approximate vertical FoV of the device camera.  Default 50° for
+   * typical 4:3 phone cameras.  When ARCore-driven path is in use
+   * the engine receives both FoVs straight from intrinsics; the
+   * gyro driver is a fallback so the defaults are good enough.
+   */
+  fovVertDegrees?: number;
 }
 
 
@@ -82,6 +87,7 @@ interface NativeProcessFrame {
     yaw: number;
     pitch: number;
     fovHorizDegrees: number;
+    fovVertDegrees: number;
     trackingPoor: boolean;
   }): Promise<unknown>;
 }
@@ -101,6 +107,7 @@ export function useIncrementalAndroidDriver(
     snapshotIntervalMs = 250,
     gyroIntervalMs = 33,
     fovHorizDegrees = 65,
+    fovVertDegrees = 50,
   } = options;
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -188,6 +195,7 @@ export function useIncrementalAndroidDriver(
             yaw: yawRef.current,
             pitch: pitchRef.current,
             fovHorizDegrees,
+            fovVertDegrees,
             trackingPoor: false,
           });
         } catch (err) {
@@ -205,7 +213,7 @@ export function useIncrementalAndroidDriver(
       tick();
       intervalRef.current = setInterval(tick, snapshotIntervalMs);
     },
-    [snapshotIntervalMs, gyroIntervalMs, fovHorizDegrees],
+    [snapshotIntervalMs, gyroIntervalMs, fovHorizDegrees, fovVertDegrees],
   );
 
   return {

@@ -258,19 +258,26 @@ class RetaiLensARCameraView @JvmOverloads constructor(
             val q = camera.pose.rotationQuaternion  // x, y, z, w
             val (yaw, pitch) = quaternionYawPitch(q)
 
-            // Horizontal FoV from intrinsics.
+            // Both FoVs from physical camera intrinsics — same fix as
+            // iOS v3.  Passing physical fovV (rather than deriving
+            // from compose aspect inside the engine) keeps pitch-
+            // dominant pans inside the overlap window.
             val intrinsics = camera.imageIntrinsics
             val fx = intrinsics.focalLength[0].toDouble()
+            val fy = intrinsics.focalLength[1].toDouble()
             val w = intrinsics.imageDimensions[0].toDouble()
+            val h = intrinsics.imageDimensions[1].toDouble()
             val fovHRad = 2.0 * atan(w / (2.0 * fx))
+            val fovVRad = 2.0 * atan(h / (2.0 * fy))
             val fovHDeg = fovHRad * 180.0 / Math.PI
+            val fovVDeg = fovVRad * 180.0 / Math.PI
 
             val trackingPoor = camera.trackingState != TrackingState.TRACKING
 
             // Hop off the GL thread so the engine's heavy work
             // doesn't stall the render loop.  The engine's own
             // serial queue will handle overlap on slow devices.
-            postFrameToEngine(written, yaw, pitch, fovHDeg, trackingPoor)
+            postFrameToEngine(written, yaw, pitch, fovHDeg, fovVDeg, trackingPoor)
         } finally {
             image.close()
         }
@@ -281,6 +288,7 @@ class RetaiLensARCameraView @JvmOverloads constructor(
         yaw: Double,
         pitch: Double,
         fovHorizDegrees: Double,
+        fovVertDegrees: Double,
         trackingPoor: Boolean,
     ) {
         // Run the ingest on the engine's existing background scope.
@@ -293,6 +301,7 @@ class RetaiLensARCameraView @JvmOverloads constructor(
             yaw = yaw,
             pitch = pitch,
             fovHorizDegrees = fovHorizDegrees,
+            fovVertDegrees = fovVertDegrees,
             trackingPoor = trackingPoor,
         )
     }

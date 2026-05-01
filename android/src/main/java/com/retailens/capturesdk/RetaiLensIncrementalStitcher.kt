@@ -132,10 +132,14 @@ class RetaiLensIncrementalStitcher(
         try {
             ensureOpenCv()
             engine = IncrementalEngine(
-                composeWidth  = options.getIntOrDefault("composeWidth",  1280),
-                composeHeight = options.getIntOrDefault("composeHeight", 720),
+                // 720x960 portrait default mirrors iOS — preserves
+                // the 3:4 aspect we get post-90°-CW rotation from
+                // ARCore's landscape-native frames.  The pre-v3
+                // 1280x720 default introduced a non-uniform stretch.
+                composeWidth  = options.getIntOrDefault("composeWidth",  720),
+                composeHeight = options.getIntOrDefault("composeHeight", 960),
                 canvasWidth   = options.getIntOrDefault("canvasWidth",   4800),
-                canvasHeight  = options.getIntOrDefault("canvasHeight",  1600),
+                canvasHeight  = options.getIntOrDefault("canvasHeight",  2200),
                 featherPx     = options.getIntOrDefault("featherPx",     20),
                 snapshotJpegQuality = options.getIntOrDefault("snapshotJpegQuality", 75),
                 snapshotEveryNAccepts = options.getIntOrDefault("snapshotEveryNAccepts", 1),
@@ -175,7 +179,12 @@ class RetaiLensIncrementalStitcher(
             ?: return promise.reject("invalid-options", "path required")
         val yaw = options.getDoubleOrDefault("yaw", 0.0)
         val pitch = options.getDoubleOrDefault("pitch", 0.0)
-        val fov = options.getDoubleOrDefault("fovHorizDegrees", 65.0)
+        val fovH = options.getDoubleOrDefault("fovHorizDegrees", 65.0)
+        // Vertical FoV defaults to 50° (typical 4:3 phone camera) if
+        // the JS driver doesn't pass it — same fallback as the
+        // engine's defensive value.  ARCore-driven path always
+        // passes both; the gyro fallback driver may not.
+        val fovV = options.getDoubleOrDefault("fovVertDegrees", 50.0)
         val trackingPoor = options.getBooleanOrDefault("trackingPoor", false)
 
         workScope.launch {
@@ -184,7 +193,8 @@ class RetaiLensIncrementalStitcher(
                     path = path,
                     yaw = yaw,
                     pitch = pitch,
-                    fovHorizDegrees = fov,
+                    fovHorizDegrees = fovH,
+                    fovVertDegrees = fovV,
                     trackingPoor = trackingPoor,
                 )
                 val state = engine.snapshotIfDue(telemetry)
@@ -265,6 +275,7 @@ class RetaiLensIncrementalStitcher(
         yaw: Double,
         pitch: Double,
         fovHorizDegrees: Double,
+        fovVertDegrees: Double,
         trackingPoor: Boolean,
     ) {
         val engine = this.engine ?: return
@@ -274,6 +285,7 @@ class RetaiLensIncrementalStitcher(
                 yaw = yaw,
                 pitch = pitch,
                 fovHorizDegrees = fovHorizDegrees,
+                fovVertDegrees = fovVertDegrees,
                 trackingPoor = trackingPoor,
             )
             val state = engine.snapshotIfDue(tele)
@@ -425,6 +437,7 @@ internal class IncrementalEngine(
         yaw: Double,
         pitch: Double,
         fovHorizDegrees: Double,
+        fovVertDegrees: Double,
         trackingPoor: Boolean,
     ): FrameTelemetry {
         val t0 = System.nanoTime()
@@ -443,8 +456,14 @@ internal class IncrementalEngine(
                 msSince(t0),
             )
         }
-        val frame = downsampleToCompose(srcRaw)
+        // Rotate 90° CW + uniform-scale to compose budget.  Matches
+        // the iOS pipeline; cures the v1/v2 non-uniform-stretch
+        // distortion that compounded across frames.
+        val rotated = Mat()
+        Core.rotate(srcRaw, rotated, Core.ROTATE_90_CLOCKWISE)
         srcRaw.release()
+        val frame = downsampleToCompose(rotated)
+        if (frame !== rotated) rotated.release()
 
         if (!hasFirstFrame) {
             placeFirstFrame(frame)
@@ -459,7 +478,7 @@ internal class IncrementalEngine(
 
         val overlap = computeOverlapPct(
             yaw - lastAcceptedYaw, pitch - lastAcceptedPitch,
-            fovHorizDegrees, composeWidth.toDouble() / composeHeight.toDouble(),
+            fovHorizDegrees, fovVertDegrees,
         )
         if (overlap > MAX_OVERLAP_PCT) {
             return FrameTelemetry(
@@ -514,17 +533,26 @@ internal class IncrementalEngine(
         val srcMof = MatOfPoint2f(); srcMof.fromList(srcPts)
         val dstMof = MatOfPoint2f(); dstMof.fromList(dstPts)
         val ransacMask = Mat()
-        val hNewToLast = Calib3d.findHomography(
-            srcMof, dstMof, Calib3d.RANSAC, RANSAC_REPROJ_THRESH, ransacMask,
+        // Similarity (4-DOF: scale, rotation, tx, ty) — same fix as
+        // iOS' estimateAffinePartial2D switch.  Rejects shear / full
+        // perspective which compounded into visible parallelogram
+        // drift in v1/v2.  Output is a 2x3 matrix; lift to 3x3 so
+        // it composes with the cumulative homography matrix.
+        val affine2x3 = Calib3d.estimateAffinePartial2D(
+            srcMof, dstMof, ransacMask,
+            Calib3d.RANSAC, RANSAC_REPROJ_THRESH, 2000, 0.99, 10,
         )
         srcMof.release(); dstMof.release()
-        if (hNewToLast.empty()) {
+        if (affine2x3.empty()) {
             ransacMask.release()
             return FrameTelemetry(
                 FrameOutcome.RejectedAlignmentLost, overlap, good.size, 0.0, 0.0,
                 msSince(t0),
             )
         }
+        val hNewToLast = Mat.eye(3, 3, CvType.CV_64F)
+        affine2x3.copyTo(hNewToLast.submat(0, 2, 0, 3))
+        affine2x3.release()
 
         val inliers = Core.countNonZero(ransacMask)
         ransacMask.release()
@@ -628,12 +656,17 @@ internal class IncrementalEngine(
     // ── internal helpers ────────────────────────────────────────────
 
     private fun downsampleToCompose(src: Mat): Mat {
-        val target = Size(composeWidth.toDouble(), composeHeight.toDouble())
-        if (src.cols() == composeWidth && src.rows() == composeHeight) {
-            return src.clone()
-        }
+        // Uniform scale that fits inside the compose-dim budget — the
+        // smaller of the two ratios wins so neither axis distorts.
+        val sw = src.cols().toDouble()
+        val sh = src.rows().toDouble()
+        var scale = minOf(composeWidth.toDouble() / sw, composeHeight.toDouble() / sh)
+        if (scale > 1.0) scale = 1.0  // never upscale
+        val outW = maxOf(1, (sw * scale).toInt())
+        val outH = maxOf(1, (sh * scale).toInt())
+        if (src.cols() == outW && src.rows() == outH) return src
         val out = Mat()
-        Imgproc.resize(src, out, target, 0.0, 0.0, Imgproc.INTER_AREA)
+        Imgproc.resize(src, out, Size(outW.toDouble(), outH.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
         return out
     }
 
@@ -756,20 +789,23 @@ internal class IncrementalEngine(
         (System.nanoTime() - t0Nanos) / 1_000_000.0
 
     companion object {
-        private const val MIN_OVERLAP_PCT = 15.0
-        private const val MAX_OVERLAP_PCT = 70.0
-        private const val MIN_MATCHES_ACCEPT = 20
-        private const val MIN_INLIER_RATIO_ACCEPT = 0.25
-        private const val HIGH_CONF_MATCHES = 80
-        private const val HIGH_CONF_INLIER_RATIO = 0.7
+        // v3 thresholds — relaxed match-count + inlier minimums for
+        // light-texture shelf scenes; tighter det range because the
+        // affine fit produces a much narrower legitimate scale band.
+        private const val MIN_OVERLAP_PCT = 10.0
+        private const val MAX_OVERLAP_PCT = 75.0
+        private const val MIN_MATCHES_ACCEPT = 10
+        private const val MIN_INLIER_RATIO_ACCEPT = 0.18
+        private const val HIGH_CONF_MATCHES = 60
+        private const val HIGH_CONF_INLIER_RATIO = 0.55
         private const val ORB_MAX_FEATURES = 1000
         private const val ORB_SCALE_FACTOR = 1.2f
         private const val ORB_LEVELS = 8
         private const val ORB_EDGE_THRESHOLD = 31
         private const val LOWE_RATIO = 0.75f
         private const val RANSAC_REPROJ_THRESH = 5.0
-        private const val HOM_DET_MIN = 0.4
-        private const val HOM_DET_MAX = 2.5
+        private const val HOM_DET_MIN = 0.7
+        private const val HOM_DET_MAX = 1.4
     }
 }
 
@@ -807,15 +843,14 @@ internal fun computeOverlapPct(
     deltaYaw: Double,
     deltaPitch: Double,
     fovHorizDegrees: Double,
-    frameAspect: Double,
+    fovVertDegrees: Double,
 ): Double {
     val absYaw = kotlin.math.abs(deltaYaw)
     val absPitch = kotlin.math.abs(deltaPitch)
     var fovH = fovHorizDegrees * Math.PI / 180.0
+    var fovV = fovVertDegrees * Math.PI / 180.0
     if (fovH <= 1e-6) fovH = 65.0 * Math.PI / 180.0
-    val fovV = 2.0 * kotlin.math.atan(
-        kotlin.math.tan(fovH / 2.0) / maxOf(frameAspect, 0.1),
-    )
+    if (fovV <= 1e-6) fovV = 50.0 * Math.PI / 180.0
     val overlap = if (absYaw >= absPitch) {
         1.0 - absYaw / fovH
     } else {

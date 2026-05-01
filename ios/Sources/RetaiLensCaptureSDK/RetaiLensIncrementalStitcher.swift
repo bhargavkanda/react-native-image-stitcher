@@ -306,11 +306,17 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         )
         let (yaw, pitch) = Self.yawPitch(from: q)
 
-        // Horizontal FoV from intrinsics — fx is in pixels, image
-        // width too, so 2 * atan(W / 2*fx) in radians, converted to
-        // degrees for the .mm side which expects degrees.
-        let fovHRad = 2.0 * atan(Double(pose.imageWidth) / (2.0 * pose.fx))
+        // Both FoVs from physical camera intrinsics.  Passing the
+        // PHYSICAL vertical FoV (vs deriving it from compose aspect
+        // inside the engine) is what fixes the v1/v2 "only left-to-
+        // right portrait pan responds" bug — the engine's overlap
+        // gate compared world-pitch against a compose-aspect-derived
+        // vertical FoV that didn't match the actual camera, so most
+        // top-to-bottom pans fell outside the 30-70% window.
+        let fovHRad = 2.0 * atan(Double(pose.imageWidth)  / (2.0 * pose.fx))
+        let fovVRad = 2.0 * atan(Double(pose.imageHeight) / (2.0 * pose.fy))
         let fovHDeg = fovHRad * 180.0 / .pi
+        let fovVDeg = fovVRad * 180.0 / .pi
 
         let trackingPoor = (pose.trackingState != .tracking)
 
@@ -336,6 +342,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             yaw: yaw,
             pitch: pitch,
             fovHorizDegrees: fovHDeg,
+            fovVertDegrees: fovVDeg,
             trackingPoor: trackingPoor
         )
 

@@ -94,17 +94,28 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
 
 namespace {
 
-constexpr double kMinOverlapPct = 15.0;   // below this → too far gone
-constexpr double kMaxOverlapPct = 70.0;   // above this → too close, wait
-constexpr int kMinMatchesAccept = 20;
-constexpr double kMinInlierRatioAccept = 0.25;
-constexpr double kHighConfidenceMatches = 80;
-constexpr double kHighConfidenceInlierRatio = 0.7;
+// FoV gate window — slightly more permissive than the design doc's
+// 30-50% sweet spot to handle pose noise + slow pans without
+// rejecting valid candidates.
+constexpr double kMinOverlapPct = 10.0;   // below this → moved too far
+constexpr double kMaxOverlapPct = 75.0;   // above this → too close, wait
+// Match-quality gates — relaxed from the design doc seeds because
+// shelf scenes with light textures (white walls behind shelves,
+// uniform packaging) produce fewer matches than the 80-feature
+// "ideal".  Field tuning in v3.
+constexpr int kMinMatchesAccept = 10;
+constexpr double kMinInlierRatioAccept = 0.18;
+constexpr double kHighConfidenceMatches = 60;
+constexpr double kHighConfidenceInlierRatio = 0.55;
 constexpr int kOrbMaxFeatures = 1000;
 constexpr float kLoweRatio = 0.75f;
 constexpr double kRansacReprojThresh = 5.0;
-constexpr double kHomDetMin = 0.4;        // det outside [min, max] = degenerate
-constexpr double kHomDetMax = 2.5;
+// Similarity (4-DOF: scale, rotation, tx, ty) keeps the determinant
+// equal to scale².  Tight bounds reject degenerate fits aggressively
+// while leaving slack for the natural ~0.9-1.1 scale that hand-held
+// pans introduce (parallax + lens distortion residuals).
+constexpr double kHomDetMin = 0.7;
+constexpr double kHomDetMax = 1.4;
 
 }  // namespace
 
@@ -142,10 +153,21 @@ constexpr double kHomDetMax = 2.5;
                          featherPx:(NSInteger)featherPx
 {
     if (self = [super init]) {
-        _composeWidth  = composeWidth  > 0 ? composeWidth  : 1280;
-        _composeHeight = composeHeight > 0 ? composeHeight : 720;
+        // Default compose dims target a 3:4 portrait aspect because
+        // ARKit delivers 1920x1440 (4:3) which we rotate 90° CW to
+        // 1440x1920 (3:4).  The pre-v3 default of 1280x720 was a
+        // 16:9 mismatch that introduced a 2.4× non-uniform scale,
+        // squishing every frame before matching and accumulating
+        // visible distortion.  See Phase 0 v3 commit.
+        _composeWidth  = composeWidth  > 0 ? composeWidth  : 720;
+        _composeHeight = composeHeight > 0 ? composeHeight : 960;
+        // Canvas defaults: shelf pans grow horizontally (left-right
+        // operator motion in portrait phone) → wide canvas.  4800
+        // wide handles ~3 frame-widths of pan; 2200 tall fits one
+        // frame-height plus ~150% extension for hand-held pitch
+        // wobble + the occasional "lift to read top shelf" gesture.
         _canvasWidth   = canvasWidth   > 0 ? canvasWidth   : 4800;
-        _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 1600;
+        _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 2200;
         _featherPx     = featherPx     > 0 ? featherPx     : 20;
 
         _orb = cv::ORB::create(
@@ -190,6 +212,7 @@ constexpr double kHomDetMax = 2.5;
                                       yaw:(double)yaw
                                     pitch:(double)pitch
                           fovHorizDegrees:(double)fovHorizDegrees
+                           fovVertDegrees:(double)fovVertDegrees
                              trackingPoor:(BOOL)trackingPoor
 {
     auto t0 = std::chrono::steady_clock::now();
@@ -227,14 +250,14 @@ constexpr double kHomDetMax = 2.5;
         return tele;
     }
 
-    // Pose-delta gating.  Estimate per-axis FoV from horizontal
-    // FoV + frame aspect; take the larger angular delta as the pan
-    // axis and compute fractional overlap.
+    // Pose-delta gating.  Both FoVs are PHYSICAL (derived from the
+    // camera's intrinsics by the Swift caller) so the overlap math
+    // is invariant of any in-engine rotation/resize we do.
     double overlap = computeOverlapPct(
         yaw - _lastAcceptedYaw,
         pitch - _lastAcceptedPitch,
         fovHorizDegrees,
-        (double)_composeWidth / (double)_composeHeight
+        fovVertDegrees
     );
     tele.overlapPercent = overlap;
 
@@ -294,15 +317,28 @@ constexpr double kHomDetMax = 2.5;
         dstPts.push_back(_lastKeypoints[m.trainIdx].pt);
     }
 
+    // Use estimateAffinePartial2D (similarity = scale + rotation +
+    // translation, 4 DOF) instead of findHomography (8 DOF).  Two
+    // big wins for shelf-style pans:
+    //   1. No shear/perspective in the fit, so accumulated drift
+    //      can't compound into the parallelogram-warp we kept
+    //      seeing from the v1 fit.
+    //   2. Far more stable on low-feature scenes — 4 DOF needs
+    //      fewer inliers to estimate cleanly than 8 DOF.
+    // Output is a 2x3 matrix; we convert to 3x3 for compose with
+    // the cumulative cv::Mat homography.
     cv::Mat ransacMask;
-    cv::Mat H_newToLast = cv::findHomography(
-        srcPts, dstPts, cv::RANSAC, kRansacReprojThresh, ransacMask
+    cv::Mat affine2x3 = cv::estimateAffinePartial2D(
+        srcPts, dstPts, ransacMask,
+        cv::RANSAC, kRansacReprojThresh
     );
-    if (H_newToLast.empty()) {
+    if (affine2x3.empty()) {
         tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
         tele.processingMs = msSince(t0);
         return tele;
     }
+    cv::Mat H_newToLast = cv::Mat::eye(3, 3, CV_64F);
+    affine2x3.copyTo(H_newToLast(cv::Rect(0, 0, 3, 2)));
 
     int inliers = cv::countNonZero(ransacMask);
     double inlierRatio = (double)inliers / (double)good.size();
@@ -451,19 +487,22 @@ static double msSince(std::chrono::steady_clock::time_point t0) {
 static double computeOverlapPct(double deltaYaw,
                                 double deltaPitch,
                                 double fovHorizDegrees,
-                                double frameAspect)
+                                double fovVertDegrees)
 {
     double absYaw = std::fabs(deltaYaw);
     double absPitch = std::fabs(deltaPitch);
     double fovH = fovHorizDegrees * M_PI / 180.0;
+    double fovV = fovVertDegrees * M_PI / 180.0;
     if (fovH <= 1e-6) {
         // Sentinel for "no intrinsics info" — assume mid-tier
-        // smartphone camera FoV (~65°) so we still gate something.
+        // smartphone camera FoV (~65° H, 50° V for 4:3 sensors).
         fovH = 65.0 * M_PI / 180.0;
     }
-    // Vertical FoV from horizontal FoV + aspect (approx, treating
-    // the image as a flat plane at a fixed depth).
-    double fovV = 2.0 * std::atan(std::tan(fovH / 2.0) / std::max(frameAspect, 0.1));
+    if (fovV <= 1e-6) {
+        // Sensible default if vertical wasn't passed; ~50° works
+        // for typical 4:3 phone cameras.
+        fovV = 50.0 * M_PI / 180.0;
+    }
 
     // Pan-axis selection — rotational handhelds dominate handheld
     // panoramas, so the larger angular delta is the pan direction.
@@ -528,9 +567,21 @@ static double computeOverlapPct(double deltaYaw,
     cv::Mat rotated;
     cv::rotate(frame, rotated, cv::ROTATE_90_CLOCKWISE);
 
-    // Downscale to compose-resolution.
-    cv::Size target((int)_composeWidth, (int)_composeHeight);
-    if (rotated.cols == target.width && rotated.rows == target.height) {
+    // Uniform-scale downsample preserving the rotated frame's aspect
+    // ratio.  Pick the scale factor from whichever input dimension
+    // hits its compose target first; the OTHER dimension comes out
+    // proportional.  Using the engine's compose dims as a budget
+    // keeps the compute predictable while never introducing the
+    // non-uniform stretch that the v1/v2 force-resize did.
+    double scale = std::min(
+        (double)_composeWidth  / (double)rotated.cols,
+        (double)_composeHeight / (double)rotated.rows
+    );
+    if (scale > 1.0) scale = 1.0;  // never upscale
+    int outW = std::max(1, (int)std::round(rotated.cols * scale));
+    int outH = std::max(1, (int)std::round(rotated.rows * scale));
+    cv::Size target(outW, outH);
+    if (rotated.cols == outW && rotated.rows == outH) {
         outBGR = rotated;
     } else {
         cv::resize(rotated, outBGR, target, 0, 0, cv::INTER_AREA);

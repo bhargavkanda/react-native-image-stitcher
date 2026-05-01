@@ -164,6 +164,13 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
         quality,
       });
       setIsRunning(false);
+      // Clear React state on finalize so the next start doesn't
+      // briefly show stale frame counts / hint banners from the
+      // previous capture.  Without this, the IncrementalStitcherView
+      // displayed acceptedCount from the prior pan if a late event
+      // had already updated state.
+      setState(null);
+      lastHintRef.current = null;
       return result;
     },
     [native],
@@ -177,12 +184,17 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
     lastHintRef.current = null;
   }, [native]);
 
-  // Tear down the engine if the host unmounts mid-capture (e.g. user
-  // navigates away).  Best-effort — the native side ignores cancel()
-  // when nothing is running.
+  // Cleanup-on-unmount that actually works.  The previous version
+  // captured `isRunning` from the initial render (false), so the
+  // cancel never fired.  Reading from a ref keeps the latest
+  // value visible at unmount time.
+  const isRunningRef = useRef(false);
+  useEffect(() => {
+    isRunningRef.current = isRunning;
+  }, [isRunning]);
   useEffect(() => {
     return () => {
-      if (native && isRunning) {
+      if (native && isRunningRef.current) {
         native.cancel().catch(() => undefined);
       }
     };
