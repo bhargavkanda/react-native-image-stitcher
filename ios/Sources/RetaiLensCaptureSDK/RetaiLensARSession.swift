@@ -164,8 +164,10 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     //   1. The bridge thread (start/stop calls from JS).
     //   2. The ARSession delegate thread (per-frame callbacks
     //      that append the latest pixelBuffer to the writer).
-    // We serialise via `captureStateQueue` to prevent the delegate
-    // appending after `finishWriting` has been called.
+    // We serialise via `writerLock` (NSLock) — the delegate uses
+    // `try()` so it never blocks ARKit; start/stop hold the lock
+    // only while swapping state pointers, never across the slow
+    // AVFoundation calls.
 
     /// Active AVAssetWriter while recording; nil when idle.
     private var assetWriter: AVAssetWriter?
@@ -181,13 +183,14 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     /// start time so CMTime presentation timestamps remain monotonic
     /// from zero.
     private var recordingStartTime: CMTime?
-    /// Serial queue guarding all asset-writer state mutations.
-    /// Must be serial — concurrent finishWriting + append crashes
-    /// AVAssetWriter.
-    private let captureStateQueue = DispatchQueue(
-        label: "com.retailens.arsession.capture",
-        qos: .userInitiated
-    )
+    /// Lock guarding writer-state reads/writes.  Used with `try()`
+    /// from the ARSession delegate so frame-append never blocks the
+    /// delegate thread; if start/stop is mid-flight, the frame is
+    /// just dropped (graceful).  Held briefly during setup +
+    /// teardown only to swap the state pointers — the slow
+    /// AVFoundation calls (`startWriting`, `finishWriting`) happen
+    /// OUTSIDE the lock.
+    private let writerLock = NSLock()
 
     private override init() {
         super.init()
@@ -294,49 +297,46 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         }
 
         // If recording is in flight, append this frame to the
-        // asset writer.
+        // asset writer DIRECTLY — no queue hop.
         //
-        // Async dispatch onto captureStateQueue.  Swift's closure
-        // capture retains the CVPixelBuffer (CF type with toll-free
-        // bridging), so it stays alive until the closure runs.
-        // adaptor.append() makes its own internal copy before
-        // returning.
+        // Apple's ARKit docs are explicit: "ARKit holds the captured
+        // pixel buffer in a small pool.  The buffer may be reused
+        // after the next ARFrame is captured.  To use the pixel
+        // buffer beyond the scope of the captured ARFrame, you must
+        // make a copy."  Swift's CF retain on capturedImage does NOT
+        // protect against ARKit's pool reuse.  Hopping queues with
+        // a captured pixelBuffer led to the EXC_BAD_ACCESS crashes
+        // we kept seeing (Sentry: "release" at objc_retain) — by
+        // the time the closure ran, ARKit had reclaimed the
+        // underlying memory.
         //
-        // We tried `.sync` previously to side-step a suspected
-        // pixel-buffer lifetime issue — but sync from ARKit's
-        // delegate queue blocks the delegate until the encoder
-        // returns.  When the encoder ran slow (or the captureStateQueue
-        // had any prior work in flight), ARKit silently dropped
-        // frames; in the worst case, ZERO frames made it to the mp4,
-        // the resulting file had no valid duration, and stitchVideo
-        // failed with the "Could not read video duration" error
-        // ~50% of the time.  Async restores frame flow.
+        // Appending synchronously inside the delegate callback
+        // means the pixel buffer is consumed (adaptor.append makes
+        // its own internal copy) before the delegate returns —
+        // exactly the lifetime ARKit guarantees.
         //
-        // Safety against the over-release crash (Sentry: "release"
-        // at 0x16adb7e10) is now provided by the early-clear in
-        // stopRecording — concurrent delegate closures find
-        // assetWriter=nil and skip cleanly.
-        let pixelBuffer = frame.capturedImage
-        let frameTimestamp = frame.timestamp
-        captureStateQueue.async { [weak self] in
-            guard let self = self,
-                  let writer = self.assetWriter,
-                  let input = self.videoInput,
-                  let adaptor = self.pixelBufferAdaptor,
-                  writer.status == .writing,
-                  input.isReadyForMoreMediaData,
-                  let startTime = self.recordingStartTime else {
-                return
-            }
-            // Compute presentation timestamp relative to recording
-            // start so the resulting mp4's timeline begins at 0.
-            let frameCMTime = CMTime(
-                seconds: frameTimestamp,
-                preferredTimescale: 1_000_000
-            )
-            let pts = CMTimeSubtract(frameCMTime, startTime)
-            adaptor.append(pixelBuffer, withPresentationTime: pts)
+        // Synchronisation with start/stop is via `writerLock.try()`:
+        // if start/stop is mid-flight, the frame is dropped (graceful
+        // backpressure) rather than blocking ARKit's delegate.  The
+        // slow AVFoundation calls (startWriting, finishWriting)
+        // happen OUTSIDE the lock so the lock hold time is
+        // microseconds, not milliseconds.
+        guard writerLock.try() else { return }
+        defer { writerLock.unlock() }
+        guard let writer = self.assetWriter,
+              let input = self.videoInput,
+              let adaptor = self.pixelBufferAdaptor,
+              writer.status == .writing,
+              input.isReadyForMoreMediaData,
+              let startTime = self.recordingStartTime else {
+            return
         }
+        let frameCMTime = CMTime(
+            seconds: frame.timestamp,
+            preferredTimescale: 1_000_000
+        )
+        let pts = CMTimeSubtract(frameCMTime, startTime)
+        adaptor.append(frame.capturedImage, withPresentationTime: pts)
     }
 
     public func session(
@@ -466,41 +466,43 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         } else {
             resolvedPath = rawPath
         }
-        captureStateQueue.async { [weak self] in
-            guard let self = self else { return }
-            if self.assetWriter != nil {
-                completion(nil, NSError(
-                    domain: "RetaiLensARCapture",
-                    code: 2010,
-                    userInfo: [NSLocalizedDescriptionKey:
-                        "A recording is already in progress."]
-                ))
-                return
-            }
-            guard let frame = self.arSession.currentFrame else {
-                completion(nil, NSError(
-                    domain: "RetaiLensARCapture",
-                    code: 2011,
-                    userInfo: [NSLocalizedDescriptionKey:
-                        "AR session has no current frame — start the session first."]
-                ))
-                return
-            }
+        // Quick existence check under lock — bail if already recording.
+        writerLock.lock()
+        let alreadyRecording = (self.assetWriter != nil)
+        writerLock.unlock()
+        if alreadyRecording {
+            completion(nil, NSError(
+                domain: "RetaiLensARCapture",
+                code: 2010,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "A recording is already in progress."]
+            ))
+            return
+        }
 
-            let pixelBuffer = frame.capturedImage
-            let width = CVPixelBufferGetWidth(pixelBuffer)
-            let height = CVPixelBufferGetHeight(pixelBuffer)
-            let cleanedPath = Self.normalisePath(resolvedPath)
-            let url = URL(fileURLWithPath: cleanedPath)
-            try? FileManager.default.removeItem(at: url)
+        guard let frame = self.arSession.currentFrame else {
+            completion(nil, NSError(
+                domain: "RetaiLensARCapture",
+                code: 2011,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "AR session has no current frame — start the session first."]
+            ))
+            return
+        }
 
-            do {
+        // Heavy AVFoundation setup happens OUTSIDE the lock so the
+        // ARSession delegate's per-frame `try()` doesn't pile up
+        // dropped frames during this ~10-30ms window.
+        let pixelBuffer = frame.capturedImage
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let cleanedPath = Self.normalisePath(resolvedPath)
+        let url = URL(fileURLWithPath: cleanedPath)
+        try? FileManager.default.removeItem(at: url)
+
+        do {
                 let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
                 // Encode H.264 at sensor dimensions (landscape).
-                // The 90° rotation transform below tells the player
-                // (and AVAssetImageGenerator inside our stitcher's
-                // extractFrames step) to display in portrait without
-                // re-encoding.
                 let videoSettings: [String: Any] = [
                     AVVideoCodecKey: AVVideoCodecType.h264,
                     AVVideoWidthKey: width,
@@ -568,10 +570,15 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
                 writer.startWriting()
                 writer.startSession(atSourceTime: .zero)
 
+                // Briefly hold the lock to swap in the new writer
+                // state.  ARSession delegate's per-frame `try()`
+                // will see consistent state once we release.
+                self.writerLock.lock()
                 self.assetWriter = writer
                 self.videoInput = input
                 self.pixelBufferAdaptor = adaptor
                 self.recordingStartTime = startTime
+                self.writerLock.unlock()
 
                 // Reset the pose log so this recording's frames
                 // correlate with a fresh window of poses; the
@@ -584,9 +591,8 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
                 NSLog("[RetaiLensARCapture] startRecording: %dx%d → %@",
                       width, height, cleanedPath)
                 completion(cleanedPath, nil)
-            } catch {
-                completion(nil, error as NSError)
-            }
+        } catch {
+            completion(nil, error as NSError)
         }
     }
 
@@ -597,55 +603,50 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     @objc public func stopRecording(
         completion: @escaping ([String: Any]?, NSError?) -> Void
     ) {
-        captureStateQueue.async { [weak self] in
-            guard let self = self,
-                  let writer = self.assetWriter,
-                  let input = self.videoInput else {
-                completion(nil, NSError(
-                    domain: "RetaiLensARCapture",
-                    code: 2020,
-                    userInfo: [NSLocalizedDescriptionKey:
-                        "No active recording to stop."]
-                ))
-                return
-            }
+        // Briefly acquire the lock just to capture + clear the
+        // writer state.  Strong locals keep the writer + input
+        // alive across the lock release for the slow finalise.
+        // Once self.assetWriter is nil, any in-flight delegate
+        // `try()` that succeeds finds nil writer state and skips —
+        // no further appends can race with finishWriting.
+        writerLock.lock()
+        let writer = self.assetWriter
+        let input = self.videoInput
+        self.assetWriter = nil
+        self.videoInput = nil
+        self.pixelBufferAdaptor = nil
+        self.recordingStartTime = nil
+        writerLock.unlock()
 
-            // CRITICAL: clear the in-flight writer state BEFORE
-            // markAsFinished/finishWriting.  Any concurrent delegate
-            // sync block (queued + waiting on captureStateQueue
-            // behind us) will then find assetWriter=nil and skip
-            // its append, instead of trying to feed a marked-as-
-            // finished input.  The strong references we keep below
-            // (`writer`, `input`) keep the objects alive long enough
-            // to finalise.
-            self.assetWriter = nil
-            self.videoInput = nil
-            self.pixelBufferAdaptor = nil
-            self.recordingStartTime = nil
+        guard let writer = writer, let input = input else {
+            completion(nil, NSError(
+                domain: "RetaiLensARCapture",
+                code: 2020,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "No active recording to stop."]
+            ))
+            return
+        }
 
-            input.markAsFinished()
-            let outputURL = writer.outputURL
-            writer.finishWriting { [weak self] in
-                guard let self = self else { return }
-                self.captureStateQueue.async {
-                    let path = outputURL.path
-                    let asset = AVAsset(url: outputURL)
-                    let durationSec = CMTimeGetSeconds(asset.duration)
-                    let fileSize = (try? FileManager.default
-                        .attributesOfItem(atPath: path))?[.size] as? Int ?? 0
-                    let track = asset.tracks(withMediaType: .video).first
-                    let naturalSize = track?.naturalSize ?? .zero
-                    NSLog("[RetaiLensARCapture] stopRecording: %.2fs, %lld bytes",
-                          durationSec, Int64(fileSize))
-                    completion([
-                        "path": path,
-                        "duration": durationSec,
-                        "size": fileSize,
-                        "width": Int(naturalSize.width),
-                        "height": Int(naturalSize.height),
-                    ], nil)
-                }
-            }
+        input.markAsFinished()
+        let outputURL = writer.outputURL
+        writer.finishWriting {
+            let path = outputURL.path
+            let asset = AVAsset(url: outputURL)
+            let durationSec = CMTimeGetSeconds(asset.duration)
+            let fileSize = (try? FileManager.default
+                .attributesOfItem(atPath: path))?[.size] as? Int ?? 0
+            let track = asset.tracks(withMediaType: .video).first
+            let naturalSize = track?.naturalSize ?? .zero
+            NSLog("[RetaiLensARCapture] stopRecording: %.2fs, %lld bytes",
+                  durationSec, Int64(fileSize))
+            completion([
+                "path": path,
+                "duration": durationSec,
+                "size": fileSize,
+                "width": Int(naturalSize.width),
+                "height": Int(naturalSize.height),
+            ], nil)
         }
     }
 
