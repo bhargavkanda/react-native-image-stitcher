@@ -477,51 +477,19 @@ constexpr double kHomDetMax = 1.4;
             cropRect = cv::Rect(0, 0, _canvas.cols, _canvas.rows);
         }
     }
-    // V8 INSCRIBED-RECTANGLE CROP (only on finalize, not live preview).
+    // V8.2: dropped the inscribed-rectangle crop — it was too
+    // aggressive on cylindrical-warped output where each frame's
+    // mask has naturally curved edges (the corners of each warped
+    // rectangle have no data).  The 95% fill threshold trimmed
+    // those rows aggressively, leaving only the middle band of
+    // each frame and producing the "thin strip" output the user
+    // reported in v8.0.
     //
-    // Trim edges where the canvas mask is sparsely filled, leaving a
-    // sub-rectangle where almost every pixel has real content.  This
-    // is what gives the saved panorama clean rectangular borders
-    // instead of jagged black corners — same effect Apple/Samsung
-    // get with their final-pass rectangle-fit.
-    //
-    // Heuristic: walk inward from each side, trim rows/cols that
-    // are < kInscribedFillRatio full (defaults to 95%).  Not the
-    // mathematically optimal largest-inscribed-rectangle, but close
-    // and very fast (O(W+H)).
-    if (tightCrop && cropRect.width > 0 && cropRect.height > 0) {
-        cv::Mat maskRoi = _canvasMask(cropRect);
-        const double kFillRatio = 0.95;
-        int top = 0, bottom = maskRoi.rows - 1;
-        int left = 0, right = maskRoi.cols - 1;
-        while (top < bottom) {
-            int filled = cv::countNonZero(maskRoi.row(top));
-            if (filled < kFillRatio * maskRoi.cols) top++;
-            else break;
-        }
-        while (bottom > top) {
-            int filled = cv::countNonZero(maskRoi.row(bottom));
-            if (filled < kFillRatio * maskRoi.cols) bottom--;
-            else break;
-        }
-        const int trimmedHeight = bottom - top + 1;
-        while (left < right && trimmedHeight > 0) {
-            int filled = cv::countNonZero(
-                maskRoi.col(left).rowRange(top, bottom + 1));
-            if (filled < kFillRatio * trimmedHeight) left++;
-            else break;
-        }
-        while (right > left && trimmedHeight > 0) {
-            int filled = cv::countNonZero(
-                maskRoi.col(right).rowRange(top, bottom + 1));
-            if (filled < kFillRatio * trimmedHeight) right--;
-            else break;
-        }
-        if (right > left && bottom > top) {
-            cropRect = cv::Rect(cropRect.x + left, cropRect.y + top,
-                                right - left + 1, bottom - top + 1);
-        }
-    }
+    // V9 will reintroduce this with a proper largest-inscribed-
+    // rectangle algorithm (histogram-based, O(W·H)) that finds the
+    // true largest sub-rectangle fully contained in the mask.  For
+    // now, plain boundingRect — the saved panorama has a few black
+    // pixels at the cylindrical edges but the content is preserved.
     cropped = _canvas(cropRect).clone();
 
     // V7.1 GRAVITY-DERIVED OUTPUT ROTATION.  The compute pipeline
@@ -849,32 +817,71 @@ static double computeOverlapPct(double deltaYaw,
     cv::bitwise_and(noPrior, warpedNewMaskClipped, newOnlyRegion);
     cv::bitwise_or(seamMaskNew, newOnlyRegion, seamMaskNew);
 
-    // ── 4. Multi-band blending ─────────────────────────────────
+    // ── 4. Mask-based blend with feather along the seam ────────
     //
-    // Decomposes both contributions into Laplacian pyramids,
-    // blends each band separately, reconstructs.  Hides any
-    // residual misalignment along the seam by spreading the
-    // transition across multiple frequency bands.
-    cv::Rect blendRoi(0, 0, dstRoiClipped.width, dstRoiClipped.height);
-    cv::detail::MultiBandBlender blender(/*try_gpu=*/false, /*num_bands=*/5);
-    blender.prepare(blendRoi);
+    // V8 originally used cv::detail::MultiBandBlender per-pair, but
+    // that primitive was designed for batch (all frames fed once,
+    // single blend call); per-pair feed/blend cycles produced
+    // degenerate output where the canvas region's pre-blended pixels
+    // got re-decomposed into Laplacian pyramids and re-smoothed,
+    // compounding blur.
+    //
+    // V8.2 simpler approach: copy new frame's pixels directly into
+    // the canvas where the seam-finder said "use new", keep canvas
+    // pixels where seam-finder said "use canvas", and feather a
+    // small band along the seam transition to hide pixel-level
+    // discontinuities.  Quality stays close to multi-band because
+    // the graph-cut seam already places the cut along scene edges
+    // where transition is invisible; the feather just smooths
+    // sub-pixel noise.
+    cv::Mat seamMaskNewSoft;
+    {
+        // Distance from the seam mask boundary, clipped to small
+        // width — gives a soft transition just at the seam.
+        cv::Mat dist;
+        cv::distanceTransform(seamMaskNew, dist, cv::DIST_L2, 3);
+        const double featherPx = (double)_featherPx;
+        cv::Mat alpha32;
+        dist.convertTo(alpha32, CV_32F, 1.0 / featherPx);
+        cv::threshold(alpha32, alpha32, 1.0, 1.0, cv::THRESH_TRUNC);
 
-    cv::Mat canvasS, newS;
-    canvasRegion.convertTo(canvasS, CV_16SC3);
-    warpedNewExposed.convertTo(newS, CV_16SC3);
+        // Outside the new frame's mask: alpha=0 (canvas wins).
+        // Inside, but where canvas mask is empty: alpha=1 (new wins).
+        cv::Mat noPriorRoi;
+        cv::compare(canvasRegionMask, 0, noPriorRoi, cv::CMP_EQ);
+        cv::Mat noPriorAndNew;
+        cv::bitwise_and(noPriorRoi, warpedNewMaskClipped, noPriorAndNew);
+        alpha32.setTo(1.0, noPriorAndNew);
 
-    blender.feed(canvasS, seamMaskCanvas, cv::Point(0, 0));
-    blender.feed(newS,    seamMaskNew,    cv::Point(0, 0));
+        cv::Mat outsideNewMask;
+        cv::compare(warpedNewMaskClipped, 0, outsideNewMask, cv::CMP_EQ);
+        alpha32.setTo(0.0, outsideNewMask);
 
-    cv::Mat blendedS, blendedMask;
-    blender.blend(blendedS, blendedMask);
+        seamMaskNewSoft = alpha32;
+    }
+
+    cv::Mat alpha3;
+    cv::Mat alphaChannels[] = {seamMaskNewSoft, seamMaskNewSoft, seamMaskNewSoft};
+    cv::merge(alphaChannels, 3, alpha3);
+    cv::Mat invAlpha3 = cv::Scalar(1, 1, 1) - alpha3;
+
+    cv::Mat canvasF, newF;
+    canvasRegion.convertTo(canvasF, CV_32FC3);
+    warpedNewExposed.convertTo(newF, CV_32FC3);
+
+    cv::Mat blendedF;
+    cv::multiply(newF, alpha3, newF);
+    cv::multiply(canvasF, invAlpha3, canvasF);
+    cv::add(newF, canvasF, blendedF);
+
     cv::Mat blended8;
-    blendedS.convertTo(blended8, CV_8UC3);
+    blendedF.convertTo(blended8, CV_8UC3);
 
-    // Write back into the canvas region — only where the union mask
-    // says we have any contribution.
-    blended8.copyTo(canvasRegion, blendedMask);
-    cv::bitwise_or(canvasRegionMask, blendedMask, canvasRegionMask);
+    // Only write where either contribution exists (union of masks).
+    cv::Mat unionMask;
+    cv::bitwise_or(canvasRegionMask, warpedNewMaskClipped, unionMask);
+    blended8.copyTo(canvasRegion, unionMask);
+    cv::bitwise_or(canvasRegionMask, warpedNewMaskClipped, canvasRegionMask);
     return YES;
 }
 
