@@ -112,6 +112,31 @@ export type {
 export { stitchVideo } from './stitching/stitchVideo';
 export type { StitchVideoOptions } from './stitching/stitchVideo';
 
+// ── Incremental (Phase 0 — live panorama, replaces stitchVideo flow) ────
+// See docs/site-content/design/2026-04-30-realtime-incremental-stitching.md.
+export {
+  IncrementalOutcome,
+  incrementalStitcherIsAvailable,
+  subscribeIncrementalState,
+} from './stitching/incremental';
+export type {
+  IncrementalState,
+  IncrementalStartOptions,
+  IncrementalFinalizeResult,
+} from './stitching/incremental';
+export { useIncrementalStitcher } from './stitching/useIncrementalStitcher';
+export type {
+  UseIncrementalStitcherReturn,
+  IncrementalHint,
+} from './stitching/useIncrementalStitcher';
+export { useIncrementalAndroidDriver } from './stitching/useIncrementalAndroidDriver';
+export type {
+  UseIncrementalAndroidDriverOptions,
+  IncrementalAndroidDriverHandle,
+} from './stitching/useIncrementalAndroidDriver';
+export { IncrementalStitcherView } from './stitching/IncrementalStitcherView';
+export type { IncrementalStitcherViewProps } from './stitching/IncrementalStitcherView';
+
 // ── Phase 6: Measurement ─────────────────────────────────────────────────
 export {
   measureDistance,

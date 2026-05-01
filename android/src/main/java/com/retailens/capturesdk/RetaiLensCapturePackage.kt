@@ -28,6 +28,7 @@ class RetaiLensCapturePackage : ReactPackage {
         RetaiLensQualityChecker(reactContext),
         RetaiLensStitcher(reactContext),
         RetaiLensARSession(reactContext),
+        RetaiLensIncrementalStitcher(reactContext),
     )
 
     override fun createViewManagers(

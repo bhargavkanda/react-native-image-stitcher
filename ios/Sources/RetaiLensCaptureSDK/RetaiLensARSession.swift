@@ -192,6 +192,17 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     /// OUTSIDE the lock.
     private let writerLock = NSLock()
 
+    /// Optional consumer that receives each ARFrame's pixel buffer +
+    /// pose for the live incremental-stitching path.  Set by
+    /// `RetaiLensIncrementalStitcher.start()` and cleared on
+    /// `finalize()` / `cancel()`.
+    ///
+    /// Weak so the consumer's lifetime is owned by whoever set it
+    /// (currently the incremental-stitcher singleton); this just
+    /// prevents the AR session from outliving a consumer that's
+    /// been torn down.
+    @objc public weak var incrementalConsumer: RetaiLensARFrameConsumer?
+
     private override init() {
         super.init()
         arSession.delegate = self
@@ -294,6 +305,17 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
                 let drop = self.poseLog.count - Self.MAX_POSE_LOG
                 self.poseLog.removeFirst(drop)
             }
+        }
+
+        // Deliver this frame to the live incremental-stitching
+        // consumer if one is registered.  The consumer MUST consume
+        // the pixel buffer before returning (Apple's ARKit pool
+        // reuse contract — same constraint as the recording-append
+        // path below) — `RetaiLensIncrementalStitcher` does this by
+        // converting NV12 → cv::Mat synchronously inside the call,
+        // then doing the heavy work on its own queue.
+        if let consumer = self.incrementalConsumer {
+            consumer.consumeFrame(pixelBuffer: frame.capturedImage, pose: pose)
         }
 
         // If recording is in flight, append this frame to the
