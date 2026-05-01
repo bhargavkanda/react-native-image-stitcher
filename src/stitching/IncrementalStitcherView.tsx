@@ -67,30 +67,46 @@ export function IncrementalStitcherView({
   style,
   emptyText = 'Pan to begin capturing',
 }: IncrementalStitcherViewProps): React.JSX.Element {
-  // Cache-bust the panorama URI: the native side overwrites the
-  // same file path on every snapshot, so React's image cache must
-  // be told something changed.  acceptedCount monotonically
-  // increases per accept — perfect bust key.
+  // Cache-bust the panorama URI.  The native side rotates through
+  // 4 filenames so the path itself changes between snapshots, plus
+  // we tag with acceptedCount as belt-and-suspenders since RN's
+  // image cache on iOS sometimes ignores file:// query strings.
   const imageUri = useMemo(() => {
     if (!state?.panoramaPath) return null;
     return `file://${state.panoramaPath}?v=${state.acceptedCount}`;
   }, [state?.panoramaPath, state?.acceptedCount]);
 
+  // Use the panorama's NATURAL aspect ratio so the strip widens as
+  // the user pans across.  Falls back to 4:3 (a single frame's
+  // shape) before any snapshot has been written.  Without this the
+  // PiP was forced into a 3:1 letterbox, cropping the actual
+  // panorama to a thin slice across the middle.
+  const naturalAspect = state?.width && state?.height && state.height > 0
+    ? state.width / state.height
+    : 4 / 3;
+
   const ringColor = confidenceLevel === 'high'
     ? '#1aaf5d'
     : confidenceLevel === 'medium'
       ? '#e6b800'
-      : 'transparent';
+      : 'rgba(255,255,255,0.35)';
 
   const message = hintMessage(hint);
 
   return (
-    <View style={[styles.container, style]}>
+    <View style={[styles.container, { aspectRatio: naturalAspect }, style]}>
       {imageUri ? (
+        // `contain` so the FULL panorama is visible inside the
+        // strip, not cropped to a slice.  Background fills the
+        // letterbox edges.  Key={acceptedCount} forces RN to
+        // remount the Image component each accept — the surest
+        // way to defeat the native image cache on file:// URIs.
         <Image
+          key={state?.acceptedCount ?? 0}
           source={{ uri: imageUri }}
           style={StyleSheet.absoluteFill}
-          resizeMode="cover"
+          resizeMode="contain"
+          fadeDuration={0}
         />
       ) : (
         <View style={styles.empty}>
@@ -100,9 +116,9 @@ export function IncrementalStitcherView({
       )}
 
       {/* Confidence ring — subtle border that picks up colour for
-          medium-confidence accepts.  High accepts are visually
-          silent (transparent border) so the operator only sees
-          feedback when something is degrading. */}
+          medium-confidence accepts.  Always visible (white-translucent
+          when no confidence signal) so the operator can see exactly
+          where the live preview is on screen. */}
       <View
         pointerEvents="none"
         style={[styles.ring, { borderColor: ringColor }]}
@@ -128,9 +144,9 @@ export function IncrementalStitcherView({
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: 'rgba(0,0,0,0.7)',
     overflow: 'hidden',
-    borderRadius: 12,
+    borderRadius: 8,
   },
   empty: {
     ...StyleSheet.absoluteFillObject,
@@ -140,13 +156,13 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     color: '#fff',
-    fontSize: 11,
+    fontSize: 12,
     opacity: 0.85,
   },
   ring: {
     ...StyleSheet.absoluteFillObject,
-    borderRadius: 12,
-    borderWidth: 3,
+    borderRadius: 8,
+    borderWidth: 2,
   },
   hintBanner: {
     position: 'absolute',

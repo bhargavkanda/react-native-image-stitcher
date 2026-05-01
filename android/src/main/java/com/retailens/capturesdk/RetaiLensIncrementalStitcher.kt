@@ -412,6 +412,11 @@ internal class IncrementalEngine(
     private var acceptsSinceSnapshot: Int = 0
     var acceptedCount: Int = 0
         private set
+    /// Rotating slot for live-snapshot filenames so RN's <Image>
+    /// cache sees a new URI per snapshot instead of caching the
+    /// first file forever.  See iOS' `_snapshotSeq` for the full
+    /// rationale.
+    private var snapshotSeq: Int = 0
     var lastState: WritableMap? = null
         private set
 
@@ -610,8 +615,10 @@ internal class IncrementalEngine(
             acceptsSinceSnapshot++
             if (acceptsSinceSnapshot >= snapshotEveryNAccepts) {
                 acceptsSinceSnapshot = 0
+                snapshotSeq++
+                val slot = snapshotSeq % 4
                 val tmpPath = "${System.getProperty("java.io.tmpdir") ?: "/data/local/tmp"}" +
-                              "/rlis-live-snapshot.jpg"
+                              "/rlis-live-$slot.jpg"
                 val snap = writeJpeg(tmpPath, snapshotJpegQuality, tightCrop = false)
                 if (snap != null) {
                     snapshotPath = snap.panoramaPath
@@ -710,19 +717,27 @@ internal class IncrementalEngine(
         )
         frameOnesMask.release()
 
-        val dist = Mat()
-        Imgproc.distanceTransform(warpedMask, dist, Imgproc.DIST_L2, 3)
+        // Ratio-of-distances feather blender — same fix as iOS v4.
+        // alpha = distNew / (distNew + distCanvas) gives a smooth
+        // 0→1 transition across the FULL overlap width instead of
+        // the 20-pixel sliver the v3 code produced (which left
+        // visible frame seams in the output).  Where the canvas is
+        // empty, distCanvas=0 so alpha collapses to 1 (new frame
+        // writes directly).
+        val distNew = Mat()
+        Imgproc.distanceTransform(warpedMask, distNew, Imgproc.DIST_L2, 3)
+        val distCanvas = Mat()
+        Imgproc.distanceTransform(canvasMask, distCanvas, Imgproc.DIST_L2, 3)
+        val distSum = Mat()
+        Core.add(distNew, distCanvas, distSum)
+        val distSumSafe = Mat()
+        Core.max(distSum, Scalar(1.0), distSumSafe)
+        distSum.release()
         val alpha = Mat()
-        dist.convertTo(alpha, CvType.CV_32F, 1.0 / featherPx.toDouble())
+        Core.divide(distNew, distSumSafe, alpha)
         Imgproc.threshold(alpha, alpha, 1.0, 1.0, Imgproc.THRESH_TRUNC)
-        dist.release()
-
-        // Force alpha=1 where canvas is empty so the new frame writes
-        // directly without blending against zero.
-        val noPriorMask = Mat()
-        Core.compare(canvasMask, Scalar(0.0), noPriorMask, Core.CMP_EQ)
-        alpha.setTo(Scalar(1.0), noPriorMask)
-        noPriorMask.release()
+        Imgproc.threshold(alpha, alpha, 0.0, 0.0, Imgproc.THRESH_TOZERO)
+        distNew.release(); distCanvas.release(); distSumSafe.release()
 
         val alphaChannels = mutableListOf(alpha, alpha, alpha)
         val alpha3 = Mat()

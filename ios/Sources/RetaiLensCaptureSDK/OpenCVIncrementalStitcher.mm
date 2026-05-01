@@ -144,6 +144,13 @@ constexpr double kHomDetMax = 1.4;
     cv::Ptr<cv::BFMatcher> _matcher;
 
     NSInteger _accepted;
+    /// Monotonic snapshot sequence — used to mint a unique path per
+    /// live snapshot.  RN's <Image> caches `file://` URIs by path
+    /// alone and ignores cache-bust query strings, so writing to the
+    /// SAME path each accept made the live preview show the FIRST
+    /// frame forever.  Bumping the path each snapshot side-steps
+    /// the cache.
+    NSInteger _snapshotSeq;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -202,6 +209,7 @@ constexpr double kHomDetMax = 1.4;
     _lastAcceptedPitch = 0.0;
     _hasFirstFrame = false;
     _accepted = 0;
+    _snapshotSeq = 0;
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
@@ -396,7 +404,8 @@ constexpr double kHomDetMax = 1.4;
 - (nullable RLISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
                                               error:(NSError **)error
 {
-    return [self writeSnapshotToPath:[self defaultSnapshotPath]
+    _snapshotSeq += 1;
+    return [self writeSnapshotToPath:[self currentSnapshotPath]
                           jpegQuality:quality
                             tightCrop:NO
                                 error:error];
@@ -414,9 +423,16 @@ constexpr double kHomDetMax = 1.4;
     return snap;
 }
 
-- (NSString *)defaultSnapshotPath {
+- (NSString *)currentSnapshotPath {
+    // Cycle through 4 filenames so RN's image cache sees a new URI
+    // on every snapshot but tmp dir doesn't grow unbounded over a
+    // long pan.  4 is enough to outpace RN's most aggressive
+    // image cache lifetimes; the OS reclaims tmp at app launch
+    // anyway.
     NSString *tmpDir = NSTemporaryDirectory();
-    return [tmpDir stringByAppendingPathComponent:@"rlis-live-snapshot.jpg"];
+    NSInteger slot = _snapshotSeq % 4;
+    NSString *filename = [NSString stringWithFormat:@"rlis-live-%ld.jpg", (long)slot];
+    return [tmpDir stringByAppendingPathComponent:filename];
 }
 
 - (nullable RLISSnapshot *)writeSnapshotToPath:(NSString *)outputPath
@@ -631,25 +647,44 @@ static double computeOverlapPct(double deltaYaw,
                         cv::INTER_NEAREST, cv::BORDER_CONSTANT,
                         cv::Scalar(0));
 
-    // Distance-transform feather: alpha ramps from 0 at the warped-
-    // frame edges to 1 over `_featherPx` pixels inward.  In the
-    // overlap region this gives a soft blend; in non-overlap region
-    // alpha will saturate to 1 in the interior, which is fine because
-    // there's no existing canvas pixel to blend against.
-    cv::Mat dist;
-    cv::distanceTransform(warpedMask, dist, cv::DIST_L2, 3);
-    cv::Mat alpha;
-    dist.convertTo(alpha, CV_32F, 1.0 / (double)_featherPx);
-    cv::threshold(alpha, alpha, 1.0, 1.0, cv::THRESH_TRUNC);
+    // Ratio-of-distances feather blender (cv::detail::FeatherBlender
+    // pattern, hand-rolled because the Android prebuilt doesn't ship
+    // cv::detail::*).  For pixels in the overlap region:
+    //
+    //     alpha_new = distance from this pixel to the new frame's
+    //                 outer (mask=0) edge
+    //     alpha_old = distance from this pixel to the existing
+    //                 canvas's outer edge
+    //     alpha     = alpha_new / (alpha_new + alpha_old)
+    //
+    // Geometric meaning: at the new frame's outer edge alpha→0 (the
+    // existing canvas wins so the seam disappears into prior content);
+    // at the existing canvas's outer edge alpha→1 (new frame wins);
+    // mid-overlap stays around 0.5 for a true 50/50 blend.  This
+    // smoothly fades across the FULL overlap width, not just a 20px
+    // sliver — which was the v3 bug that left visible frame seams.
+    //
+    // Where the existing canvas is empty, distCanvas=0 → alpha
+    // collapses to distNew/distNew = 1, i.e. the new frame writes
+    // directly with no blend.  That's the correct behaviour for
+    // first-touch regions.
+    cv::Mat distNew, distCanvas;
+    cv::distanceTransform(warpedMask, distNew, cv::DIST_L2, 3);
+    cv::distanceTransform(_canvasMask, distCanvas, cv::DIST_L2, 3);
 
-    // Where the existing canvas mask is empty, force alpha=1 so the
-    // new frame writes directly without blending against zero.
-    cv::Mat existingMaskF;
-    _canvasMask.convertTo(existingMaskF, CV_32F, 1.0 / 255.0);
-    // alpha = where(existingMask==0, 1, alpha)
-    cv::Mat noPriorMask;
-    cv::compare(_canvasMask, 0, noPriorMask, cv::CMP_EQ);
-    alpha.setTo(1.0, noPriorMask);
+    cv::Mat distSum;
+    cv::add(distNew, distCanvas, distSum);
+    // Avoid divide-by-zero where both masks are 0 (regions outside
+    // both surfaces — they'll be excluded from the final write
+    // anyway by the warpedMask gate, but the divide still has to
+    // produce a finite number).
+    cv::Mat distSumSafe;
+    cv::max(distSum, 1.0, distSumSafe);
+    cv::Mat alpha;
+    cv::divide(distNew, distSumSafe, alpha);
+    // Numerical safety: clamp to [0, 1].
+    cv::threshold(alpha, alpha, 1.0, 1.0, cv::THRESH_TRUNC);
+    cv::threshold(alpha, alpha, 0.0, 0.0, cv::THRESH_TOZERO);
 
     // Per-channel multiply: result = alpha*warped + (1-alpha)*canvas
     // OpenCV doesn't have a direct 1-channel-alpha × 3-channel-image
