@@ -89,6 +89,12 @@ interface NativeProcessFrame {
     fovHorizDegrees: number;
     fovVertDegrees: number;
     trackingPoor: boolean;
+    /** Quaternion (x, y, z, w) — pose-driven path. */
+    qx: number; qy: number; qz: number; qw: number;
+    /** Sensor-resolution intrinsics. */
+    fx: number; fy: number; cx: number; cy: number;
+    imageWidth: number;
+    imageHeight: number;
   }): Promise<unknown>;
 }
 
@@ -190,6 +196,36 @@ export function useIncrementalAndroidDriver(
         try {
           const snap = await cam.takeSnapshot({ quality: 70 });
           if (!snap?.path) return;
+          // Synthesise a quaternion from integrated yaw + pitch.
+          // Yaw rotates about world Y (gravity), pitch about world X
+          // (perpendicular to gravity in the device's frame).
+          // Combined as q = q_yaw · q_pitch.
+          const halfYaw = yawRef.current / 2;
+          const halfPitch = pitchRef.current / 2;
+          const cy_ = Math.cos(halfYaw);
+          const sy_ = Math.sin(halfYaw);
+          const cp = Math.cos(halfPitch);
+          const sp = Math.sin(halfPitch);
+          // q_yaw   = (0, sy, 0, cy)
+          // q_pitch = (sp, 0, 0, cp)
+          // q = q_yaw * q_pitch:
+          const qx = cy_ * sp;
+          const qy = sy_ * cp;
+          const qz = -sy_ * sp;
+          const qw = cy_ * cp;
+
+          // Vision-camera v4 doesn't expose camera intrinsics on
+          // Android, so we estimate fx/fy from the snapshot's pixel
+          // dimensions + assumed FoV.  cx/cy at image centre.  This
+          // is approximate; the proper Android live path is the
+          // ARCameraView, where ARCore gives us the real intrinsics.
+          const w = snap.width ?? 1920;
+          const h = snap.height ?? 1440;
+          const fx = w / (2.0 * Math.tan(((fovHorizDegrees * Math.PI) / 180) / 2));
+          const fy = h / (2.0 * Math.tan(((fovVertDegrees * Math.PI) / 180) / 2));
+          const cx = w / 2;
+          const cy = h / 2;
+
           await native.processFrameAtPath({
             path: snap.path,
             yaw: yawRef.current,
@@ -197,6 +233,9 @@ export function useIncrementalAndroidDriver(
             fovHorizDegrees,
             fovVertDegrees,
             trackingPoor: false,
+            qx, qy, qz, qw,
+            fx, fy, cx, cy,
+            imageWidth: w, imageHeight: h,
           });
         } catch (err) {
           // Swallow per-frame errors so the loop keeps running.

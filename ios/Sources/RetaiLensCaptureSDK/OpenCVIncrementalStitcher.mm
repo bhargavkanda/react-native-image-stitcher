@@ -127,21 +127,34 @@ constexpr double kHomDetMax = 1.4;
     NSInteger _canvasWidth;
     NSInteger _canvasHeight;
     NSInteger _featherPx;
+    NSInteger _frameRotationDegrees;
 
     cv::Mat _canvas;       // CV_8UC3 BGR — the running panorama
     cv::Mat _canvasMask;   // CV_8UC1 — 255 where canvas has been written
 
-    // Last accepted frame's features + descriptors, ready to match
-    // the next candidate against.  Cleared on reset.
-    std::vector<cv::KeyPoint> _lastKeypoints;
-    cv::Mat _lastDescriptors;
-    cv::Mat _lastFrameToWorld;     // 3x3 CV_64F — composes new frames
+    /// V6 pose-driven state.  Replaces the v5 feature-matching state
+    /// (lastKeypoints/Descriptors/FrameToWorld + ORB + matcher).
+    /// On the first accepted frame we capture the camera's ARKit-frame
+    /// rotation and intrinsics and use those as the reference for all
+    /// subsequent frames' pose-derived homographies.
+    cv::Mat _firstRotationArkit;  // 3x3 CV_64F, ARKit camera-to-world
+    cv::Mat _K_sensor;            // 3x3 CV_64F, sensor-resolution intrinsics
+    cv::Mat _M_arkitToCv;         // diag(1, -1, -1) basis flip
+    NSInteger _firstSensorWidth;
+    NSInteger _firstSensorHeight;
+    /// Cached scale factor + per-frame compose dims captured at first
+    /// frame so subsequent frames warp into the same compose-space.
+    double _scaleSensorToCompose;
+    NSInteger _firstFrameComposeWidth;
+    NSInteger _firstFrameComposeHeight;
+    /// Canvas-placement translation: places the first frame's
+    /// top-left corner at (canvas_center - first_frame_center) so the
+    /// pan can extend in either direction symmetrically.
+    cv::Mat _T_canvas;
+
     double _lastAcceptedYaw;
     double _lastAcceptedPitch;
     bool _hasFirstFrame;
-
-    cv::Ptr<cv::ORB> _orb;
-    cv::Ptr<cv::BFMatcher> _matcher;
 
     NSInteger _accepted;
     /// Monotonic snapshot sequence — used to mint a unique path per
@@ -158,16 +171,21 @@ constexpr double kHomDetMax = 1.4;
                          canvasWidth:(NSInteger)canvasWidth
                         canvasHeight:(NSInteger)canvasHeight
                          featherPx:(NSInteger)featherPx
+              frameRotationDegrees:(NSInteger)frameRotationDegrees
 {
     if (self = [super init]) {
-        // Default compose dims target a 3:4 portrait aspect because
-        // ARKit delivers 1920x1440 (4:3) which we rotate 90° CW to
-        // 1440x1920 (3:4).  The pre-v3 default of 1280x720 was a
-        // 16:9 mismatch that introduced a 2.4× non-uniform scale,
-        // squishing every frame before matching and accumulating
-        // visible distortion.  See Phase 0 v3 commit.
-        _composeWidth  = composeWidth  > 0 ? composeWidth  : 720;
-        _composeHeight = composeHeight > 0 ? composeHeight : 960;
+        // Frame rotation determines the post-rotate aspect, which in
+        // turn drives the compose-dim default.  Caller can override.
+        _frameRotationDegrees = frameRotationDegrees;
+        BOOL portraitRotation = (frameRotationDegrees == 90 || frameRotationDegrees == 270);
+        // Default compose dims preserve the post-rotation aspect of
+        // a 4:3 sensor: portrait rotations → 720x960 (3:4), landscape
+        // → 960x720 (4:3).  Either way, it's a uniform scale —
+        // never a non-uniform stretch that would distort matching.
+        _composeWidth  = composeWidth  > 0 ? composeWidth
+                          : (portraitRotation ? 720 : 960);
+        _composeHeight = composeHeight > 0 ? composeHeight
+                          : (portraitRotation ? 960 : 720);
         // Canvas defaults: shelf pans grow horizontally (left-right
         // operator motion in portrait phone) → wide canvas.  4800
         // wide handles ~3 frame-widths of pan; 2200 tall fits one
@@ -177,22 +195,15 @@ constexpr double kHomDetMax = 1.4;
         _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 2200;
         _featherPx     = featherPx     > 0 ? featherPx     : 20;
 
-        _orb = cv::ORB::create(
-            kOrbMaxFeatures,    // nfeatures
-            1.2f,               // scaleFactor
-            8,                  // nlevels
-            31,                 // edgeThreshold
-            0,                  // firstLevel
-            2,                  // WTA_K
-            cv::ORB::HARRIS_SCORE,
-            31,                 // patchSize
-            20                  // fastThreshold
-        );
-        // BFMatcher with NORM_HAMMING is the right pairing for ORB's
-        // binary descriptors.  crossCheck=false because we use Lowe's
-        // ratio test downstream — they're orthogonal filtering steps
-        // and ratio test alone is the established convention.
-        _matcher = cv::BFMatcher::create(cv::NORM_HAMMING, false);
+        // ARKit camera frame (Y-up, -Z forward) → OpenCV camera frame
+        // (Y-down, +Z forward).  Pre-multiplying ARKit-rotation by
+        // M (and post-multiplying by M, since M is its own inverse)
+        // converts the rotation into OpenCV camera-frame conventions
+        // before we plug it into the pinhole projection K.
+        _M_arkitToCv = (cv::Mat_<double>(3, 3) <<
+            1, 0, 0,
+            0, -1, 0,
+            0, 0, -1);
 
         [self reset];
     }
@@ -202,9 +213,14 @@ constexpr double kHomDetMax = 1.4;
 - (void)reset {
     _canvas = cv::Mat::zeros((int)_canvasHeight, (int)_canvasWidth, CV_8UC3);
     _canvasMask = cv::Mat::zeros((int)_canvasHeight, (int)_canvasWidth, CV_8UC1);
-    _lastKeypoints.clear();
-    _lastDescriptors = cv::Mat();
-    _lastFrameToWorld = cv::Mat::eye(3, 3, CV_64F);
+    _firstRotationArkit = cv::Mat();
+    _K_sensor = cv::Mat();
+    _T_canvas = cv::Mat::eye(3, 3, CV_64F);
+    _firstSensorWidth = 0;
+    _firstSensorHeight = 0;
+    _scaleSensorToCompose = 1.0;
+    _firstFrameComposeWidth = 0;
+    _firstFrameComposeHeight = 0;
     _lastAcceptedYaw = 0.0;
     _lastAcceptedPitch = 0.0;
     _hasFirstFrame = false;
@@ -214,9 +230,19 @@ constexpr double kHomDetMax = 1.4;
 
 - (NSInteger)acceptedCount { return _accepted; }
 
-// ── Public: ingestPixelBuffer ───────────────────────────────────────
+// ── Public: ingestPixelBuffer (V6 pose-driven) ─────────────────────
 
 - (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
+                                       qx:(double)qx
+                                       qy:(double)qy
+                                       qz:(double)qz
+                                       qw:(double)qw
+                                       fx:(double)fx
+                                       fy:(double)fy
+                                       cx:(double)cx
+                                       cy:(double)cy
+                              imageWidth:(NSInteger)imageWidth
+                             imageHeight:(NSInteger)imageHeight
                                       yaw:(double)yaw
                                     pitch:(double)pitch
                           fovHorizDegrees:(double)fovHorizDegrees
@@ -236,17 +262,49 @@ constexpr double kHomDetMax = 1.4;
 
     cv::Mat frameBGR;
     if (![self convertPixelBuffer:pixelBuffer toMat:frameBGR]) {
-        // Conversion failed — treat as a tracking-poor skip rather
-        // than a hard error so the capture continues.
         tele.outcome = RLISFrameOutcomeSkippedTrackingPoor;
         tele.processingMs = msSince(t0);
         return tele;
     }
 
-    // First frame is special: place at canvas centre, take its
-    // features, accept unconditionally.
+    // Build R_new (3x3, ARKit-camera-to-world rotation) from the
+    // quaternion.
+    cv::Mat R_new = quaternionToRotationMat(qx, qy, qz, qw);
+
+    // First frame: place at canvas centre, store the reference pose
+    // and intrinsics, accept unconditionally.  All subsequent frames
+    // compute their pose-driven homography RELATIVE to this first
+    // frame.
     if (!_hasFirstFrame) {
-        [self placeFirstFrame:frameBGR];
+        _firstRotationArkit = R_new.clone();
+        _firstSensorWidth = imageWidth;
+        _firstSensorHeight = imageHeight;
+        _firstFrameComposeWidth = frameBGR.cols;
+        _firstFrameComposeHeight = frameBGR.rows;
+        // Sensor-resolution K (full intrinsics as ARKit reported).
+        _K_sensor = (cv::Mat_<double>(3, 3) <<
+                     fx, 0,  cx,
+                     0,  fy, cy,
+                     0,  0,  1);
+        // Scale that takes us from sensor pixels (post-frame-rotation)
+        // to compose pixels.  For 90/270 rotation the rotated frame
+        // size is (sensorH, sensorW); scale = composeWidth / sensorH.
+        // For 0/180, scale = composeWidth / sensorW.
+        BOOL portraitRot = (_frameRotationDegrees == 90 || _frameRotationDegrees == 270);
+        double rotatedW = portraitRot ? (double)imageHeight : (double)imageWidth;
+        _scaleSensorToCompose = (double)frameBGR.cols / rotatedW;
+
+        // Place first frame at canvas centre.
+        int ox = (int)(_canvas.cols - frameBGR.cols) / 2;
+        int oy = (int)(_canvas.rows - frameBGR.rows) / 2;
+        cv::Rect roi(ox, oy, frameBGR.cols, frameBGR.rows);
+        frameBGR.copyTo(_canvas(roi));
+        _canvasMask(roi).setTo(255);
+        _T_canvas = (cv::Mat_<double>(3, 3) <<
+                     1, 0, (double)ox,
+                     0, 1, (double)oy,
+                     0, 0, 1);
+
         _lastAcceptedYaw = yaw;
         _lastAcceptedPitch = pitch;
         _hasFirstFrame = true;
@@ -258,9 +316,7 @@ constexpr double kHomDetMax = 1.4;
         return tele;
     }
 
-    // Pose-delta gating.  Both FoVs are PHYSICAL (derived from the
-    // camera's intrinsics by the Swift caller) so the overlap math
-    // is invariant of any in-engine rotation/resize we do.
+    // Pose-delta gate (cheap; runs before any warping).
     double overlap = computeOverlapPct(
         yaw - _lastAcceptedYaw,
         pitch - _lastAcceptedPitch,
@@ -270,131 +326,96 @@ constexpr double kHomDetMax = 1.4;
     tele.overlapPercent = overlap;
 
     if (overlap > kMaxOverlapPct) {
-        // Not moved enough since last accept — wait for more pan.
         tele.outcome = RLISFrameOutcomeSkippedTooClose;
         tele.processingMs = msSince(t0);
         return tele;
     }
     if (overlap < kMinOverlapPct) {
-        // Moved past the overlap window — alignment is going to be
-        // fragile.  Reject and let the JS layer hint the operator.
         tele.outcome = RLISFrameOutcomeRejectedTooFar;
         tele.processingMs = msSince(t0);
         return tele;
     }
 
-    // Feature work — only candidates in the [15, 70]% overlap window
-    // get this far.
-    std::vector<cv::KeyPoint> kpts;
-    cv::Mat descs;
-    cv::Mat gray;
-    cv::cvtColor(frameBGR, gray, cv::COLOR_BGR2GRAY);
-    _orb->detectAndCompute(gray, cv::noArray(), kpts, descs);
+    // ── Pose-driven homography ──────────────────────────────────
+    //
+    //   R_rel_cv = M · R_first_arkit⁻¹ · R_new_arkit · M
+    //   H_sensor = K · R_rel_cv · K⁻¹
+    //   H_compose = (S⁻¹ · S2R) · H_sensor · (R2S · S)
+    //   H_canvas = T_canvas · H_compose
+    //
+    // where M = diag(1, -1, -1) flips ARKit's (Y-up, -Z forward)
+    // camera frame to OpenCV's (Y-down, +Z forward); R2S maps a
+    // post-rotation pixel to a sensor-native pixel; S maps a
+    // compose pixel to a post-rotation pixel (just inverse scale).
+    // The chain composes in 3x3 cv::Mat multiplications — plenty
+    // fast (~5 ms total) and produces a perspective-correct warp
+    // for arbitrary 3D camera rotations.
 
-    if (descs.empty() || kpts.size() < 4) {
-        tele.outcome = RLISFrameOutcomeRejectedSceneUniform;
-        tele.processingMs = msSince(t0);
-        return tele;
-    }
+    cv::Mat R_relCv = _M_arkitToCv * _firstRotationArkit.t() * R_new * _M_arkitToCv;
+    cv::Mat H_sensor = _K_sensor * R_relCv * _K_sensor.inv();
 
-    // knnMatch with k=2 → ratio test.
-    std::vector<std::vector<cv::DMatch>> knn;
-    _matcher->knnMatch(descs, _lastDescriptors, knn, 2);
-    std::vector<cv::DMatch> good;
-    good.reserve(knn.size());
-    for (const auto &pair : knn) {
-        if (pair.size() < 2) continue;
-        if (pair[0].distance < kLoweRatio * pair[1].distance) {
-            good.push_back(pair[0]);
-        }
-    }
-    tele.matchCount = (NSInteger)good.size();
+    cv::Mat R2S = sensorRotationMatrix(_frameRotationDegrees,
+                                        (int)_firstSensorWidth,
+                                        (int)_firstSensorHeight);
+    cv::Mat S2R = R2S.inv();
+    double s = _scaleSensorToCompose;
+    cv::Mat S = (cv::Mat_<double>(3, 3) <<
+                 1.0/s, 0,    0,
+                 0,    1.0/s, 0,
+                 0,    0,    1);
+    cv::Mat S_inv = (cv::Mat_<double>(3, 3) <<
+                     s, 0, 0,
+                     0, s, 0,
+                     0, 0, 1);
 
-    if ((int)good.size() < kMinMatchesAccept) {
-        tele.outcome = RLISFrameOutcomeRejectedSceneUniform;
-        tele.processingMs = msSince(t0);
-        return tele;
-    }
+    cv::Mat H_compose = S_inv * S2R * H_sensor * R2S * S;
+    cv::Mat H_canvas  = _T_canvas * H_compose;
 
-    // Pull point lists for findHomography: src = new frame, dst = last.
-    std::vector<cv::Point2f> srcPts, dstPts;
-    srcPts.reserve(good.size());
-    dstPts.reserve(good.size());
-    for (const auto &m : good) {
-        srcPts.push_back(kpts[m.queryIdx].pt);
-        dstPts.push_back(_lastKeypoints[m.trainIdx].pt);
-    }
-
-    // Use estimateAffinePartial2D (similarity = scale + rotation +
-    // translation, 4 DOF) instead of findHomography (8 DOF).  Two
-    // big wins for shelf-style pans:
-    //   1. No shear/perspective in the fit, so accumulated drift
-    //      can't compound into the parallelogram-warp we kept
-    //      seeing from the v1 fit.
-    //   2. Far more stable on low-feature scenes — 4 DOF needs
-    //      fewer inliers to estimate cleanly than 8 DOF.
-    // Output is a 2x3 matrix; we convert to 3x3 for compose with
-    // the cumulative cv::Mat homography.
-    cv::Mat ransacMask;
-    cv::Mat affine2x3 = cv::estimateAffinePartial2D(
-        srcPts, dstPts, ransacMask,
-        cv::RANSAC, kRansacReprojThresh
-    );
-    if (affine2x3.empty()) {
+    // Sanity: reject the frame if the homography places the new
+    // frame's centre outside the canvas (would warp to a black
+    // void and not show anything).  This shouldn't normally happen
+    // but guards against pose glitches.
+    cv::Mat centreH = (cv::Mat_<double>(3, 1) <<
+                       frameBGR.cols / 2.0,
+                       frameBGR.rows / 2.0,
+                       1.0);
+    cv::Mat warpedCentre = H_canvas * centreH;
+    double cw = warpedCentre.at<double>(2);
+    if (std::fabs(cw) < 1e-6) {
         tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
         tele.processingMs = msSince(t0);
         return tele;
     }
-    cv::Mat H_newToLast = cv::Mat::eye(3, 3, CV_64F);
-    affine2x3.copyTo(H_newToLast(cv::Rect(0, 0, 3, 2)));
-
-    int inliers = cv::countNonZero(ransacMask);
-    double inlierRatio = (double)inliers / (double)good.size();
-    tele.inlierRatio = inlierRatio;
-
-    if (inliers < kMinMatchesAccept || inlierRatio < kMinInlierRatioAccept) {
+    double cu = warpedCentre.at<double>(0) / cw;
+    double cv_y = warpedCentre.at<double>(1) / cw;
+    if (cu < -frameBGR.cols || cu > _canvas.cols + frameBGR.cols
+        || cv_y < -frameBGR.rows || cv_y > _canvas.rows + frameBGR.rows) {
         tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
         tele.processingMs = msSince(t0);
         return tele;
     }
 
-    // Sanity-check the homography determinant.  Severe shear / fold-
-    // over collapses produce drift that compounds catastrophically;
-    // better to reject one frame and let the operator continue.
-    double det = cv::determinant(H_newToLast(cv::Rect(0, 0, 2, 2)));
-    if (det < kHomDetMin || det > kHomDetMax) {
-        tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
-        tele.processingMs = msSince(t0);
-        return tele;
-    }
+    // Warp + hard-seam blend onto the canvas in place.
+    [self warpAndBlend:frameBGR worldH:H_canvas];
 
-    // Compose worldH for the new frame: maps new-frame pixel coords
-    // → canvas pixel coords.  H_newToLast maps new → last; lastFrameToWorld
-    // maps last → world.  Multiplication order: world ← last ← new.
-    cv::Mat newFrameToWorld = _lastFrameToWorld * H_newToLast;
-
-    // Warp + feather blend onto the canvas in place.
-    [self warpAndBlend:frameBGR worldH:newFrameToWorld];
-
-    // Update state for next call.
-    _lastFrameToWorld = newFrameToWorld;
-    _lastKeypoints = kpts;
-    _lastDescriptors = descs;
     _lastAcceptedYaw = yaw;
     _lastAcceptedPitch = pitch;
     _accepted += 1;
 
-    // Confidence score: weighted blend of inlier ratio + match count.
-    double matchScore = std::min(1.0, (double)good.size() / kHighConfidenceMatches);
-    double inlierScore = std::min(1.0, inlierRatio / kHighConfidenceInlierRatio);
-    double confidence = 0.6 * inlierScore + 0.4 * matchScore;
+    // Pose-driven path is geometrically exact when ARKit tracking is
+    // good (which we already gated on `trackingPoor`).  Confidence
+    // is a function of the FoV-overlap quality: high near 50%, lower
+    // at the edges of the [10, 75]% acceptance window.
+    double midOverlap = 0.5 * (kMinOverlapPct + kMaxOverlapPct);
+    double overlapDistance = std::fabs(overlap - midOverlap)
+                              / (kMaxOverlapPct - midOverlap);
+    double confidence = std::max(0.0, 1.0 - overlapDistance);
     tele.confidence = confidence;
-
-    if (confidence >= 0.8) {
-        tele.outcome = RLISFrameOutcomeAcceptedHigh;
-    } else {
-        tele.outcome = RLISFrameOutcomeAcceptedMedium;
-    }
+    tele.matchCount = -1;       // not applicable in pose-driven path
+    tele.inlierRatio = -1;
+    tele.outcome = (confidence >= 0.6)
+                    ? RLISFrameOutcomeAcceptedHigh
+                    : RLISFrameOutcomeAcceptedMedium;
     tele.processingMs = msSince(t0);
     return tele;
 }
@@ -405,9 +426,17 @@ constexpr double kHomDetMax = 1.4;
                                               error:(NSError **)error
 {
     _snapshotSeq += 1;
+    // Tight-crop the live snapshot to the actual content.  The full
+    // canvas is 4800x2200 — most of it empty black space until the
+    // pan covers the canvas.  Without this, every snapshot was a
+    // ~24 MB JPEG that RN's <Image> couldn't keep up with — the
+    // user saw "Pan to begin capturing" for the entire capture
+    // because the previous snapshot was still loading when the
+    // next one overwrote the path.  Tight-cropped snapshots are
+    // ~50–500 KB; <Image> renders them in milliseconds.
     return [self writeSnapshotToPath:[self currentSnapshotPath]
                           jpegQuality:quality
-                            tightCrop:NO
+                            tightCrop:YES
                                 error:error];
 }
 
@@ -495,6 +524,48 @@ static double msSince(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration_cast<std::chrono::microseconds>(dt).count() / 1000.0;
 }
 
+/// Quaternion (x, y, z, w) → 3x3 rotation matrix (CV_64F).
+/// Defensive: normalises if the input isn't unit-length.
+static cv::Mat quaternionToRotationMat(double qx, double qy, double qz, double qw) {
+    double n = std::sqrt(qx*qx + qy*qy + qz*qz + qw*qw);
+    if (n > 1e-9) { qx /= n; qy /= n; qz /= n; qw /= n; }
+    return (cv::Mat_<double>(3, 3) <<
+        1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qw*qz),     2*(qx*qz + qw*qy),
+        2*(qx*qy + qw*qz),     1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qw*qx),
+        2*(qx*qz - qw*qy),     2*(qy*qz + qw*qx),     1 - 2*(qx*qx + qy*qy));
+}
+
+/// Build the 3x3 homography that maps a post-rotation pixel back to
+/// its corresponding sensor-native pixel for a given image rotation.
+/// `sensorW`/`sensorH` are the sensor's pre-rotation dimensions.
+///
+/// Convention:
+///   R2S * (u_rot, v_rot, 1)ᵀ = (u_sensor, v_sensor, 1)ᵀ
+///
+/// 90° CW: u_s = v_r,         v_s = sensorH - 1 - u_r
+/// 180°  : u_s = sensorW - 1 - u_r, v_s = sensorH - 1 - v_r
+/// 270°  : u_s = sensorW - 1 - v_r, v_s = u_r
+/// 0°    : identity
+static cv::Mat sensorRotationMatrix(int rotationDegrees, int sensorW, int sensorH) {
+    if (rotationDegrees == 90) {
+        return (cv::Mat_<double>(3, 3) <<
+            0, 1, 0,
+           -1, 0, sensorH - 1,
+            0, 0, 1);
+    } else if (rotationDegrees == 180) {
+        return (cv::Mat_<double>(3, 3) <<
+           -1, 0, sensorW - 1,
+            0, -1, sensorH - 1,
+            0, 0, 1);
+    } else if (rotationDegrees == 270) {
+        return (cv::Mat_<double>(3, 3) <<
+            0, -1, sensorW - 1,
+            1, 0, 0,
+            0, 0, 1);
+    }
+    return cv::Mat::eye(3, 3, CV_64F);
+}
+
 /// Compute fractional overlap between consecutive frames assuming the
 /// camera is rotated about its centre by (deltaYaw, deltaPitch) in
 /// radians.  Output is in percent.  We take the dominant axis (the
@@ -576,12 +647,23 @@ static double computeOverlapPct(double deltaYaw,
     if (!ok) return NO;
 
     // ARKit delivers landscape sensor pixels regardless of device
-    // orientation.  The shelf-audit user holds the phone in PORTRAIT
-    // — a horizontal pan looks vertical in the raw frame.  Rotate
-    // 90° clockwise so the panorama coordinate system matches the
-    // way the user is actually moving the phone.
+    // orientation.  Rotation matches the device orientation reported
+    // by JS (`useDeviceOrientation`):
+    //   portrait        → 90° CW: panorama grows horizontally for
+    //                     the user's left↔right pan
+    //   portrait-upside-down → 90° CCW
+    //   landscape (L/R) → no rotation: sensor is already aligned
+    //                     with the user's pan direction
     cv::Mat rotated;
-    cv::rotate(frame, rotated, cv::ROTATE_90_CLOCKWISE);
+    if (_frameRotationDegrees == 90) {
+        cv::rotate(frame, rotated, cv::ROTATE_90_CLOCKWISE);
+    } else if (_frameRotationDegrees == 180) {
+        cv::rotate(frame, rotated, cv::ROTATE_180);
+    } else if (_frameRotationDegrees == 270) {
+        cv::rotate(frame, rotated, cv::ROTATE_90_COUNTERCLOCKWISE);
+    } else {
+        rotated = frame;
+    }
 
     // Uniform-scale downsample preserving the rotated frame's aspect
     // ratio.  Pick the scale factor from whichever input dimension
@@ -605,28 +687,10 @@ static double computeOverlapPct(double deltaYaw,
     return YES;
 }
 
-- (void)placeFirstFrame:(const cv::Mat &)frameBGR {
-    int fw = frameBGR.cols, fh = frameBGR.rows;
-    int ox = (_canvas.cols - fw) / 2;
-    int oy = (_canvas.rows - fh) / 2;
-    cv::Rect roi(ox, oy, fw, fh);
-    frameBGR.copyTo(_canvas(roi));
-    _canvasMask(roi).setTo(255);
-
-    // Build the translation matrix that places (0,0)_frame at
-    // (ox, oy)_canvas — this is the seed for the cumulative
-    // homography.
-    cv::Mat H = cv::Mat::eye(3, 3, CV_64F);
-    H.at<double>(0, 2) = (double)ox;
-    H.at<double>(1, 2) = (double)oy;
-    _lastFrameToWorld = H;
-
-    // Stash this frame's keypoints + descriptors as the matching
-    // anchor for the next frame.
-    cv::Mat gray;
-    cv::cvtColor(frameBGR, gray, cv::COLOR_BGR2GRAY);
-    _orb->detectAndCompute(gray, cv::noArray(), _lastKeypoints, _lastDescriptors);
-}
+// `placeFirstFrame` was removed in v6 — the first-frame logic is now
+// inlined in `ingestPixelBuffer:` so the engine can capture the
+// reference pose + intrinsics in the same place it positions the
+// frame on the canvas.
 
 /// Warp `frameBGR` into the canvas at `worldH` and feather-blend
 /// against the existing pixels.  Touches `_canvas` and `_canvasMask`.
@@ -647,44 +711,49 @@ static double computeOverlapPct(double deltaYaw,
                         cv::INTER_NEAREST, cv::BORDER_CONSTANT,
                         cv::Scalar(0));
 
-    // Ratio-of-distances feather blender (cv::detail::FeatherBlender
-    // pattern, hand-rolled because the Android prebuilt doesn't ship
-    // cv::detail::*).  For pixels in the overlap region:
+    // Hard midline seam (replaces the v4 ratio-feather).  Within the
+    // overlap region, the seam is the locus of points where each
+    // pixel is equally far from BOTH frames' outer edges — the
+    // "middle" of the overlap.  We use the new frame on whichever
+    // side the new frame is "deeper" and the existing canvas where
+    // the canvas is deeper.  Each output pixel comes from exactly
+    // ONE frame, so misalignment of a few pixels between frames
+    // can't produce ghosting (which is what was happening with
+    // smooth feather blending — both frames' versions of the same
+    // object contributed and you saw both).
     //
-    //     alpha_new = distance from this pixel to the new frame's
-    //                 outer (mask=0) edge
-    //     alpha_old = distance from this pixel to the existing
-    //                 canvas's outer edge
-    //     alpha     = alpha_new / (alpha_new + alpha_old)
+    // The transition is softened with a small Gaussian so the seam
+    // line itself isn't a hard pixel-perfect cut (which would be
+    // visible as a faint line where lighting / exposure differ).
+    // 7-px sigma blends across ~3 px on either side — enough to
+    // hide micro-misalignment, not enough to reintroduce ghosts.
     //
-    // Geometric meaning: at the new frame's outer edge alpha→0 (the
-    // existing canvas wins so the seam disappears into prior content);
-    // at the existing canvas's outer edge alpha→1 (new frame wins);
-    // mid-overlap stays around 0.5 for a true 50/50 blend.  This
-    // smoothly fades across the FULL overlap width, not just a 20px
-    // sliver — which was the v3 bug that left visible frame seams.
-    //
-    // Where the existing canvas is empty, distCanvas=0 → alpha
-    // collapses to distNew/distNew = 1, i.e. the new frame writes
-    // directly with no blend.  That's the correct behaviour for
-    // first-touch regions.
+    // Cylindrical projection + gradient-driven seam placement
+    // (where Samsung-style panoramas hide seams along real scene
+    // edges) is Phase 0.5 work.  For now, midline + small blur
+    // gets us 80% of the way there.
     cv::Mat distNew, distCanvas;
     cv::distanceTransform(warpedMask, distNew, cv::DIST_L2, 3);
     cv::distanceTransform(_canvasMask, distCanvas, cv::DIST_L2, 3);
 
-    cv::Mat distSum;
-    cv::add(distNew, distCanvas, distSum);
-    // Avoid divide-by-zero where both masks are 0 (regions outside
-    // both surfaces — they'll be excluded from the final write
-    // anyway by the warpedMask gate, but the divide still has to
-    // produce a finite number).
-    cv::Mat distSumSafe;
-    cv::max(distSum, 1.0, distSumSafe);
+    // Binary alpha: 1 where new frame is deeper than canvas (use new)
+    //               0 where canvas is deeper than new frame  (keep canvas)
+    cv::Mat alpha8;
+    cv::compare(distNew, distCanvas, alpha8, cv::CMP_GE);
+
+    // First-touch regions: where canvasMask is 0, new frame must
+    // write unconditionally (no prior data to seam against).
+    // compare() already returns 255 here because distCanvas=0 ≤ distNew.
+    // Belt and suspenders: enforce explicitly.
+    cv::Mat noPriorMask;
+    cv::compare(_canvasMask, 0, noPriorMask, cv::CMP_EQ);
+    alpha8.setTo(255, noPriorMask);
+
     cv::Mat alpha;
-    cv::divide(distNew, distSumSafe, alpha);
-    // Numerical safety: clamp to [0, 1].
-    cv::threshold(alpha, alpha, 1.0, 1.0, cv::THRESH_TRUNC);
-    cv::threshold(alpha, alpha, 0.0, 0.0, cv::THRESH_TOZERO);
+    alpha8.convertTo(alpha, CV_32F, 1.0 / 255.0);
+    // 3-pixel Gaussian smoothing of the seam to hide pixel-perfect
+    // edge artefacts without bringing ghosting back.
+    cv::GaussianBlur(alpha, alpha, cv::Size(7, 7), 0);
 
     // Per-channel multiply: result = alpha*warped + (1-alpha)*canvas
     // OpenCV doesn't have a direct 1-channel-alpha × 3-channel-image

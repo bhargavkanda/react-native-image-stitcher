@@ -174,7 +174,8 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         canvasHeight: Int,
         featherPx: Int,
         snapshotJpegQuality: Int,
-        snapshotEveryNAccepts: Int
+        snapshotEveryNAccepts: Int,
+        frameRotationDegrees: Int
     ) {
         stateLock.lock()
         if isRunning {
@@ -186,7 +187,8 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             composeHeight: composeHeight,
             canvasWidth: canvasWidth,
             canvasHeight: canvasHeight,
-            featherPx: featherPx
+            featherPx: featherPx,
+            frameRotationDegrees: frameRotationDegrees
         )
         self.engine = stitcher
         self.isRunning = true
@@ -339,6 +341,16 @@ public final class RetaiLensIncrementalStitcher: NSObject {
 
         let telemetry = engine.ingest(
             pixelBuffer: pixelBuffer,
+            qx: pose.qx,
+            qy: pose.qy,
+            qz: pose.qz,
+            qw: pose.qw,
+            fx: pose.fx,
+            fy: pose.fy,
+            cx: pose.cx,
+            cy: pose.cy,
+            imageWidth: pose.imageWidth,
+            imageHeight: pose.imageHeight,
             yaw: yaw,
             pitch: pitch,
             fovHorizDegrees: fovHDeg,

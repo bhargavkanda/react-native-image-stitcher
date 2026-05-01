@@ -64,15 +64,16 @@ export interface IncrementalState {
 
 
 export interface IncrementalStartOptions {
-  /** Compose-resolution width in pixels (default 1280). */
+  /** Compose-resolution width in pixels (default 720 for portrait, 960 for landscape). */
   composeWidth?: number;
-  /** Compose-resolution height in pixels (default 720). */
+  /** Compose-resolution height in pixels (default 960 for portrait, 720 for landscape). */
   composeHeight?: number;
   /** Pre-allocated canvas width (default 4800). */
   canvasWidth?: number;
-  /** Pre-allocated canvas height (default 1600). */
+  /** Pre-allocated canvas height (default 2200). */
   canvasHeight?: number;
-  /** Feather-blend band width in pixels (default 20). */
+  /** Feather-blend band width in pixels (default 20).  Unused after
+   *  v5 hard-seam switch but kept for backwards compatibility. */
   featherPx?: number;
   /** JPEG quality for live snapshots [1, 100] (default 75). */
   snapshotJpegQuality?: number;
@@ -82,6 +83,19 @@ export interface IncrementalStartOptions {
    * preview.  Useful on lower-end Android.
    */
   snapshotEveryNAccepts?: number;
+  /**
+   * Per-frame rotation applied before any stitching work, in degrees.
+   * Must be one of `0`, `90`, `180`, `270`.  Compute from the device's
+   * physical orientation:
+   *   portrait              → 90  (CW; panorama grows horizontally
+   *                                for the user's left↔right pan)
+   *   portrait-upside-down  → 270 (CCW)
+   *   landscape-left        → 0   (sensor already aligned)
+   *   landscape-right       → 0   (sensor already aligned)
+   *
+   * Default `90` because most shelf scans are done in portrait.
+   */
+  frameRotationDegrees?: 0 | 90 | 180 | 270;
 }
 
 

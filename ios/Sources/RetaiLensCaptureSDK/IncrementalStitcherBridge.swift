@@ -100,6 +100,11 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         let feather  = (options["featherPx"] as? Int) ?? 0
         let snapQ    = (options["snapshotJpegQuality"] as? Int) ?? 75
         let snapN    = (options["snapshotEveryNAccepts"] as? Int) ?? 1
+        // 0/90/180/270 — JS computes this from device orientation
+        // (useDeviceOrientation hook).  Default 90° CW = the
+        // portrait-phone case (which is the dominant capture mode);
+        // unknown values fall back to that default.
+        let rotation = (options["frameRotationDegrees"] as? Int) ?? 90
 
         RetaiLensIncrementalStitcher.shared.start(
             composeWidth: composeW,
@@ -108,7 +113,8 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
             canvasHeight: canvasH,
             featherPx: feather,
             snapshotJpegQuality: snapQ,
-            snapshotEveryNAccepts: snapN
+            snapshotEveryNAccepts: snapN,
+            frameRotationDegrees: rotation
         )
         resolver(["ok": true])
     }

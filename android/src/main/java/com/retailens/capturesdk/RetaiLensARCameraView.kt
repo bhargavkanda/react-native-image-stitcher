@@ -258,13 +258,15 @@ class RetaiLensARCameraView @JvmOverloads constructor(
             val q = camera.pose.rotationQuaternion  // x, y, z, w
             val (yaw, pitch) = quaternionYawPitch(q)
 
-            // Both FoVs from physical camera intrinsics — same fix as
-            // iOS v3.  Passing physical fovV (rather than deriving
-            // from compose aspect inside the engine) keeps pitch-
-            // dominant pans inside the overlap window.
+            // Both FoVs + the full quaternion + intrinsics go to the
+            // engine.  V6 pose-driven path uses (qx, qy, qz, qw, fx,
+            // fy, cx, cy, w, h) to compute the geometrically-exact
+            // homography.
             val intrinsics = camera.imageIntrinsics
             val fx = intrinsics.focalLength[0].toDouble()
             val fy = intrinsics.focalLength[1].toDouble()
+            val cxIntr = intrinsics.principalPoint[0].toDouble()
+            val cyIntr = intrinsics.principalPoint[1].toDouble()
             val w = intrinsics.imageDimensions[0].toDouble()
             val h = intrinsics.imageDimensions[1].toDouble()
             val fovHRad = 2.0 * atan(w / (2.0 * fx))
@@ -272,12 +274,21 @@ class RetaiLensARCameraView @JvmOverloads constructor(
             val fovHDeg = fovHRad * 180.0 / Math.PI
             val fovVDeg = fovVRad * 180.0 / Math.PI
 
-            val trackingPoor = camera.trackingState != TrackingState.TRACKING
+            // ARCore quaternion comes back in (x, y, z, w) order.
+            val qarr = camera.pose.rotationQuaternion
 
-            // Hop off the GL thread so the engine's heavy work
-            // doesn't stall the render loop.  The engine's own
-            // serial queue will handle overlap on slow devices.
-            postFrameToEngine(written, yaw, pitch, fovHDeg, fovVDeg, trackingPoor)
+            val trackingPoor = camera.trackingState != TrackingState.TRACKING
+            postFrameToEngine(
+                path = written,
+                qx = qarr[0].toDouble(), qy = qarr[1].toDouble(),
+                qz = qarr[2].toDouble(), qw = qarr[3].toDouble(),
+                fx = fx, fy = fy, cx = cxIntr, cy = cyIntr,
+                imageWidth = intrinsics.imageDimensions[0],
+                imageHeight = intrinsics.imageDimensions[1],
+                yaw = yaw, pitch = pitch,
+                fovHorizDegrees = fovHDeg, fovVertDegrees = fovVDeg,
+                trackingPoor = trackingPoor,
+            )
         } finally {
             image.close()
         }
@@ -285,19 +296,21 @@ class RetaiLensARCameraView @JvmOverloads constructor(
 
     private fun postFrameToEngine(
         path: String,
+        qx: Double, qy: Double, qz: Double, qw: Double,
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        imageWidth: Int, imageHeight: Int,
         yaw: Double,
         pitch: Double,
         fovHorizDegrees: Double,
         fovVertDegrees: Double,
         trackingPoor: Boolean,
     ) {
-        // Run the ingest on the engine's existing background scope.
-        // The engine guards against concurrent calls internally; if
-        // it's busy with the previous frame, the call returns quickly
-        // (the pose-delta gate short-circuits).
         val module = RetaiLensIncrementalStitcher.bridgeInstance ?: return
         module.ingestFromARCameraView(
             path = path,
+            qx = qx, qy = qy, qz = qz, qw = qw,
+            fx = fx, fy = fy, cx = cx, cy = cy,
+            imageWidth = imageWidth, imageHeight = imageHeight,
             yaw = yaw,
             pitch = pitch,
             fovHorizDegrees = fovHorizDegrees,

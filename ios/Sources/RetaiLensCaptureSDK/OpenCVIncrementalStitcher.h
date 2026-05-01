@@ -113,34 +113,45 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
                        composeHeight:(NSInteger)composeHeight
                          canvasWidth:(NSInteger)canvasWidth
                         canvasHeight:(NSInteger)canvasHeight
-                         featherPx:(NSInteger)featherPx NS_DESIGNATED_INITIALIZER;
+                         featherPx:(NSInteger)featherPx
+              frameRotationDegrees:(NSInteger)frameRotationDegrees NS_DESIGNATED_INITIALIZER;
 
 - (instancetype)init NS_UNAVAILABLE;
 
-/// Try to incorporate `pixelBuffer` into the running panorama.  Pose
-/// inputs (`yaw`, `pitch` in radians, `fovHorizDegrees`) drive the
-/// pose-delta gating step — frames whose overlap with the previous
-/// accepted frame falls outside the [minOverlapPct, maxOverlapPct]
-/// window are skipped before any expensive feature work runs.
+/// Try to incorporate `pixelBuffer` into the running panorama.
+///
+/// V6 (pose-driven): the engine builds the warp homography
+/// `H = T · K · M · R_first⁻¹ · R_new · M · K⁻¹` directly from the
+/// ARKit camera quaternion and intrinsics passed alongside the
+/// frame.  No feature extraction, no matching, no RANSAC — the
+/// alignment is geometrically exact for the rotational pans that
+/// dominate handheld panoramas.  `M = diag(1, -1, -1)` converts
+/// ARKit's (Y-up, -Z forward) camera frame to OpenCV's standard
+/// (Y-down, +Z forward) frame.
+///
+/// Pose-delta gating still uses (yaw, pitch, fov*Degrees) to skip
+/// frames outside the overlap window before any warp work runs.
 ///
 /// `trackingPoor` should be YES when the AR session reports
 /// non-tracking state at the time of this frame; the engine then
 /// skips immediately with `RLISFrameOutcomeSkippedTrackingPoor`.
-///
-/// Returns telemetry describing what happened.  Pixel-buffer access
-/// is locked + unlocked internally; caller does not need to lock.
-///
-/// `NS_SWIFT_NAME` is set so Swift sees a stable selector name; the
-/// importer would otherwise strip "PixelBuffer" because it considers
-/// the parameter type redundant with the method name, leading to
-/// compile errors on the Swift side referring to a renamed selector.
 - (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
+                                       qx:(double)qx
+                                       qy:(double)qy
+                                       qz:(double)qz
+                                       qw:(double)qw
+                                       fx:(double)fx
+                                       fy:(double)fy
+                                       cx:(double)cx
+                                       cy:(double)cy
+                              imageWidth:(NSInteger)imageWidth
+                             imageHeight:(NSInteger)imageHeight
                                       yaw:(double)yaw
                                     pitch:(double)pitch
                           fovHorizDegrees:(double)fovHorizDegrees
                            fovVertDegrees:(double)fovVertDegrees
                              trackingPoor:(BOOL)trackingPoor
-    NS_SWIFT_NAME(ingest(pixelBuffer:yaw:pitch:fovHorizDegrees:fovVertDegrees:trackingPoor:));
+    NS_SWIFT_NAME(ingest(pixelBuffer:qx:qy:qz:qw:fx:fy:cx:cy:imageWidth:imageHeight:yaw:pitch:fovHorizDegrees:fovVertDegrees:trackingPoor:));
 
 /// Snapshot the current panorama as a JPEG (overwriting any previous
 /// snapshot file).  Cheap enough to call after each accepted frame
