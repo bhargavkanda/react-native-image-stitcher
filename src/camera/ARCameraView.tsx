@@ -41,13 +41,14 @@ import {
 } from 'react-native';
 
 
-// React Native looks up the component by its NATIVE name, which
-// for an RCTViewManager is the manager class name minus the
-// trailing "Manager".  See `ARCameraViewManager.m` for the
-// `RCT_EXTERN_MODULE(RetaiLensARCameraViewManager, RCTViewManager)`
-// declaration that produces this name.
+// React Native looks up the component by its NATIVE name.
+//   iOS: comes from `ARCameraViewManager.m`'s
+//        `RCT_EXTERN_MODULE(RetaiLensARCameraViewManager, RCTViewManager)`.
+//   Android: comes from `RetaiLensARCameraViewManager.kt`'s
+//        `getName() = "RetaiLensARCameraView"`.
+// Both expose the same name; same JS lookup works on both platforms.
 const NativeARCameraView =
-  Platform.OS === 'ios'
+  Platform.OS === 'ios' || Platform.OS === 'android'
     ? requireNativeComponent<{ style?: ViewStyle }>('RetaiLensARCameraView')
     : null;
 
@@ -188,15 +189,15 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       },
     }), []);
 
-    if (Platform.OS !== 'ios' || !NativeARCameraView) {
-      // Android (Phase 4.4 ships iOS first; Android port comes
-      // alongside the ARCore equivalent in Phase 5+) and any
-      // future platforms get a clear "not available here"
-      // placeholder instead of a silent black rectangle.
+    if (!NativeARCameraView
+        || (Platform.OS !== 'ios' && Platform.OS !== 'android')) {
+      // Web / unsupported platforms get a clear "not available here"
+      // placeholder instead of a silent black rectangle.  iOS +
+      // Android both ship the native component now.
       return (
         <View style={[styles.placeholder, style]} accessibilityLabel="AR camera unavailable">
           <Text style={styles.placeholderText}>
-            AR camera is iOS-only for now.
+            AR camera is not available on this platform.
           </Text>
         </View>
       );

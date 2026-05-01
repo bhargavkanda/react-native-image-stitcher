@@ -88,6 +88,38 @@ class RetaiLensIncrementalStitcher(
     private val isRunning = AtomicBoolean(false)
     private val workScope = CoroutineScope(Dispatchers.Default)
 
+    /// Reference to a mounted ARCameraView (if any).  Set by the view
+    /// when it attaches; the engine flips its `ingestActive` flag
+    /// on start/stop so the view feeds frames only during a capture.
+    @Volatile private var arCameraViewRef: RetaiLensARCameraView? = null
+
+    init {
+        // Static back-pointer so `RetaiLensARCameraView` can call into
+        // the singleton-style bridge module without a DI dance.  RN
+        // may rebuild module instances across reloads; the view always
+        // uses the latest reference.
+        bridgeInstance = this
+    }
+
+    /// View calls this on attach so the engine can route ingestion
+    /// without searching the view tree on every frame.
+    internal fun bindArCameraView(view: RetaiLensARCameraView) {
+        arCameraViewRef = view
+        // If a capture is already running when the view mounts, hot-
+        // engage ingestion so the user gets a partial panorama
+        // started from this point onward.
+        if (isRunning.get()) {
+            view.setIncrementalIngestionActive(true)
+        }
+    }
+
+    internal fun unbindArCameraView(view: RetaiLensARCameraView) {
+        if (arCameraViewRef === view) {
+            view.setIncrementalIngestionActive(false)
+            arCameraViewRef = null
+        }
+    }
+
     @ReactMethod
     fun start(options: ReadableMap, promise: Promise) {
         if (isRunning.getAndSet(true)) {
@@ -108,6 +140,13 @@ class RetaiLensIncrementalStitcher(
                 snapshotJpegQuality = options.getIntOrDefault("snapshotJpegQuality", 75),
                 snapshotEveryNAccepts = options.getIntOrDefault("snapshotEveryNAccepts", 1),
             )
+            // Engage the ARCameraView's per-frame ingestion path if a
+            // view is mounted — this is what gives Android parity
+            // with iOS' ARSession-driven path.  No-op when the view
+            // isn't mounted (host is using vision-camera + the gyro
+            // driver from useIncrementalAndroidDriver instead).
+            arCameraViewRef?.setIncrementalIngestionActive(true)
+
             val map = Arguments.createMap()
             map.putBoolean("ok", true)
             promise.resolve(map)
@@ -178,6 +217,10 @@ class RetaiLensIncrementalStitcher(
         }
         val quality = options.getIntOrDefault("quality", 90)
 
+        // Disengage the ARCameraView ingestion path FIRST so no late
+        // frames slip into the engine while we serialize the canvas.
+        arCameraViewRef?.setIncrementalIngestionActive(false)
+
         workScope.launch {
             try {
                 val snap = engine.finalize(outputPath, quality)
@@ -200,12 +243,42 @@ class RetaiLensIncrementalStitcher(
 
     @ReactMethod
     fun cancel(promise: Promise) {
+        arCameraViewRef?.setIncrementalIngestionActive(false)
         engine?.release()
         engine = null
         isRunning.set(false)
         val map = Arguments.createMap()
         map.putBoolean("ok", true)
         promise.resolve(map)
+    }
+
+    /**
+     * Called by `RetaiLensARCameraView` per ARCore frame when it has
+     * a fresh JPEG + pose to ingest.  Synchronous-feeling from the
+     * caller's perspective but actually dispatched onto the engine's
+     * own queue so we don't stall the GL render thread.  Drops the
+     * frame silently if no engine is running (race between view
+     * lifecycle and stitcher start/stop).
+     */
+    internal fun ingestFromARCameraView(
+        path: String,
+        yaw: Double,
+        pitch: Double,
+        fovHorizDegrees: Double,
+        trackingPoor: Boolean,
+    ) {
+        val engine = this.engine ?: return
+        workScope.launch {
+            val tele = engine.addFrameAtPath(
+                path = path,
+                yaw = yaw,
+                pitch = pitch,
+                fovHorizDegrees = fovHorizDegrees,
+                trackingPoor = trackingPoor,
+            )
+            val state = engine.snapshotIfDue(tele)
+            emitState(state)
+        }
     }
 
     @ReactMethod
@@ -247,6 +320,14 @@ class RetaiLensIncrementalStitcher(
     companion object {
         @JvmStatic
         private val opencvInitialised = AtomicBoolean(false)
+
+        /// Static back-pointer used by the camera view to reach the
+        /// active bridge module instance without a DI dance.  Set
+        /// in `init {}` of the most recently constructed instance.
+        @JvmStatic
+        @Volatile
+        var bridgeInstance: RetaiLensIncrementalStitcher? = null
+            private set
     }
 }
 

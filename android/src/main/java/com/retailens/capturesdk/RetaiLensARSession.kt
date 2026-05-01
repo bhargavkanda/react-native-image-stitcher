@@ -214,6 +214,26 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
         trackingStateRef.set(mapped)
     }
 
+    /// Used by `RetaiLensARCameraView` to borrow the underlying
+    /// ARCore Session for rendering + per-frame `update()`.  Returns
+    /// null when the session hasn't been started yet (the view will
+    /// retry on the next render frame).
+    internal fun getSessionForView(): Session? = sessionRef.get()
+
+    /// Camera view registers + unregisters itself so the bridge can
+    /// keep track of who's actively rendering.  Currently used only
+    /// for diagnostics (the view feeds frames into the engine via
+    /// the bridge module's static reference, no fan-out needed yet).
+    @Volatile private var attachedView: RetaiLensARCameraView? = null
+
+    internal fun bindCameraView(view: RetaiLensARCameraView) {
+        attachedView = view
+    }
+
+    internal fun unbindCameraView(view: RetaiLensARCameraView) {
+        if (attachedView === view) attachedView = null
+    }
+
     private fun clearPoseLogInternal() {
         poseLogLock.write { poseLog.clear() }
     }

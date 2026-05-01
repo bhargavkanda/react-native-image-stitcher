@@ -33,5 +33,7 @@ class RetaiLensCapturePackage : ReactPackage {
 
     override fun createViewManagers(
         reactContext: ReactApplicationContext,
-    ): List<ViewManager<*, *>> = emptyList()
+    ): List<ViewManager<*, *>> = listOf(
+        RetaiLensARCameraViewManager(),
+    )
 }
