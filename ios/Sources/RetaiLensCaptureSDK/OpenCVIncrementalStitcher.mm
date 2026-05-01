@@ -48,6 +48,12 @@
 #import <opencv2/imgcodecs.hpp>
 #import <opencv2/features2d.hpp>
 #import <opencv2/calib3d.hpp>
+#import <opencv2/stitching.hpp>
+#import <opencv2/stitching/detail/warpers.hpp>
+#import <opencv2/stitching/detail/seam_finders.hpp>
+#import <opencv2/stitching/detail/blenders.hpp>
+#import <opencv2/stitching/detail/exposure_compensate.hpp>
+#import <opencv2/stitching/detail/camera.hpp>
 
 #import <vector>
 #import <chrono>
@@ -132,18 +138,22 @@ constexpr double kHomDetMax = 1.4;
     cv::Mat _canvas;       // CV_8UC3 BGR — the running panorama
     cv::Mat _canvasMask;   // CV_8UC1 — 255 where canvas has been written
 
-    /// V7 pose-driven state — sensor-native compute path.  No rotation
-    /// chain (the v6 bug).  We store the first frame's ARKit rotation
-    /// and a compose-resolution intrinsic matrix; every subsequent
-    /// frame's homography is computed directly as
-    /// `H = T · K · M · R_first⁻¹ · R_new · M · K⁻¹` in compose
-    /// pixel coordinates.  No R2S/S2R, no scaleSensorToCompose
-    /// ceremony — clean math, ~1/3 the matrix multiplications, and
-    /// no orientation conflict with the canvas shape.
+    /// V7 pose-driven state — sensor-native compute path.
     cv::Mat _firstRotationArkit;  // 3x3 CV_64F, ARKit camera-to-world
     cv::Mat _K_compose;           // 3x3 CV_64F, intrinsics scaled to compose dims
     cv::Mat _M_arkitToCv;         // diag(1, -1, -1) basis flip
-    cv::Mat _T_canvas;            // first-frame placement on canvas
+    cv::Mat _T_canvas;            // (legacy from v7 planar; no longer used in v8 cylindrical)
+
+    /// V8 cylindrical-warp state.  CylindricalWarper projects each
+    /// frame onto a cylinder using the AR pose; the canvas is the
+    /// unrolled cylinder.  Mirrors the cv::Stitcher::PANORAMA
+    /// pipeline but applied per-frame instead of all-at-once.
+    cv::Ptr<cv::detail::RotationWarper> _warper;
+    /// Cylindrical-pixel coords of the canvas's (0, 0).  Set when the
+    /// first frame is placed: the first frame's cylindrical-pixel
+    /// corner gets mapped to a position near the canvas centre, so
+    /// the pan can extend in either direction.
+    cv::Point _cylinderCanvasOrigin;
 
     double _lastAcceptedYaw;
     double _lastAcceptedPitch;
@@ -197,6 +207,13 @@ constexpr double kHomDetMax = 1.4;
             1, 0, 0,
             0, -1, 0,
             0, 0, -1);
+
+        // V8 CylindricalWarper.  Constructed once with a placeholder
+        // scale; the actual scale (= focal length in compose pixels)
+        // is set when the first frame's intrinsics are known.  We
+        // recreate the warper at first-frame time via setScale to
+        // bind it to the right cylinder radius.
+        _warper = cv::CylindricalWarper().create(1.0f);
 
         [self reset];
     }
@@ -265,32 +282,54 @@ constexpr double kHomDetMax = 1.4;
     // frame.
     if (!_hasFirstFrame) {
         _firstRotationArkit = R_new.clone();
-        // V7: K is in COMPOSE pixel coordinates.  Sensor intrinsics
-        // (fx, fy, cx, cy in sensor pixels) get scaled by the same
-        // factor we used to downscale the frame from sensor to
-        // compose, so the pinhole projection K · ray → pixel
-        // produces the right pixel in compose space directly.  No
-        // R2S/S chain needed downstream.
+        // K in compose pixel coordinates.
         double sx = (double)frameBGR.cols / std::max((NSInteger)1, imageWidth);
         double sy = (double)frameBGR.rows / std::max((NSInteger)1, imageHeight);
-        // The downsample is uniform (preserved aspect), so sx == sy
-        // in practice.  Use the average defensively.
         double s = 0.5 * (sx + sy);
         _K_compose = (cv::Mat_<double>(3, 3) <<
                       fx * s, 0,      cx * s,
                       0,      fy * s, cy * s,
                       0,      0,      1);
 
-        // Place first frame at canvas centre.
-        int ox = (int)(_canvas.cols - frameBGR.cols) / 2;
-        int oy = (int)(_canvas.rows - frameBGR.rows) / 2;
-        cv::Rect roi(ox, oy, frameBGR.cols, frameBGR.rows);
-        frameBGR.copyTo(_canvas(roi));
-        _canvasMask(roi).setTo(255);
-        _T_canvas = (cv::Mat_<double>(3, 3) <<
-                     1, 0, (double)ox,
-                     0, 1, (double)oy,
-                     0, 0, 1);
+        // V8: bind the cylindrical warper to the actual focal length
+        // (= cylinder radius in compose pixels).  This is the scale
+        // that maps angular extent on the cylinder to canvas pixels.
+        float focalCompose = (float)(fx * s);
+        _warper = cv::CylindricalWarper().create(focalCompose);
+
+        // V8 first-frame placement on the cylindrical canvas.  Warp
+        // the first frame with R = identity to find its cylindrical
+        // pixel corner; place that corner near the canvas centre so
+        // subsequent frames can extend in either direction.
+        cv::Mat K32f;
+        _K_compose.convertTo(K32f, CV_32F);
+        cv::Mat R32f = cv::Mat::eye(3, 3, CV_32F);
+        cv::Mat warpedFirst, warpedFirstMask;
+        cv::Point firstCorner = _warper->warp(
+            frameBGR, K32f, R32f,
+            cv::INTER_LINEAR, cv::BORDER_CONSTANT, warpedFirst);
+        cv::Mat firstFrameMask(frameBGR.size(), CV_8U, cv::Scalar(255));
+        _warper->warp(firstFrameMask, K32f, R32f,
+                      cv::INTER_NEAREST, cv::BORDER_CONSTANT, warpedFirstMask);
+
+        // Canvas placement: centre the first warped frame.
+        int dstX = (_canvas.cols - warpedFirst.cols) / 2;
+        int dstY = (_canvas.rows - warpedFirst.rows) / 2;
+        cv::Rect roi(dstX, dstY, warpedFirst.cols, warpedFirst.rows);
+        // Clip if warped is bigger than canvas (defensive).
+        roi &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
+        cv::Rect srcRoi(0, 0, roi.width, roi.height);
+        warpedFirst(srcRoi).copyTo(_canvas(roi), warpedFirstMask(srcRoi));
+        warpedFirstMask(srcRoi).copyTo(_canvasMask(roi),
+                                        warpedFirstMask(srcRoi));
+
+        // Track where (0, 0) on the cylinder lives within the canvas.
+        // The first frame's cylindrical corner = firstCorner.
+        // We placed it at canvas pixel (dstX, dstY).
+        // So canvas (0, 0) corresponds to cylinder pixel
+        //   (firstCorner.x - dstX, firstCorner.y - dstY).
+        _cylinderCanvasOrigin = cv::Point(firstCorner.x - dstX,
+                                          firstCorner.y - dstY);
 
         _lastAcceptedYaw = yaw;
         _lastAcceptedPitch = pitch;
@@ -323,50 +362,35 @@ constexpr double kHomDetMax = 1.4;
         return tele;
     }
 
-    // ── V7 pose-driven homography (sensor-native compose space) ─
+    // ── V8 cylindrical pose-driven warp + per-pair graph-cut seam +
+    //    multi-band blend + exposure compensation ──────────────────
     //
-    //   R_rel_cv = M · R_first⁻¹ · R_new · M
-    //   H_compose = K · R_rel_cv · K⁻¹       (K is in compose pixels)
-    //   H_canvas = T_canvas · H_compose
+    // Replaces v7's planar `H = K · R · K⁻¹` warpPerspective + hard
+    // midline seam.  Each accepted frame is:
+    //   1. Warped onto the cylindrical canvas via CylindricalWarper
+    //      (geometrically correct for rotational pans — no edge
+    //      stretch like planar)
+    //   2. Exposure-matched against the existing canvas overlap
+    //      (BlocksGainCompensator)
+    //   3. Seam-cut against the existing canvas overlap with
+    //      GraphCutSeamFinder (places the seam along scene gradients
+    //      where misalignment is invisible)
+    //   4. Blended via MultiBandBlender across 5 frequency bands
+    //      (smooths any residual seam discontinuity)
     //
-    // where M = diag(1, -1, -1) flips ARKit's (Y-up, -Z forward)
-    // camera frame to OpenCV's (Y-down, +Z forward).  No R2S/S
-    // chain — the v6 bug was applying an input rotation in the
-    // compute pipeline, which forced the output direction to flip
-    // through the chain.  V7 keeps frames in sensor-native compose
-    // space (just downscaled) and lets the canvas extend in the
-    // natural pan direction.  Output rotation for display happens
-    // at snapshot/finalize time only.
+    // R for the warper: world (= first-frame coords) → camera
+    // rotation.  In our convention R_rel_cv maps new-cam to first-cam,
+    // so the world→new-cam rotation is R_rel_cv.t().
     cv::Mat R_relCv = _M_arkitToCv * _firstRotationArkit.t() * R_new * _M_arkitToCv;
-    cv::Mat H_compose = _K_compose * R_relCv * _K_compose.inv();
-    cv::Mat H_canvas  = _T_canvas * H_compose;
+    cv::Mat R_world_to_new = R_relCv.t();
 
-    // Sanity: reject the frame if the homography places the new
-    // frame's centre outside the canvas (would warp to a black
-    // void and not show anything).  This shouldn't normally happen
-    // but guards against pose glitches.
-    cv::Mat centreH = (cv::Mat_<double>(3, 1) <<
-                       frameBGR.cols / 2.0,
-                       frameBGR.rows / 2.0,
-                       1.0);
-    cv::Mat warpedCentre = H_canvas * centreH;
-    double cw = warpedCentre.at<double>(2);
-    if (std::fabs(cw) < 1e-6) {
+    BOOL placed = [self cylindricalWarpAndBlend:frameBGR
+                                    rWorldToCam:R_world_to_new];
+    if (!placed) {
         tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
         tele.processingMs = msSince(t0);
         return tele;
     }
-    double cu = warpedCentre.at<double>(0) / cw;
-    double cv_y = warpedCentre.at<double>(1) / cw;
-    if (cu < -frameBGR.cols || cu > _canvas.cols + frameBGR.cols
-        || cv_y < -frameBGR.rows || cv_y > _canvas.rows + frameBGR.rows) {
-        tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
-        tele.processingMs = msSince(t0);
-        return tele;
-    }
-
-    // Warp + hard-seam blend onto the canvas in place.
-    [self warpAndBlend:frameBGR worldH:H_canvas];
 
     _lastAcceptedYaw = yaw;
     _lastAcceptedPitch = pitch;
@@ -452,12 +476,55 @@ constexpr double kHomDetMax = 1.4;
     cv::Mat cropped;
     cv::Rect cropRect(0, 0, _canvas.cols, _canvas.rows);
     if (tightCrop) {
-        // Tight-crop to the bounding box of the canvas mask.  This
-        // is what lets the final panorama come out sized to its
-        // actual content rather than the full pre-allocated canvas.
+        // Bounding box of painted region.
         cropRect = cv::boundingRect(_canvasMask);
         if (cropRect.width <= 0 || cropRect.height <= 0) {
             cropRect = cv::Rect(0, 0, _canvas.cols, _canvas.rows);
+        }
+    }
+    // V8 INSCRIBED-RECTANGLE CROP (only on finalize, not live preview).
+    //
+    // Trim edges where the canvas mask is sparsely filled, leaving a
+    // sub-rectangle where almost every pixel has real content.  This
+    // is what gives the saved panorama clean rectangular borders
+    // instead of jagged black corners — same effect Apple/Samsung
+    // get with their final-pass rectangle-fit.
+    //
+    // Heuristic: walk inward from each side, trim rows/cols that
+    // are < kInscribedFillRatio full (defaults to 95%).  Not the
+    // mathematically optimal largest-inscribed-rectangle, but close
+    // and very fast (O(W+H)).
+    if (tightCrop && cropRect.width > 0 && cropRect.height > 0) {
+        cv::Mat maskRoi = _canvasMask(cropRect);
+        const double kFillRatio = 0.95;
+        int top = 0, bottom = maskRoi.rows - 1;
+        int left = 0, right = maskRoi.cols - 1;
+        while (top < bottom) {
+            int filled = cv::countNonZero(maskRoi.row(top));
+            if (filled < kFillRatio * maskRoi.cols) top++;
+            else break;
+        }
+        while (bottom > top) {
+            int filled = cv::countNonZero(maskRoi.row(bottom));
+            if (filled < kFillRatio * maskRoi.cols) bottom--;
+            else break;
+        }
+        const int trimmedHeight = bottom - top + 1;
+        while (left < right && trimmedHeight > 0) {
+            int filled = cv::countNonZero(
+                maskRoi.col(left).rowRange(top, bottom + 1));
+            if (filled < kFillRatio * trimmedHeight) left++;
+            else break;
+        }
+        while (right > left && trimmedHeight > 0) {
+            int filled = cv::countNonZero(
+                maskRoi.col(right).rowRange(top, bottom + 1));
+            if (filled < kFillRatio * trimmedHeight) right--;
+            else break;
+        }
+        if (right > left && bottom > top) {
+            cropRect = cv::Rect(cropRect.x + left, cropRect.y + top,
+                                right - left + 1, bottom - top + 1);
         }
     }
     cropped = _canvas(cropRect).clone();
@@ -667,93 +734,153 @@ static double computeOverlapPct(double deltaYaw,
 // reference pose + intrinsics in the same place it positions the
 // frame on the canvas.
 
-/// Warp `frameBGR` into the canvas at `worldH` and feather-blend
-/// against the existing pixels.  Touches `_canvas` and `_canvasMask`.
-- (void)warpAndBlend:(const cv::Mat &)frameBGR worldH:(const cv::Mat &)worldH {
-    cv::Size canvasSize(_canvas.cols, _canvas.rows);
+/// V8 cylindrical warp + per-pair seam-cut + multi-band blend +
+/// exposure compensation.  Replaces v7's planar warp + hard-seam
+/// path with the same cv::detail::* pipeline `cv::Stitcher::PANORAMA`
+/// uses internally — applied per accepted frame instead of all-at-once.
+///
+/// Inputs:
+///   frameBGR        — compose-resolution sensor-native frame (CV_8UC3)
+///   rWorldToCam     — world-to-camera rotation in OpenCV cam frame
+///                     (3x3 CV_64F).  Suitable for CylindricalWarper.
+///
+/// Returns NO if the warped frame falls entirely outside the canvas
+/// or is too small to blend (very rare; would indicate a pose glitch).
+- (BOOL)cylindricalWarpAndBlend:(const cv::Mat &)frameBGR
+                    rWorldToCam:(const cv::Mat &)rWorldToCam
+{
+    // K + R must be CV_32F for cv::detail::* APIs.
+    cv::Mat K32f, R32f;
+    _K_compose.convertTo(K32f, CV_32F);
+    rWorldToCam.convertTo(R32f, CV_32F);
 
-    // Warp the new frame onto an empty canvas-sized buffer.
-    cv::Mat warped;
-    cv::warpPerspective(frameBGR, warped, worldH, canvasSize,
-                        cv::INTER_LINEAR, cv::BORDER_CONSTANT,
-                        cv::Scalar(0, 0, 0));
+    // ── 1. Cylindrical warp ─────────────────────────────────────
+    cv::Mat warpedNew, warpedNewMask;
+    cv::Point newCornerCyl = _warper->warp(
+        frameBGR, K32f, R32f,
+        cv::INTER_LINEAR, cv::BORDER_CONSTANT, warpedNew);
+    cv::Mat frameOnesMask(frameBGR.size(), CV_8U, cv::Scalar(255));
+    _warper->warp(frameOnesMask, K32f, R32f,
+                  cv::INTER_NEAREST, cv::BORDER_CONSTANT, warpedNewMask);
 
-    // Warp a "this is in-frame" mask the same way.  Anywhere the
-    // mask is non-zero, `warped` has valid pixels.
-    cv::Mat frameOnesMask = cv::Mat::ones(frameBGR.rows, frameBGR.cols, CV_8UC1) * 255;
-    cv::Mat warpedMask;
-    cv::warpPerspective(frameOnesMask, warpedMask, worldH, canvasSize,
-                        cv::INTER_NEAREST, cv::BORDER_CONSTANT,
-                        cv::Scalar(0));
+    if (warpedNew.empty() || warpedNew.cols < 8 || warpedNew.rows < 8) {
+        return NO;
+    }
 
-    // Hard midline seam (replaces the v4 ratio-feather).  Within the
-    // overlap region, the seam is the locus of points where each
-    // pixel is equally far from BOTH frames' outer edges — the
-    // "middle" of the overlap.  We use the new frame on whichever
-    // side the new frame is "deeper" and the existing canvas where
-    // the canvas is deeper.  Each output pixel comes from exactly
-    // ONE frame, so misalignment of a few pixels between frames
-    // can't produce ghosting (which is what was happening with
-    // smooth feather blending — both frames' versions of the same
-    // object contributed and you saw both).
+    // Map the new frame's cylindrical corner to a canvas pixel.
+    cv::Point newCornerCanvas = newCornerCyl - _cylinderCanvasOrigin;
+
+    // ── Compute the union ROI (canvas region covered by the new
+    //    frame).  We'll do per-pair seam + blend on this region.
+    //    For the canvas side of the pair, take the canvas's existing
+    //    pixels in the same ROI.
+    cv::Rect newDstRoi(newCornerCanvas.x, newCornerCanvas.y,
+                       warpedNew.cols, warpedNew.rows);
+    cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
+    cv::Rect dstRoiClipped = newDstRoi & canvasBounds;
+    if (dstRoiClipped.width <= 0 || dstRoiClipped.height <= 0) {
+        return NO;
+    }
+    // Source ROI inside warpedNew that maps to the clipped canvas ROI.
+    cv::Rect newSrcRoi(dstRoiClipped.x - newCornerCanvas.x,
+                       dstRoiClipped.y - newCornerCanvas.y,
+                       dstRoiClipped.width,
+                       dstRoiClipped.height);
+    cv::Mat warpedNewClipped     = warpedNew(newSrcRoi);
+    cv::Mat warpedNewMaskClipped = warpedNewMask(newSrcRoi);
+    cv::Mat canvasRegion         = _canvas(dstRoiClipped);
+    cv::Mat canvasRegionMask     = _canvasMask(dstRoiClipped);
+
+    // ── 2. Exposure compensation ───────────────────────────────
     //
-    // The transition is softened with a small Gaussian so the seam
-    // line itself isn't a hard pixel-perfect cut (which would be
-    // visible as a faint line where lighting / exposure differ).
-    // 7-px sigma blends across ~3 px on either side — enough to
-    // hide micro-misalignment, not enough to reintroduce ghosts.
+    // BlocksGainCompensator computes per-block gains so frame
+    // brightnesses match in overlap regions.  For per-pair use:
+    // feed (canvasRegion, canvasRegionMask) and (warpedNewClipped,
+    // warpedNewMaskClipped) — both at corner (0, 0) within the
+    // ROI's local coordinate system.  Apply the gains to the new
+    // frame before seam finding; canvas keeps its existing values.
+    cv::Mat warpedNewExposed = warpedNewClipped.clone();
+    {
+        cv::detail::BlocksGainCompensator compensator;
+        std::vector<cv::Point> corners = {cv::Point(0, 0), cv::Point(0, 0)};
+        std::vector<cv::UMat> images(2);
+        canvasRegion.copyTo(images[0]);
+        warpedNewClipped.copyTo(images[1]);
+        std::vector<std::pair<cv::UMat, uchar>> masks(2);
+        masks[0].first = canvasRegionMask.getUMat(cv::ACCESS_READ);
+        masks[0].second = 255;
+        masks[1].first = warpedNewMaskClipped.getUMat(cv::ACCESS_READ);
+        masks[1].second = 255;
+        compensator.feed(corners, images, masks);
+        compensator.apply(1, cv::Point(0, 0),
+                          warpedNewExposed, warpedNewMaskClipped);
+    }
+
+    // ── 3. Graph-cut seam finding ──────────────────────────────
     //
-    // Cylindrical projection + gradient-driven seam placement
-    // (where Samsung-style panoramas hide seams along real scene
-    // edges) is Phase 0.5 work.  For now, midline + small blur
-    // gets us 80% of the way there.
-    cv::Mat distNew, distCanvas;
-    cv::distanceTransform(warpedMask, distNew, cv::DIST_L2, 3);
-    cv::distanceTransform(_canvasMask, distCanvas, cv::DIST_L2, 3);
+    // Find the seam through the overlap region that minimises
+    // visual discontinuity (places it along scene gradients).
+    // Operates on float-type images.  Outputs updated masks where
+    // the seam cuts across the overlap — `seamMaskCanvas` says
+    // "use canvas here", `seamMaskNew` says "use new frame here".
+    cv::Mat seamMaskCanvas = canvasRegionMask.clone();
+    cv::Mat seamMaskNew    = warpedNewMaskClipped.clone();
+    {
+        cv::Ptr<cv::detail::SeamFinder> seamFinder =
+            cv::makePtr<cv::detail::GraphCutSeamFinder>(
+                cv::detail::GraphCutSeamFinder::COST_COLOR);
+        std::vector<cv::UMat> imagesF(2);
+        cv::Mat canvasF, newF;
+        canvasRegion.convertTo(canvasF, CV_32F);
+        warpedNewExposed.convertTo(newF, CV_32F);
+        canvasF.copyTo(imagesF[0]);
+        newF.copyTo(imagesF[1]);
+        std::vector<cv::Point> corners = {cv::Point(0, 0), cv::Point(0, 0)};
+        std::vector<cv::UMat> masks(2);
+        seamMaskCanvas.copyTo(masks[0]);
+        seamMaskNew.copyTo(masks[1]);
+        seamFinder->find(imagesF, corners, masks);
+        masks[0].copyTo(seamMaskCanvas);
+        masks[1].copyTo(seamMaskNew);
+    }
 
-    // Binary alpha: 1 where new frame is deeper than canvas (use new)
-    //               0 where canvas is deeper than new frame  (keep canvas)
-    cv::Mat alpha8;
-    cv::compare(distNew, distCanvas, alpha8, cv::CMP_GE);
+    // First-touch handling: anywhere the canvas was empty before
+    // (no prior data), the new frame's seam mask must include those
+    // pixels regardless of what the seam finder said.  Otherwise we
+    // get holes.
+    cv::Mat noPrior;
+    cv::compare(canvasRegionMask, 0, noPrior, cv::CMP_EQ);
+    cv::Mat newOnlyRegion;
+    cv::bitwise_and(noPrior, warpedNewMaskClipped, newOnlyRegion);
+    cv::bitwise_or(seamMaskNew, newOnlyRegion, seamMaskNew);
 
-    // First-touch regions: where canvasMask is 0, new frame must
-    // write unconditionally (no prior data to seam against).
-    // compare() already returns 255 here because distCanvas=0 ≤ distNew.
-    // Belt and suspenders: enforce explicitly.
-    cv::Mat noPriorMask;
-    cv::compare(_canvasMask, 0, noPriorMask, cv::CMP_EQ);
-    alpha8.setTo(255, noPriorMask);
+    // ── 4. Multi-band blending ─────────────────────────────────
+    //
+    // Decomposes both contributions into Laplacian pyramids,
+    // blends each band separately, reconstructs.  Hides any
+    // residual misalignment along the seam by spreading the
+    // transition across multiple frequency bands.
+    cv::Rect blendRoi(0, 0, dstRoiClipped.width, dstRoiClipped.height);
+    cv::detail::MultiBandBlender blender(/*try_gpu=*/false, /*num_bands=*/5);
+    blender.prepare(blendRoi);
 
-    cv::Mat alpha;
-    alpha8.convertTo(alpha, CV_32F, 1.0 / 255.0);
-    // 3-pixel Gaussian smoothing of the seam to hide pixel-perfect
-    // edge artefacts without bringing ghosting back.
-    cv::GaussianBlur(alpha, alpha, cv::Size(7, 7), 0);
+    cv::Mat canvasS, newS;
+    canvasRegion.convertTo(canvasS, CV_16SC3);
+    warpedNewExposed.convertTo(newS, CV_16SC3);
 
-    // Per-channel multiply: result = alpha*warped + (1-alpha)*canvas
-    // OpenCV doesn't have a direct 1-channel-alpha × 3-channel-image
-    // multiply, so we expand alpha to 3 channels first.
-    cv::Mat alpha3;
-    cv::Mat alphaChannels[] = {alpha, alpha, alpha};
-    cv::merge(alphaChannels, 3, alpha3);
-    cv::Mat invAlpha3 = cv::Scalar(1, 1, 1) - alpha3;
+    blender.feed(canvasS, seamMaskCanvas, cv::Point(0, 0));
+    blender.feed(newS,    seamMaskNew,    cv::Point(0, 0));
 
-    cv::Mat warpedF, canvasF;
-    warped.convertTo(warpedF, CV_32FC3);
-    _canvas.convertTo(canvasF, CV_32FC3);
-    cv::Mat blendedF;
-    cv::multiply(warpedF, alpha3, warpedF);
-    cv::multiply(canvasF, invAlpha3, canvasF);
-    cv::add(warpedF, canvasF, blendedF);
-
-    // Only write into canvas where warpedMask is set — leaves the
-    // rest of the canvas (areas the new frame doesn't touch) intact.
+    cv::Mat blendedS, blendedMask;
+    blender.blend(blendedS, blendedMask);
     cv::Mat blended8;
-    blendedF.convertTo(blended8, CV_8UC3);
-    blended8.copyTo(_canvas, warpedMask);
+    blendedS.convertTo(blended8, CV_8UC3);
 
-    // Update canvas mask = OR(canvasMask, warpedMask).
-    cv::bitwise_or(_canvasMask, warpedMask, _canvasMask);
+    // Write back into the canvas region — only where the union mask
+    // says we have any contribution.
+    blended8.copyTo(canvasRegion, blendedMask);
+    cv::bitwise_or(canvasRegionMask, blendedMask, canvasRegionMask);
+    return YES;
 }
 
 @end
