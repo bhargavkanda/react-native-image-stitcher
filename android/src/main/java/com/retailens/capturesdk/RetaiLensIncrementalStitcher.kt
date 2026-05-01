@@ -777,10 +777,28 @@ internal class IncrementalEngine(
             nonZero.release()
         }
         val cropped = Mat(canvas, crop)
-        // V7 OUTPUT-ONLY ROTATION.  Compute pipeline kept frames in
-        // sensor-native landscape; rotate the output JPEG so it
-        // displays correctly for the user's device orientation.
-        val out = when (frameRotationDegrees) {
+        // V7.1 GRAVITY-DERIVED OUTPUT ROTATION.  Mirrors iOS — see
+        // OpenCVIncrementalStitcher.mm for the full derivation.  The
+        // rotation comes from the AR pose (which knows gravity) so
+        // we don't need a device-orientation hook (which was the
+        // source of the v7 "sideways for landscape" bug).
+        var rotationDeg = 0
+        if (hasFirstFrame && !firstRotationArkit.empty()) {
+            val gravWorld = Mat(3, 1, CvType.CV_64F).apply {
+                put(0, 0, 0.0); put(1, 0, -1.0); put(2, 0, 0.0)
+            }
+            val firstT = Mat()
+            Core.transpose(firstRotationArkit, firstT)
+            val gravArkit = Mat(); Core.gemm(firstT, gravWorld, 1.0, Mat(), 0.0, gravArkit)
+            val gravCv = Mat(); Core.gemm(mArkitToCv, gravArkit, 1.0, Mat(), 0.0, gravCv)
+            val gx = gravCv.get(0, 0)[0]
+            val gy = gravCv.get(1, 0)[0]
+            val angle = kotlin.math.atan2(gx, gy) * 180.0 / Math.PI
+            rotationDeg = (kotlin.math.round(angle / 90.0).toInt()) * 90
+            rotationDeg = ((rotationDeg % 360) + 360) % 360
+            gravWorld.release(); firstT.release(); gravArkit.release(); gravCv.release()
+        }
+        val out = when (rotationDeg) {
             90  -> Mat().also { Core.rotate(cropped, it, Core.ROTATE_90_CLOCKWISE) }
             180 -> Mat().also { Core.rotate(cropped, it, Core.ROTATE_180) }
             270 -> Mat().also { Core.rotate(cropped, it, Core.ROTATE_90_COUNTERCLOCKWISE) }

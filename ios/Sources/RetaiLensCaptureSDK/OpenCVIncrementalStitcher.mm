@@ -462,18 +462,42 @@ constexpr double kHomDetMax = 1.4;
     }
     cropped = _canvas(cropRect).clone();
 
-    // V7 OUTPUT-ONLY ROTATION.  Compute pipeline keeps everything in
-    // sensor-native landscape; rotate the JPEG at write time so it
-    // displays correctly for the user's device orientation.
-    //   portrait phone (frameRotationDegrees=90)  → rotate 90° CW
-    //   portrait-upside-down (270)                → rotate 90° CCW
-    //   landscape (0)                             → no rotation
+    // V7.1 GRAVITY-DERIVED OUTPUT ROTATION.  The compute pipeline
+    // keeps everything in sensor-native landscape.  At save time,
+    // we rotate the output so gravity (world -Y in ARKit) points
+    // image-down.
+    //
+    // Math: gravity in first-camera frame = R_first⁻¹ · (0, -1, 0)
+    // Convert to OpenCV camera (Y-down, +Z forward) via M = diag(1,-1,-1).
+    // The (gx, gy) components give gravity's direction in the buffer's
+    // image plane.  We snap the rotation to the nearest 90° so the
+    // output is axis-aligned regardless of small pose noise.
+    //
+    // This replaces the v7 `frameRotationDegrees` parameter (which
+    // came from the JS `useDeviceOrientation` hook and was unreliable
+    // — defaulted to portrait on first read, didn't update mid-
+    // capture, and conflated landscape-left with landscape-right).
+    int rotationDeg = 0;
+    if (_hasFirstFrame && !_firstRotationArkit.empty()) {
+        cv::Mat gravWorld = (cv::Mat_<double>(3, 1) << 0.0, -1.0, 0.0);
+        cv::Mat gravArkit = _firstRotationArkit.t() * gravWorld;
+        cv::Mat gravCv = _M_arkitToCv * gravArkit;
+        double gx = gravCv.at<double>(0);
+        double gy = gravCv.at<double>(1);
+        // atan2(gx, gy) gives angle from +Y axis (image-down).
+        // We want the rotation that aligns gravity with +Y.
+        double angle = std::atan2(gx, gy) * 180.0 / M_PI;
+        // Snap to nearest 90° and normalise to [0, 360).
+        rotationDeg = (int)std::round(angle / 90.0) * 90;
+        rotationDeg = ((rotationDeg % 360) + 360) % 360;
+    }
+
     cv::Mat out;
-    if (_frameRotationDegrees == 90) {
+    if (rotationDeg == 90) {
         cv::rotate(cropped, out, cv::ROTATE_90_CLOCKWISE);
-    } else if (_frameRotationDegrees == 180) {
+    } else if (rotationDeg == 180) {
         cv::rotate(cropped, out, cv::ROTATE_180);
-    } else if (_frameRotationDegrees == 270) {
+    } else if (rotationDeg == 270) {
         cv::rotate(cropped, out, cv::ROTATE_90_COUNTERCLOCKWISE);
     } else {
         out = cropped;
