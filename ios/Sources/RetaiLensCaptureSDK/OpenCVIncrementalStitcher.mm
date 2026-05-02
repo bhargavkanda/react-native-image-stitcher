@@ -390,12 +390,61 @@ constexpr double kHomDetMax = 1.4;
     return tele;
 }
 
+// ── Inscribed-rectangle search ──────────────────────────────────────
+//
+// Returns the largest axis-aligned rectangle of all-255 pixels inside
+// the binary mask `m` (CV_8UC1).  Classic two-pass algorithm:
+//   1. Build a height map where heights[r][c] = number of consecutive
+//      255 pixels in column c ending at (and including) row r.
+//   2. For each row's heights, find the largest rectangle in the
+//      histogram via a monotonic stack (O(W) per row).
+// Total: O(W * H).  The returned rect is in `m`'s coordinate frame.
+- (cv::Rect)largestInscribedRect:(const cv::Mat &)m {
+    if (m.empty()) return cv::Rect(0, 0, 0, 0);
+    const int H = m.rows, W = m.cols;
+    std::vector<int> heights(W, 0);
+    int bestArea = 0;
+    cv::Rect best(0, 0, 0, 0);
+
+    for (int r = 0; r < H; r++) {
+        const uchar *row = m.ptr<uchar>(r);
+        for (int c = 0; c < W; c++) {
+            heights[c] = (row[c] >= 128) ? heights[c] + 1 : 0;
+        }
+        // Largest rectangle in histogram via monotonic stack.
+        // Sentinel value at end (W index) with height 0 forces the
+        // stack to flush at the end without extra post-loop code.
+        std::vector<int> stack;
+        stack.reserve(W + 1);
+        for (int c = 0; c <= W; c++) {
+            int h = (c == W) ? 0 : heights[c];
+            int start = c;
+            while (!stack.empty() && heights[stack.back()] > h) {
+                int top = stack.back(); stack.pop_back();
+                int width = c - top;
+                int area = heights[top] * width;
+                if (area > bestArea) {
+                    bestArea = area;
+                    best = cv::Rect(top, r - heights[top] + 1,
+                                    width, heights[top]);
+                }
+                start = top;
+            }
+            if (c < W) stack.push_back(c);
+            (void)start;
+        }
+    }
+    return best;
+}
+
 // ── Snapshot / finalize ─────────────────────────────────────────────
 
 - (nullable RLISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
                                               error:(NSError **)error
 {
     _snapshotSeq += 1;
+    NSLog(@"[RLIS-PIP] snapshot called seq=%ld accepted=%ld canvasMaskNonZero=%d",
+          (long)_snapshotSeq, (long)_accepted, cv::countNonZero(_canvasMask));
     // Tight-crop the live snapshot to the actual content.  The full
     // canvas is 4800x2200 — most of it empty black space until the
     // pan covers the canvas.  Without this, every snapshot was a
@@ -452,12 +501,35 @@ constexpr double kHomDetMax = 1.4;
     cv::Mat cropped;
     cv::Rect cropRect(0, 0, _canvas.cols, _canvas.rows);
     if (tightCrop) {
-        // Tight-crop to the bounding box of the canvas mask.  This
-        // is what lets the final panorama come out sized to its
-        // actual content rather than the full pre-allocated canvas.
-        cropRect = cv::boundingRect(_canvasMask);
-        if (cropRect.width <= 0 || cropRect.height <= 0) {
+        // Bounding box of painted region (still useful as a fast
+        // upper bound — inscribed-rectangle search runs inside this).
+        cv::Rect bbox = cv::boundingRect(_canvasMask);
+        if (bbox.width <= 0 || bbox.height <= 0) {
             cropRect = cv::Rect(0, 0, _canvas.cols, _canvas.rows);
+        } else {
+            // Maximum inscribed axis-aligned rectangle inside the
+            // painted region (largest rectangle of all-255 pixels in
+            // _canvasMask, restricted to the bounding box).  This is
+            // what gives the final JPEG clean rectangular borders
+            // instead of the jagged corners a planar/cylindrical pan
+            // produces — same crop Apple/Samsung apply at finalize.
+            //
+            // Algorithm: for each row, compute "histogram" of how
+            // many consecutive 255-pixels are above each column
+            // (including this row).  For each row's histogram,
+            // run the classic O(W) stack-based largest-rectangle-
+            // in-histogram.  Track the global max across all rows.
+            // Total cost O(W*H) on the bbox region only.
+            cropRect = [self largestInscribedRect:_canvasMask(bbox)];
+            if (cropRect.width <= 0 || cropRect.height <= 0) {
+                // Fallback to plain bounding box if for some reason
+                // the inscribed search failed (shouldn't happen, but
+                // belt-and-suspenders).
+                cropRect = bbox;
+            } else {
+                cropRect.x += bbox.x;
+                cropRect.y += bbox.y;
+            }
         }
     }
     cropped = _canvas(cropRect).clone();
@@ -509,6 +581,8 @@ constexpr double kHomDetMax = 1.4;
         ? [outputPath substringFromIndex:7]
         : outputPath;
     bool ok = cv::imwrite(std::string([cleanPath UTF8String]), out, params);
+    NSLog(@"[RLIS-PIP] imwrite path=%@ size=%dx%d quality=%d ok=%d",
+          cleanPath, out.cols, out.rows, q, (int)ok);
     if (!ok) {
         if (error) {
             *error = [NSError errorWithDomain:RetaiLensIncrementalStitcherErrorDomain

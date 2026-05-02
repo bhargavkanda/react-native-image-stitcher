@@ -371,15 +371,20 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             self.acceptsSinceSnapshot += 1
             if self.acceptsSinceSnapshot >= self.snapshotEveryNAccepts {
                 self.acceptsSinceSnapshot = 0
-                if let snap = try? engine.snapshot(
-                    withJpegQuality: self.snapshotJpegQuality
-                ) {
+                do {
+                    let snap = try engine.snapshot(
+                        withJpegQuality: self.snapshotJpegQuality
+                    )
                     snapshotPath = snap.panoramaPath
                     snapW = snap.width
                     snapH = snap.height
+                    NSLog("[RLIS-PIP] swift snapshot OK path=\(snap.panoramaPath ?? "nil") size=\(snap.width)x\(snap.height)")
+                } catch {
+                    NSLog("[RLIS-PIP] swift snapshot threw: \(error)")
                 }
             }
         }
+        NSLog("[RLIS-PIP] consumeFrame outcome=\(outcome.rawValue) isAccept=\(isAccept) acceptedCount=\(engine.acceptedCount) snapshotPath=\(snapshotPath ?? "nil")")
 
         let state = RetaiLensIncrementalState(
             panoramaPath: snapshotPath,
