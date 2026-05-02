@@ -132,18 +132,24 @@ constexpr double kHomDetMax = 1.4;
     cv::Mat _canvas;       // CV_8UC3 BGR — the running panorama
     cv::Mat _canvasMask;   // CV_8UC1 — 255 where canvas has been written
 
-    /// V7 pose-driven state — sensor-native compute path.  No rotation
-    /// chain (the v6 bug).  We store the first frame's ARKit rotation
-    /// and a compose-resolution intrinsic matrix; every subsequent
-    /// frame's homography is computed directly as
-    /// `H = T · K · M · R_first⁻¹ · R_new · M · K⁻¹` in compose
-    /// pixel coordinates.  No R2S/S2R, no scaleSensorToCompose
-    /// ceremony — clean math, ~1/3 the matrix multiplications, and
-    /// no orientation conflict with the canvas shape.
+    /// V9 pose-driven state — hand-rolled cylindrical projection.
+    /// Replaces v7's planar `H = K · R · K⁻¹` with cylindrical
+    /// remap into a gravity-aligned panorama frame.  The panorama
+    /// frame is defined at first-frame time:
+    ///   +Y = world-gravity-up (cylinder axis is vertical)
+    ///   +Z = horizontal projection of first camera's forward
+    ///        (theta=0 sits at first frame's centre; no wraparound)
+    ///   +X = +Y × +Z (right-handed)
+    /// This avoids the v8 bug where cv::detail::CylindricalWarper
+    /// placed the cylinder seam directly in front of the camera.
     cv::Mat _firstRotationArkit;  // 3x3 CV_64F, ARKit camera-to-world
     cv::Mat _K_compose;           // 3x3 CV_64F, intrinsics scaled to compose dims
     cv::Mat _M_arkitToCv;         // diag(1, -1, -1) basis flip
-    cv::Mat _T_canvas;            // first-frame placement on canvas
+    cv::Mat _T_canvas;            // (legacy from v7; unused in v9)
+    cv::Mat _R_panToWorld;        // 3x3 CV_64F, panorama-to-world (cached at first frame)
+    double  _focalCompose;        // cylinder radius in compose pixels
+    int     _canvasOriginCylX;    // canvas (0,0) in cylindrical pixel space (origin offset)
+    int     _canvasOriginCylY;
 
     double _lastAcceptedYaw;
     double _lastAcceptedPitch;
@@ -265,32 +271,58 @@ constexpr double kHomDetMax = 1.4;
     // frame.
     if (!_hasFirstFrame) {
         _firstRotationArkit = R_new.clone();
-        // V7: K is in COMPOSE pixel coordinates.  Sensor intrinsics
-        // (fx, fy, cx, cy in sensor pixels) get scaled by the same
-        // factor we used to downscale the frame from sensor to
-        // compose, so the pinhole projection K · ray → pixel
-        // produces the right pixel in compose space directly.  No
-        // R2S/S chain needed downstream.
+        // K in compose pixel coords.
         double sx = (double)frameBGR.cols / std::max((NSInteger)1, imageWidth);
         double sy = (double)frameBGR.rows / std::max((NSInteger)1, imageHeight);
-        // The downsample is uniform (preserved aspect), so sx == sy
-        // in practice.  Use the average defensively.
         double s = 0.5 * (sx + sy);
         _K_compose = (cv::Mat_<double>(3, 3) <<
                       fx * s, 0,      cx * s,
                       0,      fy * s, cy * s,
                       0,      0,      1);
+        _focalCompose = fx * s;  // cylinder radius
 
-        // Place first frame at canvas centre.
-        int ox = (int)(_canvas.cols - frameBGR.cols) / 2;
-        int oy = (int)(_canvas.rows - frameBGR.rows) / 2;
-        cv::Rect roi(ox, oy, frameBGR.cols, frameBGR.rows);
-        frameBGR.copyTo(_canvas(roi));
-        _canvasMask(roi).setTo(255);
-        _T_canvas = (cv::Mat_<double>(3, 3) <<
-                     1, 0, (double)ox,
-                     0, 1, (double)oy,
-                     0, 0, 1);
+        // V9: build the panorama-to-world rotation from the first
+        // ARKit pose.  Panorama +Y = world up, +Z = horizontal
+        // projection of first-camera forward.
+        cv::Mat fwdArkitCam = (cv::Mat_<double>(3, 1) << 0, 0, -1);
+        cv::Mat fwdWorld = _firstRotationArkit * fwdArkitCam;
+        double fwx = fwdWorld.at<double>(0);
+        double fwz = fwdWorld.at<double>(2);
+        double horiz = std::sqrt(fwx * fwx + fwz * fwz);
+        if (horiz < 1e-6) { fwx = 0; fwz = -1; horiz = 1; }
+        double pzx = fwx / horiz;
+        double pzz = fwz / horiz;
+        // pan_X = pan_Y × pan_Z = (0,1,0) × (pzx,0,pzz) = (pzz, 0, -pzx)
+        _R_panToWorld = (cv::Mat_<double>(3, 3) <<
+            pzz,   0, pzx,
+            0,     1, 0,
+            -pzx,  0, pzz);
+
+        // Place first frame onto canvas via cylindrical warp.  R for
+        // the warp is panorama→camera in OpenCV cam frame; for the
+        // first frame this is approximately identity (camera-forward
+        // = panorama +Z).  The cylindrical warp gives us a warped
+        // image + a corner in cylindrical-pixel space.
+        cv::Mat warpedFirst, warpedFirstMask;
+        cv::Point firstCornerCyl =
+            [self cylindricalWarp:frameBGR rArkit:R_new
+                            outImage:warpedFirst outMask:warpedFirstMask];
+
+        // Anchor the first frame at canvas centre.
+        int dstX = (int)(_canvas.cols - warpedFirst.cols) / 2;
+        int dstY = (int)(_canvas.rows - warpedFirst.rows) / 2;
+        cv::Rect roi(dstX, dstY, warpedFirst.cols, warpedFirst.rows);
+        roi &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
+        cv::Rect srcRoi(0, 0, roi.width, roi.height);
+        warpedFirst(srcRoi).copyTo(_canvas(roi), warpedFirstMask(srcRoi));
+        warpedFirstMask(srcRoi).copyTo(_canvasMask(roi),
+                                        warpedFirstMask(srcRoi));
+
+        // Track the cylindrical pixel that lives at canvas (0, 0).
+        // Subsequent frames' cylindrical corners → canvas position
+        // by subtracting this origin.
+        _canvasOriginCylX = firstCornerCyl.x - dstX;
+        _canvasOriginCylY = firstCornerCyl.y - dstY;
 
         _lastAcceptedYaw = yaw;
         _lastAcceptedPitch = pitch;
@@ -323,50 +355,49 @@ constexpr double kHomDetMax = 1.4;
         return tele;
     }
 
-    // ── V7 pose-driven homography (sensor-native compose space) ─
-    //
-    //   R_rel_cv = M · R_first⁻¹ · R_new · M
-    //   H_compose = K · R_rel_cv · K⁻¹       (K is in compose pixels)
-    //   H_canvas = T_canvas · H_compose
-    //
-    // where M = diag(1, -1, -1) flips ARKit's (Y-up, -Z forward)
-    // camera frame to OpenCV's (Y-down, +Z forward).  No R2S/S
-    // chain — the v6 bug was applying an input rotation in the
-    // compute pipeline, which forced the output direction to flip
-    // through the chain.  V7 keeps frames in sensor-native compose
-    // space (just downscaled) and lets the canvas extend in the
-    // natural pan direction.  Output rotation for display happens
-    // at snapshot/finalize time only.
-    cv::Mat R_relCv = _M_arkitToCv * _firstRotationArkit.t() * R_new * _M_arkitToCv;
-    cv::Mat H_compose = _K_compose * R_relCv * _K_compose.inv();
-    cv::Mat H_canvas  = _T_canvas * H_compose;
-
-    // Sanity: reject the frame if the homography places the new
-    // frame's centre outside the canvas (would warp to a black
-    // void and not show anything).  This shouldn't normally happen
-    // but guards against pose glitches.
-    cv::Mat centreH = (cv::Mat_<double>(3, 1) <<
-                       frameBGR.cols / 2.0,
-                       frameBGR.rows / 2.0,
-                       1.0);
-    cv::Mat warpedCentre = H_canvas * centreH;
-    double cw = warpedCentre.at<double>(2);
-    if (std::fabs(cw) < 1e-6) {
-        tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
-        tele.processingMs = msSince(t0);
-        return tele;
-    }
-    double cu = warpedCentre.at<double>(0) / cw;
-    double cv_y = warpedCentre.at<double>(1) / cw;
-    if (cu < -frameBGR.cols || cu > _canvas.cols + frameBGR.cols
-        || cv_y < -frameBGR.rows || cv_y > _canvas.rows + frameBGR.rows) {
+    // V9 cylindrical warp + feather blend.
+    cv::Mat warpedNew, warpedNewMask;
+    cv::Point newCornerCyl =
+        [self cylindricalWarp:frameBGR rArkit:R_new
+                       outImage:warpedNew outMask:warpedNewMask];
+    if (warpedNew.empty()) {
         tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
         tele.processingMs = msSince(t0);
         return tele;
     }
 
-    // Warp + hard-seam blend onto the canvas in place.
-    [self warpAndBlend:frameBGR worldH:H_canvas];
+    // Map cylindrical-pixel corner to canvas-pixel corner.
+    cv::Point newCornerCanvas(newCornerCyl.x - _canvasOriginCylX,
+                              newCornerCyl.y - _canvasOriginCylY);
+
+    // V9b: optical-flow refinement.  ARKit pose accuracy is ~1-2°,
+    // which translates to ~25-50 px residual misalignment at typical
+    // focal lengths.  KLT flow on a sparse grid in the overlap
+    // region recovers sub-pixel accuracy without needing the full
+    // ORB+RANSAC machinery from the v1-v3 path.  The result is a
+    // single (dx, dy) translation applied to the canvas placement.
+    cv::Point2f shift = [self refineWithOpticalFlow:warpedNew
+                                          newMask:warpedNewMask
+                                     canvasOrigin:newCornerCanvas];
+    newCornerCanvas.x += (int)std::round(shift.x);
+    newCornerCanvas.y += (int)std::round(shift.y);
+
+    cv::Rect dstRoi(newCornerCanvas.x, newCornerCanvas.y,
+                    warpedNew.cols, warpedNew.rows);
+    cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
+    cv::Rect dstClipped = dstRoi & canvasBounds;
+    if (dstClipped.width <= 0 || dstClipped.height <= 0) {
+        tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
+        tele.processingMs = msSince(t0);
+        return tele;
+    }
+    cv::Rect srcRoi(dstClipped.x - dstRoi.x, dstClipped.y - dstRoi.y,
+                    dstClipped.width, dstClipped.height);
+
+    [self featherBlendWarped:warpedNew(srcRoi)
+                         mask:warpedNewMask(srcRoi)
+                  intoCanvas:_canvas(dstClipped)
+                  canvasMask:_canvasMask(dstClipped)];
 
     _lastAcceptedYaw = yaw;
     _lastAcceptedPitch = pitch;
@@ -741,8 +772,300 @@ static double computeOverlapPct(double deltaYaw,
 // reference pose + intrinsics in the same place it positions the
 // frame on the canvas.
 
-/// Warp `frameBGR` into the canvas at `worldH` and feather-blend
-/// against the existing pixels.  Touches `_canvas` and `_canvasMask`.
+/// V9 hand-rolled cylindrical projection.
+///
+/// Projects a source frame onto a vertical cylinder (axis = panorama
+/// +Y = world gravity-up).  Output coords:
+///   theta  = horizontal angle around the cylinder (radians)
+///   h      = vertical offset along the cylinder axis
+///   pixel  = (focal · theta, focal · h) at compose-resolution focal
+///
+/// We compute the panorama→camera rotation `R_panToCam` from the
+/// frame's ARKit pose, find the bbox of the source's 4 corners
+/// projected onto the cylinder, allocate inverse-map tables for that
+/// bbox, then `cv::remap` the source into the bbox.
+///
+/// Returns the bbox's top-left in cylindrical-pixel coords; the
+/// caller adds the canvas origin offset to land it on the canvas.
+- (cv::Point)cylindricalWarp:(const cv::Mat &)src
+                       rArkit:(const cv::Mat &)rArkit
+                     outImage:(cv::Mat &)outImage
+                      outMask:(cv::Mat &)outMask
+{
+    if (_R_panToWorld.empty() || _focalCompose <= 0) {
+        outImage = cv::Mat();
+        outMask = cv::Mat();
+        return cv::Point(0, 0);
+    }
+
+    // Panorama→camera rotation (CV_64F internally, CV_32F for SIMD).
+    //   R_panToCam = M · R_arkit⁻¹ · R_panToWorld
+    cv::Mat R_panToCam = _M_arkitToCv * rArkit.t() * _R_panToWorld;
+
+    // Intrinsics in compose pixels.
+    const double fx = _K_compose.at<double>(0, 0);
+    const double fy = _K_compose.at<double>(1, 1);
+    const double cx = _K_compose.at<double>(0, 2);
+    const double cy = _K_compose.at<double>(1, 2);
+    const double f  = _focalCompose;
+
+    // ── Forward-project source corners onto cylinder to size bbox ──
+    //
+    // For each source corner pixel (u, v):
+    //   ray_cam   = K⁻¹ · (u, v, 1)   = ((u-cx)/fx, (v-cy)/fy, 1)
+    //   ray_world = R_panToCam⁻¹ · ray_cam = R_panToCam.t() · ray_cam
+    //   theta     = atan2(ray_world.x, ray_world.z)
+    //   h         = ray_world.y / sqrt(x²+z²)
+    //   cyl_pixel = (f · theta, f · h)
+    cv::Mat R_camToPan = R_panToCam.t();
+    auto projectCorner = ^cv::Point2d(double u, double v) {
+        double rx = (u - cx) / fx;
+        double ry = (v - cy) / fy;
+        double rz = 1.0;
+        double wx = R_camToPan.at<double>(0,0)*rx + R_camToPan.at<double>(0,1)*ry + R_camToPan.at<double>(0,2)*rz;
+        double wy = R_camToPan.at<double>(1,0)*rx + R_camToPan.at<double>(1,1)*ry + R_camToPan.at<double>(1,2)*rz;
+        double wz = R_camToPan.at<double>(2,0)*rx + R_camToPan.at<double>(2,1)*ry + R_camToPan.at<double>(2,2)*rz;
+        double theta = std::atan2(wx, wz);
+        double denom = std::sqrt(wx*wx + wz*wz);
+        double h = (denom > 1e-9) ? (wy / denom) : 0.0;
+        return cv::Point2d(f * theta, f * h);
+    };
+    cv::Point2d c00 = projectCorner(0, 0);
+    cv::Point2d c10 = projectCorner((double)src.cols - 1, 0);
+    cv::Point2d c01 = projectCorner(0, (double)src.rows - 1);
+    cv::Point2d c11 = projectCorner((double)src.cols - 1, (double)src.rows - 1);
+    double minX = std::min({c00.x, c10.x, c01.x, c11.x});
+    double maxX = std::max({c00.x, c10.x, c01.x, c11.x});
+    double minY = std::min({c00.y, c10.y, c01.y, c11.y});
+    double maxY = std::max({c00.y, c10.y, c01.y, c11.y});
+
+    int bboxX = (int)std::floor(minX);
+    int bboxY = (int)std::floor(minY);
+    int bboxW = (int)std::ceil(maxX - minX) + 1;
+    int bboxH = (int)std::ceil(maxY - minY) + 1;
+    if (bboxW <= 0 || bboxH <= 0
+        || bboxW > (int)_canvas.cols * 2
+        || bboxH > (int)_canvas.rows * 2) {
+        outImage = cv::Mat();
+        outMask = cv::Mat();
+        return cv::Point(0, 0);
+    }
+
+    // ── Inverse-map: for each bbox pixel, find source pixel ──
+    cv::Mat mapX(bboxH, bboxW, CV_32FC1);
+    cv::Mat mapY(bboxH, bboxW, CV_32FC1);
+
+    // Cylindrical → camera: ray_world = (sin θ, h, cos θ)
+    //                       ray_cam   = R_panToCam · ray_world
+    //                       u = fx · ray.x/ray.z + cx
+    //                       v = fy · ray.y/ray.z + cy
+    const double r00 = R_panToCam.at<double>(0,0), r01 = R_panToCam.at<double>(0,1), r02 = R_panToCam.at<double>(0,2);
+    const double r10 = R_panToCam.at<double>(1,0), r11 = R_panToCam.at<double>(1,1), r12 = R_panToCam.at<double>(1,2);
+    const double r20 = R_panToCam.at<double>(2,0), r21 = R_panToCam.at<double>(2,1), r22 = R_panToCam.at<double>(2,2);
+
+    for (int y = 0; y < bboxH; y++) {
+        float *mx = mapX.ptr<float>(y);
+        float *my = mapY.ptr<float>(y);
+        double cylY = (double)(bboxY + y);
+        double h = cylY / f;
+        for (int x = 0; x < bboxW; x++) {
+            double cylX = (double)(bboxX + x);
+            double theta = cylX / f;
+            double sinT = std::sin(theta);
+            double cosT = std::cos(theta);
+            double wx = sinT, wy = h, wz = cosT;
+            double rx = r00*wx + r01*wy + r02*wz;
+            double ry = r10*wx + r11*wy + r12*wz;
+            double rz = r20*wx + r21*wy + r22*wz;
+            if (rz <= 1e-6) {
+                mx[x] = -1.0f;  // out-of-range → INTER_LINEAR border
+                my[x] = -1.0f;
+            } else {
+                double u = fx * rx / rz + cx;
+                double v = fy * ry / rz + cy;
+                if (u < 0 || u >= (double)src.cols
+                    || v < 0 || v >= (double)src.rows) {
+                    mx[x] = -1.0f;
+                    my[x] = -1.0f;
+                } else {
+                    mx[x] = (float)u;
+                    my[x] = (float)v;
+                }
+            }
+        }
+    }
+
+    // Remap source → output bbox.
+    outImage.create(bboxH, bboxW, src.type());
+    cv::remap(src, outImage, mapX, mapY,
+              cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+
+    // Build mask from valid map entries (non-negative).
+    outMask.create(bboxH, bboxW, CV_8UC1);
+    outMask.setTo(0);
+    for (int y = 0; y < bboxH; y++) {
+        const float *mx = mapX.ptr<float>(y);
+        uchar *m = outMask.ptr<uchar>(y);
+        for (int x = 0; x < bboxW; x++) {
+            if (mx[x] >= 0.0f) m[x] = 255;
+        }
+    }
+
+    return cv::Point(bboxX, bboxY);
+}
+
+/// V9b KLT optical flow refinement.  Computes a residual translation
+/// (dx, dy) the new warped frame should be shifted by to align
+/// pixel-perfectly with the existing canvas in their overlap region.
+///
+/// Algorithm:
+///   1. Compute the overlap rect between warpedNew (placed at
+///      canvasOrigin) and the existing canvas mask.
+///   2. Convert both regions to grayscale.
+///   3. `cv::goodFeaturesToTrack` on the canvas overlap: find ~50
+///      strong corners.
+///   4. `cv::calcOpticalFlowPyrLK` to track those corners into the
+///      warped overlap.
+///   5. Median (dx, dy) over inlier tracks = residual shift.
+///
+/// Returns (0, 0) if not enough tracks, or if the shift exceeds a
+/// sanity threshold (likely a bad frame, don't bias the placement).
+- (cv::Point2f)refineWithOpticalFlow:(const cv::Mat &)warpedNew
+                              newMask:(const cv::Mat &)warpedNewMask
+                         canvasOrigin:(cv::Point)canvasOrigin
+{
+    if (_accepted == 0) return cv::Point2f(0, 0);
+
+    // Compute overlap rect (canvas coords).
+    cv::Rect newRect(canvasOrigin.x, canvasOrigin.y,
+                     warpedNew.cols, warpedNew.rows);
+    cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
+    cv::Rect newOnCanvas = newRect & canvasBounds;
+    if (newOnCanvas.width < 16 || newOnCanvas.height < 16) {
+        return cv::Point2f(0, 0);
+    }
+
+    cv::Mat canvasOverlap = _canvas(newOnCanvas);
+    cv::Mat canvasMaskOverlap = _canvasMask(newOnCanvas);
+    cv::Mat warpedOverlap = warpedNew(cv::Rect(
+        newOnCanvas.x - newRect.x, newOnCanvas.y - newRect.y,
+        newOnCanvas.width, newOnCanvas.height));
+    cv::Mat warpedMaskOverlap = warpedNewMask(cv::Rect(
+        newOnCanvas.x - newRect.x, newOnCanvas.y - newRect.y,
+        newOnCanvas.width, newOnCanvas.height));
+
+    // Both regions need pixels — bail if either side is mostly empty.
+    int canvasFilled = cv::countNonZero(canvasMaskOverlap);
+    int warpedFilled = cv::countNonZero(warpedMaskOverlap);
+    int totalPx = newOnCanvas.width * newOnCanvas.height;
+    if (canvasFilled < totalPx / 4 || warpedFilled < totalPx / 4) {
+        return cv::Point2f(0, 0);
+    }
+
+    cv::Mat canvasGray, warpedGray;
+    cv::cvtColor(canvasOverlap, canvasGray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(warpedOverlap, warpedGray, cv::COLOR_BGR2GRAY);
+
+    // Find strong corners in canvas, restricted to the overlap mask.
+    std::vector<cv::Point2f> canvasPts;
+    cv::Mat featureMask;
+    cv::bitwise_and(canvasMaskOverlap, warpedMaskOverlap, featureMask);
+    cv::goodFeaturesToTrack(canvasGray, canvasPts, /*maxCorners=*/64,
+                             /*qualityLevel=*/0.01, /*minDistance=*/10,
+                             featureMask, /*blockSize=*/3, false, 0.04);
+    if (canvasPts.size() < 8) return cv::Point2f(0, 0);
+
+    // Track into warped frame.
+    std::vector<cv::Point2f> warpedPts;
+    std::vector<uchar> status;
+    std::vector<float> err;
+    cv::calcOpticalFlowPyrLK(canvasGray, warpedGray,
+                              canvasPts, warpedPts, status, err,
+                              cv::Size(21, 21), 3,
+                              cv::TermCriteria(
+                                  cv::TermCriteria::COUNT
+                                      | cv::TermCriteria::EPS,
+                                  20, 0.03));
+
+    // Collect inlier displacements.
+    std::vector<float> dxs, dys;
+    dxs.reserve(canvasPts.size());
+    dys.reserve(canvasPts.size());
+    for (size_t i = 0; i < canvasPts.size(); i++) {
+        if (!status[i] || err[i] > 30.0f) continue;
+        float dx = warpedPts[i].x - canvasPts[i].x;
+        float dy = warpedPts[i].y - canvasPts[i].y;
+        // Filter outliers — implausible jumps.
+        if (std::fabs(dx) > 60.0f || std::fabs(dy) > 60.0f) continue;
+        dxs.push_back(dx);
+        dys.push_back(dy);
+    }
+    if (dxs.size() < 6) return cv::Point2f(0, 0);
+
+    // Median is robust to remaining outliers.
+    std::nth_element(dxs.begin(), dxs.begin() + dxs.size() / 2, dxs.end());
+    std::nth_element(dys.begin(), dys.begin() + dys.size() / 2, dys.end());
+    float medDx = dxs[dxs.size() / 2];
+    float medDy = dys[dys.size() / 2];
+
+    // The track tells us "to align canvas pixels with warped pixels,
+    // shift WARPED by (-medDx, -medDy)".  We want to shift the
+    // PLACEMENT of warped on canvas by the opposite to compensate.
+    return cv::Point2f(-medDx, -medDy);
+}
+
+/// V9 feather blend.  Smooth ratio-of-distances feather (the
+/// algorithm cv::detail::FeatherBlender uses) over the canvas-vs-new
+/// overlap region.  Outside the overlap, copy whichever frame has
+/// content.
+- (void)featherBlendWarped:(cv::Mat)warped
+                       mask:(cv::Mat)warpedMask
+                intoCanvas:(cv::Mat)canvasRoi
+                canvasMask:(cv::Mat)canvasMaskRoi
+{
+    cv::Mat distNew, distCanvas;
+    cv::distanceTransform(warpedMask, distNew, cv::DIST_L2, 3);
+    cv::distanceTransform(canvasMaskRoi, distCanvas, cv::DIST_L2, 3);
+
+    // Ratio alpha: where new is deeper, alpha→1; where canvas is
+    // deeper, alpha→0.  Smooth transition mid-overlap.
+    cv::Mat sum = distNew + distCanvas + 1e-6f;
+    cv::Mat alpha;
+    cv::divide(distNew, sum, alpha, 1.0, CV_32F);
+
+    // First-touch regions: alpha=1 unconditionally.
+    cv::Mat noPrior;
+    cv::compare(canvasMaskRoi, 0, noPrior, cv::CMP_EQ);
+    alpha.setTo(1.0f, noPrior);
+
+    // Outside-of-new regions: keep canvas (alpha=0).
+    cv::Mat noNew;
+    cv::compare(warpedMask, 0, noNew, cv::CMP_EQ);
+    alpha.setTo(0.0f, noNew);
+
+    // Per-channel blend.
+    cv::Mat alpha3, invAlpha3;
+    cv::Mat ch[] = {alpha, alpha, alpha};
+    cv::merge(ch, 3, alpha3);
+    invAlpha3 = cv::Scalar(1, 1, 1) - alpha3;
+
+    cv::Mat warpedF, canvasF;
+    warped.convertTo(warpedF, CV_32FC3);
+    canvasRoi.convertTo(canvasF, CV_32FC3);
+    cv::Mat blendedF = warpedF.mul(alpha3) + canvasF.mul(invAlpha3);
+    cv::Mat blended8;
+    blendedF.convertTo(blended8, CV_8UC3);
+
+    // Write back: only where the union mask has content.
+    cv::Mat unionMask;
+    cv::bitwise_or(warpedMask, canvasMaskRoi, unionMask);
+    blended8.copyTo(canvasRoi, unionMask);
+    cv::bitwise_or(canvasMaskRoi, warpedMask, canvasMaskRoi);
+}
+
+// (Legacy v7 planar warpAndBlend kept below for reference but is no
+//  longer called.  Remove in v9-cleanup once the cylindrical path is
+//  field-validated.)
 - (void)warpAndBlend:(const cv::Mat &)frameBGR worldH:(const cv::Mat &)worldH {
     cv::Size canvasSize(_canvas.cols, _canvas.rows);
 
