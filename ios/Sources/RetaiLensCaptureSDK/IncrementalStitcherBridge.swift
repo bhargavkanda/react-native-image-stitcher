@@ -57,13 +57,8 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         return [Self.stateUpdateEvent]
     }
 
-    public override func startObserving() {
-        hasListeners = true
-    }
-
-    public override func stopObserving() {
-        hasListeners = false
-    }
+    // (startObserving / stopObserving moved next to handleStateUpdate
+    //  for the PiP investigation; remove this comment after.)
 
     // MARK: - Module methods
 
@@ -100,11 +95,13 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         let feather  = (options["featherPx"] as? Int) ?? 0
         let snapQ    = (options["snapshotJpegQuality"] as? Int) ?? 75
         let snapN    = (options["snapshotEveryNAccepts"] as? Int) ?? 1
-        // 0/90/180/270 — JS computes this from device orientation
-        // (useDeviceOrientation hook).  Default 90° CW = the
-        // portrait-phone case (which is the dominant capture mode);
-        // unknown values fall back to that default.
         let rotation = (options["frameRotationDegrees"] as? Int) ?? 90
+        // V10: engine selection.  'hybrid' (default) = v9 cylindrical
+        // + KLT optical flow + feather.  'slitscan' = Apple-style
+        // strip-painting.  Both engines share the same JS-facing
+        // contract; pick per-capture based on what the operator's
+        // gesture is best matched to.
+        let engineMode = (options["engine"] as? String) ?? "hybrid"
 
         RetaiLensIncrementalStitcher.shared.start(
             composeWidth: composeW,
@@ -114,7 +111,8 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
             featherPx: feather,
             snapshotJpegQuality: snapQ,
             snapshotEveryNAccepts: snapN,
-            frameRotationDegrees: rotation
+            frameRotationDegrees: rotation,
+            engineMode: engineMode
         )
         resolver(["ok": true])
     }
@@ -169,6 +167,19 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver(["ok": true])
     }
 
+    /// PiP investigation: write a JS-supplied message into the same
+    /// rlis-debug.log file the Swift side uses, so we get a single
+    /// timeline across native and JS.  Remove once PiP is fixed.
+    @objc(appendDebugLog:resolver:rejecter:)
+    public func appendDebugLog(
+        message: NSString,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        RetaiLensIncrementalStitcher.fileLog("JS: \(message)")
+        resolver(["ok": true])
+    }
+
     @objc(getState:rejecter:)
     public func getState(
         resolver: @escaping RCTPromiseResolveBlock,
@@ -181,9 +192,38 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
     // MARK: - Notification → device event
 
     @objc private func handleStateUpdate(_ notification: Notification) {
+        let hasPath = (notification.userInfo?["panoramaPath"] != nil)
+        if hasPath {
+            RetaiLensIncrementalStitcher.fileLog(
+                "bridge handleStateUpdate hasListeners=\(hasListeners) hasPath=\(hasPath) thread=\(Thread.isMainThread ? "main" : "bg")"
+            )
+        }
         guard hasListeners else { return }
         guard let userInfo = notification.userInfo else { return }
-        sendEvent(withName: Self.stateUpdateEvent, body: userInfo)
+        // FIX: RCTEventEmitter.sendEvent is documented to be called
+        // from any thread, but in practice events from background
+        // threads can be dropped silently if the bridge is in
+        // certain states.  Dispatch to main queue to guarantee
+        // delivery.  See e.g. RN issues #19518, #28250.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if hasPath {
+                RetaiLensIncrementalStitcher.fileLog(
+                    "bridge sendEvent (main queue) body.panoramaPath=\(userInfo["panoramaPath"] ?? "MISSING")"
+                )
+            }
+            self.sendEvent(withName: Self.stateUpdateEvent, body: userInfo)
+        }
+    }
+
+    public override func startObserving() {
+        hasListeners = true
+        RetaiLensIncrementalStitcher.fileLog("bridge startObserving (hasListeners=true)")
+    }
+
+    public override func stopObserving() {
+        hasListeners = false
+        RetaiLensIncrementalStitcher.fileLog("bridge stopObserving (hasListeners=false)")
     }
 }
 #endif

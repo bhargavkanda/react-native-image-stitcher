@@ -96,6 +96,21 @@ export interface IncrementalStartOptions {
    * Default `90` because most shelf scans are done in portrait.
    */
   frameRotationDegrees?: 0 | 90 | 180 | 270;
+  /**
+   * Engine mode:
+   *   'hybrid'   — Samsung-style: cylindrical projection + KLT
+   *                optical flow refinement + feather blend (default).
+   *   'slitscan' — Apple-style: continuous narrow vertical strips
+   *                painted onto the cylindrical canvas.  Per-strip
+   *                overlap is 1-3 px so stitching artefacts are
+   *                near-invisible; sensitive to non-rotational
+   *                motion (operator translating their body).
+   *
+   * Default 'hybrid' is the safer choice for the variety of gestures
+   * field reps actually use.  Set 'slitscan' to A/B compare on the
+   * same scene.
+   */
+  engine?: 'hybrid' | 'slitscan';
 }
 
 
@@ -121,6 +136,9 @@ interface NativeIncrementalModule {
   finalize(options: { outputPath?: string; quality?: number }): Promise<IncrementalFinalizeResult>;
   cancel(): Promise<{ ok: true }>;
   getState(): Promise<IncrementalState | null>;
+  /** PiP investigation only — write a JS-side message into the
+   *  Swift-side rlis-debug.log so we get a single timeline. */
+  appendDebugLog?(message: string): Promise<{ ok: true }>;
 }
 
 

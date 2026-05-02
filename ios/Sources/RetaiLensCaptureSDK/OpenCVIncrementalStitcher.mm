@@ -474,19 +474,13 @@ constexpr double kHomDetMax = 1.4;
                                               error:(NSError **)error
 {
     _snapshotSeq += 1;
-    NSLog(@"[RLIS-PIP] snapshot called seq=%ld accepted=%ld canvasMaskNonZero=%d",
-          (long)_snapshotSeq, (long)_accepted, cv::countNonZero(_canvasMask));
-    // Tight-crop the live snapshot to the actual content.  The full
-    // canvas is 4800x2200 — most of it empty black space until the
-    // pan covers the canvas.  Without this, every snapshot was a
-    // ~24 MB JPEG that RN's <Image> couldn't keep up with — the
-    // user saw "Pan to begin capturing" for the entire capture
-    // because the previous snapshot was still loading when the
-    // next one overwrote the path.  Tight-cropped snapshots are
-    // ~50–500 KB; <Image> renders them in milliseconds.
+    // Tight-crop the live snapshot to the actual content.  No
+    // exposure-comp on live snapshots — CLAHE adds ~50 ms which
+    // would push per-accept latency over the realtime budget.
     return [self writeSnapshotToPath:[self currentSnapshotPath]
                           jpegQuality:quality
                             tightCrop:YES
+                    applyExposureComp:NO
                                 error:error];
 }
 
@@ -494,9 +488,16 @@ constexpr double kHomDetMax = 1.4;
                               jpegQuality:(NSInteger)quality
                                     error:(NSError **)error
 {
+    // V9d: apply exposure-compensation at finalize.  Runs off the
+    // main thread because Swift wrapper dispatches finalize on
+    // workQueue.  CLAHE on the L channel of Lab evens out brightness
+    // variation across the panorama (frames captured ~200ms apart
+    // with auto-exposure produce visible vertical banding without
+    // this) without crushing colour or contrast.
     RLISSnapshot *snap = [self writeSnapshotToPath:outputPath
                                        jpegQuality:quality
                                          tightCrop:YES
+                                 applyExposureComp:YES
                                              error:error];
     [self reset];
     return snap;
@@ -517,6 +518,7 @@ constexpr double kHomDetMax = 1.4;
 - (nullable RLISSnapshot *)writeSnapshotToPath:(NSString *)outputPath
                                    jpegQuality:(NSInteger)quality
                                      tightCrop:(BOOL)tightCrop
+                             applyExposureComp:(BOOL)applyExposureComp
                                          error:(NSError **)error
 {
     if (_accepted == 0) {
@@ -604,6 +606,21 @@ constexpr double kHomDetMax = 1.4;
         cv::rotate(cropped, out, cv::ROTATE_90_COUNTERCLOCKWISE);
     } else {
         out = cropped;
+    }
+
+    if (applyExposureComp && !out.empty()) {
+        // CLAHE on the L channel of Lab.  Preserves colour, evens
+        // out luminance variation across the panorama.  Conservative
+        // clipLimit=2.0 — enough to even out auto-exposure bands,
+        // not so much that it crushes highlight/shadow detail.
+        cv::Mat lab;
+        cv::cvtColor(out, lab, cv::COLOR_BGR2Lab);
+        std::vector<cv::Mat> labChannels(3);
+        cv::split(lab, labChannels);
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+        clahe->apply(labChannels[0], labChannels[0]);
+        cv::merge(labChannels, lab);
+        cv::cvtColor(lab, out, cv::COLOR_Lab2BGR);
     }
 
     int q = (int)std::clamp((long long)quality, 0LL, 100LL);

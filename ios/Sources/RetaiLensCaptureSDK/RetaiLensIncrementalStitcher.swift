@@ -120,7 +120,23 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// Underlying OpenCV engine.  Created on `start`, torn down on
     /// `finalize`/`reset`.  Holding it across captures would keep the
     /// 24 MB canvas allocated in idle.
-    private var engine: OpenCVIncrementalStitcher?
+    ///
+    /// V10: two engine variants exist behind one Swift wrapper.
+    /// `hybridEngine` (Samsung-style, full-frame cylindrical + OF) is
+    /// the default.  `slitscanEngine` (Apple-style, per-strip painting)
+    /// is opt-in via the JS `engine: 'slitscan'` start option.  Only
+    /// one is non-nil at a time.
+    private var hybridEngine: OpenCVIncrementalStitcher?
+    private var slitscanEngine: OpenCVSlitScanStitcher?
+
+    /// Convenience: read the active engine's accepted count.  Used by
+    /// the per-frame state event.
+    private var engineAcceptedCount: Int {
+        return hybridEngine?.acceptedCount ?? slitscanEngine?.acceptedCount ?? 0
+    }
+    private var anyEngineActive: Bool {
+        return hybridEngine != nil || slitscanEngine != nil
+    }
 
     /// Serial queue for the heavy per-frame work.  ARSession delegate
     /// only dispatches a pre-allocated cv::Mat onto this queue — the
@@ -175,22 +191,35 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         featherPx: Int,
         snapshotJpegQuality: Int,
         snapshotEveryNAccepts: Int,
-        frameRotationDegrees: Int
+        frameRotationDegrees: Int,
+        engineMode: String
     ) {
         stateLock.lock()
         if isRunning {
             stateLock.unlock()
             return
         }
-        let stitcher = OpenCVIncrementalStitcher(
-            composeWidth: composeWidth,
-            composeHeight: composeHeight,
-            canvasWidth: canvasWidth,
-            canvasHeight: canvasHeight,
-            featherPx: featherPx,
-            frameRotationDegrees: frameRotationDegrees
-        )
-        self.engine = stitcher
+        if engineMode == "slitscan" {
+            self.slitscanEngine = OpenCVSlitScanStitcher(
+                composeWidth: composeWidth,
+                composeHeight: composeHeight,
+                canvasWidth: canvasWidth,
+                canvasHeight: canvasHeight,
+                featherPx: featherPx,
+                frameRotationDegrees: frameRotationDegrees
+            )
+            self.hybridEngine = nil
+        } else {
+            self.hybridEngine = OpenCVIncrementalStitcher(
+                composeWidth: composeWidth,
+                composeHeight: composeHeight,
+                canvasWidth: canvasWidth,
+                canvasHeight: canvasHeight,
+                featherPx: featherPx,
+                frameRotationDegrees: frameRotationDegrees
+            )
+            self.slitscanEngine = nil
+        }
         self.isRunning = true
         self.snapshotJpegQuality = max(1, min(100, snapshotJpegQuality))
         self.snapshotEveryNAccepts = max(1, snapshotEveryNAccepts)
@@ -227,36 +256,44 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                 return
             }
             self.stateLock.lock()
-            let engine = self.engine
-            let q = self.snapshotJpegQuality
-            self.engine = nil
+            let hybrid = self.hybridEngine
+            let slit = self.slitscanEngine
+            self.hybridEngine = nil
+            self.slitscanEngine = nil
             self.isRunning = false
             self.stateLock.unlock()
 
-            guard let engine = engine else {
-                completion(nil, NSError(
-                    domain: "RetaiLensIncremental",
-                    code: 9002,
-                    userInfo: [NSLocalizedDescriptionKey:
-                        "No active capture — call start() first."]
-                ))
-                return
-            }
             let cleaned = (outputPath.hasPrefix("file://"))
                 ? String(outputPath.dropFirst(7))
                 : outputPath
+            let q = max(1, min(100, jpegQuality))
             do {
-                let snap = try engine.finalize(
-                    atPath: cleaned,
-                    jpegQuality: max(1, min(100, jpegQuality))
-                )
-                completion([
-                    "panoramaPath": snap.panoramaPath,
-                    "width": snap.width,
-                    "height": snap.height,
-                    "acceptedCount": snap.acceptedCount,
-                    "droppedBackpressure": self.droppedBackpressure,
-                ], nil)
+                if let hybrid = hybrid {
+                    let snap = try hybrid.finalize(atPath: cleaned, jpegQuality: q)
+                    completion([
+                        "panoramaPath": snap.panoramaPath,
+                        "width": snap.width,
+                        "height": snap.height,
+                        "acceptedCount": snap.acceptedCount,
+                        "droppedBackpressure": self.droppedBackpressure,
+                    ], nil)
+                } else if let slit = slit {
+                    let snap = try slit.finalize(atPath: cleaned, jpegQuality: q)
+                    completion([
+                        "panoramaPath": snap.panoramaPath,
+                        "width": snap.width,
+                        "height": snap.height,
+                        "acceptedCount": snap.acceptedCount,
+                        "droppedBackpressure": self.droppedBackpressure,
+                    ], nil)
+                } else {
+                    completion(nil, NSError(
+                        domain: "RetaiLensIncremental",
+                        code: 9002,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "No active capture — call start() first."]
+                    ))
+                }
             } catch let err as NSError {
                 completion(nil, err)
             }
@@ -267,8 +304,10 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     @objc public func cancel() {
         RetaiLensARSession.shared.incrementalConsumer = nil
         stateLock.lock()
-        engine?.reset()
-        engine = nil
+        hybridEngine?.reset()
+        slitscanEngine?.reset()
+        hybridEngine = nil
+        slitscanEngine = nil
         isRunning = false
         lastState = nil
         stateLock.unlock()
@@ -294,10 +333,11 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             // start/stop in flight — drop this frame.
             return
         }
-        let engine = self.engine
+        let hybrid = self.hybridEngine
+        let slit = self.slitscanEngine
         let isRunning = self.isRunning
         stateLock.unlock()
-        guard isRunning, let engine = engine else { return }
+        guard isRunning, (hybrid != nil || slit != nil) else { return }
 
         // Compute yaw + pitch from the quaternion.  Convention:
         // yaw   = rotation about world Y (camera turning left/right)
@@ -339,24 +379,28 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // accepts, switch to the work-queue dispatch with an explicit
         // cv::Mat.clone() before hopping.
 
-        let telemetry = engine.ingest(
-            pixelBuffer: pixelBuffer,
-            qx: pose.qx,
-            qy: pose.qy,
-            qz: pose.qz,
-            qw: pose.qw,
-            fx: pose.fx,
-            fy: pose.fy,
-            cx: pose.cx,
-            cy: pose.cy,
-            imageWidth: pose.imageWidth,
-            imageHeight: pose.imageHeight,
-            yaw: yaw,
-            pitch: pitch,
-            fovHorizDegrees: fovHDeg,
-            fovVertDegrees: fovVDeg,
-            trackingPoor: trackingPoor
-        )
+        let telemetry: RLISFrameTelemetry
+        if let hybrid = hybrid {
+            telemetry = hybrid.ingest(
+                pixelBuffer: pixelBuffer, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw,
+                fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
+                imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
+                yaw: yaw, pitch: pitch,
+                fovHorizDegrees: fovHDeg, fovVertDegrees: fovVDeg,
+                trackingPoor: trackingPoor
+            )
+        } else if let slit = slit {
+            telemetry = slit.ingest(
+                pixelBuffer: pixelBuffer, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw,
+                fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
+                imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
+                yaw: yaw, pitch: pitch,
+                fovHorizDegrees: fovHDeg, fovVertDegrees: fovVDeg,
+                trackingPoor: trackingPoor
+            )
+        } else {
+            return
+        }
 
         // Build state and decide if a snapshot write + emit is in order.
         var snapshotPath: String?
@@ -372,25 +416,29 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             if self.acceptsSinceSnapshot >= self.snapshotEveryNAccepts {
                 self.acceptsSinceSnapshot = 0
                 do {
-                    let snap = try engine.snapshot(
-                        withJpegQuality: self.snapshotJpegQuality
-                    )
+                    let snap: RLISSnapshot
+                    if let hybrid = hybrid {
+                        snap = try hybrid.snapshot(
+                            withJpegQuality: self.snapshotJpegQuality)
+                    } else {
+                        snap = try slit!.snapshot(
+                            withJpegQuality: self.snapshotJpegQuality)
+                    }
                     snapshotPath = snap.panoramaPath
                     snapW = snap.width
                     snapH = snap.height
-                    NSLog("[RLIS-PIP] swift snapshot OK path=\(snap.panoramaPath ?? "nil") size=\(snap.width)x\(snap.height)")
                 } catch {
-                    NSLog("[RLIS-PIP] swift snapshot threw: \(error)")
+                    // Silently dropping a snapshot is fine — next
+                    // accept will retry.
                 }
             }
         }
-        NSLog("[RLIS-PIP] consumeFrame outcome=\(outcome.rawValue) isAccept=\(isAccept) acceptedCount=\(engine.acceptedCount) snapshotPath=\(snapshotPath ?? "nil")")
 
         let state = RetaiLensIncrementalState(
             panoramaPath: snapshotPath,
             width: snapW,
             height: snapH,
-            acceptedCount: engine.acceptedCount,
+            acceptedCount: hybrid?.acceptedCount ?? slit?.acceptedCount ?? 0,
             outcome: outcome,
             confidence: telemetry.confidence,
             overlapPercent: telemetry.overlapPercent,
@@ -408,6 +456,35 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             object: nil,
             userInfo: state.asDictionary()
         )
+    }
+
+    // ── Debug log file ──────────────────────────────────────────────
+    //
+    // iOS Console rate-limits Swift NSLog at 60 Hz, dropping most
+    // output silently.  File-based log captures everything, and we
+    // can pull it from Xcode's device-container browser.  Path:
+    // <Documents>/rlis-debug.log
+    private static let debugLogQueue = DispatchQueue(label: "rlis.debuglog")
+    private static var debugLogPath: String = {
+        let docs = NSSearchPathForDirectoriesInDomains(
+            .documentDirectory, .userDomainMask, true).first ?? NSTemporaryDirectory()
+        return (docs as NSString).appendingPathComponent("rlis-debug.log")
+    }()
+    static func fileLog(_ msg: String) {
+        let line = "\(Date().timeIntervalSince1970): \(msg)\n"
+        debugLogQueue.async {
+            let data = line.data(using: .utf8) ?? Data()
+            if let fh = FileHandle(forWritingAtPath: debugLogPath) {
+                fh.seekToEndOfFile()
+                fh.write(data)
+                fh.closeFile()
+            } else {
+                try? data.write(to: URL(fileURLWithPath: debugLogPath),
+                                options: .atomicWrite)
+            }
+        }
+        // Also try NSLog in case it does work occasionally
+        NSLog("[RLIS-PIP] %@", msg)
     }
 
     // ── Helpers ─────────────────────────────────────────────────────

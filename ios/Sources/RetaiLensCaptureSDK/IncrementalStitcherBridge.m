@@ -31,4 +31,8 @@ RCT_EXTERN_METHOD(cancel:(RCTPromiseResolveBlock)resolver
 RCT_EXTERN_METHOD(getState:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+RCT_EXTERN_METHOD(appendDebugLog:(NSString *)message
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 @end

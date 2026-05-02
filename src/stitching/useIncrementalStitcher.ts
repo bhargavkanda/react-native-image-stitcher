@@ -118,7 +118,25 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
   useEffect(() => {
     if (!native) return undefined;
     const sub = subscribeIncrementalState((nextState) => {
-      setState(nextState);
+      // Sticky-snapshot merge: the native side emits a state event
+      // for EVERY ARFrame the engine processes (~60 Hz), most of
+      // which are SkippedTooClose with NO snapshot path.  A naive
+      // `setState(nextState)` would wipe the panoramaPath to null
+      // 60 times per second, blanking the live preview between
+      // accepts.  Keep the last-good snapshot fields so the PiP
+      // shows the most recent panorama continuously between accepts;
+      // other fields (outcome, confidence, hint) update normally.
+      setState((prev) => {
+        if (!nextState.panoramaPath && prev?.panoramaPath) {
+          return {
+            ...nextState,
+            panoramaPath: prev.panoramaPath,
+            width: prev.width,
+            height: prev.height,
+          };
+        }
+        return nextState;
+      });
       const newHint = outcomeToHint(nextState.outcome);
       if (newHint !== null) {
         lastHintRef.current = newHint;
