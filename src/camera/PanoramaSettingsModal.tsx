@@ -47,6 +47,19 @@ export interface PanoramaSettings {
    * cleanly on the operator's device before we cut over.
    */
   useARPreview: boolean;
+  /**
+   * Incremental engine choice for live realtime stitching (only used
+   * when AR preview is on).
+   *   'hybrid'   — Samsung-style: cylindrical projection + KLT
+   *                optical flow refinement + feather blend.
+   *   'slitscan' — Apple-style: continuously paints narrow vertical
+   *                strips onto a cylindrical canvas; per-strip
+   *                overlap is 1-3 px so seams are near-invisible.
+   *
+   * Both are A/B-comparable on the same scene by toggling this in
+   * settings without restarting the app.
+   */
+  incrementalEngine: 'hybrid' | 'slitscan';
   /** Hard cap on hold duration (ms).  0 disables auto-stop. */
   maxRecordingMs: number;
   /** Frames per second of recording to sample for stitching. */
@@ -110,6 +123,7 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // Default OFF — opt-in preview only.  Phase 5 will flip this to
   // true once AR-backed capture matches vision-camera's surface.
   useARPreview: false,
+  incrementalEngine: 'hybrid',
   maxRecordingMs: 8000,
   framesPerSecond: 3,
   minFrames: 6,
@@ -195,6 +209,14 @@ export function PanoramaSettingsModal({
               value={settings.useARPreview ? 'on' : 'off'}
               onChange={(v) => update({ useARPreview: v === 'on' })}
               caption="Phase 4.4: swap the camera preview for ARKit's pose-aware feed. Capture flow unchanged (still uses vision-camera). Use to verify AR rendering before Phase 5 cutover."
+            />
+
+            <SectionHeader title="Incremental engine (AR mode only)" />
+            <SegmentedControl
+              options={['hybrid', 'slitscan']}
+              value={settings.incrementalEngine}
+              onChange={(v) => update({ incrementalEngine: v as PanoramaSettings['incrementalEngine'] })}
+              caption="Hybrid: Samsung-style cylindrical + KLT optical flow + feather (best for varied gestures, default). Slitscan: Apple-style narrow-strip painting (cleaner seams when motion is purely rotational, sensitive to body translation). Toggle to A/B test the same scene."
             />
 
             <SectionHeader title="Recording cap" />
