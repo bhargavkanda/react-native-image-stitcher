@@ -878,6 +878,44 @@ static double computeOverlapPctSensor(double sensorRotXRad,
         return cv::Point(0, 0);
     }
 
+    // ── V12.4 SLIT-SCAN + LONG-SIDE CLIP ──
+    //
+    // Apple's pano output looks clean because each frame contributes
+    // only a NARROW central strip — never the wide-FOV corners where
+    // cylindrical projection bows the rectangle into a barrel.  We
+    // do the same: shrink the bbox in cylindrical-pixel space BEFORE
+    // the inverse-map, so cv::remap fills only the strip we want.
+    //
+    //   PORTRAIT (axis = pan_Y, pan = canvas_X):
+    //     pan strip  → narrow in canvas_X, centered on the bbox
+    //     long-side  → trim canvas_Y edges (drop top/bottom corners)
+    //
+    //   LANDSCAPE (axis = pan_X, pan = canvas_Y):
+    //     pan strip  → narrow in canvas_Y, centered on the bbox
+    //     long-side  → trim canvas_X edges (drop left/right corners)
+    //
+    // The 0.70 strip width is chosen to overlap with the next frame
+    // even at the loosest accept (70% pan-axis overlap = consecutive
+    // frame centers ≤70% apart, so a ≥70%-wide strip guarantees
+    // contiguous coverage).  Tighten if curvature still shows;
+    // widen if gaps appear between strips.
+    static const double kPanStripFraction  = 0.70;
+    static const double kLongSideFraction  = 0.85;
+    {
+        int newW, newH;
+        if (_isLandscape) {
+            newW = std::max(1, (int)(bboxW * kLongSideFraction));
+            newH = std::max(1, (int)(bboxH * kPanStripFraction));
+        } else {
+            newW = std::max(1, (int)(bboxW * kPanStripFraction));
+            newH = std::max(1, (int)(bboxH * kLongSideFraction));
+        }
+        bboxX += (bboxW - newW) / 2;
+        bboxY += (bboxH - newH) / 2;
+        bboxW = newW;
+        bboxH = newH;
+    }
+
     // ── Inverse-map: for each bbox pixel, find source pixel ──
     cv::Mat mapX(bboxH, bboxW, CV_32FC1);
     cv::Mat mapY(bboxH, bboxW, CV_32FC1);

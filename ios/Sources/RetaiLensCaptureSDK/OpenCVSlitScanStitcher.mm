@@ -345,6 +345,24 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
         outImage = cv::Mat(); outMask = cv::Mat();
         return cv::Point(0, 0);
     }
+    // V12.4 slit-scan + long-side clip — see v9 engine for the
+    // rationale.  Same fractions, same axis-aware logic.
+    static const double kPanStripFraction  = 0.70;
+    static const double kLongSideFraction  = 0.85;
+    {
+        int newW, newH;
+        if (_isLandscape) {
+            newW = std::max(1, (int)(bboxW * kLongSideFraction));
+            newH = std::max(1, (int)(bboxH * kPanStripFraction));
+        } else {
+            newW = std::max(1, (int)(bboxW * kPanStripFraction));
+            newH = std::max(1, (int)(bboxH * kLongSideFraction));
+        }
+        bboxX += (bboxW - newW) / 2;
+        bboxY += (bboxH - newH) / 2;
+        bboxW = newW;
+        bboxH = newH;
+    }
     cv::Mat mapX(bboxH, bboxW, CV_32FC1);
     cv::Mat mapY(bboxH, bboxW, CV_32FC1);
     const double r00 = R_panToCam.at<double>(0,0), r01 = R_panToCam.at<double>(0,1), r02 = R_panToCam.at<double>(0,2);
