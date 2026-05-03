@@ -167,14 +167,15 @@ constexpr int    kMaxStripWidthPx = 240;
     //    natural than Apple's pure no-first-frame slit-scan.
     if (!_hasFirstFrame) {
         _firstRotationArkit = R_new.clone();
+        // V11 Gaps #1, #2: per-axis K scaling + geometric-mean cylinder
+        // radius.  See OpenCVIncrementalStitcher.mm for full annotation.
         double sx = (double)frameBGR.cols / std::max((NSInteger)1, imageWidth);
         double sy = (double)frameBGR.rows / std::max((NSInteger)1, imageHeight);
-        double s = 0.5 * (sx + sy);
         _K_compose = (cv::Mat_<double>(3, 3) <<
-                      fx * s, 0,      cx * s,
-                      0,      fy * s, cy * s,
-                      0,      0,      1);
-        _focalCompose = fx * s;
+                      fx * sx, 0,       cx * sx,
+                      0,       fy * sy, cy * sy,
+                      0,       0,       1);
+        _focalCompose = std::sqrt((fx * sx) * (fy * sy));
 
         cv::Mat fwdArkitCam = (cv::Mat_<double>(3, 1) << 0, 0, -1);
         cv::Mat fwdWorld = _firstRotationArkit * fwdArkitCam;

@@ -162,6 +162,12 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// up with.  Diagnostic only; not surfaced to JS.
     private var droppedBackpressure: Int = 0
 
+    /// V11 Gap #27: true when an ingest is in flight on the work
+    /// queue.  Subsequent AR delegate frames are dropped (rather
+    /// than queued) so latency between AR time and canvas state
+    /// stays bounded.
+    private var workInFlight: Bool = false
+
     /// Snapshot quality — host can pass on start.
     private var snapshotJpegQuality: Int = 75
 
@@ -362,47 +368,65 @@ public final class RetaiLensIncrementalStitcher: NSObject {
 
         let trackingPoor = (pose.trackingState != .tracking)
 
-        // Synchronously inside the AR delegate: build a cv::Mat from
-        // the pixel buffer (cheap) and run the pose-delta gate.  If
-        // the gate fails, return without touching the work queue at
-        // all — most frames take this path in steady state.
+        // V11 Gap #27: dispatch the heavy pipeline (engine.ingest +
+        // optional snapshot) to the work queue.  Earlier versions
+        // ran the full ~70 ms accept inside the AR delegate thread,
+        // blocking ARKit's 16 ms inter-frame budget and causing
+        // ~4-5 frames to be dropped during each accept.
         //
-        // For candidates that pass the gate, the ObjC method runs the
-        // full pipeline (feature match + RANSAC + warp + blend).  We
-        // deliberately do NOT hop to the work queue first because the
-        // pixel buffer would have to be copied into a Mat anyway and
-        // the rest of the work runs on the cv::Mat we already own.
-        // ARKit fires at ~60 Hz with ~16 ms between frames; a single
-        // accept's ~70 ms work running on the delegate thread is OK
-        // because pose-delta gating skips MOST frames in steady state.
-        // If field testing shows ARKit drops too many frames during
-        // accepts, switch to the work-queue dispatch with an explicit
-        // cv::Mat.clone() before hopping.
-
-        let telemetry: RLISFrameTelemetry
-        if let hybrid = hybrid {
-            telemetry = hybrid.ingest(
-                pixelBuffer: pixelBuffer, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw,
-                fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
-                imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
-                yaw: yaw, pitch: pitch,
-                fovHorizDegrees: fovHDeg, fovVertDegrees: fovVDeg,
-                trackingPoor: trackingPoor
-            )
-        } else if let slit = slit {
-            telemetry = slit.ingest(
-                pixelBuffer: pixelBuffer, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw,
-                fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
-                imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
-                yaw: yaw, pitch: pitch,
-                fovHorizDegrees: fovHDeg, fovVertDegrees: fovVDeg,
-                trackingPoor: trackingPoor
-            )
-        } else {
+        // Backpressure: if the work queue is already busy with a
+        // previous frame, drop this one (don't queue up — that'd
+        // produce an ever-growing latency between AR-time and
+        // canvas-state).  CVPixelBuffer auto-retains via Swift's
+        // ARC; the closure capture extends its lifetime past the
+        // delegate return.
+        if self.workInFlight {
+            self.droppedBackpressure += 1
             return
         }
+        self.workInFlight = true
 
-        // Build state and decide if a snapshot write + emit is in order.
+        let pbCopy = pixelBuffer  // ARC retain across the dispatch
+        workQueue.async { [weak self] in
+            defer { self?.workInFlight = false }
+            guard let self = self else { return }
+
+            let telemetry: RLISFrameTelemetry
+            if let hybrid = hybrid {
+                telemetry = hybrid.ingest(
+                    pixelBuffer: pbCopy, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw,
+                    fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
+                    imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
+                    yaw: yaw, pitch: pitch,
+                    fovHorizDegrees: fovHDeg, fovVertDegrees: fovVDeg,
+                    trackingPoor: trackingPoor
+                )
+            } else if let slit = slit {
+                telemetry = slit.ingest(
+                    pixelBuffer: pbCopy, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw,
+                    fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
+                    imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
+                    yaw: yaw, pitch: pitch,
+                    fovHorizDegrees: fovHDeg, fovVertDegrees: fovVDeg,
+                    trackingPoor: trackingPoor
+                )
+            } else {
+                return
+            }
+
+            self.processIngestResult(
+                telemetry: telemetry, hybrid: hybrid, slit: slit)
+        }
+    }
+
+    /// Pulled out of consumeFrame so the work-queue closure stays
+    /// readable.  Same flow: build state, optionally snapshot, post
+    /// notification.
+    private func processIngestResult(
+        telemetry: RLISFrameTelemetry,
+        hybrid: OpenCVIncrementalStitcher?,
+        slit: OpenCVFirstWinsCylindricalStitcher?
+    ) {
         var snapshotPath: String?
         var snapW = 0, snapH = 0
         let outcome = RetaiLensIncrementalOutcome(rawValue: telemetry.outcome.rawValue)

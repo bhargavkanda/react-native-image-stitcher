@@ -287,15 +287,20 @@ constexpr double kHomDetMax = 1.4;
     // frame.
     if (!_hasFirstFrame) {
         _firstRotationArkit = R_new.clone();
-        // K in compose pixel coords.
+        // V11 Gap #1: per-axis intrinsics scaling (was averaging into
+        // a single scalar — silently distorts whenever compose dims
+        // ratio ≠ sensor dims ratio).  K_compose = diag(sx,sy,1)·K.
         double sx = (double)frameBGR.cols / std::max((NSInteger)1, imageWidth);
         double sy = (double)frameBGR.rows / std::max((NSInteger)1, imageHeight);
-        double s = 0.5 * (sx + sy);
         _K_compose = (cv::Mat_<double>(3, 3) <<
-                      fx * s, 0,      cx * s,
-                      0,      fy * s, cy * s,
-                      0,      0,      1);
-        _focalCompose = fx * s;  // cylinder radius
+                      fx * sx, 0,       cx * sx,
+                      0,       fy * sy, cy * sy,
+                      0,       0,       1);
+        // V11 Gap #2: cylinder radius = geometric mean of compose
+        // focals.  Was just `fx * s`, which made canvas h-spacing
+        // inconsistent with theta-spacing for any anisotropic-pixel
+        // intrinsic.
+        _focalCompose = std::sqrt((fx * sx) * (fy * sy));
 
         // V9: build the panorama-to-world rotation from the first
         // ARKit pose.  Panorama +Y = world up, +Z = horizontal
@@ -514,13 +519,17 @@ constexpr double kHomDetMax = 1.4;
                                               error:(NSError **)error
 {
     _snapshotSeq += 1;
-    // Tight-crop the live snapshot to the actual content.  No
-    // exposure-comp on live snapshots — CLAHE adds ~50 ms which
-    // would push per-accept latency over the realtime budget.
+    // V11 Gap #16: live snapshots use plain bounding-box crop, NOT
+    // the O(W·H) inscribed-rect search.  Inscribed-rect ran on every
+    // accept (snapshotEveryNAccepts=1 default), adding ~10 ms ×
+    // accept-rate to the AR delegate thread.  At ~3 accepts/s and
+    // pipeline already at 70 ms/accept, that's ~30 ms of wasted
+    // work per second on the wrong thread.
     return [self writeSnapshotToPath:[self currentSnapshotPath]
                           jpegQuality:quality
                             tightCrop:YES
                     applyExposureComp:NO
+                  applyInscribedCrop:NO
                                 error:error];
 }
 
@@ -528,16 +537,14 @@ constexpr double kHomDetMax = 1.4;
                               jpegQuality:(NSInteger)quality
                                     error:(NSError **)error
 {
-    // V9d: apply exposure-compensation at finalize.  Runs off the
+    // Final output: full inscribed-rect crop + CLAHE.  Runs off the
     // main thread because Swift wrapper dispatches finalize on
-    // workQueue.  CLAHE on the L channel of Lab evens out brightness
-    // variation across the panorama (frames captured ~200ms apart
-    // with auto-exposure produce visible vertical banding without
-    // this) without crushing colour or contrast.
+    // workQueue.
     RLISSnapshot *snap = [self writeSnapshotToPath:outputPath
                                        jpegQuality:quality
                                          tightCrop:YES
                                  applyExposureComp:YES
+                                applyInscribedCrop:YES
                                              error:error];
     [self reset];
     return snap;
@@ -559,6 +566,7 @@ constexpr double kHomDetMax = 1.4;
                                    jpegQuality:(NSInteger)quality
                                      tightCrop:(BOOL)tightCrop
                              applyExposureComp:(BOOL)applyExposureComp
+                            applyInscribedCrop:(BOOL)applyInscribedCrop
                                          error:(NSError **)error
 {
     if (_accepted == 0) {
@@ -579,25 +587,18 @@ constexpr double kHomDetMax = 1.4;
         cv::Rect bbox = cv::boundingRect(_canvasMask);
         if (bbox.width <= 0 || bbox.height <= 0) {
             cropRect = cv::Rect(0, 0, _canvas.cols, _canvas.rows);
+        } else if (!applyInscribedCrop) {
+            // V11 Gap #16: live snapshot path uses cheap bounding box.
+            // The inscribed-rect search is O(W·H) and runs only at
+            // finalize.
+            cropRect = bbox;
         } else {
             // Maximum inscribed axis-aligned rectangle inside the
-            // painted region (largest rectangle of all-255 pixels in
-            // _canvasMask, restricted to the bounding box).  This is
-            // what gives the final JPEG clean rectangular borders
-            // instead of the jagged corners a planar/cylindrical pan
-            // produces — same crop Apple/Samsung apply at finalize.
-            //
-            // Algorithm: for each row, compute "histogram" of how
-            // many consecutive 255-pixels are above each column
-            // (including this row).  For each row's histogram,
-            // run the classic O(W) stack-based largest-rectangle-
-            // in-histogram.  Track the global max across all rows.
-            // Total cost O(W*H) on the bbox region only.
+            // painted region — clean rectangular borders for the
+            // final saved JPEG.  Classic O(W·H) histogram-monotonic-
+            // stack algorithm; expensive but final-output-only.
             cropRect = [self largestInscribedRect:_canvasMask(bbox)];
             if (cropRect.width <= 0 || cropRect.height <= 0) {
-                // Fallback to plain bounding box if for some reason
-                // the inscribed search failed (shouldn't happen, but
-                // belt-and-suspenders).
                 cropRect = bbox;
             } else {
                 cropRect.x += bbox.x;
@@ -1019,73 +1020,161 @@ static double computeOverlapPctSensor(double sensorRotXRad,
                              featureMask, /*blockSize=*/3, false, 0.04);
     if (canvasPts.size() < 8) return cv::Point2f(0, 0);
 
-    // Track into warped frame.
+    // Forward track: canvas → warped.
     std::vector<cv::Point2f> warpedPts;
-    std::vector<uchar> status;
-    std::vector<float> err;
+    std::vector<uchar> statusFwd;
+    std::vector<float> errFwd;
     cv::calcOpticalFlowPyrLK(canvasGray, warpedGray,
-                              canvasPts, warpedPts, status, err,
+                              canvasPts, warpedPts, statusFwd, errFwd,
                               cv::Size(21, 21), 3,
                               cv::TermCriteria(
                                   cv::TermCriteria::COUNT
                                       | cv::TermCriteria::EPS,
                                   20, 0.03));
 
-    // Collect inlier displacements.
-    std::vector<float> dxs, dys;
-    dxs.reserve(canvasPts.size());
-    dys.reserve(canvasPts.size());
+    // V11 Gap #9: forward-backward bidirectional check.  Track the
+    // forward-tracked points BACK into the canvas frame; reject any
+    // point whose round-trip error exceeds 1 px.  Status flag and
+    // patch-error threshold catch obvious failures, but trackers
+    // can drift inside the search window without flipping status —
+    // FB error is the standard reliability gate (every production
+    // OF aligner uses it).
+    std::vector<cv::Point2f> canvasPtsRev;
+    std::vector<uchar> statusBwd;
+    std::vector<float> errBwd;
+    cv::calcOpticalFlowPyrLK(warpedGray, canvasGray,
+                              warpedPts, canvasPtsRev, statusBwd, errBwd,
+                              cv::Size(21, 21), 3,
+                              cv::TermCriteria(
+                                  cv::TermCriteria::COUNT
+                                      | cv::TermCriteria::EPS,
+                                  20, 0.03));
+
+    // Build the inlier set: forward + backward both succeeded, FB
+    // error < 1 px, displacement in plausible range.
+    std::vector<cv::Point2f> goodCanvas, goodWarped;
+    goodCanvas.reserve(canvasPts.size());
+    goodWarped.reserve(canvasPts.size());
     for (size_t i = 0; i < canvasPts.size(); i++) {
-        if (!status[i] || err[i] > 30.0f) continue;
+        if (!statusFwd[i] || !statusBwd[i]) continue;
+        if (errFwd[i] > 30.0f || errBwd[i] > 30.0f) continue;
+        float fbDx = canvasPtsRev[i].x - canvasPts[i].x;
+        float fbDy = canvasPtsRev[i].y - canvasPts[i].y;
+        if (fbDx*fbDx + fbDy*fbDy > 1.0f) continue;  // > 1 px FB error
         float dx = warpedPts[i].x - canvasPts[i].x;
         float dy = warpedPts[i].y - canvasPts[i].y;
-        // Filter outliers — implausible jumps.
-        // V11 partial Gap #8: tighten outlier threshold from 60px →
-        // 30px.  OF residuals exceeding 30 px almost always indicate
-        // either a tracking failure on a single feature or a moving
-        // scene element — never genuine pose-vs-pixel disagreement
-        // for cylindrical projection at typical pose accuracy.
-        // Tighter threshold bounds per-frame drift contribution to
-        // ~30 px max, preventing unbounded panorama walk-off.  Real
-        // fix (re-anchor _R_panToWorld) deferred to Phase 2 after BA.
         if (std::fabs(dx) > 30.0f || std::fabs(dy) > 30.0f) continue;
-        dxs.push_back(dx);
-        dys.push_back(dy);
+        goodCanvas.push_back(canvasPts[i]);
+        goodWarped.push_back(warpedPts[i]);
     }
-    if (dxs.size() < 6) return cv::Point2f(0, 0);
+    if (goodCanvas.size() < 6) return cv::Point2f(0, 0);
 
-    // Median is robust to remaining outliers.
-    std::nth_element(dxs.begin(), dxs.begin() + dxs.size() / 2, dxs.end());
-    std::nth_element(dys.begin(), dys.begin() + dys.size() / 2, dys.end());
-    float medDx = dxs[dxs.size() / 2];
-    float medDy = dys[dys.size() / 2];
+    // V11 Gap #10: 2-D RANSAC translation fit (instead of per-axis
+    // independent median, which can pick a (dx, dy) that no single
+    // point voted for — an issue in multi-modal flow scenes like a
+    // shelf with a moving customer).
+    //
+    // `estimateAffinePartial2D` fits a 2.5-DoF (rotation + uniform
+    // scale + translation) similarity transform with RANSAC.  We
+    // use only the translation component; the rotation/scale fall-
+    // out shouldn't be applied (cylindrical warp already handled
+    // those — OF is only correcting residual translation).
+    std::vector<uchar> ransacInliers;
+    cv::Mat affine = cv::estimateAffinePartial2D(
+        goodCanvas, goodWarped, ransacInliers, cv::RANSAC,
+        /*ransacReprojThreshold=*/3.0,
+        /*maxIters=*/2000,
+        /*confidence=*/0.99,
+        /*refineIters=*/10);
+    if (affine.empty()) return cv::Point2f(0, 0);
+    // Inlier ratio sanity check.
+    int inlierCount = cv::countNonZero(ransacInliers);
+    if (inlierCount < 6 || inlierCount * 2 < (int)goodCanvas.size()) {
+        return cv::Point2f(0, 0);
+    }
+    float medDx = (float)affine.at<double>(0, 2);
+    float medDy = (float)affine.at<double>(1, 2);
 
     // The track tells us "to align canvas pixels with warped pixels,
-    // shift WARPED by (-medDx, -medDy)".  We want to shift the
-    // PLACEMENT of warped on canvas by the opposite to compensate.
+    // shift WARPED by (-medDx, -medDy)".  We shift the placement
+    // of warped on canvas by the opposite to compensate.
     return cv::Point2f(-medDx, -medDy);
 }
 
-/// V9 feather blend.  Smooth ratio-of-distances feather (the
-/// algorithm cv::detail::FeatherBlender uses) over the canvas-vs-new
-/// overlap region.  Outside the overlap, copy whichever frame has
-/// content.
+/// V11 Gap #11: NARROW-band feather blend.  Earlier versions used
+/// `alpha = distNew / (distNew + distCanvas)` over the FULL overlap,
+/// which smears every pixel of disagreement across the entire
+/// overlap region — the textbook ghosting source called out by
+/// Brown-Lowe 2007.  At the typical ARKit ~1-2° pose error + KLT-
+/// refined ~5 px residual, full-overlap feather creates visible
+/// double-image.
+///
+/// Narrow-band approach: define the SEAM as `distNew == distCanvas`
+/// (the locus of equal-distance-from-each-frame's-edge points).
+/// Within `kSeamBandPx` of the seam, smoothly transition alpha 0→1.
+/// Outside the band, alpha is binary (0 or 1).  Each pixel comes
+/// from EXACTLY ONE frame, except in the small seam band — so any
+/// per-pixel misalignment can't produce ghosts.
 - (void)featherBlendWarped:(cv::Mat)warped
                        mask:(cv::Mat)warpedMask
                 intoCanvas:(cv::Mat)canvasRoi
                 canvasMask:(cv::Mat)canvasMaskRoi
 {
+    // V11 Gap #13: per-pair gain compensation BEFORE blending.
+    // Frames captured 200ms apart often differ in luminance by
+    // 5-15% due to auto-exposure drift; without compensation the
+    // panorama shows visible vertical/horizontal banding at every
+    // seam.  Apply a per-channel mean ratio (canvas / warped)
+    // computed on the overlap region.  Conservative bounds to
+    // avoid amplifying noise.
+    cv::Mat warpedAdj;
+    cv::Mat overlapMask;
+    cv::bitwise_and(canvasMaskRoi, warpedMask, overlapMask);
+    int overlapPx = cv::countNonZero(overlapMask);
+    if (overlapPx > 100) {
+        cv::Scalar canvasMean = cv::mean(canvasRoi, overlapMask);
+        cv::Scalar warpedMean = cv::mean(warped, overlapMask);
+        double gainB = (warpedMean[0] > 1.0) ? (canvasMean[0] / warpedMean[0]) : 1.0;
+        double gainG = (warpedMean[1] > 1.0) ? (canvasMean[1] / warpedMean[1]) : 1.0;
+        double gainR = (warpedMean[2] > 1.0) ? (canvasMean[2] / warpedMean[2]) : 1.0;
+        // Clamp gains to ±25% to avoid blowing out highlights or
+        // crushing shadows on a single noisy mean estimate.
+        gainB = std::clamp(gainB, 0.75, 1.25);
+        gainG = std::clamp(gainG, 0.75, 1.25);
+        gainR = std::clamp(gainR, 0.75, 1.25);
+        cv::Mat warpedF;
+        warped.convertTo(warpedF, CV_32FC3);
+        std::vector<cv::Mat> ch(3);
+        cv::split(warpedF, ch);
+        ch[0] *= gainB;
+        ch[1] *= gainG;
+        ch[2] *= gainR;
+        cv::merge(ch, warpedF);
+        warpedF.convertTo(warpedAdj, CV_8UC3);
+    } else {
+        warpedAdj = warped;
+    }
+
     cv::Mat distNew, distCanvas;
     cv::distanceTransform(warpedMask, distNew, cv::DIST_L2, 3);
     cv::distanceTransform(canvasMaskRoi, distCanvas, cv::DIST_L2, 3);
 
-    // Ratio alpha: where new is deeper, alpha→1; where canvas is
-    // deeper, alpha→0.  Smooth transition mid-overlap.
-    cv::Mat sum = distNew + distCanvas + 1e-6f;
+    // Signed distance from seam: positive = "new wins side", negative
+    // = "canvas wins side".  Pixels >= +bandHalf use new (alpha=1),
+    // pixels <= -bandHalf use canvas (alpha=0), in-between band gets
+    // a smooth ramp.
+    constexpr float kSeamBandPx = 5.0f;
+    cv::Mat signedDist = distNew - distCanvas;
     cv::Mat alpha;
-    cv::divide(distNew, sum, alpha, 1.0, CV_32F);
+    // alpha = clamp((signedDist + bandHalf) / band, 0, 1)
+    signedDist.convertTo(alpha, CV_32F,
+                          1.0 / (2.0 * kSeamBandPx),
+                          0.5);
+    cv::min(alpha, 1.0f, alpha);
+    cv::max(alpha, 0.0f, alpha);
 
-    // First-touch regions: alpha=1 unconditionally.
+    // First-touch regions: alpha=1 unconditionally (canvas was empty
+    // here, new frame is the only source).
     cv::Mat noPrior;
     cv::compare(canvasMaskRoi, 0, noPrior, cv::CMP_EQ);
     alpha.setTo(1.0f, noPrior);
@@ -1102,7 +1191,7 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     invAlpha3 = cv::Scalar(1, 1, 1) - alpha3;
 
     cv::Mat warpedF, canvasF;
-    warped.convertTo(warpedF, CV_32FC3);
+    warpedAdj.convertTo(warpedF, CV_32FC3);  // V11 Gap #13: use gain-corrected
     canvasRoi.convertTo(canvasF, CV_32FC3);
     cv::Mat blendedF = warpedF.mul(alpha3) + canvasF.mul(invAlpha3);
     cv::Mat blended8;
