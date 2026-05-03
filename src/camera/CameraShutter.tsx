@@ -170,10 +170,17 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
           // fires onHoldComplete + drops back to idle.
           if (maxHoldMs && maxHoldMs > 0) {
             maxHoldTimerRef.current = setTimeout(() => {
-              if (phaseRef.current === 'holding') {
-                setPhaseBoth('idle');
-                onHoldComplete();
-              }
+              // Auto-stop unconditionally after maxHoldMs.  Earlier
+              // versions gated this on `phase === 'holding'`, which
+              // skipped the fire when iOS' gesture recogniser had
+              // already flipped the phase to 'idle' due to finger
+              // drift from camera motion — leaving the engine running
+              // for hundreds of frames after the user thought they
+              // released.  An extra onHoldComplete call when nothing
+              // is recording is a safe no-op (`!incremental.isRunning`
+              // early-returns).
+              if (phaseRef.current === 'holding') setPhaseBoth('idle');
+              onHoldComplete();
             }, maxHoldMs);
           }
         }

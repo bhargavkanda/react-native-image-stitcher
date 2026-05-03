@@ -159,7 +159,11 @@ constexpr int    kMaxStripWidthPx = 240;
 
     cv::Mat R_new = quatToR(qx, qy, qz, qw);
 
-    // First frame: build panorama frame, place a center strip.
+    // ── First frame: build panorama coords + paint the FULL first
+    //    frame via cylindrical warp.  Earlier slit-scan versions
+    //    painted strips only; the user's expectation is "first full
+    //    frame visible, slits append at its edges" — which is more
+    //    natural than Apple's pure no-first-frame slit-scan.
     if (!_hasFirstFrame) {
         _firstRotationArkit = R_new.clone();
         double sx = (double)frameBGR.cols / std::max((NSInteger)1, imageWidth);
@@ -171,7 +175,6 @@ constexpr int    kMaxStripWidthPx = 240;
                       0,      0,      1);
         _focalCompose = fx * s;
 
-        // Panorama-to-world (gravity-up Y, first-camera-forward Z).
         cv::Mat fwdArkitCam = (cv::Mat_<double>(3, 1) << 0, 0, -1);
         cv::Mat fwdWorld = _firstRotationArkit * fwdArkitCam;
         double fwx = fwdWorld.at<double>(0);
@@ -184,37 +187,26 @@ constexpr int    kMaxStripWidthPx = 240;
             0,    1, 0,
             -pzx, 0, pzz);
 
-        // First "strip": paint a SMALL CENTRE PATCH (60×60), not
-        // the full frame.  Earlier versions painted the entire
-        // 960×720 first frame as a "seed", but subsequent strips at
-        // small pose deltas (~20-100 px) then landed INSIDE that
-        // 720-px-tall footprint and overlay-painted on top of the
-        // existing pixels rather than appending at the edges.
-        //
-        // A 60×60 seed gives the PiP something to render so the
-        // operator sees the capture has started, while leaving
-        // ~99% of the canvas free for genuinely-new strips to
-        // append into.  The seed pixels eventually get overpainted
-        // by strips that pass through the centre region, so the
-        // visual artefact is bounded.
-        _canvasOriginCylX = -_canvas.cols / 2;
-        _canvasOriginCylY = -_canvas.rows / 2;
-        const int kSeedPx = 60;
-        int seedSrcX = (frameBGR.cols - kSeedPx) / 2;
-        int seedSrcY = (frameBGR.rows - kSeedPx) / 2;
-        if (seedSrcX < 0) seedSrcX = 0;
-        if (seedSrcY < 0) seedSrcY = 0;
-        int seedW = std::min(kSeedPx, frameBGR.cols - seedSrcX);
-        int seedH = std::min(kSeedPx, frameBGR.rows - seedSrcY);
-        cv::Rect seedSrc(seedSrcX, seedSrcY, seedW, seedH);
-        cv::Rect seedDst((_canvas.cols - seedW) / 2,
-                          (_canvas.rows - seedH) / 2, seedW, seedH);
-        seedDst &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
-        if (seedDst.width > 0 && seedDst.height > 0) {
-            cv::Rect srcR(0, 0, seedDst.width, seedDst.height);
-            frameBGR(seedSrc)(srcR).copyTo(_canvas(seedDst));
-            _canvasMask(seedDst).setTo(255);
+        // Cylindrical-warp the first frame and place at canvas centre.
+        cv::Mat warpedFirst, warpedFirstMask;
+        cv::Point firstCornerCyl =
+            [self cylindricalWarp:frameBGR rArkit:R_new
+                            outImage:warpedFirst outMask:warpedFirstMask];
+        if (warpedFirst.empty()) {
+            [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
+            return tele;
         }
+        int dstX = (int)(_canvas.cols - warpedFirst.cols) / 2;
+        int dstY = (int)(_canvas.rows - warpedFirst.rows) / 2;
+        cv::Rect roi(dstX, dstY, warpedFirst.cols, warpedFirst.rows);
+        roi &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
+        cv::Rect srcR(0, 0, roi.width, roi.height);
+        warpedFirst(srcR).copyTo(_canvas(roi), warpedFirstMask(srcR));
+        warpedFirstMask(srcR).copyTo(_canvasMask(roi),
+                                       warpedFirstMask(srcR));
+        _canvasOriginCylX = firstCornerCyl.x - dstX;
+        _canvasOriginCylY = firstCornerCyl.y - dstY;
+
         _lastAcceptedTheta = 0;
         _lastAcceptedH = 0;
         _hasFirstFrame = true;
@@ -224,80 +216,29 @@ constexpr int    kMaxStripWidthPx = 240;
         return tele;
     }
 
-    // Compute current frame's center on the cylinder.
-    cv::Mat R_panToCam = _M_arkitToCv * R_new.t() * _R_panToWorld;
-    cv::Mat camToPan = R_panToCam.t();
-    cv::Mat centerRayCam = (cv::Mat_<double>(3, 1) << 0, 0, 1);
-    cv::Mat centerRayPan = camToPan * centerRayCam;
-    double wx = centerRayPan.at<double>(0);
-    double wy = centerRayPan.at<double>(1);
-    double wz = centerRayPan.at<double>(2);
-    double currentTheta = std::atan2(wx, wz);
-    double denom = std::sqrt(wx*wx + wz*wz);
-    double currentH = (denom > 1e-9) ? (wy / denom) : 0;
-
-    double dTheta = currentTheta - _lastAcceptedTheta;
-    double dH = currentH - _lastAcceptedH;
-    int dThetaPx = (int)std::round(_focalCompose * std::fabs(dTheta));
-    int dHPx     = (int)std::round(_focalCompose * std::fabs(dH));
-
-    // ── Lock pan direction at second accept ──────────────────────
-    if (_slitScanMode == 0) {
-        if (dThetaPx < kMinStripWidthPx && dHPx < kMinStripWidthPx) {
-            [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
-            return tele;
-        }
-        _slitScanMode = (dThetaPx >= dHPx) ? 1 : 2;
+    // ── Subsequent frame: cylindrical-warp the FULL new frame, then
+    //    paint into the canvas ONLY where the canvas mask is empty.
+    //    "First-painted wins" — the original first frame stays
+    //    untouched in its footprint, and new frames append content
+    //    only into pixels that have never been painted before.  This
+    //    is what gives the user the "first full frame, slits at the
+    //    edges" behaviour.  No gaps because the cylindrical-warped
+    //    new frame covers a wide angular extent (similar to the
+    //    first frame's), so adjacent frames overlap heavily and
+    //    every pixel between them gets covered.
+    cv::Mat warpedNew, warpedNewMask;
+    cv::Point newCornerCyl =
+        [self cylindricalWarp:frameBGR rArkit:R_new
+                        outImage:warpedNew outMask:warpedNewMask];
+    if (warpedNew.empty()) {
+        [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
+        return tele;
     }
 
-    // ── Mode-specific strip extraction + placement ──────────────
-    int stripWidthPx = 0, stripHeightPx = 0;
-    cv::Rect stripSrcRect;
-    cv::Rect dstRoi;
-
-    if (_slitScanMode == 1) {
-        // YAW pan — extract a vertical strip from frame centre,
-        // strip width tracks angular delta.
-        if (dThetaPx < kMinStripWidthPx) {
-            [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
-            return tele;
-        }
-        stripWidthPx  = std::min(dThetaPx, kMaxStripWidthPx);
-        stripHeightPx = frameBGR.rows;
-        int frameCx   = frameBGR.cols / 2;
-        int srcX      = frameCx - stripWidthPx / 2;
-        srcX = std::max(0, std::min(srcX, frameBGR.cols - stripWidthPx));
-        stripSrcRect = cv::Rect(srcX, 0, stripWidthPx, stripHeightPx);
-
-        int cx = (int)std::round(_focalCompose * currentTheta) - _canvasOriginCylX;
-        int cy = (int)std::round(-_focalCompose * currentH)     - _canvasOriginCylY;
-        // Y-flip: panorama +Y is gravity-up; image +Y is image-down.
-        // Same convention as the v9 hybrid engine.
-        dstRoi = cv::Rect(cx - stripWidthPx / 2, cy - stripHeightPx / 2,
-                          stripWidthPx, stripHeightPx);
-    } else {
-        // PITCH pan — extract a horizontal strip from frame centre,
-        // strip HEIGHT tracks pitch delta.  The "narrow seam" axis
-        // is now horizontal instead of vertical.
-        if (dHPx < kMinStripWidthPx) {
-            [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
-            return tele;
-        }
-        stripHeightPx = std::min(dHPx, kMaxStripWidthPx);
-        stripWidthPx  = frameBGR.cols;
-        int frameCy   = frameBGR.rows / 2;
-        int srcY      = frameCy - stripHeightPx / 2;
-        srcY = std::max(0, std::min(srcY, frameBGR.rows - stripHeightPx));
-        stripSrcRect = cv::Rect(0, srcY, stripWidthPx, stripHeightPx);
-
-        int cx = (int)std::round(_focalCompose * currentTheta) - _canvasOriginCylX;
-        int cy = (int)std::round(-_focalCompose * currentH)     - _canvasOriginCylY;
-        dstRoi = cv::Rect(cx - stripWidthPx / 2, cy - stripHeightPx / 2,
-                          stripWidthPx, stripHeightPx);
-    }
-
-    cv::Mat stripSrc = frameBGR(stripSrcRect);
-
+    cv::Point newCornerCanvas(newCornerCyl.x - _canvasOriginCylX,
+                              newCornerCyl.y - _canvasOriginCylY);
+    cv::Rect dstRoi(newCornerCanvas.x, newCornerCanvas.y,
+                    warpedNew.cols, warpedNew.rows);
     cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
     cv::Rect dstClipped = dstRoi & canvasBounds;
     if (dstClipped.width <= 0 || dstClipped.height <= 0) {
@@ -307,68 +248,132 @@ constexpr int    kMaxStripWidthPx = 240;
     cv::Rect srcRoi(dstClipped.x - dstRoi.x, dstClipped.y - dstRoi.y,
                     dstClipped.width, dstClipped.height);
 
-    // Per-strip feather: soften the edges PERPENDICULAR to the seam.
-    //   YAW mode (vertical strips, seams on left/right edges)  → feather X.
-    //   PITCH mode (horizontal strips, seams on top/bottom)    → feather Y.
-    cv::Mat stripMask(dstClipped.height, dstClipped.width, CV_8UC1, cv::Scalar(255));
-    if (_slitScanMode == 1) {
-        int featherPx = std::min(2, dstClipped.width / 4);
-        for (int x = 0; x < featherPx; x++) {
-            uchar v = (uchar)((float)x / featherPx * 255.0f);
-            for (int y = 0; y < dstClipped.height; y++) {
-                stripMask.at<uchar>(y, x) = std::min(stripMask.at<uchar>(y, x), v);
-                stripMask.at<uchar>(y, dstClipped.width - 1 - x) =
-                    std::min(stripMask.at<uchar>(y, dstClipped.width - 1 - x), v);
-            }
-        }
-    } else {
-        int featherPx = std::min(2, dstClipped.height / 4);
-        for (int y = 0; y < featherPx; y++) {
-            uchar v = (uchar)((float)y / featherPx * 255.0f);
-            for (int x = 0; x < dstClipped.width; x++) {
-                stripMask.at<uchar>(y, x) = std::min(stripMask.at<uchar>(y, x), v);
-                stripMask.at<uchar>(dstClipped.height - 1 - y, x) =
-                    std::min(stripMask.at<uchar>(dstClipped.height - 1 - y, x), v);
-            }
-        }
-    }
-    cv::Mat canvasRoi = _canvas(dstClipped);
-    cv::Mat canvasMaskRoi = _canvasMask(dstClipped);
-    cv::Mat stripCropped = stripSrc(srcRoi);
+    cv::Mat warpedNewClipped     = warpedNew(srcRoi);
+    cv::Mat warpedNewMaskClipped = warpedNewMask(srcRoi);
+    cv::Mat canvasRoi            = _canvas(dstClipped);
+    cv::Mat canvasMaskRoi        = _canvasMask(dstClipped);
 
+    // Paint into NEW pixels only.
     cv::Mat noPrior;
     cv::compare(canvasMaskRoi, 0, noPrior, cv::CMP_EQ);
-    stripCropped.copyTo(canvasRoi, noPrior);
-
-    cv::Mat overlapMask;
-    cv::bitwise_and(canvasMaskRoi, stripMask, overlapMask);
-    if (cv::countNonZero(overlapMask) > 0) {
-        cv::Mat alphaF;
-        stripMask.convertTo(alphaF, CV_32F, 1.0 / 255.0);
-        cv::Mat alpha3;
-        cv::Mat ch[] = {alphaF, alphaF, alphaF};
-        cv::merge(ch, 3, alpha3);
-        cv::Mat invAlpha3 = cv::Scalar(1, 1, 1) - alpha3;
-        cv::Mat sF, cF;
-        stripCropped.convertTo(sF, CV_32FC3);
-        canvasRoi.convertTo(cF, CV_32FC3);
-        cv::Mat blendedF = sF.mul(alpha3) + cF.mul(invAlpha3);
-        cv::Mat blended8;
-        blendedF.convertTo(blended8, CV_8UC3);
-        blended8.copyTo(canvasRoi, overlapMask);
+    cv::Mat paintMask;
+    cv::bitwise_and(noPrior, warpedNewMaskClipped, paintMask);
+    if (cv::countNonZero(paintMask) > 0) {
+        warpedNewClipped.copyTo(canvasRoi, paintMask);
+        cv::bitwise_or(canvasMaskRoi, paintMask, canvasMaskRoi);
+        _accepted += 1;
+        [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+        [tele setValue:@(1.0) forKey:@"confidence"];
+    } else {
+        // No new content to paint — the new frame's coverage is
+        // entirely inside the existing canvas.  Skip silently.
+        [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
     }
-    cv::bitwise_or(canvasMaskRoi, stripMask, canvasMaskRoi);
-
-    _lastAcceptedTheta = currentTheta;
-    _lastAcceptedH = currentH;
-    _accepted += 1;
-    [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
-    [tele setValue:@(1.0) forKey:@"confidence"];
+    _lastAcceptedTheta = 0;  // no longer used in this path
+    _lastAcceptedH = 0;
 
     auto t1 = std::chrono::steady_clock::now();
     double ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
     [tele setValue:@(ms) forKey:@"processingMs"];
     return tele;
+}
+
+// Hand-rolled cylindrical projection.  Same algorithm as v9's helper
+// in OpenCVIncrementalStitcher.mm — duplicated here to keep the two
+// engines cleanly separated as separate files.  See that file for the
+// full annotation; in short:
+//   - panorama frame is gravity-up Y, first-camera-forward Z
+//   - R_panToCam = M · R_arkit⁻¹ · R_panToWorld
+//   - inverse-map each canvas pixel (theta, h) back to a source pixel
+//   - cv::remap fills the output bbox
+//   - output mask has 255 only where the inverse map landed inside
+//     the source frame
+- (cv::Point)cylindricalWarp:(const cv::Mat &)src
+                       rArkit:(const cv::Mat &)rArkit
+                     outImage:(cv::Mat &)outImage
+                      outMask:(cv::Mat &)outMask
+{
+    if (_R_panToWorld.empty() || _focalCompose <= 0) {
+        outImage = cv::Mat(); outMask = cv::Mat();
+        return cv::Point(0, 0);
+    }
+    cv::Mat R_panToCam = _M_arkitToCv * rArkit.t() * _R_panToWorld;
+    const double fx = _K_compose.at<double>(0, 0);
+    const double fy = _K_compose.at<double>(1, 1);
+    const double cx = _K_compose.at<double>(0, 2);
+    const double cy = _K_compose.at<double>(1, 2);
+    const double f  = _focalCompose;
+
+    cv::Mat R_camToPan = R_panToCam.t();
+    auto projectCorner = ^cv::Point2d(double u, double v) {
+        double rx = (u - cx) / fx;
+        double ry = (v - cy) / fy;
+        double rz = 1.0;
+        double wx = R_camToPan.at<double>(0,0)*rx + R_camToPan.at<double>(0,1)*ry + R_camToPan.at<double>(0,2)*rz;
+        double wy = R_camToPan.at<double>(1,0)*rx + R_camToPan.at<double>(1,1)*ry + R_camToPan.at<double>(1,2)*rz;
+        double wz = R_camToPan.at<double>(2,0)*rx + R_camToPan.at<double>(2,1)*ry + R_camToPan.at<double>(2,2)*rz;
+        double theta = std::atan2(wx, wz);
+        double denom = std::sqrt(wx*wx + wz*wz);
+        double h = (denom > 1e-9) ? (wy / denom) : 0.0;
+        return cv::Point2d(f * theta, -f * h);  // Y-flip: panorama +Y up vs image +Y down
+    };
+    cv::Point2d c00 = projectCorner(0, 0);
+    cv::Point2d c10 = projectCorner((double)src.cols - 1, 0);
+    cv::Point2d c01 = projectCorner(0, (double)src.rows - 1);
+    cv::Point2d c11 = projectCorner((double)src.cols - 1, (double)src.rows - 1);
+    double minX = std::min({c00.x, c10.x, c01.x, c11.x});
+    double maxX = std::max({c00.x, c10.x, c01.x, c11.x});
+    double minY = std::min({c00.y, c10.y, c01.y, c11.y});
+    double maxY = std::max({c00.y, c10.y, c01.y, c11.y});
+    int bboxX = (int)std::floor(minX);
+    int bboxY = (int)std::floor(minY);
+    int bboxW = (int)std::ceil(maxX - minX) + 1;
+    int bboxH = (int)std::ceil(maxY - minY) + 1;
+    if (bboxW <= 0 || bboxH <= 0
+        || bboxW > (int)_canvas.cols * 2 || bboxH > (int)_canvas.rows * 2) {
+        outImage = cv::Mat(); outMask = cv::Mat();
+        return cv::Point(0, 0);
+    }
+    cv::Mat mapX(bboxH, bboxW, CV_32FC1);
+    cv::Mat mapY(bboxH, bboxW, CV_32FC1);
+    const double r00 = R_panToCam.at<double>(0,0), r01 = R_panToCam.at<double>(0,1), r02 = R_panToCam.at<double>(0,2);
+    const double r10 = R_panToCam.at<double>(1,0), r11 = R_panToCam.at<double>(1,1), r12 = R_panToCam.at<double>(1,2);
+    const double r20 = R_panToCam.at<double>(2,0), r21 = R_panToCam.at<double>(2,1), r22 = R_panToCam.at<double>(2,2);
+    for (int y = 0; y < bboxH; y++) {
+        float *mx = mapX.ptr<float>(y);
+        float *my = mapY.ptr<float>(y);
+        double cylY = (double)(bboxY + y);
+        double h = -cylY / f;  // inverse of forward Y-flip
+        for (int x = 0; x < bboxW; x++) {
+            double cylX = (double)(bboxX + x);
+            double theta = cylX / f;
+            double sinT = std::sin(theta);
+            double cosT = std::cos(theta);
+            double wx = sinT, wy = h, wz = cosT;
+            double rx = r00*wx + r01*wy + r02*wz;
+            double ry = r10*wx + r11*wy + r12*wz;
+            double rz = r20*wx + r21*wy + r22*wz;
+            if (rz <= 1e-6) { mx[x] = -1.0f; my[x] = -1.0f; }
+            else {
+                double u = fx * rx / rz + cx;
+                double v = fy * ry / rz + cy;
+                if (u < 0 || u >= (double)src.cols || v < 0 || v >= (double)src.rows) {
+                    mx[x] = -1.0f; my[x] = -1.0f;
+                } else { mx[x] = (float)u; my[x] = (float)v; }
+            }
+        }
+    }
+    outImage.create(bboxH, bboxW, src.type());
+    cv::remap(src, outImage, mapX, mapY,
+              cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+    outMask.create(bboxH, bboxW, CV_8UC1);
+    outMask.setTo(0);
+    for (int y = 0; y < bboxH; y++) {
+        const float *mx = mapX.ptr<float>(y);
+        uchar *m = outMask.ptr<uchar>(y);
+        for (int x = 0; x < bboxW; x++) if (mx[x] >= 0.0f) m[x] = 255;
+    }
+    return cv::Point(bboxX, bboxY);
 }
 
 - (BOOL)convertPixelBuffer:(CVPixelBufferRef)pixelBuffer to:(cv::Mat &)outBGR {
