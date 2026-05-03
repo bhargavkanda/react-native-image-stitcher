@@ -184,18 +184,36 @@ constexpr int    kMaxStripWidthPx = 240;
             0,    1, 0,
             -pzx, 0, pzz);
 
-        // First strip: paint the FULL frame as a starting block at
-        // canvas centre (the seed for subsequent strip painting).
+        // First "strip": paint a SMALL CENTRE PATCH (60×60), not
+        // the full frame.  Earlier versions painted the entire
+        // 960×720 first frame as a "seed", but subsequent strips at
+        // small pose deltas (~20-100 px) then landed INSIDE that
+        // 720-px-tall footprint and overlay-painted on top of the
+        // existing pixels rather than appending at the edges.
+        //
+        // A 60×60 seed gives the PiP something to render so the
+        // operator sees the capture has started, while leaving
+        // ~99% of the canvas free for genuinely-new strips to
+        // append into.  The seed pixels eventually get overpainted
+        // by strips that pass through the centre region, so the
+        // visual artefact is bounded.
         _canvasOriginCylX = -_canvas.cols / 2;
         _canvasOriginCylY = -_canvas.rows / 2;
-        cv::Rect roi((int)((_canvas.cols - frameBGR.cols) / 2),
-                     (int)((_canvas.rows - frameBGR.rows) / 2),
-                     frameBGR.cols, frameBGR.rows);
-        roi &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
-        if (roi.width > 0 && roi.height > 0) {
-            cv::Rect srcR(0, 0, roi.width, roi.height);
-            frameBGR(srcR).copyTo(_canvas(roi));
-            _canvasMask(roi).setTo(255);
+        const int kSeedPx = 60;
+        int seedSrcX = (frameBGR.cols - kSeedPx) / 2;
+        int seedSrcY = (frameBGR.rows - kSeedPx) / 2;
+        if (seedSrcX < 0) seedSrcX = 0;
+        if (seedSrcY < 0) seedSrcY = 0;
+        int seedW = std::min(kSeedPx, frameBGR.cols - seedSrcX);
+        int seedH = std::min(kSeedPx, frameBGR.rows - seedSrcY);
+        cv::Rect seedSrc(seedSrcX, seedSrcY, seedW, seedH);
+        cv::Rect seedDst((_canvas.cols - seedW) / 2,
+                          (_canvas.rows - seedH) / 2, seedW, seedH);
+        seedDst &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
+        if (seedDst.width > 0 && seedDst.height > 0) {
+            cv::Rect srcR(0, 0, seedDst.width, seedDst.height);
+            frameBGR(seedSrc)(srcR).copyTo(_canvas(seedDst));
+            _canvasMask(seedDst).setTo(255);
         }
         _lastAcceptedTheta = 0;
         _lastAcceptedH = 0;
