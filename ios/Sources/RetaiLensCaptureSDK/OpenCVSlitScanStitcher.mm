@@ -50,13 +50,10 @@
     NSInteger _snapshotSeq;
 
     // Last-strip state — strip placement is incremental from here.
-    double _lastAcceptedTheta;  // panorama angle (radians) of last strip's centre
-    double _lastAcceptedH;      // panorama height of last strip's centre
-    // Dominant pan direction, locked at second accept.  0 = unknown,
-    // 1 = yaw (left-right pan, vertical strips), 2 = pitch (up-down
-    // pan, horizontal strips).  Once locked, only frames with motion
-    // in this direction generate new strips.
-    int _slitScanMode;
+    // V11 Gap #22: deleted dead state (_lastAcceptedTheta,
+    // _lastAcceptedH, _slitScanMode) — these were strip-extraction
+    // state from the original slit-scan design, never used by the
+    // first-painted-wins implementation.
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -96,9 +93,6 @@
     _hasFirstFrame = false;
     _accepted = 0;
     _snapshotSeq = 0;
-    _lastAcceptedTheta = 0;
-    _lastAcceptedH = 0;
-    _slitScanMode = 0;
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
@@ -113,19 +107,9 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
         2*(qx*qz - qw*qy),     2*(qy*qz + qw*qx),     1 - 2*(qx*qx + qy*qy));
 }
 
-// Slit-scan tuning constants.
-namespace {
-// Minimum strip width in compose pixels — below this, skip the
-// strip (gyro hasn't moved enough to be worth painting).
-constexpr int    kMinStripWidthPx = 6;
-// Maximum strip width in compose pixels — above this, cap (camera
-// jumped too far; capping keeps the strip from trying to cover an
-// unreasonable angular span).
-constexpr int    kMaxStripWidthPx = 240;
-// Number of strips painted before declaring "first frame done".
-// Slit-scan emits MANY accepts (every ~50ms in steady pan); keep
-// the snapshot cadence sane via the Swift-side every-N counter.
-}
+// V11 Gap #22: deleted dead kMinStripWidthPx/kMaxStripWidthPx.
+// These were strip-width bounds for the original slit-scan design,
+// never referenced in the first-painted-wins implementation.
 
 - (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                        qx:(double)qx
@@ -182,7 +166,13 @@ constexpr int    kMaxStripWidthPx = 240;
         double fwx = fwdWorld.at<double>(0);
         double fwz = fwdWorld.at<double>(2);
         double horiz = std::sqrt(fwx * fwx + fwz * fwz);
-        if (horiz < 1e-6) { fwx = 0; fwz = -1; horiz = 1; }
+        // V11 Gap #3: reject if camera looking nearly vertical (no
+        // horizontal forward to anchor the panorama frame).  See
+        // OpenCVIncrementalStitcher.mm for full annotation.
+        if (horiz < 0.1) {
+            [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
+            return tele;
+        }
         double pzx = fwx / horiz, pzz = fwz / horiz;
         _R_panToWorld = (cv::Mat_<double>(3, 3) <<
             pzz,  0, pzx,
@@ -209,8 +199,6 @@ constexpr int    kMaxStripWidthPx = 240;
         _canvasOriginCylX = firstCornerCyl.x - dstX;
         _canvasOriginCylY = firstCornerCyl.y - dstY;
 
-        _lastAcceptedTheta = 0;
-        _lastAcceptedH = 0;
         _hasFirstFrame = true;
         _accepted = 1;
         [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
@@ -271,8 +259,6 @@ constexpr int    kMaxStripWidthPx = 240;
         // entirely inside the existing canvas.  Skip silently.
         [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
     }
-    _lastAcceptedTheta = 0;  // no longer used in this path
-    _lastAcceptedH = 0;
 
     auto t1 = std::chrono::steady_clock::now();
     double ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;

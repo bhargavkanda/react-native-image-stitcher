@@ -114,8 +114,8 @@ constexpr double kRansacReprojThresh = 5.0;
 // equal to scale².  Tight bounds reject degenerate fits aggressively
 // while leaving slack for the natural ~0.9-1.1 scale that hand-held
 // pans introduce (parallax + lens distortion residuals).
-constexpr double kHomDetMin = 0.7;
-constexpr double kHomDetMax = 1.4;
+// V11 Gap #30: deleted dead kHomDetMin/kHomDetMax — pose-driven path
+// doesn't fit a homography, so the determinant bounds were dead.
 
 }  // namespace
 
@@ -310,7 +310,22 @@ constexpr double kHomDetMax = 1.4;
         double fwx = fwdWorld.at<double>(0);
         double fwz = fwdWorld.at<double>(2);
         double horiz = std::sqrt(fwx * fwx + fwz * fwz);
-        if (horiz < 1e-6) { fwx = 0; fwz = -1; horiz = 1; }
+        // V11 Gap #3: reject the first frame if the camera is
+        // looking nearly straight up or down.  The panorama frame
+        // needs a horizontal +Z anchor; if camera-forward is
+        // gravity-aligned, the horizontal projection is degenerate.
+        // Earlier code silently substituted (0, 0, -1) which gave a
+        // panorama basis that didn't match the operator's actual
+        // pan direction — every subsequent frame's placement was
+        // arbitrary.  Refuse and let the operator level the camera.
+        if (horiz < 0.1) {
+            tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
+            tele.processingMs = msSince(t0);
+            // Note: we DON'T set _hasFirstFrame, so the next ingest
+            // attempt will try again with the new pose.  Operator
+            // tilting toward horizon will succeed naturally.
+            return tele;
+        }
         double pzx = fwx / horiz;
         double pzz = fwz / horiz;
         // pan_X = pan_Y × pan_Z = (0,1,0) × (pzx,0,pzz) = (pzz, 0, -pzx)
@@ -1204,94 +1219,8 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     cv::bitwise_or(canvasMaskRoi, warpedMask, canvasMaskRoi);
 }
 
-// (Legacy v7 planar warpAndBlend kept below for reference but is no
-//  longer called.  Remove in v9-cleanup once the cylindrical path is
-//  field-validated.)
-- (void)warpAndBlend:(const cv::Mat &)frameBGR worldH:(const cv::Mat &)worldH {
-    cv::Size canvasSize(_canvas.cols, _canvas.rows);
-
-    // Warp the new frame onto an empty canvas-sized buffer.
-    cv::Mat warped;
-    cv::warpPerspective(frameBGR, warped, worldH, canvasSize,
-                        cv::INTER_LINEAR, cv::BORDER_CONSTANT,
-                        cv::Scalar(0, 0, 0));
-
-    // Warp a "this is in-frame" mask the same way.  Anywhere the
-    // mask is non-zero, `warped` has valid pixels.
-    cv::Mat frameOnesMask = cv::Mat::ones(frameBGR.rows, frameBGR.cols, CV_8UC1) * 255;
-    cv::Mat warpedMask;
-    cv::warpPerspective(frameOnesMask, warpedMask, worldH, canvasSize,
-                        cv::INTER_NEAREST, cv::BORDER_CONSTANT,
-                        cv::Scalar(0));
-
-    // Hard midline seam (replaces the v4 ratio-feather).  Within the
-    // overlap region, the seam is the locus of points where each
-    // pixel is equally far from BOTH frames' outer edges — the
-    // "middle" of the overlap.  We use the new frame on whichever
-    // side the new frame is "deeper" and the existing canvas where
-    // the canvas is deeper.  Each output pixel comes from exactly
-    // ONE frame, so misalignment of a few pixels between frames
-    // can't produce ghosting (which is what was happening with
-    // smooth feather blending — both frames' versions of the same
-    // object contributed and you saw both).
-    //
-    // The transition is softened with a small Gaussian so the seam
-    // line itself isn't a hard pixel-perfect cut (which would be
-    // visible as a faint line where lighting / exposure differ).
-    // 7-px sigma blends across ~3 px on either side — enough to
-    // hide micro-misalignment, not enough to reintroduce ghosts.
-    //
-    // Cylindrical projection + gradient-driven seam placement
-    // (where Samsung-style panoramas hide seams along real scene
-    // edges) is Phase 0.5 work.  For now, midline + small blur
-    // gets us 80% of the way there.
-    cv::Mat distNew, distCanvas;
-    cv::distanceTransform(warpedMask, distNew, cv::DIST_L2, 3);
-    cv::distanceTransform(_canvasMask, distCanvas, cv::DIST_L2, 3);
-
-    // Binary alpha: 1 where new frame is deeper than canvas (use new)
-    //               0 where canvas is deeper than new frame  (keep canvas)
-    cv::Mat alpha8;
-    cv::compare(distNew, distCanvas, alpha8, cv::CMP_GE);
-
-    // First-touch regions: where canvasMask is 0, new frame must
-    // write unconditionally (no prior data to seam against).
-    // compare() already returns 255 here because distCanvas=0 ≤ distNew.
-    // Belt and suspenders: enforce explicitly.
-    cv::Mat noPriorMask;
-    cv::compare(_canvasMask, 0, noPriorMask, cv::CMP_EQ);
-    alpha8.setTo(255, noPriorMask);
-
-    cv::Mat alpha;
-    alpha8.convertTo(alpha, CV_32F, 1.0 / 255.0);
-    // 3-pixel Gaussian smoothing of the seam to hide pixel-perfect
-    // edge artefacts without bringing ghosting back.
-    cv::GaussianBlur(alpha, alpha, cv::Size(7, 7), 0);
-
-    // Per-channel multiply: result = alpha*warped + (1-alpha)*canvas
-    // OpenCV doesn't have a direct 1-channel-alpha × 3-channel-image
-    // multiply, so we expand alpha to 3 channels first.
-    cv::Mat alpha3;
-    cv::Mat alphaChannels[] = {alpha, alpha, alpha};
-    cv::merge(alphaChannels, 3, alpha3);
-    cv::Mat invAlpha3 = cv::Scalar(1, 1, 1) - alpha3;
-
-    cv::Mat warpedF, canvasF;
-    warped.convertTo(warpedF, CV_32FC3);
-    _canvas.convertTo(canvasF, CV_32FC3);
-    cv::Mat blendedF;
-    cv::multiply(warpedF, alpha3, warpedF);
-    cv::multiply(canvasF, invAlpha3, canvasF);
-    cv::add(warpedF, canvasF, blendedF);
-
-    // Only write into canvas where warpedMask is set — leaves the
-    // rest of the canvas (areas the new frame doesn't touch) intact.
-    cv::Mat blended8;
-    blendedF.convertTo(blended8, CV_8UC3);
-    blended8.copyTo(_canvas, warpedMask);
-
-    // Update canvas mask = OR(canvasMask, warpedMask).
-    cv::bitwise_or(_canvasMask, warpedMask, _canvasMask);
-}
+// V11 Gap #21: deleted ~85 lines of dead `warpAndBlend` (legacy v7
+// planar warp + Gaussian-blurred binary alpha-blend).  Was never
+// called after v9 switched to cylindricalWarp + featherBlendWarped.
 
 @end
