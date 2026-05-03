@@ -334,15 +334,15 @@ constexpr double kRansacReprojThresh = 5.0;
             0,     1, 0,
             -pzx,  0, pzz);
 
-        // Place first frame onto canvas via spherical warp.  R for
+        // Place first frame onto canvas via cylindrical warp.  R for
         // the warp is panorama→camera in OpenCV cam frame; for the
         // first frame this is approximately identity (camera-forward
-        // = panorama +Z).  The spherical warp gives us a warped
-        // image + a corner in sphere-pixel (theta, phi)·f space.
+        // = panorama +Z).  The cylindrical warp gives us a warped
+        // image + a corner in cylindrical-pixel (theta, h)·f space.
         cv::Mat warpedFirst, warpedFirstMask;
         cv::Point firstCornerCyl =
-            [self sphericalWarp:frameBGR rArkit:R_new
-                           outImage:warpedFirst outMask:warpedFirstMask];
+            [self cylindricalWarp:frameBGR rArkit:R_new
+                            outImage:warpedFirst outMask:warpedFirstMask];
 
         // Anchor the first frame at canvas centre.
         int dstX = (int)(_canvas.cols - warpedFirst.cols) / 2;
@@ -414,10 +414,10 @@ constexpr double kRansacReprojThresh = 5.0;
         return tele;
     }
 
-    // V12 spherical warp + feather blend.
+    // V12.2 cylindrical warp (with V12 mirror fix) + feather blend.
     cv::Mat warpedNew, warpedNewMask;
     cv::Point newCornerCyl =
-        [self sphericalWarp:frameBGR rArkit:R_new
+        [self cylindricalWarp:frameBGR rArkit:R_new
                        outImage:warpedNew outMask:warpedNewMask];
     if (warpedNew.empty()) {
         tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
@@ -557,9 +557,10 @@ constexpr double kRansacReprojThresh = 5.0;
     // layout — buffer-Y was image-down for portrait, image-right for
     // landscape, etc.  V8+ switched to a panorama-frame canvas
     // (gravity-up = +panorama-Y; the warp Y-flip puts world-up at
-    // image-top by construction).  V12 swapped the cylindrical warp
-    // for spherical — same gravity-alignment guarantee holds.  The
-    // canvas IS already correctly oriented for any device hold.
+    // image-top by construction).  V12 briefly tried spherical but
+    // V12.2 reverted to cylindrical — the gravity-alignment guarantee
+    // is the same.  The canvas IS already correctly oriented for
+    // any device hold.
     cv::Mat out = cropped;
 
     if (applyExposureComp && !out.empty()) {
@@ -745,39 +746,42 @@ static double computeOverlapPctSensor(double sensorRotXRad,
 // reference pose + intrinsics in the same place it positions the
 // frame on the canvas.
 
-/// V12 hand-rolled SPHERICAL (equirectangular) projection.
-/// (Was cylindrical pre-V12 — replaced for the primary use case
-/// of top-to-bottom landscape pan, which hits cylindrical's
-/// degenerate poles at moderate pitch angles.  Spherical handles
-/// ±90° pitch cleanly.)
+/// V12.2 hand-rolled CYLINDRICAL projection (with V12 mirror fix
+/// kept).  V12 had tried spherical to handle extreme pitch, but
+/// spherical bulges both axes and made every level frame look
+/// fisheye.  Reverted to cylindrical here; pitch-axis flexibility
+/// will come from making the cylinder axis orientation-aware
+/// (Step 3) rather than from changing the projection itself.
 ///
-/// Sphere parameterised by:
-///   theta = horizontal angle (longitude), atan2(-wx, wz)
+/// Cylinder parameterised by:
+///   theta = horizontal angle around panorama-Y, atan2(-wx, wz)
 ///                       (the −wx is the V12 mirror fix —
 ///                       panorama-X is "user's left" in our
-///                       right-handed setup, so we flip the X
-///                       sign before computing theta to put
-///                       user's-right content at canvas-right)
-///   phi   = vertical angle (latitude),    asin(wy / |w|)
-///   pixel = (focal · theta, -focal · phi)
-///                       (the −phi is the Y-flip — panorama +Y
-///                       is gravity-up, image +Y is image-down)
+///                       right-handed setup, so we flip X before
+///                       atan2 to put user's-right at canvas-right)
+///   h     = wy / sqrt(wx² + wz²)         (height up the cylinder)
+///   pixel = (focal · theta, -focal · h)
+///                       (the −h is the Y-flip — panorama +Y is
+///                       gravity-up, image +Y is image-down)
 ///
 /// Inverse map:
 ///   theta = canvas_x / focal
-///   phi   = -canvas_y / focal
-///   ray   = (-cos(phi)·sin(theta), sin(phi), cos(phi)·cos(theta))
+///   h     = -canvas_y / focal
+///   ray   = (-sin(theta), h, cos(theta))
 ///
-/// The ray is unit-length and well-defined for ALL (theta, phi)
-/// in [−π,π] × [−π/2, π/2] — no singularities except at the poles
-/// themselves where cos(phi) = 0 (degenerate but bounded).
+/// Vertical lines (perpendicular to the cylinder axis) stay
+/// straight in the projection — that's why cylindrical produces a
+/// natural-looking panorama for level scenes.  Pitch close to ±90°
+/// (looking straight up/down) makes h = wy/sqrt(wx²+wz²) blow up
+/// and the bbox grows unbounded; the canvas-x2 sanity check rejects
+/// those frames.
 ///
-/// Returns the bbox's top-left in sphere-pixel coords; the
+/// Returns the bbox's top-left in cylindrical-pixel coords; the
 /// caller adds the canvas origin offset to land it on the canvas.
-- (cv::Point)sphericalWarp:(const cv::Mat &)src
-                     rArkit:(const cv::Mat &)rArkit
-                   outImage:(cv::Mat &)outImage
-                    outMask:(cv::Mat &)outMask
+- (cv::Point)cylindricalWarp:(const cv::Mat &)src
+                       rArkit:(const cv::Mat &)rArkit
+                     outImage:(cv::Mat &)outImage
+                      outMask:(cv::Mat &)outMask
 {
     if (_R_panToWorld.empty() || _focalCompose <= 0) {
         outImage = cv::Mat();
@@ -795,7 +799,16 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     const double cy = _K_compose.at<double>(1, 2);
     const double f  = _focalCompose;
 
-    // ── Forward-project source corners onto sphere to size bbox ──
+    // ── Forward-project source corners onto cylinder to size bbox ──
+    //
+    // V12.2: reverted the spherical projection.  Spherical (asin on
+    // wy/|w|) bulged BOTH axes — every first frame looked fisheye
+    // even at level pitch.  Cylindrical only curves the horizontal
+    // axis (cylinder axis = panorama Y, gravity-up); vertical
+    // straight lines stay straight, which matches Apple's pano and
+    // human expectation for level scenes.  The pitch failure that
+    // motivated V12 will be fixed in a different way (orientation-
+    // aware cylinder axis, see Step 3).
     auto projectCorner = ^cv::Point2d(double u, double v) {
         double rx = (u - cx) / fx;
         double ry = (v - cy) / fy;
@@ -803,31 +816,23 @@ static double computeOverlapPctSensor(double sensorRotXRad,
         double wx = R_camToPan.at<double>(0,0)*rx + R_camToPan.at<double>(0,1)*ry + R_camToPan.at<double>(0,2)*rz;
         double wy = R_camToPan.at<double>(1,0)*rx + R_camToPan.at<double>(1,1)*ry + R_camToPan.at<double>(1,2)*rz;
         double wz = R_camToPan.at<double>(2,0)*rx + R_camToPan.at<double>(2,1)*ry + R_camToPan.at<double>(2,2)*rz;
-        double rayMag = std::sqrt(wx*wx + wy*wy + wz*wz);
-        if (rayMag < 1e-9) return cv::Point2d(0, 0);
-        // V12 MIRROR FIX: flip wx sign so user's-right (world +X,
-        // which is panorama-X = -1 in our right-handed setup)
-        // maps to positive theta = canvas-right.
+        // V12 mirror fix kept: −wx so user's-right maps to canvas-right.
         double theta = std::atan2(-wx, wz);
-        double phi = std::asin(std::clamp(wy / rayMag, -1.0, 1.0));
+        double denom = std::sqrt(wx*wx + wz*wz);
+        double h = (denom > 1e-9) ? (wy / denom) : 0.0;
         // Y-flip: panorama +Y is gravity-up, image +Y is image-down.
-        return cv::Point2d(f * theta, -f * phi);
+        return cv::Point2d(f * theta, -f * h);
     };
     cv::Point2d c00 = projectCorner(0, 0);
     cv::Point2d c10 = projectCorner((double)src.cols - 1, 0);
     cv::Point2d c01 = projectCorner(0, (double)src.rows - 1);
     cv::Point2d c11 = projectCorner((double)src.cols - 1, (double)src.rows - 1);
-    // Sample additional points along the source edges — for spherical
-    // projection at extreme pitch, the bbox of just 4 corners can
-    // miss the "bulge" the sphere creates between corners.
-    cv::Point2d cTop  = projectCorner(src.cols / 2.0, 0);
-    cv::Point2d cBot  = projectCorner(src.cols / 2.0, (double)src.rows - 1);
-    cv::Point2d cLeft = projectCorner(0, src.rows / 2.0);
-    cv::Point2d cRight= projectCorner((double)src.cols - 1, src.rows / 2.0);
-    double minX = std::min({c00.x, c10.x, c01.x, c11.x, cTop.x, cBot.x, cLeft.x, cRight.x});
-    double maxX = std::max({c00.x, c10.x, c01.x, c11.x, cTop.x, cBot.x, cLeft.x, cRight.x});
-    double minY = std::min({c00.y, c10.y, c01.y, c11.y, cTop.y, cBot.y, cLeft.y, cRight.y});
-    double maxY = std::max({c00.y, c10.y, c01.y, c11.y, cTop.y, cBot.y, cLeft.y, cRight.y});
+    // 4-corner bbox is exact for cylindrical (vertical lines stay
+    // straight in the projection, so the corners are extrema).
+    double minX = std::min({c00.x, c10.x, c01.x, c11.x});
+    double maxX = std::max({c00.x, c10.x, c01.x, c11.x});
+    double minY = std::min({c00.y, c10.y, c01.y, c11.y});
+    double maxY = std::max({c00.y, c10.y, c01.y, c11.y});
 
     int bboxX = (int)std::floor(minX);
     int bboxY = (int)std::floor(minY);
@@ -852,20 +857,18 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     for (int y = 0; y < bboxH; y++) {
         float *mx = mapX.ptr<float>(y);
         float *my = mapY.ptr<float>(y);
-        double sphereY = (double)(bboxY + y);
-        double phi = -sphereY / f;  // inverse of forward Y-flip
-        double sinPhi = std::sin(phi);
-        double cosPhi = std::cos(phi);
+        double cylY = (double)(bboxY + y);
+        double h = -cylY / f;  // inverse of forward Y-flip
         for (int x = 0; x < bboxW; x++) {
-            double sphereX = (double)(bboxX + x);
-            double theta = sphereX / f;
+            double cylX = (double)(bboxX + x);
+            double theta = cylX / f;
             double sinT = std::sin(theta);
             double cosT = std::cos(theta);
-            // Inverse of the V12 mirror fix: wx = -cosPhi · sinT
-            // (forward had theta = atan2(-wx, wz)).
-            double wx = -cosPhi * sinT;
-            double wy = sinPhi;
-            double wz = cosPhi * cosT;
+            // Inverse of V12 mirror fix: wx = −sinT (forward had
+            // theta = atan2(−wx, wz), so wx = −sin(theta)).
+            double wx = -sinT;
+            double wy = h;
+            double wz = cosT;
             double rx = r00*wx + r01*wy + r02*wz;
             double ry = r10*wx + r11*wy + r12*wz;
             double rz = r20*wx + r21*wy + r22*wz;
