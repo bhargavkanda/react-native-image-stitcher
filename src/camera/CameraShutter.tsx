@@ -188,15 +188,29 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
     }, [disabled, isProcessing, onHoldStart, onHoldComplete, maxHoldMs, setPhaseBoth]);
 
     const handlePressOut = useCallback(() => {
-      if (disabled || isProcessing) return;
+      // CRITICAL: release ALWAYS stops the recording, regardless of
+      // disabled/isProcessing state.  The previous version returned
+      // early when `isProcessing === true`, silently swallowing the
+      // release.  When that happened mid-recording, `onHoldComplete`
+      // never fired, the engine kept ingesting AR frames forever
+      // (hundreds of frames stacked up before the user even noticed),
+      // and the final stitch ran on data the user never intended.
+      //
+      // The release event is the user's primary signal that they
+      // want this capture to end.  No internal state is allowed to
+      // block it.  `onHoldComplete` itself is idempotent (it
+      // early-returns when there's nothing running), so an extra
+      // call when the engine is already finishing is a safe no-op.
       const wasHolding = phaseRef.current === 'holding';
       clearHoldTimer();
       clearMaxHoldTimer();
       setPhaseBoth('idle');
       if (wasHolding) {
         onHoldComplete();
-      } else {
-        // It was a tap (released before the threshold).
+      } else if (!disabled && !isProcessing) {
+        // It was a tap (released before the threshold).  Suppress
+        // the tap when the camera is busy — taps trigger photos and
+        // we don't want to fire-and-forget into a busy pipeline.
         onTap();
       }
     }, [disabled, isProcessing, onTap, onHoldComplete, clearHoldTimer, clearMaxHoldTimer, setPhaseBoth]);
