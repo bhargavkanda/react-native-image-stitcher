@@ -1,5 +1,5 @@
 //
-// OpenCVSlitScanStitcher.mm
+// OpenCVFirstWinsCylindricalStitcher.mm
 //
 // Apple-style slit-scan engine (Option B from the panorama north-star
 // doc).  Reuses the panorama-frame coord setup from v9 but paints
@@ -24,9 +24,9 @@
 #define NO  ((BOOL)0)
 #define YES ((BOOL)1)
 
-#import "OpenCVSlitScanStitcher.h"
+#import "OpenCVSlitScanStitcher.h"  // file name kept; class renamed to OpenCVFirstWinsCylindricalStitcher (V11 Gap #23)
 
-@implementation OpenCVSlitScanStitcher {
+@implementation OpenCVFirstWinsCylindricalStitcher {
     NSInteger _composeWidth;
     NSInteger _composeHeight;
     NSInteger _canvasWidth;
@@ -69,8 +69,9 @@
     if (self = [super init]) {
         _composeWidth  = composeWidth  > 0 ? composeWidth  : 960;
         _composeHeight = composeHeight > 0 ? composeHeight : 720;
-        _canvasWidth   = canvasWidth   > 0 ? canvasWidth   : 4800;
-        _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 2200;
+        // V11 Gap #4: square canvas — see OpenCVIncrementalStitcher.mm.
+        _canvasWidth   = canvasWidth   > 0 ? canvasWidth   : 5000;
+        _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 5000;
         _frameRotationDegrees = frameRotationDegrees;
 
         _M_arkitToCv = (cv::Mat_<double>(3, 3) <<
@@ -469,23 +470,10 @@ constexpr int    kMaxStripWidthPx = 240;
     }
     cv::Mat cropped = _canvas(bbox).clone();
 
-    // Gravity-derived output rotation (same logic as v9 engine).
-    int rotationDeg = 0;
-    if (_hasFirstFrame && !_firstRotationArkit.empty()) {
-        cv::Mat gravWorld = (cv::Mat_<double>(3, 1) << 0, -1, 0);
-        cv::Mat gravArkit = _firstRotationArkit.t() * gravWorld;
-        cv::Mat gravCv = _M_arkitToCv * gravArkit;
-        double gx = gravCv.at<double>(0);
-        double gy = gravCv.at<double>(1);
-        double angle = std::atan2(gx, gy) * 180.0 / M_PI;
-        rotationDeg = (int)std::round(angle / 90.0) * 90;
-        rotationDeg = ((rotationDeg % 360) + 360) % 360;
-    }
-    cv::Mat out;
-    if (rotationDeg == 90) cv::rotate(cropped, out, cv::ROTATE_90_CLOCKWISE);
-    else if (rotationDeg == 180) cv::rotate(cropped, out, cv::ROTATE_180);
-    else if (rotationDeg == 270) cv::rotate(cropped, out, cv::ROTATE_90_COUNTERCLOCKWISE);
-    else out = cropped;
+    // V11 Gap #14: cylindrical canvas is gravity-aligned by
+    // construction.  No output rotation needed.  See v9 engine for
+    // the full explanation.
+    cv::Mat out = cropped;
 
     if (applyExposureComp && !out.empty()) {
         cv::Mat lab;

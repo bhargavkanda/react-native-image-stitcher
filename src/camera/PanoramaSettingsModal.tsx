@@ -52,14 +52,15 @@ export interface PanoramaSettings {
    * when AR preview is on).
    *   'hybrid'   — Samsung-style: cylindrical projection + KLT
    *                optical flow refinement + feather blend.
-   *   'slitscan' — Apple-style: continuously paints narrow vertical
-   *                strips onto a cylindrical canvas; per-strip
-   *                overlap is 1-3 px so seams are near-invisible.
+   *   'firstwins' — Cylindrical full-frame warp + first-painted-wins
+   *                  hard overlay (no OF refinement, no blending).
+   *                  Was 'slitscan' but the implementation is full-
+   *                  frame cylindrical, not Apple-style narrow strips.
    *
    * Both are A/B-comparable on the same scene by toggling this in
    * settings without restarting the app.
    */
-  incrementalEngine: 'hybrid' | 'slitscan';
+  incrementalEngine: 'hybrid' | 'firstwins';
   /** Hard cap on hold duration (ms).  0 disables auto-stop. */
   maxRecordingMs: number;
   /** Frames per second of recording to sample for stitching. */
@@ -213,10 +214,10 @@ export function PanoramaSettingsModal({
 
             <SectionHeader title="Incremental engine (AR mode only)" />
             <SegmentedControl
-              options={['hybrid', 'slitscan']}
+              options={['hybrid', 'firstwins']}
               value={settings.incrementalEngine}
               onChange={(v) => update({ incrementalEngine: v as PanoramaSettings['incrementalEngine'] })}
-              caption="Hybrid: Samsung-style cylindrical + KLT optical flow + feather (best for varied gestures, default). Slitscan: Apple-style narrow-strip painting (cleaner seams when motion is purely rotational, sensitive to body translation). Toggle to A/B test the same scene."
+              caption="Hybrid: cylindrical + KLT optical flow + feather (default, more forgiving alignment). FirstWins: cylindrical + first-painted-wins overlay (preserves anchor frame, no later corrections, simpler). Toggle to A/B test on the same scene."
             />
 
             <SectionHeader title="Recording cap" />

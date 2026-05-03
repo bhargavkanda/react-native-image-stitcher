@@ -68,9 +68,10 @@ export interface IncrementalStartOptions {
   composeWidth?: number;
   /** Compose-resolution height in pixels (default 960 for portrait, 720 for landscape). */
   composeHeight?: number;
-  /** Pre-allocated canvas width (default 4800). */
+  /** Pre-allocated canvas width (default 5000). */
   canvasWidth?: number;
-  /** Pre-allocated canvas height (default 2200). */
+  /** Pre-allocated canvas height (default 5000 — square so either
+   *  pan axis fits without runtime grow logic). */
   canvasHeight?: number;
   /** Feather-blend band width in pixels (default 20).  Unused after
    *  v5 hard-seam switch but kept for backwards compatibility. */
@@ -98,19 +99,23 @@ export interface IncrementalStartOptions {
   frameRotationDegrees?: 0 | 90 | 180 | 270;
   /**
    * Engine mode:
-   *   'hybrid'   — Samsung-style: cylindrical projection + KLT
-   *                optical flow refinement + feather blend (default).
-   *   'slitscan' — Apple-style: continuous narrow vertical strips
-   *                painted onto the cylindrical canvas.  Per-strip
-   *                overlap is 1-3 px so stitching artefacts are
-   *                near-invisible; sensitive to non-rotational
-   *                motion (operator translating their body).
+   *   'hybrid'    — Cylindrical projection + KLT optical-flow
+   *                 refinement + feather blend (default).
+   *   'firstwins' — Cylindrical projection + first-painted-wins
+   *                 hard overlay (no OF refinement, no blending).
+   *                 Preserves the first frame's exact pixels;
+   *                 later frames CANNOT correct early bad ones.
+   *
+   * (Was 'slitscan' in earlier versions — renamed in V11 because
+   * the implementation is full-frame cylindrical + binary fill,
+   * not Apple-style narrow-strip painting.  A real slit-scan engine
+   * is planned as a separate follow-up.)
    *
    * Default 'hybrid' is the safer choice for the variety of gestures
-   * field reps actually use.  Set 'slitscan' to A/B compare on the
+   * field reps actually use.  Set 'firstwins' to A/B compare on the
    * same scene.
    */
-  engine?: 'hybrid' | 'slitscan';
+  engine?: 'hybrid' | 'firstwins';
 }
 
 

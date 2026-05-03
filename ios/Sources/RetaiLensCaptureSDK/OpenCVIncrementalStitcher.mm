@@ -150,6 +150,14 @@ constexpr double kHomDetMax = 1.4;
     double  _focalCompose;        // cylinder radius in compose pixels
     int     _canvasOriginCylX;    // canvas (0,0) in cylindrical pixel space (origin offset)
     int     _canvasOriginCylY;
+    /// V11 Gap #5: last-accepted rotation matrix (ARKit cam-to-world).
+    /// The pose-delta gate computes the relative rotation between
+    /// frames in SENSOR FRAME (axes fixed to the device hardware),
+    /// not in world frame.  World-frame yaw/pitch were being compared
+    /// against camera-frame FoV, which broke landscape pitch pans
+    /// (the dominant pan axis is rotation about world-Y, but in
+    /// landscape the sensor sees that as pitch-equivalent motion).
+    cv::Mat _lastAcceptedR;
 
     double _lastAcceptedYaw;
     double _lastAcceptedPitch;
@@ -190,8 +198,15 @@ constexpr double kHomDetMax = 1.4;
         // sees content shifting along its X axis (the wide 1920
         // axis).  Canvas-X covers ~3 frame-widths of pan; canvas-Y
         // covers one frame plus pitch-wobble headroom.
-        _canvasWidth   = canvasWidth   > 0 ? canvasWidth   : 4800;
-        _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 2200;
+        // V11 Gap #4: square canvas so EITHER pan axis fits.  The
+        // primary use case (top-to-bottom landscape pan) needs canvas-Y
+        // ≥ 3000 px to cover ~90° pitch at typical compose focal — the
+        // earlier 2200 px clipped the pan after 4-5 frames.  5000² is
+        // ~88 MB (canvas + mask), comfortable on iPhone 13+ where the
+        // app is targeted.  Real auto-grow is deferred — flat over-
+        // allocation is simpler and works for both use cases.
+        _canvasWidth   = canvasWidth   > 0 ? canvasWidth   : 5000;
+        _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 5000;
         _featherPx     = featherPx     > 0 ? featherPx     : 20;
 
         // ARKit camera frame (Y-up, -Z forward) → OpenCV camera frame
@@ -217,6 +232,7 @@ constexpr double kHomDetMax = 1.4;
     _T_canvas = cv::Mat::eye(3, 3, CV_64F);
     _lastAcceptedYaw = 0.0;
     _lastAcceptedPitch = 0.0;
+    _lastAcceptedR = cv::Mat();  // V11 Gap #5: clear sensor-frame gate state
     _hasFirstFrame = false;
     _accepted = 0;
     _snapshotSeq = 0;
@@ -326,6 +342,7 @@ constexpr double kHomDetMax = 1.4;
 
         _lastAcceptedYaw = yaw;
         _lastAcceptedPitch = pitch;
+        _lastAcceptedR = R_new.clone();
         _hasFirstFrame = true;
         _accepted = 1;
         tele.outcome = RLISFrameOutcomeAcceptedHigh;
@@ -335,10 +352,32 @@ constexpr double kHomDetMax = 1.4;
         return tele;
     }
 
-    // Pose-delta gate (cheap; runs before any warping).
-    double overlap = computeOverlapPct(
-        yaw - _lastAcceptedYaw,
-        pitch - _lastAcceptedPitch,
+    // V11 Gap #5: pose-delta gate in SENSOR FRAME.
+    //
+    // Compute the relative rotation between the last-accepted frame
+    // and this frame, expressed in the previous frame's CAMERA-LOCAL
+    // axes (these are fixed to the device sensor hardware regardless
+    // of how the user is holding the phone).
+    //
+    //   R_relative_in_prev_cam = R_prev⁻¹ · R_new   (column-vector convention)
+    //
+    // For ARKit camera axes (+X right, +Y up, −Z forward):
+    //   rotation about sensor +Y → scene shifts horizontally on screen
+    //                              → compare against fovH
+    //   rotation about sensor +X → scene shifts vertically on screen
+    //                              → compare against fovV
+    //
+    // For small-angle rotations (typical accept window 5-25°),
+    // cv::Rodrigues' axis-angle vector ≈ (rotX, rotY, rotZ) with
+    // each component being the rotation about that sensor axis.
+    cv::Mat R_relSensor = _lastAcceptedR.t() * R_new;
+    cv::Mat rvec;
+    cv::Rodrigues(R_relSensor, rvec);
+    double sensorRotX = std::fabs(rvec.at<double>(0));
+    double sensorRotY = std::fabs(rvec.at<double>(1));
+    double overlap = computeOverlapPctSensor(
+        sensorRotX,
+        sensorRotY,
         fovHorizDegrees,
         fovVertDegrees
     );
@@ -401,6 +440,7 @@ constexpr double kHomDetMax = 1.4;
 
     _lastAcceptedYaw = yaw;
     _lastAcceptedPitch = pitch;
+    _lastAcceptedR = R_new.clone();  // V11 Gap #5: sensor-frame gate state
     _accepted += 1;
 
     // Pose-driven path is geometrically exact when ARKit tracking is
@@ -567,46 +607,23 @@ constexpr double kHomDetMax = 1.4;
     }
     cropped = _canvas(cropRect).clone();
 
-    // V7.1 GRAVITY-DERIVED OUTPUT ROTATION.  The compute pipeline
-    // keeps everything in sensor-native landscape.  At save time,
-    // we rotate the output so gravity (world -Y in ARKit) points
-    // image-down.
+    // V11 Gap #14: NO output rotation needed for cylindrical canvas.
     //
-    // Math: gravity in first-camera frame = R_first⁻¹ · (0, -1, 0)
-    // Convert to OpenCV camera (Y-down, +Z forward) via M = diag(1,-1,-1).
-    // The (gx, gy) components give gravity's direction in the buffer's
-    // image plane.  We snap the rotation to the nearest 90° so the
-    // output is axis-aligned regardless of small pose noise.
+    // The earlier (v7) sensor-native canvas needed a gravity-derived
+    // rotation because the canvas was the camera buffer's pixel
+    // layout — buffer-Y was image-down for portrait, image-right for
+    // landscape, etc.  V8+ switched to a CYLINDRICAL canvas in
+    // panorama frame (gravity-up = +panorama-Y; the cylindricalWarp
+    // Y-flip puts world-up at image-top by construction).  The
+    // canvas IS already correctly oriented for any device hold — no
+    // rotation is correct for any case.
     //
-    // This replaces the v7 `frameRotationDegrees` parameter (which
-    // came from the JS `useDeviceOrientation` hook and was unreliable
-    // — defaulted to portrait on first read, didn't update mid-
-    // capture, and conflated landscape-left with landscape-right).
-    int rotationDeg = 0;
-    if (_hasFirstFrame && !_firstRotationArkit.empty()) {
-        cv::Mat gravWorld = (cv::Mat_<double>(3, 1) << 0.0, -1.0, 0.0);
-        cv::Mat gravArkit = _firstRotationArkit.t() * gravWorld;
-        cv::Mat gravCv = _M_arkitToCv * gravArkit;
-        double gx = gravCv.at<double>(0);
-        double gy = gravCv.at<double>(1);
-        // atan2(gx, gy) gives angle from +Y axis (image-down).
-        // We want the rotation that aligns gravity with +Y.
-        double angle = std::atan2(gx, gy) * 180.0 / M_PI;
-        // Snap to nearest 90° and normalise to [0, 360).
-        rotationDeg = (int)std::round(angle / 90.0) * 90;
-        rotationDeg = ((rotationDeg % 360) + 360) % 360;
-    }
-
-    cv::Mat out;
-    if (rotationDeg == 90) {
-        cv::rotate(cropped, out, cv::ROTATE_90_CLOCKWISE);
-    } else if (rotationDeg == 180) {
-        cv::rotate(cropped, out, cv::ROTATE_180);
-    } else if (rotationDeg == 270) {
-        cv::rotate(cropped, out, cv::ROTATE_90_COUNTERCLOCKWISE);
-    } else {
-        out = cropped;
-    }
+    // The v7-era atan2 trick computed the WRONG sign for landscape
+    // (atan2(gx=-1, gy=0) = -π/2 → 270° → ROTATE_90_CCW), which then
+    // un-aligned the otherwise-correct cylindrical canvas.  Removing
+    // it fixes landscape orientation; portrait orientation already
+    // produced 0° from the atan2 (gx≈0, gy≈1) so it's unchanged.
+    cv::Mat out = cropped;
 
     if (applyExposureComp && !out.empty()) {
         // CLAHE on the L channel of Lab.  Preserves colour, evens
@@ -678,33 +695,35 @@ static cv::Mat quaternionToRotationMat(double qx, double qy, double qz, double q
 /// radians.  Output is in percent.  We take the dominant axis (the
 /// one with larger angular delta) as the pan axis — overlap on that
 /// axis is what determines whether the frames have moved enough.
-static double computeOverlapPct(double deltaYaw,
-                                double deltaPitch,
-                                double fovHorizDegrees,
-                                double fovVertDegrees)
+/// V11 Gap #5: sensor-frame gate.
+///
+/// Inputs are absolute rotation magnitudes (radians) about the
+/// sensor's +X and +Y axes — these axes are FIXED to the device
+/// hardware regardless of how the operator is holding the phone.
+///
+///   sensorRotXRad: rotation about sensor +X → vertical scene shift
+///                  → compare against fovV (sensor's vertical FoV)
+///   sensorRotYRad: rotation about sensor +Y → horizontal scene shift
+///                  → compare against fovH (sensor's horizontal FoV)
+///
+/// The "dominant axis = pan direction" heuristic still applies — pick
+/// whichever rotation is larger and use the matching FoV to compute
+/// the per-axis overlap.  Output is overlap percent [0, 100].
+static double computeOverlapPctSensor(double sensorRotXRad,
+                                      double sensorRotYRad,
+                                      double fovHorizDegrees,
+                                      double fovVertDegrees)
 {
-    double absYaw = std::fabs(deltaYaw);
-    double absPitch = std::fabs(deltaPitch);
     double fovH = fovHorizDegrees * M_PI / 180.0;
     double fovV = fovVertDegrees * M_PI / 180.0;
-    if (fovH <= 1e-6) {
-        // Sentinel for "no intrinsics info" — assume mid-tier
-        // smartphone camera FoV (~65° H, 50° V for 4:3 sensors).
-        fovH = 65.0 * M_PI / 180.0;
-    }
-    if (fovV <= 1e-6) {
-        // Sensible default if vertical wasn't passed; ~50° works
-        // for typical 4:3 phone cameras.
-        fovV = 50.0 * M_PI / 180.0;
-    }
+    if (fovH <= 1e-6) fovH = 65.0 * M_PI / 180.0;
+    if (fovV <= 1e-6) fovV = 50.0 * M_PI / 180.0;
 
-    // Pan-axis selection — rotational handhelds dominate handheld
-    // panoramas, so the larger angular delta is the pan direction.
     double overlap;
-    if (absYaw >= absPitch) {
-        overlap = 1.0 - absYaw / fovH;
+    if (sensorRotYRad >= sensorRotXRad) {
+        overlap = 1.0 - sensorRotYRad / fovH;
     } else {
-        overlap = 1.0 - absPitch / fovV;
+        overlap = 1.0 - sensorRotXRad / fovV;
     }
     return std::clamp(overlap, 0.0, 1.0) * 100.0;
 }
@@ -1021,7 +1040,15 @@ static double computeOverlapPct(double deltaYaw,
         float dx = warpedPts[i].x - canvasPts[i].x;
         float dy = warpedPts[i].y - canvasPts[i].y;
         // Filter outliers — implausible jumps.
-        if (std::fabs(dx) > 60.0f || std::fabs(dy) > 60.0f) continue;
+        // V11 partial Gap #8: tighten outlier threshold from 60px →
+        // 30px.  OF residuals exceeding 30 px almost always indicate
+        // either a tracking failure on a single feature or a moving
+        // scene element — never genuine pose-vs-pixel disagreement
+        // for cylindrical projection at typical pose accuracy.
+        // Tighter threshold bounds per-frame drift contribution to
+        // ~30 px max, preventing unbounded panorama walk-off.  Real
+        // fix (re-anchor _R_panToWorld) deferred to Phase 2 after BA.
+        if (std::fabs(dx) > 30.0f || std::fabs(dy) > 30.0f) continue;
         dxs.push_back(dx);
         dys.push_back(dy);
     }

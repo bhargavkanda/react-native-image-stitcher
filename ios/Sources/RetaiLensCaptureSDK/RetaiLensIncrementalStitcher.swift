@@ -123,19 +123,19 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     ///
     /// V10: two engine variants exist behind one Swift wrapper.
     /// `hybridEngine` (Samsung-style, full-frame cylindrical + OF) is
-    /// the default.  `slitscanEngine` (Apple-style, per-strip painting)
+    /// the default.  `firstwinsEngine` (Apple-style, per-strip painting)
     /// is opt-in via the JS `engine: 'slitscan'` start option.  Only
     /// one is non-nil at a time.
     private var hybridEngine: OpenCVIncrementalStitcher?
-    private var slitscanEngine: OpenCVSlitScanStitcher?
+    private var firstwinsEngine: OpenCVFirstWinsCylindricalStitcher?
 
     /// Convenience: read the active engine's accepted count.  Used by
     /// the per-frame state event.
     private var engineAcceptedCount: Int {
-        return hybridEngine?.acceptedCount ?? slitscanEngine?.acceptedCount ?? 0
+        return hybridEngine?.acceptedCount ?? firstwinsEngine?.acceptedCount ?? 0
     }
     private var anyEngineActive: Bool {
-        return hybridEngine != nil || slitscanEngine != nil
+        return hybridEngine != nil || firstwinsEngine != nil
     }
 
     /// Serial queue for the heavy per-frame work.  ARSession delegate
@@ -199,8 +199,8 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             stateLock.unlock()
             return
         }
-        if engineMode == "slitscan" {
-            self.slitscanEngine = OpenCVSlitScanStitcher(
+        if engineMode == "firstwins" {
+            self.firstwinsEngine = OpenCVFirstWinsCylindricalStitcher(
                 composeWidth: composeWidth,
                 composeHeight: composeHeight,
                 canvasWidth: canvasWidth,
@@ -218,7 +218,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                 featherPx: featherPx,
                 frameRotationDegrees: frameRotationDegrees
             )
-            self.slitscanEngine = nil
+            self.firstwinsEngine = nil
         }
         self.isRunning = true
         self.snapshotJpegQuality = max(1, min(100, snapshotJpegQuality))
@@ -257,9 +257,9 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             }
             self.stateLock.lock()
             let hybrid = self.hybridEngine
-            let slit = self.slitscanEngine
+            let slit = self.firstwinsEngine
             self.hybridEngine = nil
-            self.slitscanEngine = nil
+            self.firstwinsEngine = nil
             self.isRunning = false
             self.stateLock.unlock()
 
@@ -305,9 +305,9 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         RetaiLensARSession.shared.incrementalConsumer = nil
         stateLock.lock()
         hybridEngine?.reset()
-        slitscanEngine?.reset()
+        firstwinsEngine?.reset()
         hybridEngine = nil
-        slitscanEngine = nil
+        firstwinsEngine = nil
         isRunning = false
         lastState = nil
         stateLock.unlock()
@@ -334,7 +334,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             return
         }
         let hybrid = self.hybridEngine
-        let slit = self.slitscanEngine
+        let slit = self.firstwinsEngine
         let isRunning = self.isRunning
         stateLock.unlock()
         guard isRunning, (hybrid != nil || slit != nil) else { return }

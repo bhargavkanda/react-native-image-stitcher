@@ -1,5 +1,5 @@
 //
-// OpenCVSlitScanStitcher.h
+// OpenCVFirstWinsCylindricalStitcher.h
 //
 // Apple-style slit-scan panorama engine.  Alternative to
 // OpenCVIncrementalStitcher (which is the Samsung-style hybrid
@@ -37,7 +37,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface OpenCVSlitScanStitcher : NSObject
+@interface OpenCVFirstWinsCylindricalStitcher : NSObject
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
                        composeHeight:(NSInteger)composeHeight
