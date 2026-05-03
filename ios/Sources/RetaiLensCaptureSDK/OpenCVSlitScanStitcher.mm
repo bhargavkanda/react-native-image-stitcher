@@ -32,6 +32,8 @@
     NSInteger _canvasWidth;
     NSInteger _canvasHeight;
     NSInteger _frameRotationDegrees;
+    /// V12.3 orientation-aware cylinder axis — see v9 engine.
+    BOOL _isLandscape;
 
     cv::Mat _canvas;
     cv::Mat _canvasMask;
@@ -70,6 +72,10 @@
         _canvasWidth   = canvasWidth   > 0 ? canvasWidth   : 5000;
         _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 5000;
         _frameRotationDegrees = frameRotationDegrees;
+        // V12.3: orientation-aware cylinder axis.  Portrait → vertical
+        // cylinder, landscape → transverse (axis = pan_X).
+        _isLandscape = (frameRotationDegrees == 0
+                        || frameRotationDegrees == 180);
 
         _M_arkitToCv = (cv::Mat_<double>(3, 3) <<
             1, 0, 0,
@@ -299,6 +305,9 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
     const double f  = _focalCompose;
 
     cv::Mat R_camToPan = R_panToCam.t();
+    // V12.3: orientation-aware cylinder axis — see v9 engine for the
+    // full derivation.  Portrait → vertical-axis cylinder.  Landscape
+    // → transverse (pan_X-axis) cylinder.
     auto projectCorner = ^cv::Point2d(double u, double v) {
         double rx = (u - cx) / fx;
         double ry = (v - cy) / fy;
@@ -306,11 +315,18 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
         double wx = R_camToPan.at<double>(0,0)*rx + R_camToPan.at<double>(0,1)*ry + R_camToPan.at<double>(0,2)*rz;
         double wy = R_camToPan.at<double>(1,0)*rx + R_camToPan.at<double>(1,1)*ry + R_camToPan.at<double>(1,2)*rz;
         double wz = R_camToPan.at<double>(2,0)*rx + R_camToPan.at<double>(2,1)*ry + R_camToPan.at<double>(2,2)*rz;
-        // V12 mirror fix kept: −wx so user's-right maps to canvas-right.
-        double theta = std::atan2(-wx, wz);
-        double denom = std::sqrt(wx*wx + wz*wz);
-        double h = (denom > 1e-9) ? (wy / denom) : 0.0;
-        return cv::Point2d(f * theta, -f * h);  // Y-flip
+        if (_isLandscape) {
+            double denom = std::sqrt(wy*wy + wz*wz);
+            double s = (denom > 1e-9) ? (-wx / denom) : 0.0;
+            double theta = std::atan2(wy, wz);
+            return cv::Point2d(f * s, -f * theta);
+        } else {
+            // V12 mirror fix kept: −wx so user's-right maps to canvas-right.
+            double theta = std::atan2(-wx, wz);
+            double denom = std::sqrt(wx*wx + wz*wz);
+            double h = (denom > 1e-9) ? (wy / denom) : 0.0;
+            return cv::Point2d(f * theta, -f * h);  // Y-flip
+        }
     };
     cv::Point2d c00 = projectCorner(0, 0);
     cv::Point2d c10 = projectCorner((double)src.cols - 1, 0);
@@ -334,28 +350,57 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
     const double r00 = R_panToCam.at<double>(0,0), r01 = R_panToCam.at<double>(0,1), r02 = R_panToCam.at<double>(0,2);
     const double r10 = R_panToCam.at<double>(1,0), r11 = R_panToCam.at<double>(1,1), r12 = R_panToCam.at<double>(1,2);
     const double r20 = R_panToCam.at<double>(2,0), r21 = R_panToCam.at<double>(2,1), r22 = R_panToCam.at<double>(2,2);
-    for (int y = 0; y < bboxH; y++) {
-        float *mx = mapX.ptr<float>(y);
-        float *my = mapY.ptr<float>(y);
-        double cylY = (double)(bboxY + y);
-        double h = -cylY / f;  // inverse Y-flip
-        for (int x = 0; x < bboxW; x++) {
-            double cylX = (double)(bboxX + x);
-            double theta = cylX / f;
-            double sinT = std::sin(theta);
-            double cosT = std::cos(theta);
-            // Inverse of V12 mirror fix: wx = −sinT.
-            double wx = -sinT, wy = h, wz = cosT;
-            double rx = r00*wx + r01*wy + r02*wz;
-            double ry = r10*wx + r11*wy + r12*wz;
-            double rz = r20*wx + r21*wy + r22*wz;
-            if (rz <= 1e-6) { mx[x] = -1.0f; my[x] = -1.0f; }
-            else {
-                double u = fx * rx / rz + cx;
-                double v = fy * ry / rz + cy;
-                if (u < 0 || u >= (double)src.cols || v < 0 || v >= (double)src.rows) {
-                    mx[x] = -1.0f; my[x] = -1.0f;
-                } else { mx[x] = (float)u; my[x] = (float)v; }
+    if (_isLandscape) {
+        // Transverse cylinder (axis = pan_X) inverse map.
+        for (int y = 0; y < bboxH; y++) {
+            float *mx = mapX.ptr<float>(y);
+            float *my = mapY.ptr<float>(y);
+            double cylY = (double)(bboxY + y);
+            double theta = -cylY / f;
+            double sinTh = std::sin(theta);
+            double cosTh = std::cos(theta);
+            for (int x = 0; x < bboxW; x++) {
+                double cylX = (double)(bboxX + x);
+                double s = cylX / f;
+                double wx = -s, wy = sinTh, wz = cosTh;
+                double rx = r00*wx + r01*wy + r02*wz;
+                double ry = r10*wx + r11*wy + r12*wz;
+                double rz = r20*wx + r21*wy + r22*wz;
+                if (rz <= 1e-6) { mx[x] = -1.0f; my[x] = -1.0f; }
+                else {
+                    double u = fx * rx / rz + cx;
+                    double v = fy * ry / rz + cy;
+                    if (u < 0 || u >= (double)src.cols || v < 0 || v >= (double)src.rows) {
+                        mx[x] = -1.0f; my[x] = -1.0f;
+                    } else { mx[x] = (float)u; my[x] = (float)v; }
+                }
+            }
+        }
+    } else {
+        // Vertical cylinder (axis = pan_Y) inverse map.
+        for (int y = 0; y < bboxH; y++) {
+            float *mx = mapX.ptr<float>(y);
+            float *my = mapY.ptr<float>(y);
+            double cylY = (double)(bboxY + y);
+            double h = -cylY / f;  // inverse Y-flip
+            for (int x = 0; x < bboxW; x++) {
+                double cylX = (double)(bboxX + x);
+                double theta = cylX / f;
+                double sinT = std::sin(theta);
+                double cosT = std::cos(theta);
+                // Inverse of V12 mirror fix: wx = −sinT.
+                double wx = -sinT, wy = h, wz = cosT;
+                double rx = r00*wx + r01*wy + r02*wz;
+                double ry = r10*wx + r11*wy + r12*wz;
+                double rz = r20*wx + r21*wy + r22*wz;
+                if (rz <= 1e-6) { mx[x] = -1.0f; my[x] = -1.0f; }
+                else {
+                    double u = fx * rx / rz + cx;
+                    double v = fy * ry / rz + cy;
+                    if (u < 0 || u >= (double)src.cols || v < 0 || v >= (double)src.rows) {
+                        mx[x] = -1.0f; my[x] = -1.0f;
+                    } else { mx[x] = (float)u; my[x] = (float)v; }
+                }
             }
         }
     }

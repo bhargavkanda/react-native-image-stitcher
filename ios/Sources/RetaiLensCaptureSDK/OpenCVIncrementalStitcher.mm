@@ -128,6 +128,14 @@ constexpr double kRansacReprojThresh = 5.0;
     NSInteger _canvasHeight;
     NSInteger _featherPx;
     NSInteger _frameRotationDegrees;
+    /// V12.3 orientation-aware cylinder axis.  Derived from
+    /// frameRotationDegrees: 0/180 → landscape (axis = pan_X,
+    /// transverse cylinder; pan direction is vertical world); 90/270 →
+    /// portrait (axis = pan_Y, vertical-axis cylinder; pan direction
+    /// is horizontal world).  Apple's pano follows the same rule:
+    /// pan along the device's longer side, projection wraps around
+    /// the shorter side.
+    BOOL _isLandscape;
 
     cv::Mat _canvas;       // CV_8UC3 BGR — the running panorama
     cv::Mat _canvasMask;   // CV_8UC1 — 255 where canvas has been written
@@ -186,6 +194,14 @@ constexpr double kRansacReprojThresh = 5.0;
         // JPEG for display.  The compute pipeline always works in
         // sensor-native landscape compose space.
         _frameRotationDegrees = frameRotationDegrees;
+        // V12.3: also use it to pick the cylinder axis.  Portrait
+        // device → vertical-axis cylinder (pan = world horizontal).
+        // Landscape device → transverse (pan_X-axis) cylinder
+        // (pan = world vertical).  JS sends 90 for portrait,
+        // 270 for portrait-upside-down, and 0 for both landscape
+        // orientations.
+        _isLandscape = (frameRotationDegrees == 0
+                        || frameRotationDegrees == 180);
         // Default compose dims preserve the 4:3 sensor aspect
         // (1920x1440 → 960x720 at scale 0.5).  Always landscape
         // because we no longer rotate input; the canvas geometry
@@ -801,14 +817,23 @@ static double computeOverlapPctSensor(double sensorRotXRad,
 
     // ── Forward-project source corners onto cylinder to size bbox ──
     //
-    // V12.2: reverted the spherical projection.  Spherical (asin on
-    // wy/|w|) bulged BOTH axes — every first frame looked fisheye
-    // even at level pitch.  Cylindrical only curves the horizontal
-    // axis (cylinder axis = panorama Y, gravity-up); vertical
-    // straight lines stay straight, which matches Apple's pano and
-    // human expectation for level scenes.  The pitch failure that
-    // motivated V12 will be fixed in a different way (orientation-
-    // aware cylinder axis, see Step 3).
+    // V12.2: reverted V12's spherical projection (it bulged both
+    // axes and made level frames look fisheye).
+    //
+    // V12.3: orientation-aware cylinder axis.
+    //   PORTRAIT (axis = pan_Y, gravity-up):
+    //     theta = horizontal angle, atan2(-wx, wz)
+    //     h     = wy / sqrt(wx²+wz²)   (height up the cylinder)
+    //     pixel = (f·theta, -f·h)
+    //     → vertical world lines stay straight; pan is horizontal.
+    //   LANDSCAPE (axis = pan_X, world horizontal — same as Apple's
+    //              landscape pano):
+    //     s     = -wx / sqrt(wy²+wz²)  (position along cylinder axis,
+    //                                   mirror-flipped so user's-right
+    //                                   sits at canvas-right)
+    //     theta = atan2(wy, wz)        (vertical angle, positive = up)
+    //     pixel = (f·s, -f·theta)
+    //     → horizontal world lines stay straight; pan is vertical.
     auto projectCorner = ^cv::Point2d(double u, double v) {
         double rx = (u - cx) / fx;
         double ry = (v - cy) / fy;
@@ -816,12 +841,19 @@ static double computeOverlapPctSensor(double sensorRotXRad,
         double wx = R_camToPan.at<double>(0,0)*rx + R_camToPan.at<double>(0,1)*ry + R_camToPan.at<double>(0,2)*rz;
         double wy = R_camToPan.at<double>(1,0)*rx + R_camToPan.at<double>(1,1)*ry + R_camToPan.at<double>(1,2)*rz;
         double wz = R_camToPan.at<double>(2,0)*rx + R_camToPan.at<double>(2,1)*ry + R_camToPan.at<double>(2,2)*rz;
-        // V12 mirror fix kept: −wx so user's-right maps to canvas-right.
-        double theta = std::atan2(-wx, wz);
-        double denom = std::sqrt(wx*wx + wz*wz);
-        double h = (denom > 1e-9) ? (wy / denom) : 0.0;
-        // Y-flip: panorama +Y is gravity-up, image +Y is image-down.
-        return cv::Point2d(f * theta, -f * h);
+        if (_isLandscape) {
+            double denom = std::sqrt(wy*wy + wz*wz);
+            double s = (denom > 1e-9) ? (-wx / denom) : 0.0;
+            double theta = std::atan2(wy, wz);
+            return cv::Point2d(f * s, -f * theta);
+        } else {
+            // V12 mirror fix: −wx so user's-right maps to canvas-right.
+            double theta = std::atan2(-wx, wz);
+            double denom = std::sqrt(wx*wx + wz*wz);
+            double h = (denom > 1e-9) ? (wy / denom) : 0.0;
+            // Y-flip: panorama +Y is gravity-up, image +Y is image-down.
+            return cv::Point2d(f * theta, -f * h);
+        }
     };
     cv::Point2d c00 = projectCorner(0, 0);
     cv::Point2d c10 = projectCorner((double)src.cols - 1, 0);
@@ -854,37 +886,78 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     const double r10 = R_panToCam.at<double>(1,0), r11 = R_panToCam.at<double>(1,1), r12 = R_panToCam.at<double>(1,2);
     const double r20 = R_panToCam.at<double>(2,0), r21 = R_panToCam.at<double>(2,1), r22 = R_panToCam.at<double>(2,2);
 
-    for (int y = 0; y < bboxH; y++) {
-        float *mx = mapX.ptr<float>(y);
-        float *my = mapY.ptr<float>(y);
-        double cylY = (double)(bboxY + y);
-        double h = -cylY / f;  // inverse of forward Y-flip
-        for (int x = 0; x < bboxW; x++) {
-            double cylX = (double)(bboxX + x);
-            double theta = cylX / f;
-            double sinT = std::sin(theta);
-            double cosT = std::cos(theta);
-            // Inverse of V12 mirror fix: wx = −sinT (forward had
-            // theta = atan2(−wx, wz), so wx = −sin(theta)).
-            double wx = -sinT;
-            double wy = h;
-            double wz = cosT;
-            double rx = r00*wx + r01*wy + r02*wz;
-            double ry = r10*wx + r11*wy + r12*wz;
-            double rz = r20*wx + r21*wy + r22*wz;
-            if (rz <= 1e-6) {
-                mx[x] = -1.0f;
-                my[x] = -1.0f;
-            } else {
-                double u = fx * rx / rz + cx;
-                double v = fy * ry / rz + cy;
-                if (u < 0 || u >= (double)src.cols
-                    || v < 0 || v >= (double)src.rows) {
+    // V12.3: same orientation branch as projectCorner.
+    if (_isLandscape) {
+        // Transverse cylinder (axis = pan_X) inverse map.
+        for (int y = 0; y < bboxH; y++) {
+            float *mx = mapX.ptr<float>(y);
+            float *my = mapY.ptr<float>(y);
+            double cylY = (double)(bboxY + y);
+            double theta = -cylY / f;  // inverse of forward Y-flip
+            double sinTh = std::sin(theta);
+            double cosTh = std::cos(theta);
+            for (int x = 0; x < bboxW; x++) {
+                double cylX = (double)(bboxX + x);
+                double s = cylX / f;
+                // Inverse of forward s = -wx/sqrt(wy²+wz²) on the
+                // unit cylinder (wy²+wz² = 1): wx = -s.
+                double wx = -s;
+                double wy = sinTh;
+                double wz = cosTh;
+                double rx = r00*wx + r01*wy + r02*wz;
+                double ry = r10*wx + r11*wy + r12*wz;
+                double rz = r20*wx + r21*wy + r22*wz;
+                if (rz <= 1e-6) {
                     mx[x] = -1.0f;
                     my[x] = -1.0f;
                 } else {
-                    mx[x] = (float)u;
-                    my[x] = (float)v;
+                    double u = fx * rx / rz + cx;
+                    double v = fy * ry / rz + cy;
+                    if (u < 0 || u >= (double)src.cols
+                        || v < 0 || v >= (double)src.rows) {
+                        mx[x] = -1.0f;
+                        my[x] = -1.0f;
+                    } else {
+                        mx[x] = (float)u;
+                        my[x] = (float)v;
+                    }
+                }
+            }
+        }
+    } else {
+        // Vertical cylinder (axis = pan_Y) inverse map.
+        for (int y = 0; y < bboxH; y++) {
+            float *mx = mapX.ptr<float>(y);
+            float *my = mapY.ptr<float>(y);
+            double cylY = (double)(bboxY + y);
+            double h = -cylY / f;  // inverse of forward Y-flip
+            for (int x = 0; x < bboxW; x++) {
+                double cylX = (double)(bboxX + x);
+                double theta = cylX / f;
+                double sinT = std::sin(theta);
+                double cosT = std::cos(theta);
+                // Inverse of V12 mirror fix: wx = −sinT (forward had
+                // theta = atan2(−wx, wz), so wx = −sin(theta)).
+                double wx = -sinT;
+                double wy = h;
+                double wz = cosT;
+                double rx = r00*wx + r01*wy + r02*wz;
+                double ry = r10*wx + r11*wy + r12*wz;
+                double rz = r20*wx + r21*wy + r22*wz;
+                if (rz <= 1e-6) {
+                    mx[x] = -1.0f;
+                    my[x] = -1.0f;
+                } else {
+                    double u = fx * rx / rz + cx;
+                    double v = fy * ry / rz + cy;
+                    if (u < 0 || u >= (double)src.cols
+                        || v < 0 || v >= (double)src.rows) {
+                        mx[x] = -1.0f;
+                        my[x] = -1.0f;
+                    } else {
+                        mx[x] = (float)u;
+                        my[x] = (float)v;
+                    }
                 }
             }
         }
