@@ -241,34 +241,43 @@ public final class RetaiLensIncrementalStitcher: NSObject {
 
     /// Stop ingestion + write the final panorama to `outputPath`.
     /// Returns the result on the main thread via completion.
+    ///
+    /// V12.1 frame-leak fix: the previous version waited until the
+    /// finalize block ran on the work queue to set isRunning=false.
+    /// Between the JS shutter-release and that block running, the
+    /// AR delegate could deliver several more frames — each one
+    /// passed consumeFrame's `isRunning == true` check and got
+    /// ingested into the canvas, producing visible "phantom" frames
+    /// after the user thought they had released.  The engine refs
+    /// and isRunning flag are now flipped SYNCHRONOUSLY here so the
+    /// AR delegate's very next consumeFrame sees isRunning=false.
+    /// The work-queue body just runs the engine's own finalize.
     @objc public func finalize(
         toPath outputPath: String,
         jpegQuality: Int,
         completion: @escaping ([String: Any]?, NSError?) -> Void
     ) {
-        // Detach from AR session first so no new frames slip in
-        // between our finalize call and the engine teardown.
+        // Detach from AR session first so the next delegate tick
+        // doesn't even reach consumeFrame.
         RetaiLensARSession.shared.incrementalConsumer = nil
 
-        // Hop to the work queue so any in-flight frame finishes
-        // before we serialize the canvas.
-        workQueue.async { [weak self] in
-            guard let self = self else {
-                completion(nil, NSError(
-                    domain: "RetaiLensIncremental",
-                    code: 9001,
-                    userInfo: [NSLocalizedDescriptionKey: "Stitcher gone."]
-                ))
-                return
-            }
-            self.stateLock.lock()
-            let hybrid = self.hybridEngine
-            let slit = self.firstwinsEngine
-            self.hybridEngine = nil
-            self.firstwinsEngine = nil
-            self.isRunning = false
-            self.stateLock.unlock()
+        // Synchronously snapshot + null the engine refs and flip
+        // isRunning=false.  Any AR delegate frame that already
+        // grabbed the consumer reference and is mid-consumeFrame
+        // will see isRunning=false and bail before calling ingest.
+        stateLock.lock()
+        let hybrid = self.hybridEngine
+        let slit = self.firstwinsEngine
+        self.hybridEngine = nil
+        self.firstwinsEngine = nil
+        self.isRunning = false
+        let drops = self.droppedBackpressure
+        stateLock.unlock()
 
+        // Hop to the work queue so any frame currently mid-ingest
+        // finishes before we serialize the canvas.  The serial
+        // queue guarantees finalize runs strictly after that frame.
+        workQueue.async {
             let cleaned = (outputPath.hasPrefix("file://"))
                 ? String(outputPath.dropFirst(7))
                 : outputPath
@@ -281,7 +290,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                         "width": snap.width,
                         "height": snap.height,
                         "acceptedCount": snap.acceptedCount,
-                        "droppedBackpressure": self.droppedBackpressure,
+                        "droppedBackpressure": drops,
                     ], nil)
                 } else if let slit = slit {
                     let snap = try slit.finalize(atPath: cleaned, jpegQuality: q)
@@ -290,7 +299,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                         "width": snap.width,
                         "height": snap.height,
                         "acceptedCount": snap.acceptedCount,
-                        "droppedBackpressure": self.droppedBackpressure,
+                        "droppedBackpressure": drops,
                     ], nil)
                 } else {
                     completion(nil, NSError(
@@ -307,16 +316,23 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     }
 
     /// Cancel an in-progress capture without producing output.
+    /// Same V12.1 synchronous-stop pattern as finalize.
     @objc public func cancel() {
         RetaiLensARSession.shared.incrementalConsumer = nil
         stateLock.lock()
-        hybridEngine?.reset()
-        firstwinsEngine?.reset()
-        hybridEngine = nil
-        firstwinsEngine = nil
-        isRunning = false
-        lastState = nil
+        let hybrid = self.hybridEngine
+        let slit = self.firstwinsEngine
+        self.hybridEngine = nil
+        self.firstwinsEngine = nil
+        self.isRunning = false
+        self.lastState = nil
         stateLock.unlock()
+        // Reset on the work queue so we don't race with an in-flight
+        // ingest that's still touching the engine's canvas.
+        workQueue.async {
+            hybrid?.reset()
+            slit?.reset()
+        }
     }
 
     /// Read the most recent state snapshot (JS pulls this on demand).
@@ -390,6 +406,18 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         workQueue.async { [weak self] in
             defer { self?.workInFlight = false }
             guard let self = self else { return }
+
+            // V12.1 frame-leak fix: finalize/cancel may have run on
+            // the JS thread between consumeFrame's isRunning check
+            // and now.  If isRunning is now false, this frame would
+            // have been dispatched a few ms BEFORE the user released
+            // the shutter — ingesting it now is exactly the
+            // "phantom frame after release" the user observed.  Bail
+            // before touching the engine.
+            self.stateLock.lock()
+            let stillRunning = self.isRunning
+            self.stateLock.unlock()
+            guard stillRunning else { return }
 
             let telemetry: RLISFrameTelemetry
             if let hybrid = hybrid {
