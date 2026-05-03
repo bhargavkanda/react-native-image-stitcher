@@ -179,11 +179,11 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
             0,    1, 0,
             -pzx, 0, pzz);
 
-        // Cylindrical-warp the first frame and place at canvas centre.
+        // V12 spherical-warp the first frame and place at canvas centre.
         cv::Mat warpedFirst, warpedFirstMask;
         cv::Point firstCornerCyl =
-            [self cylindricalWarp:frameBGR rArkit:R_new
-                            outImage:warpedFirst outMask:warpedFirstMask];
+            [self sphericalWarp:frameBGR rArkit:R_new
+                           outImage:warpedFirst outMask:warpedFirstMask];
         if (warpedFirst.empty()) {
             [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
             return tele;
@@ -206,20 +206,20 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
         return tele;
     }
 
-    // ── Subsequent frame: cylindrical-warp the FULL new frame, then
+    // ── Subsequent frame: spherical-warp the FULL new frame, then
     //    paint into the canvas ONLY where the canvas mask is empty.
     //    "First-painted wins" — the original first frame stays
     //    untouched in its footprint, and new frames append content
     //    only into pixels that have never been painted before.  This
     //    is what gives the user the "first full frame, slits at the
-    //    edges" behaviour.  No gaps because the cylindrical-warped
+    //    edges" behaviour.  No gaps because the spherical-warped
     //    new frame covers a wide angular extent (similar to the
     //    first frame's), so adjacent frames overlap heavily and
     //    every pixel between them gets covered.
     cv::Mat warpedNew, warpedNewMask;
     cv::Point newCornerCyl =
-        [self cylindricalWarp:frameBGR rArkit:R_new
-                        outImage:warpedNew outMask:warpedNewMask];
+        [self sphericalWarp:frameBGR rArkit:R_new
+                       outImage:warpedNew outMask:warpedNewMask];
     if (warpedNew.empty()) {
         [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
         return tele;
@@ -266,20 +266,24 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
     return tele;
 }
 
-// Hand-rolled cylindrical projection.  Same algorithm as v9's helper
+// Hand-rolled spherical projection.  Same algorithm as v9's helper
 // in OpenCVIncrementalStitcher.mm — duplicated here to keep the two
 // engines cleanly separated as separate files.  See that file for the
 // full annotation; in short:
 //   - panorama frame is gravity-up Y, first-camera-forward Z
 //   - R_panToCam = M · R_arkit⁻¹ · R_panToWorld
-//   - inverse-map each canvas pixel (theta, h) back to a source pixel
+//   - V12 spherical (equirectangular) projection: each pixel is
+//     (theta, phi)·f, where theta = atan2(-wx, wz) and
+//     phi = asin(wy/|w|).  The −wx flip is the V12 mirror fix
+//     (right-handed pan_X = -world_X for a forward camera).
+//   - inverse-map each canvas pixel back to a source pixel
 //   - cv::remap fills the output bbox
 //   - output mask has 255 only where the inverse map landed inside
 //     the source frame
-- (cv::Point)cylindricalWarp:(const cv::Mat &)src
-                       rArkit:(const cv::Mat &)rArkit
-                     outImage:(cv::Mat &)outImage
-                      outMask:(cv::Mat &)outMask
+- (cv::Point)sphericalWarp:(const cv::Mat &)src
+                     rArkit:(const cv::Mat &)rArkit
+                   outImage:(cv::Mat &)outImage
+                    outMask:(cv::Mat &)outMask
 {
     if (_R_panToWorld.empty() || _focalCompose <= 0) {
         outImage = cv::Mat(); outMask = cv::Mat();
@@ -300,19 +304,27 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
         double wx = R_camToPan.at<double>(0,0)*rx + R_camToPan.at<double>(0,1)*ry + R_camToPan.at<double>(0,2)*rz;
         double wy = R_camToPan.at<double>(1,0)*rx + R_camToPan.at<double>(1,1)*ry + R_camToPan.at<double>(1,2)*rz;
         double wz = R_camToPan.at<double>(2,0)*rx + R_camToPan.at<double>(2,1)*ry + R_camToPan.at<double>(2,2)*rz;
-        double theta = std::atan2(wx, wz);
-        double denom = std::sqrt(wx*wx + wz*wz);
-        double h = (denom > 1e-9) ? (wy / denom) : 0.0;
-        return cv::Point2d(f * theta, -f * h);  // Y-flip: panorama +Y up vs image +Y down
+        double rayMag = std::sqrt(wx*wx + wy*wy + wz*wz);
+        if (rayMag < 1e-9) return cv::Point2d(0, 0);
+        // V12 mirror fix: −wx so user's-right maps to canvas-right.
+        double theta = std::atan2(-wx, wz);
+        double phi = std::asin(std::clamp(wy / rayMag, -1.0, 1.0));
+        return cv::Point2d(f * theta, -f * phi);  // Y-flip
     };
     cv::Point2d c00 = projectCorner(0, 0);
     cv::Point2d c10 = projectCorner((double)src.cols - 1, 0);
     cv::Point2d c01 = projectCorner(0, (double)src.rows - 1);
     cv::Point2d c11 = projectCorner((double)src.cols - 1, (double)src.rows - 1);
-    double minX = std::min({c00.x, c10.x, c01.x, c11.x});
-    double maxX = std::max({c00.x, c10.x, c01.x, c11.x});
-    double minY = std::min({c00.y, c10.y, c01.y, c11.y});
-    double maxY = std::max({c00.y, c10.y, c01.y, c11.y});
+    // Edge midpoints capture the spherical bulge that the 4-corner
+    // bbox misses at extreme pitch (top/bottom edges curve outward).
+    cv::Point2d cTop  = projectCorner(src.cols / 2.0, 0);
+    cv::Point2d cBot  = projectCorner(src.cols / 2.0, (double)src.rows - 1);
+    cv::Point2d cLeft = projectCorner(0, src.rows / 2.0);
+    cv::Point2d cRight= projectCorner((double)src.cols - 1, src.rows / 2.0);
+    double minX = std::min({c00.x, c10.x, c01.x, c11.x, cTop.x, cBot.x, cLeft.x, cRight.x});
+    double maxX = std::max({c00.x, c10.x, c01.x, c11.x, cTop.x, cBot.x, cLeft.x, cRight.x});
+    double minY = std::min({c00.y, c10.y, c01.y, c11.y, cTop.y, cBot.y, cLeft.y, cRight.y});
+    double maxY = std::max({c00.y, c10.y, c01.y, c11.y, cTop.y, cBot.y, cLeft.y, cRight.y});
     int bboxX = (int)std::floor(minX);
     int bboxY = (int)std::floor(minY);
     int bboxW = (int)std::ceil(maxX - minX) + 1;
@@ -330,14 +342,19 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
     for (int y = 0; y < bboxH; y++) {
         float *mx = mapX.ptr<float>(y);
         float *my = mapY.ptr<float>(y);
-        double cylY = (double)(bboxY + y);
-        double h = -cylY / f;  // inverse of forward Y-flip
+        double sphereY = (double)(bboxY + y);
+        double phi = -sphereY / f;  // inverse Y-flip
+        double sinPhi = std::sin(phi);
+        double cosPhi = std::cos(phi);
         for (int x = 0; x < bboxW; x++) {
-            double cylX = (double)(bboxX + x);
-            double theta = cylX / f;
+            double sphereX = (double)(bboxX + x);
+            double theta = sphereX / f;
             double sinT = std::sin(theta);
             double cosT = std::cos(theta);
-            double wx = sinT, wy = h, wz = cosT;
+            // Inverse of V12 mirror fix: wx = −cosPhi · sinT.
+            double wx = -cosPhi * sinT;
+            double wy = sinPhi;
+            double wz = cosPhi * cosT;
             double rx = r00*wx + r01*wy + r02*wz;
             double ry = r10*wx + r11*wy + r12*wz;
             double rz = r20*wx + r21*wy + r22*wz;
@@ -457,7 +474,7 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
     }
     cv::Mat cropped = _canvas(bbox).clone();
 
-    // V11 Gap #14: cylindrical canvas is gravity-aligned by
+    // V11 Gap #14: panorama-frame canvas is gravity-aligned by
     // construction.  No output rotation needed.  See v9 engine for
     // the full explanation.
     cv::Mat out = cropped;

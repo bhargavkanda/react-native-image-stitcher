@@ -121,9 +121,9 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // both in the settings modal.
   blenderType: _isLowMem ? 'feather' : 'multiband',
   seamFinderType: _isLowMem ? 'skip' : 'graphcut',
-  // Default OFF — opt-in preview only.  Phase 5 will flip this to
-  // true once AR-backed capture matches vision-camera's surface.
-  useARPreview: false,
+  // AR-backed capture is the default — vision-camera path is kept as
+  // a fallback while we shake out edge cases.
+  useARPreview: true,
   incrementalEngine: 'hybrid',
   maxRecordingMs: 8000,
   framesPerSecond: 3,
@@ -204,12 +204,12 @@ export function PanoramaSettingsModal({
               caption="GraphCut: optimal seams, pairs best with MultiBand (more memory). Skip: streams warp+feed (lower peak memory, fine with Feather)."
             />
 
-            <SectionHeader title="AR preview (experimental)" />
+            <SectionHeader title="AR preview" />
             <SegmentedControl
-              options={['off', 'on']}
+              options={['on', 'off']}
               value={settings.useARPreview ? 'on' : 'off'}
               onChange={(v) => update({ useARPreview: v === 'on' })}
-              caption="Phase 4.4: swap the camera preview for ARKit's pose-aware feed. Capture flow unchanged (still uses vision-camera). Use to verify AR rendering before Phase 5 cutover."
+              caption="ARKit pose-aware preview + capture (default). Off falls back to the vision-camera path."
             />
 
             <SectionHeader title="Incremental engine (AR mode only)" />
@@ -217,7 +217,7 @@ export function PanoramaSettingsModal({
               options={['hybrid', 'firstwins']}
               value={settings.incrementalEngine}
               onChange={(v) => update({ incrementalEngine: v as PanoramaSettings['incrementalEngine'] })}
-              caption="Hybrid: cylindrical + KLT optical flow + feather (default, more forgiving alignment). FirstWins: cylindrical + first-painted-wins overlay (preserves anchor frame, no later corrections, simpler). Toggle to A/B test on the same scene."
+              caption="Hybrid (default): spherical warp + KLT optical-flow refinement + feather blend — best general-purpose quality. FirstWins: spherical warp with anchor-frame priority — best for short, mostly-horizontal pans where you want the first frame to dominate; no later corrections."
             />
 
             <SectionHeader title="Recording cap" />

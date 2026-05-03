@@ -334,15 +334,15 @@ constexpr double kRansacReprojThresh = 5.0;
             0,     1, 0,
             -pzx,  0, pzz);
 
-        // Place first frame onto canvas via cylindrical warp.  R for
+        // Place first frame onto canvas via spherical warp.  R for
         // the warp is panorama→camera in OpenCV cam frame; for the
         // first frame this is approximately identity (camera-forward
-        // = panorama +Z).  The cylindrical warp gives us a warped
-        // image + a corner in cylindrical-pixel space.
+        // = panorama +Z).  The spherical warp gives us a warped
+        // image + a corner in sphere-pixel (theta, phi)·f space.
         cv::Mat warpedFirst, warpedFirstMask;
         cv::Point firstCornerCyl =
-            [self cylindricalWarp:frameBGR rArkit:R_new
-                            outImage:warpedFirst outMask:warpedFirstMask];
+            [self sphericalWarp:frameBGR rArkit:R_new
+                           outImage:warpedFirst outMask:warpedFirstMask];
 
         // Anchor the first frame at canvas centre.
         int dstX = (int)(_canvas.cols - warpedFirst.cols) / 2;
@@ -414,10 +414,10 @@ constexpr double kRansacReprojThresh = 5.0;
         return tele;
     }
 
-    // V9 cylindrical warp + feather blend.
+    // V12 spherical warp + feather blend.
     cv::Mat warpedNew, warpedNewMask;
     cv::Point newCornerCyl =
-        [self cylindricalWarp:frameBGR rArkit:R_new
+        [self sphericalWarp:frameBGR rArkit:R_new
                        outImage:warpedNew outMask:warpedNewMask];
     if (warpedNew.empty()) {
         tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
@@ -481,70 +481,16 @@ constexpr double kRansacReprojThresh = 5.0;
     return tele;
 }
 
-// ── Inscribed-rectangle search ──────────────────────────────────────
-//
-// Returns the largest axis-aligned rectangle of all-255 pixels inside
-// the binary mask `m` (CV_8UC1).  Classic two-pass algorithm:
-//   1. Build a height map where heights[r][c] = number of consecutive
-//      255 pixels in column c ending at (and including) row r.
-//   2. For each row's heights, find the largest rectangle in the
-//      histogram via a monotonic stack (O(W) per row).
-// Total: O(W * H).  The returned rect is in `m`'s coordinate frame.
-- (cv::Rect)largestInscribedRect:(const cv::Mat &)m {
-    if (m.empty()) return cv::Rect(0, 0, 0, 0);
-    const int H = m.rows, W = m.cols;
-    std::vector<int> heights(W, 0);
-    int bestArea = 0;
-    cv::Rect best(0, 0, 0, 0);
-
-    for (int r = 0; r < H; r++) {
-        const uchar *row = m.ptr<uchar>(r);
-        for (int c = 0; c < W; c++) {
-            heights[c] = (row[c] >= 128) ? heights[c] + 1 : 0;
-        }
-        // Largest rectangle in histogram via monotonic stack.
-        // Sentinel value at end (W index) with height 0 forces the
-        // stack to flush at the end without extra post-loop code.
-        std::vector<int> stack;
-        stack.reserve(W + 1);
-        for (int c = 0; c <= W; c++) {
-            int h = (c == W) ? 0 : heights[c];
-            int start = c;
-            while (!stack.empty() && heights[stack.back()] > h) {
-                int top = stack.back(); stack.pop_back();
-                int width = c - top;
-                int area = heights[top] * width;
-                if (area > bestArea) {
-                    bestArea = area;
-                    best = cv::Rect(top, r - heights[top] + 1,
-                                    width, heights[top]);
-                }
-                start = top;
-            }
-            if (c < W) stack.push_back(c);
-            (void)start;
-        }
-    }
-    return best;
-}
-
 // ── Snapshot / finalize ─────────────────────────────────────────────
 
 - (nullable RLISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
                                               error:(NSError **)error
 {
     _snapshotSeq += 1;
-    // V11 Gap #16: live snapshots use plain bounding-box crop, NOT
-    // the O(W·H) inscribed-rect search.  Inscribed-rect ran on every
-    // accept (snapshotEveryNAccepts=1 default), adding ~10 ms ×
-    // accept-rate to the AR delegate thread.  At ~3 accepts/s and
-    // pipeline already at 70 ms/accept, that's ~30 ms of wasted
-    // work per second on the wrong thread.
     return [self writeSnapshotToPath:[self currentSnapshotPath]
                           jpegQuality:quality
                             tightCrop:YES
                     applyExposureComp:NO
-                  applyInscribedCrop:NO
                                 error:error];
 }
 
@@ -552,14 +498,16 @@ constexpr double kRansacReprojThresh = 5.0;
                               jpegQuality:(NSInteger)quality
                                     error:(NSError **)error
 {
-    // Final output: full inscribed-rect crop + CLAHE.  Runs off the
-    // main thread because Swift wrapper dispatches finalize on
-    // workQueue.
+    // Final output: bounding-box crop + CLAHE.  Runs off the AR
+    // delegate thread because the Swift wrapper dispatches finalize
+    // on workQueue.  V12 Gap #2: dropped the O(W·H) inscribed-rect
+    // search — it produced a far thinner output than the actual
+    // painted region for any non-rectangular pan footprint, and the
+    // mask edges are clean (no per-pixel artefacts to crop away).
     RLISSnapshot *snap = [self writeSnapshotToPath:outputPath
                                        jpegQuality:quality
                                          tightCrop:YES
                                  applyExposureComp:YES
-                                applyInscribedCrop:YES
                                              error:error];
     [self reset];
     return snap;
@@ -581,7 +529,6 @@ constexpr double kRansacReprojThresh = 5.0;
                                    jpegQuality:(NSInteger)quality
                                      tightCrop:(BOOL)tightCrop
                              applyExposureComp:(BOOL)applyExposureComp
-                            applyInscribedCrop:(BOOL)applyInscribedCrop
                                          error:(NSError **)error
 {
     if (_accepted == 0) {
@@ -594,51 +541,25 @@ constexpr double kRansacReprojThresh = 5.0;
         return nil;
     }
 
-    cv::Mat cropped;
     cv::Rect cropRect(0, 0, _canvas.cols, _canvas.rows);
     if (tightCrop) {
-        // Bounding box of painted region (still useful as a fast
-        // upper bound — inscribed-rectangle search runs inside this).
         cv::Rect bbox = cv::boundingRect(_canvasMask);
-        if (bbox.width <= 0 || bbox.height <= 0) {
-            cropRect = cv::Rect(0, 0, _canvas.cols, _canvas.rows);
-        } else if (!applyInscribedCrop) {
-            // V11 Gap #16: live snapshot path uses cheap bounding box.
-            // The inscribed-rect search is O(W·H) and runs only at
-            // finalize.
+        if (bbox.width > 0 && bbox.height > 0) {
             cropRect = bbox;
-        } else {
-            // Maximum inscribed axis-aligned rectangle inside the
-            // painted region — clean rectangular borders for the
-            // final saved JPEG.  Classic O(W·H) histogram-monotonic-
-            // stack algorithm; expensive but final-output-only.
-            cropRect = [self largestInscribedRect:_canvasMask(bbox)];
-            if (cropRect.width <= 0 || cropRect.height <= 0) {
-                cropRect = bbox;
-            } else {
-                cropRect.x += bbox.x;
-                cropRect.y += bbox.y;
-            }
         }
     }
-    cropped = _canvas(cropRect).clone();
+    cv::Mat cropped = _canvas(cropRect).clone();
 
-    // V11 Gap #14: NO output rotation needed for cylindrical canvas.
+    // V11 Gap #14: NO output rotation needed.
     //
     // The earlier (v7) sensor-native canvas needed a gravity-derived
     // rotation because the canvas was the camera buffer's pixel
     // layout — buffer-Y was image-down for portrait, image-right for
-    // landscape, etc.  V8+ switched to a CYLINDRICAL canvas in
-    // panorama frame (gravity-up = +panorama-Y; the cylindricalWarp
-    // Y-flip puts world-up at image-top by construction).  The
-    // canvas IS already correctly oriented for any device hold — no
-    // rotation is correct for any case.
-    //
-    // The v7-era atan2 trick computed the WRONG sign for landscape
-    // (atan2(gx=-1, gy=0) = -π/2 → 270° → ROTATE_90_CCW), which then
-    // un-aligned the otherwise-correct cylindrical canvas.  Removing
-    // it fixes landscape orientation; portrait orientation already
-    // produced 0° from the atan2 (gx≈0, gy≈1) so it's unchanged.
+    // landscape, etc.  V8+ switched to a panorama-frame canvas
+    // (gravity-up = +panorama-Y; the warp Y-flip puts world-up at
+    // image-top by construction).  V12 swapped the cylindrical warp
+    // for spherical — same gravity-alignment guarantee holds.  The
+    // canvas IS already correctly oriented for any device hold.
     cv::Mat out = cropped;
 
     if (applyExposureComp && !out.empty()) {
@@ -824,25 +745,39 @@ static double computeOverlapPctSensor(double sensorRotXRad,
 // reference pose + intrinsics in the same place it positions the
 // frame on the canvas.
 
-/// V9 hand-rolled cylindrical projection.
+/// V12 hand-rolled SPHERICAL (equirectangular) projection.
+/// (Was cylindrical pre-V12 — replaced for the primary use case
+/// of top-to-bottom landscape pan, which hits cylindrical's
+/// degenerate poles at moderate pitch angles.  Spherical handles
+/// ±90° pitch cleanly.)
 ///
-/// Projects a source frame onto a vertical cylinder (axis = panorama
-/// +Y = world gravity-up).  Output coords:
-///   theta  = horizontal angle around the cylinder (radians)
-///   h      = vertical offset along the cylinder axis
-///   pixel  = (focal · theta, focal · h) at compose-resolution focal
+/// Sphere parameterised by:
+///   theta = horizontal angle (longitude), atan2(-wx, wz)
+///                       (the −wx is the V12 mirror fix —
+///                       panorama-X is "user's left" in our
+///                       right-handed setup, so we flip the X
+///                       sign before computing theta to put
+///                       user's-right content at canvas-right)
+///   phi   = vertical angle (latitude),    asin(wy / |w|)
+///   pixel = (focal · theta, -focal · phi)
+///                       (the −phi is the Y-flip — panorama +Y
+///                       is gravity-up, image +Y is image-down)
 ///
-/// We compute the panorama→camera rotation `R_panToCam` from the
-/// frame's ARKit pose, find the bbox of the source's 4 corners
-/// projected onto the cylinder, allocate inverse-map tables for that
-/// bbox, then `cv::remap` the source into the bbox.
+/// Inverse map:
+///   theta = canvas_x / focal
+///   phi   = -canvas_y / focal
+///   ray   = (-cos(phi)·sin(theta), sin(phi), cos(phi)·cos(theta))
 ///
-/// Returns the bbox's top-left in cylindrical-pixel coords; the
+/// The ray is unit-length and well-defined for ALL (theta, phi)
+/// in [−π,π] × [−π/2, π/2] — no singularities except at the poles
+/// themselves where cos(phi) = 0 (degenerate but bounded).
+///
+/// Returns the bbox's top-left in sphere-pixel coords; the
 /// caller adds the canvas origin offset to land it on the canvas.
-- (cv::Point)cylindricalWarp:(const cv::Mat &)src
-                       rArkit:(const cv::Mat &)rArkit
-                     outImage:(cv::Mat &)outImage
-                      outMask:(cv::Mat &)outMask
+- (cv::Point)sphericalWarp:(const cv::Mat &)src
+                     rArkit:(const cv::Mat &)rArkit
+                   outImage:(cv::Mat &)outImage
+                    outMask:(cv::Mat &)outMask
 {
     if (_R_panToWorld.empty() || _focalCompose <= 0) {
         outImage = cv::Mat();
@@ -850,26 +785,17 @@ static double computeOverlapPctSensor(double sensorRotXRad,
         return cv::Point(0, 0);
     }
 
-    // Panorama→camera rotation (CV_64F internally, CV_32F for SIMD).
-    //   R_panToCam = M · R_arkit⁻¹ · R_panToWorld
+    // Panorama→camera rotation:  R_panToCam = M · R_arkit⁻¹ · R_panToWorld
     cv::Mat R_panToCam = _M_arkitToCv * rArkit.t() * _R_panToWorld;
+    cv::Mat R_camToPan = R_panToCam.t();
 
-    // Intrinsics in compose pixels.
     const double fx = _K_compose.at<double>(0, 0);
     const double fy = _K_compose.at<double>(1, 1);
     const double cx = _K_compose.at<double>(0, 2);
     const double cy = _K_compose.at<double>(1, 2);
     const double f  = _focalCompose;
 
-    // ── Forward-project source corners onto cylinder to size bbox ──
-    //
-    // For each source corner pixel (u, v):
-    //   ray_cam   = K⁻¹ · (u, v, 1)   = ((u-cx)/fx, (v-cy)/fy, 1)
-    //   ray_world = R_panToCam⁻¹ · ray_cam = R_panToCam.t() · ray_cam
-    //   theta     = atan2(ray_world.x, ray_world.z)
-    //   h         = ray_world.y / sqrt(x²+z²)
-    //   cyl_pixel = (f · theta, f · h)
-    cv::Mat R_camToPan = R_panToCam.t();
+    // ── Forward-project source corners onto sphere to size bbox ──
     auto projectCorner = ^cv::Point2d(double u, double v) {
         double rx = (u - cx) / fx;
         double ry = (v - cy) / fy;
@@ -877,24 +803,31 @@ static double computeOverlapPctSensor(double sensorRotXRad,
         double wx = R_camToPan.at<double>(0,0)*rx + R_camToPan.at<double>(0,1)*ry + R_camToPan.at<double>(0,2)*rz;
         double wy = R_camToPan.at<double>(1,0)*rx + R_camToPan.at<double>(1,1)*ry + R_camToPan.at<double>(1,2)*rz;
         double wz = R_camToPan.at<double>(2,0)*rx + R_camToPan.at<double>(2,1)*ry + R_camToPan.at<double>(2,2)*rz;
-        double theta = std::atan2(wx, wz);
-        double denom = std::sqrt(wx*wx + wz*wz);
-        double h = (denom > 1e-9) ? (wy / denom) : 0.0;
-        // Y-flip: panorama +Y is gravity-up, but image +Y goes DOWN.
-        // Without the flip, above-camera content (h>0) lands at
-        // image-bottom and below-camera content (h<0) at image-top —
-        // the entire panorama renders upside down.  The forward and
-        // inverse maps must both flip Y consistently.
-        return cv::Point2d(f * theta, -f * h);
+        double rayMag = std::sqrt(wx*wx + wy*wy + wz*wz);
+        if (rayMag < 1e-9) return cv::Point2d(0, 0);
+        // V12 MIRROR FIX: flip wx sign so user's-right (world +X,
+        // which is panorama-X = -1 in our right-handed setup)
+        // maps to positive theta = canvas-right.
+        double theta = std::atan2(-wx, wz);
+        double phi = std::asin(std::clamp(wy / rayMag, -1.0, 1.0));
+        // Y-flip: panorama +Y is gravity-up, image +Y is image-down.
+        return cv::Point2d(f * theta, -f * phi);
     };
     cv::Point2d c00 = projectCorner(0, 0);
     cv::Point2d c10 = projectCorner((double)src.cols - 1, 0);
     cv::Point2d c01 = projectCorner(0, (double)src.rows - 1);
     cv::Point2d c11 = projectCorner((double)src.cols - 1, (double)src.rows - 1);
-    double minX = std::min({c00.x, c10.x, c01.x, c11.x});
-    double maxX = std::max({c00.x, c10.x, c01.x, c11.x});
-    double minY = std::min({c00.y, c10.y, c01.y, c11.y});
-    double maxY = std::max({c00.y, c10.y, c01.y, c11.y});
+    // Sample additional points along the source edges — for spherical
+    // projection at extreme pitch, the bbox of just 4 corners can
+    // miss the "bulge" the sphere creates between corners.
+    cv::Point2d cTop  = projectCorner(src.cols / 2.0, 0);
+    cv::Point2d cBot  = projectCorner(src.cols / 2.0, (double)src.rows - 1);
+    cv::Point2d cLeft = projectCorner(0, src.rows / 2.0);
+    cv::Point2d cRight= projectCorner((double)src.cols - 1, src.rows / 2.0);
+    double minX = std::min({c00.x, c10.x, c01.x, c11.x, cTop.x, cBot.x, cLeft.x, cRight.x});
+    double maxX = std::max({c00.x, c10.x, c01.x, c11.x, cTop.x, cBot.x, cLeft.x, cRight.x});
+    double minY = std::min({c00.y, c10.y, c01.y, c11.y, cTop.y, cBot.y, cLeft.y, cRight.y});
+    double maxY = std::max({c00.y, c10.y, c01.y, c11.y, cTop.y, cBot.y, cLeft.y, cRight.y});
 
     int bboxX = (int)std::floor(minX);
     int bboxY = (int)std::floor(minY);
@@ -912,10 +845,6 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     cv::Mat mapX(bboxH, bboxW, CV_32FC1);
     cv::Mat mapY(bboxH, bboxW, CV_32FC1);
 
-    // Cylindrical → camera: ray_world = (sin θ, h, cos θ)
-    //                       ray_cam   = R_panToCam · ray_world
-    //                       u = fx · ray.x/ray.z + cx
-    //                       v = fy · ray.y/ray.z + cy
     const double r00 = R_panToCam.at<double>(0,0), r01 = R_panToCam.at<double>(0,1), r02 = R_panToCam.at<double>(0,2);
     const double r10 = R_panToCam.at<double>(1,0), r11 = R_panToCam.at<double>(1,1), r12 = R_panToCam.at<double>(1,2);
     const double r20 = R_panToCam.at<double>(2,0), r21 = R_panToCam.at<double>(2,1), r22 = R_panToCam.at<double>(2,2);
@@ -923,22 +852,25 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     for (int y = 0; y < bboxH; y++) {
         float *mx = mapX.ptr<float>(y);
         float *my = mapY.ptr<float>(y);
-        double cylY = (double)(bboxY + y);
-        // Inverse of the forward Y-flip: image +Y (down) maps to
-        // panorama -Y (gravity-down).  Must match the projectCorner
-        // sign convention or the warped content goes off-canvas.
-        double h = -cylY / f;
+        double sphereY = (double)(bboxY + y);
+        double phi = -sphereY / f;  // inverse of forward Y-flip
+        double sinPhi = std::sin(phi);
+        double cosPhi = std::cos(phi);
         for (int x = 0; x < bboxW; x++) {
-            double cylX = (double)(bboxX + x);
-            double theta = cylX / f;
+            double sphereX = (double)(bboxX + x);
+            double theta = sphereX / f;
             double sinT = std::sin(theta);
             double cosT = std::cos(theta);
-            double wx = sinT, wy = h, wz = cosT;
+            // Inverse of the V12 mirror fix: wx = -cosPhi · sinT
+            // (forward had theta = atan2(-wx, wz)).
+            double wx = -cosPhi * sinT;
+            double wy = sinPhi;
+            double wz = cosPhi * cosT;
             double rx = r00*wx + r01*wy + r02*wz;
             double ry = r10*wx + r11*wy + r12*wz;
             double rz = r20*wx + r21*wy + r22*wz;
             if (rz <= 1e-6) {
-                mx[x] = -1.0f;  // out-of-range → INTER_LINEAR border
+                mx[x] = -1.0f;
                 my[x] = -1.0f;
             } else {
                 double u = fx * rx / rz + cx;
@@ -955,12 +887,10 @@ static double computeOverlapPctSensor(double sensorRotXRad,
         }
     }
 
-    // Remap source → output bbox.
     outImage.create(bboxH, bboxW, src.type());
     cv::remap(src, outImage, mapX, mapY,
               cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
 
-    // Build mask from valid map entries (non-negative).
     outMask.create(bboxH, bboxW, CV_8UC1);
     outMask.setTo(0);
     for (int y = 0; y < bboxH; y++) {
