@@ -52,6 +52,11 @@
     // Last-strip state — strip placement is incremental from here.
     double _lastAcceptedTheta;  // panorama angle (radians) of last strip's centre
     double _lastAcceptedH;      // panorama height of last strip's centre
+    // Dominant pan direction, locked at second accept.  0 = unknown,
+    // 1 = yaw (left-right pan, vertical strips), 2 = pitch (up-down
+    // pan, horizontal strips).  Once locked, only frames with motion
+    // in this direction generate new strips.
+    int _slitScanMode;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -92,6 +97,7 @@
     _snapshotSeq = 0;
     _lastAcceptedTheta = 0;
     _lastAcceptedH = 0;
+    _slitScanMode = 0;
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
@@ -212,39 +218,68 @@ constexpr int    kMaxStripWidthPx = 240;
     double denom = std::sqrt(wx*wx + wz*wz);
     double currentH = (denom > 1e-9) ? (wy / denom) : 0;
 
-    // Strip width = focal * angular delta from last strip.
     double dTheta = currentTheta - _lastAcceptedTheta;
-    int stripWidthPx = (int)std::round(_focalCompose * std::fabs(dTheta));
-    if (stripWidthPx < kMinStripWidthPx) {
-        [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
-        return tele;
-    }
-    if (stripWidthPx > kMaxStripWidthPx) {
-        // Operator panned too fast — cap the strip; we lose the
-        // intermediate scene but at least the strip width stays sane.
-        stripWidthPx = kMaxStripWidthPx;
+    double dH = currentH - _lastAcceptedH;
+    int dThetaPx = (int)std::round(_focalCompose * std::fabs(dTheta));
+    int dHPx     = (int)std::round(_focalCompose * std::fabs(dH));
+
+    // ── Lock pan direction at second accept ──────────────────────
+    if (_slitScanMode == 0) {
+        if (dThetaPx < kMinStripWidthPx && dHPx < kMinStripWidthPx) {
+            [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
+            return tele;
+        }
+        _slitScanMode = (dThetaPx >= dHPx) ? 1 : 2;
     }
 
-    // Strip: take from the FRAME CENTER along the pan direction.
-    int frameCenterX = frameBGR.cols / 2;
-    int stripStartX = frameCenterX - stripWidthPx / 2;
-    if (stripStartX < 0) stripStartX = 0;
-    if (stripStartX + stripWidthPx > frameBGR.cols) {
-        stripWidthPx = frameBGR.cols - stripStartX;
+    // ── Mode-specific strip extraction + placement ──────────────
+    int stripWidthPx = 0, stripHeightPx = 0;
+    cv::Rect stripSrcRect;
+    cv::Rect dstRoi;
+
+    if (_slitScanMode == 1) {
+        // YAW pan — extract a vertical strip from frame centre,
+        // strip width tracks angular delta.
+        if (dThetaPx < kMinStripWidthPx) {
+            [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
+            return tele;
+        }
+        stripWidthPx  = std::min(dThetaPx, kMaxStripWidthPx);
+        stripHeightPx = frameBGR.rows;
+        int frameCx   = frameBGR.cols / 2;
+        int srcX      = frameCx - stripWidthPx / 2;
+        srcX = std::max(0, std::min(srcX, frameBGR.cols - stripWidthPx));
+        stripSrcRect = cv::Rect(srcX, 0, stripWidthPx, stripHeightPx);
+
+        int cx = (int)std::round(_focalCompose * currentTheta) - _canvasOriginCylX;
+        int cy = (int)std::round(-_focalCompose * currentH)     - _canvasOriginCylY;
+        // Y-flip: panorama +Y is gravity-up; image +Y is image-down.
+        // Same convention as the v9 hybrid engine.
+        dstRoi = cv::Rect(cx - stripWidthPx / 2, cy - stripHeightPx / 2,
+                          stripWidthPx, stripHeightPx);
+    } else {
+        // PITCH pan — extract a horizontal strip from frame centre,
+        // strip HEIGHT tracks pitch delta.  The "narrow seam" axis
+        // is now horizontal instead of vertical.
+        if (dHPx < kMinStripWidthPx) {
+            [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
+            return tele;
+        }
+        stripHeightPx = std::min(dHPx, kMaxStripWidthPx);
+        stripWidthPx  = frameBGR.cols;
+        int frameCy   = frameBGR.rows / 2;
+        int srcY      = frameCy - stripHeightPx / 2;
+        srcY = std::max(0, std::min(srcY, frameBGR.rows - stripHeightPx));
+        stripSrcRect = cv::Rect(0, srcY, stripWidthPx, stripHeightPx);
+
+        int cx = (int)std::round(_focalCompose * currentTheta) - _canvasOriginCylX;
+        int cy = (int)std::round(-_focalCompose * currentH)     - _canvasOriginCylY;
+        dstRoi = cv::Rect(cx - stripWidthPx / 2, cy - stripHeightPx / 2,
+                          stripWidthPx, stripHeightPx);
     }
-    cv::Rect stripSrcRect(stripStartX, 0, stripWidthPx, frameBGR.rows);
+
     cv::Mat stripSrc = frameBGR(stripSrcRect);
 
-    // Cylindrical placement.
-    // Strip's centre theta = currentTheta (at frame centre).
-    // Strip extends ±(stripWidthPx/2) pixels.  Map to canvas:
-    //   canvas_x = focal * theta - canvasOriginCylX
-    int stripCenterCanvasX = (int)std::round(_focalCompose * currentTheta) - _canvasOriginCylX;
-    int stripCenterCanvasY = (int)std::round(_focalCompose * currentH)     - _canvasOriginCylY;
-
-    int dstX = stripCenterCanvasX - stripWidthPx / 2;
-    int dstY = stripCenterCanvasY - frameBGR.rows / 2;
-    cv::Rect dstRoi(dstX, dstY, stripWidthPx, frameBGR.rows);
     cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
     cv::Rect dstClipped = dstRoi & canvasBounds;
     if (dstClipped.width <= 0 || dstClipped.height <= 0) {
@@ -254,17 +289,12 @@ constexpr int    kMaxStripWidthPx = 240;
     cv::Rect srcRoi(dstClipped.x - dstRoi.x, dstClipped.y - dstRoi.y,
                     dstClipped.width, dstClipped.height);
 
-    // Per-strip feather blend (1-3 px overlap with the prior strip
-    // on each side).  At these widths a smooth ratio-of-distances
-    // feather is overkill; we use a 2-pixel linear ramp at each
-    // edge of the strip mask.
+    // Per-strip feather: soften the edges PERPENDICULAR to the seam.
+    //   YAW mode (vertical strips, seams on left/right edges)  → feather X.
+    //   PITCH mode (horizontal strips, seams on top/bottom)    → feather Y.
     cv::Mat stripMask(dstClipped.height, dstClipped.width, CV_8UC1, cv::Scalar(255));
-    int featherPx = std::min(2, dstClipped.width / 4);
-    if (featherPx > 0) {
-        // Soften the left + right edges only; top and bottom are
-        // hard (the strip spans full frame height — top/bottom
-        // boundary is the panorama vertical extent, not a per-
-        // strip seam).
+    if (_slitScanMode == 1) {
+        int featherPx = std::min(2, dstClipped.width / 4);
         for (int x = 0; x < featherPx; x++) {
             uchar v = (uchar)((float)x / featherPx * 255.0f);
             for (int y = 0; y < dstClipped.height; y++) {
@@ -273,26 +303,34 @@ constexpr int    kMaxStripWidthPx = 240;
                     std::min(stripMask.at<uchar>(y, dstClipped.width - 1 - x), v);
             }
         }
+    } else {
+        int featherPx = std::min(2, dstClipped.height / 4);
+        for (int y = 0; y < featherPx; y++) {
+            uchar v = (uchar)((float)y / featherPx * 255.0f);
+            for (int x = 0; x < dstClipped.width; x++) {
+                stripMask.at<uchar>(y, x) = std::min(stripMask.at<uchar>(y, x), v);
+                stripMask.at<uchar>(dstClipped.height - 1 - y, x) =
+                    std::min(stripMask.at<uchar>(dstClipped.height - 1 - y, x), v);
+            }
+        }
     }
     cv::Mat canvasRoi = _canvas(dstClipped);
     cv::Mat canvasMaskRoi = _canvasMask(dstClipped);
     cv::Mat stripCropped = stripSrc(srcRoi);
 
-    // Where canvas is empty: copy strip directly.
     cv::Mat noPrior;
     cv::compare(canvasMaskRoi, 0, noPrior, cv::CMP_EQ);
     stripCropped.copyTo(canvasRoi, noPrior);
 
-    // Where overlap: alpha-blend per stripMask.
     cv::Mat overlapMask;
     cv::bitwise_and(canvasMaskRoi, stripMask, overlapMask);
     if (cv::countNonZero(overlapMask) > 0) {
-        cv::Mat alphaF, invAlphaF;
+        cv::Mat alphaF;
         stripMask.convertTo(alphaF, CV_32F, 1.0 / 255.0);
-        cv::Mat alpha3, invAlpha3;
+        cv::Mat alpha3;
         cv::Mat ch[] = {alphaF, alphaF, alphaF};
         cv::merge(ch, 3, alpha3);
-        invAlpha3 = cv::Scalar(1, 1, 1) - alpha3;
+        cv::Mat invAlpha3 = cv::Scalar(1, 1, 1) - alpha3;
         cv::Mat sF, cF;
         stripCropped.convertTo(sF, CV_32FC3);
         canvasRoi.convertTo(cF, CV_32FC3);

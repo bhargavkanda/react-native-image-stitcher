@@ -845,7 +845,12 @@ static double computeOverlapPct(double deltaYaw,
         double theta = std::atan2(wx, wz);
         double denom = std::sqrt(wx*wx + wz*wz);
         double h = (denom > 1e-9) ? (wy / denom) : 0.0;
-        return cv::Point2d(f * theta, f * h);
+        // Y-flip: panorama +Y is gravity-up, but image +Y goes DOWN.
+        // Without the flip, above-camera content (h>0) lands at
+        // image-bottom and below-camera content (h<0) at image-top —
+        // the entire panorama renders upside down.  The forward and
+        // inverse maps must both flip Y consistently.
+        return cv::Point2d(f * theta, -f * h);
     };
     cv::Point2d c00 = projectCorner(0, 0);
     cv::Point2d c10 = projectCorner((double)src.cols - 1, 0);
@@ -884,7 +889,10 @@ static double computeOverlapPct(double deltaYaw,
         float *mx = mapX.ptr<float>(y);
         float *my = mapY.ptr<float>(y);
         double cylY = (double)(bboxY + y);
-        double h = cylY / f;
+        // Inverse of the forward Y-flip: image +Y (down) maps to
+        // panorama -Y (gravity-down).  Must match the projectCorner
+        // sign convention or the warped content goes off-canvas.
+        double h = -cylY / f;
         for (int x = 0; x < bboxW; x++) {
             double cylX = (double)(bboxX + x);
             double theta = cylX / f;
