@@ -228,18 +228,30 @@ internal class IncrementalFirstwinsEngine(
             )
 
             if (useRectilinear) {
-                // V12.8 Variant B first frame: paste the LONG-SIDE-CLIPPED
-                // portion at canvas centre.  See iOS engine + user's
-                // mental-model drawing for the rationale (clip only on
-                // the perpendicular-to-pan direction; full pan-axis).
+                // V12.11 Step C — first-frame placement at canvas EDGE
+                // (matching the start of the user's pan), not canvas
+                // centre.  Mirrors iOS' kLongSideFractionRect logic
+                // and first-frame placement in OpenCVSlitScanStitcher.mm.
+                //
+                //   landscape device (vertical pan, user pans DOWN):
+                //     first frame at canvas TOP, centred horizontally.
+                //   portrait device (horizontal pan, user pans RIGHT):
+                //     first frame at canvas LEFT, centred vertically.
                 val clipW = max(1, (frameBGR.cols() * kLongSideFractionRect).toInt())
                 val clipH = frameBGR.rows()
                 val srcClipX = (frameBGR.cols() - clipW) / 2
                 val srcClipY = 0
                 val frameClipped = Mat(frameBGR, Rect(srcClipX, srcClipY, clipW, clipH))
 
-                val dstX = (canvasWidth - clipW) / 2
-                val dstY = (canvasHeight - clipH) / 2
+                val dstX: Int
+                val dstY: Int
+                if (isLandscape) {
+                    dstX = (canvasWidth - clipW) / 2
+                    dstY = 0
+                } else {
+                    dstX = 0
+                    dstY = (canvasHeight - clipH) / 2
+                }
                 val roi = Rect(dstX, dstY, clipW, clipH).intersection(
                     Rect(0, 0, canvasWidth, canvasHeight)
                 )
@@ -256,10 +268,10 @@ internal class IncrementalFirstwinsEngine(
                 hasFirstFrame = true
                 acceptedCountAtomic.set(1); cachedBoundingRect = null
                 Log.i(
-                    "V12.8-rect",
+                    "V12.11-rect",
                     "first frame clipped+pasted at ($dstX,$dstY) " +
                         "clipped=${clipW}x${clipH} isLandscape=$isLandscape " +
-                        "focal=${"%.2f".format(focalCompose)}",
+                        "focal=${"%.2f".format(focalCompose)} canvas=${canvasWidth}x${canvasHeight}",
                 )
                 frameClipped.release()
                 frameBGR.release()

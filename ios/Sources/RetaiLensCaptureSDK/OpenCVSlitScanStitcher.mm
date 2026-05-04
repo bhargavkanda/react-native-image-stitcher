@@ -415,8 +415,34 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
             int srcClipY = 0;
             cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
 
-            int dstX = (int)(_canvas.cols - clipW) / 2;
-            int dstY = (int)(_canvas.rows - clipH) / 2;
+            // V12.11 Step C — first-frame placement at canvas EDGE
+            // (matching the start of the user's pan), not canvas
+            // centre.  The Apple-pano UX models the canvas as a
+            // strip the user fills by panning in one direction;
+            // starting at centre wastes half the canvas if the
+            // user pans straight in either direction.
+            //
+            //   landscape device (vertical pan, user pans DOWN):
+            //     first frame at canvas TOP, centred horizontally.
+            //     dstX = (canvas - clipW) / 2, dstY = 0.
+            //
+            //   portrait device (horizontal pan, user pans RIGHT):
+            //     first frame at canvas LEFT, centred vertically.
+            //     dstX = 0, dstY = (canvas - clipH) / 2.
+            //
+            // Pairs with Item C's dynamic canvas dimensioning where
+            // the canvas is sized as [perpAxis × 5000] for landscape
+            // or [5000 × perpAxis] for portrait — so the long axis
+            // (5000) is the pan extent and the perpendicular axis
+            // is just frameDim, leaving no slack for centring.
+            int dstX, dstY;
+            if (_isLandscape) {
+                dstX = (int)(_canvas.cols - clipW) / 2;
+                dstY = 0;
+            } else {
+                dstX = 0;
+                dstY = (int)(_canvas.rows - clipH) / 2;
+            }
             cv::Rect roi(dstX, dstY, clipW, clipH);
             roi &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
             cv::Rect srcR(0, 0, roi.width, roi.height);
@@ -428,8 +454,9 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
             _accepted = 1;
             [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
             [tele setValue:@(1.0) forKey:@"confidence"];
-            NSLog(@"[V12.8-rect] first frame clipped+pasted at (%d,%d) size %dx%d (clip=%dx%d) isLandscape=%d focal=%.2f",
-                  dstX, dstY, clipW, clipH, srcClipX, srcClipY, (int)_isLandscape, _focalCompose);
+            NSLog(@"[V12.11-rect] first frame clipped+pasted at (%d,%d) size %dx%d (clip=%dx%d) isLandscape=%d focal=%.2f canvas=%dx%d",
+                  dstX, dstY, clipW, clipH, srcClipX, srcClipY, (int)_isLandscape, _focalCompose,
+                  _canvas.cols, _canvas.rows);
             return tele;
         }
 
