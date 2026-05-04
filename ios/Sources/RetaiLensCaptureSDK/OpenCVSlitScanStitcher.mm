@@ -131,6 +131,140 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
 // These were strip-width bounds for the original slit-scan design,
 // never referenced in the first-painted-wins implementation.
 
+// V12.10 Fix #1 — image-aligned slit refinement.
+//
+// Pose alone places frames within ~5–15 px when the user pans cleanly
+// around the device's optical centre, but real-world handheld motion
+// introduces small translation parallax and rotation drift that pose
+// can't model.  When those errors compound frame-to-frame, the
+// leading-edge sliver wobbles relative to the already-stitched canvas.
+//
+// This helper takes a small grayscale template from the OVERLAP region
+// of the canvas (where mask==255), searches for the same texture in
+// the new frame's source region within ±searchPx, and returns the
+// (delta_x, delta_y) by which the source content is offset from the
+// pose-predicted position.  The caller subtracts this delta from the
+// paste position so the leading-edge sliver lines up with the existing
+// edge.
+//
+// Returns (0,0) when:
+//   • overlap area is too small to host the template,
+//   • the search window can't fit around the template inside srcRegion,
+//   • or the best NCC score is below kRefineMinNcc (low-confidence
+//     match — a featureless wall, motion blur, or genuine drift bigger
+//     than the search window).  Falling back to pose-only placement is
+//     safer than introducing a bogus shift.
+static cv::Point refineSlitOffset(const cv::Mat& canvasOverlap,
+                                  const cv::Mat& srcOverlap,
+                                  const cv::Mat& maskOverlap,
+                                  int searchPx,
+                                  double *outNcc) {
+    constexpr int kRefineTemplateSize = 64;
+    constexpr int kRefineMinOverlapPx = 80;
+    constexpr double kRefineMinNcc    = 0.5;
+
+    if (outNcc) { *outNcc = 0.0; }
+
+    if (canvasOverlap.empty() || srcOverlap.empty() || maskOverlap.empty()) {
+        return cv::Point(0, 0);
+    }
+    if (canvasOverlap.size() != srcOverlap.size() ||
+        canvasOverlap.size() != maskOverlap.size()) {
+        return cv::Point(0, 0);
+    }
+    if (canvasOverlap.cols < kRefineMinOverlapPx ||
+        canvasOverlap.rows < kRefineMinOverlapPx) {
+        return cv::Point(0, 0);
+    }
+
+    // The "where existing canvas has been painted" submask.  Template
+    // must be wholly inside this region — otherwise the template
+    // contains all-black canvas pixels which would NCC poorly.
+    cv::Mat painted;
+    cv::compare(maskOverlap, 255, painted, cv::CMP_EQ);
+    int paintedCount = cv::countNonZero(painted);
+    if (paintedCount < kRefineTemplateSize * kRefineTemplateSize) {
+        return cv::Point(0, 0);
+    }
+
+    // Centroid of the painted region — anchor the template here.
+    cv::Moments m = cv::moments(painted, true);
+    if (m.m00 <= 0) { return cv::Point(0, 0); }
+    int cx = (int)std::round(m.m10 / m.m00);
+    int cy = (int)std::round(m.m01 / m.m00);
+
+    int tplX = cx - kRefineTemplateSize / 2;
+    int tplY = cy - kRefineTemplateSize / 2;
+    if (tplX < 0) tplX = 0;
+    if (tplY < 0) tplY = 0;
+    if (tplX + kRefineTemplateSize > canvasOverlap.cols) {
+        tplX = canvasOverlap.cols - kRefineTemplateSize;
+    }
+    if (tplY + kRefineTemplateSize > canvasOverlap.rows) {
+        tplY = canvasOverlap.rows - kRefineTemplateSize;
+    }
+    if (tplX < 0 || tplY < 0) { return cv::Point(0, 0); }
+
+    // Sanity: the tile we picked must be fully inside the painted area
+    // — if a chunk of it is unpainted (mask==0), the NCC will lock onto
+    // black-vs-image rather than texture-vs-texture.  Reject in that
+    // case.
+    cv::Rect tplRoi(tplX, tplY, kRefineTemplateSize, kRefineTemplateSize);
+    cv::Mat tplMask = painted(tplRoi);
+    if (cv::countNonZero(tplMask) < (kRefineTemplateSize * kRefineTemplateSize * 9 / 10)) {
+        return cv::Point(0, 0);
+    }
+
+    // Search region in srcOverlap — pad ±searchPx around tplRoi.
+    int searchX = std::max(0, tplX - searchPx);
+    int searchY = std::max(0, tplY - searchPx);
+    int searchW = std::min(srcOverlap.cols  - searchX,
+                            kRefineTemplateSize + 2 * searchPx);
+    int searchH = std::min(srcOverlap.rows  - searchY,
+                            kRefineTemplateSize + 2 * searchPx);
+    if (searchW < kRefineTemplateSize || searchH < kRefineTemplateSize) {
+        return cv::Point(0, 0);
+    }
+
+    // Grayscale conversion — faster, equally robust for NCC, and
+    // robust to small exposure differences across frames.
+    cv::Mat tplBGR  = canvasOverlap(tplRoi);
+    cv::Mat srchBGR = srcOverlap(cv::Rect(searchX, searchY, searchW, searchH));
+    cv::Mat tplGray, srchGray;
+    cv::cvtColor(tplBGR,  tplGray,  cv::COLOR_BGR2GRAY);
+    cv::cvtColor(srchBGR, srchGray, cv::COLOR_BGR2GRAY);
+
+    cv::Mat result;
+    cv::matchTemplate(srchGray, tplGray, result, cv::TM_CCOEFF_NORMED);
+
+    double maxVal = 0.0;
+    cv::Point maxLoc;
+    cv::minMaxLoc(result, nullptr, &maxVal, nullptr, &maxLoc);
+    if (outNcc) { *outNcc = maxVal; }
+    if (maxVal < kRefineMinNcc) {
+        return cv::Point(0, 0);
+    }
+
+    // matchLoc in srcOverlap coords.
+    int matchX = searchX + maxLoc.x;
+    int matchY = searchY + maxLoc.y;
+
+    // Delta = how much srcOverlap's content is offset from canvas's at
+    // pose-predicted alignment.  Caller subtracts this delta from the
+    // paste position to align them.
+    int deltaX = matchX - tplX;
+    int deltaY = matchY - tplY;
+
+    // Belt-and-braces clamp (matchTemplate result map dimensions
+    // already constrain the answer, but explicit is good).
+    if (deltaX >  searchPx) deltaX =  searchPx;
+    if (deltaX < -searchPx) deltaX = -searchPx;
+    if (deltaY >  searchPx) deltaY =  searchPx;
+    if (deltaY < -searchPx) deltaY = -searchPx;
+
+    return cv::Point(deltaX, deltaY);
+}
+
 - (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                        qx:(double)qx
                                        qy:(double)qy
@@ -306,6 +440,49 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
             dstX = _firstFrameDstX + (int)std::round(alpha * _focalCompose);
             dstY = _firstFrameDstY;
         }
+
+        // V12.10 Fix #1 — image-aligned slit refinement.
+        //
+        // Build a TENTATIVE destination ROI from the pose-predicted
+        // (dstX, dstY).  In the overlap zone (where canvasMask==255),
+        // run a small NCC template match between canvas and the new
+        // frame's source region.  The returned (delta_x, delta_y) is
+        // how much the new frame's content is offset from the
+        // pose-predicted alignment — we SUBTRACT it from (dstX, dstY)
+        // so the leading-edge sliver lines up with the existing edge.
+        // refineSlitOffset returns (0,0) when the overlap is too small
+        // or NCC confidence is too low — fall back to pose-only in
+        // those cases.
+        const int kRefineSearchPx = 24;
+        cv::Rect refineCanvasBounds(0, 0, _canvas.cols, _canvas.rows);
+        {
+            cv::Rect tentativeRoi(dstX, dstY, clipW, clipH);
+            cv::Rect tentativeClipped = tentativeRoi & refineCanvasBounds;
+            if (tentativeClipped.width  >= 80 && tentativeClipped.height >= 80) {
+                cv::Mat canvasOverlap = _canvas(tentativeClipped);
+                cv::Mat maskOverlap   = _canvasMask(tentativeClipped);
+                cv::Rect srcInClipped(tentativeClipped.x - dstX,
+                                      tentativeClipped.y - dstY,
+                                      tentativeClipped.width,
+                                      tentativeClipped.height);
+                cv::Mat srcOverlap = frameClipped(srcInClipped);
+                double ncc = 0.0;
+                cv::Point delta = refineSlitOffset(canvasOverlap,
+                                                   srcOverlap,
+                                                   maskOverlap,
+                                                   kRefineSearchPx,
+                                                   &ncc);
+                if (delta.x != 0 || delta.y != 0) {
+                    dstX -= delta.x;
+                    dstY -= delta.y;
+                    NSLog(@"[V12.10-refine] delta=(%+d,%+d) ncc=%.3f"
+                          " adjusted dst=(%d,%d) (was %d,%d)",
+                          delta.x, delta.y, ncc, dstX, dstY,
+                          dstX + delta.x, dstY + delta.y);
+                }
+            }
+        }
+
         cv::Rect dstRoi(dstX, dstY, clipW, clipH);
         cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
         cv::Rect dstClipped = dstRoi & canvasBounds;

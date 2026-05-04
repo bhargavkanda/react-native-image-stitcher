@@ -305,8 +305,8 @@ internal class IncrementalFirstwinsEngine(
             val srcClipY = 0
             val frameClipped = Mat(frameBGR, Rect(srcClipX, srcClipY, clipW, clipH))
 
-            val dstX: Int
-            val dstY: Int
+            var dstX: Int
+            var dstY: Int
             val alpha: Double
             if (isLandscape) {
                 // Vertical pan around cam +X: alpha = atan2(R_rel[2,1], R_rel[1,1]).
@@ -322,6 +322,49 @@ internal class IncrementalFirstwinsEngine(
                 dstY = firstFrameDstY
             }
             rRel.release()
+
+            // V12.10 Fix #1 — image-aligned slit refinement.  Mirror of
+            // iOS path: build a tentative ROI from pose-predicted
+            // (dstX, dstY); in the overlap zone (mask==255) run an NCC
+            // template match; subtract the returned delta from
+            // (dstX, dstY) so the leading-edge sliver lines up with the
+            // existing edge.  Falls back to pose-only when overlap is
+            // too small or NCC confidence is low.
+            run {
+                val kRefineSearchPx = 24
+                val tentativeRoi = Rect(dstX, dstY, clipW, clipH).intersection(
+                    Rect(0, 0, canvasWidth, canvasHeight)
+                )
+                if (tentativeRoi.width >= 80 && tentativeRoi.height >= 80) {
+                    val canvasOverlap = Mat(canvas, tentativeRoi)
+                    val maskOverlap = Mat(canvasMask, tentativeRoi)
+                    val srcInClipped = Rect(
+                        tentativeRoi.x - dstX,
+                        tentativeRoi.y - dstY,
+                        tentativeRoi.width,
+                        tentativeRoi.height,
+                    )
+                    val srcOverlap = Mat(frameClipped, srcInClipped)
+                    val (delta, ncc) = refineSlitOffset(
+                        canvasOverlap, srcOverlap, maskOverlap, kRefineSearchPx,
+                    )
+                    canvasOverlap.release(); maskOverlap.release(); srcOverlap.release()
+                    val dx = delta.x.toInt()
+                    val dy = delta.y.toInt()
+                    if (dx != 0 || dy != 0) {
+                        val priorX = dstX
+                        val priorY = dstY
+                        dstX -= dx
+                        dstY -= dy
+                        Log.d(
+                            "V12.10-refine",
+                            "delta=(%+d,%+d) ncc=%.3f adjusted dst=(%d,%d) (was %d,%d)".format(
+                                Locale.US, dx, dy, ncc, dstX, dstY, priorX, priorY,
+                            ),
+                        )
+                    }
+                }
+            }
 
             val dstRoi = Rect(dstX, dstY, clipW, clipH).intersection(
                 Rect(0, 0, canvasWidth, canvasHeight)
@@ -785,5 +828,112 @@ private fun Rect.intersection(other: Rect): Rect {
     val r = min(this.x + this.width, other.x + other.width)
     val b = min(this.y + this.height, other.y + other.height)
     return Rect(x, y, max(0, r - x), max(0, b - y))
+}
+
+/**
+ * V12.10 Fix #1 — image-aligned slit refinement (Android port).
+ *
+ * Pose alone places frames within ~5–15 px when the user pans cleanly
+ * around the device's optical centre, but real-world handheld motion
+ * introduces small translation parallax and rotation drift that pose
+ * can't model.  When those errors compound frame-to-frame, the
+ * leading-edge sliver wobbles relative to the already-stitched canvas.
+ *
+ * This helper takes a small grayscale template from the OVERLAP region
+ * of the canvas (where mask==255), searches for the same texture in the
+ * new frame's source region within ±searchPx, and returns the
+ * (delta_x, delta_y) by which the source content is offset from the
+ * pose-predicted position.  The caller subtracts this delta from the
+ * paste position so the leading-edge sliver lines up with the existing
+ * edge.
+ *
+ * Returns Pair(Point(0,0), 0.0) when the overlap is too small or NCC
+ * confidence is too low — fall back to pose-only in those cases.
+ */
+private fun refineSlitOffset(
+    canvasOverlap: Mat,
+    srcOverlap: Mat,
+    maskOverlap: Mat,
+    searchPx: Int,
+): Pair<Point, Double> {
+    val kRefineTemplateSize = 64
+    val kRefineMinOverlapPx = 80
+    val kRefineMinNcc = 0.5
+    val zero = Pair(Point(0.0, 0.0), 0.0)
+
+    if (canvasOverlap.empty() || srcOverlap.empty() || maskOverlap.empty()) return zero
+    if (canvasOverlap.cols() != srcOverlap.cols() || canvasOverlap.rows() != srcOverlap.rows()) return zero
+    if (canvasOverlap.cols() != maskOverlap.cols() || canvasOverlap.rows() != maskOverlap.rows()) return zero
+    if (canvasOverlap.cols() < kRefineMinOverlapPx || canvasOverlap.rows() < kRefineMinOverlapPx) return zero
+
+    val painted = Mat()
+    Core.compare(maskOverlap, Scalar(255.0), painted, Core.CMP_EQ)
+    val paintedCount = Core.countNonZero(painted)
+    if (paintedCount < kRefineTemplateSize * kRefineTemplateSize) {
+        painted.release(); return zero
+    }
+
+    // Centroid of painted region.
+    val moments = Imgproc.moments(painted, true)
+    if (moments.m00 <= 0) {
+        painted.release(); return zero
+    }
+    val cx = round(moments.m10 / moments.m00).toInt()
+    val cy = round(moments.m01 / moments.m00).toInt()
+
+    var tplX = cx - kRefineTemplateSize / 2
+    var tplY = cy - kRefineTemplateSize / 2
+    if (tplX < 0) tplX = 0
+    if (tplY < 0) tplY = 0
+    if (tplX + kRefineTemplateSize > canvasOverlap.cols()) tplX = canvasOverlap.cols() - kRefineTemplateSize
+    if (tplY + kRefineTemplateSize > canvasOverlap.rows()) tplY = canvasOverlap.rows() - kRefineTemplateSize
+    if (tplX < 0 || tplY < 0) {
+        painted.release(); return zero
+    }
+
+    // Reject if the chosen tile isn't ≥90 % painted — would NCC poorly
+    // against a black-vs-image edge.
+    val tplRoi = Rect(tplX, tplY, kRefineTemplateSize, kRefineTemplateSize)
+    val tplMaskSub = Mat(painted, tplRoi)
+    val paintedInTpl = Core.countNonZero(tplMaskSub)
+    tplMaskSub.release()
+    painted.release()
+    if (paintedInTpl < (kRefineTemplateSize * kRefineTemplateSize * 9 / 10)) return zero
+
+    val searchX = max(0, tplX - searchPx)
+    val searchY = max(0, tplY - searchPx)
+    val searchW = min(srcOverlap.cols() - searchX, kRefineTemplateSize + 2 * searchPx)
+    val searchH = min(srcOverlap.rows() - searchY, kRefineTemplateSize + 2 * searchPx)
+    if (searchW < kRefineTemplateSize || searchH < kRefineTemplateSize) return zero
+
+    val tplBGR = Mat(canvasOverlap, tplRoi)
+    val srchBGR = Mat(srcOverlap, Rect(searchX, searchY, searchW, searchH))
+    val tplGray = Mat()
+    val srchGray = Mat()
+    Imgproc.cvtColor(tplBGR, tplGray, Imgproc.COLOR_BGR2GRAY)
+    Imgproc.cvtColor(srchBGR, srchGray, Imgproc.COLOR_BGR2GRAY)
+
+    val result = Mat()
+    Imgproc.matchTemplate(srchGray, tplGray, result, Imgproc.TM_CCOEFF_NORMED)
+    val mm = Core.minMaxLoc(result)
+    val maxVal = mm.maxVal
+    val maxLoc = mm.maxLoc
+
+    tplBGR.release(); srchBGR.release()
+    tplGray.release(); srchGray.release()
+    result.release()
+
+    if (maxVal < kRefineMinNcc) return Pair(Point(0.0, 0.0), maxVal)
+
+    val matchX = searchX + maxLoc.x.toInt()
+    val matchY = searchY + maxLoc.y.toInt()
+    var deltaX = matchX - tplX
+    var deltaY = matchY - tplY
+    if (deltaX > searchPx) deltaX = searchPx
+    if (deltaX < -searchPx) deltaX = -searchPx
+    if (deltaY > searchPx) deltaY = searchPx
+    if (deltaY < -searchPx) deltaY = -searchPx
+
+    return Pair(Point(deltaX.toDouble(), deltaY.toDouble()), maxVal)
 }
 
