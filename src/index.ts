@@ -72,6 +72,9 @@ export type { PanoramaBandOverlayProps } from './camera/PanoramaBandOverlay';
 export { IncrementalPanGuide } from './camera/IncrementalPanGuide';
 export type { IncrementalPanGuideProps } from './camera/IncrementalPanGuide';
 
+export { ViewportCropOverlay } from './camera/ViewportCropOverlay';
+export type { ViewportCropOverlayProps } from './camera/ViewportCropOverlay';
+
 // ── AR (Phase 4) ────────────────────────────────────────────────────────
 // ARKit (iOS) / ARCore (Android) session wrapper.  Foundation for
 // pose-driven stitching (Phase 5), measurement (Phase 6), and
