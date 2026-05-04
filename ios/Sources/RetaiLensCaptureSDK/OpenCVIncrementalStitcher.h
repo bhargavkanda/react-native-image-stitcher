@@ -59,6 +59,14 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
     /// Tracking state from the AR session was poor at the time of
     /// this frame — no point trying to incorporate it.
     RLISFrameOutcomeSkippedTrackingPoor = 6,
+    /// V12.11 Step D — operator has panned BACKWARDS past the
+    /// running max along the pan axis by more than
+    /// `kReverseStopPx`.  Engine has SKIPPED the paste; host should
+    /// auto-finalize the capture and surface the panorama as it
+    /// stood at the running-max position.  Emitted by the
+    /// rectilinear engine only — cylindrical engines tolerate
+    /// reverse motion via their warp pipeline.
+    RLISFrameOutcomeRejectedReverseDirection = 7,
 };
 
 /// Telemetry returned alongside each addFrame call — host can log

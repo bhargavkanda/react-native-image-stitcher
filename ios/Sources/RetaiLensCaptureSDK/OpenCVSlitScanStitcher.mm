@@ -46,6 +46,15 @@
     /// V12.7 first-frame anchor for rectilinear placement.
     int _firstFrameDstX;
     int _firstFrameDstY;
+    /// V12.11 Step D — running max position along the pan axis.
+    /// Tracks the FURTHEST extent reached during the current
+    /// capture.  If a subsequent frame's homography-corrected
+    /// dst position drops below `max - kReverseStopPx` the
+    /// engine treats it as a reverse-direction event and emits
+    /// RLISFrameOutcomeRejectedReverseDirection without pasting.
+    /// Reset by `[reset]` to firstFrameDstX/Y at first frame.
+    int _maxDstX;
+    int _maxDstY;
 
     cv::Mat _canvas;
     cv::Mat _canvasMask;
@@ -88,6 +97,8 @@
         _useRectilinear = useRectilinear;
         _firstFrameDstX = 0;
         _firstFrameDstY = 0;
+        _maxDstX = 0;
+        _maxDstY = 0;
         // V12.6 Step C: detected at first-frame init from R_panToCam,
         // not from frameRotationDegrees.  Default false here is just
         // a safe initialiser.
@@ -115,6 +126,12 @@
     _hasFirstFrame = false;
     _accepted = 0;
     _snapshotSeq = 0;
+    // V12.11 Step D — clear running-max trackers; will be
+    // re-initialised to first-frame position on next accept.
+    _firstFrameDstX = 0;
+    _firstFrameDstY = 0;
+    _maxDstX = 0;
+    _maxDstY = 0;
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
@@ -450,6 +467,11 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
             cv::rectangle(_canvasMask, roi, cv::Scalar(255), cv::FILLED);
             _firstFrameDstX = dstX;
             _firstFrameDstY = dstY;
+            // V12.11 Step D — initialise the running-max tracker
+            // to first-frame position.  Subsequent frames must
+            // monotonically advance from here along the pan axis.
+            _maxDstX = dstX;
+            _maxDstY = dstY;
             _hasFirstFrame = true;
             _accepted = 1;
             [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
@@ -577,6 +599,43 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
                           " — falling back to pose-only",
                           inliers, det);
                 }
+            }
+        }
+
+        // V12.11 Step D — reverse-direction detection.
+        //
+        // After homography correction, check whether the new paste
+        // position has REGRESSED from the running max along the
+        // pan axis by more than `kReverseStopPx`.  If so, the
+        // operator has reversed direction (intentionally or
+        // accidentally) — skip the paste, emit
+        // `RejectedReverseDirection`, and let the host auto-finalise.
+        // The high-water-mark (max) is what we want to ship as the
+        // pano; back-tracking would only damage it under
+        // first-painted-wins.
+        //
+        // Threshold: 150 px ≈ 4° of pan at the typical iPhone focal —
+        // comfortably above normal alignment-correction wobble.
+        constexpr int kReverseStopPx = 150;
+        if (_isLandscape) {
+            if (dstY > _maxDstY) {
+                _maxDstY = dstY;
+            } else if (dstY < _maxDstY - kReverseStopPx) {
+                NSLog(@"[V12.11-reverse] landscape stop: dstY=%d max=%d "
+                      "(regressed %d px)",
+                      dstY, _maxDstY, _maxDstY - dstY);
+                [tele setValue:@(RLISFrameOutcomeRejectedReverseDirection) forKey:@"outcome"];
+                return tele;
+            }
+        } else {
+            if (dstX > _maxDstX) {
+                _maxDstX = dstX;
+            } else if (dstX < _maxDstX - kReverseStopPx) {
+                NSLog(@"[V12.11-reverse] portrait stop: dstX=%d max=%d "
+                      "(regressed %d px)",
+                      dstX, _maxDstX, _maxDstX - dstX);
+                [tele setValue:@(RLISFrameOutcomeRejectedReverseDirection) forKey:@"outcome"];
+                return tele;
             }
         }
 

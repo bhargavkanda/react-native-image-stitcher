@@ -104,6 +104,12 @@ internal class IncrementalFirstwinsEngine(
     /// V12.7 first-frame anchor for rectilinear placement (canvas-pixel).
     private var firstFrameDstX: Int = 0
     private var firstFrameDstY: Int = 0
+    /// V12.11 Step D — running max position along the pan axis.
+    /// Mirrors iOS' _maxDstX/_maxDstY.  Reverse-direction stop
+    /// fires when the homography-corrected dst regresses below
+    /// max - kReverseStopPx.
+    private var maxDstX: Int = 0
+    private var maxDstY: Int = 0
     /// V12.6 detected at first frame from R_panToCam.
     private var isLandscape: Boolean = false
 
@@ -265,6 +271,10 @@ internal class IncrementalFirstwinsEngine(
                 )
                 firstFrameDstX = dstX
                 firstFrameDstY = dstY
+                // V12.11 Step D — initialise running-max trackers
+                // to first-frame position.
+                maxDstX = dstX
+                maxDstY = dstY
                 hasFirstFrame = true
                 acceptedCountAtomic.set(1); cachedBoundingRect = null
                 Log.i(
@@ -407,6 +417,43 @@ internal class IncrementalFirstwinsEngine(
                             ),
                         )
                     }
+                }
+            }
+
+            // V12.11 Step D — reverse-direction detection.  Mirrors
+            // iOS' running-max check.  See OpenCVSlitScanStitcher.mm
+            // for the full rationale.  150 px ≈ 4° of pan at the
+            // typical iPhone focal — comfortably above wobble.
+            val kReverseStopPx = 150
+            if (isLandscape) {
+                if (dstY > maxDstY) {
+                    maxDstY = dstY
+                } else if (dstY < maxDstY - kReverseStopPx) {
+                    Log.i(
+                        "V12.11-reverse",
+                        "landscape stop: dstY=$dstY max=$maxDstY (regressed ${maxDstY - dstY} px)",
+                    )
+                    frameClipped.release()
+                    frameBGR.release()
+                    return FrameTelemetry(
+                        FrameOutcome.RejectedReverseDirection, -1.0, 0, yaw, pitch,
+                        msSince(t0),
+                    )
+                }
+            } else {
+                if (dstX > maxDstX) {
+                    maxDstX = dstX
+                } else if (dstX < maxDstX - kReverseStopPx) {
+                    Log.i(
+                        "V12.11-reverse",
+                        "portrait stop: dstX=$dstX max=$maxDstX (regressed ${maxDstX - dstX} px)",
+                    )
+                    frameClipped.release()
+                    frameBGR.release()
+                    return FrameTelemetry(
+                        FrameOutcome.RejectedReverseDirection, -1.0, 0, yaw, pitch,
+                        msSince(t0),
+                    )
                 }
             }
 
@@ -574,6 +621,10 @@ internal class IncrementalFirstwinsEngine(
         canvasOriginCylY = 0
         firstFrameDstX = 0
         firstFrameDstY = 0
+        // V12.11 Step D — clear running-max trackers; reinitialised
+        // to first-frame position on next accept.
+        maxDstX = 0
+        maxDstY = 0
         isLandscape = false
         hasFirstFrame = false
         acceptsSinceSnapshot = 0

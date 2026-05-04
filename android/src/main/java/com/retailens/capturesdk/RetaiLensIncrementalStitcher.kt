@@ -526,6 +526,10 @@ internal enum class FrameOutcome {
     RejectedSceneUniform,
     RejectedAlignmentLost,
     SkippedTrackingPoor,
+    /** V12.11 Step D — operator panned BACKWARDS past the running
+     *  max along the pan axis.  Engine has SKIPPED the paste; host
+     *  should auto-finalize.  Rectilinear-only. */
+    RejectedReverseDirection,
 }
 
 

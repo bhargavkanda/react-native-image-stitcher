@@ -33,6 +33,15 @@ export enum IncrementalOutcome {
   RejectedAlignmentLost = 5,
   /** AR tracking quality was poor — skip silently. */
   SkippedTrackingPoor = 6,
+  /**
+   * V12.11 Step D — operator panned BACKWARDS past the running
+   * max along the pan axis.  Engine has SKIPPED the paste; host
+   * should auto-finalize the capture (the most useful pano is
+   * what we have so far at the high-water mark).  Emitted by
+   * the rectilinear engine only — cylindrical engines tolerate
+   * reverse motion via their warp pipeline.
+   */
+  RejectedReverseDirection = 7,
 }
 
 
