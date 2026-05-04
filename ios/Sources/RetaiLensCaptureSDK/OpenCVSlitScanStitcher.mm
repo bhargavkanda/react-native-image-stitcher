@@ -212,17 +212,28 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
               (int)_isLandscape, absR01, absR11, (long)_frameRotationDegrees);
 
         if (_useRectilinear) {
-            // V12.7 Variant B first frame: paste raw sensor frame at
-            // canvas centre.  No cylindrical warp.  Canvas is in the
-            // camera's native rectilinear projection — pixel-for-pixel
-            // the same as the live viewport.  Lens distortion is
-            // whatever the camera produces (small for iPhone main).
-            int dstX = (int)(_canvas.cols - frameBGR.cols) / 2;
-            int dstY = (int)(_canvas.rows - frameBGR.rows) / 2;
-            cv::Rect roi(dstX, dstY, frameBGR.cols, frameBGR.rows);
+            // V12.8 Variant B first frame: paste the LONG-SIDE-CLIPPED
+            // portion of the raw sensor frame at canvas centre.  Long
+            // side = sensor X (always wide for landscape-mounted iPhone
+            // sensor, regardless of device orientation).  Pan axis =
+            // sensor Y, kept FULL to match user's mental-model drawing
+            // (clipping only on the longer side perpendicular to pan).
+            //
+            // No cylindrical warp.  Canvas pixels are camera-native
+            // rectilinear — straight world lines stay straight.
+            const double kLongSideFractionRect = 0.85;
+            int clipW = std::max(1, (int)(frameBGR.cols * kLongSideFractionRect));
+            int clipH = frameBGR.rows;
+            int srcClipX = (frameBGR.cols - clipW) / 2;
+            int srcClipY = 0;
+            cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
+
+            int dstX = (int)(_canvas.cols - clipW) / 2;
+            int dstY = (int)(_canvas.rows - clipH) / 2;
+            cv::Rect roi(dstX, dstY, clipW, clipH);
             roi &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
             cv::Rect srcR(0, 0, roi.width, roi.height);
-            frameBGR(srcR).copyTo(_canvas(roi));
+            frameClipped(srcR).copyTo(_canvas(roi));
             cv::rectangle(_canvasMask, roi, cv::Scalar(255), cv::FILLED);
             _firstFrameDstX = dstX;
             _firstFrameDstY = dstY;
@@ -230,8 +241,8 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
             _accepted = 1;
             [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
             [tele setValue:@(1.0) forKey:@"confidence"];
-            NSLog(@"[V12.7-rect] first frame pasted raw at (%d,%d) size %dx%d isLandscape=%d focal=%.2f",
-                  dstX, dstY, frameBGR.cols, frameBGR.rows, (int)_isLandscape, _focalCompose);
+            NSLog(@"[V12.8-rect] first frame clipped+pasted at (%d,%d) size %dx%d (clip=%dx%d) isLandscape=%d focal=%.2f",
+                  dstX, dstY, clipW, clipH, srcClipX, srcClipY, (int)_isLandscape, _focalCompose);
             return tele;
         }
 
@@ -263,56 +274,60 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
     }
 
     if (_useRectilinear) {
-        // V12.7 Variant B subsequent frame: extract a narrow central
-        // strip from the raw frame (no warp), place by pose-delta
-        // around the dominant pan axis, paint only into empty canvas
-        // pixels (first-painted-wins).
+        // V12.8 Variant B subsequent frame: paste the SAME long-side-
+        // clipped portion as the first frame, at canvas position
+        // offset by pan_angle × focal along the pan axis.  First-
+        // painted-wins masking ensures only the LEADING-EDGE sliver
+        // (the part outside the previously-painted region) actually
+        // gets painted.  Even tiny pans produce immediate
+        // incremental growth — no V12.7 dead-zone where strips
+        // entirely overlapped the first frame.
         cv::Mat R_rel = _firstRotationArkit.t() * R_new;
-        int stripW, stripH, stripSrcX, stripSrcY;
+        const double kLongSideFractionRect = 0.85;
+        int clipW = std::max(1, (int)(frameBGR.cols * kLongSideFractionRect));
+        int clipH = frameBGR.rows;
+        int srcClipX = (frameBGR.cols - clipW) / 2;
+        int srcClipY = 0;
+        cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
+
         int dstX, dstY;
         double alpha;
         if (_isLandscape) {
-            // Vertical pan around cam +X axis.  alpha > 0 = looking up
-            // (per ARKit convention; verify on device + flip if wrong).
+            // Vertical pan around cam +X axis.  alpha > 0 = look up
+            // (verified by R_x convention: +α rotates cam-Z toward cam+Y).
             alpha = std::atan2(R_rel.at<double>(2, 1), R_rel.at<double>(1, 1));
-            stripW = frameBGR.cols;
-            stripH = std::max(8, (int)(frameBGR.rows * 0.10));
-            stripSrcX = 0;
-            stripSrcY = (frameBGR.rows - stripH) / 2;
             dstX = _firstFrameDstX;
-            // Looking up → strip ABOVE first-frame centre (smaller Y).
-            // canvas_Y_offset = -alpha * focal
-            dstY = _firstFrameDstY + stripSrcY - (int)std::round(alpha * _focalCompose);
+            // Look up → content shifts UP in canvas (smaller Y).
+            dstY = _firstFrameDstY - (int)std::round(alpha * _focalCompose);
         } else {
             // Horizontal pan around cam +Y axis.
             alpha = std::atan2(R_rel.at<double>(0, 2), R_rel.at<double>(0, 0));
-            stripW = std::max(8, (int)(frameBGR.cols * 0.10));
-            stripH = frameBGR.rows;
-            stripSrcX = (frameBGR.cols - stripW) / 2;
-            stripSrcY = 0;
-            // Looking right → strip RIGHT of first-frame centre (larger X).
-            dstX = _firstFrameDstX + stripSrcX + (int)std::round(alpha * _focalCompose);
+            // Look right → content shifts RIGHT in canvas (larger X).
+            dstX = _firstFrameDstX + (int)std::round(alpha * _focalCompose);
             dstY = _firstFrameDstY;
         }
-        cv::Rect dstRoi(dstX, dstY, stripW, stripH);
+        cv::Rect dstRoi(dstX, dstY, clipW, clipH);
         cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
         cv::Rect dstClipped = dstRoi & canvasBounds;
         if (dstClipped.width <= 0 || dstClipped.height <= 0) {
             [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
             return tele;
         }
-        cv::Rect srcClipped(stripSrcX + (dstClipped.x - dstRoi.x),
-                            stripSrcY + (dstClipped.y - dstRoi.y),
-                            dstClipped.width, dstClipped.height);
-        cv::Mat srcStrip = frameBGR(srcClipped);
+        // Source ROI: same offset within the (already-clipped) frame.
+        cv::Rect srcRoi(dstClipped.x - dstX,
+                        dstClipped.y - dstY,
+                        dstClipped.width, dstClipped.height);
+        cv::Mat srcRegion = frameClipped(srcRoi);
         cv::Mat canvasRoi = _canvas(dstClipped);
         cv::Mat maskRoi = _canvasMask(dstClipped);
-        // First-painted-wins: only fill where mask == 0.
+        // First-painted-wins: only fill where mask == 0.  This is what
+        // produces the smooth incremental edge — overlap with first
+        // frame is blocked, leading-edge sliver gets the new content.
         cv::Mat emptyMask;
         cv::compare(maskRoi, 0, emptyMask, cv::CMP_EQ);
         int newPixels = cv::countNonZero(emptyMask);
         if (newPixels > 0) {
-            srcStrip.copyTo(canvasRoi, emptyMask);
+            srcRegion.copyTo(canvasRoi, emptyMask);
             maskRoi.setTo(255, emptyMask);
             _accepted += 1;
             [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];

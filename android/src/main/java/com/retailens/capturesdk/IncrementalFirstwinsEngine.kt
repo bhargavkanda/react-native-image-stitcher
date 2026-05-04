@@ -115,6 +115,8 @@ internal class IncrementalFirstwinsEngine(
     /// V12.4 slit-scan + long-side clip fractions.  Same values as iOS.
     private val kPanStripFraction: Double = 0.70
     private val kLongSideFraction: Double = 0.85
+    /// V12.8 rectilinear long-side clip fraction (no pan-axis clip).
+    private val kLongSideFractionRect: Double = 0.85
 
     /**
      * Same shape as the V7 IncrementalEngine.addFrameAtPath() so the
@@ -210,14 +212,23 @@ internal class IncrementalFirstwinsEngine(
             )
 
             if (useRectilinear) {
-                // V12.7 Variant B first frame: paste raw at canvas centre.
-                val dstX = (canvasWidth - frameBGR.cols()) / 2
-                val dstY = (canvasHeight - frameBGR.rows()) / 2
-                val roi = Rect(dstX, dstY, frameBGR.cols(), frameBGR.rows()).intersection(
+                // V12.8 Variant B first frame: paste the LONG-SIDE-CLIPPED
+                // portion at canvas centre.  See iOS engine + user's
+                // mental-model drawing for the rationale (clip only on
+                // the perpendicular-to-pan direction; full pan-axis).
+                val clipW = max(1, (frameBGR.cols() * kLongSideFractionRect).toInt())
+                val clipH = frameBGR.rows()
+                val srcClipX = (frameBGR.cols() - clipW) / 2
+                val srcClipY = 0
+                val frameClipped = Mat(frameBGR, Rect(srcClipX, srcClipY, clipW, clipH))
+
+                val dstX = (canvasWidth - clipW) / 2
+                val dstY = (canvasHeight - clipH) / 2
+                val roi = Rect(dstX, dstY, clipW, clipH).intersection(
                     Rect(0, 0, canvasWidth, canvasHeight)
                 )
                 val srcR = Rect(0, 0, roi.width, roi.height)
-                Mat(frameBGR, srcR).copyTo(Mat(canvas, roi))
+                Mat(frameClipped, srcR).copyTo(Mat(canvas, roi))
                 Imgproc.rectangle(
                     canvasMask,
                     Point(roi.x.toDouble(), roi.y.toDouble()),
@@ -229,11 +240,12 @@ internal class IncrementalFirstwinsEngine(
                 hasFirstFrame = true
                 acceptedCountAtomic.set(1); cachedBoundingRect = null
                 Log.i(
-                    "V12.7-rect",
-                    "first frame pasted raw at ($dstX,$dstY) size " +
-                        "${frameBGR.cols()}x${frameBGR.rows()} isLandscape=$isLandscape " +
+                    "V12.8-rect",
+                    "first frame clipped+pasted at ($dstX,$dstY) " +
+                        "clipped=${clipW}x${clipH} isLandscape=$isLandscape " +
                         "focal=${"%.2f".format(focalCompose)}",
                 )
+                frameClipped.release()
                 frameBGR.release()
                 return FrameTelemetry(
                     FrameOutcome.AcceptedHigh, 1.0, 0, yaw, pitch, msSince(t0),
@@ -273,46 +285,49 @@ internal class IncrementalFirstwinsEngine(
 
         // ─── Subsequent frame ───────────────────────────────────────
         if (useRectilinear) {
-            // V12.7 Variant B: extract central strip, place by pose-delta,
-            // first-painted-wins paint.
+            // V12.8 Variant B: paste the SAME long-side-clipped portion
+            // as the first frame at canvas offset = pan_angle * focal.
+            // First-painted-wins masking ensures only the leading-edge
+            // sliver (the part outside the previously-painted region)
+            // gets painted — smooth incremental growth from frame 2,
+            // no V12.7 dead-zone.
             val rRel = Mat()
-            Core.gemm(firstRotationArkit.t(), rNew, 1.0, Mat(), 0.0, rRel)
+            val firstT = firstRotationArkit.t()
+            try {
+                Core.gemm(firstT, rNew, 1.0, Mat(), 0.0, rRel)
+            } finally {
+                firstT.release()
+            }
 
-            val stripW: Int
-            val stripH: Int
-            val stripSrcX: Int
-            val stripSrcY: Int
+            val clipW = max(1, (frameBGR.cols() * kLongSideFractionRect).toInt())
+            val clipH = frameBGR.rows()
+            val srcClipX = (frameBGR.cols() - clipW) / 2
+            val srcClipY = 0
+            val frameClipped = Mat(frameBGR, Rect(srcClipX, srcClipY, clipW, clipH))
+
             val dstX: Int
             val dstY: Int
             val alpha: Double
-
             if (isLandscape) {
-                // Vertical pan around cam +X: alpha = atan2(R_rel[2,1], R_rel[1,1])
+                // Vertical pan around cam +X: alpha = atan2(R_rel[2,1], R_rel[1,1]).
                 alpha = atan2(rRel[2, 1][0], rRel[1, 1][0])
-                stripW = frameBGR.cols()
-                stripH = max(8, (frameBGR.rows() * 0.10).toInt())
-                stripSrcX = 0
-                stripSrcY = (frameBGR.rows() - stripH) / 2
                 dstX = firstFrameDstX
-                dstY = firstFrameDstY + stripSrcY -
-                    round(alpha * focalCompose).toInt()
+                // alpha > 0 (look up) → content shifts UP in canvas.
+                dstY = firstFrameDstY - round(alpha * focalCompose).toInt()
             } else {
-                // Horizontal pan around cam +Y: alpha = atan2(R_rel[0,2], R_rel[0,0])
+                // Horizontal pan around cam +Y: alpha = atan2(R_rel[0,2], R_rel[0,0]).
                 alpha = atan2(rRel[0, 2][0], rRel[0, 0][0])
-                stripW = max(8, (frameBGR.cols() * 0.10).toInt())
-                stripH = frameBGR.rows()
-                stripSrcX = (frameBGR.cols() - stripW) / 2
-                stripSrcY = 0
-                dstX = firstFrameDstX + stripSrcX +
-                    round(alpha * focalCompose).toInt()
+                // alpha > 0 (look right) → content shifts RIGHT in canvas.
+                dstX = firstFrameDstX + round(alpha * focalCompose).toInt()
                 dstY = firstFrameDstY
             }
             rRel.release()
 
-            val dstRoi = Rect(dstX, dstY, stripW, stripH).intersection(
+            val dstRoi = Rect(dstX, dstY, clipW, clipH).intersection(
                 Rect(0, 0, canvasWidth, canvasHeight)
             )
             if (dstRoi.width <= 0 || dstRoi.height <= 0) {
+                frameClipped.release()
                 frameBGR.release()
                 return FrameTelemetry(
                     FrameOutcome.RejectedAlignmentLost, -1.0, 0, yaw, pitch,
@@ -320,27 +335,29 @@ internal class IncrementalFirstwinsEngine(
                 )
             }
             val srcRoi = Rect(
-                stripSrcX + (dstRoi.x - dstX),
-                stripSrcY + (dstRoi.y - dstY),
+                dstRoi.x - dstX,
+                dstRoi.y - dstY,
                 dstRoi.width, dstRoi.height,
             )
-            val srcStrip = Mat(frameBGR, srcRoi)
+            val srcRegion = Mat(frameClipped, srcRoi)
             val canvasRoi = Mat(canvas, dstRoi)
             val maskRoi = Mat(canvasMask, dstRoi)
             val emptyMask = Mat()
             Core.compare(maskRoi, Scalar(0.0), emptyMask, Core.CMP_EQ)
             val newPixels = Core.countNonZero(emptyMask)
             if (newPixels > 0) {
-                srcStrip.copyTo(canvasRoi, emptyMask)
+                srcRegion.copyTo(canvasRoi, emptyMask)
                 maskRoi.setTo(Scalar(255.0), emptyMask)
                 acceptedCountAtomic.incrementAndGet(); cachedBoundingRect = null
-                emptyMask.release()
+                srcRegion.release(); canvasRoi.release(); maskRoi.release()
+                emptyMask.release(); frameClipped.release()
                 frameBGR.release()
                 return FrameTelemetry(
                     FrameOutcome.AcceptedHigh, 1.0, 0, yaw, pitch, msSince(t0),
                 )
             }
-            emptyMask.release()
+            srcRegion.release(); canvasRoi.release(); maskRoi.release()
+            emptyMask.release(); frameClipped.release()
             frameBGR.release()
             return FrameTelemetry(
                 FrameOutcome.SkippedTooClose, 0.0, 0, yaw, pitch, msSince(t0),
