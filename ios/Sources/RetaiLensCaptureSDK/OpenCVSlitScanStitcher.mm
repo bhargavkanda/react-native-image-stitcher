@@ -17,6 +17,8 @@
 #import <opencv2/core.hpp>
 #import <opencv2/imgproc.hpp>
 #import <opencv2/imgcodecs.hpp>
+#import <opencv2/features2d.hpp>  // ORB, BFMatcher (V12.11 Step 4)
+#import <opencv2/calib3d.hpp>     // findHomography (V12.11 Step 4)
 
 #import <vector>
 #import <chrono>
@@ -148,39 +150,67 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
 // misbehaves (frame 1 placed bigger than frame 2's source ROI).
 static const double kLongSideFractionRect = 0.70;
 
-// V12.10 Fix #1 — image-aligned slit refinement.
+// V12.11 Step 4 — feature-based slit alignment via homography.
 //
-// Pose alone places frames within ~5–15 px when the user pans cleanly
-// around the device's optical centre, but real-world handheld motion
-// introduces small translation parallax and rotation drift that pose
-// can't model.  When those errors compound frame-to-frame, the
-// leading-edge sliver wobbles relative to the already-stitched canvas.
+// Replaces V12.10 Fix #1's NCC template match (which was capped at
+// ±24 px and demonstrably insufficient — Ram's logs showed delta_y
+// saturating at -24 with NCC dropping below 0.5 during lateral
+// motion).  This is the standard image-stitching pipeline:
 //
-// This helper takes a small grayscale template from the OVERLAP region
-// of the canvas (where mask==255), searches for the same texture in
-// the new frame's source region within ±searchPx, and returns the
-// (delta_x, delta_y) by which the source content is offset from the
-// pose-predicted position.  The caller subtracts this delta from the
-// paste position so the leading-edge sliver lines up with the existing
-// edge.
+//   1. Detect ORB features in the OVERLAP zone of canvas (where
+//      mask==255) and in the new frame's same-sized source region.
+//   2. Match descriptors with brute-force Hamming + Lowe's ratio
+//      test (k=2, ratio < 0.75).
+//   3. RANSAC-estimate a homography mapping src → canvas.
+//   4. Sanity-reject homographies whose 2×2 affine determinant is
+//      outside (0.5, 2.0) — those represent degenerate or
+//      excessive transforms (e.g., pure shear or extreme zoom)
+//      that would smear the panorama if applied.
+//   5. Extract the effective TRANSLATION component by mapping the
+//      source-region centre under H and reporting the delta.  This
+//      gives us a (dx, dy) offset to ADD to the pose-predicted
+//      paste position so the new frame aligns with the canvas.
 //
-// Returns (0,0) when:
-//   • overlap area is too small to host the template,
-//   • the search window can't fit around the template inside srcRegion,
-//   • or the best NCC score is below kRefineMinNcc (low-confidence
-//     match — a featureless wall, motion blur, or genuine drift bigger
-//     than the search window).  Falling back to pose-only placement is
-//     safer than introducing a bogus shift.
-static cv::Point refineSlitOffset(const cv::Mat& canvasOverlap,
+// Why translation-only extraction (not full warpPerspective)?  The
+// existing paste code is built around a (dstX, dstY) integer offset.
+// Full perspective warp is a bigger refactor that risks correctness
+// regressions on the well-tested first-painted-wins masking.
+// Translation captures the dominant component of H for incremental
+// small motions — exactly the lateral-drift case Ram reported.
+// Wobble from small rotations may persist as a smaller artefact;
+// V12.11.1 (a future tightening) can add the full warp.
+//
+// Returns (0,0) AND fills outInliers/outDet with diagnostic data
+// when:
+//   • overlap area is too small (< 200×200) to host enough features,
+//   • painted-area fraction inside overlap < 50 % (mostly first
+//     frame — no features to match against yet),
+//   • either side has < 8 keypoints,
+//   • Lowe-filtered match count < 8,
+//   • findHomography returned an empty H (RANSAC couldn't agree),
+//   • inlier count < 8,
+//   • or the affine determinant is outside (0.5, 2.0).
+//
+// In every fallback case the caller proceeds with pose-only paste,
+// which is what the engine already did pre-V12.10.  Never makes
+// alignment WORSE than pose-only.
+static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
                                   const cv::Mat& srcOverlap,
                                   const cv::Mat& maskOverlap,
-                                  int searchPx,
-                                  double *outNcc) {
-    constexpr int kRefineTemplateSize = 64;
-    constexpr int kRefineMinOverlapPx = 80;
-    constexpr double kRefineMinNcc    = 0.5;
+                                  int *outInliers,
+                                  double *outDet) {
+    constexpr int kMinOverlapPx        = 200;
+    constexpr double kMinPaintedFrac   = 0.5;
+    constexpr int kOrbFeatureCount     = 500;
+    constexpr float kLoweRatio         = 0.75f;
+    constexpr int kMinGoodMatches      = 8;
+    constexpr int kMinInliers          = 8;
+    constexpr double kRansacReprojPx   = 3.0;
+    constexpr double kDetMin           = 0.5;
+    constexpr double kDetMax           = 2.0;
 
-    if (outNcc) { *outNcc = 0.0; }
+    if (outInliers) *outInliers = 0;
+    if (outDet)     *outDet     = 0.0;
 
     if (canvasOverlap.empty() || srcOverlap.empty() || maskOverlap.empty()) {
         return cv::Point(0, 0);
@@ -189,97 +219,101 @@ static cv::Point refineSlitOffset(const cv::Mat& canvasOverlap,
         canvasOverlap.size() != maskOverlap.size()) {
         return cv::Point(0, 0);
     }
-    if (canvasOverlap.cols < kRefineMinOverlapPx ||
-        canvasOverlap.rows < kRefineMinOverlapPx) {
+    if (canvasOverlap.cols < kMinOverlapPx ||
+        canvasOverlap.rows < kMinOverlapPx) {
         return cv::Point(0, 0);
     }
 
-    // The "where existing canvas has been painted" submask.  Template
-    // must be wholly inside this region — otherwise the template
-    // contains all-black canvas pixels which would NCC poorly.
+    // Painted-area mask — ORB will only sample keypoints from
+    // here on the canvas side (otherwise it would lock onto the
+    // black-vs-image edge of the unpainted region, which gives
+    // strong but USELESS keypoints).
     cv::Mat painted;
     cv::compare(maskOverlap, 255, painted, cv::CMP_EQ);
     int paintedCount = cv::countNonZero(painted);
-    if (paintedCount < kRefineTemplateSize * kRefineTemplateSize) {
+    int totalPx = canvasOverlap.rows * canvasOverlap.cols;
+    if (paintedCount < (int)(totalPx * kMinPaintedFrac)) {
         return cv::Point(0, 0);
     }
 
-    // Centroid of the painted region — anchor the template here.
-    cv::Moments m = cv::moments(painted, true);
-    if (m.m00 <= 0) { return cv::Point(0, 0); }
-    int cx = (int)std::round(m.m10 / m.m00);
-    int cy = (int)std::round(m.m01 / m.m00);
+    // Grayscale for ORB.  Faster than BGR and equally robust;
+    // ORB is intensity-based, colour adds nothing.
+    cv::Mat canvasGray, srcGray;
+    cv::cvtColor(canvasOverlap, canvasGray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(srcOverlap,    srcGray,    cv::COLOR_BGR2GRAY);
 
-    int tplX = cx - kRefineTemplateSize / 2;
-    int tplY = cy - kRefineTemplateSize / 2;
-    if (tplX < 0) tplX = 0;
-    if (tplY < 0) tplY = 0;
-    if (tplX + kRefineTemplateSize > canvasOverlap.cols) {
-        tplX = canvasOverlap.cols - kRefineTemplateSize;
-    }
-    if (tplY + kRefineTemplateSize > canvasOverlap.rows) {
-        tplY = canvasOverlap.rows - kRefineTemplateSize;
-    }
-    if (tplX < 0 || tplY < 0) { return cv::Point(0, 0); }
+    cv::Ptr<cv::ORB> orb = cv::ORB::create(kOrbFeatureCount);
+    std::vector<cv::KeyPoint> kpCanvas, kpSrc;
+    cv::Mat descCanvas, descSrc;
+    orb->detectAndCompute(canvasGray, painted, kpCanvas, descCanvas);
+    orb->detectAndCompute(srcGray, cv::noArray(), kpSrc, descSrc);
 
-    // Sanity: the tile we picked must be fully inside the painted area
-    // — if a chunk of it is unpainted (mask==0), the NCC will lock onto
-    // black-vs-image rather than texture-vs-texture.  Reject in that
-    // case.
-    cv::Rect tplRoi(tplX, tplY, kRefineTemplateSize, kRefineTemplateSize);
-    cv::Mat tplMask = painted(tplRoi);
-    if (cv::countNonZero(tplMask) < (kRefineTemplateSize * kRefineTemplateSize * 9 / 10)) {
+    if ((int)kpCanvas.size() < kMinGoodMatches ||
+        (int)kpSrc.size()    < kMinGoodMatches ||
+        descCanvas.empty() ||
+        descSrc.empty()) {
         return cv::Point(0, 0);
     }
 
-    // Search region in srcOverlap — pad ±searchPx around tplRoi.
-    int searchX = std::max(0, tplX - searchPx);
-    int searchY = std::max(0, tplY - searchPx);
-    int searchW = std::min(srcOverlap.cols  - searchX,
-                            kRefineTemplateSize + 2 * searchPx);
-    int searchH = std::min(srcOverlap.rows  - searchY,
-                            kRefineTemplateSize + 2 * searchPx);
-    if (searchW < kRefineTemplateSize || searchH < kRefineTemplateSize) {
+    // Brute-force Hamming match with k=2 → Lowe's ratio test.
+    cv::BFMatcher matcher(cv::NORM_HAMMING);
+    std::vector<std::vector<cv::DMatch>> knn;
+    matcher.knnMatch(descSrc, descCanvas, knn, 2);
+
+    std::vector<cv::Point2f> srcPts, dstPts;
+    srcPts.reserve(knn.size());
+    dstPts.reserve(knn.size());
+    for (const auto& m : knn) {
+        if (m.size() == 2 && m[0].distance < kLoweRatio * m[1].distance) {
+            srcPts.push_back(kpSrc[m[0].queryIdx].pt);
+            dstPts.push_back(kpCanvas[m[0].trainIdx].pt);
+        }
+    }
+    if ((int)srcPts.size() < kMinGoodMatches) {
         return cv::Point(0, 0);
     }
 
-    // Grayscale conversion — faster, equally robust for NCC, and
-    // robust to small exposure differences across frames.
-    cv::Mat tplBGR  = canvasOverlap(tplRoi);
-    cv::Mat srchBGR = srcOverlap(cv::Rect(searchX, searchY, searchW, searchH));
-    cv::Mat tplGray, srchGray;
-    cv::cvtColor(tplBGR,  tplGray,  cv::COLOR_BGR2GRAY);
-    cv::cvtColor(srchBGR, srchGray, cv::COLOR_BGR2GRAY);
-
-    cv::Mat result;
-    cv::matchTemplate(srchGray, tplGray, result, cv::TM_CCOEFF_NORMED);
-
-    double maxVal = 0.0;
-    cv::Point maxLoc;
-    cv::minMaxLoc(result, nullptr, &maxVal, nullptr, &maxLoc);
-    if (outNcc) { *outNcc = maxVal; }
-    if (maxVal < kRefineMinNcc) {
+    // RANSAC homography src → canvas (both sets in their respective
+    // overlap-local coords; same origin since the overlaps are the
+    // same size and aligned by construction).
+    cv::Mat inlierMask;
+    cv::Mat H = cv::findHomography(srcPts, dstPts, cv::RANSAC,
+                                    kRansacReprojPx, inlierMask);
+    if (H.empty()) {
+        return cv::Point(0, 0);
+    }
+    int inliers = cv::countNonZero(inlierMask);
+    if (outInliers) *outInliers = inliers;
+    if (inliers < kMinInliers) {
         return cv::Point(0, 0);
     }
 
-    // matchLoc in srcOverlap coords.
-    int matchX = searchX + maxLoc.x;
-    int matchY = searchY + maxLoc.y;
+    // Sanity-check the affine 2×2 determinant.  Pure translation
+    // gives det = 1.  Small rotation/scale stays close to 1.
+    // Outside (0.5, 2.0) means a degenerate or excessive transform
+    // — fall back to pose-only.
+    double a = H.at<double>(0, 0);
+    double b = H.at<double>(0, 1);
+    double c = H.at<double>(1, 0);
+    double d = H.at<double>(1, 1);
+    double det = std::abs(a * d - b * c);
+    if (outDet) *outDet = det;
+    if (det < kDetMin || det > kDetMax) {
+        return cv::Point(0, 0);
+    }
 
-    // Delta = how much srcOverlap's content is offset from canvas's at
-    // pose-predicted alignment.  Caller subtracts this delta from the
-    // paste position to align them.
-    int deltaX = matchX - tplX;
-    int deltaY = matchY - tplY;
+    // Extract the effective translation by mapping the source-
+    // region centre under H.  In pose-aligned overlay (H ≈ I),
+    // this gives delta = (0, 0).  Real motion shifts it.
+    cv::Point2f srcCenter(srcOverlap.cols * 0.5f, srcOverlap.rows * 0.5f);
+    std::vector<cv::Point2f> srcCenters = { srcCenter };
+    std::vector<cv::Point2f> dstCenters;
+    cv::perspectiveTransform(srcCenters, dstCenters, H);
 
-    // Belt-and-braces clamp (matchTemplate result map dimensions
-    // already constrain the answer, but explicit is good).
-    if (deltaX >  searchPx) deltaX =  searchPx;
-    if (deltaX < -searchPx) deltaX = -searchPx;
-    if (deltaY >  searchPx) deltaY =  searchPx;
-    if (deltaY < -searchPx) deltaY = -searchPx;
+    int dx = (int)std::round(dstCenters[0].x - srcCenter.x);
+    int dy = (int)std::round(dstCenters[0].y - srcCenter.y);
 
-    return cv::Point(deltaX, deltaY);
+    return cv::Point(dx, dy);
 }
 
 - (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
@@ -461,24 +495,31 @@ static cv::Point refineSlitOffset(const cv::Mat& canvasOverlap,
             dstY = _firstFrameDstY;
         }
 
-        // V12.10 Fix #1 — image-aligned slit refinement.
+        // V12.11 Step 4 — feature-based slit alignment via homography.
         //
-        // Build a TENTATIVE destination ROI from the pose-predicted
-        // (dstX, dstY).  In the overlap zone (where canvasMask==255),
-        // run a small NCC template match between canvas and the new
-        // frame's source region.  The returned (delta_x, delta_y) is
-        // how much the new frame's content is offset from the
-        // pose-predicted alignment — we SUBTRACT it from (dstX, dstY)
-        // so the leading-edge sliver lines up with the existing edge.
-        // refineSlitOffset returns (0,0) when the overlap is too small
-        // or NCC confidence is too low — fall back to pose-only in
-        // those cases.
-        const int kRefineSearchPx = 24;
+        // Build a tentative destination ROI from the pose-predicted
+        // (dstX, dstY).  In the overlap zone (where canvasMask==255)
+        // run an ORB+RANSAC homography between canvas and the new
+        // frame's source region.  The returned (dx, dy) is the
+        // effective translation from src → canvas — we ADD it to
+        // (dstX, dstY) so the leading-edge sliver lines up with the
+        // existing edge.  Falls back to pose-only when overlap is
+        // too small, painted fraction is too low, feature density
+        // is insufficient, or the homography is degenerate.
+        //
+        // Sign convention: homographyOffset returns (dx, dy) =
+        // dstCenter - srcCenter under H.  If src content is
+        // shifted LEFT relative to canvas (camera moved right),
+        // dstCenter > srcCenter → dx > 0 → ADD to dstX shifts the
+        // paste position right, pulling src content into alignment.
         cv::Rect refineCanvasBounds(0, 0, _canvas.cols, _canvas.rows);
         {
             cv::Rect tentativeRoi(dstX, dstY, clipW, clipH);
             cv::Rect tentativeClipped = tentativeRoi & refineCanvasBounds;
-            if (tentativeClipped.width  >= 80 && tentativeClipped.height >= 80) {
+            // Need a meaningful overlap (>= 200 px on each side
+            // matches homographyOffset's kMinOverlapPx) to host
+            // enough features for RANSAC to be reliable.
+            if (tentativeClipped.width >= 200 && tentativeClipped.height >= 200) {
                 cv::Mat canvasOverlap = _canvas(tentativeClipped);
                 cv::Mat maskOverlap   = _canvasMask(tentativeClipped);
                 cv::Rect srcInClipped(tentativeClipped.x - dstX,
@@ -486,19 +527,28 @@ static cv::Point refineSlitOffset(const cv::Mat& canvasOverlap,
                                       tentativeClipped.width,
                                       tentativeClipped.height);
                 cv::Mat srcOverlap = frameClipped(srcInClipped);
-                double ncc = 0.0;
-                cv::Point delta = refineSlitOffset(canvasOverlap,
-                                                   srcOverlap,
-                                                   maskOverlap,
-                                                   kRefineSearchPx,
-                                                   &ncc);
+                int inliers = 0;
+                double det = 0.0;
+                cv::Point delta = homographyOffset(canvasOverlap,
+                                                    srcOverlap,
+                                                    maskOverlap,
+                                                    &inliers,
+                                                    &det);
                 if (delta.x != 0 || delta.y != 0) {
-                    dstX -= delta.x;
-                    dstY -= delta.y;
-                    NSLog(@"[V12.10-refine] delta=(%+d,%+d) ncc=%.3f"
+                    int priorX = dstX, priorY = dstY;
+                    dstX += delta.x;
+                    dstY += delta.y;
+                    NSLog(@"[V12.11-homog] delta=(%+d,%+d) inliers=%d det=%.3f"
                           " adjusted dst=(%d,%d) (was %d,%d)",
-                          delta.x, delta.y, ncc, dstX, dstY,
-                          dstX + delta.x, dstY + delta.y);
+                          delta.x, delta.y, inliers, det,
+                          dstX, dstY, priorX, priorY);
+                } else if (inliers > 0) {
+                    // Homography returned but rejected (det out of
+                    // range, etc.).  Log so field telemetry shows
+                    // the rejection rate.
+                    NSLog(@"[V12.11-homog] REJECTED inliers=%d det=%.3f"
+                          " — falling back to pose-only",
+                          inliers, det);
                 }
             }
         }

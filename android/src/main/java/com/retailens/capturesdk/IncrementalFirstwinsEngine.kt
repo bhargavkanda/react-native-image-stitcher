@@ -3,14 +3,23 @@ package com.retailens.capturesdk
 
 import android.util.Log
 import com.facebook.react.bridge.WritableMap
+import org.opencv.calib3d.Calib3d
 import org.opencv.core.Core
 import org.opencv.core.CvType
+import org.opencv.core.DMatch
+import org.opencv.core.KeyPoint
 import org.opencv.core.Mat
+import org.opencv.core.MatOfByte
+import org.opencv.core.MatOfDMatch
 import org.opencv.core.MatOfInt
+import org.opencv.core.MatOfKeyPoint
+import org.opencv.core.MatOfPoint2f
 import org.opencv.core.Point
 import org.opencv.core.Rect
 import org.opencv.core.Scalar
 import org.opencv.core.Size
+import org.opencv.features2d.BFMatcher
+import org.opencv.features2d.ORB
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import java.io.File
@@ -332,17 +341,25 @@ internal class IncrementalFirstwinsEngine(
 
             // V12.10 Fix #1 — image-aligned slit refinement.  Mirror of
             // iOS path: build a tentative ROI from pose-predicted
-            // (dstX, dstY); in the overlap zone (mask==255) run an NCC
-            // template match; subtract the returned delta from
-            // (dstX, dstY) so the leading-edge sliver lines up with the
-            // existing edge.  Falls back to pose-only when overlap is
-            // too small or NCC confidence is low.
+            // (dstX, dstY); in the overlap zone (mask==255) run an
+            // ORB+RANSAC homography between canvas and the new
+            // frame's source region; ADD the returned (dx, dy)
+            // translation to (dstX, dstY) so the leading-edge
+            // sliver lines up with the existing edge.  Falls back
+            // to pose-only when overlap is too small, painted-area
+            // fraction is too low, feature density is insufficient,
+            // or the homography is degenerate.
+            //
+            // Sign convention: homographyOffset returns (dx, dy) =
+            // dstCenter - srcCenter under H.  Add to dstX/dstY.
             run {
-                val kRefineSearchPx = 24
                 val tentativeRoi = Rect(dstX, dstY, clipW, clipH).intersection(
                     Rect(0, 0, canvasWidth, canvasHeight)
                 )
-                if (tentativeRoi.width >= 80 && tentativeRoi.height >= 80) {
+                // 200 px on each side matches homographyOffset's
+                // kMinOverlapPx — needed for ORB to have enough
+                // texture for RANSAC to converge.
+                if (tentativeRoi.width >= 200 && tentativeRoi.height >= 200) {
                     val canvasOverlap = Mat(canvas, tentativeRoi)
                     val maskOverlap = Mat(canvasMask, tentativeRoi)
                     val srcInClipped = Rect(
@@ -352,8 +369,8 @@ internal class IncrementalFirstwinsEngine(
                         tentativeRoi.height,
                     )
                     val srcOverlap = Mat(frameClipped, srcInClipped)
-                    val (delta, ncc) = refineSlitOffset(
-                        canvasOverlap, srcOverlap, maskOverlap, kRefineSearchPx,
+                    val (delta, inliers, det) = homographyOffset(
+                        canvasOverlap, srcOverlap, maskOverlap,
                     )
                     canvasOverlap.release(); maskOverlap.release(); srcOverlap.release()
                     val dx = delta.x.toInt()
@@ -361,12 +378,20 @@ internal class IncrementalFirstwinsEngine(
                     if (dx != 0 || dy != 0) {
                         val priorX = dstX
                         val priorY = dstY
-                        dstX -= dx
-                        dstY -= dy
+                        dstX += dx
+                        dstY += dy
                         Log.d(
-                            "V12.10-refine",
-                            "delta=(%+d,%+d) ncc=%.3f adjusted dst=(%d,%d) (was %d,%d)".format(
-                                Locale.US, dx, dy, ncc, dstX, dstY, priorX, priorY,
+                            "V12.11-homog",
+                            "delta=(%+d,%+d) inliers=%d det=%.3f adjusted dst=(%d,%d) (was %d,%d)".format(
+                                Locale.US, dx, dy, inliers, det,
+                                dstX, dstY, priorX, priorY,
+                            ),
+                        )
+                    } else if (inliers > 0) {
+                        Log.d(
+                            "V12.11-homog",
+                            "REJECTED inliers=%d det=%.3f — falling back to pose-only".format(
+                                Locale.US, inliers, det,
                             ),
                         )
                     }
@@ -838,109 +863,161 @@ private fun Rect.intersection(other: Rect): Rect {
 }
 
 /**
- * V12.10 Fix #1 — image-aligned slit refinement (Android port).
+ * V12.11 Step 4 — feature-based slit alignment via homography
+ * (Android port — mirrors iOS' `homographyOffset` in
+ * OpenCVSlitScanStitcher.mm).
  *
- * Pose alone places frames within ~5–15 px when the user pans cleanly
- * around the device's optical centre, but real-world handheld motion
- * introduces small translation parallax and rotation drift that pose
- * can't model.  When those errors compound frame-to-frame, the
- * leading-edge sliver wobbles relative to the already-stitched canvas.
+ * Replaces V12.10 Fix #1's NCC template match with the standard
+ * image-stitching pipeline:
  *
- * This helper takes a small grayscale template from the OVERLAP region
- * of the canvas (where mask==255), searches for the same texture in the
- * new frame's source region within ±searchPx, and returns the
- * (delta_x, delta_y) by which the source content is offset from the
- * pose-predicted position.  The caller subtracts this delta from the
- * paste position so the leading-edge sliver lines up with the existing
- * edge.
+ *   1. Detect ORB features in the OVERLAP zone of canvas (where
+ *      mask==255) and in the new frame's same-sized source region.
+ *   2. Match descriptors with brute-force Hamming + Lowe's ratio
+ *      test (k=2, ratio < 0.75).
+ *   3. RANSAC-estimate a homography mapping src → canvas.
+ *   4. Sanity-reject homographies whose 2×2 affine determinant is
+ *      outside (0.5, 2.0).
+ *   5. Extract effective TRANSLATION by mapping the source-region
+ *      centre under H and reporting the delta.
  *
- * Returns Pair(Point(0,0), 0.0) when the overlap is too small or NCC
- * confidence is too low — fall back to pose-only in those cases.
+ * Returns Triple(delta, inliers, det):
+ *   • delta: Point(0,0) on any fallback path; otherwise the
+ *     translation to ADD to the pose-predicted (dstX, dstY).
+ *   • inliers: RANSAC inlier count (0 when we couldn't even get
+ *     to RANSAC — overlap too small, too few keypoints, etc.).
+ *   • det: |H[0:2, 0:2]| determinant when computed; 0.0 otherwise.
+ *     Caller surfaces both inliers and det in field telemetry.
  */
-private fun refineSlitOffset(
+private fun homographyOffset(
     canvasOverlap: Mat,
     srcOverlap: Mat,
     maskOverlap: Mat,
-    searchPx: Int,
-): Pair<Point, Double> {
-    val kRefineTemplateSize = 64
-    val kRefineMinOverlapPx = 80
-    val kRefineMinNcc = 0.5
-    val zero = Pair(Point(0.0, 0.0), 0.0)
+): Triple<Point, Int, Double> {
+    val kMinOverlapPx     = 200
+    val kMinPaintedFrac   = 0.5
+    val kOrbFeatureCount  = 500
+    val kLoweRatio        = 0.75f
+    val kMinGoodMatches   = 8
+    val kMinInliers       = 8
+    val kRansacReprojPx   = 3.0
+    val kDetMin           = 0.5
+    val kDetMax           = 2.0
+    val zeroResult = Triple(Point(0.0, 0.0), 0, 0.0)
 
-    if (canvasOverlap.empty() || srcOverlap.empty() || maskOverlap.empty()) return zero
-    if (canvasOverlap.cols() != srcOverlap.cols() || canvasOverlap.rows() != srcOverlap.rows()) return zero
-    if (canvasOverlap.cols() != maskOverlap.cols() || canvasOverlap.rows() != maskOverlap.rows()) return zero
-    if (canvasOverlap.cols() < kRefineMinOverlapPx || canvasOverlap.rows() < kRefineMinOverlapPx) return zero
+    if (canvasOverlap.empty() || srcOverlap.empty() || maskOverlap.empty()) return zeroResult
+    if (canvasOverlap.cols() != srcOverlap.cols() || canvasOverlap.rows() != srcOverlap.rows()) return zeroResult
+    if (canvasOverlap.cols() != maskOverlap.cols() || canvasOverlap.rows() != maskOverlap.rows()) return zeroResult
+    if (canvasOverlap.cols() < kMinOverlapPx || canvasOverlap.rows() < kMinOverlapPx) return zeroResult
 
     val painted = Mat()
     Core.compare(maskOverlap, Scalar(255.0), painted, Core.CMP_EQ)
     val paintedCount = Core.countNonZero(painted)
-    if (paintedCount < kRefineTemplateSize * kRefineTemplateSize) {
-        painted.release(); return zero
+    val totalPx = canvasOverlap.rows() * canvasOverlap.cols()
+    if (paintedCount < (totalPx * kMinPaintedFrac).toInt()) {
+        painted.release(); return zeroResult
     }
 
-    // Centroid of painted region.
-    val moments = Imgproc.moments(painted, true)
-    if (moments.m00 <= 0) {
-        painted.release(); return zero
-    }
-    val cx = round(moments.m10 / moments.m00).toInt()
-    val cy = round(moments.m01 / moments.m00).toInt()
+    val canvasGray = Mat()
+    val srcGray = Mat()
+    Imgproc.cvtColor(canvasOverlap, canvasGray, Imgproc.COLOR_BGR2GRAY)
+    Imgproc.cvtColor(srcOverlap,    srcGray,    Imgproc.COLOR_BGR2GRAY)
 
-    var tplX = cx - kRefineTemplateSize / 2
-    var tplY = cy - kRefineTemplateSize / 2
-    if (tplX < 0) tplX = 0
-    if (tplY < 0) tplY = 0
-    if (tplX + kRefineTemplateSize > canvasOverlap.cols()) tplX = canvasOverlap.cols() - kRefineTemplateSize
-    if (tplY + kRefineTemplateSize > canvasOverlap.rows()) tplY = canvasOverlap.rows() - kRefineTemplateSize
-    if (tplX < 0 || tplY < 0) {
-        painted.release(); return zero
-    }
+    val orb = ORB.create(kOrbFeatureCount)
+    val kpCanvas = MatOfKeyPoint()
+    val kpSrc = MatOfKeyPoint()
+    val descCanvas = Mat()
+    val descSrc = Mat()
+    orb.detectAndCompute(canvasGray, painted, kpCanvas, descCanvas)
+    orb.detectAndCompute(srcGray, Mat(), kpSrc, descSrc)
 
-    // Reject if the chosen tile isn't ≥90 % painted — would NCC poorly
-    // against a black-vs-image edge.
-    val tplRoi = Rect(tplX, tplY, kRefineTemplateSize, kRefineTemplateSize)
-    val tplMaskSub = Mat(painted, tplRoi)
-    val paintedInTpl = Core.countNonZero(tplMaskSub)
-    tplMaskSub.release()
+    canvasGray.release()
+    srcGray.release()
     painted.release()
-    if (paintedInTpl < (kRefineTemplateSize * kRefineTemplateSize * 9 / 10)) return zero
 
-    val searchX = max(0, tplX - searchPx)
-    val searchY = max(0, tplY - searchPx)
-    val searchW = min(srcOverlap.cols() - searchX, kRefineTemplateSize + 2 * searchPx)
-    val searchH = min(srcOverlap.rows() - searchY, kRefineTemplateSize + 2 * searchPx)
-    if (searchW < kRefineTemplateSize || searchH < kRefineTemplateSize) return zero
+    val kpCanvasArr = kpCanvas.toArray()
+    val kpSrcArr = kpSrc.toArray()
 
-    val tplBGR = Mat(canvasOverlap, tplRoi)
-    val srchBGR = Mat(srcOverlap, Rect(searchX, searchY, searchW, searchH))
-    val tplGray = Mat()
-    val srchGray = Mat()
-    Imgproc.cvtColor(tplBGR, tplGray, Imgproc.COLOR_BGR2GRAY)
-    Imgproc.cvtColor(srchBGR, srchGray, Imgproc.COLOR_BGR2GRAY)
+    if (kpCanvasArr.size < kMinGoodMatches ||
+        kpSrcArr.size    < kMinGoodMatches ||
+        descCanvas.empty() ||
+        descSrc.empty()) {
+        kpCanvas.release(); kpSrc.release()
+        descCanvas.release(); descSrc.release()
+        return zeroResult
+    }
 
-    val result = Mat()
-    Imgproc.matchTemplate(srchGray, tplGray, result, Imgproc.TM_CCOEFF_NORMED)
-    val mm = Core.minMaxLoc(result)
-    val maxVal = mm.maxVal
-    val maxLoc = mm.maxLoc
+    // Brute-force Hamming match with k=2 → Lowe's ratio test.
+    val matcher = BFMatcher.create(Core.NORM_HAMMING)
+    val knn = mutableListOf<MatOfDMatch>()
+    matcher.knnMatch(descSrc, descCanvas, knn, 2)
 
-    tplBGR.release(); srchBGR.release()
-    tplGray.release(); srchGray.release()
-    result.release()
+    val srcPtsList = mutableListOf<Point>()
+    val dstPtsList = mutableListOf<Point>()
+    for (matMatch in knn) {
+        val arr = matMatch.toArray()
+        if (arr.size == 2 && arr[0].distance < kLoweRatio * arr[1].distance) {
+            srcPtsList.add(kpSrcArr[arr[0].queryIdx].pt)
+            dstPtsList.add(kpCanvasArr[arr[0].trainIdx].pt)
+        }
+        matMatch.release()
+    }
 
-    if (maxVal < kRefineMinNcc) return Pair(Point(0.0, 0.0), maxVal)
+    kpCanvas.release(); kpSrc.release()
+    descCanvas.release(); descSrc.release()
 
-    val matchX = searchX + maxLoc.x.toInt()
-    val matchY = searchY + maxLoc.y.toInt()
-    var deltaX = matchX - tplX
-    var deltaY = matchY - tplY
-    if (deltaX > searchPx) deltaX = searchPx
-    if (deltaX < -searchPx) deltaX = -searchPx
-    if (deltaY > searchPx) deltaY = searchPx
-    if (deltaY < -searchPx) deltaY = -searchPx
+    if (srcPtsList.size < kMinGoodMatches) return zeroResult
 
-    return Pair(Point(deltaX.toDouble(), deltaY.toDouble()), maxVal)
+    val srcPts = MatOfPoint2f()
+    srcPts.fromList(srcPtsList)
+    val dstPts = MatOfPoint2f()
+    dstPts.fromList(dstPtsList)
+
+    val inlierMask = Mat()
+    val H = Calib3d.findHomography(srcPts, dstPts, Calib3d.RANSAC,
+                                    kRansacReprojPx, inlierMask)
+
+    srcPts.release()
+    dstPts.release()
+
+    if (H.empty()) {
+        inlierMask.release()
+        return zeroResult
+    }
+
+    val inliers = Core.countNonZero(inlierMask)
+    inlierMask.release()
+    if (inliers < kMinInliers) {
+        H.release()
+        return Triple(Point(0.0, 0.0), inliers, 0.0)
+    }
+
+    // Sanity-check the affine 2×2 determinant.
+    val a = H[0, 0][0]
+    val b = H[0, 1][0]
+    val c = H[1, 0][0]
+    val d = H[1, 1][0]
+    val det = kotlin.math.abs(a * d - b * c)
+    if (det < kDetMin || det > kDetMax) {
+        H.release()
+        return Triple(Point(0.0, 0.0), inliers, det)
+    }
+
+    // Extract effective translation by mapping the source-region
+    // centre under H.
+    val srcCenter = MatOfPoint2f(Point(srcOverlap.cols() * 0.5, srcOverlap.rows() * 0.5))
+    val dstCenter = MatOfPoint2f()
+    Core.perspectiveTransform(srcCenter, dstCenter, H)
+    val dstCenterArr = dstCenter.toArray()
+
+    srcCenter.release()
+    dstCenter.release()
+    H.release()
+
+    if (dstCenterArr.isEmpty()) return Triple(Point(0.0, 0.0), inliers, det)
+
+    val dx = round(dstCenterArr[0].x - srcOverlap.cols() * 0.5).toInt()
+    val dy = round(dstCenterArr[0].y - srcOverlap.rows() * 0.5).toInt()
+
+    return Triple(Point(dx.toDouble(), dy.toDouble()), inliers, det)
 }
 
