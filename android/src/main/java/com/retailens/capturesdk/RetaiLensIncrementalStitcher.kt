@@ -84,7 +84,14 @@ class RetaiLensIncrementalStitcher(
     @ReactMethod
     fun removeListeners(count: Int) { /* no-op */ }
 
+    /// V7 hybrid engine — selected for engineMode == 'hybrid'.
     private var engine: IncrementalEngine? = null
+    /// V12.7 firstwins engine — selected for any engineMode starting
+    /// with 'firstwins' (firstwins, firstwins-zoomed, firstwins-rectilinear).
+    /// Native engine is identical for firstwins and firstwins-zoomed
+    /// (the difference is JS-side viewport zoom only).  useRectilinear
+    /// is set for 'firstwins-rectilinear'.
+    private var firstwinsEngine: IncrementalFirstwinsEngine? = null
     private val isRunning = AtomicBoolean(false)
     private val workScope = CoroutineScope(Dispatchers.Default)
 
@@ -131,22 +138,47 @@ class RetaiLensIncrementalStitcher(
         }
         try {
             ensureOpenCv()
-            // V7: frameRotationDegrees is now an OUTPUT-ONLY rotation
-            // applied at snapshot/finalize time.  Compute pipeline
-            // always works in sensor-native landscape compose space.
             val rotation = options.getIntOrDefault("frameRotationDegrees", 90)
-            engine = IncrementalEngine(
-                // Compose dims are always landscape (4:3 sensor aspect)
-                // because we no longer rotate input.  Default 960x720.
-                composeWidth  = options.getIntOrDefault("composeWidth",  960),
-                composeHeight = options.getIntOrDefault("composeHeight", 720),
-                canvasWidth   = options.getIntOrDefault("canvasWidth",   4800),
-                canvasHeight  = options.getIntOrDefault("canvasHeight",  2200),
-                featherPx     = options.getIntOrDefault("featherPx",     20),
-                snapshotJpegQuality = options.getIntOrDefault("snapshotJpegQuality", 75),
-                snapshotEveryNAccepts = options.getIntOrDefault("snapshotEveryNAccepts", 1),
-                frameRotationDegrees = rotation,
-            )
+            val composeW = options.getIntOrDefault("composeWidth",  960)
+            val composeH = options.getIntOrDefault("composeHeight", 720)
+            // V12 default canvas: 5000x5000 to match iOS.  Old default
+            // was 4800x2200 (V7 wide-only); V12 needs square because
+            // either pan axis can grow.
+            val canvasW  = options.getIntOrDefault("canvasWidth",   5000)
+            val canvasH  = options.getIntOrDefault("canvasHeight",  5000)
+            val featherP = options.getIntOrDefault("featherPx",     20)
+            val snapQ    = options.getIntOrDefault("snapshotJpegQuality", 75)
+            val snapN    = options.getIntOrDefault("snapshotEveryNAccepts", 1)
+            // V12.7 — engineMode now distinguishes 4 variants.  See
+            // src/stitching/incremental.ts for the full description.
+            val engineMode = options.getString("engine") ?: "hybrid"
+            val isFirstwins = engineMode.startsWith("firstwins")
+            val useRectilinear = engineMode == "firstwins-rectilinear"
+            if (isFirstwins) {
+                firstwinsEngine = IncrementalFirstwinsEngine(
+                    composeWidth = composeW,
+                    composeHeight = composeH,
+                    canvasWidth = canvasW,
+                    canvasHeight = canvasH,
+                    snapshotJpegQuality = snapQ,
+                    snapshotEveryNAccepts = snapN,
+                    frameRotationDegrees = rotation,
+                    useRectilinear = useRectilinear,
+                )
+                engine = null
+            } else {
+                engine = IncrementalEngine(
+                    composeWidth  = composeW,
+                    composeHeight = composeH,
+                    canvasWidth   = canvasW,
+                    canvasHeight  = canvasH,
+                    featherPx     = featherP,
+                    snapshotJpegQuality = snapQ,
+                    snapshotEveryNAccepts = snapN,
+                    frameRotationDegrees = rotation,
+                )
+                firstwinsEngine = null
+            }
             // Engage the ARCameraView's per-frame ingestion path if a
             // view is mounted — this is what gives Android parity
             // with iOS' ARSession-driven path.  No-op when the view
@@ -173,11 +205,14 @@ class RetaiLensIncrementalStitcher(
      */
     @ReactMethod
     fun processFrameAtPath(options: ReadableMap, promise: Promise) {
-        val engine = this.engine
-            ?: return promise.reject(
+        val hybrid = this.engine
+        val firstwins = this.firstwinsEngine
+        if (hybrid == null && firstwins == null) {
+            return promise.reject(
                 "incremental-not-running",
                 "Call start() before processFrameAtPath().",
             )
+        }
         val path = options.getString("path")
             ?: return promise.reject("invalid-options", "path required")
         val yaw = options.getDoubleOrDefault("yaw", 0.0)
@@ -205,25 +240,41 @@ class RetaiLensIncrementalStitcher(
 
         workScope.launch {
             try {
-                val telemetry = engine.addFrameAtPath(
-                    path = path,
-                    qx = qx, qy = qy, qz = qz, qw = qw,
-                    fx = fx, fy = fy, cx = cx, cy = cy,
-                    imageWidth = imageWidth, imageHeight = imageHeight,
-                    yaw = yaw,
-                    pitch = pitch,
-                    fovHorizDegrees = fovH,
-                    fovVertDegrees = fovV,
-                    trackingPoor = trackingPoor,
-                )
-                val state = engine.snapshotIfDue(telemetry)
+                val telemetry: FrameTelemetry
+                val state: WritableMap?
+                val accepted: Int
+                if (firstwins != null) {
+                    telemetry = firstwins.addFrameAtPath(
+                        path = path,
+                        qx = qx, qy = qy, qz = qz, qw = qw,
+                        fx = fx, fy = fy, cx = cx, cy = cy,
+                        imageWidth = imageWidth, imageHeight = imageHeight,
+                        yaw = yaw, pitch = pitch,
+                        fovHorizDegrees = fovH, fovVertDegrees = fovV,
+                        trackingPoor = trackingPoor,
+                    )
+                    state = firstwins.snapshotIfDue(telemetry)
+                    accepted = firstwins.acceptedCount
+                } else {
+                    telemetry = hybrid!!.addFrameAtPath(
+                        path = path,
+                        qx = qx, qy = qy, qz = qz, qw = qw,
+                        fx = fx, fy = fy, cx = cx, cy = cy,
+                        imageWidth = imageWidth, imageHeight = imageHeight,
+                        yaw = yaw, pitch = pitch,
+                        fovHorizDegrees = fovH, fovVertDegrees = fovV,
+                        trackingPoor = trackingPoor,
+                    )
+                    state = hybrid.snapshotIfDue(telemetry)
+                    accepted = hybrid.acceptedCount
+                }
                 emitState(state)
                 val result = Arguments.createMap()
                 result.putInt("outcome", telemetry.outcome.ordinal)
                 result.putDouble("confidence", telemetry.confidence)
                 result.putDouble("overlapPercent", telemetry.overlapPercent)
                 result.putDouble("processingMs", telemetry.processingMs)
-                result.putInt("acceptedCount", engine.acceptedCount)
+                result.putInt("acceptedCount", accepted)
                 promise.resolve(result)
             } catch (t: Throwable) {
                 promise.reject("incremental-process-failed", t.message, t)
@@ -233,11 +284,14 @@ class RetaiLensIncrementalStitcher(
 
     @ReactMethod
     fun finalize(options: ReadableMap, promise: Promise) {
-        val engine = this.engine
-            ?: return promise.reject(
+        val hybrid = this.engine
+        val firstwins = this.firstwinsEngine
+        if (hybrid == null && firstwins == null) {
+            return promise.reject(
                 "incremental-not-running",
                 "No active capture — call start() first.",
             )
+        }
         val outputPathOpt = options.getString("outputPath") ?: ""
         val outputPath = if (outputPathOpt.isEmpty()) {
             File(reactContext.cacheDir, "RetaiLensIncremental-${System.nanoTime()}.jpg").absolutePath
@@ -252,18 +306,29 @@ class RetaiLensIncrementalStitcher(
 
         workScope.launch {
             try {
-                val snap = engine.finalize(outputPath, quality)
-                this@RetaiLensIncrementalStitcher.engine = null
-                isRunning.set(false)
                 val map = Arguments.createMap()
-                map.putString("panoramaPath", snap.panoramaPath)
-                map.putInt("width", snap.width)
-                map.putInt("height", snap.height)
-                map.putInt("acceptedCount", snap.acceptedCount)
+                if (firstwins != null) {
+                    val snap = firstwins.finalize(outputPath, quality)
+                        ?: throw IllegalStateException("firstwins.finalize returned null")
+                    map.putString("panoramaPath", snap.panoramaPath)
+                    map.putInt("width", snap.width)
+                    map.putInt("height", snap.height)
+                    map.putInt("acceptedCount", snap.acceptedCount)
+                } else {
+                    val snap = hybrid!!.finalize(outputPath, quality)
+                    map.putString("panoramaPath", snap.panoramaPath)
+                    map.putInt("width", snap.width)
+                    map.putInt("height", snap.height)
+                    map.putInt("acceptedCount", snap.acceptedCount)
+                }
+                this@RetaiLensIncrementalStitcher.engine = null
+                this@RetaiLensIncrementalStitcher.firstwinsEngine = null
+                isRunning.set(false)
                 map.putInt("droppedBackpressure", 0)
                 promise.resolve(map)
             } catch (t: Throwable) {
                 this@RetaiLensIncrementalStitcher.engine = null
+                this@RetaiLensIncrementalStitcher.firstwinsEngine = null
                 isRunning.set(false)
                 promise.reject("incremental-finalize-failed", t.message, t)
             }
@@ -274,7 +339,9 @@ class RetaiLensIncrementalStitcher(
     fun cancel(promise: Promise) {
         arCameraViewRef?.setIncrementalIngestionActive(false)
         engine?.release()
+        firstwinsEngine?.reset()
         engine = null
+        firstwinsEngine = null
         isRunning.set(false)
         val map = Arguments.createMap()
         map.putBoolean("ok", true)
@@ -300,27 +367,42 @@ class RetaiLensIncrementalStitcher(
         fovVertDegrees: Double,
         trackingPoor: Boolean,
     ) {
-        val engine = this.engine ?: return
+        val hybrid = this.engine
+        val firstwins = this.firstwinsEngine
+        if (hybrid == null && firstwins == null) return
         workScope.launch {
-            val tele = engine.addFrameAtPath(
-                path = path,
-                qx = qx, qy = qy, qz = qz, qw = qw,
-                fx = fx, fy = fy, cx = cx, cy = cy,
-                imageWidth = imageWidth, imageHeight = imageHeight,
-                yaw = yaw,
-                pitch = pitch,
-                fovHorizDegrees = fovHorizDegrees,
-                fovVertDegrees = fovVertDegrees,
-                trackingPoor = trackingPoor,
-            )
-            val state = engine.snapshotIfDue(tele)
+            val state: WritableMap? = if (firstwins != null) {
+                val tele = firstwins.addFrameAtPath(
+                    path = path,
+                    qx = qx, qy = qy, qz = qz, qw = qw,
+                    fx = fx, fy = fy, cx = cx, cy = cy,
+                    imageWidth = imageWidth, imageHeight = imageHeight,
+                    yaw = yaw, pitch = pitch,
+                    fovHorizDegrees = fovHorizDegrees,
+                    fovVertDegrees = fovVertDegrees,
+                    trackingPoor = trackingPoor,
+                )
+                firstwins.snapshotIfDue(tele)
+            } else {
+                val tele = hybrid!!.addFrameAtPath(
+                    path = path,
+                    qx = qx, qy = qy, qz = qz, qw = qw,
+                    fx = fx, fy = fy, cx = cx, cy = cy,
+                    imageWidth = imageWidth, imageHeight = imageHeight,
+                    yaw = yaw, pitch = pitch,
+                    fovHorizDegrees = fovHorizDegrees,
+                    fovVertDegrees = fovVertDegrees,
+                    trackingPoor = trackingPoor,
+                )
+                hybrid.snapshotIfDue(tele)
+            }
             emitState(state)
         }
     }
 
     @ReactMethod
     fun getState(promise: Promise) {
-        val state = engine?.lastState
+        val state = firstwinsEngine?.lastState ?: engine?.lastState
         if (state == null) {
             promise.resolve(null)
             return
