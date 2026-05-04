@@ -66,6 +66,9 @@ export type {
 export { useDeviceOrientation } from './camera/useDeviceOrientation';
 export type { DeviceOrientation } from './camera/useDeviceOrientation';
 
+export { PanoramaBandOverlay } from './camera/PanoramaBandOverlay';
+export type { PanoramaBandOverlayProps } from './camera/PanoramaBandOverlay';
+
 // ── AR (Phase 4) ────────────────────────────────────────────────────────
 // ARKit (iOS) / ARCore (Android) session wrapper.  Foundation for
 // pose-driven stitching (Phase 5), measurement (Phase 6), and
