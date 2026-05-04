@@ -72,10 +72,10 @@
         _canvasWidth   = canvasWidth   > 0 ? canvasWidth   : 5000;
         _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 5000;
         _frameRotationDegrees = frameRotationDegrees;
-        // V12.3: orientation-aware cylinder axis.  Portrait → vertical
-        // cylinder, landscape → transverse (axis = pan_X).
-        _isLandscape = (frameRotationDegrees == 0
-                        || frameRotationDegrees == 180);
+        // V12.6 Step C: detected at first-frame init from R_panToCam,
+        // not from frameRotationDegrees.  Default false here is just
+        // a safe initialiser.
+        _isLandscape = NO;
 
         _M_arkitToCv = (cv::Mat_<double>(3, 3) <<
             1, 0, 0,
@@ -184,6 +184,18 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
             pzz,  0, pzx,
             0,    1, 0,
             -pzx, 0, pzz);
+
+        // V12.6 Step C: detect orientation from R_panToCam at first
+        // frame — see v9 engine for the rationale.  JS's
+        // frameRotationDegrees is unreliable when iOS orientation-
+        // lock is on; ARKit's pose is ground truth.
+        cv::Mat R_panToCam_first = _M_arkitToCv * _firstRotationArkit.t() * _R_panToWorld;
+        const double absR01 = std::fabs(R_panToCam_first.at<double>(0, 1));
+        const double absR11 = std::fabs(R_panToCam_first.at<double>(1, 1));
+        _isLandscape = (absR11 > absR01);
+        NSLog(@"[V12.6-orient] engine=firstwins detected isLandscape=%d "
+              @"|R[0,1]|=%.4f |R[1,1]|=%.4f (frameRotationDegrees from JS = %ld)",
+              (int)_isLandscape, absR01, absR11, (long)_frameRotationDegrees);
 
         // V12.2 cylindrical-warp the first frame and place at canvas centre.
         cv::Mat warpedFirst, warpedFirstMask;

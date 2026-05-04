@@ -194,14 +194,16 @@ constexpr double kRansacReprojThresh = 5.0;
         // JPEG for display.  The compute pipeline always works in
         // sensor-native landscape compose space.
         _frameRotationDegrees = frameRotationDegrees;
-        // V12.3: also use it to pick the cylinder axis.  Portrait
-        // device → vertical-axis cylinder (pan = world horizontal).
-        // Landscape device → transverse (pan_X-axis) cylinder
-        // (pan = world vertical).  JS sends 90 for portrait,
-        // 270 for portrait-upside-down, and 0 for both landscape
-        // orientations.
-        _isLandscape = (frameRotationDegrees == 0
-                        || frameRotationDegrees == 180);
+        // V12.6 Step C: _isLandscape is no longer derived from the
+        // JS-passed frameRotationDegrees.  V12.5 telemetry proved
+        // JS was sending the wrong value when iOS orientation-lock
+        // suppressed the rotation event (always reported portrait
+        // even in landscape).  We now detect at first-frame init
+        // from R_panToCam directly — see the cylindricalWarp's
+        // first-frame branch.  Default false here is just a safe
+        // initialiser; it WILL be overwritten before any warping
+        // happens.
+        _isLandscape = NO;
         // Default compose dims preserve the 4:3 sensor aspect
         // (1920x1440 → 960x720 at scale 0.5).  Always landscape
         // because we no longer rotate input; the canvas geometry
@@ -349,6 +351,27 @@ constexpr double kRansacReprojThresh = 5.0;
             pzz,   0, pzx,
             0,     1, 0,
             -pzx,  0, pzz);
+
+        // V12.6 Step C: detect orientation from the actual ARKit
+        // rotation matrix at first frame, NOT from the JS-passed
+        // frameRotationDegrees.  V12.5 telemetry showed JS was
+        // sending portrait (90) even when the device was held in
+        // landscape — `useDeviceOrientation` doesn't fire reliably
+        // when iOS interface-orientation lock prevents the screen
+        // from rotating.  ARKit's pose IS ground truth: gravity is
+        // gravity regardless of what JS believes about the device.
+        //
+        // Detection: world-UP (pan_Y) projects onto the camera's
+        // narrow axis (cam_Y) for landscape orientation, and onto
+        // the camera's wide axis (cam_X) for portrait.  Pick the
+        // axis with the larger projection magnitude.
+        cv::Mat R_panToCam_first = _M_arkitToCv * _firstRotationArkit.t() * _R_panToWorld;
+        const double absR01 = std::fabs(R_panToCam_first.at<double>(0, 1));
+        const double absR11 = std::fabs(R_panToCam_first.at<double>(1, 1));
+        _isLandscape = (absR11 > absR01);
+        NSLog(@"[V12.6-orient] engine=v9 detected isLandscape=%d "
+              @"|R[0,1]|=%.4f |R[1,1]|=%.4f (frameRotationDegrees from JS = %ld)",
+              (int)_isLandscape, absR01, absR11, (long)_frameRotationDegrees);
 
         // Place first frame onto canvas via cylindrical warp.  R for
         // the warp is panorama→camera in OpenCV cam frame; for the
