@@ -267,14 +267,19 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         jpegQuality: Int,
         completion: @escaping ([String: Any]?, NSError?) -> Void
     ) {
-        // Detach from AR session first so the next delegate tick
-        // doesn't even reach consumeFrame.
-        RetaiLensARSession.shared.incrementalConsumer = nil
-
-        // Synchronously snapshot + null the engine refs and flip
-        // isRunning=false.  Any AR delegate frame that already
-        // grabbed the consumer reference and is mid-consumeFrame
-        // will see isRunning=false and bail before calling ingest.
+        // V12.9 fix #3 — flip isRunning=false BEFORE nulling the AR
+        // consumer.  The previous order had a race window: AR
+        // delegate captures `incrementalConsumer` (non-nil), the
+        // delegate is briefly suspended, finalize runs and sets
+        // consumer=nil + isRunning=false, then the suspended delegate
+        // resumes and calls consumer.consumeFrame().  consumeFrame
+        // saw isRunning=false at its first guard and bailed in MOST
+        // cases, but the in-flight workQueue task (if any) had
+        // already captured non-nil engine refs at consumeFrame
+        // entry — by re-checking inside the workQueue async we
+        // catch it, but only just.  Flipping isRunning first
+        // collapses the race: any consumeFrame entered after this
+        // line sees isRunning=false at its very first guard.
         stateLock.lock()
         let hybrid = self.hybridEngine
         let slit = self.firstwinsEngine
@@ -283,6 +288,11 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         self.isRunning = false
         let drops = self.droppedBackpressure
         stateLock.unlock()
+
+        // Then detach the AR consumer.  Any in-flight delegate that
+        // already captured the consumer reference will reach
+        // consumeFrame, see isRunning=false, and bail.
+        RetaiLensARSession.shared.incrementalConsumer = nil
 
         // Hop to the work queue so any frame currently mid-ingest
         // finishes before we serialize the canvas.  The serial
@@ -328,7 +338,9 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// Cancel an in-progress capture without producing output.
     /// Same V12.1 synchronous-stop pattern as finalize.
     @objc public func cancel() {
-        RetaiLensARSession.shared.incrementalConsumer = nil
+        // V12.9 fix #3 — same ordering as finalize: flip isRunning
+        // FIRST so any in-flight consumeFrame bails at its first
+        // guard.  Then detach the AR consumer.
         stateLock.lock()
         let hybrid = self.hybridEngine
         let slit = self.firstwinsEngine
@@ -337,6 +349,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         self.isRunning = false
         self.lastState = nil
         stateLock.unlock()
+        RetaiLensARSession.shared.incrementalConsumer = nil
         // Reset on the work queue so we don't race with an in-flight
         // ingest that's still touching the engine's canvas.
         workQueue.async {
