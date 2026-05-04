@@ -901,6 +901,7 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     // widen if gaps appear between strips.
     static const double kPanStripFraction  = 0.70;
     static const double kLongSideFraction  = 0.85;
+    int preCropX = bboxX, preCropY = bboxY, preCropW = bboxW, preCropH = bboxH;
     {
         int newW, newH;
         if (_isLandscape) {
@@ -914,6 +915,28 @@ static double computeOverlapPctSensor(double sensorRotXRad,
         bboxY += (bboxH - newH) / 2;
         bboxW = newW;
         bboxH = newH;
+    }
+
+    // V12.5 TELEMETRY — log every Nth accept so we can verify the
+    // transverse-cylinder math against numbers, not screenshots.  N=1
+    // for now (every accept) — turn down if log volume becomes a
+    // problem.  Format is single-line, prefix-tagged, so it's easy
+    // to grep/awk on the device log.
+    if ((_accepted % 1) == 0) {
+        NSLog(@"[V12.5-warp] engine=v9 accepted=%ld isLandscape=%d "
+              @"corners=(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f) "
+              @"preCrop=(x=%d,y=%d,w=%d,h=%d) "
+              @"postCrop=(x=%d,y=%d,w=%d,h=%d) "
+              @"R_panToCam=[[%.4f,%.4f,%.4f],[%.4f,%.4f,%.4f],[%.4f,%.4f,%.4f]] "
+              @"focalCompose=%.2f",
+              (long)_accepted, (int)_isLandscape,
+              c00.x, c00.y, c10.x, c10.y, c01.x, c01.y, c11.x, c11.y,
+              preCropX, preCropY, preCropW, preCropH,
+              bboxX, bboxY, bboxW, bboxH,
+              R_panToCam.at<double>(0,0), R_panToCam.at<double>(0,1), R_panToCam.at<double>(0,2),
+              R_panToCam.at<double>(1,0), R_panToCam.at<double>(1,1), R_panToCam.at<double>(1,2),
+              R_panToCam.at<double>(2,0), R_panToCam.at<double>(2,1), R_panToCam.at<double>(2,2),
+              f);
     }
 
     // ── Inverse-map: for each bbox pixel, find source pixel ──

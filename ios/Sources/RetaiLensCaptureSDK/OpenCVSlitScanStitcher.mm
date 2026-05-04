@@ -349,6 +349,7 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
     // rationale.  Same fractions, same axis-aware logic.
     static const double kPanStripFraction  = 0.70;
     static const double kLongSideFraction  = 0.85;
+    int preCropX = bboxX, preCropY = bboxY, preCropW = bboxW, preCropH = bboxH;
     {
         int newW, newH;
         if (_isLandscape) {
@@ -363,6 +364,21 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
         bboxW = newW;
         bboxH = newH;
     }
+    // V12.5 telemetry — same line shape as v9 engine, engine tag swapped.
+    NSLog(@"[V12.5-warp] engine=firstwins accepted=%ld isLandscape=%d "
+          @"corners=(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f) "
+          @"preCrop=(x=%d,y=%d,w=%d,h=%d) "
+          @"postCrop=(x=%d,y=%d,w=%d,h=%d) "
+          @"R_panToCam=[[%.4f,%.4f,%.4f],[%.4f,%.4f,%.4f],[%.4f,%.4f,%.4f]] "
+          @"focalCompose=%.2f",
+          (long)_accepted, (int)_isLandscape,
+          c00.x, c00.y, c10.x, c10.y, c01.x, c01.y, c11.x, c11.y,
+          preCropX, preCropY, preCropW, preCropH,
+          bboxX, bboxY, bboxW, bboxH,
+          R_panToCam.at<double>(0,0), R_panToCam.at<double>(0,1), R_panToCam.at<double>(0,2),
+          R_panToCam.at<double>(1,0), R_panToCam.at<double>(1,1), R_panToCam.at<double>(1,2),
+          R_panToCam.at<double>(2,0), R_panToCam.at<double>(2,1), R_panToCam.at<double>(2,2),
+          f);
     cv::Mat mapX(bboxH, bboxW, CV_32FC1);
     cv::Mat mapY(bboxH, bboxW, CV_32FC1);
     const double r00 = R_panToCam.at<double>(0,0), r01 = R_panToCam.at<double>(0,1), r02 = R_panToCam.at<double>(0,2);
