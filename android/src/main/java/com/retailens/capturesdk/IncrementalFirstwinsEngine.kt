@@ -115,8 +115,15 @@ internal class IncrementalFirstwinsEngine(
     /// V12.4 slit-scan + long-side clip fractions.  Same values as iOS.
     private val kPanStripFraction: Double = 0.70
     private val kLongSideFraction: Double = 0.85
-    /// V12.8 rectilinear long-side clip fraction (no pan-axis clip).
-    private val kLongSideFractionRect: Double = 0.85
+    /// V12.11 Step 3: rectilinear long-side clip fraction.  No pan-
+    /// axis clip — only the long (perpendicular-to-pan) side is
+    /// trimmed.
+    ///
+    /// Tightened from 0.85 → 0.70 so the matching 1/0.70 ≈ 1.43×
+    /// CSS zoom on the live preview is visibly obvious.  Matches
+    /// iOS' file-scope kLongSideFractionRect — the two engines must
+    /// stay in sync for cross-platform parity.
+    private val kLongSideFractionRect: Double = 0.70
 
     /**
      * Same shape as the V7 IncrementalEngine.addFrameAtPath() so the

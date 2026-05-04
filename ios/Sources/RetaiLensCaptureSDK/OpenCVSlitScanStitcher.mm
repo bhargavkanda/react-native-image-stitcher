@@ -131,6 +131,23 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
 // These were strip-width bounds for the original slit-scan design,
 // never referenced in the first-painted-wins implementation.
 
+// V12.11 Step 3 — fraction of the long-side (pan-perpendicular)
+// that the rectilinear engine retains per frame.  The remaining
+// (1 - fraction) is cropped equally from both edges of the long
+// side, keeping the pan axis full-width.
+//
+// Tightened from 0.85 → 0.70 in V12.11 Step 3 so the matching
+// 1/0.70 ≈ 1.43× CSS zoom on the live preview is visibly obvious
+// to the operator (matches the V3 mockup's "no playpen / no chair
+// edges — they're not in the buffer" specification).  At 0.85 the
+// 1.18× zoom was technically correct but visually imperceptible;
+// 0.70 makes the source-crop match what the user sees.
+//
+// First-frame and subsequent-frame branches both reference this
+// constant — DRY-critical because if they ever drift the engine
+// misbehaves (frame 1 placed bigger than frame 2's source ROI).
+static const double kLongSideFractionRect = 0.70;
+
 // V12.10 Fix #1 — image-aligned slit refinement.
 //
 // Pose alone places frames within ~5–15 px when the user pans cleanly
@@ -355,7 +372,9 @@ static cv::Point refineSlitOffset(const cv::Mat& canvasOverlap,
             //
             // No cylindrical warp.  Canvas pixels are camera-native
             // rectilinear — straight world lines stay straight.
-            const double kLongSideFractionRect = 0.85;
+            // kLongSideFractionRect lives at file scope (above) so
+            // the first-frame and subsequent-frame branches stay
+            // in sync.
             int clipW = std::max(1, (int)(frameBGR.cols * kLongSideFractionRect));
             int clipH = frameBGR.rows;
             int srcClipX = (frameBGR.cols - clipW) / 2;
@@ -417,7 +436,8 @@ static cv::Point refineSlitOffset(const cv::Mat& canvasOverlap,
         // incremental growth — no V12.7 dead-zone where strips
         // entirely overlapped the first frame.
         cv::Mat R_rel = _firstRotationArkit.t() * R_new;
-        const double kLongSideFractionRect = 0.85;
+        // kLongSideFractionRect is the file-scope constant defined
+        // alongside its first-frame counterpart so they stay in sync.
         int clipW = std::max(1, (int)(frameBGR.cols * kLongSideFractionRect));
         int clipH = frameBGR.rows;
         int srcClipX = (frameBGR.cols - clipW) / 2;
