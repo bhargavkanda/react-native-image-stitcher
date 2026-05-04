@@ -205,14 +205,24 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             stateLock.unlock()
             return
         }
-        if engineMode == "firstwins" {
+        // V12.7 — engineMode now distinguishes 4 variants:
+        //   'hybrid'                 → hybrid engine
+        //   'firstwins'              → firstwins, cylindrical, no zoom (baseline)
+        //   'firstwins-zoomed'       → firstwins, cylindrical, JS applies viewport zoom
+        //   'firstwins-rectilinear'  → firstwins, RECTILINEAR (no warp), JS applies zoom
+        // The viewport-zoom decision is JS-only; native treats 'firstwins'
+        // and 'firstwins-zoomed' identically.
+        let isFirstwins = engineMode.hasPrefix("firstwins")
+        let useRectilinear = (engineMode == "firstwins-rectilinear")
+        if isFirstwins {
             self.firstwinsEngine = OpenCVFirstWinsCylindricalStitcher(
                 composeWidth: composeWidth,
                 composeHeight: composeHeight,
                 canvasWidth: canvasWidth,
                 canvasHeight: canvasHeight,
                 featherPx: featherPx,
-                frameRotationDegrees: frameRotationDegrees
+                frameRotationDegrees: frameRotationDegrees,
+                useRectilinear: useRectilinear
             )
             self.hybridEngine = nil
         } else {

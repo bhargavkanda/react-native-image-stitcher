@@ -34,6 +34,16 @@
     NSInteger _frameRotationDegrees;
     /// V12.3 orientation-aware cylinder axis — see v9 engine.
     BOOL _isLandscape;
+    /// V12.7 Variant B: rectilinear mode.  When YES, skip cylindrical
+    /// warp entirely.  First frame is pasted raw onto canvas.
+    /// Subsequent frames contribute a narrow central strip placed by
+    /// ARKit pose-delta, with first-painted-wins masking.  The
+    /// canvas content stays in the camera's native rectilinear
+    /// projection — zero cylindrical curvature.
+    BOOL _useRectilinear;
+    /// V12.7 first-frame anchor for rectilinear placement.
+    int _firstFrameDstX;
+    int _firstFrameDstY;
 
     cv::Mat _canvas;
     cv::Mat _canvasMask;
@@ -64,6 +74,7 @@
                         canvasHeight:(NSInteger)canvasHeight
                          featherPx:(NSInteger)featherPx
               frameRotationDegrees:(NSInteger)frameRotationDegrees
+                     useRectilinear:(BOOL)useRectilinear
 {
     if (self = [super init]) {
         _composeWidth  = composeWidth  > 0 ? composeWidth  : 960;
@@ -72,6 +83,9 @@
         _canvasWidth   = canvasWidth   > 0 ? canvasWidth   : 5000;
         _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 5000;
         _frameRotationDegrees = frameRotationDegrees;
+        _useRectilinear = useRectilinear;
+        _firstFrameDstX = 0;
+        _firstFrameDstY = 0;
         // V12.6 Step C: detected at first-frame init from R_panToCam,
         // not from frameRotationDegrees.  Default false here is just
         // a safe initialiser.
@@ -197,6 +211,30 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
               @"|R[0,1]|=%.4f |R[1,1]|=%.4f (frameRotationDegrees from JS = %ld)",
               (int)_isLandscape, absR01, absR11, (long)_frameRotationDegrees);
 
+        if (_useRectilinear) {
+            // V12.7 Variant B first frame: paste raw sensor frame at
+            // canvas centre.  No cylindrical warp.  Canvas is in the
+            // camera's native rectilinear projection — pixel-for-pixel
+            // the same as the live viewport.  Lens distortion is
+            // whatever the camera produces (small for iPhone main).
+            int dstX = (int)(_canvas.cols - frameBGR.cols) / 2;
+            int dstY = (int)(_canvas.rows - frameBGR.rows) / 2;
+            cv::Rect roi(dstX, dstY, frameBGR.cols, frameBGR.rows);
+            roi &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
+            cv::Rect srcR(0, 0, roi.width, roi.height);
+            frameBGR(srcR).copyTo(_canvas(roi));
+            cv::rectangle(_canvasMask, roi, cv::Scalar(255), cv::FILLED);
+            _firstFrameDstX = dstX;
+            _firstFrameDstY = dstY;
+            _hasFirstFrame = true;
+            _accepted = 1;
+            [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+            [tele setValue:@(1.0) forKey:@"confidence"];
+            NSLog(@"[V12.7-rect] first frame pasted raw at (%d,%d) size %dx%d isLandscape=%d focal=%.2f",
+                  dstX, dstY, frameBGR.cols, frameBGR.rows, (int)_isLandscape, _focalCompose);
+            return tele;
+        }
+
         // V12.2 cylindrical-warp the first frame and place at canvas centre.
         cv::Mat warpedFirst, warpedFirstMask;
         cv::Point firstCornerCyl =
@@ -221,6 +259,69 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
         _accepted = 1;
         [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
         [tele setValue:@(1.0) forKey:@"confidence"];
+        return tele;
+    }
+
+    if (_useRectilinear) {
+        // V12.7 Variant B subsequent frame: extract a narrow central
+        // strip from the raw frame (no warp), place by pose-delta
+        // around the dominant pan axis, paint only into empty canvas
+        // pixels (first-painted-wins).
+        cv::Mat R_rel = _firstRotationArkit.t() * R_new;
+        int stripW, stripH, stripSrcX, stripSrcY;
+        int dstX, dstY;
+        double alpha;
+        if (_isLandscape) {
+            // Vertical pan around cam +X axis.  alpha > 0 = looking up
+            // (per ARKit convention; verify on device + flip if wrong).
+            alpha = std::atan2(R_rel.at<double>(2, 1), R_rel.at<double>(1, 1));
+            stripW = frameBGR.cols;
+            stripH = std::max(8, (int)(frameBGR.rows * 0.10));
+            stripSrcX = 0;
+            stripSrcY = (frameBGR.rows - stripH) / 2;
+            dstX = _firstFrameDstX;
+            // Looking up → strip ABOVE first-frame centre (smaller Y).
+            // canvas_Y_offset = -alpha * focal
+            dstY = _firstFrameDstY + stripSrcY - (int)std::round(alpha * _focalCompose);
+        } else {
+            // Horizontal pan around cam +Y axis.
+            alpha = std::atan2(R_rel.at<double>(0, 2), R_rel.at<double>(0, 0));
+            stripW = std::max(8, (int)(frameBGR.cols * 0.10));
+            stripH = frameBGR.rows;
+            stripSrcX = (frameBGR.cols - stripW) / 2;
+            stripSrcY = 0;
+            // Looking right → strip RIGHT of first-frame centre (larger X).
+            dstX = _firstFrameDstX + stripSrcX + (int)std::round(alpha * _focalCompose);
+            dstY = _firstFrameDstY;
+        }
+        cv::Rect dstRoi(dstX, dstY, stripW, stripH);
+        cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
+        cv::Rect dstClipped = dstRoi & canvasBounds;
+        if (dstClipped.width <= 0 || dstClipped.height <= 0) {
+            [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
+            return tele;
+        }
+        cv::Rect srcClipped(stripSrcX + (dstClipped.x - dstRoi.x),
+                            stripSrcY + (dstClipped.y - dstRoi.y),
+                            dstClipped.width, dstClipped.height);
+        cv::Mat srcStrip = frameBGR(srcClipped);
+        cv::Mat canvasRoi = _canvas(dstClipped);
+        cv::Mat maskRoi = _canvasMask(dstClipped);
+        // First-painted-wins: only fill where mask == 0.
+        cv::Mat emptyMask;
+        cv::compare(maskRoi, 0, emptyMask, cv::CMP_EQ);
+        int newPixels = cv::countNonZero(emptyMask);
+        if (newPixels > 0) {
+            srcStrip.copyTo(canvasRoi, emptyMask);
+            maskRoi.setTo(255, emptyMask);
+            _accepted += 1;
+            [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+        } else {
+            [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
+        [tele setValue:@(ms) forKey:@"processingMs"];
         return tele;
     }
 

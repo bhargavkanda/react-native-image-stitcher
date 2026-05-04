@@ -44,7 +44,8 @@ NS_ASSUME_NONNULL_BEGIN
                          canvasWidth:(NSInteger)canvasWidth
                         canvasHeight:(NSInteger)canvasHeight
                          featherPx:(NSInteger)featherPx
-              frameRotationDegrees:(NSInteger)frameRotationDegrees NS_DESIGNATED_INITIALIZER;
+              frameRotationDegrees:(NSInteger)frameRotationDegrees
+                     useRectilinear:(BOOL)useRectilinear NS_DESIGNATED_INITIALIZER;
 
 - (instancetype)init NS_UNAVAILABLE;
 

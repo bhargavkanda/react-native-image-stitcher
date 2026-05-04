@@ -99,23 +99,33 @@ export interface IncrementalStartOptions {
   frameRotationDegrees?: 0 | 90 | 180 | 270;
   /**
    * Engine mode:
-   *   'hybrid'    — Cylindrical projection + KLT optical-flow
-   *                 refinement + feather blend (default).
-   *   'firstwins' — Cylindrical projection + first-painted-wins
-   *                 hard overlay (no OF refinement, no blending).
-   *                 Preserves the first frame's exact pixels;
-   *                 later frames CANNOT correct early bad ones.
+   *   'hybrid'                — Cylindrical projection + KLT optical-flow
+   *                             refinement + feather blend.
+   *   'firstwins'             — Cylindrical projection + V12.4 central-70%
+   *                             slit-scan crop + first-painted-wins overlay.
+   *                             Original V12.4 firstwins behaviour, no
+   *                             viewport zoom — kept as a baseline.
+   *   'firstwins-zoomed'      — Same engine as 'firstwins' but JS applies
+   *                             a viewport-zoom transform so the live
+   *                             camera preview shows EXACTLY the central
+   *                             region that gets painted (matches Apple's
+   *                             pano viewport-vs-output relationship).
+   *                             No native engine change vs 'firstwins'.
+   *   'firstwins-rectilinear' — Skip cylindrical warp entirely.  First
+   *                             frame is pasted raw onto the canvas
+   *                             (matches the live viewport pixel-for-pixel).
+   *                             Subsequent frames contribute a narrow
+   *                             central strip placed by ARKit pose at
+   *                             canvas_Y = -f·pitch_delta (landscape) or
+   *                             canvas_X = -f·yaw_delta (portrait).
+   *                             Zero cylindrical-projection curvature.
+   *                             Limit: very wide pans (>~70° per direction)
+   *                             will stretch at the edges due to inherent
+   *                             rectilinear projection limits.
    *
-   * (Was 'slitscan' in earlier versions — renamed in V11 because
-   * the implementation is full-frame cylindrical + binary fill,
-   * not Apple-style narrow-strip painting.  A real slit-scan engine
-   * is planned as a separate follow-up.)
-   *
-   * Default 'hybrid' is the safer choice for the variety of gestures
-   * field reps actually use.  Set 'firstwins' to A/B compare on the
-   * same scene.
+   * Default 'hybrid' is the safer choice.
    */
-  engine?: 'hybrid' | 'firstwins';
+  engine?: 'hybrid' | 'firstwins' | 'firstwins-zoomed' | 'firstwins-rectilinear';
 }
 
 

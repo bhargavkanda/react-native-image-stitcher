@@ -50,17 +50,31 @@ export interface PanoramaSettings {
   /**
    * Incremental engine choice for live realtime stitching (only used
    * when AR preview is on).
-   *   'hybrid'   — Samsung-style: cylindrical projection + KLT
-   *                optical flow refinement + feather blend.
-   *   'firstwins' — Cylindrical full-frame warp + first-painted-wins
-   *                  hard overlay (no OF refinement, no blending).
-   *                  Was 'slitscan' but the implementation is full-
-   *                  frame cylindrical, not Apple-style narrow strips.
+   *   'hybrid'                 — Cylindrical + KLT + feather blend.
+   *   'firstwins'              — Cylindrical + V12.4 central-70%
+   *                              slit-scan crop + first-painted-wins.
+   *                              Original V12.4 baseline; no viewport
+   *                              zoom (viewport != PiP).
+   *   'firstwins-zoomed'       — Same engine as 'firstwins' but JS
+   *                              applies a viewport-zoom transform to
+   *                              the live camera so it matches the
+   *                              central region the engine paints.
+   *                              iOS-pano equivalent.
+   *   'firstwins-rectilinear'  — No cylindrical warp anywhere.  First
+   *                              frame pasted raw onto canvas;
+   *                              subsequent frames contribute a
+   *                              narrow central strip placed by
+   *                              ARKit pose-delta.  Zero cylindrical
+   *                              curvature.  Viewport zoom applied.
    *
-   * Both are A/B-comparable on the same scene by toggling this in
-   * settings without restarting the app.
+   * All four are A/B-comparable on the same scene by toggling here
+   * without restarting the app.
    */
-  incrementalEngine: 'hybrid' | 'firstwins';
+  incrementalEngine:
+    | 'hybrid'
+    | 'firstwins'
+    | 'firstwins-zoomed'
+    | 'firstwins-rectilinear';
   /** Hard cap on hold duration (ms).  0 disables auto-stop. */
   maxRecordingMs: number;
   /** Frames per second of recording to sample for stitching. */
@@ -214,10 +228,10 @@ export function PanoramaSettingsModal({
 
             <SectionHeader title="Incremental engine (AR mode only)" />
             <SegmentedControl
-              options={['hybrid', 'firstwins']}
+              options={['hybrid', 'firstwins', 'firstwins-zoomed', 'firstwins-rectilinear']}
               value={settings.incrementalEngine}
               onChange={(v) => update({ incrementalEngine: v as PanoramaSettings['incrementalEngine'] })}
-              caption="Hybrid (default): spherical warp + KLT optical-flow refinement + feather blend — best general-purpose quality. FirstWins: spherical warp with anchor-frame priority — best for short, mostly-horizontal pans where you want the first frame to dominate; no later corrections."
+              caption="hybrid: cylindrical+KLT+feather. firstwins: cylindrical+70% slit+first-painted-wins (V12.4 baseline). firstwins-zoomed: same engine, viewport zoomed to match captured region (iOS-pano equivalent). firstwins-rectilinear: NO cylindrical warp — first frame pasted raw, subsequent frames paint narrow central strips placed by ARKit pose. Zero cylindrical curvature."
             />
 
             <SectionHeader title="Recording cap" />
