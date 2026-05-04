@@ -6,7 +6,7 @@ import com.facebook.react.bridge.WritableMap
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
-import org.opencv.core.MatOfDouble
+import org.opencv.core.MatOfInt
 import org.opencv.core.Point
 import org.opencv.core.Rect
 import org.opencv.core.Scalar
@@ -14,6 +14,8 @@ import org.opencv.core.Size
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import java.io.File
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.floor
@@ -69,6 +71,11 @@ internal class IncrementalFirstwinsEngine(
     val frameRotationDegrees: Int,
     /// V12.7 Variant B: when true, skip cylindrical warp.  See class doc.
     val useRectilinear: Boolean,
+    /// Critic #27 fix: cache-dir from the bridge.  Snapshot JPEGs are
+    /// written here.  System.getProperty("java.io.tmpdir") on Android
+    /// resolves to /data/local/tmp which is NOT writable by ordinary
+    /// apps, so the previous version silently dropped every snapshot.
+    val snapshotCacheDir: String,
 ) {
     private val canvas: Mat = Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC3)
     private val canvasMask: Mat = Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC1)
@@ -93,9 +100,15 @@ internal class IncrementalFirstwinsEngine(
 
     private var hasFirstFrame: Boolean = false
     private var acceptsSinceSnapshot: Int = 0
-    var acceptedCount: Int = 0
-        private set
+    /// Critic #19 fix: AtomicInteger so JS-thread reads from
+    /// `getState`/promise resolves see a consistent value.
+    private val acceptedCountAtomic = AtomicInteger(0)
+    val acceptedCount: Int get() = acceptedCountAtomic.get()
     private var snapshotSeq: Int = 0
+    /// Critic #30 fix: cache the painted-region bbox so we don't
+    /// re-scan a 25M-px mask N times per accept (writeOut + width
+    /// + height + buildState all called boundingRect separately).
+    private var cachedBoundingRect: Rect? = null
     var lastState: WritableMap? = null
         private set
 
@@ -214,7 +227,7 @@ internal class IncrementalFirstwinsEngine(
                 firstFrameDstX = dstX
                 firstFrameDstY = dstY
                 hasFirstFrame = true
-                acceptedCount = 1
+                acceptedCountAtomic.set(1); cachedBoundingRect = null
                 Log.i(
                     "V12.7-rect",
                     "first frame pasted raw at ($dstX,$dstY) size " +
@@ -251,7 +264,7 @@ internal class IncrementalFirstwinsEngine(
 
             warped.release(); warpedMask.release()
             hasFirstFrame = true
-            acceptedCount = 1
+            acceptedCountAtomic.set(1); cachedBoundingRect = null
             frameBGR.release()
             return FrameTelemetry(
                 FrameOutcome.AcceptedHigh, 1.0, 0, yaw, pitch, msSince(t0),
@@ -320,7 +333,7 @@ internal class IncrementalFirstwinsEngine(
             if (newPixels > 0) {
                 srcStrip.copyTo(canvasRoi, emptyMask)
                 maskRoi.setTo(Scalar(255.0), emptyMask)
-                acceptedCount += 1
+                acceptedCountAtomic.incrementAndGet(); cachedBoundingRect = null
                 emptyMask.release()
                 frameBGR.release()
                 return FrameTelemetry(
@@ -377,7 +390,7 @@ internal class IncrementalFirstwinsEngine(
         if (newPixels > 0) {
             warpedClipped.copyTo(canvasRoi, paintMask)
             paintMask.copyTo(canvasMaskRoi, paintMask)
-            acceptedCount += 1
+            acceptedCountAtomic.incrementAndGet(); cachedBoundingRect = null
         }
         noPrior.release(); paintMask.release()
         warped.release(); warpedMask.release(); frameBGR.release()
@@ -391,22 +404,27 @@ internal class IncrementalFirstwinsEngine(
      * Live-snapshot path — same JPEG-cycle pattern as iOS.  Cycles
      * through 4 filenames so RN's <Image> cache sees a fresh URI
      * each accept.
+     *
+     * Critic #8 / #9 fix: ALWAYS build state and pass `telemetry` so
+     * JS sees outcome / confidence / overlapPercent / processingMs
+     * even on rejected/skipped frames.  Matches the JS
+     * IncrementalState contract in src/stitching/incremental.ts.
      */
     fun snapshotIfDue(telemetry: FrameTelemetry): WritableMap? {
         val isAccept = telemetry.outcome == FrameOutcome.AcceptedHigh ||
             telemetry.outcome == FrameOutcome.AcceptedMedium
+        var snapshotPath: String? = null
         if (isAccept) {
             acceptsSinceSnapshot += 1
             if (acceptsSinceSnapshot >= snapshotEveryNAccepts) {
                 acceptsSinceSnapshot = 0
                 val path = currentSnapshotPath()
-                writeOut(path, snapshotJpegQuality, applyExposureComp = false)
-                lastState = buildState(snapshotPath = path)
-                return lastState
+                if (writeOut(path, snapshotJpegQuality, applyExposureComp = false)) {
+                    snapshotPath = path
+                }
             }
         }
-        // Even if no snapshot, refresh state so JS sees the new acceptedCount.
-        lastState = buildState(snapshotPath = null)
+        lastState = buildState(snapshotPath = snapshotPath, telemetry = telemetry)
         return lastState
     }
 
@@ -414,9 +432,31 @@ internal class IncrementalFirstwinsEngine(
         val cleaned = outputPath.removePrefix("file://")
         val ok = writeOut(cleaned, quality, applyExposureComp = true)
         if (!ok) return null
-        val snap = StitcherSnapshot(cleaned, canvasMaskBoundingW(), canvasMaskBoundingH(), acceptedCount)
+        val bbox = cachedBoundingRect ?: Imgproc.boundingRect(canvasMask).also { cachedBoundingRect = it }
+        val snap = StitcherSnapshot(
+            cleaned,
+            if (bbox.width > 0) bbox.width else canvasWidth,
+            if (bbox.height > 0) bbox.height else canvasHeight,
+            acceptedCount,
+        )
         reset()
         return snap
+    }
+
+    /**
+     * Critic #22 fix: explicit native-buffer release (75 MB canvas
+     * + 25 MB mask + smaller transient Mats).  Call from the bridge
+     * when the engine is being thrown away (finalize/cancel paths).
+     * After this, the engine is unusable.
+     */
+    fun release() {
+        canvas.release()
+        canvasMask.release()
+        firstRotationArkit.release()
+        rPanToWorld.release()
+        kCompose.release()
+        mArkitToCv.release()
+        cachedBoundingRect = null
     }
 
     fun reset() {
@@ -433,7 +473,7 @@ internal class IncrementalFirstwinsEngine(
         isLandscape = false
         hasFirstFrame = false
         acceptsSinceSnapshot = 0
-        acceptedCount = 0
+        acceptedCountAtomic.set(0)
         snapshotSeq = 0
         lastState = null
     }
@@ -654,8 +694,10 @@ internal class IncrementalFirstwinsEngine(
     private fun currentSnapshotPath(): String {
         snapshotSeq += 1
         val slot = snapshotSeq % 4
-        val tmpDir = System.getProperty("java.io.tmpdir") ?: "/data/local/tmp"
-        return "$tmpDir/rlis-live-$slot.jpg"
+        // Critic #27 fix: use the bridge-provided cache dir
+        // (reactContext.cacheDir.absolutePath), NOT java.io.tmpdir
+        // which on Android is /data/local/tmp (rooted-only).
+        return "$snapshotCacheDir/rlis-live-$slot.jpg"
     }
 
     private fun writeOut(path: String, quality: Int, applyExposureComp: Boolean): Boolean {
@@ -687,17 +729,17 @@ internal class IncrementalFirstwinsEngine(
         return out
     }
 
-    private fun canvasMaskBoundingW(): Int {
-        val r = Imgproc.boundingRect(canvasMask)
-        return if (r.width > 0) r.width else canvasWidth
-    }
-
-    private fun canvasMaskBoundingH(): Int {
-        val r = Imgproc.boundingRect(canvasMask)
-        return if (r.height > 0) r.height else canvasHeight
-    }
-
-    private fun buildState(snapshotPath: String?): WritableMap {
+    /**
+     * Critic #8/#9/#23 fix: always include the full state event shape
+     * the JS IncrementalState interface expects (outcome, confidence,
+     * overlapPercent, processingMs).  Matches the hybrid engine's
+     * shape so JS subscribers don't break when the engine variant
+     * is toggled at runtime.
+     *
+     * Critic #30 fix: use cached bounding rect; refresh once per
+     * accept inside the inner loops, NOT here on every state event.
+     */
+    private fun buildState(snapshotPath: String?, telemetry: FrameTelemetry): WritableMap {
         val map = com.facebook.react.bridge.Arguments.createMap()
         map.putInt("acceptedCount", acceptedCount)
         if (snapshotPath != null) {
@@ -705,10 +747,13 @@ internal class IncrementalFirstwinsEngine(
         } else {
             map.putNull("panoramaPath")
         }
-        // Use the last-known canvas mask bbox for width/height.
-        val r = Imgproc.boundingRect(canvasMask)
+        val r = cachedBoundingRect ?: Imgproc.boundingRect(canvasMask).also { cachedBoundingRect = it }
         map.putInt("width", if (r.width > 0) r.width else 0)
         map.putInt("height", if (r.height > 0) r.height else 0)
+        map.putInt("outcome", telemetry.outcome.ordinal)
+        map.putDouble("confidence", telemetry.confidence)
+        map.putDouble("overlapPercent", telemetry.overlapPercent)
+        map.putDouble("processingMs", telemetry.processingMs)
         return map
     }
 
@@ -725,5 +770,3 @@ private fun Rect.intersection(other: Rect): Rect {
     return Rect(x, y, max(0, r - x), max(0, b - y))
 }
 
-// Used by writeOut JPEG params.
-private class MatOfInt(vararg ints: Int) : org.opencv.core.MatOfInt(*ints)

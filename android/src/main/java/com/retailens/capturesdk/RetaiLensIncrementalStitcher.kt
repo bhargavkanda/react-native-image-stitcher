@@ -9,6 +9,8 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import kotlin.math.max
+import kotlin.math.min
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -93,7 +95,13 @@ class RetaiLensIncrementalStitcher(
     /// is set for 'firstwins-rectilinear'.
     private var firstwinsEngine: IncrementalFirstwinsEngine? = null
     private val isRunning = AtomicBoolean(false)
-    private val workScope = CoroutineScope(Dispatchers.Default)
+    /// Critic #5 fix: serial dispatcher so concurrent
+    /// processFrameAtPath() calls can't race on the engine's canvas.
+    /// `limitedParallelism(1)` guarantees one-at-a-time execution
+    /// while still backing onto the Default pool — matches iOS'
+    /// `workQueue` (DispatchQueue.serial).
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val workScope = CoroutineScope(Dispatchers.Default.limitedParallelism(1))
 
     /// Reference to a mounted ARCameraView (if any).  Set by the view
     /// when it attaches; the engine flips its `ingestActive` flag
@@ -147,8 +155,10 @@ class RetaiLensIncrementalStitcher(
             val canvasW  = options.getIntOrDefault("canvasWidth",   5000)
             val canvasH  = options.getIntOrDefault("canvasHeight",  5000)
             val featherP = options.getIntOrDefault("featherPx",     20)
-            val snapQ    = options.getIntOrDefault("snapshotJpegQuality", 75)
-            val snapN    = options.getIntOrDefault("snapshotEveryNAccepts", 1)
+            val snapQ    = max(1, min(100, options.getIntOrDefault("snapshotJpegQuality", 75)))
+            // Critic #29: clamp snapshotEveryNAccepts to >= 1 so a
+            // value of 0 doesn't mean "snapshot every frame forever".
+            val snapN    = max(1, options.getIntOrDefault("snapshotEveryNAccepts", 1))
             // V12.7 — engineMode now distinguishes 4 variants.  See
             // src/stitching/incremental.ts for the full description.
             val engineMode = options.getString("engine") ?: "hybrid"
@@ -164,6 +174,10 @@ class RetaiLensIncrementalStitcher(
                     snapshotEveryNAccepts = snapN,
                     frameRotationDegrees = rotation,
                     useRectilinear = useRectilinear,
+                    // Critic #27 fix: writable app-sandbox dir for
+                    // live-snapshot JPEGs.  java.io.tmpdir resolves to
+                    // /data/local/tmp on Android (rooted-only).
+                    snapshotCacheDir = reactContext.cacheDir.absolutePath,
                 )
                 engine = null
             } else {
@@ -219,17 +233,25 @@ class RetaiLensIncrementalStitcher(
         val pitch = options.getDoubleOrDefault("pitch", 0.0)
         val fovH = options.getDoubleOrDefault("fovHorizDegrees", 65.0)
         val fovV = options.getDoubleOrDefault("fovVertDegrees", 50.0)
-        // V6 pose-driven params.  ARCore path passes the real
-        // quaternion/intrinsics; the gyro fallback driver synthesises
-        // a yaw-only quaternion + a guessed K (since vision-camera
-        // doesn't expose intrinsics in v4 of the lib).  Defaults
-        // give an identity rotation = first-frame placement only,
-        // which is non-functional for stitching — gyro driver MUST
-        // pass real values.
-        val qx = options.getDoubleOrDefault("qx", 0.0)
-        val qy = options.getDoubleOrDefault("qy", 0.0)
-        val qz = options.getDoubleOrDefault("qz", 0.0)
-        val qw = options.getDoubleOrDefault("qw", 1.0)
+        // V6 pose-driven params.  Defaults removed per critic finding
+        // #3: previously qw=1.0 default meant frames without explicit
+        // quaternion produced an identity rotation, and EVERY
+        // subsequent frame had R_rel = R_first^T (constant), so
+        // strip placement never advanced and `acceptedCount` froze
+        // at 1 after the first frame.  Now every quaternion field is
+        // required; missing → reject as RejectedAlignmentLost so the
+        // gyro driver upstream notices instantly.
+        if (!options.hasKey("qx") || !options.hasKey("qy")
+            || !options.hasKey("qz") || !options.hasKey("qw")) {
+            return promise.reject(
+                "invalid-options",
+                "qx/qy/qz/qw all required (no identity-quaternion fallback)",
+            )
+        }
+        val qx = options.getDouble("qx")
+        val qy = options.getDouble("qy")
+        val qz = options.getDouble("qz")
+        val qw = options.getDouble("qw")
         val fx = options.getDoubleOrDefault("fx", 0.0)
         val fy = options.getDoubleOrDefault("fy", 0.0)
         val cx = options.getDoubleOrDefault("cx", 0.0)
@@ -239,6 +261,15 @@ class RetaiLensIncrementalStitcher(
         val trackingPoor = options.getBooleanOrDefault("trackingPoor", false)
 
         workScope.launch {
+            // Critic #4 fix: re-check isRunning synchronously here in
+            // case finalize/cancel ran on the JS thread between the
+            // null-check above and this dispatch landing.  Skip the
+            // ingest if we're no longer running — matches iOS' V12.1
+            // pattern (synchronous-stop + worker re-check).
+            if (!isRunning.get()) {
+                promise.resolve(Arguments.createMap().apply { putInt("outcome", -1) })
+                return@launch
+            }
             try {
                 val telemetry: FrameTelemetry
                 val state: WritableMap?
@@ -303,6 +334,18 @@ class RetaiLensIncrementalStitcher(
         // Disengage the ARCameraView ingestion path FIRST so no late
         // frames slip into the engine while we serialize the canvas.
         arCameraViewRef?.setIncrementalIngestionActive(false)
+        // Critic #4 fix: synchronously flip isRunning=false BEFORE
+        // dispatching the finalize body, so any in-flight
+        // processFrameAtPath workers that are about to launch will
+        // bail at the re-check (see processFrameAtPath above).
+        // Matches iOS V12.1 fix.
+        isRunning.set(false)
+
+        // Null the bridge refs synchronously NOW so any worker that's
+        // about to run sees them as gone (V12.1 pattern).  We keep
+        // local refs to do the actual finalize.
+        engine = null
+        firstwinsEngine = null
 
         workScope.launch {
             try {
@@ -314,22 +357,21 @@ class RetaiLensIncrementalStitcher(
                     map.putInt("width", snap.width)
                     map.putInt("height", snap.height)
                     map.putInt("acceptedCount", snap.acceptedCount)
+                    // Critic #22 fix: explicit native-buffer release.
+                    firstwins.release()
                 } else {
                     val snap = hybrid!!.finalize(outputPath, quality)
                     map.putString("panoramaPath", snap.panoramaPath)
                     map.putInt("width", snap.width)
                     map.putInt("height", snap.height)
                     map.putInt("acceptedCount", snap.acceptedCount)
+                    hybrid.release()
                 }
-                this@RetaiLensIncrementalStitcher.engine = null
-                this@RetaiLensIncrementalStitcher.firstwinsEngine = null
-                isRunning.set(false)
                 map.putInt("droppedBackpressure", 0)
                 promise.resolve(map)
             } catch (t: Throwable) {
-                this@RetaiLensIncrementalStitcher.engine = null
-                this@RetaiLensIncrementalStitcher.firstwinsEngine = null
-                isRunning.set(false)
+                firstwins?.release()
+                hybrid?.release()
                 promise.reject("incremental-finalize-failed", t.message, t)
             }
         }
@@ -337,12 +379,23 @@ class RetaiLensIncrementalStitcher(
 
     @ReactMethod
     fun cancel(promise: Promise) {
+        // Critic #4 fix: synchronously flip isRunning + null engine
+        // refs BEFORE releasing.  Any in-flight worker bails at the
+        // re-check before touching the now-null engine.  Matches
+        // iOS V12.1 cancel path.
         arCameraViewRef?.setIncrementalIngestionActive(false)
-        engine?.release()
-        firstwinsEngine?.reset()
+        isRunning.set(false)
+        val hybrid = engine
+        val firstwins = firstwinsEngine
         engine = null
         firstwinsEngine = null
-        isRunning.set(false)
+        // Defer engine release onto the work queue so we don't race
+        // with an ingest that already passed the null-check and is
+        // mid-execution on a captured local reference.
+        workScope.launch {
+            hybrid?.release()
+            firstwins?.reset()
+        }
         val map = Arguments.createMap()
         map.putBoolean("ok", true)
         promise.resolve(map)
