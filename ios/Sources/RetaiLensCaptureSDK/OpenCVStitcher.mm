@@ -275,9 +275,40 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // line for a crashed run, the crash is BEFORE stitchFramePaths
   // (e.g., in extractFramesFromVideoAtPath or in the dispatch_async
   // block in StitcherBridge).
+  const double kStartResidentMB = StitcherResidentMB();
   os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
       "[stitch-bc] STITCH START: %lu frames mem=%.1fMB",
-      (unsigned long)framePaths.count, StitcherResidentMB());
+      (unsigned long)framePaths.count, kStartResidentMB);
+
+  // V12.14.8 — pre-stitch memory abort.  Sentry confirmed the V12.14.6
+  // crash signature was WatchdogTermination = iOS jetsam OOM-kill.
+  // Threshold of 700 MB is just below the empirical kill point on a
+  // camera-active foreground RetaiLens app (~720 MB observed) and
+  // leaves ~80 MB headroom for the stitcher's own ~50-150 MB peak.
+  //
+  // V12.14.8's primary fix unmounts the CameraView during stitch so
+  // baseline at this point should be ~350-450 MB.  This guard is a
+  // SAFETY NET: if the unmount didn't happen (state stuck, RN render
+  // blocked, etc.), we fail with a recoverable error instead of
+  // letting the watchdog kill the whole app.
+  constexpr double kPreStitchAbortMB = 700.0;
+  if (kStartResidentMB > kPreStitchAbortMB) {
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+        "[stitch-bc] PRE-STITCH ABORT: mem=%.1fMB > %.1fMB threshold",
+        kStartResidentMB, kPreStitchAbortMB);
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1009
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"System memory pressure too high (%.0f MB resident). "
+             "Please close other apps and retry.",
+            kStartResidentMB],
+      }];
+    }
+    return nil;
+  }
 
   // Defaults if caller passed nil — keeps the old 3-arg call-sites
   // working until we update them.
