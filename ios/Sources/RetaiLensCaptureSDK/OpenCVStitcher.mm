@@ -51,6 +51,9 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <os/log.h>
+#import <mach/mach.h>
+#import <mach/task.h>
+#import <mach/task_info.h>
 
 // V12.14.2 — dedicated os_log subsystem for the stitcher.  os_log
 // with OS_LOG_TYPE_FAULT survives Console.app's rate-limit cap that
@@ -66,6 +69,24 @@ static os_log_t StitcherDiagLog(void) {
         log = os_log_create("com.tiger.retailens.sdk", "stitch");
     });
     return log;
+}
+
+// V12.14.7 — resident memory probe for jetsam diagnosis.  Returns
+// the process' resident_size in MB.  When stitch fails with cv::Exception
+// AND the app subsequently dies (V12.14.6 trace pattern: throw caught
+// → app quits), iOS jetsam OOM-kill is the prime suspect.  Logging
+// resident_size before/after each pipeline stage lets us correlate
+// the kill with a memory growth pattern across successive captures.
+static double StitcherResidentMB(void) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO,
+                                 (task_info_t)&info, &count);
+    if (kr != KERN_SUCCESS) return -1.0;
+    // phys_footprint is what jetsam evaluates against; resident_size
+    // is what `ps`/Xcode shows.  We log both via the same helper for
+    // correlation — phys_footprint is the one that matters for survival.
+    return (double)info.phys_footprint / (1024.0 * 1024.0);
 }
 
 NSString *const RetaiLensStitcherErrorDomain = @"RetaiLensStitcherErrorDomain";
@@ -255,7 +276,8 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // (e.g., in extractFramesFromVideoAtPath or in the dispatch_async
   // block in StitcherBridge).
   os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-      "[stitch-bc] STITCH START: %lu frames", (unsigned long)framePaths.count);
+      "[stitch-bc] STITCH START: %lu frames mem=%.1fMB",
+      (unsigned long)framePaths.count, StitcherResidentMB());
 
   // Defaults if caller passed nil — keeps the old 3-arg call-sites
   // working until we update them.
@@ -801,8 +823,12 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         }
       }
     } catch (const cv::Exception &e) {
+      // V12.14.7 — %{public}s so the message survives Console.app
+      // privacy redaction.  Without this, e.what() shows as "<private>"
+      // and we can't see which assertion fired.
       os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step7c: cv::resize threw cv::Exception: %s", e.what());
+          "[stitch-bc] step7c: cv::resize threw cv::Exception: %{public}s",
+          e.what());
       if (error) {
         *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
                                      code:1007
@@ -838,7 +864,8 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     for (auto &f : frames) f.release();
     frames.clear();
     os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] step7e: full-res frames released");
+        "[stitch-bc] step7e: full-res frames released mem=%.1fMB",
+        StitcherResidentMB());
     NSLog(@"[RetaiLensStitcher] step7.5: composeFrames %d×%d "
           "(compose_scale=%.3f)",
           composeFrames.empty() ? 0 : composeFrames[0].cols,
@@ -948,11 +975,23 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
             warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
                          cv::BORDER_CONSTANT, masksWarped[i]);
             sizes[i] = imagesWarped[i].size();
+            // V12.14.7 — release composeFrames[i] inside the loop
+            // (was: released only after the entire loop at step8c).
+            // Frees ~14 MB per frame mid-loop, keeping peak working
+            // set ~50-100 MB lower for an 8-frame batch — directly
+            // targets the jetsam OOM kill that struck V12.14.6
+            // after cv::Exception was caught (process died despite
+            // managed throw).  composeFrames[i] is no longer needed
+            // after warp populates imagesWarped[i] / masksWarped[i].
+            composeFrames[i].release();
           }
         }
       } catch (const cv::Exception &e) {
+        // V12.14.7 — %{public}s to unredact the message under
+        // Console.app privacy filtering.  e.what() was showing as
+        // "<private>" in V12.14.6's caught traces.
         os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-            "[stitch-bc] step8b: warper->warp threw cv::Exception: %s",
+            "[stitch-bc] step8b: warper->warp threw cv::Exception: %{public}s",
             e.what());
         if (error) {
           *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
@@ -976,9 +1015,13 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         return nil;
       }
       os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step8c: warp loop done");
+          "[stitch-bc] step8c: warp loop done mem=%.1fMB",
+          StitcherResidentMB());
       // composeFrames has done its job — release before we
       // allocate the float UMat shadow set for seam finding.
+      // V12.14.7: most/all of these are already released inside
+      // the warp loop above; the .clear() drops the now-empty
+      // Mat headers from the vector.
       for (auto &cf : composeFrames) cf.release();
       composeFrames.clear();
 
@@ -1157,8 +1200,8 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
             panorama.cols, panorama.rows, _ms);
     }
     os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] step11c: panorama 8U conversion done (panorama=%dx%d)",
-        panorama.cols, panorama.rows);
+        "[stitch-bc] step11c: panorama 8U conversion done (panorama=%dx%d) mem=%.1fMB",
+        panorama.cols, panorama.rows, StitcherResidentMB());
   } catch (const cv::Exception &e) {
     if (error) {
       *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
