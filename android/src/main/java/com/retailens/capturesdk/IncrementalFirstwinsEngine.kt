@@ -361,26 +361,23 @@ internal class IncrementalFirstwinsEngine(
             }
             rRel.release()
 
-            // V12.10 Fix #1 — image-aligned slit refinement.  Mirror of
-            // iOS path: build a tentative ROI from pose-predicted
-            // (dstX, dstY); in the overlap zone (mask==255) run an
-            // ORB+RANSAC homography between canvas and the new
-            // frame's source region; ADD the returned (dx, dy)
-            // translation to (dstX, dstY) so the leading-edge
-            // sliver lines up with the existing edge.  Falls back
-            // to pose-only when overlap is too small, painted-area
-            // fraction is too low, feature density is insufficient,
-            // or the homography is degenerate.
+            // V12.11 Step 4 + V12.11.1 (Item E) — image-aligned slit
+            // refinement via homography.  Updated for Item E: also
+            // capture the H matrix so the paste step below can do a
+            // full warpPerspective (not just translation).  Mirrors
+            // iOS' OpenCVSlitScanStitcher.mm.  See iOS comments for
+            // the rationale around translation extraction (used for
+            // reverse-pan check) vs full warp (used for paste).
             //
-            // Sign convention: homographyOffset returns (dx, dy) =
-            // dstCenter - srcCenter under H.  Add to dstX/dstY.
+            // CALLER OWNS the H Mat returned via HomographyResult.H
+            // and must release it before exiting this branch.
+            var homographyOverlap: Mat? = null
+            var srcInClippedHom: Rect? = null
+            var tentativeClippedHom: Rect? = null
             run {
                 val tentativeRoi = Rect(dstX, dstY, clipW, clipH).intersection(
                     Rect(0, 0, canvasWidth, canvasHeight)
                 )
-                // 200 px on each side matches homographyOffset's
-                // kMinOverlapPx — needed for ORB to have enough
-                // texture for RANSAC to converge.
                 if (tentativeRoi.width >= 200 && tentativeRoi.height >= 200) {
                     val canvasOverlap = Mat(canvas, tentativeRoi)
                     val maskOverlap = Mat(canvasMask, tentativeRoi)
@@ -391,12 +388,12 @@ internal class IncrementalFirstwinsEngine(
                         tentativeRoi.height,
                     )
                     val srcOverlap = Mat(frameClipped, srcInClipped)
-                    val (delta, inliers, det) = homographyOffset(
+                    val result = homographyOffset(
                         canvasOverlap, srcOverlap, maskOverlap,
                     )
                     canvasOverlap.release(); maskOverlap.release(); srcOverlap.release()
-                    val dx = delta.x.toInt()
-                    val dy = delta.y.toInt()
+                    val dx = result.delta.x.toInt()
+                    val dy = result.delta.y.toInt()
                     if (dx != 0 || dy != 0) {
                         val priorX = dstX
                         val priorY = dstY
@@ -405,18 +402,25 @@ internal class IncrementalFirstwinsEngine(
                         Log.d(
                             "V12.11-homog",
                             "delta=(%+d,%+d) inliers=%d det=%.3f adjusted dst=(%d,%d) (was %d,%d)".format(
-                                Locale.US, dx, dy, inliers, det,
+                                Locale.US, dx, dy, result.inliers, result.det,
                                 dstX, dstY, priorX, priorY,
                             ),
                         )
-                    } else if (inliers > 0) {
+                    } else if (result.inliers > 0) {
                         Log.d(
                             "V12.11-homog",
                             "REJECTED inliers=%d det=%.3f — falling back to pose-only".format(
-                                Locale.US, inliers, det,
+                                Locale.US, result.inliers, result.det,
                             ),
                         )
                     }
+                    // Stash the H + overlap geometry for the full-
+                    // warp path below.  H is null when invalid →
+                    // full-warp branch is skipped, pose-only paste
+                    // runs.
+                    homographyOverlap = result.H
+                    srcInClippedHom = srcInClipped
+                    tentativeClippedHom = tentativeRoi
                 }
             }
 
@@ -457,6 +461,106 @@ internal class IncrementalFirstwinsEngine(
                 }
             }
 
+            // V12.11.1 (Item E) — full warpPerspective paste when a
+            // valid homography was found.  See iOS' equivalent in
+            // OpenCVSlitScanStitcher.mm for the rationale.
+            val H = homographyOverlap
+            val tcHom = tentativeClippedHom
+            val sicHom = srcInClippedHom
+            if (H != null && tcHom != null && sicHom != null) {
+                val T1 = Mat(3, 3, CvType.CV_64F).apply {
+                    put(0, 0, 1.0, 0.0, -sicHom.x.toDouble())
+                    put(1, 0, 0.0, 1.0, -sicHom.y.toDouble())
+                    put(2, 0, 0.0, 0.0, 1.0)
+                }
+                val T2 = Mat(3, 3, CvType.CV_64F).apply {
+                    put(0, 0, 1.0, 0.0, tcHom.x.toDouble())
+                    put(1, 0, 0.0, 1.0, tcHom.y.toDouble())
+                    put(2, 0, 0.0, 0.0, 1.0)
+                }
+                val T2H = Mat()
+                val Hframe = Mat()
+                Core.gemm(T2, H, 1.0, Mat(), 0.0, T2H)
+                Core.gemm(T2H, T1, 1.0, Mat(), 0.0, Hframe)
+                T1.release(); T2.release(); T2H.release()
+
+                // Bounding box of warped corners in canvas coords.
+                val srcCorners = MatOfPoint2f(
+                    Point(0.0, 0.0),
+                    Point(frameClipped.cols().toDouble(), 0.0),
+                    Point(frameClipped.cols().toDouble(), frameClipped.rows().toDouble()),
+                    Point(0.0, frameClipped.rows().toDouble()),
+                )
+                val dstCorners = MatOfPoint2f()
+                Core.perspectiveTransform(srcCorners, dstCorners, Hframe)
+                val cornersArr = dstCorners.toArray()
+                srcCorners.release(); dstCorners.release()
+
+                val xs = cornersArr.map { it.x }
+                val ys = cornersArr.map { it.y }
+                val bboxRaw = Rect(
+                    floor(xs.min()).toInt(),
+                    floor(ys.min()).toInt(),
+                    (kotlin.math.ceil(xs.max() - xs.min())).toInt(),
+                    (kotlin.math.ceil(ys.max() - ys.min())).toInt(),
+                )
+                val bbox = bboxRaw.intersection(Rect(0, 0, canvasWidth, canvasHeight))
+                if (bbox.width > 0 && bbox.height > 0) {
+                    val T3 = Mat(3, 3, CvType.CV_64F).apply {
+                        put(0, 0, 1.0, 0.0, -bbox.x.toDouble())
+                        put(1, 0, 0.0, 1.0, -bbox.y.toDouble())
+                        put(2, 0, 0.0, 0.0, 1.0)
+                    }
+                    val Hbbox = Mat()
+                    Core.gemm(T3, Hframe, 1.0, Mat(), 0.0, Hbbox)
+                    T3.release(); Hframe.release()
+
+                    val warpedFrame = Mat(bbox.size(), frameClipped.type(), Scalar(0.0, 0.0, 0.0))
+                    Imgproc.warpPerspective(
+                        frameClipped, warpedFrame, Hbbox, bbox.size(),
+                        Imgproc.INTER_LINEAR, Core.BORDER_CONSTANT, Scalar(0.0, 0.0, 0.0),
+                    )
+                    Hbbox.release()
+
+                    val warpedGray = Mat()
+                    val warpedMask = Mat()
+                    Imgproc.cvtColor(warpedFrame, warpedGray, Imgproc.COLOR_BGR2GRAY)
+                    Imgproc.threshold(warpedGray, warpedMask, 0.0, 255.0, Imgproc.THRESH_BINARY)
+                    warpedGray.release()
+
+                    val canvasRoi = Mat(canvas, bbox)
+                    val canvasMaskRoi = Mat(canvasMask, bbox)
+                    val noPrior = Mat()
+                    Core.compare(canvasMaskRoi, Scalar(0.0), noPrior, Core.CMP_EQ)
+                    val paintMask = Mat()
+                    Core.bitwise_and(noPrior, warpedMask, paintMask)
+                    val newPixels = Core.countNonZero(paintMask)
+                    val outcome: FrameOutcome
+                    if (newPixels > 0) {
+                        warpedFrame.copyTo(canvasRoi, paintMask)
+                        Core.bitwise_or(canvasMaskRoi, paintMask, canvasMaskRoi)
+                        acceptedCountAtomic.incrementAndGet(); cachedBoundingRect = null
+                        outcome = FrameOutcome.AcceptedHigh
+                    } else {
+                        outcome = FrameOutcome.SkippedTooClose
+                    }
+                    warpedFrame.release(); warpedMask.release()
+                    canvasRoi.release(); canvasMaskRoi.release()
+                    noPrior.release(); paintMask.release()
+                    H.release()
+                    frameClipped.release(); frameBGR.release()
+                    return FrameTelemetry(
+                        outcome,
+                        if (outcome == FrameOutcome.AcceptedHigh) 1.0 else 0.0,
+                        0, yaw, pitch, msSince(t0),
+                    )
+                }
+                Hframe.release()
+                H.release()
+                // bbox empty → fall through to pose-only.
+            }
+
+            // Pose-only fallback paste (when H invalid or bbox empty).
             val dstRoi = Rect(dstX, dstY, clipW, clipH).intersection(
                 Rect(0, 0, canvasWidth, canvasHeight)
             )
@@ -926,36 +1030,44 @@ private fun Rect.intersection(other: Rect): Rect {
 }
 
 /**
- * V12.11 Step 4 — feature-based slit alignment via homography
- * (Android port — mirrors iOS' `homographyOffset` in
- * OpenCVSlitScanStitcher.mm).
+ * V12.11.1 (Item E) — feature-based slit alignment via homography,
+ * now returning the H matrix itself for full warpPerspective use.
  *
- * Replaces V12.10 Fix #1's NCC template match with the standard
- * image-stitching pipeline:
+ * Mirrors iOS' `homographyOffset` in OpenCVSlitScanStitcher.mm.
  *
- *   1. Detect ORB features in the OVERLAP zone of canvas (where
- *      mask==255) and in the new frame's same-sized source region.
- *   2. Match descriptors with brute-force Hamming + Lowe's ratio
- *      test (k=2, ratio < 0.75).
- *   3. RANSAC-estimate a homography mapping src → canvas.
- *   4. Sanity-reject homographies whose 2×2 affine determinant is
- *      outside (0.5, 2.0).
- *   5. Extract effective TRANSLATION by mapping the source-region
- *      centre under H and reporting the delta.
+ * Pipeline:
+ *   1. ORB features in OVERLAP zone of canvas (mask==255 only)
+ *      and in new frame's same-sized source region.
+ *   2. BFMatcher Hamming + Lowe's ratio test (k=2, ratio < 0.75).
+ *   3. RANSAC homography src → canvas.
+ *   4. Sanity-reject |2×2 det| outside (0.5, 2.0).
+ *   5. Extract translation delta + return H matrix.
  *
- * Returns Triple(delta, inliers, det):
- *   • delta: Point(0,0) on any fallback path; otherwise the
- *     translation to ADD to the pose-predicted (dstX, dstY).
+ * Returns HomographyResult:
+ *   • delta:   Point(0,0) on any fallback path; otherwise the
+ *              translation to ADD to the pose-predicted (dstX, dstY).
  *   • inliers: RANSAC inlier count (0 when we couldn't even get
- *     to RANSAC — overlap too small, too few keypoints, etc.).
- *   • det: |H[0:2, 0:2]| determinant when computed; 0.0 otherwise.
- *     Caller surfaces both inliers and det in field telemetry.
+ *              to RANSAC).
+ *   • det:     |H[0:2, 0:2]| determinant when computed; 0.0 otherwise.
+ *   • H:       The homography matrix (3×3, CV_64F) when valid;
+ *              null otherwise.  CALLER OWNS the H Mat — must
+ *              `release()` it after use.  Used by the full-warp
+ *              paste path to map the entire frameClipped into
+ *              canvas coords (rotation + scale + perspective, not
+ *              just translation).
  */
+private data class HomographyResult(
+    val delta: Point,
+    val inliers: Int,
+    val det: Double,
+    val H: Mat?,
+)
+
 private fun homographyOffset(
     canvasOverlap: Mat,
     srcOverlap: Mat,
     maskOverlap: Mat,
-): Triple<Point, Int, Double> {
+): HomographyResult {
     val kMinOverlapPx     = 200
     val kMinPaintedFrac   = 0.5
     val kOrbFeatureCount  = 500
@@ -965,7 +1077,7 @@ private fun homographyOffset(
     val kRansacReprojPx   = 3.0
     val kDetMin           = 0.5
     val kDetMax           = 2.0
-    val zeroResult = Triple(Point(0.0, 0.0), 0, 0.0)
+    val zeroResult = HomographyResult(Point(0.0, 0.0), 0, 0.0, null)
 
     if (canvasOverlap.empty() || srcOverlap.empty() || maskOverlap.empty()) return zeroResult
     if (canvasOverlap.cols() != srcOverlap.cols() || canvasOverlap.rows() != srcOverlap.rows()) return zeroResult
@@ -1009,7 +1121,6 @@ private fun homographyOffset(
         return zeroResult
     }
 
-    // Brute-force Hamming match with k=2 → Lowe's ratio test.
     val matcher = BFMatcher.create(Core.NORM_HAMMING)
     val knn = mutableListOf<MatOfDMatch>()
     matcher.knnMatch(descSrc, descCanvas, knn, 2)
@@ -1051,7 +1162,7 @@ private fun homographyOffset(
     inlierMask.release()
     if (inliers < kMinInliers) {
         H.release()
-        return Triple(Point(0.0, 0.0), inliers, 0.0)
+        return HomographyResult(Point(0.0, 0.0), inliers, 0.0, null)
     }
 
     // Sanity-check the affine 2×2 determinant.
@@ -1062,11 +1173,11 @@ private fun homographyOffset(
     val det = kotlin.math.abs(a * d - b * c)
     if (det < kDetMin || det > kDetMax) {
         H.release()
-        return Triple(Point(0.0, 0.0), inliers, det)
+        return HomographyResult(Point(0.0, 0.0), inliers, det, null)
     }
 
-    // Extract effective translation by mapping the source-region
-    // centre under H.
+    // Translation delta — caller uses it for the reverse-pan check
+    // (Item D) even when the paste itself goes through full warp.
     val srcCenter = MatOfPoint2f(Point(srcOverlap.cols() * 0.5, srcOverlap.rows() * 0.5))
     val dstCenter = MatOfPoint2f()
     Core.perspectiveTransform(srcCenter, dstCenter, H)
@@ -1074,13 +1185,16 @@ private fun homographyOffset(
 
     srcCenter.release()
     dstCenter.release()
-    H.release()
 
-    if (dstCenterArr.isEmpty()) return Triple(Point(0.0, 0.0), inliers, det)
+    if (dstCenterArr.isEmpty()) {
+        H.release()
+        return HomographyResult(Point(0.0, 0.0), inliers, det, null)
+    }
 
     val dx = round(dstCenterArr[0].x - srcOverlap.cols() * 0.5).toInt()
     val dy = round(dstCenterArr[0].y - srcOverlap.rows() * 0.5).toInt()
 
-    return Triple(Point(dx.toDouble(), dy.toDouble()), inliers, det)
+    // Caller MUST release H after use.
+    return HomographyResult(Point(dx.toDouble(), dy.toDouble()), inliers, det, H)
 }
 

@@ -215,7 +215,8 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
                                   const cv::Mat& srcOverlap,
                                   const cv::Mat& maskOverlap,
                                   int *outInliers,
-                                  double *outDet) {
+                                  double *outDet,
+                                  cv::Mat *outH /* optional */) {
     constexpr int kMinOverlapPx        = 200;
     constexpr double kMinPaintedFrac   = 0.5;
     constexpr int kOrbFeatureCount     = 500;
@@ -228,6 +229,7 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
 
     if (outInliers) *outInliers = 0;
     if (outDet)     *outDet     = 0.0;
+    if (outH)       *outH       = cv::Mat();
 
     if (canvasOverlap.empty() || srcOverlap.empty() || maskOverlap.empty()) {
         return cv::Point(0, 0);
@@ -319,9 +321,19 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
         return cv::Point(0, 0);
     }
 
+    // Pass the validated H back to the caller for full warp use
+    // (V12.11.1 / Item E).  H maps srcOverlap-local →
+    // canvasOverlap-local; caller composes with the appropriate
+    // translations to lift it to frameClipped → canvas coords.
+    if (outH) *outH = H.clone();
+
     // Extract the effective translation by mapping the source-
     // region centre under H.  In pose-aligned overlay (H ≈ I),
-    // this gives delta = (0, 0).  Real motion shifts it.
+    // this gives delta = (0, 0).  Real motion shifts it.  Used
+    // by the caller for the reverse-pan stop (Item D) — even when
+    // the paste itself goes through full warpPerspective, the
+    // direction-of-travel check still wants a single (dx, dy)
+    // describing where the frame's centre lands.
     cv::Point2f srcCenter(srcOverlap.cols * 0.5f, srcOverlap.rows * 0.5f);
     std::vector<cv::Point2f> srcCenters = { srcCenter };
     std::vector<cv::Point2f> dstCenters;
@@ -561,6 +573,16 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
         // shifted LEFT relative to canvas (camera moved right),
         // dstCenter > srcCenter → dx > 0 → ADD to dstX shifts the
         // paste position right, pulling src content into alignment.
+        // V12.11.1 (Item E) — capture the homography matrix itself
+        // (not just its translation extract) so the paste step below
+        // can perform a full warpPerspective.  Translation-only
+        // alignment from V12.11 Step 4 left visible band-seams
+        // because adjacent slivers had small rotation/scale
+        // differences that pose+translation couldn't model.  Full
+        // warp eliminates them.
+        cv::Mat homographyOverlap;  // empty when invalid; full warp falls back to pose-only
+        cv::Rect tentativeClippedHom;
+        cv::Rect srcInClippedHom;
         cv::Rect refineCanvasBounds(0, 0, _canvas.cols, _canvas.rows);
         {
             cv::Rect tentativeRoi(dstX, dstY, clipW, clipH);
@@ -582,7 +604,8 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
                                                     srcOverlap,
                                                     maskOverlap,
                                                     &inliers,
-                                                    &det);
+                                                    &det,
+                                                    &homographyOverlap);
                 if (delta.x != 0 || delta.y != 0) {
                     int priorX = dstX, priorY = dstY;
                     dstX += delta.x;
@@ -599,6 +622,13 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
                           " — falling back to pose-only",
                           inliers, det);
                 }
+                // Stash the overlap rects so the full-warp path
+                // below can compose canvas-coords transforms even
+                // after dstX/dstY were updated by `delta`.  We use
+                // the PRE-delta overlap geometry because H was
+                // computed against it.
+                tentativeClippedHom = tentativeClipped;
+                srcInClippedHom = srcInClipped;
             }
         }
 
@@ -639,6 +669,102 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
             }
         }
 
+        // V12.11.1 (Item E) — full warpPerspective paste when a
+        // valid homography was found.  Captures rotation + scale +
+        // perspective in addition to the translation that V12.11
+        // Step 4 already handled.  Eliminates the residual band-
+        // seams Ram reported when adjacent slivers had small
+        // rotation differences pose+translation alone couldn't
+        // model.
+        //
+        // H (homographyOverlap) maps srcOverlap-local →
+        // canvasOverlap-local.  To warp the WHOLE frameClipped
+        // into canvas coords we compose:
+        //
+        //   Hframe = T2 × H × T1
+        //
+        // where:
+        //   T1: frameClipped-local → srcOverlap-local
+        //       (translate by -srcInClippedHom)
+        //   T2: canvasOverlap-local → canvas global
+        //       (translate by +tentativeClippedHom)
+        //
+        // Then we compute the bounding box of the warped corners
+        // in canvas coords, warp into a bbox-sized buffer (avoids
+        // allocating a canvas-sized buffer per frame — would be
+        // ~75 MB), and paste under first-painted-wins.
+        if (!homographyOverlap.empty()) {
+            cv::Mat T1 = (cv::Mat_<double>(3, 3) <<
+                1, 0, -srcInClippedHom.x,
+                0, 1, -srcInClippedHom.y,
+                0, 0, 1);
+            cv::Mat T2 = (cv::Mat_<double>(3, 3) <<
+                1, 0, tentativeClippedHom.x,
+                0, 1, tentativeClippedHom.y,
+                0, 0, 1);
+            cv::Mat Hframe = T2 * homographyOverlap * T1;
+
+            // Bounding box of warped corners in canvas coords.
+            std::vector<cv::Point2f> srcCorners = {
+                {0.f, 0.f},
+                {(float)frameClipped.cols, 0.f},
+                {(float)frameClipped.cols, (float)frameClipped.rows},
+                {0.f, (float)frameClipped.rows}
+            };
+            std::vector<cv::Point2f> dstCorners;
+            cv::perspectiveTransform(srcCorners, dstCorners, Hframe);
+            cv::Rect bbox = cv::boundingRect(dstCorners)
+                & cv::Rect(0, 0, _canvas.cols, _canvas.rows);
+            if (bbox.width > 0 && bbox.height > 0) {
+                // Translate Hframe into bbox-local coords so the
+                // output buffer can be just the bbox size.
+                cv::Mat T3 = (cv::Mat_<double>(3, 3) <<
+                    1, 0, -bbox.x,
+                    0, 1, -bbox.y,
+                    0, 0, 1);
+                cv::Mat Hbbox = T3 * Hframe;
+
+                cv::Mat warpedFrame(bbox.size(), frameClipped.type(),
+                                     cv::Scalar(0, 0, 0));
+                cv::warpPerspective(frameClipped, warpedFrame, Hbbox,
+                                    bbox.size(), cv::INTER_LINEAR,
+                                    cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+
+                // Mask of valid warped pixels (anything non-black).
+                // Black source pixels would be incorrectly excluded
+                // here, but the V12.11 rectilinear path doesn't
+                // produce true-black source content (camera input).
+                cv::Mat warpedGray, warpedMask;
+                cv::cvtColor(warpedFrame, warpedGray, cv::COLOR_BGR2GRAY);
+                cv::threshold(warpedGray, warpedMask, 0, 255, cv::THRESH_BINARY);
+
+                cv::Mat canvasRoi = _canvas(bbox);
+                cv::Mat canvasMaskRoi = _canvasMask(bbox);
+                cv::Mat noPrior;
+                cv::compare(canvasMaskRoi, 0, noPrior, cv::CMP_EQ);
+                cv::Mat paintMask;
+                cv::bitwise_and(noPrior, warpedMask, paintMask);
+                int newPixels = cv::countNonZero(paintMask);
+                if (newPixels > 0) {
+                    warpedFrame.copyTo(canvasRoi, paintMask);
+                    cv::bitwise_or(canvasMaskRoi, paintMask, canvasMaskRoi);
+                    _accepted += 1;
+                    [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+                } else {
+                    [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
+                }
+                auto t1 = std::chrono::steady_clock::now();
+                double ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
+                [tele setValue:@(ms) forKey:@"processingMs"];
+                return tele;
+            }
+            // bbox empty → fall through to pose-only paste.  Edge
+            // case: H mapped frame entirely outside canvas bounds.
+        }
+
+        // Pose-only fallback paste — used when H was invalid (low
+        // inliers, degenerate det, or empty bbox above).  Uses
+        // the homography-translation-corrected (dstX, dstY).
         cv::Rect dstRoi(dstX, dstY, clipW, clipH);
         cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
         cv::Rect dstClipped = dstRoi & canvasBounds;
