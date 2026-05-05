@@ -171,31 +171,31 @@ export function PanoramaBandOverlay({
     [isLandscape],
   );
 
-  // V12.13 — thumb pan-axis dim grows as the pano grows.
+  // V12.14.9 — thumb pan-axis dim is a direct fraction of canvas
+  // pan-axis fill: `fillRatio = paintedExtent / panExtent`.
   //
-  // Both portrait and landscape bands are JS-horizontal strips
-  // (full JS-width × BAND_THICKNESS tall).  In both cases the
-  // thumb sits at one JS-horizontal end and the arrow track
-  // fills the other end.  As the pano elongates along its pan
-  // axis (state.width grows in portrait, state.height grows in
-  // landscape), we want the thumb's JS-WIDTH to grow so the user
-  // visually sees the thumb extending toward the arrow — matching
-  // their pan direction.
+  // Replaces V12.13's aspect-ratio formula which only made the thumb
+  // grow once `state.height > state.width` (i.e. > 1920 px of pan)
+  // — much further than typical captures, so users saw a static
+  // square thumb for the entire capture.
   //
-  // panAxisRatio: how much longer the pano is along its pan axis
-  // vs its perpendicular axis.  At first frame both axes are the
-  // sensor compose dim, so the ratio is < 1; we floor to 1.0 so
-  // the initial thumb is square.  As the user pans, the ratio
-  // climbs above 1 and the thumb elongates.  Capped at
-  // THUMB_MAX_PAN_LEN so the arrow always has a visible run.
+  // Mental model (per the user's clarification): the band represents
+  // the full canvas pan extent (5000 px); the thumb is the painted
+  // fraction of it.  At first-frame paintedExtent ≈ slit pan-axis
+  // size (~756 px) → fillRatio ≈ 0.15 → thumb takes 15% of the band.
+  // Grows monotonically toward 1.0 (full band) as user pans further.
+  //
+  // Both `paintedExtent` and `panExtent` come from native telemetry
+  // (V12.14.9), emitted on every state event (not just snapshot
+  // frames), so the thumb grows smoothly per accept.
+  const fillRatio = useMemo(() => {
+    if (!state?.paintedExtent || !state?.panExtent) return 0;
+    return Math.max(0, Math.min(1, state.paintedExtent / state.panExtent));
+  }, [state?.paintedExtent, state?.panExtent]);
+
   const thumbPanLen = useMemo(() => {
-    if (!state?.width || !state?.height) return THUMB_INNER;
-    const panAxisRatio = isLandscape
-      ? state.height / state.width   // landscape: pano grows in height
-      : state.width / state.height;  // portrait : pano grows in width
-    const naturalLen = THUMB_INNER * Math.max(1, panAxisRatio);
-    return Math.min(THUMB_MAX_PAN_LEN, naturalLen);
-  }, [state?.width, state?.height, isLandscape]);
+    return Math.max(THUMB_INNER, THUMB_MAX_PAN_LEN * fillRatio);
+  }, [fillRatio]);
 
   // Thumb dimensions: pan-axis dim grows with the pano, perp-axis
   // dim stays at THUMB_INNER (matches band thickness).
@@ -204,6 +204,34 @@ export function PanoramaBandOverlay({
     height: THUMB_INNER,
   };
 
+  // V12.14.9 — rotate the panorama image 90° in landscape mode so
+  // the captured scene appears UPRIGHT to the user in their landscape
+  // head-up view.
+  //
+  // Why: the panorama JPEG is written by the engine in canvas/sensor
+  // coords (1920w × Yh — wide image). When the app is portrait-locked
+  // and the user holds phone landscape-left, JS coords stay portrait,
+  // so a wide-1920 image rendered without transform has its "wide"
+  // axis along JS-horizontal which appears as the user's VERTICAL in
+  // landscape view → scene reads sideways.
+  //
+  // 90° clockwise rotation maps the image so its natural "top" (canvas
+  // Y=0 = first-frame paste position) aligns with the user's top in
+  // landscape-left orientation.  Direction may need to be `-90deg`
+  // depending on which landscape variant we anchor to; flip the sign
+  // here if the scene reads upside-down on first build.
+  //
+  // Portrait+horizontal-pan mode (the other supported mode) doesn't
+  // need this — the JPEG's natural orientation already aligns with
+  // the user's portrait view.
+  const imageStyle = useMemo(
+    () =>
+      isLandscape
+        ? [StyleSheet.absoluteFill, { transform: [{ rotate: '90deg' }] }]
+        : StyleSheet.absoluteFill,
+    [isLandscape],
+  );
+
   return (
     <View pointerEvents="none" style={[styles.bandBase, layout.band]}>
       <View style={[styles.thumbBox, thumbStyle]}>
@@ -211,7 +239,7 @@ export function PanoramaBandOverlay({
           <Image
             key={state?.acceptedCount ?? 0}
             source={{ uri: imageUri }}
-            style={StyleSheet.absoluteFill}
+            style={imageStyle}
             // `cover` so the thumbnail box always reads as a
             // panorama-preview rather than a letterboxed strip
             // — the operator wants spatial intuition, not pixel

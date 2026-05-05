@@ -72,6 +72,9 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
 @property (nonatomic, readwrite) double confidence;
 @property (nonatomic, readwrite) double processingMs;
 @property (nonatomic, readwrite) BOOL isLandscape;
+// V12.14.9 — see header doc for `paintedExtent` / `panExtent` semantics.
+@property (nonatomic, readwrite) NSInteger paintedExtent;
+@property (nonatomic, readwrite) NSInteger panExtent;
 @end
 
 @implementation RLISFrameTelemetry

@@ -103,6 +103,21 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
 /// unreliable under iOS interface-orientation lock; pose detection
 /// is.
 @property (nonatomic, readonly) BOOL isLandscape;
+
+/// V12.14.9 — running max paint position along the pan axis, in
+/// canvas pixels.  In landscape mode (`isLandscape == TRUE`) this
+/// is the canvas Y at which the most-recently-pasted slit ends;
+/// in portrait mode (`isLandscape == FALSE` = portrait+horizontal-pan
+/// per the two-mode spec) this is the canvas X.  Zero before
+/// first frame is accepted.  JS-side band overlay computes
+/// `fillRatio = paintedExtent / panExtent` to size the thumb.
+@property (nonatomic, readonly) NSInteger paintedExtent;
+
+/// V12.14.9 — total pan-axis extent of the canvas (the engine's
+/// `_canvasPanExtent` config value, default 5000).  Constant for
+/// the lifetime of a capture.  Emitted on every telemetry frame
+/// for symmetry with `paintedExtent`; JS uses the ratio.
+@property (nonatomic, readonly) NSInteger panExtent;
 @end
 
 

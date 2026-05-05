@@ -72,6 +72,15 @@ public final class RetaiLensIncrementalState: NSObject {
     /// for the full rationale (single source of truth across SDK
     /// + host).
     @objc public let isLandscape: Bool
+    /// V12.14.9 — running painted extent along the pan axis, in
+    /// canvas pixels.  Combined with `panExtent`, lets the JS band
+    /// overlay size the thumbnail proportionally on every state
+    /// event (not just snapshot frames).
+    @objc public let paintedExtent: Int
+    /// V12.14.9 — total canvas pan-axis extent (engine config).
+    /// Constant for the lifetime of a capture.  fillRatio =
+    /// `paintedExtent / panExtent`.
+    @objc public let panExtent: Int
 
     @objc public init(
         panoramaPath: String?,
@@ -82,7 +91,9 @@ public final class RetaiLensIncrementalState: NSObject {
         confidence: Double,
         overlapPercent: Double,
         processingMs: Double,
-        isLandscape: Bool
+        isLandscape: Bool,
+        paintedExtent: Int,
+        panExtent: Int
     ) {
         self.panoramaPath = panoramaPath
         self.width = width
@@ -93,6 +104,8 @@ public final class RetaiLensIncrementalState: NSObject {
         self.overlapPercent = overlapPercent
         self.processingMs = processingMs
         self.isLandscape = isLandscape
+        self.paintedExtent = paintedExtent
+        self.panExtent = panExtent
     }
 
     @objc public func asDictionary() -> [String: Any] {
@@ -105,6 +118,8 @@ public final class RetaiLensIncrementalState: NSObject {
             "overlapPercent": overlapPercent,
             "processingMs": processingMs,
             "isLandscape": isLandscape,
+            "paintedExtent": paintedExtent,
+            "panExtent": panExtent,
         ]
         if let p = panoramaPath { dict["panoramaPath"] = p }
         return dict
@@ -526,7 +541,9 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             confidence: telemetry.confidence,
             overlapPercent: telemetry.overlapPercent,
             processingMs: telemetry.processingMs,
-            isLandscape: telemetry.isLandscape
+            isLandscape: telemetry.isLandscape,
+            paintedExtent: telemetry.paintedExtent,
+            panExtent: telemetry.panExtent
         )
         stateLock.lock()
         self.lastState = state

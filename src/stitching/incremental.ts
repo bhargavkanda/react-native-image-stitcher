@@ -88,6 +88,28 @@ export interface IncrementalState {
    * for the brief pre-capture preview if needed.
    */
   isLandscape: boolean;
+  /**
+   * V12.14.9 — running painted extent along the pan axis, in canvas
+   * pixels.  Trailing edge of the most-recently-pasted slit.  Pre-
+   * first-frame this is 0.  After first-frame ≈ slit pan-axis size
+   * (~756 px for default kPanAxisFractionRect=0.7 on 1080-row sensor).
+   * Grows toward `panExtent` as the user pans.
+   *
+   * Used by the band overlay to compute `fillRatio = paintedExtent /
+   * panExtent`, which sizes the thumbnail proportional to pan
+   * progress.  Replaces the V12.13 aspect-ratio-based formula that
+   * required the user to pan >1920 px before the thumb visibly grew.
+   *
+   * Defaults to 0 before the first frame.
+   */
+  paintedExtent: number;
+  /**
+   * V12.14.9 — total canvas pan-axis extent in pixels (engine config,
+   * default 5000).  Constant for the lifetime of a capture.  Used as
+   * the denominator for the fillRatio computation.  Defaults to 0
+   * before the first frame.
+   */
+  panExtent: number;
 }
 
 

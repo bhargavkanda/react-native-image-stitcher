@@ -443,6 +443,15 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
     // it's just the default (NO/portrait), which is a safe initial
     // state for the JS layer to render against.
     [tele setValue:@(_isLandscape ? YES : NO) forKey:@"isLandscape"];
+    // V12.14.9 — paintedExtent + panExtent on EVERY return path so
+    // the JS band overlay can size the thumb proportionally on every
+    // state event (not just snapshot frames).  paintedExtent is the
+    // running max along the pan axis (canvas Y in landscape, canvas X
+    // in portrait+horizontal).  Pre-first-frame both _maxDstX and
+    // _maxDstY are 0 so paintedExtent=0 → fillRatio=0 → minimum-size
+    // thumb.  panExtent is constant for the capture lifetime.
+    [tele setValue:@(_isLandscape ? _maxDstY : _maxDstX) forKey:@"paintedExtent"];
+    [tele setValue:@(_canvasPanExtent) forKey:@"panExtent"];
 
     if (trackingPoor) {
         [tele setValue:@(RLISFrameOutcomeSkippedTrackingPoor) forKey:@"outcome"];
@@ -583,6 +592,15 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
             _accepted = 1;
             [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
             [tele setValue:@(1.0) forKey:@"confidence"];
+            // V12.14.9 — first-frame paintedExtent on the RECTILINEAR
+            // path (this is the actively-used engine; the cylindrical
+            // branch below is V12.2 legacy).  Use the slit's pan-axis
+            // size so the band thumb shows non-zero progress on the
+            // very first frame.
+            {
+                const int panSliceExtent = _isLandscape ? clipH : clipW;
+                [tele setValue:@(panSliceExtent) forKey:@"paintedExtent"];
+            }
             NSLog(@"[V12.12-rect] first frame placed at (%d,%d) clipped=%dx%d "
                   @"(srcClip=%d,%d) along-pan-axis isLandscape=%d focal=%.2f canvas=%dx%d",
                   dstX, dstY, clipW, clipH, srcClipX, srcClipY,
@@ -615,6 +633,15 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
         _accepted = 1;
         [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
         [tele setValue:@(1.0) forKey:@"confidence"];
+        // V12.14.9 — paintedExtent was set at line ~445 to _maxDstY (= 0
+        // before first frame).  In the cylindrical first-frame branch
+        // we don't update _maxDstY (cylindrical uses its own canvas-
+        // centre placement model rather than the slit-leading-edge
+        // tracker).  Leaving paintedExtent at 0 here means the band
+        // thumb shows zero progress on the cylindrical first frame —
+        // acceptable; the next frame's running-max update will set
+        // a real value.  Cylindrical is V12.2 legacy and not the
+        // primary engine; rectilinear (above) sets a real value.
         return tele;
     }
 
@@ -802,6 +829,25 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
                 [tele setValue:@(RLISFrameOutcomeRejectedReverseDirection) forKey:@"outcome"];
                 return tele;
             }
+        }
+        // V12.14.9 — re-stamp paintedExtent on the tele AFTER the
+        // running-max update so the JS state for THIS frame reflects
+        // this frame's contribution to the pano (not the previous
+        // frame's max).  Without this re-stamp the band thumb grows
+        // one frame behind the actual paint.
+        //
+        // paintedExtent = leading-edge of the latest slit + the slit's
+        // pan-axis extent = trailing-edge of the slit on the pan
+        // axis.  This is the actual filled extent of the canvas
+        // along the pan axis.  Pre-V12.14.10 (portrait branch wired
+        // for portrait+vertical-pan), clip pan-axis extent is `clipW`
+        // for portrait, `clipH` for landscape.  V12.14.10 rewire
+        // makes both modes use `clipH` (sensor Y as pan axis in
+        // both supported modes); update accordingly when that lands.
+        {
+            const int panSliceExtent = _isLandscape ? clipH : clipW;
+            const int panLeadingEdge = _isLandscape ? _maxDstY : _maxDstX;
+            [tele setValue:@(panLeadingEdge + panSliceExtent) forKey:@"paintedExtent"];
         }
 
         // V12.11.1 (Item E) — full warpPerspective paste when a
