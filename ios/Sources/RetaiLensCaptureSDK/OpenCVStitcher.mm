@@ -870,6 +870,9 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     NSLog(@"[RetaiLensStitcher] step8: %s",
           useSeam ? "BATCH (warp-all + seam + feed)"
                   : "STREAM (warp+feed per frame)");
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+        "[stitch-bc] step8 enter: %s",
+        useSeam ? "BATCH" : "STREAM");
 
     // Build the blender once — both paths feed into it.
     //
@@ -905,7 +908,13 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       std::vector<cv::Mat> imagesWarped(N);
       std::vector<cv::Mat> masksWarped(N);
       std::vector<cv::Size> sizes(N);
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step8a: BATCH warp loop (N=%lu)",
+          (unsigned long)N);
       for (size_t i = 0; i < N; i++) {
+        os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+            "[stitch-bc] step8b: warp frame %zu (%dx%d)", i,
+            composeFrames[i].cols, composeFrames[i].rows);
         cv::Mat K;
         cameras[i].K().convertTo(K, CV_32F);
         cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
@@ -916,6 +925,8 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                      cv::BORDER_CONSTANT, masksWarped[i]);
         sizes[i] = imagesWarped[i].size();
       }
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step8c: warp loop done");
       // composeFrames has done its job — release before we
       // allocate the float UMat shadow set for seam finding.
       for (auto &cf : composeFrames) cf.release();
@@ -951,6 +962,9 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
               seam_compose_aspect, _ms);
       }
       auto _seamStart = std::chrono::steady_clock::now();
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step9a: seam-scale resize loop (aspect=%.3f)",
+          seam_compose_aspect);
       std::vector<cv::UMat> imagesWarpedF_seam(N);
       std::vector<cv::UMat> masksWarpedU_seam(N);
       std::vector<cv::Point> corners_seam(N);
@@ -968,11 +982,15 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
             cvRound(corners[i].x * seam_compose_aspect),
             cvRound(corners[i].y * seam_compose_aspect));
       }
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step9b: seam-scale resize done, GraphCut find starting");
       cv::Ptr<cv::detail::SeamFinder> seamFinder =
           cv::makePtr<cv::detail::GraphCutSeamFinder>(
               cv::detail::GraphCutSeamFinder::COST_COLOR);
       seamFinder->find(imagesWarpedF_seam, corners_seam,
                        masksWarpedU_seam);
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step9c: GraphCut find done");
       {
         auto _t = std::chrono::steady_clock::now();
         double _seamMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1009,8 +1027,15 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       masksWarpedU_seam.clear();
 
       // Feed the blender, releasing each frame as we go.
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step10a: blender->prepare");
       blender->prepare(corners, sizes);
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step10b: feeding blender (N=%lu)",
+          (unsigned long)N);
       for (size_t i = 0; i < N; i++) {
+        os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+            "[stitch-bc] step10c: feed frame %zu", i);
         cv::Mat imgS;
         imagesWarped[i].convertTo(imgS, CV_16S);
         blender->feed(imgS, masksWarped[i], corners[i]);
@@ -1020,6 +1045,8 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       }
       imagesWarped.clear();
       masksWarped.clear();
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step10d: feed loop done");
     } else {
       // ── STREAM path ────────────────────────────────────────────
       // Pre-pass: warp masks ONLY (single-channel, cheap) to
@@ -1065,7 +1092,12 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     }
 
     cv::Mat panoramaS, panoramaMask;
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+        "[stitch-bc] step11a: blender->blend starting");
     blender->blend(panoramaS, panoramaMask);
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+        "[stitch-bc] step11b: blend complete (panoramaS=%dx%d)",
+        panoramaS.cols, panoramaS.rows);
     panoramaS.convertTo(panorama, CV_8U);
     {
       auto _t = std::chrono::steady_clock::now();
@@ -1074,6 +1106,9 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       NSLog(@"[RetaiLensStitcher] step11: blend complete (output %d×%d, t+%.0fms)",
             panorama.cols, panorama.rows, _ms);
     }
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+        "[stitch-bc] step11c: panorama 8U conversion done (panorama=%dx%d)",
+        panorama.cols, panorama.rows);
   } catch (const cv::Exception &e) {
     if (error) {
       *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
