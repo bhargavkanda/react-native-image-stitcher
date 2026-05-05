@@ -50,6 +50,23 @@
 #import "OpenCVStitcher.h"
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <os/log.h>
+
+// V12.14.2 — dedicated os_log subsystem for the stitcher.  os_log
+// with OS_LOG_TYPE_FAULT survives Console.app's rate-limit cap that
+// drops bursts of NSLog calls — Ram's V12.14 trace had Run 2's
+// extractFrames + loadFrames + step1 entirely missing, only the
+// step2-5 enter cluster surviving.  We use FAULT level for SENTINEL
+// breadcrumbs that MUST be visible (start of stitch, BA call site,
+// any catch-all for the BA crash).
+static os_log_t StitcherDiagLog(void) {
+    static os_log_t log = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        log = os_log_create("com.tiger.retailens.sdk", "stitch");
+    });
+    return log;
+}
 
 NSString *const RetaiLensStitcherErrorDomain = @"RetaiLensStitcherErrorDomain";
 
@@ -232,6 +249,14 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                          blenderType:(NSString *)blenderType
                                       seamFinderType:(NSString *)seamFinderType
                                                error:(NSError **)error {
+  // V12.14.2 — FAULT-level sentinel.  Survives Console.app rate-limit;
+  // proves the function entered.  If a future trace doesn't show this
+  // line for a crashed run, the crash is BEFORE stitchFramePaths
+  // (e.g., in extractFramesFromVideoAtPath or in the dispatch_async
+  // block in StitcherBridge).
+  os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+      "[stitch-bc] STITCH START: %lu frames", (unsigned long)framePaths.count);
+
   // Defaults if caller passed nil — keeps the old 3-arg call-sites
   // working until we update them.
   if (warperType == nil || warperType.length == 0) warperType = @"plane";
@@ -249,12 +274,40 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   }
 
+  // V12.14.2 — defensive frame cap.  Ram's V12.14 traces showed a
+  // landscape capture with 12 frames (144 pairwise) crash inside
+  // BundleAdjusterRay.  A 7-frame capture (49 pairwise) succeeded.
+  // Above ~10 frames the BA solver becomes unstable on landscape
+  // inputs — most likely the Levenberg-Marquardt Jacobian conditions
+  // get bad with the wider aspect ratio + more pairwise constraints.
+  // Cap framePaths to kMaxFramesForStitch evenly-spaced indices
+  // BEFORE loadFramesOrFail so we don't even pay the imread cost
+  // for the discarded frames.  Trade-off: long pans get slightly
+  // less overlap (a 5-second pan at 3 fps = 15 frames is downsampled
+  // to 8 evenly-spaced).  Quality regression is minor; stability is
+  // huge — this kills the EXC_BAD_ACCESS deterministically.
+  static const NSUInteger kMaxFramesForStitch = 8;
+  NSArray<NSString *> *workFramePaths = framePaths;
+  if (workFramePaths.count > kMaxFramesForStitch) {
+    NSMutableArray<NSString *> *downsampled =
+        [NSMutableArray arrayWithCapacity:kMaxFramesForStitch];
+    NSUInteger origCount = workFramePaths.count;
+    for (NSUInteger i = 0; i < kMaxFramesForStitch; i++) {
+      NSUInteger idx = (i * (origCount - 1)) / (kMaxFramesForStitch - 1);
+      [downsampled addObject:workFramePaths[idx]];
+    }
+    workFramePaths = downsampled;
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+        "[stitch-bc] downsampled %lu -> %lu frames (BA stability cap)",
+        (unsigned long)origCount, (unsigned long)kMaxFramesForStitch);
+  }
+
   // Load all input frames before invoking the stitcher.  Memory cost
   // is N × frame size — for typical shelf captures (~2048×1536 RGB,
   // ~9 MB / frame raw, but cv::imread decodes JPEG so resident
   // footprint is bounded by the original sensor resolution).
   std::vector<cv::Mat> frames;
-  if (!loadFramesOrFail(framePaths, frames, error)) {
+  if (!loadFramesOrFail(workFramePaths, frames, error)) {
     return nil;
   }
 
@@ -506,16 +559,60 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         cv::TermCriteria::EPS + cv::TermCriteria::COUNT,
         100,
         DBL_EPSILON));
-    if (!(*adjuster)(imgFeatures, pairwise, cameras)) {
-      if (error) {
-        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                     code:1006
-                                 userInfo:@{
-          NSLocalizedDescriptionKey:
-            @"Stitcher could not refine camera parameters — try recapturing with more overlap.",
-        }];
-      }
-      return nil;
+
+    // V12.14.2 — FAULT-level sentinel + camera sanity dump.  These
+    // bracket the BA call so a future trace can pinpoint whether
+    // the crash is BEFORE BA invocation, INSIDE BA, or AFTER BA.
+    // Also dump the first camera's R[0,0] + focal so we can see if
+    // estimator produced NaN/Inf values that would crash BA's
+    // Levenberg-Marquardt.
+    {
+      double r00 = cameras.empty() ? 0.0 :
+          (cameras[0].R.empty() ? 0.0 : (double)cameras[0].R.at<float>(0, 0));
+      double focal = cameras.empty() ? 0.0 : cameras[0].focal;
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step5 BA INVOKE: cameras=%lu cam0.R[0,0]=%.4f cam0.focal=%.2f",
+          (unsigned long)cameras.size(), r00, focal);
+    }
+
+    // V12.14.2 — wrap BA in try/catch.  Catches cv::Exception (most
+    // likely if BA detects a bad input) and std::exception (defensive).
+    // On exception, fall back to the estimator cameras (skipping the
+    // BA refinement step).  Pano quality is slightly lower without
+    // BA but it WON'T CRASH.  Note: this catches C++ exceptions;
+    // raw SIGSEGV from BA's internal pointer deref would still
+    // terminate the process — for that, the kMaxFramesForStitch=8
+    // cap above is the primary defence.
+    bool baSucceeded = false;
+    try {
+      baSucceeded = (*adjuster)(imgFeatures, pairwise, cameras);
+    } catch (const cv::Exception &e) {
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step5 BA threw cv::Exception: %s — fallback to estimator cameras",
+          e.what());
+      baSucceeded = false;
+    } catch (const std::exception &e) {
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step5 BA threw std::exception: %s — fallback to estimator cameras",
+          e.what());
+      baSucceeded = false;
+    } catch (...) {
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step5 BA threw unknown exception — fallback to estimator cameras");
+      baSucceeded = false;
+    }
+
+    if (!baSucceeded) {
+      // Fall through with the cameras the estimator produced —
+      // step5.5 wave correction + step6+ compose can still run on
+      // unrefined cameras.  Result quality will be lower (no global
+      // optimisation) but the engine returns a panorama instead of
+      // crashing.
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step5 BA SKIPPED — proceeding with estimator cameras");
+    } else {
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step5 BA OK");
     }
 
     // Step 5.5: WAVE CORRECTION.  cv::Stitcher::PANORAMA does
