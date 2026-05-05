@@ -431,16 +431,22 @@ internal class IncrementalFirstwinsEngine(
             }
             rRel.release()
 
-            // V12.11 Step 4 + V12.11.1 (Item E) — image-aligned slit
-            // refinement via homography.  Updated for Item E: also
-            // capture the H matrix so the paste step below can do a
-            // full warpPerspective (not just translation).  Mirrors
-            // iOS' OpenCVSlitScanStitcher.mm.  See iOS comments for
-            // the rationale around translation extraction (used for
-            // reverse-pan check) vs full warp (used for paste).
+            // V12.14 — three-tier homography correction.  See
+            // `homographyOffset` doc + iOS engine for the rationale
+            // (low-confidence H produces wild deltas / warps that
+            // make stitching WORSE than pose-only).
             //
-            // CALLER OWNS the H Mat returned via HomographyResult.H
-            // and must release it before exiting this branch.
+            // tier == LOW    → pose-only paste (no correction)
+            // tier == MEDIUM → translation-only correction
+            // tier == HIGH   → full warpPerspective with H
+            //
+            // Plus a perpendicular-axis delta clamp: in landscape,
+            // |delta_x| > kMaxPerpDeltaPx is rejected (camera shake
+            // / homography lock-onto-wrong-feature).  Symmetric
+            // for portrait.
+            //
+            // CALLER OWNS the H Mat (when non-null) returned via
+            // HomographyResult.H — must release it before exiting.
             var homographyOverlap: Mat? = null
             var srcInClippedHom: Rect? = null
             var tentativeClippedHom: Rect? = null
@@ -462,33 +468,53 @@ internal class IncrementalFirstwinsEngine(
                         canvasOverlap, srcOverlap, maskOverlap,
                     )
                     canvasOverlap.release(); maskOverlap.release(); srcOverlap.release()
-                    val dx = result.delta.x.toInt()
-                    val dy = result.delta.y.toInt()
-                    if (dx != 0 || dy != 0) {
+
+                    // Clamp perpendicular delta.
+                    val kMaxPerpDeltaPx = 30
+                    var dx = result.delta.x.toInt()
+                    var dy = result.delta.y.toInt()
+                    if (isLandscape) {
+                        if (dx > kMaxPerpDeltaPx) dx = kMaxPerpDeltaPx
+                        if (dx < -kMaxPerpDeltaPx) dx = -kMaxPerpDeltaPx
+                    } else {
+                        if (dy > kMaxPerpDeltaPx) dy = kMaxPerpDeltaPx
+                        if (dy < -kMaxPerpDeltaPx) dy = -kMaxPerpDeltaPx
+                    }
+
+                    val tierName = when (result.tier) {
+                        kHomogTierHigh -> "HIGH"
+                        kHomogTierMedium -> "MED"
+                        else -> "LOW"
+                    }
+                    if (result.tier >= kHomogTierMedium) {
                         val priorX = dstX
                         val priorY = dstY
                         dstX += dx
                         dstY += dy
                         Log.d(
-                            "V12.11-homog",
-                            "delta=(%+d,%+d) inliers=%d det=%.3f adjusted dst=(%d,%d) (was %d,%d)".format(
-                                Locale.US, dx, dy, result.inliers, result.det,
+                            "V12.14-homog",
+                            "tier=%s delta=(%+d,%+d) inliers=%d det=%.3f adjusted dst=(%d,%d) (was %d,%d)".format(
+                                Locale.US, tierName, dx, dy, result.inliers, result.det,
                                 dstX, dstY, priorX, priorY,
                             ),
                         )
                     } else if (result.inliers > 0) {
                         Log.d(
-                            "V12.11-homog",
-                            "REJECTED inliers=%d det=%.3f — falling back to pose-only".format(
+                            "V12.14-homog",
+                            "tier=LOW inliers=%d det=%.3f — pose-only (no correction)".format(
                                 Locale.US, result.inliers, result.det,
                             ),
                         )
                     }
-                    // Stash the H + overlap geometry for the full-
-                    // warp path below.  H is null when invalid →
-                    // full-warp branch is skipped, pose-only paste
-                    // runs.
-                    homographyOverlap = result.H
+
+                    // Only let the full-warp path engage on HIGH tier.
+                    // For LOW/MEDIUM we release the H Mat right here
+                    // (caller-owns contract).
+                    if (result.tier == kHomogTierHigh) {
+                        homographyOverlap = result.H
+                    } else {
+                        result.H?.release()
+                    }
                     srcInClippedHom = srcInClipped
                     tentativeClippedHom = tentativeRoi
                 }
@@ -1138,11 +1164,20 @@ private fun Rect.intersection(other: Rect): Rect {
  *              canvas coords (rotation + scale + perspective, not
  *              just translation).
  */
+// V12.14 — confidence tiers, mirror of iOS' kHomogTier* constants.
+// Drives the caller's three-way switch (pose-only / translation-only
+// / full warp).  See OpenCVSlitScanStitcher.mm for the rationale.
+private const val kHomogTierLow = 0
+private const val kHomogTierMedium = 1
+private const val kHomogTierHigh = 2
+
 private data class HomographyResult(
     val delta: Point,
     val inliers: Int,
     val det: Double,
     val H: Mat?,
+    /** V12.14 — confidence tier (kHomogTierLow / Medium / High). */
+    val tier: Int = kHomogTierLow,
 )
 
 private fun homographyOffset(
@@ -1276,7 +1311,22 @@ private fun homographyOffset(
     val dx = round(dstCenterArr[0].x - srcOverlap.cols() * 0.5).toInt()
     val dy = round(dstCenterArr[0].y - srcOverlap.rows() * 0.5).toInt()
 
+    // V12.14 — assign tier from inliers + det (mirrors iOS).
+    val kHighInliers = 50
+    val kMidInliers = 20
+    val kHighDetLow = 0.95
+    val kHighDetHigh = 1.05
+    val kMidDetLow = 0.85
+    val kMidDetHigh = 1.15
+    val tier = when {
+        inliers >= kHighInliers && det in kHighDetLow..kHighDetHigh -> kHomogTierHigh
+        inliers >= kMidInliers && det in kMidDetLow..kMidDetHigh -> kHomogTierMedium
+        else -> kHomogTierLow
+    }
+
     // Caller MUST release H after use.
-    return HomographyResult(Point(dx.toDouble(), dy.toDouble()), inliers, det, H)
+    return HomographyResult(
+        Point(dx.toDouble(), dy.toDouble()), inliers, det, H, tier,
+    )
 }
 

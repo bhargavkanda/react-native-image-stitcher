@@ -235,12 +235,34 @@ static const double kPanAxisFractionRect = 0.70;
 // In every fallback case the caller proceeds with pose-only paste,
 // which is what the engine already did pre-V12.10.  Never makes
 // alignment WORSE than pose-only.
+// V12.14 — Confidence tiers for the homography correction.  The
+// caller switches its paste behaviour on this tier:
+//   • Low    (0): no homography correction at all — pose-only paste.
+//   • Medium (1): apply translation delta only — corrected pose,
+//                  no perspective warp.  Use when H is plausible but
+//                  not trustworthy enough to drive a full warp.
+//   • High   (2): apply full warpPerspective using H.  Best quality
+//                  when alignment is highly confident.
+//
+// Earlier (V12.10–V12.13) versions only had the binary "use H or
+// pose-only" gate, with kMinInliers=8 and det in (0.5, 2.0).  Those
+// thresholds turned out to be way too lax — Ram's logs showed full
+// warp engaging at inliers=10, det=1.38, applying delta=(+15,+118)
+// in a single frame which baked wild noise into the warped slivers.
+// The 3-tier ladder caps full-warp engagement to high-confidence
+// frames only, falling through to less-aggressive corrections
+// when features are sparse or the homography looks degenerate.
+static const int kHomogTierLow = 0;
+static const int kHomogTierMedium = 1;
+static const int kHomogTierHigh = 2;
+
 static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
                                   const cv::Mat& srcOverlap,
                                   const cv::Mat& maskOverlap,
                                   int *outInliers,
                                   double *outDet,
-                                  cv::Mat *outH /* optional */) {
+                                  cv::Mat *outH /* optional */,
+                                  int *outTier /* optional, V12.14 */) {
     constexpr int kMinOverlapPx        = 200;
     constexpr double kMinPaintedFrac   = 0.5;
     constexpr int kOrbFeatureCount     = 500;
@@ -254,6 +276,7 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
     if (outInliers) *outInliers = 0;
     if (outDet)     *outDet     = 0.0;
     if (outH)       *outH       = cv::Mat();
+    if (outTier)    *outTier    = kHomogTierLow;
 
     if (canvasOverlap.empty() || srcOverlap.empty() || maskOverlap.empty()) {
         return cv::Point(0, 0);
@@ -365,6 +388,31 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
 
     int dx = (int)std::round(dstCenters[0].x - srcCenter.x);
     int dy = (int)std::round(dstCenters[0].y - srcCenter.y);
+
+    // V12.14 — assign confidence tier based on inliers + det.
+    // Thresholds tuned from Ram's V12.13 logs where:
+    //   • Healthy frames had inliers ≥ 200 and det ≈ 0.99-1.02
+    //   • Mid-degraded had inliers ~50-150 and det ≈ 0.93-1.05
+    //   • Late-degraded had inliers ~10 and det = 0.71-1.38 (wild)
+    //
+    // High tier (full warp): conservative — only when both signals
+    // agree it's a clean homography.  Mid tier (translation-only):
+    // covers the gradient where translation alone is still safe.
+    // Anything below mid falls through to caller's pose-only path
+    // even though we still return the delta (caller may log it).
+    constexpr int    kHighInliers = 50;
+    constexpr int    kMidInliers  = 20;
+    constexpr double kHighDetLow  = 0.95;
+    constexpr double kHighDetHigh = 1.05;
+    constexpr double kMidDetLow   = 0.85;
+    constexpr double kMidDetHigh  = 1.15;
+    int tier = kHomogTierLow;
+    if (inliers >= kHighInliers && det >= kHighDetLow && det <= kHighDetHigh) {
+        tier = kHomogTierHigh;
+    } else if (inliers >= kMidInliers && det >= kMidDetLow && det <= kMidDetHigh) {
+        tier = kHomogTierMedium;
+    }
+    if (outTier) *outTier = tier;
 
     return cv::Point(dx, dy);
 }
@@ -638,16 +686,22 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
         // because adjacent slivers had small rotation/scale
         // differences that pose+translation couldn't model.  Full
         // warp eliminates them.
-        cv::Mat homographyOverlap;  // empty when invalid; full warp falls back to pose-only
+        // V12.14 — three-tier homography correction.  See
+        // `homographyOffset` doc for tier definitions.  Caller
+        // switches paste behaviour:
+        //   • tier == LOW    → no correction, no warp, pose-only paste
+        //   • tier == MEDIUM → apply translation delta only (no warp)
+        //   • tier == HIGH   → full warpPerspective with H
+        // The full-warp path below checks `homographyOverlap.empty()`;
+        // we only set H non-empty when tier == HIGH so the warp
+        // engages only on highly-confident frames.
+        cv::Mat homographyOverlap;  // empty unless tier == HIGH
         cv::Rect tentativeClippedHom;
         cv::Rect srcInClippedHom;
         cv::Rect refineCanvasBounds(0, 0, _canvas.cols, _canvas.rows);
         {
             cv::Rect tentativeRoi(dstX, dstY, clipW, clipH);
             cv::Rect tentativeClipped = tentativeRoi & refineCanvasBounds;
-            // Need a meaningful overlap (>= 200 px on each side
-            // matches homographyOffset's kMinOverlapPx) to host
-            // enough features for RANSAC to be reliable.
             if (tentativeClipped.width >= 200 && tentativeClipped.height >= 200) {
                 cv::Mat canvasOverlap = _canvas(tentativeClipped);
                 cv::Mat maskOverlap   = _canvasMask(tentativeClipped);
@@ -658,33 +712,56 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
                 cv::Mat srcOverlap = frameClipped(srcInClipped);
                 int inliers = 0;
                 double det = 0.0;
+                int tier = kHomogTierLow;
+                cv::Mat candidateH;  // returned but only used if tier == HIGH
                 cv::Point delta = homographyOffset(canvasOverlap,
                                                     srcOverlap,
                                                     maskOverlap,
                                                     &inliers,
                                                     &det,
-                                                    &homographyOverlap);
-                if (delta.x != 0 || delta.y != 0) {
+                                                    &candidateH,
+                                                    &tier);
+
+                // V12.14 — clamp the perpendicular-axis delta.  In
+                // landscape (vertical pan) the engine paste ONLY
+                // moves dstY; |delta_x| > kMaxPerpDeltaPx is camera-
+                // shake noise / homography lock-onto-wrong-feature
+                // (Ram's V12.13 logs showed delta_x swinging from
+                // -78 → +15 between consecutive frames during a
+                // pure vertical pan).  Reject the perp component
+                // beyond the cap.  Symmetric for portrait.
+                constexpr int kMaxPerpDeltaPx = 30;
+                if (_isLandscape) {
+                    if (delta.x > kMaxPerpDeltaPx)  delta.x =  kMaxPerpDeltaPx;
+                    if (delta.x < -kMaxPerpDeltaPx) delta.x = -kMaxPerpDeltaPx;
+                } else {
+                    if (delta.y > kMaxPerpDeltaPx)  delta.y =  kMaxPerpDeltaPx;
+                    if (delta.y < -kMaxPerpDeltaPx) delta.y = -kMaxPerpDeltaPx;
+                }
+
+                // Apply translation delta when tier ≥ MEDIUM.  Tier
+                // LOW means even the translation isn't trustworthy
+                // (e.g., inliers < 20) — leave dstX/dstY at pose.
+                const char *tierName = (tier == kHomogTierHigh) ? "HIGH" :
+                                       (tier == kHomogTierMedium) ? "MED" : "LOW";
+                if (tier >= kHomogTierMedium) {
                     int priorX = dstX, priorY = dstY;
                     dstX += delta.x;
                     dstY += delta.y;
-                    NSLog(@"[V12.11-homog] delta=(%+d,%+d) inliers=%d det=%.3f"
+                    NSLog(@"[V12.14-homog] tier=%s delta=(%+d,%+d) inliers=%d det=%.3f"
                           " adjusted dst=(%d,%d) (was %d,%d)",
-                          delta.x, delta.y, inliers, det,
+                          tierName, delta.x, delta.y, inliers, det,
                           dstX, dstY, priorX, priorY);
                 } else if (inliers > 0) {
-                    // Homography returned but rejected (det out of
-                    // range, etc.).  Log so field telemetry shows
-                    // the rejection rate.
-                    NSLog(@"[V12.11-homog] REJECTED inliers=%d det=%.3f"
-                          " — falling back to pose-only",
+                    NSLog(@"[V12.14-homog] tier=LOW inliers=%d det=%.3f"
+                          " — pose-only (no correction)",
                           inliers, det);
                 }
-                // Stash the overlap rects so the full-warp path
-                // below can compose canvas-coords transforms even
-                // after dstX/dstY were updated by `delta`.  We use
-                // the PRE-delta overlap geometry because H was
-                // computed against it.
+
+                // Only let the full-warp path engage on HIGH tier.
+                if (tier == kHomogTierHigh) {
+                    homographyOverlap = candidateH;
+                }
                 tentativeClippedHom = tentativeClipped;
                 srcInClippedHom = srcInClipped;
             }
