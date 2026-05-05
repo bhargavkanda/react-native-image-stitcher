@@ -98,9 +98,18 @@ bool loadFramesOrFail(NSArray<NSString *> *framePaths,
                       std::vector<cv::Mat> &frames,
                       NSError **error) {
   frames.reserve(framePaths.count);
+  // V12.13 — breadcrumb each load.  If the landscape-only crash is
+  // in cv::imread (e.g., decoding a JPEG produced by the new
+  // per-frame autoreleasepool extract) the LAST log line tells us
+  // which frame index + path triggered it.
+  NSInteger idx = 0;
   for (NSString *path in framePaths) {
     NSString *cleaned = normalizeImagePath(path);
     cv::Mat img = cv::imread([cleaned UTF8String]);
+    NSLog(@"[stitch-bc] loadFrames %ld/%lu: %@ -> %dx%d (channels=%d, empty=%d)",
+          (long)idx, (unsigned long)framePaths.count,
+          path.lastPathComponent, img.cols, img.rows, img.channels(),
+          (int)img.empty());
     if (img.empty()) {
       if (error) {
         *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
@@ -113,6 +122,7 @@ bool loadFramesOrFail(NSArray<NSString *> *framePaths,
       return false;
     }
     frames.push_back(img);
+    idx += 1;
   }
   return true;
 }
@@ -1157,37 +1167,84 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       [NSMutableArray arrayWithCapacity:(NSUInteger)maxFrames];
   NSString *cleanedOutputDir = normalizeImagePath(outputDir);
 
+  // V12.13 — diagnostic for the landscape-only `EXC_BAD_ACCESS` crash
+  // Ram caught.  Track per-frame extract progress + dimensions so the
+  // log breadcrumb pinpoints which stage and frame triggers the
+  // memory error if it recurs.  Also log the asset's video track size
+  // + preferred transform up front so we know what AVFoundation is
+  // about to hand us before the loop runs.
+  AVAssetTrack *videoTrack = nil;
+  NSArray *videoTracks = [asset tracksWithMediaType:AVMediaTypeVideo];
+  if (videoTracks.count > 0) {
+    videoTrack = videoTracks.firstObject;
+  }
+  CGSize naturalSize = videoTrack ? videoTrack.naturalSize : CGSizeZero;
+  CGAffineTransform xform = videoTrack ? videoTrack.preferredTransform
+                                       : CGAffineTransformIdentity;
+  NSLog(@"[stitch-bc] extractFrames start: maxFrames=%ld duration=%.2fs "
+        @"track.naturalSize=%.0fx%.0f preferredTransform=[a=%.2f b=%.2f c=%.2f d=%.2f tx=%.2f ty=%.2f]",
+        (long)maxFrames, totalSeconds,
+        naturalSize.width, naturalSize.height,
+        xform.a, xform.b, xform.c, xform.d, xform.tx, xform.ty);
+
   for (NSInteger i = 0; i < maxFrames; i++) {
-    // Even time spacing across [0, duration].  Dividing by
-    // (maxFrames - 1) gives endpoints at exactly 0 and `duration`,
-    // capturing the first and last useful moments.
-    Float64 fraction = (Float64)i / (Float64)(maxFrames - 1);
-    Float64 timeSeconds = fraction * totalSeconds;
-    CMTime cmTime = CMTimeMakeWithSeconds(timeSeconds, 600);
+    // V12.13 — wrap each iteration in its own @autoreleasepool so
+    // UIImage / NSData / NSString temporaries get drained per-frame
+    // instead of accumulating to function exit.  Without this, a
+    // 30-frame extract from a landscape video can hold ~100+ MB of
+    // autoreleased temporaries — combined with the video extractor's
+    // own caches this has historically triggered jetsam +
+    // EXC_BAD_ACCESS-during-tear-down (see the COMPOSE_MP comment
+    // around line 313 of stitchFramePaths for the same pattern).
+    @autoreleasepool {
+      // Even time spacing across [0, duration].  Dividing by
+      // (maxFrames - 1) gives endpoints at exactly 0 and `duration`,
+      // capturing the first and last useful moments.
+      Float64 fraction = (Float64)i / (Float64)(maxFrames - 1);
+      Float64 timeSeconds = fraction * totalSeconds;
+      CMTime cmTime = CMTimeMakeWithSeconds(timeSeconds, 600);
 
-    NSError *frameErr = nil;
-    CGImageRef cgImage =
-        [generator copyCGImageAtTime:cmTime actualTime:NULL error:&frameErr];
-    if (cgImage == NULL) {
-      // Skip an unreadable frame rather than aborting — sometimes
-      // the very-last-millisecond seek fails on short videos.  The
-      // stitcher just gets one fewer frame.
-      continue;
-    }
+      NSError *frameErr = nil;
+      CGImageRef cgImage =
+          [generator copyCGImageAtTime:cmTime actualTime:NULL error:&frameErr];
+      if (cgImage == NULL) {
+        NSLog(@"[stitch-bc] frame %ld/%ld: copyCGImageAtTime returned NULL "
+              @"(t=%.2fs, err=%@)",
+              (long)i, (long)maxFrames, timeSeconds,
+              frameErr.localizedDescription ?: @"nil");
+        // Skip an unreadable frame rather than aborting — sometimes
+        // the very-last-millisecond seek fails on short videos.  The
+        // stitcher just gets one fewer frame.
+        continue;
+      }
 
-    UIImage *uiImage = [UIImage imageWithCGImage:cgImage];
-    CGImageRelease(cgImage);
+      size_t cgW = CGImageGetWidth(cgImage);
+      size_t cgH = CGImageGetHeight(cgImage);
 
-    NSData *jpegData = UIImageJPEGRepresentation(uiImage, compressionQuality);
-    if (jpegData == nil) continue;
+      UIImage *uiImage = [UIImage imageWithCGImage:cgImage];
+      CGImageRelease(cgImage);
 
-    NSString *framePath =
-        [cleanedOutputDir stringByAppendingPathComponent:
-            [NSString stringWithFormat:@"frame_%03ld.jpg", (long)i]];
-    if ([jpegData writeToFile:framePath atomically:YES]) {
-      [paths addObject:framePath];
+      NSData *jpegData = UIImageJPEGRepresentation(uiImage, compressionQuality);
+      if (jpegData == nil) {
+        NSLog(@"[stitch-bc] frame %ld/%ld: UIImageJPEGRepresentation returned nil",
+              (long)i, (long)maxFrames);
+        continue;
+      }
+
+      NSString *framePath =
+          [cleanedOutputDir stringByAppendingPathComponent:
+              [NSString stringWithFormat:@"frame_%03ld.jpg", (long)i]];
+      BOOL wrote = [jpegData writeToFile:framePath atomically:YES];
+      NSLog(@"[stitch-bc] frame %ld/%ld: cgImage=%zux%zu jpeg=%lu bytes wrote=%d",
+            (long)i, (long)maxFrames, cgW, cgH,
+            (unsigned long)jpegData.length, (int)wrote);
+      if (wrote) {
+        [paths addObject:framePath];
+      }
     }
   }
+  NSLog(@"[stitch-bc] extractFrames done: produced %lu frames",
+        (unsigned long)paths.count);
 
   if (paths.count < 2) {
     if (error) {
