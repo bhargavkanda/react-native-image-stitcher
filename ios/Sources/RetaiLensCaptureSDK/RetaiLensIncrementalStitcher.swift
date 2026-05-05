@@ -67,6 +67,11 @@ public final class RetaiLensIncrementalState: NSObject {
     @objc public let confidence: Double
     @objc public let overlapPercent: Double
     @objc public let processingMs: Double
+    /// V12.12 — engine-detected physical orientation, plumbed up
+    /// from `RLISFrameTelemetry.isLandscape`.  See incremental.ts
+    /// for the full rationale (single source of truth across SDK
+    /// + host).
+    @objc public let isLandscape: Bool
 
     @objc public init(
         panoramaPath: String?,
@@ -76,7 +81,8 @@ public final class RetaiLensIncrementalState: NSObject {
         outcome: RetaiLensIncrementalOutcome,
         confidence: Double,
         overlapPercent: Double,
-        processingMs: Double
+        processingMs: Double,
+        isLandscape: Bool
     ) {
         self.panoramaPath = panoramaPath
         self.width = width
@@ -86,6 +92,7 @@ public final class RetaiLensIncrementalState: NSObject {
         self.confidence = confidence
         self.overlapPercent = overlapPercent
         self.processingMs = processingMs
+        self.isLandscape = isLandscape
     }
 
     @objc public func asDictionary() -> [String: Any] {
@@ -97,6 +104,7 @@ public final class RetaiLensIncrementalState: NSObject {
             "confidence": confidence,
             "overlapPercent": overlapPercent,
             "processingMs": processingMs,
+            "isLandscape": isLandscape,
         ]
         if let p = panoramaPath { dict["panoramaPath"] = p }
         return dict
@@ -517,7 +525,8 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             outcome: outcome,
             confidence: telemetry.confidence,
             overlapPercent: telemetry.overlapPercent,
-            processingMs: telemetry.processingMs
+            processingMs: telemetry.processingMs,
+            isLandscape: telemetry.isLandscape
         )
         stateLock.lock()
         self.lastState = state

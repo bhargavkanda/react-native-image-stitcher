@@ -33,6 +33,15 @@
     NSInteger _composeHeight;
     NSInteger _canvasWidth;
     NSInteger _canvasHeight;
+    /// V12.12 — pan-axis canvas extent (defaults to max of
+    /// constructor's canvasWidth/Height, e.g. 5000).  Used at first-
+    /// frame allocation to size the pan-axis dimension of the canvas.
+    /// The perpendicular axis is taken from the actual frame size at
+    /// first-frame ingest, so the canvas is "just wide enough" along
+    /// perpendicular and "5000-deep" along the pan axis.  This pairs
+    /// with the new engine-internal canvas allocation (deferred to
+    /// first frame so we can use the pose-detected orientation).
+    NSInteger _canvasPanExtent;
     NSInteger _frameRotationDegrees;
     /// V12.3 orientation-aware cylinder axis — see v9 engine.
     BOOL _isLandscape;
@@ -90,9 +99,15 @@
     if (self = [super init]) {
         _composeWidth  = composeWidth  > 0 ? composeWidth  : 960;
         _composeHeight = composeHeight > 0 ? composeHeight : 720;
-        // V11 Gap #4: square canvas — see OpenCVIncrementalStitcher.mm.
+        // V12.12 — canvasWidth/Height args become HINTS, not exact
+        // dims: the engine allocates the actual canvas at first frame
+        // based on detected orientation.  The pan-axis dimension is
+        // max(canvasWidth, canvasHeight) — both are typically 5000 so
+        // the value is unambiguous; the perpendicular dim is
+        // determined by the actual frame size at first-frame ingest.
         _canvasWidth   = canvasWidth   > 0 ? canvasWidth   : 5000;
         _canvasHeight  = canvasHeight  > 0 ? canvasHeight  : 5000;
+        _canvasPanExtent = std::max(_canvasWidth, _canvasHeight);
         _frameRotationDegrees = frameRotationDegrees;
         _useRectilinear = useRectilinear;
         _firstFrameDstX = 0;
@@ -115,8 +130,13 @@
 }
 
 - (void)reset {
-    _canvas = cv::Mat::zeros((int)_canvasHeight, (int)_canvasWidth, CV_8UC3);
-    _canvasMask = cv::Mat::zeros((int)_canvasHeight, (int)_canvasWidth, CV_8UC1);
+    // V12.12 — canvas alloc DEFERRED to first-frame branch (see
+    // ingestPixelBuffer below) so we can size it based on the
+    // pose-detected orientation.  Empty Mats here signal "no canvas
+    // yet" — first-frame branch checks `_canvas.empty()` and
+    // allocates accordingly.
+    _canvas = cv::Mat();
+    _canvasMask = cv::Mat();
     _firstRotationArkit = cv::Mat();
     _R_panToWorld = cv::Mat();
     _K_compose = cv::Mat();
@@ -150,22 +170,26 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
 // These were strip-width bounds for the original slit-scan design,
 // never referenced in the first-painted-wins implementation.
 
-// V12.11 Step 3 — fraction of the long-side (pan-perpendicular)
-// that the rectilinear engine retains per frame.  The remaining
-// (1 - fraction) is cropped equally from both edges of the long
-// side, keeping the pan axis full-width.
+// V12.12 — fraction of the PAN-AXIS the rectilinear engine retains
+// per frame.  The remaining (1 - fraction) is cropped equally from
+// both edges of the pan axis, keeping the perpendicular axis full.
 //
-// Tightened from 0.85 → 0.70 in V12.11 Step 3 so the matching
-// 1/0.70 ≈ 1.43× CSS zoom on the live preview is visibly obvious
-// to the operator (matches the V3 mockup's "no playpen / no chair
-// edges — they're not in the buffer" specification).  At 0.85 the
-// 1.18× zoom was technically correct but visually imperceptible;
-// 0.70 makes the source-crop match what the user sees.
+// Apple-pano-style slit scan: each frame contributes a NARROWER-
+// than-frame slit centred on the screen, perpendicular to motion.
+// The clipped-out content (top/bottom in landscape, left/right in
+// portrait — the user-perceived edges along the pan direction) sits
+// behind translucent dim bars in the live preview.  Earlier versions
+// (V12.11 Step 3) clipped the LONG sensor axis (perpendicular to
+// pan in landscape, along pan in portrait) which produced bars on
+// the wrong screen edge in landscape and forced the JS layer to
+// guess orientation.  V12.12 makes the engine itself
+// orientation-aware: clip rows for landscape (canvas Y is pan
+// axis), clip cols for portrait (canvas X is pan axis).
 //
 // First-frame and subsequent-frame branches both reference this
 // constant — DRY-critical because if they ever drift the engine
 // misbehaves (frame 1 placed bigger than frame 2's source ROI).
-static const double kLongSideFractionRect = 0.70;
+static const double kPanAxisFractionRect = 0.70;
 
 // V12.11 Step 4 — feature-based slit alignment via homography.
 //
@@ -364,6 +388,13 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
 {
     auto t0 = std::chrono::steady_clock::now();
     RLISFrameTelemetry *tele = [[RLISFrameTelemetry alloc] init];
+    // V12.12 — set isLandscape on every telemetry up-front so every
+    // return path (early-out trackingPoor, alignment-lost, accept,
+    // skip, reverse, etc.) carries the orientation.  Stays at the
+    // FIRST-FRAME determination after that point.  Pre-first-frame
+    // it's just the default (NO/portrait), which is a safe initial
+    // state for the JS layer to render against.
+    [tele setValue:@(_isLandscape ? YES : NO) forKey:@"isLandscape"];
 
     if (trackingPoor) {
         [tele setValue:@(RLISFrameOutcomeSkippedTrackingPoor) forKey:@"outcome"];
@@ -421,57 +452,73 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
         const double absR01 = std::fabs(R_panToCam_first.at<double>(0, 1));
         const double absR11 = std::fabs(R_panToCam_first.at<double>(1, 1));
         _isLandscape = (absR11 > absR01);
+        // V12.12 — re-stamp the tele with the freshly-detected
+        // isLandscape so the FIRST frame's state event carries the
+        // right value (the up-front set at the top of this method
+        // ran before _isLandscape was computed).
+        [tele setValue:@(_isLandscape ? YES : NO) forKey:@"isLandscape"];
         NSLog(@"[V12.6-orient] engine=firstwins detected isLandscape=%d "
               @"|R[0,1]|=%.4f |R[1,1]|=%.4f (frameRotationDegrees from JS = %ld)",
               (int)_isLandscape, absR01, absR11, (long)_frameRotationDegrees);
 
         if (_useRectilinear) {
-            // V12.8 Variant B first frame: paste the LONG-SIDE-CLIPPED
-            // portion of the raw sensor frame at canvas centre.  Long
-            // side = sensor X (always wide for landscape-mounted iPhone
-            // sensor, regardless of device orientation).  Pan axis =
-            // sensor Y, kept FULL to match user's mental-model drawing
-            // (clipping only on the longer side perpendicular to pan).
+            // V12.12 — orientation-aware clip + engine-internal
+            // canvas allocation.  Pan axis = canvas Y for landscape
+            // (vertical pan), canvas X for portrait (horizontal pan).
+            // Clip is ALONG the pan axis (Apple slit-scan), so each
+            // frame contributes a narrower-than-frame slit centred
+            // perpendicular to motion.
             //
-            // No cylindrical warp.  Canvas pixels are camera-native
-            // rectilinear — straight world lines stay straight.
-            // kLongSideFractionRect lives at file scope (above) so
-            // the first-frame and subsequent-frame branches stay
-            // in sync.
-            int clipW = std::max(1, (int)(frameBGR.cols * kLongSideFractionRect));
-            int clipH = frameBGR.rows;
-            int srcClipX = (frameBGR.cols - clipW) / 2;
-            int srcClipY = 0;
+            //   landscape: clip rows → frame Y trimmed to 70%.
+            //              perpendicular = full cols (sensor X).
+            //   portrait:  clip cols → frame X trimmed to 70%.
+            //              perpendicular = full rows (sensor Y).
+            int clipW, clipH, srcClipX, srcClipY;
+            if (_isLandscape) {
+                clipW = frameBGR.cols;  // perpendicular: full
+                clipH = std::max(1, (int)(frameBGR.rows * kPanAxisFractionRect));
+                srcClipX = 0;
+                srcClipY = (frameBGR.rows - clipH) / 2;
+            } else {
+                clipW = std::max(1, (int)(frameBGR.cols * kPanAxisFractionRect));
+                clipH = frameBGR.rows;
+                srcClipX = (frameBGR.cols - clipW) / 2;
+                srcClipY = 0;
+            }
             cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
 
-            // V12.11 Step C — first-frame placement at canvas EDGE
-            // (matching the start of the user's pan), not canvas
-            // centre.  The Apple-pano UX models the canvas as a
-            // strip the user fills by panning in one direction;
-            // starting at centre wastes half the canvas if the
-            // user pans straight in either direction.
-            //
-            //   landscape device (vertical pan, user pans DOWN):
-            //     first frame at canvas TOP, centred horizontally.
-            //     dstX = (canvas - clipW) / 2, dstY = 0.
-            //
-            //   portrait device (horizontal pan, user pans RIGHT):
-            //     first frame at canvas LEFT, centred vertically.
-            //     dstX = 0, dstY = (canvas - clipH) / 2.
-            //
-            // Pairs with Item C's dynamic canvas dimensioning where
-            // the canvas is sized as [perpAxis × 5000] for landscape
-            // or [5000 × perpAxis] for portrait — so the long axis
-            // (5000) is the pan extent and the perpendicular axis
-            // is just frameDim, leaving no slack for centring.
-            int dstX, dstY;
-            if (_isLandscape) {
-                dstX = (int)(_canvas.cols - clipW) / 2;
-                dstY = 0;
-            } else {
-                dstX = 0;
-                dstY = (int)(_canvas.rows - clipH) / 2;
+            // V12.12 — engine-internal canvas allocation, sized from
+            // detected orientation + actual frame dimensions.  Pan
+            // axis dim = `_canvasPanExtent` (5000 default); perp dim
+            // = matching frame perp dim.  Memory: ~28 MB BGR for
+            // landscape (1920×5000), ~16 MB for portrait (5000×1080).
+            // Allocated only on first frame (canvas is empty after
+            // [reset]).
+            if (_canvas.empty()) {
+                int canvasCols, canvasRows;
+                if (_isLandscape) {
+                    canvasCols = frameBGR.cols;        // perpendicular full
+                    canvasRows = (int)_canvasPanExtent; // pan extent
+                } else {
+                    canvasCols = (int)_canvasPanExtent; // pan extent
+                    canvasRows = frameBGR.rows;        // perpendicular full
+                }
+                _canvas = cv::Mat::zeros(canvasRows, canvasCols, CV_8UC3);
+                _canvasMask = cv::Mat::zeros(canvasRows, canvasCols, CV_8UC1);
+                NSLog(@"[V12.12-canvas] allocated %dx%d (cols x rows) for "
+                      @"isLandscape=%d (pan extent %ld, frame=%dx%d)",
+                      canvasCols, canvasRows, (int)_isLandscape,
+                      (long)_canvasPanExtent, frameBGR.cols, frameBGR.rows);
             }
+
+            // V12.12 — first-frame placement at canvas ORIGIN (0, 0).
+            // With the new engine-internal canvas allocation the
+            // canvas perpendicular dim EXACTLY matches the clipped
+            // frame's perpendicular dim, so there's no centring
+            // offset — both axes are 0.  As the user pans, dstX
+            // (portrait) or dstY (landscape) advances from 0.
+            int dstX = 0;
+            int dstY = 0;
             cv::Rect roi(dstX, dstY, clipW, clipH);
             roi &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
             cv::Rect srcR(0, 0, roi.width, roi.height);
@@ -488,8 +535,10 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
             _accepted = 1;
             [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
             [tele setValue:@(1.0) forKey:@"confidence"];
-            NSLog(@"[V12.11-rect] first frame clipped+pasted at (%d,%d) size %dx%d (clip=%dx%d) isLandscape=%d focal=%.2f canvas=%dx%d",
-                  dstX, dstY, clipW, clipH, srcClipX, srcClipY, (int)_isLandscape, _focalCompose,
+            NSLog(@"[V12.12-rect] first frame placed at (%d,%d) clipped=%dx%d "
+                  @"(srcClip=%d,%d) along-pan-axis isLandscape=%d focal=%.2f canvas=%dx%d",
+                  dstX, dstY, clipW, clipH, srcClipX, srcClipY,
+                  (int)_isLandscape, _focalCompose,
                   _canvas.cols, _canvas.rows);
             return tele;
         }
@@ -531,12 +580,21 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
         // incremental growth — no V12.7 dead-zone where strips
         // entirely overlapped the first frame.
         cv::Mat R_rel = _firstRotationArkit.t() * R_new;
-        // kLongSideFractionRect is the file-scope constant defined
-        // alongside its first-frame counterpart so they stay in sync.
-        int clipW = std::max(1, (int)(frameBGR.cols * kLongSideFractionRect));
-        int clipH = frameBGR.rows;
-        int srcClipX = (frameBGR.cols - clipW) / 2;
-        int srcClipY = 0;
+        // V12.12 — orientation-aware clip, MUST match the first-frame
+        // branch above so subsequent frames have the same shape as
+        // the first frame (otherwise paste positions get inconsistent).
+        int clipW, clipH, srcClipX, srcClipY;
+        if (_isLandscape) {
+            clipW = frameBGR.cols;
+            clipH = std::max(1, (int)(frameBGR.rows * kPanAxisFractionRect));
+            srcClipX = 0;
+            srcClipY = (frameBGR.rows - clipH) / 2;
+        } else {
+            clipW = std::max(1, (int)(frameBGR.cols * kPanAxisFractionRect));
+            clipH = frameBGR.rows;
+            srcClipX = (frameBGR.cols - clipW) / 2;
+            srcClipY = 0;
+        }
         cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
 
         int dstX, dstY;

@@ -1,71 +1,50 @@
 /**
- * PanoramaBandOverlay — V12.11 step A (re-rev of step 1).
+ * PanoramaBandOverlay — V12.12 (re-arch).
  *
  * Floating "band" overlay for the live incremental panorama,
  * matching the V3 mockups the user validated:
  *
- *   • Portrait device → horizontal band, vertically centred,
- *     thumbnail at LEFT, arrow pointing RIGHT.
+ *   • Portrait device  → horizontal band, vertically centred,
+ *                        thumbnail at LEFT, arrow pointing RIGHT.
  *   • Landscape device → vertical band on user's LEFT (full
- *     screen height), thumbnail at user's TOP, arrow pointing
- *     DOWN.
+ *                        screen height), thumbnail at user's TOP,
+ *                        arrow pointing DOWN.
  *
- * Why this is a re-rev of the original step 1:
+ * Why this is V12.12:
  *
- * The first cut positioned the landscape band with naive JS
- * coordinates (`left: 12, top: 50%`) and a max-height cap.
- * That ignored two facts the operator (Ram) caught immediately:
+ *   The earlier band took its orientation from `useDeviceOrientation`
+ *   (a JS accelerometer hook).  That hook is unreliable when iOS
+ *   interface-orientation lock is on — exactly the case here.  The
+ *   engine ALREADY detects orientation correctly from `R_panToCam`
+ *   at first frame (V12.6 fix).  V12.12 plumbs that detection into
+ *   `IncrementalState.isLandscape` and the band reads it from there.
  *
- *   1. The host app is portrait-LOCKED at the iOS level.  JS
- *      layout coords don't rotate with the device.  In landscape
- *      orientation the screen's true edges are mapped to JS
- *      coords as:
+ *   This means: the band is right whenever the engine is right.  No
+ *   second source of truth.
  *
- *         landscape-left  (right edge of phone UP):
- *           user's TOP    = JS-RIGHT
- *           user's BOTTOM = JS-LEFT
- *           user's LEFT   = JS-BOTTOM
- *           user's RIGHT  = JS-TOP
+ * Layout choices:
  *
- *         landscape-right (right edge of phone DOWN):
- *           user's TOP    = JS-LEFT
- *           user's BOTTOM = JS-RIGHT
- *           user's LEFT   = JS-TOP
- *           user's RIGHT  = JS-BOTTOM
+ *   • Landscape: ONE default = landscape-left positioning (per user
+ *     instruction "one default").  The band sits at JS-bottom (full
+ *     JS-width × BAND_THICKNESS), which appears as a vertical strip
+ *     on the user's LEFT when they hold the phone landscape-left
+ *     (camera lens pointing to their right).  Users holding the
+ *     phone landscape-right (rotated 180° from this) will see the
+ *     band on their right edge instead — accepted as the cost of
+ *     a single default.  Most field reps hold landscape-left so
+ *     this is the right default.
  *
- *      So a "vertical strip on the user's LEFT" needs to be
- *      positioned at JS-BOTTOM in landscape-left, JS-TOP in
- *      landscape-right.  Same pattern PanoramaGuidance and
- *      CaptureStatusOverlay use for their bottom-anchored pills.
+ *   • Pre-first-frame: `state` is null, so we render the portrait
+ *     layout as a safe initial guess.  Once the engine emits its
+ *     first state event with `isLandscape`, the band re-renders
+ *     in the correct layout.
  *
- *   2. The mockup wants the landscape band to span the FULL user
- *      height, not be capped at 320 px.  In JS coords that's
- *      "spans full JS-width" (since user's vertical = JS's
- *      horizontal in landscape).
+ * Arrow glyphs picked per orientation rather than rotated:
  *
- * Arrow glyphs are picked per-orientation rather than rotated:
- *
- *   • portrait                 → "→" (points JS-right == user-right)
- *   • portrait-upside-down     → "←" (points JS-left  == user-right after 180° flip)
- *   • landscape-left           → "←" (points JS-left  == user-down)
- *   • landscape-right          → "→" (points JS-right == user-down)
- *
- * Thumbnail placement inside the band:
- *
- *   • portrait                 → JS-left  (= user-left, START of pan)
- *   • portrait-upside-down     → JS-right (= user-left after flip)
- *   • landscape-left           → JS-right (= user-top)
- *   • landscape-right          → JS-left  (= user-top)
- *
- * Behind first-painted-wins, the pano image asset itself is
- * stored in sensor-native landscape pixel order regardless of
- * device orientation.  We render it with no rotation transform —
- * the natural-aspect math drives the thumbnail box dimensions so
- * the image fits proportionally.  This intentionally accepts a
- * small visual quirk in landscape mode (the pano image's pixel-
- * aspect tilts visually compared to the user's perception) in
- * exchange for keeping the rendering pipeline trivial.  We can
- * revisit if it reads poorly in field testing.
+ *   • portrait  → "→" (points JS-right == user-right)
+ *   • landscape → "←" (points JS-left  == user-bottom in landscape-left
+ *                       — that's the user's "down the pan axis"
+ *                       direction)
  */
 
 import React, { useMemo } from 'react';
@@ -75,17 +54,13 @@ import {
   Text,
   View,
   type ViewStyle,
-  type TextStyle,
 } from 'react-native';
 import type { IncrementalState } from '../stitching/incremental';
-import type { DeviceOrientation } from './useDeviceOrientation';
 
 
 export interface PanoramaBandOverlayProps {
   /** Latest engine state.  Pass `useIncrementalStitcher().state`. */
   state: IncrementalState | null;
-  /** Live device orientation.  Pass `useDeviceOrientation()`. */
-  orientation: DeviceOrientation;
 }
 
 
@@ -101,133 +76,77 @@ type Layout = {
   thumb: ViewStyle;
   arrowTrack: ViewStyle;
   arrowGlyph: string;
-  arrowStyle: TextStyle;
 };
 
 
 /**
- * Resolve the JS-coord layout for the band given the current
- * physical device orientation.  The host app is portrait-locked so
- * JS-axes do NOT rotate with the device — we have to map user-
- * perceived edges to JS edges manually (see header comment).
+ * Resolve the JS-coord layout for the band given the engine-detected
+ * orientation.  Two cases:
+ *
+ *   • isLandscape == true (engine sees landscape capture) → vertical
+ *     band on user's LEFT.  In the portrait-locked JS coord system
+ *     when device is held landscape-left, user's LEFT = JS-BOTTOM,
+ *     so we anchor the band there.  Inside (row-reverse): thumbnail
+ *     at JS-RIGHT (= user-top), arrow at JS-LEFT (= user-bottom).
+ *
+ *   • isLandscape == false (engine sees portrait capture, OR no
+ *     state yet) → horizontal band, vertically centred at top:40%.
+ *     Inside (row): thumbnail at JS-LEFT (= user-left, start of
+ *     horizontal pan), arrow at JS-RIGHT (= user-right).
  */
-function layoutForOrientation(orientation: DeviceOrientation): Layout {
-  switch (orientation) {
-    case 'landscape-left':
-      // landscape-left: user-LEFT == JS-BOTTOM.  Band spans full
-      // JS-width (= full user-height) anchored at JS-bottom, with
-      // BAND_THICKNESS in JS-vertical direction.
-      // Inside (row layout): thumbnail at JS-RIGHT (= user-top),
-      // arrow track filling toward JS-LEFT (= user-bottom).
-      return {
-        band: {
-          position: 'absolute',
-          left: 0,
-          right: 0,
-          bottom: 12,
-          height: BAND_THICKNESS,
-          flexDirection: 'row-reverse',
-          alignItems: 'center',
-          paddingHorizontal: BAND_PADDING,
-          paddingVertical: BAND_PADDING,
-          backgroundColor: 'rgba(0, 0, 0, 0.55)',
-        },
-        thumb: { width: THUMB_INNER, height: THUMB_INNER },
-        arrowTrack: {
-          flex: 1, alignItems: 'center', justifyContent: 'center',
-          paddingHorizontal: BAND_PADDING,
-        },
-        arrowGlyph: '←', // user perceives JS-left as their "down"
-        arrowStyle: {},
-      };
-
-    case 'landscape-right':
-      // landscape-right: user-LEFT == JS-TOP.  Symmetric mirror
-      // of landscape-left.  flexDirection: 'row' puts thumbnail
-      // at JS-LEFT (= user-top), arrow track to JS-RIGHT
-      // (= user-bottom).
-      return {
-        band: {
-          position: 'absolute',
-          left: 0,
-          right: 0,
-          top: 12,
-          height: BAND_THICKNESS,
-          flexDirection: 'row',
-          alignItems: 'center',
-          paddingHorizontal: BAND_PADDING,
-          paddingVertical: BAND_PADDING,
-          backgroundColor: 'rgba(0, 0, 0, 0.55)',
-        },
-        thumb: { width: THUMB_INNER, height: THUMB_INNER },
-        arrowTrack: {
-          flex: 1, alignItems: 'center', justifyContent: 'center',
-          paddingHorizontal: BAND_PADDING,
-        },
-        arrowGlyph: '→', // user perceives JS-right as their "down"
-        arrowStyle: {},
-      };
-
-    case 'portrait-upside-down':
-      // Symmetric flip of portrait — band horizontal, but anchored
-      // at the BOTTOM of JS so it appears at the TOP to the user
-      // (who has the phone upside-down).  Thumbnail at JS-RIGHT.
-      return {
-        band: {
-          position: 'absolute',
-          alignSelf: 'center',
-          bottom: '40%',
-          flexDirection: 'row-reverse',
-          alignItems: 'center',
-          paddingHorizontal: BAND_PADDING,
-          paddingVertical: BAND_PADDING,
-          backgroundColor: 'rgba(0, 0, 0, 0.55)',
-          maxWidth: PORTRAIT_BAND_MAX_LEN,
-          height: BAND_THICKNESS,
-        },
-        thumb: { width: THUMB_INNER, height: THUMB_INNER },
-        arrowTrack: {
-          flex: 1, alignItems: 'center', justifyContent: 'center',
-          paddingHorizontal: BAND_PADDING,
-        },
-        arrowGlyph: '←',
-        arrowStyle: {},
-      };
-
-    case 'portrait':
-    default:
-      // Portrait, the canonical case.  Band horizontal, vertically
-      // centred, thumbnail at JS-LEFT (= user-left), arrow points
-      // JS-right (= user-right).  Capped width so it doesn't
-      // dominate the camera viewport.
-      return {
-        band: {
-          position: 'absolute',
-          alignSelf: 'center',
-          top: '40%',
-          flexDirection: 'row',
-          alignItems: 'center',
-          paddingHorizontal: BAND_PADDING,
-          paddingVertical: BAND_PADDING,
-          backgroundColor: 'rgba(0, 0, 0, 0.55)',
-          maxWidth: PORTRAIT_BAND_MAX_LEN,
-          height: BAND_THICKNESS,
-        },
-        thumb: { width: THUMB_INNER, height: THUMB_INNER },
-        arrowTrack: {
-          flex: 1, alignItems: 'center', justifyContent: 'center',
-          paddingHorizontal: BAND_PADDING,
-        },
-        arrowGlyph: '→',
-        arrowStyle: {},
-      };
+function layoutForOrientation(isLandscape: boolean): Layout {
+  if (isLandscape) {
+    return {
+      band: {
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        bottom: 12,
+        height: BAND_THICKNESS,
+        flexDirection: 'row-reverse',
+        alignItems: 'center',
+        paddingHorizontal: BAND_PADDING,
+        paddingVertical: BAND_PADDING,
+        backgroundColor: 'rgba(0, 0, 0, 0.55)',
+      },
+      thumb: { width: THUMB_INNER, height: THUMB_INNER },
+      arrowTrack: {
+        flex: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingHorizontal: BAND_PADDING,
+      },
+      arrowGlyph: '←', // user perceives JS-left as their "down" in landscape-left
+    };
   }
+  // Portrait.
+  return {
+    band: {
+      position: 'absolute',
+      alignSelf: 'center',
+      top: '40%',
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: BAND_PADDING,
+      paddingVertical: BAND_PADDING,
+      backgroundColor: 'rgba(0, 0, 0, 0.55)',
+      maxWidth: PORTRAIT_BAND_MAX_LEN,
+      height: BAND_THICKNESS,
+    },
+    thumb: { width: THUMB_INNER, height: THUMB_INNER },
+    arrowTrack: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: BAND_PADDING,
+    },
+    arrowGlyph: '→',
+  };
 }
 
 
 export function PanoramaBandOverlay({
   state,
-  orientation,
 }: PanoramaBandOverlayProps): React.JSX.Element | null {
   // Cache-bust the panorama URI.  Same pattern as
   // IncrementalStitcherView — the native side rotates filenames
@@ -238,9 +157,13 @@ export function PanoramaBandOverlay({
     return `file://${state.panoramaPath}?v=${state.acceptedCount}`;
   }, [state?.panoramaPath, state?.acceptedCount]);
 
+  // Read orientation from engine state.  Defaults to false
+  // (portrait layout) before first frame is captured.
+  const isLandscape = state?.isLandscape ?? false;
+
   const layout = useMemo(
-    () => layoutForOrientation(orientation),
-    [orientation],
+    () => layoutForOrientation(isLandscape),
+    [isLandscape],
   );
 
   return (
@@ -261,9 +184,7 @@ export function PanoramaBandOverlay({
         ) : null}
       </View>
       <View style={layout.arrowTrack}>
-        <Text style={[styles.arrowGlyph, layout.arrowStyle]}>
-          {layout.arrowGlyph}
-        </Text>
+        <Text style={styles.arrowGlyph}>{layout.arrowGlyph}</Text>
       </View>
     </View>
   );
@@ -271,11 +192,11 @@ export function PanoramaBandOverlay({
 
 
 const styles = StyleSheet.create({
-  // Properties common to every orientation — borderRadius is
-  // applied uniformly so the band reads as a single capsule no
-  // matter which edge it's anchored to.  The orientation-specific
-  // layout (positioning, flex direction, dimensions) is supplied
-  // by `layoutForOrientation`.
+  // Properties common to every layout — borderRadius is applied
+  // uniformly so the band reads as a single capsule no matter
+  // which edge it's anchored to.  The orientation-specific layout
+  // (positioning, flex direction, dimensions) is supplied by
+  // `layoutForOrientation`.
   bandBase: {
     borderRadius: 12,
   },

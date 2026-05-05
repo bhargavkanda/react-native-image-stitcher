@@ -89,6 +89,20 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
 @property (nonatomic, readonly) double confidence;
 /// Wall-clock milliseconds the addFrame call took (end-to-end).
 @property (nonatomic, readonly) double processingMs;
+/// V12.12 — physical device orientation as detected by the engine
+/// from `R_panToCam` at first frame.  TRUE for landscape capture
+/// (vertical pan), FALSE for portrait capture (horizontal pan).
+/// Stays at the FIRST-FRAME determination for the rest of the
+/// capture (orientation can't physically change without restarting
+/// pano).  Defaults to FALSE (portrait) before first frame.
+///
+/// JS side reads this from `IncrementalState.isLandscape` to drive
+/// orientation-aware UI (band overlay, dim bars).  This is the
+/// single source of truth for orientation across the SDK + host —
+/// the V12.6 fix established that JS-side orientation hooks are
+/// unreliable under iOS interface-orientation lock; pose detection
+/// is.
+@property (nonatomic, readonly) BOOL isLandscape;
 @end
 
 

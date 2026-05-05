@@ -71,6 +71,7 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
 @property (nonatomic, readwrite) double inlierRatio;
 @property (nonatomic, readwrite) double confidence;
 @property (nonatomic, readwrite) double processingMs;
+@property (nonatomic, readwrite) BOOL isLandscape;
 @end
 
 @implementation RLISFrameTelemetry

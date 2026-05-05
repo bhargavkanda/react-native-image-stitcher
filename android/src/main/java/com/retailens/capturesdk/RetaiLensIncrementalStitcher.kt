@@ -540,6 +540,11 @@ internal data class FrameTelemetry(
     val inlierRatio: Double,
     val confidence: Double,
     val processingMs: Double,
+    /** V12.12 — engine-detected orientation.  Mirrors iOS'
+     *  `RLISFrameTelemetry.isLandscape`.  TRUE for landscape capture
+     *  (vertical pan), FALSE for portrait (horizontal pan).  Stays
+     *  at the FIRST-FRAME determination thereafter. */
+    val isLandscape: Boolean = false,
 )
 
 

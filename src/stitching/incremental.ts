@@ -69,6 +69,25 @@ export interface IncrementalState {
   overlapPercent: number;
   /** Wall-clock ms the most recent addPixelBuffer call took. */
   processingMs: number;
+  /**
+   * V12.12 — engine-detected physical orientation, set from
+   * `R_panToCam` at first frame.  TRUE for landscape capture
+   * (vertical pan), FALSE for portrait (horizontal pan).  Stays
+   * at the FIRST-FRAME determination thereafter.
+   *
+   * **This is the single source of truth for orientation across
+   * the SDK + host.**  JS-side hooks (e.g. `useDeviceOrientation`,
+   * `useWindowDimensions`) are unreliable when iOS interface-
+   * orientation lock is on; pose-derived detection is.  UI
+   * components that need to know orientation (band overlay, dim
+   * bars, pan guide) MUST consume `state.isLandscape` rather
+   * than re-detecting.
+   *
+   * Defaults to `false` before the first frame is accepted (no
+   * pose to detect from yet).  Hosts can fall back to a JS hook
+   * for the brief pre-capture preview if needed.
+   */
+  isLandscape: boolean;
 }
 
 

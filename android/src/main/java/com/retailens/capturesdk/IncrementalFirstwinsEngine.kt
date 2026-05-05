@@ -86,8 +86,25 @@ internal class IncrementalFirstwinsEngine(
     /// apps, so the previous version silently dropped every snapshot.
     val snapshotCacheDir: String,
 ) {
-    private val canvas: Mat = Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC3)
-    private val canvasMask: Mat = Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC1)
+    // V12.12 — canvas allocation:
+    //   • RECTILINEAR engine: deferred to first-frame branch so the
+    //     canvas can be sized from the pose-detected orientation.
+    //     Empty Mats here; the first-frame branch checks
+    //     `canvas.empty()` and allocates.
+    //   • CYLINDRICAL engines (hybrid, firstwins): use the
+    //     constructor's square 5000×5000 canvas as before — they
+    //     compute paste positions in cylinder coords and don't
+    //     benefit from orientation-aware sizing.
+    private var canvas: Mat = if (useRectilinear) {
+        Mat()
+    } else {
+        Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC3)
+    }
+    private var canvasMask: Mat = if (useRectilinear) {
+        Mat()
+    } else {
+        Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC1)
+    }
 
     // V12.x state — mirrors iOS layout.
     private var firstRotationArkit: Mat = Mat()
@@ -130,15 +147,19 @@ internal class IncrementalFirstwinsEngine(
     /// V12.4 slit-scan + long-side clip fractions.  Same values as iOS.
     private val kPanStripFraction: Double = 0.70
     private val kLongSideFraction: Double = 0.85
-    /// V12.11 Step 3: rectilinear long-side clip fraction.  No pan-
-    /// axis clip — only the long (perpendicular-to-pan) side is
-    /// trimmed.
-    ///
-    /// Tightened from 0.85 → 0.70 so the matching 1/0.70 ≈ 1.43×
-    /// CSS zoom on the live preview is visibly obvious.  Matches
-    /// iOS' file-scope kLongSideFractionRect — the two engines must
-    /// stay in sync for cross-platform parity.
-    private val kLongSideFractionRect: Double = 0.70
+    /// V12.12 — fraction of the PAN AXIS (not the long side) the
+    /// rectilinear engine retains per frame.  Apple-pano slit-scan:
+    /// each frame contributes a narrower-than-frame slit perpendicular
+    /// to motion.  See iOS `kPanAxisFractionRect` for the full
+    /// rationale.  Both platforms MUST stay in sync.
+    private val kPanAxisFractionRect: Double = 0.70
+
+    /// V12.12 — pan-axis canvas extent, sized at first-frame
+    /// allocation alongside the orientation-detected perpendicular
+    /// dim.  Default 5000 (max of the constructor canvas dims) —
+    /// kept as max-of-args for backwards compatibility with hosts
+    /// that pass canvasWidth/Height hints.
+    private val canvasPanExtent: Int = max(canvasWidth, canvasHeight)
 
     /**
      * Same shape as the V7 IncrementalEngine.addFrameAtPath() so the
@@ -167,6 +188,7 @@ internal class IncrementalFirstwinsEngine(
             return FrameTelemetry(
                 FrameOutcome.SkippedTrackingPoor, -1.0, 0, yaw, pitch,
                 msSince(t0),
+                isLandscape = isLandscape,
             )
         }
         val cleaned = path.removePrefix("file://")
@@ -175,6 +197,7 @@ internal class IncrementalFirstwinsEngine(
             return FrameTelemetry(
                 FrameOutcome.RejectedAlignmentLost, -1.0, 0, yaw, pitch,
                 msSince(t0),
+                isLandscape = isLandscape,
             )
         }
         val frameBGR = downsampleToCompose(srcRaw)
@@ -211,6 +234,7 @@ internal class IncrementalFirstwinsEngine(
                 return FrameTelemetry(
                     FrameOutcome.RejectedAlignmentLost, -1.0, 0, yaw, pitch,
                     msSince(t0),
+                isLandscape = isLandscape,
                 )
             }
             val pzx = fwx / horiz
@@ -234,32 +258,59 @@ internal class IncrementalFirstwinsEngine(
             )
 
             if (useRectilinear) {
-                // V12.11 Step C — first-frame placement at canvas EDGE
-                // (matching the start of the user's pan), not canvas
-                // centre.  Mirrors iOS' kLongSideFractionRect logic
-                // and first-frame placement in OpenCVSlitScanStitcher.mm.
-                //
-                //   landscape device (vertical pan, user pans DOWN):
-                //     first frame at canvas TOP, centred horizontally.
-                //   portrait device (horizontal pan, user pans RIGHT):
-                //     first frame at canvas LEFT, centred vertically.
-                val clipW = max(1, (frameBGR.cols() * kLongSideFractionRect).toInt())
-                val clipH = frameBGR.rows()
-                val srcClipX = (frameBGR.cols() - clipW) / 2
-                val srcClipY = 0
+                // V12.12 — orientation-aware clip + engine-internal
+                // canvas allocation.  Pan axis = canvas Y for
+                // landscape (vertical pan), canvas X for portrait
+                // (horizontal pan).  Clip is ALONG the pan axis.
+                // Mirrors iOS' OpenCVSlitScanStitcher.mm exactly.
+                val clipW: Int
+                val clipH: Int
+                val srcClipX: Int
+                val srcClipY: Int
+                if (isLandscape) {
+                    clipW = frameBGR.cols()
+                    clipH = max(1, (frameBGR.rows() * kPanAxisFractionRect).toInt())
+                    srcClipX = 0
+                    srcClipY = (frameBGR.rows() - clipH) / 2
+                } else {
+                    clipW = max(1, (frameBGR.cols() * kPanAxisFractionRect).toInt())
+                    clipH = frameBGR.rows()
+                    srcClipX = (frameBGR.cols() - clipW) / 2
+                    srcClipY = 0
+                }
                 val frameClipped = Mat(frameBGR, Rect(srcClipX, srcClipY, clipW, clipH))
 
-                val dstX: Int
-                val dstY: Int
-                if (isLandscape) {
-                    dstX = (canvasWidth - clipW) / 2
-                    dstY = 0
-                } else {
-                    dstX = 0
-                    dstY = (canvasHeight - clipH) / 2
+                // V12.12 — engine-internal canvas allocation, sized
+                // from detected orientation + actual frame dims.
+                if (canvas.empty()) {
+                    val newCanvasCols: Int
+                    val newCanvasRows: Int
+                    if (isLandscape) {
+                        newCanvasCols = frameBGR.cols()      // perp full
+                        newCanvasRows = canvasPanExtent      // pan extent
+                    } else {
+                        newCanvasCols = canvasPanExtent      // pan extent
+                        newCanvasRows = frameBGR.rows()      // perp full
+                    }
+                    canvas = Mat.zeros(newCanvasRows, newCanvasCols, CvType.CV_8UC3)
+                    canvasMask = Mat.zeros(newCanvasRows, newCanvasCols, CvType.CV_8UC1)
+                    Log.i(
+                        "V12.12-canvas",
+                        "allocated ${newCanvasCols}x${newCanvasRows} (cols x rows) for " +
+                            "isLandscape=$isLandscape (pan extent $canvasPanExtent, " +
+                            "frame=${frameBGR.cols()}x${frameBGR.rows()})",
+                    )
                 }
+
+                // V12.12 — first-frame placement at canvas ORIGIN
+                // (0,0).  Canvas perpendicular dim now matches
+                // clipped frame perpendicular dim, so no centring
+                // offset.  As user pans, dstX (portrait) or dstY
+                // (landscape) advances from 0.
+                val dstX = 0
+                val dstY = 0
                 val roi = Rect(dstX, dstY, clipW, clipH).intersection(
-                    Rect(0, 0, canvasWidth, canvasHeight)
+                    Rect(0, 0, canvas.cols(), canvas.rows())
                 )
                 val srcR = Rect(0, 0, roi.width, roi.height)
                 Mat(frameClipped, srcR).copyTo(Mat(canvas, roi))
@@ -278,15 +329,17 @@ internal class IncrementalFirstwinsEngine(
                 hasFirstFrame = true
                 acceptedCountAtomic.set(1); cachedBoundingRect = null
                 Log.i(
-                    "V12.11-rect",
-                    "first frame clipped+pasted at ($dstX,$dstY) " +
-                        "clipped=${clipW}x${clipH} isLandscape=$isLandscape " +
-                        "focal=${"%.2f".format(focalCompose)} canvas=${canvasWidth}x${canvasHeight}",
+                    "V12.12-rect",
+                    "first frame placed at ($dstX,$dstY) clipped=${clipW}x${clipH} " +
+                        "(srcClip=$srcClipX,$srcClipY) along-pan-axis " +
+                        "isLandscape=$isLandscape focal=${"%.2f".format(focalCompose)} " +
+                        "canvas=${canvas.cols()}x${canvas.rows()}",
                 )
                 frameClipped.release()
                 frameBGR.release()
                 return FrameTelemetry(
                     FrameOutcome.AcceptedHigh, 1.0, 0, yaw, pitch, msSince(t0),
+                isLandscape = isLandscape,
                 )
             }
 
@@ -299,6 +352,7 @@ internal class IncrementalFirstwinsEngine(
                 return FrameTelemetry(
                     FrameOutcome.RejectedAlignmentLost, -1.0, 0, yaw, pitch,
                     msSince(t0),
+                isLandscape = isLandscape,
                 )
             }
             val dstX = (canvasWidth - warped.cols()) / 2
@@ -318,6 +372,7 @@ internal class IncrementalFirstwinsEngine(
             frameBGR.release()
             return FrameTelemetry(
                 FrameOutcome.AcceptedHigh, 1.0, 0, yaw, pitch, msSince(t0),
+                isLandscape = isLandscape,
             )
         }
 
@@ -337,10 +392,25 @@ internal class IncrementalFirstwinsEngine(
                 firstT.release()
             }
 
-            val clipW = max(1, (frameBGR.cols() * kLongSideFractionRect).toInt())
-            val clipH = frameBGR.rows()
-            val srcClipX = (frameBGR.cols() - clipW) / 2
-            val srcClipY = 0
+            // V12.12 — orientation-aware clip, MUST match the
+            // first-frame branch above so subsequent frames have the
+            // same shape as the first frame (otherwise paste positions
+            // get inconsistent).
+            val clipW: Int
+            val clipH: Int
+            val srcClipX: Int
+            val srcClipY: Int
+            if (isLandscape) {
+                clipW = frameBGR.cols()
+                clipH = max(1, (frameBGR.rows() * kPanAxisFractionRect).toInt())
+                srcClipX = 0
+                srcClipY = (frameBGR.rows() - clipH) / 2
+            } else {
+                clipW = max(1, (frameBGR.cols() * kPanAxisFractionRect).toInt())
+                clipH = frameBGR.rows()
+                srcClipX = (frameBGR.cols() - clipW) / 2
+                srcClipY = 0
+            }
             val frameClipped = Mat(frameBGR, Rect(srcClipX, srcClipY, clipW, clipH))
 
             var dstX: Int
@@ -376,7 +446,7 @@ internal class IncrementalFirstwinsEngine(
             var tentativeClippedHom: Rect? = null
             run {
                 val tentativeRoi = Rect(dstX, dstY, clipW, clipH).intersection(
-                    Rect(0, 0, canvasWidth, canvasHeight)
+                    Rect(0, 0, canvas.cols(), canvas.rows())
                 )
                 if (tentativeRoi.width >= 200 && tentativeRoi.height >= 200) {
                     val canvasOverlap = Mat(canvas, tentativeRoi)
@@ -442,6 +512,7 @@ internal class IncrementalFirstwinsEngine(
                     return FrameTelemetry(
                         FrameOutcome.RejectedReverseDirection, -1.0, 0, yaw, pitch,
                         msSince(t0),
+                isLandscape = isLandscape,
                     )
                 }
             } else {
@@ -457,6 +528,7 @@ internal class IncrementalFirstwinsEngine(
                     return FrameTelemetry(
                         FrameOutcome.RejectedReverseDirection, -1.0, 0, yaw, pitch,
                         msSince(t0),
+                isLandscape = isLandscape,
                     )
                 }
             }
@@ -504,7 +576,7 @@ internal class IncrementalFirstwinsEngine(
                     (kotlin.math.ceil(xs.max() - xs.min())).toInt(),
                     (kotlin.math.ceil(ys.max() - ys.min())).toInt(),
                 )
-                val bbox = bboxRaw.intersection(Rect(0, 0, canvasWidth, canvasHeight))
+                val bbox = bboxRaw.intersection(Rect(0, 0, canvas.cols(), canvas.rows()))
                 if (bbox.width > 0 && bbox.height > 0) {
                     val T3 = Mat(3, 3, CvType.CV_64F).apply {
                         put(0, 0, 1.0, 0.0, -bbox.x.toDouble())
@@ -553,6 +625,7 @@ internal class IncrementalFirstwinsEngine(
                         outcome,
                         if (outcome == FrameOutcome.AcceptedHigh) 1.0 else 0.0,
                         0, yaw, pitch, msSince(t0),
+                isLandscape = isLandscape,
                     )
                 }
                 Hframe.release()
@@ -562,7 +635,7 @@ internal class IncrementalFirstwinsEngine(
 
             // Pose-only fallback paste (when H invalid or bbox empty).
             val dstRoi = Rect(dstX, dstY, clipW, clipH).intersection(
-                Rect(0, 0, canvasWidth, canvasHeight)
+                Rect(0, 0, canvas.cols(), canvas.rows())
             )
             if (dstRoi.width <= 0 || dstRoi.height <= 0) {
                 frameClipped.release()
@@ -570,6 +643,7 @@ internal class IncrementalFirstwinsEngine(
                 return FrameTelemetry(
                     FrameOutcome.RejectedAlignmentLost, -1.0, 0, yaw, pitch,
                     msSince(t0),
+                isLandscape = isLandscape,
                 )
             }
             val srcRoi = Rect(
@@ -592,6 +666,7 @@ internal class IncrementalFirstwinsEngine(
                 frameBGR.release()
                 return FrameTelemetry(
                     FrameOutcome.AcceptedHigh, 1.0, 0, yaw, pitch, msSince(t0),
+                isLandscape = isLandscape,
                 )
             }
             srcRegion.release(); canvasRoi.release(); maskRoi.release()
@@ -599,6 +674,7 @@ internal class IncrementalFirstwinsEngine(
             frameBGR.release()
             return FrameTelemetry(
                 FrameOutcome.SkippedTooClose, 0.0, 0, yaw, pitch, msSince(t0),
+                isLandscape = isLandscape,
             )
         }
 
@@ -610,6 +686,7 @@ internal class IncrementalFirstwinsEngine(
             frameBGR.release()
             return FrameTelemetry(
                 FrameOutcome.RejectedAlignmentLost, -1.0, 0, yaw, pitch, msSince(t0),
+                isLandscape = isLandscape,
             )
         }
         val newCornerCanvas = Point(
@@ -619,11 +696,12 @@ internal class IncrementalFirstwinsEngine(
         val dstRoi = Rect(
             newCornerCanvas.x.toInt(), newCornerCanvas.y.toInt(),
             warped.cols(), warped.rows(),
-        ).intersection(Rect(0, 0, canvasWidth, canvasHeight))
+        ).intersection(Rect(0, 0, canvas.cols(), canvas.rows()))
         if (dstRoi.width <= 0 || dstRoi.height <= 0) {
             warped.release(); warpedMask.release(); frameBGR.release()
             return FrameTelemetry(
                 FrameOutcome.RejectedAlignmentLost, -1.0, 0, yaw, pitch, msSince(t0),
+                isLandscape = isLandscape,
             )
         }
         val srcRoi = Rect(
@@ -652,6 +730,7 @@ internal class IncrementalFirstwinsEngine(
         return FrameTelemetry(
             if (newPixels > 0) FrameOutcome.AcceptedHigh else FrameOutcome.SkippedTooClose,
             if (newPixels > 0) 1.0 else 0.0, 0, yaw, pitch, msSince(t0),
+                isLandscape = isLandscape,
         )
     }
 
@@ -1013,6 +1092,9 @@ internal class IncrementalFirstwinsEngine(
         map.putDouble("confidence", telemetry.confidence)
         map.putDouble("overlapPercent", telemetry.overlapPercent)
         map.putDouble("processingMs", telemetry.processingMs)
+        // V12.12 — engine-detected orientation, plumbed through to JS
+        // for the band overlay + dim bar UI.
+        map.putBoolean("isLandscape", telemetry.isLandscape)
         return map
     }
 
