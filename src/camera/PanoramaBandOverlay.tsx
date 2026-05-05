@@ -69,11 +69,18 @@ const BAND_PADDING = 6;
 const BAND_THICKNESS = 64;        // user-perceived "thinness" of the band
 const PORTRAIT_BAND_MAX_LEN = 320; // cap on the band's pan-axis length in portrait
 const THUMB_INNER = BAND_THICKNESS - BAND_PADDING * 2;
+// V12.13 — cap on how big the thumb can grow along the pan axis
+// before the arrow gets squeezed.  ~60 % of a typical phone's
+// short JS dim leaves clearly visible arrow track on either side.
+const THUMB_MAX_PAN_LEN = 240;
 
 
 type Layout = {
   band: ViewStyle;
-  thumb: ViewStyle;
+  // V12.13: thumb dims are no longer in Layout — they're computed
+  // separately from the pano natural aspect so the thumb can grow
+  // along the band's pan axis as the user pans.  See `thumbPanLen`
+  // in the component body.
   arrowTrack: ViewStyle;
   arrowGlyph: string;
 };
@@ -109,7 +116,6 @@ function layoutForOrientation(isLandscape: boolean): Layout {
         paddingVertical: BAND_PADDING,
         backgroundColor: 'rgba(0, 0, 0, 0.55)',
       },
-      thumb: { width: THUMB_INNER, height: THUMB_INNER },
       arrowTrack: {
         flex: 1,
         alignItems: 'center',
@@ -133,7 +139,6 @@ function layoutForOrientation(isLandscape: boolean): Layout {
       maxWidth: PORTRAIT_BAND_MAX_LEN,
       height: BAND_THICKNESS,
     },
-    thumb: { width: THUMB_INNER, height: THUMB_INNER },
     arrowTrack: {
       flex: 1,
       alignItems: 'center',
@@ -166,9 +171,42 @@ export function PanoramaBandOverlay({
     [isLandscape],
   );
 
+  // V12.13 — thumb pan-axis dim grows as the pano grows.
+  //
+  // Both portrait and landscape bands are JS-horizontal strips
+  // (full JS-width × BAND_THICKNESS tall).  In both cases the
+  // thumb sits at one JS-horizontal end and the arrow track
+  // fills the other end.  As the pano elongates along its pan
+  // axis (state.width grows in portrait, state.height grows in
+  // landscape), we want the thumb's JS-WIDTH to grow so the user
+  // visually sees the thumb extending toward the arrow — matching
+  // their pan direction.
+  //
+  // panAxisRatio: how much longer the pano is along its pan axis
+  // vs its perpendicular axis.  At first frame both axes are the
+  // sensor compose dim, so the ratio is < 1; we floor to 1.0 so
+  // the initial thumb is square.  As the user pans, the ratio
+  // climbs above 1 and the thumb elongates.  Capped at
+  // THUMB_MAX_PAN_LEN so the arrow always has a visible run.
+  const thumbPanLen = useMemo(() => {
+    if (!state?.width || !state?.height) return THUMB_INNER;
+    const panAxisRatio = isLandscape
+      ? state.height / state.width   // landscape: pano grows in height
+      : state.width / state.height;  // portrait : pano grows in width
+    const naturalLen = THUMB_INNER * Math.max(1, panAxisRatio);
+    return Math.min(THUMB_MAX_PAN_LEN, naturalLen);
+  }, [state?.width, state?.height, isLandscape]);
+
+  // Thumb dimensions: pan-axis dim grows with the pano, perp-axis
+  // dim stays at THUMB_INNER (matches band thickness).
+  const thumbStyle: ViewStyle = {
+    width: thumbPanLen,
+    height: THUMB_INNER,
+  };
+
   return (
     <View pointerEvents="none" style={[styles.bandBase, layout.band]}>
-      <View style={[styles.thumbBox, layout.thumb]}>
+      <View style={[styles.thumbBox, thumbStyle]}>
         {imageUri ? (
           <Image
             key={state?.acceptedCount ?? 0}
