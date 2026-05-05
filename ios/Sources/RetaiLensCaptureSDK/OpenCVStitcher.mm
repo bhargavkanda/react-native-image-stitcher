@@ -911,19 +911,69 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
           "[stitch-bc] step8a: BATCH warp loop (N=%lu)",
           (unsigned long)N);
-      for (size_t i = 0; i < N; i++) {
+      // V12.14.6 — defensive measures around the warp loop.  Same
+      // recycled-mmap pattern that hit cv::resize in V12.14.3
+      // logs (Ram's 4th-capture crash).  cv::PlaneWarper::warp
+      // uses cv::remap internally which has its own cached state
+      // keyed on input addresses.
+      try {
+        for (size_t i = 0; i < N; i++) {
+          os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+              "[stitch-bc] step8b: warp frame %zu (%dx%d, data=%p)", i,
+              composeFrames[i].cols, composeFrames[i].rows,
+              (void *)composeFrames[i].data);
+          // Per-iteration @autoreleasepool drains any ObjC
+          // autoreleased temps cv::remap holds onto.
+          @autoreleasepool {
+            cv::Mat K;
+            cameras[i].K().convertTo(K, CV_32F);
+
+            // V12.14.6 — clone input to break any recycled-mmap
+            // link to prior captures' allocations.  cv::Mat::clone
+            // forces a fresh memcpy into a freshly-allocated buffer.
+            cv::Mat freshInput = composeFrames[i].clone();
+
+            // V12.14.6 — pre-allocate output Mats via warpRoi() so
+            // cv::remap doesn't need to call create() internally
+            // (the suspect path that crashed in cv::resize too).
+            cv::Rect roi = warper->warpRoi(
+                freshInput.size(), K, cameras[i].R);
+            imagesWarped[i].create(roi.size(), freshInput.type());
+            masksWarped[i].create(roi.size(), CV_8U);
+
+            cv::Mat mask(freshInput.size(), CV_8U, cv::Scalar(255));
+            corners[i] = warper->warp(
+                freshInput, K, cameras[i].R, cv::INTER_LINEAR,
+                cv::BORDER_CONSTANT, imagesWarped[i]);
+            warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
+                         cv::BORDER_CONSTANT, masksWarped[i]);
+            sizes[i] = imagesWarped[i].size();
+          }
+        }
+      } catch (const cv::Exception &e) {
         os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-            "[stitch-bc] step8b: warp frame %zu (%dx%d)", i,
-            composeFrames[i].cols, composeFrames[i].rows);
-        cv::Mat K;
-        cameras[i].K().convertTo(K, CV_32F);
-        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
-        corners[i] = warper->warp(
-            composeFrames[i], K, cameras[i].R, cv::INTER_LINEAR,
-            cv::BORDER_CONSTANT, imagesWarped[i]);
-        warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
-                     cv::BORDER_CONSTANT, masksWarped[i]);
-        sizes[i] = imagesWarped[i].size();
+            "[stitch-bc] step8b: warper->warp threw cv::Exception: %s",
+            e.what());
+        if (error) {
+          *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                       code:1008
+                                   userInfo:@{
+            NSLocalizedDescriptionKey:
+              [NSString stringWithFormat:@"Warp stage failed: %s", e.what()],
+          }];
+        }
+        return nil;
+      } catch (...) {
+        os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+            "[stitch-bc] step8b: warper->warp threw unknown exception");
+        if (error) {
+          *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                       code:1008
+                                   userInfo:@{
+            NSLocalizedDescriptionKey: @"Warp stage failed (unknown).",
+          }];
+        }
+        return nil;
       }
       os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
           "[stitch-bc] step8c: warp loop done");
