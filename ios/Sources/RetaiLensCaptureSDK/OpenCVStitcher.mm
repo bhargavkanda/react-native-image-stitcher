@@ -723,8 +723,14 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       // below.
       warperCreator = cv::makePtr<cv::PlaneWarper>();
     }
+    // V12.14.3 — FAULT breadcrumbs around each sub-step within
+    // step7 → step7.5.  Ram's V12.14.2 trace had the crash here
+    // (last visible log was step7 enter; step7.5 never fired).
+    // These pinpoint which sub-step actually crashes.
     cv::Ptr<cv::detail::RotationWarper> warper =
         warperCreator->create(warpedScale);
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+        "[stitch-bc] step7a: warper created (warpedScale=%.2f)", warpedScale);
 
     // Step 7.5: build composeFrames at COMPOSE_MP from full-res
     // input.  Warp + blend run at this resolution to produce the
@@ -733,19 +739,61 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // ensures the two big arrays never coexist at peak.
     for (auto &wf : workFrames) wf.release();
     workFrames.clear();
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+        "[stitch-bc] step7b: workFrames released, building composeFrames "
+        "(N=%lu, compose_scale=%.3f)",
+        (unsigned long)frames.size(), compose_scale);
 
+    // V12.14.3 — wrap the resize loop in try/catch so a bad input
+    // Mat doesn't terminate the process.  Per-frame resize on
+    // bogus/corrupt cv::Mat data has historically been a SIGSEGV
+    // source on consecutive captures.
     std::vector<cv::Mat> composeFrames;
     composeFrames.reserve(frames.size());
-    for (const auto &f : frames) {
-      cv::Mat scaled;
-      if (std::abs(compose_scale - 1.0) > 1e-3) {
-        cv::resize(f, scaled, cv::Size(), compose_scale, compose_scale,
-                   cv::INTER_AREA);
-      } else {
-        scaled = f.clone();
+    try {
+      for (size_t i = 0; i < frames.size(); i++) {
+        const auto &f = frames[i];
+        os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+            "[stitch-bc] step7c: resize frame %zu (%dx%d, channels=%d, "
+            "data=%p)", i, f.cols, f.rows, f.channels(), (void *)f.data);
+        cv::Mat scaled;
+        if (std::abs(compose_scale - 1.0) > 1e-3) {
+          cv::resize(f, scaled, cv::Size(), compose_scale, compose_scale,
+                     cv::INTER_AREA);
+        } else {
+          scaled = f.clone();
+        }
+        composeFrames.push_back(scaled);
       }
-      composeFrames.push_back(scaled);
+    } catch (const cv::Exception &e) {
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step7c: cv::resize threw cv::Exception: %s", e.what());
+      if (error) {
+        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                     code:1007
+                                 userInfo:@{
+          NSLocalizedDescriptionKey:
+            [NSString stringWithFormat:@"Compose-stage resize failed: %s", e.what()],
+        }];
+      }
+      return nil;
+    } catch (...) {
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+          "[stitch-bc] step7c: cv::resize threw unknown exception");
+      if (error) {
+        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                     code:1007
+                                 userInfo:@{
+          NSLocalizedDescriptionKey:
+            @"Compose-stage resize failed (unknown).",
+        }];
+      }
+      return nil;
     }
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+        "[stitch-bc] step7d: composeFrames built (N=%lu)",
+        (unsigned long)composeFrames.size());
+
     // Release full-res `frames` now that composeFrames has its
     // own resized copies.  Frees ~50-100 MB for a typical 8-frame
     // stitch — a critical part of staying under iOS' jetsam
@@ -754,6 +802,8 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // confirmed those were OOM kills, not OpenCV bugs).
     for (auto &f : frames) f.release();
     frames.clear();
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+        "[stitch-bc] step7e: full-res frames released");
     NSLog(@"[RetaiLensStitcher] step7.5: composeFrames %d×%d "
           "(compose_scale=%.3f)",
           composeFrames.empty() ? 0 : composeFrames[0].cols,
