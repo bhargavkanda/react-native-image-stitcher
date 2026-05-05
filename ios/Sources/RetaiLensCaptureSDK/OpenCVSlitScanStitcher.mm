@@ -401,11 +401,23 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
     // Anything below mid falls through to caller's pose-only path
     // even though we still return the delta (caller may log it).
     constexpr int    kHighInliers = 50;
-    constexpr int    kMidInliers  = 20;
+    // V12.14.11 — tighten MED tier thresholds to reject overly-distorted
+    // homographies that the looser V12.14 bands accepted.  Ram's trace
+    // showed det=1.144 accepted as MED → 14% area expansion → real
+    // geometric mismatch (rotation+scale, not pure translation), but
+    // MED tier strips rotation/scale and applies translation only →
+    // visible chevrons + banding in the panorama (Issue 1).
+    //
+    // V12.14:    MED required inliers ≥ 20, det ∈ [0.85, 1.15]  — too loose.
+    // V12.14.11: MED requires inliers ≥ 30, det ∈ [0.92, 1.08] — rejects
+    //            ~80% of the "geometric mismatch but kinda-translates"
+    //            cases that produced visible artifacts, falls through
+    //            to LOW (pose-only paste) instead.
+    constexpr int    kMidInliers  = 30;
     constexpr double kHighDetLow  = 0.95;
     constexpr double kHighDetHigh = 1.05;
-    constexpr double kMidDetLow   = 0.85;
-    constexpr double kMidDetHigh  = 1.15;
+    constexpr double kMidDetLow   = 0.92;
+    constexpr double kMidDetHigh  = 1.08;
     int tier = kHomogTierLow;
     if (inliers >= kHighInliers && det >= kHighDetLow && det <= kHighDetHigh) {
         tier = kHomogTierHigh;
@@ -754,6 +766,23 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
                 constexpr int kMaxPerpDeltaPx = 30;
                 if (delta.x > kMaxPerpDeltaPx)  delta.x =  kMaxPerpDeltaPx;
                 if (delta.x < -kMaxPerpDeltaPx) delta.x = -kMaxPerpDeltaPx;
+
+                // V12.14.11 — MED-tier-only pan-axis clamp to bound
+                // homography over-correction (the "frames pull back"
+                // pattern in Ram's trace).  When pose-only is well-
+                // tracked (HIGH tier with full warp) we trust the
+                // homography fully.  When we fall back to MED tier
+                // (translation-only), the homography may pull the
+                // frame back to align with the dominant overlap
+                // region, even if pose says we panned further.  Cap
+                // at 60 px (symmetric) — covers normal fast-pan
+                // corrections but rejects pathological pull-backs
+                // like the -30 to -78 swings observed pre-fix.
+                if (tier == kHomogTierMedium) {
+                    constexpr int kMaxMedPanDeltaPx = 60;
+                    if (delta.y >  kMaxMedPanDeltaPx) delta.y =  kMaxMedPanDeltaPx;
+                    if (delta.y < -kMaxMedPanDeltaPx) delta.y = -kMaxMedPanDeltaPx;
+                }
 
                 // Apply translation delta when tier ≥ MEDIUM.  Tier
                 // LOW means even the translation isn't trustworthy
