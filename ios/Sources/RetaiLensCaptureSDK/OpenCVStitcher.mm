@@ -354,6 +354,16 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     NSLog(@"[RetaiLensStitcher] step1: features (work scale %d×%d)",
           workFrames.empty() ? 0 : workFrames[0].cols,
           workFrames.empty() ? 0 : workFrames[0].rows);
+    // V12.14 Commit B — paired fprintf(stderr) breadcrumb.  iOS'
+    // Console.app rate-limits NSLog under high-frequency emission
+    // (Ram's V12.13 trace had loadFrames 4-7 + step1 missing while
+    // loadFrames 0-3 + step2 made it through).  Stderr is not rate-
+    // limited and flushes promptly, so the LAST stderr line before
+    // the crash reliably pinpoints the failing stage.
+    fprintf(stderr, "[stitch-bc] step1 enter (work %d×%d, %lu frames)\n",
+            workFrames.empty() ? 0 : workFrames[0].cols,
+            workFrames.empty() ? 0 : workFrames[0].rows,
+            (unsigned long)workFrames.size());
     // Step 1: features.  800 ORB features is enough for matching
     // ~50% overlap between adjacent frames; 1500 was overkill and
     // doubled the matching work for marginal quality gain.
@@ -363,7 +373,10 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       cv::detail::computeImageFeatures(featuresFinder, workFrames[i],
                                         imgFeatures[i]);
       imgFeatures[i].img_idx = (int)i;
+      fprintf(stderr, "[stitch-bc] step1 frame %zu: %lu features\n",
+              i, (unsigned long)imgFeatures[i].keypoints.size());
     }
+    fprintf(stderr, "[stitch-bc] step1 done\n");
 
     // Step 2: pairwise matching.  match_conf=0.65 matches what
     // cv::Stitcher::PANORAMA uses internally — looser values
@@ -371,10 +384,13 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // contradictory low-confidence matches that don't fit a
     // consistent rotation model.  Stick with the proven default.
     NSLog(@"[RetaiLensStitcher] step2: matching");
+    fprintf(stderr, "[stitch-bc] step2 enter: BestOf2Nearest matching\n");
     cv::detail::BestOf2NearestMatcher matcher(false, 0.65f);
     std::vector<cv::detail::MatchesInfo> pairwise;
     matcher(imgFeatures, pairwise);
     matcher.collectGarbage();
+    fprintf(stderr, "[stitch-bc] step2 done: %lu pairwise entries\n",
+            (unsigned long)pairwise.size());
 
     // Step 3: leave-best-of-2 keeps only well-connected images at
     // confThresh=1.0 — also matches cv::Stitcher::PANORAMA's
@@ -406,6 +422,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     }
 
     NSLog(@"[RetaiLensStitcher] step3: leave-biggest");
+    fprintf(stderr, "[stitch-bc] step3 enter: leave-biggest\n");
     // leaveBiggestComponent mutates imgFeatures and pairwise IN
     // PLACE to drop frames that aren't part of the biggest
     // connected component.  We MUST also subset workFrames to
@@ -447,6 +464,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
     // Step 4: estimator
     NSLog(@"[RetaiLensStitcher] step4: estimator");
+    fprintf(stderr, "[stitch-bc] step4 enter: estimator\n");
     cv::detail::HomographyBasedEstimator estimator;
     std::vector<cv::detail::CameraParams> cameras;
     if (!estimator(imgFeatures, pairwise, cameras)) {
@@ -480,6 +498,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
           _t - t0).count();
       NSLog(@"[RetaiLensStitcher] step5: bundle adjustment (t+%.0fms)", _ms);
+      fprintf(stderr, "[stitch-bc] step5 enter: bundle adjustment\n");
     }
     auto adjuster = cv::makePtr<cv::detail::BundleAdjusterRay>();
     adjuster->setConfThresh(1.0f);
@@ -526,6 +545,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
           _t - t0).count();
       NSLog(@"[RetaiLensStitcher] step5.5: wave correction (BA done, t+%.0fms)", _ms);
+      fprintf(stderr, "[stitch-bc] step5.5 enter: wave correction\n");
     }
     std::vector<cv::Mat> rmats;
     rmats.reserve(cameras.size());
@@ -589,6 +609,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // with affine BA which we just established was the wrong
     // estimator for our motion).
     NSLog(@"[RetaiLensStitcher] step7: warper (%s)", warperType.UTF8String);
+    fprintf(stderr, "[stitch-bc] step7 enter: warper=%s\n", warperType.UTF8String);
     // Plane / Cylindrical / Spherical — runtime-selectable so
     // the host's settings UI can A/B test which projection looks
     // best for the operator's actual gesture (close-up planar
