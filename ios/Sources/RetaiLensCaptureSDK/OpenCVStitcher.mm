@@ -756,14 +756,49 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
             "[stitch-bc] step7c: resize frame %zu (%dx%d, channels=%d, "
             "data=%p)", i, f.cols, f.rows, f.channels(), (void *)f.data);
-        cv::Mat scaled;
-        if (std::abs(compose_scale - 1.0) > 1e-3) {
-          cv::resize(f, scaled, cv::Size(), compose_scale, compose_scale,
-                     cv::INTER_AREA);
-        } else {
-          scaled = f.clone();
+
+        // V12.14.4 — defensive validation.  Skip frames with NULL
+        // data ptr, zero dimensions, or non-positive total — they
+        // would SIGSEGV inside cv::resize regardless of interp mode.
+        if (f.data == nullptr || f.empty() || f.total() == 0
+            || f.cols <= 0 || f.rows <= 0) {
+          os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+              "[stitch-bc] step7c: SKIPPING frame %zu — invalid Mat "
+              "(data=%p empty=%d total=%zu)",
+              i, (void *)f.data, (int)f.empty(), (size_t)f.total());
+          continue;
         }
-        composeFrames.push_back(scaled);
+
+        // V12.14.4 — wrap each iteration in @autoreleasepool so any
+        // ObjC temporaries cv::resize might autorelease internally
+        // get drained between frames.  Doesn't hurt.
+        @autoreleasepool {
+          cv::Mat scaled;
+          if (std::abs(compose_scale - 1.0) > 1e-3) {
+            // V12.14.4 — pre-allocate `scaled` with explicit dims
+            // BEFORE cv::resize so the internal `dst.create()` is a
+            // no-op.  Skips the allocator state corruption Ram's
+            // V12.14.3 trace pointed at: cv::resize crashed on the
+            // 5th consecutive resize when iOS recycled mmap regions
+            // from a prior capture, suggesting cv::resize's internal
+            // allocator path was hitting stale state.
+            //
+            // Plus: switch INTER_AREA → INTER_LINEAR.  INTER_AREA
+            // uses precomputed cached interpolation tables that
+            // appear to be the corrupted state.  INTER_LINEAR uses
+            // a different code path (no cached table).  Slightly
+            // less crisp at extreme downscales but for our 0.538×
+            // shelf-image downscale the visual difference is
+            // negligible — and stability >> sharpness.
+            int newCols = (int)std::round(f.cols * compose_scale);
+            int newRows = (int)std::round(f.rows * compose_scale);
+            scaled.create(newRows, newCols, f.type());
+            cv::resize(f, scaled, scaled.size(), 0, 0, cv::INTER_LINEAR);
+          } else {
+            scaled = f.clone();
+          }
+          composeFrames.push_back(scaled);
+        }
       }
     } catch (const cv::Exception &e) {
       os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
