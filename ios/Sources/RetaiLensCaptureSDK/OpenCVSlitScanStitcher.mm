@@ -445,12 +445,11 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
     [tele setValue:@(_isLandscape ? YES : NO) forKey:@"isLandscape"];
     // V12.14.9 — paintedExtent + panExtent on EVERY return path so
     // the JS band overlay can size the thumb proportionally on every
-    // state event (not just snapshot frames).  paintedExtent is the
-    // running max along the pan axis (canvas Y in landscape, canvas X
-    // in portrait+horizontal).  Pre-first-frame both _maxDstX and
-    // _maxDstY are 0 so paintedExtent=0 → fillRatio=0 → minimum-size
-    // thumb.  panExtent is constant for the capture lifetime.
-    [tele setValue:@(_isLandscape ? _maxDstY : _maxDstX) forKey:@"paintedExtent"];
+    // state event (not just snapshot frames).
+    // V12.14.10: unified — both supported modes use _maxDstY as the
+    // pan-axis leading edge.  Pre-first-frame _maxDstY=0 so
+    // paintedExtent=0 → fillRatio=0 → minimum-size thumb.
+    [tele setValue:@(_maxDstY) forKey:@"paintedExtent"];
     [tele setValue:@(_canvasPanExtent) forKey:@"panExtent"];
 
     if (trackingPoor) {
@@ -519,50 +518,54 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
               (int)_isLandscape, absR01, absR11, (long)_frameRotationDegrees);
 
         if (_useRectilinear) {
-            // V12.12 — orientation-aware clip + engine-internal
-            // canvas allocation.  Pan axis = canvas Y for landscape
-            // (vertical pan), canvas X for portrait (horizontal pan).
-            // Clip is ALONG the pan axis (Apple slit-scan), so each
-            // frame contributes a narrower-than-frame slit centred
-            // perpendicular to motion.
+            // V12.14.10 — UNIFIED clip for both supported modes.
+            // Per the two-mode spec (project memory `ar-stitching-two-modes`),
+            // the supported modes are landscape+vertical-pan and
+            // portrait+horizontal-pan.  Both have pan rotation around
+            // CAM +X (the phone's long edge / sensor X direction):
             //
-            //   landscape: clip rows → frame Y trimmed to 70%.
-            //              perpendicular = full cols (sensor X).
-            //   portrait:  clip cols → frame X trimmed to 70%.
-            //              perpendicular = full rows (sensor Y).
+            //   - landscape vertical pan: phone long edge = user
+            //     horizontal; rotation around it = tilt up/down.
+            //   - portrait horizontal pan: phone long edge = user
+            //     vertical; rotation around it = pan sideways.
+            //
+            // Both rotations move sensor content along sensor Y.
+            // So clip ALONG sensor Y (clip rows to 70% = ~756 px),
+            // perp = full sensor X (1920) — IDENTICAL in both modes.
+            //
+            // Pre-V12.14.10 the portrait branch wrongly clipped sensor X
+            // (assumed cam +Y rotation = portrait+vertical-pan, an
+            // unsupported mode).  That mis-wiring was the root cause of
+            // Issue 2 ("sideways portrait → first frame only output").
             int clipW, clipH, srcClipX, srcClipY;
-            if (_isLandscape) {
-                clipW = frameBGR.cols;  // perpendicular: full
-                clipH = std::max(1, (int)(frameBGR.rows * kPanAxisFractionRect));
-                srcClipX = 0;
-                srcClipY = (frameBGR.rows - clipH) / 2;
-            } else {
-                clipW = std::max(1, (int)(frameBGR.cols * kPanAxisFractionRect));
-                clipH = frameBGR.rows;
-                srcClipX = (frameBGR.cols - clipW) / 2;
-                srcClipY = 0;
-            }
+            clipW = frameBGR.cols;  // perpendicular: full sensor X (1920)
+            clipH = std::max(1, (int)(frameBGR.rows * kPanAxisFractionRect));
+            srcClipX = 0;
+            srcClipY = (frameBGR.rows - clipH) / 2;
             cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
 
-            // V12.12 — engine-internal canvas allocation, sized from
-            // detected orientation + actual frame dimensions.  Pan
-            // axis dim = `_canvasPanExtent` (5000 default); perp dim
-            // = matching frame perp dim.  Memory: ~28 MB BGR for
-            // landscape (1920×5000), ~16 MB for portrait (5000×1080).
-            // Allocated only on first frame (canvas is empty after
-            // [reset]).
+            // V12.14.10 — UNIFIED canvas allocation.  Both supported
+            // modes pan along canvas Y (mirrors sensor Y motion).
+            // Canvas: 1920 cols × 5000 rows = 1920w × 5000h.
+            // Memory: ~28 MB BGR.
+            //
+            // For portrait+horizontal-pan, the saved JPEG must be in
+            // user-perspective WIDE horizontal strip orientation
+            // (~5000w × 1920h).  Rotation 90° applied at snapshot /
+            // finalize time (see writeOutToPath) — keeps the runtime
+            // engine simple, single rotation per output rather than
+            // per-frame paste rotations.
+            //
+            // Pre-V12.14.10 the portrait canvas was 5000×1080 (perp =
+            // sensor Y, wrong) — caused frames to never advance dstX
+            // because the engine's pose projection was on a different
+            // axis than the actual pan direction.
             if (_canvas.empty()) {
-                int canvasCols, canvasRows;
-                if (_isLandscape) {
-                    canvasCols = frameBGR.cols;        // perpendicular full
-                    canvasRows = (int)_canvasPanExtent; // pan extent
-                } else {
-                    canvasCols = (int)_canvasPanExtent; // pan extent
-                    canvasRows = frameBGR.rows;        // perpendicular full
-                }
+                int canvasCols = frameBGR.cols;        // perp = sensor X = 1920
+                int canvasRows = (int)_canvasPanExtent; // pan = 5000
                 _canvas = cv::Mat::zeros(canvasRows, canvasCols, CV_8UC3);
                 _canvasMask = cv::Mat::zeros(canvasRows, canvasCols, CV_8UC1);
-                NSLog(@"[V12.12-canvas] allocated %dx%d (cols x rows) for "
+                NSLog(@"[V12.14.10-canvas] allocated %dx%d (cols x rows) for "
                       @"isLandscape=%d (pan extent %ld, frame=%dx%d)",
                       canvasCols, canvasRows, (int)_isLandscape,
                       (long)_canvasPanExtent, frameBGR.cols, frameBGR.rows);
@@ -597,10 +600,9 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
             // branch below is V12.2 legacy).  Use the slit's pan-axis
             // size so the band thumb shows non-zero progress on the
             // very first frame.
-            {
-                const int panSliceExtent = _isLandscape ? clipH : clipW;
-                [tele setValue:@(panSliceExtent) forKey:@"paintedExtent"];
-            }
+            // V12.14.10: unified — both supported modes use clipH as
+            // the slit's pan-axis extent.
+            [tele setValue:@(clipH) forKey:@"paintedExtent"];
             NSLog(@"[V12.12-rect] first frame placed at (%d,%d) clipped=%dx%d "
                   @"(srcClip=%d,%d) along-pan-axis isLandscape=%d focal=%.2f canvas=%dx%d",
                   dstX, dstY, clipW, clipH, srcClipX, srcClipY,
@@ -655,39 +657,32 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
         // incremental growth — no V12.7 dead-zone where strips
         // entirely overlapped the first frame.
         cv::Mat R_rel = _firstRotationArkit.t() * R_new;
-        // V12.12 — orientation-aware clip, MUST match the first-frame
-        // branch above so subsequent frames have the same shape as
-        // the first frame (otherwise paste positions get inconsistent).
+        // V12.14.10 — UNIFIED clip for both supported modes (see
+        // first-frame branch comment).  Both pan around cam +X →
+        // sensor content moves along sensor Y → clip sensor Y to
+        // 70%, full sensor X.
         int clipW, clipH, srcClipX, srcClipY;
-        if (_isLandscape) {
-            clipW = frameBGR.cols;
-            clipH = std::max(1, (int)(frameBGR.rows * kPanAxisFractionRect));
-            srcClipX = 0;
-            srcClipY = (frameBGR.rows - clipH) / 2;
-        } else {
-            clipW = std::max(1, (int)(frameBGR.cols * kPanAxisFractionRect));
-            clipH = frameBGR.rows;
-            srcClipX = (frameBGR.cols - clipW) / 2;
-            srcClipY = 0;
-        }
+        clipW = frameBGR.cols;
+        clipH = std::max(1, (int)(frameBGR.rows * kPanAxisFractionRect));
+        srcClipX = 0;
+        srcClipY = (frameBGR.rows - clipH) / 2;
         cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
 
-        int dstX, dstY;
-        double alpha;
-        if (_isLandscape) {
-            // Vertical pan around cam +X axis.  alpha > 0 = look up
-            // (verified by R_x convention: +α rotates cam-Z toward cam+Y).
-            alpha = std::atan2(R_rel.at<double>(2, 1), R_rel.at<double>(1, 1));
-            dstX = _firstFrameDstX;
-            // Look up → content shifts UP in canvas (smaller Y).
-            dstY = _firstFrameDstY - (int)std::round(alpha * _focalCompose);
-        } else {
-            // Horizontal pan around cam +Y axis.
-            alpha = std::atan2(R_rel.at<double>(0, 2), R_rel.at<double>(0, 0));
-            // Look right → content shifts RIGHT in canvas (larger X).
-            dstX = _firstFrameDstX + (int)std::round(alpha * _focalCompose);
-            dstY = _firstFrameDstY;
-        }
+        // V12.14.10 — UNIFIED pose projection.  Both supported modes
+        // have pan rotation around cam +X axis.  alpha > 0 means the
+        // camera rotated such that sensor content moved DOWN (cam-Z
+        // toward cam+Y in OpenCV right-down-forward convention) →
+        // dstY in canvas advances NEGATIVE (content shifts UP / to
+        // smaller Y), matching the existing landscape paste convention.
+        //
+        // For portrait+horizontal-pan the user perceives this as
+        // "look right" or "look left" depending on hold direction;
+        // the canvas-Y growth still represents pan progress, and
+        // the canvas-rotated saved JPEG (writeOutToPath) maps that
+        // progress to the user-perspective horizontal direction.
+        double alpha = std::atan2(R_rel.at<double>(2, 1), R_rel.at<double>(1, 1));
+        int dstX = _firstFrameDstX;
+        int dstY = _firstFrameDstY - (int)std::round(alpha * _focalCompose);
 
         // V12.11 Step 4 — feature-based slit alignment via homography.
         //
@@ -749,22 +744,16 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
                                                     &candidateH,
                                                     &tier);
 
-                // V12.14 — clamp the perpendicular-axis delta.  In
-                // landscape (vertical pan) the engine paste ONLY
-                // moves dstY; |delta_x| > kMaxPerpDeltaPx is camera-
-                // shake noise / homography lock-onto-wrong-feature
-                // (Ram's V12.13 logs showed delta_x swinging from
-                // -78 → +15 between consecutive frames during a
-                // pure vertical pan).  Reject the perp component
-                // beyond the cap.  Symmetric for portrait.
+                // V12.14 — clamp the perpendicular-axis delta.
+                // V12.14.10 — UNIFIED for both supported modes.
+                // Both modes paste advances along canvas Y (pan axis)
+                // only; canvas X is the perpendicular axis (sensor X
+                // = phone's long edge in both modes).  Clamp delta.x
+                // to filter out camera-shake noise and homography
+                // lock-onto-wrong-feature artifacts.
                 constexpr int kMaxPerpDeltaPx = 30;
-                if (_isLandscape) {
-                    if (delta.x > kMaxPerpDeltaPx)  delta.x =  kMaxPerpDeltaPx;
-                    if (delta.x < -kMaxPerpDeltaPx) delta.x = -kMaxPerpDeltaPx;
-                } else {
-                    if (delta.y > kMaxPerpDeltaPx)  delta.y =  kMaxPerpDeltaPx;
-                    if (delta.y < -kMaxPerpDeltaPx) delta.y = -kMaxPerpDeltaPx;
-                }
+                if (delta.x > kMaxPerpDeltaPx)  delta.x =  kMaxPerpDeltaPx;
+                if (delta.x < -kMaxPerpDeltaPx) delta.x = -kMaxPerpDeltaPx;
 
                 // Apply translation delta when tier ≥ MEDIUM.  Tier
                 // LOW means even the translation isn't trustworthy
@@ -808,47 +797,27 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
         //
         // Threshold: 150 px ≈ 4° of pan at the typical iPhone focal —
         // comfortably above normal alignment-correction wobble.
+        // V12.14.10 — UNIFIED running-max for both supported modes.
+        // Both pan along canvas Y, so _maxDstY is the leading-edge
+        // tracker in both.  _maxDstX stays at 0 (perp axis static).
+        // Reverse-direction detection: when dstY regresses
+        // > kReverseStopPx (150 px ≈ 4° at iPhone focal), auto-stop
+        // the engine — operator has clearly reversed pan direction.
         constexpr int kReverseStopPx = 150;
-        if (_isLandscape) {
-            if (dstY > _maxDstY) {
-                _maxDstY = dstY;
-            } else if (dstY < _maxDstY - kReverseStopPx) {
-                NSLog(@"[V12.11-reverse] landscape stop: dstY=%d max=%d "
-                      "(regressed %d px)",
-                      dstY, _maxDstY, _maxDstY - dstY);
-                [tele setValue:@(RLISFrameOutcomeRejectedReverseDirection) forKey:@"outcome"];
-                return tele;
-            }
-        } else {
-            if (dstX > _maxDstX) {
-                _maxDstX = dstX;
-            } else if (dstX < _maxDstX - kReverseStopPx) {
-                NSLog(@"[V12.11-reverse] portrait stop: dstX=%d max=%d "
-                      "(regressed %d px)",
-                      dstX, _maxDstX, _maxDstX - dstX);
-                [tele setValue:@(RLISFrameOutcomeRejectedReverseDirection) forKey:@"outcome"];
-                return tele;
-            }
+        if (dstY > _maxDstY) {
+            _maxDstY = dstY;
+        } else if (dstY < _maxDstY - kReverseStopPx) {
+            NSLog(@"[V12.11-reverse] %s stop: dstY=%d max=%d (regressed %d px)",
+                  _isLandscape ? "landscape" : "portrait",
+                  dstY, _maxDstY, _maxDstY - dstY);
+            [tele setValue:@(RLISFrameOutcomeRejectedReverseDirection) forKey:@"outcome"];
+            return tele;
         }
         // V12.14.9 — re-stamp paintedExtent on the tele AFTER the
-        // running-max update so the JS state for THIS frame reflects
-        // this frame's contribution to the pano (not the previous
-        // frame's max).  Without this re-stamp the band thumb grows
-        // one frame behind the actual paint.
-        //
-        // paintedExtent = leading-edge of the latest slit + the slit's
-        // pan-axis extent = trailing-edge of the slit on the pan
-        // axis.  This is the actual filled extent of the canvas
-        // along the pan axis.  Pre-V12.14.10 (portrait branch wired
-        // for portrait+vertical-pan), clip pan-axis extent is `clipW`
-        // for portrait, `clipH` for landscape.  V12.14.10 rewire
-        // makes both modes use `clipH` (sensor Y as pan axis in
-        // both supported modes); update accordingly when that lands.
-        {
-            const int panSliceExtent = _isLandscape ? clipH : clipW;
-            const int panLeadingEdge = _isLandscape ? _maxDstY : _maxDstX;
-            [tele setValue:@(panLeadingEdge + panSliceExtent) forKey:@"paintedExtent"];
-        }
+        // running-max update so JS state reflects THIS frame's
+        // contribution.  V12.14.10: unified — both modes use _maxDstY
+        // and clipH (sensor Y as pan axis).
+        [tele setValue:@(_maxDstY + clipH) forKey:@"paintedExtent"];
 
         // V12.11.1 (Item E) — full warpPerspective paste when a
         // valid homography was found.  Captures rotation + scale +
@@ -1312,10 +1281,32 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
     }
     cv::Mat cropped = _canvas(bbox).clone();
 
-    // V11 Gap #14: panorama-frame canvas is gravity-aligned by
-    // construction.  No output rotation needed.  See v9 engine for
-    // the full explanation.
-    cv::Mat out = cropped;
+    // V12.14.10 — orientation-aware output rotation.
+    //
+    // The engine's canvas is in sensor-Y-as-pan-axis orientation in
+    // both supported modes (1920w × 5000h, dstY grows with pan).
+    // For LANDSCAPE+vertical-pan that's the user-natural output:
+    // 1920 wide × Y tall → wide horizontal strip when displayed in
+    // the portrait-locked app UI (matches what the user saw in
+    // their landscape view).
+    //
+    // For PORTRAIT+horizontal-pan the canvas is the same shape
+    // (1920w × Yh) but the user EXPECTS a wide horizontal strip
+    // showing their horizontal pan extent.  Rotate 90° CCW so
+    // the saved JPEG is Y wide × 1920 tall — wide strip in
+    // portrait UI.
+    //
+    // ROTATE_90_COUNTERCLOCKWISE: result rows = src cols (1920),
+    // result cols = src rows (Y).  Sign may need flipping to
+    // _CLOCKWISE depending on which "horizontal" direction the
+    // user perceives as "forward" — iterate after first device
+    // test.
+    cv::Mat out;
+    if (_isLandscape) {
+        out = cropped;
+    } else {
+        cv::rotate(cropped, out, cv::ROTATE_90_COUNTERCLOCKWISE);
+    }
 
     if (applyExposureComp && !out.empty()) {
         cv::Mat lab;
