@@ -578,15 +578,57 @@ static const double kPanAxisFractionRect = 0.70;
         // > kReverseStopPx (150 px ≈ 4° at iPhone focal), auto-stop
         // the engine — operator has clearly reversed pan direction.
         constexpr int kReverseStopPx = 150;
-        if (dstY > _maxDstY) {
-            _maxDstY = dstY;
-        } else if (dstY < _maxDstY - kReverseStopPx) {
+        if (dstY < _maxDstY - kReverseStopPx) {
             NSLog(@"[V12.11-reverse] %s stop: dstY=%d max=%d (regressed %d px)",
                   _isLandscape ? "landscape" : "portrait",
                   dstY, _maxDstY, _maxDstY - dstY);
             [tele setValue:@(RLISFrameOutcomeRejectedReverseDirection) forKey:@"outcome"];
             return tele;
         }
+
+        // V13.0b — minimum-Δ accept gate.  Slow handheld pans
+        // currently produce 1–6 px slivers per accept (Ram's
+        // V13.0a.4 trace showed ~2–3 px typical), creating ~270
+        // zig-zag boundaries in 663 px of pan growth — the high-
+        // frequency wobble pattern the eye reads as "compressed
+        // vertical features" / TV-stand-looks-shorter.
+        //
+        // Throttle accepts to require at least kMinAcceptDeltaPx
+        // of pan-axis advance from the last accepted frame.  Per-
+        // accept sliver becomes ~50 px tall instead of ~2 px,
+        // dropping zig-zag boundary count ~25× over the same pan
+        // extent.  Same wobble magnitude per boundary, but spread
+        // across far fewer transitions = visually much smoother.
+        //
+        // Mirrors how production camera apps gate slit-scan accepts
+        // by motion-distance threshold (iOS Camera Pano, Samsung
+        // native pano).  No new outcome enum — reuse SkippedTooClose
+        // since the gate's intent matches: "frame too close to
+        // previous accept to contribute meaningfully".
+        constexpr int kMinAcceptDeltaPx = 50;
+        const int panDelta = dstY - _maxDstY;
+        if (panDelta < kMinAcceptDeltaPx) {
+            // V13.0b — diagnostic gate-fire log (throttled).
+            if (_engineCallCounter % 5 == 0) {
+                os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                    "[V13.0b-gate] #%ld dstY=%d _maxDstY=%d panDelta=%d "
+                    "< kMinAcceptDeltaPx=%d -> SkippedTooClose",
+                    (long)_engineCallCounter, dstY, _maxDstY, panDelta,
+                    kMinAcceptDeltaPx);
+            }
+            [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
+            auto t1 = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration_cast<std::chrono::microseconds>(
+                t1 - t0).count() / 1000.0;
+            [tele setValue:@(ms) forKey:@"processingMs"];
+            return tele;
+        }
+
+        // Past the gate: this frame WILL be accepted.  Update
+        // running max so the next frame's gate is measured from
+        // this position.
+        _maxDstY = dstY;
+
         // V12.14.9 — re-stamp paintedExtent on the tele AFTER the
         // running-max update so JS state reflects THIS frame's
         // contribution.  V12.14.10: unified — both modes use _maxDstY
