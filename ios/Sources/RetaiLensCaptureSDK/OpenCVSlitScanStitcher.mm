@@ -508,20 +508,17 @@ static const double kPanAxisFractionRect = 0.70;
         int dstY = _firstFrameDstY - (int)std::round(alpha * _focalCompose);
 
         // V13.0a.1 — diagnostic log #2: pose projection per frame.
-        // Inspecting `alpha_deg` (the rotation around cam +X axis since
-        // first frame) and `dst*` (canvas position the slit will paste
-        // at) lets us check:
-        //   - In portrait+horizontal pan: does alpha_deg grow as the
-        //     user pans sideways?  If always 0 → V12.14.10's cam +X
-        //     unification is wrong for portrait, must revert to cam +Y.
-        //   - In landscape+vertical pan: how much dstY grows per frame
-        //     vs how much pan was actually applied physically.
-        //     Undercount = focal calibration error → height-shrink
-        //     artifact in V13.0a captures.
-        NSLog(@"[V13.0a-pose] alpha_deg=%.3f focal=%.1f dstX=%d dstY=%d "
-              @"(firstDstY=%d, ΔdstY_from_first=%d)",
-              alpha * 180.0 / M_PI, _focalCompose, dstX, dstY,
-              _firstFrameDstY, dstY - _firstFrameDstY);
+        // V13.0a.3 — THROTTLED: NSLog rate-limit drops bursts > ~10/s,
+        // and per-frame logs at 50 fps fire 50/s.  Use the shared
+        // _engineCallCounter (above) to log every 5th frame, matching
+        // the [V13.0a-call] cadence.  At ~10 lines/s this survives
+        // Console.app's burst budget.
+        if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
+            NSLog(@"[V13.0a-pose] #%ld alpha_deg=%.3f focal=%.1f dstX=%d dstY=%d "
+                  @"(firstDstY=%d, ΔdstY_from_first=%d)",
+                  (long)_engineCallCounter, alpha * 180.0 / M_PI, _focalCompose,
+                  dstX, dstY, _firstFrameDstY, dstY - _firstFrameDstY);
+        }
 
         // V13.0a — REVERTED V12.11 Step 4 + V12.11.1 Item E + V12.14
         // homography refinement.  Restored pose-only paste.
@@ -614,22 +611,20 @@ static const double kPanAxisFractionRect = 0.70;
             maskRoi.setTo(255, emptyMask);
             _accepted += 1;
             // V13.0a.1 — diagnostic log #3: per-accept slit width +
-            // dst delta from previous accepted frame.  This is the
-            // smoking-gun signal for height-shrinking: if the slit
-            // width (newPixels / clipW per row) is too small relative
-            // to expected per-frame pan, focal calibration is off.
-            //
-            // Expected newPixels ≈ clipW × ΔdstY where ΔdstY is the
-            // pose-projected pan delta.  Shrunken pano = ΔdstY too
-            // small per frame.  Approximate the per-row slit width:
-            //   slitWidthPx ≈ newPixels / clipW  (assuming first-
-            //   painted-wins took only the trailing-edge sliver)
+            // dst delta from previous accepted frame.  Shrunken pano
+            // signal: if slit width per row is consistently small
+            // relative to expected per-frame pan, focal calibration
+            // is off.
+            // V13.0a.3 — THROTTLED to every 5th call (NSLog burst
+            // rate-limit).
             const int slitWidthPx = clipW > 0 ? (newPixels / clipW) : 0;
             const int dstYDeltaFromMax = dstY - _maxDstY;
-            NSLog(@"[V13.0a-paint] dstY=%d (Δfrom_max=%+d) clipH=%d "
-                  @"newPixels=%d slitWidth≈%dpx _accepted=%ld",
-                  dstY, dstYDeltaFromMax, clipH, newPixels, slitWidthPx,
-                  (long)_accepted);
+            if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
+                NSLog(@"[V13.0a-paint] #%ld dstY=%d (Δfrom_max=%+d) clipH=%d "
+                      @"newPixels=%d slitWidth≈%dpx _accepted=%ld",
+                      (long)_engineCallCounter, dstY, dstYDeltaFromMax,
+                      clipH, newPixels, slitWidthPx, (long)_accepted);
+            }
             [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
         } else {
             [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
