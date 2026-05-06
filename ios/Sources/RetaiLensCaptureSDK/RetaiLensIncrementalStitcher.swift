@@ -203,6 +203,18 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// Internal counter used with snapshotEveryNAccepts.
     private var acceptsSinceSnapshot: Int = 0
 
+    /// V13.0c.1 — diagnostic state: first-frame world translation.
+    /// Used to compute Δtranslation per frame for the
+    /// [V13.0c-trans] log.  We need to know how much users actually
+    /// translate during typical captures before committing to the
+    /// per-pixel depth correction architecture (V13.0c.2-.4).
+    /// Reset on each new capture (handled in `start()` below).
+    private var firstFrameTx: Double = 0
+    private var firstFrameTy: Double = 0
+    private var firstFrameTz: Double = 0
+    private var hasFirstFrameTranslation: Bool = false
+    private var consumeFrameCounter: Int = 0
+
     private override init() {
         super.init()
     }
@@ -265,6 +277,11 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         self.acceptsSinceSnapshot = 0
         self.droppedBackpressure = 0
         self.lastState = nil
+        // V13.0c.1 — reset translation diagnostic state for the
+        // new capture.  First-frame translation will be captured
+        // on the next consumeFrame call.
+        self.hasFirstFrameTranslation = false
+        self.consumeFrameCounter = 0
         stateLock.unlock()
 
         // Register with the AR session.  Weak so the singleton is the
@@ -404,6 +421,45 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let hybrid = self.hybridEngine
         let slit = self.firstwinsEngine
         let isRunning = self.isRunning
+
+        // V13.0c.1 — diagnostic translation logging.  Captures the
+        // FIRST frame's world position, then logs delta from first
+        // on every subsequent frame.  Throttled to every 5th call
+        // to keep Console.app readable.  This data tells us how
+        // much users physically translate during typical captures
+        // before we commit to per-pixel depth correction (V13.0c.2+).
+        //
+        // Notes:
+        //   • tx,ty,tz are in ARKit world coords (metres).
+        //   • magnitudeM = √(Δtx² + Δty² + Δtz²) — total camera
+        //     displacement from first frame.
+        //   • If typical magnitudeM < 0.05 m (5 cm) → minimal
+        //     translation, NCC alone may suffice.
+        //   • If typical magnitudeM > 0.30 m (30 cm) → significant
+        //     translation, per-depth correction essential.
+        if isRunning {
+            self.consumeFrameCounter += 1
+            if !self.hasFirstFrameTranslation {
+                self.firstFrameTx = pose.tx
+                self.firstFrameTy = pose.ty
+                self.firstFrameTz = pose.tz
+                self.hasFirstFrameTranslation = true
+                NSLog(
+                    "[V13.0c-trans] first-frame world position " +
+                    "tx=%.4f ty=%.4f tz=%.4f", pose.tx, pose.ty, pose.tz
+                )
+            } else if self.consumeFrameCounter % 5 == 0 {
+                let dx = pose.tx - self.firstFrameTx
+                let dy = pose.ty - self.firstFrameTy
+                let dz = pose.tz - self.firstFrameTz
+                let mag = sqrt(dx * dx + dy * dy + dz * dz)
+                NSLog(
+                    "[V13.0c-trans] #%d Δt_world=(%+.4f,%+.4f,%+.4f) " +
+                    "magnitude=%.4f m",
+                    self.consumeFrameCounter, dx, dy, dz, mag
+                )
+            }
+        }
         stateLock.unlock()
         guard isRunning, (hybrid != nil || slit != nil) else { return }
 
