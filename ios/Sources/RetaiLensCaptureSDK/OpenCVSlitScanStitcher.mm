@@ -22,6 +22,19 @@
 
 #import <vector>
 #import <chrono>
+#import <os/log.h>
+
+// V13.0a.4 — diagnostic os_log subsystem.  os_log_with_type(FAULT)
+// survives Console.app's NSLog burst rate-limit (~10/sec) — same
+// pattern we used in V12.14.x to get crash-trail breadcrumbs through.
+static os_log_t SlitDiagLog(void) {
+    static os_log_t log = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        log = os_log_create("com.tiger.retailens.sdk", "slitscan");
+    });
+    return log;
+}
 
 #define NO  ((BOOL)0)
 #define YES ((BOOL)1)
@@ -256,11 +269,13 @@ static const double kPanAxisFractionRect = 0.70;
     // the per-frame pattern.  (At 60 fps × 2 sec capture ≈ 120
     // frames → 24 log lines, fits in Console.app's burst budget.)
     if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 3) {
-        NSLog(@"[V13.0a-call] #%ld hasFirstFrame=%d trackingPoor=%d "
-              @"useRectilinear=%d _accepted=%ld",
-              (long)_engineCallCounter, (int)_hasFirstFrame,
-              (int)trackingPoor, (int)_useRectilinear,
-              (long)_accepted);
+        // V13.0a.4 — FAULT-level os_log to bypass NSLog burst rate-limit.
+        os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+            "[V13.0a-call] #%ld hasFirstFrame=%d trackingPoor=%d "
+            "useRectilinear=%d _accepted=%ld",
+            (long)_engineCallCounter, (int)_hasFirstFrame,
+            (int)trackingPoor, (int)_useRectilinear,
+            (long)_accepted);
     }
 
     if (trackingPoor) {
@@ -507,17 +522,14 @@ static const double kPanAxisFractionRect = 0.70;
         int dstX = _firstFrameDstX;
         int dstY = _firstFrameDstY - (int)std::round(alpha * _focalCompose);
 
-        // V13.0a.1 — diagnostic log #2: pose projection per frame.
-        // V13.0a.3 — THROTTLED: NSLog rate-limit drops bursts > ~10/s,
-        // and per-frame logs at 50 fps fire 50/s.  Use the shared
-        // _engineCallCounter (above) to log every 5th frame, matching
-        // the [V13.0a-call] cadence.  At ~10 lines/s this survives
-        // Console.app's burst budget.
+        // V13.0a.4 — FAULT-level os_log (bypasses NSLog burst rate-
+        // limit; throttle still applied to keep Console.app readable).
         if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
-            NSLog(@"[V13.0a-pose] #%ld alpha_deg=%.3f focal=%.1f dstX=%d dstY=%d "
-                  @"(firstDstY=%d, ΔdstY_from_first=%d)",
-                  (long)_engineCallCounter, alpha * 180.0 / M_PI, _focalCompose,
-                  dstX, dstY, _firstFrameDstY, dstY - _firstFrameDstY);
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V13.0a-pose] #%ld alpha_deg=%.3f focal=%.1f dstX=%d dstY=%d "
+                "(firstDstY=%d, deltaDstY=%d)",
+                (long)_engineCallCounter, alpha * 180.0 / M_PI, _focalCompose,
+                dstX, dstY, _firstFrameDstY, dstY - _firstFrameDstY);
         }
 
         // V13.0a — REVERTED V12.11 Step 4 + V12.11.1 Item E + V12.14
@@ -619,11 +631,13 @@ static const double kPanAxisFractionRect = 0.70;
             // rate-limit).
             const int slitWidthPx = clipW > 0 ? (newPixels / clipW) : 0;
             const int dstYDeltaFromMax = dstY - _maxDstY;
+            // V13.0a.4 — FAULT-level os_log + throttle.
             if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
-                NSLog(@"[V13.0a-paint] #%ld dstY=%d (Δfrom_max=%+d) clipH=%d "
-                      @"newPixels=%d slitWidth≈%dpx _accepted=%ld",
-                      (long)_engineCallCounter, dstY, dstYDeltaFromMax,
-                      clipH, newPixels, slitWidthPx, (long)_accepted);
+                os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                    "[V13.0a-paint] #%ld dstY=%d (deltaFromMax=%+d) clipH=%d "
+                    "newPixels=%d slitWidth=%dpx _accepted=%ld",
+                    (long)_engineCallCounter, dstY, dstYDeltaFromMax,
+                    clipH, newPixels, slitWidthPx, (long)_accepted);
             }
             [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
         } else {
