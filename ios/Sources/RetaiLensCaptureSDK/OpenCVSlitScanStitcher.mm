@@ -242,6 +242,27 @@ static const double kPanAxisFractionRect = 0.70;
     [tele setValue:@(_maxDstY) forKey:@"paintedExtent"];
     [tele setValue:@(_canvasPanExtent) forKey:@"panExtent"];
 
+    // V13.0a.2 — call counter + per-call state log.  Ram's V13.0a.1
+    // trace showed only [V13.0a-focal] firing (1 per capture), no
+    // [V13.0a-pose] / [V13.0a-paint] — meaning subsequent frames are
+    // returning early before reaching the pose projection.  Most
+    // likely culprit: trackingPoor=YES on ARKit → silent return at
+    // line ~247.  This log fires on EVERY ingestPixelBuffer call
+    // BEFORE any early returns, so we can see how many frames per
+    // capture are coming in and what their tracking state is.
+    static NSInteger _engineCallCounter = 0;
+    _engineCallCounter += 1;
+    // Log every 5th call to keep volume manageable but still see
+    // the per-frame pattern.  (At 60 fps × 2 sec capture ≈ 120
+    // frames → 24 log lines, fits in Console.app's burst budget.)
+    if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 3) {
+        NSLog(@"[V13.0a-call] #%ld hasFirstFrame=%d trackingPoor=%d "
+              @"useRectilinear=%d _accepted=%ld",
+              (long)_engineCallCounter, (int)_hasFirstFrame,
+              (int)trackingPoor, (int)_useRectilinear,
+              (long)_accepted);
+    }
+
     if (trackingPoor) {
         [tele setValue:@(RLISFrameOutcomeSkippedTrackingPoor) forKey:@"outcome"];
         return tele;
