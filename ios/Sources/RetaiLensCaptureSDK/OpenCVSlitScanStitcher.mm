@@ -624,67 +624,202 @@ static const double kPanAxisFractionRect = 0.70;
             return tele;
         }
 
-        // Past the gate: this frame WILL be accepted.  Update
-        // running max so the next frame's gate is measured from
-        // this position.
+        // V13.0d — 2D NCC visual refinement + feather-blend paint
+        // over a 100 px sliver (50 painted overlap + 50 new content).
+        //
+        // ─── DESIGN ──────────────────────────────────────────────────
+        // Past the V13.0b 50 px gate, but BEFORE updating _maxDstY.
+        // The previous accepted frame painted up to canvas Y =
+        // prevMaxDstY + clipH.  We extract a 100 px source region from
+        // the bottom of the new slit (source Y = [clipH-100, clipH])
+        // and run 2D NCC matching its top 50 rows against the
+        // canvas's painted edge.  The NCC offset (Δx, Δy) tells us
+        // where the slit visually best aligns vs where pose says.
+        //
+        // Constraints:
+        //   • Forward-only Δy: never pull back along pan axis (max(0, ·))
+        //     — same lesson as V12.14: pull-back creates frame stacking.
+        //   • Δy capped at +40: keep at least 10 px overlap for feather blend.
+        //   • Δx capped at ±30: handles wobble + small lateral translation.
+        //   • NCC confidence gate ≥ 0.6: low-confidence falls back to
+        //     pose-only (Δx=Δy=0).
+        //
+        // Paint:
+        //   • Top portion (canvas Y already painted): linear feather
+        //     blend, alpha ramps 0→1 from canvas-side to new-side.
+        //   • Bottom portion (canvas Y empty): full write of new content.
+        //   • Mask: set to 255 for the entire 100 px painted region.
+        //
+        // This is a fundamental departure from first-painted-wins: the
+        // overlap zone gets re-painted (blended) on each accept.  This
+        // is what allows the 100 px sliver to recover scene content
+        // that translation parallax shifted between frames.
+        const int prevMaxDstY = _maxDstY;
+        const int poseDstY = dstY;  // for diagnostics
+        const int poseDstX = dstX;
+
+        int nccDx = 0, nccDy = 0;
+        double nccConfidence = 0.0;
+        bool nccApplied = false;
+
+        const int kSliverPaintHeight = 100;
+        const int kOverlapHeight = 50;  // = kSliverPaintHeight / 2
+        const int srcOverlapYInFrame = srcClipY + clipH - kSliverPaintHeight;
+
+        // Ensure the source-overlap rect fits in frame.
+        if (srcOverlapYInFrame >= 0
+            && srcOverlapYInFrame + kOverlapHeight <= frameBGR.rows
+            && prevMaxDstY + clipH - kOverlapHeight >= 0) {
+            cv::Mat sourceOverlap = frameBGR(
+                cv::Rect(srcClipX, srcOverlapYInFrame, clipW, kOverlapHeight));
+
+            // Search canvas region: ±50 Y, ±30 X around the baseline match
+            // position (canvas Y = prevMaxDstY + clipH - kOverlapHeight,
+            // canvas X = 0 since pose puts dstX = _firstFrameDstX = 0).
+            constexpr int kSearchYMargin = 50;
+            constexpr int kSearchXMargin = 30;
+            const int baselineMatchY = prevMaxDstY + clipH - kOverlapHeight;
+            int searchTop = baselineMatchY - kSearchYMargin;
+            int searchBottom = baselineMatchY + kSearchYMargin + kOverlapHeight;
+            int searchLeft = -kSearchXMargin;
+            int searchRight = clipW + kSearchXMargin;
+
+            searchTop = std::max(0, searchTop);
+            searchBottom = std::min(_canvas.rows, searchBottom);
+            searchLeft = std::max(0, searchLeft);
+            searchRight = std::min(_canvas.cols, searchRight);
+
+            const int searchW = searchRight - searchLeft;
+            const int searchH = searchBottom - searchTop;
+
+            if (searchW > clipW && searchH > kOverlapHeight) {
+                cv::Mat canvasSearch = _canvas(
+                    cv::Rect(searchLeft, searchTop, searchW, searchH));
+
+                // Grayscale NCC for speed (sufficient for matching).
+                cv::Mat sourceGray, canvasGray;
+                cv::cvtColor(sourceOverlap, sourceGray, cv::COLOR_BGR2GRAY);
+                cv::cvtColor(canvasSearch, canvasGray, cv::COLOR_BGR2GRAY);
+
+                cv::Mat nccResult;
+                cv::matchTemplate(canvasGray, sourceGray, nccResult,
+                                  cv::TM_CCOEFF_NORMED);
+
+                double nccMin, nccMax;
+                cv::Point nccMinLoc, nccMaxLoc;
+                cv::minMaxLoc(nccResult, &nccMin, &nccMax, &nccMinLoc, &nccMaxLoc);
+                nccConfidence = nccMax;
+
+                // maxLoc is top-left of best match in canvasSearch.
+                // Translate to absolute canvas coords:
+                const int matchX = searchLeft + nccMaxLoc.x;
+                const int matchY = searchTop + nccMaxLoc.y;
+                const int rawDx = matchX - 0;  // pose dstX = 0
+                const int rawDy = matchY - baselineMatchY;
+
+                constexpr double kMinNccConfidence = 0.6;
+                if (nccConfidence >= kMinNccConfidence) {
+                    int adjDx = rawDx;
+                    int adjDy = rawDy;
+
+                    // Forward-only Δy clamp + max-cap to preserve overlap
+                    // for blending.
+                    if (adjDy < 0) adjDy = 0;
+                    constexpr int kMaxNccDy = 40;
+                    if (adjDy > kMaxNccDy) adjDy = kMaxNccDy;
+
+                    // Symmetric X clamp.
+                    constexpr int kMaxNccDx = 30;
+                    if (adjDx >  kMaxNccDx) adjDx =  kMaxNccDx;
+                    if (adjDx < -kMaxNccDx) adjDx = -kMaxNccDx;
+
+                    nccDx = adjDx;
+                    nccDy = adjDy;
+                    dstX += nccDx;
+                    dstY += nccDy;
+                    nccApplied = true;
+                }
+            }
+        }
+
+        if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V13.0d-ncc] #%ld dx=%+d dy=%+d ncc=%.3f applied=%d "
+                "(poseDstY=%d -> dstY=%d)",
+                (long)_engineCallCounter, nccDx, nccDy, nccConfidence,
+                (int)nccApplied, poseDstY, dstY);
+        }
+
+        // Update _maxDstY to the (possibly NCC-corrected) dstY.  This
+        // becomes the baseline for the NEXT frame's V13.0b gate +
+        // V13.0d NCC search.
         _maxDstY = dstY;
 
-        // V12.14.9 — re-stamp paintedExtent on the tele AFTER the
-        // running-max update so JS state reflects THIS frame's
-        // contribution.  V12.14.10: unified — both modes use _maxDstY
-        // and clipH (sensor Y as pan axis).
+        // V12.14.9 — paintedExtent reflects the new max.
         [tele setValue:@(_maxDstY + clipH) forKey:@"paintedExtent"];
 
-        // V13.0a — pose-only paste (the ONLY paste path now in the
-        // rectilinear engine).  V12.11.1's full warpPerspective paste
-        // and its homography-translation correction were removed;
-        // this pose-projected (dstX, dstY) is now the final paste
-        // position with no per-frame visual refinement.
-        cv::Rect dstRoi(dstX, dstY, clipW, clipH);
-        cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
-        cv::Rect dstClipped = dstRoi & canvasBounds;
+        // ─── PAINT: feather blend overlap + full write new ─────────
+        const int newBandTopCanvasY = dstY + clipH - kSliverPaintHeight;
+        cv::Rect dstRoi(dstX, newBandTopCanvasY, clipW, kSliverPaintHeight);
+        cv::Rect canvasBoundsRect(0, 0, _canvas.cols, _canvas.rows);
+        cv::Rect dstClipped = dstRoi & canvasBoundsRect;
         if (dstClipped.width <= 0 || dstClipped.height <= 0) {
             [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
             return tele;
         }
-        // Source ROI: same offset within the (already-clipped) frame.
-        cv::Rect srcRoi(dstClipped.x - dstX,
-                        dstClipped.y - dstY,
-                        dstClipped.width, dstClipped.height);
-        cv::Mat srcRegion = frameClipped(srcRoi);
+
+        // Source ROI in frameBGR coords, accounting for any clipping.
+        cv::Rect srcRoiInFrame(
+            srcClipX + (dstClipped.x - dstX),
+            srcOverlapYInFrame + (dstClipped.y - newBandTopCanvasY),
+            dstClipped.width, dstClipped.height);
+        cv::Mat srcRegion = frameBGR(srcRoiInFrame);
         cv::Mat canvasRoi = _canvas(dstClipped);
         cv::Mat maskRoi = _canvasMask(dstClipped);
-        // First-painted-wins: only fill where mask == 0.  This is what
-        // produces the smooth incremental edge — overlap with first
-        // frame is blocked, leading-edge sliver gets the new content.
-        cv::Mat emptyMask;
-        cv::compare(maskRoi, 0, emptyMask, cv::CMP_EQ);
-        int newPixels = cv::countNonZero(emptyMask);
-        if (newPixels > 0) {
-            srcRegion.copyTo(canvasRoi, emptyMask);
-            maskRoi.setTo(255, emptyMask);
-            _accepted += 1;
-            // V13.0a.1 — diagnostic log #3: per-accept slit width +
-            // dst delta from previous accepted frame.  Shrunken pano
-            // signal: if slit width per row is consistently small
-            // relative to expected per-frame pan, focal calibration
-            // is off.
-            // V13.0a.3 — THROTTLED to every 5th call (NSLog burst
-            // rate-limit).
-            const int slitWidthPx = clipW > 0 ? (newPixels / clipW) : 0;
-            const int dstYDeltaFromMax = dstY - _maxDstY;
-            // V13.0a.4 — FAULT-level os_log + throttle.
-            if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
-                os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                    "[V13.0a-paint] #%ld dstY=%d (deltaFromMax=%+d) clipH=%d "
-                    "newPixels=%d slitWidth=%dpx _accepted=%ld",
-                    (long)_engineCallCounter, dstY, dstYDeltaFromMax,
-                    clipH, newPixels, slitWidthPx, (long)_accepted);
-            }
-            [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
-        } else {
-            [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
+
+        // Compute overlap row range within dstClipped (relative coords).
+        // Overlap canvas rows: [newBandTopCanvasY, prevMaxDstY+clipH].
+        const int overlapBottomCanvasY = prevMaxDstY + clipH;
+        const int overlapStartRel = std::max(
+            0, newBandTopCanvasY - dstClipped.y);  // typically 0
+        const int overlapEndRel = std::max(
+            overlapStartRel,
+            std::min(dstClipped.height,
+                     overlapBottomCanvasY - dstClipped.y));
+        const int overlapHeight = overlapEndRel - overlapStartRel;
+        const int newRegionHeight = dstClipped.height - overlapEndRel;
+
+        // Feather-blend each row in the overlap zone.  Alpha ramps
+        // 0 → 1 from canvas-side (top of overlap) to new-side (bottom).
+        for (int relY = overlapStartRel; relY < overlapEndRel; relY++) {
+            const float alpha = (overlapHeight > 0)
+                ? (float)(relY - overlapStartRel + 1) / (float)overlapHeight
+                : 0.0f;
+            cv::addWeighted(srcRegion.row(relY), alpha,
+                            canvasRoi.row(relY), 1.0f - alpha,
+                            0.0, canvasRoi.row(relY));
         }
+
+        // Full write for new region (canvas was empty here).
+        if (newRegionHeight > 0) {
+            cv::Mat srcNew = srcRegion(
+                cv::Rect(0, overlapEndRel, dstClipped.width, newRegionHeight));
+            cv::Mat dstNew = canvasRoi(
+                cv::Rect(0, overlapEndRel, dstClipped.width, newRegionHeight));
+            srcNew.copyTo(dstNew);
+        }
+
+        // Update mask to 255 for the entire painted band.
+        maskRoi.setTo(255);
+        _accepted += 1;
+
+        if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V13.0a-paint] #%ld dstY=%d overlap=%d new=%d _accepted=%ld",
+                (long)_engineCallCounter, dstY, overlapHeight,
+                newRegionHeight, (long)_accepted);
+        }
+        [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
         auto t1 = std::chrono::steady_clock::now();
         double ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
         [tele setValue:@(ms) forKey:@"processingMs"];
