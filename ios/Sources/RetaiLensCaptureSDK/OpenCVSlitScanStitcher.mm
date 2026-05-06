@@ -191,243 +191,21 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
 // misbehaves (frame 1 placed bigger than frame 2's source ROI).
 static const double kPanAxisFractionRect = 0.70;
 
-// V12.11 Step 4 — feature-based slit alignment via homography.
+// V13.0a — homographyOffset() and the kHomogTier* constants were
+// removed in the revert from V12.11.1 + V12.14 (ORB+RANSAC homography
+// correction with 3-tier confidence ladder) back to pose-only paste.
 //
-// Replaces V12.10 Fix #1's NCC template match (which was capped at
-// ±24 px and demonstrably insufficient — Ram's logs showed delta_y
-// saturating at -24 with NCC dropping below 0.5 during lateral
-// motion).  This is the standard image-stitching pipeline:
+// Per-frame homography refinement was chronically fragile under low-
+// overlap / low-texture / fast-pan conditions.  V12.14's tier ladder
+// filtered the worst homographies but couldn't fully tame them — MED
+// tier (translation-only) stripped rotation/scale and produced
+// visible chevrons + frame-stacking pull-back artifacts.
 //
-//   1. Detect ORB features in the OVERLAP zone of canvas (where
-//      mask==255) and in the new frame's same-sized source region.
-//   2. Match descriptors with brute-force Hamming + Lowe's ratio
-//      test (k=2, ratio < 0.75).
-//   3. RANSAC-estimate a homography mapping src → canvas.
-//   4. Sanity-reject homographies whose 2×2 affine determinant is
-//      outside (0.5, 2.0) — those represent degenerate or
-//      excessive transforms (e.g., pure shear or extreme zoom)
-//      that would smear the panorama if applied.
-//   5. Extract the effective TRANSLATION component by mapping the
-//      source-region centre under H and reporting the delta.  This
-//      gives us a (dx, dy) offset to ADD to the pose-predicted
-//      paste position so the new frame aligns with the canvas.
-//
-// Why translation-only extraction (not full warpPerspective)?  The
-// existing paste code is built around a (dstX, dstY) integer offset.
-// Full perspective warp is a bigger refactor that risks correctness
-// regressions on the well-tested first-painted-wins masking.
-// Translation captures the dominant component of H for incremental
-// small motions — exactly the lateral-drift case Ram reported.
-// Wobble from small rotations may persist as a smaller artefact;
-// V12.11.1 (a future tightening) can add the full warp.
-//
-// Returns (0,0) AND fills outInliers/outDet with diagnostic data
-// when:
-//   • overlap area is too small (< 200×200) to host enough features,
-//   • painted-area fraction inside overlap < 50 % (mostly first
-//     frame — no features to match against yet),
-//   • either side has < 8 keypoints,
-//   • Lowe-filtered match count < 8,
-//   • findHomography returned an empty H (RANSAC couldn't agree),
-//   • inlier count < 8,
-//   • or the affine determinant is outside (0.5, 2.0).
-//
-// In every fallback case the caller proceeds with pose-only paste,
-// which is what the engine already did pre-V12.10.  Never makes
-// alignment WORSE than pose-only.
-// V12.14 — Confidence tiers for the homography correction.  The
-// caller switches its paste behaviour on this tier:
-//   • Low    (0): no homography correction at all — pose-only paste.
-//   • Medium (1): apply translation delta only — corrected pose,
-//                  no perspective warp.  Use when H is plausible but
-//                  not trustworthy enough to drive a full warp.
-//   • High   (2): apply full warpPerspective using H.  Best quality
-//                  when alignment is highly confident.
-//
-// Earlier (V12.10–V12.13) versions only had the binary "use H or
-// pose-only" gate, with kMinInliers=8 and det in (0.5, 2.0).  Those
-// thresholds turned out to be way too lax — Ram's logs showed full
-// warp engaging at inliers=10, det=1.38, applying delta=(+15,+118)
-// in a single frame which baked wild noise into the warped slivers.
-// The 3-tier ladder caps full-warp engagement to high-confidence
-// frames only, falling through to less-aggressive corrections
-// when features are sparse or the homography looks degenerate.
-static const int kHomogTierLow = 0;
-static const int kHomogTierMedium = 1;
-static const int kHomogTierHigh = 2;
-
-static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
-                                  const cv::Mat& srcOverlap,
-                                  const cv::Mat& maskOverlap,
-                                  int *outInliers,
-                                  double *outDet,
-                                  cv::Mat *outH /* optional */,
-                                  int *outTier /* optional, V12.14 */) {
-    constexpr int kMinOverlapPx        = 200;
-    constexpr double kMinPaintedFrac   = 0.5;
-    constexpr int kOrbFeatureCount     = 500;
-    constexpr float kLoweRatio         = 0.75f;
-    constexpr int kMinGoodMatches      = 8;
-    constexpr int kMinInliers          = 8;
-    constexpr double kRansacReprojPx   = 3.0;
-    constexpr double kDetMin           = 0.5;
-    constexpr double kDetMax           = 2.0;
-
-    if (outInliers) *outInliers = 0;
-    if (outDet)     *outDet     = 0.0;
-    if (outH)       *outH       = cv::Mat();
-    if (outTier)    *outTier    = kHomogTierLow;
-
-    if (canvasOverlap.empty() || srcOverlap.empty() || maskOverlap.empty()) {
-        return cv::Point(0, 0);
-    }
-    if (canvasOverlap.size() != srcOverlap.size() ||
-        canvasOverlap.size() != maskOverlap.size()) {
-        return cv::Point(0, 0);
-    }
-    if (canvasOverlap.cols < kMinOverlapPx ||
-        canvasOverlap.rows < kMinOverlapPx) {
-        return cv::Point(0, 0);
-    }
-
-    // Painted-area mask — ORB will only sample keypoints from
-    // here on the canvas side (otherwise it would lock onto the
-    // black-vs-image edge of the unpainted region, which gives
-    // strong but USELESS keypoints).
-    cv::Mat painted;
-    cv::compare(maskOverlap, 255, painted, cv::CMP_EQ);
-    int paintedCount = cv::countNonZero(painted);
-    int totalPx = canvasOverlap.rows * canvasOverlap.cols;
-    if (paintedCount < (int)(totalPx * kMinPaintedFrac)) {
-        return cv::Point(0, 0);
-    }
-
-    // Grayscale for ORB.  Faster than BGR and equally robust;
-    // ORB is intensity-based, colour adds nothing.
-    cv::Mat canvasGray, srcGray;
-    cv::cvtColor(canvasOverlap, canvasGray, cv::COLOR_BGR2GRAY);
-    cv::cvtColor(srcOverlap,    srcGray,    cv::COLOR_BGR2GRAY);
-
-    cv::Ptr<cv::ORB> orb = cv::ORB::create(kOrbFeatureCount);
-    std::vector<cv::KeyPoint> kpCanvas, kpSrc;
-    cv::Mat descCanvas, descSrc;
-    orb->detectAndCompute(canvasGray, painted, kpCanvas, descCanvas);
-    orb->detectAndCompute(srcGray, cv::noArray(), kpSrc, descSrc);
-
-    if ((int)kpCanvas.size() < kMinGoodMatches ||
-        (int)kpSrc.size()    < kMinGoodMatches ||
-        descCanvas.empty() ||
-        descSrc.empty()) {
-        return cv::Point(0, 0);
-    }
-
-    // Brute-force Hamming match with k=2 → Lowe's ratio test.
-    cv::BFMatcher matcher(cv::NORM_HAMMING);
-    std::vector<std::vector<cv::DMatch>> knn;
-    matcher.knnMatch(descSrc, descCanvas, knn, 2);
-
-    std::vector<cv::Point2f> srcPts, dstPts;
-    srcPts.reserve(knn.size());
-    dstPts.reserve(knn.size());
-    for (const auto& m : knn) {
-        if (m.size() == 2 && m[0].distance < kLoweRatio * m[1].distance) {
-            srcPts.push_back(kpSrc[m[0].queryIdx].pt);
-            dstPts.push_back(kpCanvas[m[0].trainIdx].pt);
-        }
-    }
-    if ((int)srcPts.size() < kMinGoodMatches) {
-        return cv::Point(0, 0);
-    }
-
-    // RANSAC homography src → canvas (both sets in their respective
-    // overlap-local coords; same origin since the overlaps are the
-    // same size and aligned by construction).
-    cv::Mat inlierMask;
-    cv::Mat H = cv::findHomography(srcPts, dstPts, cv::RANSAC,
-                                    kRansacReprojPx, inlierMask);
-    if (H.empty()) {
-        return cv::Point(0, 0);
-    }
-    int inliers = cv::countNonZero(inlierMask);
-    if (outInliers) *outInliers = inliers;
-    if (inliers < kMinInliers) {
-        return cv::Point(0, 0);
-    }
-
-    // Sanity-check the affine 2×2 determinant.  Pure translation
-    // gives det = 1.  Small rotation/scale stays close to 1.
-    // Outside (0.5, 2.0) means a degenerate or excessive transform
-    // — fall back to pose-only.
-    double a = H.at<double>(0, 0);
-    double b = H.at<double>(0, 1);
-    double c = H.at<double>(1, 0);
-    double d = H.at<double>(1, 1);
-    double det = std::abs(a * d - b * c);
-    if (outDet) *outDet = det;
-    if (det < kDetMin || det > kDetMax) {
-        return cv::Point(0, 0);
-    }
-
-    // Pass the validated H back to the caller for full warp use
-    // (V12.11.1 / Item E).  H maps srcOverlap-local →
-    // canvasOverlap-local; caller composes with the appropriate
-    // translations to lift it to frameClipped → canvas coords.
-    if (outH) *outH = H.clone();
-
-    // Extract the effective translation by mapping the source-
-    // region centre under H.  In pose-aligned overlay (H ≈ I),
-    // this gives delta = (0, 0).  Real motion shifts it.  Used
-    // by the caller for the reverse-pan stop (Item D) — even when
-    // the paste itself goes through full warpPerspective, the
-    // direction-of-travel check still wants a single (dx, dy)
-    // describing where the frame's centre lands.
-    cv::Point2f srcCenter(srcOverlap.cols * 0.5f, srcOverlap.rows * 0.5f);
-    std::vector<cv::Point2f> srcCenters = { srcCenter };
-    std::vector<cv::Point2f> dstCenters;
-    cv::perspectiveTransform(srcCenters, dstCenters, H);
-
-    int dx = (int)std::round(dstCenters[0].x - srcCenter.x);
-    int dy = (int)std::round(dstCenters[0].y - srcCenter.y);
-
-    // V12.14 — assign confidence tier based on inliers + det.
-    // Thresholds tuned from Ram's V12.13 logs where:
-    //   • Healthy frames had inliers ≥ 200 and det ≈ 0.99-1.02
-    //   • Mid-degraded had inliers ~50-150 and det ≈ 0.93-1.05
-    //   • Late-degraded had inliers ~10 and det = 0.71-1.38 (wild)
-    //
-    // High tier (full warp): conservative — only when both signals
-    // agree it's a clean homography.  Mid tier (translation-only):
-    // covers the gradient where translation alone is still safe.
-    // Anything below mid falls through to caller's pose-only path
-    // even though we still return the delta (caller may log it).
-    constexpr int    kHighInliers = 50;
-    // V12.14.11 — tighten MED tier thresholds to reject overly-distorted
-    // homographies that the looser V12.14 bands accepted.  Ram's trace
-    // showed det=1.144 accepted as MED → 14% area expansion → real
-    // geometric mismatch (rotation+scale, not pure translation), but
-    // MED tier strips rotation/scale and applies translation only →
-    // visible chevrons + banding in the panorama (Issue 1).
-    //
-    // V12.14:    MED required inliers ≥ 20, det ∈ [0.85, 1.15]  — too loose.
-    // V12.14.11: MED requires inliers ≥ 30, det ∈ [0.92, 1.08] — rejects
-    //            ~80% of the "geometric mismatch but kinda-translates"
-    //            cases that produced visible artifacts, falls through
-    //            to LOW (pose-only paste) instead.
-    constexpr int    kMidInliers  = 30;
-    constexpr double kHighDetLow  = 0.95;
-    constexpr double kHighDetHigh = 1.05;
-    constexpr double kMidDetLow   = 0.92;
-    constexpr double kMidDetHigh  = 1.08;
-    int tier = kHomogTierLow;
-    if (inliers >= kHighInliers && det >= kHighDetLow && det <= kHighDetHigh) {
-        tier = kHomogTierHigh;
-    } else if (inliers >= kMidInliers && det >= kMidDetLow && det <= kMidDetHigh) {
-        tier = kHomogTierMedium;
-    }
-    if (outTier) *outTier = tier;
-
-    return cv::Point(dx, dy);
-}
+// V13.0b will reintroduce a LIGHTWEIGHT 1D column-edge NCC
+// correlation (~1 ms, ±100 px search) for sub-pixel perpendicular
+// drift correction on top of pose — the algorithm production camera
+// apps (iOS Camera Pano, Samsung native pano) ship.  Until that
+// lands, perpendicular drift is bounded only by ARKit pose accuracy.
 
 - (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                        qx:(double)qx
@@ -696,121 +474,30 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
         int dstX = _firstFrameDstX;
         int dstY = _firstFrameDstY - (int)std::round(alpha * _focalCompose);
 
-        // V12.11 Step 4 — feature-based slit alignment via homography.
+        // V13.0a — REVERTED V12.11 Step 4 + V12.11.1 Item E + V12.14
+        // homography refinement.  Restored pose-only paste.
         //
-        // Build a tentative destination ROI from the pose-predicted
-        // (dstX, dstY).  In the overlap zone (where canvasMask==255)
-        // run an ORB+RANSAC homography between canvas and the new
-        // frame's source region.  The returned (dx, dy) is the
-        // effective translation from src → canvas — we ADD it to
-        // (dstX, dstY) so the leading-edge sliver lines up with the
-        // existing edge.  Falls back to pose-only when overlap is
-        // too small, painted fraction is too low, feature density
-        // is insufficient, or the homography is degenerate.
+        // Why reverted: the ORB+RANSAC homography correction (V12.11)
+        // and the full warpPerspective paste (V12.11.1) introduced
+        // chronic chevron / banding / frame-stacking artifacts under
+        // realistic capture conditions (low overlap, low texture,
+        // fast pan).  V12.14's 3-tier ladder filtered the worst
+        // homographies but couldn't fully tame them — MED tier
+        // translation-only correction strips rotation/scale and
+        // produces the "frames pull back" pattern in field traces.
         //
-        // Sign convention: homographyOffset returns (dx, dy) =
-        // dstCenter - srcCenter under H.  If src content is
-        // shifted LEFT relative to canvas (camera moved right),
-        // dstCenter > srcCenter → dx > 0 → ADD to dstX shifts the
-        // paste position right, pulling src content into alignment.
-        // V12.11.1 (Item E) — capture the homography matrix itself
-        // (not just its translation extract) so the paste step below
-        // can perform a full warpPerspective.  Translation-only
-        // alignment from V12.11 Step 4 left visible band-seams
-        // because adjacent slivers had small rotation/scale
-        // differences that pose+translation couldn't model.  Full
-        // warp eliminates them.
-        // V12.14 — three-tier homography correction.  See
-        // `homographyOffset` doc for tier definitions.  Caller
-        // switches paste behaviour:
-        //   • tier == LOW    → no correction, no warp, pose-only paste
-        //   • tier == MEDIUM → apply translation delta only (no warp)
-        //   • tier == HIGH   → full warpPerspective with H
-        // The full-warp path below checks `homographyOverlap.empty()`;
-        // we only set H non-empty when tier == HIGH so the warp
-        // engages only on highly-confident frames.
-        cv::Mat homographyOverlap;  // empty unless tier == HIGH
-        cv::Rect tentativeClippedHom;
-        cv::Rect srcInClippedHom;
-        cv::Rect refineCanvasBounds(0, 0, _canvas.cols, _canvas.rows);
-        {
-            cv::Rect tentativeRoi(dstX, dstY, clipW, clipH);
-            cv::Rect tentativeClipped = tentativeRoi & refineCanvasBounds;
-            if (tentativeClipped.width >= 200 && tentativeClipped.height >= 200) {
-                cv::Mat canvasOverlap = _canvas(tentativeClipped);
-                cv::Mat maskOverlap   = _canvasMask(tentativeClipped);
-                cv::Rect srcInClipped(tentativeClipped.x - dstX,
-                                      tentativeClipped.y - dstY,
-                                      tentativeClipped.width,
-                                      tentativeClipped.height);
-                cv::Mat srcOverlap = frameClipped(srcInClipped);
-                int inliers = 0;
-                double det = 0.0;
-                int tier = kHomogTierLow;
-                cv::Mat candidateH;  // returned but only used if tier == HIGH
-                cv::Point delta = homographyOffset(canvasOverlap,
-                                                    srcOverlap,
-                                                    maskOverlap,
-                                                    &inliers,
-                                                    &det,
-                                                    &candidateH,
-                                                    &tier);
-
-                // V12.14 — clamp the perpendicular-axis delta.
-                // V12.14.10 — UNIFIED for both supported modes.
-                // Both modes paste advances along canvas Y (pan axis)
-                // only; canvas X is the perpendicular axis (sensor X
-                // = phone's long edge in both modes).  Clamp delta.x
-                // to filter out camera-shake noise and homography
-                // lock-onto-wrong-feature artifacts.
-                constexpr int kMaxPerpDeltaPx = 30;
-                if (delta.x > kMaxPerpDeltaPx)  delta.x =  kMaxPerpDeltaPx;
-                if (delta.x < -kMaxPerpDeltaPx) delta.x = -kMaxPerpDeltaPx;
-
-                // V12.14.11 — MED-tier-only pan-axis clamp to bound
-                // homography over-correction (the "frames pull back"
-                // pattern in Ram's trace).  When pose-only is well-
-                // tracked (HIGH tier with full warp) we trust the
-                // homography fully.  When we fall back to MED tier
-                // (translation-only), the homography may pull the
-                // frame back to align with the dominant overlap
-                // region, even if pose says we panned further.  Cap
-                // at 60 px (symmetric) — covers normal fast-pan
-                // corrections but rejects pathological pull-backs
-                // like the -30 to -78 swings observed pre-fix.
-                if (tier == kHomogTierMedium) {
-                    constexpr int kMaxMedPanDeltaPx = 60;
-                    if (delta.y >  kMaxMedPanDeltaPx) delta.y =  kMaxMedPanDeltaPx;
-                    if (delta.y < -kMaxMedPanDeltaPx) delta.y = -kMaxMedPanDeltaPx;
-                }
-
-                // Apply translation delta when tier ≥ MEDIUM.  Tier
-                // LOW means even the translation isn't trustworthy
-                // (e.g., inliers < 20) — leave dstX/dstY at pose.
-                const char *tierName = (tier == kHomogTierHigh) ? "HIGH" :
-                                       (tier == kHomogTierMedium) ? "MED" : "LOW";
-                if (tier >= kHomogTierMedium) {
-                    int priorX = dstX, priorY = dstY;
-                    dstX += delta.x;
-                    dstY += delta.y;
-                    NSLog(@"[V12.14-homog] tier=%s delta=(%+d,%+d) inliers=%d det=%.3f"
-                          " adjusted dst=(%d,%d) (was %d,%d)",
-                          tierName, delta.x, delta.y, inliers, det,
-                          dstX, dstY, priorX, priorY);
-                } else if (inliers > 0) {
-                    NSLog(@"[V12.14-homog] tier=LOW inliers=%d det=%.3f"
-                          " — pose-only (no correction)",
-                          inliers, det);
-                }
-
-                // Only let the full-warp path engage on HIGH tier.
-                if (tier == kHomogTierHigh) {
-                    homographyOverlap = candidateH;
-                }
-                tentativeClippedHom = tentativeClipped;
-                srcInClippedHom = srcInClipped;
-            }
-        }
+        // Pose-only paste is what production camera apps (iOS Camera
+        // Pano, Samsung native pano) use as their PRIMARY tracking;
+        // they layer lightweight 1D edge correlation on top for
+        // sub-pixel perpendicular drift correction.  V13.0b will
+        // restore that lightweight refinement (1D NCC column
+        // correlation, ±100 px search) on top of this pose-only
+        // baseline.
+        //
+        // For now (V13.0a): rotation is correct from ARKit pose;
+        // perpendicular drift may be visible (~5–10 px on short
+        // pans) until V13.0b lands.  Translation along the pan
+        // axis comes from `alpha * _focalCompose` above.
 
         // V12.11 Step D — reverse-direction detection.
         //
@@ -848,102 +535,11 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
         // and clipH (sensor Y as pan axis).
         [tele setValue:@(_maxDstY + clipH) forKey:@"paintedExtent"];
 
-        // V12.11.1 (Item E) — full warpPerspective paste when a
-        // valid homography was found.  Captures rotation + scale +
-        // perspective in addition to the translation that V12.11
-        // Step 4 already handled.  Eliminates the residual band-
-        // seams Ram reported when adjacent slivers had small
-        // rotation differences pose+translation alone couldn't
-        // model.
-        //
-        // H (homographyOverlap) maps srcOverlap-local →
-        // canvasOverlap-local.  To warp the WHOLE frameClipped
-        // into canvas coords we compose:
-        //
-        //   Hframe = T2 × H × T1
-        //
-        // where:
-        //   T1: frameClipped-local → srcOverlap-local
-        //       (translate by -srcInClippedHom)
-        //   T2: canvasOverlap-local → canvas global
-        //       (translate by +tentativeClippedHom)
-        //
-        // Then we compute the bounding box of the warped corners
-        // in canvas coords, warp into a bbox-sized buffer (avoids
-        // allocating a canvas-sized buffer per frame — would be
-        // ~75 MB), and paste under first-painted-wins.
-        if (!homographyOverlap.empty()) {
-            cv::Mat T1 = (cv::Mat_<double>(3, 3) <<
-                1, 0, -srcInClippedHom.x,
-                0, 1, -srcInClippedHom.y,
-                0, 0, 1);
-            cv::Mat T2 = (cv::Mat_<double>(3, 3) <<
-                1, 0, tentativeClippedHom.x,
-                0, 1, tentativeClippedHom.y,
-                0, 0, 1);
-            cv::Mat Hframe = T2 * homographyOverlap * T1;
-
-            // Bounding box of warped corners in canvas coords.
-            std::vector<cv::Point2f> srcCorners = {
-                {0.f, 0.f},
-                {(float)frameClipped.cols, 0.f},
-                {(float)frameClipped.cols, (float)frameClipped.rows},
-                {0.f, (float)frameClipped.rows}
-            };
-            std::vector<cv::Point2f> dstCorners;
-            cv::perspectiveTransform(srcCorners, dstCorners, Hframe);
-            cv::Rect bbox = cv::boundingRect(dstCorners)
-                & cv::Rect(0, 0, _canvas.cols, _canvas.rows);
-            if (bbox.width > 0 && bbox.height > 0) {
-                // Translate Hframe into bbox-local coords so the
-                // output buffer can be just the bbox size.
-                cv::Mat T3 = (cv::Mat_<double>(3, 3) <<
-                    1, 0, -bbox.x,
-                    0, 1, -bbox.y,
-                    0, 0, 1);
-                cv::Mat Hbbox = T3 * Hframe;
-
-                cv::Mat warpedFrame(bbox.size(), frameClipped.type(),
-                                     cv::Scalar(0, 0, 0));
-                cv::warpPerspective(frameClipped, warpedFrame, Hbbox,
-                                    bbox.size(), cv::INTER_LINEAR,
-                                    cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
-
-                // Mask of valid warped pixels (anything non-black).
-                // Black source pixels would be incorrectly excluded
-                // here, but the V12.11 rectilinear path doesn't
-                // produce true-black source content (camera input).
-                cv::Mat warpedGray, warpedMask;
-                cv::cvtColor(warpedFrame, warpedGray, cv::COLOR_BGR2GRAY);
-                cv::threshold(warpedGray, warpedMask, 0, 255, cv::THRESH_BINARY);
-
-                cv::Mat canvasRoi = _canvas(bbox);
-                cv::Mat canvasMaskRoi = _canvasMask(bbox);
-                cv::Mat noPrior;
-                cv::compare(canvasMaskRoi, 0, noPrior, cv::CMP_EQ);
-                cv::Mat paintMask;
-                cv::bitwise_and(noPrior, warpedMask, paintMask);
-                int newPixels = cv::countNonZero(paintMask);
-                if (newPixels > 0) {
-                    warpedFrame.copyTo(canvasRoi, paintMask);
-                    cv::bitwise_or(canvasMaskRoi, paintMask, canvasMaskRoi);
-                    _accepted += 1;
-                    [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
-                } else {
-                    [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
-                }
-                auto t1 = std::chrono::steady_clock::now();
-                double ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
-                [tele setValue:@(ms) forKey:@"processingMs"];
-                return tele;
-            }
-            // bbox empty → fall through to pose-only paste.  Edge
-            // case: H mapped frame entirely outside canvas bounds.
-        }
-
-        // Pose-only fallback paste — used when H was invalid (low
-        // inliers, degenerate det, or empty bbox above).  Uses
-        // the homography-translation-corrected (dstX, dstY).
+        // V13.0a — pose-only paste (the ONLY paste path now in the
+        // rectilinear engine).  V12.11.1's full warpPerspective paste
+        // and its homography-translation correction were removed;
+        // this pose-projected (dstX, dstY) is now the final paste
+        // position with no per-frame visual refinement.
         cv::Rect dstRoi(dstX, dstY, clipW, clipH);
         cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
         cv::Rect dstClipped = dstRoi & canvasBounds;
@@ -1325,16 +921,17 @@ static cv::Point homographyOffset(const cv::Mat& canvasOverlap,
     // the saved JPEG is Y wide × 1920 tall — wide strip in
     // portrait UI.
     //
-    // ROTATE_90_COUNTERCLOCKWISE: result rows = src cols (1920),
-    // result cols = src rows (Y).  Sign may need flipping to
-    // _CLOCKWISE depending on which "horizontal" direction the
-    // user perceives as "forward" — iterate after first device
-    // test.
+    // V13.0a — ROTATE_90_CLOCKWISE (was COUNTERCLOCKWISE in V12.14.10).
+    // Ram's V12.14.10 device test showed the saved JPEG appearing
+    // upside-down in the portrait UI; CCW was the wrong direction.
+    // CW maps the canvas's pan-axis growth direction to the user-
+    // perspective rightward direction, which matches the UI's
+    // expected wide-horizontal-strip layout.
     cv::Mat out;
     if (_isLandscape) {
         out = cropped;
     } else {
-        cv::rotate(cropped, out, cv::ROTATE_90_COUNTERCLOCKWISE);
+        cv::rotate(cropped, out, cv::ROTATE_90_CLOCKWISE);
     }
 
     if (applyExposureComp && !out.empty()) {
