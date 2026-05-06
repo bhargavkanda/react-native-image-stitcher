@@ -41,6 +41,7 @@ import Foundation
 import ARKit
 import simd
 import UIKit
+import os.log
 
 /// Public outcome enum mirroring the ObjC `RLISFrameOutcome` so JS
 /// callers can inspect what happened to each frame without crossing
@@ -137,6 +138,16 @@ public extension Notification.Name {
 
 @objc(RetaiLensIncrementalStitcher)
 public final class RetaiLensIncrementalStitcher: NSObject {
+
+    /// V13.0c.1.1 — same os_log subsystem as the slit-scan engine's
+    /// SlitDiagLog so Console.app sees both V13.0b-gate and V13.0c-trans
+    /// under one filter.  FAULT-level survives NSLog's burst rate-limit
+    /// (~10/sec) — diagnostic logs at 50fps would otherwise be dropped.
+    fileprivate static let diagLog = OSLog(
+        subsystem: "com.tiger.retailens.sdk",
+        category: "slitscan"
+    )
+
 
     @objc public static let shared = RetaiLensIncrementalStitcher()
 
@@ -444,20 +455,20 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                 self.firstFrameTy = pose.ty
                 self.firstFrameTz = pose.tz
                 self.hasFirstFrameTranslation = true
-                NSLog(
-                    "[V13.0c-trans] first-frame world position " +
-                    "tx=%.4f ty=%.4f tz=%.4f", pose.tx, pose.ty, pose.tz
-                )
+                // V13.0c.1.1 — FAULT-level os_log under same subsystem
+                // as V13.0b-gate so logs appear under either Console.app
+                // filter (process-only or subsystem).
+                os_log(.fault, log: Self.diagLog,
+                       "[V13.0c-trans] first-frame world position tx=%.4f ty=%.4f tz=%.4f",
+                       pose.tx, pose.ty, pose.tz)
             } else if self.consumeFrameCounter % 5 == 0 {
                 let dx = pose.tx - self.firstFrameTx
                 let dy = pose.ty - self.firstFrameTy
                 let dz = pose.tz - self.firstFrameTz
                 let mag = sqrt(dx * dx + dy * dy + dz * dz)
-                NSLog(
-                    "[V13.0c-trans] #%d Δt_world=(%+.4f,%+.4f,%+.4f) " +
-                    "magnitude=%.4f m",
-                    self.consumeFrameCounter, dx, dy, dz, mag
-                )
+                os_log(.fault, log: Self.diagLog,
+                       "[V13.0c-trans] #%d delta_t_world=(%+.4f,%+.4f,%+.4f) magnitude=%.4f m",
+                       self.consumeFrameCounter, dx, dy, dz, mag)
             }
         }
         stateLock.unlock()
