@@ -128,8 +128,24 @@ static os_log_t SlitDiagLog(void) {
     cv::Mat _prevDescriptors;
     cv::Mat _prevRotationArkit;     // 3x3 R at previous accept
     cv::Mat _prevTranslationArkit;  // 3x1 t at previous accept (m)
-    cv::Mat _firstTranslationArkit; // 3x1 t at first frame (m)
+    cv::Mat _firstTranslationArkit; // 3x1 t at first frame (m) — V13.0g unused, kept for diag.
     bool _hasPrevAccept;
+
+    // V13.0g — per-accept incremental tri-correction accumulator.
+    // V13.0e/f computed correction = focal × R^T × (t_now − t_first) / Z
+    // (cumulative-from-first), capped at ±50/±100.  At realistic pan
+    // motion (Δt cumulative ~40 cm) the true correction can reach 200–
+    // 400 px; the cap clipped most of it, leaving tens to hundreds of
+    // pixels of misalignment between adjacent slits.  V13.0g switches
+    // to per-accept INCREMENTAL Δt (t_now − t_prev_accept ≈ 4 cm),
+    // computes a small per-accept correction (~30–100 px), caps that
+    // increment at ±80, and ACCUMULATES it.  Total correction over a
+    // pan grows naturally to whatever cumulative parallax demands;
+    // per-accept artifact stays bounded; bad-Z bursts on individual
+    // accepts contribute ±80 (not the global rescaling that V13.0f's
+    // cumulative-Z formula caused).
+    double _accumTriCorrectionX;
+    double _accumTriCorrectionY;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -213,6 +229,10 @@ static os_log_t SlitDiagLog(void) {
     _prevTranslationArkit = cv::Mat();
     _firstTranslationArkit = cv::Mat();
     _hasPrevAccept = false;
+
+    // V13.0g — zero the per-accept incremental tri accumulator.
+    _accumTriCorrectionX = 0.0;
+    _accumTriCorrectionY = 0.0;
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
@@ -781,10 +801,16 @@ static const double kPanAxisFractionRect = 0.70;
         }
 
         // ── LAYER 1: triangulation-based parallax correction ────────
+        // V13.0g: triDx/triDy report the ACCUMULATED total (rounded
+        // _accumTriCorrectionX/Y) actually applied to dstX/Y.
+        // triIncX/triIncY report this accept's incremental contribution
+        // to that accumulator — useful for spotting bad-Z bursts.
         int triMatches = 0;
         double medianZ = 0.0;
         int triDx = 0;
         int triDy = 0;
+        int triIncX = 0;
+        int triIncY = 0;
         bool triApplied = false;
 
         if (_hasPrevAccept
@@ -884,32 +910,56 @@ static const double kPanAxisFractionRect = 0.70;
                     std::sort(zs.begin(), zs.end());
                     medianZ = zs[zs.size() / 2];
 
-                    // Δt expressed in CURRENT camera frame (cv coords).
-                    // Reference frame is FIRST accept (not prev) so the
-                    // correction is consistent with `dstY = firstDstY -
-                    // alpha × focal`'s reference frame — both anchored
-                    // to first frame, both yield monotonic canvas
-                    // positions.
+                    // V13.0g — INCREMENTAL Δt since previous accept,
+                    // NOT cumulative since first frame.  V13.0e/f's
+                    // cumulative-from-first formulation produced
+                    // corrections of hundreds of px at typical pan
+                    // motion (Δt cumulative ≈ 40 cm × focal / Z), and
+                    // the cap clipped most of them — leaving severe
+                    // misalignment between adjacent slits in the late
+                    // half of every pan.  Per-accept Δt is small
+                    // (~4 cm); per-accept correction is small (~30–100
+                    // px); we accumulate the increments in
+                    // _accumTriCorrectionX/Y to recover the cumulative
+                    // total without a hard cap on that total.
                     cv::Mat dt_world_cv = _M_arkitToCv *
-                        ((cv::Mat_<double>(3, 1) << tx, ty, tz) - _firstTranslationArkit);
+                        ((cv::Mat_<double>(3, 1) << tx, ty, tz) - _prevTranslationArkit);
                     cv::Mat dt_cam_cv = R1_cv_T * dt_world_cv;
 
-                    double rawTriDx = +_focalCompose * dt_cam_cv.at<double>(0) / medianZ;
-                    double rawTriDy = +_focalCompose * dt_cam_cv.at<double>(1) / medianZ;
+                    double rawTriDxInc = +_focalCompose * dt_cam_cv.at<double>(0) / medianZ;
+                    double rawTriDyInc = +_focalCompose * dt_cam_cv.at<double>(1) / medianZ;
 
-                    // V13.0f cap = ±50 (was V13.0e ±100).  Keeps post-
-                    // tri position close enough that the NCC ±30 search
-                    // can find the right answer if tri was a bit off.
-                    constexpr double kMaxTriCorrection = 50.0;
-                    if (std::fabs(rawTriDx) > kMaxTriCorrection) {
-                        rawTriDx = (rawTriDx > 0 ? 1.0 : -1.0) * kMaxTriCorrection;
+                    // V13.0g per-accept cap = ±80.  Bigger than V13.0f's
+                    // ±50 because the INCREMENT lands at typical per-
+                    // accept parallax magnitude (Δt ~4 cm × focal / Z ≈
+                    // 30–100 px for Z ∈ [0.5, 1.5] m).  Bad-Z spikes on
+                    // a single accept contribute up to ±80 to the
+                    // accumulator; subsequent good-Z accepts continue
+                    // with their correct magnitudes (no global
+                    // rescaling like V13.0e/f cumulative formulas).
+                    constexpr double kMaxTriIncCorrection = 80.0;
+                    if (std::fabs(rawTriDxInc) > kMaxTriIncCorrection) {
+                        rawTriDxInc = (rawTriDxInc > 0 ? 1.0 : -1.0) * kMaxTriIncCorrection;
                     }
-                    if (std::fabs(rawTriDy) > kMaxTriCorrection) {
-                        rawTriDy = (rawTriDy > 0 ? 1.0 : -1.0) * kMaxTriCorrection;
+                    if (std::fabs(rawTriDyInc) > kMaxTriIncCorrection) {
+                        rawTriDyInc = (rawTriDyInc > 0 ? 1.0 : -1.0) * kMaxTriIncCorrection;
                     }
 
-                    triDx = (int)std::round(rawTriDx);
-                    triDy = (int)std::round(rawTriDy);
+                    // Per-accept increment (ints, for diagnostics).
+                    triIncX = (int)std::round(rawTriDxInc);
+                    triIncY = (int)std::round(rawTriDyInc);
+
+                    // Accumulate.  Total correction grows naturally
+                    // as accepts process; no hard cap on the running
+                    // total.  The applied dstX/Y delta is the ROUNDED
+                    // accumulator, not just this accept's increment —
+                    // pose-only dstX/Y is reset to first-frame anchor
+                    // every accept, so we layer the full accumulator.
+                    _accumTriCorrectionX += rawTriDxInc;
+                    _accumTriCorrectionY += rawTriDyInc;
+
+                    triDx = (int)std::round(_accumTriCorrectionX);
+                    triDy = (int)std::round(_accumTriCorrectionY);
 
                     // V13.0f: NO inner Y clamp here.  The final
                     // forward-only clamp runs once after BOTH layers
@@ -924,10 +974,11 @@ static const double kPanAxisFractionRect = 0.70;
 
         if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                "[V13.0f-tri] #%ld matches=%d medianZ=%.2fm dx=%+d dy=%+d "
-                "applied=%d (poseDstX=%d poseDstY=%d -> dstX=%d dstY=%d)",
+                "[V13.0g-tri] #%ld matches=%d medianZ=%.2fm inc=%+d,%+d "
+                "accum=%+d,%+d applied=%d (poseDstX=%d poseDstY=%d -> "
+                "dstX=%d dstY=%d)",
                 (long)_engineCallCounter, triMatches, medianZ,
-                triDx, triDy, (int)triApplied,
+                triIncX, triIncY, triDx, triDy, (int)triApplied,
                 poseDstX, poseDstY, dstX, dstY);
         }
 
@@ -1026,7 +1077,7 @@ static const double kPanAxisFractionRect = 0.70;
 
         if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                "[V13.0f-ncc] #%ld dx=%+d dy=%+d ncc=%.3f applied=%d "
+                "[V13.0g-ncc] #%ld dx=%+d dy=%+d ncc=%.3f applied=%d "
                 "(after-tri dstX=%d dstY=%d)",
                 (long)_engineCallCounter, nccDx, nccDy, nccConfidence,
                 (int)nccApplied, dstX, dstY);
@@ -1086,7 +1137,7 @@ static const double kPanAxisFractionRect = 0.70;
 
         if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                "[V13.0f-paint] #%ld dstX=%d dstY=%d _accepted=%ld",
+                "[V13.0g-paint] #%ld dstX=%d dstY=%d _accepted=%ld",
                 (long)_engineCallCounter, dstX, dstY, (long)_accepted);
         }
         [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
