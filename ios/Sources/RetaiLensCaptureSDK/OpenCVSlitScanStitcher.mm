@@ -146,6 +146,15 @@ static os_log_t SlitDiagLog(void) {
     // cumulative-Z formula caused).
     double _accumTriCorrectionX;
     double _accumTriCorrectionY;
+
+    // V14.0a — last accept's final canvas paste position.  Used to
+    // build per-match canvas-coord pairs that feed RANSAC homography
+    // in subsequent accepts.  Captured AFTER V13.0g's incremental
+    // tri+accumulator and the forward-only Y clamp, because that's
+    // what was actually painted onto canvas.  Initialized at first
+    // accept; updated at the end of each subsequent accept.
+    int _prevAcceptDstX;
+    int _prevAcceptDstY;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -233,6 +242,10 @@ static os_log_t SlitDiagLog(void) {
     // V13.0g — zero the per-accept incremental tri accumulator.
     _accumTriCorrectionX = 0.0;
     _accumTriCorrectionY = 0.0;
+
+    // V14.0a — clear prev accept canvas position; set on first accept.
+    _prevAcceptDstX = 0;
+    _prevAcceptDstY = 0;
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
@@ -510,6 +523,10 @@ static const double kPanAxisFractionRect = 0.30;
             cv::rectangle(_canvasMask, roi, cv::Scalar(255), cv::FILLED);
             _firstFrameDstX = dstX;
             _firstFrameDstY = dstY;
+            // V14.0a — first accept's canvas position becomes prev for
+            // the second accept's homography target-pair construction.
+            _prevAcceptDstX = dstX;
+            _prevAcceptDstY = dstY;
             // V12.11 Step D — initialise the running-max tracker
             // to first-frame position.  Subsequent frames must
             // monotonically advance from here along the pan axis.
@@ -833,6 +850,12 @@ static const double kPanAxisFractionRect = 0.30;
         int triIncY = 0;
         bool triApplied = false;
 
+        // V14.0a — prevPts/curPts declared at outer scope (was inside
+        // the triangulation if-block in V13.0g) so V14.0a's RANSAC
+        // homography pass below can reuse them.  Empty when no matches
+        // were computed (e.g., first accept, or _hasPrevAccept=false).
+        std::vector<cv::Point2d> prevPts, curPts;
+
         if (_hasPrevAccept
             && !curDescriptors.empty()
             && !_prevDescriptors.empty()
@@ -846,7 +869,9 @@ static const double kPanAxisFractionRect = 0.30;
             // Lowe ratio test: keep matches where the best match's
             // descriptor distance is < 0.7 × second-best's, weeding
             // out ambiguous repeated-texture pairs.
-            std::vector<cv::Point2d> prevPts, curPts;
+            // V14.0a — prevPts/curPts moved to outer scope (just before
+            // the if-block) so V14.0a's RANSAC homography pass below
+            // can use them; declarations no longer here.
             prevPts.reserve(knnMatches.size());
             curPts.reserve(knnMatches.size());
             constexpr float kLoweRatio = 0.7f;
@@ -1002,148 +1027,220 @@ static const double kPanAxisFractionRect = 0.30;
                 poseDstX, poseDstY, dstX, dstY);
         }
 
-        // ── LAYER 2: 2D NCC fine-alignment refinement ───────────────
-        // Source: top of the new clipped slit, INSET by 30 px on each
-        // X side so matchTemplate has horizontal slide room when the
-        // search window is the full canvas perpendicular extent.  Fixes
-        // the V13.0d bug where searchW = clipW gave zero slide room.
-        constexpr int kNccSourceHeight = 100;
-        constexpr int kNccSearchMargin = 30;
-        constexpr int kNccSourceXInset = 30;
+        // ── LAYER 2: V14.0a RANSAC homography refinement ─────────────
+        // V13.0g used 2D NCC to find a single (Δx, Δy) translation that
+        // best aligned the slit's overlap region with the canvas's
+        // existing painted region.  NCC's single-translation model
+        // cannot satisfy multi-depth scenes (a door with frame at 1.4 m,
+        // surface at 1.5 m, wall behind at 1.8 m): each depth wants a
+        // different shift, so a single shift visibly mis-aligns at
+        // least one depth → the door-shear visible in V13.0g and
+        // V14.0pre.1 outputs.
+        //
+        // V14.0a feeds the SAME ORB matches V13.0g already computed
+        // for triangulation into RANSAC homography fitting.
+        // Homography is 8-DOF: each matched feature gets its own
+        // implied position via a 3×3 projective transform.  The
+        // dominant scene plane fits exactly; off-plane features (with
+        // residual parallax) become RANSAC outliers and are filtered.
+        // The slit is then warped via cv::warpPerspective into canvas
+        // space — producing a non-rectangular footprint that aligns
+        // visually for all features simultaneously.
+        //
+        // Failure mode: degenerate matches (fewer than 8 inliers, or
+        // matches on a single line) → fall back to V13.0g pose+tri-only
+        // rectangular paste.  No multi-tier ladder (V12.14's lesson:
+        // confidence tiers compound errors).
+        bool homographyApplied = false;
+        cv::Mat homographyH;
+        int homographyInlierCount = 0;
+        double homographyAvgReproj = 0.0;
 
-        const int nccSourceW = clipW - 2 * kNccSourceXInset;
-        const int nccSourceH = kNccSourceHeight;
+        if (_hasPrevAccept && prevPts.size() >= 8 && curPts.size() >= 8) {
+            // Build per-match canvas-coord targets: where each prev
+            // feature was actually painted on the canvas.
+            //
+            // prev_pts is in PREV FRAME pixel coords (full sensor).
+            // prev was painted at canvas position
+            //   (_prevAcceptDstX + prev_fx − srcClipX,
+            //    _prevAcceptDstY + prev_fy − srcClipY)
+            // assuming a rectangular paste at (_prevAcceptDstX,
+            // _prevAcceptDstY).  If the previous accept used homography
+            // warp itself, this is approximate within the prev
+            // homography's deviation from translation; RANSAC absorbs
+            // the residual as match-pair noise.
+            std::vector<cv::Point2f> srcPts;     // cur frame pixel coords
+            std::vector<cv::Point2f> dstCanvasPts;  // canvas pixel coords
+            srcPts.reserve(prevPts.size());
+            dstCanvasPts.reserve(prevPts.size());
+            for (size_t i = 0; i < prevPts.size(); i++) {
+                const double prev_canvas_x =
+                    _prevAcceptDstX + prevPts[i].x - srcClipX;
+                const double prev_canvas_y =
+                    _prevAcceptDstY + prevPts[i].y - srcClipY;
+                srcPts.emplace_back((float)curPts[i].x, (float)curPts[i].y);
+                dstCanvasPts.emplace_back((float)prev_canvas_x,
+                                          (float)prev_canvas_y);
+            }
 
-        int nccDx = 0, nccDy = 0;
-        double nccConfidence = 0.0;
-        bool nccApplied = false;
+            std::vector<unsigned char> ransacInliers;
+            cv::Mat H = cv::findHomography(srcPts, dstCanvasPts,
+                                            cv::RANSAC,
+                                            3.0,        // reproj threshold (px)
+                                            ransacInliers,
+                                            2000,       // max iters
+                                            0.995);     // confidence
 
-        if (nccSourceW > 0
-            && srcClipY + nccSourceH <= frameBGR.rows
-            && srcClipX + kNccSourceXInset + nccSourceW <= frameBGR.cols) {
+            if (!H.empty()) {
+                homographyInlierCount = cv::countNonZero(ransacInliers);
 
-            cv::Mat sourceRegion = frameBGR(cv::Rect(
-                srcClipX + kNccSourceXInset,
-                srcClipY,
-                nccSourceW, nccSourceH));
+                // Reject degenerate homographies: too few inliers OR
+                // a near-singular matrix (det close to 0, common when
+                // matches lie on a single line — peg-board scenes).
+                const double H_det = cv::determinant(H);
+                const bool degenerate =
+                    (homographyInlierCount < 8) ||
+                    (std::fabs(H_det) < 1e-6);
 
-            // Where the source's top-left would land in canvas if
-            // alignment were already perfect (i.e., at current dstX/Y).
-            const int expectedMatchX = dstX + kNccSourceXInset;
-            const int expectedMatchY = dstY;
-
-            // Search window: ±kNccSearchMargin around expected position.
-            // Clamped to canvas bounds.
-            int searchLeft   = std::max(0, expectedMatchX - kNccSearchMargin);
-            int searchTop    = std::max(0, expectedMatchY - kNccSearchMargin);
-            int searchRight  = std::min((int)_canvas.cols,
-                                        expectedMatchX + nccSourceW + kNccSearchMargin);
-            int searchBottom = std::min((int)_canvas.rows,
-                                        expectedMatchY + nccSourceH + kNccSearchMargin);
-
-            const int searchW = searchRight - searchLeft;
-            const int searchH = searchBottom - searchTop;
-
-            if (searchW >= nccSourceW && searchH >= nccSourceH) {
-                // Need at least SOME painted canvas in the search
-                // region for matchTemplate to match against.
-                cv::Mat searchMaskRoi = _canvasMask(
-                    cv::Rect(searchLeft, searchTop, searchW, searchH));
-                if (cv::countNonZero(searchMaskRoi) > 0) {
-                    cv::Mat searchRegion = _canvas(
-                        cv::Rect(searchLeft, searchTop, searchW, searchH));
-
-                    // Grayscale NCC — colour-channel correlation gives
-                    // marginal accuracy gain at 3× the cost.
-                    cv::Mat sourceGray, searchGray;
-                    cv::cvtColor(sourceRegion, sourceGray, cv::COLOR_BGR2GRAY);
-                    cv::cvtColor(searchRegion, searchGray, cv::COLOR_BGR2GRAY);
-
-                    cv::Mat nccResult;
-                    cv::matchTemplate(searchGray, sourceGray, nccResult,
-                                      cv::TM_CCOEFF_NORMED);
-
-                    double nccMin, nccMax;
-                    cv::Point nccMinLoc, nccMaxLoc;
-                    cv::minMaxLoc(nccResult, &nccMin, &nccMax,
-                                  &nccMinLoc, &nccMaxLoc);
-                    nccConfidence = nccMax;
-
-                    constexpr double kMinNccConfidence = 0.6;
-                    if (nccConfidence >= kMinNccConfidence) {
-                        // Best canvas-side top-left for the source.
-                        const int matchX = searchLeft + nccMaxLoc.x;
-                        const int matchY = searchTop + nccMaxLoc.y;
-                        int rawDx = matchX - expectedMatchX;
-                        int rawDy = matchY - expectedMatchY;
-
-                        // Cap each at ±kNccSearchMargin (the search
-                        // bound — already implied by the search window
-                        // size, but explicit for clarity).
-                        if (rawDx >  kNccSearchMargin) rawDx =  kNccSearchMargin;
-                        if (rawDx < -kNccSearchMargin) rawDx = -kNccSearchMargin;
-                        if (rawDy >  kNccSearchMargin) rawDy =  kNccSearchMargin;
-                        if (rawDy < -kNccSearchMargin) rawDy = -kNccSearchMargin;
-
-                        nccDx = rawDx;
-                        nccDy = rawDy;
-                        dstX += nccDx;
-                        dstY += nccDy;
-                        nccApplied = true;
+                if (!degenerate) {
+                    // Compute mean reprojection residual on inliers
+                    // (diagnostic: tight homographies → small residual).
+                    double sumResid = 0.0;
+                    int nResid = 0;
+                    for (size_t i = 0; i < srcPts.size(); i++) {
+                        if (!ransacInliers[i]) continue;
+                        cv::Mat src_h = (cv::Mat_<double>(3, 1) <<
+                                         srcPts[i].x, srcPts[i].y, 1.0);
+                        cv::Mat dst_h = H * src_h;
+                        const double w = dst_h.at<double>(2);
+                        if (std::fabs(w) < 1e-9) continue;
+                        const double dxR = dst_h.at<double>(0) / w
+                                           - dstCanvasPts[i].x;
+                        const double dyR = dst_h.at<double>(1) / w
+                                           - dstCanvasPts[i].y;
+                        sumResid += std::sqrt(dxR * dxR + dyR * dyR);
+                        nResid++;
                     }
+                    homographyAvgReproj = (nResid > 0)
+                        ? (sumResid / nResid) : 0.0;
+
+                    homographyH = H;
+                    homographyApplied = true;
                 }
             }
         }
 
         if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                "[V13.0g-ncc] #%ld dx=%+d dy=%+d ncc=%.3f applied=%d "
-                "(after-tri dstX=%d dstY=%d)",
-                (long)_engineCallCounter, nccDx, nccDy, nccConfidence,
-                (int)nccApplied, dstX, dstY);
+                "[V14.0a-ransac] #%ld matches=%zu inliers=%d "
+                "avgReproj=%.2fpx applied=%d",
+                (long)_engineCallCounter,
+                prevPts.size(), homographyInlierCount,
+                homographyAvgReproj, (int)homographyApplied);
         }
 
-        // ── FINAL forward-only Y clamp (after BOTH layers) ──────────
-        // Combined tri (cap ±50) + NCC (cap ±30) can pull dstY by up
-        // to 80 below the pose-only value.  V13.0b gate guaranteed
-        // panDelta ≥ 50, so worst case dstY = _maxDstY − 30.  Clamp
-        // here protects V13.0b's monotonic-advance invariant.
+        // ── Forward-only Y guard on running max ─────────────────────
+        // For pose+tri fallback, dstY (post-clamp) is the slit top.
+        // For homography path, the warped slit's actual top edge is
+        // the warpedMask's bounding-box top.  Clamp dstY (used by
+        // pose+tri fallback path AND as the diagnostic "pre-warp dstY"
+        // value in the paint log).
         if (dstY < (int)_maxDstY) {
-            dstY = (int)_maxDstY;  // zero advance, never pull back
+            dstY = (int)_maxDstY;
         }
 
-        // Running max along pan axis.
-        _maxDstY = (NSInteger)dstY;
+        // ── V14.0a paint ────────────────────────────────────────────
+        // Two paths: homography warp (preferred) or pose+tri rectangular
+        // paste (fallback).  Both apply first-painted-wins masking so
+        // earlier slits' content is preserved.
+        cv::Mat warpedCanvas;
+        cv::Mat warpedCanvasMask;
 
-        // V12.14.9 — paintedExtent reflects the new max.
+        if (homographyApplied) {
+            // Warp the clipped slit into canvas-sized output via the
+            // RANSAC homography.  Compose H with a translation matrix
+            // so the warp source is the slit-local clipped ROI rather
+            // than the full frame:
+            //   pixel_canvas = H_full * pixel_full
+            //   pixel_full   = pixel_slit + (srcClipX, srcClipY)
+            //   ⇒ H_slit     = H_full * T(srcClipX, srcClipY)
+            cv::Rect srcSlitRect(srcClipX, srcClipY, clipW, clipH);
+            cv::Mat srcSlit = frameBGR(srcSlitRect);
+
+            cv::Mat T_slit = (cv::Mat_<double>(3, 3) <<
+                1, 0, (double)srcClipX,
+                0, 1, (double)srcClipY,
+                0, 0, 1);
+            cv::Mat H_slit = homographyH * T_slit;
+
+            warpedCanvas = cv::Mat::zeros(_canvas.size(), CV_8UC3);
+            cv::warpPerspective(srcSlit, warpedCanvas, H_slit,
+                                _canvas.size(),
+                                cv::INTER_LINEAR,
+                                cv::BORDER_CONSTANT,
+                                cv::Scalar(0, 0, 0));
+
+            cv::Mat whiteSlit(srcSlit.size(), CV_8UC1, cv::Scalar(255));
+            warpedCanvasMask = cv::Mat::zeros(_canvas.size(), CV_8UC1);
+            cv::warpPerspective(whiteSlit, warpedCanvasMask, H_slit,
+                                _canvas.size(),
+                                cv::INTER_NEAREST,
+                                cv::BORDER_CONSTANT,
+                                cv::Scalar(0));
+        } else {
+            // Fallback: V13.0g pose+tri-only rectangular paste at
+            // (dstX, dstY).  Build a canvas-sized image with just the
+            // slit pasted at its rectangular position.
+            warpedCanvas = cv::Mat::zeros(_canvas.size(), CV_8UC3);
+            warpedCanvasMask = cv::Mat::zeros(_canvas.size(), CV_8UC1);
+
+            cv::Rect dstRoi(dstX, dstY, clipW, clipH);
+            cv::Rect canvasBoundsRect(0, 0, _canvas.cols, _canvas.rows);
+            cv::Rect dstClipped = dstRoi & canvasBoundsRect;
+            if (dstClipped.width <= 0 || dstClipped.height <= 0) {
+                [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost)
+                        forKey:@"outcome"];
+                return tele;
+            }
+
+            cv::Rect srcRoiInFrame(
+                srcClipX + (dstClipped.x - dstX),
+                srcClipY + (dstClipped.y - dstY),
+                dstClipped.width, dstClipped.height);
+            frameBGR(srcRoiInFrame).copyTo(warpedCanvas(dstClipped));
+            warpedCanvasMask(dstClipped).setTo(255);
+        }
+
+        // ── Update running max along pan axis ───────────────────────
+        // For non-rectangular warped footprints, use the mask's
+        // bounding-box top as the upper edge (forward-only invariant
+        // means we never let _maxDstY decrease).
+        {
+            int newMaxDstY = (int)_maxDstY;
+            if (homographyApplied) {
+                cv::Mat nz;
+                cv::findNonZero(warpedCanvasMask, nz);
+                if (!nz.empty()) {
+                    cv::Rect bb = cv::boundingRect(nz);
+                    newMaxDstY = std::max(newMaxDstY, bb.y);
+                } else {
+                    newMaxDstY = std::max(newMaxDstY, dstY);
+                }
+            } else {
+                newMaxDstY = std::max(newMaxDstY, dstY);
+            }
+            _maxDstY = newMaxDstY;
+        }
+
         [tele setValue:@(_maxDstY + clipH) forKey:@"paintedExtent"];
 
-        // ─── PAINT: first-painted-wins on the full clipH slit ────────
-        cv::Rect dstRoi(dstX, dstY, clipW, clipH);
-        cv::Rect canvasBoundsRect(0, 0, _canvas.cols, _canvas.rows);
-        cv::Rect dstClipped = dstRoi & canvasBoundsRect;
-        if (dstClipped.width <= 0 || dstClipped.height <= 0) {
-            [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
-            return tele;
-        }
-
-        // Source ROI in frameBGR coords, accounting for any clipping
-        // against canvas edges.
-        cv::Rect srcRoiInFrame(
-            srcClipX + (dstClipped.x - dstX),
-            srcClipY + (dstClipped.y - dstY),
-            dstClipped.width, dstClipped.height);
-        cv::Mat srcRegion = frameBGR(srcRoiInFrame);
-        cv::Mat canvasRoi = _canvas(dstClipped);
-        cv::Mat canvasMaskRoi = _canvasMask(dstClipped);
-
-        // Paint only where canvas is currently unpainted.  Mask == 0
-        // means no prior content; OR-update mask to 255 in those
-        // pixels so future slits respect first-arrival.
-        cv::Mat noPriorMask;
-        cv::compare(canvasMaskRoi, 0, noPriorMask, cv::CMP_EQ);
-        srcRegion.copyTo(canvasRoi, noPriorMask);
-        canvasMaskRoi.setTo(255, noPriorMask);
+        // ── First-painted-wins paint of warpedCanvas onto _canvas ───
+        cv::Mat canvasMaskZero;
+        cv::compare(_canvasMask, 0, canvasMaskZero, cv::CMP_EQ);
+        cv::Mat paintMask;
+        cv::bitwise_and(canvasMaskZero, warpedCanvasMask, paintMask);
+        warpedCanvas.copyTo(_canvas, paintMask);
+        cv::bitwise_or(_canvasMask, paintMask, _canvasMask);
 
         _accepted += 1;
 
@@ -1154,11 +1251,25 @@ static const double kPanAxisFractionRect = 0.30;
         _prevDescriptors = curDescriptors;
         _prevRotationArkit = R_new.clone();
         _prevTranslationArkit = (cv::Mat_<double>(3, 1) << tx, ty, tz);
+        // V14.0a — store this accept's final canvas position for the
+        // NEXT accept's homography target-pair construction.  Use the
+        // post-clamp dstX/dstY because that's what got painted (or, for
+        // the homography path, the pose+tri pre-warp position — the
+        // homography itself encodes the warp, so prev_pts in frame
+        // coords + this dst position correctly identifies where each
+        // matched feature landed on canvas).
+        _prevAcceptDstX = dstX;
+        _prevAcceptDstY = dstY;
 
         if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
+            // V14.0a — note that when homo=1 the actual painted footprint
+            // is non-rectangular; dstX/dstY here describe the pose+tri
+            // pre-warp position (used by the fallback path), not the
+            // warp result's centroid.
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                "[V13.0g-paint] #%ld dstX=%d dstY=%d _accepted=%ld",
-                (long)_engineCallCounter, dstX, dstY, (long)_accepted);
+                "[V14.0a-paint] #%ld dstX=%d dstY=%d homo=%d _accepted=%ld",
+                (long)_engineCallCounter, dstX, dstY,
+                (int)homographyApplied, (long)_accepted);
         }
         [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
         auto t1 = std::chrono::steady_clock::now();
