@@ -270,13 +270,17 @@ static cv::Mat quatToR(double qx, double qy, double qz, double qw) {
 // First-frame and subsequent-frame branches both reference this
 // constant — DRY-critical because if they ever drift the engine
 // misbehaves (frame 1 placed bigger than frame 2's source ROI).
-// V14.0pre — narrowed from 0.70 to 0.10 to reduce within-slit
-// multi-depth parallax disagreement.  At 0.70 each slit covered ~32°
-// vertical FOV → visible shear on depth-rich content (door, V13.0g
-// field test).  At 0.10 each slit covers ~5° → shear shrinks ~6×.
-// V14.0a (RANSAC homography) is conditional on this NOT being
-// sufficient on its own.
-static const double kPanAxisFractionRect = 0.10;
+// V14.0pre.1 — bumped from 0.10 back to 0.30 after V14.0pre field test
+// surfaced gaps from fast-pan per-accept advance exceeding clipH.  At
+// clipH=108 (V14.0pre), per-accept advance during burst pan (~3000 px/s
+// pan rate × ~40 ms accept time = 120 px/accept) exceeds the slit, so
+// adjacent slits don't overlap → unpainted canvas Y bands = gaps.
+//
+// At 0.30, clipH = 324 px.  Still 2× narrower than V13.0g's 0.70 (756
+// px) — meaningfully reduces within-slit multi-depth disagreement (the
+// door-shear in V13.0g) — but with 3× safety margin over typical burst
+// per-accept advance, no gaps.
+static const double kPanAxisFractionRect = 0.30;
 
 // V13.0a — homographyOffset() and the kHomogTier* constants were
 // removed in the revert from V12.11.1 + V12.14 (ORB+RANSAC homography
@@ -484,10 +488,10 @@ static const double kPanAxisFractionRect = 0.10;
                       @"isLandscape=%d (pan extent %ld, frame=%dx%d)",
                       canvasCols, canvasRows, (int)_isLandscape,
                       (long)_canvasPanExtent, frameBGR.cols, frameBGR.rows);
-                // V14.0pre — confirm narrowed slit + dropped accept gate
-                // are live.  Fires once per capture (first-frame).
+                // V14.0pre.1 — confirm slit width + gate are live.
+                // Fires once per capture (first-frame).
                 NSLog(@"[V14.0pre-slit] kPanAxisFractionRect=%.2f "
-                      @"clipH=%d clipW=%d kMinAcceptDeltaPx=20",
+                      @"clipH=%d clipW=%d kMinAcceptDeltaPx=50",
                       kPanAxisFractionRect, clipH, clipW);
             }
 
@@ -711,12 +715,12 @@ static const double kPanAxisFractionRect = 0.10;
         // native pano).  No new outcome enum — reuse SkippedTooClose
         // since the gate's intent matches: "frame too close to
         // previous accept to contribute meaningfully".
-        // V14.0pre — dropped from 50 to 20 to maintain healthy slit
-        // overlap after narrowing kPanAxisFractionRect.  At clipH=108
-        // and gate=20, overlap = 88 px (~80% of slit) → contiguous
-        // coverage even at fast pan.  At gate=50 overlap would have
-        // been only 58 px — risk of gaps under fast pan.
-        constexpr int kMinAcceptDeltaPx = 20;
+        // V14.0pre.1 — restored to 50 (V13.0g value) after kPanAxisFractionRect
+        // was widened back to 0.30 (clipH = 324).  At clipH=324 and gate=50
+        // overlap = 274 px (~85% of slit), comfortably gap-free even at
+        // burst pan rates.  V14.0pre's gate=20 was a compensating workaround
+        // for the over-narrow clipH=108; both are reverted together.
+        constexpr int kMinAcceptDeltaPx = 50;
         const int panDelta = dstY - _maxDstY;
         if (panDelta < kMinAcceptDeltaPx) {
             // V13.0b — diagnostic gate-fire log (throttled).

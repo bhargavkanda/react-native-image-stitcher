@@ -365,18 +365,26 @@ constexpr double kRansacReprojThresh = 5.0;
         // V14.0pre — orientation detection BEFORE _R_panToWorld
         // construction (was V12.6 detection done AFTER, using
         // R_panToCam_first which itself depended on _R_panToWorld —
-        // chicken-and-egg).  cam-Y direction in world via
-        // R_arkit · (0,1,0) [ARKit cam-Y is up].  Landscape if the
-        // cam-Y vector is more horizontal (X or Z) than vertical (Y)
-        // — i.e., the phone is held with its long edge horizontal so
-        // the sensor-Y direction lies in the horizontal plane.
+        // chicken-and-egg).
+        //
+        // V14.0pre.1 — comparison INVERTED after V14.0pre field test
+        // showed it firing backwards.  Hardware geometry: the phone's
+        // sensor-Y axis (cam-Y) is along the SHORT edge of the phone.
+        // In LANDSCAPE the phone is held long-edge horizontal, so
+        // cam-Y points UP in the user's view (= along world-up =
+        // gravity).  In PORTRAIT it points sideways (horizontal).
+        // V14.0pre had max(|X|,|Z|) > |Y| firing as "landscape" — that
+        // pattern actually identifies PORTRAIT.  Field log showed
+        // |camY.worldY|=0.937 (clearly landscape) firing isLandscape=0.
+        // Inverted comparison matches V12.6 slit-scan detection's
+        // direction (absR11 > absR01).
         cv::Mat camYInWorld = _firstRotationArkit *
             (cv::Mat_<double>(3, 1) << 0, 1, 0);
         const double absCamYInWorldX = std::fabs(camYInWorld.at<double>(0));
         const double absCamYInWorldY = std::fabs(camYInWorld.at<double>(1));
         const double absCamYInWorldZ = std::fabs(camYInWorld.at<double>(2));
-        _isLandscape = (std::max(absCamYInWorldX, absCamYInWorldZ)
-                        > absCamYInWorldY);
+        _isLandscape = (absCamYInWorldY
+                        > std::max(absCamYInWorldX, absCamYInWorldZ));
         NSLog(@"[V14.0pre-orient] engine=hybrid isLandscape=%d "
               @"|camY.worldX|=%.4f |camY.worldY|=%.4f |camY.worldZ|=%.4f",
               (int)_isLandscape, absCamYInWorldX, absCamYInWorldY,
