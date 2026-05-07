@@ -699,74 +699,78 @@ static const double kPanAxisFractionRect = 0.70;
             return tele;
         }
 
-        // V13.0e — ORB-triangulation translation correction +
-        // first-painted-wins paint over the full clipH slit.
+        // V13.0f — TWO-LAYER alignment: ORB triangulation (depth-aware
+        // big shifts) + 2D NCC (visual fine refinement) on top of
+        // pose-only.  Paint is first-painted-wins on the full clipH.
         //
-        // ─── DESIGN ──────────────────────────────────────────────────
-        // Past the V13.0b 50 px gate; this slit will be accepted.
+        // ─── ARCHITECTURE ────────────────────────────────────────────
+        // Past the V13.0b 50 px gate; this slit will be accepted.  Three
+        // independent error sources move scene pixels off their pose-
+        // predicted canvas position:
         //
-        // (a) Triangulation-based parallax correction.
-        //     ARKit pose has 6-DOF.  Pose-only paste uses the rotation
-        //     part exclusively — `dstY = firstFrameDstY - alpha × focal`
-        //     where alpha is panaxis rotation since first frame.  But
-        //     V13.0c.1 traces showed realistic captures translate the
-        //     camera by 30–40 cm during a pan; at 1–3 m scene depth that
-        //     produces 30–100 px of perpendicular jitter and missing-
-        //     scene gaps between adjacent slits (Ram's V13.0d output).
+        //   (1) Translation parallax — the camera doesn't pivot in
+        //       place; ARKit logs ~30–40 cm of camera translation per
+        //       pan.  At 1–3 m scene depth that's tens to a hundred px
+        //       of perpendicular drift.  This is depth-dependent and
+        //       hence Z-aware.
+        //   (2) ARKit pose drift / sensor wobble — sub-degree pose
+        //       errors that show up as a few-px shift in image plane.
+        //       Depth-INdependent (uniform across the slit).
+        //   (3) Multi-depth disagreement — close objects have larger
+        //       parallax than far objects; a single canvas-paste shift
+        //       can't satisfy both.  Architectural limit; out of scope
+        //       for V13.0f (would need per-pixel depth = LiDAR).
         //
-        //     Fix: detect ORB on this frame, knnMatch + Lowe ratio test
-        //     against the previous accept's descriptors, run
-        //     cv::triangulatePoints with cv-frame projection matrices
-        //     to get a 3D point cloud, take median Z (per-frame depth
-        //     scalar — single canvas paste position can only encode a
-        //     single shift), and add parallax correction:
+        // V13.0e fixed (1) only — triangulation handles the depth-aware
+        // big shifts.  But V13.0e bad-Z cases (close textured features
+        // bias median Z) over-corrected, and the test exposed (2) as
+        // visible hard seams in the rotation case.  V13.0f layers NCC
+        // on top of triangulation so:
         //
-        //         Δpixel_correct = +focal × R_now_cv^T × Δt_world_cv / Z
+        //   tri    handles parallax (when Z is plausible)
+        //   NCC    handles residual visual mismatch (~ ±30 px)
         //
-        //     where Δt_world_cv = M × (t_now_arkit - t_first_arkit) is
-        //     the camera translation since first frame in cv coords.
-        //     Sign derivation: a static world point at depth Z shifts
-        //     in image plane by -focal × R^T × Δt_world / Z when the
-        //     camera moves; to compensate the canvas paste so the
-        //     SAME scene content lands at the SAME canvas position,
-        //     shift paste by the NEGATIVE of that = +focal × ... / Z.
+        // ─── TIGHTER TRIANGULATION ───────────────────────────────────
+        //   • Z range filter [0.5m, 10m] (was [0.1, 20m]).  V13.0e test
+        //     showed median Z = 0.27 m — real, but biased by
+        //     close-textured peg-hook features.  Rejecting Z < 0.5 m
+        //     biases median onto the dominant mid-scene plane (1–3 m).
+        //   • Cap |triDx|, |triDy| at ±50 px (was ±100).  Smaller cap
+        //     keeps the post-tri position close enough that NCC's ±30
+        //     search can find the visually correct match if tri was off.
         //
-        // (b) Why median Z and not per-pixel Z.
-        //     A single canvas paste position can only encode a single
-        //     translation; we can't deform the slit per-pixel without
-        //     a per-pixel depth map (LiDAR or dense stereo, neither
-        //     cheap on commodity Android devices we plan to support).
-        //     Median-Z is the right scalar — robust to outliers, fits
-        //     the dominant scene plane.
+        // ─── 2D NCC FINE-ALIGNMENT ──────────────────────────────────
+        //   V13.0d's NCC bug: the X-search width clamped to canvas.cols
+        //   left zero slide room (`searchW > clipW` was 1440 > 1440).
+        //   V13.0f fixes this by NARROWING the SOURCE template by 30 px
+        //   on each side (sourceW = clipW − 60).  matchTemplate over a
+        //   1440 × ~160 search region against a 1380 × 100 source has
+        //   60 × 60 of slide room — enough to recover ±30 px in X and Y.
         //
-        // (c) Why NOT V12.11 Step 4's per-frame ORB+RANSAC homography.
-        //     That approach was brittle under low overlap / low texture
-        //     / fast pan (V12.14's tier ladder was a workaround that
-        //     never fully tamed it).  V13.0e is different in TWO ways:
-        //       • Triangulation only — geometric pose still drives
-        //         placement; ORB just supplies the parallax denominator.
-        //         No homography stacking, no transform composition.
-        //       • Forward-only Y clamp — never pulls back below the
-        //         running max along pan axis (V12.14 frame-stacking
-        //         lesson).
+        //   Source: top kNccSourceHeight = 100 px of clipped slit, X-
+        //   inset by kNccSourceXInset = 30.  Search: canvas region
+        //   around (dstX, dstY) with ±kNccSearchMargin = 30 px slop.
+        //   NCC confidence ≥ 0.6 to apply, else skip.
         //
-        // (d) Why first-painted-wins paint, not feather blend.
-        //     V13.0d's 100 px overlap-feather created visible ghosting
-        //     in multi-depth regions: blending under imperfect
-        //     translation correction (single Z, not per-pixel) blurs
-        //     edges.  First-painted-wins on the full clipH slit keeps
-        //     the SHARPEST version of every pixel — whichever frame got
-        //     there first wins, no blending.  Sub-pixel jitter shows as
-        //     thin seams rather than blurred regions; far more
-        //     acceptable visually.
+        // ─── FORWARD-ONLY Y CLAMP (after both layers) ───────────────
+        //   The combined tri + NCC correction can pull dstY below
+        //   _maxDstY (V12.14 frame-stacking risk).  Clamp dstY ≥
+        //   _maxDstY at the very end — applied ONCE on the final value,
+        //   not inside each layer.
+        //
+        // ─── FIRST-PAINTED-WINS PAINT ───────────────────────────────
+        //   No feather blend.  V13.0d showed feather + imperfect
+        //   alignment = ghosting in detail-rich regions.  With tri + NCC
+        //   doing the alignment work, residuals are sub-px to a few px
+        //   — hard seams in those regions read as thin lines rather
+        //   than blurred edges.
         const int poseDstY = dstY;
         const int poseDstX = dstX;
 
         // Detect ORB on the FULL sensor frame (~5 ms on iPhone 14+
-        // with our 500-feature budget).  Operating on the full frame
-        // (not the 70%-clipped slit) gives the matcher more to work
-        // with; the next slit's overlap region is still typically
-        // 700+ px deep.
+        // with our 500-feature budget).  Reused by both triangulation
+        // (matched against prev descriptors) and as the prev set for
+        // the next accept.
         std::vector<cv::KeyPoint> curKeypoints;
         cv::Mat curDescriptors;
         {
@@ -776,6 +780,7 @@ static const double kPanAxisFractionRect = 0.70;
                                            curKeypoints, curDescriptors);
         }
 
+        // ── LAYER 1: triangulation-based parallax correction ────────
         int triMatches = 0;
         double medianZ = 0.0;
         int triDx = 0;
@@ -852,9 +857,11 @@ static const double kPanAxisFractionRect = 0.70;
                 cv::triangulatePoints(P0, P1, prevMat, curMat, pts4D);
 
                 // Compute Z (depth) in CURRENT camera frame for each
-                // triangulated point.  Filter to plausible scene range
-                // [0.1m, 20m] — discards back-projected points behind
-                // either camera and outliers from degenerate matches.
+                // triangulated point.  V13.0f tightens the filter to
+                // [0.5m, 10m] (was [0.1, 20]) — V13.0e test showed
+                // close textured features (peg hooks at ~30 cm) biased
+                // the median.  Rejecting Z < 0.5 m biases the median
+                // onto the dominant mid-scene plane.
                 std::vector<double> zs;
                 zs.reserve(pts4D.cols);
                 cv::Mat R1_cv_T = R1_cv.t();
@@ -867,7 +874,7 @@ static const double kPanAxisFractionRect = 0.70;
                                       pts4D.at<double>(2, i) / w);
                     cv::Mat Pcam = R1_cv_T * (Pworld - t1_cv);
                     double Z = Pcam.at<double>(2);
-                    if (Z > 0.1 && Z < 20.0) {
+                    if (Z > 0.5 && Z < 10.0) {
                         zs.push_back(Z);
                     }
                 }
@@ -890,11 +897,10 @@ static const double kPanAxisFractionRect = 0.70;
                     double rawTriDx = +_focalCompose * dt_cam_cv.at<double>(0) / medianZ;
                     double rawTriDy = +_focalCompose * dt_cam_cv.at<double>(1) / medianZ;
 
-                    // Cap to prevent runaway corrections from outlier Z.
-                    // 100 px is ~2× a typical 50 px advance — generous
-                    // enough to absorb legitimate parallax, tight enough
-                    // to keep one-bad-frame artifacts contained.
-                    constexpr double kMaxTriCorrection = 100.0;
+                    // V13.0f cap = ±50 (was V13.0e ±100).  Keeps post-
+                    // tri position close enough that the NCC ±30 search
+                    // can find the right answer if tri was a bit off.
+                    constexpr double kMaxTriCorrection = 50.0;
                     if (std::fabs(rawTriDx) > kMaxTriCorrection) {
                         rawTriDx = (rawTriDx > 0 ? 1.0 : -1.0) * kMaxTriCorrection;
                     }
@@ -905,15 +911,10 @@ static const double kPanAxisFractionRect = 0.70;
                     triDx = (int)std::round(rawTriDx);
                     triDy = (int)std::round(rawTriDy);
 
-                    // Forward-only Y clamp: never let the correction
-                    // pull dstY below the running max along the pan
-                    // axis (V12.14 frame-stacking lesson).  At worst,
-                    // clamp to zero advance — the slit lands exactly
-                    // on the previous max.
-                    if (dstY + triDy < _maxDstY) {
-                        triDy = (int)_maxDstY - dstY;  // ≤ 0; lands on max
-                    }
-
+                    // V13.0f: NO inner Y clamp here.  The final
+                    // forward-only clamp runs once after BOTH layers
+                    // (tri + NCC), which is the point where dstY's
+                    // value is actually committed.
                     dstX += triDx;
                     dstY += triDy;
                     triApplied = true;
@@ -923,24 +924,130 @@ static const double kPanAxisFractionRect = 0.70;
 
         if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                "[V13.0e-tri] #%ld matches=%d medianZ=%.2fm dx=%+d dy=%+d "
+                "[V13.0f-tri] #%ld matches=%d medianZ=%.2fm dx=%+d dy=%+d "
                 "applied=%d (poseDstX=%d poseDstY=%d -> dstX=%d dstY=%d)",
                 (long)_engineCallCounter, triMatches, medianZ,
                 triDx, triDy, (int)triApplied,
                 poseDstX, poseDstY, dstX, dstY);
         }
 
-        // Running max along pan axis.  Use std::max so a clamped
-        // pull-back can't decrease the high-water mark — protects
-        // V13.0b's gate intent (slits monotonically advance).
-        _maxDstY = std::max((int)_maxDstY, dstY);
+        // ── LAYER 2: 2D NCC fine-alignment refinement ───────────────
+        // Source: top of the new clipped slit, INSET by 30 px on each
+        // X side so matchTemplate has horizontal slide room when the
+        // search window is the full canvas perpendicular extent.  Fixes
+        // the V13.0d bug where searchW = clipW gave zero slide room.
+        constexpr int kNccSourceHeight = 100;
+        constexpr int kNccSearchMargin = 30;
+        constexpr int kNccSourceXInset = 30;
+
+        const int nccSourceW = clipW - 2 * kNccSourceXInset;
+        const int nccSourceH = kNccSourceHeight;
+
+        int nccDx = 0, nccDy = 0;
+        double nccConfidence = 0.0;
+        bool nccApplied = false;
+
+        if (nccSourceW > 0
+            && srcClipY + nccSourceH <= frameBGR.rows
+            && srcClipX + kNccSourceXInset + nccSourceW <= frameBGR.cols) {
+
+            cv::Mat sourceRegion = frameBGR(cv::Rect(
+                srcClipX + kNccSourceXInset,
+                srcClipY,
+                nccSourceW, nccSourceH));
+
+            // Where the source's top-left would land in canvas if
+            // alignment were already perfect (i.e., at current dstX/Y).
+            const int expectedMatchX = dstX + kNccSourceXInset;
+            const int expectedMatchY = dstY;
+
+            // Search window: ±kNccSearchMargin around expected position.
+            // Clamped to canvas bounds.
+            int searchLeft   = std::max(0, expectedMatchX - kNccSearchMargin);
+            int searchTop    = std::max(0, expectedMatchY - kNccSearchMargin);
+            int searchRight  = std::min((int)_canvas.cols,
+                                        expectedMatchX + nccSourceW + kNccSearchMargin);
+            int searchBottom = std::min((int)_canvas.rows,
+                                        expectedMatchY + nccSourceH + kNccSearchMargin);
+
+            const int searchW = searchRight - searchLeft;
+            const int searchH = searchBottom - searchTop;
+
+            if (searchW >= nccSourceW && searchH >= nccSourceH) {
+                // Need at least SOME painted canvas in the search
+                // region for matchTemplate to match against.
+                cv::Mat searchMaskRoi = _canvasMask(
+                    cv::Rect(searchLeft, searchTop, searchW, searchH));
+                if (cv::countNonZero(searchMaskRoi) > 0) {
+                    cv::Mat searchRegion = _canvas(
+                        cv::Rect(searchLeft, searchTop, searchW, searchH));
+
+                    // Grayscale NCC — colour-channel correlation gives
+                    // marginal accuracy gain at 3× the cost.
+                    cv::Mat sourceGray, searchGray;
+                    cv::cvtColor(sourceRegion, sourceGray, cv::COLOR_BGR2GRAY);
+                    cv::cvtColor(searchRegion, searchGray, cv::COLOR_BGR2GRAY);
+
+                    cv::Mat nccResult;
+                    cv::matchTemplate(searchGray, sourceGray, nccResult,
+                                      cv::TM_CCOEFF_NORMED);
+
+                    double nccMin, nccMax;
+                    cv::Point nccMinLoc, nccMaxLoc;
+                    cv::minMaxLoc(nccResult, &nccMin, &nccMax,
+                                  &nccMinLoc, &nccMaxLoc);
+                    nccConfidence = nccMax;
+
+                    constexpr double kMinNccConfidence = 0.6;
+                    if (nccConfidence >= kMinNccConfidence) {
+                        // Best canvas-side top-left for the source.
+                        const int matchX = searchLeft + nccMaxLoc.x;
+                        const int matchY = searchTop + nccMaxLoc.y;
+                        int rawDx = matchX - expectedMatchX;
+                        int rawDy = matchY - expectedMatchY;
+
+                        // Cap each at ±kNccSearchMargin (the search
+                        // bound — already implied by the search window
+                        // size, but explicit for clarity).
+                        if (rawDx >  kNccSearchMargin) rawDx =  kNccSearchMargin;
+                        if (rawDx < -kNccSearchMargin) rawDx = -kNccSearchMargin;
+                        if (rawDy >  kNccSearchMargin) rawDy =  kNccSearchMargin;
+                        if (rawDy < -kNccSearchMargin) rawDy = -kNccSearchMargin;
+
+                        nccDx = rawDx;
+                        nccDy = rawDy;
+                        dstX += nccDx;
+                        dstY += nccDy;
+                        nccApplied = true;
+                    }
+                }
+            }
+        }
+
+        if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V13.0f-ncc] #%ld dx=%+d dy=%+d ncc=%.3f applied=%d "
+                "(after-tri dstX=%d dstY=%d)",
+                (long)_engineCallCounter, nccDx, nccDy, nccConfidence,
+                (int)nccApplied, dstX, dstY);
+        }
+
+        // ── FINAL forward-only Y clamp (after BOTH layers) ──────────
+        // Combined tri (cap ±50) + NCC (cap ±30) can pull dstY by up
+        // to 80 below the pose-only value.  V13.0b gate guaranteed
+        // panDelta ≥ 50, so worst case dstY = _maxDstY − 30.  Clamp
+        // here protects V13.0b's monotonic-advance invariant.
+        if (dstY < (int)_maxDstY) {
+            dstY = (int)_maxDstY;  // zero advance, never pull back
+        }
+
+        // Running max along pan axis.
+        _maxDstY = (NSInteger)dstY;
 
         // V12.14.9 — paintedExtent reflects the new max.
         [tele setValue:@(_maxDstY + clipH) forKey:@"paintedExtent"];
 
         // ─── PAINT: first-painted-wins on the full clipH slit ────────
-        // Drop V13.0d's 100 px overlap-feather entirely.  See design
-        // comment (d) above for rationale.
         cv::Rect dstRoi(dstX, dstY, clipW, clipH);
         cv::Rect canvasBoundsRect(0, 0, _canvas.cols, _canvas.rows);
         cv::Rect dstClipped = dstRoi & canvasBoundsRect;
@@ -979,7 +1086,7 @@ static const double kPanAxisFractionRect = 0.70;
 
         if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                "[V13.0e-paint] #%ld dstX=%d dstY=%d _accepted=%ld",
+                "[V13.0f-paint] #%ld dstX=%d dstY=%d _accepted=%ld",
                 (long)_engineCallCounter, dstX, dstY, (long)_accepted);
         }
         [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
