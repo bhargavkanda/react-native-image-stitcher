@@ -269,6 +269,9 @@ constexpr double kRansacReprojThresh = 5.0;
                                        qy:(double)qy
                                        qz:(double)qz
                                        qw:(double)qw
+                                       tx:(double)tx
+                                       ty:(double)ty
+                                       tz:(double)tz
                                        fx:(double)fx
                                        fy:(double)fy
                                        cx:(double)cx
@@ -281,6 +284,14 @@ constexpr double kRansacReprojThresh = 5.0;
                            fovVertDegrees:(double)fovVertDegrees
                              trackingPoor:(BOOL)trackingPoor
 {
+    // V13.0e — hybrid engine accepts tx/ty/tz for API symmetry with the
+    // slit-scan engine but does not (yet) use them.  The Samsung-style
+    // hybrid path's robustness comes from feature-matching its overlap
+    // each frame; pose translation correction layered on top would be
+    // redundant.  Suppress unused-warning explicitly so the call stays
+    // semantically tied to the slit engine.
+    (void)tx; (void)ty; (void)tz;
+
     auto t0 = std::chrono::steady_clock::now();
 
     RLISFrameTelemetry *tele = [[RLISFrameTelemetry alloc] init];

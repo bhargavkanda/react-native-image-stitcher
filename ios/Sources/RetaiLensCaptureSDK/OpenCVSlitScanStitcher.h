@@ -54,6 +54,9 @@ NS_ASSUME_NONNULL_BEGIN
                                        qy:(double)qy
                                        qz:(double)qz
                                        qw:(double)qw
+                                       tx:(double)tx
+                                       ty:(double)ty
+                                       tz:(double)tz
                                        fx:(double)fx
                                        fy:(double)fy
                                        cx:(double)cx
@@ -65,7 +68,7 @@ NS_ASSUME_NONNULL_BEGIN
                           fovHorizDegrees:(double)fovHorizDegrees
                            fovVertDegrees:(double)fovVertDegrees
                              trackingPoor:(BOOL)trackingPoor
-    NS_SWIFT_NAME(ingest(pixelBuffer:qx:qy:qz:qw:fx:fy:cx:cy:imageWidth:imageHeight:yaw:pitch:fovHorizDegrees:fovVertDegrees:trackingPoor:));
+    NS_SWIFT_NAME(ingest(pixelBuffer:qx:qy:qz:qw:tx:ty:tz:fx:fy:cx:cy:imageWidth:imageHeight:yaw:pitch:fovHorizDegrees:fovVertDegrees:trackingPoor:));
 
 - (nullable RLISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
                                               error:(NSError **)error;

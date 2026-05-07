@@ -99,6 +99,37 @@ static os_log_t SlitDiagLog(void) {
     // _lastAcceptedH, _slitScanMode) — these were strip-extraction
     // state from the original slit-scan design, never used by the
     // first-painted-wins implementation.
+
+    // ── V13.0e: ORB-triangulation translation correction state ────────
+    // Per-frame ORB feature detection on each accepted slit; matched
+    // against the previous accept to triangulate depth and compensate
+    // canvas-paste position for camera translation parallax.
+    //
+    // Why this exists: pose-only paste assumes pure rotation.  Field
+    // captures show ~30–40 cm of camera translation per pan, which at
+    // typical 1–3 m scene depth produces ~30–100 px of perpendicular
+    // jitter and missing scene content between adjacent slits (the
+    // "translation gaps" Ram observed in V13.0d).  Triangulating
+    // matched features between adjacent accepts gives a per-frame
+    // depth estimate; the parallax correction Δpixel = focal × Δt_cam / Z
+    // closes that gap.
+    //
+    // V12.11 Step 4's per-frame ORB+RANSAC homography approach was
+    // brittle under low overlap / low texture / fast pan.  V13.0e is
+    // different in TWO ways:
+    //   1. Triangulation only — we use ORB to compute a depth scalar
+    //      (median Z), not to drive a homography.  Geometric pose still
+    //      drives placement; ORB just supplies the parallax denominator.
+    //   2. Forward-only Y clamp on the correction — never pulls back
+    //      below the running max along the pan axis.  Same lesson as
+    //      V12.14 (frame-stacking under pull-back).
+    cv::Ptr<cv::ORB> _orbDetector;
+    std::vector<cv::KeyPoint> _prevKeypoints;
+    cv::Mat _prevDescriptors;
+    cv::Mat _prevRotationArkit;     // 3x3 R at previous accept
+    cv::Mat _prevTranslationArkit;  // 3x1 t at previous accept (m)
+    cv::Mat _firstTranslationArkit; // 3x1 t at first frame (m)
+    bool _hasPrevAccept;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -137,6 +168,12 @@ static os_log_t SlitDiagLog(void) {
             0, -1, 0,
             0, 0, -1);
 
+        // V13.0e — ORB detector lives for the engine's lifetime;
+        // detectAndCompute is called per accepted slit.  500 features
+        // is plenty for matching across 50–60 px sliver advances; ORB
+        // on 1920×1080 with this budget runs in ~5 ms on iPhone 14+.
+        _orbDetector = cv::ORB::create(500);
+
         [self reset];
     }
     return self;
@@ -165,6 +202,17 @@ static os_log_t SlitDiagLog(void) {
     _firstFrameDstY = 0;
     _maxDstX = 0;
     _maxDstY = 0;
+
+    // V13.0e — clear triangulation state so a fresh capture starts
+    // with no carried-over keypoints/descriptors/poses.  ORB detector
+    // itself stays alive (re-created in init only) — it has no
+    // per-capture state.
+    _prevKeypoints.clear();
+    _prevDescriptors = cv::Mat();
+    _prevRotationArkit = cv::Mat();
+    _prevTranslationArkit = cv::Mat();
+    _firstTranslationArkit = cv::Mat();
+    _hasPrevAccept = false;
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
@@ -225,6 +273,9 @@ static const double kPanAxisFractionRect = 0.70;
                                        qy:(double)qy
                                        qz:(double)qz
                                        qw:(double)qw
+                                       tx:(double)tx
+                                       ty:(double)ty
+                                       tz:(double)tz
                                        fx:(double)fx
                                        fy:(double)fy
                                        cx:(double)cx
@@ -446,6 +497,30 @@ static const double kPanAxisFractionRect = 0.70;
                   dstX, dstY, clipW, clipH, srcClipX, srcClipY,
                   (int)_isLandscape, _focalCompose,
                   _canvas.cols, _canvas.rows);
+
+            // V13.0e — initialise translation correction state at the
+            // FIRST accepted frame.  All subsequent slits' canvas
+            // positions reference this anchor (firstFrameDstX/Y, set
+            // above) AND this translation origin (_firstTranslationArkit).
+            //
+            // Detect ORB on the FULL sensor frame (not just the
+            // 70%-clipped slit) so features near the leading edge of
+            // the next pan are already in the prev set when the second
+            // accept arrives — knnMatch quality depends on dense feature
+            // coverage in the OVERLAP between consecutive slits.
+            _firstTranslationArkit = (cv::Mat_<double>(3, 1) << tx, ty, tz);
+            _prevRotationArkit = R_new.clone();
+            _prevTranslationArkit = _firstTranslationArkit.clone();
+            {
+                cv::Mat frameGray;
+                cv::cvtColor(frameBGR, frameGray, cv::COLOR_BGR2GRAY);
+                std::vector<cv::KeyPoint> kps;
+                cv::Mat descs;
+                _orbDetector->detectAndCompute(frameGray, cv::noArray(), kps, descs);
+                _prevKeypoints = std::move(kps);
+                _prevDescriptors = descs;
+            }
+            _hasPrevAccept = true;
             return tele;
         }
 
@@ -624,143 +699,249 @@ static const double kPanAxisFractionRect = 0.70;
             return tele;
         }
 
-        // V13.0d — 2D NCC visual refinement + feather-blend paint
-        // over a 100 px sliver (50 painted overlap + 50 new content).
+        // V13.0e — ORB-triangulation translation correction +
+        // first-painted-wins paint over the full clipH slit.
         //
         // ─── DESIGN ──────────────────────────────────────────────────
-        // Past the V13.0b 50 px gate, but BEFORE updating _maxDstY.
-        // The previous accepted frame painted up to canvas Y =
-        // prevMaxDstY + clipH.  We extract a 100 px source region from
-        // the bottom of the new slit (source Y = [clipH-100, clipH])
-        // and run 2D NCC matching its top 50 rows against the
-        // canvas's painted edge.  The NCC offset (Δx, Δy) tells us
-        // where the slit visually best aligns vs where pose says.
+        // Past the V13.0b 50 px gate; this slit will be accepted.
         //
-        // Constraints:
-        //   • Forward-only Δy: never pull back along pan axis (max(0, ·))
-        //     — same lesson as V12.14: pull-back creates frame stacking.
-        //   • Δy capped at +40: keep at least 10 px overlap for feather blend.
-        //   • Δx capped at ±30: handles wobble + small lateral translation.
-        //   • NCC confidence gate ≥ 0.6: low-confidence falls back to
-        //     pose-only (Δx=Δy=0).
+        // (a) Triangulation-based parallax correction.
+        //     ARKit pose has 6-DOF.  Pose-only paste uses the rotation
+        //     part exclusively — `dstY = firstFrameDstY - alpha × focal`
+        //     where alpha is panaxis rotation since first frame.  But
+        //     V13.0c.1 traces showed realistic captures translate the
+        //     camera by 30–40 cm during a pan; at 1–3 m scene depth that
+        //     produces 30–100 px of perpendicular jitter and missing-
+        //     scene gaps between adjacent slits (Ram's V13.0d output).
         //
-        // Paint:
-        //   • Top portion (canvas Y already painted): linear feather
-        //     blend, alpha ramps 0→1 from canvas-side to new-side.
-        //   • Bottom portion (canvas Y empty): full write of new content.
-        //   • Mask: set to 255 for the entire 100 px painted region.
+        //     Fix: detect ORB on this frame, knnMatch + Lowe ratio test
+        //     against the previous accept's descriptors, run
+        //     cv::triangulatePoints with cv-frame projection matrices
+        //     to get a 3D point cloud, take median Z (per-frame depth
+        //     scalar — single canvas paste position can only encode a
+        //     single shift), and add parallax correction:
         //
-        // This is a fundamental departure from first-painted-wins: the
-        // overlap zone gets re-painted (blended) on each accept.  This
-        // is what allows the 100 px sliver to recover scene content
-        // that translation parallax shifted between frames.
-        const int prevMaxDstY = _maxDstY;
-        const int poseDstY = dstY;  // for diagnostics
+        //         Δpixel_correct = +focal × R_now_cv^T × Δt_world_cv / Z
+        //
+        //     where Δt_world_cv = M × (t_now_arkit - t_first_arkit) is
+        //     the camera translation since first frame in cv coords.
+        //     Sign derivation: a static world point at depth Z shifts
+        //     in image plane by -focal × R^T × Δt_world / Z when the
+        //     camera moves; to compensate the canvas paste so the
+        //     SAME scene content lands at the SAME canvas position,
+        //     shift paste by the NEGATIVE of that = +focal × ... / Z.
+        //
+        // (b) Why median Z and not per-pixel Z.
+        //     A single canvas paste position can only encode a single
+        //     translation; we can't deform the slit per-pixel without
+        //     a per-pixel depth map (LiDAR or dense stereo, neither
+        //     cheap on commodity Android devices we plan to support).
+        //     Median-Z is the right scalar — robust to outliers, fits
+        //     the dominant scene plane.
+        //
+        // (c) Why NOT V12.11 Step 4's per-frame ORB+RANSAC homography.
+        //     That approach was brittle under low overlap / low texture
+        //     / fast pan (V12.14's tier ladder was a workaround that
+        //     never fully tamed it).  V13.0e is different in TWO ways:
+        //       • Triangulation only — geometric pose still drives
+        //         placement; ORB just supplies the parallax denominator.
+        //         No homography stacking, no transform composition.
+        //       • Forward-only Y clamp — never pulls back below the
+        //         running max along pan axis (V12.14 frame-stacking
+        //         lesson).
+        //
+        // (d) Why first-painted-wins paint, not feather blend.
+        //     V13.0d's 100 px overlap-feather created visible ghosting
+        //     in multi-depth regions: blending under imperfect
+        //     translation correction (single Z, not per-pixel) blurs
+        //     edges.  First-painted-wins on the full clipH slit keeps
+        //     the SHARPEST version of every pixel — whichever frame got
+        //     there first wins, no blending.  Sub-pixel jitter shows as
+        //     thin seams rather than blurred regions; far more
+        //     acceptable visually.
+        const int poseDstY = dstY;
         const int poseDstX = dstX;
 
-        int nccDx = 0, nccDy = 0;
-        double nccConfidence = 0.0;
-        bool nccApplied = false;
+        // Detect ORB on the FULL sensor frame (~5 ms on iPhone 14+
+        // with our 500-feature budget).  Operating on the full frame
+        // (not the 70%-clipped slit) gives the matcher more to work
+        // with; the next slit's overlap region is still typically
+        // 700+ px deep.
+        std::vector<cv::KeyPoint> curKeypoints;
+        cv::Mat curDescriptors;
+        {
+            cv::Mat curGray;
+            cv::cvtColor(frameBGR, curGray, cv::COLOR_BGR2GRAY);
+            _orbDetector->detectAndCompute(curGray, cv::noArray(),
+                                           curKeypoints, curDescriptors);
+        }
 
-        const int kSliverPaintHeight = 100;
-        const int kOverlapHeight = 50;  // = kSliverPaintHeight / 2
-        const int srcOverlapYInFrame = srcClipY + clipH - kSliverPaintHeight;
+        int triMatches = 0;
+        double medianZ = 0.0;
+        int triDx = 0;
+        int triDy = 0;
+        bool triApplied = false;
 
-        // Ensure the source-overlap rect fits in frame.
-        if (srcOverlapYInFrame >= 0
-            && srcOverlapYInFrame + kOverlapHeight <= frameBGR.rows
-            && prevMaxDstY + clipH - kOverlapHeight >= 0) {
-            cv::Mat sourceOverlap = frameBGR(
-                cv::Rect(srcClipX, srcOverlapYInFrame, clipW, kOverlapHeight));
+        if (_hasPrevAccept
+            && !curDescriptors.empty()
+            && !_prevDescriptors.empty()
+            && _prevKeypoints.size() >= 8
+            && curKeypoints.size() >= 8) {
 
-            // Search canvas region: ±50 Y, ±30 X around the baseline match
-            // position (canvas Y = prevMaxDstY + clipH - kOverlapHeight,
-            // canvas X = 0 since pose puts dstX = _firstFrameDstX = 0).
-            constexpr int kSearchYMargin = 50;
-            constexpr int kSearchXMargin = 30;
-            const int baselineMatchY = prevMaxDstY + clipH - kOverlapHeight;
-            int searchTop = baselineMatchY - kSearchYMargin;
-            int searchBottom = baselineMatchY + kSearchYMargin + kOverlapHeight;
-            int searchLeft = -kSearchXMargin;
-            int searchRight = clipW + kSearchXMargin;
+            cv::BFMatcher matcher(cv::NORM_HAMMING);
+            std::vector<std::vector<cv::DMatch>> knnMatches;
+            matcher.knnMatch(_prevDescriptors, curDescriptors, knnMatches, 2);
 
-            searchTop = std::max(0, searchTop);
-            searchBottom = std::min(_canvas.rows, searchBottom);
-            searchLeft = std::max(0, searchLeft);
-            searchRight = std::min(_canvas.cols, searchRight);
+            // Lowe ratio test: keep matches where the best match's
+            // descriptor distance is < 0.7 × second-best's, weeding
+            // out ambiguous repeated-texture pairs.
+            std::vector<cv::Point2d> prevPts, curPts;
+            prevPts.reserve(knnMatches.size());
+            curPts.reserve(knnMatches.size());
+            constexpr float kLoweRatio = 0.7f;
+            for (const auto &m : knnMatches) {
+                if (m.size() == 2 && m[0].distance < kLoweRatio * m[1].distance) {
+                    prevPts.emplace_back(
+                        _prevKeypoints[m[0].queryIdx].pt.x,
+                        _prevKeypoints[m[0].queryIdx].pt.y);
+                    curPts.emplace_back(
+                        curKeypoints[m[0].trainIdx].pt.x,
+                        curKeypoints[m[0].trainIdx].pt.y);
+                }
+            }
 
-            const int searchW = searchRight - searchLeft;
-            const int searchH = searchBottom - searchTop;
+            if (prevPts.size() >= 8) {
+                // Build cv-frame projection matrices.  Pose convention:
+                //   R_arkit is camera-to-world in arkit coords.
+                //   R_cv  = M × R_arkit × M^T  (M = diag(1,-1,-1)).
+                //   t_cv  = M × t_arkit  (camera origin in world cv).
+                // World-to-camera projection: K × [R_cv^T | -R_cv^T × t_cv].
+                cv::Mat R0_cv = _M_arkitToCv * _prevRotationArkit * _M_arkitToCv;
+                cv::Mat R1_cv = _M_arkitToCv * R_new * _M_arkitToCv;
+                cv::Mat t0_cv = _M_arkitToCv * _prevTranslationArkit;
+                cv::Mat t1_cv = _M_arkitToCv * (cv::Mat_<double>(3, 1) << tx, ty, tz);
 
-            if (searchW > clipW && searchH > kOverlapHeight) {
-                cv::Mat canvasSearch = _canvas(
-                    cv::Rect(searchLeft, searchTop, searchW, searchH));
+                cv::Mat T0(3, 4, CV_64F);
+                cv::Mat T1(3, 4, CV_64F);
+                {
+                    cv::Mat R0t = R0_cv.t();
+                    cv::Mat origin0 = -R0t * t0_cv;
+                    R0t.copyTo(T0(cv::Rect(0, 0, 3, 3)));
+                    origin0.copyTo(T0(cv::Rect(3, 0, 1, 3)));
 
-                // Grayscale NCC for speed (sufficient for matching).
-                cv::Mat sourceGray, canvasGray;
-                cv::cvtColor(sourceOverlap, sourceGray, cv::COLOR_BGR2GRAY);
-                cv::cvtColor(canvasSearch, canvasGray, cv::COLOR_BGR2GRAY);
+                    cv::Mat R1t = R1_cv.t();
+                    cv::Mat origin1 = -R1t * t1_cv;
+                    R1t.copyTo(T1(cv::Rect(0, 0, 3, 3)));
+                    origin1.copyTo(T1(cv::Rect(3, 0, 1, 3)));
+                }
 
-                cv::Mat nccResult;
-                cv::matchTemplate(canvasGray, sourceGray, nccResult,
-                                  cv::TM_CCOEFF_NORMED);
+                cv::Mat P0 = _K_compose * T0;
+                cv::Mat P1 = _K_compose * T1;
 
-                double nccMin, nccMax;
-                cv::Point nccMinLoc, nccMaxLoc;
-                cv::minMaxLoc(nccResult, &nccMin, &nccMax, &nccMinLoc, &nccMaxLoc);
-                nccConfidence = nccMax;
+                // 2xN pixel-coord matrices for each camera.
+                cv::Mat prevMat(2, (int)prevPts.size(), CV_64F);
+                cv::Mat curMat(2, (int)curPts.size(), CV_64F);
+                for (int i = 0; i < (int)prevPts.size(); i++) {
+                    prevMat.at<double>(0, i) = prevPts[i].x;
+                    prevMat.at<double>(1, i) = prevPts[i].y;
+                    curMat.at<double>(0, i) = curPts[i].x;
+                    curMat.at<double>(1, i) = curPts[i].y;
+                }
 
-                // maxLoc is top-left of best match in canvasSearch.
-                // Translate to absolute canvas coords:
-                const int matchX = searchLeft + nccMaxLoc.x;
-                const int matchY = searchTop + nccMaxLoc.y;
-                const int rawDx = matchX - 0;  // pose dstX = 0
-                const int rawDy = matchY - baselineMatchY;
+                cv::Mat pts4D;
+                cv::triangulatePoints(P0, P1, prevMat, curMat, pts4D);
 
-                constexpr double kMinNccConfidence = 0.6;
-                if (nccConfidence >= kMinNccConfidence) {
-                    int adjDx = rawDx;
-                    int adjDy = rawDy;
+                // Compute Z (depth) in CURRENT camera frame for each
+                // triangulated point.  Filter to plausible scene range
+                // [0.1m, 20m] — discards back-projected points behind
+                // either camera and outliers from degenerate matches.
+                std::vector<double> zs;
+                zs.reserve(pts4D.cols);
+                cv::Mat R1_cv_T = R1_cv.t();
+                for (int i = 0; i < pts4D.cols; i++) {
+                    double w = pts4D.at<double>(3, i);
+                    if (std::fabs(w) < 1e-9) continue;
+                    cv::Mat Pworld = (cv::Mat_<double>(3, 1) <<
+                                      pts4D.at<double>(0, i) / w,
+                                      pts4D.at<double>(1, i) / w,
+                                      pts4D.at<double>(2, i) / w);
+                    cv::Mat Pcam = R1_cv_T * (Pworld - t1_cv);
+                    double Z = Pcam.at<double>(2);
+                    if (Z > 0.1 && Z < 20.0) {
+                        zs.push_back(Z);
+                    }
+                }
+                triMatches = (int)zs.size();
 
-                    // Forward-only Δy clamp + max-cap to preserve overlap
-                    // for blending.
-                    if (adjDy < 0) adjDy = 0;
-                    constexpr int kMaxNccDy = 40;
-                    if (adjDy > kMaxNccDy) adjDy = kMaxNccDy;
+                if (zs.size() >= 5) {
+                    std::sort(zs.begin(), zs.end());
+                    medianZ = zs[zs.size() / 2];
 
-                    // Symmetric X clamp.
-                    constexpr int kMaxNccDx = 30;
-                    if (adjDx >  kMaxNccDx) adjDx =  kMaxNccDx;
-                    if (adjDx < -kMaxNccDx) adjDx = -kMaxNccDx;
+                    // Δt expressed in CURRENT camera frame (cv coords).
+                    // Reference frame is FIRST accept (not prev) so the
+                    // correction is consistent with `dstY = firstDstY -
+                    // alpha × focal`'s reference frame — both anchored
+                    // to first frame, both yield monotonic canvas
+                    // positions.
+                    cv::Mat dt_world_cv = _M_arkitToCv *
+                        ((cv::Mat_<double>(3, 1) << tx, ty, tz) - _firstTranslationArkit);
+                    cv::Mat dt_cam_cv = R1_cv_T * dt_world_cv;
 
-                    nccDx = adjDx;
-                    nccDy = adjDy;
-                    dstX += nccDx;
-                    dstY += nccDy;
-                    nccApplied = true;
+                    double rawTriDx = +_focalCompose * dt_cam_cv.at<double>(0) / medianZ;
+                    double rawTriDy = +_focalCompose * dt_cam_cv.at<double>(1) / medianZ;
+
+                    // Cap to prevent runaway corrections from outlier Z.
+                    // 100 px is ~2× a typical 50 px advance — generous
+                    // enough to absorb legitimate parallax, tight enough
+                    // to keep one-bad-frame artifacts contained.
+                    constexpr double kMaxTriCorrection = 100.0;
+                    if (std::fabs(rawTriDx) > kMaxTriCorrection) {
+                        rawTriDx = (rawTriDx > 0 ? 1.0 : -1.0) * kMaxTriCorrection;
+                    }
+                    if (std::fabs(rawTriDy) > kMaxTriCorrection) {
+                        rawTriDy = (rawTriDy > 0 ? 1.0 : -1.0) * kMaxTriCorrection;
+                    }
+
+                    triDx = (int)std::round(rawTriDx);
+                    triDy = (int)std::round(rawTriDy);
+
+                    // Forward-only Y clamp: never let the correction
+                    // pull dstY below the running max along the pan
+                    // axis (V12.14 frame-stacking lesson).  At worst,
+                    // clamp to zero advance — the slit lands exactly
+                    // on the previous max.
+                    if (dstY + triDy < _maxDstY) {
+                        triDy = (int)_maxDstY - dstY;  // ≤ 0; lands on max
+                    }
+
+                    dstX += triDx;
+                    dstY += triDy;
+                    triApplied = true;
                 }
             }
         }
 
         if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                "[V13.0d-ncc] #%ld dx=%+d dy=%+d ncc=%.3f applied=%d "
-                "(poseDstY=%d -> dstY=%d)",
-                (long)_engineCallCounter, nccDx, nccDy, nccConfidence,
-                (int)nccApplied, poseDstY, dstY);
+                "[V13.0e-tri] #%ld matches=%d medianZ=%.2fm dx=%+d dy=%+d "
+                "applied=%d (poseDstX=%d poseDstY=%d -> dstX=%d dstY=%d)",
+                (long)_engineCallCounter, triMatches, medianZ,
+                triDx, triDy, (int)triApplied,
+                poseDstX, poseDstY, dstX, dstY);
         }
 
-        // Update _maxDstY to the (possibly NCC-corrected) dstY.  This
-        // becomes the baseline for the NEXT frame's V13.0b gate +
-        // V13.0d NCC search.
-        _maxDstY = dstY;
+        // Running max along pan axis.  Use std::max so a clamped
+        // pull-back can't decrease the high-water mark — protects
+        // V13.0b's gate intent (slits monotonically advance).
+        _maxDstY = std::max((int)_maxDstY, dstY);
 
         // V12.14.9 — paintedExtent reflects the new max.
         [tele setValue:@(_maxDstY + clipH) forKey:@"paintedExtent"];
 
-        // ─── PAINT: feather blend overlap + full write new ─────────
-        const int newBandTopCanvasY = dstY + clipH - kSliverPaintHeight;
-        cv::Rect dstRoi(dstX, newBandTopCanvasY, clipW, kSliverPaintHeight);
+        // ─── PAINT: first-painted-wins on the full clipH slit ────────
+        // Drop V13.0d's 100 px overlap-feather entirely.  See design
+        // comment (d) above for rationale.
+        cv::Rect dstRoi(dstX, dstY, clipW, clipH);
         cv::Rect canvasBoundsRect(0, 0, _canvas.cols, _canvas.rows);
         cv::Rect dstClipped = dstRoi & canvasBoundsRect;
         if (dstClipped.width <= 0 || dstClipped.height <= 0) {
@@ -768,56 +949,38 @@ static const double kPanAxisFractionRect = 0.70;
             return tele;
         }
 
-        // Source ROI in frameBGR coords, accounting for any clipping.
+        // Source ROI in frameBGR coords, accounting for any clipping
+        // against canvas edges.
         cv::Rect srcRoiInFrame(
             srcClipX + (dstClipped.x - dstX),
-            srcOverlapYInFrame + (dstClipped.y - newBandTopCanvasY),
+            srcClipY + (dstClipped.y - dstY),
             dstClipped.width, dstClipped.height);
         cv::Mat srcRegion = frameBGR(srcRoiInFrame);
         cv::Mat canvasRoi = _canvas(dstClipped);
-        cv::Mat maskRoi = _canvasMask(dstClipped);
+        cv::Mat canvasMaskRoi = _canvasMask(dstClipped);
 
-        // Compute overlap row range within dstClipped (relative coords).
-        // Overlap canvas rows: [newBandTopCanvasY, prevMaxDstY+clipH].
-        const int overlapBottomCanvasY = prevMaxDstY + clipH;
-        const int overlapStartRel = std::max(
-            0, newBandTopCanvasY - dstClipped.y);  // typically 0
-        const int overlapEndRel = std::max(
-            overlapStartRel,
-            std::min(dstClipped.height,
-                     overlapBottomCanvasY - dstClipped.y));
-        const int overlapHeight = overlapEndRel - overlapStartRel;
-        const int newRegionHeight = dstClipped.height - overlapEndRel;
+        // Paint only where canvas is currently unpainted.  Mask == 0
+        // means no prior content; OR-update mask to 255 in those
+        // pixels so future slits respect first-arrival.
+        cv::Mat noPriorMask;
+        cv::compare(canvasMaskRoi, 0, noPriorMask, cv::CMP_EQ);
+        srcRegion.copyTo(canvasRoi, noPriorMask);
+        canvasMaskRoi.setTo(255, noPriorMask);
 
-        // Feather-blend each row in the overlap zone.  Alpha ramps
-        // 0 → 1 from canvas-side (top of overlap) to new-side (bottom).
-        for (int relY = overlapStartRel; relY < overlapEndRel; relY++) {
-            const float alpha = (overlapHeight > 0)
-                ? (float)(relY - overlapStartRel + 1) / (float)overlapHeight
-                : 0.0f;
-            cv::addWeighted(srcRegion.row(relY), alpha,
-                            canvasRoi.row(relY), 1.0f - alpha,
-                            0.0, canvasRoi.row(relY));
-        }
-
-        // Full write for new region (canvas was empty here).
-        if (newRegionHeight > 0) {
-            cv::Mat srcNew = srcRegion(
-                cv::Rect(0, overlapEndRel, dstClipped.width, newRegionHeight));
-            cv::Mat dstNew = canvasRoi(
-                cv::Rect(0, overlapEndRel, dstClipped.width, newRegionHeight));
-            srcNew.copyTo(dstNew);
-        }
-
-        // Update mask to 255 for the entire painted band.
-        maskRoi.setTo(255);
         _accepted += 1;
+
+        // Update prev state for next-frame triangulation.  Move (not
+        // copy) the keypoint vector — std::move on cv::Mat is also
+        // cheap (header copy, refcount bump).
+        _prevKeypoints = std::move(curKeypoints);
+        _prevDescriptors = curDescriptors;
+        _prevRotationArkit = R_new.clone();
+        _prevTranslationArkit = (cv::Mat_<double>(3, 1) << tx, ty, tz);
 
         if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                "[V13.0a-paint] #%ld dstY=%d overlap=%d new=%d _accepted=%ld",
-                (long)_engineCallCounter, dstY, overlapHeight,
-                newRegionHeight, (long)_accepted);
+                "[V13.0e-paint] #%ld dstX=%d dstY=%d _accepted=%ld",
+                (long)_engineCallCounter, dstX, dstY, (long)_accepted);
         }
         [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
         auto t1 = std::chrono::steady_clock::now();

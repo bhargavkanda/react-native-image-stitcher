@@ -177,6 +177,9 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
                                        qy:(double)qy
                                        qz:(double)qz
                                        qw:(double)qw
+                                       tx:(double)tx
+                                       ty:(double)ty
+                                       tz:(double)tz
                                        fx:(double)fx
                                        fy:(double)fy
                                        cx:(double)cx
@@ -188,7 +191,7 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
                           fovHorizDegrees:(double)fovHorizDegrees
                            fovVertDegrees:(double)fovVertDegrees
                              trackingPoor:(BOOL)trackingPoor
-    NS_SWIFT_NAME(ingest(pixelBuffer:qx:qy:qz:qw:fx:fy:cx:cy:imageWidth:imageHeight:yaw:pitch:fovHorizDegrees:fovVertDegrees:trackingPoor:));
+    NS_SWIFT_NAME(ingest(pixelBuffer:qx:qy:qz:qw:tx:ty:tz:fx:fy:cx:cy:imageWidth:imageHeight:yaw:pitch:fovHorizDegrees:fovVertDegrees:trackingPoor:));
 
 /// Snapshot the current panorama as a JPEG (overwriting any previous
 /// snapshot file).  Cheap enough to call after each accepted frame

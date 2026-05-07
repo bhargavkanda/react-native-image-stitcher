@@ -536,6 +536,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             if let hybrid = hybrid {
                 telemetry = hybrid.ingest(
                     pixelBuffer: pbCopy, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw,
+                    tx: pose.tx, ty: pose.ty, tz: pose.tz,
                     fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
                     imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
                     yaw: yaw, pitch: pitch,
@@ -543,8 +544,13 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     trackingPoor: trackingPoor
                 )
             } else if let slit = slit {
+                // V13.0e — slit-scan engine consumes tx/ty/tz for
+                // ORB-triangulation-based depth estimation and per-frame
+                // translation parallax correction.  Hybrid passes them
+                // for API symmetry; only the slit engine uses them.
                 telemetry = slit.ingest(
                     pixelBuffer: pbCopy, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw,
+                    tx: pose.tx, ty: pose.ty, tz: pose.tz,
                     fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
                     imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
                     yaw: yaw, pitch: pitch,
