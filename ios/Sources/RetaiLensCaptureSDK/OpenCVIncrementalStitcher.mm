@@ -48,6 +48,7 @@
 #import <opencv2/imgcodecs.hpp>
 #import <opencv2/features2d.hpp>
 #import <opencv2/calib3d.hpp>
+#import <opencv2/stitching/detail/warpers.hpp>  // V14.0pre — cv::detail::CylindricalWarper
 
 #import <vector>
 #import <chrono>
@@ -336,57 +337,101 @@ constexpr double kRansacReprojThresh = 5.0;
         _focalCompose = std::sqrt((fx * sx) * (fy * sy));
 
         // V9: build the panorama-to-world rotation from the first
-        // ARKit pose.  Panorama +Y = world up, +Z = horizontal
-        // projection of first-camera forward.
+        // ARKit pose.  Panorama +Z = horizontal projection of first-
+        // camera forward.  For PORTRAIT (cylinder axis = vertical):
+        // panorama +Y = world up.  For LANDSCAPE (cylinder axis =
+        // horizontal pan rotation axis): V14.0pre — panorama +Y =
+        // first-camera +X (sensor X = phone long edge in landscape =
+        // pan rotation axis).  This makes pano-Y the actual rotation
+        // axis, eliminating the V12.x landscape-projection roll-
+        // sensitivity bug (see 2026-05-07-v14-stitcher-plan.md).
         cv::Mat fwdArkitCam = (cv::Mat_<double>(3, 1) << 0, 0, -1);
         cv::Mat fwdWorld = _firstRotationArkit * fwdArkitCam;
         double fwx = fwdWorld.at<double>(0);
         double fwz = fwdWorld.at<double>(2);
         double horiz = std::sqrt(fwx * fwx + fwz * fwz);
-        // V11 Gap #3: reject the first frame if the camera is
-        // looking nearly straight up or down.  The panorama frame
-        // needs a horizontal +Z anchor; if camera-forward is
-        // gravity-aligned, the horizontal projection is degenerate.
-        // Earlier code silently substituted (0, 0, -1) which gave a
-        // panorama basis that didn't match the operator's actual
-        // pan direction — every subsequent frame's placement was
-        // arbitrary.  Refuse and let the operator level the camera.
+        // V11 Gap #3: reject if camera looking nearly vertical.  The
+        // panorama frame needs a horizontal +Z anchor; if camera
+        // forward is gravity-aligned, the horizontal projection is
+        // degenerate.
         if (horiz < 0.1) {
             tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
             tele.processingMs = msSince(t0);
-            // Note: we DON'T set _hasFirstFrame, so the next ingest
-            // attempt will try again with the new pose.  Operator
-            // tilting toward horizon will succeed naturally.
             return tele;
         }
         double pzx = fwx / horiz;
         double pzz = fwz / horiz;
-        // pan_X = pan_Y × pan_Z = (0,1,0) × (pzx,0,pzz) = (pzz, 0, -pzx)
-        _R_panToWorld = (cv::Mat_<double>(3, 3) <<
-            pzz,   0, pzx,
-            0,     1, 0,
-            -pzx,  0, pzz);
 
-        // V12.6 Step C: detect orientation from the actual ARKit
-        // rotation matrix at first frame, NOT from the JS-passed
-        // frameRotationDegrees.  V12.5 telemetry showed JS was
-        // sending portrait (90) even when the device was held in
-        // landscape — `useDeviceOrientation` doesn't fire reliably
-        // when iOS interface-orientation lock prevents the screen
-        // from rotating.  ARKit's pose IS ground truth: gravity is
-        // gravity regardless of what JS believes about the device.
-        //
-        // Detection: world-UP (pan_Y) projects onto the camera's
-        // narrow axis (cam_Y) for landscape orientation, and onto
-        // the camera's wide axis (cam_X) for portrait.  Pick the
-        // axis with the larger projection magnitude.
-        cv::Mat R_panToCam_first = _M_arkitToCv * _firstRotationArkit.t() * _R_panToWorld;
-        const double absR01 = std::fabs(R_panToCam_first.at<double>(0, 1));
-        const double absR11 = std::fabs(R_panToCam_first.at<double>(1, 1));
-        _isLandscape = (absR11 > absR01);
-        NSLog(@"[V12.6-orient] engine=v9 detected isLandscape=%d "
-              @"|R[0,1]|=%.4f |R[1,1]|=%.4f (frameRotationDegrees from JS = %ld)",
-              (int)_isLandscape, absR01, absR11, (long)_frameRotationDegrees);
+        // V14.0pre — orientation detection BEFORE _R_panToWorld
+        // construction (was V12.6 detection done AFTER, using
+        // R_panToCam_first which itself depended on _R_panToWorld —
+        // chicken-and-egg).  cam-Y direction in world via
+        // R_arkit · (0,1,0) [ARKit cam-Y is up].  Landscape if the
+        // cam-Y vector is more horizontal (X or Z) than vertical (Y)
+        // — i.e., the phone is held with its long edge horizontal so
+        // the sensor-Y direction lies in the horizontal plane.
+        cv::Mat camYInWorld = _firstRotationArkit *
+            (cv::Mat_<double>(3, 1) << 0, 1, 0);
+        const double absCamYInWorldX = std::fabs(camYInWorld.at<double>(0));
+        const double absCamYInWorldY = std::fabs(camYInWorld.at<double>(1));
+        const double absCamYInWorldZ = std::fabs(camYInWorld.at<double>(2));
+        _isLandscape = (std::max(absCamYInWorldX, absCamYInWorldZ)
+                        > absCamYInWorldY);
+        NSLog(@"[V14.0pre-orient] engine=hybrid isLandscape=%d "
+              @"|camY.worldX|=%.4f |camY.worldY|=%.4f |camY.worldZ|=%.4f",
+              (int)_isLandscape, absCamYInWorldX, absCamYInWorldY,
+              absCamYInWorldZ);
+
+        if (_isLandscape) {
+            // V14.0pre LANDSCAPE: pano-Y = first-cam +X axis (the pan
+            // rotation axis for vertical pan).  Cylinder axis = pano-Y
+            // = cam-X → roll around cam-Z just slides pixels along
+            // theta with no asymmetric distortion.  Pano-Z = horizontal
+            // projection of first-cam forward (already computed above).
+            // Pano-X = pano-Y × pano-Z (right-handed completion;
+            // approximately gravity-up for level first frame).
+            //
+            // pano-Y = R_first · (1,0,0)  (cam-X in world coords)
+            cv::Mat camXInWorld = _firstRotationArkit *
+                (cv::Mat_<double>(3, 1) << 1, 0, 0);
+            const double pyx = camXInWorld.at<double>(0);
+            const double pyy = camXInWorld.at<double>(1);
+            const double pyz = camXInWorld.at<double>(2);
+            // pano-Z = (pzx, 0, pzz) by construction above.
+            // pano-X = pano-Y × pano-Z; with pano-Z having zero Y comp:
+            //   px.x = pyy*pzz - pyz*0   = pyy*pzz
+            //   px.y = pyz*pzx - pyx*pzz
+            //   px.z = pyx*0   - pyy*pzx = -pyy*pzx
+            const double pxx = pyy * pzz;
+            const double pxy = pyz * pzx - pyx * pzz;
+            const double pxz = -pyy * pzx;
+            // Columns of _R_panToWorld are pano-X, pano-Y, pano-Z.
+            _R_panToWorld = (cv::Mat_<double>(3, 3) <<
+                pxx,  pyx,  pzx,
+                pxy,  pyy,  0.0,
+                pxz,  pyz,  pzz);
+        } else {
+            // PORTRAIT (unchanged from V9): pano-Y = world up.
+            // pano-X = pano-Y × pano-Z = (0,1,0) × (pzx,0,pzz) = (pzz, 0, -pzx)
+            _R_panToWorld = (cv::Mat_<double>(3, 3) <<
+                pzz,   0, pzx,
+                0,     1, 0,
+                -pzx,  0, pzz);
+        }
+
+        // V14.0pre — sanity check the constructed pano frame is
+        // orthonormal (det ≈ 1, R · R^T ≈ I).  Logs once per capture
+        // (first-frame).  If det ≈ -1 or off-diagonals are large, the
+        // pano-X cross-product computation has a sign or transcription
+        // bug — fix BEFORE proceeding.
+        const double pano_det = cv::determinant(_R_panToWorld);
+        cv::Mat pano_RRT = _R_panToWorld * _R_panToWorld.t();
+        NSLog(@"[V14.0pre-pano] det=%.4f I[0,0]=%.4f I[1,1]=%.4f I[2,2]=%.4f "
+              @"I[0,1]=%.4f I[0,2]=%.4f I[1,2]=%.4f",
+              pano_det,
+              pano_RRT.at<double>(0,0), pano_RRT.at<double>(1,1),
+              pano_RRT.at<double>(2,2), pano_RRT.at<double>(0,1),
+              pano_RRT.at<double>(0,2), pano_RRT.at<double>(1,2));
 
         // Place first frame onto canvas via cylindrical warp.  R for
         // the warp is panorama→camera in OpenCV cam frame; for the
@@ -843,240 +888,47 @@ static double computeOverlapPctSensor(double sensorRotXRad,
         return cv::Point(0, 0);
     }
 
-    // Panorama→camera rotation:  R_panToCam = M · R_arkit⁻¹ · R_panToWorld
+    // V14.0pre — cv::detail::CylindricalWarper does the projection.
+    // R = camera-to-panorama rotation in OpenCV camera frame.  K is
+    // intrinsics in CV_32F (warper requires float).  Cylinder radius
+    // = focal length.
+    //
+    // Replaces ~240 lines of hand-rolled per-corner forward projection
+    // + bbox computation + inverse-map remap.  Same K + R inputs, same
+    // cv::Point corner output (top-left of warped image in cylindrical-
+    // pixel space).  Battle-tested edge handling, antialiased remap.
     cv::Mat R_panToCam = _M_arkitToCv * rArkit.t() * _R_panToWorld;
     cv::Mat R_camToPan = R_panToCam.t();
 
-    const double fx = _K_compose.at<double>(0, 0);
-    const double fy = _K_compose.at<double>(1, 1);
-    const double cx = _K_compose.at<double>(0, 2);
-    const double cy = _K_compose.at<double>(1, 2);
-    const double f  = _focalCompose;
+    cv::Mat K32, R32;
+    _K_compose.convertTo(K32, CV_32F);
+    R_camToPan.convertTo(R32, CV_32F);
 
-    // ── Forward-project source corners onto cylinder to size bbox ──
-    //
-    // V12.2: reverted V12's spherical projection (it bulged both
-    // axes and made level frames look fisheye).
-    //
-    // V12.3: orientation-aware cylinder axis.
-    //   PORTRAIT (axis = pan_Y, gravity-up):
-    //     theta = horizontal angle, atan2(-wx, wz)
-    //     h     = wy / sqrt(wx²+wz²)   (height up the cylinder)
-    //     pixel = (f·theta, -f·h)
-    //     → vertical world lines stay straight; pan is horizontal.
-    //   LANDSCAPE (axis = pan_X, world horizontal — same as Apple's
-    //              landscape pano):
-    //     s     = -wx / sqrt(wy²+wz²)  (position along cylinder axis,
-    //                                   mirror-flipped so user's-right
-    //                                   sits at canvas-right)
-    //     theta = atan2(wy, wz)        (vertical angle, positive = up)
-    //     pixel = (f·s, -f·theta)
-    //     → horizontal world lines stay straight; pan is vertical.
-    auto projectCorner = ^cv::Point2d(double u, double v) {
-        double rx = (u - cx) / fx;
-        double ry = (v - cy) / fy;
-        double rz = 1.0;
-        double wx = R_camToPan.at<double>(0,0)*rx + R_camToPan.at<double>(0,1)*ry + R_camToPan.at<double>(0,2)*rz;
-        double wy = R_camToPan.at<double>(1,0)*rx + R_camToPan.at<double>(1,1)*ry + R_camToPan.at<double>(1,2)*rz;
-        double wz = R_camToPan.at<double>(2,0)*rx + R_camToPan.at<double>(2,1)*ry + R_camToPan.at<double>(2,2)*rz;
-        if (_isLandscape) {
-            double denom = std::sqrt(wy*wy + wz*wz);
-            double s = (denom > 1e-9) ? (-wx / denom) : 0.0;
-            double theta = std::atan2(wy, wz);
-            return cv::Point2d(f * s, -f * theta);
-        } else {
-            // V12 mirror fix: −wx so user's-right maps to canvas-right.
-            double theta = std::atan2(-wx, wz);
-            double denom = std::sqrt(wx*wx + wz*wz);
-            double h = (denom > 1e-9) ? (wy / denom) : 0.0;
-            // Y-flip: panorama +Y is gravity-up, image +Y is image-down.
-            return cv::Point2d(f * theta, -f * h);
-        }
-    };
-    cv::Point2d c00 = projectCorner(0, 0);
-    cv::Point2d c10 = projectCorner((double)src.cols - 1, 0);
-    cv::Point2d c01 = projectCorner(0, (double)src.rows - 1);
-    cv::Point2d c11 = projectCorner((double)src.cols - 1, (double)src.rows - 1);
-    // 4-corner bbox is exact for cylindrical (vertical lines stay
-    // straight in the projection, so the corners are extrema).
-    double minX = std::min({c00.x, c10.x, c01.x, c11.x});
-    double maxX = std::max({c00.x, c10.x, c01.x, c11.x});
-    double minY = std::min({c00.y, c10.y, c01.y, c11.y});
-    double maxY = std::max({c00.y, c10.y, c01.y, c11.y});
+    cv::detail::CylindricalWarper warper((float)_focalCompose);
+    cv::Point corner = warper.warp(src, K32, R32,
+                                   cv::INTER_LINEAR,
+                                   cv::BORDER_REFLECT,
+                                   outImage);
 
-    int bboxX = (int)std::floor(minX);
-    int bboxY = (int)std::floor(minY);
-    int bboxW = (int)std::ceil(maxX - minX) + 1;
-    int bboxH = (int)std::ceil(maxY - minY) + 1;
-    if (bboxW <= 0 || bboxH <= 0
-        || bboxW > (int)_canvas.cols * 2
-        || bboxH > (int)_canvas.rows * 2) {
-        outImage = cv::Mat();
-        outMask = cv::Mat();
-        return cv::Point(0, 0);
+    // Build the mask by warping a white frame the same way.  Non-zero
+    // pixels in outMask are the valid output footprint; zero means
+    // "outside the warped frame's region" (cylinder-edge clipping).
+    cv::Mat whiteFrame(src.size(), CV_8UC1, cv::Scalar(255));
+    warper.warp(whiteFrame, K32, R32,
+                cv::INTER_NEAREST,
+                cv::BORDER_CONSTANT,
+                outMask);
+
+    static bool _v14LoggedFirstWarp = false;
+    if (!_v14LoggedFirstWarp) {
+        _v14LoggedFirstWarp = true;
+        NSLog(@"[V14.0pre-warp] OpenCV CylindricalWarper "
+              @"corner=(%d,%d) outSize=%dx%d focal=%.1f",
+              corner.x, corner.y, outImage.cols, outImage.rows,
+              _focalCompose);
     }
 
-    // ── V12.4 SLIT-SCAN + LONG-SIDE CLIP ──
-    //
-    // Apple's pano output looks clean because each frame contributes
-    // only a NARROW central strip — never the wide-FOV corners where
-    // cylindrical projection bows the rectangle into a barrel.  We
-    // do the same: shrink the bbox in cylindrical-pixel space BEFORE
-    // the inverse-map, so cv::remap fills only the strip we want.
-    //
-    //   PORTRAIT (axis = pan_Y, pan = canvas_X):
-    //     pan strip  → narrow in canvas_X, centered on the bbox
-    //     long-side  → trim canvas_Y edges (drop top/bottom corners)
-    //
-    //   LANDSCAPE (axis = pan_X, pan = canvas_Y):
-    //     pan strip  → narrow in canvas_Y, centered on the bbox
-    //     long-side  → trim canvas_X edges (drop left/right corners)
-    //
-    // The 0.70 strip width is chosen to overlap with the next frame
-    // even at the loosest accept (70% pan-axis overlap = consecutive
-    // frame centers ≤70% apart, so a ≥70%-wide strip guarantees
-    // contiguous coverage).  Tighten if curvature still shows;
-    // widen if gaps appear between strips.
-    static const double kPanStripFraction  = 0.70;
-    static const double kLongSideFraction  = 0.85;
-    int preCropX = bboxX, preCropY = bboxY, preCropW = bboxW, preCropH = bboxH;
-    {
-        int newW, newH;
-        if (_isLandscape) {
-            newW = std::max(1, (int)(bboxW * kLongSideFraction));
-            newH = std::max(1, (int)(bboxH * kPanStripFraction));
-        } else {
-            newW = std::max(1, (int)(bboxW * kPanStripFraction));
-            newH = std::max(1, (int)(bboxH * kLongSideFraction));
-        }
-        bboxX += (bboxW - newW) / 2;
-        bboxY += (bboxH - newH) / 2;
-        bboxW = newW;
-        bboxH = newH;
-    }
-
-    // V12.5 TELEMETRY — log every Nth accept so we can verify the
-    // transverse-cylinder math against numbers, not screenshots.  N=1
-    // for now (every accept) — turn down if log volume becomes a
-    // problem.  Format is single-line, prefix-tagged, so it's easy
-    // to grep/awk on the device log.
-    if ((_accepted % 1) == 0) {
-        NSLog(@"[V12.5-warp] engine=v9 accepted=%ld isLandscape=%d "
-              @"corners=(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f) "
-              @"preCrop=(x=%d,y=%d,w=%d,h=%d) "
-              @"postCrop=(x=%d,y=%d,w=%d,h=%d) "
-              @"R_panToCam=[[%.4f,%.4f,%.4f],[%.4f,%.4f,%.4f],[%.4f,%.4f,%.4f]] "
-              @"focalCompose=%.2f",
-              (long)_accepted, (int)_isLandscape,
-              c00.x, c00.y, c10.x, c10.y, c01.x, c01.y, c11.x, c11.y,
-              preCropX, preCropY, preCropW, preCropH,
-              bboxX, bboxY, bboxW, bboxH,
-              R_panToCam.at<double>(0,0), R_panToCam.at<double>(0,1), R_panToCam.at<double>(0,2),
-              R_panToCam.at<double>(1,0), R_panToCam.at<double>(1,1), R_panToCam.at<double>(1,2),
-              R_panToCam.at<double>(2,0), R_panToCam.at<double>(2,1), R_panToCam.at<double>(2,2),
-              f);
-    }
-
-    // ── Inverse-map: for each bbox pixel, find source pixel ──
-    cv::Mat mapX(bboxH, bboxW, CV_32FC1);
-    cv::Mat mapY(bboxH, bboxW, CV_32FC1);
-
-    const double r00 = R_panToCam.at<double>(0,0), r01 = R_panToCam.at<double>(0,1), r02 = R_panToCam.at<double>(0,2);
-    const double r10 = R_panToCam.at<double>(1,0), r11 = R_panToCam.at<double>(1,1), r12 = R_panToCam.at<double>(1,2);
-    const double r20 = R_panToCam.at<double>(2,0), r21 = R_panToCam.at<double>(2,1), r22 = R_panToCam.at<double>(2,2);
-
-    // V12.3: same orientation branch as projectCorner.
-    if (_isLandscape) {
-        // Transverse cylinder (axis = pan_X) inverse map.
-        for (int y = 0; y < bboxH; y++) {
-            float *mx = mapX.ptr<float>(y);
-            float *my = mapY.ptr<float>(y);
-            double cylY = (double)(bboxY + y);
-            double theta = -cylY / f;  // inverse of forward Y-flip
-            double sinTh = std::sin(theta);
-            double cosTh = std::cos(theta);
-            for (int x = 0; x < bboxW; x++) {
-                double cylX = (double)(bboxX + x);
-                double s = cylX / f;
-                // Inverse of forward s = -wx/sqrt(wy²+wz²) on the
-                // unit cylinder (wy²+wz² = 1): wx = -s.
-                double wx = -s;
-                double wy = sinTh;
-                double wz = cosTh;
-                double rx = r00*wx + r01*wy + r02*wz;
-                double ry = r10*wx + r11*wy + r12*wz;
-                double rz = r20*wx + r21*wy + r22*wz;
-                if (rz <= 1e-6) {
-                    mx[x] = -1.0f;
-                    my[x] = -1.0f;
-                } else {
-                    double u = fx * rx / rz + cx;
-                    double v = fy * ry / rz + cy;
-                    if (u < 0 || u >= (double)src.cols
-                        || v < 0 || v >= (double)src.rows) {
-                        mx[x] = -1.0f;
-                        my[x] = -1.0f;
-                    } else {
-                        mx[x] = (float)u;
-                        my[x] = (float)v;
-                    }
-                }
-            }
-        }
-    } else {
-        // Vertical cylinder (axis = pan_Y) inverse map.
-        for (int y = 0; y < bboxH; y++) {
-            float *mx = mapX.ptr<float>(y);
-            float *my = mapY.ptr<float>(y);
-            double cylY = (double)(bboxY + y);
-            double h = -cylY / f;  // inverse of forward Y-flip
-            for (int x = 0; x < bboxW; x++) {
-                double cylX = (double)(bboxX + x);
-                double theta = cylX / f;
-                double sinT = std::sin(theta);
-                double cosT = std::cos(theta);
-                // Inverse of V12 mirror fix: wx = −sinT (forward had
-                // theta = atan2(−wx, wz), so wx = −sin(theta)).
-                double wx = -sinT;
-                double wy = h;
-                double wz = cosT;
-                double rx = r00*wx + r01*wy + r02*wz;
-                double ry = r10*wx + r11*wy + r12*wz;
-                double rz = r20*wx + r21*wy + r22*wz;
-                if (rz <= 1e-6) {
-                    mx[x] = -1.0f;
-                    my[x] = -1.0f;
-                } else {
-                    double u = fx * rx / rz + cx;
-                    double v = fy * ry / rz + cy;
-                    if (u < 0 || u >= (double)src.cols
-                        || v < 0 || v >= (double)src.rows) {
-                        mx[x] = -1.0f;
-                        my[x] = -1.0f;
-                    } else {
-                        mx[x] = (float)u;
-                        my[x] = (float)v;
-                    }
-                }
-            }
-        }
-    }
-
-    outImage.create(bboxH, bboxW, src.type());
-    cv::remap(src, outImage, mapX, mapY,
-              cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
-
-    outMask.create(bboxH, bboxW, CV_8UC1);
-    outMask.setTo(0);
-    for (int y = 0; y < bboxH; y++) {
-        const float *mx = mapX.ptr<float>(y);
-        uchar *m = outMask.ptr<uchar>(y);
-        for (int x = 0; x < bboxW; x++) {
-            if (mx[x] >= 0.0f) m[x] = 255;
-        }
-    }
-
-    return cv::Point(bboxX, bboxY);
+    return corner;
 }
 
 /// V9b KLT optical flow refinement.  Computes a residual translation
