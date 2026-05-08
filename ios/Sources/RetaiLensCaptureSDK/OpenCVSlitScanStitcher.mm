@@ -210,6 +210,19 @@ static os_log_t SlitDiagLog(void) {
     int _lastNcc2dDxApplied;
     int _lastNcc2dDyApplied;
     BOOL _haveNcc2dEmaHistory;
+
+    // V15.0g.1 — adaptive pixels-per-meter for the plane-projection
+    // canvas mapping.  Set on the FIRST successful plane-projected
+    // frame to `focal / t_int_center` so the rendered rectangle
+    // matches sensor dimensions 1:1 (scale = 1.0).  Without this,
+    // a hardcoded ppm=1000 produced narrow output at typical retail
+    // scan distances (~1m → rectangle 63% of sensor width — Ram
+    // reported 2026-05-08 that the panorama looked much narrower
+    // than the live camera preview).  Persists for the rest of the
+    // capture; reset on -reset.  Zero = not yet set (use 1000.0
+    // fallback so off-plane detection works on the very first frame
+    // before this is initialised).
+    double _dynamicKPixelsPerMeter;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -445,10 +458,45 @@ static os_log_t SlitDiagLog(void) {
     if (U_axis_norm < 1e-6) return NO;
     U_axis /= U_axis_norm;
 
-    constexpr double kPixelsPerMeter = 1000.0;
     const double cCenterX = _canvas.cols / 2.0;
     const double cCenterY = _canvas.rows / 2.0;
     cv::Mat K_inv = _K_compose.inv();
+
+    // V15.0g.1 — adaptive ppm setup BEFORE the corner loop so both
+    // Trapezoidal and Rectified modes use the same ppm consistently
+    // on the first frame (and every frame after).  We need a single
+    // raycast for the camera CENTER to compute t_int_center, then
+    // ppm = focal / t_int_center → scale = 1.0 → rectangle matches
+    // sensor dimensions on canvas.  Without this hoist, the corner
+    // loop ran at the default ppm=1000 on the first frame (only),
+    // producing a narrow output (Ram observed 2026-05-08).
+    const double focalForPPM = std::sqrt(
+        _K_compose.at<double>(0, 0) * _K_compose.at<double>(1, 1));
+    cv::Mat centerPixHomo =
+        (cv::Mat_<double>(3, 1) << frameBGR.cols / 2.0, frameBGR.rows / 2.0, 1.0);
+    cv::Mat centerRayCv = K_inv * centerPixHomo;
+    cv::Mat centerRayArkit = _M_arkitToCv * centerRayCv;
+    cv::Mat centerRayWorld = R_new * centerRayArkit;
+    cv::Mat diffCenter = planeOrigin - t_arkit;
+    double numCenter = diffCenter.dot(planeNormal);
+    double denomCenter = centerRayWorld.dot(planeNormal);
+    double t_int_center = -1.0;
+    if (std::fabs(denomCenter) >= 1e-6) {
+        const double t = numCenter / denomCenter;
+        if (t >= 0.05 && t <= 50.0) {
+            t_int_center = t;
+        }
+    }
+    if (_dynamicKPixelsPerMeter <= 0.0 && t_int_center > 0.0) {
+        _dynamicKPixelsPerMeter = focalForPPM / t_int_center;
+        os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+            "[V15.0g.1-adaptive-ppm] capture ppm locked to %.1f "
+            "(focal=%.1f / t_int_center=%.3fm) — sensor 1:1 canvas "
+            "mapping; first frame's rectangle = sensor dims",
+            _dynamicKPixelsPerMeter, focalForPPM, t_int_center);
+    }
+    const double kPixelsPerMeter =
+        (_dynamicKPixelsPerMeter > 0.0) ? _dynamicKPixelsPerMeter : 1000.0;
 
     std::vector<cv::Point2f> camCorners = {
         cv::Point2f(0, 0),
@@ -522,37 +570,20 @@ static os_log_t SlitDiagLog(void) {
 
     // V15.0g — Rectified rendering: REPLACE the trapezoidal canvas
     // corners with a clean rectangle centred on the camera-center's
-    // raycast anchor.  Eliminates the bottom-wider-than-top
-    // distortion that's intrinsic to projecting a perspective image
-    // onto an oblique plane.  Only the camera CENTER is raycast; the
-    // 4 frame corners are placed as a clean rectangle of size
-    // (sensorW × scale, sensorH × scale) around the anchor, where
-    // scale = t_int_center × ppm / focal.  Result: tilting the
-    // camera moves the rectangle's anchor on the canvas (correct
-    // for panorama assembly) without warping the rectangle's shape.
+    // raycast anchor.  Reuses t_int_center / centerRayWorld /
+    // diffCenter computed above (V15.0g.1 hoist) so we don't redo
+    // the raycast.  scale = t_int_center * ppm / focal; with the
+    // adaptive ppm locked on first frame this resolves to 1.0, so
+    // the rectangle matches sensor dimensions 1:1.
     if (_config.planeProjectionStyle == RLISPlaneProjectionStyleRectified) {
-        cv::Mat centerPixHomo =
-            (cv::Mat_<double>(3, 1) << frameBGR.cols / 2.0, frameBGR.rows / 2.0, 1.0);
-        cv::Mat centerRayCv = K_inv * centerPixHomo;
-        cv::Mat centerRayArkit = _M_arkitToCv * centerRayCv;
-        cv::Mat centerRayWorld = R_new * centerRayArkit;
-        cv::Mat diffCenter = planeOrigin - t_arkit;
-        double numCenter = diffCenter.dot(planeNormal);
-        double denomCenter = centerRayWorld.dot(planeNormal);
-        if (std::fabs(denomCenter) < 1e-6) return NO;
-        double t_int_center = numCenter / denomCenter;
-        if (t_int_center < 0.05 || t_int_center > 50.0) return NO;
+        if (t_int_center <= 0.0) return NO;
         cv::Mat P_center_world = t_arkit + t_int_center * centerRayWorld;
         cv::Mat diffCenterWorld = P_center_world - planeOrigin;
         double Up_center = diffCenterWorld.dot(U_axis);
         double Vp_center = diffCenterWorld.dot(V_axis);
         double cU_anchor = cCenterX + Up_center * kPixelsPerMeter;
         double cV_anchor = cCenterY + Vp_center * kPixelsPerMeter;
-
-        // Scale: canvas-pixels per sensor-pixel at this depth.
-        double focal = std::sqrt(
-            _K_compose.at<double>(0, 0) * _K_compose.at<double>(1, 1));
-        double scale = t_int_center * kPixelsPerMeter / focal;
+        double scale = t_int_center * kPixelsPerMeter / focalForPPM;
 
         double halfW = frameBGR.cols / 2.0;
         double halfH = frameBGR.rows / 2.0;
@@ -699,6 +730,9 @@ static os_log_t SlitDiagLog(void) {
     _lastNcc2dDyApplied = 0;
     _haveNcc2dEmaHistory = NO;
     _planeTransform = cv::Mat();
+    // V15.0g.1 — clear the adaptive ppm so the next capture's first
+    // frame computes a fresh value from its distance.
+    _dynamicKPixelsPerMeter = 0.0;
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
