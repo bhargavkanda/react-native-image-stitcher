@@ -199,26 +199,33 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
 
     /// V15.0g — clear the latched plane and re-evaluate ALL currently-
     /// tracked vertical ARPlaneAnchors against the camera's CURRENT
-    /// aim, picking the BEST candidate by combined alignment-and-area
-    /// score.  Use this when the user signals "I'm ready to scan" —
-    /// e.g., on hold-to-scan press — so the latched plane is whatever
-    /// they're looking at NOW, not whichever plane ARKit happened to
-    /// notice first as the camera was being mounted (Ram observed
-    /// 2026-05-08 that latching-on-detection picks random / wrong
-    /// surfaces because didAdd fires non-deterministically).
+    /// aim, picking the BEST candidate.
     ///
-    /// Scoring rule:
-    ///   1. Reject any plane whose alignment score is below
+    /// V15.0g.3 scoring (replaces V15.0g area-weighted):
+    ///   1. Reject planes whose alignment is below
     ///      `planeAlignmentThreshold`.
-    ///   2. Among the rest, pick the LARGEST plane by area
-    ///      (`extent.x * extent.z`).  Larger planes are more likely
-    ///      to be the wall / fixture face the user is actually
-    ///      scanning, vs. small artifact planes (table edges, signs).
-    ///   3. Tiebreak on alignment if areas are nearly equal.
+    ///   2. Reject planes smaller than `kMinPlaneArea` (0.20 m²) —
+    ///      filters out micro-planes from artifacts (sign edges, etc.)
+    ///      that might happen to be very close.
+    ///   3. Among the rest, pick the **closest** plane (smallest
+    ///      perpendicular distance from camera).
+    ///
+    /// Why closest, not largest:
+    /// Field testing on a Pepsi cooler (2026-05-08) showed the area-
+    /// weighted heuristic picking the WALL behind the cooler (3.5 m²,
+    /// 1.5m away) over the cooler face itself (0.85 m², 0.85m away).
+    /// Wall normal isn't perpendicular to the camera view → projecting
+    /// onto wall plane caused horizontal anchor drift as user tilted
+    /// down ("everything moves to the right as I pan down").
+    ///
+    /// The user is almost always aimed at the FOREGROUND object they
+    /// want to scan — that's why they're aimed at it.  Closest plane
+    /// = foreground = scan target.  Min-area filter prevents tiny
+    /// nearby artifacts (a sign's edge, a small reflection) from
+    /// winning by being super close.
     ///
     /// Returns YES if a plane was latched, NO if no candidate passed
-    /// the alignment filter (caller should keep showing the searching
-    /// pill until the next attempt).
+    /// both filters.
     @objc public func relatchPlaneFromCurrentAnchors() -> Bool {
         planeLatchLock.lock()
         defer { planeLatchLock.unlock() }
@@ -238,9 +245,19 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
             -cameraTransform.columns.2.y,
             -cameraTransform.columns.2.z
         )
+        let cameraPosWorld = simd_float3(
+            cameraTransform.columns.3.x,
+            cameraTransform.columns.3.y,
+            cameraTransform.columns.3.z
+        )
+
+        // V15.0g.3 — minimum plane area to be considered a real scan
+        // target.  Tiny planes are usually artifacts (a small reflective
+        // surface, a sign's edge) that ARKit briefly fits.
+        let kMinPlaneArea: Float = 0.20  // 0.45m × 0.45m
 
         var bestPlane: ARPlaneAnchor? = nil
-        var bestScore: Float = -1.0
+        var bestPerpDist: Float = .greatestFiniteMagnitude
         var bestAlignment: Float = -1.0
         var bestArea: Float = 0.0
 
@@ -252,6 +269,11 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
                 plane.transform.columns.1.x,
                 plane.transform.columns.1.y,
                 plane.transform.columns.1.z
+            )
+            let planeOriginWorld = simd_float3(
+                plane.transform.columns.3.x,
+                plane.transform.columns.3.y,
+                plane.transform.columns.3.z
             )
             let dotPos = simd_dot(planeNormalWorld, cameraFacingWorld)
             let alignment = max(dotPos, -dotPos)
@@ -268,19 +290,30 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
             // accurate but we don't depend on absolute precision here).
             let area = plane.extent.x * plane.extent.z
 
-            // Composite score: area is the dominant factor (larger
-            // walls are more likely the scan target), but break ties
-            // by alignment so a plane that's both large AND well-
-            // aligned wins over one that's just large.
-            let score = area * (1.0 + alignment)
+            // V15.0g.3 — reject micro-planes.
+            if area < kMinPlaneArea {
+                os_log(.fault, log: arSessionDiagLog,
+                       "[V15.0g-relatch] candidate REJECTED (area too small): alignment=%f area=%fm² (extent %fx%f) < min=%f",
+                       alignment, area, plane.extent.x, plane.extent.z, kMinPlaneArea)
+                continue
+            }
+
+            // V15.0g.3 — perpendicular distance from camera to plane.
+            // Closer = more likely the foreground scan target.
+            let diff = planeOriginWorld - cameraPosWorld
+            let perpDist = abs(simd_dot(diff, planeNormalWorld))
+            // Score is inverse-distance for diagnostic clarity; lower
+            // perpDist = higher score.
+            let score = (perpDist > 0.001) ? (1.0 / perpDist) : 1000.0
 
             os_log(.fault, log: arSessionDiagLog,
-                   "[V15.0g-relatch] candidate plane: alignment=%f area=%fm² (extent %fx%f) score=%f",
-                   alignment, area, plane.extent.x, plane.extent.z, score)
+                   "[V15.0g-relatch] candidate plane: alignment=%f area=%fm² (extent %fx%f) perpDist=%fm score=%f",
+                   alignment, area, plane.extent.x, plane.extent.z, perpDist, score)
 
-            if score > bestScore {
+            // V15.0g.3 — closer wins.
+            if perpDist < bestPerpDist {
                 bestPlane = plane
-                bestScore = score
+                bestPerpDist = perpDist
                 bestAlignment = alignment
                 bestArea = area
             }
@@ -288,15 +321,15 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
 
         guard let chosen = bestPlane else {
             os_log(.fault, log: arSessionDiagLog,
-                   "[V15.0g-relatch] no candidate plane passed alignment threshold (best rejected=%f, threshold=%f); engine will refuse first frame until lock",
+                   "[V15.0g-relatch] no candidate plane passed alignment+area filters (best rejected alignment=%f, threshold=%f); engine will refuse first frame until lock",
                    bestRejectedAlignment, planeAlignmentThreshold)
             return false
         }
 
         detectedPlaneTransformInternal = chosen.transform
         os_log(.fault, log: arSessionDiagLog,
-               "[V15.0g-relatch] latched best plane: alignment=%f area=%fm² extent=%fx%f centre=(%f,%f,%f)",
-               bestAlignment, bestArea,
+               "[V15.0g-relatch] latched best plane: alignment=%f area=%fm² perpDist=%fm extent=%fx%f centre=(%f,%f,%f)",
+               bestAlignment, bestArea, bestPerpDist,
                chosen.extent.x, chosen.extent.z,
                chosen.center.x, chosen.center.y, chosen.center.z)
         return true
