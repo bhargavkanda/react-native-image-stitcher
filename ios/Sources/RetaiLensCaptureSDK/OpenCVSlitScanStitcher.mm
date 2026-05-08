@@ -235,16 +235,21 @@ static os_log_t SlitDiagLog(void) {
 - (void)setConfig:(RLISStitcherConfig *)config {
     if (config == nil) return;
     _config = config;
-    NSLog(@"[V15-config] slit-scan config applied: panAxisFrac=%.2f "
-          @"acceptGate=%ld tri=%d triAccum=%d 1dNcc=%d 2dNcc=%d "
-          @"ransac=%d paint=%@ useDetectedPlane=%d",
-          _config.kPanAxisFractionRect, (long)_config.kMinAcceptDeltaPx,
-          (int)_config.enableTriangulation, (int)_config.enableTriAccumulator,
-          (int)_config.enable1dNcc, (int)_config.enable2dNcc,
-          (int)_config.enableRansacHomography,
-          _config.paintMode == RLISPaintModeFeatherBlend
-              ? @"FeatherBlend" : @"FirstPaintedWins",
-          (int)_config.useDetectedPlane);
+    // V15.0c.4 — converted to fault log so it isn't rate-limited.
+    // os_log "default" messages can be coalesced or dropped under load
+    // (especially when many fire close together at capture start),
+    // which makes diagnosing config-propagation issues unreliable.
+    os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+        "[V15-config] slit-scan config applied: panAxisFrac=%.2f "
+        "acceptGate=%ld tri=%d triAccum=%d 1dNcc=%d 2dNcc=%d "
+        "ransac=%d paint=%s useDetectedPlane=%d",
+        _config.kPanAxisFractionRect, (long)_config.kMinAcceptDeltaPx,
+        (int)_config.enableTriangulation, (int)_config.enableTriAccumulator,
+        (int)_config.enable1dNcc, (int)_config.enable2dNcc,
+        (int)_config.enableRansacHomography,
+        _config.paintMode == RLISPaintModeFeatherBlend
+            ? "FeatherBlend" : "FirstPaintedWins",
+        (int)_config.useDetectedPlane);
 }
 
 - (void)setPlaneTransformFlat:(NSArray<NSNumber *> *)transform16 {
@@ -268,12 +273,14 @@ static os_log_t SlitDiagLog(void) {
     // V15.0c.2 — clear the off-plane baseline; first successful
     // plane-projected frame after this will set the baseline.
     _firstPlaneTInt = 0.0;
-    NSLog(@"[V15.0b-plane] engine received plane transform: "
-          @"origin=(%.3f, %.3f, %.3f) scale=(%.3f, %.3f, %.3f)",
-          T.at<double>(0,3), T.at<double>(1,3), T.at<double>(2,3),
-          cv::norm(T.col(0).rowRange(0,3)),
-          cv::norm(T.col(1).rowRange(0,3)),
-          cv::norm(T.col(2).rowRange(0,3)));
+    // V15.0c.4 — fault log (was NSLog/default).  See note on setConfig.
+    os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+        "[V15.0b-plane] engine received plane transform: "
+        "origin=(%.3f, %.3f, %.3f) scale=(%.3f, %.3f, %.3f)",
+        T.at<double>(0,3), T.at<double>(1,3), T.at<double>(2,3),
+        cv::norm(T.col(0).rowRange(0,3)),
+        cv::norm(T.col(1).rowRange(0,3)),
+        cv::norm(T.col(2).rowRange(0,3)));
 }
 
 - (void)reset {
@@ -600,18 +607,23 @@ static const double kPanAxisFractionRect = 0.30;
                       canvasCols, canvasRows, (int)_isLandscape,
                       (long)_canvasPanExtent, frameBGR.cols, frameBGR.rows);
                 // V15 — log config snapshot at first frame.
-                NSLog(@"[V15-slit] panAxisFrac=%.2f clipH=%d clipW=%d "
-                      @"acceptGate=%ld tri=%d triAccum=%d 1dNcc=%d "
-                      @"2dNcc=%d ransac=%d paint=%@",
-                      _config.kPanAxisFractionRect, clipH, clipW,
-                      (long)_config.kMinAcceptDeltaPx,
-                      (int)_config.enableTriangulation,
-                      (int)_config.enableTriAccumulator,
-                      (int)_config.enable1dNcc,
-                      (int)_config.enable2dNcc,
-                      (int)_config.enableRansacHomography,
-                      _config.paintMode == RLISPaintModeFeatherBlend
-                          ? @"FeatherBlend" : @"FirstPaintedWins");
+                // V15.0c.4 — fault log so it always shows.
+                os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                    "[V15-slit] panAxisFrac=%.2f clipH=%d clipW=%d "
+                    "acceptGate=%ld tri=%d triAccum=%d 1dNcc=%d "
+                    "2dNcc=%d ransac=%d paint=%s useDetectedPlane=%d "
+                    "planeTransform.empty=%d",
+                    _config.kPanAxisFractionRect, clipH, clipW,
+                    (long)_config.kMinAcceptDeltaPx,
+                    (int)_config.enableTriangulation,
+                    (int)_config.enableTriAccumulator,
+                    (int)_config.enable1dNcc,
+                    (int)_config.enable2dNcc,
+                    (int)_config.enableRansacHomography,
+                    _config.paintMode == RLISPaintModeFeatherBlend
+                        ? "FeatherBlend" : "FirstPaintedWins",
+                    (int)_config.useDetectedPlane,
+                    (int)_planeTransform.empty());
             }
 
             // V12.12 — first-frame placement at canvas ORIGIN (0, 0).
@@ -665,12 +677,17 @@ static const double kPanAxisFractionRect = 0.30;
                         break;
                 }
                 _firstFrameDstY = anchorY;
-                NSLog(@"[V15.0c-anchor] firstFrameFullFrame=on, "
-                      @"sliverPosition=%@, frameRows=%d, "
-                      @"subsequentClipH=%d, _firstFrameDstY=%d",
-                      _config.sliverPosition == RLISSliverPositionTop ? @"Top"
-                          : (_config.sliverPosition == RLISSliverPositionBottom ? @"Bottom" : @"Center"),
-                      frameBGR.rows, subsequentClipH, anchorY);
+                // V15.0c.4 — fault log so it always shows.  C-string
+                // %s instead of NSString %@ since os_log doesn't accept
+                // %@ formatters.
+                const char *posStr =
+                    _config.sliverPosition == RLISSliverPositionTop ? "Top"
+                    : (_config.sliverPosition == RLISSliverPositionBottom ? "Bottom" : "Center");
+                os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                    "[V15.0c-anchor] firstFrameFullFrame=on, "
+                    "sliverPosition=%s, frameRows=%d, "
+                    "subsequentClipH=%d, _firstFrameDstY=%d",
+                    posStr, frameBGR.rows, subsequentClipH, anchorY);
             }
 
             // V14.0a — first accept's canvas position becomes prev for
@@ -780,6 +797,25 @@ static const double kPanAxisFractionRect = 0.30;
         // refinements (1D NCC, 2D NCC, RANSAC) don't apply — they're
         // 2D-image alignments, and plane projection gives us 3D-correct
         // alignment for any pixel ON the plane.
+        // V15.0c.4 — UNCONDITIONAL fault-log on early frames showing
+        // the values feeding the plane-branch decision.  Fires on
+        // counter ≤ 5 and every 60 frames.  Tells us, with no doubt,
+        // (a) ingestPixelBuffer reached this point, and (b) what
+        // useDetectedPlane / planeTransform.empty actually evaluate
+        // to.  Earlier diagnostic (V15.0c.3) was inside the else
+        // branch only — if the if-branch was being entered (e.g.,
+        // because a stale plane transform survived a capture restart)
+        // the noplane log silently never fired, masking the real state.
+        if (_engineCallCounter <= 5 || _engineCallCounter % 60 == 0) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V15.0c.4-pre] #%ld pre-plane-check: "
+                "useDetectedPlane=%d planeTransform.empty=%d "
+                "(if both 1/0 → enter plane branch; "
+                "else → noplane skip)",
+                (long)_engineCallCounter,
+                (int)_config.useDetectedPlane,
+                (int)_planeTransform.empty());
+        }
         if (_config.useDetectedPlane && !_planeTransform.empty()) {
             cv::Mat t_arkit = (cv::Mat_<double>(3, 1) << tx, ty, tz);
 
@@ -965,10 +1001,12 @@ static const double kPanAxisFractionRect = 0.30;
                 // frame as the "what's reasonable" reference.
                 if (_firstPlaneTInt <= 0.0 && currentMaxTInt > 0.0) {
                     _firstPlaneTInt = currentMaxTInt;
-                    NSLog(@"[V15.0c.2-baseline] off-plane baseline "
-                          @"_firstPlaneTInt set to %.3fm (max corner t_int "
-                          @"on first plane-projected frame)",
-                          _firstPlaneTInt);
+                    // V15.0c.4 — fault log so it always shows.
+                    os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                        "[V15.0c.2-baseline] off-plane baseline "
+                        "_firstPlaneTInt set to %.3fm (max corner t_int "
+                        "on first plane-projected frame)",
+                        _firstPlaneTInt);
                 }
 
                 cv::Mat H = cv::getPerspectiveTransform(camCorners, canvasCorners);

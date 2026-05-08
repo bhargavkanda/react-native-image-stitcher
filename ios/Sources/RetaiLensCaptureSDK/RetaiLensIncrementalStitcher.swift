@@ -637,6 +637,10 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                let plane = RetaiLensARSession.shared.planeTransformFlat() {
                 slit?.setPlaneTransformFlat(plane)
                 self.havePropagatedPlane = true
+                // V15.0c.4 — fault log so we can see the propagation
+                // moment without rate-limit drops.
+                os_log(.fault, log: Self.diagLog,
+                       "[V15.0b-plane] bridge propagated plane to slit-scan engine (one-shot per capture)")
             }
 
             let telemetry: RLISFrameTelemetry

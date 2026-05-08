@@ -28,6 +28,17 @@ import ARKit
 import AVFoundation
 import simd
 import UIKit
+import os.log
+
+// V15.0c.4 — FAULT-level os_log on the same subsystem/category the
+// slit-scan engine uses, so Console.app's filter for `category =
+// slitscan` shows ARKit plane events alongside engine events.
+// FAULT survives os_log's default-level rate limiting; NSLog is
+// "default" level and gets coalesced/dropped under burst.
+fileprivate let arSessionDiagLog = OSLog(
+    subsystem: "com.tiger.retailens.sdk",
+    category: "slitscan"
+)
 
 
 /// Track state mirrors `ARCamera.TrackingState`.  We mirror it
@@ -448,9 +459,11 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
                 // iOS 16+ has .planeExtent which is more accurate but
                 // we don't depend on the size for stitching, only for
                 // diagnostics.
-                NSLog("[V15.0b-plane] latched vertical plane "
-                      + "extent=\(plane.extent.x)×\(plane.extent.z) "
-                      + "centre=(\(plane.center.x),\(plane.center.y),\(plane.center.z))")
+                // V15.0c.4 — fault log so it isn't rate-limited.
+                os_log(.fault, log: arSessionDiagLog,
+                       "[V15.0b-plane] latched vertical plane extent=%fx%f centre=(%f,%f,%f)",
+                       plane.extent.x, plane.extent.z,
+                       plane.center.x, plane.center.y, plane.center.z)
                 break
             }
         }
