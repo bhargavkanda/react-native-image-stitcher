@@ -167,6 +167,16 @@ static os_log_t SlitDiagLog(void) {
     // -setPlaneTransformFlat: is called by the bridge with the
     // ARSession's first detected vertical plane.
     cv::Mat _planeTransform;
+
+    // V15.0c.2 — off-plane detector.  Tracks the max corner ray
+    // distance (t_int) for the FIRST successful plane-projected
+    // frame.  Subsequent frames whose max corner t_int exceeds
+    // kOffPlaneMultiplier × _firstPlaneTInt are flagged as off-plane
+    // (camera tilted past the wall edge → rays grazing the plane
+    // hit the floor / open air rather than the wall) and the engine
+    // falls back to the slit-scan path for that frame.  Reset to 0
+    // on -reset; set on the first frame with a valid raycast.
+    double _firstPlaneTInt;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -240,6 +250,9 @@ static os_log_t SlitDiagLog(void) {
 - (void)setPlaneTransformFlat:(NSArray<NSNumber *> *)transform16 {
     if (transform16.count != 16) {
         _planeTransform = cv::Mat();
+        // V15.0c.2 — clear the off-plane baseline when the plane
+        // transform is cleared.  Next plane latch will start fresh.
+        _firstPlaneTInt = 0.0;
         return;
     }
     // Column-major from Swift's simd_float4x4.  Build a 4×4 CV_64F
@@ -252,6 +265,9 @@ static os_log_t SlitDiagLog(void) {
         }
     }
     _planeTransform = T;
+    // V15.0c.2 — clear the off-plane baseline; first successful
+    // plane-projected frame after this will set the baseline.
+    _firstPlaneTInt = 0.0;
     NSLog(@"[V15.0b-plane] engine received plane transform: "
           @"origin=(%.3f, %.3f, %.3f) scale=(%.3f, %.3f, %.3f)",
           T.at<double>(0,3), T.at<double>(1,3), T.at<double>(2,3),
@@ -302,6 +318,10 @@ static os_log_t SlitDiagLog(void) {
     // V14.0a — clear prev accept canvas position; set on first accept.
     _prevAcceptDstX = 0;
     _prevAcceptDstY = 0;
+
+    // V15.0c.2 — reset the off-plane detector.  First successful
+    // plane-projected frame in the new capture will set the baseline.
+    _firstPlaneTInt = 0.0;
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
@@ -763,26 +783,33 @@ static const double kPanAxisFractionRect = 0.30;
         if (_config.useDetectedPlane && !_planeTransform.empty()) {
             cv::Mat t_arkit = (cv::Mat_<double>(3, 1) << tx, ty, tz);
 
-            // V15.0c — fixed plane axes.  ARKit ARPlaneAnchor convention:
-            //   • The plane lies in its local XZ plane (Y=0).
-            //   • Local +Y axis is the SURFACE NORMAL (out of the wall,
-            //     toward the camera for a wall the user is facing).
-            //   • Local X axis is horizontal along the wall (perpendicular
-            //     to gravity).
-            //   • Local Z axis is in the wall plane, parallel to gravity
-            //     (typically pointing DOWN in world coords).
+            // V15.0c.2 — gravity-aligned U/V axes.  Replaces V15.0c's
+            // direct read of plane-local X/Z, which was wrong because
+            // ARKit's ARPlaneAnchor.transform DOES NOT guarantee column-2
+            // points DOWN in world.  It is one of two possible vectors
+            // parallel to gravity, and the orientation depends on how
+            // the plane was detected — there's no documented contract.
             //
-            // Pre-V15.0c BUG: I read column 2 (Z = gravity direction) as
-            // the normal and projected with (X, Y) as canvas coords.
-            // Result: all 4 corners had plane-local Y ≈ 0 (since they're
-            // ON the plane), so canvas V was constant → degenerate
-            // homography → "image inverted and shows something else".
+            // Symptom of the V15.0c bug (Ram observed on top-to-bottom
+            // pan): the second-pass content rendered as a tilted/
+            // rotated quadrilateral below the first frame because the
+            // sign of the V axis flipped relative to expected.
             //
-            // V15.0c uses column 1 (Y = normal) for the plane equation
-            // and (X_local, Z_local) — the in-plane coords — for the
-            // canvas mapping.
-            const cv::Mat T_plane_inv = _planeTransform.inv();
-            const cv::Mat planeNormal = (cv::Mat_<double>(3, 1) <<
+            // V15.0c.2 fix: derive the in-plane U/V axes deterministically
+            // from world gravity, regardless of how ARKit labelled
+            // the plane's local Z.
+            //
+            //   • Surface normal (n): column 1 of plane transform — the
+            //     ARKit convention IS documented for this one.
+            //   • V axis (canvas-Y, +V = down on canvas):
+            //       projection of -world_up onto the plane, normalized.
+            //       For a vertical wall plane, this resolves to the
+            //       in-plane direction parallel to gravity, pointing DOWN.
+            //   • U axis (canvas-X, +U = right when looking AT the wall):
+            //       n × V (right-handed).
+            //   • Canvas mapping: cU = cx + (P_world − O) · U_axis × ppm
+            //                     cV = cy + (P_world − O) · V_axis × ppm
+            cv::Mat planeNormal = (cv::Mat_<double>(3, 1) <<
                 _planeTransform.at<double>(0, 1),
                 _planeTransform.at<double>(1, 1),
                 _planeTransform.at<double>(2, 1));
@@ -790,6 +817,55 @@ static const double kPanAxisFractionRect = 0.30;
                 _planeTransform.at<double>(0, 3),
                 _planeTransform.at<double>(1, 3),
                 _planeTransform.at<double>(2, 3));
+
+            // V15.0c.2 — ensure plane normal points TOWARD the camera.
+            // ARKit's column 1 is the surface normal but its sign isn't
+            // guaranteed (could point INTO the wall).  Flipping ensures
+            // U_axis = n × V_axis follows the right-hand rule correctly:
+            // when the camera is looking at the wall, +U → camera's right.
+            cv::Mat camToPlane = planeOrigin - t_arkit;
+            if (camToPlane.dot(planeNormal) > 0) {
+                // Normal points away from camera — flip so it points
+                // toward the camera (away from the wall surface).
+                planeNormal = -planeNormal;
+            }
+
+            // World up in ARKit is (0, 1, 0).  For a vertical plane,
+            // negUp's projection onto the plane points DOWN in the
+            // wall's surface — exactly the canvas-Y "down" direction.
+            const cv::Mat negWorldUp = (cv::Mat_<double>(3, 1) << 0.0, -1.0, 0.0);
+            const double upDotN = negWorldUp.dot(planeNormal);
+            cv::Mat V_axis = negWorldUp - upDotN * planeNormal;
+            double V_axis_norm = cv::norm(V_axis);
+            // Degenerate edge case: plane is HORIZONTAL (normal parallel
+            // to gravity).  V_axis collapses to zero — there's no
+            // unambiguous "down" in the plane.  Skip plane projection
+            // for this frame and fall through to slit-scan.  Should
+            // never happen with planeDetection = .vertical, but guarding
+            // anyway in case the ARKit detector ever returns a wonky
+            // plane (e.g., a tilted shelf labelled vertical).
+            if (V_axis_norm < 1e-6) {
+                if (_engineCallCounter % 30 == 0) {
+                    os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                        "[V15.0c.2-plane-horizontal] #%ld plane normal "
+                        "parallel to gravity (|V_axis|=%.3e); falling "
+                        "back to slit-scan",
+                        (long)_engineCallCounter, V_axis_norm);
+                }
+                goto skipPlaneProjection;
+            }
+            V_axis /= V_axis_norm;
+            // U_axis = n × V_axis.  Right-handed: when the camera is
+            // looking AT the wall (so -n points away from camera), +U
+            // points to the camera's right.
+            cv::Mat U_axis = planeNormal.cross(V_axis);
+            double U_axis_norm = cv::norm(U_axis);
+            if (U_axis_norm < 1e-6) {
+                // Should be impossible given V_axis ⟂ n, but guard
+                // defensively against numerical edge cases.
+                goto skipPlaneProjection;
+            }
+            U_axis /= U_axis_norm;
 
             constexpr double kPixelsPerMeter = 1000.0;
             const double cCenterX = _canvas.cols / 2.0;
@@ -807,6 +883,10 @@ static const double kPanAxisFractionRect = 0.30;
             canvasCorners.reserve(4);
 
             bool degenerate = false;
+            // V15.0c.2 — track the max |t_int| across the 4 corners
+            // for off-plane detection (see fallback check after the
+            // loop).
+            double currentMaxTInt = 0.0;
             for (const auto &cp : camCorners) {
                 cv::Mat pixHomo = (cv::Mat_<double>(3, 1) << cp.x, cp.y, 1.0);
                 cv::Mat rayCv = K_inv * pixHomo;
@@ -819,26 +899,78 @@ static const double kPanAxisFractionRect = 0.30;
                 if (std::fabs(denom) < 1e-6) { degenerate = true; break; }
                 const double t_int = num / denom;
                 if (t_int < 0.05 || t_int > 50.0) { degenerate = true; break; }
+                if (t_int > currentMaxTInt) currentMaxTInt = t_int;
                 cv::Mat P_world = t_arkit + t_int * rayWorld;
-                // Plane-local: T_plane_inv × P_world (homogeneous).
-                cv::Mat P_world_h = cv::Mat::ones(4, 1, CV_64F);
-                P_world.copyTo(P_world_h.rowRange(0, 3));
-                cv::Mat P_plane = T_plane_inv * P_world_h;
-                // V15.0c — use plane-local X and Z (the in-plane
-                // coords).  Local Y component should be ~0 for a point
-                // ON the plane — verified by the t_int formula above.
-                const double Xp = P_plane.at<double>(0);
-                const double Zp = P_plane.at<double>(2);
-                const double cU = cCenterX + Xp * kPixelsPerMeter;
-                // Plane-local Z typically points along gravity (DOWN in
-                // world).  Canvas V increases DOWNWARD.  So a canvas
-                // pixel directly below the plane origin has Zp > 0
-                // and cV > cCenterY — no negation needed.
-                const double cV = cCenterY + Zp * kPixelsPerMeter;
+                // V15.0c.2 — project onto in-plane U/V axes (gravity-
+                // aligned), not raw plane-local X/Z.  diffWorld is
+                // P_world − O, the in-plane displacement of this corner
+                // from the plane's origin.
+                cv::Mat diffWorld = P_world - planeOrigin;
+                const double Up = diffWorld.dot(U_axis);
+                const double Vp = diffWorld.dot(V_axis);
+                const double cU = cCenterX + Up * kPixelsPerMeter;
+                // V_axis already points DOWN on the wall (gravity-
+                // aligned), so canvas Y just adds Vp directly.
+                const double cV = cCenterY + Vp * kPixelsPerMeter;
                 canvasCorners.emplace_back((float)cU, (float)cV);
             }
 
+            // V15.0c.2 — off-plane fallback.  Once the camera tilts
+            // past the wall edge (e.g., user pans down past where
+            // the pegboard ends, onto the bench / floor in front of
+            // the wall), the rays still mathematically intersect the
+            // INFINITE wall plane equation, but the actual content
+            // they see is NOT on the plane.  The result is a tilted
+            // / wrong-scale parallelogram pasted at the WRONG canvas
+            // position — visually, the user sees the floor / bench
+            // wrongly placed below the first frame.
+            //
+            // Heuristic: track the max corner t_int for the FIRST
+            // successful plane-projected frame (set as baseline).
+            // For subsequent frames, if the max corner t_int exceeds
+            // 3× the baseline, the camera is rotated such that at
+            // least one corner ray is grazing the plane far away —
+            // strong evidence the camera has panned off-plane.
+            // Skip the plane warp this frame; fall through to the
+            // slit-scan path so the capture continues with a known
+            // (less ambitious) algorithm rather than producing a
+            // visibly wrong output.
+            //
+            // Threshold of 3× picked from typical retail aisle
+            // geometry: a phone scan of a 1.5 m fixture face at 1.0 m
+            // depth has corner rays in [0.8, 1.4] m.  Tilting past
+            // the fixture edge takes the FAR corner past 4 m before
+            // the eye-line clears.  3× catches this comfortably.
+            constexpr double kOffPlaneMultiplier = 3.0;
+            if (!degenerate
+                && _firstPlaneTInt > 0.0
+                && currentMaxTInt > kOffPlaneMultiplier * _firstPlaneTInt) {
+                if (_engineCallCounter % 5 == 0) {
+                    os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                        "[V15.0c.2-offplane] #%ld camera off detected "
+                        "plane (currentMaxTInt=%.2fm baseline=%.2fm "
+                        "ratio=%.2f); falling back to slit-scan",
+                        (long)_engineCallCounter,
+                        currentMaxTInt, _firstPlaneTInt,
+                        currentMaxTInt / std::max(0.001, _firstPlaneTInt));
+                }
+                degenerate = true;
+            }
+
             if (!degenerate) {
+                // V15.0c.2 — set the off-plane baseline on the FIRST
+                // successful plane-projected frame.  All subsequent
+                // frames are compared to this baseline (see kOffPlaneMultiplier
+                // check above).  We use the max-corner t_int from THIS
+                // frame as the "what's reasonable" reference.
+                if (_firstPlaneTInt <= 0.0 && currentMaxTInt > 0.0) {
+                    _firstPlaneTInt = currentMaxTInt;
+                    NSLog(@"[V15.0c.2-baseline] off-plane baseline "
+                          @"_firstPlaneTInt set to %.3fm (max corner t_int "
+                          @"on first plane-projected frame)",
+                          _firstPlaneTInt);
+                }
+
                 cv::Mat H = cv::getPerspectiveTransform(camCorners, canvasCorners);
 
                 cv::Mat warpedCanvas = cv::Mat::zeros(_canvas.size(), CV_8UC3);
@@ -912,6 +1044,11 @@ static const double kPanAxisFractionRect = 0.30;
                     (long)_engineCallCounter);
             }
         }
+
+        // V15.0c.2 — target for early-exits inside the plane-projection
+        // block when the plane axes are degenerate (e.g., normal parallel
+        // to gravity).  Falls through to the slit-scan path below.
+        skipPlaneProjection: ;
 
         cv::Mat R_rel = _firstRotationArkit.t() * R_new;
         // V12.14.10 — UNIFIED clip for both supported modes (see
@@ -1459,7 +1596,15 @@ static const double kPanAxisFractionRect = 0.30;
 
         if (_config.enable2dNcc) {
             constexpr int kNccSourceHeight = 100;
-            constexpr int kNccSearchMargin = 30;
+            // V15.0c.2 — tightened from ±30 to ±12 px.  Ram observed
+            // visible step-discontinuities at slit boundaries with the
+            // ±30 setting: on repetitive textures (peg holes, slatted
+            // panels, carpet weave) the NCC peak can SNAP to a different
+            // copy of the pattern within the search window, shifting
+            // the slit by 20+ px frame-to-frame.  ±12 caps the worst-
+            // case single-frame snap and forces the NCC to refine
+            // around the pose-predicted position, not search broadly.
+            constexpr int kNccSearchMargin = 12;
             constexpr int kNccSourceXInset = 30;
 
             const int sourceW = clipW - 2 * kNccSourceXInset;
@@ -1504,7 +1649,14 @@ static const double kPanAxisFractionRect = 0.30;
                         cv::minMaxLoc(result, &rmin, &rmax, &lmin, &lmax);
                         ncc2dConfidence = rmax;
 
-                        if (ncc2dConfidence >= 0.6) {
+                        // V15.0c.2 — raised from 0.6 → 0.75.  Pegboards
+                        // and slatted panels produce 0.65–0.80 matches
+                        // at MULTIPLE Y positions within the search
+                        // window — the "best" of those is essentially
+                        // arbitrary.  0.75 cuts most spurious matches
+                        // on repetitive textures while keeping genuine
+                        // matches on real overlap.
+                        if (ncc2dConfidence >= 0.75) {
                             const int matchX = searchLeft + lmax.x;
                             const int matchY = searchTop + lmax.y;
                             int rawDx = matchX - expectedMatchX;
