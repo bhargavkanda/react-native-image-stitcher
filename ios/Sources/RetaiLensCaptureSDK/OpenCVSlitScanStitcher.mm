@@ -1043,6 +1043,31 @@ static const double kPanAxisFractionRect = 0.30;
                     "range; falling back to slit-scan path",
                     (long)_engineCallCounter);
             }
+        } else {
+            // V15.0c.3 diag — plane-projection branch was SKIPPED.
+            // Ram reported the plane mode wasn't taking effect at all
+            // and we saw zero `[V15.0b-paint]` / `[V15.0c.2-baseline]`
+            // logs, only slit-scan logs.  Log the skip reason once at
+            // start and periodically thereafter so we can see WHICH of
+            // the two pre-conditions is failing:
+            //
+            //   • useDetectedPlane=0  → JS override not propagating
+            //     (check `[V15-config] useDetectedPlane=…` line)
+            //   • planeTransform.empty=1 → ARKit hasn't latched a plane
+            //     yet (need a featureful vertical surface to detect),
+            //     OR the bridge never called setPlaneTransformFlat:
+            //     (check for `[V15.0b-plane] engine received plane
+            //     transform:` line — should fire ONCE per capture
+            //     after the plane is latched).
+            if (_engineCallCounter <= 3 || _engineCallCounter % 60 == 0) {
+                os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                    "[V15.0c.3-noplane] #%ld plane-proj branch SKIPPED: "
+                    "useDetectedPlane=%d planeTransform.empty=%d "
+                    "(if you intended to use plane mode, both must be 1 / 0)",
+                    (long)_engineCallCounter,
+                    (int)_config.useDetectedPlane,
+                    (int)_planeTransform.empty());
+            }
         }
 
         // V15.0c.2 — target for early-exits inside the plane-projection
