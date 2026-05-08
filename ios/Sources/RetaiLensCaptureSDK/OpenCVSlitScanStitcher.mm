@@ -223,6 +223,22 @@ static os_log_t SlitDiagLog(void) {
     // fallback so off-plane detection works on the very first frame
     // before this is initialised).
     double _dynamicKPixelsPerMeter;
+
+    // V15.0g.4 — first-frame plane-local coordinates of the camera
+    // CENTER ray's intersection with the plane.  Used to OFFSET the
+    // canvas mapping so the FIRST plane-projected frame lands at
+    // canvas center (cCenterX, cCenterY) regardless of where ARKit
+    // chose to place the plane anchor's local origin in 3D space.
+    // Without this offset, the rectangle's canvas position depended
+    // on ARKit's arbitrary anchor placement and could land far from
+    // canvas center → frames clipped at canvas bounds → narrow
+    // output (Ram observed 2026-05-08 with cooler scan).  Subsequent
+    // frames' canvas position = cCenter + (current_UV − first_UV)
+    // × ppm, giving a panorama anchored on the user's first-frame
+    // aim.  `_haveFirstPlaneAnchor` flag tracks whether they're set.
+    double _firstPlaneAnchorUp;
+    double _firstPlaneAnchorVp;
+    BOOL _haveFirstPlaneAnchor;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -509,6 +525,29 @@ static os_log_t SlitDiagLog(void) {
     const double kPixelsPerMeter =
         (_dynamicKPixelsPerMeter > 0.0) ? _dynamicKPixelsPerMeter : 1000.0;
 
+    // V15.0g.4 — compute first-frame anchor offset.  If we have a
+    // valid t_int_center, set the first-frame plane-local UV ONCE
+    // per capture so the FIRST plane-projected frame lands at canvas
+    // (cCenterX, cCenterY).  Subsequent frames' canvas positions are
+    // RELATIVE to this anchor.  Without this, ARKit's arbitrary
+    // plane-anchor origin caused frames to land off-canvas (Ram
+    // observed 2026-05-08 — cooler clipped at canvas left edge
+    // because ARKit anchored the cooler plane 0.3m to the left of
+    // where the camera was aimed).
+    if (!_haveFirstPlaneAnchor && t_int_center > 0.0) {
+        cv::Mat P_world_first = t_arkit + t_int_center * centerRayWorld;
+        cv::Mat diffWorld_first = P_world_first - planeOrigin;
+        _firstPlaneAnchorUp = diffWorld_first.dot(U_axis);
+        _firstPlaneAnchorVp = diffWorld_first.dot(V_axis);
+        _haveFirstPlaneAnchor = YES;
+        os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+            "[V15.0g.4-anchor] first-frame plane anchor offset locked: "
+            "(Up=%.3fm, Vp=%.3fm) — subsequent frames offset relative "
+            "to this so first frame lands at canvas centre regardless "
+            "of where ARKit placed its plane origin",
+            _firstPlaneAnchorUp, _firstPlaneAnchorVp);
+    }
+
     std::vector<cv::Point2f> camCorners = {
         cv::Point2f(0, 0),
         cv::Point2f((float)frameBGR.cols, 0),
@@ -536,8 +575,9 @@ static os_log_t SlitDiagLog(void) {
         cv::Mat diffWorld = P_world - planeOrigin;
         const double Up = diffWorld.dot(U_axis);
         const double Vp = diffWorld.dot(V_axis);
-        const double cU = cCenterX + Up * kPixelsPerMeter;
-        const double cV = cCenterY + Vp * kPixelsPerMeter;
+        // V15.0g.4 — apply first-frame anchor offset.
+        const double cU = cCenterX + (Up - _firstPlaneAnchorUp) * kPixelsPerMeter;
+        const double cV = cCenterY + (Vp - _firstPlaneAnchorVp) * kPixelsPerMeter;
         canvasCorners.emplace_back((float)cU, (float)cV);
     }
 
@@ -606,8 +646,12 @@ static os_log_t SlitDiagLog(void) {
         cv::Mat diffCenterWorld = P_center_world - planeOrigin;
         double Up_center = diffCenterWorld.dot(U_axis);
         double Vp_center = diffCenterWorld.dot(V_axis);
-        double cU_anchor = cCenterX + Up_center * kPixelsPerMeter;
-        double cV_anchor = cCenterY + Vp_center * kPixelsPerMeter;
+        // V15.0g.4 — apply first-frame anchor offset so first frame
+        // lands at canvas centre, subsequent frames offset relative.
+        double cU_anchor = cCenterX +
+            (Up_center - _firstPlaneAnchorUp) * kPixelsPerMeter;
+        double cV_anchor = cCenterY +
+            (Vp_center - _firstPlaneAnchorVp) * kPixelsPerMeter;
         // Perpendicular cam-to-plane distance.  diffCenter =
         // planeOrigin − t_arkit was computed at the top of the
         // helper; planeNormal was flipped to point TOWARD the camera
@@ -764,6 +808,12 @@ static os_log_t SlitDiagLog(void) {
     // V15.0g.1 — clear the adaptive ppm so the next capture's first
     // frame computes a fresh value from its distance.
     _dynamicKPixelsPerMeter = 0.0;
+    // V15.0g.4 — clear first-frame plane anchor so the next capture's
+    // first plane-projected frame becomes the new canvas-center
+    // reference.
+    _firstPlaneAnchorUp = 0.0;
+    _firstPlaneAnchorVp = 0.0;
+    _haveFirstPlaneAnchor = NO;
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
