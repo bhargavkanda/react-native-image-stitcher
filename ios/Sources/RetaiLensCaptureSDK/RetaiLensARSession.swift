@@ -286,6 +286,19 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
             currentTrackingState = .notAvailable
             return
         }
+        // V15.0f — IDEMPOTENT.  Calling start() while the session is
+        // already running used to re-run with [.resetTracking,
+        // .removeExistingAnchors], which silently WIPED any plane
+        // detection that had been accumulating since the camera
+        // view first mounted.  Multiple call sites (camera view's
+        // didMoveToWindow, JS bridge's start, useARSession hook)
+        // could trigger this race.  Guarding here keeps plane
+        // detection state stable across redundant start() calls.
+        if isRunning {
+            os_log(.fault, log: arSessionDiagLog,
+                   "[V15.0f-ar-start] start() called while already running — ignored to preserve plane detection state")
+            return
+        }
         let config = ARWorldTrackingConfiguration()
         // sceneDepth gives us per-pixel depth on LiDAR-equipped
         // devices; gracefully no-ops on non-LiDAR devices.  Used by
