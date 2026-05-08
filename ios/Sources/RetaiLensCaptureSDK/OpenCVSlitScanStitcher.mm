@@ -41,6 +41,21 @@ static os_log_t SlitDiagLog(void) {
 
 #import "OpenCVSlitScanStitcher.h"  // file name kept; class renamed to OpenCVFirstWinsCylindricalStitcher (V11 Gap #23)
 
+// V15.0e — class extension declaring private helper methods.  The
+// public interface stays in OpenCVSlitScanStitcher.h; these are
+// implementation-only.  Without a declaration the compiler still
+// finds them at link time but warns about each call site.  Listing
+// them here keeps the build warning-free.
+@interface OpenCVFirstWinsCylindricalStitcher ()
+- (BOOL)tryPaintPlaneProjected:(const cv::Mat &)frameBGR
+                          R_new:(const cv::Mat &)R_new
+                             tx:(double)tx
+                             ty:(double)ty
+                             tz:(double)tz
+                          tele:(RLISFrameTelemetry *)tele
+                             t0:(std::chrono::steady_clock::time_point)t0;
+@end
+
 @implementation OpenCVFirstWinsCylindricalStitcher {
     NSInteger _composeWidth;
     NSInteger _composeHeight;
@@ -331,6 +346,238 @@ static os_log_t SlitDiagLog(void) {
         cv::norm(T.col(0).rowRange(0,3)),
         cv::norm(T.col(1).rowRange(0,3)),
         cv::norm(T.col(2).rowRange(0,3)));
+}
+
+// V15.0e — plane-projection helper.  Called from BOTH the first-frame
+// branch AND the steady-state branch.  Paints frameBGR onto _canvas
+// via 4-corner raycast onto the latched plane (or a synthesized
+// virtual plane in Virtual mode).  Returns YES if painted (caller
+// should return tele), NO if plane is unavailable / degenerate
+// (caller falls back to rectilinear paste / slit-scan path).
+//
+// Why this is now a helper: V15.0b previously lived inline in the
+// steady-state branch only.  Field testing showed the first frame
+// painted at canvas (0, 0) in pixel coords while subsequent slivers
+// painted at plane-derived canvas positions — TWO disjoint coord
+// systems → two disjoint patches on the canvas (Ram screenshot
+// 2026-05-08).  The fix is to paint the FIRST frame via plane
+// projection too, so first-frame and slivers share a coord system.
+// Sharing the helper avoids duplicating ~150 lines of warp logic.
+- (BOOL)tryPaintPlaneProjected:(const cv::Mat &)frameBGR
+                          R_new:(const cv::Mat &)R_new
+                             tx:(double)tx
+                             ty:(double)ty
+                             tz:(double)tz
+                          tele:(RLISFrameTelemetry *)tele
+                             t0:(std::chrono::steady_clock::time_point)t0 {
+    if (_config.planeSource == RLISPlaneSourceDisabled) return NO;
+
+    // V15.0d Virtual mode — synthesize plane from current pose if
+    // one isn't already set.
+    if (_config.planeSource == RLISPlaneSourceVirtual && _planeTransform.empty()) {
+        cv::Mat camForwardWorld = R_new *
+            (cv::Mat_<double>(3, 1) << 0.0, 0.0, -1.0);
+        cv::Mat normalWorld = -camForwardWorld;
+        cv::Mat originWorld =
+            (cv::Mat_<double>(3, 1) << tx, ty, tz) +
+            _config.virtualPlaneDepthMeters * camForwardWorld;
+        cv::Mat T = cv::Mat::eye(4, 4, CV_64F);
+        T.at<double>(0, 1) = normalWorld.at<double>(0);
+        T.at<double>(1, 1) = normalWorld.at<double>(1);
+        T.at<double>(2, 1) = normalWorld.at<double>(2);
+        T.at<double>(0, 3) = originWorld.at<double>(0);
+        T.at<double>(1, 3) = originWorld.at<double>(1);
+        T.at<double>(2, 3) = originWorld.at<double>(2);
+        _planeTransform = T;
+        _firstPlaneTInt = 0.0;
+        os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+            "[V15.0d-virtual-plane] synthesized at depth=%.2fm "
+            "origin=(%.3f, %.3f, %.3f) normal=(%.3f, %.3f, %.3f)",
+            _config.virtualPlaneDepthMeters,
+            originWorld.at<double>(0),
+            originWorld.at<double>(1),
+            originWorld.at<double>(2),
+            normalWorld.at<double>(0),
+            normalWorld.at<double>(1),
+            normalWorld.at<double>(2));
+    }
+
+    // ARKitDetected mode — plane may not be ready yet; bail.
+    if (_planeTransform.empty()) return NO;
+
+    cv::Mat t_arkit = (cv::Mat_<double>(3, 1) << tx, ty, tz);
+
+    cv::Mat planeNormal = (cv::Mat_<double>(3, 1) <<
+        _planeTransform.at<double>(0, 1),
+        _planeTransform.at<double>(1, 1),
+        _planeTransform.at<double>(2, 1));
+    const cv::Mat planeOrigin = (cv::Mat_<double>(3, 1) <<
+        _planeTransform.at<double>(0, 3),
+        _planeTransform.at<double>(1, 3),
+        _planeTransform.at<double>(2, 3));
+
+    // Flip plane normal if it points away from the camera (V15.0c.2).
+    cv::Mat camToPlane = planeOrigin - t_arkit;
+    if (camToPlane.dot(planeNormal) > 0) {
+        planeNormal = -planeNormal;
+    }
+
+    // Gravity-aligned U/V axes (V15.0c.2).
+    const cv::Mat negWorldUp = (cv::Mat_<double>(3, 1) << 0.0, -1.0, 0.0);
+    const double upDotN = negWorldUp.dot(planeNormal);
+    cv::Mat V_axis = negWorldUp - upDotN * planeNormal;
+    double V_axis_norm = cv::norm(V_axis);
+    if (V_axis_norm < 1e-6) {
+        if (_captureFrameCounter % 30 == 0 || _captureFrameCounter <= 3) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V15.0c.2-plane-horizontal] plane normal parallel "
+                "to gravity (|V_axis|=%.3e); helper returns NO",
+                V_axis_norm);
+        }
+        return NO;
+    }
+    V_axis /= V_axis_norm;
+    cv::Mat U_axis = planeNormal.cross(V_axis);
+    double U_axis_norm = cv::norm(U_axis);
+    if (U_axis_norm < 1e-6) return NO;
+    U_axis /= U_axis_norm;
+
+    constexpr double kPixelsPerMeter = 1000.0;
+    const double cCenterX = _canvas.cols / 2.0;
+    const double cCenterY = _canvas.rows / 2.0;
+    cv::Mat K_inv = _K_compose.inv();
+
+    std::vector<cv::Point2f> camCorners = {
+        cv::Point2f(0, 0),
+        cv::Point2f((float)frameBGR.cols, 0),
+        cv::Point2f((float)frameBGR.cols, (float)frameBGR.rows),
+        cv::Point2f(0, (float)frameBGR.rows)
+    };
+    std::vector<cv::Point2f> canvasCorners;
+    canvasCorners.reserve(4);
+
+    bool degenerate = false;
+    double currentMaxTInt = 0.0;
+    for (const auto &cp : camCorners) {
+        cv::Mat pixHomo = (cv::Mat_<double>(3, 1) << cp.x, cp.y, 1.0);
+        cv::Mat rayCv = K_inv * pixHomo;
+        cv::Mat rayArkit = _M_arkitToCv * rayCv;
+        cv::Mat rayWorld = R_new * rayArkit;
+        cv::Mat diff = planeOrigin - t_arkit;
+        const double num = diff.dot(planeNormal);
+        const double denom = rayWorld.dot(planeNormal);
+        if (std::fabs(denom) < 1e-6) { degenerate = true; break; }
+        const double t_int = num / denom;
+        if (t_int < 0.05 || t_int > 50.0) { degenerate = true; break; }
+        if (t_int > currentMaxTInt) currentMaxTInt = t_int;
+        cv::Mat P_world = t_arkit + t_int * rayWorld;
+        cv::Mat diffWorld = P_world - planeOrigin;
+        const double Up = diffWorld.dot(U_axis);
+        const double Vp = diffWorld.dot(V_axis);
+        const double cU = cCenterX + Up * kPixelsPerMeter;
+        const double cV = cCenterY + Vp * kPixelsPerMeter;
+        canvasCorners.emplace_back((float)cU, (float)cV);
+    }
+
+    // V15.0c.2 off-plane fallback: ratio check against first-frame baseline.
+    constexpr double kOffPlaneMultiplier = 3.0;
+    if (!degenerate
+        && _firstPlaneTInt > 0.0
+        && currentMaxTInt > kOffPlaneMultiplier * _firstPlaneTInt) {
+        if (_captureFrameCounter % 5 == 0 || _captureFrameCounter <= 3) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V15.0c.2-offplane] capFr=%ld camera off detected plane "
+                "(currentMaxTInt=%.2fm baseline=%.2fm ratio=%.2f); "
+                "helper returns NO",
+                (long)_captureFrameCounter,
+                currentMaxTInt, _firstPlaneTInt,
+                currentMaxTInt / std::max(0.001, _firstPlaneTInt));
+        }
+        degenerate = true;
+    }
+
+    if (degenerate) {
+        if (_captureFrameCounter % 30 == 0 || _captureFrameCounter <= 3) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V15.0b-plane-degenerate] capFr=%ld ray ∥ plane or out of "
+                "range; helper returns NO",
+                (long)_captureFrameCounter);
+        }
+        return NO;
+    }
+
+    // First successful plane-projected frame in this capture sets the
+    // off-plane baseline (V15.0c.2).
+    if (_firstPlaneTInt <= 0.0 && currentMaxTInt > 0.0) {
+        _firstPlaneTInt = currentMaxTInt;
+        os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+            "[V15.0c.2-baseline] off-plane baseline _firstPlaneTInt "
+            "set to %.3fm (max corner t_int on first plane-projected "
+            "frame)",
+            _firstPlaneTInt);
+    }
+
+    // Warp + paint.
+    cv::Mat H = cv::getPerspectiveTransform(camCorners, canvasCorners);
+    cv::Mat warpedCanvas = cv::Mat::zeros(_canvas.size(), CV_8UC3);
+    cv::warpPerspective(frameBGR, warpedCanvas, H, _canvas.size(),
+                        cv::INTER_LINEAR,
+                        cv::BORDER_CONSTANT,
+                        cv::Scalar(0, 0, 0));
+    cv::Mat whiteFrame(frameBGR.size(), CV_8UC1, cv::Scalar(255));
+    cv::Mat warpedMask = cv::Mat::zeros(_canvas.size(), CV_8UC1);
+    cv::warpPerspective(whiteFrame, warpedMask, H, _canvas.size(),
+                        cv::INTER_NEAREST,
+                        cv::BORDER_CONSTANT,
+                        cv::Scalar(0));
+
+    // Paint mode (composes with plane mode).
+    cv::Mat canvasMaskZero;
+    cv::compare(_canvasMask, 0, canvasMaskZero, cv::CMP_EQ);
+    cv::Mat paintMaskFresh;
+    cv::bitwise_and(canvasMaskZero, warpedMask, paintMaskFresh);
+    warpedCanvas.copyTo(_canvas, paintMaskFresh);
+    cv::bitwise_or(_canvasMask, paintMaskFresh, _canvasMask);
+
+    if (_config.paintMode == RLISPaintModeFeatherBlend) {
+        cv::Mat canvasMaskNonZero;
+        cv::compare(_canvasMask, 0, canvasMaskNonZero, cv::CMP_NE);
+        cv::Mat overlapMask;
+        cv::bitwise_and(canvasMaskNonZero, warpedMask, overlapMask);
+        if (cv::countNonZero(overlapMask) > 0) {
+            cv::Mat blended;
+            cv::addWeighted(warpedCanvas, 0.3, _canvas, 0.7, 0.0, blended);
+            blended.copyTo(_canvas, overlapMask);
+        }
+    }
+
+    // Update painted-extent telemetry from warpedMask bbox.
+    cv::Mat nz;
+    cv::findNonZero(warpedMask, nz);
+    if (!nz.empty()) {
+        cv::Rect bb = cv::boundingRect(nz);
+        _maxDstY = std::max((int)_maxDstY, bb.y + bb.height);
+    }
+    [tele setValue:@(_maxDstY) forKey:@"paintedExtent"];
+    _accepted += 1;
+    if (_captureFrameCounter % 5 == 0 || _captureFrameCounter <= 5) {
+        os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+            "[V15.0b-paint] capFr=%ld plane-projected corners=("
+            "%.0f,%.0f)→(%.0f,%.0f)→(%.0f,%.0f)→(%.0f,%.0f) "
+            "_accepted=%ld",
+            (long)_captureFrameCounter,
+            canvasCorners[0].x, canvasCorners[0].y,
+            canvasCorners[1].x, canvasCorners[1].y,
+            canvasCorners[2].x, canvasCorners[2].y,
+            canvasCorners[3].x, canvasCorners[3].y,
+            (long)_accepted);
+    }
+    [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+    auto t1 = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration_cast<std::chrono::microseconds>(
+        t1 - t0).count() / 1000.0;
+    [tele setValue:@(ms) forKey:@"processingMs"];
+    return YES;
 }
 
 - (void)reset {
@@ -692,6 +939,73 @@ static const double kPanAxisFractionRect = 0.30;
                     (int)_planeTransform.empty());
             }
 
+            // ── V15.0e — FIRST-FRAME PLANE PROJECTION ───────────────
+            // When planeSource is ARKitDetected or Virtual, the first
+            // frame is painted via plane projection (helper) rather
+            // than via the rectilinear paste at canvas (0, 0).  This
+            // keeps the first frame and all subsequent slivers in
+            // the SAME coord system — without it, the first frame
+            // and slivers were two disjoint patches on the canvas
+            // (Ram observed 2026-05-08 with planeSource=ARKitDetected).
+            //
+            // If the helper returns NO (plane unavailable / degenerate),
+            // we REFUSE the first frame (per Ram's UX choice) — the
+            // capture screen shows "waiting for plane" and the user
+            // tries again once the plane locks.  Subsequent attempts
+            // re-enter the first-frame branch since _hasFirstFrame
+            // stays NO.
+            if (_config.planeSource != RLISPlaneSourceDisabled) {
+                if ([self tryPaintPlaneProjected:frameBGR
+                                           R_new:R_new
+                                              tx:tx
+                                              ty:ty
+                                              tz:tz
+                                           tele:tele
+                                              t0:t0]) {
+                    _hasFirstFrame = true;
+                    // Init prev-accept state for slit-scan fallback
+                    // safety (a future frame that goes off-plane
+                    // falls through to slit-scan, which expects
+                    // these set).  Mirrors the existing rectilinear
+                    // first-frame init below.
+                    _firstTranslationArkit = (cv::Mat_<double>(3, 1) << tx, ty, tz);
+                    _prevRotationArkit = R_new.clone();
+                    _prevTranslationArkit = _firstTranslationArkit.clone();
+                    {
+                        cv::Mat frameGray;
+                        cv::cvtColor(frameBGR, frameGray, cv::COLOR_BGR2GRAY);
+                        std::vector<cv::KeyPoint> kps;
+                        cv::Mat descs;
+                        _orbDetector->detectAndCompute(frameGray, cv::noArray(), kps, descs);
+                        _prevKeypoints = std::move(kps);
+                        _prevDescriptors = descs;
+                    }
+                    _hasPrevAccept = true;
+                    os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                        "[V15.0e-first-plane] first frame painted via "
+                        "plane projection (planeSource=%s); slit-scan "
+                        "fallback state initialised",
+                        _config.planeSource == RLISPlaneSourceVirtual ? "Virtual" : "ARKitDetected");
+                    return tele;
+                } else {
+                    // Plane not ready — refuse first frame.  User
+                    // retries on next.  _hasFirstFrame stays NO so
+                    // the next ingestPixelBuffer re-enters this branch.
+                    [tele setValue:@(RLISFrameOutcomeSkippedTrackingPoor) forKey:@"outcome"];
+                    if (_captureFrameCounter <= 5 || _captureFrameCounter % 30 == 0) {
+                        os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                            "[V15.0e-first-frame-refused] capFr=%ld plane "
+                            "not ready (planeSource=%s, planeTransform.empty=%d); "
+                            "first frame skipped — UI should show 'waiting "
+                            "for plane' until lock",
+                            (long)_captureFrameCounter,
+                            _config.planeSource == RLISPlaneSourceVirtual ? "Virtual" : "ARKitDetected",
+                            (int)_planeTransform.empty());
+                    }
+                    return tele;
+                }
+            }
+
             // V12.12 — first-frame placement at canvas ORIGIN (0, 0).
             // With the new engine-internal canvas allocation the
             // canvas perpendicular dim EXACTLY matches the clipped
@@ -854,21 +1168,15 @@ static const double kPanAxisFractionRect = 0.30;
         // gets painted.  Even tiny pans produce immediate
         // incremental growth — no V12.7 dead-zone where strips
         // entirely overlapped the first frame.
-        // ── V15.0b — plane-projected stitch path (Trax-style) ──
-        // When useDetectedPlane is on AND ARKit has latched a plane,
-        // bypass the slit-scan/triangulation/RANSAC pipeline entirely.
-        // Each frame is warped via a 3×3 homography that maps camera
-        // pixels onto the actual fixture plane in 3D (canvas = plane,
-        // not a virtual cylinder/plane at first-frame anchor).  Other
-        // refinements (1D NCC, 2D NCC, RANSAC) don't apply — they're
-        // 2D-image alignments, and plane projection gives us 3D-correct
-        // alignment for any pixel ON the plane.
-        // V15.0c.4 — UNCONDITIONAL fault-log on early frames showing
-        // the values feeding the plane-branch decision.  V15.0d uses
-        // _captureFrameCounter (per-capture) instead of _engineCallCounter
-        // (per-app-launch) so the log fires on every capture's first
-        // 5 frames.  V15.0d also added `planeSource` and the resulting
-        // dispatch decision to the log.
+        // ── V15.0e — plane-projected stitch path (helper-driven) ──
+        // The actual plane-projection logic lives in
+        // -tryPaintPlaneProjected: (extracted in V15.0e so the
+        // first-frame branch can reuse it — paint first frame and
+        // subsequent slivers in the SAME coord system).  This
+        // dispatch site just logs the pre-check state and calls
+        // the helper.  Helper returns YES if it painted (caller
+        // returns tele); NO if plane is unavailable / degenerate /
+        // off-plane (caller falls through to slit-scan path).
         const char *planeSrcStr =
             _config.planeSource == RLISPlaneSourceVirtual ? "Virtual"
             : (_config.planeSource == RLISPlaneSourceARKitDetected ? "ARKitDetected"
@@ -884,6 +1192,36 @@ static const double kPanAxisFractionRect = 0.30;
                 (int)_planeTransform.empty());
         }
 
+        if ([self tryPaintPlaneProjected:frameBGR
+                                   R_new:R_new
+                                      tx:tx
+                                      ty:ty
+                                      tz:tz
+                                   tele:tele
+                                      t0:t0]) {
+            return tele;
+        }
+        // Helper returned NO → plane unavailable / degenerate / off-
+        // plane.  Fall through to the slit-scan path.  When the user
+        // selected planeSource != Disabled but we got here, the
+        // existing slit-scan code paints this frame as a fallback —
+        // less ambitious but always works.
+        if (_config.planeSource != RLISPlaneSourceDisabled
+            && (_captureFrameCounter <= 3 || _captureFrameCounter % 60 == 0)) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V15.0c.3-noplane] capFr=%ld helper returned NO "
+                "(planeSource=%s planeTransform.empty=%d); slit-scan fallback",
+                (long)_captureFrameCounter,
+                planeSrcStr,
+                (int)_planeTransform.empty());
+        }
+
+        // V15.0e legacy V15.0d inline dispatch block removed below — the
+        // helper -tryPaintPlaneProjected: now owns this logic.  The
+        // dead code that follows (until skipPlaneProjection: label)
+        // is preserved as comments for one release; a follow-up commit
+        // will physically delete it once V15.0e is field-validated.
+#if 0
         // V15.0d — dispatch on planeSource enum.  When the legacy
         // boolean useDetectedPlane was YES, setConfig already
         // upgraded planeSource → ARKitDetected (see -setConfig:).
@@ -1224,10 +1562,7 @@ static const double kPanAxisFractionRect = 0.30;
             }
         }
 
-        // V15.0c.2 — target for early-exits inside the plane-projection
-        // block when the plane axes are degenerate (e.g., normal parallel
-        // to gravity).  Falls through to the slit-scan path below.
-        skipPlaneProjection: ;
+#endif  // V15.0e — end of #if 0'd legacy V15.0d inline dispatch
 
         cv::Mat R_rel = _firstRotationArkit.t() * R_new;
         // V12.14.10 — UNIFIED clip for both supported modes (see

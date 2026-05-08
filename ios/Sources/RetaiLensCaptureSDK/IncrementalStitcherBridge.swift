@@ -198,6 +198,51 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver(dict ?? NSNull())
     }
 
+    /// V15.0e — JS-callable poll for ARKit plane detection state.
+    /// Used by the capture screen to render a status pill when
+    /// planeSource=ARKitDetected so the operator knows whether
+    /// they're waiting for a plane lock, the plane is detected
+    /// but off-axis, or the plane is ready.
+    ///
+    /// Returns a dictionary:
+    ///   `status`           — one of "searching" / "evaluating" / "ready"
+    ///   `hasPlane`         — true if a plane is latched
+    ///   `bestAlignment`    — best rejected-alignment score seen so
+    ///                        far (range [-1, 1]; -1 = no candidate
+    ///                        seen yet); when status="evaluating",
+    ///                        UI shows this so the operator knows
+    ///                        how close they are to clearing the
+    ///                        threshold
+    ///   `threshold`        — current alignment threshold for
+    ///                        comparison/UI display
+    @objc(getARPlaneStatus:rejecter:)
+    public func getARPlaneStatus(
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        let session = RetaiLensARSession.shared
+        let hasPlane = session.hasPlaneDetected
+        let best = Double(session.bestRejectedAlignment)
+        let threshold = Double(session.planeAlignmentThreshold)
+        let status: String
+        if hasPlane {
+            status = "ready"
+        } else if best > 0 {
+            // ARKit found a plane but the alignment filter rejected
+            // it — operator is in the right ballpark but needs to
+            // face the wall more directly.
+            status = "evaluating"
+        } else {
+            status = "searching"
+        }
+        resolver([
+            "status": status,
+            "hasPlane": hasPlane,
+            "bestAlignment": best,
+            "threshold": threshold,
+        ])
+    }
+
     // MARK: - Notification → device event
 
     @objc private func handleStateUpdate(_ notification: Notification) {

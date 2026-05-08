@@ -182,6 +182,14 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     /// `setPlaneAlignmentThreshold` from the engine config.
     @objc public var planeAlignmentThreshold: Float = 0.6
 
+    /// V15.0e — best alignment score seen on any candidate plane
+    /// rejected by the alignment filter.  -1 = no candidate seen
+    /// yet.  When > 0 but a plane hasn't been latched, the JS UI
+    /// shows "found plane but off-axis (best 0.45)" so the operator
+    /// knows to face the wall more directly to clear the threshold.
+    /// Reset on -stop.
+    @objc public private(set) var bestRejectedAlignment: Float = -1.0
+
     /// Whether a vertical plane has been detected and latched.
     @objc public var hasPlaneDetected: Bool {
         planeLatchLock.lock()
@@ -314,8 +322,12 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         // V15.0b — clear latched plane so the next capture detects
         // afresh.  Plane geometry is per-capture: a different
         // fixture in a different orientation needs a new lock.
+        // V15.0e — also reset the rejected-alignment cache so the
+        // next capture's UI starts at "Searching" rather than
+        // showing a stale alignment from the previous capture.
         planeLatchLock.lock()
         detectedPlaneTransformInternal = nil
+        bestRejectedAlignment = -1.0
         planeLatchLock.unlock()
     }
 
@@ -511,6 +523,11 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
 
             if alignment < planeAlignmentThreshold {
                 // Reject — not the surface the camera is aimed at.
+                // Track the best-rejected score so JS UI can show
+                // a progress hint ("found plane but off-axis 0.45").
+                if alignment > bestRejectedAlignment {
+                    bestRejectedAlignment = alignment
+                }
                 os_log(.fault, log: arSessionDiagLog,
                        "[V15.0d-plane-filter] REJECTED candidate plane: alignment=%f < threshold=%f extent=%fx%f",
                        alignment, planeAlignmentThreshold,
@@ -560,7 +577,12 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
             )
             let dotPos = simd_dot(planeNormalWorld, cameraFacingWorld)
             let alignment = max(dotPos, -dotPos)
-            if alignment < planeAlignmentThreshold { continue }
+            if alignment < planeAlignmentThreshold {
+                if alignment > bestRejectedAlignment {
+                    bestRejectedAlignment = alignment
+                }
+                continue
+            }
 
             detectedPlaneTransformInternal = plane.transform
             os_log(.fault, log: arSessionDiagLog,

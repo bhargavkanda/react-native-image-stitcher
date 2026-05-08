@@ -320,6 +320,32 @@ export interface IncrementalFinalizeResult {
 }
 
 
+/**
+ * V15.0e — ARKit plane detection state, polled by the capture screen
+ * UI when planeSource=ARKitDetected.  Used to render a status pill:
+ *
+ *   - status === 'searching': no candidate plane seen yet.  UI shows
+ *     a red/amber "Looking for wall plane…" pill and a hint to aim
+ *     at a textured area for a few seconds.
+ *   - status === 'evaluating': ARKit found candidate plane(s) but
+ *     the alignment filter rejected them all.  UI shows the
+ *     bestAlignment so the operator can see they're CLOSE
+ *     ("plane found but off-axis (best 0.45)") and aim more
+ *     directly at the wall.
+ *   - status === 'ready': plane is latched.  UI shows green "Plane
+ *     locked" and enables the Capture (hold-to-scan) button.
+ */
+export interface ARPlaneStatus {
+  status: 'searching' | 'evaluating' | 'ready';
+  hasPlane: boolean;
+  /** Best rejected-alignment score seen so far.  -1 = no candidate yet.
+   *  Range [-1, 1]; positive when at least one candidate was evaluated. */
+  bestAlignment: number;
+  /** Current alignment threshold (matches the engine config). */
+  threshold: number;
+}
+
+
 interface NativeIncrementalModule {
   start(options: IncrementalStartOptions): Promise<{ ok: true }>;
   /**
@@ -331,6 +357,9 @@ interface NativeIncrementalModule {
   finalize(options: { outputPath?: string; quality?: number }): Promise<IncrementalFinalizeResult>;
   cancel(): Promise<{ ok: true }>;
   getState(): Promise<IncrementalState | null>;
+  /** V15.0e — poll AR plane detection state.  Polled at ~2 Hz when
+   *  planeSource=ARKitDetected so the status pill updates live. */
+  getARPlaneStatus(): Promise<ARPlaneStatus>;
   /** PiP investigation only — write a JS-side message into the
    *  Swift-side rlis-debug.log so we get a single timeline. */
   appendDebugLog?(message: string): Promise<{ ok: true }>;

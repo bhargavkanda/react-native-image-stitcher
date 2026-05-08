@@ -35,4 +35,8 @@ RCT_EXTERN_METHOD(appendDebugLog:(NSString *)message
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// V15.0e — JS poll for ARKit plane detection state.
+RCT_EXTERN_METHOD(getARPlaneStatus:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 @end

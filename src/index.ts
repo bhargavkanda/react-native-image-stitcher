@@ -127,11 +127,13 @@ export {
   IncrementalOutcome,
   incrementalStitcherIsAvailable,
   subscribeIncrementalState,
+  getIncrementalNativeModule,
 } from './stitching/incremental';
 export type {
   IncrementalState,
   IncrementalStartOptions,
   IncrementalFinalizeResult,
+  ARPlaneStatus,
 } from './stitching/incremental';
 export { useIncrementalStitcher } from './stitching/useIncrementalStitcher';
 export type {
