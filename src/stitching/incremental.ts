@@ -220,6 +220,18 @@ export interface StitcherConfig {
   /** 'Cylindrical' (V12.x – V14.0a behaviour) or 'Planar' (V15 default;
    *  cv::detail::PlaneWarper).  Planar is well-behaved for pans <60°. */
   hybridProjection: 'Cylindrical' | 'Planar';
+
+  /** V15.0b — when true (slit-scan modes), each accepted frame is
+   *  warped onto a detected vertical plane (Trax-style "Virtual
+   *  Ruler") rather than onto the pose-driven rectilinear canvas.
+   *  Requires ARKit to detect a vertical plane during the capture
+   *  (typically 2–5 s on non-LiDAR; sub-second on LiDAR).  Until a
+   *  plane is detected, frames fall back to the standard pose-driven
+   *  projection.  Composes with paint mode but skips the per-stage
+   *  refinements (1D NCC, 2D NCC, RANSAC homography) since they're
+   *  2D-image alignments that don't apply when the canvas is the
+   *  actual 3D plane. */
+  useDetectedPlane: boolean;
 }
 
 

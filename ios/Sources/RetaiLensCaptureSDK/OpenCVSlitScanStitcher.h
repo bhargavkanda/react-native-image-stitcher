@@ -58,6 +58,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// `+[RLISStitcherConfig configForMode:@"slitscan-both"]`.
 - (void)setConfig:(RLISStitcherConfig *)config;
 
+/// V15.0b — set the world-frame plane transform (4×4, column-major,
+/// 16 floats).  Should be called once a vertical plane has been
+/// detected by ARKit and before any subsequent ingest.  If never
+/// called, the engine ignores `_config.useDetectedPlane` and falls
+/// back to pose-driven projection.
+- (void)setPlaneTransformFlat:(NSArray<NSNumber *> *)transform16;
+
 - (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                        qx:(double)qx
                                        qy:(double)qy

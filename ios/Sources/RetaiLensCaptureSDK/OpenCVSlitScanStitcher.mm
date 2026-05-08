@@ -161,6 +161,12 @@ static os_log_t SlitDiagLog(void) {
     // -setConfig: after init; defaults to slitscan-both factory config
     // if never set.
     RLISStitcherConfig *_config;
+
+    // V15.0b — latched plane transform for plane-projected stitch
+    // mode.  4×4 column-major in CV_64F, world coords.  Empty until
+    // -setPlaneTransformFlat: is called by the bridge with the
+    // ARSession's first detected vertical plane.
+    cv::Mat _planeTransform;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -221,13 +227,37 @@ static os_log_t SlitDiagLog(void) {
     _config = config;
     NSLog(@"[V15-config] slit-scan config applied: panAxisFrac=%.2f "
           @"acceptGate=%ld tri=%d triAccum=%d 1dNcc=%d 2dNcc=%d "
-          @"ransac=%d paint=%@",
+          @"ransac=%d paint=%@ useDetectedPlane=%d",
           _config.kPanAxisFractionRect, (long)_config.kMinAcceptDeltaPx,
           (int)_config.enableTriangulation, (int)_config.enableTriAccumulator,
           (int)_config.enable1dNcc, (int)_config.enable2dNcc,
           (int)_config.enableRansacHomography,
           _config.paintMode == RLISPaintModeFeatherBlend
-              ? @"FeatherBlend" : @"FirstPaintedWins");
+              ? @"FeatherBlend" : @"FirstPaintedWins",
+          (int)_config.useDetectedPlane);
+}
+
+- (void)setPlaneTransformFlat:(NSArray<NSNumber *> *)transform16 {
+    if (transform16.count != 16) {
+        _planeTransform = cv::Mat();
+        return;
+    }
+    // Column-major from Swift's simd_float4x4.  Build a 4×4 CV_64F
+    // matrix in row-major (OpenCV convention).
+    cv::Mat T(4, 4, CV_64F);
+    for (int col = 0; col < 4; col++) {
+        for (int row = 0; row < 4; row++) {
+            const int idx = col * 4 + row;
+            T.at<double>(row, col) = transform16[idx].doubleValue;
+        }
+    }
+    _planeTransform = T;
+    NSLog(@"[V15.0b-plane] engine received plane transform: "
+          @"origin=(%.3f, %.3f, %.3f) scale=(%.3f, %.3f, %.3f)",
+          T.at<double>(0,3), T.at<double>(1,3), T.at<double>(2,3),
+          cv::norm(T.col(0).rowRange(0,3)),
+          cv::norm(T.col(1).rowRange(0,3)),
+          cv::norm(T.col(2).rowRange(0,3)));
 }
 
 - (void)reset {
@@ -658,6 +688,146 @@ static const double kPanAxisFractionRect = 0.30;
         // gets painted.  Even tiny pans produce immediate
         // incremental growth — no V12.7 dead-zone where strips
         // entirely overlapped the first frame.
+        // ── V15.0b — plane-projected stitch path (Trax-style) ──
+        // When useDetectedPlane is on AND ARKit has latched a plane,
+        // bypass the slit-scan/triangulation/RANSAC pipeline entirely.
+        // Each frame is warped via a 3×3 homography that maps camera
+        // pixels onto the actual fixture plane in 3D (canvas = plane,
+        // not a virtual cylinder/plane at first-frame anchor).  Other
+        // refinements (1D NCC, 2D NCC, RANSAC) don't apply — they're
+        // 2D-image alignments, and plane projection gives us 3D-correct
+        // alignment for any pixel ON the plane.
+        if (_config.useDetectedPlane && !_planeTransform.empty()) {
+            cv::Mat t_arkit = (cv::Mat_<double>(3, 1) << tx, ty, tz);
+
+            // Compute plane-projection homography from 4 corner
+            // raycasts.  Camera frame corner → ARKit cam ray → world
+            // ray → intersect plane → plane-local (X,Y) → canvas pixel.
+            const cv::Mat T_plane_inv = _planeTransform.inv();
+            const cv::Mat planeNormal = (cv::Mat_<double>(3, 1) <<
+                _planeTransform.at<double>(0, 2),
+                _planeTransform.at<double>(1, 2),
+                _planeTransform.at<double>(2, 2));
+            const cv::Mat planeOrigin = (cv::Mat_<double>(3, 1) <<
+                _planeTransform.at<double>(0, 3),
+                _planeTransform.at<double>(1, 3),
+                _planeTransform.at<double>(2, 3));
+
+            constexpr double kPixelsPerMeter = 1000.0;
+            const double cCenterX = _canvas.cols / 2.0;
+            const double cCenterY = _canvas.rows / 2.0;
+
+            cv::Mat K_inv = _K_compose.inv();
+
+            std::vector<cv::Point2f> camCorners = {
+                cv::Point2f(0, 0),
+                cv::Point2f((float)frameBGR.cols, 0),
+                cv::Point2f((float)frameBGR.cols, (float)frameBGR.rows),
+                cv::Point2f(0, (float)frameBGR.rows)
+            };
+            std::vector<cv::Point2f> canvasCorners;
+            canvasCorners.reserve(4);
+
+            bool degenerate = false;
+            for (const auto &cp : camCorners) {
+                cv::Mat pixHomo = (cv::Mat_<double>(3, 1) << cp.x, cp.y, 1.0);
+                cv::Mat rayCv = K_inv * pixHomo;
+                cv::Mat rayArkit = _M_arkitToCv * rayCv;
+                cv::Mat rayWorld = R_new * rayArkit;
+                // Plane intersection: t_int = ((P0 − O) · n) / (d · n)
+                cv::Mat diff = planeOrigin - t_arkit;
+                const double num = diff.dot(planeNormal);
+                const double denom = rayWorld.dot(planeNormal);
+                if (std::fabs(denom) < 1e-6) { degenerate = true; break; }
+                const double t_int = num / denom;
+                if (t_int < 0.05 || t_int > 50.0) { degenerate = true; break; }
+                cv::Mat P_world = t_arkit + t_int * rayWorld;
+                // Plane-local: T_plane_inv × P_world (homogeneous).
+                cv::Mat P_world_h = cv::Mat::ones(4, 1, CV_64F);
+                P_world.copyTo(P_world_h.rowRange(0, 3));
+                cv::Mat P_plane = T_plane_inv * P_world_h;
+                const double Xp = P_plane.at<double>(0);
+                const double Yp = P_plane.at<double>(1);
+                const double cU = cCenterX + Xp * kPixelsPerMeter;
+                const double cV = cCenterY - Yp * kPixelsPerMeter;
+                canvasCorners.emplace_back((float)cU, (float)cV);
+            }
+
+            if (!degenerate) {
+                cv::Mat H = cv::getPerspectiveTransform(camCorners, canvasCorners);
+
+                cv::Mat warpedCanvas = cv::Mat::zeros(_canvas.size(), CV_8UC3);
+                cv::warpPerspective(frameBGR, warpedCanvas, H,
+                                    _canvas.size(),
+                                    cv::INTER_LINEAR,
+                                    cv::BORDER_CONSTANT,
+                                    cv::Scalar(0, 0, 0));
+
+                cv::Mat whiteFrame(frameBGR.size(), CV_8UC1, cv::Scalar(255));
+                cv::Mat warpedMask = cv::Mat::zeros(_canvas.size(), CV_8UC1);
+                cv::warpPerspective(whiteFrame, warpedMask, H,
+                                    _canvas.size(),
+                                    cv::INTER_NEAREST,
+                                    cv::BORDER_CONSTANT,
+                                    cv::Scalar(0));
+
+                // Paint mode (composes with plane mode).
+                cv::Mat canvasMaskZero;
+                cv::compare(_canvasMask, 0, canvasMaskZero, cv::CMP_EQ);
+                cv::Mat paintMaskFresh;
+                cv::bitwise_and(canvasMaskZero, warpedMask, paintMaskFresh);
+                warpedCanvas.copyTo(_canvas, paintMaskFresh);
+                cv::bitwise_or(_canvasMask, paintMaskFresh, _canvasMask);
+
+                if (_config.paintMode == RLISPaintModeFeatherBlend) {
+                    cv::Mat canvasMaskNonZero;
+                    cv::compare(_canvasMask, 0, canvasMaskNonZero, cv::CMP_NE);
+                    cv::Mat overlapMask;
+                    cv::bitwise_and(canvasMaskNonZero, warpedMask, overlapMask);
+                    if (cv::countNonZero(overlapMask) > 0) {
+                        cv::Mat blended;
+                        cv::addWeighted(warpedCanvas, 0.3, _canvas, 0.7, 0.0, blended);
+                        blended.copyTo(_canvas, overlapMask);
+                    }
+                }
+
+                // Update painted-extent telemetry from warpedMask bbox.
+                cv::Mat nz;
+                cv::findNonZero(warpedMask, nz);
+                if (!nz.empty()) {
+                    cv::Rect bb = cv::boundingRect(nz);
+                    _maxDstY = std::max((int)_maxDstY, bb.y + bb.height);
+                }
+                [tele setValue:@(_maxDstY) forKey:@"paintedExtent"];
+                _accepted += 1;
+                if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
+                    os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                        "[V15.0b-paint] #%ld plane-projected corners=("
+                        "%.0f,%.0f)→(%.0f,%.0f)→(%.0f,%.0f)→(%.0f,%.0f) "
+                        "_accepted=%ld",
+                        (long)_engineCallCounter,
+                        canvasCorners[0].x, canvasCorners[0].y,
+                        canvasCorners[1].x, canvasCorners[1].y,
+                        canvasCorners[2].x, canvasCorners[2].y,
+                        canvasCorners[3].x, canvasCorners[3].y,
+                        (long)_accepted);
+                }
+                [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+                auto t1 = std::chrono::steady_clock::now();
+                double ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
+                [tele setValue:@(ms) forKey:@"processingMs"];
+                return tele;
+            }
+            // Degenerate raycast — fall through to slit-scan path
+            // (also logs that we couldn't use plane this frame).
+            if (_engineCallCounter % 30 == 0) {
+                os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                    "[V15.0b-plane-degenerate] #%ld ray ∥ plane or out of "
+                    "range; falling back to slit-scan path",
+                    (long)_engineCallCounter);
+            }
+        }
+
         cv::Mat R_rel = _firstRotationArkit.t() * R_new;
         // V12.14.10 — UNIFIED clip for both supported modes (see
         // first-frame branch comment).  Both pan around cam +X →

@@ -122,6 +122,7 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
         c.enableRansacHomography     = NO;
         c.paintMode                  = RLISPaintModeFeatherBlend;  // V12.x feather
         c.hybridProjection           = RLISHybridProjectionPlanar;  // V15: planar default
+        c.useDetectedPlane           = NO;
     } else if ([m isEqualToString:@"slitscan-rotate"]) {
         // V13.0a baseline + 1D NCC.  No tri, no 2D NCC, no homography.
         c.kPanAxisFractionRect       = 0.30;
@@ -134,6 +135,7 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
         c.enableRansacHomography     = NO;
         c.paintMode                  = RLISPaintModeFirstPaintedWins;
         c.hybridProjection           = RLISHybridProjectionPlanar;  // unused
+        c.useDetectedPlane           = NO;
     } else {
         // slitscan-both (default).  V13.0a baseline + no gate + feather.
         // Iterate via settings UI: enable tri / 2D NCC / RANSAC as needed.
@@ -147,6 +149,7 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
         c.enableRansacHomography     = NO;
         c.paintMode                  = RLISPaintModeFeatherBlend;
         c.hybridProjection           = RLISHybridProjectionPlanar;  // unused
+        c.useDetectedPlane           = NO;
     }
 
     return c;

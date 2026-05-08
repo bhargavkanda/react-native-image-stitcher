@@ -184,6 +184,22 @@ typedef NS_ENUM(NSInteger, RLISHybridProjection) {
 /// FirstPaintedWins for slitscan-rotate, FeatherBlend for slitscan-both.
 @property (nonatomic) RLISPaintMode paintMode;
 
+/// V15.0b new: if YES, the slit-scan engine projects each accepted
+/// camera frame onto a detected vertical plane (Trax-style "Virtual
+/// Ruler") rather than onto the pose-driven rectilinear canvas.
+/// Requires that ARKit's vertical plane detection has identified a
+/// plane during the capture (RetaiLensARSession latches the first
+/// such plane and the bridge calls -setPlaneTransform: on the engine
+/// before ingesting frames).  When useDetectedPlane is YES but no
+/// plane has been latched yet, frames fall back to the standard
+/// pose-driven projection until the plane is available.
+///
+/// Composes with paint mode (first-painted-wins or feather blend);
+/// does NOT compose with the per-stage refinements (triangulation,
+/// 2D NCC, RANSAC homography) — those are slit-axis 2D corrections
+/// and don't apply when the canvas is the actual 3D plane.
+@property (nonatomic) BOOL useDetectedPlane;
+
 // ── Hybrid-specific ─────────────────────────────────────────────────
 
 /// V15 new: projection for hybrid engine.  Default Planar in V15

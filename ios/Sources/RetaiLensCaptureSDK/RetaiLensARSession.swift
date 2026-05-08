@@ -151,6 +151,41 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     @objc public private(set) var isRunning: Bool = false
 
     // ──────────────────────────────────────────────────────────────
+    // V15.0b — vertical plane detection
+    // ──────────────────────────────────────────────────────────────
+    /// First detected vertical plane anchor's transform (4x4, column-
+    /// major, world coords).  Nil until ARKit detects a vertical
+    /// plane.  Once latched, NOT updated — canvas geometry needs to
+    /// be stable across the capture.
+    private var detectedPlaneTransformInternal: simd_float4x4? = nil
+    private let planeLatchLock = NSLock()
+
+    /// Whether a vertical plane has been detected and latched.
+    @objc public var hasPlaneDetected: Bool {
+        planeLatchLock.lock()
+        defer { planeLatchLock.unlock() }
+        return detectedPlaneTransformInternal != nil
+    }
+
+    /// Returns the latched plane transform as a 16-element [Float]
+    /// array (column-major).  `nil` if no plane detected yet.
+    @objc public func planeTransformFlat() -> [NSNumber]? {
+        planeLatchLock.lock()
+        defer { planeLatchLock.unlock() }
+        guard let m = detectedPlaneTransformInternal else { return nil }
+        let cols = [m.columns.0, m.columns.1, m.columns.2, m.columns.3]
+        var out: [NSNumber] = []
+        out.reserveCapacity(16)
+        for c in cols {
+            out.append(NSNumber(value: c.x))
+            out.append(NSNumber(value: c.y))
+            out.append(NSNumber(value: c.z))
+            out.append(NSNumber(value: c.w))
+        }
+        return out
+    }
+
+    // ──────────────────────────────────────────────────────────────
     // Phase 5 — AR-backed photo + video capture state
     // ──────────────────────────────────────────────────────────────
     //
@@ -228,11 +263,17 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
             config.frameSemantics = .smoothedSceneDepth
         }
-        // Disable plane detection for now — we don't need it for
-        // pose tracking, and turning it off frees CPU.  Phase 6
-        // measurement may re-enable horizontal/vertical plane
-        // tracking for better hit-testing.
-        config.planeDetection = []
+        // V15.0b — enable VERTICAL plane detection for the
+        // plane-projected stitch mode.  ARKit incrementally builds a
+        // model of any vertical surface in view (typical retail
+        // fixture wall).  The first-detected vertical plane's
+        // transform is latched at capture-start and used as the
+        // canvas reference frame: each accepted camera frame is
+        // warped onto the plane via a 3×3 homography rather than
+        // onto a virtual cylinder/plane at first-frame anchor.
+        // CPU cost is negligible (<2 ms/frame).  Detection time:
+        // 2–5 s on non-LiDAR devices, sub-second on LiDAR.
+        config.planeDetection = [.vertical]
         // Auto-focus on for better feature tracking on shelves with
         // small text and packaging detail.
         config.isAutoFocusEnabled = true
@@ -248,6 +289,12 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         isRunning = false
         currentTrackingState = .notAvailable
         clearPoseLog()
+        // V15.0b — clear latched plane so the next capture detects
+        // afresh.  Plane geometry is per-capture: a different
+        // fixture in a different orientation needs a new lock.
+        planeLatchLock.lock()
+        detectedPlaneTransformInternal = nil
+        planeLatchLock.unlock()
     }
 
     /// Empty the pose log — call between captures so the next
@@ -379,6 +426,34 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         NSLog("[RetaiLensARSession] failed: \(error.localizedDescription)")
         currentTrackingState = .notAvailable
         isRunning = false
+    }
+
+    // V15.0b — latch the first detected vertical plane.  Subsequent
+    // ARKit refinements of the same plane (didUpdate) are ignored so
+    // canvas geometry stays stable across the capture.
+    public func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        planeLatchLock.lock()
+        defer { planeLatchLock.unlock() }
+        guard detectedPlaneTransformInternal == nil else { return }
+        for anchor in anchors {
+            guard let plane = anchor as? ARPlaneAnchor else { continue }
+            // We're configured with planeDetection = [.vertical] so
+            // anchors here will always be vertical, but defensive
+            // check anyway.
+            if plane.alignment == .vertical {
+                detectedPlaneTransformInternal = plane.transform
+                // .extent (deprecated iOS 16+) is the size of the
+                // plane's bounding rect in metres along its local X/Z.
+                // We use the deprecated form for iOS 15 compatibility;
+                // iOS 16+ has .planeExtent which is more accurate but
+                // we don't depend on the size for stitching, only for
+                // diagnostics.
+                NSLog("[V15.0b-plane] latched vertical plane "
+                      + "extent=\(plane.extent.x)×\(plane.extent.z) "
+                      + "centre=(\(plane.center.x),\(plane.center.y),\(plane.center.z))")
+                break
+            }
+        }
     }
 
     // MARK: - Phase 5: AR-backed photo + video capture

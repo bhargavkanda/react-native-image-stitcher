@@ -163,6 +163,14 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     private var hybridEngine: OpenCVIncrementalStitcher?
     private var firstwinsEngine: OpenCVFirstWinsCylindricalStitcher?
 
+    /// V15.0b — true once we've forwarded the latched plane transform
+    /// from RetaiLensARSession to the slit-scan engine.  Reset on
+    /// every start() so the next capture re-propagates.  We only
+    /// forward once per capture: the plane transform is latched
+    /// (RetaiLensARSession ignores subsequent ARKit refinements),
+    /// so re-propagating each frame is wasted work.
+    private var havePropagatedPlane: Bool = false
+
     /// Convenience: read the active engine's accepted count.  Used by
     /// the per-frame state event.
     private var engineAcceptedCount: Int {
@@ -315,6 +323,8 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         self.acceptsSinceSnapshot = 0
         self.droppedBackpressure = 0
         self.lastState = nil
+        // V15.0b — re-arm plane propagation for the new capture.
+        self.havePropagatedPlane = false
         // V13.0c.1 — reset translation diagnostic state for the
         // new capture.  First-frame translation will be captured
         // on the next consumeFrame call.
@@ -379,6 +389,9 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             case "Planar":      config.hybridProjection = .planar
             default: break
             }
+        }
+        if let v = overrides["useDetectedPlane"] as? Bool {
+            config.useDetectedPlane = v
         }
     }
 
@@ -604,6 +617,16 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             let stillRunning = self.isRunning
             self.stateLock.unlock()
             guard stillRunning else { return }
+
+            // V15.0b — if a vertical plane has just been detected and
+            // we haven't propagated it to the slit-scan engine yet,
+            // do so now.  Propagated only once per latched plane;
+            // RetaiLensARSession resets on stop().
+            if !self.havePropagatedPlane,
+               let plane = RetaiLensARSession.shared.planeTransformFlat() {
+                slit?.setPlaneTransformFlat(plane)
+                self.havePropagatedPlane = true
+            }
 
             let telemetry: RLISFrameTelemetry
             if let hybrid = hybrid {

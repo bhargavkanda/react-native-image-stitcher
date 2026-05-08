@@ -86,6 +86,11 @@ export interface PanoramaSettings {
   hybridProjection: 'Cylindrical' | 'Planar';
   /** 1D NCC search radius (slitscan-rotate only). */
   nccSearchRadius1d: number;
+  /** V15.0b — Trax-style plane projection: warp each accepted frame
+   *  onto an ARKit-detected vertical plane instead of the pose-only
+   *  rectilinear canvas.  Slit-scan modes only.  Requires plane
+   *  detection (2–5 s on non-LiDAR; near-instant on LiDAR). */
+  useDetectedPlane: boolean;
   /** Hard cap on hold duration (ms).  0 disables auto-stop. */
   maxRecordingMs: number;
   /** Frames per second of recording to sample for stitching. */
@@ -161,6 +166,7 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   paintMode: 'FeatherBlend',
   hybridProjection: 'Planar',
   nccSearchRadius1d: 15,
+  useDetectedPlane: false,
   maxRecordingMs: 8000,
   framesPerSecond: 3,
   minFrames: 6,
@@ -310,6 +316,14 @@ export function PanoramaSettingsModal({
               value={settings.hybridProjection}
               onChange={(v) => update({ hybridProjection: v as PanoramaSettings['hybridProjection'] })}
               caption="V15 hybrid mode default = Planar (cv::detail::PlaneWarper, well-behaved <60° pans).  Cylindrical preserves V12.x – V14.0a behaviour but has the documented landscape roll-asymmetry bug."
+            />
+
+            <SectionHeader title="Plane projection (V14.0b — Trax Virtual Ruler)" />
+            <SegmentedControl
+              options={['off', 'on']}
+              value={settings.useDetectedPlane ? 'on' : 'off'}
+              onChange={(v) => update({ useDetectedPlane: v === 'on' })}
+              caption="When ON (slit-scan modes), each accepted frame is warped onto an ARKit-detected vertical plane (the actual fixture wall in 3D).  Composes with paint mode; skips slit-scan stage refinements (1D NCC, 2D NCC, RANSAC).  Requires 2–5 s plane detection on non-LiDAR devices.  Falls back to slit-scan until a plane is detected."
             />
 
             <SectionHeader title="Recording cap" />
