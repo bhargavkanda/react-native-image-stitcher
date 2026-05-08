@@ -597,19 +597,29 @@ static os_log_t SlitDiagLog(void) {
         canvasCorners.emplace_back((float)cU, (float)cV);
     }
 
-    // V15.0c.2 off-plane fallback: ratio check against first-frame baseline.
+    // V15.0i — off-plane detection now uses CENTER ray t_int instead of
+    // max corner t_int.  The max corner heuristic was tripping at
+    // ~30° camera tilt because the BOTTOM corners' rays go very
+    // oblique to the plane and t_int explodes — even though the
+    // camera is still legitimately aimed AT the plane (just oblique).
+    // Center-ray t_int tracks "where the camera is aimed" which is
+    // what we actually want.  Off-plane should fire only when the
+    // camera is genuinely no longer looking at the plane (~78°+ tilt
+    // past the wall edge), not when corner rays graze the plane.
     constexpr double kOffPlaneMultiplier = 3.0;
     if (!degenerate
         && _firstPlaneTInt > 0.0
-        && currentMaxTInt > kOffPlaneMultiplier * _firstPlaneTInt) {
+        && t_int_center > 0.0
+        && t_int_center > kOffPlaneMultiplier * _firstPlaneTInt) {
         if (_captureFrameCounter % 5 == 0 || _captureFrameCounter <= 3) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
                 "[V15.0c.2-offplane] capFr=%ld camera off detected plane "
-                "(currentMaxTInt=%.2fm baseline=%.2fm ratio=%.2f); "
-                "helper returns NO",
+                "(t_int_center=%.2fm baseline=%.2fm ratio=%.2f "
+                "maxCornerTInt=%.2fm); helper returns NO",
                 (long)_captureFrameCounter,
-                currentMaxTInt, _firstPlaneTInt,
-                currentMaxTInt / std::max(0.001, _firstPlaneTInt));
+                t_int_center, _firstPlaneTInt,
+                t_int_center / std::max(0.001, _firstPlaneTInt),
+                currentMaxTInt);
         }
         degenerate = true;
     }
@@ -625,13 +635,15 @@ static os_log_t SlitDiagLog(void) {
     }
 
     // First successful plane-projected frame in this capture sets the
-    // off-plane baseline (V15.0c.2).
-    if (_firstPlaneTInt <= 0.0 && currentMaxTInt > 0.0) {
-        _firstPlaneTInt = currentMaxTInt;
+    // off-plane baseline.  V15.0i — baseline is now the FIRST FRAME's
+    // CENTER ray t_int, not the max corner.  Subsequent frames'
+    // center t_int is compared against this.
+    if (_firstPlaneTInt <= 0.0 && t_int_center > 0.0) {
+        _firstPlaneTInt = t_int_center;
         os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
             "[V15.0c.2-baseline] off-plane baseline _firstPlaneTInt "
-            "set to %.3fm (max corner t_int on first plane-projected "
-            "frame)",
+            "set to %.3fm (V15.0i: center-ray t_int on first plane-"
+            "projected frame; was max-corner pre-V15.0i)",
             _firstPlaneTInt);
     }
 
