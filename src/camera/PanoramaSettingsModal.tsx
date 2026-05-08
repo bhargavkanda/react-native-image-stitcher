@@ -86,11 +86,48 @@ export interface PanoramaSettings {
   hybridProjection: 'Cylindrical' | 'Planar';
   /** 1D NCC search radius (slitscan-rotate only). */
   nccSearchRadius1d: number;
-  /** V15.0b — Trax-style plane projection: warp each accepted frame
-   *  onto an ARKit-detected vertical plane instead of the pose-only
-   *  rectilinear canvas.  Slit-scan modes only.  Requires plane
-   *  detection (2–5 s on non-LiDAR; near-instant on LiDAR). */
+  /** **DEPRECATED in V15.0d** — see `planeSource`.  Kept on the type
+   *  for backward compat with stored settings.  When `planeSource`
+   *  is 'Disabled' (default) and this is true, the engine treats it
+   *  as 'ARKitDetected'. */
   useDetectedPlane: boolean;
+  /** V15.0d — source of the plane used by the V15.0b plane-projected
+   *  stitch path.  Slit-scan modes only.
+   *
+   *  - 'Disabled': no plane projection (plain slit-scan).
+   *  - 'ARKitDetected': use ARKit's first vertical plane that aligns
+   *    with the camera's view direction.  Falls back to slit-scan
+   *    silently when no aligned plane is found.
+   *  - 'Virtual': synthesize a plane perpendicular to the camera at
+   *    `virtualPlaneDepthMeters` distance.  Always works; loses
+   *    "real depth" advantage but immune to ARKit picking the wrong
+   *    surface (which is the common failure mode for ARKitDetected). */
+  planeSource: 'Disabled' | 'ARKitDetected' | 'Virtual';
+  /** V15.0d — depth (m) of the synthetic plane in front of the camera
+   *  when `planeSource = 'Virtual'`.  0.3 – 5.0 m.  Default 1.5 m. */
+  virtualPlaneDepthMeters: number;
+  /** V15.0d — alignment threshold (cosine) for ARKit-detected planes.
+   *  Higher = stricter (fewer planes accepted).  0.0 – 1.0.
+   *  Default 0.6 (≈53° max angle off-camera). */
+  arkitPlaneAlignmentThreshold: number;
+  /** V15.0d — 2D NCC search half-window in pixels.  4 – 30.
+   *  Default 12. */
+  nccSearchMargin2d: number;
+  /** V15.0d — 2D NCC confidence threshold below which corrections
+   *  are rejected.  0.30 – 0.99.  Default 0.75. */
+  nccConfidenceThreshold2d: number;
+  /** V15.0d (1B) — EMA smoothing on 2D NCC corrections to damp
+   *  single-frame snaps.  Default false. */
+  enableNcc2dEmaSmoothing: boolean;
+  /** V15.0d — EMA weight on the CURRENT-frame correction.  0.05 – 0.95.
+   *  Default 0.4 (60% prev / 40% current). */
+  ncc2dEmaAlpha: number;
+  /** V15.0d (1C) — pan-axis-aware 2D NCC: clamp the cross-axis
+   *  correction tighter than the pan-axis.  Default false. */
+  enableNcc2dPanAxisLock: boolean;
+  /** V15.0d — cross-axis clamp (px) when pan-axis lock is on.
+   *  0 – 30.  Default 5. */
+  ncc2dCrossAxisLockPx: number;
   /** V15.0c — sliver position within the camera frame.  'Center' is
    *  V13.x default.  'Bottom' takes leading-edge content for top-to-
    *  bottom pan; 'Top' for bottom-to-top pan. */
@@ -176,6 +213,24 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   hybridProjection: 'Planar',
   nccSearchRadius1d: 15,
   useDetectedPlane: false,
+  // V15.0d — plane projection source defaults.  Disabled keeps the
+  // existing slit-scan behaviour as the safe default; operators opt
+  // into Virtual or ARKitDetected explicitly.  Virtual = always works
+  // (no ARKit dependency); ARKitDetected = best fidelity when ARKit
+  // picks the right surface, but unreliable in arbitrary scenes.
+  planeSource: 'Disabled',
+  virtualPlaneDepthMeters: 1.5,
+  arkitPlaneAlignmentThreshold: 0.6,
+  // V15.0d — NCC 2D defaults match V15.0c.4's hardcoded values, now
+  // tunable via the settings UI.  EMA smoothing and pan-axis lock are
+  // off by default so the V15.0c.4 baseline behaviour is preserved
+  // until the operator explicitly opts in.
+  nccSearchMargin2d: 12,
+  nccConfidenceThreshold2d: 0.75,
+  enableNcc2dEmaSmoothing: false,
+  ncc2dEmaAlpha: 0.4,
+  enableNcc2dPanAxisLock: false,
+  ncc2dCrossAxisLockPx: 5,
   // V15.0c — sliver tweaks: leading-edge sliver from BOTTOM for typical
   // top-to-bottom pan + full first-frame anchor produced the best
   // outputs in early iteration.
@@ -348,12 +403,76 @@ export function PanoramaSettingsModal({
               caption="V15 hybrid mode default = Planar (cv::detail::PlaneWarper, well-behaved <60° pans).  Cylindrical preserves V12.x – V14.0a behaviour but has the documented landscape roll-asymmetry bug."
             />
 
-            <SectionHeader title="Plane projection (V14.0b — Trax Virtual Ruler)" />
+            <SectionHeader title="Plane projection source (V15.0d)" />
+            <SegmentedControl
+              options={['Disabled', 'ARKitDetected', 'Virtual']}
+              value={settings.planeSource}
+              onChange={(v) => update({ planeSource: v as PanoramaSettings['planeSource'] })}
+              caption="Disabled = plain slit-scan (V13.x baseline). ARKitDetected = warp onto an ARKit-detected vertical plane that aligns with the camera (filter threshold below); falls back to slit-scan when no aligned plane is found. Virtual = synthesize a plane perpendicular to the camera at the configured depth — always works, immune to ARKit picking the wrong surface, but loses the 'real depth' advantage."
+            />
+
+            <SectionHeader title="Virtual plane depth (V15.0d, when planeSource=Virtual)" />
+            <SegmentedControl
+              options={['0.5m', '1.0m', '1.5m', '2.0m', '3.0m']}
+              value={`${settings.virtualPlaneDepthMeters.toFixed(1)}m`}
+              onChange={(v) => update({ virtualPlaneDepthMeters: parseFloat(v) })}
+              caption="Depth at which the synthetic plane is placed in front of the camera at the first frame. Set to your typical scan distance: too close = scene content gets clipped; too far = perspective distortion grows."
+            />
+
+            <SectionHeader title="ARKit plane alignment threshold (V15.0d, when planeSource=ARKitDetected)" />
+            <SegmentedControl
+              options={['0.3', '0.5', '0.6', '0.7', '0.85']}
+              value={settings.arkitPlaneAlignmentThreshold.toFixed(2)}
+              onChange={(v) => update({ arkitPlaneAlignmentThreshold: parseFloat(v) })}
+              caption="Minimum dot product between the candidate plane's surface normal and the camera's facing direction. 0.3 = ~72° max angle off-camera (lax); 0.6 = ~53° (default); 0.85 = ~32° (strict). Higher = fewer wrong-surface latches but slower to detect any plane."
+            />
+
+            <SectionHeader title="2D NCC search half-window (V15.0d)" />
+            <SegmentedControl
+              options={['6', '10', '12', '20', '30']}
+              value={String(settings.nccSearchMargin2d)}
+              onChange={(v) => update({ nccSearchMargin2d: parseInt(v, 10) })}
+              caption="Pixels: 2D NCC searches ±this around the pose-predicted match. Smaller = less wandering on repetitive textures (peg holes, slatted panels), but easier to miss real overlap when pose noise is high. V15.0c.4 was 12 (now configurable)."
+            />
+
+            <SectionHeader title="2D NCC confidence threshold (V15.0d)" />
+            <SegmentedControl
+              options={['0.50', '0.65', '0.75', '0.85', '0.95']}
+              value={settings.nccConfidenceThreshold2d.toFixed(2)}
+              onChange={(v) => update({ nccConfidenceThreshold2d: parseFloat(v) })}
+              caption="Reject NCC corrections below this confidence. Higher = stricter, fewer spurious matches on repetitive textures, but more frames where NCC silently doesn't fire. V15.0c.4 was 0.75 (now configurable)."
+            />
+
+            <SectionHeader title="2D NCC EMA smoothing (V15.0d, 1B)" />
             <SegmentedControl
               options={['off', 'on']}
-              value={settings.useDetectedPlane ? 'on' : 'off'}
-              onChange={(v) => update({ useDetectedPlane: v === 'on' })}
-              caption="When ON (slit-scan modes), each accepted frame is warped onto an ARKit-detected vertical plane (the actual fixture wall in 3D).  Composes with paint mode; skips slit-scan stage refinements (1D NCC, 2D NCC, RANSAC).  Requires 2–5 s plane detection on non-LiDAR devices.  Falls back to slit-scan until a plane is detected."
+              value={settings.enableNcc2dEmaSmoothing ? 'on' : 'off'}
+              onChange={(v) => update({ enableNcc2dEmaSmoothing: v === 'on' })}
+              caption="Apply exponential-moving-average to 2D NCC corrections so a single-frame snap to a spurious peak doesn't shift the slit by 20+ px. Adds ~2 frame lag."
+            />
+
+            <SectionHeader title="EMA alpha (current-frame weight)" />
+            <SegmentedControl
+              options={['0.20', '0.30', '0.40', '0.60', '0.80']}
+              value={settings.ncc2dEmaAlpha.toFixed(2)}
+              onChange={(v) => update({ ncc2dEmaAlpha: parseFloat(v) })}
+              caption="Weight on the CURRENT frame's correction (1−α weight on prev). 0.20 = heavy damping (more lag); 0.80 = light damping (less lag, more snaps through)."
+            />
+
+            <SectionHeader title="2D NCC pan-axis lock (V15.0d, 1C)" />
+            <SegmentedControl
+              options={['off', 'on']}
+              value={settings.enableNcc2dPanAxisLock ? 'on' : 'off'}
+              onChange={(v) => update({ enableNcc2dPanAxisLock: v === 'on' })}
+              caption="Clamp the cross-axis (perpendicular to pan) NCC correction tighter than the pan-axis. Idea: 1D NCC + pose handle cross-axis wobble; 2D's cross-axis search is mostly noise."
+            />
+
+            <SectionHeader title="Cross-axis lock (px)" />
+            <SegmentedControl
+              options={['2', '5', '10', '15']}
+              value={String(settings.ncc2dCrossAxisLockPx)}
+              onChange={(v) => update({ ncc2dCrossAxisLockPx: parseInt(v, 10) })}
+              caption="Cross-axis clamp when pan-axis lock is on. Lower = tighter lock."
             />
 
             <SectionHeader title="Recording cap" />

@@ -177,6 +177,24 @@ static os_log_t SlitDiagLog(void) {
     // falls back to the slit-scan path for that frame.  Reset to 0
     // on -reset; set on the first frame with a valid raycast.
     double _firstPlaneTInt;
+
+    // V15.0d — per-capture frame counter for diagnostic-log gating.
+    // The function-scope `static _engineCallCounter` persists for the
+    // lifetime of the engine instance, so its `<= 5` window only
+    // catches the very first capture after app launch.  This per-
+    // capture counter resets on every -reset, so the
+    // `[V15.0c.4-pre]` and other "first 5 frames" diagnostic logs
+    // fire on every capture.  Incremented at the top of
+    // ingestPixelBuffer alongside _engineCallCounter.
+    NSInteger _captureFrameCounter;
+
+    // V15.0d — EMA state for 1B 2D-NCC smoothing.  Holds the LAST
+    // applied (after-EMA) Δx/Δy correction so the next frame can
+    // blend with it.  Reset on -reset.  Used only when
+    // _config.enableNcc2dEmaSmoothing is YES.
+    int _lastNcc2dDxApplied;
+    int _lastNcc2dDyApplied;
+    BOOL _haveNcc2dEmaHistory;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -234,25 +252,57 @@ static os_log_t SlitDiagLog(void) {
 
 - (void)setConfig:(RLISStitcherConfig *)config {
     if (config == nil) return;
+    // V15.0d backward-compat: legacy callers set the boolean
+    // useDetectedPlane=YES.  New planeSource enum subsumes that flag.
+    // If planeSource is at its default (Disabled) but the legacy
+    // boolean is YES, upgrade to ARKitDetected — preserving V15.0b
+    // semantics for callers that haven't migrated to planeSource yet.
+    if (config.planeSource == RLISPlaneSourceDisabled && config.useDetectedPlane) {
+        config.planeSource = RLISPlaneSourceARKitDetected;
+    }
     _config = config;
     // V15.0c.4 — converted to fault log so it isn't rate-limited.
-    // os_log "default" messages can be coalesced or dropped under load
-    // (especially when many fire close together at capture start),
-    // which makes diagnosing config-propagation issues unreliable.
+    // V15.0d — added planeSource + new NCC knobs to the snapshot.
+    const char *planeSrc =
+        _config.planeSource == RLISPlaneSourceVirtual ? "Virtual"
+        : (_config.planeSource == RLISPlaneSourceARKitDetected ? "ARKitDetected"
+           : "Disabled");
     os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
         "[V15-config] slit-scan config applied: panAxisFrac=%.2f "
         "acceptGate=%ld tri=%d triAccum=%d 1dNcc=%d 2dNcc=%d "
-        "ransac=%d paint=%s useDetectedPlane=%d",
+        "ransac=%d paint=%s planeSource=%s "
+        "(virtualDepth=%.2fm arkitAlignThr=%.2f) "
+        "ncc2d(margin=%ld confThr=%.2f ema=%d emaA=%.2f "
+        "panLock=%d crossLock=%ld)",
         _config.kPanAxisFractionRect, (long)_config.kMinAcceptDeltaPx,
         (int)_config.enableTriangulation, (int)_config.enableTriAccumulator,
         (int)_config.enable1dNcc, (int)_config.enable2dNcc,
         (int)_config.enableRansacHomography,
         _config.paintMode == RLISPaintModeFeatherBlend
             ? "FeatherBlend" : "FirstPaintedWins",
-        (int)_config.useDetectedPlane);
+        planeSrc,
+        _config.virtualPlaneDepthMeters,
+        _config.arkitPlaneAlignmentThreshold,
+        (long)_config.nccSearchMargin2d,
+        _config.nccConfidenceThreshold2d,
+        (int)_config.enableNcc2dEmaSmoothing,
+        _config.ncc2dEmaAlpha,
+        (int)_config.enableNcc2dPanAxisLock,
+        (long)_config.ncc2dCrossAxisLockPx);
 }
 
 - (void)setPlaneTransformFlat:(NSArray<NSNumber *> *)transform16 {
+    // V15.0d — Virtual plane mode owns _planeTransform itself: it
+    // synthesizes a plane on the first plane-projected frame from
+    // the camera pose.  Ignore bridge propagations in Virtual mode
+    // so the bridge's ARKit-detected plane (if any) doesn't clobber
+    // the synthesized plane.
+    if (_config.planeSource == RLISPlaneSourceVirtual) {
+        os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+            "[V15.0d-plane] setPlaneTransformFlat ignored "
+            "(planeSource=Virtual; engine synthesizes its own plane)");
+        return;
+    }
     if (transform16.count != 16) {
         _planeTransform = cv::Mat();
         // V15.0c.2 — clear the off-plane baseline when the plane
@@ -329,6 +379,16 @@ static os_log_t SlitDiagLog(void) {
     // V15.0c.2 — reset the off-plane detector.  First successful
     // plane-projected frame in the new capture will set the baseline.
     _firstPlaneTInt = 0.0;
+
+    // V15.0d — reset per-capture diagnostics + NCC EMA history +
+    // any latched plane (so Virtual mode synthesizes fresh from the
+    // new first-frame pose, and ARKit mode awaits a fresh propagation
+    // from the bridge).
+    _captureFrameCounter = 0;
+    _lastNcc2dDxApplied = 0;
+    _lastNcc2dDyApplied = 0;
+    _haveNcc2dEmaHistory = NO;
+    _planeTransform = cv::Mat();
 }
 
 - (NSInteger)acceptedCount { return _accepted; }
@@ -442,6 +502,12 @@ static const double kPanAxisFractionRect = 0.30;
     // capture are coming in and what their tracking state is.
     static NSInteger _engineCallCounter = 0;
     _engineCallCounter += 1;
+    // V15.0d — per-capture frame counter resets on -reset (vs the
+    // function-scope static which persists across captures).  Used
+    // for diagnostic-log gating so "first 5 frames" diagnostics
+    // fire on every capture, not just the first capture after app
+    // launch.
+    _captureFrameCounter += 1;
     // Log every 5th call to keep volume manageable but still see
     // the per-frame pattern.  (At 60 fps × 2 sec capture ≈ 120
     // frames → 24 log lines, fits in Console.app's burst budget.)
@@ -798,25 +864,76 @@ static const double kPanAxisFractionRect = 0.30;
         // 2D-image alignments, and plane projection gives us 3D-correct
         // alignment for any pixel ON the plane.
         // V15.0c.4 — UNCONDITIONAL fault-log on early frames showing
-        // the values feeding the plane-branch decision.  Fires on
-        // counter ≤ 5 and every 60 frames.  Tells us, with no doubt,
-        // (a) ingestPixelBuffer reached this point, and (b) what
-        // useDetectedPlane / planeTransform.empty actually evaluate
-        // to.  Earlier diagnostic (V15.0c.3) was inside the else
-        // branch only — if the if-branch was being entered (e.g.,
-        // because a stale plane transform survived a capture restart)
-        // the noplane log silently never fired, masking the real state.
-        if (_engineCallCounter <= 5 || _engineCallCounter % 60 == 0) {
+        // the values feeding the plane-branch decision.  V15.0d uses
+        // _captureFrameCounter (per-capture) instead of _engineCallCounter
+        // (per-app-launch) so the log fires on every capture's first
+        // 5 frames.  V15.0d also added `planeSource` and the resulting
+        // dispatch decision to the log.
+        const char *planeSrcStr =
+            _config.planeSource == RLISPlaneSourceVirtual ? "Virtual"
+            : (_config.planeSource == RLISPlaneSourceARKitDetected ? "ARKitDetected"
+               : "Disabled");
+        if (_captureFrameCounter <= 5 || _captureFrameCounter % 60 == 0) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                "[V15.0c.4-pre] #%ld pre-plane-check: "
-                "useDetectedPlane=%d planeTransform.empty=%d "
-                "(if both 1/0 → enter plane branch; "
-                "else → noplane skip)",
-                (long)_engineCallCounter,
-                (int)_config.useDetectedPlane,
+                "[V15.0c.4-pre] capFr=%ld engFr=%ld pre-plane-check: "
+                "planeSource=%s planeTransform.empty=%d "
+                "(Disabled→slit-scan; ARKitDetected→plane only if "
+                "empty=0; Virtual→plane after synthesis)",
+                (long)_captureFrameCounter, (long)_engineCallCounter,
+                planeSrcStr,
                 (int)_planeTransform.empty());
         }
-        if (_config.useDetectedPlane && !_planeTransform.empty()) {
+
+        // V15.0d — dispatch on planeSource enum.  When the legacy
+        // boolean useDetectedPlane was YES, setConfig already
+        // upgraded planeSource → ARKitDetected (see -setConfig:).
+        bool runPlaneProjection = false;
+        if (_config.planeSource == RLISPlaneSourceARKitDetected) {
+            runPlaneProjection = !_planeTransform.empty();
+        } else if (_config.planeSource == RLISPlaneSourceVirtual) {
+            // Synthesize on first frame in Virtual mode.  Plane:
+            //   origin = camera_pos + depth × camera_forward_world
+            //   normal = -camera_forward_world  (pointing AT camera)
+            //
+            // R_new is ARKit camera-to-world rotation; ARKit camera
+            // looks down -Z in its local frame, so multiplying
+            // (0, 0, -1) by R_new yields the world-space direction
+            // the camera is facing (i.e. camera-forward in world).
+            if (_planeTransform.empty()) {
+                cv::Mat camForwardWorld = R_new *
+                    (cv::Mat_<double>(3, 1) << 0.0, 0.0, -1.0);
+                cv::Mat normalWorld = -camForwardWorld;
+                cv::Mat originWorld =
+                    (cv::Mat_<double>(3, 1) << tx, ty, tz) +
+                    _config.virtualPlaneDepthMeters * camForwardWorld;
+                // Build a 4×4 transform.  V15.0c.2 onward only reads
+                // column 1 (normal) and column 3 (origin); columns
+                // 0 and 2 are unused (U/V derived from gravity).
+                cv::Mat T = cv::Mat::eye(4, 4, CV_64F);
+                T.at<double>(0, 1) = normalWorld.at<double>(0);
+                T.at<double>(1, 1) = normalWorld.at<double>(1);
+                T.at<double>(2, 1) = normalWorld.at<double>(2);
+                T.at<double>(0, 3) = originWorld.at<double>(0);
+                T.at<double>(1, 3) = originWorld.at<double>(1);
+                T.at<double>(2, 3) = originWorld.at<double>(2);
+                _planeTransform = T;
+                _firstPlaneTInt = 0.0;  // baseline reset for new plane
+                os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                    "[V15.0d-virtual-plane] synthesized at depth=%.2fm "
+                    "origin=(%.3f, %.3f, %.3f) normal=(%.3f, %.3f, %.3f) "
+                    "(camera-forward × depth in front of camera_pos)",
+                    _config.virtualPlaneDepthMeters,
+                    originWorld.at<double>(0),
+                    originWorld.at<double>(1),
+                    originWorld.at<double>(2),
+                    normalWorld.at<double>(0),
+                    normalWorld.at<double>(1),
+                    normalWorld.at<double>(2));
+            }
+            runPlaneProjection = true;
+        }
+        // planeSource == Disabled → runPlaneProjection stays false
+        if (runPlaneProjection) {
             cv::Mat t_arkit = (cv::Mat_<double>(3, 1) << tx, ty, tz);
 
             // V15.0c.2 — gravity-aligned U/V axes.  Replaces V15.0c's
@@ -1082,28 +1199,27 @@ static const double kPanAxisFractionRect = 0.30;
                     (long)_engineCallCounter);
             }
         } else {
-            // V15.0c.3 diag — plane-projection branch was SKIPPED.
-            // Ram reported the plane mode wasn't taking effect at all
-            // and we saw zero `[V15.0b-paint]` / `[V15.0c.2-baseline]`
-            // logs, only slit-scan logs.  Log the skip reason once at
-            // start and periodically thereafter so we can see WHICH of
-            // the two pre-conditions is failing:
+            // V15.0c.3 / V15.0d — plane-projection branch was SKIPPED.
+            // Decoded: tells you WHICH of the two skip reasons fired.
             //
-            //   • useDetectedPlane=0  → JS override not propagating
-            //     (check `[V15-config] useDetectedPlane=…` line)
-            //   • planeTransform.empty=1 → ARKit hasn't latched a plane
-            //     yet (need a featureful vertical surface to detect),
-            //     OR the bridge never called setPlaneTransformFlat:
-            //     (check for `[V15.0b-plane] engine received plane
-            //     transform:` line — should fire ONCE per capture
-            //     after the plane is latched).
-            if (_engineCallCounter <= 3 || _engineCallCounter % 60 == 0) {
+            //   • planeSource=Disabled → user opted out of plane mode
+            //     entirely (or backward-compat upgrade didn't fire
+            //     because legacy useDetectedPlane was also NO)
+            //   • planeSource=ARKitDetected + planeTransform.empty=1
+            //     → ARKit hasn't found an aligned plane yet (filter
+            //     in didAdd may have rejected unaligned candidates);
+            //     check for `[V15.0b-plane] latched vertical plane`
+            //     and `[V15.0b-plane] engine received plane transform`
+            //   • planeSource=Virtual + planeTransform.empty=1 →
+            //     should NEVER happen (Virtual synthesizes on entry);
+            //     would indicate a code path bypassing the synthesis
+            if (_captureFrameCounter <= 3 || _captureFrameCounter % 60 == 0) {
                 os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
-                    "[V15.0c.3-noplane] #%ld plane-proj branch SKIPPED: "
-                    "useDetectedPlane=%d planeTransform.empty=%d "
-                    "(if you intended to use plane mode, both must be 1 / 0)",
-                    (long)_engineCallCounter,
-                    (int)_config.useDetectedPlane,
+                    "[V15.0c.3-noplane] capFr=%ld plane-proj branch "
+                    "SKIPPED: planeSource=%s planeTransform.empty=%d "
+                    "(see [V15-config] line for why)",
+                    (long)_captureFrameCounter,
+                    planeSrcStr,
                     (int)_planeTransform.empty());
             }
         }
@@ -1659,15 +1775,13 @@ static const double kPanAxisFractionRect = 0.30;
 
         if (_config.enable2dNcc) {
             constexpr int kNccSourceHeight = 100;
-            // V15.0c.2 — tightened from ±30 to ±12 px.  Ram observed
-            // visible step-discontinuities at slit boundaries with the
-            // ±30 setting: on repetitive textures (peg holes, slatted
-            // panels, carpet weave) the NCC peak can SNAP to a different
-            // copy of the pattern within the search window, shifting
-            // the slit by 20+ px frame-to-frame.  ±12 caps the worst-
-            // case single-frame snap and forces the NCC to refine
-            // around the pose-predicted position, not search broadly.
-            constexpr int kNccSearchMargin = 12;
+            // V15.0d — search margin and confidence threshold are
+            // now config-driven (was hardcoded ±12 / 0.75 in V15.0c.4).
+            // Bounded by the search-region computation below; very
+            // small values (< 4) bypass NCC effectively, very large
+            // values (> 30) reintroduce the snap-to-pattern problem.
+            const int kNccSearchMargin =
+                std::clamp((int)_config.nccSearchMargin2d, 4, 60);
             constexpr int kNccSourceXInset = 30;
 
             const int sourceW = clipW - 2 * kNccSourceXInset;
@@ -1712,22 +1826,61 @@ static const double kPanAxisFractionRect = 0.30;
                         cv::minMaxLoc(result, &rmin, &rmax, &lmin, &lmax);
                         ncc2dConfidence = rmax;
 
-                        // V15.0c.2 — raised from 0.6 → 0.75.  Pegboards
-                        // and slatted panels produce 0.65–0.80 matches
-                        // at MULTIPLE Y positions within the search
-                        // window — the "best" of those is essentially
-                        // arbitrary.  0.75 cuts most spurious matches
-                        // on repetitive textures while keeping genuine
-                        // matches on real overlap.
-                        if (ncc2dConfidence >= 0.75) {
+                        // V15.0d — confidence threshold is config-driven
+                        // (was hardcoded 0.6 in V13.0g and 0.75 in V15.0c.4).
+                        // Clamped to a sensible range so misconfigured
+                        // values can't silently disable NCC entirely.
+                        const double kNccConfidenceThreshold =
+                            std::clamp(_config.nccConfidenceThreshold2d, 0.30, 0.99);
+                        if (ncc2dConfidence >= kNccConfidenceThreshold) {
                             const int matchX = searchLeft + lmax.x;
                             const int matchY = searchTop + lmax.y;
                             int rawDx = matchX - expectedMatchX;
                             int rawDy = matchY - expectedMatchY;
+                            // Clamp to the search window first.
                             if (rawDx >  kNccSearchMargin) rawDx =  kNccSearchMargin;
                             if (rawDx < -kNccSearchMargin) rawDx = -kNccSearchMargin;
                             if (rawDy >  kNccSearchMargin) rawDy =  kNccSearchMargin;
                             if (rawDy < -kNccSearchMargin) rawDy = -kNccSearchMargin;
+
+                            // V15.0d 1C — pan-axis-aware NCC.  The
+                            // cross-axis (perpendicular to pan) is
+                            // already handled by 1D NCC and pose; 2D
+                            // NCC's cross-axis search is mostly noise.
+                            // Clamp it tighter than the pan-axis when
+                            // the user has opted in.
+                            // _isLandscape=YES → pan axis = Y → cross = X
+                            // _isLandscape=NO  → pan axis = X → cross = Y
+                            if (_config.enableNcc2dPanAxisLock) {
+                                const int crossLock =
+                                    std::clamp((int)_config.ncc2dCrossAxisLockPx, 0, 30);
+                                if (_isLandscape) {
+                                    if (rawDx >  crossLock) rawDx =  crossLock;
+                                    if (rawDx < -crossLock) rawDx = -crossLock;
+                                } else {
+                                    if (rawDy >  crossLock) rawDy =  crossLock;
+                                    if (rawDy < -crossLock) rawDy = -crossLock;
+                                }
+                            }
+
+                            // V15.0d 1B — EMA smoothing.  Damps single-
+                            // frame snaps when the NCC peak jumps to a
+                            // different copy of a repeated pattern.
+                            // Applied AFTER pan-axis lock so the lock
+                            // bounds the input to the EMA.
+                            if (_config.enableNcc2dEmaSmoothing) {
+                                if (_haveNcc2dEmaHistory) {
+                                    const double a =
+                                        std::clamp(_config.ncc2dEmaAlpha, 0.05, 0.95);
+                                    rawDx = (int)std::round(
+                                        a * rawDx + (1.0 - a) * _lastNcc2dDxApplied);
+                                    rawDy = (int)std::round(
+                                        a * rawDy + (1.0 - a) * _lastNcc2dDyApplied);
+                                }
+                                _lastNcc2dDxApplied = rawDx;
+                                _lastNcc2dDyApplied = rawDy;
+                                _haveNcc2dEmaHistory = YES;
+                            }
 
                             ncc2dDx = rawDx;
                             ncc2dDy = rawDy;

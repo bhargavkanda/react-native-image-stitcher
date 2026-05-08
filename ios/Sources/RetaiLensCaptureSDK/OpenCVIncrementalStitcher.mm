@@ -110,6 +110,19 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
         m = @"slitscan-both";
     }
 
+    // V15.0d — defaults shared by all engine modes for the new knobs.
+    // Set before the per-mode overrides so per-mode only overrides
+    // the fields that genuinely differ from this baseline.
+    c.nccSearchMargin2d              = 12;     // was hardcoded V15.0c.4
+    c.nccConfidenceThreshold2d       = 0.75;   // was hardcoded V15.0c.4
+    c.enableNcc2dEmaSmoothing        = NO;     // 1B opt-in
+    c.ncc2dEmaAlpha                  = 0.4;    // 60% prev / 40% current
+    c.enableNcc2dPanAxisLock         = NO;     // 1C opt-in
+    c.ncc2dCrossAxisLockPx           = 5;
+    c.planeSource                    = RLISPlaneSourceDisabled;
+    c.virtualPlaneDepthMeters        = 1.5;
+    c.arkitPlaneAlignmentThreshold   = 0.6;    // ~53° max off-camera
+
     if ([m isEqualToString:@"hybrid"]) {
         // n/a slit-shaping; hybrid uses whole-frame projection.
         c.kPanAxisFractionRect       = 0.30;  // unused for hybrid

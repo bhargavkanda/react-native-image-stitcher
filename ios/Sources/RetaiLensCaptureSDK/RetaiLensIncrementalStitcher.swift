@@ -404,6 +404,44 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         if let v = overrides["firstFrameFullFrame"] as? Bool {
             config.firstFrameFullFrame = v
         }
+        // V15.0d new overrides.
+        if let v = overrides["planeSource"] as? String {
+            switch v {
+            case "Disabled":      config.planeSource = .disabled
+            case "ARKitDetected": config.planeSource = .arKitDetected
+            case "Virtual":       config.planeSource = .virtual
+            default: break
+            }
+        }
+        if let v = overrides["virtualPlaneDepthMeters"] as? Double {
+            config.virtualPlaneDepthMeters = max(0.3, min(5.0, v))
+        }
+        if let v = overrides["arkitPlaneAlignmentThreshold"] as? Double {
+            config.arkitPlaneAlignmentThreshold = max(0.0, min(1.0, v))
+        }
+        if let v = overrides["nccSearchMargin2d"] as? Int {
+            config.nccSearchMargin2d = max(4, min(60, v))
+        }
+        if let v = overrides["nccConfidenceThreshold2d"] as? Double {
+            config.nccConfidenceThreshold2d = max(0.30, min(0.99, v))
+        }
+        if let v = overrides["enableNcc2dEmaSmoothing"] as? Bool {
+            config.enableNcc2dEmaSmoothing = v
+        }
+        if let v = overrides["ncc2dEmaAlpha"] as? Double {
+            config.ncc2dEmaAlpha = max(0.05, min(0.95, v))
+        }
+        if let v = overrides["enableNcc2dPanAxisLock"] as? Bool {
+            config.enableNcc2dPanAxisLock = v
+        }
+        if let v = overrides["ncc2dCrossAxisLockPx"] as? Int {
+            config.ncc2dCrossAxisLockPx = max(0, min(30, v))
+        }
+        // Propagate the alignment threshold to the AR session so its
+        // didAdd / didUpdate filter uses the operator-chosen value.
+        // (planeAlignmentThreshold is a Float on the AR session.)
+        RetaiLensARSession.shared.planeAlignmentThreshold =
+            Float(config.arkitPlaneAlignmentThreshold)
     }
 
     /// after the user thought they had released.  The engine refs

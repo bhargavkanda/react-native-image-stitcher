@@ -152,6 +152,42 @@ typedef NS_ENUM(NSInteger, RLISHybridProjection) {
     RLISHybridProjectionPlanar = 1,
 };
 
+/// V15.0d — source of the plane used by the slit-scan engine's V15.0b
+/// plane-projected stitch path.  Replaces V15.0b's boolean
+/// `useDetectedPlane` toggle (which is kept as a deprecated alias)
+/// with three explicit options:
+///
+///   • `Disabled`        — no plane projection; slit-scan path runs
+///                         (V13.x baseline + V15 refinements).
+///   • `ARKitDetected`   — use the first vertical plane that ARKit
+///                         finds AND whose surface normal aligns with
+///                         the camera's view direction (filter
+///                         threshold = `arkitPlaneAlignmentThreshold`).
+///                         If no aligned plane is detected, the engine
+///                         falls back to the slit-scan path silently.
+///   • `Virtual`         — synthesize a plane from the FIRST plane-
+///                         projected frame's camera pose:
+///                           origin = camera_pos + virtualPlaneDepthMeters
+///                                    × camera_forward
+///                           normal = -camera_forward
+///                         No ARKit dependency; always available.
+///                         Loses the "real depth" advantage of an
+///                         ARKit-detected plane.
+///
+/// Why both ARKit and Virtual exist:
+/// Field testing showed ARKit plane detection often picks the WRONG
+/// surface (side wall, doorframe, table edge) instead of the fixture
+/// face the user is scanning — producing nonsense projections (huge
+/// corner ray distances, 90°-rotated quads).  Virtual side-steps this
+/// with a synthetic plane perpendicular to the camera at first frame.
+/// Operators can A/B between the two and pick whichever wins for
+/// their typical scene.
+typedef NS_ENUM(NSInteger, RLISPlaneSource) {
+    RLISPlaneSourceDisabled       = 0,
+    RLISPlaneSourceARKitDetected  = 1,
+    RLISPlaneSourceVirtual        = 2,
+};
+
 /// V15 stitcher config — single source of truth for which correction
 /// stages run in the slit-scan and hybrid engines.  Each engine mode
 /// (`hybrid`, `slitscan-rotate`, `slitscan-both`) has a default config
@@ -189,6 +225,38 @@ typedef NS_ENUM(NSInteger, RLISHybridProjection) {
 
 /// V13.0g: 2D NCC fine-alignment after triangulation.
 @property (nonatomic) BOOL enable2dNcc;
+/// V15.0d: 2D NCC search half-window in pixels.  Was a hardcoded
+/// constexpr (V13.0g: 30, V15.0c.4: 12).  Smaller = less wandering on
+/// repetitive textures, but easier to miss the true overlap when pose
+/// noise is high.  Range 4 – 30.  Default 12 for slitscan modes.
+@property (nonatomic) NSInteger nccSearchMargin2d;
+/// V15.0d: 2D NCC confidence threshold below which the correction
+/// is rejected.  Was hardcoded (V13.0g: 0.6, V15.0c.4: 0.75).  Higher
+/// = stricter — fewer false matches on repetitive textures, but more
+/// frames where NCC silently doesn't fire.  Range 0.4 – 0.95.  Default
+/// 0.75 for slitscan modes.
+@property (nonatomic) double nccConfidenceThreshold2d;
+
+/// V15.0d new (1B): EMA smoothing on 2D NCC corrections.  When enabled,
+/// the applied correction is `α × current + (1−α) × prev` instead of
+/// just `current`.  Dampens single-frame snaps to spurious peaks at
+/// the cost of a 2-frame lag.  Default OFF for slitscan modes.
+@property (nonatomic) BOOL enableNcc2dEmaSmoothing;
+/// V15.0d new: EMA weight on the CURRENT-frame NCC correction (the
+/// remaining `1 − α` weight is on the previous correction).  Range
+/// 0.1 – 0.9.  Default 0.4 (60% prev / 40% current — heavy damping).
+@property (nonatomic) double ncc2dEmaAlpha;
+
+/// V15.0d new (1C): pan-axis-aware 2D NCC.  When enabled, the cross-
+/// axis (perpendicular to the pan direction) NCC correction is
+/// clamped to ±`ncc2dCrossAxisLockPx`, regardless of what the search
+/// window size allows.  Idea: 1D NCC already handles cross-axis
+/// wobble; 2D NCC's cross-axis search is mostly noise.  Default OFF.
+@property (nonatomic) BOOL enableNcc2dPanAxisLock;
+/// V15.0d new: cross-axis clamp for the pan-axis-aware mode.  Range
+/// 0 – 15 px.  Default 5.
+@property (nonatomic) NSInteger ncc2dCrossAxisLockPx;
+
 /// V14.0a: RANSAC homography per slit + cv::warpPerspective.
 @property (nonatomic) BOOL enableRansacHomography;
 
@@ -209,21 +277,41 @@ typedef NS_ENUM(NSInteger, RLISHybridProjection) {
 /// Default YES for slitscan-rotate / slitscan-both.
 @property (nonatomic) BOOL firstFrameFullFrame;
 
-/// V15.0b new: if YES, the slit-scan engine projects each accepted
-/// camera frame onto a detected vertical plane (Trax-style "Virtual
-/// Ruler") rather than onto the pose-driven rectilinear canvas.
-/// Requires that ARKit's vertical plane detection has identified a
-/// plane during the capture (RetaiLensARSession latches the first
-/// such plane and the bridge calls -setPlaneTransform: on the engine
-/// before ingesting frames).  When useDetectedPlane is YES but no
-/// plane has been latched yet, frames fall back to the standard
-/// pose-driven projection until the plane is available.
+/// **DEPRECATED in V15.0d** — use `planeSource` instead.
 ///
-/// Composes with paint mode (first-painted-wins or feather blend);
-/// does NOT compose with the per-stage refinements (triangulation,
-/// 2D NCC, RANSAC homography) — those are slit-axis 2D corrections
-/// and don't apply when the canvas is the actual 3D plane.
+/// V15.0b boolean toggle for the plane-projected stitch path.  Kept
+/// as an alias for backward compat: when `planeSource` is left at
+/// its default (Disabled), `useDetectedPlane = YES` upgrades it to
+/// `ARKitDetected`.  New callers should set `planeSource` directly.
+///
+/// V15.0b semantics: if YES, the slit-scan engine projects each
+/// accepted frame onto a vertical plane.  Composes with paint mode;
+/// bypasses the slit-axis 2D refinements (triangulation, 2D NCC,
+/// RANSAC homography) — those don't apply when the canvas is a
+/// real 3D plane.
 @property (nonatomic) BOOL useDetectedPlane;
+
+/// V15.0d new: source of the plane used by the V15.0b path.  See
+/// `RLISPlaneSource` enum docs above for tradeoffs.  Default
+/// Disabled for all engine modes; settings UI / capture overrides
+/// promote to ARKitDetected or Virtual.
+@property (nonatomic) RLISPlaneSource planeSource;
+
+/// V15.0d new: depth (metres) at which the synthetic plane is placed
+/// in front of the camera when `planeSource = Virtual`.  Set the
+/// plane at the user's typical scan distance — too close = scene
+/// content gets clipped behind the plane; too far = perspective
+/// distortion grows.  Range 0.3 – 5.0 m.  Default 1.5 m.
+@property (nonatomic) double virtualPlaneDepthMeters;
+
+/// V15.0d new: minimum dot product between the candidate plane's
+/// surface normal and the camera's negative-forward direction
+/// (i.e. the direction the camera is facing).  Used by
+/// `RetaiLensARSession.didAdd` to filter ARKit-detected planes for
+/// `planeSource = ARKitDetected`.  1.0 = plane perfectly facing
+/// camera; 0.0 = plane edge-on to camera; -1.0 = facing away.
+/// Range 0.0 – 1.0.  Default 0.6 (≈53° max angle off-camera).
+@property (nonatomic) double arkitPlaneAlignmentThreshold;
 
 // ── Hybrid-specific ─────────────────────────────────────────────────
 

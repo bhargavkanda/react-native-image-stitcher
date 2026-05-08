@@ -171,6 +171,17 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     private var detectedPlaneTransformInternal: simd_float4x4? = nil
     private let planeLatchLock = NSLock()
 
+    /// V15.0d — minimum dot product between a candidate plane's
+    /// surface normal and the camera's FACING direction (i.e. the
+    /// negative of camera-forward) at detection time.  Planes whose
+    /// alignment is below this threshold are REJECTED — the user is
+    /// scanning a wall in front of them, not a side wall or a
+    /// doorframe.  Ranges 0.0 (accept any vertical plane) – 1.0
+    /// (only accept perfectly camera-facing planes).  Default 0.6
+    /// ≈ 53° max angle off-camera.  Set by the bridge via
+    /// `setPlaneAlignmentThreshold` from the engine config.
+    @objc public var planeAlignmentThreshold: Float = 0.6
+
     /// Whether a vertical plane has been detected and latched.
     @objc public var hasPlaneDetected: Bool {
         planeLatchLock.lock()
@@ -446,26 +457,118 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         planeLatchLock.lock()
         defer { planeLatchLock.unlock() }
         guard detectedPlaneTransformInternal == nil else { return }
+
+        // V15.0d — alignment filter (3A).  ARKit's vertical-plane
+        // detection finds whatever vertical surface it can — the
+        // wall in front of the user, the wall behind, side walls,
+        // doorframes, table edges.  Latching the FIRST one ARKit
+        // reports often picks a surface unrelated to the user's
+        // scan target, producing a wildly wrong projection in the
+        // V15.0b path.
+        //
+        // Filter: only accept a candidate plane whose surface
+        // normal is within `planeAlignmentThreshold` (cosine of
+        // angle) of the camera's facing direction.  If no plane
+        // in the current `anchors` batch passes the filter, leave
+        // `detectedPlaneTransformInternal` nil so a future
+        // `didAdd` callback can try again.
+        //
+        // Camera facing in WORLD = -worldForward = -camera.transform.cols[2]
+        //   (ARKit camera looks down its local -Z; column 2 of the
+        //    camera transform is local +Z in world, so the camera
+        //    is looking in the direction of -columns.2)
+        // Plane surface normal in WORLD = plane.transform.cols[1]
+        //   (ARPlaneAnchor convention: local Y axis = surface normal)
+        guard let cameraTransform = session.currentFrame?.camera.transform else {
+            // No camera pose yet — log and bail; next didAdd may
+            // succeed once the session warms up.
+            os_log(.fault, log: arSessionDiagLog,
+                   "[V15.0d-plane-filter] didAdd received but no camera pose yet; deferring latch")
+            return
+        }
+        let cameraFacingWorld = simd_float3(
+            -cameraTransform.columns.2.x,
+            -cameraTransform.columns.2.y,
+            -cameraTransform.columns.2.z
+        )
+
         for anchor in anchors {
             guard let plane = anchor as? ARPlaneAnchor else { continue }
-            // We're configured with planeDetection = [.vertical] so
-            // anchors here will always be vertical, but defensive
-            // check anyway.
-            if plane.alignment == .vertical {
-                detectedPlaneTransformInternal = plane.transform
-                // .extent (deprecated iOS 16+) is the size of the
-                // plane's bounding rect in metres along its local X/Z.
-                // We use the deprecated form for iOS 15 compatibility;
-                // iOS 16+ has .planeExtent which is more accurate but
-                // we don't depend on the size for stitching, only for
-                // diagnostics.
-                // V15.0c.4 — fault log so it isn't rate-limited.
+            if plane.alignment != .vertical { continue }
+
+            let planeNormalWorld = simd_float3(
+                plane.transform.columns.1.x,
+                plane.transform.columns.1.y,
+                plane.transform.columns.1.z
+            )
+            // Two possible orientations for the normal (column 1
+            // can point either side of the wall).  Take the
+            // larger of the two dot products — i.e. assume the
+            // normal that's most aligned with the camera-facing
+            // direction is the "outward" surface normal.
+            let dotPos = simd_dot(planeNormalWorld, cameraFacingWorld)
+            let alignment = max(dotPos, -dotPos)
+
+            if alignment < planeAlignmentThreshold {
+                // Reject — not the surface the camera is aimed at.
                 os_log(.fault, log: arSessionDiagLog,
-                       "[V15.0b-plane] latched vertical plane extent=%fx%f centre=(%f,%f,%f)",
-                       plane.extent.x, plane.extent.z,
-                       plane.center.x, plane.center.y, plane.center.z)
-                break
+                       "[V15.0d-plane-filter] REJECTED candidate plane: alignment=%f < threshold=%f extent=%fx%f",
+                       alignment, planeAlignmentThreshold,
+                       plane.extent.x, plane.extent.z)
+                continue
             }
+
+            detectedPlaneTransformInternal = plane.transform
+            os_log(.fault, log: arSessionDiagLog,
+                   "[V15.0b-plane] latched vertical plane alignment=%f extent=%fx%f centre=(%f,%f,%f)",
+                   alignment,
+                   plane.extent.x, plane.extent.z,
+                   plane.center.x, plane.center.y, plane.center.z)
+            break
+        }
+    }
+
+    public func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        // V15.0d — ARKit refines plane anchors over time via
+        // didUpdate.  If our didAdd alignment filter rejected all
+        // candidates (e.g. user wasn't aimed at the wall yet when
+        // detection fired), we want to give the same anchors
+        // another chance once they're refined / the camera is
+        // pointed differently.  Same logic as didAdd: consider
+        // each updated anchor; latch the first that passes the
+        // alignment filter.  Once latched, never re-evaluate.
+        planeLatchLock.lock()
+        defer { planeLatchLock.unlock() }
+        guard detectedPlaneTransformInternal == nil else { return }
+
+        guard let cameraTransform = session.currentFrame?.camera.transform else {
+            return
+        }
+        let cameraFacingWorld = simd_float3(
+            -cameraTransform.columns.2.x,
+            -cameraTransform.columns.2.y,
+            -cameraTransform.columns.2.z
+        )
+
+        for anchor in anchors {
+            guard let plane = anchor as? ARPlaneAnchor else { continue }
+            if plane.alignment != .vertical { continue }
+            let planeNormalWorld = simd_float3(
+                plane.transform.columns.1.x,
+                plane.transform.columns.1.y,
+                plane.transform.columns.1.z
+            )
+            let dotPos = simd_dot(planeNormalWorld, cameraFacingWorld)
+            let alignment = max(dotPos, -dotPos)
+            if alignment < planeAlignmentThreshold { continue }
+
+            detectedPlaneTransformInternal = plane.transform
+            os_log(.fault, log: arSessionDiagLog,
+                   "[V15.0b-plane] latched vertical plane (via didUpdate) alignment=%f extent=%fx%f centre=(%f,%f,%f)",
+                   alignment,
+                   plane.extent.x, plane.extent.z,
+                   plane.center.x, plane.center.y, plane.center.z)
+            break
         }
     }
 

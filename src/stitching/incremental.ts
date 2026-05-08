@@ -232,17 +232,80 @@ export interface StitcherConfig {
    *  is Bottom/Top so the canvas is anchored with full-frame content. */
   firstFrameFullFrame: boolean;
 
-  /** V15.0b — when true (slit-scan modes), each accepted frame is
-   *  warped onto a detected vertical plane (Trax-style "Virtual
-   *  Ruler") rather than onto the pose-driven rectilinear canvas.
-   *  Requires ARKit to detect a vertical plane during the capture
-   *  (typically 2–5 s on non-LiDAR; sub-second on LiDAR).  Until a
-   *  plane is detected, frames fall back to the standard pose-driven
-   *  projection.  Composes with paint mode but skips the per-stage
-   *  refinements (1D NCC, 2D NCC, RANSAC homography) since they're
-   *  2D-image alignments that don't apply when the canvas is the
-   *  actual 3D plane. */
+  /** **DEPRECATED in V15.0d** — use `planeSource` instead.
+   *
+   *  V15.0b boolean toggle for the plane-projected stitch path.
+   *  Kept for backward compat: when `planeSource` is left at its
+   *  default (Disabled), `useDetectedPlane = true` upgrades it to
+   *  ARKitDetected.  New callers should set `planeSource` directly. */
   useDetectedPlane: boolean;
+
+  /** V15.0d — source of the plane used by the V15.0b plane-projected
+   *  stitch path.
+   *
+   *  - 'Disabled' (default): no plane projection; slit-scan path runs.
+   *  - 'ARKitDetected': use ARKit's first vertical plane that aligns
+   *    with the camera's view direction (filter threshold:
+   *    `arkitPlaneAlignmentThreshold`).  Falls back to slit-scan
+   *    silently when no aligned plane is found.
+   *  - 'Virtual': synthesize a plane at first frame: origin =
+   *    camera_pos + `virtualPlaneDepthMeters` × camera_forward;
+   *    normal = -camera_forward.  Always works; no ARKit dependency.
+   *
+   *  Field testing showed ARKit plane detection often picks the WRONG
+   *  surface (side wall, doorframe) — Virtual mode is the safer
+   *  default for arbitrary scenes.  ARKitDetected wins when ARKit
+   *  finds the correct fixture face. */
+  planeSource: 'Disabled' | 'ARKitDetected' | 'Virtual';
+
+  /** V15.0d — depth (metres) at which the synthetic plane is placed
+   *  in front of the camera when `planeSource = Virtual`.  Set to
+   *  the user's typical scan distance.  Range 0.3 – 5.0 m.  Default
+   *  1.5 m. */
+  virtualPlaneDepthMeters: number;
+
+  /** V15.0d — minimum dot product between an ARKit-detected plane's
+   *  surface normal and the camera's facing direction for the plane
+   *  to be accepted (when `planeSource = ARKitDetected`).  1.0 =
+   *  plane perfectly facing camera; 0.0 = plane edge-on; negative
+   *  = facing away.  Range 0.0 – 1.0.  Default 0.6 (≈53° max angle
+   *  off-camera). */
+  arkitPlaneAlignmentThreshold: number;
+
+  /** V15.0d — 2D NCC search half-window in pixels.  Was hardcoded
+   *  ±12 in V15.0c.4.  Smaller = less wandering on repetitive
+   *  textures (peg holes, slatted panels), but easier to miss the
+   *  true overlap when pose noise is high.  Range 4 – 30.  Default
+   *  12. */
+  nccSearchMargin2d: number;
+
+  /** V15.0d — 2D NCC confidence threshold below which the correction
+   *  is rejected.  Was hardcoded 0.75 in V15.0c.4.  Higher = stricter,
+   *  fewer false matches on repetitive textures, but more frames
+   *  where NCC silently doesn't fire.  Range 0.30 – 0.99.  Default
+   *  0.75. */
+  nccConfidenceThreshold2d: number;
+
+  /** V15.0d (1B) — exponential-moving-average smoothing on 2D NCC
+   *  corrections.  When enabled, the applied correction is
+   *  `α × current + (1−α) × prev` instead of just `current`.  Damps
+   *  single-frame snaps to spurious peaks.  Default false. */
+  enableNcc2dEmaSmoothing: boolean;
+
+  /** V15.0d — EMA weight on the CURRENT-frame NCC correction
+   *  (1 − α weight on the previous correction).  Range 0.05 – 0.95.
+   *  Default 0.4 (60% prev / 40% current — heavy damping). */
+  ncc2dEmaAlpha: number;
+
+  /** V15.0d (1C) — pan-axis-aware 2D NCC.  When enabled, the cross-
+   *  axis (perpendicular to pan) NCC correction is clamped tighter
+   *  than the pan-axis (since 1D NCC + pose already handle cross-
+   *  axis wobble).  Default false. */
+  enableNcc2dPanAxisLock: boolean;
+
+  /** V15.0d — cross-axis clamp (pixels) for the pan-axis-aware mode.
+   *  Range 0 – 30.  Default 5. */
+  ncc2dCrossAxisLockPx: number;
 }
 
 
