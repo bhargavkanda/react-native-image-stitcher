@@ -155,6 +155,12 @@ static os_log_t SlitDiagLog(void) {
     // accept; updated at the end of each subsequent accept.
     int _prevAcceptDstX;
     int _prevAcceptDstY;
+
+    // V15 — runtime config controlling which correction stages run.
+    // See RLISStitcherConfig in OpenCVIncrementalStitcher.h.  Set via
+    // -setConfig: after init; defaults to slitscan-both factory config
+    // if never set.
+    RLISStitcherConfig *_config;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -199,9 +205,29 @@ static os_log_t SlitDiagLog(void) {
         // on 1920×1080 with this budget runs in ~5 ms on iPhone 14+.
         _orbDetector = cv::ORB::create(500);
 
+        // V15 — default config (slitscan-both).  Caller should override
+        // via -setConfig: after init.  Default chosen so engines work
+        // correctly with the legacy `useRectilinear=YES` path even if
+        // setConfig is never called.
+        _config = [RLISStitcherConfig configForMode:@"slitscan-both"];
+
         [self reset];
     }
     return self;
+}
+
+- (void)setConfig:(RLISStitcherConfig *)config {
+    if (config == nil) return;
+    _config = config;
+    NSLog(@"[V15-config] slit-scan config applied: panAxisFrac=%.2f "
+          @"acceptGate=%ld tri=%d triAccum=%d 1dNcc=%d 2dNcc=%d "
+          @"ransac=%d paint=%@",
+          _config.kPanAxisFractionRect, (long)_config.kMinAcceptDeltaPx,
+          (int)_config.enableTriangulation, (int)_config.enableTriAccumulator,
+          (int)_config.enable1dNcc, (int)_config.enable2dNcc,
+          (int)_config.enableRansacHomography,
+          _config.paintMode == RLISPaintModeFeatherBlend
+              ? @"FeatherBlend" : @"FirstPaintedWins");
 }
 
 - (void)reset {
@@ -471,7 +497,10 @@ static const double kPanAxisFractionRect = 0.30;
             // Issue 2 ("sideways portrait → first frame only output").
             int clipW, clipH, srcClipX, srcClipY;
             clipW = frameBGR.cols;  // perpendicular: full sensor X (1920)
-            clipH = std::max(1, (int)(frameBGR.rows * kPanAxisFractionRect));
+            // V15 — clipH driven by _config.kPanAxisFractionRect (was a
+            // file-scope constant in V14.x).  Defaults to 0.30 in all
+            // V15 modes; settings UI exposes a slider 0.10–0.70.
+            clipH = std::max(1, (int)(frameBGR.rows * _config.kPanAxisFractionRect));
             srcClipX = 0;
             srcClipY = (frameBGR.rows - clipH) / 2;
             cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
@@ -501,11 +530,19 @@ static const double kPanAxisFractionRect = 0.30;
                       @"isLandscape=%d (pan extent %ld, frame=%dx%d)",
                       canvasCols, canvasRows, (int)_isLandscape,
                       (long)_canvasPanExtent, frameBGR.cols, frameBGR.rows);
-                // V14.0pre.1 — confirm slit width + gate are live.
-                // Fires once per capture (first-frame).
-                NSLog(@"[V14.0pre-slit] kPanAxisFractionRect=%.2f "
-                      @"clipH=%d clipW=%d kMinAcceptDeltaPx=50",
-                      kPanAxisFractionRect, clipH, clipW);
+                // V15 — log config snapshot at first frame.
+                NSLog(@"[V15-slit] panAxisFrac=%.2f clipH=%d clipW=%d "
+                      @"acceptGate=%ld tri=%d triAccum=%d 1dNcc=%d "
+                      @"2dNcc=%d ransac=%d paint=%@",
+                      _config.kPanAxisFractionRect, clipH, clipW,
+                      (long)_config.kMinAcceptDeltaPx,
+                      (int)_config.enableTriangulation,
+                      (int)_config.enableTriAccumulator,
+                      (int)_config.enable1dNcc,
+                      (int)_config.enable2dNcc,
+                      (int)_config.enableRansacHomography,
+                      _config.paintMode == RLISPaintModeFeatherBlend
+                          ? @"FeatherBlend" : @"FirstPaintedWins");
             }
 
             // V12.12 — first-frame placement at canvas ORIGIN (0, 0).
@@ -628,7 +665,8 @@ static const double kPanAxisFractionRect = 0.30;
         // 70%, full sensor X.
         int clipW, clipH, srcClipX, srcClipY;
         clipW = frameBGR.cols;
-        clipH = std::max(1, (int)(frameBGR.rows * kPanAxisFractionRect));
+        // V15 — clipH from _config (matches first-frame branch above).
+        clipH = std::max(1, (int)(frameBGR.rows * _config.kPanAxisFractionRect));
         srcClipX = 0;
         srcClipY = (frameBGR.rows - clipH) / 2;
         cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
@@ -732,14 +770,15 @@ static const double kPanAxisFractionRect = 0.30;
         // native pano).  No new outcome enum — reuse SkippedTooClose
         // since the gate's intent matches: "frame too close to
         // previous accept to contribute meaningfully".
-        // V14.0pre.1 — restored to 50 (V13.0g value) after kPanAxisFractionRect
-        // was widened back to 0.30 (clipH = 324).  At clipH=324 and gate=50
-        // overlap = 274 px (~85% of slit), comfortably gap-free even at
-        // burst pan rates.  V14.0pre's gate=20 was a compensating workaround
-        // for the over-narrow clipH=108; both are reverted together.
-        constexpr int kMinAcceptDeltaPx = 50;
+        // V15 — accept gate is config-driven.  When _config.kMinAcceptDeltaPx
+        // is 0 (slitscan-rotate / slitscan-both defaults), the gate is
+        // effectively disabled — we accept on every frame the engine isn't
+        // already busy with.  When 50 (V13.0g/V14.0a default), throttles
+        // accepts to one per 50 px of pan-axis advance to reduce zig-zag
+        // boundary density.  Settings UI exposes this for testing.
+        const int kMinAcceptDeltaPx = (int)_config.kMinAcceptDeltaPx;
         const int panDelta = dstY - _maxDstY;
-        if (panDelta < kMinAcceptDeltaPx) {
+        if (kMinAcceptDeltaPx > 0 && panDelta < kMinAcceptDeltaPx) {
             // V13.0b — diagnostic gate-fire log (throttled).
             if (_engineCallCounter % 5 == 0) {
                 os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
@@ -824,13 +863,109 @@ static const double kPanAxisFractionRect = 0.30;
         const int poseDstY = dstY;
         const int poseDstX = dstX;
 
-        // Detect ORB on the FULL sensor frame (~5 ms on iPhone 14+
-        // with our 500-feature budget).  Reused by both triangulation
-        // (matched against prev descriptors) and as the prev set for
-        // the next accept.
+        // ── V15 LAYER 0: 1D NCC perpendicular-axis wobble correction ──
+        // For slitscan-rotate (rotation-only pan), the dominant residual
+        // after pose-only paste is small horizontal jitter in canvas-X
+        // from handheld wobble (rotation around an imperfectly-stable
+        // axis introduces small perpendicular displacement frame-to-
+        // frame).  A narrow 1D NCC search in canvas-X (Y fixed at pose
+        // value) recovers the sub-pixel offset.
+        //
+        // Source: a thin strip from the top of the new clipped slit
+        // (the part that overlaps already-painted canvas).  Search:
+        // canvas region around (dstX, poseDstY) with ±kRadius in X,
+        // narrow Y window.  Templates correlate via TM_CCOEFF_NORMED;
+        // confidence ≥ 0.6 to apply, else skip.
+        //
+        // Independent of triangulation/RANSAC stages — those handle
+        // translation parallax (depth-dependent shift, big magnitudes).
+        // 1D NCC handles depth-INDEPENDENT wobble (small, perpendicular).
+        // Both can run simultaneously if the user enables them.
+        int ncc1dDx = 0;
+        double ncc1dConfidence = 0.0;
+        bool ncc1dApplied = false;
+
+        if (_config.enable1dNcc && _hasPrevAccept && _accepted >= 1) {
+            const int kRadius = std::max(5, std::min(60,
+                                  (int)_config.nccSearchRadius1d));
+            const int kSourceHeight = 60;       // shallow strip
+            const int kSourceXInset = kRadius;  // leave slide room
+            const int sourceW = clipW - 2 * kSourceXInset;
+
+            if (sourceW > 0
+                && srcClipY >= 0
+                && srcClipY + kSourceHeight <= frameBGR.rows
+                && srcClipX + kSourceXInset + sourceW <= frameBGR.cols
+                && dstY >= 0
+                && dstY + kSourceHeight <= _canvas.rows) {
+
+                cv::Mat sourceRegion = frameBGR(cv::Rect(
+                    srcClipX + kSourceXInset, srcClipY,
+                    sourceW, kSourceHeight));
+
+                int searchLeft = std::max(0, dstX + kSourceXInset - kRadius);
+                int searchRight = std::min((int)_canvas.cols,
+                                  dstX + kSourceXInset + sourceW + kRadius);
+                int searchTop = std::max(0, dstY);
+                int searchBottom = std::min((int)_canvas.rows,
+                                            dstY + kSourceHeight);
+                const int searchW = searchRight - searchLeft;
+                const int searchH = searchBottom - searchTop;
+
+                if (searchW >= sourceW && searchH >= kSourceHeight) {
+                    cv::Mat searchMaskRoi = _canvasMask(cv::Rect(
+                        searchLeft, searchTop, searchW, searchH));
+                    if (cv::countNonZero(searchMaskRoi) > 0) {
+                        cv::Mat searchRegion = _canvas(cv::Rect(
+                            searchLeft, searchTop, searchW, searchH));
+
+                        cv::Mat sg, rg;
+                        cv::cvtColor(sourceRegion, sg, cv::COLOR_BGR2GRAY);
+                        cv::cvtColor(searchRegion, rg, cv::COLOR_BGR2GRAY);
+
+                        cv::Mat result;
+                        cv::matchTemplate(rg, sg, result,
+                                          cv::TM_CCOEFF_NORMED);
+
+                        double rmin, rmax;
+                        cv::Point lmin, lmax;
+                        cv::minMaxLoc(result, &rmin, &rmax, &lmin, &lmax);
+                        ncc1dConfidence = rmax;
+
+                        if (ncc1dConfidence >= 0.6) {
+                            const int matchX = searchLeft + lmax.x;
+                            int rawDx = matchX - (dstX + kSourceXInset);
+                            if (rawDx >  kRadius) rawDx =  kRadius;
+                            if (rawDx < -kRadius) rawDx = -kRadius;
+                            ncc1dDx = rawDx;
+                            dstX += ncc1dDx;
+                            ncc1dApplied = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V15-1dncc] #%ld dx=%+d conf=%.3f applied=%d "
+                "(poseDstX=%d -> dstX=%d)",
+                (long)_engineCallCounter, ncc1dDx, ncc1dConfidence,
+                (int)ncc1dApplied, poseDstX, dstX);
+        }
+
+        // V15 — ORB detect runs only if any feature-using stage is
+        // enabled.  Skips ~5 ms per accept when slitscan-rotate /
+        // slitscan-both-default (pose-only + 1D NCC + feather) don't
+        // need it.
+        const bool needFeatures =
+            _config.enableTriangulation ||
+            _config.enable2dNcc ||
+            _config.enableRansacHomography;
+
         std::vector<cv::KeyPoint> curKeypoints;
         cv::Mat curDescriptors;
-        {
+        if (needFeatures) {
             cv::Mat curGray;
             cv::cvtColor(frameBGR, curGray, cv::COLOR_BGR2GRAY);
             _orbDetector->detectAndCompute(curGray, cv::noArray(),
@@ -856,7 +991,14 @@ static const double kPanAxisFractionRect = 0.30;
         // were computed (e.g., first accept, or _hasPrevAccept=false).
         std::vector<cv::Point2d> prevPts, curPts;
 
-        if (_hasPrevAccept
+        // V15 — feature matching runs whenever ORB is detected.  The
+        // resulting prevPts/curPts are reused by triangulation (this
+        // block), 2D NCC (V13.0g code, gated on _config.enable2dNcc),
+        // and RANSAC homography (V14.0a code, gated on
+        // _config.enableRansacHomography).  Triangulation logic itself
+        // is gated on _config.enableTriangulation inside.
+        if (needFeatures
+            && _hasPrevAccept
             && !curDescriptors.empty()
             && !_prevDescriptors.empty()
             && _prevKeypoints.size() >= 8
@@ -886,7 +1028,10 @@ static const double kPanAxisFractionRect = 0.30;
                 }
             }
 
-            if (prevPts.size() >= 8) {
+            // V15 — triangulation algorithm gated on enableTriangulation.
+            // ORB matches above (prevPts/curPts) are computed regardless
+            // because they're shared with V14.0a RANSAC homography below.
+            if (_config.enableTriangulation && prevPts.size() >= 8) {
                 // Build cv-frame projection matrices.  Pose convention:
                 //   R_arkit is camera-to-world in arkit coords.
                 //   R_cv  = M × R_arkit × M^T  (M = diag(1,-1,-1)).
@@ -1027,6 +1172,99 @@ static const double kPanAxisFractionRect = 0.30;
                 poseDstX, poseDstY, dstX, dstY);
         }
 
+        // ── V15 LAYER 1.5: V13.0g-style 2D NCC fine-alignment ────────
+        // Restored from V13.0g (was deleted in V14.0a in favour of
+        // RANSAC homography).  Gated on _config.enable2dNcc.  When both
+        // 2D NCC and RANSAC are enabled, 2D NCC's translation refines
+        // dstX/dstY first; RANSAC then runs on top — if RANSAC produces
+        // a valid homography it warps the slit non-rigidly, overriding
+        // the rectangular paste path.  When RANSAC is disabled, 2D NCC
+        // is the only refinement after triangulation.
+        //
+        // Source: top 100 px of clipped slit, X-inset 30 px each side
+        // (so cv::matchTemplate has slide room).  Search: canvas region
+        // around (dstX, dstY) with ±30 px X+Y slop.  Confidence ≥ 0.6
+        // to apply, Δx/Δy each capped at ±30.
+        int ncc2dDx = 0, ncc2dDy = 0;
+        double ncc2dConfidence = 0.0;
+        bool ncc2dApplied = false;
+
+        if (_config.enable2dNcc) {
+            constexpr int kNccSourceHeight = 100;
+            constexpr int kNccSearchMargin = 30;
+            constexpr int kNccSourceXInset = 30;
+
+            const int sourceW = clipW - 2 * kNccSourceXInset;
+
+            if (sourceW > 0
+                && srcClipY + kNccSourceHeight <= frameBGR.rows
+                && srcClipX + kNccSourceXInset + sourceW <= frameBGR.cols) {
+
+                cv::Mat sourceRegion = frameBGR(cv::Rect(
+                    srcClipX + kNccSourceXInset,
+                    srcClipY,
+                    sourceW, kNccSourceHeight));
+
+                const int expectedMatchX = dstX + kNccSourceXInset;
+                const int expectedMatchY = dstY;
+
+                int searchLeft = std::max(0, expectedMatchX - kNccSearchMargin);
+                int searchTop = std::max(0, expectedMatchY - kNccSearchMargin);
+                int searchRight = std::min((int)_canvas.cols,
+                                  expectedMatchX + sourceW + kNccSearchMargin);
+                int searchBottom = std::min((int)_canvas.rows,
+                                  expectedMatchY + kNccSourceHeight + kNccSearchMargin);
+                const int searchW = searchRight - searchLeft;
+                const int searchH = searchBottom - searchTop;
+
+                if (searchW >= sourceW && searchH >= kNccSourceHeight) {
+                    cv::Mat searchMaskRoi = _canvasMask(cv::Rect(
+                        searchLeft, searchTop, searchW, searchH));
+                    if (cv::countNonZero(searchMaskRoi) > 0) {
+                        cv::Mat searchRegion = _canvas(cv::Rect(
+                            searchLeft, searchTop, searchW, searchH));
+
+                        cv::Mat sg, rg;
+                        cv::cvtColor(sourceRegion, sg, cv::COLOR_BGR2GRAY);
+                        cv::cvtColor(searchRegion, rg, cv::COLOR_BGR2GRAY);
+
+                        cv::Mat result;
+                        cv::matchTemplate(rg, sg, result, cv::TM_CCOEFF_NORMED);
+
+                        double rmin, rmax;
+                        cv::Point lmin, lmax;
+                        cv::minMaxLoc(result, &rmin, &rmax, &lmin, &lmax);
+                        ncc2dConfidence = rmax;
+
+                        if (ncc2dConfidence >= 0.6) {
+                            const int matchX = searchLeft + lmax.x;
+                            const int matchY = searchTop + lmax.y;
+                            int rawDx = matchX - expectedMatchX;
+                            int rawDy = matchY - expectedMatchY;
+                            if (rawDx >  kNccSearchMargin) rawDx =  kNccSearchMargin;
+                            if (rawDx < -kNccSearchMargin) rawDx = -kNccSearchMargin;
+                            if (rawDy >  kNccSearchMargin) rawDy =  kNccSearchMargin;
+                            if (rawDy < -kNccSearchMargin) rawDy = -kNccSearchMargin;
+
+                            ncc2dDx = rawDx;
+                            ncc2dDy = rawDy;
+                            dstX += ncc2dDx;
+                            dstY += ncc2dDy;
+                            ncc2dApplied = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (_engineCallCounter % 5 == 0 || _engineCallCounter <= 5) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V15-2dncc] #%ld dx=%+d dy=%+d conf=%.3f applied=%d "
+                "(after-tri dstX=%d dstY=%d)",
+                (long)_engineCallCounter, ncc2dDx, ncc2dDy,
+                ncc2dConfidence, (int)ncc2dApplied, dstX, dstY);
+        }
+
         // ── LAYER 2: V14.0a RANSAC homography refinement ─────────────
         // V13.0g used 2D NCC to find a single (Δx, Δy) translation that
         // best aligned the slit's overlap region with the canvas's
@@ -1056,7 +1294,11 @@ static const double kPanAxisFractionRect = 0.30;
         int homographyInlierCount = 0;
         double homographyAvgReproj = 0.0;
 
-        if (_hasPrevAccept && prevPts.size() >= 8 && curPts.size() >= 8) {
+        // V15 — RANSAC homography gated on enableRansacHomography.
+        if (_config.enableRansacHomography
+            && _hasPrevAccept
+            && prevPts.size() >= 8
+            && curPts.size() >= 8) {
             // Build per-match canvas-coord targets: where each prev
             // feature was actually painted on the canvas.
             //
@@ -1234,13 +1476,54 @@ static const double kPanAxisFractionRect = 0.30;
 
         [tele setValue:@(_maxDstY + clipH) forKey:@"paintedExtent"];
 
-        // ── First-painted-wins paint of warpedCanvas onto _canvas ───
+        // ── V15: Paint warpedCanvas onto _canvas, mode per config ────
+        // FirstPaintedWins (default for slitscan-rotate, V13.0e+ baseline):
+        //   Paint only where canvas is currently UNPAINTED (mask==0).
+        //   Already-painted pixels are protected.
+        //
+        // FeatherBlend (default for slitscan-both):
+        //   Paint UNPAINTED canvas pixels straight (mask==0 → copy).
+        //   Already-painted overlap pixels (mask==255) get an alpha
+        //   blend with the new content, preserving the first slit's
+        //   structural signal while smoothing slit boundaries.
+        //   Hypothesis (Ram): with no accept gate (kMinAcceptDeltaPx
+        //   = 0 in slitscan-both default), per-accept advance is small
+        //   (~5–10 px) → per-accept misalignment is small → blending
+        //   small misalignment over large overlap looks smooth, not
+        //   ghosted (the V13.0d ghosting came from blending 50 px
+        //   misalignment in a 50 px overlap zone — much larger error/
+        //   overlap ratio).
         cv::Mat canvasMaskZero;
         cv::compare(_canvasMask, 0, canvasMaskZero, cv::CMP_EQ);
-        cv::Mat paintMask;
-        cv::bitwise_and(canvasMaskZero, warpedCanvasMask, paintMask);
-        warpedCanvas.copyTo(_canvas, paintMask);
-        cv::bitwise_or(_canvasMask, paintMask, _canvasMask);
+
+        cv::Mat paintMaskFresh;
+        cv::bitwise_and(canvasMaskZero, warpedCanvasMask, paintMaskFresh);
+
+        // Always paint unpainted canvas pixels straight from new slit.
+        warpedCanvas.copyTo(_canvas, paintMaskFresh);
+        cv::bitwise_or(_canvasMask, paintMaskFresh, _canvasMask);
+
+        if (_config.paintMode == RLISPaintModeFeatherBlend) {
+            // For overlap pixels (already painted AND warpedCanvasMask
+            // has new content): alpha-blend at 0.3 weight on new
+            // content (= 70% prev / 30% new).  Choice of 0.3 keeps
+            // first-arrival's signal dominant while letting later
+            // slits soften visible seams.  At dense per-accept advance
+            // (gate=0), each canvas pixel sees ~30 successive blends;
+            // first-arrival's effective weight is 0.7^N + decay terms,
+            // which converges so the FIRST slit dominates ~50% of
+            // final value — analogous in spirit to first-painted-wins
+            // but smoother at boundaries.
+            cv::Mat canvasMaskNonZero;
+            cv::compare(_canvasMask, 0, canvasMaskNonZero, cv::CMP_NE);
+            cv::Mat overlapMask;
+            cv::bitwise_and(canvasMaskNonZero, warpedCanvasMask, overlapMask);
+            if (cv::countNonZero(overlapMask) > 0) {
+                cv::Mat blended;
+                cv::addWeighted(warpedCanvas, 0.3, _canvas, 0.7, 0.0, blended);
+                blended.copyTo(_canvas, overlapMask);
+            }
+        }
 
         _accepted += 1;
 

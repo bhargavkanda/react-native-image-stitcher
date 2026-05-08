@@ -96,12 +96,20 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         let snapQ    = (options["snapshotJpegQuality"] as? Int) ?? 75
         let snapN    = (options["snapshotEveryNAccepts"] as? Int) ?? 1
         let rotation = (options["frameRotationDegrees"] as? Int) ?? 90
-        // V10: engine selection.  'hybrid' (default) = v9 cylindrical
-        // + KLT optical flow + feather.  'slitscan' = Apple-style
-        // strip-painting.  Both engines share the same JS-facing
-        // contract; pick per-capture based on what the operator's
-        // gesture is best matched to.
-        let engineMode = (options["engine"] as? String) ?? "hybrid"
+        // V15 — engine selection.  Three modes:
+        //   'hybrid'           — planar projection + feature matching
+        //   'slitscan-rotate'  — V13.0a + 1D NCC for rotation wobble
+        //   'slitscan-both'    — DEFAULT — V13.0a + no gate + feather
+        //                         blend; iterate via per-stage toggles
+        //                         in the config dict.
+        // Backward compat: 'firstwins-rectilinear' → 'slitscan-rotate'.
+        // Legacy 'firstwins' / 'firstwins-zoomed' / 'slitscan' fall
+        // back to 'slitscan-both' with a deprecation warning.
+        let engineMode = (options["engine"] as? String) ?? "slitscan-both"
+
+        // V15 — per-stage config overrides.  All optional; missing
+        // fields use mode defaults from +[RLISStitcherConfig configForMode:].
+        let configOverrides = options["config"] as? [String: Any] ?? [:]
 
         RetaiLensIncrementalStitcher.shared.start(
             composeWidth: composeW,
@@ -112,7 +120,8 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
             snapshotJpegQuality: snapQ,
             snapshotEveryNAccepts: snapN,
             frameRotationDegrees: rotation,
-            engineMode: engineMode
+            engineMode: engineMode,
+            configOverrides: configOverrides
         )
         resolver(["ok": true])
     }

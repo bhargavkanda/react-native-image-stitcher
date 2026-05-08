@@ -121,6 +121,86 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
 @end
 
 
+/// V15 — paint-mode toggle for the slit-scan engine.
+/// `RLISPaintModeFirstPaintedWins` preserves the first frame's content
+/// (V13.0e+ default).  `RLISPaintModeFeatherBlend` alpha-blends new
+/// content into already-painted pixels at slit boundaries (V13.0d-style
+/// row alpha ramp), aiming to smooth visible seams when many slits
+/// stack with small per-accept advance.
+typedef NS_ENUM(NSInteger, RLISPaintMode) {
+    RLISPaintModeFirstPaintedWins = 0,
+    RLISPaintModeFeatherBlend = 1,
+};
+
+/// V15 — projection toggle for the hybrid engine.
+/// `RLISHybridProjectionCylindrical` is the V12.x baseline; `Planar`
+/// uses cv::detail::PlaneWarper, well-behaved for pans under ~60°.
+typedef NS_ENUM(NSInteger, RLISHybridProjection) {
+    RLISHybridProjectionCylindrical = 0,
+    RLISHybridProjectionPlanar = 1,
+};
+
+/// V15 stitcher config — single source of truth for which correction
+/// stages run in the slit-scan and hybrid engines.  Each engine mode
+/// (`hybrid`, `slitscan-rotate`, `slitscan-both`) has a default config
+/// returned by `+configForMode:`; JS-side callers (settings UI, capture
+/// start options) override individual fields on top of the default.
+///
+/// V13.0e+/V13.0g/V14.0a correction stages are preserved in the source;
+/// each is gated on the corresponding `enableX` flag.  Field iteration
+/// happens by toggling settings, not by recompiling.
+@interface RLISStitcherConfig : NSObject
+
+// ── Slit shaping (slit-scan engine only) ────────────────────────────
+
+/// Fraction of the pan-axis the rectilinear slit retains per frame
+/// (the rest is cropped equally from both edges).  Range 0.10 – 0.70.
+/// Default 0.30 for both slitscan modes; n/a for hybrid.
+@property (nonatomic) double kPanAxisFractionRect;
+
+/// Minimum pan-axis advance required before a frame is accepted.
+/// 0 = accept on every consumeFrame (Apple-dense slit-scan); 50 =
+/// V13.0g default.  Default 0 for both slitscan modes; n/a for hybrid.
+@property (nonatomic) NSInteger kMinAcceptDeltaPx;
+
+// ── Per-stage correction toggles (slit-scan engine) ─────────────────
+
+/// V13.0e+: ORB triangulation + median-Z parallax correction.
+@property (nonatomic) BOOL enableTriangulation;
+/// V13.0g: per-accept incremental Δt accumulator on top of triangulation.
+@property (nonatomic) BOOL enableTriAccumulator;
+
+/// V15 new: 1D NCC perpendicular-axis wobble correction (slitscan-rotate).
+@property (nonatomic) BOOL enable1dNcc;
+/// 1D NCC search radius in pixels (5 – 30).
+@property (nonatomic) NSInteger nccSearchRadius1d;
+
+/// V13.0g: 2D NCC fine-alignment after triangulation.
+@property (nonatomic) BOOL enable2dNcc;
+/// V14.0a: RANSAC homography per slit + cv::warpPerspective.
+@property (nonatomic) BOOL enableRansacHomography;
+
+/// V15 new: paint mode for the slit-scan engine.  Default
+/// FirstPaintedWins for slitscan-rotate, FeatherBlend for slitscan-both.
+@property (nonatomic) RLISPaintMode paintMode;
+
+// ── Hybrid-specific ─────────────────────────────────────────────────
+
+/// V15 new: projection for hybrid engine.  Default Planar in V15
+/// (was Cylindrical in V12.x – V14.0a).
+@property (nonatomic) RLISHybridProjection hybridProjection;
+
+/// Build a default config for the named engine mode.
+/// Recognised modes: `@"hybrid"`, `@"slitscan-rotate"`,
+/// `@"slitscan-both"`.  Backward-compat: `@"firstwins-rectilinear"`
+/// maps to `slitscan-rotate`; legacy `@"firstwins"` /
+/// `@"firstwins-zoomed"` log a deprecation warning and fall back to
+/// `slitscan-both`.  Unrecognised modes default to `slitscan-both`.
++ (instancetype)configForMode:(NSString *)mode;
+
+@end
+
+
 /// Snapshot of the current panorama canvas.  Returned by `snapshot`.
 @interface RLISSnapshot : NSObject
 /// Path to the JPEG written for this snapshot.  Lives in
@@ -154,6 +234,12 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
               frameRotationDegrees:(NSInteger)frameRotationDegrees NS_DESIGNATED_INITIALIZER;
 
 - (instancetype)init NS_UNAVAILABLE;
+
+/// V15 — set the per-stage correction config.  Should be called once
+/// after init, before any `ingestPixelBuffer:` call.  If never called,
+/// the engine uses a default equivalent to
+/// `+[RLISStitcherConfig configForMode:@"hybrid"]`.
+- (void)setConfig:(RLISStitcherConfig *)config;
 
 /// Try to incorporate `pixelBuffer` into the running panorama.
 ///

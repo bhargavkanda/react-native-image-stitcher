@@ -49,6 +49,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)init NS_UNAVAILABLE;
 
+/// V15 — set the per-stage correction config.  Should be called once
+/// after init, before any `ingestPixelBuffer:` call.  Subsequent calls
+/// replace the config but mid-capture changes can produce inconsistent
+/// state (prev features tracked under different settings).  Best
+/// practice: reset the engine when config changes.  If never called,
+/// the engine uses a default equivalent to
+/// `+[RLISStitcherConfig configForMode:@"slitscan-both"]`.
+- (void)setConfig:(RLISStitcherConfig *)config;
+
 - (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                        qx:(double)qx
                                        qy:(double)qy

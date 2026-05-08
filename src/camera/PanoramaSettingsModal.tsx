@@ -48,33 +48,44 @@ export interface PanoramaSettings {
    */
   useARPreview: boolean;
   /**
-   * Incremental engine choice for live realtime stitching (only used
-   * when AR preview is on).
-   *   'hybrid'                 — Cylindrical + KLT + feather blend.
-   *   'firstwins'              — Cylindrical + V12.4 central-70%
-   *                              slit-scan crop + first-painted-wins.
-   *                              Original V12.4 baseline; no viewport
-   *                              zoom (viewport != PiP).
-   *   'firstwins-zoomed'       — Same engine as 'firstwins' but JS
-   *                              applies a viewport-zoom transform to
-   *                              the live camera so it matches the
-   *                              central region the engine paints.
-   *                              iOS-pano equivalent.
-   *   'firstwins-rectilinear'  — No cylindrical warp anywhere.  First
-   *                              frame pasted raw onto canvas;
-   *                              subsequent frames contribute a
-   *                              narrow central strip placed by
-   *                              ARKit pose-delta.  Zero cylindrical
-   *                              curvature.  Viewport zoom applied.
+   * V15 — Incremental engine choice for live realtime stitching.
+   *   'hybrid'           — Whole-frame projection + feature matching;
+   *                        planar by default (was cylindrical).
+   *   'slitscan-rotate'  — V13.0a baseline + 1D NCC for rotation
+   *                        wobble correction.
+   *   'slitscan-both'    — DEFAULT.  V13.0a + no accept gate +
+   *                        feather blend.  Iterate via per-stage
+   *                        toggles below.
    *
-   * All four are A/B-comparable on the same scene by toggling here
+   * All three are A/B-comparable on the same scene by toggling here
    * without restarting the app.
    */
   incrementalEngine:
     | 'hybrid'
-    | 'firstwins'
-    | 'firstwins-zoomed'
-    | 'firstwins-rectilinear';
+    | 'slitscan-rotate'
+    | 'slitscan-both';
+
+  /**
+   * V15 — Slit-scan slit width (fraction of pan-axis retained per
+   * frame).  Range 0.10 – 0.70.  Smaller = less within-slit multi-
+   * depth disagreement but tighter overlap budget at fast pans.
+   * Default 0.30.  Only applied to slitscan-* engines.
+   */
+  slitWidthFraction: number;
+
+  /**
+   * V15 — Per-stage correction toggles for slitscan-both.  Settings
+   * UI exposes these so iteration happens via toggles, not rebuilds.
+   */
+  acceptGate: 0 | 50;
+  enableTriangulation: boolean;
+  enableTriAccumulator: boolean;
+  enable2dNcc: boolean;
+  enableRansacHomography: boolean;
+  paintMode: 'FirstPaintedWins' | 'FeatherBlend';
+  hybridProjection: 'Cylindrical' | 'Planar';
+  /** 1D NCC search radius (slitscan-rotate only). */
+  nccSearchRadius1d: number;
   /** Hard cap on hold duration (ms).  0 disables auto-stop. */
   maxRecordingMs: number;
   /** Frames per second of recording to sample for stitching. */
@@ -138,7 +149,18 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // AR-backed capture is the default — vision-camera path is kept as
   // a fallback while we shake out edge cases.
   useARPreview: true,
-  incrementalEngine: 'hybrid',
+  // V15 — slitscan-both is the default; iterate via per-stage toggles
+  // below (no rebuilds needed).
+  incrementalEngine: 'slitscan-both',
+  slitWidthFraction: 0.30,
+  acceptGate: 0,
+  enableTriangulation: false,
+  enableTriAccumulator: false,
+  enable2dNcc: false,
+  enableRansacHomography: false,
+  paintMode: 'FeatherBlend',
+  hybridProjection: 'Planar',
+  nccSearchRadius1d: 15,
   maxRecordingMs: 8000,
   framesPerSecond: 3,
   minFrames: 6,
@@ -228,10 +250,66 @@ export function PanoramaSettingsModal({
 
             <SectionHeader title="Incremental engine (AR mode only)" />
             <SegmentedControl
-              options={['hybrid', 'firstwins', 'firstwins-zoomed', 'firstwins-rectilinear']}
+              options={['hybrid', 'slitscan-rotate', 'slitscan-both']}
               value={settings.incrementalEngine}
               onChange={(v) => update({ incrementalEngine: v as PanoramaSettings['incrementalEngine'] })}
-              caption="hybrid: cylindrical+KLT+feather. firstwins: cylindrical+70% slit+first-painted-wins (V12.4 baseline). firstwins-zoomed: same engine, viewport zoomed to match captured region (iOS-pano equivalent). firstwins-rectilinear: NO cylindrical warp — first frame pasted raw, subsequent frames paint narrow central strips placed by ARKit pose. Zero cylindrical curvature."
+              caption="hybrid: whole-frame projection + feature matching (planar by default). slitscan-rotate: V13.0a + 1D NCC for rotation wobble. slitscan-both (default): V13.0a + no accept gate + feather blend; iterate via toggles below."
+            />
+
+            <SectionHeader title="Slit width (slit-scan modes only)" />
+            <SegmentedControl
+              options={['0.10', '0.20', '0.30', '0.40', '0.50', '0.70']}
+              value={settings.slitWidthFraction.toFixed(2)}
+              onChange={(v) => update({ slitWidthFraction: parseFloat(v) })}
+              caption="Fraction of pan-axis the slit retains. 0.10 = narrow (less depth disagreement, tighter overlap budget). 0.30 = V15 default. 0.70 = V13.0g default (visible door-shear on multi-depth)."
+            />
+
+            <SectionHeader title="Accept gate (slit-scan modes only)" />
+            <SegmentedControl
+              options={['0', '50']}
+              value={String(settings.acceptGate)}
+              onChange={(v) => update({ acceptGate: parseInt(v, 10) as PanoramaSettings['acceptGate'] })}
+              caption="0 = accept on every frame (Apple-dense slit-scan, default). 50 = V13.0g throttle (one accept per 50px advance)."
+            />
+
+            <SectionHeader title="Paint mode (slit-scan modes only)" />
+            <SegmentedControl
+              options={['FirstPaintedWins', 'FeatherBlend']}
+              value={settings.paintMode}
+              onChange={(v) => update({ paintMode: v as PanoramaSettings['paintMode'] })}
+              caption="FirstPaintedWins: protect already-painted pixels (V13.0e+ baseline; sharper, hard seams). FeatherBlend (default): alpha-blend new content into already-painted overlap (V15 hypothesis: smooths seams when accept gate is 0)."
+            />
+
+            <SectionHeader title="Triangulation parallax (slitscan-both)" />
+            <SegmentedControl
+              options={['off', 'on']}
+              value={settings.enableTriangulation ? 'on' : 'off'}
+              onChange={(v) => update({ enableTriangulation: v === 'on' })}
+              caption="V13.0e+ ORB triangulation + median-Z parallax correction.  Adds ~10ms/accept."
+            />
+
+            <SectionHeader title="2D NCC fine-alignment (slitscan-both)" />
+            <SegmentedControl
+              options={['off', 'on']}
+              value={settings.enable2dNcc ? 'on' : 'off'}
+              onChange={(v) => update({ enable2dNcc: v === 'on' })}
+              caption="V13.0g 2D NCC after triangulation.  Refines (Δx, Δy) translation via cv::matchTemplate."
+            />
+
+            <SectionHeader title="RANSAC homography (slitscan-both)" />
+            <SegmentedControl
+              options={['off', 'on']}
+              value={settings.enableRansacHomography ? 'on' : 'off'}
+              onChange={(v) => update({ enableRansacHomography: v === 'on' })}
+              caption="V14.0a RANSAC 3×3 homography per slit + cv::warpPerspective.  Supersedes rectangular paste when successful (8 inliers, det>1e-6)."
+            />
+
+            <SectionHeader title="Hybrid projection" />
+            <SegmentedControl
+              options={['Planar', 'Cylindrical']}
+              value={settings.hybridProjection}
+              onChange={(v) => update({ hybridProjection: v as PanoramaSettings['hybridProjection'] })}
+              caption="V15 hybrid mode default = Planar (cv::detail::PlaneWarper, well-behaved <60° pans).  Cylindrical preserves V12.x – V14.0a behaviour but has the documented landscape roll-asymmetry bug."
             />
 
             <SectionHeader title="Recording cap" />

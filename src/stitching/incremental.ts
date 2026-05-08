@@ -148,34 +148,78 @@ export interface IncrementalStartOptions {
    */
   frameRotationDegrees?: 0 | 90 | 180 | 270;
   /**
-   * Engine mode:
-   *   'hybrid'                — Cylindrical projection + KLT optical-flow
-   *                             refinement + feather blend.
-   *   'firstwins'             — Cylindrical projection + V12.4 central-70%
-   *                             slit-scan crop + first-painted-wins overlay.
-   *                             Original V12.4 firstwins behaviour, no
-   *                             viewport zoom — kept as a baseline.
-   *   'firstwins-zoomed'      — Same engine as 'firstwins' but JS applies
-   *                             a viewport-zoom transform so the live
-   *                             camera preview shows EXACTLY the central
-   *                             region that gets painted (matches Apple's
-   *                             pano viewport-vs-output relationship).
-   *                             No native engine change vs 'firstwins'.
-   *   'firstwins-rectilinear' — Skip cylindrical warp entirely.  First
-   *                             frame is pasted raw onto the canvas
-   *                             (matches the live viewport pixel-for-pixel).
-   *                             Subsequent frames contribute a narrow
-   *                             central strip placed by ARKit pose at
-   *                             canvas_Y = -f·pitch_delta (landscape) or
-   *                             canvas_X = -f·yaw_delta (portrait).
-   *                             Zero cylindrical-projection curvature.
-   *                             Limit: very wide pans (>~70° per direction)
-   *                             will stretch at the edges due to inherent
-   *                             rectilinear projection limits.
+   * Engine mode (V15):
+   *   'hybrid'           — Whole-frame projection + feature matching;
+   *                        planar projection by default (was cylindrical
+   *                        before V15; cylindrical can be re-enabled via
+   *                        `config.hybridProjection`).
+   *   'slitscan-rotate'  — V13.0a baseline (pose-only paste, rectilinear,
+   *                        first-painted-wins) + 1D NCC for rotation
+   *                        wobble correction.
+   *   'slitscan-both'    — DEFAULT.  V13.0a baseline + no accept gate
+   *                        + feather blend.  Iterate via `config`
+   *                        overrides (toggle triangulation / 2D NCC /
+   *                        RANSAC homography / paint mode etc.).
    *
-   * Default 'hybrid' is the safer choice.
+   * Backward compat: 'firstwins-rectilinear' is mapped to
+   * 'slitscan-rotate'.  Legacy 'firstwins', 'firstwins-zoomed', and
+   * 'slitscan' fall back to 'slitscan-both' with a deprecation warning
+   * in the native log.
    */
-  engine?: 'hybrid' | 'firstwins' | 'firstwins-zoomed' | 'firstwins-rectilinear';
+  engine?: 'hybrid' | 'slitscan-rotate' | 'slitscan-both' |
+           // Deprecated — kept for type-compat during the V14 → V15 transition:
+           'firstwins' | 'firstwins-zoomed' | 'firstwins-rectilinear' | 'slitscan';
+  /**
+   * V15 — per-stage correction config overrides.  Mode-driven defaults
+   * are applied first (see RLISStitcherConfig +configForMode:); fields
+   * present here override those defaults.  Any field may be omitted to
+   * accept the default.
+   */
+  config?: Partial<StitcherConfig>;
+}
+
+
+/**
+ * V15 — per-stage stitcher correction config.  Each field is a runtime
+ * toggle/value; the native engine reads it on every ingest call.  All
+ * fields optional (omit to accept the engine-mode default).
+ */
+export interface StitcherConfig {
+  // Slit shaping (slit-scan engine only)
+  /** Fraction of pan-axis the rectilinear slit retains per frame.
+   *  Range 0.10 – 0.70, default 0.30 in V15 slit-scan modes. */
+  kPanAxisFractionRect: number;
+  /** Minimum pan-axis advance (px) before a frame is accepted.
+   *  0 = accept on every consumeFrame (Apple-dense slit-scan, V15
+   *  default).  50 = V13.0g default. */
+  kMinAcceptDeltaPx: number;
+
+  // Per-stage correction toggles
+  /** V13.0e+ ORB triangulation + median-Z parallax correction. */
+  enableTriangulation: boolean;
+  /** V13.0g per-accept incremental Δt accumulator on top of triangulation. */
+  enableTriAccumulator: boolean;
+  /** V15 1D NCC perpendicular-axis wobble correction (slitscan-rotate
+   *  default).  Independent of the other correction stages. */
+  enable1dNcc: boolean;
+  /** 1D NCC search radius in pixels (5 – 60). */
+  nccSearchRadius1d: number;
+  /** V13.0g 2D NCC fine-alignment after triangulation. */
+  enable2dNcc: boolean;
+  /** V14.0a RANSAC homography per slit + cv::warpPerspective.  When
+   *  enabled and successful, supersedes the rectangular paste path. */
+  enableRansacHomography: boolean;
+
+  // Paint mode (slit-scan engine only)
+  /** 'FirstPaintedWins' protects already-painted pixels (V13.0e+
+   *  default).  'FeatherBlend' alpha-blends new content into already-
+   *  painted overlap pixels (V13.0d-style; V15 slitscan-both default). */
+  paintMode: 'FirstPaintedWins' | 'FeatherBlend';
+
+  // Hybrid engine
+  /** 'Cylindrical' (V12.x – V14.0a behaviour) or 'Planar' (V15 default;
+   *  cv::detail::PlaneWarper).  Planar is well-behaved for pans <60°. */
+  hybridProjection: 'Cylindrical' | 'Planar';
 }
 
 

@@ -91,6 +91,70 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
 @implementation RLISSnapshot
 @end
 
+
+// ── V15 — RLISStitcherConfig ────────────────────────────────────────
+
+@implementation RLISStitcherConfig
+
++ (instancetype)configForMode:(NSString *)mode {
+    RLISStitcherConfig *c = [[RLISStitcherConfig alloc] init];
+
+    NSString *m = mode ?: @"slitscan-both";
+    // Backward-compat translation.
+    if ([m isEqualToString:@"firstwins-rectilinear"]) {
+        m = @"slitscan-rotate";
+    } else if ([m isEqualToString:@"firstwins"] ||
+               [m isEqualToString:@"firstwins-zoomed"]) {
+        NSLog(@"[V15-config] DEPRECATED engine mode '%@' — falling "
+              @"back to 'slitscan-both'", mode);
+        m = @"slitscan-both";
+    }
+
+    if ([m isEqualToString:@"hybrid"]) {
+        // n/a slit-shaping; hybrid uses whole-frame projection.
+        c.kPanAxisFractionRect       = 0.30;  // unused for hybrid
+        c.kMinAcceptDeltaPx          = 50;
+        c.enableTriangulation        = NO;
+        c.enableTriAccumulator       = NO;
+        c.enable1dNcc                = NO;
+        c.nccSearchRadius1d          = 15;
+        c.enable2dNcc                = NO;
+        c.enableRansacHomography     = NO;
+        c.paintMode                  = RLISPaintModeFeatherBlend;  // V12.x feather
+        c.hybridProjection           = RLISHybridProjectionPlanar;  // V15: planar default
+    } else if ([m isEqualToString:@"slitscan-rotate"]) {
+        // V13.0a baseline + 1D NCC.  No tri, no 2D NCC, no homography.
+        c.kPanAxisFractionRect       = 0.30;
+        c.kMinAcceptDeltaPx          = 0;     // accept on every frame
+        c.enableTriangulation        = NO;
+        c.enableTriAccumulator       = NO;
+        c.enable1dNcc                = YES;   // wobble correction
+        c.nccSearchRadius1d          = 15;
+        c.enable2dNcc                = NO;
+        c.enableRansacHomography     = NO;
+        c.paintMode                  = RLISPaintModeFirstPaintedWins;
+        c.hybridProjection           = RLISHybridProjectionPlanar;  // unused
+    } else {
+        // slitscan-both (default).  V13.0a baseline + no gate + feather.
+        // Iterate via settings UI: enable tri / 2D NCC / RANSAC as needed.
+        c.kPanAxisFractionRect       = 0.30;
+        c.kMinAcceptDeltaPx          = 0;     // accept on every frame
+        c.enableTriangulation        = NO;
+        c.enableTriAccumulator       = NO;
+        c.enable1dNcc                = NO;
+        c.nccSearchRadius1d          = 15;
+        c.enable2dNcc                = NO;
+        c.enableRansacHomography     = NO;
+        c.paintMode                  = RLISPaintModeFeatherBlend;
+        c.hybridProjection           = RLISHybridProjectionPlanar;  // unused
+    }
+
+    return c;
+}
+
+@end
+
+
 // ── Acceptance thresholds ───────────────────────────────────────────
 //
 // All values empirical seeds from the design doc.  Documented here
@@ -184,6 +248,12 @@ constexpr double kRansacReprojThresh = 5.0;
     /// frame forever.  Bumping the path each snapshot side-steps
     /// the cache.
     NSInteger _snapshotSeq;
+
+    /// V15 — runtime config controlling projection (cylindrical vs
+    /// planar) and other hybrid-specific knobs.  Set via -setConfig:
+    /// after init; defaults to hybrid factory config (planar) if
+    /// never set.
+    RLISStitcherConfig *_config;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -242,9 +312,21 @@ constexpr double kRansacReprojThresh = 5.0;
             0, -1, 0,
             0, 0, -1);
 
+        // V15 — default config (hybrid mode → planar projection).
+        // Caller should override via -setConfig: after init.
+        _config = [RLISStitcherConfig configForMode:@"hybrid"];
+
         [self reset];
     }
     return self;
+}
+
+- (void)setConfig:(RLISStitcherConfig *)config {
+    if (config == nil) return;
+    _config = config;
+    NSLog(@"[V15-config] hybrid config applied: hybridProjection=%@",
+          _config.hybridProjection == RLISHybridProjectionPlanar
+              ? @"Planar" : @"Cylindrical");
 }
 
 - (void)reset {
@@ -912,24 +994,43 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     _K_compose.convertTo(K32, CV_32F);
     R_camToPan.convertTo(R32, CV_32F);
 
-    cv::detail::CylindricalWarper warper((float)_focalCompose);
-    cv::Point corner = warper.warp(src, K32, R32,
-                                   cv::INTER_LINEAR,
-                                   cv::BORDER_REFLECT,
-                                   outImage);
-
-    // Build the mask by warping a white frame the same way.  Non-zero
-    // pixels in outMask are the valid output footprint; zero means
-    // "outside the warped frame's region" (cylinder-edge clipping).
+    // V15 — projection selectable via _config.hybridProjection.
+    // Default is Planar (cv::detail::PlaneWarper) for V15 hybrid mode,
+    // because cylindrical projection has the V12.x roll-asymmetry bug
+    // that's been documented in the V14 spec.  Planar is well-behaved
+    // for pans <60°, which is the typical retail use case.
+    cv::Point corner;
     cv::Mat whiteFrame(src.size(), CV_8UC1, cv::Scalar(255));
-    warper.warp(whiteFrame, K32, R32,
-                cv::INTER_NEAREST,
-                cv::BORDER_CONSTANT,
-                outMask);
+
+    if (_config.hybridProjection == RLISHybridProjectionPlanar) {
+        cv::detail::PlaneWarper warper((float)_focalCompose);
+        corner = warper.warp(src, K32, R32,
+                             cv::INTER_LINEAR,
+                             cv::BORDER_REFLECT,
+                             outImage);
+        warper.warp(whiteFrame, K32, R32,
+                    cv::INTER_NEAREST,
+                    cv::BORDER_CONSTANT,
+                    outMask);
+    } else {
+        cv::detail::CylindricalWarper warper((float)_focalCompose);
+        corner = warper.warp(src, K32, R32,
+                             cv::INTER_LINEAR,
+                             cv::BORDER_REFLECT,
+                             outImage);
+        warper.warp(whiteFrame, K32, R32,
+                    cv::INTER_NEAREST,
+                    cv::BORDER_CONSTANT,
+                    outMask);
+    }
 
     static bool _v14LoggedFirstWarp = false;
     if (!_v14LoggedFirstWarp) {
         _v14LoggedFirstWarp = true;
+        NSLog(@"[V15-warp] hybrid projection=%@ corner=(%d,%d) outSize=%dx%d focal=%.1f",
+              _config.hybridProjection == RLISHybridProjectionPlanar
+                  ? @"Planar" : @"Cylindrical",
+              corner.x, corner.y, outImage.cols, outImage.rows, _focalCompose);
         NSLog(@"[V14.0pre-warp] OpenCV CylindricalWarper "
               @"corner=(%d,%d) outSize=%dx%d focal=%.1f",
               corner.x, corner.y, outImage.cols, outImage.rows,

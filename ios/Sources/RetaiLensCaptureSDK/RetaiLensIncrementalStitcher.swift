@@ -244,23 +244,48 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         snapshotJpegQuality: Int,
         snapshotEveryNAccepts: Int,
         frameRotationDegrees: Int,
-        engineMode: String
+        engineMode: String,
+        configOverrides: [String: Any] = [:]
     ) {
         stateLock.lock()
         if isRunning {
             stateLock.unlock()
             return
         }
-        // V12.7 — engineMode now distinguishes 4 variants:
-        //   'hybrid'                 → hybrid engine
-        //   'firstwins'              → firstwins, cylindrical, no zoom (baseline)
-        //   'firstwins-zoomed'       → firstwins, cylindrical, JS applies viewport zoom
-        //   'firstwins-rectilinear'  → firstwins, RECTILINEAR (no warp), JS applies zoom
-        // The viewport-zoom decision is JS-only; native treats 'firstwins'
-        // and 'firstwins-zoomed' identically.
-        let isFirstwins = engineMode.hasPrefix("firstwins")
-        let useRectilinear = (engineMode == "firstwins-rectilinear")
-        if isFirstwins {
+        // V15 — engine modes:
+        //   'hybrid'           → hybrid engine, planar projection by default
+        //   'slitscan-rotate'  → slit-scan, rectilinear, V13.0a + 1D NCC
+        //   'slitscan-both'    → slit-scan, rectilinear, V13.0a + no gate
+        //                        + feather blend (iterate via overrides)
+        // Backward compat in -[RLISStitcherConfig configForMode:] handles
+        // 'firstwins-rectilinear' → 'slitscan-rotate' and warns on
+        // legacy 'firstwins' / 'firstwins-zoomed' / 'slitscan' modes.
+        let normalisedMode: String
+        switch engineMode {
+        case "hybrid": normalisedMode = "hybrid"
+        case "slitscan-rotate", "firstwins-rectilinear":
+            normalisedMode = "slitscan-rotate"
+        case "slitscan-both":
+            normalisedMode = "slitscan-both"
+        case "firstwins", "firstwins-zoomed", "slitscan":
+            NSLog("[V15-bridge] DEPRECATED engine '\(engineMode)' — using slitscan-both")
+            normalisedMode = "slitscan-both"
+        default:
+            NSLog("[V15-bridge] unknown engine '\(engineMode)' — using slitscan-both")
+            normalisedMode = "slitscan-both"
+        }
+
+        let useFirstwinsClass = normalisedMode.hasPrefix("slitscan")
+
+        // Build the V15 config: factory default for the mode, then apply
+        // JS-side overrides.
+        let config = RLISStitcherConfig(forMode: normalisedMode)
+        Self.applyConfigOverrides(configOverrides, to: config)
+
+        if useFirstwinsClass {
+            // Slit-scan engine always uses rectilinear in V15
+            // (firstwins-cylindrical and firstwins-zoomed modes were
+            // removed; their behaviour is unused).
             self.firstwinsEngine = OpenCVFirstWinsCylindricalStitcher(
                 composeWidth: composeWidth,
                 composeHeight: composeHeight,
@@ -268,8 +293,9 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                 canvasHeight: canvasHeight,
                 featherPx: featherPx,
                 frameRotationDegrees: frameRotationDegrees,
-                useRectilinear: useRectilinear
+                useRectilinear: true
             )
+            self.firstwinsEngine?.setConfig(config)
             self.hybridEngine = nil
         } else {
             self.hybridEngine = OpenCVIncrementalStitcher(
@@ -280,6 +306,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                 featherPx: featherPx,
                 frameRotationDegrees: frameRotationDegrees
             )
+            self.hybridEngine?.setConfig(config)
             self.firstwinsEngine = nil
         }
         self.isRunning = true
@@ -309,6 +336,52 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// AR delegate could deliver several more frames — each one
     /// passed consumeFrame's `isRunning == true` check and got
     /// ingested into the canvas, producing visible "phantom" frames
+    /// V15 — apply per-stage JS overrides on top of a mode default.
+    /// Keys recognised in `overrides`: any non-readonly RLISStitcherConfig
+    /// field.  Unrecognised keys are ignored.  Values out of range are
+    /// clamped silently (e.g. kPanAxisFractionRect outside [0.05, 0.90]).
+    private static func applyConfigOverrides(_ overrides: [String: Any],
+                                             to config: RLISStitcherConfig) {
+        if let v = overrides["kPanAxisFractionRect"] as? Double {
+            config.kPanAxisFractionRect = max(0.05, min(0.90, v))
+        }
+        if let v = overrides["kMinAcceptDeltaPx"] as? Int {
+            config.kMinAcceptDeltaPx = max(0, min(500, v))
+        }
+        if let v = overrides["enableTriangulation"] as? Bool {
+            config.enableTriangulation = v
+        }
+        if let v = overrides["enableTriAccumulator"] as? Bool {
+            config.enableTriAccumulator = v
+        }
+        if let v = overrides["enable1dNcc"] as? Bool {
+            config.enable1dNcc = v
+        }
+        if let v = overrides["nccSearchRadius1d"] as? Int {
+            config.nccSearchRadius1d = max(5, min(60, v))
+        }
+        if let v = overrides["enable2dNcc"] as? Bool {
+            config.enable2dNcc = v
+        }
+        if let v = overrides["enableRansacHomography"] as? Bool {
+            config.enableRansacHomography = v
+        }
+        if let v = overrides["paintMode"] as? String {
+            switch v {
+            case "FirstPaintedWins": config.paintMode = .firstPaintedWins
+            case "FeatherBlend":     config.paintMode = .featherBlend
+            default: break
+            }
+        }
+        if let v = overrides["hybridProjection"] as? String {
+            switch v {
+            case "Cylindrical": config.hybridProjection = .cylindrical
+            case "Planar":      config.hybridProjection = .planar
+            default: break
+            }
+        }
+    }
+
     /// after the user thought they had released.  The engine refs
     /// and isRunning flag are now flipped SYNCHRONOUSLY here so the
     /// AR delegate's very next consumeFrame sees isRunning=false.
