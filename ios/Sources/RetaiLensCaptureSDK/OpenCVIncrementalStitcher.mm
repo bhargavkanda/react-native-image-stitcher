@@ -114,7 +114,11 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
     // Set before the per-mode overrides so per-mode only overrides
     // the fields that genuinely differ from this baseline.
     c.nccSearchMargin2d              = 12;     // was hardcoded V15.0c.4
-    c.nccConfidenceThreshold2d       = 0.75;   // was hardcoded V15.0c.4
+    // V15.0i.1 — default raised to 0.99.  At 0.75 the NCC was applying
+    // corrections on weak matches in plane-projected mode (Ram observed
+    // mid-capture wobble).  0.99 means we only apply corrections on
+    // near-perfect overlap matches; ambiguous matches are skipped.
+    c.nccConfidenceThreshold2d       = 0.99;
     c.enableNcc2dEmaSmoothing        = NO;     // 1B opt-in
     c.ncc2dEmaAlpha                  = 0.4;    // 60% prev / 40% current
     c.enableNcc2dPanAxisLock         = NO;     // 1C opt-in

@@ -237,7 +237,10 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // off by default so the V15.0c.4 baseline behaviour is preserved
   // until the operator explicitly opts in.
   nccSearchMargin2d: 12,
-  nccConfidenceThreshold2d: 0.75,
+  // V15.0i.1 — default raised to 0.99 per Ram (only apply on near-
+  // perfect overlap matches; reject ambiguous matches that snap to
+  // wrong patterns on repetitive textures like shelf rails).
+  nccConfidenceThreshold2d: 0.99,
   enableNcc2dEmaSmoothing: false,
   ncc2dEmaAlpha: 0.4,
   enableNcc2dPanAxisLock: false,
@@ -456,10 +459,10 @@ export function PanoramaSettingsModal({
 
             <SectionHeader title="2D NCC confidence threshold (V15.0d)" />
             <SegmentedControl
-              options={['0.50', '0.65', '0.75', '0.85', '0.95']}
+              options={['0.50', '0.65', '0.75', '0.85', '0.95', '0.99']}
               value={settings.nccConfidenceThreshold2d.toFixed(2)}
               onChange={(v) => update({ nccConfidenceThreshold2d: parseFloat(v) })}
-              caption="Reject NCC corrections below this confidence. Higher = stricter, fewer spurious matches on repetitive textures, but more frames where NCC silently doesn't fire. V15.0c.4 was 0.75 (now configurable)."
+              caption="Reject NCC corrections below this confidence. Higher = stricter, fewer spurious matches on repetitive textures, but more frames where NCC silently doesn't fire. V15.0c.4 was 0.75 (now configurable). 0.99 = only apply on near-perfect overlap matches."
             />
 
             <SectionHeader title="2D NCC EMA smoothing (V15.0d, 1B)" />
