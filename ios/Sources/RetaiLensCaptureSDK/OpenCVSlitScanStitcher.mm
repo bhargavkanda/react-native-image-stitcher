@@ -609,15 +609,59 @@ static const double kPanAxisFractionRect = 0.30;
             cv::rectangle(_canvasMask, roi, cv::Scalar(255), cv::FILLED);
             _firstFrameDstX = dstX;
             _firstFrameDstY = dstY;
+
+            // V15.0c FIX — when first frame painted the FULL camera
+            // frame (firstFrameFullFrame=true), reset the canvas-Y
+            // anchor to the sliver's position within the first frame.
+            // Otherwise subsequent slivers (taken from the configured
+            // sliverPosition of each new frame) land at canvas Y
+            // = -alpha × focal, which is small for typical pan tilt
+            // and therefore INSIDE the first frame's full-frame
+            // painted region (0, 0)–(rows, cols) — first-painted-wins
+            // masks them all out → "first frame paints, nothing else
+            // gets added" (Ram observed this in V15.0b).
+            //
+            // The anchor must be set so that subsequent slivers'
+            // canvas Y matches their physical position relative to
+            // first frame's full content.  For sliverPosition=Bottom,
+            // the sliver source at sensor Y = rows-subsequentClipH;
+            // first frame's full paste already painted that sensor-Y
+            // region at canvas Y = rows-subsequentClipH, so the
+            // sliver's canvas anchor should be there too.
+            if (_config.firstFrameFullFrame) {
+                const int subsequentClipH = std::max(1,
+                    (int)(frameBGR.rows * _config.kPanAxisFractionRect));
+                int anchorY = 0;
+                switch (_config.sliverPosition) {
+                    case RLISSliverPositionTop:
+                        anchorY = 0;
+                        break;
+                    case RLISSliverPositionBottom:
+                        anchorY = frameBGR.rows - subsequentClipH;
+                        break;
+                    case RLISSliverPositionCenter:
+                    default:
+                        anchorY = (frameBGR.rows - subsequentClipH) / 2;
+                        break;
+                }
+                _firstFrameDstY = anchorY;
+                NSLog(@"[V15.0c-anchor] firstFrameFullFrame=on, "
+                      @"sliverPosition=%@, frameRows=%d, "
+                      @"subsequentClipH=%d, _firstFrameDstY=%d",
+                      _config.sliverPosition == RLISSliverPositionTop ? @"Top"
+                          : (_config.sliverPosition == RLISSliverPositionBottom ? @"Bottom" : @"Center"),
+                      frameBGR.rows, subsequentClipH, anchorY);
+            }
+
             // V14.0a — first accept's canvas position becomes prev for
             // the second accept's homography target-pair construction.
             _prevAcceptDstX = dstX;
-            _prevAcceptDstY = dstY;
+            _prevAcceptDstY = _firstFrameDstY;
             // V12.11 Step D — initialise the running-max tracker
             // to first-frame position.  Subsequent frames must
             // monotonically advance from here along the pan axis.
             _maxDstX = dstX;
-            _maxDstY = dstY;
+            _maxDstY = _firstFrameDstY;
             _hasFirstFrame = true;
             _accepted = 1;
             [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
