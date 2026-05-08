@@ -122,6 +122,10 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
     c.planeSource                    = RLISPlaneSourceDisabled;
     c.virtualPlaneDepthMeters        = 1.5;
     c.arkitPlaneAlignmentThreshold   = 0.6;    // ~53° max off-camera
+    // V15.0g — Rectified is the default since Trapezoidal's
+    // tilt-induced distortion was the field-blocker on V15.0e/f.
+    // Operators can flip back to Trapezoidal for A/B comparison.
+    c.planeProjectionStyle           = RLISPlaneProjectionStyleRectified;
 
     if ([m isEqualToString:@"hybrid"]) {
         // n/a slit-shaping; hybrid uses whole-frame projection.

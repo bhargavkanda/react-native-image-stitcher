@@ -39,4 +39,9 @@ RCT_EXTERN_METHOD(appendDebugLog:(NSString *)message
 RCT_EXTERN_METHOD(getARPlaneStatus:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// V15.0g — relatch the AR plane to the camera's current aim, picking
+// the largest plane that passes the alignment threshold.
+RCT_EXTERN_METHOD(relatchARPlane:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 @end

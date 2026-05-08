@@ -272,6 +272,21 @@ export interface StitcherConfig {
    *  off-camera). */
   arkitPlaneAlignmentThreshold: number;
 
+  /** V15.0g — how the plane-projection helper renders each frame onto
+   *  the canvas.  Affects ARKitDetected and Virtual modes; ignored
+   *  when planeSource = Disabled.
+   *
+   *  - 'Trapezoidal' (V15.0b legacy): geometrically-correct 3D
+   *    raycast.  Each camera pixel maps to its plane intersection.
+   *    Result is a trapezoid that grows distorted with tilt
+   *    (cooler-bottom-2.3×-wider-than-top problem).
+   *  - 'Rectified' (V15.0g default): camera frame pasted as a clean
+   *    rectangle around its plane-projected anchor.  Eliminates the
+   *    tilt-induced trapezoidal distortion at the cost of strict 3D-
+   *    correctness — the camera's per-pixel perspective stays inside
+   *    the rectangle but doesn't reconcile across tilts. */
+  planeProjectionStyle: 'Trapezoidal' | 'Rectified';
+
   /** V15.0d — 2D NCC search half-window in pixels.  Was hardcoded
    *  ±12 in V15.0c.4.  Smaller = less wandering on repetitive
    *  textures (peg holes, slatted panels), but easier to miss the
@@ -360,6 +375,13 @@ interface NativeIncrementalModule {
   /** V15.0e — poll AR plane detection state.  Polled at ~2 Hz when
    *  planeSource=ARKitDetected so the status pill updates live. */
   getARPlaneStatus(): Promise<ARPlaneStatus>;
+  /** V15.0g — clear the latched ARKit plane and re-evaluate all
+   *  currently-tracked vertical planes against the camera's CURRENT
+   *  aim, picking the largest plane that passes the alignment
+   *  threshold.  Called by the capture screen on hold-to-scan press
+   *  so the latched plane reflects what the operator is aiming at
+   *  right NOW, not whichever plane ARKit noticed first. */
+  relatchARPlane(): Promise<{ latched: boolean }>;
   /** PiP investigation only — write a JS-side message into the
    *  Swift-side rlis-debug.log so we get a single timeline. */
   appendDebugLog?(message: string): Promise<{ ok: true }>;

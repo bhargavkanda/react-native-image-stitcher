@@ -419,6 +419,13 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         if let v = overrides["arkitPlaneAlignmentThreshold"] as? Double {
             config.arkitPlaneAlignmentThreshold = max(0.0, min(1.0, v))
         }
+        if let v = overrides["planeProjectionStyle"] as? String {
+            switch v {
+            case "Trapezoidal": config.planeProjectionStyle = .trapezoidal
+            case "Rectified":   config.planeProjectionStyle = .rectified
+            default: break
+            }
+        }
         if let v = overrides["nccSearchMargin2d"] as? Int {
             config.nccSearchMargin2d = max(4, min(60, v))
         }

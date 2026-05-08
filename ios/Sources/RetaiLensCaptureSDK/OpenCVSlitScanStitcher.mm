@@ -282,10 +282,13 @@ static os_log_t SlitDiagLog(void) {
         _config.planeSource == RLISPlaneSourceVirtual ? "Virtual"
         : (_config.planeSource == RLISPlaneSourceARKitDetected ? "ARKitDetected"
            : "Disabled");
+    const char *planeStyle =
+        _config.planeProjectionStyle == RLISPlaneProjectionStyleRectified
+            ? "Rectified" : "Trapezoidal";
     os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
         "[V15-config] slit-scan config applied: panAxisFrac=%.2f "
         "acceptGate=%ld tri=%d triAccum=%d 1dNcc=%d 2dNcc=%d "
-        "ransac=%d paint=%s planeSource=%s "
+        "ransac=%d paint=%s planeSource=%s planeStyle=%s "
         "(virtualDepth=%.2fm arkitAlignThr=%.2f) "
         "ncc2d(margin=%ld confThr=%.2f ema=%d emaA=%.2f "
         "panLock=%d crossLock=%ld)",
@@ -295,7 +298,7 @@ static os_log_t SlitDiagLog(void) {
         (int)_config.enableRansacHomography,
         _config.paintMode == RLISPaintModeFeatherBlend
             ? "FeatherBlend" : "FirstPaintedWins",
-        planeSrc,
+        planeSrc, planeStyle,
         _config.virtualPlaneDepthMeters,
         _config.arkitPlaneAlignmentThreshold,
         (long)_config.nccSearchMargin2d,
@@ -515,6 +518,66 @@ static os_log_t SlitDiagLog(void) {
             "set to %.3fm (max corner t_int on first plane-projected "
             "frame)",
             _firstPlaneTInt);
+    }
+
+    // V15.0g — Rectified rendering: REPLACE the trapezoidal canvas
+    // corners with a clean rectangle centred on the camera-center's
+    // raycast anchor.  Eliminates the bottom-wider-than-top
+    // distortion that's intrinsic to projecting a perspective image
+    // onto an oblique plane.  Only the camera CENTER is raycast; the
+    // 4 frame corners are placed as a clean rectangle of size
+    // (sensorW × scale, sensorH × scale) around the anchor, where
+    // scale = t_int_center × ppm / focal.  Result: tilting the
+    // camera moves the rectangle's anchor on the canvas (correct
+    // for panorama assembly) without warping the rectangle's shape.
+    if (_config.planeProjectionStyle == RLISPlaneProjectionStyleRectified) {
+        cv::Mat centerPixHomo =
+            (cv::Mat_<double>(3, 1) << frameBGR.cols / 2.0, frameBGR.rows / 2.0, 1.0);
+        cv::Mat centerRayCv = K_inv * centerPixHomo;
+        cv::Mat centerRayArkit = _M_arkitToCv * centerRayCv;
+        cv::Mat centerRayWorld = R_new * centerRayArkit;
+        cv::Mat diffCenter = planeOrigin - t_arkit;
+        double numCenter = diffCenter.dot(planeNormal);
+        double denomCenter = centerRayWorld.dot(planeNormal);
+        if (std::fabs(denomCenter) < 1e-6) return NO;
+        double t_int_center = numCenter / denomCenter;
+        if (t_int_center < 0.05 || t_int_center > 50.0) return NO;
+        cv::Mat P_center_world = t_arkit + t_int_center * centerRayWorld;
+        cv::Mat diffCenterWorld = P_center_world - planeOrigin;
+        double Up_center = diffCenterWorld.dot(U_axis);
+        double Vp_center = diffCenterWorld.dot(V_axis);
+        double cU_anchor = cCenterX + Up_center * kPixelsPerMeter;
+        double cV_anchor = cCenterY + Vp_center * kPixelsPerMeter;
+
+        // Scale: canvas-pixels per sensor-pixel at this depth.
+        double focal = std::sqrt(
+            _K_compose.at<double>(0, 0) * _K_compose.at<double>(1, 1));
+        double scale = t_int_center * kPixelsPerMeter / focal;
+
+        double halfW = frameBGR.cols / 2.0;
+        double halfH = frameBGR.rows / 2.0;
+        canvasCorners.clear();
+        canvasCorners.reserve(4);
+        canvasCorners.emplace_back(
+            (float)(cU_anchor - halfW * scale),
+            (float)(cV_anchor - halfH * scale));  // TL
+        canvasCorners.emplace_back(
+            (float)(cU_anchor + halfW * scale),
+            (float)(cV_anchor - halfH * scale));  // TR
+        canvasCorners.emplace_back(
+            (float)(cU_anchor + halfW * scale),
+            (float)(cV_anchor + halfH * scale));  // BR
+        canvasCorners.emplace_back(
+            (float)(cU_anchor - halfW * scale),
+            (float)(cV_anchor + halfH * scale));  // BL
+
+        if (_captureFrameCounter % 5 == 0 || _captureFrameCounter <= 5) {
+            os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                "[V15.0g-rectified] capFr=%ld anchor=(%.0f,%.0f) "
+                "scale=%.3f t_int_center=%.3fm",
+                (long)_captureFrameCounter,
+                cU_anchor, cV_anchor, scale, t_int_center);
+        }
     }
 
     // Warp + paint.

@@ -215,6 +215,31 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
     ///                        threshold
     ///   `threshold`        — current alignment threshold for
     ///                        comparison/UI display
+    /// V15.0g — clear the latched ARKit plane and re-evaluate ALL
+    /// currently-tracked vertical planes against the camera's CURRENT
+    /// aim.  Picks the BEST candidate by area-weighted alignment
+    /// score (largest plane that passes the alignment threshold).
+    /// Use this on hold-to-scan press so the plane reflects what the
+    /// operator is aiming at right now, not whichever plane ARKit
+    /// noticed first.
+    ///
+    /// Returns:
+    ///   `latched` — true if a plane was latched; false if no
+    ///               candidate passed the alignment threshold (the
+    ///               status pill will keep showing 'searching' /
+    ///               'evaluating' and the engine will refuse the
+    ///               first capture frame until a plane locks)
+    @objc(relatchARPlane:rejecter:)
+    public func relatchARPlane(
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        DispatchQueue.main.async {
+            let latched = RetaiLensARSession.shared.relatchPlaneFromCurrentAnchors()
+            resolver(["latched": latched])
+        }
+    }
+
     @objc(getARPlaneStatus:rejecter:)
     public func getARPlaneStatus(
         resolver: @escaping RCTPromiseResolveBlock,

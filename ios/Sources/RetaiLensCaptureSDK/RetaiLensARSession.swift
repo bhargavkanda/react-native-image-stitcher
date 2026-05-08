@@ -197,6 +197,111 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         return detectedPlaneTransformInternal != nil
     }
 
+    /// V15.0g — clear the latched plane and re-evaluate ALL currently-
+    /// tracked vertical ARPlaneAnchors against the camera's CURRENT
+    /// aim, picking the BEST candidate by combined alignment-and-area
+    /// score.  Use this when the user signals "I'm ready to scan" —
+    /// e.g., on hold-to-scan press — so the latched plane is whatever
+    /// they're looking at NOW, not whichever plane ARKit happened to
+    /// notice first as the camera was being mounted (Ram observed
+    /// 2026-05-08 that latching-on-detection picks random / wrong
+    /// surfaces because didAdd fires non-deterministically).
+    ///
+    /// Scoring rule:
+    ///   1. Reject any plane whose alignment score is below
+    ///      `planeAlignmentThreshold`.
+    ///   2. Among the rest, pick the LARGEST plane by area
+    ///      (`extent.x * extent.z`).  Larger planes are more likely
+    ///      to be the wall / fixture face the user is actually
+    ///      scanning, vs. small artifact planes (table edges, signs).
+    ///   3. Tiebreak on alignment if areas are nearly equal.
+    ///
+    /// Returns YES if a plane was latched, NO if no candidate passed
+    /// the alignment filter (caller should keep showing the searching
+    /// pill until the next attempt).
+    @objc public func relatchPlaneFromCurrentAnchors() -> Bool {
+        planeLatchLock.lock()
+        defer { planeLatchLock.unlock() }
+
+        // Clear any existing latch; we're picking fresh.
+        detectedPlaneTransformInternal = nil
+        bestRejectedAlignment = -1.0
+
+        guard let frame = arSession.currentFrame else {
+            os_log(.fault, log: arSessionDiagLog,
+                   "[V15.0g-relatch] no current frame; deferred until next session tick")
+            return false
+        }
+        let cameraTransform = frame.camera.transform
+        let cameraFacingWorld = simd_float3(
+            -cameraTransform.columns.2.x,
+            -cameraTransform.columns.2.y,
+            -cameraTransform.columns.2.z
+        )
+
+        var bestPlane: ARPlaneAnchor? = nil
+        var bestScore: Float = -1.0
+        var bestAlignment: Float = -1.0
+        var bestArea: Float = 0.0
+
+        for anchor in frame.anchors {
+            guard let plane = anchor as? ARPlaneAnchor else { continue }
+            if plane.alignment != .vertical { continue }
+
+            let planeNormalWorld = simd_float3(
+                plane.transform.columns.1.x,
+                plane.transform.columns.1.y,
+                plane.transform.columns.1.z
+            )
+            let dotPos = simd_dot(planeNormalWorld, cameraFacingWorld)
+            let alignment = max(dotPos, -dotPos)
+
+            if alignment < planeAlignmentThreshold {
+                if alignment > bestRejectedAlignment {
+                    bestRejectedAlignment = alignment
+                }
+                continue
+            }
+
+            // Area = extent.x × extent.z (using deprecated extent for
+            // iOS 15 compat; iOS 16+ has planeExtent which is more
+            // accurate but we don't depend on absolute precision here).
+            let area = plane.extent.x * plane.extent.z
+
+            // Composite score: area is the dominant factor (larger
+            // walls are more likely the scan target), but break ties
+            // by alignment so a plane that's both large AND well-
+            // aligned wins over one that's just large.
+            let score = area * (1.0 + alignment)
+
+            os_log(.fault, log: arSessionDiagLog,
+                   "[V15.0g-relatch] candidate plane: alignment=%f area=%fm² (extent %fx%f) score=%f",
+                   alignment, area, plane.extent.x, plane.extent.z, score)
+
+            if score > bestScore {
+                bestPlane = plane
+                bestScore = score
+                bestAlignment = alignment
+                bestArea = area
+            }
+        }
+
+        guard let chosen = bestPlane else {
+            os_log(.fault, log: arSessionDiagLog,
+                   "[V15.0g-relatch] no candidate plane passed alignment threshold (best rejected=%f, threshold=%f); engine will refuse first frame until lock",
+                   bestRejectedAlignment, planeAlignmentThreshold)
+            return false
+        }
+
+        detectedPlaneTransformInternal = chosen.transform
+        os_log(.fault, log: arSessionDiagLog,
+               "[V15.0g-relatch] latched best plane: alignment=%f area=%fm² extent=%fx%f centre=(%f,%f,%f)",
+               bestAlignment, bestArea,
+               chosen.extent.x, chosen.extent.z,
+               chosen.center.x, chosen.center.y, chosen.center.z)
+        return true
+    }
+
     /// Returns the latched plane transform as a 16-element [Float]
     /// array (column-major).  `nil` if no plane detected yet.
     @objc public func planeTransformFlat() -> [NSNumber]? {

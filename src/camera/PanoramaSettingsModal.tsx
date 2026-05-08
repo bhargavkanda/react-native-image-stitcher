@@ -110,6 +110,12 @@ export interface PanoramaSettings {
    *  Higher = stricter (fewer planes accepted).  0.0 – 1.0.
    *  Default 0.6 (≈53° max angle off-camera). */
   arkitPlaneAlignmentThreshold: number;
+  /** V15.0g — plane-projection rendering style.  Trapezoidal is the
+   *  V15.0b legacy 3D-correct mapping; Rectified is V15.0g's clean-
+   *  rectangle paste that eliminates tilt-induced trapezoidal
+   *  distortion.  Default Rectified.  Ignored when planeSource =
+   *  Disabled. */
+  planeProjectionStyle: 'Trapezoidal' | 'Rectified';
   /** V15.0d — 2D NCC search half-window in pixels.  4 – 30.
    *  Default 12. */
   nccSearchMargin2d: number;
@@ -221,6 +227,11 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   planeSource: 'Disabled',
   virtualPlaneDepthMeters: 1.5,
   arkitPlaneAlignmentThreshold: 0.6,
+  // V15.0g — Rectified is the default (Trapezoidal had the tilt-
+  // induced bottom-wider-than-top distortion that was the field
+  // blocker on V15.0e/f).  Trapezoidal stays available for
+  // operator A/B comparison.
+  planeProjectionStyle: 'Rectified',
   // V15.0d — NCC 2D defaults match V15.0c.4's hardcoded values, now
   // tunable via the settings UI.  EMA smoothing and pan-axis lock are
   // off by default so the V15.0c.4 baseline behaviour is preserved
@@ -409,6 +420,14 @@ export function PanoramaSettingsModal({
               value={settings.planeSource}
               onChange={(v) => update({ planeSource: v as PanoramaSettings['planeSource'] })}
               caption="Disabled = plain slit-scan (V13.x baseline). ARKitDetected = warp onto an ARKit-detected vertical plane that aligns with the camera (filter threshold below); falls back to slit-scan when no aligned plane is found. Virtual = synthesize a plane perpendicular to the camera at the configured depth — always works, immune to ARKit picking the wrong surface, but loses the 'real depth' advantage."
+            />
+
+            <SectionHeader title="Plane projection style (V15.0g)" />
+            <SegmentedControl
+              options={['Rectified', 'Trapezoidal']}
+              value={settings.planeProjectionStyle}
+              onChange={(v) => update({ planeProjectionStyle: v as PanoramaSettings['planeProjectionStyle'] })}
+              caption="Rectified (default): paste each frame as a clean rectangle around its plane anchor — eliminates the tilt-induced trapezoidal distortion (cooler bottom 2.3× wider than top) that V15.0b/e produced. Trapezoidal: V15.0b legacy 3D-correct raycast — geometrically pure but distorted-looking when the camera tilts off-perpendicular. Ignored when planeSource is Disabled."
             />
 
             <SectionHeader title="Virtual plane depth (V15.0d, when planeSource=Virtual)" />

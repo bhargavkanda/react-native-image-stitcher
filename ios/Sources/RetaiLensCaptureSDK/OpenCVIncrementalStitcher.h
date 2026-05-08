@@ -188,6 +188,35 @@ typedef NS_ENUM(NSInteger, RLISPlaneSource) {
     RLISPlaneSourceVirtual        = 2,
 };
 
+/// V15.0g — how the plane-projection helper renders each frame onto
+/// the canvas.  Affects ARKitDetected and Virtual modes; ignored when
+/// planeSource = Disabled.
+///
+///   • `Trapezoidal` (V15.0b legacy):
+///       Geometrically correct 3D mapping.  Each camera pixel is
+///       raycast onto the plane and pasted at the resulting plane-
+///       local canvas position.  When the camera tilts off-
+///       perpendicular, the projected camera frame becomes a
+///       TRAPEZOID — visually distorted (Ram observed cooler bottom
+///       2.3× wider than top at 30° tilt, 2026-05-08).
+///   • `Rectified` (V15.0g default):
+///       Camera frame is pasted as a CLEAN RECTANGLE around its
+///       projected anchor on the canvas.  Anchor is the canvas
+///       position of the camera CENTER raycast.  Rectangle size
+///       depends on plane distance × pixels-per-meter.  No
+///       trapezoidal distortion regardless of tilt angle, at the
+///       cost of true 3D-correctness (the camera's per-pixel
+///       perspective is preserved within the rectangle, but
+///       different tilts don't reconcile geometrically — they
+///       overlap with FirstPaintedWins keeping the earliest paint).
+///
+/// Field-validate Rectified vs Trapezoidal; the right choice depends
+/// on the operator's typical pan range and tolerance for distortion.
+typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
+    RLISPlaneProjectionStyleTrapezoidal = 0,
+    RLISPlaneProjectionStyleRectified   = 1,
+};
+
 /// V15 stitcher config — single source of truth for which correction
 /// stages run in the slit-scan and hybrid engines.  Each engine mode
 /// (`hybrid`, `slitscan-rotate`, `slitscan-both`) has a default config
@@ -312,6 +341,12 @@ typedef NS_ENUM(NSInteger, RLISPlaneSource) {
 /// camera; 0.0 = plane edge-on to camera; -1.0 = facing away.
 /// Range 0.0 – 1.0.  Default 0.6 (≈53° max angle off-camera).
 @property (nonatomic) double arkitPlaneAlignmentThreshold;
+
+/// V15.0g new: plane projection rendering style.  See enum docs above
+/// for tradeoffs (Trapezoidal = 3D-correct + distorted; Rectified =
+/// clean-rectangle + slight 3D approximation).  Ignored when
+/// planeSource = Disabled.  Default Rectified for slit-scan modes.
+@property (nonatomic) RLISPlaneProjectionStyle planeProjectionStyle;
 
 // ── Hybrid-specific ─────────────────────────────────────────────────
 
