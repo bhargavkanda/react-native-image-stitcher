@@ -91,6 +91,13 @@ export interface PanoramaSettings {
    *  rectilinear canvas.  Slit-scan modes only.  Requires plane
    *  detection (2–5 s on non-LiDAR; near-instant on LiDAR). */
   useDetectedPlane: boolean;
+  /** V15.0c — sliver position within the camera frame.  'Center' is
+   *  V13.x default.  'Bottom' takes leading-edge content for top-to-
+   *  bottom pan; 'Top' for bottom-to-top pan. */
+  sliverPosition: 'Center' | 'Bottom' | 'Top';
+  /** V15.0c — paint full first frame, then add slivers as user pans.
+   *  Useful with 'Bottom' or 'Top' sliverPosition. */
+  firstFrameFullFrame: boolean;
   /** Hard cap on hold duration (ms).  0 disables auto-stop. */
   maxRecordingMs: number;
   /** Frames per second of recording to sample for stitching. */
@@ -163,10 +170,17 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   enableTriAccumulator: false,
   enable2dNcc: false,
   enableRansacHomography: false,
-  paintMode: 'FeatherBlend',
+  // V15.0c — Ram observation: FirstPaintedWins is consistently the best
+  // output across all combinations.  Default switched from FeatherBlend.
+  paintMode: 'FirstPaintedWins',
   hybridProjection: 'Planar',
   nccSearchRadius1d: 15,
   useDetectedPlane: false,
+  // V15.0c — sliver tweaks: leading-edge sliver from BOTTOM for typical
+  // top-to-bottom pan + full first-frame anchor produced the best
+  // outputs in early iteration.
+  sliverPosition: 'Bottom',
+  firstFrameFullFrame: true,
   maxRecordingMs: 8000,
   framesPerSecond: 3,
   minFrames: 6,
@@ -264,10 +278,26 @@ export function PanoramaSettingsModal({
 
             <SectionHeader title="Slit width (slit-scan modes only)" />
             <SegmentedControl
-              options={['0.10', '0.20', '0.30', '0.40', '0.50', '0.70']}
+              options={['0.01', '0.05', '0.10', '0.20', '0.30', '0.50']}
               value={settings.slitWidthFraction.toFixed(2)}
               onChange={(v) => update({ slitWidthFraction: parseFloat(v) })}
-              caption="Fraction of pan-axis the slit retains. 0.10 = narrow (less depth disagreement, tighter overlap budget). 0.30 = V15 default. 0.70 = V13.0g default (visible door-shear on multi-depth)."
+              caption="Fraction of pan-axis retained per sliver. 0.01 ≈ 10 px (Apple-thin), 0.05 ≈ 54 px, 0.10 ≈ 108 px, 0.30 ≈ 324 px (V15 default), 0.50+ wider. Smaller = less within-slit depth disagreement, but tighter overlap budget at fast pans."
+            />
+
+            <SectionHeader title="Sliver position (slit-scan modes only)" />
+            <SegmentedControl
+              options={['Center', 'Bottom', 'Top']}
+              value={settings.sliverPosition}
+              onChange={(v) => update({ sliverPosition: v as PanoramaSettings['sliverPosition'] })}
+              caption="Where on the camera sensor frame the sliver is taken. Center = V13.x default. Bottom = leading edge for top-to-bottom landscape pan (recommended). Top = leading edge for bottom-to-top pan."
+            />
+
+            <SectionHeader title="First frame: full-frame anchor (slit-scan modes)" />
+            <SegmentedControl
+              options={['off', 'on']}
+              value={settings.firstFrameFullFrame ? 'on' : 'off'}
+              onChange={(v) => update({ firstFrameFullFrame: v === 'on' })}
+              caption="When ON, the FIRST accepted frame paints the full camera frame at the canvas anchor; subsequent frames still use the configured sliver clip. Recommended ON when sliverPosition is Bottom/Top so the canvas is anchored with maximum first-frame content."
             />
 
             <SectionHeader title="Accept gate (slit-scan modes only)" />
@@ -291,7 +321,7 @@ export function PanoramaSettingsModal({
               options={['off', 'on']}
               value={settings.enableTriangulation ? 'on' : 'off'}
               onChange={(v) => update({ enableTriangulation: v === 'on' })}
-              caption="V13.0e+ ORB triangulation + median-Z parallax correction.  Adds ~10ms/accept."
+              caption="V13.0e+ ORB triangulation + median-Z parallax correction.  Adds ~10ms/accept.  Known limitation: per-accept correction can over-shoot, leaving gaps in the canvas — disable if output stops updating."
             />
 
             <SectionHeader title="2D NCC fine-alignment (slitscan-both)" />
@@ -307,7 +337,7 @@ export function PanoramaSettingsModal({
               options={['off', 'on']}
               value={settings.enableRansacHomography ? 'on' : 'off'}
               onChange={(v) => update({ enableRansacHomography: v === 'on' })}
-              caption="V14.0a RANSAC 3×3 homography per slit + cv::warpPerspective.  Supersedes rectangular paste when successful (8 inliers, det>1e-6)."
+              caption="V14.0a RANSAC 3×3 homography per slit + cv::warpPerspective.  Supersedes rectangular paste when successful (8 inliers, det>1e-6).  Known limitation: per-frame homography can absorb pan advance as scale, shrinking each warped sliver — leaves visible gaps between slits."
             />
 
             <SectionHeader title="Hybrid projection" />

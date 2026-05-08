@@ -123,6 +123,8 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
         c.paintMode                  = RLISPaintModeFeatherBlend;  // V12.x feather
         c.hybridProjection           = RLISHybridProjectionPlanar;  // V15: planar default
         c.useDetectedPlane           = NO;
+        c.sliverPosition             = RLISSliverPositionCenter;
+        c.firstFrameFullFrame        = NO;
     } else if ([m isEqualToString:@"slitscan-rotate"]) {
         // V13.0a baseline + 1D NCC.  No tri, no 2D NCC, no homography.
         c.kPanAxisFractionRect       = 0.30;
@@ -136,9 +138,14 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
         c.paintMode                  = RLISPaintModeFirstPaintedWins;
         c.hybridProjection           = RLISHybridProjectionPlanar;  // unused
         c.useDetectedPlane           = NO;
+        c.sliverPosition             = RLISSliverPositionCenter;
+        c.firstFrameFullFrame        = NO;
     } else {
-        // slitscan-both (default).  V13.0a baseline + no gate + feather.
-        // Iterate via settings UI: enable tri / 2D NCC / RANSAC as needed.
+        // slitscan-both (V15.0c default).  V13.0a baseline + no gate +
+        // first-painted-wins (Ram observation: feather often introduces
+        // ghosting; first-painted-wins is consistently the best for our
+        // typical retail fixture pans).  Iterate via settings UI:
+        // enable tri / 2D NCC / RANSAC as needed.
         c.kPanAxisFractionRect       = 0.30;
         c.kMinAcceptDeltaPx          = 0;     // accept on every frame
         c.enableTriangulation        = NO;
@@ -147,9 +154,11 @@ NSString *const RetaiLensIncrementalStitcherErrorDomain =
         c.nccSearchRadius1d          = 15;
         c.enable2dNcc                = NO;
         c.enableRansacHomography     = NO;
-        c.paintMode                  = RLISPaintModeFeatherBlend;
+        c.paintMode                  = RLISPaintModeFirstPaintedWins;  // V15.0c default
         c.hybridProjection           = RLISHybridProjectionPlanar;  // unused
         c.useDetectedPlane           = NO;
+        c.sliverPosition             = RLISSliverPositionCenter;
+        c.firstFrameFullFrame        = NO;
     }
 
     return c;

@@ -221,6 +221,17 @@ export interface StitcherConfig {
    *  cv::detail::PlaneWarper).  Planar is well-behaved for pans <60°. */
   hybridProjection: 'Cylindrical' | 'Planar';
 
+  /** V15.0c — where on the camera frame the per-accept sliver is taken.
+   *  'Center' (V13.x default), 'Bottom' (leading edge for top-to-bottom
+   *  pan), or 'Top' (leading edge for bottom-to-top pan). */
+  sliverPosition: 'Center' | 'Bottom' | 'Top';
+
+  /** V15.0c — when true, the FIRST accepted frame paints the entire
+   *  camera frame at canvas (0, 0); subsequent frames still use the
+   *  configured sliver clip.  Default false; set true when sliverPosition
+   *  is Bottom/Top so the canvas is anchored with full-frame content. */
+  firstFrameFullFrame: boolean;
+
   /** V15.0b — when true (slit-scan modes), each accepted frame is
    *  warped onto a detected vertical plane (Trax-style "Virtual
    *  Ruler") rather than onto the pose-driven rectilinear canvas.

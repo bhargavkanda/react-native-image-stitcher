@@ -393,6 +393,17 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         if let v = overrides["useDetectedPlane"] as? Bool {
             config.useDetectedPlane = v
         }
+        if let v = overrides["sliverPosition"] as? String {
+            switch v {
+            case "Center": config.sliverPosition = .center
+            case "Bottom": config.sliverPosition = .bottom
+            case "Top":    config.sliverPosition = .top
+            default: break
+            }
+        }
+        if let v = overrides["firstFrameFullFrame"] as? Bool {
+            config.firstFrameFullFrame = v
+        }
     }
 
     /// after the user thought they had released.  The engine refs

@@ -527,12 +527,31 @@ static const double kPanAxisFractionRect = 0.30;
             // Issue 2 ("sideways portrait → first frame only output").
             int clipW, clipH, srcClipX, srcClipY;
             clipW = frameBGR.cols;  // perpendicular: full sensor X (1920)
-            // V15 — clipH driven by _config.kPanAxisFractionRect (was a
-            // file-scope constant in V14.x).  Defaults to 0.30 in all
-            // V15 modes; settings UI exposes a slider 0.10–0.70.
-            clipH = std::max(1, (int)(frameBGR.rows * _config.kPanAxisFractionRect));
+            // V15.0c — clipH driven by _config.kPanAxisFractionRect.
+            // For the FIRST frame, if firstFrameFullFrame is enabled,
+            // override to use the FULL camera sensor frame so the
+            // canvas is anchored with as much content as possible
+            // before subsequent slivers extend it.
+            if (_config.firstFrameFullFrame) {
+                clipH = frameBGR.rows;
+                srcClipY = 0;
+            } else {
+                clipH = std::max(1, (int)(frameBGR.rows * _config.kPanAxisFractionRect));
+                // V15.0c — srcClipY position from sliverPosition.
+                switch (_config.sliverPosition) {
+                    case RLISSliverPositionTop:
+                        srcClipY = 0;
+                        break;
+                    case RLISSliverPositionBottom:
+                        srcClipY = frameBGR.rows - clipH;
+                        break;
+                    case RLISSliverPositionCenter:
+                    default:
+                        srcClipY = (frameBGR.rows - clipH) / 2;
+                        break;
+                }
+            }
             srcClipX = 0;
-            srcClipY = (frameBGR.rows - clipH) / 2;
             cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
 
             // V12.14.10 — UNIFIED canvas allocation.  Both supported
@@ -700,14 +719,29 @@ static const double kPanAxisFractionRect = 0.30;
         if (_config.useDetectedPlane && !_planeTransform.empty()) {
             cv::Mat t_arkit = (cv::Mat_<double>(3, 1) << tx, ty, tz);
 
-            // Compute plane-projection homography from 4 corner
-            // raycasts.  Camera frame corner → ARKit cam ray → world
-            // ray → intersect plane → plane-local (X,Y) → canvas pixel.
+            // V15.0c — fixed plane axes.  ARKit ARPlaneAnchor convention:
+            //   • The plane lies in its local XZ plane (Y=0).
+            //   • Local +Y axis is the SURFACE NORMAL (out of the wall,
+            //     toward the camera for a wall the user is facing).
+            //   • Local X axis is horizontal along the wall (perpendicular
+            //     to gravity).
+            //   • Local Z axis is in the wall plane, parallel to gravity
+            //     (typically pointing DOWN in world coords).
+            //
+            // Pre-V15.0c BUG: I read column 2 (Z = gravity direction) as
+            // the normal and projected with (X, Y) as canvas coords.
+            // Result: all 4 corners had plane-local Y ≈ 0 (since they're
+            // ON the plane), so canvas V was constant → degenerate
+            // homography → "image inverted and shows something else".
+            //
+            // V15.0c uses column 1 (Y = normal) for the plane equation
+            // and (X_local, Z_local) — the in-plane coords — for the
+            // canvas mapping.
             const cv::Mat T_plane_inv = _planeTransform.inv();
             const cv::Mat planeNormal = (cv::Mat_<double>(3, 1) <<
-                _planeTransform.at<double>(0, 2),
-                _planeTransform.at<double>(1, 2),
-                _planeTransform.at<double>(2, 2));
+                _planeTransform.at<double>(0, 1),
+                _planeTransform.at<double>(1, 1),
+                _planeTransform.at<double>(2, 1));
             const cv::Mat planeOrigin = (cv::Mat_<double>(3, 1) <<
                 _planeTransform.at<double>(0, 3),
                 _planeTransform.at<double>(1, 3),
@@ -746,10 +780,17 @@ static const double kPanAxisFractionRect = 0.30;
                 cv::Mat P_world_h = cv::Mat::ones(4, 1, CV_64F);
                 P_world.copyTo(P_world_h.rowRange(0, 3));
                 cv::Mat P_plane = T_plane_inv * P_world_h;
+                // V15.0c — use plane-local X and Z (the in-plane
+                // coords).  Local Y component should be ~0 for a point
+                // ON the plane — verified by the t_int formula above.
                 const double Xp = P_plane.at<double>(0);
-                const double Yp = P_plane.at<double>(1);
+                const double Zp = P_plane.at<double>(2);
                 const double cU = cCenterX + Xp * kPixelsPerMeter;
-                const double cV = cCenterY - Yp * kPixelsPerMeter;
+                // Plane-local Z typically points along gravity (DOWN in
+                // world).  Canvas V increases DOWNWARD.  So a canvas
+                // pixel directly below the plane origin has Zp > 0
+                // and cV > cCenterY — no negation needed.
+                const double cV = cCenterY + Zp * kPixelsPerMeter;
                 canvasCorners.emplace_back((float)cU, (float)cV);
             }
 
@@ -835,10 +876,23 @@ static const double kPanAxisFractionRect = 0.30;
         // 70%, full sensor X.
         int clipW, clipH, srcClipX, srcClipY;
         clipW = frameBGR.cols;
-        // V15 — clipH from _config (matches first-frame branch above).
+        // V15.0c — clipH + srcClipY from _config.  Subsequent frames
+        // ALWAYS use the configured sliver clip even if firstFrameFullFrame
+        // was on (that flag only changes the FIRST frame's behaviour).
         clipH = std::max(1, (int)(frameBGR.rows * _config.kPanAxisFractionRect));
         srcClipX = 0;
-        srcClipY = (frameBGR.rows - clipH) / 2;
+        switch (_config.sliverPosition) {
+            case RLISSliverPositionTop:
+                srcClipY = 0;
+                break;
+            case RLISSliverPositionBottom:
+                srcClipY = frameBGR.rows - clipH;
+                break;
+            case RLISSliverPositionCenter:
+            default:
+                srcClipY = (frameBGR.rows - clipH) / 2;
+                break;
+        }
         cv::Mat frameClipped = frameBGR(cv::Rect(srcClipX, srcClipY, clipW, clipH));
 
         // V12.14.10 — UNIFIED pose projection.  Both supported modes

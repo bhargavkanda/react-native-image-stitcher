@@ -132,6 +132,18 @@ typedef NS_ENUM(NSInteger, RLISPaintMode) {
     RLISPaintModeFeatherBlend = 1,
 };
 
+/// V15.0c — where on the camera frame the per-accept sliver is taken
+/// from.  For a typical landscape vertical pan tilting DOWN, the LEADING
+/// EDGE (new content not seen by previous frames) is at the BOTTOM of
+/// the camera sensor frame; for upward tilt, the leading edge is at
+/// the TOP.  `Center` is the V13.x default (sliver from the centred
+/// 70% / 30% of pan-axis).
+typedef NS_ENUM(NSInteger, RLISSliverPosition) {
+    RLISSliverPositionCenter = 0,
+    RLISSliverPositionBottom = 1,
+    RLISSliverPositionTop    = 2,
+};
+
 /// V15 — projection toggle for the hybrid engine.
 /// `RLISHybridProjectionCylindrical` is the V12.x baseline; `Planar`
 /// uses cv::detail::PlaneWarper, well-behaved for pans under ~60°.
@@ -183,6 +195,19 @@ typedef NS_ENUM(NSInteger, RLISHybridProjection) {
 /// V15 new: paint mode for the slit-scan engine.  Default
 /// FirstPaintedWins for slitscan-rotate, FeatherBlend for slitscan-both.
 @property (nonatomic) RLISPaintMode paintMode;
+
+/// V15.0c new: where on the camera frame the per-accept sliver is
+/// taken.  Default Center (V13.x behaviour).  Bottom = leading edge for
+/// typical top-to-bottom landscape pan.
+@property (nonatomic) RLISSliverPosition sliverPosition;
+
+/// V15.0c new: when YES, the FIRST accepted frame paints the entire
+/// camera frame at canvas (0, 0) instead of just the sliver.  Subsequent
+/// frames still use the configured sliver clip.  Useful with sliverPosition=
+/// Bottom: the first frame anchors the canvas with full-frame content,
+/// then leading-edge slivers extend the canvas as the camera pans.
+/// Default YES for slitscan-rotate / slitscan-both.
+@property (nonatomic) BOOL firstFrameFullFrame;
 
 /// V15.0b new: if YES, the slit-scan engine projects each accepted
 /// camera frame onto a detected vertical plane (Trax-style "Virtual
