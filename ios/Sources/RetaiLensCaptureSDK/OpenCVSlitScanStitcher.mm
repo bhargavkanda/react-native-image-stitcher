@@ -724,6 +724,148 @@ static os_log_t SlitDiagLog(void) {
                         cv::BORDER_CONSTANT,
                         cv::Scalar(0));
 
+    // ── V15.0h — 2D NCC alignment refinement for plane projection ──
+    // Ram observation 2026-05-08: 2D NCC was bypassed entirely in
+    // plane mode (V15.0b assumed 3D-correct alignment made it
+    // unnecessary).  In practice ARKit pose noise + plane fit error +
+    // handheld jitter cause sub-pixel-to-few-pixel alignment errors
+    // between adjacent slivers.  This block extracts a TOP STRIP of
+    // the freshly-warped frame, finds the best (Δx, Δy) translation
+    // matching the existing canvas content via cv::matchTemplate,
+    // and shifts the warpedCanvas + warpedMask by that delta before
+    // painting.  Reuses the existing _config NCC settings (search
+    // margin, confidence threshold, EMA smoothing, pan-axis lock).
+    if (_config.enable2dNcc && _accepted >= 1
+        && cv::countNonZero(_canvasMask) > 0) {
+        constexpr int kNccSourceHeight = 100;
+        const int kNccSearchMargin =
+            std::clamp((int)_config.nccSearchMargin2d, 4, 60);
+        constexpr int kNccSourceXInset = 30;
+        const double kNccConfidenceThreshold =
+            std::clamp(_config.nccConfidenceThreshold2d, 0.30, 0.99);
+
+        cv::Mat nz;
+        cv::findNonZero(warpedMask, nz);
+        if (!nz.empty()) {
+            cv::Rect bb = cv::boundingRect(nz);
+            // Source: top strip of bb (X-inset both sides for slide
+            // room in matchTemplate).
+            const int sourceX = bb.x + kNccSourceXInset;
+            const int sourceY = bb.y;
+            const int sourceW = bb.width - 2 * kNccSourceXInset;
+            const int sourceH = std::min(kNccSourceHeight, bb.height);
+            cv::Rect sourceRect(sourceX, sourceY, sourceW, sourceH);
+            sourceRect &= cv::Rect(0, 0, _canvas.cols, _canvas.rows);
+
+            if (sourceRect.width > 0 && sourceRect.height > 0
+                && sourceRect.width >= sourceW
+                && sourceRect.height >= sourceH) {
+                cv::Mat sourceRegion = warpedCanvas(sourceRect);
+
+                // Search canvas region around sourceRect ± margin.
+                const int searchLeft = std::max(
+                    0, sourceRect.x - kNccSearchMargin);
+                const int searchTop = std::max(
+                    0, sourceRect.y - kNccSearchMargin);
+                const int searchRight = std::min(
+                    (int)_canvas.cols,
+                    sourceRect.x + sourceRect.width + kNccSearchMargin);
+                const int searchBottom = std::min(
+                    (int)_canvas.rows,
+                    sourceRect.y + sourceRect.height + kNccSearchMargin);
+                const int searchW = searchRight - searchLeft;
+                const int searchH = searchBottom - searchTop;
+
+                int alignDx = 0, alignDy = 0;
+                double alignConfidence = 0.0;
+                bool alignApplied = false;
+
+                if (searchW >= sourceRect.width
+                    && searchH >= sourceRect.height) {
+                    cv::Rect searchRect(searchLeft, searchTop, searchW, searchH);
+                    cv::Mat searchMaskRoi = _canvasMask(searchRect);
+                    if (cv::countNonZero(searchMaskRoi) > 0) {
+                        cv::Mat searchRegion = _canvas(searchRect);
+                        cv::Mat sg, rg;
+                        cv::cvtColor(sourceRegion, sg, cv::COLOR_BGR2GRAY);
+                        cv::cvtColor(searchRegion, rg, cv::COLOR_BGR2GRAY);
+
+                        cv::Mat result;
+                        cv::matchTemplate(rg, sg, result, cv::TM_CCOEFF_NORMED);
+                        double rmin, rmax;
+                        cv::Point lmin, lmax;
+                        cv::minMaxLoc(result, &rmin, &rmax, &lmin, &lmax);
+                        alignConfidence = rmax;
+
+                        if (alignConfidence >= kNccConfidenceThreshold) {
+                            const int matchX = searchLeft + lmax.x;
+                            const int matchY = searchTop + lmax.y;
+                            int rawDx = matchX - sourceRect.x;
+                            int rawDy = matchY - sourceRect.y;
+                            // Clamp to search margin (defensive).
+                            rawDx = std::clamp(rawDx, -kNccSearchMargin, kNccSearchMargin);
+                            rawDy = std::clamp(rawDy, -kNccSearchMargin, kNccSearchMargin);
+
+                            // Pan-axis lock (1C): clamp cross-axis tighter.
+                            if (_config.enableNcc2dPanAxisLock) {
+                                const int crossLock = std::clamp(
+                                    (int)_config.ncc2dCrossAxisLockPx, 0, 30);
+                                if (_isLandscape) {
+                                    rawDx = std::clamp(rawDx, -crossLock, crossLock);
+                                } else {
+                                    rawDy = std::clamp(rawDy, -crossLock, crossLock);
+                                }
+                            }
+
+                            // EMA smoothing (1B).
+                            if (_config.enableNcc2dEmaSmoothing) {
+                                if (_haveNcc2dEmaHistory) {
+                                    const double a = std::clamp(
+                                        _config.ncc2dEmaAlpha, 0.05, 0.95);
+                                    rawDx = (int)std::round(
+                                        a * rawDx + (1.0 - a) * _lastNcc2dDxApplied);
+                                    rawDy = (int)std::round(
+                                        a * rawDy + (1.0 - a) * _lastNcc2dDyApplied);
+                                }
+                                _lastNcc2dDxApplied = rawDx;
+                                _lastNcc2dDyApplied = rawDy;
+                                _haveNcc2dEmaHistory = YES;
+                            }
+
+                            alignDx = rawDx;
+                            alignDy = rawDy;
+                            alignApplied = (alignDx != 0 || alignDy != 0);
+                        }
+                    }
+                }
+
+                // Apply offset by translating the warpedCanvas + warpedMask.
+                if (alignApplied) {
+                    cv::Mat translation = (cv::Mat_<double>(2, 3) <<
+                        1, 0, (double)alignDx,
+                        0, 1, (double)alignDy);
+                    cv::Mat warpedCanvasShifted, warpedMaskShifted;
+                    cv::warpAffine(warpedCanvas, warpedCanvasShifted, translation,
+                                   _canvas.size(), cv::INTER_LINEAR,
+                                   cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+                    cv::warpAffine(warpedMask, warpedMaskShifted, translation,
+                                   _canvas.size(), cv::INTER_NEAREST,
+                                   cv::BORDER_CONSTANT, cv::Scalar(0));
+                    warpedCanvas = warpedCanvasShifted;
+                    warpedMask = warpedMaskShifted;
+                }
+
+                if (_captureFrameCounter % 5 == 0 || _captureFrameCounter <= 5) {
+                    os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
+                        "[V15.0h-plane-ncc] capFr=%ld dx=%+d dy=%+d "
+                        "conf=%.3f applied=%d",
+                        (long)_captureFrameCounter,
+                        alignDx, alignDy, alignConfidence, (int)alignApplied);
+                }
+            }
+        }
+    }
+
     // Paint mode (composes with plane mode).
     cv::Mat canvasMaskZero;
     cv::compare(_canvasMask, 0, canvasMaskZero, cv::CMP_EQ);
