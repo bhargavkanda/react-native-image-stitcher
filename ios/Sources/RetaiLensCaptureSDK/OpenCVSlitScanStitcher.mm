@@ -576,8 +576,24 @@ static os_log_t SlitDiagLog(void) {
         const double Up = diffWorld.dot(U_axis);
         const double Vp = diffWorld.dot(V_axis);
         // V15.0g.4 — apply first-frame anchor offset.
-        const double cU = cCenterX + (Up - _firstPlaneAnchorUp) * kPixelsPerMeter;
-        const double cV = cCenterY + (Vp - _firstPlaneAnchorVp) * kPixelsPerMeter;
+        // V15.0g.5 — lock CROSS-AXIS to first frame's value to
+        // suppress unintentional drift from handheld yaw/translate
+        // during single-axis pans.  _isLandscape == TRUE means the
+        // user's intentional pan axis is V (vertical, tilt-down on
+        // a landscape phone) → lock U.  FALSE means intentional pan
+        // is U (horizontal translate on portrait phone) → lock V.
+        // Without this, ~20° of unintentional yaw over a 4-second
+        // tilt-down pan caused 400 px of horizontal staircase drift
+        // in the panorama (Ram observed 2026-05-08).
+        double dU = Up - _firstPlaneAnchorUp;
+        double dV = Vp - _firstPlaneAnchorVp;
+        if (_isLandscape) {
+            dU = 0.0;  // pan axis = V; lock U to first-frame value
+        } else {
+            dV = 0.0;  // pan axis = U; lock V to first-frame value
+        }
+        const double cU = cCenterX + dU * kPixelsPerMeter;
+        const double cV = cCenterY + dV * kPixelsPerMeter;
         canvasCorners.emplace_back((float)cU, (float)cV);
     }
 
@@ -648,10 +664,18 @@ static os_log_t SlitDiagLog(void) {
         double Vp_center = diffCenterWorld.dot(V_axis);
         // V15.0g.4 — apply first-frame anchor offset so first frame
         // lands at canvas centre, subsequent frames offset relative.
-        double cU_anchor = cCenterX +
-            (Up_center - _firstPlaneAnchorUp) * kPixelsPerMeter;
-        double cV_anchor = cCenterY +
-            (Vp_center - _firstPlaneAnchorVp) * kPixelsPerMeter;
+        // V15.0g.5 — also lock the CROSS-AXIS to first-frame value
+        // to suppress handheld yaw drift (see corner loop above for
+        // the same logic).
+        double dU_center = Up_center - _firstPlaneAnchorUp;
+        double dV_center = Vp_center - _firstPlaneAnchorVp;
+        if (_isLandscape) {
+            dU_center = 0.0;
+        } else {
+            dV_center = 0.0;
+        }
+        double cU_anchor = cCenterX + dU_center * kPixelsPerMeter;
+        double cV_anchor = cCenterY + dV_center * kPixelsPerMeter;
         // Perpendicular cam-to-plane distance.  diffCenter =
         // planeOrigin − t_arkit was computed at the top of the
         // helper; planeNormal was flipped to point TOWARD the camera
