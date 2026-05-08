@@ -487,13 +487,24 @@ static os_log_t SlitDiagLog(void) {
             t_int_center = t;
         }
     }
-    if (_dynamicKPixelsPerMeter <= 0.0 && t_int_center > 0.0) {
-        _dynamicKPixelsPerMeter = focalForPPM / t_int_center;
+    // V15.0g.2 — adaptive ppm uses PERPENDICULAR cam-to-plane
+    // distance, not t_int_center.  perp dist is invariant to
+    // camera tilt (only changes if the camera translates), so
+    // the locked ppm is correct even if the capture starts at a
+    // slight tilt.  Math: perpDistance = |numCenter| since
+    // numCenter = diffCenter.dot(planeNormal) (planeNormal is
+    // unit-length post-flip; diffCenter = planeOrigin − cameraPos
+    // points in -normal direction so numCenter is signed
+    // negative — take fabs).
+    const double perpDistanceForPPM = std::fabs(numCenter);
+    if (_dynamicKPixelsPerMeter <= 0.0 && perpDistanceForPPM >= 0.05) {
+        _dynamicKPixelsPerMeter = focalForPPM / perpDistanceForPPM;
         os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
             "[V15.0g.1-adaptive-ppm] capture ppm locked to %.1f "
-            "(focal=%.1f / t_int_center=%.3fm) — sensor 1:1 canvas "
-            "mapping; first frame's rectangle = sensor dims",
-            _dynamicKPixelsPerMeter, focalForPPM, t_int_center);
+            "(focal=%.1f / perpDist=%.3fm) — sensor 1:1 canvas "
+            "mapping; first frame's rectangle = sensor dims; "
+            "scale stays constant across tilt",
+            _dynamicKPixelsPerMeter, focalForPPM, perpDistanceForPPM);
     }
     const double kPixelsPerMeter =
         (_dynamicKPixelsPerMeter > 0.0) ? _dynamicKPixelsPerMeter : 1000.0;
@@ -572,9 +583,23 @@ static os_log_t SlitDiagLog(void) {
     // corners with a clean rectangle centred on the camera-center's
     // raycast anchor.  Reuses t_int_center / centerRayWorld /
     // diffCenter computed above (V15.0g.1 hoist) so we don't redo
-    // the raycast.  scale = t_int_center * ppm / focal; with the
-    // adaptive ppm locked on first frame this resolves to 1.0, so
-    // the rectangle matches sensor dimensions 1:1.
+    // the raycast.
+    //
+    // V15.0g.2 — scale now uses the PERPENDICULAR camera-to-plane
+    // distance, not the center ray's t_int.  Why: t_int_center is
+    // |perp_dist / cos(tilt)| which GROWS as the user tilts off-
+    // perpendicular (Ram observed scale going 1.0→1.55 over a 50°
+    // top-to-bottom pan, distorting the panorama by 55%).  The
+    // perpendicular distance is INVARIANT to tilt — only changes if
+    // the camera physically translates closer/farther from the wall.
+    // For the typical retail-audit pan (operator stays put, tilts
+    // camera), perp distance is constant → scale stays constant →
+    // rectangle stays sensor-size → no smear / trumpet effect.
+    //
+    // ANCHOR position still uses t_int_center (the center ray's
+    // intersection on the plane), which is correct: anchor tracks
+    // where the camera is AIMED, scale tracks how BIG the camera's
+    // view is.  These are independent — V15.0g had them tangled.
     if (_config.planeProjectionStyle == RLISPlaneProjectionStyleRectified) {
         if (t_int_center <= 0.0) return NO;
         cv::Mat P_center_world = t_arkit + t_int_center * centerRayWorld;
@@ -583,7 +608,12 @@ static os_log_t SlitDiagLog(void) {
         double Vp_center = diffCenterWorld.dot(V_axis);
         double cU_anchor = cCenterX + Up_center * kPixelsPerMeter;
         double cV_anchor = cCenterY + Vp_center * kPixelsPerMeter;
-        double scale = t_int_center * kPixelsPerMeter / focalForPPM;
+        // Perpendicular cam-to-plane distance.  diffCenter =
+        // planeOrigin − t_arkit was computed at the top of the
+        // helper; planeNormal was flipped to point TOWARD the camera
+        // (V15.0c.2), so this dot product is negative — take fabs().
+        const double camToPlaneDistance = std::fabs(diffCenter.dot(planeNormal));
+        double scale = camToPlaneDistance * kPixelsPerMeter / focalForPPM;
 
         double halfW = frameBGR.cols / 2.0;
         double halfH = frameBGR.rows / 2.0;
@@ -605,9 +635,10 @@ static os_log_t SlitDiagLog(void) {
         if (_captureFrameCounter % 5 == 0 || _captureFrameCounter <= 5) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
                 "[V15.0g-rectified] capFr=%ld anchor=(%.0f,%.0f) "
-                "scale=%.3f t_int_center=%.3fm",
+                "scale=%.3f perpDist=%.3fm t_int=%.3fm",
                 (long)_captureFrameCounter,
-                cU_anchor, cV_anchor, scale, t_int_center);
+                cU_anchor, cV_anchor, scale,
+                camToPlaneDistance, t_int_center);
         }
     }
 
