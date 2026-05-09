@@ -2175,6 +2175,14 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   }
 
+  // V16 Phase 1 — memory diagnostic instrumentation.  Each stage
+  // logs phys_footprint (the metric jetsam evaluates) so we can
+  // bisect the stage that pushed us into OS-watchdog termination.
+  // FAULT level so iOS doesn't drop logs under burst.
+  os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+         "[V16-stitch-mem] ENTER framePaths=%d posesCount=%d phys=%.1fMB",
+         (int)framePaths.count, (int)poses.count, StitcherResidentMB());
+
   // Load each path → cv::Mat + cameraParams.  Drop any that fail
   // to load (corrupt JPEG, missing file) — but require ≥2 to
   // succeed for a panorama to be possible.
@@ -2199,6 +2207,15 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   }
   NSLog(@"[RetaiLensStitcher] keyframe-stitch: loaded=%d dropped=%d",
         loaded, dropped);
+  if (!frames.empty()) {
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+           "[V16-stitch-mem] AFTER imread N=%d size=%dx%d totalMB=%.1f phys=%.1fMB",
+           (int)frames.size(),
+           frames[0].cols, frames[0].rows,
+           (double)frames.size() * frames[0].cols * frames[0].rows * 3
+             / (1024.0 * 1024.0),
+           StitcherResidentMB());
+  }
 
   if (frames.size() < 2) {
     if (error) {
@@ -2283,6 +2300,13 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     }
     for (auto &f : frames) f.release();
     frames.clear();
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+           "[V16-stitch-mem] AFTER composeFrames built+frames cleared "
+           "compose_scale=%.3f compose_size=%dx%d phys=%.1fMB",
+           compose_scale,
+           composeFrames.empty() ? 0 : composeFrames[0].cols,
+           composeFrames.empty() ? 0 : composeFrames[0].rows,
+           StitcherResidentMB());
 
     BOOL useSeam = [seamFinderType isEqualToString:@"graphcut"];
     cv::Ptr<cv::detail::Blender> blender;
@@ -2297,6 +2321,9 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       auto mbb = blender.dynamicCast<cv::detail::MultiBandBlender>();
       if (mbb) mbb->setNumBands(5);
     }
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+           "[V16-stitch-mem] config blender=%{public}@ seam=%{public}@ warper=%{public}@ phys=%.1fMB",
+           blenderType, seamFinderType, warperType, StitcherResidentMB());
 
     if (useSeam) {
       const size_t M = composeFrames.size();
@@ -2315,8 +2342,34 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                      cv::BORDER_CONSTANT, masksWarped[i]);
         sizes[i] = imagesWarped[i].size();
       }
+      // Compute panorama bbox so we can see if the warped span is
+      // unexpectedly large (drives MultiBand pyramid memory).
+      int minX = INT_MAX, minY = INT_MAX, maxX = INT_MIN, maxY = INT_MIN;
+      for (size_t i = 0; i < M; i++) {
+        minX = std::min(minX, corners[i].x);
+        minY = std::min(minY, corners[i].y);
+        maxX = std::max(maxX, corners[i].x + (int)sizes[i].width);
+        maxY = std::max(maxY, corners[i].y + (int)sizes[i].height);
+      }
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+             "[V16-stitch-mem] AFTER warps M=%d bbox=%dx%d "
+             "warpedTotalMB=%.1f phys=%.1fMB",
+             (int)M,
+             (maxX > minX ? maxX - minX : 0),
+             (maxY > minY ? maxY - minY : 0),
+             (double)M * (M ? sizes[0].width : 0)
+               * (M ? sizes[0].height : 0) * 3 / (1024.0 * 1024.0),
+             StitcherResidentMB());
+      const int panBboxW = (maxX > minX ? maxX - minX : 0);
+      const int panBboxH = (maxY > minY ? maxY - minY : 0);
+      // Quiet `unused variable` warnings if the inner os_log calls
+      // are stripped by the compiler in release builds.
+      (void)panBboxW; (void)panBboxH;
       for (auto &cf : composeFrames) cf.release();
       composeFrames.clear();
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+             "[V16-stitch-mem] AFTER composeFrames cleared (warps held) phys=%.1fMB",
+             StitcherResidentMB());
 
       const double SEAM_MP = 0.1;
       double seam_scale = std::min(1.0, std::sqrt(SEAM_MP / origMp));
@@ -2338,10 +2391,16 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
             cvRound(corners[i].x * seam_compose_aspect),
             cvRound(corners[i].y * seam_compose_aspect));
       }
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+             "[V16-stitch-mem] BEFORE GraphCutSeamFinder seam_scale=%.3f phys=%.1fMB",
+             seam_scale, StitcherResidentMB());
       cv::Ptr<cv::detail::SeamFinder> seamFinder =
           cv::makePtr<cv::detail::GraphCutSeamFinder>(
               cv::detail::GraphCutSeamFinder::COST_COLOR);
       seamFinder->find(imagesWarpedF_seam, corners_seam, masksWarpedU_seam);
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+             "[V16-stitch-mem] AFTER GraphCutSeamFinder phys=%.1fMB",
+             StitcherResidentMB());
       imagesWarpedF_seam.clear();
       for (size_t i = 0; i < M; i++) {
         cv::Mat seamMaskCpu, seamMaskDilated, seamMaskFull;
@@ -2354,6 +2413,9 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       masksWarpedU_seam.clear();
 
       blender->prepare(corners, sizes);
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+             "[V16-stitch-mem] AFTER blender->prepare() phys=%.1fMB",
+             StitcherResidentMB());
       for (size_t i = 0; i < M; i++) {
         cv::Mat imgS;
         imagesWarped[i].convertTo(imgS, CV_16S);
@@ -2364,6 +2426,9 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       }
       imagesWarped.clear();
       masksWarped.clear();
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+             "[V16-stitch-mem] AFTER blender->feed() loop (graphcut) phys=%.1fMB",
+             StitcherResidentMB());
     } else {
       // STREAM path
       const size_t M = composeFrames.size();
@@ -2397,10 +2462,22 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       composeFrames.clear();
     }
 
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+           "[V16-stitch-mem] BEFORE blender->blend() phys=%.1fMB",
+           StitcherResidentMB());
     cv::Mat panoramaS, panoramaMask;
     blender->blend(panoramaS, panoramaMask);
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+           "[V16-stitch-mem] AFTER blender->blend() panorama=%dx%d phys=%.1fMB",
+           panoramaS.cols, panoramaS.rows, StitcherResidentMB());
     panoramaS.convertTo(panorama, CV_8U);
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+           "[V16-stitch-mem] AFTER 16S->8U convert phys=%.1fMB",
+           StitcherResidentMB());
   } catch (const cv::Exception &e) {
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+           "[V16-stitch-mem] cv::Exception: %{public}s phys=%.1fMB",
+           e.what(), StitcherResidentMB());
     if (error) {
       *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
                                    code:1100
@@ -2451,6 +2528,9 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   } catch (...) {
     finalImage = panorama;
   }
+  os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+         "[V16-stitch-mem] AFTER crop final=%dx%d phys=%.1fMB",
+         finalImage.cols, finalImage.rows, StitcherResidentMB());
 
   auto t1 = std::chrono::steady_clock::now();
   double durationMs =
@@ -2464,6 +2544,9 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       ? [outputPath substringFromIndex:[@"file://" length]]
       : outputPath);
   bool wrote = cv::imwrite([cleanedOutPath UTF8String], finalImage, params);
+  os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+         "[V16-stitch-mem] AFTER cv::imwrite ok=%d total=%.0fms phys=%.1fMB",
+         wrote ? 1 : 0, durationMs, StitcherResidentMB());
 
   if (!wrote) {
     if (error) {

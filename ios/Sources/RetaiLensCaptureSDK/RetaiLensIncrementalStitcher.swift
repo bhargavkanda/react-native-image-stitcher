@@ -625,6 +625,9 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     // to OpenCVStitcher's full BA + GraphCut +
                     // ExposureComp + MultiBand pipeline.  ≤6 frames
                     // means BA stays bounded and MultiBand fits.
+                    os_log(.fault, log: Self.diagLog,
+                           "[V16-batch-keyframe] finalize ENTRY frames=%d",
+                           paths.count)
                     if paths.count < 2 {
                         collector?.cleanup()
                         completion(nil, NSError(

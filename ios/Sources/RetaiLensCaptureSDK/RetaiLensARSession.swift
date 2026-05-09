@@ -473,6 +473,15 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         config.isAutoFocusEnabled = true
 
         arSession.run(config, options: [.resetTracking, .removeExistingAnchors])
+        // V16-diag — log the chosen video format so we can correlate
+        // batch-keyframe memory with ARFrame resolution.  iPhone Pro
+        // models can default to higher-res capture which inflates
+        // every downstream cv::Mat allocation 3-5×.
+        let vfRes = config.videoFormat.imageResolution
+        os_log(.fault, log: arSessionDiagLog,
+               "[V16-diag] AR videoFormat: %dx%d @ %d fps",
+               Int32(vfRes.width), Int32(vfRes.height),
+               Int32(config.videoFormat.framesPerSecond))
         isRunning = true
         currentTrackingState = .initialising
     }
