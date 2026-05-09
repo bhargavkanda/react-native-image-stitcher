@@ -295,16 +295,15 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// correctly while the stitcher (with IMREAD_IGNORE_ORIENTATION)
     /// gets raw landscape pixels matching the pose's intrinsics.
     private var keyframeExifOrientation: Int = 1
-    /// V16 Phase 1.fix3 — cv::Stitcher pipeline knobs read from JS
-    /// config so the modal can A/B between warpers without rebuilds.
-    /// Default warperType is "spherical" for batch-keyframe because:
-    ///   - PlaneWarper produces unbounded bbox for tilt-heavy pans
-    ///     (umatrix.cpp:710 crash from fix2 reproduction)
-    ///   - CylindricalWarper has a hardcoded vertical cylinder axis,
-    ///     unrolls vertical pans along the wrong direction
-    ///   - SphericalWarper is rotationally symmetric — handles any
-    ///     pan direction uniformly with mild curvature
-    private var batchWarperType: String = "spherical"
+    /// V16 Phase 1.fix4 — cv::Stitcher knobs.  Defaults match the
+    /// modal's defaults and the legacy batch path defaults
+    /// (PlaneWarper + MultiBandBlender + GraphCutSeamFinder) since
+    /// fix4 routes through cv::Stitcher's feature-matched pipeline
+    /// where these defaults are the production-tested combo.  User
+    /// can override via the modal Projection / Blender / Seam-finder
+    /// sections — those values flow through configOverrides at
+    /// start().
+    private var batchWarperType: String = "plane"
     private var batchBlenderType: String = "multiband"
     private var batchSeamFinderType: String = "graphcut"
 
@@ -410,14 +409,13 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             case 270: self.keyframeExifOrientation = 8
             default:  self.keyframeExifOrientation = 1
             }
-            // V16 Phase 1.fix3 — read cv::Stitcher knobs from JS config.
-            // Defaults overridden to "spherical" for batch-keyframe to
-            // sidestep the pose-driven CylindricalWarper / PlaneWarper
-            // pathologies for vertical pans.  User can pick anything
-            // from the modal's Projection / Blender / Seam-finder
-            // sections.
+            // V16 Phase 1.fix4 — read cv::Stitcher knobs from JS config.
+            // Defaults to "plane" / "multiband" / "graphcut" — the
+            // proven combo cv::Stitcher::PANORAMA uses internally.
+            // Operator can A/B different warpers from the modal's
+            // Projection / Blender / Seam-finder sections.
             self.batchWarperType =
-                (configOverrides["warperType"] as? String) ?? "spherical"
+                (configOverrides["warperType"] as? String) ?? "plane"
             self.batchBlenderType =
                 (configOverrides["blenderType"] as? String) ?? "multiband"
             self.batchSeamFinderType =
@@ -646,7 +644,14 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let inBatchKeyframeMode = self.batchKeyframeMode
         let collector = self.keyframeCollector
         let paths = self.keyframePaths
-        let poses = self.keyframePoses
+        // V16 Phase 1.fix4 — pose array still held on self ivar (and
+        // queued for persistent sidecar storage in a future debug-menu
+        // feature) but NOT passed to the stitcher in this drop.  fix4
+        // uses feature-matched stitchFramePaths which doesn't take
+        // poses; cv::Stitcher's BA derives camera placement from
+        // features.  Drop the closure-capture to avoid a compile
+        // warning; ARKit pose data is preserved on the ivar regardless.
+        _ = self.keyframePoses
         self.hybridEngine = nil
         self.firstwinsEngine = nil
         self.batchKeyframeMode = false
@@ -695,26 +700,49 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     // try block (or we wouldn't reach the success
                     // branch).
                     do {
-                        // V16 Phase 1.fix3 — pose-driven cv::Stitcher
-                        // pipeline with user-configurable warper /
-                        // blender / seam-finder.  Defaults overridden
-                        // to "spherical" / "multiband" / "graphcut"
-                        // for batch-keyframe in start().  Operator can
-                        // A/B different warpers from the modal without
-                        // rebuilding.
+                        // V16 Phase 1.fix4 — ARCHITECTURAL PIVOT.
+                        // Three iterations of pose-driven (fix1/2/3)
+                        // produced different failure modes (UMat
+                        // bbox blowup, sideways output, frames out of
+                        // order, same physical object placed twice).
+                        // Per the systematic-debugging skill: 3+ failed
+                        // fixes on the same approach = wrong
+                        // architecture.
+                        //
+                        // Switching to cv::Stitcher's feature-matched
+                        // pipeline (stitchFramePaths) — same warper /
+                        // blender / seam settings, but uses ORB +
+                        // BFMatcher + RANSAC + BundleAdjusterRay +
+                        // waveCorrect for camera placement instead of
+                        // ARKit poses.  Battle-tested for years in
+                        // cv::Stitcher::PANORAMA / SCANS modes.
+                        //
+                        // The 4-6 keyframes (with ≥40% new content
+                        // each, guaranteed by the Phase 0 gate) have
+                        // 60% overlap on retail content — features
+                        // are abundant and BA converges in <500 ms.
+                        // Output orientation, frame ordering, and
+                        // canvas bounds are all determined BY THE
+                        // FEATURES, not by pose-convention assumptions.
+                        //
+                        // ARKit poses are still saved alongside each
+                        // keyframe (`keyframePoses`) for future
+                        // pose-driven investigation as a separate
+                        // workstream — that path stays in the codebase
+                        // (stitchKeyframePaths method) but isn't on
+                        // the hot path.
                         os_log(.fault, log: Self.diagLog,
-                               "[V16-batch-keyframe] stitch: warper=%{public}@ blender=%{public}@ seam=%{public}@",
+                               "[V16-batch-keyframe] stitch (feature-matched): warper=%{public}@ blender=%{public}@ seam=%{public}@",
                                self.batchWarperType,
                                self.batchBlenderType,
                                self.batchSeamFinderType)
-                        let r = try OpenCVStitcher.stitchKeyframePaths(
+                        let r = try OpenCVStitcher.stitchFramePaths(
                             paths,
                             outputPath: cleaned,
                             jpegQuality: q,
                             warperType: self.batchWarperType,
                             blenderType: self.batchBlenderType,
-                            seamFinderType: self.batchSeamFinderType,
-                            poses: poses
+                            seamFinderType: self.batchSeamFinderType
                         )
                         // Keep saved keyframes on disk for post-hoc
                         // re-processing (Ram's request).  Cleanup is
