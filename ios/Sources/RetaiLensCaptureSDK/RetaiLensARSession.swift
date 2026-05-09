@@ -353,6 +353,19 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         return out
     }
 
+    /// V16 keyframe-gate accessor — returns the latched plane as a
+    /// `simd_float4x4`, the form Swift code (`KeyframeGate`,
+    /// `RetaiLensIncrementalStitcher`) needs for in-process polygon
+    /// math.  Distinct from `planeTransformFlat()` which exists only
+    /// to bridge the same data into ObjC++ as an NSNumber array.
+    /// Nil until a plane is latched (via the AR delegate's didAdd
+    /// alignment filter or `relatchPlaneFromCurrentAnchors()`).
+    public func latchedPlaneTransform() -> simd_float4x4? {
+        planeLatchLock.lock()
+        defer { planeLatchLock.unlock() }
+        return detectedPlaneTransformInternal
+    }
+
     // ──────────────────────────────────────────────────────────────
     // Phase 5 — AR-backed photo + video capture state
     // ──────────────────────────────────────────────────────────────

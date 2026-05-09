@@ -42,6 +42,21 @@ export enum IncrementalOutcome {
    * reverse motion via their warp pipeline.
    */
   RejectedReverseDirection = 7,
+  /**
+   * V16 — pose-driven keyframe gate rejected the frame because it
+   * overlapped >= (1 − overlapThreshold) with the last accepted
+   * keyframe.  Host should keep showing the same status — user is
+   * mid-pan between two natural keyframe boundaries.  No UX hint
+   * needed (this is the expected behaviour 90% of the time when
+   * pose-based selection is on).
+   */
+  SkippedKeyframeOverlap = 8,
+  /**
+   * V16 — pose-driven keyframe gate rejected the frame because the
+   * capture has hit `keyframeMaxCount` (default 6).  Host should
+   * auto-finalize since no more frames will be accepted.
+   */
+  SkippedKeyframeMaxReached = 9,
 }
 
 
@@ -110,6 +125,18 @@ export interface IncrementalState {
    * before the first frame.
    */
   panExtent: number;
+  /**
+   * V16 — pose-driven keyframe gate's max-keyframes cap for the
+   * current capture.  When > 0, the JS status pill renders
+   * `Keyframes: acceptedCount / keyframeMax` so the operator can see
+   * the budget remaining.  When 0, the keyframe gate is disabled
+   * (frameSelectionMode = "time-based") and the host should display
+   * acceptedCount as a raw counter without a denominator.
+   *
+   * Defaults to 0 before the first frame and stays 0 for the entire
+   * capture when the gate is disabled.
+   */
+  keyframeMax: number;
 }
 
 
@@ -321,6 +348,40 @@ export interface StitcherConfig {
   /** V15.0d — cross-axis clamp (pixels) for the pan-axis-aware mode.
    *  Range 0 – 30.  Default 5. */
   ncc2dCrossAxisLockPx: number;
+
+  // Frame selection (V16)
+
+  /** V16 — how the engine decides which ARFrames to ingest.
+   *
+   *  - 'time-based' (default): every frame the AR delegate delivers
+   *    is forwarded to the engine; the engine's existing internal
+   *    gate (kMinAcceptDeltaPx, time-throttled snapshot) decides
+   *    accept/reject.  Backward-compatible with all prior versions.
+   *  - 'pose-based': frames are pre-filtered by a Swift-side
+   *    KeyframeGate.  A frame is forwarded only when its projection
+   *    onto the latched ARKit plane has at least
+   *    `keyframeOverlapThreshold` of NEW area vs the last accepted
+   *    keyframe.  Bounded to `keyframeMaxCount` frames per capture.
+   *    Mirrors how iOS Camera and Samsung Pano actually work.
+   *
+   *  Pose-based requires `planeSource` != 'Disabled' for the gate to
+   *  engage; with no plane available the gate degrades silently to
+   *  passthrough. */
+  frameSelectionMode: 'time-based' | 'pose-based';
+
+  /** V16 — required fraction of NEW content per keyframe in pose-
+   *  based mode.  Range 0.10 – 0.80.  Default 0.40 (= the new frame
+   *  must share at most 60% of its plane footprint with the last
+   *  accepted keyframe).  Lower = more keyframes per capture +
+   *  more redundancy + better feature matching but higher memory.
+   *  Higher = fewer keyframes + less margin for blurry frames. */
+  keyframeOverlapThreshold: number;
+
+  /** V16 — hard cap on keyframes per capture in pose-based mode.
+   *  Range 3 – 10.  Default 6 (matches Samsung's typical behaviour).
+   *  Once reached, all subsequent frames are rejected and the host
+   *  should auto-finalize. */
+  keyframeMaxCount: number;
 }
 
 
@@ -382,6 +443,12 @@ interface NativeIncrementalModule {
    *  so the latched plane reflects what the operator is aiming at
    *  right NOW, not whichever plane ARKit noticed first. */
   relatchARPlane(): Promise<{ latched: boolean }>;
+  /** V16 — arm the pose-driven keyframe gate to force-accept the
+   *  next ARFrame regardless of overlap.  Called by the capture
+   *  screen on shutter release so the trailing edge of the scan
+   *  isn't truncated when the user releases mid-pan.  No-op when
+   *  the gate is disabled (frameSelectionMode = 'time-based'). */
+  markNextFrameAsLastKeyframe(): Promise<{ ok: true }>;
   /** PiP investigation only — write a JS-side message into the
    *  Swift-side rlis-debug.log so we get a single timeline. */
   appendDebugLog?(message: string): Promise<{ ok: true }>;

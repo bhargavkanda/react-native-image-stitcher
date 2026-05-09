@@ -44,4 +44,10 @@ RCT_EXTERN_METHOD(getARPlaneStatus:(RCTPromiseResolveBlock)resolver
 RCT_EXTERN_METHOD(relatchARPlane:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// V16 — pose-based keyframe gate: arm the next ARFrame to be
+// force-accepted, used on shutter release so the trailing edge of
+// the scan isn't truncated.
+RCT_EXTERN_METHOD(markNextFrameAsLastKeyframe:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 @end

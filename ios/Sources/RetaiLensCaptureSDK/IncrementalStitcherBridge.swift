@@ -176,6 +176,22 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver(["ok": true])
     }
 
+    /// V16 — JS-side hook for shutter-release in pose-based frame
+    /// selection mode.  Arms the keyframe gate so the next ARFrame
+    /// delivered is force-accepted regardless of overlap, ensuring
+    /// the trailing edge of the scan isn't truncated when the user
+    /// releases the shutter mid-pan.  No-op when the gate is
+    /// disabled (frameSelectionMode = "time-based") or no capture
+    /// is in flight.  Always resolves with `{ ok: true }`.
+    @objc(markNextFrameAsLastKeyframe:rejecter:)
+    public func markNextFrameAsLastKeyframe(
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        RetaiLensIncrementalStitcher.shared.markNextFrameAsLastKeyframe()
+        resolver(["ok": true])
+    }
+
     /// PiP investigation: write a JS-supplied message into the same
     /// rlis-debug.log file the Swift side uses, so we get a single
     /// timeline across native and JS.  Remove once PiP is fixed.

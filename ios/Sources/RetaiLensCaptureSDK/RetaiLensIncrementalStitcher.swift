@@ -46,6 +46,10 @@ import os.log
 /// Public outcome enum mirroring the ObjC `RLISFrameOutcome` so JS
 /// callers can inspect what happened to each frame without crossing
 /// the ObjC++ boundary themselves.
+///
+/// Values 7+ are emitted from the Swift gate layer (KeyframeGate),
+/// not from the native engine.  Keep numeric values in lockstep with
+/// `IncrementalOutcome` in incremental.ts.
 @objc public enum RetaiLensIncrementalOutcome: Int {
     case acceptedHigh = 0
     case acceptedMedium = 1
@@ -54,6 +58,18 @@ import os.log
     case rejectedSceneUniform = 4
     case rejectedAlignmentLost = 5
     case skippedTrackingPoor = 6
+    /// V12.11 — engine refused a frame because pan reversed past the
+    /// running max along the pan axis.  Mirrors the JS-side enum value
+    /// that's been there since V12.11.  Was missing on the Swift side
+    /// previously; the bridge fell back to `.skippedTrackingPoor` for
+    /// any rawValue >= 7.
+    case rejectedReverseDirection = 7
+    /// V16 — KeyframeGate rejected the frame: not enough new content
+    /// vs the last accepted keyframe (overlap > 1 - overlapThreshold).
+    case skippedKeyframeOverlap = 8
+    /// V16 — KeyframeGate rejected the frame: hit `keyframeMaxCount`
+    /// for the capture.  Host should auto-finalize.
+    case skippedKeyframeMaxReached = 9
 }
 
 /// State snapshot the bridge re-emits to JS on every accepted frame
@@ -82,6 +98,12 @@ public final class RetaiLensIncrementalState: NSObject {
     /// Constant for the lifetime of a capture.  fillRatio =
     /// `paintedExtent / panExtent`.
     @objc public let panExtent: Int
+    /// V16 — KeyframeGate's max-keyframes cap for this capture.  0
+    /// when the gate is disabled (frameSelectionMode = "time-based"),
+    /// in which case `acceptedCount` should be displayed as a raw
+    /// counter rather than a "n / max" pill.  When > 0, the JS
+    /// status pill renders "Keyframes: acceptedCount / keyframeMax".
+    @objc public let keyframeMax: Int
 
     @objc public init(
         panoramaPath: String?,
@@ -94,7 +116,8 @@ public final class RetaiLensIncrementalState: NSObject {
         processingMs: Double,
         isLandscape: Bool,
         paintedExtent: Int,
-        panExtent: Int
+        panExtent: Int,
+        keyframeMax: Int = 0
     ) {
         self.panoramaPath = panoramaPath
         self.width = width
@@ -107,6 +130,7 @@ public final class RetaiLensIncrementalState: NSObject {
         self.isLandscape = isLandscape
         self.paintedExtent = paintedExtent
         self.panExtent = panExtent
+        self.keyframeMax = keyframeMax
     }
 
     @objc public func asDictionary() -> [String: Any] {
@@ -121,6 +145,7 @@ public final class RetaiLensIncrementalState: NSObject {
             "isLandscape": isLandscape,
             "paintedExtent": paintedExtent,
             "panExtent": panExtent,
+            "keyframeMax": keyframeMax,
         ]
         if let p = panoramaPath { dict["panoramaPath"] = p }
         return dict
@@ -234,6 +259,14 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     private var hasFirstFrameTranslation: Bool = false
     private var consumeFrameCounter: Int = 0
 
+    /// V16 — pose-driven keyframe gate.  When `enabled` (set from the
+    /// JS `frameSelectionMode = "pose-based"` config), each ARFrame is
+    /// projected onto the latched ARKit plane and accepted only when
+    /// it has ≥ `overlapThreshold` of NEW content vs the last
+    /// accepted keyframe.  Bounded to `maxCount` keyframes per
+    /// capture.  See KeyframeGate.swift for the full rationale.
+    private let keyframeGate = KeyframeGate()
+
     private override init() {
         super.init()
     }
@@ -330,6 +363,32 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // on the next consumeFrame call.
         self.hasFirstFrameTranslation = false
         self.consumeFrameCounter = 0
+
+        // V16 — configure the pose-driven keyframe gate from JS
+        // config overrides.  Defaults match the field-tested values
+        // for a 90° landscape pan over a retail shelf: 40% required
+        // new content per keyframe, capped at 6 keyframes per
+        // capture.  Values out of range are clamped silently.
+        let frameMode = (configOverrides["frameSelectionMode"] as? String)
+                        ?? "time-based"
+        self.keyframeGate.enabled = (frameMode == "pose-based")
+        if let v = configOverrides["keyframeOverlapThreshold"] as? Double {
+            self.keyframeGate.overlapThreshold = max(0.10, min(0.80, v))
+        } else {
+            self.keyframeGate.overlapThreshold = 0.4
+        }
+        if let v = configOverrides["keyframeMaxCount"] as? Int {
+            self.keyframeGate.maxCount = max(3, min(10, v))
+        } else {
+            self.keyframeGate.maxCount = 6
+        }
+        self.keyframeGate.reset()
+        os_log(.fault, log: Self.diagLog,
+               "[V16-keyframe] start gate enabled=%d thr=%.2f max=%d",
+               self.keyframeGate.enabled ? 1 : 0,
+               self.keyframeGate.overlapThreshold,
+               self.keyframeGate.maxCount)
+
         stateLock.unlock()
 
         // Register with the AR session.  Weak so the singleton is the
@@ -541,6 +600,12 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         self.firstwinsEngine = nil
         self.isRunning = false
         self.lastState = nil
+        // V16 — reset the keyframe gate so the next start() begins
+        // with a clean polygon state and counter.  Safe to do under
+        // stateLock because the gate is only mutated from the AR
+        // delegate (consumeFrame) and the JS thread (start/cancel
+        // /markNextFrameAsLastKeyframe), all serialized via this lock.
+        self.keyframeGate.reset()
         stateLock.unlock()
         RetaiLensARSession.shared.incrementalConsumer = nil
         // Reset on the work queue so we don't race with an in-flight
@@ -549,6 +614,69 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             hybrid?.reset()
             slit?.reset()
         }
+    }
+
+    /// V16 — JS-side hook for shutter-release: arm the gate so the
+    /// NEXT delivered ARFrame is force-accepted regardless of overlap.
+    /// Without this, the user releasing mid-pan (between two natural
+    /// keyframe boundaries) would leave the trailing edge of the
+    /// scene unrepresented in the panorama.
+    ///
+    /// Idempotent: setting the flag while it's already set is a no-op.
+    /// Safe to call from any thread (NSLock-guarded).  No-op when the
+    /// gate is disabled (frameSelectionMode = "time-based").
+    @objc public func markNextFrameAsLastKeyframe() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard self.isRunning, self.keyframeGate.enabled else { return }
+        self.keyframeGate.forceAcceptNext = true
+        os_log(.fault, log: Self.diagLog,
+               "[V16-keyframe] markNextFrameAsLastKeyframe armed (count=%d max=%d)",
+               self.keyframeGate.acceptedCount, self.keyframeGate.maxCount)
+    }
+
+    /// Synthesise + emit a state event for a frame the keyframe gate
+    /// rejected.  The native engine never sees the frame, so its own
+    /// state machinery isn't invoked — but JS still wants the event
+    /// so the status pill can update ("frame skipped, still 3/6").
+    private func emitKeyframeRejectState(decision: KeyframeGateDecision) {
+        // Pick the right outcome value for JS; defaults match the
+        // intent (overlap-too-high vs cap-reached).
+        let outcome: RetaiLensIncrementalOutcome
+        switch decision.reason {
+        case "max-reached":      outcome = .skippedKeyframeMaxReached
+        case "overlap-too-high": outcome = .skippedKeyframeOverlap
+        default:                 outcome = .skippedKeyframeOverlap
+        }
+        // Re-use the previous state's pan-extent / orientation fields
+        // so the band overlay doesn't flicker when a reject lands.
+        let prev = self.lastState
+        let acceptedCount = self.engineAcceptedCount
+        let overlapPercent = (decision.newContentFraction >= 0)
+            ? (1.0 - decision.newContentFraction) * 100.0
+            : (prev?.overlapPercent ?? -1.0)
+        let state = RetaiLensIncrementalState(
+            panoramaPath: nil,
+            width: 0,
+            height: 0,
+            acceptedCount: acceptedCount,
+            outcome: outcome,
+            confidence: 0,
+            overlapPercent: overlapPercent,
+            processingMs: 0,
+            isLandscape: prev?.isLandscape ?? false,
+            paintedExtent: prev?.paintedExtent ?? 0,
+            panExtent: prev?.panExtent ?? 0,
+            keyframeMax: decision.maxCount
+        )
+        stateLock.lock()
+        self.lastState = state
+        stateLock.unlock()
+        NotificationCenter.default.post(
+            name: .retailensIncrementalStateUpdate,
+            object: nil,
+            userInfo: state.asDictionary()
+        )
     }
 
     /// Read the most recent state snapshot (JS pulls this on demand).
@@ -615,6 +743,27 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         }
         stateLock.unlock()
         guard isRunning, (hybrid != nil || slit != nil) else { return }
+
+        // V16 — pose-driven keyframe gate.  When enabled, only frames
+        // that add ≥ overlapThreshold of new content vs the last
+        // accepted keyframe are forwarded to the engine.  Bounded to
+        // `maxCount` keyframes per capture.  When disabled (default)
+        // every frame passes through and the engine's existing time/
+        // pose-based gate decides.  See KeyframeGate.swift.
+        //
+        // We evaluate BEFORE the workInFlight check so a rejected
+        // frame doesn't burn workQueue slots — the gate is the cheap
+        // filter, the engine is the expensive one.
+        if self.keyframeGate.enabled {
+            let plane = RetaiLensARSession.shared.latchedPlaneTransform()
+            let decision = self.keyframeGate.evaluate(
+                pose: pose, latchedPlane: plane
+            )
+            if !decision.accept {
+                self.emitKeyframeRejectState(decision: decision)
+                return
+            }
+        }
 
         // Compute yaw + pitch from the quaternion.  Convention:
         // yaw   = rotation about world Y (camera turning left/right)
@@ -761,6 +910,10 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             }
         }
 
+        // V16 — pass the gate's max keyframe count when the gate is
+        // active so JS can render "Keyframes: n/max".  Zero signals
+        // "gate disabled" to the JS pill.
+        let kfMax = self.keyframeGate.enabled ? self.keyframeGate.maxCount : 0
         let state = RetaiLensIncrementalState(
             panoramaPath: snapshotPath,
             width: snapW,
@@ -772,7 +925,8 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             processingMs: telemetry.processingMs,
             isLandscape: telemetry.isLandscape,
             paintedExtent: telemetry.paintedExtent,
-            panExtent: telemetry.panExtent
+            panExtent: telemetry.panExtent,
+            keyframeMax: kfMax
         )
         stateLock.lock()
         self.lastState = state

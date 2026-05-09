@@ -134,6 +134,29 @@ export interface PanoramaSettings {
   /** V15.0d — cross-axis clamp (px) when pan-axis lock is on.
    *  0 – 30.  Default 5. */
   ncc2dCrossAxisLockPx: number;
+
+  /** V16 — frame-selection mode for the live engine.
+   *
+   *  - 'time-based' (default): every ARFrame is forwarded to the
+   *    engine; the engine's own gate (kMinAcceptDeltaPx etc.) decides.
+   *    Backward-compatible with all prior versions.
+   *  - 'pose-based': frames are pre-filtered by a Swift KeyframeGate
+   *    that projects each onto the latched ARKit plane and accepts
+   *    only when overlap with the previous keyframe is < 1 −
+   *    overlapThreshold.  Bounded to keyframeMaxCount frames per
+   *    capture (matches iOS Camera / Samsung Pano architecture).
+   *    Requires planeSource != 'Disabled' to engage. */
+  frameSelectionMode: 'time-based' | 'pose-based';
+  /** V16 — required NEW-content fraction for a keyframe to be
+   *  accepted (pose-based mode).  Default 0.40 (= ≤60% overlap with
+   *  the previous keyframe).  Tuneable from 0.20 to 0.60 in the
+   *  modal. */
+  keyframeOverlapThreshold: number;
+  /** V16 — hard cap on keyframes per capture (pose-based mode).
+   *  Default 6.  Once reached, all further frames are rejected and
+   *  the host should auto-finalize. */
+  keyframeMaxCount: number;
+
   /** V15.0c — sliver position within the camera frame.  'Center' is
    *  V13.x default.  'Bottom' takes leading-edge content for top-to-
    *  bottom pan; 'Top' for bottom-to-top pan. */
@@ -245,6 +268,13 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   ncc2dEmaAlpha: 0.4,
   enableNcc2dPanAxisLock: false,
   ncc2dCrossAxisLockPx: 5,
+  // V16 — pose-driven keyframe gate.  Default off so existing
+  // captures keep their behaviour; operators opt in via the modal.
+  // Defaults match the field-tested values (40% required new content
+  // per keyframe, capped at 6 keyframes per capture).
+  frameSelectionMode: 'time-based',
+  keyframeOverlapThreshold: 0.40,
+  keyframeMaxCount: 6,
   // V15.0c — sliver tweaks: leading-edge sliver from BOTTOM for typical
   // top-to-bottom pan + full first-frame anchor produced the best
   // outputs in early iteration.
@@ -495,6 +525,30 @@ export function PanoramaSettingsModal({
               value={String(settings.ncc2dCrossAxisLockPx)}
               onChange={(v) => update({ ncc2dCrossAxisLockPx: parseInt(v, 10) })}
               caption="Cross-axis clamp when pan-axis lock is on. Lower = tighter lock."
+            />
+
+            <SectionHeader title="Frame selection mode (V16, AR mode)" />
+            <SegmentedControl
+              options={['time-based', 'pose-based']}
+              value={settings.frameSelectionMode}
+              onChange={(v) => update({ frameSelectionMode: v as PanoramaSettings['frameSelectionMode'] })}
+              caption="time-based (default): every ARFrame goes to the engine; engine's internal gate decides. pose-based (V16): a Swift KeyframeGate projects each frame onto the AR plane and accepts only when overlap < (1−threshold) AND keyframe count < max. Matches iOS/Samsung architecture (~5 distinct keyframes per capture, multi-band blender does the heavy lifting). Requires planeSource != Disabled to engage."
+            />
+
+            <SectionHeader title="Keyframe overlap threshold (V16, pose-based mode)" />
+            <SegmentedControl
+              options={['20%', '30%', '40%', '50%', '60%']}
+              value={`${Math.round(settings.keyframeOverlapThreshold * 100)}%`}
+              onChange={(v) => update({ keyframeOverlapThreshold: parseInt(v, 10) / 100 })}
+              caption="Fraction of NEW content required before a frame is accepted as a keyframe (= 1 − max overlap with the previous keyframe). 40% (default) ≈ 4–5 keyframes for a 90° landscape pan. Lower = more keyframes, more redundancy, better matching but more memory. Higher = fewer keyframes, tighter budget but more visible seams between them."
+            />
+
+            <SectionHeader title="Max keyframes per capture (V16, pose-based mode)" />
+            <SegmentedControl
+              options={['3', '4', '5', '6', '8', '10']}
+              value={String(settings.keyframeMaxCount)}
+              onChange={(v) => update({ keyframeMaxCount: parseInt(v, 10) })}
+              caption="Hard cap on keyframes per capture. Once reached, all further frames are rejected (host auto-finalizes). 6 (default) matches Samsung's typical behaviour. 4 = iOS Camera-style. Higher = wider pan supported, lower = stricter memory bound."
             />
 
             <SectionHeader title="Recording cap" />
