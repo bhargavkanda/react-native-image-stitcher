@@ -76,9 +76,27 @@ const FRAME_LEN = 56;
 export interface LiveFrameStripProps {
   /**
    * Ref to the underlying vision-camera `<Camera>` (forwarded by
-   * `<CameraView>`).  Used to call `takeSnapshot` periodically.
+   * `<CameraView>`).  Used to call `takeSnapshot` periodically when
+   * `frameUris` is NOT provided (the legacy AR-OFF / batch path).
+   *
+   * In the V16 AR + batch-keyframe path, vision-camera doesn't own
+   * the camera (ARKit does), so `takeSnapshot` would fail.  Pass
+   * `frameUris` instead and leave `cameraRef` undefined — the strip
+   * skips the snapshot polling entirely.
    */
-  cameraRef: React.RefObject<Camera | null>;
+  cameraRef?: React.RefObject<Camera | null>;
+  /**
+   * V16 Phase 1 — externally-provided thumbnail URIs.  When set,
+   * the strip renders these directly and ignores `cameraRef`.  Used
+   * by AR-mode batch-keyframe: each frame the KeyframeGate accepts
+   * is saved by the native `OpenCVKeyframeCollector` and its path
+   * is pushed into this array via the host's IncrementalState
+   * subscription.
+   *
+   * Pass `undefined` (or omit) to keep the legacy
+   * `cameraRef.takeSnapshot()` polling behaviour.
+   */
+  frameUris?: string[];
   /**
    * Sample frames only while this is true.  Wire to the recording
    * phase of your capture flow — typically `statusPhase === 'recording'`.
@@ -86,8 +104,8 @@ export interface LiveFrameStripProps {
   active: boolean;
   /**
    * Interval between snapshots in milliseconds.  Default 500 ms.
-   * Lower = more frames + more disk I/O.  Don't go below 200 ms;
-   * vision-camera's snapshot pipeline can't keep up reliably.
+   * Only relevant when `cameraRef`-driven (legacy mode).  Don't go
+   * below 200 ms; vision-camera's snapshot pipeline can't keep up.
    */
   sampleIntervalMs?: number;
   /**
@@ -104,6 +122,7 @@ export interface LiveFrameStripProps {
 
 export function LiveFrameStrip({
   cameraRef,
+  frameUris: externalFrameUris,
   active,
   sampleIntervalMs = DEFAULT_SAMPLE_INTERVAL_MS,
   orientation,
@@ -119,7 +138,14 @@ export function LiveFrameStrip({
   const resolvedOrientation =
     orientation ?? (isPortrait ? 'horizontal' : 'vertical');
 
-  const [frameUris, setFrameUris] = useState<string[]>([]);
+  // Two source modes:
+  //   1. external (V16 batch-keyframe): the host pushes URIs into
+  //      the `externalFrameUris` prop on each keyframe-accepted
+  //      event.  We render those directly.
+  //   2. legacy (vision-camera batch path): we poll `cameraRef`
+  //      via takeSnapshot every `sampleIntervalMs` and accumulate
+  //      results in this internal state.
+  const [internalFrameUris, setInternalFrameUris] = useState<string[]>([]);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Imperative handle on the ScrollView so we can scroll to the
   // latest frame each time one's added.  Without this, frames
@@ -127,21 +153,18 @@ export function LiveFrameStrip({
   // the most recent ones — defeats the purpose of a live preview.
   const scrollRef = useRef<ScrollView | null>(null);
 
+  const externalMode = externalFrameUris !== undefined;
+
   const captureOne = useCallback(async () => {
-    const cam = cameraRef.current;
+    const cam = cameraRef?.current;
     if (!cam) return;
     try {
-      // takeSnapshot returns { path, width, height }.  We only need
-      // the path for display; everything else is ignored.
       const snap = await cam.takeSnapshot({ quality: 50 });
       if (!snap?.path) return;
       const uri = snap.path.startsWith('file://')
         ? snap.path
         : `file://${snap.path}`;
-      // Cap the strip at a reasonable length so the JS state object
-      // doesn't grow unbounded on long holds — keep the most recent
-      // 24 frames (≈ 12 s at 500 ms cadence).
-      setFrameUris((prev) => {
+      setInternalFrameUris((prev) => {
         const next = [...prev, uri];
         return next.length > 24 ? next.slice(next.length - 24) : next;
       });
@@ -156,17 +179,18 @@ export function LiveFrameStrip({
 
   useEffect(() => {
     if (!active) {
-      // Tear down the interval AND clear the strip so the next
-      // panorama starts from a blank state.
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
-      setFrameUris([]);
+      setInternalFrameUris([]);
       return;
     }
-    // Kick off an immediate first sample so the strip isn't empty
-    // for the first half-second of the hold.
+    // External mode: host pushes URIs via the prop, no polling.
+    // takeSnapshot would fail anyway (ARKit owns the camera).
+    if (externalMode) {
+      return;
+    }
     captureOne();
     intervalRef.current = setInterval(captureOne, sampleIntervalMs);
     return () => {
@@ -175,9 +199,13 @@ export function LiveFrameStrip({
         intervalRef.current = null;
       }
     };
-  }, [active, sampleIntervalMs, captureOne]);
+  }, [active, sampleIntervalMs, captureOne, externalMode]);
 
-  if (!active || frameUris.length === 0) return null;
+  if (!active) return null;
+  const stripFrameUris = externalMode
+    ? (externalFrameUris ?? [])
+    : internalFrameUris;
+  if (stripFrameUris.length === 0) return null;
 
   // Layout swaps between row / column based on the resolved
   // orientation.  In both axes the natural pan-start is the
@@ -199,7 +227,7 @@ export function LiveFrameStrip({
         { backgroundColor },
         style,
       ]}
-      accessibilityLabel={`Live preview, ${frameUris.length} frames captured`}
+      accessibilityLabel={`Live preview, ${stripFrameUris.length} frames captured`}
     >
       <ScrollView
         ref={scrollRef}
@@ -218,7 +246,7 @@ export function LiveFrameStrip({
           scrollRef.current?.scrollToEnd({ animated: false });
         }}
       >
-        {frameUris.map((uri, idx) => (
+        {stripFrameUris.map((uri, idx) => (
           <Image
             key={`${uri}-${idx}`}
             source={{ uri }}

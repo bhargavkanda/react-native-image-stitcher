@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: UNLICENSED
+//
+// OpenCVKeyframeCollector — V16 Phase 1 helper that accumulates the
+// AR-keyframe-gate's accepted CVPixelBuffers as on-disk JPEGs while
+// the user pans, then hands the path list off to OpenCVStitcher's
+// `stitchKeyframePaths:withPoses:` on shutter release.
+//
+// Why a separate class:
+//   - CVPixelBuffer → cv::Mat → cv::imwrite has to live in ObjC++ /
+//     OpenCV-aware code.  RetaiLensIncrementalStitcher.swift can't
+//     call it directly.
+//   - The frame collection state (session dir, accepted-frame
+//     counter) is small and capture-scoped; isolating it from the
+//     much larger OpenCVStitcher class file keeps the surface
+//     small.
+//   - When KLT/multi-band incremental work lands later (Phase 3 LHF
+//     #2), this collector becomes the natural seam between the
+//     "frames are arriving live" path and the "stitch them now"
+//     path; centralising it now pays back later.
+
+#import <Foundation/Foundation.h>
+#import <CoreVideo/CoreVideo.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+/// Each saved keyframe ends up with a JPEG path + the index it was
+/// saved at + the on-disk size.  Returned from `saveKeyframe:…` so
+/// the host can build the path/pose list for `stitchKeyframePaths:`.
+@interface OpenCVKeyframeRecord : NSObject
+@property (nonatomic, copy, readonly) NSString *path;
+@property (nonatomic, assign, readonly) NSInteger index;
+@property (nonatomic, assign, readonly) NSInteger width;
+@property (nonatomic, assign, readonly) NSInteger height;
+- (instancetype)initWithPath:(NSString *)path
+                       index:(NSInteger)index
+                       width:(NSInteger)width
+                      height:(NSInteger)height NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+
+@interface OpenCVKeyframeCollector : NSObject
+
+/// Active session directory under
+/// `Library/AppSupport/Captures/{capture-uuid}/`.  Persisted (NOT
+/// NSTemporaryDirectory) so the operator / debug menu can re-process
+/// captures later.  Caller is responsible for `cleanup` when no
+/// longer needed.
+@property (nonatomic, copy, readonly) NSString *sessionDir;
+
+/// Total keyframes saved so far.
+@property (nonatomic, assign, readonly) NSInteger acceptedCount;
+
+/// Create a new collector with a freshly-minted session directory
+/// under `Library/AppSupport/Captures/{NSUUID}/`.  Returns nil if
+/// the directory couldn't be created (out-of-space etc.) and
+/// populates `error`.  Imported into Swift as
+/// `try OpenCVKeyframeCollector()`.
+- (nullable instancetype)initWithError:(NSError **)error NS_DESIGNATED_INITIALIZER;
+/// Plain `init` is forwarded to `initWithError:` with a discarded
+/// error so Swift's `try Type()` translation works without colliding
+/// with NS_UNAVAILABLE machinery.  Don't call from ObjC — use the
+/// throwing initializer.
+- (nullable instancetype)init;
+
+/// Save one accepted ARFrame's pixel buffer as a JPEG inside the
+/// session directory.  Filename is `keyframe-{index zero-padded}.jpg`.
+/// Pixel buffer format must be NV12 (the ARFrame default) or BGRA;
+/// other formats fail with NSError code 1200.  `rotationDegrees`
+/// must be one of 0/90/180/270 — the buffer is rotated by that
+/// amount before encoding so the saved JPEG is in the same
+/// orientation `OpenCVStitcher.stitchKeyframePaths` expects (sensor
+/// landscape rotated to user-pan orientation).
+- (nullable OpenCVKeyframeRecord *)saveKeyframe:(CVPixelBufferRef)pixelBuffer
+                                rotationDegrees:(NSInteger)rotationDegrees
+                                    jpegQuality:(NSInteger)jpegQuality
+                                          error:(NSError **)error;
+
+/// Remove the session directory and any saved keyframes.  Idempotent.
+/// Called from RetaiLensIncrementalStitcher's `cancel` / on
+/// successful finalize when the operator hasn't opted into
+/// "keep-for-reprocess" mode.
+- (void)cleanup;
+
+@end
+
+NS_ASSUME_NONNULL_END

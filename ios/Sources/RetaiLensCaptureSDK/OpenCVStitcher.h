@@ -139,6 +139,31 @@ extern NSString *const RetaiLensStitcherErrorDomain;
                                                 poses:(NSArray<NSDictionary *> *)poses
                                                 error:(NSError **)error;
 
+/// V16 Phase 1: pose-driven stitch over an explicit list of frame
+/// paths.  Sibling of `stitchVideoAtPath:withPoses:` — same compose
+/// stage, but the caller supplies frames as already-on-disk JPEGs
+/// + a 1:1 pose array, so the video extraction + timestamp matching
+/// steps are skipped entirely.
+///
+/// This is the hot path for the "batch-on-AR-keyframes" flow: the
+/// Swift `KeyframeGate` accepts ≤6 frames per capture, each saved
+/// to disk with a known pose; on shutter release we feed those
+/// straight into the same `BundleAdjuster + GraphCutSeamFinder +
+/// MultiBandBlender` pipeline that the video-driven path uses.
+///
+/// `framePaths.count` MUST equal `poses.count` (1:1 mapping; any
+/// downstream filtering happens inside this method).  `framePaths`
+/// must be at least 2 entries.  Pose dictionaries follow the same
+/// shape as `RetaiLensARFramePose.asDictionary()`.
++ (nullable RetaiLensStitchResult *)stitchKeyframePaths:(NSArray<NSString *> *)framePaths
+                                            outputPath:(NSString *)outputPath
+                                           jpegQuality:(NSInteger)quality
+                                            warperType:(nullable NSString *)warperType
+                                           blenderType:(nullable NSString *)blenderType
+                                        seamFinderType:(nullable NSString *)seamFinderType
+                                                 poses:(NSArray<NSDictionary *> *)poses
+                                                 error:(NSError **)error;
+
 /// Normalise the EXIF orientation of `imagePath` in place.
 ///
 /// vision-camera writes photos with the camera-sensor's native

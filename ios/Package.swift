@@ -51,6 +51,9 @@ let package = Package(
         // OpenCV-dependent (Phase 2 stitcher)
         "OpenCVStitcher.h",
         "OpenCVStitcher.mm",
+        // OpenCV-dependent (V16 Phase 1 keyframe collector)
+        "OpenCVKeyframeCollector.h",
+        "OpenCVKeyframeCollector.mm",
         // Stitcher.swift is `#if canImport(UIKit)`-gated so it
         // compiles to nothing on macOS; including it keeps the
         // file available to the Pods build without breaking

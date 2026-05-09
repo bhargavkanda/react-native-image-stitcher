@@ -2127,6 +2127,367 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
 
 // ─────────────────────────────────────────────────────────────────────
+// V16 Phase 1: pose-driven stitch over explicit keyframe paths
+// ─────────────────────────────────────────────────────────────────────
+//
+// Same compose stage as the video-driven pose path above, minus the
+// AVAssetImageGenerator extract + timestamp-matching step.  Frames
+// arrive as already-on-disk JPEGs from the AR-keyframe capture flow;
+// poses are 1:1 with frames (KeyframeGate saved both as the user
+// panned).  Compose code is duplicated per the convention noted
+// above ("DRY when the new path is proven on real shelf captures").
+
++ (nullable RetaiLensStitchResult *)stitchKeyframePaths:(NSArray<NSString *> *)framePaths
+                                            outputPath:(NSString *)outputPath
+                                           jpegQuality:(NSInteger)quality
+                                            warperType:(NSString *)warperType
+                                           blenderType:(NSString *)blenderType
+                                        seamFinderType:(NSString *)seamFinderType
+                                                 poses:(NSArray<NSDictionary *> *)poses
+                                                 error:(NSError **)error {
+  if (warperType == nil || warperType.length == 0) warperType = @"plane";
+  if (blenderType == nil || blenderType.length == 0) blenderType = @"multiband";
+  if (seamFinderType == nil || seamFinderType.length == 0) seamFinderType = @"graphcut";
+  if (framePaths.count < 2) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1030
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Keyframe stitch needs at least 2 frames; got fewer.",
+      }];
+    }
+    return nil;
+  }
+  if (framePaths.count != poses.count) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1033
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"Keyframe stitch requires 1:1 paths/poses; "
+             "got %lu paths, %lu poses.",
+            (unsigned long)framePaths.count,
+            (unsigned long)poses.count],
+      }];
+    }
+    return nil;
+  }
+
+  // Load each path → cv::Mat + cameraParams.  Drop any that fail
+  // to load (corrupt JPEG, missing file) — but require ≥2 to
+  // succeed for a panorama to be possible.
+  std::vector<cv::Mat> frames;
+  std::vector<cv::detail::CameraParams> cameras;
+  frames.reserve(framePaths.count);
+  cameras.reserve(framePaths.count);
+  int loaded = 0, dropped = 0;
+  for (NSInteger i = 0; i < (NSInteger)framePaths.count; i++) {
+    NSString *path = framePaths[i];
+    NSString *cleaned = ([path hasPrefix:@"file://"]
+        ? [path substringFromIndex:[@"file://" length]]
+        : path);
+    cv::Mat img = cv::imread([cleaned UTF8String]);
+    if (img.empty()) {
+      dropped++;
+      continue;
+    }
+    frames.push_back(img);
+    cameras.push_back(cameraParamsFromPose(poses[i]));
+    loaded++;
+  }
+  NSLog(@"[RetaiLensStitcher] keyframe-stitch: loaded=%d dropped=%d",
+        loaded, dropped);
+
+  if (frames.size() < 2) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1032
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Fewer than 2 keyframes loaded successfully — JPEGs may "
+           "have been corrupted or removed before stitch ran.",
+      }];
+    }
+    return nil;
+  }
+
+  auto t0 = std::chrono::steady_clock::now();
+  cv::Mat panorama;
+
+  @autoreleasepool {
+  try {
+    int origCols = frames[0].cols;
+    int origRows = frames[0].rows;
+    double origMp = (double)origCols * origRows / 1e6;
+    constexpr double COMPOSE_MP = 1.0;
+    double compose_scale = (origMp > COMPOSE_MP)
+        ? std::sqrt(COMPOSE_MP / origMp)
+        : 1.0;
+    double compose_work_aspect = compose_scale;  // work_scale == 1
+
+    // Wave correction in HORIZ mode (matches the video-driven pose
+    // path).  Aligns each camera's "up" to gravity, which is what
+    // we want for both portrait and landscape pans assuming the
+    // user keeps the phone vertical (the typical handheld case).
+    std::vector<cv::Mat> rmats;
+    rmats.reserve(cameras.size());
+    for (const auto &cam : cameras) rmats.push_back(cam.R.clone());
+    try {
+      cv::detail::waveCorrect(rmats, cv::detail::WAVE_CORRECT_HORIZ);
+      for (size_t i = 0; i < cameras.size(); i++) {
+        cameras[i].R = rmats[i];
+      }
+    } catch (const cv::Exception &e) {
+      NSLog(@"[RetaiLensStitcher] keyframe: wave correction skipped: %s",
+            e.what());
+    }
+
+    // Rescale intrinsics for compose-scale warping.
+    for (auto &cam : cameras) {
+      cam.focal *= compose_work_aspect;
+      cam.ppx   *= compose_work_aspect;
+      cam.ppy   *= compose_work_aspect;
+    }
+
+    std::vector<double> focals;
+    for (const auto &cam : cameras) focals.push_back(cam.focal);
+    std::sort(focals.begin(), focals.end());
+    float warpedScale = focals.empty() ? 1.0f
+                                       : (float)focals[focals.size() / 2];
+
+    cv::Ptr<cv::WarperCreator> warperCreator;
+    if ([warperType isEqualToString:@"cylindrical"]) {
+      warperCreator = cv::makePtr<cv::CylindricalWarper>();
+    } else if ([warperType isEqualToString:@"spherical"]) {
+      warperCreator = cv::makePtr<cv::SphericalWarper>();
+    } else {
+      warperCreator = cv::makePtr<cv::PlaneWarper>();
+    }
+    cv::Ptr<cv::detail::RotationWarper> warper =
+        warperCreator->create(warpedScale);
+
+    // Build composeFrames at COMPOSE_MP from full-res input.
+    std::vector<cv::Mat> composeFrames;
+    composeFrames.reserve(frames.size());
+    for (const auto &f : frames) {
+      cv::Mat scaled;
+      if (std::abs(compose_scale - 1.0) > 1e-3) {
+        cv::resize(f, scaled, cv::Size(), compose_scale, compose_scale,
+                   cv::INTER_AREA);
+      } else {
+        scaled = f.clone();
+      }
+      composeFrames.push_back(scaled);
+    }
+    for (auto &f : frames) f.release();
+    frames.clear();
+
+    BOOL useSeam = [seamFinderType isEqualToString:@"graphcut"];
+    cv::Ptr<cv::detail::Blender> blender;
+    if ([blenderType isEqualToString:@"feather"]) {
+      blender = cv::detail::Blender::createDefault(
+          cv::detail::Blender::FEATHER, false);
+      auto fb = blender.dynamicCast<cv::detail::FeatherBlender>();
+      if (fb) fb->setSharpness(0.02f);
+    } else {
+      blender = cv::detail::Blender::createDefault(
+          cv::detail::Blender::MULTI_BAND, false);
+      auto mbb = blender.dynamicCast<cv::detail::MultiBandBlender>();
+      if (mbb) mbb->setNumBands(5);
+    }
+
+    if (useSeam) {
+      const size_t M = composeFrames.size();
+      std::vector<cv::Point> corners(M);
+      std::vector<cv::Mat> imagesWarped(M);
+      std::vector<cv::Mat> masksWarped(M);
+      std::vector<cv::Size> sizes(M);
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat K;
+        cameras[i].K().convertTo(K, CV_32F);
+        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
+        corners[i] = warper->warp(
+            composeFrames[i], K, cameras[i].R, cv::INTER_LINEAR,
+            cv::BORDER_CONSTANT, imagesWarped[i]);
+        warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
+                     cv::BORDER_CONSTANT, masksWarped[i]);
+        sizes[i] = imagesWarped[i].size();
+      }
+      for (auto &cf : composeFrames) cf.release();
+      composeFrames.clear();
+
+      const double SEAM_MP = 0.1;
+      double seam_scale = std::min(1.0, std::sqrt(SEAM_MP / origMp));
+      double seam_compose_aspect = seam_scale / compose_scale;
+      std::vector<cv::UMat> imagesWarpedF_seam(M);
+      std::vector<cv::UMat> masksWarpedU_seam(M);
+      std::vector<cv::Point> corners_seam(M);
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat seamImage, seamMask;
+        cv::resize(imagesWarped[i], seamImage, cv::Size(),
+                   seam_compose_aspect, seam_compose_aspect,
+                   cv::INTER_LINEAR);
+        cv::resize(masksWarped[i], seamMask, cv::Size(),
+                   seam_compose_aspect, seam_compose_aspect,
+                   cv::INTER_NEAREST);
+        seamImage.convertTo(imagesWarpedF_seam[i], CV_32F);
+        seamMask.copyTo(masksWarpedU_seam[i]);
+        corners_seam[i] = cv::Point(
+            cvRound(corners[i].x * seam_compose_aspect),
+            cvRound(corners[i].y * seam_compose_aspect));
+      }
+      cv::Ptr<cv::detail::SeamFinder> seamFinder =
+          cv::makePtr<cv::detail::GraphCutSeamFinder>(
+              cv::detail::GraphCutSeamFinder::COST_COLOR);
+      seamFinder->find(imagesWarpedF_seam, corners_seam, masksWarpedU_seam);
+      imagesWarpedF_seam.clear();
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat seamMaskCpu, seamMaskDilated, seamMaskFull;
+        masksWarpedU_seam[i].copyTo(seamMaskCpu);
+        cv::dilate(seamMaskCpu, seamMaskDilated, cv::Mat());
+        cv::resize(seamMaskDilated, seamMaskFull,
+                   masksWarped[i].size(), 0, 0, cv::INTER_LINEAR);
+        cv::bitwise_and(seamMaskFull, masksWarped[i], masksWarped[i]);
+      }
+      masksWarpedU_seam.clear();
+
+      blender->prepare(corners, sizes);
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat imgS;
+        imagesWarped[i].convertTo(imgS, CV_16S);
+        blender->feed(imgS, masksWarped[i], corners[i]);
+        imagesWarped[i].release();
+        masksWarped[i].release();
+        imgS.release();
+      }
+      imagesWarped.clear();
+      masksWarped.clear();
+    } else {
+      // STREAM path
+      const size_t M = composeFrames.size();
+      std::vector<cv::Point> corners(M);
+      std::vector<cv::Size> sizes(M);
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat K;
+        cameras[i].K().convertTo(K, CV_32F);
+        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
+        cv::Mat tmpMaskWarped;
+        corners[i] = warper->warp(
+            mask, K, cameras[i].R, cv::INTER_NEAREST,
+            cv::BORDER_CONSTANT, tmpMaskWarped);
+        sizes[i] = tmpMaskWarped.size();
+      }
+      blender->prepare(corners, sizes);
+      for (size_t i = 0; i < M; i++) {
+        cv::Mat K;
+        cameras[i].K().convertTo(K, CV_32F);
+        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
+        cv::Mat imgWarped, maskWarped;
+        warper->warp(composeFrames[i], K, cameras[i].R,
+                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, imgWarped);
+        warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
+                     cv::BORDER_CONSTANT, maskWarped);
+        cv::Mat imgS;
+        imgWarped.convertTo(imgS, CV_16S);
+        blender->feed(imgS, maskWarped, corners[i]);
+        composeFrames[i].release();
+      }
+      composeFrames.clear();
+    }
+
+    cv::Mat panoramaS, panoramaMask;
+    blender->blend(panoramaS, panoramaMask);
+    panoramaS.convertTo(panorama, CV_8U);
+  } catch (const cv::Exception &e) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1100
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"OpenCV exception during keyframe stitch: %s", e.what()],
+      }];
+    }
+    return nil;
+  } catch (...) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1102
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Unknown exception during keyframe stitch.",
+      }];
+    }
+    return nil;
+  }
+  }  // end @autoreleasepool
+
+  if (panorama.empty()) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1003
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Keyframe stitch produced an empty panorama.",
+      }];
+    }
+    return nil;
+  }
+
+  // Crop to bounding box.
+  cv::Mat finalImage = panorama;
+  try {
+    cv::Mat gray;
+    cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+    cv::Mat mask;
+    cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
+    cv::Rect bbox = cv::boundingRect(mask);
+    if (bbox.width > 0 && bbox.height > 0
+        && bbox.width <= panorama.cols && bbox.height <= panorama.rows) {
+      finalImage = panorama(bbox).clone();
+    }
+  } catch (...) {
+    finalImage = panorama;
+  }
+
+  auto t1 = std::chrono::steady_clock::now();
+  double durationMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+  NSInteger clampedQuality = MAX(0, MIN(100, quality));
+  std::vector<int> params = {
+      cv::IMWRITE_JPEG_QUALITY, static_cast<int>(clampedQuality),
+  };
+  NSString *cleanedOutPath = ([outputPath hasPrefix:@"file://"]
+      ? [outputPath substringFromIndex:[@"file://" length]]
+      : outputPath);
+  bool wrote = cv::imwrite([cleanedOutPath UTF8String], finalImage, params);
+
+  if (!wrote) {
+    if (error) {
+      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                   code:1002
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"Keyframe stitch succeeded but could not write JPEG to %@",
+            outputPath],
+      }];
+    }
+    return nil;
+  }
+
+  return [[RetaiLensStitchResult alloc]
+      initWithOutputPath:outputPath
+                   width:(NSInteger)finalImage.cols
+                  height:(NSInteger)finalImage.rows
+              durationMs:durationMs];
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
 // Photo orientation normalisation
 // ─────────────────────────────────────────────────────────────────────
 // Round-trip through cv::imread / cv::imwrite to bake the EXIF

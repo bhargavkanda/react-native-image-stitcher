@@ -61,6 +61,7 @@ export interface PanoramaSettings {
    * without restarting the app.
    */
   incrementalEngine:
+    | 'batch-keyframe'
     | 'hybrid'
     | 'slitscan-rotate'
     | 'slitscan-both';
@@ -227,9 +228,12 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // AR-backed capture is the default — vision-camera path is kept as
   // a fallback while we shake out edge cases.
   useARPreview: true,
-  // V15 — slitscan-both is the default; iterate via per-stage toggles
-  // below (no rebuilds needed).
-  incrementalEngine: 'slitscan-both',
+  // V16 Phase 1 — batch-keyframe is the new default-recommended
+  // engine: KeyframeGate caps input at ≤ keyframeMaxCount frames,
+  // OpenCVStitcher's BA + GraphCut + ExposureCompensator +
+  // MultiBandBlender runs once on shutter release.  Existing
+  // slitscan-* engines remain available for wide-pan fallback.
+  incrementalEngine: 'batch-keyframe',
   slitWidthFraction: 0.30,
   acceptGate: 0,
   enableTriangulation: false,
@@ -242,12 +246,15 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   hybridProjection: 'Planar',
   nccSearchRadius1d: 15,
   useDetectedPlane: false,
-  // V15.0d — plane projection source defaults.  Disabled keeps the
-  // existing slit-scan behaviour as the safe default; operators opt
-  // into Virtual or ARKitDetected explicitly.  Virtual = always works
-  // (no ARKit dependency); ARKitDetected = best fidelity when ARKit
-  // picks the right surface, but unreliable in arbitrary scenes.
-  planeSource: 'Disabled',
+  // V16 Phase 1 — Virtual plane is the default since batch-keyframe
+  // is the recommended engine and the gate needs a plane to compute
+  // polygon overlap.  Virtual works without ARKit-detected planes (a
+  // synthesized plane perpendicular to the first-frame camera at
+  // virtualPlaneDepthMeters); operators can flip to ARKitDetected
+  // when in a controlled scene with a clearly-visible wall.  Disabled
+  // is still selectable for the older slit-scan paths that don't
+  // need a plane.
+  planeSource: 'Virtual',
   virtualPlaneDepthMeters: 1.5,
   arkitPlaneAlignmentThreshold: 0.6,
   // V15.0g — Rectified is the default (Trapezoidal had the tilt-
@@ -268,11 +275,12 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   ncc2dEmaAlpha: 0.4,
   enableNcc2dPanAxisLock: false,
   ncc2dCrossAxisLockPx: 5,
-  // V16 — pose-driven keyframe gate.  Default off so existing
-  // captures keep their behaviour; operators opt in via the modal.
-  // Defaults match the field-tested values (40% required new content
-  // per keyframe, capped at 6 keyframes per capture).
-  frameSelectionMode: 'time-based',
+  // V16 Phase 1 — pose-driven keyframe gate is now the default since
+  // batch-keyframe is the recommended engine and depends on it.
+  // Operators can flip back to time-based + slitscan-* in the modal
+  // for the older paths.  Defaults match the field-tested values
+  // (40% required new content, ≤6 keyframes per capture).
+  frameSelectionMode: 'pose-based',
   keyframeOverlapThreshold: 0.40,
   keyframeMaxCount: 6,
   // V15.0c — sliver tweaks: leading-edge sliver from BOTTOM for typical
@@ -369,10 +377,10 @@ export function PanoramaSettingsModal({
 
             <SectionHeader title="Incremental engine (AR mode only)" />
             <SegmentedControl
-              options={['hybrid', 'slitscan-rotate', 'slitscan-both']}
+              options={['batch-keyframe', 'hybrid', 'slitscan-rotate', 'slitscan-both']}
               value={settings.incrementalEngine}
               onChange={(v) => update({ incrementalEngine: v as PanoramaSettings['incrementalEngine'] })}
-              caption="hybrid: whole-frame projection + feature matching (planar by default). slitscan-rotate: V13.0a + 1D NCC for rotation wobble. slitscan-both (default): V13.0a + no accept gate + feather blend; iterate via toggles below."
+              caption="batch-keyframe (V16, NEW): KeyframeGate accepts ≤ keyframeMaxCount frames as JPEGs; on shutter release the full batch pipeline (BA + GraphCut + ExposureCompensator + MultiBandBlender) runs once. Best output. Requires Frame selection = pose-based + a plane to engage. hybrid: streaming planar projection + feature matching (no BA / multi-band — older path). slitscan-rotate: V13.0a + 1D NCC. slitscan-both: V13.0a + no accept gate + feather blend (slit-scan iteration playground)."
             />
 
             <SectionHeader title="Slit width (slit-scan modes only)" />

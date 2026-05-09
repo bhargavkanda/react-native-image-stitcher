@@ -137,6 +137,20 @@ export interface IncrementalState {
    * capture when the gate is disabled.
    */
   keyframeMax: number;
+  /**
+   * V16 Phase 1 — populated by the `batch-keyframe` engine on each
+   * keyframe-accepted event.  Path to the JPEG saved under the
+   * session directory.  Host can render a thumbnail from this path
+   * in `LiveFrameStrip` so the operator sees what the gate accepted.
+   * Undefined for other engines and for non-accept events.
+   */
+  batchKeyframeThumbnailPath?: string;
+  /**
+   * V16 Phase 1 — zero-based keyframe index assigned by the
+   * collector when the JPEG was saved.  Useful as a stable React key
+   * for the thumbnail strip.
+   */
+  batchKeyframeIndex?: number;
 }
 
 
@@ -193,7 +207,7 @@ export interface IncrementalStartOptions {
    * 'slitscan' fall back to 'slitscan-both' with a deprecation warning
    * in the native log.
    */
-  engine?: 'hybrid' | 'slitscan-rotate' | 'slitscan-both' |
+  engine?: 'hybrid' | 'slitscan-rotate' | 'slitscan-both' | 'batch-keyframe' |
            // Deprecated — kept for type-compat during the V14 → V15 transition:
            'firstwins' | 'firstwins-zoomed' | 'firstwins-rectilinear' | 'slitscan';
   /**

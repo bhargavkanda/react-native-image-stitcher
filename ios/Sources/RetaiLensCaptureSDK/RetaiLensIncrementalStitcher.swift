@@ -267,6 +267,30 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// capture.  See KeyframeGate.swift for the full rationale.
     private let keyframeGate = KeyframeGate()
 
+    /// V16 Phase 1 — when `engineMode == "batch-keyframe"`, no
+    /// incremental engine runs; we accumulate the gate-accepted
+    /// frames as on-disk JPEGs + their poses, then on `finalize` hand
+    /// them to `OpenCVStitcher.stitchKeyframePaths:withPoses:` (the
+    /// full BA + ExposureCompensator + GraphCutSeamFinder +
+    /// MultiBandBlender pipeline) for one-shot stitching.  Why this
+    /// is structurally different from the slit-scan / hybrid engines:
+    /// they ingest into a streaming canvas, whereas batch-keyframe
+    /// defers all stitching until shutter release so the global-
+    /// stage quality wins (BA, multi-band) become available.
+    private var batchKeyframeMode: Bool = false
+    private var keyframeCollector: OpenCVKeyframeCollector?
+    /// Poses recorded 1:1 with `keyframeCollector`'s saved JPEGs.
+    /// Each entry is `RetaiLensARFramePose.asDictionary()`.  Reset
+    /// on every `start()`.
+    private var keyframePoses: [[String: Any]] = []
+    /// Saved JPEG paths in capture order.  Tracked separately from
+    /// the collector so finalize doesn't have to reach back into ObjC.
+    private var keyframePaths: [String] = []
+    /// Frame rotation degrees passed at `start()` — needed when
+    /// saving keyframes so the JPEGs land in user-pan orientation
+    /// (the stitcher reads them in that orientation).
+    private var keyframeRotationDegrees: Int = 90
+
     private override init() {
         super.init()
     }
@@ -304,6 +328,12 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let normalisedMode: String
         switch engineMode {
         case "hybrid": normalisedMode = "hybrid"
+        case "batch-keyframe":
+            // V16 Phase 1 — new mode.  Skips the live incremental
+            // engines entirely; KeyframeGate accumulates accepted
+            // frames as JPEGs, on finalize OpenCVStitcher does the
+            // full-pipeline stitch.
+            normalisedMode = "batch-keyframe"
         case "slitscan-rotate", "firstwins-rectilinear":
             normalisedMode = "slitscan-rotate"
         case "slitscan-both":
@@ -316,6 +346,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             normalisedMode = "slitscan-both"
         }
 
+        let useBatchKeyframe = (normalisedMode == "batch-keyframe")
         let useFirstwinsClass = normalisedMode.hasPrefix("slitscan")
 
         // Build the V15 config: factory default for the mode, then apply
@@ -323,7 +354,31 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let config = RLISStitcherConfig(forMode: normalisedMode)
         Self.applyConfigOverrides(configOverrides, to: config)
 
-        if useFirstwinsClass {
+        if useBatchKeyframe {
+            // V16 Phase 1 — no live engine; spin up a keyframe
+            // collector that saves accepted frames to disk under
+            // Library/AppSupport/Captures/{uuid}/.  On finalize
+            // these are handed to OpenCVStitcher's full pipeline
+            // (BA + GraphCut + ExposureComp + MultiBand) — the
+            // actually-quality path.  Memory is bounded because
+            // KeyframeGate caps input at `keyframeMaxCount` (≤6).
+            do {
+                self.keyframeCollector = try OpenCVKeyframeCollector()
+            } catch {
+                NSLog("[V16-batch-keyframe] collector init failed: \(error.localizedDescription)")
+                self.keyframeCollector = nil
+            }
+            self.keyframePaths = []
+            self.keyframePoses = []
+            self.keyframeRotationDegrees = frameRotationDegrees
+            self.batchKeyframeMode = true
+            self.hybridEngine = nil
+            self.firstwinsEngine = nil
+            os_log(.fault, log: Self.diagLog,
+                   "[V16-batch-keyframe] start mode=batch-keyframe rotation=%d sessionDir=%{public}@",
+                   frameRotationDegrees,
+                   self.keyframeCollector?.sessionDir ?? "(nil)")
+        } else if useFirstwinsClass {
             // Slit-scan engine always uses rectilinear in V15
             // (firstwins-cylindrical and firstwins-zoomed modes were
             // removed; their behaviour is unused).
@@ -338,6 +393,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             )
             self.firstwinsEngine?.setConfig(config)
             self.hybridEngine = nil
+            self.batchKeyframeMode = false
         } else {
             self.hybridEngine = OpenCVIncrementalStitcher(
                 composeWidth: composeWidth,
@@ -349,6 +405,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             )
             self.hybridEngine?.setConfig(config)
             self.firstwinsEngine = nil
+            self.batchKeyframeMode = false
         }
         self.isRunning = true
         self.snapshotJpegQuality = max(1, min(100, snapshotJpegQuality))
@@ -535,8 +592,16 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         stateLock.lock()
         let hybrid = self.hybridEngine
         let slit = self.firstwinsEngine
+        let inBatchKeyframeMode = self.batchKeyframeMode
+        let collector = self.keyframeCollector
+        let paths = self.keyframePaths
+        let poses = self.keyframePoses
         self.hybridEngine = nil
         self.firstwinsEngine = nil
+        self.batchKeyframeMode = false
+        self.keyframeCollector = nil
+        self.keyframePaths = []
+        self.keyframePoses = []
         self.isRunning = false
         let drops = self.droppedBackpressure
         stateLock.unlock()
@@ -555,7 +620,53 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                 : outputPath
             let q = max(1, min(100, jpegQuality))
             do {
-                if let hybrid = hybrid {
+                if inBatchKeyframeMode {
+                    // V16 Phase 1 — hand collected keyframes + poses
+                    // to OpenCVStitcher's full BA + GraphCut +
+                    // ExposureComp + MultiBand pipeline.  ≤6 frames
+                    // means BA stays bounded and MultiBand fits.
+                    if paths.count < 2 {
+                        collector?.cleanup()
+                        completion(nil, NSError(
+                            domain: "RetaiLensIncremental",
+                            code: 9003,
+                            userInfo: [NSLocalizedDescriptionKey:
+                                "Batch-keyframe finalize: only \(paths.count) keyframe(s) saved — at least 2 required."]
+                        ))
+                        return
+                    }
+                    // Swift bridges `(NSError**)error` as `throws`,
+                    // so we use a do/catch instead of an inout error
+                    // pointer.  Result is non-optional inside the
+                    // try block (or we wouldn't reach the success
+                    // branch).
+                    do {
+                        let r = try OpenCVStitcher.stitchKeyframePaths(
+                            paths,
+                            outputPath: cleaned,
+                            jpegQuality: q,
+                            warperType: "plane",
+                            blenderType: "multiband",
+                            seamFinderType: "graphcut",
+                            poses: poses
+                        )
+                        // Keep saved keyframes on disk for post-hoc
+                        // re-processing (Ram's request).  Cleanup is
+                        // a follow-up debug-menu task.
+                        completion([
+                            "panoramaPath": r.outputPath,
+                            "width": Int(r.width),
+                            "height": Int(r.height),
+                            "acceptedCount": paths.count,
+                            "droppedBackpressure": drops,
+                            "batchKeyframeSessionDir":
+                                collector?.sessionDir ?? "",
+                            "batchKeyframeCount": paths.count,
+                        ], nil)
+                    } catch let stitchErr as NSError {
+                        completion(nil, stitchErr)
+                    }
+                } else if let hybrid = hybrid {
                     let snap = try hybrid.finalize(atPath: cleaned, jpegQuality: q)
                     completion([
                         "panoramaPath": snap.panoramaPath,
@@ -596,8 +707,13 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         stateLock.lock()
         let hybrid = self.hybridEngine
         let slit = self.firstwinsEngine
+        let collector = self.keyframeCollector
         self.hybridEngine = nil
         self.firstwinsEngine = nil
+        self.keyframeCollector = nil
+        self.batchKeyframeMode = false
+        self.keyframePaths = []
+        self.keyframePoses = []
         self.isRunning = false
         self.lastState = nil
         // V16 — reset the keyframe gate so the next start() begins
@@ -609,10 +725,14 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         stateLock.unlock()
         RetaiLensARSession.shared.incrementalConsumer = nil
         // Reset on the work queue so we don't race with an in-flight
-        // ingest that's still touching the engine's canvas.
+        // ingest that's still touching the engine's canvas.  Cancel
+        // ALSO removes the collector's session directory — the
+        // operator explicitly aborted, so the saved JPEGs aren't
+        // worth keeping for re-processing.
         workQueue.async {
             hybrid?.reset()
             slit?.reset()
+            collector?.cleanup()
         }
     }
 
@@ -633,6 +753,45 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         os_log(.fault, log: Self.diagLog,
                "[V16-keyframe] markNextFrameAsLastKeyframe armed (count=%d max=%d)",
                self.keyframeGate.acceptedCount, self.keyframeGate.maxCount)
+    }
+
+    /// V16 Phase 1 — emit a state event when a batch-keyframe is
+    /// saved.  Carries the on-disk thumbnail path so JS can render it
+    /// in LiveFrameStrip + advance the "Keyframes: N/M" pill.
+    private func emitBatchKeyframeAcceptedState(
+        thumbnailPath: String,
+        keyframeIndex: Int,
+        keyframeCount: Int,
+        keyframeMax: Int,
+        isLandscape: Bool
+    ) {
+        let state = RetaiLensIncrementalState(
+            panoramaPath: nil,
+            width: 0,
+            height: 0,
+            acceptedCount: keyframeCount,
+            outcome: .acceptedHigh,
+            confidence: 1.0,
+            overlapPercent: -1.0,
+            processingMs: 0,
+            isLandscape: isLandscape,
+            paintedExtent: 0,
+            panExtent: 0,
+            keyframeMax: keyframeMax
+        )
+        stateLock.lock()
+        self.lastState = state
+        stateLock.unlock()
+        var dict = state.asDictionary()
+        // Extra fields the existing IncrementalState schema doesn't
+        // carry — JS reads these directly from the userInfo blob.
+        dict["batchKeyframeThumbnailPath"] = thumbnailPath
+        dict["batchKeyframeIndex"] = keyframeIndex
+        NotificationCenter.default.post(
+            name: .retailensIncrementalStateUpdate,
+            object: nil,
+            userInfo: dict
+        )
     }
 
     /// Synthesise + emit a state event for a frame the keyframe gate
@@ -702,6 +861,12 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let hybrid = self.hybridEngine
         let slit = self.firstwinsEngine
         let isRunning = self.isRunning
+        // V16 Phase 1 — capture batch-keyframe state under the lock so
+        // the work-queue closure (or the synchronous reject below)
+        // sees consistent ivars even if start/cancel races.
+        let inBatchKeyframeMode = self.batchKeyframeMode
+        let collector = self.keyframeCollector
+        let rotationDegreesForBatch = self.keyframeRotationDegrees
 
         // V13.0c.1 — diagnostic translation logging.  Captures the
         // FIRST frame's world position, then logs delta from first
@@ -742,7 +907,11 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             }
         }
         stateLock.unlock()
-        guard isRunning, (hybrid != nil || slit != nil) else { return }
+        // V16 Phase 1 — batch-keyframe is also a valid running mode
+        // (no engine pointer, but the collector and gate are active).
+        guard isRunning,
+              (hybrid != nil || slit != nil || inBatchKeyframeMode)
+        else { return }
 
         // V16 — pose-driven keyframe gate.  When enabled, only frames
         // that add ≥ overlapThreshold of new content vs the last
@@ -822,6 +991,43 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             let stillRunning = self.isRunning
             self.stateLock.unlock()
             guard stillRunning else { return }
+
+            // V16 Phase 1 — batch-keyframe path: save the buffer as
+            // a JPEG via the collector, append the pose, emit a
+            // notification so JS can render the thumbnail in
+            // LiveFrameStrip.  No incremental engine to call.
+            if inBatchKeyframeMode {
+                guard let coll = collector else { return }
+                do {
+                    let record = try coll.saveKeyframe(
+                        pbCopy,
+                        rotationDegrees: rotationDegreesForBatch,
+                        jpegQuality: 80
+                    )
+                    self.stateLock.lock()
+                    self.keyframePaths.append(record.path)
+                    self.keyframePoses.append(pose.asDictionary())
+                    let count = self.keyframePaths.count
+                    self.stateLock.unlock()
+                    os_log(.fault, log: Self.diagLog,
+                           "[V16-batch-keyframe] saved keyframe %d → %{public}@ (%dx%d)",
+                           Int32(count),
+                           record.path,
+                           Int32(record.width), Int32(record.height))
+                    self.emitBatchKeyframeAcceptedState(
+                        thumbnailPath: record.path,
+                        keyframeIndex: Int(record.index),
+                        keyframeCount: count,
+                        keyframeMax: self.keyframeGate.maxCount,
+                        isLandscape: pose.imageWidth >= pose.imageHeight
+                    )
+                } catch let err as NSError {
+                    os_log(.fault, log: Self.diagLog,
+                           "[V16-batch-keyframe] saveKeyframe failed: %{public}@",
+                           err.localizedDescription)
+                }
+                return
+            }
 
             // V15.0b — if a vertical plane has just been detected and
             // we haven't propagated it to the slit-scan engine yet,
