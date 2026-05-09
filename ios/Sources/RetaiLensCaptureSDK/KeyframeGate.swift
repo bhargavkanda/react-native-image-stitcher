@@ -147,6 +147,12 @@ final class KeyframeGate {
     /// truncated.
     var forceAcceptNext: Bool = false
 
+    /// V16 Phase 1b — last accepted keyframe's pose.  Used by the
+    /// angular-delta fallback when no AR plane is available (no
+    /// polygon overlap to compute).  Set on every accept path; nil
+    /// before first frame.  Reset in `reset()`.
+    private var lastAcceptedPose: RetaiLensARFramePose?
+
     // MARK: Logging
 
     private static let log = OSLog(
@@ -161,6 +167,7 @@ final class KeyframeGate {
         lastCornersOnPlane = nil
         planeForCapture = nil
         forceAcceptNext = false
+        lastAcceptedPose = nil
     }
 
     /// Decide whether to accept this ARFrame as a keyframe.
@@ -196,6 +203,7 @@ final class KeyframeGate {
                 lastCornersOnPlane = corners
                 if planeForCapture == nil { planeForCapture = basis }
             }
+            lastAcceptedPose = pose
             acceptedCount += 1
             os_log(.fault, log: Self.log,
                    "[V16-keyframe] FORCE-LAST accepted (#%d/%d)",
@@ -209,6 +217,7 @@ final class KeyframeGate {
 
         // First-frame anchor — always accepted.
         if acceptedCount == 0 {
+            lastAcceptedPose = pose
             if let planeMat = latchedPlane,
                let basis = PlaneBasis(transform: planeMat),
                let corners = projectCornersOntoPlane(pose: pose, plane: basis) {
@@ -224,12 +233,12 @@ final class KeyframeGate {
                     acceptedCount: 1, maxCount: maxCount
                 )
             } else {
-                // No plane yet — accept first frame unconditionally.
-                // Subsequent frames will see no cached polygon and
-                // fall through the no-plane branch below ("accept all").
+                // No plane — first frame still accepted unconditionally.
+                // Subsequent frames will use the angular-delta fallback
+                // (see no-plane branch below).
                 acceptedCount = 1
                 os_log(.fault, log: Self.log,
-                       "[V16-keyframe] FIRST keyframe accepted but NO PLANE — gate disengaged for capture")
+                       "[V16-keyframe] FIRST keyframe accepted (no plane — angular-delta fallback for subsequent frames)")
                 return KeyframeGateDecision(
                     accept: true, reason: "first-no-plane",
                     newContentFraction: -1.0,
@@ -238,18 +247,76 @@ final class KeyframeGate {
             }
         }
 
-        // No plane cached → can't compute overlap → pass through (the
-        // engine's own gate decides).  Counter stays at 1 because we
-        // never finished anchoring on a plane; max is effectively
-        // disengaged for this capture.
+        // V16 Phase 1b — no-plane angular fallback.  When the gate has
+        // no plane to project corners onto, fall back to comparing
+        // camera-forward angular delta from the last accepted
+        // keyframe.  newContentFraction = angularDelta / minFoV
+        // (using the smaller of horizontal/vertical FoV — the user
+        // could be panning along either axis and we don't know which).
+        // This makes pose-based selection useful even when
+        // planeSource = Disabled or ARKitDetected couldn't lock a
+        // candidate plane.
         guard let basis = planeForCapture,
               let lastCorners = lastCornersOnPlane else {
-            // Don't increment acceptedCount past 1 — we never engaged
-            // gating, so JS pill shouldn't tick up.
+            guard let lastPose = lastAcceptedPose else {
+                // Defensive — should never happen because the first-frame
+                // branch always sets lastAcceptedPose.
+                return KeyframeGateDecision(
+                    accept: true, reason: "no-pose-yet",
+                    newContentFraction: -1.0,
+                    acceptedCount: acceptedCount, maxCount: maxCount
+                )
+            }
+            // Cap reached.
+            if acceptedCount >= maxCount {
+                os_log(.fault, log: Self.log,
+                       "[V16-keyframe] REJECT max-reached (%d/%d) (angular path)",
+                       acceptedCount, maxCount)
+                return KeyframeGateDecision(
+                    accept: false, reason: "max-reached",
+                    newContentFraction: -1.0,
+                    acceptedCount: acceptedCount, maxCount: maxCount
+                )
+            }
+            let lastFwd = cameraForwardWorld(pose: lastPose)
+            let currFwd = cameraForwardWorld(pose: pose)
+            let dotProd = max(-1.0, min(1.0, simd_dot(lastFwd, currFwd)))
+            let angleRad = acos(dotProd)
+            // Use the smaller of H/V FoV as the denominator — pan can
+            // be along either axis; new-content fraction relative to
+            // the tighter axis is the conservative choice.
+            let fovH = 2.0 * atan(Float(pose.imageWidth)
+                                    / (2.0 * Float(pose.fx)))
+            let fovV = 2.0 * atan(Float(pose.imageHeight)
+                                    / (2.0 * Float(pose.fy)))
+            let fovRef = min(fovH, fovV)
+            let newContent = (fovRef > 1e-3)
+                ? Double(angleRad / fovRef)
+                : 0.0
+            if newContent < overlapThreshold {
+                os_log(.fault, log: Self.log,
+                       "[V16-keyframe] REJECT angular-overlap newContent=%.3f thr=%.3f (%d/%d) angle=%.1f° fov=%.1f°",
+                       newContent, overlapThreshold,
+                       acceptedCount, maxCount,
+                       angleRad * 180 / .pi, fovRef * 180 / .pi)
+                return KeyframeGateDecision(
+                    accept: false, reason: "overlap-too-high (angular)",
+                    newContentFraction: newContent,
+                    acceptedCount: acceptedCount, maxCount: maxCount
+                )
+            }
+            // Accept via angular path.
+            lastAcceptedPose = pose
+            acceptedCount += 1
+            os_log(.fault, log: Self.log,
+                   "[V16-keyframe] accepted (#%d/%d) angular newContent=%.3f thr=%.3f angle=%.1f° fov=%.1f°",
+                   acceptedCount, maxCount,
+                   newContent, overlapThreshold,
+                   angleRad * 180 / .pi, fovRef * 180 / .pi)
             return KeyframeGateDecision(
-                accept: true, reason: "no-plane-pass-through",
-                newContentFraction: -1.0,
-                acceptedCount: 1, maxCount: maxCount
+                accept: true, reason: "ok-angular",
+                newContentFraction: newContent,
+                acceptedCount: acceptedCount, maxCount: maxCount
             )
         }
 
@@ -306,6 +373,7 @@ final class KeyframeGate {
 
         // Accept.
         lastCornersOnPlane = currentCorners
+        lastAcceptedPose = pose
         acceptedCount += 1
         os_log(.fault, log: Self.log,
                "[V16-keyframe] accepted (#%d/%d) newContent=%.3f thr=%.3f",
@@ -318,6 +386,19 @@ final class KeyframeGate {
     }
 
     // MARK: Geometry helpers (file-private)
+
+    /// V16 Phase 1b — camera-forward axis in world coordinates,
+    /// derived from the pose's quaternion.  Used by the angular
+    /// fallback when no plane is available for polygon overlap.
+    /// ARKit camera frame: +Z back, so forward is -Z; quaternion
+    /// rotates camera-frame vectors to world-frame.
+    private func cameraForwardWorld(pose: RetaiLensARFramePose) -> simd_float3 {
+        let q = simd_quatf(
+            ix: Float(pose.qx), iy: Float(pose.qy),
+            iz: Float(pose.qz), r: Float(pose.qw)
+        )
+        return simd_normalize(simd_act(q, simd_float3(0, 0, -1)))
+    }
 
     /// Project the 4 image corners (TL, TR, BR, BL) onto the plane via
     /// the camera pose's intrinsics + extrinsics.  Returns 4 plane-

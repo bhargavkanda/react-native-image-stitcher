@@ -16,7 +16,7 @@
  * forcing every host app to update its settings screen.
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Modal,
   NativeModules,
@@ -313,6 +313,40 @@ export function PanoramaSettingsModal({
   const update = (patch: Partial<PanoramaSettings>) =>
     onChange({ ...settings, ...patch });
 
+  // V16 Phase 1b — derive the 2-axis (timing × algorithm) UI state
+  // from the underlying single `incrementalEngine` field.  Storage
+  // shape is unchanged; the modal just presents it in two segmented
+  // controls so the user's mental model matches the system's actual
+  // primary axis (batch vs realtime).
+  //
+  // Mapping:
+  //   incrementalEngine === 'batch-keyframe'  → timing='batch'
+  //   incrementalEngine === 'hybrid'          → timing='realtime', algo='hybrid'
+  //   incrementalEngine === 'slitscan-rotate' → timing='realtime', algo='slitscan-rotate'
+  //   incrementalEngine === 'slitscan-both'   → timing='realtime', algo='slitscan-both'
+  const timing: 'batch' | 'realtime' =
+    settings.incrementalEngine === 'batch-keyframe' ? 'batch' : 'realtime';
+  // When in batch mode, remember 'hybrid' as the realtime algorithm
+  // the user would land on if they flipped timing back.  When already
+  // in realtime, the engine field IS the algorithm.
+  const realtimeAlgorithm:
+    'hybrid' | 'slitscan-rotate' | 'slitscan-both' =
+      settings.incrementalEngine === 'batch-keyframe'
+        ? 'hybrid'
+        : settings.incrementalEngine;
+  const setTiming = (t: 'batch' | 'realtime') => {
+    if (t === 'batch') {
+      update({ incrementalEngine: 'batch-keyframe' });
+    } else {
+      update({ incrementalEngine: realtimeAlgorithm });
+    }
+  };
+
+  // Frame Selection only makes sense for batch and hybrid engines —
+  // slit-scan needs dense input and the gate would starve it.
+  const showFrameSelection =
+    timing === 'batch' || realtimeAlgorithm === 'hybrid';
+
   return (
     <Modal
       visible={visible}
@@ -343,250 +377,302 @@ export function PanoramaSettingsModal({
                 + `isLowMem=${_isLowMem ? 'yes' : 'no'} · `
                 + `default blender=${_isLowMem ? 'feather' : 'multiband'}`}
             </Text>
-            <SectionHeader title="Projection" />
+            {/* ──────────────────────────────────────────────
+             *  STITCH TIMING — top-level decision.  Maps to the
+             *  `incrementalEngine` storage field via setTiming().
+             * ────────────────────────────────────────────── */}
+            <SectionHeader title="Stitch timing" />
             <SegmentedControl
-              options={['plane', 'cylindrical', 'spherical']}
-              value={settings.warperType}
-              onChange={(v) => update({ warperType: v as PanoramaSettings['warperType'] })}
-              caption="Plane: flat output, good for short pans / close-up shelves. Cylindrical: rotational mid-arc. Spherical: wide pans (180°+)."
+              options={['batch', 'realtime']}
+              value={timing}
+              onChange={(v) => setTiming(v as 'batch' | 'realtime')}
+              caption="batch (recommended): full cv::Stitcher pipeline at shutter release. Highest quality. ~1–2 s post-release. realtime: incremental during pan; lower latency, fewer quality stages."
             />
 
-            <SectionHeader title="Blender" />
-            <SegmentedControl
-              options={['multiband', 'feather']}
-              value={settings.blenderType}
-              onChange={(v) => update({ blenderType: v as PanoramaSettings['blenderType'] })}
-              caption="MultiBand: best seams when exposure is consistent. Feather: faster, no halo artifacts when exposure varies."
-            />
+            {/* ──────────────────────────────────────────────
+             *  FRAME SELECTION (V16) — only for batch + hybrid.
+             *  Slit-scan needs dense input; gate would starve it.
+             * ────────────────────────────────────────────── */}
+            {showFrameSelection && (
+              <>
+                <SectionHeader title="Frame selection (V16)" />
+                <SegmentedControl
+                  options={['time-based', 'pose-based']}
+                  value={settings.frameSelectionMode}
+                  onChange={(v) => update({ frameSelectionMode: v as PanoramaSettings['frameSelectionMode'] })}
+                  caption="pose-based (V16): KeyframeGate filters frames using AR plane-polygon overlap (or angular fallback when no plane). time-based: every ARFrame goes to the engine."
+                />
+                {settings.frameSelectionMode === 'pose-based' && (
+                  <>
+                    <SectionHeader title="Overlap threshold (new content per keyframe)" />
+                    <SegmentedControl
+                      options={['20%', '30%', '40%', '50%', '60%']}
+                      value={`${Math.round(settings.keyframeOverlapThreshold * 100)}%`}
+                      onChange={(v) => update({ keyframeOverlapThreshold: parseInt(v, 10) / 100 })}
+                      caption="Required NEW content per keyframe. 40% (default) ≈ 4–5 keyframes for a 90° pan."
+                    />
+                    <SectionHeader title="Max keyframes per capture" />
+                    <SegmentedControl
+                      options={['3', '4', '5', '6', '8', '10']}
+                      value={String(settings.keyframeMaxCount)}
+                      onChange={(v) => update({ keyframeMaxCount: parseInt(v, 10) })}
+                      caption="Hard cap. 6 (default) matches Samsung's behaviour. Once reached, host auto-finalizes."
+                    />
+                  </>
+                )}
+              </>
+            )}
 
-            <SectionHeader title="Seam finder" />
-            <SegmentedControl
-              options={['graphcut', 'skip']}
-              value={settings.seamFinderType}
-              onChange={(v) => update({ seamFinderType: v as PanoramaSettings['seamFinderType'] })}
-              caption="GraphCut: optimal seams, pairs best with MultiBand (more memory). Skip: streams warp+feed (lower peak memory, fine with Feather)."
-            />
-
-            <SectionHeader title="AR preview" />
-            <SegmentedControl
-              options={['on', 'off']}
-              value={settings.useARPreview ? 'on' : 'off'}
-              onChange={(v) => update({ useARPreview: v === 'on' })}
-              caption="ARKit pose-aware preview + capture (default). Off falls back to the vision-camera path."
-            />
-
-            <SectionHeader title="Incremental engine (AR mode only)" />
-            <SegmentedControl
-              options={['batch-keyframe', 'hybrid', 'slitscan-rotate', 'slitscan-both']}
-              value={settings.incrementalEngine}
-              onChange={(v) => update({ incrementalEngine: v as PanoramaSettings['incrementalEngine'] })}
-              caption="batch-keyframe (V16, NEW): KeyframeGate accepts ≤ keyframeMaxCount frames as JPEGs; on shutter release the full batch pipeline (BA + GraphCut + ExposureCompensator + MultiBandBlender) runs once. Best output. Requires Frame selection = pose-based + a plane to engage. hybrid: streaming planar projection + feature matching (no BA / multi-band — older path). slitscan-rotate: V13.0a + 1D NCC. slitscan-both: V13.0a + no accept gate + feather blend (slit-scan iteration playground)."
-            />
-
-            <SectionHeader title="Slit width (slit-scan modes only)" />
-            <SegmentedControl
-              options={['0.01', '0.05', '0.10', '0.20', '0.30', '0.50']}
-              value={settings.slitWidthFraction.toFixed(2)}
-              onChange={(v) => update({ slitWidthFraction: parseFloat(v) })}
-              caption="Fraction of pan-axis retained per sliver. 0.01 ≈ 10 px (Apple-thin), 0.05 ≈ 54 px, 0.10 ≈ 108 px, 0.30 ≈ 324 px (V15 default), 0.50+ wider. Smaller = less within-slit depth disagreement, but tighter overlap budget at fast pans."
-            />
-
-            <SectionHeader title="Sliver position (slit-scan modes only)" />
-            <SegmentedControl
-              options={['Center', 'Bottom', 'Top']}
-              value={settings.sliverPosition}
-              onChange={(v) => update({ sliverPosition: v as PanoramaSettings['sliverPosition'] })}
-              caption="Where on the camera sensor frame the sliver is taken. Center = V13.x default. Bottom = leading edge for top-to-bottom landscape pan (recommended). Top = leading edge for bottom-to-top pan."
-            />
-
-            <SectionHeader title="First frame: full-frame anchor (slit-scan modes)" />
-            <SegmentedControl
-              options={['off', 'on']}
-              value={settings.firstFrameFullFrame ? 'on' : 'off'}
-              onChange={(v) => update({ firstFrameFullFrame: v === 'on' })}
-              caption="When ON, the FIRST accepted frame paints the full camera frame at the canvas anchor; subsequent frames still use the configured sliver clip. Recommended ON when sliverPosition is Bottom/Top so the canvas is anchored with maximum first-frame content."
-            />
-
-            <SectionHeader title="Accept gate (slit-scan modes only)" />
-            <SegmentedControl
-              options={['0', '50']}
-              value={String(settings.acceptGate)}
-              onChange={(v) => update({ acceptGate: parseInt(v, 10) as PanoramaSettings['acceptGate'] })}
-              caption="0 = accept on every frame (Apple-dense slit-scan, default). 50 = V13.0g throttle (one accept per 50px advance)."
-            />
-
-            <SectionHeader title="Paint mode (slit-scan modes only)" />
-            <SegmentedControl
-              options={['FirstPaintedWins', 'FeatherBlend']}
-              value={settings.paintMode}
-              onChange={(v) => update({ paintMode: v as PanoramaSettings['paintMode'] })}
-              caption="FirstPaintedWins: protect already-painted pixels (V13.0e+ baseline; sharper, hard seams). FeatherBlend (default): alpha-blend new content into already-painted overlap (V15 hypothesis: smooths seams when accept gate is 0)."
-            />
-
-            <SectionHeader title="Triangulation parallax (slitscan-both)" />
-            <SegmentedControl
-              options={['off', 'on']}
-              value={settings.enableTriangulation ? 'on' : 'off'}
-              onChange={(v) => update({ enableTriangulation: v === 'on' })}
-              caption="V13.0e+ ORB triangulation + median-Z parallax correction.  Adds ~10ms/accept.  Known limitation: per-accept correction can over-shoot, leaving gaps in the canvas — disable if output stops updating."
-            />
-
-            <SectionHeader title="2D NCC fine-alignment (slitscan-both)" />
-            <SegmentedControl
-              options={['off', 'on']}
-              value={settings.enable2dNcc ? 'on' : 'off'}
-              onChange={(v) => update({ enable2dNcc: v === 'on' })}
-              caption="V13.0g 2D NCC after triangulation.  Refines (Δx, Δy) translation via cv::matchTemplate."
-            />
-
-            <SectionHeader title="RANSAC homography (slitscan-both)" />
-            <SegmentedControl
-              options={['off', 'on']}
-              value={settings.enableRansacHomography ? 'on' : 'off'}
-              onChange={(v) => update({ enableRansacHomography: v === 'on' })}
-              caption="V14.0a RANSAC 3×3 homography per slit + cv::warpPerspective.  Supersedes rectangular paste when successful (8 inliers, det>1e-6).  Known limitation: per-frame homography can absorb pan advance as scale, shrinking each warped sliver — leaves visible gaps between slits."
-            />
-
-            <SectionHeader title="Hybrid projection" />
-            <SegmentedControl
-              options={['Planar', 'Cylindrical']}
-              value={settings.hybridProjection}
-              onChange={(v) => update({ hybridProjection: v as PanoramaSettings['hybridProjection'] })}
-              caption="V15 hybrid mode default = Planar (cv::detail::PlaneWarper, well-behaved <60° pans).  Cylindrical preserves V12.x – V14.0a behaviour but has the documented landscape roll-asymmetry bug."
-            />
-
-            <SectionHeader title="Plane projection source (V15.0d)" />
+            {/* ──────────────────────────────────────────────
+             *  AR PLANE PROJECTION — used by KeyframeGate's overlap
+             *  calculation, slit-scan plane-projection, and (future)
+             *  pose-driven batch.  Sub-fields reveal based on source.
+             * ────────────────────────────────────────────── */}
+            <SectionHeader title="AR plane projection" />
             <SegmentedControl
               options={['Disabled', 'ARKitDetected', 'Virtual']}
               value={settings.planeSource}
               onChange={(v) => update({ planeSource: v as PanoramaSettings['planeSource'] })}
-              caption="Disabled = plain slit-scan (V13.x baseline). ARKitDetected = warp onto an ARKit-detected vertical plane that aligns with the camera (filter threshold below); falls back to slit-scan when no aligned plane is found. Virtual = synthesize a plane perpendicular to the camera at the configured depth — always works, immune to ARKit picking the wrong surface, but loses the 'real depth' advantage."
+              caption="Disabled: no plane (gate falls back to angular delta). ARKitDetected: latch ARKit's vertical plane (best fidelity, picky). Virtual: synthesise plane perpendicular to camera at a fixed depth (always works)."
             />
+            {settings.planeSource === 'ARKitDetected' && (
+              <>
+                <SectionHeader title="ARKit alignment threshold" />
+                <SegmentedControl
+                  options={['0.3', '0.5', '0.6', '0.7', '0.85']}
+                  value={settings.arkitPlaneAlignmentThreshold.toFixed(2)}
+                  onChange={(v) => update({ arkitPlaneAlignmentThreshold: parseFloat(v) })}
+                  caption="Min dot product between candidate plane normal and camera facing. 0.6 (default) = ~53° max angle off-camera. Higher = stricter."
+                />
+              </>
+            )}
+            {settings.planeSource === 'Virtual' && (
+              <>
+                <SectionHeader title="Virtual plane depth" />
+                <SegmentedControl
+                  options={['0.5m', '1.0m', '1.5m', '2.0m', '3.0m']}
+                  value={`${settings.virtualPlaneDepthMeters.toFixed(1)}m`}
+                  onChange={(v) => update({ virtualPlaneDepthMeters: parseFloat(v) })}
+                  caption="Synthetic plane depth at first frame. Set to your typical scan distance."
+                />
+              </>
+            )}
+            {settings.planeSource !== 'Disabled' && (
+              <>
+                <SectionHeader title="Plane projection style" />
+                <SegmentedControl
+                  options={['Rectified', 'Trapezoidal']}
+                  value={settings.planeProjectionStyle}
+                  onChange={(v) => update({ planeProjectionStyle: v as PanoramaSettings['planeProjectionStyle'] })}
+                  caption="Rectified (default): clean rectangle paste, no tilt distortion. Trapezoidal: V15.0b legacy 3D-correct raycast — geometric purity at the cost of tilt artifacts."
+                />
+              </>
+            )}
 
-            <SectionHeader title="Plane projection style (V15.0g)" />
-            <SegmentedControl
-              options={['Rectified', 'Trapezoidal']}
-              value={settings.planeProjectionStyle}
-              onChange={(v) => update({ planeProjectionStyle: v as PanoramaSettings['planeProjectionStyle'] })}
-              caption="Rectified (default): paste each frame as a clean rectangle around its plane anchor — eliminates the tilt-induced trapezoidal distortion (cooler bottom 2.3× wider than top) that V15.0b/e produced. Trapezoidal: V15.0b legacy 3D-correct raycast — geometrically pure but distorted-looking when the camera tilts off-perpendicular. Ignored when planeSource is Disabled."
-            />
+            {/* ──────────────────────────────────────────────
+             *  ALGORITHM — what runs at stitch time.  In batch mode
+             *  there's no choice (cv::Stitcher feature-matched
+             *  pipeline).  In realtime, three live engines.
+             * ────────────────────────────────────────────── */}
+            <SectionHeader title="Algorithm" />
+            {timing === 'batch' ? (
+              <View style={styles.infoBox}>
+                <Text style={styles.infoText}>
+                  Full feature-matched pipeline:
+                  ORB → BFMatcher → RANSAC → BundleAdjusterRay →
+                  waveCorrect → Warper → GraphCutSeamFinder →
+                  ExposureCompensator → MultiBandBlender. No engine
+                  choice in batch mode.
+                </Text>
+              </View>
+            ) : (
+              <SegmentedControl
+                options={['hybrid', 'slitscan-rotate', 'slitscan-both']}
+                value={realtimeAlgorithm}
+                onChange={(v) => update({ incrementalEngine: v as PanoramaSettings['incrementalEngine'] })}
+                caption="hybrid: streaming planar projection + feature matching. slitscan-rotate: V13.0a + 1D NCC. slitscan-both: V13.0a + no accept gate + feather blend (iteration playground)."
+              />
+            )}
 
-            <SectionHeader title="Virtual plane depth (V15.0d, when planeSource=Virtual)" />
-            <SegmentedControl
-              options={['0.5m', '1.0m', '1.5m', '2.0m', '3.0m']}
-              value={`${settings.virtualPlaneDepthMeters.toFixed(1)}m`}
-              onChange={(v) => update({ virtualPlaneDepthMeters: parseFloat(v) })}
-              caption="Depth at which the synthetic plane is placed in front of the camera at the first frame. Set to your typical scan distance: too close = scene content gets clipped; too far = perspective distortion grows."
-            />
+            {/* ──────────────────────────────────────────────
+             *  ALGORITHM TUNING — engine-specific knobs revealed
+             *  by current Algorithm choice.
+             * ────────────────────────────────────────────── */}
+            {timing === 'batch' && (
+              <>
+                <SectionHeader title="Batch tuning — Warper" />
+                <SegmentedControl
+                  options={['plane', 'cylindrical', 'spherical']}
+                  value={settings.warperType}
+                  onChange={(v) => update({ warperType: v as PanoramaSettings['warperType'] })}
+                  caption="plane (default, recommended for retail shelves): flat rectangular output. cylindrical: rotational mid-arc, gentle curvature. spherical: wide pans (180°+) but always-curved."
+                />
+                <SectionHeader title="Batch tuning — Blender" />
+                <SegmentedControl
+                  options={['multiband', 'feather']}
+                  value={settings.blenderType}
+                  onChange={(v) => update({ blenderType: v as PanoramaSettings['blenderType'] })}
+                  caption="multiband (default): Laplacian-pyramid blending; cleanest seams. feather: faster, no halo when exposure varies."
+                />
+                <SectionHeader title="Batch tuning — Seam finder" />
+                <SegmentedControl
+                  options={['graphcut', 'skip']}
+                  value={settings.seamFinderType}
+                  onChange={(v) => update({ seamFinderType: v as PanoramaSettings['seamFinderType'] })}
+                  caption="graphcut (default): cv::detail::GraphCutSeamFinder; optimal seams, pairs with multiband, holds all warps in memory. skip: stream warp+feed (lower peak memory)."
+                />
+              </>
+            )}
+            {timing === 'realtime' && realtimeAlgorithm === 'hybrid' && (
+              <>
+                <SectionHeader title="Hybrid tuning — Projection" />
+                <SegmentedControl
+                  options={['Planar', 'Cylindrical']}
+                  value={settings.hybridProjection}
+                  onChange={(v) => update({ hybridProjection: v as PanoramaSettings['hybridProjection'] })}
+                  caption="Planar (default): cv::detail::PlaneWarper. Cylindrical: V12.x – V14.0a behaviour (legacy)."
+                />
+              </>
+            )}
+            {timing === 'realtime' && realtimeAlgorithm.startsWith('slitscan') && (
+              <>
+                <SectionHeader title="Slit-scan tuning — Slit width" />
+                <SegmentedControl
+                  options={['0.01', '0.05', '0.10', '0.20', '0.30', '0.50']}
+                  value={settings.slitWidthFraction.toFixed(2)}
+                  onChange={(v) => update({ slitWidthFraction: parseFloat(v) })}
+                  caption="Fraction of pan-axis retained per sliver. 0.30 (V15 default) ≈ 324 px. Smaller = less within-slit depth disagreement."
+                />
+                <SectionHeader title="Slit-scan tuning — Sliver position" />
+                <SegmentedControl
+                  options={['Center', 'Bottom', 'Top']}
+                  value={settings.sliverPosition}
+                  onChange={(v) => update({ sliverPosition: v as PanoramaSettings['sliverPosition'] })}
+                  caption="Where on the camera sensor frame the sliver is taken."
+                />
+                <SectionHeader title="Slit-scan tuning — Full first-frame" />
+                <SegmentedControl
+                  options={['off', 'on']}
+                  value={settings.firstFrameFullFrame ? 'on' : 'off'}
+                  onChange={(v) => update({ firstFrameFullFrame: v === 'on' })}
+                  caption="ON: first accepted frame paints the full camera frame at the canvas anchor; subsequent frames use sliver clip."
+                />
+                <SectionHeader title="Slit-scan tuning — Paint mode" />
+                <SegmentedControl
+                  options={['FirstPaintedWins', 'FeatherBlend']}
+                  value={settings.paintMode}
+                  onChange={(v) => update({ paintMode: v as PanoramaSettings['paintMode'] })}
+                  caption="FirstPaintedWins (default): protect already-painted pixels. FeatherBlend: alpha-blend new content into overlap."
+                />
+              </>
+            )}
 
-            <SectionHeader title="ARKit plane alignment threshold (V15.0d, when planeSource=ARKitDetected)" />
-            <SegmentedControl
-              options={['0.3', '0.5', '0.6', '0.7', '0.85']}
-              value={settings.arkitPlaneAlignmentThreshold.toFixed(2)}
-              onChange={(v) => update({ arkitPlaneAlignmentThreshold: parseFloat(v) })}
-              caption="Minimum dot product between the candidate plane's surface normal and the camera's facing direction. 0.3 = ~72° max angle off-camera (lax); 0.6 = ~53° (default); 0.85 = ~32° (strict). Higher = fewer wrong-surface latches but slower to detect any plane."
-            />
+            {/* ──────────────────────────────────────────────
+             *  ADVANCED — 2D NCC fine-alignment (closed by default).
+             *  Used by slit-scan plane mode and any 2D NCC stage.
+             * ────────────────────────────────────────────── */}
+            <Accordion title="Advanced — 2D NCC fine-alignment" badge="advanced">
+              <SectionHeader title="Enable 2D NCC" />
+              <SegmentedControl
+                options={['off', 'on']}
+                value={settings.enable2dNcc ? 'on' : 'off'}
+                onChange={(v) => update({ enable2dNcc: v === 'on' })}
+                caption="V13.0g 2D NCC fine-alignment after pose-driven projection. Refines (Δx, Δy) translation via cv::matchTemplate."
+              />
+              {settings.enable2dNcc && (
+                <>
+                  <SectionHeader title="Confidence threshold" />
+                  <SegmentedControl
+                    options={['0.50', '0.65', '0.75', '0.85', '0.95', '0.99']}
+                    value={settings.nccConfidenceThreshold2d.toFixed(2)}
+                    onChange={(v) => update({ nccConfidenceThreshold2d: parseFloat(v) })}
+                    caption="Reject NCC corrections below this confidence. 0.99 = only apply on near-perfect overlap."
+                  />
+                  <SectionHeader title="Search half-window (px)" />
+                  <SegmentedControl
+                    options={['6', '10', '12', '20', '30']}
+                    value={String(settings.nccSearchMargin2d)}
+                    onChange={(v) => update({ nccSearchMargin2d: parseInt(v, 10) })}
+                    caption="Pixels: 2D NCC searches ±this around the pose-predicted match."
+                  />
+                  <SectionHeader title="EMA smoothing" />
+                  <SegmentedControl
+                    options={['off', 'on']}
+                    value={settings.enableNcc2dEmaSmoothing ? 'on' : 'off'}
+                    onChange={(v) => update({ enableNcc2dEmaSmoothing: v === 'on' })}
+                    caption="Damp single-frame snaps to spurious peaks via EMA."
+                  />
+                  {settings.enableNcc2dEmaSmoothing && (
+                    <>
+                      <SectionHeader title="EMA alpha (current-frame weight)" />
+                      <SegmentedControl
+                        options={['0.20', '0.30', '0.40', '0.60', '0.80']}
+                        value={settings.ncc2dEmaAlpha.toFixed(2)}
+                        onChange={(v) => update({ ncc2dEmaAlpha: parseFloat(v) })}
+                      />
+                    </>
+                  )}
+                  <SectionHeader title="Pan-axis lock" />
+                  <SegmentedControl
+                    options={['off', 'on']}
+                    value={settings.enableNcc2dPanAxisLock ? 'on' : 'off'}
+                    onChange={(v) => update({ enableNcc2dPanAxisLock: v === 'on' })}
+                    caption="Clamp cross-axis correction tighter than pan-axis (pose + 1D NCC handle cross-axis already)."
+                  />
+                  {settings.enableNcc2dPanAxisLock && (
+                    <>
+                      <SectionHeader title="Cross-axis clamp (px)" />
+                      <SegmentedControl
+                        options={['2', '5', '10', '15']}
+                        value={String(settings.ncc2dCrossAxisLockPx)}
+                        onChange={(v) => update({ ncc2dCrossAxisLockPx: parseInt(v, 10) })}
+                      />
+                    </>
+                  )}
+                </>
+              )}
+            </Accordion>
 
-            <SectionHeader title="2D NCC search half-window (V15.0d)" />
-            <SegmentedControl
-              options={['6', '10', '12', '20', '30']}
-              value={String(settings.nccSearchMargin2d)}
-              onChange={(v) => update({ nccSearchMargin2d: parseInt(v, 10) })}
-              caption="Pixels: 2D NCC searches ±this around the pose-predicted match. Smaller = less wandering on repetitive textures (peg holes, slatted panels), but easier to miss real overlap when pose noise is high. V15.0c.4 was 12 (now configurable)."
-            />
+            {/* ──────────────────────────────────────────────
+             *  ADVANCED — Slit-scan experimental.  Only relevant
+             *  when slitscan-both is the active engine.
+             * ────────────────────────────────────────────── */}
+            {timing === 'realtime' && realtimeAlgorithm === 'slitscan-both' && (
+              <Accordion title="Advanced — Slit-scan experimental" badge="experimental">
+                <SectionHeader title="Triangulation parallax" />
+                <SegmentedControl
+                  options={['off', 'on']}
+                  value={settings.enableTriangulation ? 'on' : 'off'}
+                  onChange={(v) => update({ enableTriangulation: v === 'on' })}
+                  caption="V13.0e ORB triangulation + median-Z parallax correction. Adds ~10ms/accept."
+                />
+                <SectionHeader title="RANSAC homography" />
+                <SegmentedControl
+                  options={['off', 'on']}
+                  value={settings.enableRansacHomography ? 'on' : 'off'}
+                  onChange={(v) => update({ enableRansacHomography: v === 'on' })}
+                  caption="V14.0a RANSAC homography per slit + cv::warpPerspective. Known limitation: can absorb pan as scale, leaving gaps."
+                />
+                <SectionHeader title="Accept gate (px)" />
+                <SegmentedControl
+                  options={['0', '50']}
+                  value={String(settings.acceptGate)}
+                  onChange={(v) => update({ acceptGate: parseInt(v, 10) as PanoramaSettings['acceptGate'] })}
+                  caption="0 = accept on every frame (Apple-dense). 50 = V13.0g throttle."
+                />
+              </Accordion>
+            )}
 
-            <SectionHeader title="2D NCC confidence threshold (V15.0d)" />
-            <SegmentedControl
-              options={['0.50', '0.65', '0.75', '0.85', '0.95', '0.99']}
-              value={settings.nccConfidenceThreshold2d.toFixed(2)}
-              onChange={(v) => update({ nccConfidenceThreshold2d: parseFloat(v) })}
-              caption="Reject NCC corrections below this confidence. Higher = stricter, fewer spurious matches on repetitive textures, but more frames where NCC silently doesn't fire. V15.0c.4 was 0.75 (now configurable). 0.99 = only apply on near-perfect overlap matches."
-            />
-
-            <SectionHeader title="2D NCC EMA smoothing (V15.0d, 1B)" />
-            <SegmentedControl
-              options={['off', 'on']}
-              value={settings.enableNcc2dEmaSmoothing ? 'on' : 'off'}
-              onChange={(v) => update({ enableNcc2dEmaSmoothing: v === 'on' })}
-              caption="Apply exponential-moving-average to 2D NCC corrections so a single-frame snap to a spurious peak doesn't shift the slit by 20+ px. Adds ~2 frame lag."
-            />
-
-            <SectionHeader title="EMA alpha (current-frame weight)" />
-            <SegmentedControl
-              options={['0.20', '0.30', '0.40', '0.60', '0.80']}
-              value={settings.ncc2dEmaAlpha.toFixed(2)}
-              onChange={(v) => update({ ncc2dEmaAlpha: parseFloat(v) })}
-              caption="Weight on the CURRENT frame's correction (1−α weight on prev). 0.20 = heavy damping (more lag); 0.80 = light damping (less lag, more snaps through)."
-            />
-
-            <SectionHeader title="2D NCC pan-axis lock (V15.0d, 1C)" />
-            <SegmentedControl
-              options={['off', 'on']}
-              value={settings.enableNcc2dPanAxisLock ? 'on' : 'off'}
-              onChange={(v) => update({ enableNcc2dPanAxisLock: v === 'on' })}
-              caption="Clamp the cross-axis (perpendicular to pan) NCC correction tighter than the pan-axis. Idea: 1D NCC + pose handle cross-axis wobble; 2D's cross-axis search is mostly noise."
-            />
-
-            <SectionHeader title="Cross-axis lock (px)" />
-            <SegmentedControl
-              options={['2', '5', '10', '15']}
-              value={String(settings.ncc2dCrossAxisLockPx)}
-              onChange={(v) => update({ ncc2dCrossAxisLockPx: parseInt(v, 10) })}
-              caption="Cross-axis clamp when pan-axis lock is on. Lower = tighter lock."
-            />
-
-            <SectionHeader title="Frame selection mode (V16, AR mode)" />
-            <SegmentedControl
-              options={['time-based', 'pose-based']}
-              value={settings.frameSelectionMode}
-              onChange={(v) => update({ frameSelectionMode: v as PanoramaSettings['frameSelectionMode'] })}
-              caption="time-based (default): every ARFrame goes to the engine; engine's internal gate decides. pose-based (V16): a Swift KeyframeGate projects each frame onto the AR plane and accepts only when overlap < (1−threshold) AND keyframe count < max. Matches iOS/Samsung architecture (~5 distinct keyframes per capture, multi-band blender does the heavy lifting). Requires planeSource != Disabled to engage."
-            />
-
-            <SectionHeader title="Keyframe overlap threshold (V16, pose-based mode)" />
-            <SegmentedControl
-              options={['20%', '30%', '40%', '50%', '60%']}
-              value={`${Math.round(settings.keyframeOverlapThreshold * 100)}%`}
-              onChange={(v) => update({ keyframeOverlapThreshold: parseInt(v, 10) / 100 })}
-              caption="Fraction of NEW content required before a frame is accepted as a keyframe (= 1 − max overlap with the previous keyframe). 40% (default) ≈ 4–5 keyframes for a 90° landscape pan. Lower = more keyframes, more redundancy, better matching but more memory. Higher = fewer keyframes, tighter budget but more visible seams between them."
-            />
-
-            <SectionHeader title="Max keyframes per capture (V16, pose-based mode)" />
-            <SegmentedControl
-              options={['3', '4', '5', '6', '8', '10']}
-              value={String(settings.keyframeMaxCount)}
-              onChange={(v) => update({ keyframeMaxCount: parseInt(v, 10) })}
-              caption="Hard cap on keyframes per capture. Once reached, all further frames are rejected (host auto-finalizes). 6 (default) matches Samsung's typical behaviour. 4 = iOS Camera-style. Higher = wider pan supported, lower = stricter memory bound."
-            />
-
+            {/* ──────────────────────────────────────────────
+             *  OUTPUT — always visible.
+             * ────────────────────────────────────────────── */}
             <SectionHeader title="Recording cap" />
             <SegmentedControl
               options={['4 s', '6 s', '8 s', '10 s']}
               value={`${Math.round(settings.maxRecordingMs / 1000)} s`}
               onChange={(v) => update({ maxRecordingMs: parseInt(v, 10) * 1000 })}
-              caption="Auto-stops the hold-recording at this duration. Combined with FPS below, controls how many frames the stitcher processes."
+              caption="Auto-stops the hold-recording at this duration."
             />
-
-            <SectionHeader title="Frame sampling" />
-            <SegmentedControl
-              options={['2', '3', '4']}
-              value={String(settings.framesPerSecond)}
-              onChange={(v) => update({ framesPerSecond: parseInt(v, 10) })}
-              caption={`Frames per second of recording extracted for stitching. Lower = faster but riskier overlap.`}
-            />
-            <View style={styles.row}>
-              <Text style={styles.label}>Frame count clamp</Text>
-              <SegmentedControl
-                options={['4-12', '6-16', '8-20']}
-                value={`${settings.minFrames}-${settings.maxFrames}`}
-                onChange={(v) => {
-                  const [min, max] = v.split('-').map((n) => parseInt(n, 10));
-                  update({ minFrames: min, maxFrames: max });
-                }}
-                caption="Floor and ceiling for frames extracted, regardless of duration × FPS."
-              />
-            </View>
-
             <SectionHeader title="JPEG quality" />
             <SegmentedControl
               options={['70', '85', '92']}
@@ -594,6 +680,50 @@ export function PanoramaSettingsModal({
               onChange={(v) => update({ quality: parseInt(v, 10) })}
               caption="Higher = bigger files, sharper detail. 85 is the recommended default."
             />
+
+            {/* ──────────────────────────────────────────────
+             *  DIAGNOSTICS / FALLBACKS — closed by default.  AR is
+             *  the active path for 99% of use; the vision-camera
+             *  fallback path lives here for emergencies.
+             * ────────────────────────────────────────────── */}
+            <Accordion title="Diagnostics / fallbacks" badge="rarely needed">
+              <View style={styles.infoBox}>
+                <Text style={styles.infoText}>
+                  AR-backed capture is the recommended path. Toggle off
+                  ONLY if ARKit fails on a specific device (very rare on
+                  modern iPhones). Doing so falls back to vision-camera
+                  video recording + post-stitch via cv::Stitcher.
+                </Text>
+              </View>
+              <SectionHeader title="AR-backed capture" />
+              <SegmentedControl
+                options={['on', 'off']}
+                value={settings.useARPreview ? 'on' : 'off'}
+                onChange={(v) => update({ useARPreview: v === 'on' })}
+                caption="Default ON. OFF only when ARKit is unavailable or for A/B testing."
+              />
+              {!settings.useARPreview && (
+                <>
+                  <SectionHeader title="Frame extraction — Frames per second" />
+                  <SegmentedControl
+                    options={['2', '3', '4']}
+                    value={String(settings.framesPerSecond)}
+                    onChange={(v) => update({ framesPerSecond: parseInt(v, 10) })}
+                    caption="Frames/sec extracted from the recorded video. Lower = faster but riskier overlap."
+                  />
+                  <SectionHeader title="Frame extraction — Frame count clamp" />
+                  <SegmentedControl
+                    options={['4-12', '6-16', '8-20']}
+                    value={`${settings.minFrames}-${settings.maxFrames}`}
+                    onChange={(v) => {
+                      const [min, max] = v.split('-').map((n) => parseInt(n, 10));
+                      update({ minFrames: min, maxFrames: max });
+                    }}
+                    caption="Floor/ceiling for extracted frames."
+                  />
+                </>
+              )}
+            </Accordion>
 
             <Pressable
               onPress={() => onChange(DEFAULT_PANORAMA_SETTINGS)}
@@ -613,6 +743,62 @@ export function PanoramaSettingsModal({
 
 function SectionHeader({ title }: { title: string }) {
   return <Text style={styles.sectionHeader}>{title}</Text>;
+}
+
+
+/**
+ * Collapsible section.  Used for closed-by-default groupings
+ * ("Advanced", "Diagnostics / fallbacks") so the modal's primary
+ * surface stays focused on the controls operators actually touch
+ * day-to-day.
+ *
+ * State is local — each Accordion instance manages its own open
+ * flag.  The modal opens fresh-collapsed every mount which is what
+ * we want for now; persisting open state across mounts (e.g. via
+ * AsyncStorage) is a future enhancement.
+ */
+function Accordion({
+  title,
+  initiallyOpen = false,
+  badge,
+  children,
+}: {
+  title: string;
+  initiallyOpen?: boolean;
+  badge?: string;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  const [open, setOpen] = useState(initiallyOpen);
+  return (
+    <View style={styles.accordion}>
+      <Pressable
+        onPress={() => setOpen((v) => !v)}
+        style={styles.accordionHeader}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        accessibilityLabel={`${title}, ${open ? 'expanded' : 'collapsed'}`}
+      >
+        <Text style={styles.accordionChevron}>{open ? '▼' : '▶'}</Text>
+        <Text style={styles.accordionTitle}>{title}</Text>
+        {badge ? <Tag label={badge} /> : null}
+      </Pressable>
+      {open ? <View style={styles.accordionBody}>{children}</View> : null}
+    </View>
+  );
+}
+
+
+/**
+ * Small grey-text badge.  Marks sections / fields as "advanced",
+ * "experimental", "legacy", or similar — quick visual signal that
+ * the operator can usually ignore them.
+ */
+function Tag({ label }: { label: string }): React.JSX.Element {
+  return (
+    <View style={styles.tag}>
+      <Text style={styles.tagText}>{label}</Text>
+    </View>
+  );
 }
 
 
@@ -787,5 +973,61 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 14,
     fontWeight: '500',
+  },
+  // V16 Phase 1b — Accordion + Tag + InfoBox
+  accordion: {
+    marginTop: 18,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  accordionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    gap: 8,
+  },
+  accordionChevron: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 11,
+    width: 14,
+  },
+  accordionTitle: {
+    color: '#ffffff',
+    opacity: 0.85,
+    fontSize: 13,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    flex: 1,
+  },
+  accordionBody: {
+    paddingHorizontal: 12,
+    paddingBottom: 14,
+  },
+  tag: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  tagText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 9,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  infoBox: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 4,
+  },
+  infoText: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 12,
+    lineHeight: 17,
   },
 });
