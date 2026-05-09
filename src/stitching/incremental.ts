@@ -396,6 +396,41 @@ export interface StitcherConfig {
    *  Once reached, all subsequent frames are rejected and the host
    *  should auto-finalize. */
   keyframeMaxCount: number;
+
+  // cv::Stitcher pipeline knobs (batch-keyframe engine, V16 Phase 1.fix3)
+
+  /** V16 Phase 1.fix3 — `cv::Stitcher`'s warper choice for the
+   *  batch-keyframe finalize.
+   *
+   *  - 'plane': flat output, best when camera angles stay near
+   *    perpendicular to scene.  Unbounded bbox for tilt-heavy pans
+   *    (umatrix.cpp:710 crash).
+   *  - 'cylindrical': wraps onto a cylinder with FIXED vertical axis.
+   *    Good for horizontal pans; unrolls vertical pans along the wrong
+   *    axis (output looks rotated 90°).
+   *  - 'spherical' (recommended for batch-keyframe): rotationally
+   *    symmetric, handles any pan direction.  Mild uniform curvature.
+   *
+   *  Native default is "spherical" specifically for batch-keyframe
+   *  (overrides this prop's value in `RetaiLensIncrementalStitcher.start`
+   *  unless explicitly provided).  Same field is also consumed by the
+   *  legacy non-AR batch path (`RetaiLensStitcher.stitchVideo`) where
+   *  the historical default is "plane". */
+  warperType: 'plane' | 'cylindrical' | 'spherical';
+
+  /** V16 Phase 1.fix3 — `cv::Stitcher`'s blender choice for the
+   *  batch-keyframe finalize.
+   *  - 'multiband' (default): Laplacian-pyramid blending; best seam
+   *    quality, higher peak memory.
+   *  - 'feather': single-band alpha; faster, no halo artifacts when
+   *    exposure varies. */
+  blenderType: 'multiband' | 'feather';
+
+  /** V16 Phase 1.fix3 — `cv::Stitcher`'s seam-finder choice.
+   *  - 'graphcut' (default): cv::detail::GraphCutSeamFinder; optimal
+   *    seams, pairs with multi-band, holds all warped frames in memory.
+   *  - 'skip': stream warp+feed, lower peak memory, fine with feather. */
+  seamFinderType: 'graphcut' | 'skip';
 }
 
 

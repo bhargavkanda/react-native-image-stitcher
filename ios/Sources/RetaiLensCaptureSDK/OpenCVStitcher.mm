@@ -1791,7 +1791,14 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       dropped++;
       continue;
     }
-    cv::Mat img = cv::imread([framePaths[i] UTF8String]);
+    // V16 Phase 1.fix3 — IMREAD_IGNORE_ORIENTATION parity with the
+    // batch-keyframe path.  AVAssetImageGenerator writes JPEGs with
+    // EXIF Orientation tags; cv::imread defaults (OpenCV 4.5+) apply
+    // them, returning rotated pixels that don't match the pose's
+    // intrinsics (which describe the unrotated landscape sensor).
+    // Force raw landscape pixels for the stitcher.
+    cv::Mat img = cv::imread([framePaths[i] UTF8String],
+                             cv::IMREAD_COLOR | cv::IMREAD_IGNORE_ORIENTATION);
     if (img.empty()) {
       dropped++;
       continue;

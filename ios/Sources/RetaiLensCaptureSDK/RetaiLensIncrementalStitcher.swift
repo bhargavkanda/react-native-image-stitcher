@@ -295,6 +295,18 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// correctly while the stitcher (with IMREAD_IGNORE_ORIENTATION)
     /// gets raw landscape pixels matching the pose's intrinsics.
     private var keyframeExifOrientation: Int = 1
+    /// V16 Phase 1.fix3 — cv::Stitcher pipeline knobs read from JS
+    /// config so the modal can A/B between warpers without rebuilds.
+    /// Default warperType is "spherical" for batch-keyframe because:
+    ///   - PlaneWarper produces unbounded bbox for tilt-heavy pans
+    ///     (umatrix.cpp:710 crash from fix2 reproduction)
+    ///   - CylindricalWarper has a hardcoded vertical cylinder axis,
+    ///     unrolls vertical pans along the wrong direction
+    ///   - SphericalWarper is rotationally symmetric — handles any
+    ///     pan direction uniformly with mild curvature
+    private var batchWarperType: String = "spherical"
+    private var batchBlenderType: String = "multiband"
+    private var batchSeamFinderType: String = "graphcut"
 
     private override init() {
         super.init()
@@ -398,6 +410,18 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             case 270: self.keyframeExifOrientation = 8
             default:  self.keyframeExifOrientation = 1
             }
+            // V16 Phase 1.fix3 — read cv::Stitcher knobs from JS config.
+            // Defaults overridden to "spherical" for batch-keyframe to
+            // sidestep the pose-driven CylindricalWarper / PlaneWarper
+            // pathologies for vertical pans.  User can pick anything
+            // from the modal's Projection / Blender / Seam-finder
+            // sections.
+            self.batchWarperType =
+                (configOverrides["warperType"] as? String) ?? "spherical"
+            self.batchBlenderType =
+                (configOverrides["blenderType"] as? String) ?? "multiband"
+            self.batchSeamFinderType =
+                (configOverrides["seamFinderType"] as? String) ?? "graphcut"
             self.batchKeyframeMode = true
             self.hybridEngine = nil
             self.firstwinsEngine = nil
@@ -671,23 +695,25 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     // try block (or we wouldn't reach the success
                     // branch).
                     do {
-                        // V16 Phase 1.fix2 — RCA from second crash:
-                        // cv::detail::PlaneWarper produces an unbounded
-                        // output bbox for tilt-heavy pans (Ram's top-to-
-                        // bottom landscape pan), causing UMat allocator
-                        // failure at umatrix.cpp:710.  Switching to
-                        // CylindricalWarper which wraps the projection
-                        // around the dominant pan axis and bounds the
-                        // output regardless of tilt range.  User-settings
-                        // wiring (so this can be toggled via the modal)
-                        // is queued for Phase 1b.
+                        // V16 Phase 1.fix3 — pose-driven cv::Stitcher
+                        // pipeline with user-configurable warper /
+                        // blender / seam-finder.  Defaults overridden
+                        // to "spherical" / "multiband" / "graphcut"
+                        // for batch-keyframe in start().  Operator can
+                        // A/B different warpers from the modal without
+                        // rebuilding.
+                        os_log(.fault, log: Self.diagLog,
+                               "[V16-batch-keyframe] stitch: warper=%{public}@ blender=%{public}@ seam=%{public}@",
+                               self.batchWarperType,
+                               self.batchBlenderType,
+                               self.batchSeamFinderType)
                         let r = try OpenCVStitcher.stitchKeyframePaths(
                             paths,
                             outputPath: cleaned,
                             jpegQuality: q,
-                            warperType: "cylindrical",
-                            blenderType: "multiband",
-                            seamFinderType: "graphcut",
+                            warperType: self.batchWarperType,
+                            blenderType: self.batchBlenderType,
+                            seamFinderType: self.batchSeamFinderType,
                             poses: poses
                         )
                         // Keep saved keyframes on disk for post-hoc
