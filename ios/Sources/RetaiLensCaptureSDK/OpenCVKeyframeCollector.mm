@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 
 #import "OpenCVKeyframeCollector.h"
+#import <ImageIO/ImageIO.h>
+#import <CoreServices/CoreServices.h>
 
 // Same #pragma dance the other ObjC++ stitcher files use to suppress
 // noisy header warnings before importing opencv2.
@@ -9,6 +11,71 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/imgcodecs.hpp>
 #pragma pop_macro("NO")
+
+// V16 Phase 1.fix2 — write a JPEG with an EXIF Orientation tag so
+// iOS image renderers display the saved frame correctly while
+// cv::imread (with IMREAD_IGNORE_ORIENTATION) gets raw landscape
+// pixels for the stitcher.  Returns YES on success.
+static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
+                              NSString *path,
+                              NSInteger exifOrientation,
+                              NSInteger quality) {
+  if (bgr.empty()) return NO;
+
+  // Convert BGR (OpenCV native) → RGBA (CoreGraphics expects).
+  cv::Mat rgba;
+  cv::cvtColor(bgr, rgba, cv::COLOR_BGR2RGBA);
+
+  CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+  CGBitmapInfo bitmapInfo =
+      kCGBitmapByteOrderDefault | kCGImageAlphaNoneSkipLast;
+  CGContextRef ctx = CGBitmapContextCreate(
+      rgba.data,
+      (size_t)rgba.cols,
+      (size_t)rgba.rows,
+      8,
+      (size_t)rgba.step,
+      colorSpace,
+      bitmapInfo);
+  if (!ctx) {
+    CGColorSpaceRelease(colorSpace);
+    return NO;
+  }
+  CGImageRef cgImage = CGBitmapContextCreateImage(ctx);
+  CGContextRelease(ctx);
+  CGColorSpaceRelease(colorSpace);
+  if (!cgImage) return NO;
+
+  NSURL *url = [NSURL fileURLWithPath:path];
+  CGImageDestinationRef dst = CGImageDestinationCreateWithURL(
+      (__bridge CFURLRef)url,
+      // public.jpeg is the stable UTI for JPEG.  Avoiding kUTTypeJPEG
+      // (deprecated) and the iOS-15+ UTType class so this compiles
+      // against older deployment targets too.
+      CFSTR("public.jpeg"),
+      1,
+      NULL);
+  if (!dst) {
+    CGImageRelease(cgImage);
+    return NO;
+  }
+
+  NSInteger q = MAX(0, MIN(100, quality));
+  // Clamp EXIF orientation to the valid range (1..8).  Default to
+  // 1 (no rotation) for unrecognised values.
+  NSInteger exif = (exifOrientation >= 1 && exifOrientation <= 8)
+      ? exifOrientation : 1;
+  NSDictionary *props = @{
+    (id)kCGImageDestinationLossyCompressionQuality: @((double)q / 100.0),
+    (id)kCGImagePropertyOrientation: @(exif),
+  };
+  CGImageDestinationAddImage(
+      dst, cgImage, (__bridge CFDictionaryRef)props);
+  BOOL ok = CGImageDestinationFinalize(dst);
+  CFRelease(dst);
+  CGImageRelease(cgImage);
+  return ok;
+}
 
 
 // ─────────────────────────────────────────────────────────────────────
@@ -78,6 +145,7 @@
 
 - (nullable OpenCVKeyframeRecord *)saveKeyframe:(CVPixelBufferRef)pixelBuffer
                                 rotationDegrees:(NSInteger)rotationDegrees
+                                exifOrientation:(NSInteger)exifOrientation
                                     jpegQuality:(NSInteger)jpegQuality
                                           error:(NSError **)error {
   if (!pixelBuffer) {
@@ -128,17 +196,15 @@
   NSString *fullPath =
       [self.sessionDir stringByAppendingPathComponent:filename];
 
-  NSInteger q = MAX(0, MIN(100, jpegQuality));
-  std::vector<int> params = {
-    cv::IMWRITE_JPEG_QUALITY, static_cast<int>(q),
-  };
-  bool wrote = false;
-  try {
-    wrote = cv::imwrite([fullPath UTF8String], rotated, params);
-  } catch (const cv::Exception &e) {
-    NSLog(@"[KeyframeCollector] cv::imwrite threw: %s", e.what());
-    wrote = false;
-  }
+  // V16 Phase 1.fix2 — write JPEG via ImageIO so we can set the
+  // EXIF Orientation tag.  cv::imwrite doesn't support EXIF; iOS
+  // image renderers (RN's <Image>, Files.app) need the tag to display
+  // the saved landscape-sensor JPEG correctly when the user is
+  // holding the phone in portrait (which puts the sensor's natural
+  // long axis vertical to user — making un-tagged thumbnails appear
+  // sideways).
+  BOOL wrote = WriteJPEGWithEXIF(rotated, fullPath, exifOrientation,
+                                  jpegQuality);
   if (!wrote) {
     if (error) {
       *error = [NSError errorWithDomain:@"OpenCVKeyframeCollector"
@@ -146,7 +212,8 @@
                                userInfo:@{
         NSLocalizedDescriptionKey:
           [NSString stringWithFormat:
-            @"cv::imwrite failed for %@", fullPath],
+            @"WriteJPEGWithEXIF failed for %@ (orient=%ld q=%ld)",
+            fullPath, (long)exifOrientation, (long)jpegQuality],
       }];
     }
     return nil;

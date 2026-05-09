@@ -290,6 +290,11 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// saving keyframes so the JPEGs land in user-pan orientation
     /// (the stitcher reads them in that orientation).
     private var keyframeRotationDegrees: Int = 90
+    /// V16 Phase 1.fix2 — EXIF Orientation tag (1..8) baked into
+    /// each saved keyframe JPEG so iOS image renderers display
+    /// correctly while the stitcher (with IMREAD_IGNORE_ORIENTATION)
+    /// gets raw landscape pixels matching the pose's intrinsics.
+    private var keyframeExifOrientation: Int = 1
 
     private override init() {
         super.init()
@@ -370,22 +375,29 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             }
             self.keyframePaths = []
             self.keyframePoses = []
-            // V16 Phase 1.fix1 — RCA from the umatrix.cpp:710 'u != 0'
-            // crash on iPhone 16 Pro: the pose's intrinsics describe
-            // the LANDSCAPE sensor (1920×1440) but a rotated save
-            // produced 1440×1920 portrait frames.  PlaneWarper saw the
-            // image-vs-intrinsics mismatch and produced a degenerate
-            // output bbox → UMat allocator returned null.
-            //
-            // Fix: keep frames in native landscape sensor orientation
-            // for the batch-keyframe path.  The slit-scan and hybrid
-            // engines (which DO paste rotated slivers onto a rotated
-            // canvas) continue to receive `frameRotationDegrees`
-            // unchanged below.  waveCorrect aligns the final panorama
-            // to gravity using the camera quaternions, so visual
-            // orientation is correct regardless of saved-image
-            // rotation.
+            // V16 Phase 1.fix1 — keep frames in native landscape
+            // sensor orientation for the batch-keyframe path so the
+            // pose's intrinsics (which describe the unrotated
+            // 1920×1440 sensor) match the saved-image dimensions.
+            // The slit-scan and hybrid engines continue to receive
+            // `frameRotationDegrees` unchanged.
             self.keyframeRotationDegrees = 0
+            // V16 Phase 1.fix2 — encode the user's perceived
+            // orientation as EXIF Orientation in the saved JPEG.
+            // cv::imread (with IMREAD_IGNORE_ORIENTATION, set in
+            // stitchKeyframePaths) ignores it for the stitcher, but
+            // RN's <Image>, Files.app, etc. honour it for display.
+            // Mapping (frameRotationDegrees → EXIF tag):
+            //   0   = landscape-left      → 1 (no rotation)
+            //   90  = portrait            → 6 (rotate 90° CW for view)
+            //   180 = landscape-right     → 3 (rotate 180°)
+            //   270 = portrait-up-down    → 8 (rotate 90° CCW)
+            switch frameRotationDegrees {
+            case 90:  self.keyframeExifOrientation = 6
+            case 180: self.keyframeExifOrientation = 3
+            case 270: self.keyframeExifOrientation = 8
+            default:  self.keyframeExifOrientation = 1
+            }
             self.batchKeyframeMode = true
             self.hybridEngine = nil
             self.firstwinsEngine = nil
@@ -659,11 +671,21 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     // try block (or we wouldn't reach the success
                     // branch).
                     do {
+                        // V16 Phase 1.fix2 — RCA from second crash:
+                        // cv::detail::PlaneWarper produces an unbounded
+                        // output bbox for tilt-heavy pans (Ram's top-to-
+                        // bottom landscape pan), causing UMat allocator
+                        // failure at umatrix.cpp:710.  Switching to
+                        // CylindricalWarper which wraps the projection
+                        // around the dominant pan axis and bounds the
+                        // output regardless of tilt range.  User-settings
+                        // wiring (so this can be toggled via the modal)
+                        // is queued for Phase 1b.
                         let r = try OpenCVStitcher.stitchKeyframePaths(
                             paths,
                             outputPath: cleaned,
                             jpegQuality: q,
-                            warperType: "plane",
+                            warperType: "cylindrical",
                             blenderType: "multiband",
                             seamFinderType: "graphcut",
                             poses: poses
@@ -885,6 +907,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let inBatchKeyframeMode = self.batchKeyframeMode
         let collector = self.keyframeCollector
         let rotationDegreesForBatch = self.keyframeRotationDegrees
+        let exifOrientationForBatch = self.keyframeExifOrientation
 
         // V13.0c.1 — diagnostic translation logging.  Captures the
         // FIRST frame's world position, then logs delta from first
@@ -1020,6 +1043,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     let record = try coll.saveKeyframe(
                         pbCopy,
                         rotationDegrees: rotationDegreesForBatch,
+                        exifOrientation: exifOrientationForBatch,
                         jpegQuality: 80
                     )
                     self.stateLock.lock()

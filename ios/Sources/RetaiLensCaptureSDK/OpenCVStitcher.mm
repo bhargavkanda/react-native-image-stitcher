@@ -2186,6 +2186,14 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // Load each path → cv::Mat + cameraParams.  Drop any that fail
   // to load (corrupt JPEG, missing file) — but require ≥2 to
   // succeed for a panorama to be possible.
+  //
+  // V16 Phase 1.fix2 — IMREAD_IGNORE_ORIENTATION: collector saves
+  // JPEGs with an EXIF Orientation tag so iOS Image renderers (e.g.
+  // LiveFrameStrip) display correctly.  cv::imread defaults (since
+  // OpenCV 4.5+) APPLY the EXIF rotation; that would re-introduce
+  // the image-vs-intrinsics mismatch fix1 was meant to remove.  Pass
+  // IMREAD_IGNORE_ORIENTATION explicitly to get raw landscape sensor
+  // pixels for the stitcher.
   std::vector<cv::Mat> frames;
   std::vector<cv::detail::CameraParams> cameras;
   frames.reserve(framePaths.count);
@@ -2196,7 +2204,8 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     NSString *cleaned = ([path hasPrefix:@"file://"]
         ? [path substringFromIndex:[@"file://" length]]
         : path);
-    cv::Mat img = cv::imread([cleaned UTF8String]);
+    cv::Mat img = cv::imread([cleaned UTF8String],
+                             cv::IMREAD_COLOR | cv::IMREAD_IGNORE_ORIENTATION);
     if (img.empty()) {
       dropped++;
       continue;
@@ -2244,15 +2253,50 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         : 1.0;
     double compose_work_aspect = compose_scale;  // work_scale == 1
 
-    // Wave correction in HORIZ mode (matches the video-driven pose
-    // path).  Aligns each camera's "up" to gravity, which is what
-    // we want for both portrait and landscape pans assuming the
-    // user keeps the phone vertical (the typical handheld case).
+    // V16 Phase 1.fix2 — auto-detect pan axis from camera rotation
+    // spread.  Compute the std-dev of camera "forward" vectors
+    // projected onto each world axis; the axis with the smallest
+    // spread is the pan-rotation axis (i.e. rotation about that
+    // axis is what differs across frames most).  HORIZ_PAN means
+    // rotation about world Y (yaw): use WAVE_CORRECT_HORIZ.
+    // VERT_PAN means rotation about world X (pitch): use WAVE_CORRECT_VERT.
+    //
+    // Earlier hardcoded HORIZ produced misaligned panoramas for
+    // Ram's top-to-bottom landscape pan (no yaw spread; pitch
+    // spread).  Picking the right axis lets waveCorrect actually
+    // help instead of being a no-op (or flipping the panorama).
+    cv::detail::WaveCorrectKind waveKind = cv::detail::WAVE_CORRECT_HORIZ;
+    if (cameras.size() >= 2) {
+      // forward[i] = -3rd-column of R (camera looks along -Z in cv)
+      double minF[3] = { 1e9, 1e9, 1e9};
+      double maxF[3] = {-1e9,-1e9,-1e9};
+      for (const auto &cam : cameras) {
+        for (int axis = 0; axis < 3; axis++) {
+          double v = -cam.R.at<float>(2, axis);
+          if (v < minF[axis]) minF[axis] = v;
+          if (v > maxF[axis]) maxF[axis] = v;
+        }
+      }
+      double rangeX = maxF[0] - minF[0];
+      double rangeY = maxF[1] - minF[1];
+      // Larger Y-range of forward => more vertical (pitch) variation
+      // => vertical pan => WAVE_CORRECT_VERT.
+      if (rangeY > rangeX) {
+        waveKind = cv::detail::WAVE_CORRECT_VERT;
+      }
+      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+             "[V16-stitch-mem] waveKind=%{public}s "
+             "rangeForwardX=%.3f rangeForwardY=%.3f",
+             (waveKind == cv::detail::WAVE_CORRECT_VERT)
+               ? "VERT (vertical pan)"
+               : "HORIZ (horizontal pan)",
+             rangeX, rangeY);
+    }
     std::vector<cv::Mat> rmats;
     rmats.reserve(cameras.size());
     for (const auto &cam : cameras) rmats.push_back(cam.R.clone());
     try {
-      cv::detail::waveCorrect(rmats, cv::detail::WAVE_CORRECT_HORIZ);
+      cv::detail::waveCorrect(rmats, waveKind);
       for (size_t i = 0; i < cameras.size(); i++) {
         cameras[i].R = rmats[i];
       }

@@ -66,13 +66,23 @@ NS_ASSUME_NONNULL_BEGIN
 /// Save one accepted ARFrame's pixel buffer as a JPEG inside the
 /// session directory.  Filename is `keyframe-{index zero-padded}.jpg`.
 /// Pixel buffer format must be NV12 (the ARFrame default) or BGRA;
-/// other formats fail with NSError code 1200.  `rotationDegrees`
-/// must be one of 0/90/180/270 — the buffer is rotated by that
-/// amount before encoding so the saved JPEG is in the same
-/// orientation `OpenCVStitcher.stitchKeyframePaths` expects (sensor
-/// landscape rotated to user-pan orientation).
+/// other formats fail with NSError code 1200.
+///
+/// `rotationDegrees`: 0/90/180/270.  The buffer is PHYSICALLY
+/// rotated by this amount before encoding.  Use 0 for batch-keyframe
+/// (the stitcher's intrinsics describe the unrotated landscape
+/// sensor; rotating breaks the camera-K-matrix contract).
+///
+/// `exifOrientation`: standard EXIF Orientation tag value (1..8).
+///   1 = no rotation; 6 = 90° CW for display; 3 = 180°; 8 = 90° CCW.
+/// Saved as JPEG metadata via ImageIO.  iOS Image renderers (RN's
+/// `<Image>`, Files.app, Photos) honour this and display the photo
+/// rotated for natural viewing.  cv::imread (when called with
+/// IMREAD_IGNORE_ORIENTATION) returns raw landscape pixels — match
+/// for the stitcher's intrinsics.
 - (nullable OpenCVKeyframeRecord *)saveKeyframe:(CVPixelBufferRef)pixelBuffer
                                 rotationDegrees:(NSInteger)rotationDegrees
+                                exifOrientation:(NSInteger)exifOrientation
                                     jpegQuality:(NSInteger)jpegQuality
                                           error:(NSError **)error;
 
