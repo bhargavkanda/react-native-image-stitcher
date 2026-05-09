@@ -370,12 +370,27 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             }
             self.keyframePaths = []
             self.keyframePoses = []
-            self.keyframeRotationDegrees = frameRotationDegrees
+            // V16 Phase 1.fix1 — RCA from the umatrix.cpp:710 'u != 0'
+            // crash on iPhone 16 Pro: the pose's intrinsics describe
+            // the LANDSCAPE sensor (1920×1440) but a rotated save
+            // produced 1440×1920 portrait frames.  PlaneWarper saw the
+            // image-vs-intrinsics mismatch and produced a degenerate
+            // output bbox → UMat allocator returned null.
+            //
+            // Fix: keep frames in native landscape sensor orientation
+            // for the batch-keyframe path.  The slit-scan and hybrid
+            // engines (which DO paste rotated slivers onto a rotated
+            // canvas) continue to receive `frameRotationDegrees`
+            // unchanged below.  waveCorrect aligns the final panorama
+            // to gravity using the camera quaternions, so visual
+            // orientation is correct regardless of saved-image
+            // rotation.
+            self.keyframeRotationDegrees = 0
             self.batchKeyframeMode = true
             self.hybridEngine = nil
             self.firstwinsEngine = nil
             os_log(.fault, log: Self.diagLog,
-                   "[V16-batch-keyframe] start mode=batch-keyframe rotation=%d sessionDir=%{public}@",
+                   "[V16-batch-keyframe] start mode=batch-keyframe rotation=0 (was %d, forced to 0 to match pose intrinsics) sessionDir=%{public}@",
                    frameRotationDegrees,
                    self.keyframeCollector?.sessionDir ?? "(nil)")
         } else if useFirstwinsClass {
