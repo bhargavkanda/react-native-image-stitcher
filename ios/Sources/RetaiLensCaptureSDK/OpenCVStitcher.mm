@@ -280,18 +280,32 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       "[stitch-bc] STITCH START: %lu frames mem=%.1fMB",
       (unsigned long)framePaths.count, kStartResidentMB);
 
-  // V12.14.8 — pre-stitch memory abort.  Sentry confirmed the V12.14.6
-  // crash signature was WatchdogTermination = iOS jetsam OOM-kill.
-  // Threshold of 700 MB is just below the empirical kill point on a
-  // camera-active foreground RetaiLens app (~720 MB observed) and
-  // leaves ~80 MB headroom for the stitcher's own ~50-150 MB peak.
+  // V16 Phase 1b.fix1 — device-aware pre-stitch memory abort.
   //
-  // V12.14.8's primary fix unmounts the CameraView during stitch so
-  // baseline at this point should be ~350-450 MB.  This guard is a
-  // SAFETY NET: if the unmount didn't happen (state stuck, RN render
-  // blocked, etc.), we fail with a recoverable error instead of
-  // letting the watchdog kill the whole app.
-  constexpr double kPreStitchAbortMB = 700.0;
+  // Original V12.14.8 fixed the threshold at 700 MB, sized for legacy
+  // iPhones (~2 GB total RAM, ~720 MB jetsam kill point on camera-
+  // active foreground apps).  That ceiling is irrelevant on modern
+  // hardware: iPhone 16 Pro has 8 GB RAM and a per-process limit of
+  // ~3 GB on iOS 26 (confirmed by JetsamEvent at 3.38 GB).
+  //
+  // Also, the V12.14.8 assumption — "vision-camera CameraView is
+  // unmounted before stitch, so baseline drops to ~350-450 MB" —
+  // doesn't hold for the V16 batch-keyframe flow, where the AR
+  // session keeps running during stitch (baseline naturally 600-800
+  // MB).  AR pause is now done at the bridge level (Phase 1b.fix1
+  // in RetaiLensIncrementalStitcher.swift), but even with that, the
+  // 700 MB threshold throttles modern devices for no reason.
+  //
+  // New formula: max(700, totalRAMGB × 300).  Leaves ~30% headroom
+  // below the per-process limit for the stitch peak.
+  //   2 GB device → 700  MB threshold (clamped, legacy protection)
+  //   4 GB device → 1200 MB
+  //   6 GB device → 1800 MB
+  //   8 GB device → 2400 MB
+  double kStartTotalRAMGB =
+      (double)NSProcessInfo.processInfo.physicalMemory
+      / (1024.0 * 1024.0 * 1024.0);
+  const double kPreStitchAbortMB = MAX(700.0, kStartTotalRAMGB * 300.0);
   if (kStartResidentMB > kPreStitchAbortMB) {
     os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
         "[stitch-bc] PRE-STITCH ABORT: mem=%.1fMB > %.1fMB threshold",

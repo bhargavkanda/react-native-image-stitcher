@@ -667,10 +667,43 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // consumeFrame, see isRunning=false, and bail.
         RetaiLensARSession.shared.incrementalConsumer = nil
 
+        // V16 Phase 1b.fix1 — pause the AR session for the duration
+        // of the stitch (batch-keyframe path only).  ARSession holds
+        // a pixel-buffer pool, world map, and plane geometry that
+        // collectively contribute ~200-300 MB to baseline.  Dropping
+        // them while cv::Stitcher's BA + GraphCut + MultiBand runs
+        // gives the stitcher more headroom under the per-process
+        // limit.  Restart on the main thread after the stitch
+        // completes so the next capture has AR ready (next plane
+        // detection + tracking re-initialise will take 2-3 s, which
+        // matches Ram's chosen "Option C" trade-off).
+        let arWasRunning = inBatchKeyframeMode
+            && RetaiLensARSession.shared.isRunning
+        if arWasRunning {
+            os_log(.fault, log: Self.diagLog,
+                   "[V16-batch-keyframe] pausing AR session for stitch (memory drop)")
+            RetaiLensARSession.shared.stop()
+        }
+
         // Hop to the work queue so any frame currently mid-ingest
         // finishes before we serialize the canvas.  The serial
         // queue guarantees finalize runs strictly after that frame.
         workQueue.async {
+            // V16 Phase 1b.fix1 — defer-restart AR session.  Fires
+            // on every exit path (success, error, early return).
+            // Restart is dispatched to main because ARSession.run()
+            // expects main-thread invocation to set up its rendering
+            // hooks; happens AFTER the stitch completes so it doesn't
+            // contend for the memory budget.
+            defer {
+                if arWasRunning {
+                    DispatchQueue.main.async {
+                        os_log(.fault, log: Self.diagLog,
+                               "[V16-batch-keyframe] restarting AR session post-stitch")
+                        RetaiLensARSession.shared.start()
+                    }
+                }
+            }
             let cleaned = (outputPath.hasPrefix("file://"))
                 ? String(outputPath.dropFirst(7))
                 : outputPath
