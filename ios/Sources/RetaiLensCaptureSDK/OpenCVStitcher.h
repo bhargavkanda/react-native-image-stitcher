@@ -64,12 +64,31 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 ///   - "skip" streams warp+feed in a single pass and never holds
 ///     more than one warped frame.  Lower peak memory.  Use on
 ///     low-RAM devices or for fastest path with FeatherBlender.
+/// V16 Phase 1b.fix3 added two output-presentation enhancements:
+///
+///   - `exifOrientation` (1..8): EXIF Orientation tag baked into
+///     the output JPEG.  Lets iOS image renderers display the
+///     panorama correctly when the user holds the phone in a
+///     non-default orientation.  Pass 1 (no rotation) to keep
+///     legacy behaviour.  Mapping from device orientation:
+///       portrait              → 6 (rotate 90° CW for view)
+///       landscape-left        → 1 (no rotation)
+///       portrait-upside-down  → 8
+///       landscape-right       → 3
+///
+///   - **Maximum-inscribed-rectangle crop** instead of bounding-
+///     rectangle.  cv::Stitcher's output has irregular black corners
+///     where the projection didn't fill; bbox crop still included
+///     them.  Now we find the largest axis-aligned rectangle entirely
+///     inside the non-zero region and crop to that — clean output
+///     with no black corners.
 + (nullable RetaiLensStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
                                           outputPath:(NSString *)outputPath
                                          jpegQuality:(NSInteger)quality
                                           warperType:(nullable NSString *)warperType
                                          blenderType:(nullable NSString *)blenderType
                                       seamFinderType:(nullable NSString *)seamFinderType
+                                     exifOrientation:(NSInteger)exifOrientation
                                                error:(NSError **)error;
 
 /// Extract `maxFrames` evenly-spaced frames from the video at

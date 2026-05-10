@@ -142,7 +142,13 @@ public enum Stitcher {
         jpegQuality: options.jpegQuality,
         warperType: "plane",
         blenderType: "multiband",
-        seamFinderType: "graphcut"
+        seamFinderType: "graphcut",
+        // V16 Phase 1b.fix3 — generic Stitcher API doesn't carry
+        // capture orientation; default to 1 (no rotation) so the
+        // pixels are interpreted as-stored.  Callers that care
+        // about EXIF (e.g. RetaiLensIncrementalStitcher) hit the
+        // method directly with the right value.
+        exifOrientation: 1
       )
       return StitchResult(
         outputPath: result.outputPath,

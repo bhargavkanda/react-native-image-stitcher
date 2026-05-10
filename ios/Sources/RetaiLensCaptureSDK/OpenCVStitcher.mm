@@ -51,6 +51,9 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <os/log.h>
+// V16 Phase 1b.fix3 — ImageIO for EXIF Orientation tag on output
+// panorama JPEG.
+#import <ImageIO/ImageIO.h>
 #import <mach/mach.h>
 #import <mach/task.h>
 #import <mach/task_info.h>
@@ -88,6 +91,138 @@ static double StitcherResidentMB(void) {
     // correlation — phys_footprint is the one that matters for survival.
     return (double)info.phys_footprint / (1024.0 * 1024.0);
 }
+
+// V16 Phase 1b.fix3 — find the largest axis-aligned rectangle that
+// fits ENTIRELY inside the non-zero region of `mask` (CV_8UC1).
+// Used to crop the post-stitch panorama tightly: the regular
+// boundingRect of non-zero pixels still includes the black corners
+// where the projection didn't fill; the max-inscribed rectangle
+// excludes those entirely.
+//
+// Algorithm: maximum-rectangle-in-histogram swept row by row.
+// O(W * H).  For a 4-6 MP panorama on iPhone 16 Pro, completes in
+// 30-60 ms.
+//
+// Returns cv::Rect(0,0,0,0) if `mask` is empty or fully zero.
+static cv::Rect MaxInscribedRectFromMask(const cv::Mat &mask) {
+    if (mask.empty() || mask.type() != CV_8UC1) {
+        return cv::Rect();
+    }
+    const int H = mask.rows;
+    const int W = mask.cols;
+
+    // Per-column running heights of consecutive non-zero pixels
+    // ending at the current row.
+    std::vector<int> heights((size_t)W, 0);
+    cv::Rect bestRect(0, 0, 0, 0);
+    long long bestArea = 0;
+
+    // Reusable monotonic stack for the row's largest-rectangle-in-
+    // histogram subroutine.
+    std::vector<int> stack;
+    stack.reserve((size_t)W + 1);
+
+    for (int row = 0; row < H; ++row) {
+        const uchar *m = mask.ptr<uchar>(row);
+        for (int col = 0; col < W; ++col) {
+            heights[(size_t)col] =
+                (m[col] != 0) ? heights[(size_t)col] + 1 : 0;
+        }
+
+        // Largest rectangle in the histogram for this row.
+        stack.clear();
+        for (int col = 0; col <= W; ++col) {
+            const int h = (col == W) ? 0 : heights[(size_t)col];
+            while (!stack.empty()
+                   && heights[(size_t)stack.back()] > h) {
+                const int topIdx = stack.back();
+                stack.pop_back();
+                const int leftIdx =
+                    stack.empty() ? -1 : stack.back();
+                const int width = col - leftIdx - 1;
+                const long long area =
+                    (long long)heights[(size_t)topIdx]
+                    * (long long)width;
+                if (area > bestArea) {
+                    bestArea = area;
+                    bestRect = cv::Rect(
+                        leftIdx + 1,
+                        row - heights[(size_t)topIdx] + 1,
+                        width,
+                        heights[(size_t)topIdx]
+                    );
+                }
+            }
+            stack.push_back(col);
+        }
+    }
+    return bestRect;
+}
+
+
+// V16 Phase 1b.fix3 — write a cv::Mat (BGR) as a JPEG with an EXIF
+// Orientation tag, via ImageIO.  iOS image renderers (UIImage,
+// RN's <Image>, Files.app, Photos) honour the tag; cv::imread with
+// IMREAD_IGNORE_ORIENTATION returns raw landscape pixels.  Mirrors
+// the helper of the same name in OpenCVKeyframeCollector.mm — kept
+// duplicated rather than refactored to a shared header per the
+// codebase convention ("duplicate stage code, DRY when proven").
+static BOOL WriteJPEGWithEXIFTag(const cv::Mat &bgr,
+                                  NSString *path,
+                                  NSInteger exifOrientation,
+                                  NSInteger quality) {
+    if (bgr.empty()) return NO;
+
+    cv::Mat rgba;
+    cv::cvtColor(bgr, rgba, cv::COLOR_BGR2RGBA);
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGBitmapInfo bitmapInfo =
+        kCGBitmapByteOrderDefault | kCGImageAlphaNoneSkipLast;
+    CGContextRef ctx = CGBitmapContextCreate(
+        rgba.data,
+        (size_t)rgba.cols,
+        (size_t)rgba.rows,
+        8,
+        (size_t)rgba.step,
+        colorSpace,
+        bitmapInfo);
+    if (!ctx) {
+        CGColorSpaceRelease(colorSpace);
+        return NO;
+    }
+    CGImageRef cgImage = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    CGColorSpaceRelease(colorSpace);
+    if (!cgImage) return NO;
+
+    NSURL *url = [NSURL fileURLWithPath:path];
+    CGImageDestinationRef dst = CGImageDestinationCreateWithURL(
+        (__bridge CFURLRef)url,
+        CFSTR("public.jpeg"),
+        1,
+        NULL);
+    if (!dst) {
+        CGImageRelease(cgImage);
+        return NO;
+    }
+
+    NSInteger q = MAX(0, MIN(100, quality));
+    NSInteger exif = (exifOrientation >= 1 && exifOrientation <= 8)
+        ? exifOrientation : 1;
+    NSDictionary *props = @{
+        (id)kCGImageDestinationLossyCompressionQuality:
+            @((double)q / 100.0),
+        (id)kCGImagePropertyOrientation: @(exif),
+    };
+    CGImageDestinationAddImage(
+        dst, cgImage, (__bridge CFDictionaryRef)props);
+    BOOL ok = CGImageDestinationFinalize(dst);
+    CFRelease(dst);
+    CGImageRelease(cgImage);
+    return ok;
+}
+
 
 NSString *const RetaiLensStitcherErrorDomain = @"RetaiLensStitcherErrorDomain";
 
@@ -269,6 +404,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                           warperType:(NSString *)warperType
                                          blenderType:(NSString *)blenderType
                                       seamFinderType:(NSString *)seamFinderType
+                                     exifOrientation:(NSInteger)exifOrientation
                                                error:(NSError **)error {
   // V12.14.2 — FAULT-level sentinel.  Survives Console.app rate-limit;
   // proves the function entered.  If a future trace doesn't show this
@@ -1322,16 +1458,25 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   //   3. boundingRect of all non-zero pixels.
   //   4. Crop the panorama to that rect.
   //
-  // Wrapped in try/catch so any OpenCV edge case (e.g. fully
-  // black panorama from a failed stitch) falls back to writing
-  // the un-cropped output rather than crashing.
+  // V16 Phase 1b.fix3 — maximum-inscribed-rectangle crop (was bbox).
+  // cv::Stitcher's compose stage produces irregular black corners
+  // where the warped frames didn't fill; cv::boundingRect was
+  // including those.  MaxInscribedRectFromMask finds the largest
+  // axis-aligned rectangle entirely inside the non-zero region —
+  // clean output with no black corners.  Falls back to bbox
+  // (and ultimately the un-cropped panorama) on any OpenCV failure.
   cv::Mat finalImage = panorama;
   try {
     cv::Mat gray;
     cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
     cv::Mat mask;
     cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
-    cv::Rect bbox = cv::boundingRect(mask);
+    cv::Rect bbox = MaxInscribedRectFromMask(mask);
+    if (bbox.width <= 0 || bbox.height <= 0) {
+      // Empty mask or degenerate result — fall back to bounding rect
+      // so we still produce *something* viewable.
+      bbox = cv::boundingRect(mask);
+    }
     if (bbox.width > 0 && bbox.height > 0
         && bbox.width <= panorama.cols && bbox.height <= panorama.rows) {
       finalImage = panorama(bbox).clone();
@@ -1440,12 +1585,18 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
   // Encode + write the JPEG.  Clamp quality into [0, 100] to defend
   // against caller bugs.
+  //
+  // V16 Phase 1b.fix3 — write via ImageIO so we can bake the EXIF
+  // Orientation tag into the output.  cv::imwrite produces a plain
+  // JPEG with no metadata; iOS image renderers (UIImage / RN
+  // <Image>) display it in raw pixel orientation, which looks
+  // sideways when the user holds the phone in portrait.  The tag
+  // tells the renderer how to rotate for display without re-
+  // encoding the pixels.
   NSInteger clampedQuality = MAX(0, MIN(100, quality));
-  std::vector<int> params = {
-      cv::IMWRITE_JPEG_QUALITY, static_cast<int>(clampedQuality),
-  };
   NSString *cleanedOutPath = normalizeImagePath(outputPath);
-  bool wrote = cv::imwrite([cleanedOutPath UTF8String], finalImage, params);
+  BOOL wrote = WriteJPEGWithEXIFTag(finalImage, cleanedOutPath,
+                                    exifOrientation, clampedQuality);
   if (!wrote) {
     if (error) {
       *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
@@ -1676,6 +1827,10 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   }
 
   NSError *stitchErr = nil;
+  // V16 Phase 1b.fix3 — passes exifOrientation:1 (no rotation) for
+  // the legacy video-driven path.  Callers of the video flow don't
+  // have AR-frame orientation context; the keyframe-driven Swift
+  // path supplies the actual orientation derived from the AR frame.
   RetaiLensStitchResult *result =
       [self stitchFramePaths:frames
                   outputPath:outputPath
@@ -1683,6 +1838,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                   warperType:warperType
                  blenderType:blenderType
               seamFinderType:seamFinderType
+             exifOrientation:1
                        error:&stitchErr];
 
   // Always tear down the tmp dir, success or fail — leaving

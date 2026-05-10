@@ -764,18 +764,29 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                         // workstream — that path stays in the codebase
                         // (stitchKeyframePaths method) but isn't on
                         // the hot path.
+                        // V16 Phase 1b.fix3 — pass the EXIF Orientation
+                        // tag derived from `frameRotationDegrees` (see
+                        // `start(...)` switch).  cv::Stitcher writes
+                        // wide pixels regardless of capture orientation
+                        // (lens is fixed); without a baked tag, iOS
+                        // image renderers display the panorama
+                        // sideways when the user holds the phone in
+                        // portrait.  The tag is metadata-only — pixels
+                        // are unchanged — so it costs nothing.
                         os_log(.fault, log: Self.diagLog,
-                               "[V16-batch-keyframe] stitch (feature-matched): warper=%{public}@ blender=%{public}@ seam=%{public}@",
+                               "[V16-batch-keyframe] stitch (feature-matched): warper=%{public}@ blender=%{public}@ seam=%{public}@ exif=%d",
                                self.batchWarperType,
                                self.batchBlenderType,
-                               self.batchSeamFinderType)
+                               self.batchSeamFinderType,
+                               Int32(self.keyframeExifOrientation))
                         let r = try OpenCVStitcher.stitchFramePaths(
                             paths,
                             outputPath: cleaned,
                             jpegQuality: q,
                             warperType: self.batchWarperType,
                             blenderType: self.batchBlenderType,
-                            seamFinderType: self.batchSeamFinderType
+                            seamFinderType: self.batchSeamFinderType,
+                            exifOrientation: self.keyframeExifOrientation
                         )
                         // Keep saved keyframes on disk for post-hoc
                         // re-processing (Ram's request).  Cleanup is
