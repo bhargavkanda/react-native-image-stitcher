@@ -1465,17 +1465,62 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // axis-aligned rectangle entirely inside the non-zero region —
   // clean output with no black corners.  Falls back to bbox
   // (and ultimately the un-cropped panorama) on any OpenCV failure.
+  //
+  // V16 Phase 1b.fix5 — RCA from Ram's first fix3 capture: the
+  // raw inscribed-rect collapsed to a thin sliver in the
+  // landscape output.  Cause: cv::Stitcher's compose produces
+  // small scattered zero-pixels INSIDE the content region (graph-
+  // cut seam, exposure-comp rounding, multi-band blend artifacts).
+  // The inscribed-rect algorithm demands a strictly hole-free
+  // rectangle, so a single interior zero forces it to either
+  // avoid that pixel (collapsing to a thin strip) or skip the
+  // affected row entirely.  Python simulation on a realistic
+  // 800×200 mask with 0.5% scattered holes:
+  //
+  //     raw inscribed-rect    →   23×100 = 1.4% of original (BUG)
+  //     after 5×5 close       → 642×196 = 78.6% of original (clean)
+  //     bounding rect          → 800×200 = 100%
+  //
+  // Fix: morphologically CLOSE the mask before the inscribed-rect
+  // search — a 5×5 close fills holes ≤5 px (more than enough for
+  // compose artifacts) without bridging across legitimate concave
+  // gaps (which cv::Stitcher panoramas don't really have).  Keep
+  // the bbox safety floor: if the inscribed rect still came out
+  // < 50% of bbox area, use bbox — the mask shape is pathological
+  // and shipping bbox-with-corners is better than a sliver.
   cv::Mat finalImage = panorama;
   try {
     cv::Mat gray;
     cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
     cv::Mat mask;
     cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
-    cv::Rect bbox = MaxInscribedRectFromMask(mask);
-    if (bbox.width <= 0 || bbox.height <= 0) {
-      // Empty mask or degenerate result — fall back to bounding rect
-      // so we still produce *something* viewable.
-      bbox = cv::boundingRect(mask);
+    cv::Mat closedMask;
+    cv::morphologyEx(
+        mask, closedMask, cv::MORPH_CLOSE,
+        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)));
+    cv::Rect bbox = MaxInscribedRectFromMask(closedMask);
+    cv::Rect bboxFallback = cv::boundingRect(mask);
+    const long long inscribedArea =
+        (long long)bbox.width * bbox.height;
+    const long long fallbackArea =
+        (long long)bboxFallback.width * bboxFallback.height;
+    if (bbox.width <= 0 || bbox.height <= 0
+        || inscribedArea * 2 < fallbackArea) {
+      // Either degenerate, or inscribed < 50% of bbox area.
+      // Safety floor: ship bbox so the operator gets *something*
+      // usable (legacy behaviour pre-fix3) rather than a sliver.
+      NSLog(@"[RetaiLensStitcher] inscribed-rect rejected: "
+            "%dx%d (area=%lld) vs bbox %dx%d (area=%lld); "
+            "using bbox fallback.",
+            bbox.width, bbox.height, inscribedArea,
+            bboxFallback.width, bboxFallback.height, fallbackArea);
+      bbox = bboxFallback;
+    } else {
+      NSLog(@"[RetaiLensStitcher] inscribed-rect: %dx%d "
+            "(area=%lld, %.0f%% of bbox %dx%d)",
+            bbox.width, bbox.height, inscribedArea,
+            100.0 * (double)inscribedArea / (double)fallbackArea,
+            bboxFallback.width, bboxFallback.height);
     }
     if (bbox.width > 0 && bbox.height > 0
         && bbox.width <= panorama.cols && bbox.height <= panorama.rows) {
