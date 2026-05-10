@@ -921,6 +921,97 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         )
     }
 
+    /// V16 Phase 1b.fix2 — deep-copy a CVPixelBuffer so it survives
+    /// past ARKit's pool reuse window.  Apple's contract is that
+    /// ARFrame.capturedImage is only valid inside the delegate
+    /// scope; CFRetain alone doesn't extend the underlying
+    /// IOSurface's lifetime.  This is the documented fix.
+    ///
+    /// Handles both planar (NV12 — ARKit default) and packed
+    /// (BGRA) formats.  Returns nil on allocation failure.
+    private static func deepCopyPixelBuffer(
+        _ src: CVPixelBuffer
+    ) -> CVPixelBuffer? {
+        let format = CVPixelBufferGetPixelFormatType(src)
+        let width = CVPixelBufferGetWidth(src)
+        let height = CVPixelBufferGetHeight(src)
+
+        // IOSurface-backed copy so cv::imread / Vision frameworks
+        // can read the buffer without re-uploading.  Empty dict =
+        // use default IOSurface attributes.
+        let attrs: NSDictionary = [
+            kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
+        ]
+        var dst: CVPixelBuffer?
+        let createStatus = CVPixelBufferCreate(
+            kCFAllocatorDefault, width, height, format, attrs, &dst
+        )
+        guard createStatus == kCVReturnSuccess, let copy = dst else {
+            return nil
+        }
+
+        let srcLock = CVPixelBufferLockBaseAddress(src, .readOnly)
+        let dstLock = CVPixelBufferLockBaseAddress(copy, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(src, .readOnly)
+            CVPixelBufferUnlockBaseAddress(copy, [])
+        }
+        guard srcLock == kCVReturnSuccess,
+              dstLock == kCVReturnSuccess else {
+            return nil
+        }
+
+        if CVPixelBufferIsPlanar(src) {
+            let nPlanes = CVPixelBufferGetPlaneCount(src)
+            for plane in 0..<nPlanes {
+                guard
+                    let srcBase =
+                        CVPixelBufferGetBaseAddressOfPlane(src, plane),
+                    let dstBase =
+                        CVPixelBufferGetBaseAddressOfPlane(copy, plane)
+                else { return nil }
+                let srcStride =
+                    CVPixelBufferGetBytesPerRowOfPlane(src, plane)
+                let dstStride =
+                    CVPixelBufferGetBytesPerRowOfPlane(copy, plane)
+                let planeH =
+                    CVPixelBufferGetHeightOfPlane(src, plane)
+                if srcStride == dstStride {
+                    memcpy(dstBase, srcBase, srcStride * planeH)
+                } else {
+                    let rowBytes = min(srcStride, dstStride)
+                    for r in 0..<planeH {
+                        memcpy(
+                            dstBase.advanced(by: r * dstStride),
+                            srcBase.advanced(by: r * srcStride),
+                            rowBytes
+                        )
+                    }
+                }
+            }
+        } else {
+            // Packed (e.g. BGRA).
+            guard let srcBase = CVPixelBufferGetBaseAddress(src),
+                  let dstBase = CVPixelBufferGetBaseAddress(copy)
+            else { return nil }
+            let srcStride = CVPixelBufferGetBytesPerRow(src)
+            let dstStride = CVPixelBufferGetBytesPerRow(copy)
+            if srcStride == dstStride {
+                memcpy(dstBase, srcBase, srcStride * height)
+            } else {
+                let rowBytes = min(srcStride, dstStride)
+                for r in 0..<height {
+                    memcpy(
+                        dstBase.advanced(by: r * dstStride),
+                        srcBase.advanced(by: r * srcStride),
+                        rowBytes
+                    )
+                }
+            }
+        }
+        return copy
+    }
+
     /// Synthesise + emit a state event for a frame the keyframe gate
     /// rejected.  The native engine never sees the frame, so its own
     /// state machinery isn't invoked — but JS still wants the event
@@ -1103,7 +1194,32 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         }
         self.workInFlight = true
 
-        let pbCopy = pixelBuffer  // ARC retain across the dispatch
+        // V16 Phase 1b.fix2 — DEEP COPY of the pixel buffer.
+        //
+        // Apple's contract on ARFrame.capturedImage: "valid only
+        // within the scope of the captured ARFrame.  To use beyond
+        // that scope you must make a copy."  Swift's `let pbCopy =
+        // pixelBuffer` is JUST an ARC retain on the CVPixelBufferRef;
+        // it does NOT extend the lifetime of the underlying IOSurface.
+        // ARKit's pixel-buffer pool (~3–4 buffers) recycles slots
+        // aggressively under load — long pans race the workQueue's
+        // 50–100 ms JPEG encode against pool churn and randomly hit
+        // a freed slot, producing the EXC_BAD_ACCESS in objc_retain
+        // we saw mid-pan ("when I pan the device more").
+        //
+        // CVPixelBufferCreate + memcpy gives us a fully-owned copy
+        // that ARC alone governs.  ~1-2 ms cost on iPhone 16 Pro
+        // (10 MB memcpy at memory bandwidth ~10 GB/s).  Fixes the
+        // crash for ALL engine paths (slit-scan / hybrid / batch-
+        // keyframe) since they all dispatch via consumeFrame.
+        guard let pbCopy = Self.deepCopyPixelBuffer(pixelBuffer) else {
+            // Allocation failure — drop the frame.  Extremely rare;
+            // would only happen under genuine OOM.
+            os_log(.fault, log: Self.diagLog,
+                   "[V16-pbcopy] CVPixelBufferCreate failed; dropping frame")
+            self.workInFlight = false
+            return
+        }
         workQueue.async { [weak self] in
             defer { self?.workInFlight = false }
             guard let self = self else { return }

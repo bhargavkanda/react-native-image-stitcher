@@ -50,4 +50,10 @@ RCT_EXTERN_METHOD(relatchARPlane:(RCTPromiseResolveBlock)resolver
 RCT_EXTERN_METHOD(markNextFrameAsLastKeyframe:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// V16 Phase 1b.fix2 — JS-callable poll for process phys_footprint MB.
+// Backs the on-screen memory debug overlay; same metric iOS jetsam
+// evaluates against.
+RCT_EXTERN_METHOD(getMemoryFootprintMB:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 @end

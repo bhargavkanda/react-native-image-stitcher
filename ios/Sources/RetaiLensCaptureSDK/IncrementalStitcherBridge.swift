@@ -192,6 +192,41 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver(["ok": true])
     }
 
+    /// V16 Phase 1b.fix2 — JS-callable poll for the process'
+    /// phys_footprint in MB.  This is the SAME metric iOS jetsam
+    /// evaluates against, so it's the right number for an on-screen
+    /// debug overlay correlating capture activity with memory pressure.
+    /// Returns -1 on task_info failure.
+    @objc(getMemoryFootprintMB:rejecter:)
+    public func getMemoryFootprintMB(
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size
+                / MemoryLayout<integer_t>.size
+        )
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(
+                to: integer_t.self, capacity: Int(count)
+            ) { reboundPtr in
+                task_info(
+                    mach_task_self_,
+                    task_flavor_t(TASK_VM_INFO),
+                    reboundPtr,
+                    &count
+                )
+            }
+        }
+        if kr != KERN_SUCCESS {
+            resolver(-1.0)
+            return
+        }
+        let mb = Double(info.phys_footprint) / (1024.0 * 1024.0)
+        resolver(mb)
+    }
+
     /// PiP investigation: write a JS-supplied message into the same
     /// rlis-debug.log file the Swift side uses, so we get a single
     /// timeline across native and JS.  Remove once PiP is fixed.

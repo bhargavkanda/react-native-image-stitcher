@@ -498,6 +498,12 @@ interface NativeIncrementalModule {
    *  isn't truncated when the user releases mid-pan.  No-op when
    *  the gate is disabled (frameSelectionMode = 'time-based'). */
   markNextFrameAsLastKeyframe(): Promise<{ ok: true }>;
+  /** V16 Phase 1b.fix2 — poll the process phys_footprint in MB.
+   *  Backs the on-screen memory debug overlay.  Same metric iOS
+   *  jetsam evaluates against, so the displayed value is the
+   *  one-true-number for "how close are we to OOM?".  Returns -1
+   *  on task_info failure (very rare).  Resolves immediately. */
+  getMemoryFootprintMB(): Promise<number>;
   /** PiP investigation only — write a JS-side message into the
    *  Swift-side rlis-debug.log so we get a single timeline. */
   appendDebugLog?(message: string): Promise<{ ok: true }>;
