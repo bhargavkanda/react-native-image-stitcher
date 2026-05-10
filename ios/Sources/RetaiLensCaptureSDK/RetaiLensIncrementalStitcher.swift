@@ -644,6 +644,44 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let inBatchKeyframeMode = self.batchKeyframeMode
         let collector = self.keyframeCollector
         let paths = self.keyframePaths
+        // V16 Phase 1b.fix4 — snapshot the cv::Stitcher knobs and
+        // EXIF orientation under stateLock so the workQueue closure
+        // has a stable view of these values, independent of any
+        // concurrent start() that may begin a new capture before
+        // this closure finishes.
+        //
+        // Why this matters (RCA from Sentry crashes 2026-05-09
+        // 21:59-22:03, all 3 .ips traces):
+        //   EXC_BAD_ACCESS at objc_retain+16, frame 1 = closure #1
+        //   in finalize+2648, queue = com.retailens.incremental.
+        //   stitcher.  +2648 lands inside the os_log call that
+        //   bridges self.batchWarperType → NSString via
+        //   swift_bridgeObjectRetain → objc_retain.  The retain
+        //   loaded a torn buffer pointer because:
+        //
+        //     T0: finalize releases stateLock, dispatches workQueue
+        //         async closure (long stitch ahead).
+        //     T1: User sees fix2's "9002 No active capture" popup
+        //         (race between shutter-release + auto-finalize
+        //         useEffect, fixed in fix3 but pre-existing in
+        //         fix2).
+        //     T2: User dismisses popup, starts a new capture.
+        //     T3: start() acquires stateLock, sees isRunning==false,
+        //         WRITES self.batchWarperType = newValue.  ARC
+        //         releases the old String buffer.
+        //     T4: workQueue closure (still mid-finalize from
+        //         capture N) loads self.batchWarperType for os_log.
+        //         Read interleaved with T3's write → torn String
+        //         buffer pointer → swift_bridgeObjectRetain →
+        //         objc_retain on freed memory → KERN_INVALID_ADDRESS.
+        //
+        // Fix3's JS dedupe closes the practical trigger (no popup,
+        // no operator-confusion-driven new capture).  Fix4 closes
+        // the underlying race regardless of UI flow correctness.
+        let batchWarperType = self.batchWarperType
+        let batchBlenderType = self.batchBlenderType
+        let batchSeamFinderType = self.batchSeamFinderType
+        let keyframeExifOrientation = self.keyframeExifOrientation
         // V16 Phase 1.fix4 — pose array still held on self ivar (and
         // queued for persistent sidecar storage in a future debug-menu
         // feature) but NOT passed to the stitcher in this drop.  fix4
@@ -773,20 +811,26 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                         // sideways when the user holds the phone in
                         // portrait.  The tag is metadata-only — pixels
                         // are unchanged — so it costs nothing.
+                        // V16 Phase 1b.fix4 — read knobs from the
+                        // closure-local snapshots (taken under
+                        // stateLock in finalize's prologue), NOT
+                        // self.batch*, to avoid a torn-pointer race
+                        // against a concurrent start().  See RCA
+                        // comment at the top of finalize().
                         os_log(.fault, log: Self.diagLog,
                                "[V16-batch-keyframe] stitch (feature-matched): warper=%{public}@ blender=%{public}@ seam=%{public}@ exif=%d",
-                               self.batchWarperType,
-                               self.batchBlenderType,
-                               self.batchSeamFinderType,
-                               Int32(self.keyframeExifOrientation))
+                               batchWarperType,
+                               batchBlenderType,
+                               batchSeamFinderType,
+                               Int32(keyframeExifOrientation))
                         let r = try OpenCVStitcher.stitchFramePaths(
                             paths,
                             outputPath: cleaned,
                             jpegQuality: q,
-                            warperType: self.batchWarperType,
-                            blenderType: self.batchBlenderType,
-                            seamFinderType: self.batchSeamFinderType,
-                            exifOrientation: self.keyframeExifOrientation
+                            warperType: batchWarperType,
+                            blenderType: batchBlenderType,
+                            seamFinderType: batchSeamFinderType,
+                            exifOrientation: keyframeExifOrientation
                         )
                         // Keep saved keyframes on disk for post-hoc
                         // re-processing (Ram's request).  Cleanup is
