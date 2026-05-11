@@ -312,9 +312,104 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     // the inscribed-rect + morph-close + col-projection pipeline
     // runs.
     private var batchEnableInscribedRectCrop: Bool = false
+    /// AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
+    ///
+    /// Physical phone orientation at start() time, sourced from the
+    /// JS accelerometer hook.  Used to drive the OUTPUT panorama's
+    /// bake-rotation in OpenCVStitcher.stitchFramePaths.  Held for
+    /// the lifetime of the capture so finalize() doesn't need to
+    /// re-sample (the user may have rotated the phone mid-pan and
+    /// we want the rotation that was correct WHEN they started).
+    ///
+    /// Valid values mirror IncrementalStartOptions.captureOrientation
+    /// in the JS API: "portrait", "portrait-upside-down",
+    /// "landscape-left", "landscape-right".  Any other string is
+    /// treated as "portrait" (no rotation) by the .mm side.
+    private var captureOrientation: String = "portrait"
 
     private override init() {
         super.init()
+    }
+
+    // ── Native orientation classifier ────────────────────────────────
+    //
+    // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
+    //
+    // Why this exists: JS's useDeviceOrientation hook ships React
+    // state that's stale at the moment incremental.start() is invoked
+    // (the hook samples accelerometer at 10 Hz and renders through
+    // React's normal update cycle — by the time the start() callback
+    // runs, the closure has captured the previous-state value).
+    // Field test on 2026-05-11 confirmed: 3/3 captures (Mode B,
+    // Mode A landscape-left, Mode A landscape-right) all arrived at
+    // the bridge with captureOrientation="portrait" even though the
+    // user explicitly rotated to landscape for two of them.
+    //
+    // ARKit gives us the answer directly: `frame.camera.eulerAngles.z`
+    // is the camera's roll (rotation around its optical axis) — the
+    // exact value that distinguishes portrait / landscape-left /
+    // landscape-right / portrait-upside-down regardless of any UI
+    // lock or JS state staleness.  Read it synchronously at start()
+    // time and use it as the source of truth.
+    //
+    // Convention (verified against ARKit docs + iOS device axes):
+    //   • Camera local axes: +X right, +Y up (along phone length
+    //     when held portrait), +Z back (toward user's face).
+    //   • Roll = rotation around camera's +Z (right-hand rule).
+    //   • Portrait                  → roll ≈ 0
+    //   • Landscape-left (CCW)      → roll ≈ +π/2 (verified empirically;
+    //                                 swap with -right if first test
+    //                                 shows landscape-right hitting
+    //                                 this branch instead)
+    //   • Portrait-upside-down      → roll ≈ ±π
+    //   • Landscape-right (CW)      → roll ≈ -π/2
+    //
+    // ±45° tolerance per quadrant keeps classification stable under
+    // small hand wobble.
+    private static func nativeCaptureOrientation() -> (
+        orientation: String,
+        rollDegrees: Double,
+        hadFrame: Bool
+    ) {
+        guard let frame = RetaiLensARSession.shared.arSession.currentFrame else {
+            // No AR frame yet — falls back to "portrait" (Mode B start
+            // state).  Should be rare: incremental.start() requires
+            // ARSession to be running, which means frames are flowing.
+            return ("portrait", 0.0, false)
+        }
+        let rollRadians = Double(frame.camera.eulerAngles.z)
+        let rollDegrees = rollRadians * 180.0 / .pi
+        let classified: String
+        // Empirically calibrated against Ram's 2026-05-11 3-capture
+        // test (1st=L-left, 2nd=portrait, 3rd=L-right):
+        //   Ram's "landscape-left"  →  roll ≈ 0°    (NOT -90° as I assumed)
+        //   Ram's "portrait"        →  roll ≈ -90°
+        //   Ram's "landscape-right" →  roll ≈ ±180°
+        //   Ram's "portrait-upside-down" →  roll ≈ +90° (by symmetry, untested)
+        //
+        // Why this differs from the device-orientation intuition:
+        // ARKit's `camera.eulerAngles.z` is the camera's roll around
+        // its optical axis, measured against world-up.  The iPhone's
+        // image sensor is mounted such that its long axis aligns
+        // with the phone's WIDTH (not length), so the camera's +Y
+        // is naturally aligned with world-UP when the phone is in
+        // landscape — roll = 0 means the phone is landscape.
+        // Holding the phone in portrait rotates the camera +Y to
+        // horizontal in world → roll = ±90°.
+        //
+        // The rotation table in OpenCVStitcher.mm (landscape-left →
+        // 90° CCW, portrait → none, etc.) is unchanged — only the
+        // classifier mapping is shifted by 90°.
+        if abs(rollDegrees) < 45 {
+            classified = "landscape-left"
+        } else if rollDegrees >= 45 && rollDegrees < 135 {
+            classified = "portrait-upside-down"
+        } else if rollDegrees <= -45 && rollDegrees > -135 {
+            classified = "portrait"
+        } else {
+            classified = "landscape-right"
+        }
+        return (classified, rollDegrees, true)
     }
 
     // ── Public lifecycle ────────────────────────────────────────────
@@ -332,6 +427,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         snapshotEveryNAccepts: Int,
         frameRotationDegrees: Int,
         engineMode: String,
+        captureOrientation: String = "portrait",
         configOverrides: [String: Any] = [:]
     ) {
         stateLock.lock()
@@ -339,6 +435,26 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             stateLock.unlock()
             return
         }
+        // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
+        // Override the JS-supplied captureOrientation with a native
+        // ARKit reading.  Field test on 2026-05-11 confirmed JS state
+        // is consistently stale at start() time (always "portrait"
+        // regardless of physical orientation); native AR frame data
+        // is real-time and unambiguous.  See nativeCaptureOrientation
+        // for the full RCA.  JS-supplied value retained in the log
+        // for diagnostic purposes.
+        let nativeResult = Self.nativeCaptureOrientation()
+        let resolvedOrientation = nativeResult.hadFrame
+            ? nativeResult.orientation
+            : captureOrientation   // no AR frame yet — fall back to JS
+        self.captureOrientation = resolvedOrientation
+        os_log(.fault, log: Self.diagLog,
+               "[V16-orchestrator] start: JS sent=%{public}@ native roll=%.1f° → resolved=%{public}@ (native_used=%d) engineMode=%{public}@",
+               captureOrientation,
+               nativeResult.rollDegrees,
+               resolvedOrientation,
+               nativeResult.hadFrame ? Int32(1) : Int32(0),
+               engineMode)
         // V15 — engine modes:
         //   'hybrid'           → hybrid engine, planar projection by default
         //   'slitscan-rotate'  → slit-scan, rectilinear, V13.0a + 1D NCC
@@ -693,6 +809,13 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let batchSeamFinderType = self.batchSeamFinderType
         let batchEnableInscribedRectCrop = self.batchEnableInscribedRectCrop
         let keyframeExifOrientation = self.keyframeExifOrientation
+        // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
+        // Snapshot the capture-time hold orientation for the bake-
+        // rotation pass.  Reasons same as the other snapshots above:
+        // stateLock-protected against a concurrent start() rewriting
+        // self.captureOrientation while the workQueue closure is mid-
+        // flight.
+        let captureOrientation = self.captureOrientation
         // V16 Phase 1.fix4 — pose array still held on self ivar (and
         // queued for persistent sidecar storage in a future debug-menu
         // feature) but NOT passed to the stitcher in this drop.  fix4
@@ -828,12 +951,23 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                         // self.batch*, to avoid a torn-pointer race
                         // against a concurrent start().  See RCA
                         // comment at the top of finalize().
+                        // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
+                        // Pass the capture-time hold orientation to
+                        // the native side; .mm uses it to bake-rotate
+                        // the output Mat per the two-modes rotation
+                        // table (portrait → 0°, portrait-upside-down
+                        // → 180°, landscape-left → 90° CCW,
+                        // landscape-right → 90° CW).
+                        // `keyframeExifOrientation` (still snapshotted
+                        // above) is kept for any future per-keyframe
+                        // EXIF needs; unused on this call now.
+                        _ = keyframeExifOrientation
                         os_log(.fault, log: Self.diagLog,
-                               "[V16-batch-keyframe] stitch (feature-matched): warper=%{public}@ blender=%{public}@ seam=%{public}@ exif=%d",
+                               "[V16-batch-keyframe] stitch (feature-matched): warper=%{public}@ blender=%{public}@ seam=%{public}@ captureOrientation=%{public}@",
                                batchWarperType,
                                batchBlenderType,
                                batchSeamFinderType,
-                               Int32(keyframeExifOrientation))
+                               captureOrientation)
                         let r = try OpenCVStitcher.stitchFramePaths(
                             paths,
                             outputPath: cleaned,
@@ -841,7 +975,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                             warperType: batchWarperType,
                             blenderType: batchBlenderType,
                             seamFinderType: batchSeamFinderType,
-                            exifOrientation: keyframeExifOrientation,
+                            captureOrientation: captureOrientation,
                             useInscribedRectCrop: batchEnableInscribedRectCrop
                         )
                         // Keep saved keyframes on disk for post-hoc

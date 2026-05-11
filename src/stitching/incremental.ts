@@ -186,8 +186,44 @@ export interface IncrementalStartOptions {
    *   landscape-right       → 0   (sensor already aligned)
    *
    * Default `90` because most shelf scans are done in portrait.
+   *
+   * @deprecated Use `captureOrientation` instead — it carries the
+   *   landscape-left vs landscape-right distinction we need for
+   *   correct output rotation per the two-modes spec
+   *   (see memory/ar-stitching-two-modes.md).  Once Phase 3 of the
+   *   captureOrientation migration lands this field is removed.
    */
   frameRotationDegrees?: 0 | 90 | 180 | 270;
+  /**
+   * Physical phone orientation at capture start, classified by the
+   * accelerometer (`useDeviceOrientation`).  Drives the output
+   * panorama's bake-rotation per the two supported capture modes:
+   *
+   *   AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
+   *
+   *   Mode A — landscape phone + vertical pan from top:
+   *     'landscape-left'        → bake-rotate output 90° CCW
+   *     'landscape-right'       → bake-rotate output 90° CW
+   *       (mirror images of each other: world-up is on opposite
+   *        sensor edges between L-left and L-right, so the
+   *        rotations are opposite to land world-up at output-top)
+   *
+   *   Mode B — portrait phone + horizontal pan from left:
+   *     'portrait'              → no bake-rotation
+   *     'portrait-upside-down'  → bake-rotate output 180°
+   *
+   * Any other combination of phone orientation + pan direction is a
+   * user deviation, not a supported mode.  The engine still runs
+   * for unsupported combinations but the output rotation is a best-
+   * effort: the same mapping is applied.
+   *
+   * Defaults to `'portrait'` (Mode B start state) if not supplied.
+   */
+  captureOrientation?:
+    | 'portrait'
+    | 'portrait-upside-down'
+    | 'landscape-left'
+    | 'landscape-right';
   /**
    * Engine mode (V15):
    *   'hybrid'           — Whole-frame projection + feature matching;

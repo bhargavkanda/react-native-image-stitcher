@@ -19,6 +19,7 @@
 #if canImport(React)
 import Foundation
 import React
+import os.log
 
 @objc(RetaiLensIncrementalStitcherBridge)
 public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
@@ -96,6 +97,35 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         let snapQ    = (options["snapshotJpegQuality"] as? Int) ?? 75
         let snapN    = (options["snapshotEveryNAccepts"] as? Int) ?? 1
         let rotation = (options["frameRotationDegrees"] as? Int) ?? 90
+        // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
+        //
+        // Capture orientation classifies the user's phone-hold at
+        // start() time, sourced from the JS-side accelerometer hook
+        // `useDeviceOrientation`.  Drives the OUTPUT bake-rotation in
+        // OpenCVStitcher.stitchFramePaths.  Distinct from `rotation`
+        // (frameRotationDegrees) above: rotation collapses both
+        // landscape variants to 0°, losing the left/right
+        // distinction we need to mirror-rotate the output correctly.
+        //
+        // Default 'portrait' matches the historical Mode B start
+        // state.  Unknown values are passed through verbatim; the
+        // .mm side falls back to no rotation on anything outside the
+        // four supported labels.
+        let captureOrientation =
+            (options["captureOrientation"] as? String) ?? "portrait"
+        // Diagnostic: trace the value as received from JS, before
+        // any downstream layer touches it.  os_log %{public}@ to
+        // bypass iOS log redaction.  Logs BOTH captureOrientation
+        // (the new field) and frameRotationDegrees (the legacy one)
+        // so we can spot a mismatch — frameRotationDegrees=0 with
+        // captureOrientation="portrait" means JS is passing stale
+        // accelerometer state.
+        os_log(.fault, log: OSLog(subsystem: "com.tiger.retailens",
+                                  category: "stitcher.diag"),
+               "[V16-bridge] start: captureOrientation=%{public}@ frameRotationDegrees=%d (raw_options_value=%{public}@)",
+               captureOrientation,
+               Int32(rotation),
+               String(describing: options["captureOrientation"]))
         // V15 — engine selection.  Three modes:
         //   'hybrid'           — planar projection + feature matching
         //   'slitscan-rotate'  — V13.0a + 1D NCC for rotation wobble
@@ -121,6 +151,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
             snapshotEveryNAccepts: snapN,
             frameRotationDegrees: rotation,
             engineMode: engineMode,
+            captureOrientation: captureOrientation,
             configOverrides: configOverrides
         )
         resolver(["ok": true])

@@ -64,31 +64,33 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 ///   - "skip" streams warp+feed in a single pass and never holds
 ///     more than one warped frame.  Lower peak memory.  Use on
 ///     low-RAM devices or for fastest path with FeatherBlender.
-/// V16 Phase 1b.fix3 added two output-presentation enhancements:
+/// AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
 ///
-///   - `exifOrientation` (1..8): EXIF Orientation tag baked into
-///     the output JPEG.  Lets iOS image renderers display the
-///     panorama correctly when the user holds the phone in a
-///     non-default orientation.  Pass 1 (no rotation) to keep
-///     legacy behaviour.  Mapping from device orientation:
-///       portrait              → 6 (rotate 90° CW for view)
-///       landscape-left        → 1 (no rotation)
-///       portrait-upside-down  → 8
-///       landscape-right       → 3
+///   - `captureOrientation` ("portrait" | "portrait-upside-down" |
+///     "landscape-left" | "landscape-right"): physical phone hold at
+///     capture start, sourced from the JS-side accelerometer hook.
+///     Drives the OUTPUT panorama's bake-rotation per the two
+///     supported capture modes:
+///       portrait              → no bake-rotation
+///       portrait-upside-down  → bake ROTATE_180
+///       landscape-left        → bake ROTATE_90_COUNTERCLOCKWISE
+///       landscape-right       → bake ROTATE_90_CLOCKWISE
+///     Output JPEG is always written with EXIF=1 (no metadata
+///     rotation) since the rotation is baked into the pixels.
 ///
 ///   - **Maximum-inscribed-rectangle crop** instead of bounding-
 ///     rectangle.  cv::Stitcher's output has irregular black corners
 ///     where the projection didn't fill; bbox crop still included
-///     them.  Now we find the largest axis-aligned rectangle entirely
-///     inside the non-zero region and crop to that — clean output
-///     with no black corners.
+///     them.  With `useInscribedRectCrop:YES` we find the largest
+///     axis-aligned rectangle entirely inside the non-zero region
+///     and crop to that — clean output with no black corners.
 + (nullable RetaiLensStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
                                           outputPath:(NSString *)outputPath
                                          jpegQuality:(NSInteger)quality
                                           warperType:(nullable NSString *)warperType
                                          blenderType:(nullable NSString *)blenderType
                                       seamFinderType:(nullable NSString *)seamFinderType
-                                     exifOrientation:(NSInteger)exifOrientation
+                                  captureOrientation:(nullable NSString *)captureOrientation
                                 useInscribedRectCrop:(BOOL)useInscribedRectCrop
                                                error:(NSError **)error;
 

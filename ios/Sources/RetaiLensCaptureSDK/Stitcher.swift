@@ -143,12 +143,13 @@ public enum Stitcher {
         warperType: "plane",
         blenderType: "multiband",
         seamFinderType: "graphcut",
-        // V16 Phase 1b.fix3 — generic Stitcher API doesn't carry
-        // capture orientation; default to 1 (no rotation) so the
-        // pixels are interpreted as-stored.  Callers that care
-        // about EXIF (e.g. RetaiLensIncrementalStitcher) hit the
-        // method directly with the right value.
-        exifOrientation: 1,
+        // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
+        // Generic Stitcher API doesn't carry capture orientation;
+        // pass nil → .mm treats as "portrait" → no bake-rotation.
+        // Callers that care about output orientation (e.g.
+        // RetaiLensIncrementalStitcher) hit the method directly with
+        // the right value.
+        captureOrientation: nil,
         // V16 Phase 1b.fix5c — generic Stitcher API defaults the
         // crop strategy to bbox-only (matches the operator-default
         // in the panorama settings modal).  Callers that want

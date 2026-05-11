@@ -404,7 +404,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                           warperType:(NSString *)warperType
                                          blenderType:(NSString *)blenderType
                                       seamFinderType:(NSString *)seamFinderType
-                                     exifOrientation:(NSInteger)exifOrientation
+                                  captureOrientation:(NSString *)captureOrientation
                                 useInscribedRectCrop:(BOOL)useInscribedRectCrop
                                                error:(NSError **)error {
   // V12.14.2 — FAULT-level sentinel.  Survives Console.app rate-limit;
@@ -1653,8 +1653,108 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // encoding the pixels.
   NSInteger clampedQuality = MAX(0, MIN(100, quality));
   NSString *cleanedOutPath = normalizeImagePath(outputPath);
-  BOOL wrote = WriteJPEGWithEXIFTag(finalImage, cleanedOutPath,
-                                    exifOrientation, clampedQuality);
+
+  // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
+  //
+  // Bake-rotation driven by the user's phone-hold orientation at
+  // capture start, NOT the output Mat's aspect ratio.  Reasoning:
+  //
+  //   - fix5d's earlier attempt to key off the same orientation used
+  //     `exifOrientation:NSInteger` (an EXIF tag 1/3/6/8), inferred
+  //     from frameRotationDegrees, which collapsed landscape-left
+  //     and landscape-right to the same value.  Ram's reports made
+  //     it clear the two landscape variants need OPPOSITE rotations
+  //     (they're mirror images of each other w.r.t. the sensor's
+  //     world-up direction), so the EXIF-tag intermediary was lossy.
+  //
+  //   - fix5e's aspect-ratio approach was correct for 3+ frame
+  //     horizontal pans but the threshold "cols > rows" was fragile
+  //     at 2 frames (output Mat near-square or even tall) and
+  //     conflated "wide because horizontal pan" with "tall because
+  //     vertical pan."  The user spec explicitly lists two modes;
+  //     using their classification is more robust than guessing
+  //     from output geometry.
+  //
+  // The two supported modes:
+  //
+  //   Mode A — landscape phone + vertical pan from top
+  //     landscape-left  → ROTATE_90_COUNTERCLOCKWISE
+  //     landscape-right → ROTATE_90_CLOCKWISE
+  //       (mirror-image directions because world-up sits on opposite
+  //        sensor edges between landscape-left and landscape-right;
+  //        opposite rotations land world-up at output-top for both)
+  //
+  //   Mode B — portrait phone + horizontal pan from left
+  //     portrait              → no rotation (cv::Stitcher's natural
+  //                              output already aligns world-up to
+  //                              output-top for portrait hold)
+  //     portrait-upside-down  → ROTATE_180
+  //
+  // Anything else: best-effort no rotation.  Unsupported combination
+  // (e.g., portrait phone + vertical pan) is treated as Mode B.
+  //
+  // Properties:
+  //   - Compose canvas geometry unchanged from baseline 437c763:
+  //     cv::imread default applies EXIF rotation at load time,
+  //     producing portrait Mats for portrait hold and landscape
+  //     Mats for landscape hold.  No fix5b-style 6-frame OOM.
+  //   - Output JPEG always EXIF=1.  Bake is in the pixels, so all
+  //     viewers (Photos.app, RN <Image>, share-sheet) agree.
+  //   - The cv::rotate happens AFTER BA / blend / seam-find when
+  //     their working sets are released — incremental memory cost.
+  //   - Per-keyframe JPEGs (OpenCVKeyframeCollector) untouched —
+  //     they still carry EXIF=6 so LiveFrameStrip thumbnails show
+  //     portrait-correct during capture.
+  cv::Mat finalImageRotated;
+  cv::Mat *imageToWrite = &finalImage;
+  NSString *normalisedOrientation = captureOrientation ?: @"portrait";
+  // os_log with %{public}@ — without `public` qualifier iOS redacts
+  // the string to "<private>" in the system log, making it impossible
+  // to read what orientation actually arrived from JS.  These two
+  // log lines are diagnostic-only and contain no PII, safe to mark
+  // public.
+  // Empirically calibrated (Ram's 2026-05-11 test, iteration 2):
+  // Iteration 1 swapped both the labels AND the directions — net
+  // visual rotation per roll-value was unchanged (output still
+  // looked "landscape-left oriented" to Ram).  Iteration 2 flips
+  // ONLY the directions; labels stay where they landed.
+  //   landscape-left  (roll ≈ -90°, Ram's L-left hold)  → 90° CCW
+  //   landscape-right (roll ≈ +90°, Ram's L-right hold) → 90° CW
+  // For a roll=-90° capture (what Ram tested), this rotates the
+  // OPPOSITE direction from iteration 1.  If iteration 1 put
+  // scene-up on the LEFT of the tall image, iteration 2 will put
+  // scene-up on the RIGHT.
+  if ([normalisedOrientation isEqualToString:@"landscape-left"]) {
+    cv::rotate(finalImage, finalImageRotated,
+               cv::ROTATE_90_COUNTERCLOCKWISE);
+    imageToWrite = &finalImageRotated;
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+                     "[RetaiLensStitcher] bake-rotated 90° CCW for landscape-left "
+                     "(%dx%d → %dx%d)",
+                     finalImage.cols, finalImage.rows,
+                     finalImageRotated.cols, finalImageRotated.rows);
+  } else if ([normalisedOrientation isEqualToString:@"landscape-right"]) {
+    cv::rotate(finalImage, finalImageRotated,
+               cv::ROTATE_90_CLOCKWISE);
+    imageToWrite = &finalImageRotated;
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+                     "[RetaiLensStitcher] bake-rotated 90° CW for landscape-right "
+                     "(%dx%d → %dx%d)",
+                     finalImage.cols, finalImage.rows,
+                     finalImageRotated.cols, finalImageRotated.rows);
+  } else if ([normalisedOrientation isEqualToString:@"portrait-upside-down"]) {
+    cv::rotate(finalImage, finalImageRotated, cv::ROTATE_180);
+    imageToWrite = &finalImageRotated;
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+                     "[RetaiLensStitcher] bake-rotated 180° for portrait-upside-down "
+                     "(%dx%d)", finalImage.cols, finalImage.rows);
+  } else {
+    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
+                     "[RetaiLensStitcher] no bake-rotation (orientation=%{public}@, %dx%d)",
+                     normalisedOrientation, finalImage.cols, finalImage.rows);
+  }
+  BOOL wrote = WriteJPEGWithEXIFTag(*imageToWrite, cleanedOutPath,
+                                    1, clampedQuality);  // always EXIF=1 — rotation is baked
   if (!wrote) {
     if (error) {
       *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
@@ -1668,10 +1768,13 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   }
 
+  // V16 Phase 1b.fix5d — report the dimensions of the bytes we
+  // actually wrote (rotated, if we baked one in above), not the
+  // pre-rotate Mat.  JS-side consumers need the displayable shape.
   return [[RetaiLensStitchResult alloc]
       initWithOutputPath:outputPath
-                   width:(NSInteger)finalImage.cols
-                  height:(NSInteger)finalImage.rows
+                   width:(NSInteger)imageToWrite->cols
+                  height:(NSInteger)imageToWrite->rows
               durationMs:durationMs];
 }
 
@@ -1885,10 +1988,12 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   }
 
   NSError *stitchErr = nil;
-  // V16 Phase 1b.fix3 — passes exifOrientation:1 (no rotation) for
-  // the legacy video-driven path.  Callers of the video flow don't
-  // have AR-frame orientation context; the keyframe-driven Swift
-  // path supplies the actual orientation derived from the AR frame.
+  // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
+  // Legacy video-driven path: no AR-frame orientation context, so
+  // we pass nil for captureOrientation → the .mm side treats nil as
+  // "portrait" → no bake-rotation.  Callers wanting rotation should
+  // use the keyframe-driven Swift path which carries the orientation
+  // from the JS accelerometer hook through RetaiLensIncrementalStitcher.
   RetaiLensStitchResult *result =
       [self stitchFramePaths:frames
                   outputPath:outputPath
@@ -1896,7 +2001,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                   warperType:warperType
                  blenderType:blenderType
               seamFinderType:seamFinderType
-             exifOrientation:1
+          captureOrientation:nil
         useInscribedRectCrop:NO
                        error:&stitchErr];
 
