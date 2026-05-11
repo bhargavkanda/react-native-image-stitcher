@@ -38,6 +38,23 @@ export interface PanoramaSettings {
    */
   seamFinderType: 'graphcut' | 'skip';
   /**
+   * V16 Phase 1b.fix5c (Ram's call 2026-05-10) — toggle the
+   * max-inscribed-rectangle crop on the batch-keyframe output
+   * panorama.  When false (default), the output is cropped to the
+   * bounding rectangle of non-black pixels only (cv::boundingRect)
+   * — preserves all stitched content at the cost of some black
+   * corners where cv::Stitcher's projection didn't fill.  When
+   * true, the post-stitch pipeline additionally runs
+   * `MaxInscribedRectFromMask` to find the largest axis-aligned
+   * rectangle entirely inside content, followed by the
+   * column-projection second-pass.  Inscribed-rect can be
+   * over-aggressive on lopsided masks (field log showed a
+   * 1146×1102 bbox shrinking to a 602×1102 strip), so default OFF
+   * lets the operator see the full stitched scene; flip ON to
+   * A/B against the cleaner-but-smaller output.
+   */
+  enableMaxInscribedRectCrop: boolean;
+  /**
    * Phase 4.4 EXPERIMENTAL: when true, the host swaps the
    * vision-camera-backed CameraView for an ARKit-backed ARCameraView
    * during panorama capture.  Default false (keeps the existing
@@ -225,6 +242,8 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // both in the settings modal.
   blenderType: _isLowMem ? 'feather' : 'multiband',
   seamFinderType: _isLowMem ? 'skip' : 'graphcut',
+  // V16 Phase 1b.fix5c — default OFF.  See PanoramaSettings.enableMaxInscribedRectCrop.
+  enableMaxInscribedRectCrop: false,
   // AR-backed capture is the default — vision-camera path is kept as
   // a fallback while we shake out edge cases.
   useARPreview: true,
@@ -254,7 +273,12 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // when in a controlled scene with a clearly-visible wall.  Disabled
   // is still selectable for the older slit-scan paths that don't
   // need a plane.
-  planeSource: 'Virtual',
+  // V16 Phase 1b.fix5c (Ram's call 2026-05-10): switched default
+  // from 'Virtual' to 'ARKitDetected'.  ARKit's real plane gives
+  // better intrinsics-to-pixel alignment than a synthesised plane
+  // at a fixed depth, when ARKit can find a vertical plane.  Falls
+  // back to slit-scan when no plane latches.
+  planeSource: 'ARKitDetected',
   virtualPlaneDepthMeters: 1.5,
   arkitPlaneAlignmentThreshold: 0.6,
   // V15.0g — Rectified is the default (Trapezoidal had the tilt-
@@ -520,6 +544,13 @@ export function PanoramaSettingsModal({
                   value={settings.seamFinderType}
                   onChange={(v) => update({ seamFinderType: v as PanoramaSettings['seamFinderType'] })}
                   caption="graphcut (default): cv::detail::GraphCutSeamFinder; optimal seams, pairs with multiband, holds all warps in memory. skip: stream warp+feed (lower peak memory)."
+                />
+                <SectionHeader title="Batch tuning — Inscribed-rect crop" />
+                <SegmentedControl
+                  options={['off', 'on']}
+                  value={settings.enableMaxInscribedRectCrop ? 'on' : 'off'}
+                  onChange={(v) => update({ enableMaxInscribedRectCrop: v === 'on' })}
+                  caption="off (default): final crop is just cv::boundingRect of non-black pixels — preserves all stitched content; may have black corners. on: additionally run MaxInscribedRectFromMask + column-projection second-pass for a clean-cornered rectangle — can shrink the output if the panorama mask is lopsided. A/B against the bbox crop on real scenes."
                 />
               </>
             )}

@@ -405,6 +405,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                          blenderType:(NSString *)blenderType
                                       seamFinderType:(NSString *)seamFinderType
                                      exifOrientation:(NSInteger)exifOrientation
+                                useInscribedRectCrop:(BOOL)useInscribedRectCrop
                                                error:(NSError **)error {
   // V12.14.2 — FAULT-level sentinel.  Survives Console.app rate-limit;
   // proves the function entered.  If a future trace doesn't show this
@@ -1494,62 +1495,73 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
     cv::Mat mask;
     cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
-    cv::Mat closedMask;
-    cv::morphologyEx(
-        mask, closedMask, cv::MORPH_CLOSE,
-        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)));
-    cv::Rect bbox = MaxInscribedRectFromMask(closedMask);
-    cv::Rect bboxFallback = cv::boundingRect(mask);
-    const long long inscribedArea =
-        (long long)bbox.width * bbox.height;
-    const long long fallbackArea =
-        (long long)bboxFallback.width * bboxFallback.height;
-    if (bbox.width <= 0 || bbox.height <= 0
-        || inscribedArea * 2 < fallbackArea) {
-      // Either degenerate, or inscribed < 50% of bbox area.
-      // Safety floor: ship bbox so the operator gets *something*
-      // usable (legacy behaviour pre-fix3) rather than a sliver.
-      NSLog(@"[RetaiLensStitcher] inscribed-rect rejected: "
-            "%dx%d (area=%lld) vs bbox %dx%d (area=%lld); "
-            "using bbox fallback.",
-            bbox.width, bbox.height, inscribedArea,
-            bboxFallback.width, bboxFallback.height, fallbackArea);
-      bbox = bboxFallback;
+
+    // V16 Phase 1b.fix5c — operator-toggleable crop strategy.
+    //
+    //   useInscribedRectCrop = NO (default in settings modal):
+    //     Final crop is just cv::boundingRect(mask) — preserves all
+    //     stitched content at the cost of possible black corners
+    //     where cv::Stitcher's projection didn't fill.
+    //
+    //   useInscribedRectCrop = YES (operator opt-in):
+    //     Run the full inscribed-rect pipeline (morph-close + 50%
+    //     safety floor + column-projection second pass) for a clean
+    //     -cornered rectangle.  Can over-aggressively shrink the
+    //     output on lopsided masks (1146×1102 bbox → 602×1102 strip
+    //     in one field log).
+    cv::Rect bbox;
+    if (useInscribedRectCrop) {
+      cv::Mat closedMask;
+      cv::morphologyEx(
+          mask, closedMask, cv::MORPH_CLOSE,
+          cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)));
+      bbox = MaxInscribedRectFromMask(closedMask);
+      cv::Rect bboxFallback = cv::boundingRect(mask);
+      const long long inscribedArea =
+          (long long)bbox.width * bbox.height;
+      const long long fallbackArea =
+          (long long)bboxFallback.width * bboxFallback.height;
+      if (bbox.width <= 0 || bbox.height <= 0
+          || inscribedArea * 2 < fallbackArea) {
+        // Either degenerate, or inscribed < 50% of bbox area.
+        // Safety floor: ship bbox so the operator gets *something*
+        // usable (legacy behaviour pre-fix3) rather than a sliver.
+        NSLog(@"[RetaiLensStitcher] inscribed-rect rejected: "
+              "%dx%d (area=%lld) vs bbox %dx%d (area=%lld); "
+              "using bbox fallback.",
+              bbox.width, bbox.height, inscribedArea,
+              bboxFallback.width, bboxFallback.height, fallbackArea);
+        bbox = bboxFallback;
+      } else {
+        NSLog(@"[RetaiLensStitcher] inscribed-rect: %dx%d "
+              "(area=%lld, %.0f%% of bbox %dx%d)",
+              bbox.width, bbox.height, inscribedArea,
+              100.0 * (double)inscribedArea / (double)fallbackArea,
+              bboxFallback.width, bboxFallback.height);
+      }
     } else {
-      NSLog(@"[RetaiLensStitcher] inscribed-rect: %dx%d "
-            "(area=%lld, %.0f%% of bbox %dx%d)",
-            bbox.width, bbox.height, inscribedArea,
-            100.0 * (double)inscribedArea / (double)fallbackArea,
-            bboxFallback.width, bboxFallback.height);
+      bbox = cv::boundingRect(mask);
+      NSLog(@"[RetaiLensStitcher] crop: bbox-only %dx%d "
+            "(useInscribedRectCrop=NO via setting)",
+            bbox.width, bbox.height);
     }
     if (bbox.width > 0 && bbox.height > 0
         && bbox.width <= panorama.cols && bbox.height <= panorama.rows) {
       finalImage = panorama(bbox).clone();
     }
 
+    // V16 Phase 1b.fix5c — column-projection second pass ALSO gated
+    // on the inscribed-rect toggle.  When OFF, skip directly to the
+    // write so the operator sees the full bbox-cropped panorama
+    // without further trimming.  When ON, keep the existing
+    // 95%-then-80%-then-skip relaxation chain.
+    if (!useInscribedRectCrop) {
+      // Skip the second-pass column-projection entirely.
+    } else
+
+    {
     // Second pass: rectangular crop.  Find the column range where
     // ≥95% of rows have content, crop to that × full height.
-    //
-    // Algorithm (column projection — more robust than the per-row
-    // scan I had before):
-    //   1. Build a binary content mask (threshold + erode to drop
-    //      fringe artifacts at the warp edges).
-    //   2. For each column, count how many rows have content at
-    //      that column.  Use cv::reduce(REDUCE_SUM).
-    //   3. A column "qualifies" if its content-row count is at
-    //      least 95% of total rows.  ≥95% (not 100%) tolerates
-    //      the small black artifacts that survive thresholding
-    //      at hourglass corners.
-    //   4. Find leftmost + rightmost qualifying columns.  Crop
-    //      to that range, full height.
-    //
-    // Why column projection is better than the per-row scan:
-    //   The per-row approach computed globalLeft = max(rowLeft)
-    //   across rows.  Bug: even with erosion, antialiasing left
-    //   stray non-zero pixels at edge columns in some rows, so
-    //   globalLeft kept getting reset to 0 by those rows.
-    //   Column projection asks "is this column mostly content?"
-    //   and naturally ignores stray pixels in 1-2 rows.
     cv::Mat finalGray;
     cv::cvtColor(finalImage, finalGray, cv::COLOR_BGR2GRAY);
     cv::Mat finalMask;
@@ -1618,6 +1630,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
               cropRight >= 0 ? (cropRight - cropLeft + 1) : 0,
               minRectWidth);
       }
+    }
     }
   } catch (...) {
     // Crop failed — fall back to the raw stitched output.
@@ -1884,6 +1897,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                  blenderType:blenderType
               seamFinderType:seamFinderType
              exifOrientation:1
+        useInscribedRectCrop:NO
                        error:&stitchErr];
 
   // Always tear down the tmp dir, success or fail — leaving

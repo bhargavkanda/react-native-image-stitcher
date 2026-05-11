@@ -431,6 +431,18 @@ export interface StitcherConfig {
    *    seams, pairs with multi-band, holds all warped frames in memory.
    *  - 'skip': stream warp+feed, lower peak memory, fine with feather. */
   seamFinderType: 'graphcut' | 'skip';
+
+  /** V16 Phase 1b.fix5c — toggle the max-inscribed-rectangle crop in
+   *  the batch-keyframe finalize pipeline.  When false (default), the
+   *  output is cropped to `cv::boundingRect(mask)` only — preserves
+   *  all stitched content at the cost of possible black corners
+   *  where cv::Stitcher's projection didn't fill.  When true, the
+   *  pipeline additionally runs `MaxInscribedRectFromMask` +
+   *  morphological-close + column-projection second pass for a
+   *  clean-cornered rectangle (but can over-aggressively shrink the
+   *  output on lopsided masks).  Surfaced as a settings toggle so
+   *  the operator can A/B the two crop strategies on real scenes. */
+  enableMaxInscribedRectCrop: boolean;
 }
 
 

@@ -306,6 +306,12 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     private var batchWarperType: String = "plane"
     private var batchBlenderType: String = "multiband"
     private var batchSeamFinderType: String = "graphcut"
+    // V16 Phase 1b.fix5c — operator-visible toggle for the
+    // max-inscribed-rectangle crop in the batch-keyframe finalize.
+    // Default OFF.  When OFF, native crops to bbox only; when ON,
+    // the inscribed-rect + morph-close + col-projection pipeline
+    // runs.
+    private var batchEnableInscribedRectCrop: Bool = false
 
     private override init() {
         super.init()
@@ -420,6 +426,10 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                 (configOverrides["blenderType"] as? String) ?? "multiband"
             self.batchSeamFinderType =
                 (configOverrides["seamFinderType"] as? String) ?? "graphcut"
+            // V16 Phase 1b.fix5c — read inscribed-rect toggle.  Defaults
+            // to FALSE if not provided by JS.
+            self.batchEnableInscribedRectCrop =
+                (configOverrides["enableMaxInscribedRectCrop"] as? Bool) ?? false
             self.batchKeyframeMode = true
             self.hybridEngine = nil
             self.firstwinsEngine = nil
@@ -681,6 +691,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let batchWarperType = self.batchWarperType
         let batchBlenderType = self.batchBlenderType
         let batchSeamFinderType = self.batchSeamFinderType
+        let batchEnableInscribedRectCrop = self.batchEnableInscribedRectCrop
         let keyframeExifOrientation = self.keyframeExifOrientation
         // V16 Phase 1.fix4 — pose array still held on self ivar (and
         // queued for persistent sidecar storage in a future debug-menu
@@ -830,7 +841,8 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                             warperType: batchWarperType,
                             blenderType: batchBlenderType,
                             seamFinderType: batchSeamFinderType,
-                            exifOrientation: keyframeExifOrientation
+                            exifOrientation: keyframeExifOrientation,
+                            useInscribedRectCrop: batchEnableInscribedRectCrop
                         )
                         // Keep saved keyframes on disk for post-hoc
                         // re-processing (Ram's request).  Cleanup is

@@ -148,7 +148,13 @@ public enum Stitcher {
         // pixels are interpreted as-stored.  Callers that care
         // about EXIF (e.g. RetaiLensIncrementalStitcher) hit the
         // method directly with the right value.
-        exifOrientation: 1
+        exifOrientation: 1,
+        // V16 Phase 1b.fix5c — generic Stitcher API defaults the
+        // crop strategy to bbox-only (matches the operator-default
+        // in the panorama settings modal).  Callers that want
+        // inscribed-rect can use RetaiLensIncrementalStitcher with
+        // the toggle on.
+        useInscribedRectCrop: false
       )
       return StitchResult(
         outputPath: result.outputPath,

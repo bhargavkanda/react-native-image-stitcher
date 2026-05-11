@@ -89,6 +89,7 @@ extern NSString *const RetaiLensStitcherErrorDomain;
                                          blenderType:(nullable NSString *)blenderType
                                       seamFinderType:(nullable NSString *)seamFinderType
                                      exifOrientation:(NSInteger)exifOrientation
+                                useInscribedRectCrop:(BOOL)useInscribedRectCrop
                                                error:(NSError **)error;
 
 /// Extract `maxFrames` evenly-spaced frames from the video at
