@@ -130,6 +130,20 @@ class RetaiLensIncrementalStitcher(
     /// table inside the JNI shim.  Sourced from configOverrides
     /// (passed from JS), falling back to "portrait".
     private var batchCaptureOrientation: String = "portrait"
+
+    /// V16 Phase 1 / P3-F — shared-C++ KeyframeGate.  Replaces the
+    /// V16-Phase-1 frame-counter MVP placeholder
+    /// (handleBatchKeyframeFrame above) with the same pose-driven
+    /// 40%-new-content algorithm iOS has used since the V16 ship.
+    /// Both platforms call into retailens::KeyframeGate (in
+    /// retailens-capture-sdk/cpp/keyframe_gate.cpp) — see that file
+    /// for the algorithm.
+    ///
+    /// Lifetime: owned for the life of the module.  Closed in
+    /// `onCatalystInstanceDestroy()` to release the C++ heap
+    /// allocation.  `reset()` is called between captures.
+    private val keyframeGate = KeyframeGate()
+
     private val isRunning = AtomicBoolean(false)
     /// Critic #5 fix: serial dispatcher so concurrent
     /// processFrameAtPath() calls can't race on the engine's canvas.
@@ -234,9 +248,22 @@ class RetaiLensIncrementalStitcher(
                 // JS hook is stale but at least it's directional).
                 batchCaptureOrientation = options.getString("captureOrientation")
                     ?: "portrait"
+                // P3-F — configure the shared-C++ KeyframeGate for
+                // this capture.  Same knob set + defaults as iOS:
+                //   overlapThreshold default 0.4 (40% new content)
+                //   maxCount         default 6
+                // Both clamped to safe ranges that iOS also uses (see
+                // RetaiLensIncrementalStitcher.swift:608-615).
+                val threshold = configOverrides
+                    ?.getDoubleOrDefault("keyframeOverlapThreshold", 0.4) ?: 0.4
+                keyframeGate.overlapThreshold = threshold.coerceIn(0.10, 0.80)
+                keyframeGate.maxCount = batchKeyframeMaxCount.coerceIn(3, 10)
+                keyframeGate.enabled = true
+                keyframeGate.reset()
             } else if (isFirstwins) {
                 batchKeyframeMode = false
                 batchKeyframePaths.clear()
+                keyframeGate.enabled = false   // gate is batch-only; off for live engines
                 firstwinsEngine = IncrementalFirstwinsEngine(
                     composeWidth = composeW,
                     composeHeight = composeH,
@@ -255,6 +282,7 @@ class RetaiLensIncrementalStitcher(
             } else {
                 batchKeyframeMode = false
                 batchKeyframePaths.clear()
+                keyframeGate.enabled = false   // gate is batch-only; off for hybrid engine
                 engine = IncrementalEngine(
                     composeWidth  = composeW,
                     composeHeight = composeH,
@@ -292,29 +320,60 @@ class RetaiLensIncrementalStitcher(
      * just less gated.
      */
     /**
-     * V16 batch-keyframe gate.  Called from processFrameAtPath when
-     * batchKeyframeMode is on.  Accept every Nth frame up to the cap,
-     * append to batchKeyframePaths.  Returns an outcome int:
-     *   1 = accepted (frame is now a keyframe)
-     *   2 = rejected (gate skipped this frame)
-     *   3 = rejected — at maxCount cap, no more keyframes accepted
+     * Copy a (non-persistent) source JPEG to a persistent per-keyframe
+     * path under the React context's cache dir.  The ARCameraView's
+     * forwardToIncremental writes every frame to a SINGLE reused tmp
+     * file (rlis-arframe.jpg) — adequate for the live engines that
+     * decode synchronously, but the batch-keyframe collector
+     * accumulates paths for stitching at finalize time, so each
+     * keyframe needs its own stable file.
      *
-     * Future work: replace the every-Nth-frame gate with a pose-
-     * based overlap gate matching iOS' keyframeGate behaviour.
+     * Returns the absolute path of the destination on success, or
+     * null if the copy failed.  Cost ≈ 3-5 ms for a 1080p JPEG on
+     * iPhone 16 / Galaxy A35 class hardware.
+     *
+     * Naming: `rlis-keyframe-{N}.jpg` where N is the next slot index
+     * (= batchKeyframePaths.size).  Survives until either the next
+     * batch-keyframe capture overwrites the same slot or the OS
+     * cleans the cache dir.  iOS counterpart writes per-session
+     * uuid-dirs via OpenCVKeyframeCollector — that's deeper parity
+     * for a Phase 3 follow-up; this MVP is just enough to make
+     * batch-keyframe work end-to-end on Android.
      */
-    private fun handleBatchKeyframeFrame(path: String): Int {
-        if (batchKeyframePaths.size >= batchKeyframeMaxCount) {
-            return 3
+    private fun copyKeyframeToStore(srcPath: String): String? {
+        val destFile = java.io.File(
+            reactContext.cacheDir,
+            "rlis-keyframe-${batchKeyframePaths.size}.jpg",
+        )
+        return try {
+            java.io.File(srcPath).copyTo(destFile, overwrite = true).absolutePath
+        } catch (e: Exception) {
+            android.util.Log.w(
+                "RetaiLensIncrementalStitcher",
+                "copyKeyframeToStore: failed to copy $srcPath → " +
+                    "${destFile.absolutePath}: ${e.message}",
+                e,
+            )
+            null
         }
-        val counter = batchKeyframeFrameCounter++
-        // First frame: always accept (anchor frame).  Then every Nth
-        // frame thereafter.
-        if (counter == 0 || counter % batchKeyframeAcceptStride == 0) {
-            batchKeyframePaths.add(path)
-            return 1
-        }
-        return 2
     }
+
+    // ── V16 Phase 1 → P3-F migration note ────────────────────────
+    // The frame-counter placeholder gate `handleBatchKeyframeFrame`
+    // that lived here has been REMOVED.  Both the AR-driven path
+    // (ingestFromARCameraView) and the vision-camera fallback path
+    // (processFrameAtPath) now route through the shared-C++
+    // `KeyframeGate` (cpp/keyframe_gate.{hpp,cpp}) — same algorithm
+    // iOS has used since the V16 ship.  See
+    // `private val keyframeGate = KeyframeGate()` above for the
+    // instance + lifetime.
+    //
+    // `batchKeyframeAcceptStride` is no longer consulted (the proper
+    // gate uses pose-driven overlap, not a frame-counter stride);
+    // the field is kept around for now because removing it would
+    // touch unrelated init/serialization paths.  Wire it back in if
+    // we ever add a "force every Nth frame regardless of overlap"
+    // override.
 
     @ReactMethod
     fun processFrameAtPath(options: ReadableMap, promise: Promise) {
@@ -322,12 +381,52 @@ class RetaiLensIncrementalStitcher(
         val firstwins = this.firstwinsEngine
         // batch-keyframe mode runs without a live engine — handle it
         // up-front before the null-check rejects.
+        //
+        // P3-F: this path uses the same shared-C++ KeyframeGate as
+        // the AR view path, but with translation = 0 (gyro-derived
+        // poses have only rotation, not position).  The gate's
+        // internal logic detects the missing plane and uses the
+        // camera-forward angular-delta fallback automatically.
         if (batchKeyframeMode) {
             val path = options.getString("path")
                 ?: return promise.reject("invalid-options", "path required")
-            val outcome = handleBatchKeyframeFrame(path)
+            val pose = RetaiLensARFramePose(
+                tx = options.getDoubleOrDefault("tx", 0.0) ?: 0.0,
+                ty = options.getDoubleOrDefault("ty", 0.0) ?: 0.0,
+                tz = options.getDoubleOrDefault("tz", 0.0) ?: 0.0,
+                qx = options.getDoubleOrDefault("qx", 0.0) ?: 0.0,
+                qy = options.getDoubleOrDefault("qy", 0.0) ?: 0.0,
+                qz = options.getDoubleOrDefault("qz", 0.0) ?: 0.0,
+                qw = options.getDoubleOrDefault("qw", 1.0) ?: 1.0,
+                fx = options.getDoubleOrDefault("fx", 1000.0) ?: 1000.0,
+                fy = options.getDoubleOrDefault("fy", 1000.0) ?: 1000.0,
+                cx = options.getDoubleOrDefault("cx", 540.0) ?: 540.0,
+                cy = options.getDoubleOrDefault("cy", 960.0) ?: 960.0,
+                imageWidth = options.getIntOrDefault("imageWidth", 1080),
+                imageHeight = options.getIntOrDefault("imageHeight", 1920),
+                timestampMs = 0.0,
+                trackingState = RetaiLensARSession.TRACKING_TRACKING,
+            )
+            // Vision-camera path: no plane available (gyro can't fit
+            // planes).  Pass null → C++ uses angular fallback.
+            val decision = keyframeGate.evaluate(pose, null)
             val result = Arguments.createMap()
+            // Outcome mapping for iOS-parity JS contract:
+            //   1 = accepted, 2 = rejected (gate), 3 = rejected (cap).
+            // C++ enum → outcome int:
+            val outcome = when {
+                decision.accept -> 1
+                decision.reason == "max-reached" -> 3
+                else -> 2
+            }
             result.putInt("outcome", outcome)
+            if (decision.accept) {
+                batchKeyframePaths.add(path)  // vision-camera path
+                                              // gives us a unique
+                                              // per-snapshot file
+                                              // already (no copy
+                                              // needed).
+            }
             result.putInt("acceptedCount", batchKeyframePaths.size)
             promise.resolve(result)
             return
@@ -565,6 +664,7 @@ class RetaiLensIncrementalStitcher(
      */
     internal fun ingestFromARCameraView(
         path: String,
+        tx: Double, ty: Double, tz: Double,
         qx: Double, qy: Double, qz: Double, qw: Double,
         fx: Double, fy: Double, cx: Double, cy: Double,
         imageWidth: Int, imageHeight: Int,
@@ -574,6 +674,78 @@ class RetaiLensIncrementalStitcher(
         fovVertDegrees: Double,
         trackingPoor: Boolean,
     ) {
+        // ── V16 batch-keyframe: AR-driven path ─────────────────────
+        //
+        // Batch-keyframe mode runs WITHOUT a live engine (engine ==
+        // firstwinsEngine == null) — frames accumulate as keyframe
+        // paths and the cv::Stitcher pipeline runs at finalize time.
+        //
+        // P3-F: this branch now calls into the shared-C++
+        // KeyframeGate (cpp/keyframe_gate.{hpp,cpp}, same algorithm
+        // iOS uses).  The placeholder frame-counter gate that lived
+        // here previously (handleBatchKeyframeFrame) is GONE.
+        //
+        // The ARCameraView's JPEG-encode pipeline writes to a single
+        // REUSED tmp file (rlis-arframe.jpg in cacheDir) — fine for
+        // live engines (decoded into cv::Mat synchronously inside
+        // addFrameAtPath, before next frame arrives), but FATAL for
+        // batch-keyframe (all accepted keyframe paths would point to
+        // the same overwritten file → finalize stitches 6 copies of
+        // the same frame).  So we must COPY to a unique path on
+        // accept.  We do the gate-evaluate BEFORE the copy so we
+        // skip the ~5 ms JPEG copy on rejected frames.
+        if (batchKeyframeMode) {
+            // Build the POD pose for the gate.  tx/ty/tz are passed
+            // through from the AR camera view (camera.pose.tx() etc.);
+            // they're required for the plane-overlap math.  Falling
+            // back to the angular path when no plane is latched is
+            // handled internally by the gate (latchedPlane=null arg).
+            val pose = RetaiLensARFramePose(
+                tx = tx, ty = ty, tz = tz,
+                qx = qx, qy = qy, qz = qz, qw = qw,
+                fx = fx, fy = fy, cx = cx, cy = cy,
+                imageWidth = imageWidth, imageHeight = imageHeight,
+                timestampMs = 0.0,           // not used by the gate
+                trackingState = RetaiLensARSession.TRACKING_TRACKING,
+            )
+            // Fetch the latched plane (if any) from the AR session
+            // and convert to a column-major 16-float matrix matching
+            // the C++ PlaneTransform layout.  ARCore's
+            // Pose.toMatrix(out, offset) gives us exactly that layout
+            // (same as iOS simd_float4x4).
+            val planeMatrix: FloatArray? =
+                RetaiLensARSession.instance?.latchedPlaneTransform?.let { p ->
+                    FloatArray(16).also { p.toMatrix(it, 0) }
+                }
+
+            val decision = keyframeGate.evaluate(pose, planeMatrix)
+            if (!decision.accept) {
+                // Frame rejected by the gate — could be overlap-too-
+                // high (most common), max-reached, or projection-
+                // degenerate.  Drop silently; the next frame will be
+                // evaluated.  TODO(P1-followup): emit a state event
+                // so the JS UI can surface the reason in the pill.
+                return
+            }
+            // Accepted — copy the (reused) tmp JPEG to a persistent
+            // per-keyframe path so subsequent frames overwriting the
+            // source don't clobber it.
+            val persistentPath = copyKeyframeToStore(path)
+            if (persistentPath == null) {
+                // Copy failed — drop the frame.  Logged inside
+                // copyKeyframeToStore.  Counter was already incremented
+                // inside the gate; that's fine — the next acceptable
+                // frame will still be accepted on its own merits.
+                return
+            }
+            batchKeyframePaths.add(persistentPath)
+            // TODO(P1-followup): emit `batchKeyframeThumbnailPath`
+            // state event so the JS LiveFrameStrip renders thumbnails
+            // as frames are accepted (one of the missing state-event
+            // fields from the parity audit).
+            return
+        }
+
         val hybrid = this.engine
         val firstwins = this.firstwinsEngine
         if (hybrid == null && firstwins == null) return
@@ -615,6 +787,96 @@ class RetaiLensIncrementalStitcher(
             return
         }
         promise.resolve(state)
+    }
+
+    // ── V15.0e — AR plane detection bridge (iOS-parity) ──────────────
+    //
+    // iOS exposes these on the IncrementalStitcherBridge (NOT on the
+    // ARSession module) so the JS code calls
+    //   getIncrementalNativeModule().getARPlaneStatus()
+    // (see retailens-capture-sdk/src/stitching/incremental.ts:535).
+    // Both methods delegate to the AR session singleton — same pattern
+    // as iOS' IncrementalStitcherBridge.swift, where the bridge holds
+    // the RN @objc surface and the singleton holds the AR algorithm.
+
+    /**
+     * Poll-friendly plane-status read.  Called by JS at 2 Hz while
+     * planeSource = 'ARKitDetected' (the default).  When the AR session
+     * native module isn't registered (e.g. plain stitching tests
+     * without an active AR session), returns a stable "searching"
+     * default so the JS gate never throws.
+     */
+    @ReactMethod
+    fun getARPlaneStatus(promise: Promise) {
+        val session = RetaiLensARSession.instance
+        if (session == null) {
+            // Safe default: no AR session = no plane to lock onto.
+            // Shape MUST match the iOS contract so JS doesn't branch.
+            val map = Arguments.createMap()
+            map.putString("status", "searching")
+            map.putBoolean("hasPlane", false)
+            map.putDouble("bestAlignment", -1.0)
+            map.putDouble("threshold", 0.6)
+            promise.resolve(map)
+            return
+        }
+        promise.resolve(session.buildARPlaneStatusMap())
+    }
+
+    /**
+     * Force re-evaluation of plane detection.  Used by the JS
+     * hold-to-scan press handler in AuditCaptureScreen.tsx:529 (which
+     * `.catch(()=>{})`s the result).  Returns `latched=false`
+     * synchronously; JS sees the new state on the next 2 Hz
+     * getARPlaneStatus poll (~16 ms later, when the GL render thread
+     * runs evaluatePlanesForFrame on the next ARCore frame).  See
+     * detailed semantic note in RetaiLensARSession.buildARPlaneStatusMap.
+     */
+    @ReactMethod
+    fun relatchARPlane(promise: Promise) {
+        RetaiLensARSession.instance?.clearPlaneLatch()
+        val map = Arguments.createMap()
+        map.putBoolean("latched", false)
+        promise.resolve(map)
+    }
+
+    /**
+     * iOS-parity bridge method (was missing from Android — flagged
+     * in the parity audit as Section C gap #1 / Section F gap #2).
+     *
+     * Arms the KeyframeGate to force-accept the NEXT frame regardless
+     * of overlap.  Used by the JS shutter-release path so we don't
+     * truncate the trailing edge of the scan.  iOS counterpart:
+     * IncrementalStitcherBridge.swift markNextFrameAsLastKeyframe.
+     *
+     * Always resolves with `{ ok: true }`.  No-op when the gate is
+     * disabled (which is fine — the live engines don't need a
+     * force-last; only batch-keyframe does).
+     */
+    @ReactMethod
+    fun markNextFrameAsLastKeyframe(promise: Promise) {
+        keyframeGate.forceAcceptNext = true
+        val map = Arguments.createMap()
+        map.putBoolean("ok", true)
+        promise.resolve(map)
+    }
+
+    /**
+     * Release the C++ KeyframeGate heap allocation when RN tears
+     * down the bridge module (e.g. on a JS reload).  Without this,
+     * each reload leaks ~100 bytes of native heap — small but
+     * unbounded over a long dev session.
+     */
+    override fun onCatalystInstanceDestroy() {
+        try {
+            keyframeGate.close()
+        } catch (t: Throwable) {
+            android.util.Log.w(
+                "RetaiLensIncrementalStitcher",
+                "onCatalystInstanceDestroy: keyframeGate.close failed: ${t.message}",
+            )
+        }
+        super.onCatalystInstanceDestroy()
     }
 
     private fun emitState(state: WritableMap?) {

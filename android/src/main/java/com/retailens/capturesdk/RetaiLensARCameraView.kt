@@ -97,20 +97,46 @@ class RetaiLensARCameraView @JvmOverloads constructor(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        Log.i(TAG, "onAttachedToWindow: requesting AR session start (iOS-parity didMoveToWindow)")
+        // iOS parity (didMoveToWindow): ensure the singleton AR
+        // session is running BEFORE we try to borrow it for
+        // rendering.  Previously the view only borrowed an existing
+        // session — if nothing else had started one yet, the
+        // GLSurfaceView would stay at its cleared-black state
+        // forever and the user would see a black camera preview.
+        //
+        // startForView() is idempotent (no-op if a session is
+        // already running) and silently logs failures rather than
+        // throwing — if it returns false the view falls through to
+        // the borrow logic below, which then renders empty.  Worst-
+        // case the user navigates away + back to retry.
+        RetaiLensARSession.instance?.startForView()
+
         glView.onResume()
         // Try to borrow the session from the running RetaiLensARSession.
         val session = RetaiLensARSession.instance?.getSessionForView()
         if (session != null) {
             sessionRef.set(session)
             // ARCore's `Session.resume()` must be called on the main
-            // thread — the JS bridge already does that via start(),
-            // but if the view mounts after start() and the session
-            // was paused on a stop, we resume here too (idempotent).
+            // thread — startForView() above already resumed a freshly-
+            // created session, but if we got here with a pre-existing
+            // paused session (e.g. another ARCameraView's onDetached
+            // ran and paused, then this view re-mounted) we resume
+            // again here.  Idempotent: Session.resume() is a no-op
+            // if the session is already resumed.
             try {
                 session.resume()
             } catch (e: CameraNotAvailableException) {
                 Log.w(TAG, "session.resume on attach: $e")
             }
+        } else {
+            Log.w(
+                TAG,
+                "onAttachedToWindow: session is still null after startForView; " +
+                    "preview will stay black until the view re-mounts " +
+                    "(possible reasons: no Activity, ARCore install in progress, " +
+                    "device unsupported — see RetaiLensARSession logs)",
+            )
         }
         RetaiLensARSession.instance?.bindCameraView(this)
         RetaiLensIncrementalStitcher.bridgeInstance?.bindArCameraView(this)
@@ -118,14 +144,25 @@ class RetaiLensARCameraView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        // Pause the GL thread but DO NOT pause the Session — other
-        // ARCameraView instances or non-rendering consumers (Phase 6
-        // measurement) may still want pose updates.  Session lifecycle
-        // is owned exclusively by the bridge module's start/stop.
+        Log.i(TAG, "onDetachedFromWindow: requesting AR session stop (iOS-parity didMoveToWindow)")
+        // Pause the GL thread so we stop drawing frames.
         glView.onPause()
         sessionTextureBound = false
         RetaiLensIncrementalStitcher.bridgeInstance?.unbindArCameraView(this)
         RetaiLensARSession.instance?.unbindCameraView(this)
+        // iOS parity (didMoveToWindow else-branch): stop the session
+        // so the hardware camera is freed for vision-camera or other
+        // consumers when the user navigates away.  Updated from the
+        // previous "do NOT pause the session" comment, which assumed
+        // the bridge module's start/stop owned lifecycle exclusively.
+        // With startForView()/stopForView(), the view is now the
+        // primary lifecycle owner for the auto-mounted case (the
+        // most common path: AuditCaptureScreen mounts the view, which
+        // starts the session; navigates away, which stops it).
+        // The JS-facing `start(promise)` / `stop(promise)` continue
+        // to work for hosts that prefer explicit control — the
+        // refs/state are shared.
+        RetaiLensARSession.instance?.stopForView()
     }
 
     /// Called by RetaiLensIncrementalStitcher.start/stop.  When true,
@@ -183,6 +220,27 @@ class RetaiLensARCameraView @JvmOverloads constructor(
         backgroundRenderer.draw(frame)
 
         val camera: Camera = frame.camera
+
+        // ── V15.0e — vertical plane detection (iOS parity) ──────────
+        // Run this each frame so the JS 2 Hz getARPlaneStatus poll
+        // sees a live answer without the user having to take any
+        // action.  iOS ARKit re-runs evaluation internally on each
+        // ARSessionDelegate didUpdate callback; we mirror by polling
+        // every ARCore frame.  Cost: ~10-20 us per frame at idle (no
+        // planes), ~50-100 us when iterating a handful of tracking
+        // planes — negligible against the 16ms frame budget.
+        val pose = camera.pose
+        // ARCore Pose convention: zAxis is the world-space direction
+        // of the local Z axis.  Camera looks down -Z (OpenGL
+        // convention), so cameraForward = -zAxis.  ARCore 1.45's
+        // Pose.getZAxis() takes no args and returns a new FloatArray.
+        val zAxis = pose.zAxis
+        val cameraForwardWorld = floatArrayOf(-zAxis[0], -zAxis[1], -zAxis[2])
+        val cameraPosWorld = floatArrayOf(pose.tx(), pose.ty(), pose.tz())
+        RetaiLensARSession.instance?.evaluatePlanesForFrame(
+            cameraForwardWorld,
+            cameraPosWorld,
+        )
 
         // Push pose into the AR session log.  Mirrors iOS' delegate
         // path; the existing RetaiLensARFramePose / appendPose
@@ -276,10 +334,18 @@ class RetaiLensARCameraView @JvmOverloads constructor(
 
             // ARCore quaternion comes back in (x, y, z, w) order.
             val qarr = camera.pose.rotationQuaternion
+            // P3-F: also extract translation so the KeyframeGate's
+            // plane-based ray-projection can compute polygon overlap.
+            // Previously these were dropped, forcing the gate into
+            // angular-fallback even when a plane was latched.
+            val tArr = camera.pose.translation
 
             val trackingPoor = camera.trackingState != TrackingState.TRACKING
             postFrameToEngine(
                 path = written,
+                tx = tArr[0].toDouble(),
+                ty = tArr[1].toDouble(),
+                tz = tArr[2].toDouble(),
                 qx = qarr[0].toDouble(), qy = qarr[1].toDouble(),
                 qz = qarr[2].toDouble(), qw = qarr[3].toDouble(),
                 fx = fx, fy = fy, cx = cxIntr, cy = cyIntr,
@@ -296,6 +362,7 @@ class RetaiLensARCameraView @JvmOverloads constructor(
 
     private fun postFrameToEngine(
         path: String,
+        tx: Double, ty: Double, tz: Double,
         qx: Double, qy: Double, qz: Double, qw: Double,
         fx: Double, fy: Double, cx: Double, cy: Double,
         imageWidth: Int, imageHeight: Int,
@@ -308,6 +375,7 @@ class RetaiLensARCameraView @JvmOverloads constructor(
         val module = RetaiLensIncrementalStitcher.bridgeInstance ?: return
         module.ingestFromARCameraView(
             path = path,
+            tx = tx, ty = ty, tz = tz,
             qx = qx, qy = qy, qz = qz, qw = qw,
             fx = fx, fy = fy, cx = cx, cy = cy,
             imageWidth = imageWidth, imageHeight = imageHeight,
