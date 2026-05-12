@@ -44,7 +44,14 @@ Pod::Spec.new do |s|
   s.platforms    = { :ios => '14.0' }
   s.swift_version = '5.0'
 
-  s.source_files = 'ios/Sources/**/*.{swift,h,m,mm}'
+  # Sources: iOS-specific Swift/Obj-C/Obj-C++ AND the shared C++ port
+  # (cpp/) that both iOS and Android compile from a single source.
+  # See cpp/keyframe_gate.hpp for the design rationale on shared-C++.
+  s.source_files = ['ios/Sources/**/*.{swift,h,m,mm}',
+                    'cpp/**/*.{h,hpp,cpp}']
+  # Add cpp/ to header search path so the .mm bridges can use
+  # `#include "keyframe_gate.hpp"` without going up the relative path.
+  s.public_header_files = ['ios/Sources/**/*.h']
 
   # Frameworks shipped with iOS itself — no binary cost.
   #   * Accelerate — vImage (image convolution) + vDSP (variance / mean).
@@ -119,6 +126,11 @@ Pod::Spec.new do |s|
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
     'CLANG_CXX_LIBRARY' => 'libc++',
     'OTHER_CPLUSPLUSFLAGS' => '$(inherited) -std=c++17',
+    # Add the shared cpp/ dir to the header search path so the
+    # KeyframeGateBridge.mm can `#include "keyframe_gate.hpp"`
+    # without going up the relative path.  ${PODS_TARGET_SRCROOT}
+    # is the pod's package root (one level above ios/Sources/).
+    'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_TARGET_SRCROOT}/cpp"',
   }
 
 end
