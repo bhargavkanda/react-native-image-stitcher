@@ -66,12 +66,31 @@ add_library(opencv_stitching STATIC IMPORTED)
 set_target_properties(opencv_stitching PROPERTIES
     IMPORTED_LOCATION "${OPENCV_STITCHING_A}")
 
+# ── Shared C++ port (KeyframeGate) ────────────────────────────────
+#
+# `cpp/` at the SDK root holds C++ that's compiled into BOTH the iOS
+# pod (via the podspec source globs + HEADER_SEARCH_PATHS) and the
+# Android JNI shim (here).  Same source, same algorithm, same
+# panorama output — closes the iOS↔Android parity gap that the V16
+# Phase 1 frame-counter MVP placeholder left open.
+set(SHARED_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp")
+if(NOT EXISTS "${SHARED_CPP_DIR}/keyframe_gate.hpp")
+    message(FATAL_ERROR
+        "Shared C++ port missing at:\n  ${SHARED_CPP_DIR}\n"
+        "Expected retailens-capture-sdk/cpp/ — was it moved or deleted?")
+endif()
+
 # ── Our shim ───────────────────────────────────────────────────────
 add_library(retailens_stitcher SHARED
-    retailens_stitcher.cpp)
+    retailens_stitcher.cpp
+    keyframe_gate_jni.cpp
+    "${SHARED_CPP_DIR}/keyframe_gate.cpp")
 
 target_include_directories(retailens_stitcher PRIVATE
-    "${OPENCV_INCLUDE_DIR}")
+    "${OPENCV_INCLUDE_DIR}"
+    # cpp/ holds keyframe_gate.hpp + ar_frame_pose.h that the JNI
+    # bindings include without relative-path spelunking.
+    "${SHARED_CPP_DIR}")
 
 # Link order matters:
 #   1. opencv_stitching (static .a) — pulls in cv::Stitcher code

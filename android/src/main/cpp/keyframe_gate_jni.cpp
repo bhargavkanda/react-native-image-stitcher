@@ -1,0 +1,170 @@
+// SPDX-License-Identifier: UNLICENSED
+//
+// keyframe_gate_jni.cpp — JNI bindings exposing the shared C++
+// retailens::KeyframeGate (in ../../../../cpp/) to the Kotlin side
+// (com.retailens.capturesdk.KeyframeGate).
+//
+// Architecture parity with iOS:
+//   iOS uses an Obj-C++ bridge (KeyframeGateBridge.mm) to wrap the
+//   same C++ class.  Android uses these JNI thunks.  Both ultimately
+//   call into the same code in cpp/keyframe_gate.cpp — that's the
+//   point of the port.
+//
+// Handle pattern:
+//   nativeCreate() returns a `Long` opaque handle (the C++ KeyframeGate
+//   pointer cast to jlong).  All subsequent calls pass the handle
+//   back.  The Kotlin wrapper owns the handle's lifetime and MUST
+//   call nativeDestroy() before being garbage-collected (otherwise we
+//   leak a small heap allocation per gate-instance).
+//
+// Decision packing:
+//   Evaluate returns a DoubleArray of length 5:
+//     [0] accept              — 1.0 or 0.0
+//     [1] reasonCode          — int (the C++ enum int value)
+//     [2] newContentFraction  — -1.0 when not computed
+//     [3] acceptedCount       — int
+//     [4] maxCount            — int
+//   Kotlin wrapper unpacks into a data class.  This avoids JNI
+//   per-call object construction (NewObject) which is ~10× more
+//   expensive than a primitive-array allocation.
+
+#include <jni.h>
+#include <cstring>
+
+#include "keyframe_gate.hpp"
+#include "ar_frame_pose.h"
+
+namespace {
+inline retailens::KeyframeGate* gate(jlong h) {
+    return reinterpret_cast<retailens::KeyframeGate*>(h);
+}
+} // anonymous namespace
+
+extern "C" {
+
+// ── Lifecycle ────────────────────────────────────────────────────
+
+JNIEXPORT jlong JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeCreate(JNIEnv*, jclass) {
+    return reinterpret_cast<jlong>(new retailens::KeyframeGate());
+}
+
+JNIEXPORT void JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeDestroy(
+    JNIEnv*, jclass, jlong handle)
+{
+    delete gate(handle);
+}
+
+// ── Settings ─────────────────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeSetEnabled(
+    JNIEnv*, jclass, jlong handle, jboolean enabled)
+{
+    gate(handle)->setEnabled(enabled);
+}
+
+JNIEXPORT void JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeSetOverlapThreshold(
+    JNIEnv*, jclass, jlong handle, jdouble t)
+{
+    gate(handle)->setOverlapThreshold(t);
+}
+
+JNIEXPORT void JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeSetMaxCount(
+    JNIEnv*, jclass, jlong handle, jint n)
+{
+    gate(handle)->setMaxCount(static_cast<int32_t>(n));
+}
+
+JNIEXPORT void JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeMarkNextFrameAsLast(
+    JNIEnv*, jclass, jlong handle)
+{
+    gate(handle)->markNextFrameAsLast();
+}
+
+JNIEXPORT void JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeReset(
+    JNIEnv*, jclass, jlong handle)
+{
+    gate(handle)->reset();
+}
+
+// ── Read-only state ──────────────────────────────────────────────
+
+JNIEXPORT jint JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeGetAcceptedCount(
+    JNIEnv*, jclass, jlong handle)
+{
+    return static_cast<jint>(gate(handle)->getAcceptedCount());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeGetMaxCount(
+    JNIEnv*, jclass, jlong handle)
+{
+    return static_cast<jint>(gate(handle)->getMaxCount());
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeIsEnabled(
+    JNIEnv*, jclass, jlong handle)
+{
+    return static_cast<jboolean>(gate(handle)->isEnabled());
+}
+
+// ── Per-frame evaluate ───────────────────────────────────────────
+//
+// plane16OrNull is FloatArray of exactly 16 elements (column-major),
+// or null for angular-delta fallback.  Returns DoubleArray[5] as
+// described in the file header.
+
+JNIEXPORT jdoubleArray JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeEvaluate(
+    JNIEnv* env, jclass, jlong handle,
+    jfloat tx, jfloat ty, jfloat tz,
+    jfloat qx, jfloat qy, jfloat qz, jfloat qw,
+    jfloat fx, jfloat fy, jfloat cx, jfloat cy,
+    jint imageWidth, jint imageHeight,
+    jfloatArray plane16OrNull)
+{
+    retailens::Pose pose;
+    pose.tx = tx; pose.ty = ty; pose.tz = tz;
+    pose.qx = qx; pose.qy = qy; pose.qz = qz; pose.qw = qw;
+    pose.fx = fx; pose.fy = fy; pose.cx = cx; pose.cy = cy;
+    pose.imageWidth  = static_cast<int32_t>(imageWidth);
+    pose.imageHeight = static_cast<int32_t>(imageHeight);
+
+    retailens::PlaneTransform planeStorage;
+    const retailens::PlaneTransform* planePtr = nullptr;
+    if (plane16OrNull) {
+        jsize len = env->GetArrayLength(plane16OrNull);
+        if (len == 16) {
+            jfloat* src = env->GetFloatArrayElements(plane16OrNull, nullptr);
+            if (src) {
+                std::memcpy(planeStorage.m, src, sizeof(float) * 16);
+                env->ReleaseFloatArrayElements(plane16OrNull, src, JNI_ABORT);
+                planePtr = &planeStorage;
+            }
+        }
+        // len != 16 silently falls through to angular fallback; the
+        // Kotlin caller is responsible for passing exactly 16 floats.
+    }
+
+    retailens::KeyframeGateDecision d = gate(handle)->evaluate(pose, planePtr);
+
+    jdoubleArray out = env->NewDoubleArray(5);
+    jdouble values[5];
+    values[0] = d.accept ? 1.0 : 0.0;
+    values[1] = static_cast<jdouble>(static_cast<int32_t>(d.reason));
+    values[2] = d.newContentFraction;
+    values[3] = static_cast<jdouble>(d.acceptedCount);
+    values[4] = static_cast<jdouble>(d.maxCount);
+    env->SetDoubleArrayRegion(out, 0, 5, values);
+    return out;
+}
+
+} // extern "C"
