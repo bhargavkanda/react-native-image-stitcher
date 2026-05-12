@@ -249,12 +249,42 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
     }
 
     /**
+     * Internal-visibility synchronous stitch entry point so the
+     * orchestrator (RetaiLensIncrementalStitcher) can drive the V16
+     * batch-keyframe finalize without re-marshalling through the
+     * @ReactMethod surface.  Loads the JNI shim if not yet loaded,
+     * then calls straight into native.  Throws on error.
+     */
+    internal fun stitchSync(
+        framePaths: Array<String>,
+        outputPath: String,
+        jpegQuality: Int,
+        warperType: String,
+        blenderType: String,
+        seamFinderType: String,
+        captureOrientation: String,
+        useInscribedRectCrop: Boolean,
+    ): IntArray {
+        ensureNativeStitcher()
+        return nativeStitchFramePaths(
+            framePaths,
+            outputPath,
+            jpegQuality,
+            warperType,
+            blenderType,
+            seamFinderType,
+            captureOrientation,
+            useInscribedRectCrop,
+        )
+    }
+
+    /**
      * Load the JNI shim that exposes cv::Stitcher.  libopencv_java4
      * must be loaded FIRST because the shim dynamically links against
      * it (uses cv::Mat, cv::imread/imwrite, cv::imgproc symbols
      * exported by the fat lib).
      */
-    private fun ensureNativeStitcher() {
+    internal fun ensureNativeStitcher() {
         ensureOpenCv()
         if (!stitcherInitialised.get()) {
             try {

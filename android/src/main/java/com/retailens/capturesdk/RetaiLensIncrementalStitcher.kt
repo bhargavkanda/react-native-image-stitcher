@@ -94,6 +94,42 @@ class RetaiLensIncrementalStitcher(
     /// (the difference is JS-side viewport zoom only).  useRectilinear
     /// is set for 'firstwins-rectilinear'.
     private var firstwinsEngine: IncrementalFirstwinsEngine? = null
+
+    // ── V16 batch-keyframe mode (Android parity with iOS' V16 Phase 1) ─
+    //
+    // Selected for engineMode == 'batch-keyframe'.  No live engine
+    // runs — instead, accepted frames are collected as keyframe paths,
+    // and at finalize() time we hand them all to the JNI shim
+    // (libretailens_stitcher.so) for one-shot cv::Stitcher processing.
+    //
+    // The MVP gate is frame-count-based ("accept every Nth frame
+    // until cap").  iOS uses a pose-based gate (overlap < threshold)
+    // — adding that here is a follow-up that needs ARCore-pose
+    // accumulation across processFrameAtPath calls.  For now, every
+    // N-th frame is good enough to validate end-to-end stitching
+    // parity.
+    private var batchKeyframeMode: Boolean = false
+    private val batchKeyframePaths: MutableList<String> = mutableListOf()
+    private var batchKeyframeFrameCounter: Int = 0
+    /// Accept every Nth frame.  10 is the iOS default capture cadence
+    /// (5-6 keyframes over a ~2-3 second pan = roughly one every 10
+    /// frames at 30fps).
+    private var batchKeyframeAcceptStride: Int = 10
+    /// Hard cap on keyframes to match iOS' default (V16 Phase 1's
+    /// keyframeMaxCount=6).  Going higher inflates cv::Stitcher's
+    /// MultiBandBlender memory; iOS hit OOM at 7+ on some scenes.
+    private var batchKeyframeMaxCount: Int = 6
+    /// Batch knobs threaded through to nativeStitchFramePaths at
+    /// finalize.  Mirror iOS' batchWarperType / batchBlenderType /
+    /// batchSeamFinderType / batchEnableInscribedRectCrop ivars.
+    private var batchWarperType: String = "plane"
+    private var batchBlenderType: String = "multiband"
+    private var batchSeamFinderType: String = "graphcut"
+    private var batchUseInscribedRectCrop: Boolean = false
+    /// Capture orientation at start time.  Drives the bake-rotation
+    /// table inside the JNI shim.  Sourced from configOverrides
+    /// (passed from JS), falling back to "portrait".
+    private var batchCaptureOrientation: String = "portrait"
     private val isRunning = AtomicBoolean(false)
     /// Critic #5 fix: serial dispatcher so concurrent
     /// processFrameAtPath() calls can't race on the engine's canvas.
@@ -161,10 +197,46 @@ class RetaiLensIncrementalStitcher(
             val snapN    = max(1, options.getIntOrDefault("snapshotEveryNAccepts", 1))
             // V12.7 — engineMode now distinguishes 4 variants.  See
             // src/stitching/incremental.ts for the full description.
+            // V16 added 'batch-keyframe' as a fifth variant: no live
+            // engine, frames are saved as JPEGs and handed to
+            // cv::Stitcher (via the JNI shim) at finalize.
             val engineMode = options.getString("engine") ?: "hybrid"
             val isFirstwins = engineMode.startsWith("firstwins")
             val useRectilinear = engineMode == "firstwins-rectilinear"
-            if (isFirstwins) {
+            val isBatchKeyframe = engineMode == "batch-keyframe"
+
+            val configOverrides: ReadableMap? =
+                if (options.hasKey("config")) options.getMap("config") else null
+
+            if (isBatchKeyframe) {
+                // No live engine runs.  Reset the keyframe collector
+                // state.  Read knobs from `config` per the V16 Phase
+                // 1 plumbing pattern.
+                engine = null
+                firstwinsEngine = null
+                batchKeyframeMode = true
+                batchKeyframePaths.clear()
+                batchKeyframeFrameCounter = 0
+                batchKeyframeMaxCount = configOverrides
+                    ?.getIntOrDefault("keyframeMaxCount", 6) ?: 6
+                batchWarperType = configOverrides?.getString("warperType")
+                    ?: "plane"
+                batchBlenderType = configOverrides?.getString("blenderType")
+                    ?: "multiband"
+                batchSeamFinderType = configOverrides?.getString("seamFinderType")
+                    ?: "graphcut"
+                batchUseInscribedRectCrop = configOverrides
+                    ?.getBooleanOrDefault("enableMaxInscribedRectCrop", false)
+                    ?: false
+                // captureOrientation is JS-supplied here (Android
+                // doesn't yet have a native ARCore classifier
+                // equivalent to iOS' nativeCaptureOrientation; the
+                // JS hook is stale but at least it's directional).
+                batchCaptureOrientation = options.getString("captureOrientation")
+                    ?: "portrait"
+            } else if (isFirstwins) {
+                batchKeyframeMode = false
+                batchKeyframePaths.clear()
                 firstwinsEngine = IncrementalFirstwinsEngine(
                     composeWidth = composeW,
                     composeHeight = composeH,
@@ -181,6 +253,8 @@ class RetaiLensIncrementalStitcher(
                 )
                 engine = null
             } else {
+                batchKeyframeMode = false
+                batchKeyframePaths.clear()
                 engine = IncrementalEngine(
                     composeWidth  = composeW,
                     composeHeight = composeH,
@@ -217,10 +291,47 @@ class RetaiLensIncrementalStitcher(
      * substitutes a 65° default, so frames will still be processed,
      * just less gated.
      */
+    /**
+     * V16 batch-keyframe gate.  Called from processFrameAtPath when
+     * batchKeyframeMode is on.  Accept every Nth frame up to the cap,
+     * append to batchKeyframePaths.  Returns an outcome int:
+     *   1 = accepted (frame is now a keyframe)
+     *   2 = rejected (gate skipped this frame)
+     *   3 = rejected — at maxCount cap, no more keyframes accepted
+     *
+     * Future work: replace the every-Nth-frame gate with a pose-
+     * based overlap gate matching iOS' keyframeGate behaviour.
+     */
+    private fun handleBatchKeyframeFrame(path: String): Int {
+        if (batchKeyframePaths.size >= batchKeyframeMaxCount) {
+            return 3
+        }
+        val counter = batchKeyframeFrameCounter++
+        // First frame: always accept (anchor frame).  Then every Nth
+        // frame thereafter.
+        if (counter == 0 || counter % batchKeyframeAcceptStride == 0) {
+            batchKeyframePaths.add(path)
+            return 1
+        }
+        return 2
+    }
+
     @ReactMethod
     fun processFrameAtPath(options: ReadableMap, promise: Promise) {
         val hybrid = this.engine
         val firstwins = this.firstwinsEngine
+        // batch-keyframe mode runs without a live engine — handle it
+        // up-front before the null-check rejects.
+        if (batchKeyframeMode) {
+            val path = options.getString("path")
+                ?: return promise.reject("invalid-options", "path required")
+            val outcome = handleBatchKeyframeFrame(path)
+            val result = Arguments.createMap()
+            result.putInt("outcome", outcome)
+            result.putInt("acceptedCount", batchKeyframePaths.size)
+            promise.resolve(result)
+            return
+        }
         if (hybrid == null && firstwins == null) {
             return promise.reject(
                 "incremental-not-running",
@@ -317,7 +428,7 @@ class RetaiLensIncrementalStitcher(
     fun finalize(options: ReadableMap, promise: Promise) {
         val hybrid = this.engine
         val firstwins = this.firstwinsEngine
-        if (hybrid == null && firstwins == null) {
+        if (hybrid == null && firstwins == null && !batchKeyframeMode) {
             return promise.reject(
                 "incremental-not-running",
                 "No active capture — call start() first.",
@@ -341,6 +452,20 @@ class RetaiLensIncrementalStitcher(
         // Matches iOS V12.1 fix.
         isRunning.set(false)
 
+        // V16 batch-keyframe finalize: snapshot the keyframe state
+        // synchronously under the same "stop ingestion before
+        // dispatching" pattern, then null out the live state.
+        val wasBatchKeyframe = batchKeyframeMode
+        val keyframePathsSnapshot = batchKeyframePaths.toList()
+        val captureOrientationSnapshot = batchCaptureOrientation
+        val warperTypeSnapshot = batchWarperType
+        val blenderTypeSnapshot = batchBlenderType
+        val seamFinderTypeSnapshot = batchSeamFinderType
+        val useInscribedRectCropSnapshot = batchUseInscribedRectCrop
+        batchKeyframeMode = false
+        batchKeyframePaths.clear()
+        batchKeyframeFrameCounter = 0
+
         // Null the bridge refs synchronously NOW so any worker that's
         // about to run sees them as gone (V12.1 pattern).  We keep
         // local refs to do the actual finalize.
@@ -350,7 +475,36 @@ class RetaiLensIncrementalStitcher(
         workScope.launch {
             try {
                 val map = Arguments.createMap()
-                if (firstwins != null) {
+                if (wasBatchKeyframe) {
+                    // V16 batch-keyframe: hand keyframe paths to the
+                    // JNI shim for one-shot cv::Stitcher processing.
+                    if (keyframePathsSnapshot.size < 2) {
+                        throw IllegalStateException(
+                            "Batch-keyframe finalize: only " +
+                            "${keyframePathsSnapshot.size} keyframe(s) " +
+                            "captured — at least 2 required."
+                        )
+                    }
+                    val stitcher = reactContext
+                        .getNativeModule(RetaiLensStitcher::class.java)
+                        ?: throw IllegalStateException(
+                            "RetaiLensStitcher module not registered"
+                        )
+                    val dims = stitcher.stitchSync(
+                        keyframePathsSnapshot.toTypedArray(),
+                        outputPath,
+                        quality,
+                        warperTypeSnapshot,
+                        blenderTypeSnapshot,
+                        seamFinderTypeSnapshot,
+                        captureOrientationSnapshot,
+                        useInscribedRectCropSnapshot,
+                    )
+                    map.putString("panoramaPath", outputPath)
+                    map.putInt("width", dims[0])
+                    map.putInt("height", dims[1])
+                    map.putInt("acceptedCount", keyframePathsSnapshot.size)
+                } else if (firstwins != null) {
                     val snap = firstwins.finalize(outputPath, quality)
                         ?: throw IllegalStateException("firstwins.finalize returned null")
                     map.putString("panoramaPath", snap.panoramaPath)
