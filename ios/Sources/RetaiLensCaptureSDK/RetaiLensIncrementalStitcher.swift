@@ -857,10 +857,54 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             RetaiLensARSession.shared.stop()
         }
 
-        // Hop to the work queue so any frame currently mid-ingest
-        // finishes before we serialize the canvas.  The serial
-        // queue guarantees finalize runs strictly after that frame.
-        workQueue.async {
+        // V16 Phase 1b.fix6 — ARCHITECTURAL: workQueue.sync (not async)
+        // for finalize.
+        //
+        // Background: finalize ran 5 prior fixes targeting an
+        // EXC_BAD_ACCESS in objc_retain inside this closure.  fix4
+        // snapshotted every self.batch*, self.captureOrientation,
+        // self.keyframePoses, and the engine refs into closure-locals
+        // under stateLock, closing the visible torn-pointer race.
+        // Three Sentry traces post-fix4 still showed the same crash
+        // signature (frame 1 = closure #1 in finalize+N, queue =
+        // com.retailens.incremental.stitcher), which per the
+        // systematic-debugging skill (3+ fixes failed on the same
+        // symptom = wrong architecture) means the workQueue.async
+        // pattern itself is the problem, not any specific captured
+        // ivar.
+        //
+        // Why .sync fixes the entire class of issues:
+        //   1. Serializes finalize with start(): the bridge thread
+        //      can't return to JS until the stitch + completion fire.
+        //      JS can't trigger a new start() during the in-flight
+        //      stitch because the JS side awaits the finalize promise.
+        //   2. Eliminates the "1-frame crash" race: with .async, when
+        //      paths.count==1 the closure rejected via completion +
+        //      returned synchronously, but the auto-finalize useEffect
+        //      on JS occasionally fired a SECOND finalize before the
+        //      first one's completion had landed.  With .sync, the
+        //      second finalize is blocked until the first one returns.
+        //   3. Removes the "what if completion's captured resolver/
+        //      rejecter get released by the bridge before the closure
+        //      runs" failure mode entirely — there's no longer any
+        //      window between dispatch and execution.
+        //
+        // Cost: bridge thread blocks for the stitch duration (2-5 s
+        // on 4-6 keyframes at iPhone 16 Pro).  The bridge thread is
+        // NOT main (RCTEventEmitter.requiresMainQueueSetup() is false
+        // and we don't override methodQueue) so UI stays responsive.
+        // Other RetaiLensIncrementalStitcher bridge calls queue up
+        // for ~3 s — acceptable since the JS side is awaiting the
+        // finalize promise anyway and isn't issuing other calls
+        // during that interval.
+        //
+        // Deadlock check: workQueue is consumed by consumeFrame
+        // (AR delegate, line ~1424) and finalize.  If the AR delegate
+        // is currently mid-frame on workQueue when we call .sync, the
+        // .sync waits for it (~50-100 ms JPEG encode) — not a
+        // deadlock, just brief serialization.  No other queue
+        // dispatches synchronously TO workQueue, so .sync is safe.
+        workQueue.sync {
             // V16 Phase 1b.fix1 — defer-restart AR session.  Fires
             // on every exit path (success, error, early return).
             // Restart is dispatched to main because ARSession.run()
@@ -889,13 +933,82 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     os_log(.fault, log: Self.diagLog,
                            "[V16-batch-keyframe] finalize ENTRY frames=%d",
                            paths.count)
+                    // V16 Phase 1b.fix7 — single-keyframe UX:
+                    // accept a 1-frame finalize by copying the lone
+                    // keyframe JPEG to outputPath (preserving the JPEG
+                    // bytes as-is, no re-encode).  Previously this path
+                    // rejected with code 9003, and an auto-finalize
+                    // useEffect on JS could fire it during a quick
+                    // tap-and-release.  The user-visible failure
+                    // ("9003 only 1 keyframe saved") was both
+                    // confusing AND occasionally racing with a second
+                    // finalize call into the EXC_BAD_ACCESS path that
+                    // fix4/fix6 closed.  Returning the single frame as
+                    // the output is the right UX: a single keyframe IS
+                    // a valid panorama capture (just one shot).
                     if paths.count < 2 {
+                        if paths.count == 1 {
+                            let src = paths[0]
+                            do {
+                                // Remove any pre-existing file at the
+                                // output path — copyItem refuses to
+                                // overwrite, and a stale tmp file from
+                                // a prior auto-finalize attempt is the
+                                // common case.
+                                let fm = FileManager.default
+                                if fm.fileExists(atPath: cleaned) {
+                                    try fm.removeItem(atPath: cleaned)
+                                }
+                                try fm.copyItem(atPath: src, toPath: cleaned)
+                                // Read back the JPEG dimensions for
+                                // the result dictionary — match
+                                // OpenCVStitcher.stitchFramePaths'
+                                // {width, height} contract so JS
+                                // doesn't have to special-case a
+                                // single-frame result.
+                                var width: Int = 0
+                                var height: Int = 0
+                                if let provider = CGDataProvider(filename: cleaned),
+                                   let img = CGImage(
+                                    jpegDataProviderSource: provider,
+                                    decode: nil,
+                                    shouldInterpolate: false,
+                                    intent: .defaultIntent) {
+                                    width = img.width
+                                    height = img.height
+                                }
+                                os_log(.fault, log: Self.diagLog,
+                                       "[V16-batch-keyframe.fix7] single-keyframe finalize: copied %{public}@ → %{public}@ (%dx%d)",
+                                       src, cleaned,
+                                       Int32(width), Int32(height))
+                                completion([
+                                    "panoramaPath": cleaned,
+                                    "width": width,
+                                    "height": height,
+                                    "acceptedCount": 1,
+                                    "droppedBackpressure": drops,
+                                    "batchKeyframeSessionDir":
+                                        collector?.sessionDir ?? "",
+                                    "batchKeyframeCount": 1,
+                                    "singleKeyframe": true,
+                                ], nil)
+                                return
+                            } catch let copyErr as NSError {
+                                // Fall through to the legacy "not
+                                // enough keyframes" rejection so the
+                                // user at least gets a discoverable
+                                // error rather than a silent hang.
+                                os_log(.fault, log: Self.diagLog,
+                                       "[V16-batch-keyframe.fix7] single-keyframe copy failed: %{public}@",
+                                       copyErr.localizedDescription)
+                            }
+                        }
                         collector?.cleanup()
                         completion(nil, NSError(
                             domain: "RetaiLensIncremental",
                             code: 9003,
                             userInfo: [NSLocalizedDescriptionKey:
-                                "Batch-keyframe finalize: only \(paths.count) keyframe(s) saved — at least 2 required."]
+                                "Batch-keyframe finalize: 0 keyframes saved — capture didn't accept any frames."]
                         ))
                         return
                     }
