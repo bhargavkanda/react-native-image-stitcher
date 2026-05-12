@@ -449,6 +449,17 @@ class RetaiLensIncrementalStitcher(
                                               // per-snapshot file
                                               // already (no copy
                                               // needed).
+                // Emit the same state event the AR path emits so
+                // the JS LiveFrameStrip + "Keyframes n/max" pill
+                // work identically on the vision-camera fallback
+                // path.
+                emitBatchKeyframeAcceptedState(
+                    thumbnailPath = path,
+                    keyframeIndex = batchKeyframePaths.size - 1,
+                    keyframeCount = batchKeyframePaths.size,
+                    keyframeMax = keyframeGate.maxCount,
+                    isLandscape = pose.imageWidth >= pose.imageHeight,
+                )
             }
             result.putInt("acceptedCount", batchKeyframePaths.size)
             promise.resolve(result)
@@ -799,10 +810,19 @@ class RetaiLensIncrementalStitcher(
                 "ingestFromARCameraView batch: ACCEPTED keyframe #${batchKeyframePaths.size}" +
                     " → $persistentPath",
             )
-            // TODO(P1-followup): emit `batchKeyframeThumbnailPath`
-            // state event so the JS LiveFrameStrip renders thumbnails
-            // as frames are accepted (one of the missing state-event
-            // fields from the parity audit).
+            // Emit a state event so the JS-side LiveFrameStrip
+            // renders the thumbnail strip + the "Keyframes: n/max"
+            // pill updates in real time.  iOS counterpart:
+            // emitBatchKeyframeAcceptedState in
+            // RetaiLensIncrementalStitcher.swift — same field set
+            // so the JS subscriber doesn't branch on platform.
+            emitBatchKeyframeAcceptedState(
+                thumbnailPath = persistentPath,
+                keyframeIndex = batchKeyframePaths.size - 1,
+                keyframeCount = batchKeyframePaths.size,
+                keyframeMax = keyframeGate.maxCount,
+                isLandscape = imageWidth >= imageHeight,
+            )
             return
         }
 
@@ -947,6 +967,49 @@ class RetaiLensIncrementalStitcher(
         reactContext
             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             .emit("RetaiLensIncrementalStateUpdate", state)
+    }
+
+    /**
+     * Emit a state event when a batch-keyframe is accepted.  Carries
+     * the on-disk thumbnail path so JS can render it in the
+     * LiveFrameStrip + advance the "Keyframes: N/M" pill.
+     *
+     * iOS-parity field set — mirrors
+     * RetaiLensIncrementalStitcher.swift::emitBatchKeyframeAcceptedState
+     * exactly (same field names, types, order) so the JS subscriber
+     * in incremental.ts doesn't need to branch on platform.
+     */
+    private fun emitBatchKeyframeAcceptedState(
+        thumbnailPath: String,
+        keyframeIndex: Int,
+        keyframeCount: Int,
+        keyframeMax: Int,
+        isLandscape: Boolean,
+    ) {
+        val state = Arguments.createMap()
+        state.putNull("panoramaPath")
+        state.putInt("width", 0)
+        state.putInt("height", 0)
+        state.putInt("acceptedCount", keyframeCount)
+        // Outcome 0 = AcceptedHigh — matches the FrameOutcome enum
+        // ordinal that the live engines emit.  Keeps the iOS
+        // RetaiLensIncrementalOutcome contract: batch-keyframe
+        // accepts all carry outcome=acceptedHigh.
+        state.putInt("outcome", 0)
+        state.putDouble("confidence", 1.0)
+        state.putDouble("overlapPercent", -1.0)
+        state.putInt("processingMs", 0)
+        state.putBoolean("isLandscape", isLandscape)
+        state.putInt("paintedExtent", 0)   // batch-keyframe doesn't
+        state.putInt("panExtent", 0)        // paint a live canvas
+        state.putInt("keyframeMax", keyframeMax)
+        // Batch-keyframe extras the live-engine schema doesn't carry
+        // — JS reads these directly from the event payload (matches
+        // iOS' direct-userInfo-write at the bottom of the iOS
+        // emitter).
+        state.putString("batchKeyframeThumbnailPath", thumbnailPath)
+        state.putInt("batchKeyframeIndex", keyframeIndex)
+        emitState(state)
     }
 
     // ── OpenCV bootstrap ────────────────────────────────────────────
