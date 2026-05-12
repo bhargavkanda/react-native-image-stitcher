@@ -144,6 +144,12 @@ class RetaiLensIncrementalStitcher(
     /// allocation.  `reset()` is called between captures.
     private val keyframeGate = KeyframeGate()
 
+    /// P3-G diagnostic — rate-limit the per-frame log in
+    /// ingestFromARCameraView so we don't spam logcat at 60Hz but
+    /// still see the "0 frames captured" mystery resolve to a
+    /// specific failure mode.
+    private var frameIngestLogTick: Int = 0
+
     private val isRunning = AtomicBoolean(false)
     /// Critic #5 fix: serial dispatcher so concurrent
     /// processFrameAtPath() calls can't race on the engine's canvas.
@@ -301,6 +307,23 @@ class RetaiLensIncrementalStitcher(
             // isn't mounted (host is using vision-camera + the gyro
             // driver from useIncrementalAndroidDriver instead).
             arCameraViewRef?.setIncrementalIngestionActive(true)
+
+            // ── P3-G diagnostic ──────────────────────────────────
+            // Surfaces start() state so we can see in logcat: (a)
+            // engine mode actually selected, (b) batchKeyframeMode
+            // flag, (c) KeyframeGate config, (d) whether the AR
+            // view is bound.  Each of these is a potential failure
+            // point for the "0 keyframes captured" symptom.
+            android.util.Log.i(
+                "RetaiLensIncrementalStitcher",
+                "start() ENTRY: engineMode=$engineMode " +
+                    "batchKeyframeMode=$batchKeyframeMode " +
+                    "gate.enabled=${keyframeGate.enabled} " +
+                    "gate.maxCount=${keyframeGate.maxCount} " +
+                    "gate.threshold=${keyframeGate.overlapThreshold} " +
+                    "arCameraViewBound=${arCameraViewRef != null} " +
+                    "isRunning=${isRunning.get()}",
+            )
 
             val map = Arguments.createMap()
             map.putBoolean("ok", true)
@@ -584,10 +607,22 @@ class RetaiLensIncrementalStitcher(
                             "captured — at least 2 required."
                         )
                     }
-                    val stitcher = reactContext
-                        .getNativeModule(RetaiLensStitcher::class.java)
+                    // Use the static `bridgeInstance` accessor on
+                    // RetaiLensStitcher rather than
+                    // reactContext.getNativeModule — the latter
+                    // returns null under bridgeless / new-architecture
+                    // mode even for legacy-registered modules.
+                    // Empirically: getNativeModule failed on Galaxy
+                    // A35 with `RetaiLensStitcher module not
+                    // registered`, despite the module being present
+                    // in RetaiLensCapturePackage.createNativeModules.
+                    // Same pattern that already works for
+                    // RetaiLensIncrementalStitcher.bridgeInstance.
+                    val stitcher = RetaiLensStitcher.bridgeInstance
                         ?: throw IllegalStateException(
-                            "RetaiLensStitcher module not registered"
+                            "RetaiLensStitcher.bridgeInstance is null " +
+                                "— module hasn't been instantiated yet. " +
+                                "Check RetaiLensCapturePackage registration."
                         )
                     val dims = stitcher.stitchSync(
                         keyframePathsSnapshot.toTypedArray(),
@@ -719,6 +754,22 @@ class RetaiLensIncrementalStitcher(
                 }
 
             val decision = keyframeGate.evaluate(pose, planeMatrix)
+
+            // ── P3-G diagnostic ──────────────────────────────────
+            // Rate-limit at the same cadence as the plane evaluator
+            // (every 30 frames ≈ 2 Hz at 60Hz frame rate) but ALWAYS
+            // log accepts (rare, important signal).
+            if (decision.accept || (frameIngestLogTick++ % 30 == 0)) {
+                android.util.Log.i(
+                    "RetaiLensIncrementalStitcher",
+                    "ingestFromARCameraView batch: " +
+                        "accept=${decision.accept} reason=${decision.reason} " +
+                        "newContent=${"%.3f".format(decision.newContentFraction)} " +
+                        "gateCount=${decision.acceptedCount} " +
+                        "paths.size=${batchKeyframePaths.size} " +
+                        "planeAvailable=${planeMatrix != null}",
+                )
+            }
             if (!decision.accept) {
                 // Frame rejected by the gate — could be overlap-too-
                 // high (most common), max-reached, or projection-
@@ -732,6 +783,10 @@ class RetaiLensIncrementalStitcher(
             // source don't clobber it.
             val persistentPath = copyKeyframeToStore(path)
             if (persistentPath == null) {
+                android.util.Log.w(
+                    "RetaiLensIncrementalStitcher",
+                    "ingestFromARCameraView batch: ACCEPTED but copy FAILED — frame dropped",
+                )
                 // Copy failed — drop the frame.  Logged inside
                 // copyKeyframeToStore.  Counter was already incremented
                 // inside the gate; that's fine — the next acceptable
@@ -739,6 +794,11 @@ class RetaiLensIncrementalStitcher(
                 return
             }
             batchKeyframePaths.add(persistentPath)
+            android.util.Log.i(
+                "RetaiLensIncrementalStitcher",
+                "ingestFromARCameraView batch: ACCEPTED keyframe #${batchKeyframePaths.size}" +
+                    " → $persistentPath",
+            )
             // TODO(P1-followup): emit `batchKeyframeThumbnailPath`
             // state event so the JS LiveFrameStrip renders thumbnails
             // as frames are accepted (one of the missing state-event

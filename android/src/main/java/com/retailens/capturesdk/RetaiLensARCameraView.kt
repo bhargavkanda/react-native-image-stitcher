@@ -170,6 +170,12 @@ class RetaiLensARCameraView @JvmOverloads constructor(
     /// to the engine; when false, the per-frame work skips ingestion
     /// (the camera feed continues to render either way).
     fun setIncrementalIngestionActive(active: Boolean) {
+        // P3-G diagnostic — surfaces whether the camera view ever
+        // got "engage the ingestion path" command from the stitcher.
+        // Common failure mode: stitcher.start() ran, but
+        // arCameraViewRef was null (view not bound yet) → this never
+        // fires → forwardToIncremental never runs → 0 frames.
+        Log.i(TAG, "setIncrementalIngestionActive: $active (prev=$ingestActive)")
         ingestActive = active
     }
 
@@ -290,16 +296,28 @@ class RetaiLensARCameraView @JvmOverloads constructor(
         RetaiLensARSession.instance?.updateTrackingState(camera.trackingState)
     }
 
+    /// P3-G diagnostic — rate-limit the per-frame log so we can see
+    /// at-a-glance whether forwardToIncremental is even running, vs
+    /// being short-circuited at the `if (ingestActive)` guard in
+    /// onDrawFrame.
+    private var forwardLogTick: Int = 0
+
     private fun forwardToIncremental(
         frame: com.google.ar.core.Frame,
         camera: Camera,
     ) {
+        if (forwardLogTick++ % 30 == 0) {
+            Log.i(TAG, "forwardToIncremental: ingestActive=$ingestActive trackingState=${camera.trackingState}")
+        }
         // Acquire the camera image.  Each call may throw
         // NotYetAvailableException for the first ~1-2 frames before
         // ARCore catches up — silently skip those.
         val image = try {
             frame.acquireCameraImage()
         } catch (t: Throwable) {
+            if (forwardLogTick % 30 == 1) {
+                Log.w(TAG, "forwardToIncremental: acquireCameraImage failed: ${t.message}")
+            }
             return
         }
         try {

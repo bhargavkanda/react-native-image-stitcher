@@ -304,11 +304,42 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
 
     private class StitcherException(val code: String, message: String) : Exception(message)
 
+    init {
+        // Singleton-style accessor for callers that need the
+        // RetaiLensStitcher instance from outside the @ReactMethod
+        // path (e.g. RetaiLensIncrementalStitcher.finalize() during
+        // batch-keyframe stitching).
+        //
+        // Why this exists:
+        //   reactContext.getNativeModule(RetaiLensStitcher::class.java)
+        //   returns null under bridgeless / new-architecture mode for
+        //   modules registered the legacy way (ReactPackage +
+        //   createNativeModules), even when the module is fully
+        //   registered.  Empirically confirmed by Galaxy A35
+        //   capture session 2026-05-13: stitcher IS registered (see
+        //   RetaiLensCapturePackage.kt) but lookup returned null →
+        //   "RetaiLensStitcher module not registered" IllegalState
+        //   at finalize time.
+        //
+        // Same pattern RetaiLensIncrementalStitcher uses (its
+        // `bridgeInstance` companion).
+        bridgeInstance = this
+    }
+
     companion object {
         @JvmStatic
         private val opencvInitialised = AtomicBoolean(false)
 
         @JvmStatic
         private val stitcherInitialised = AtomicBoolean(false)
+
+        /// Direct access to the last-constructed RetaiLensStitcher.
+        /// RN may rebuild modules across reloads; the lookup always
+        /// returns the latest reference.  Read-only from outside;
+        /// only the init {} above sets it.
+        @JvmStatic
+        @Volatile
+        var bridgeInstance: RetaiLensStitcher? = null
+            private set
     }
 }
