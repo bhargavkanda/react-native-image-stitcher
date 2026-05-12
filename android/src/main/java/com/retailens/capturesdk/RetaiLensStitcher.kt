@@ -46,37 +46,114 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
 
     override fun getName(): String = "RetaiLensStitcher"
 
+    /**
+     * JNI bridge to our custom-built OpenCV stitcher.  Mirrors iOS'
+     * OpenCVStitcher.stitchFramePaths so the batch-keyframe flow has
+     * parity across platforms.  Implementation:
+     *   retailens-capture-sdk/android/src/main/cpp/retailens_stitcher.cpp
+     *
+     * @param framePaths  input JPEG paths in capture order (≥2 required)
+     * @param outputPath  destination JPEG path
+     * @param jpegQuality 0..100
+     * @param warperType  "plane" | "cylindrical" | "spherical"
+     * @param blenderType "multiband" | "feather"
+     * @param seamFinderType "graphcut" | "skip" | "voronoi"
+     * @param captureOrientation "portrait" | "portrait-upside-down"
+     *                            | "landscape-left" | "landscape-right"
+     *                            (drives output bake-rotation table,
+     *                            mirrors iOS)
+     * @param useInscribedRectCrop  reserved for future parity with
+     *                              iOS' inscribed-rect crop toggle;
+     *                              currently bbox-only on Android
+     * @return [width, height] of the written JPEG
+     * @throws RuntimeException on stitch failure
+     */
+    private external fun nativeStitchFramePaths(
+        framePaths: Array<String>,
+        outputPath: String,
+        jpegQuality: Int,
+        warperType: String,
+        blenderType: String,
+        seamFinderType: String,
+        captureOrientation: String,
+        useInscribedRectCrop: Boolean,
+    ): IntArray
+
     // ── Stitch frames → panorama ─────────────────────────────────
 
     @ReactMethod
     fun stitch(options: ReadableMap, promise: Promise) {
-        // OpenCV's prebuilt Android `libopencv_java4.so` doesn't
-        // contain `cv::Stitcher::create` symbols (the stitching
-        // module is dropped from the binary at OpenCV's build
-        // time, not just from Java bindings).  Reject with the
-        // SDK's standard "not implemented on this platform" code
-        // so the JS side falls through to the host app's
-        // panorama-unsupported flow — same as web/older builds.
-        promise.reject(
-            "STITCH_NOT_IMPLEMENTED",
-            "stitchFrames is not yet implemented on Android.  OpenCV's "
-                + "prebuilt Android distribution drops the stitching "
-                + "module; enabling it requires building OpenCV from "
-                + "source with BUILD_opencv_stitching=ON.  See the SDK's "
-                + "android/build.gradle comment for next steps.",
-        )
+        // Unmarshal options.  We accept iOS-aligned parameter names
+        // so the JS-side code stays platform-agnostic.
+        val framePathsArr = options.getArray("framePaths")
+        if (framePathsArr == null || framePathsArr.size() < 2) {
+            promise.reject(
+                "invalid-options",
+                "framePaths must be an array of at least 2 paths " +
+                    "(got ${framePathsArr?.size() ?: 0}).",
+            )
+            return
+        }
+        val framePaths = Array(framePathsArr.size()) {
+            stripFileScheme(framePathsArr.getString(it) ?: "")
+        }
+        val outputPath = options.getString("outputPath")
+            ?.let(::stripFileScheme)
+            ?: return promise.reject("invalid-options", "outputPath required")
+        val quality = if (options.hasKey("quality"))
+            options.getInt("quality") else 85
+        val warperType = options.getString("warperType") ?: "plane"
+        val blenderType = options.getString("blenderType") ?: "multiband"
+        val seamFinderType = options.getString("seamFinderType") ?: "graphcut"
+        val captureOrientation = options.getString("captureOrientation") ?: "portrait"
+        val useInscribedRectCrop = options.hasKey("useInscribedRectCrop") &&
+            options.getBoolean("useInscribedRectCrop")
+
+        CoroutineScope(Dispatchers.Default).launch {
+            val start = System.currentTimeMillis()
+            try {
+                ensureNativeStitcher()
+                val dims = nativeStitchFramePaths(
+                    framePaths,
+                    outputPath,
+                    quality,
+                    warperType,
+                    blenderType,
+                    seamFinderType,
+                    captureOrientation,
+                    useInscribedRectCrop,
+                )
+                val duration = System.currentTimeMillis() - start
+                val result = WritableNativeMap().apply {
+                    putString("outputPath", outputPath)
+                    putInt("width", dims[0])
+                    putInt("height", dims[1])
+                    putInt("durationMs", duration.toInt())
+                }
+                promise.resolve(result)
+            } catch (t: Throwable) {
+                promise.reject(
+                    "stitch-failed",
+                    "Native stitch threw: ${t.message ?: t.javaClass.simpleName}",
+                    t,
+                )
+            }
+        }
     }
 
     // ── Stitch video → panorama (extract + stitch + cleanup) ─────
 
     @ReactMethod
     fun stitchVideo(options: ReadableMap, promise: Promise) {
+        // Video → frames extraction not yet implemented on Android.
+        // The batch-keyframe flow drives stitch() directly with
+        // already-captured frame paths.  If video-driven panorama
+        // ever ships on Android, extract via MediaMetadataRetriever
+        // and delegate to nativeStitchFramePaths.
         promise.reject(
-            "STITCH_NOT_IMPLEMENTED",
-            "stitchVideo is not yet implemented on Android.  Reason: "
-                + "OpenCV's prebuilt Android library doesn't include "
-                + "cv::Stitcher.  See android/build.gradle for the path "
-                + "to a custom OpenCV build that re-enables stitching.",
+            "STITCH_VIDEO_NOT_IMPLEMENTED",
+            "stitchVideo() is not implemented on Android.  Use " +
+                "stitch() with pre-extracted framePaths instead.",
         )
     }
 
@@ -171,10 +248,37 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
         }
     }
 
+    /**
+     * Load the JNI shim that exposes cv::Stitcher.  libopencv_java4
+     * must be loaded FIRST because the shim dynamically links against
+     * it (uses cv::Mat, cv::imread/imwrite, cv::imgproc symbols
+     * exported by the fat lib).
+     */
+    private fun ensureNativeStitcher() {
+        ensureOpenCv()
+        if (!stitcherInitialised.get()) {
+            try {
+                System.loadLibrary("retailens_stitcher")
+                stitcherInitialised.set(true)
+            } catch (e: UnsatisfiedLinkError) {
+                throw IllegalStateException(
+                    "JNI shim 'retailens_stitcher' failed to load. " +
+                        "Check that the custom OpenCV build artifacts " +
+                        "(libopencv_java4.so + libopencv_stitching.a) " +
+                        "are in vendor/OpenCV-android-sdk/sdk/native/.",
+                    e,
+                )
+            }
+        }
+    }
+
     private class StitcherException(val code: String, message: String) : Exception(message)
 
     companion object {
         @JvmStatic
         private val opencvInitialised = AtomicBoolean(false)
+
+        @JvmStatic
+        private val stitcherInitialised = AtomicBoolean(false)
     }
 }
