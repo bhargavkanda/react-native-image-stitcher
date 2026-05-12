@@ -2,6 +2,15 @@
  * LiveFrameStrip — mini strip of live preview snapshots captured
  * during a panorama hold.
  *
+ * @deprecated V16 Phase 2 — folded into `<PanoramaBandOverlay />`,
+ *   which now renders BOTH the cumulative-panorama thumbnail AND the
+ *   scrolling per-keyframe strip in one cohesive band (single
+ *   component, iOS + Android parity).  New host code should mount
+ *   `<PanoramaBandOverlay state={...} frameUris={...} />` and skip
+ *   `<LiveFrameStrip />` entirely.  This file is kept exported so
+ *   external consumers of @retailens/capture-sdk don't break on
+ *   upgrade; it will be deleted in a future major version.
+ *
  *   ┌──────────────────────────────────────────────────────────┐
  *   │ [f1][f2][f3][f4]…                                        │ ← portrait (top, L→R)
  *   │                                                          │

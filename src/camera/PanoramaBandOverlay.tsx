@@ -1,55 +1,66 @@
 /**
- * PanoramaBandOverlay — V12.12 (re-arch).
+ * PanoramaBandOverlay — V16 Phase 2 (merged band + strip).
  *
- * Floating "band" overlay for the live incremental panorama,
- * matching the V3 mockups the user validated:
+ * SINGLE source of truth for the live "progress strip" that sits on
+ * top of the camera preview during a panorama hold.  Replaces what
+ * was previously TWO components rendered side-by-side:
  *
- *   • Portrait device  → horizontal band, vertically centred,
- *                        thumbnail at LEFT, arrow pointing RIGHT.
- *   • Landscape device → vertical band on user's LEFT (full
- *                        screen height), thumbnail at user's TOP,
- *                        arrow pointing DOWN.
+ *   1. <LiveFrameStrip />        — fed by per-keyframe thumbnail URIs
+ *                                  (batch-keyframe engine) OR by
+ *                                  periodic vision-camera snapshots.
+ *   2. <PanoramaBandOverlay />   — a single cumulative-panorama
+ *                                  thumbnail with a "fill ratio"
+ *                                  bar growing with the pan.
  *
- * Why this is V12.12:
+ * The split made the UI visually noisy AND made it differ between
+ * platforms when one side emitted keyframe events and the other
+ * didn't.  V16 Phase 2 collapses them into ONE component that:
  *
- *   The earlier band took its orientation from `useDeviceOrientation`
- *   (a JS accelerometer hook).  That hook is unreliable when iOS
- *   interface-orientation lock is on — exactly the case here.  The
- *   engine ALREADY detects orientation correctly from `R_panToCam`
- *   at first frame (V12.6 fix).  V12.12 plumbs that detection into
- *   `IncrementalState.isLandscape` and the band reads it from there.
+ *   • Renders a horizontally-scrolling list of per-keyframe
+ *     thumbnails when `frameUris` is non-empty (batch-keyframe
+ *     mode).  Each frame the KeyframeGate accepts shows up as a
+ *     mini-thumb.
  *
- *   This means: the band is right whenever the engine is right.  No
- *   second source of truth.
+ *   • Falls back to a SINGLE cumulative-panorama thumbnail (the
+ *     V12.14.9 fill-ratio behaviour) when `frameUris` is empty —
+ *     i.e. the live-stitching engines that don't surface
+ *     per-keyframe paths.  This preserves the existing visual for
+ *     hybrid / firstwins / firstwins-rectilinear engines.
  *
- * Layout choices:
+ *   • Edge-pinned to the BOTTOM of the camera area in portrait, and
+ *     to the user's RIGHT in landscape (which corresponds to
+ *     JS-bottom under the app's portrait-lock).  Both anchors keep
+ *     the band out of the centre of the scene the operator is
+ *     framing.
  *
- *   • Landscape: ONE default = landscape-left positioning (per user
- *     instruction "one default").  The band sits at JS-bottom (full
- *     JS-width × BAND_THICKNESS), which appears as a vertical strip
- *     on the user's LEFT when they hold the phone landscape-left
- *     (camera lens pointing to their right).  Users holding the
- *     phone landscape-right (rotated 180° from this) will see the
- *     band on their right edge instead — accepted as the cost of
- *     a single default.  Most field reps hold landscape-left so
- *     this is the right default.
+ *   • Trailing arrow points along the pan axis (→ in portrait, ← in
+ *     landscape-left's user perception).  Arrow always sits at the
+ *     pan-END side, so the LATEST keyframe abuts the arrow.
  *
- *   • Pre-first-frame: `state` is null, so we render the portrait
- *     layout as a safe initial guess.  Once the engine emits its
- *     first state event with `isLandscape`, the band re-renders
- *     in the correct layout.
+ *   • Auto-scrolls a `<ScrollView>` so the latest keyframe stays
+ *     visible regardless of how many frames have been accumulated.
  *
- * Arrow glyphs picked per orientation rather than rotated:
+ * Empty-state intentional non-design:
+ *   The KeyframeGate force-accepts the FIRST frame of every capture
+ *   (see C++ `AcceptFirstAnchoredOnPlane` / `AcceptFirstNoPlane` in
+ *   keyframe_gate.cpp).  By the time the operator's perceived "the
+ *   band appeared", we already have at least one thumb/snapshot in
+ *   flight.  We therefore don't render any "no frames yet"
+ *   placeholder — the empty period is sub-perceptual.
  *
- *   • portrait  → "→" (points JS-right == user-right)
- *   • landscape → "←" (points JS-left  == user-bottom in landscape-left
- *                       — that's the user's "down the pan axis"
- *                       direction)
+ * Why this component is in @retailens/capture-sdk (not host):
+ *   It's the same JSX shipped to iOS and Android.  Differences in
+ *   what shows up come only from native-emitted data
+ *   (`state.batchKeyframeThumbnailPath` / `state.panoramaPath`),
+ *   not from per-platform component code.  That's exactly the parity
+ *   property the user wants: "the UI should not differ between iOS
+ *   and Android — it's the same UI reused".
  */
 
-import React, { useMemo } from 'react';
+import React, { useCallback, useMemo, useRef } from 'react';
 import {
   Image,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -59,51 +70,72 @@ import type { IncrementalState } from '../stitching/incremental';
 
 
 export interface PanoramaBandOverlayProps {
-  /** Latest engine state.  Pass `useIncrementalStitcher().state`. */
+  /**
+   * Latest engine state.  Pass `useIncrementalStitcher().state`.
+   * Used for orientation detection, single-thumb fallback URI, and
+   * fill-ratio when no per-keyframe URIs are provided.
+   */
   state: IncrementalState | null;
+  /**
+   * Optional list of per-keyframe thumbnail URIs accumulated by the
+   * host as the native batch-keyframe engine emits
+   * `batchKeyframeThumbnailPath` events.  When non-empty, the band
+   * renders these as a scrolling mini-thumb strip.  When empty or
+   * undefined, the band falls back to the single cumulative-panorama
+   * thumbnail (legacy live-engine visual).
+   *
+   * Caller should cap the list length itself if needed (e.g. the
+   * AuditCaptureScreen already trims at 24 entries).  This component
+   * applies an internal hard cap as a safety net so a runaway
+   * emission doesn't blow up the scroll view.
+   */
+  frameUris?: string[];
 }
 
 
-// Layout constants — picked to read clearly at arm's length.
+// ── Layout constants — tuned to read clearly at arm's length ────────
 const BAND_PADDING = 6;
-const BAND_THICKNESS = 64;        // user-perceived "thinness" of the band
-const PORTRAIT_BAND_MAX_LEN = 320; // cap on the band's pan-axis length in portrait
-const THUMB_INNER = BAND_THICKNESS - BAND_PADDING * 2;
-// V12.13 — cap on how big the thumb can grow along the pan axis
-// before the arrow gets squeezed.  ~60 % of a typical phone's
-// short JS dim leaves clearly visible arrow track on either side.
-const THUMB_MAX_PAN_LEN = 240;
+const BAND_THICKNESS = 64;
+const ARROW_TRACK_LEN = 44;          // fixed slot for the arrow glyph
+const SINGLE_THUMB_INNER = BAND_THICKNESS - BAND_PADDING * 2;
+const SINGLE_THUMB_MAX_PAN_LEN = 240;
+const MULTI_THUMB_LEN = 48;
+const MULTI_THUMB_GAP = 4;
+const MULTI_THUMB_HARD_CAP = 32;     // safety net; host typically caps at 24
 
 
-type Layout = {
+type LayoutKind = 'portrait' | 'landscape';
+interface Layout {
+  kind: LayoutKind;
+  /** Outer container style — positioning + flexDirection. */
   band: ViewStyle;
-  // V12.13: thumb dims are no longer in Layout — they're computed
-  // separately from the pano natural aspect so the thumb can grow
-  // along the band's pan axis as the user pans.  See `thumbPanLen`
-  // in the component body.
-  arrowTrack: ViewStyle;
+  /** Direction used by both the outer band AND the scroll content. */
+  flexDirection: 'row' | 'row-reverse';
+  /** Unicode arrow pointing along the user-perceived pan axis. */
   arrowGlyph: string;
-};
+}
 
 
 /**
- * Resolve the JS-coord layout for the band given the engine-detected
- * orientation.  Two cases:
+ * Resolve band layout from engine-detected orientation.  Two cases:
  *
- *   • isLandscape == true (engine sees landscape capture) → vertical
- *     band on user's LEFT.  In the portrait-locked JS coord system
- *     when device is held landscape-left, user's LEFT = JS-BOTTOM,
- *     so we anchor the band there.  Inside (row-reverse): thumbnail
- *     at JS-RIGHT (= user-top), arrow at JS-LEFT (= user-bottom).
+ *   • LANDSCAPE (engine sees landscape capture, e.g. user is panning
+ *     vertically).  Phone held landscape-left + app portrait-locked
+ *     means JS-bottom appears on the user's RIGHT, so we anchor the
+ *     band to JS-bottom and use `row-reverse` so the latest keyframe
+ *     ends up on the user's BOTTOM (which is JS-left in this case),
+ *     right next to the arrow.
  *
- *   • isLandscape == false (engine sees portrait capture, OR no
- *     state yet) → horizontal band, vertically centred at top:40%.
- *     Inside (row): thumbnail at JS-LEFT (= user-left, start of
- *     horizontal pan), arrow at JS-RIGHT (= user-right).
+ *   • PORTRAIT (engine sees portrait capture OR no first-frame
+ *     decision yet).  Anchor to JS-bottom (= user-bottom) so the
+ *     band hovers above the controls bar without covering the
+ *     operator's framing area.  Use `row` so the latest keyframe
+ *     sits at JS-right (= user-right), abutting the arrow.
  */
-function layoutForOrientation(isLandscape: boolean): Layout {
+function layoutFor(isLandscape: boolean): Layout {
   if (isLandscape) {
     return {
+      kind: 'landscape',
       band: {
         position: 'absolute',
         left: 0,
@@ -116,35 +148,29 @@ function layoutForOrientation(isLandscape: boolean): Layout {
         paddingVertical: BAND_PADDING,
         backgroundColor: 'rgba(0, 0, 0, 0.55)',
       },
-      arrowTrack: {
-        flex: 1,
-        alignItems: 'center',
-        justifyContent: 'center',
-        paddingHorizontal: BAND_PADDING,
-      },
-      arrowGlyph: '←', // user perceives JS-left as their "down" in landscape-left
+      flexDirection: 'row-reverse',
+      // JS-left = user-bottom in landscape-left → arrow trails downward.
+      arrowGlyph: '←',
     };
   }
-  // Portrait.
   return {
+    kind: 'portrait',
     band: {
       position: 'absolute',
-      alignSelf: 'center',
-      top: '40%',
+      left: 16,
+      right: 16,
+      // Edge-pinned to bottom in portrait (user's Q2 answer).
+      // 16 px of breathing room above the host's controls bar so
+      // the band doesn't visually fuse with the shutter row.
+      bottom: 16,
+      height: BAND_THICKNESS,
       flexDirection: 'row',
       alignItems: 'center',
       paddingHorizontal: BAND_PADDING,
       paddingVertical: BAND_PADDING,
       backgroundColor: 'rgba(0, 0, 0, 0.55)',
-      maxWidth: PORTRAIT_BAND_MAX_LEN,
-      height: BAND_THICKNESS,
     },
-    arrowTrack: {
-      flex: 1,
-      alignItems: 'center',
-      justifyContent: 'center',
-      paddingHorizontal: BAND_PADDING,
-    },
+    flexDirection: 'row',
     arrowGlyph: '→',
   };
 }
@@ -152,79 +178,74 @@ function layoutForOrientation(isLandscape: boolean): Layout {
 
 export function PanoramaBandOverlay({
   state,
+  frameUris,
 }: PanoramaBandOverlayProps): React.JSX.Element | null {
-  // Cache-bust the panorama URI.  Same pattern as
-  // IncrementalStitcherView — the native side rotates filenames
-  // and we tag with acceptedCount as belt-and-suspenders since
-  // RN's iOS image cache sometimes ignores file:// query strings.
-  const imageUri = useMemo(() => {
+  // Engine-detected orientation (single source of truth — see
+  // IncrementalState.isLandscape docs).  Defaults to false (portrait)
+  // before the first frame lands, which is fine because the band's
+  // bottom-pinned anchor reads sensibly in either layout.
+  const isLandscape = state?.isLandscape ?? false;
+  const layout = useMemo(() => layoutFor(isLandscape), [isLandscape]);
+
+  const scrollRef = useRef<ScrollView | null>(null);
+
+  // Trim incoming URIs to a hard cap.  The host already caps at 24
+  // (AuditCaptureScreen) but defence-in-depth keeps the ScrollView
+  // bounded if a different host forgets to.  Slice from the END so
+  // we keep the MOST RECENT N — older frames slide off the start.
+  const cappedFrameUris = useMemo(() => {
+    if (!frameUris || frameUris.length === 0) return [];
+    return frameUris.length > MULTI_THUMB_HARD_CAP
+      ? frameUris.slice(frameUris.length - MULTI_THUMB_HARD_CAP)
+      : frameUris;
+  }, [frameUris]);
+
+  const hasMultiThumb = cappedFrameUris.length > 0;
+
+  // Auto-scroll on content-size change.  With `row` flex direction
+  // the latest item is at JS-rightmost → scrollToEnd.  With
+  // `row-reverse` the latest item is at JS-leftmost (since row-reverse
+  // places the FIRST array item at JS-rightmost and grows leftward),
+  // so the default scrollX=0 already shows the latest — but we
+  // explicitly call scrollTo({x:0}) for clarity and to handle any
+  // residual scroll state from a previous capture.
+  const onContentSizeChange = useCallback(() => {
+    const sv = scrollRef.current;
+    if (!sv) return;
+    if (layout.flexDirection === 'row-reverse') {
+      sv.scrollTo({ x: 0, y: 0, animated: false });
+    } else {
+      sv.scrollToEnd({ animated: false });
+    }
+  }, [layout.flexDirection]);
+
+  // ── Single cumulative thumbnail (live-engine fallback) ──────────
+  //
+  // Same fill-ratio math as V12.14.9.  Kept so live-stitching engines
+  // (hybrid / firstwins / firstwins-rectilinear / firstwins-zoomed)
+  // that don't emit per-keyframe URIs still get a useful
+  // progress-thumbnail UX — the thumb widens proportionally as the
+  // operator pans further.
+  const cumulativeUri = useMemo(() => {
     if (!state?.panoramaPath) return null;
     return `file://${state.panoramaPath}?v=${state.acceptedCount}`;
   }, [state?.panoramaPath, state?.acceptedCount]);
 
-  // Read orientation from engine state.  Defaults to false
-  // (portrait layout) before first frame is captured.
-  const isLandscape = state?.isLandscape ?? false;
-
-  const layout = useMemo(
-    () => layoutForOrientation(isLandscape),
-    [isLandscape],
-  );
-
-  // V12.14.9 — thumb pan-axis dim is a direct fraction of canvas
-  // pan-axis fill: `fillRatio = paintedExtent / panExtent`.
-  //
-  // Replaces V12.13's aspect-ratio formula which only made the thumb
-  // grow once `state.height > state.width` (i.e. > 1920 px of pan)
-  // — much further than typical captures, so users saw a static
-  // square thumb for the entire capture.
-  //
-  // Mental model (per the user's clarification): the band represents
-  // the full canvas pan extent (5000 px); the thumb is the painted
-  // fraction of it.  At first-frame paintedExtent ≈ slit pan-axis
-  // size (~756 px) → fillRatio ≈ 0.15 → thumb takes 15% of the band.
-  // Grows monotonically toward 1.0 (full band) as user pans further.
-  //
-  // Both `paintedExtent` and `panExtent` come from native telemetry
-  // (V12.14.9), emitted on every state event (not just snapshot
-  // frames), so the thumb grows smoothly per accept.
   const fillRatio = useMemo(() => {
     if (!state?.paintedExtent || !state?.panExtent) return 0;
     return Math.max(0, Math.min(1, state.paintedExtent / state.panExtent));
   }, [state?.paintedExtent, state?.panExtent]);
 
-  const thumbPanLen = useMemo(() => {
-    return Math.max(THUMB_INNER, THUMB_MAX_PAN_LEN * fillRatio);
+  const singleThumbPanLen = useMemo(() => {
+    return Math.max(SINGLE_THUMB_INNER, SINGLE_THUMB_MAX_PAN_LEN * fillRatio);
   }, [fillRatio]);
 
-  // Thumb dimensions: pan-axis dim grows with the pano, perp-axis
-  // dim stays at THUMB_INNER (matches band thickness).
-  const thumbStyle: ViewStyle = {
-    width: thumbPanLen,
-    height: THUMB_INNER,
-  };
-
   // V12.14.9 — rotate the panorama image 90° in landscape mode so
-  // the captured scene appears UPRIGHT to the user in their landscape
-  // head-up view.
-  //
-  // Why: the panorama JPEG is written by the engine in canvas/sensor
-  // coords (1920w × Yh — wide image). When the app is portrait-locked
-  // and the user holds phone landscape-left, JS coords stay portrait,
-  // so a wide-1920 image rendered without transform has its "wide"
-  // axis along JS-horizontal which appears as the user's VERTICAL in
-  // landscape view → scene reads sideways.
-  //
-  // 90° clockwise rotation maps the image so its natural "top" (canvas
-  // Y=0 = first-frame paste position) aligns with the user's top in
-  // landscape-left orientation.  Direction may need to be `-90deg`
-  // depending on which landscape variant we anchor to; flip the sign
-  // here if the scene reads upside-down on first build.
-  //
-  // Portrait+horizontal-pan mode (the other supported mode) doesn't
-  // need this — the JPEG's natural orientation already aligns with
-  // the user's portrait view.
-  const imageStyle = useMemo(
+  // the captured scene reads UPRIGHT to the user in landscape head-up
+  // view.  See original comment in the pre-V16 PanoramaBandOverlay for
+  // the full reasoning.  Portrait+horizontal-pan mode (the other
+  // supported mode) doesn't need rotation.
+  const singleImageStyle = useMemo(
     () =>
       isLandscape
         ? [StyleSheet.absoluteFill, { transform: [{ rotate: '90deg' }] }]
@@ -234,22 +255,63 @@ export function PanoramaBandOverlay({
 
   return (
     <View pointerEvents="none" style={[styles.bandBase, layout.band]}>
-      <View style={[styles.thumbBox, thumbStyle]}>
-        {imageUri ? (
-          <Image
-            key={state?.acceptedCount ?? 0}
-            source={{ uri: imageUri }}
-            style={imageStyle}
-            // `cover` so the thumbnail box always reads as a
-            // panorama-preview rather than a letterboxed strip
-            // — the operator wants spatial intuition, not pixel
-            // accuracy at this scale.
-            resizeMode="cover"
-            fadeDuration={0}
-          />
-        ) : null}
-      </View>
-      <View style={layout.arrowTrack}>
+      {hasMultiThumb ? (
+        // Multi-thumb path: one image per accepted keyframe, scrolling
+        // horizontally (in JS-coords) within the band.  Content
+        // flex-direction matches the outer band so OLDEST is at the
+        // pan-start side and LATEST sits next to the arrow.
+        <ScrollView
+          ref={scrollRef}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          showsVerticalScrollIndicator={false}
+          style={styles.thumbScroll}
+          contentContainerStyle={[
+            styles.thumbScrollContent,
+            { flexDirection: layout.flexDirection },
+          ]}
+          onContentSizeChange={onContentSizeChange}
+        >
+          {cappedFrameUris.map((uri, idx) => (
+            <Image
+              // Composite key: idx prevents collisions if the same path
+              // ever gets re-emitted (shouldn't happen but cheap to be
+              // defensive).  URI segment helps RN's image cache key.
+              key={`${idx}-${uri}`}
+              source={{ uri }}
+              style={styles.multiThumb}
+              resizeMode="cover"
+              fadeDuration={0}
+            />
+          ))}
+        </ScrollView>
+      ) : (
+        // Single-thumb path: cumulative panorama image, width grows
+        // with the pan extent.  Visually identical to pre-V16
+        // PanoramaBandOverlay so live-engine UX is unchanged.
+        <View
+          style={[
+            styles.thumbBox,
+            { width: singleThumbPanLen, height: SINGLE_THUMB_INNER },
+          ]}
+        >
+          {cumulativeUri ? (
+            <Image
+              key={state?.acceptedCount ?? 0}
+              source={{ uri: cumulativeUri }}
+              style={singleImageStyle}
+              resizeMode="cover"
+              fadeDuration={0}
+            />
+          ) : null}
+        </View>
+      )}
+
+      {/* Arrow trailing the latest thumbnail along the pan axis.  Fixed
+       *  slot width so it doesn't get squeezed when the scroll view's
+       *  content grows.  The outer band's flex direction puts this on
+       *  the JS-end-side of the row regardless of orientation. */}
+      <View style={styles.arrowTrack}>
         <Text style={styles.arrowGlyph}>{layout.arrowGlyph}</Text>
       </View>
     </View>
@@ -258,18 +320,32 @@ export function PanoramaBandOverlay({
 
 
 const styles = StyleSheet.create({
-  // Properties common to every layout — borderRadius is applied
-  // uniformly so the band reads as a single capsule no matter
-  // which edge it's anchored to.  The orientation-specific layout
-  // (positioning, flex direction, dimensions) is supplied by
-  // `layoutForOrientation`.
+  // Properties common to every layout — uniform border-radius so the
+  // band reads as a single capsule regardless of which edge it's
+  // anchored to.  Orientation-specific values (position, flexDirection,
+  // sizing) come from `layoutFor()`.
   bandBase: {
     borderRadius: 12,
   },
-  // The thumbnail container has a thin white border so it reads as
-  // "the panorama so far" against the dark band background.  Without
-  // the border the thumbnail blends into the band when the pano
-  // hasn't started yet (image source is null).
+  thumbScroll: {
+    flex: 1,
+  },
+  thumbScrollContent: {
+    alignItems: 'center',
+    paddingHorizontal: BAND_PADDING,
+  },
+  multiThumb: {
+    width: MULTI_THUMB_LEN,
+    height: MULTI_THUMB_LEN,
+    borderRadius: 4,
+    // marginHorizontal so the gap applies in both `row` and
+    // `row-reverse` directions identically; flex layout collapses
+    // adjacent margins, giving us a single inter-thumb gap.
+    marginHorizontal: MULTI_THUMB_GAP / 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.55)',
+  },
   thumbBox: {
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
     borderWidth: 1,
@@ -277,9 +353,12 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     overflow: 'hidden',
   },
-  // Arrow glyph — Unicode character keeps the implementation
-  // cross-platform without an SVG library.  Sized to read at
-  // arm's length on a phone screen.
+  arrowTrack: {
+    width: ARROW_TRACK_LEN,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: BAND_PADDING,
+  },
   arrowGlyph: {
     color: 'rgba(255, 255, 255, 0.9)',
     fontSize: 28,

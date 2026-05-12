@@ -53,6 +53,12 @@ export type {
   PanoramaGuidanceProps,
   PanoramaSpeedBucket,
 } from './camera/PanoramaGuidance';
+/**
+ * @deprecated V16 Phase 2 — superseded by `<PanoramaBandOverlay />`,
+ *   which now subsumes per-keyframe thumbnails in addition to the
+ *   single cumulative panorama thumb.  Export kept for backward
+ *   compatibility; will be removed in a future major version.
+ */
 export { LiveFrameStrip } from './camera/LiveFrameStrip';
 export type { LiveFrameStripProps } from './camera/LiveFrameStrip';
 export {
