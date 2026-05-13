@@ -1476,6 +1476,37 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         }
         stateLock.unlock()
 
+        // V16 fix-attempt-7 verify (Ram report 2026-05-13): post-fix-7
+        // bursting was still observed.  Per the design doc's Phase
+        // protocol (docs/site-content/design/2026-05-12-finalize-crash-
+        // investigation.md §"Verification protocol", step 3), we need
+        // to distinguish three hypotheses:
+        //   (i)   A1 angular-fallback isn't in the device's binary
+        //         (build hygiene) → we'd expect NO `ok-angular` or
+        //         `overlap-too-high (angular)` reasons in the burst.
+        //   (ii)  A1 is on-device but the burst comes from a different
+        //         accept path — e.g. force-last, first-on-plane,
+        //         first-no-plane, no-pose-yet — we'd see one of those
+        //         reason codes spamming.
+        //   (iii) A1's `evaluateAngularFallback` has a bug: accepts
+        //         but doesn't advance state → we'd see `ok-angular`
+        //         spamming with non-incrementing acceptedCount.
+        //
+        // Log every decision (accept AND reject) with reason code,
+        // acceptedCount, and newContentFraction.  Fault-level so the
+        // 50fps stream survives Console's burst rate-limit (see
+        // diagLog declaration ~line 171).  This is *diagnostic* —
+        // remove once bursting root cause is identified and fixed.
+        if let decision = gateDecision {
+            os_log(.fault, log: Self.diagLog,
+                   "[V16-keyframe-decision] accept=%d reason=%{public}@ newContent=%.3f count=%d/%d",
+                   decision.accept ? 1 : 0,
+                   decision.reason as NSString,
+                   decision.newContentFraction,
+                   decision.acceptedCount,
+                   decision.maxCount)
+        }
+
         // V16 Phase 1 — batch-keyframe is also a valid running mode
         // (no engine pointer, but the collector and gate are active).
         guard isRunning,
