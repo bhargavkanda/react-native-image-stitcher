@@ -1241,6 +1241,50 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                             captureOrientation: payload.captureOrientation,
                             useInscribedRectCrop: payload.batchEnableInscribedRectCrop
                         )
+                        // V16 fix-attempt 9 (verified on device,
+                        // 2026-05-13) — sentinel-result detection.
+                        //
+                        // Background: 8 prior fix attempts (fix1-fix8)
+                        // chased a deterministic SEGV in Swift's
+                        // try-bridge over OpenCVStitcher's NSError-
+                        // out-parameter return.  ASan with Sentry
+                        // disabled (.ips 172125) localised the SEGV to
+                        // an objc_retain on a wild pointer in unmapped
+                        // VM (0x60007a530, ReportDeadlySignal — no
+                        // shadow-memory match) immediately after the
+                        // .mm `return nil`.  The fix-9 NULL TEST
+                        // (2026-05-13 17:21) replaced the two
+                        // immediate-repro `*error+return nil` sites
+                        // with non-nil sentinel returns; the crash
+                        // went away cleanly.  After the test passed
+                        // we extended the sentinel pattern to ALL six
+                        // failure-return sites in stitchFramePaths
+                        // (pre-stitch memory abort, frames<2,
+                        // loadFramesOrFail, validPairs<1, workFrames<2,
+                        // estimator failure) so a production trigger of
+                        // any of them produces a clean error surface
+                        // instead of crashing the same way.
+                        //
+                        // We can't tell which underlying cause produced
+                        // a given sentinel from Swift (the .mm logs the
+                        // specific reason via NSLog so Console.app
+                        // shows it).  JS gets one generic error code
+                        // (9007); refining the JS-facing taxonomy is
+                        // a follow-up if/when product needs differ-
+                        // entiated UX per cause.
+                        //
+                        // See: docs/site-content/design/2026-05-12-finalize-crash-investigation.md
+                        if r.width == 0 && r.height == 0 {
+                            os_log(.fault, log: Self.diagLog,
+                                   "[V16-batch-keyframe.fix9] sentinel result from stitchFramePaths — see preceding [RetaiLensStitcher] NSLog for cause; emitting clean error to JS")
+                            completion(nil, NSError(
+                                domain: "RetaiLensIncremental",
+                                code: 9007,
+                                userInfo: [NSLocalizedDescriptionKey:
+                                    "Could not stitch the captured frames into a panorama. Please try recapturing with a slower, more deliberate pan that overlaps each section by at least 50%."]
+                            ))
+                            return
+                        }
                         // Keep saved keyframes on disk for post-hoc
                         // re-processing (Ram's request).  Cleanup is
                         // a follow-up debug-menu task.

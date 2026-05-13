@@ -447,18 +447,19 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
         "[stitch-bc] PRE-STITCH ABORT: mem=%.1fMB > %.1fMB threshold",
         kStartResidentMB, kPreStitchAbortMB);
-    if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                   code:1009
-                               userInfo:@{
-        NSLocalizedDescriptionKey:
-          [NSString stringWithFormat:
-            @"System memory pressure too high (%.0f MB resident). "
-             "Please close other apps and retry.",
-            kStartResidentMB],
-      }];
-    }
-    return nil;
+    // V16 fix-attempt 9 — sentinel return.  See validPairs<1 site
+    // below for the full root-cause analysis.  The Swift try-bridge
+    // crashes on this method's `return nil`+`*error` failure pattern;
+    // returning a non-nil sentinel result (width=0, height=0) bypasses
+    // it.  *error left unwritten — the Swift caller maps any sentinel
+    // to its own NSError, so a populated *error here would be ignored
+    // anyway.
+    NSLog(@"[RetaiLensStitcher] PRE-STITCH ABORT (mem %.1fMB > %.1fMB) — returning sentinel (fix-9)",
+          kStartResidentMB, kPreStitchAbortMB);
+    return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
+                                                       width:0
+                                                      height:0
+                                                  durationMs:0];
   }
 
   // Defaults if caller passed nil — keeps the old 3-arg call-sites
@@ -467,15 +468,17 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   if (blenderType == nil || blenderType.length == 0) blenderType = @"multiband";
   if (seamFinderType == nil || seamFinderType.length == 0) seamFinderType = @"graphcut";
   if (framePaths.count < 2) {
-    if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                   code:1000
-                               userInfo:@{
-        NSLocalizedDescriptionKey:
-          @"Need at least 2 frames to stitch a panorama.",
-      }];
-    }
-    return nil;
+    // V16 fix-attempt 9 — sentinel return (see validPairs<1 site
+    // below for full RCA).  Defensive: the Swift caller intercepts
+    // count<2 before reaching here, but a future call-site could
+    // hit this without that guard, and we want the bridge-bypass
+    // applied consistently across every nil-return in this method.
+    NSLog(@"[RetaiLensStitcher] framePaths.count<2 (%lu) — returning sentinel (fix-9)",
+          (unsigned long)framePaths.count);
+    return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
+                                                       width:0
+                                                      height:0
+                                                  durationMs:0];
   }
 
   // V12.14.2 — defensive frame cap.  Ram's V12.14 traces showed a
@@ -512,7 +515,20 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // footprint is bounded by the original sensor resolution).
   std::vector<cv::Mat> frames;
   if (!loadFramesOrFail(workFramePaths, frames, error)) {
-    return nil;
+    // V16 fix-attempt 9 — sentinel return.  loadFramesOrFail may
+    // have populated *error with an NSError describing which path
+    // failed to read (e.g., bad JPEG, missing file).  That *error
+    // would crash Swift's try-bridge on `return nil` here (see
+    // validPairs<1 site below for full RCA).  Returning a sentinel
+    // RetaiLensStitchResult instead leaves *error harmlessly in the
+    // Swift autoreleasing pad — Swift only reads it on nil return,
+    // so the diagnostic is preserved in Console.app via NSLog from
+    // loadFramesOrFail but Swift never retains the dangerous pointer.
+    NSLog(@"[RetaiLensStitcher] loadFramesOrFail returned false — returning sentinel (fix-9)");
+    return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
+                                                       width:0
+                                                      height:0
+                                                  durationMs:0];
   }
 
   auto t0 = std::chrono::steady_clock::now();
@@ -667,15 +683,35 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     }
     NSLog(@"[RetaiLensStitcher] step2.5: %d valid pairwise matches", validPairs);
     if (validPairs < 1) {
-      if (error) {
-        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                     code:1004
-                                 userInfo:@{
-          NSLocalizedDescriptionKey:
-            @"Stitcher could not match enough overlapping frames — try recapturing with a slower, more overlapping pan.",
-        }];
-      }
-      return nil;
+      // V16 fix-attempt 9 (NULL TEST, 2026-05-13).  Eight prior
+      // attempts chased a deterministic SEGV inside Swift's try-bridge
+      // on this *error→throw path.  ASan-on-device with Sentry
+      // disabled (RetaiLens-2026-05-13-172125.ips) showed
+      // EXC_BAD_ACCESS at 0x60007a530 (UNMAPPED VM, ASan
+      // ReportDeadlySignal — no shadow-memory match) firing inside
+      // objc_retain immediately after this return.  By returning a
+      // non-nil SENTINEL result (width=0, height=0) instead of
+      // populating *error and returning nil, we bypass Swift's
+      // autoreleasing NSError out-parameter retain entirely.  The
+      // Swift caller in RetaiLensIncrementalStitcher.finalize checks
+      // `r.width == 0` and constructs a Swift-native NSError to pass
+      // to its completion block.
+      //
+      // Hypothesis under test:
+      //   (A) If this path no longer crashes → the throw bridge IS
+      //       the proximate trigger.  Permanent: keep sentinel,
+      //       document why.
+      //   (B) If it still crashes the same way → corruption is
+      //       upstream of our return (likely inside opencv2.framework
+      //       stitcher allocator pool).  Revert and escalate to C3
+      //       (stitch on isolated DispatchQueue).
+      //
+      // See: docs/site-content/design/2026-05-12-finalize-crash-investigation.md
+      NSLog(@"[RetaiLensStitcher] step2.5: 0 valid pairs — returning sentinel (fix-9 NULL TEST)");
+      return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
+                                                         width:0
+                                                        height:0
+                                                    durationMs:0];
     }
 
     NSLog(@"[RetaiLensStitcher] step3: leave-biggest");
@@ -708,15 +744,14 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     NSLog(@"[RetaiLensStitcher] step3.5: kept %lu frames in biggest component",
           (unsigned long)workFrames.size());
     if (workFrames.size() < 2) {
-      if (error) {
-        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                     code:1004
-                                 userInfo:@{
-          NSLocalizedDescriptionKey:
-            @"Stitcher could not match enough overlapping frames — try recapturing with a slower pan and more overlap.",
-        }];
-      }
-      return nil;
+      // V16 fix-attempt 9 (NULL TEST) — same rationale as the
+      // validPairs<1 sentinel above.  Bypass the *error→throw bridge
+      // by returning a width=0/height=0 sentinel result instead.
+      NSLog(@"[RetaiLensStitcher] step3.5: <2 frames after leaveBiggestComponent — returning sentinel (fix-9 NULL TEST)");
+      return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
+                                                         width:0
+                                                        height:0
+                                                    durationMs:0];
     }
 
     // Step 4: estimator
@@ -725,15 +760,18 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     cv::detail::HomographyBasedEstimator estimator;
     std::vector<cv::detail::CameraParams> cameras;
     if (!estimator(imgFeatures, pairwise, cameras)) {
-      if (error) {
-        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                     code:1005
-                                 userInfo:@{
-          NSLocalizedDescriptionKey:
-            @"Stitcher could not estimate camera parameters — frames may be too dissimilar.",
-        }];
-      }
-      return nil;
+      // V16 fix-attempt 9 — sentinel return (see validPairs<1 site
+      // above for full RCA).  Estimator failures are a real production
+      // hazard on borderline-dissimilar frame sequences (typical mode:
+      // user pans through occluded regions or featureless walls
+      // mid-arc).  Returning sentinel keeps the failure surface clean
+      // even though the immediate V16 batch-keyframe repro doesn't
+      // typically reach this path.
+      NSLog(@"[RetaiLensStitcher] step4: HomographyBasedEstimator failed — returning sentinel (fix-9)");
+      return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
+                                                         width:0
+                                                        height:0
+                                                    durationMs:0];
     }
     for (auto &cam : cameras) {
       cv::Mat R32;
