@@ -656,9 +656,39 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // (counter-intuitively) hurt BA convergence by letting through
     // contradictory low-confidence matches that don't fit a
     // consistent rotation model.  Stick with the proven default.
+    // V16 — swapped BestOf2NearestMatcher → AffineBestOf2NearestMatcher
+    // (2026-05-13).  The plain matcher fits a rotation-only homography
+    // during RANSAC outlier rejection, which collapses MatchesInfo.
+    // confidence to 0 whenever the user has translated the camera
+    // (parallax breaks the rotation-only model).  Symptom:
+    // [RetaiLensStitcher] step2.5: 0 valid pairwise matches → sentinel
+    // → "Could not stitch" toast (or, before fix-9, EXC_BAD_ACCESS in
+    // Swift's try-bridge).  In Ram's repros the camera translates
+    // 25-60cm between adjacent keyframes — way past what rotation-
+    // only RANSAC can absorb.
+    //
+    // AffineBestOf2NearestMatcher uses an affine model for inlier
+    // selection (full_affine=true → 6 DOF: rotation, non-uniform
+    // scale, shear, translation).  This tolerates the typical
+    // shelf-scanning translation pattern.  The downstream stitcher
+    // pipeline (HomographyBasedEstimator + BundleAdjusterRay) is
+    // unchanged; the swap only affects WHICH pairwise matches are
+    // accepted as inliers — the rest of the pipeline still computes
+    // a proper rotation-based camera placement on the surviving
+    // inliers.
+    //
+    // Trade-off: an affine inlier check is more permissive than a
+    // rotation-only one — false positives are theoretically possible
+    // when the two views are entirely unrelated.  In practice the
+    // gate has already vetted novelty/overlap, so the matcher only
+    // sees frames that genuinely overlap; permissiveness is the
+    // right side of the trade-off.
     NSLog(@"[RetaiLensStitcher] step2: matching");
-    NSLog(@"[stitch-bc] step2 enter: BestOf2Nearest matching");
-    cv::detail::BestOf2NearestMatcher matcher(false, 0.65f);
+    NSLog(@"[stitch-bc] step2 enter: AffineBestOf2Nearest matching (full_affine=YES)");
+    cv::detail::AffineBestOf2NearestMatcher matcher(/*full_affine=*/true,
+                                                    /*try_use_gpu=*/false,
+                                                    /*match_conf=*/0.65f,
+                                                    /*num_matches_thresh1=*/6);
     std::vector<cv::detail::MatchesInfo> pairwise;
     matcher(imgFeatures, pairwise);
     matcher.collectGarbage();
