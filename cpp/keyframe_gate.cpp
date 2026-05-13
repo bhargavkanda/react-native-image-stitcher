@@ -310,6 +310,61 @@ int32_t KeyframeGate::getAcceptedCount() const { return pImpl_->acceptedCount; }
 int32_t KeyframeGate::getMaxCount() const       { return pImpl_->maxCount; }
 bool    KeyframeGate::isEnabled() const         { return pImpl_->enabled; }
 
+// Shared angular-delta evaluation path.  Used by:
+//   • §4 (no plane was ever latched — original use)
+//   • §5's degenerate branches (V16 Phase 2 fix — projection-degenerate
+//     and current-area-zero no longer accept blindly; they fall back
+//     to angular-delta so the gate keeps producing sensibly-spaced
+//     keyframes even when the plane geometry breaks down at the
+//     edges of the latched patch).
+//
+// Returns a KeyframeGateDecision exactly the way §4 used to return
+// inline.  Caller decides which reason codes to emit; we emit the
+// canonical angular reason codes here (`AcceptOkAngular` /
+// `RejectOverlapTooHighAngular`) regardless of which call-site
+// invoked the fallback — what matters for telemetry is "this was
+// decided via the angular criterion", not why we ended up there.
+// The `AcceptProjectionDegenerate` / `AcceptCurrentAreaZero` reasons
+// remain in the enum for back-compat but are NO LONGER EMITTED.
+// Diagnostic logging at the call sites tells us if a degenerate
+// projection triggered the fallback.
+KeyframeGateDecision KeyframeGate::evaluateAngularFallback(
+    Impl& s,
+    const Pose& pose)
+{
+    if (!s.lastAcceptedPose) {
+        // Defensive — first-frame branch always sets lastAcceptedPose.
+        return { true, KeyframeGateDecisionReason::AcceptNoPoseYet,
+                 -1.0, s.acceptedCount, s.maxCount };
+    }
+    if (s.acceptedCount >= s.maxCount) {
+        return { false, KeyframeGateDecisionReason::RejectMaxReached,
+                 -1.0, s.acceptedCount, s.maxCount };
+    }
+    Vec3 lastFwd = cameraForwardWorld(*s.lastAcceptedPose);
+    Vec3 currFwd = cameraForwardWorld(pose);
+    float dotProd = v3_dot(lastFwd, currFwd);
+    if (dotProd > 1.0f)  dotProd = 1.0f;
+    if (dotProd < -1.0f) dotProd = -1.0f;
+    float angleRad = std::acos(dotProd);
+    float fovH = 2.0f * std::atan(pose.imageWidth  / (2.0f * pose.fx));
+    float fovV = 2.0f * std::atan(pose.imageHeight / (2.0f * pose.fy));
+    float fovRef = fovH < fovV ? fovH : fovV;
+    double newContent = (fovRef > 1e-3f)
+        ? static_cast<double>(angleRad / fovRef)
+        : 0.0;
+    if (newContent < s.overlapThreshold) {
+        return { false,
+                 KeyframeGateDecisionReason::RejectOverlapTooHighAngular,
+                 newContent, s.acceptedCount, s.maxCount };
+    }
+    s.lastAcceptedPose = pose;
+    s.acceptedCount += 1;
+    return { true, KeyframeGateDecisionReason::AcceptOkAngular,
+             newContent, s.acceptedCount, s.maxCount };
+}
+
+
 KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
                                             const PlaneTransform* latchedPlane)
 {
@@ -370,36 +425,7 @@ KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
     // 4) No-plane angular fallback (when planeSource=Disabled or
     //    we never latched a plane).
     if (!s.planeForCapture || !s.lastCornersOnPlane) {
-        if (!s.lastAcceptedPose) {
-            // Defensive — first-frame branch always sets lastAcceptedPose.
-            return { true, KeyframeGateDecisionReason::AcceptNoPoseYet,
-                     -1.0, s.acceptedCount, s.maxCount };
-        }
-        if (s.acceptedCount >= s.maxCount) {
-            return { false, KeyframeGateDecisionReason::RejectMaxReached,
-                     -1.0, s.acceptedCount, s.maxCount };
-        }
-        Vec3 lastFwd = cameraForwardWorld(*s.lastAcceptedPose);
-        Vec3 currFwd = cameraForwardWorld(pose);
-        float dotProd = v3_dot(lastFwd, currFwd);
-        if (dotProd > 1.0f)  dotProd = 1.0f;
-        if (dotProd < -1.0f) dotProd = -1.0f;
-        float angleRad = std::acos(dotProd);
-        float fovH = 2.0f * std::atan(pose.imageWidth  / (2.0f * pose.fx));
-        float fovV = 2.0f * std::atan(pose.imageHeight / (2.0f * pose.fy));
-        float fovRef = fovH < fovV ? fovH : fovV;
-        double newContent = (fovRef > 1e-3f)
-            ? static_cast<double>(angleRad / fovRef)
-            : 0.0;
-        if (newContent < s.overlapThreshold) {
-            return { false,
-                     KeyframeGateDecisionReason::RejectOverlapTooHighAngular,
-                     newContent, s.acceptedCount, s.maxCount };
-        }
-        s.lastAcceptedPose = pose;
-        s.acceptedCount += 1;
-        return { true, KeyframeGateDecisionReason::AcceptOkAngular,
-                 newContent, s.acceptedCount, s.maxCount };
+        return evaluateAngularFallback(s, pose);
     }
 
     // 5) Plane-based path.
@@ -411,10 +437,30 @@ KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
     }
 
     // Project current frame's corners onto the cached plane basis.
+    //
+    // V16 Phase 2 fix — when projection degenerates (camera FoV no
+    // longer fully intersects the latched plane in front of the
+    // camera, e.g. user has panned past the end of the shelf or
+    // around a corner onto a perpendicular wall), the ORIGINAL Swift
+    // gate and the initial P3-A port both did `return { accept=true,
+    // …AcceptProjectionDegenerate }` WITHOUT advancing acceptedCount
+    // or lastCornersOnPlane.  That meant every subsequent frame ALSO
+    // degenerated, ALSO accepted, ALSO didn't advance state — an
+    // unbounded burst-accept at frame rate until shutter release.
+    // The cap check above this never triggered because acceptedCount
+    // wasn't growing.
+    //
+    // The fix: fall back to angular-delta on degenerate projection.
+    // Angular fallback correctly increments acceptedCount and
+    // updates lastAcceptedPose, so cap-reached gates the burst.  For
+    // pure-translation captures (rare) angular delta won't grow and
+    // the fallback ends up rejecting — which is the *correct*
+    // outcome (those frames couldn't be gated geometrically and
+    // weren't rotating the camera either, so they offer little new
+    // information for stitching).
     auto currentCornersOpt = projectCornersOntoPlane(pose, *s.planeForCapture);
     if (!currentCornersOpt) {
-        return { true, KeyframeGateDecisionReason::AcceptProjectionDegenerate,
-                 -1.0, s.acceptedCount, s.maxCount };
+        return evaluateAngularFallback(s, pose);
     }
     const std::vector<Vec2>& currentCorners = *currentCornersOpt;
     const std::vector<Vec2>& lastCorners    = *s.lastCornersOnPlane;
@@ -422,8 +468,9 @@ KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
     float intersectArea = polygonIntersectionArea(currentCorners, lastCorners);
     float currentArea   = polygonArea(currentCorners);
     if (currentArea <= 1e-6f) {
-        return { true, KeyframeGateDecisionReason::AcceptCurrentAreaZero,
-                 -1.0, s.acceptedCount, s.maxCount };
+        // Same degenerate-shape failure mode — fall back to angular.
+        // See the long comment above projectCornersOntoPlane(...).
+        return evaluateAngularFallback(s, pose);
     }
     float overlapRatio = intersectArea / currentArea;
     if (overlapRatio < 0.0f) overlapRatio = 0.0f;

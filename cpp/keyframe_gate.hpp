@@ -111,6 +111,14 @@ public:
 private:
     struct Impl;
     Impl* pImpl_;
+
+    // Shared angular-delta evaluation path.  Used by §4 (no plane was
+    // ever latched) and §5's degenerate branches (V16 Phase 2 fix —
+    // projection-degenerate / current-area-zero fall back here rather
+    // than accepting blindly, which used to burst-accept every frame
+    // and corrupt the gate cap).
+    static KeyframeGateDecision evaluateAngularFallback(
+        Impl& s, const Pose& pose);
 };
 
 } // namespace retailens

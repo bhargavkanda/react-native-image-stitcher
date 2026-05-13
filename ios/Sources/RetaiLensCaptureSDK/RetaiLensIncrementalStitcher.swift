@@ -1439,32 +1439,56 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                        self.consumeFrameCounter, dx, dy, dz, mag)
             }
         }
+
+        // V16 Phase 2 (C1 fix) — evaluate the pose-driven keyframe gate
+        // BEFORE releasing stateLock.
+        //
+        // RCA: KeyframeGate is documented thread-unsafe (its C++ pImpl
+        // holds std::optional<std::vector<Vec2>>, etc.; caller must
+        // serialise).  Every OTHER access already runs under stateLock —
+        // `start`'s configure-gate path, `cancel`'s `keyframeGate.reset()`,
+        // `markNextFrameAsLastKeyframe`'s `forceAcceptNext = true` write.
+        // ONLY this read site (the AR-delegate hot path) used to run
+        // OUTSIDE stateLock, which is a thread-safety hole — concurrent
+        // mutation from the JS-bridge thread could corrupt the gate's
+        // internal vectors mid-evaluate().
+        //
+        // We compute the decision under the lock, then unlock BEFORE the
+        // heavier work (emitKeyframeRejectState fires a JS event; the
+        // workQueue dispatch + JPEG encode + path-append happen below).
+        // Holding the lock for the ~50–200 µs evaluate is negligible vs
+        // the alternative (latent corruption that produced the V16
+        // Phase 1b finalize crashes).
+        //
+        // We evaluate BEFORE the workInFlight check so a rejected frame
+        // doesn't burn workQueue slots — the gate is the cheap filter,
+        // the engine is the expensive one.
+        var gateDecision: KeyframeGateDecision? = nil
+        let shouldEvaluateGate =
+            isRunning
+            && (hybrid != nil || slit != nil || inBatchKeyframeMode)
+            && self.keyframeGate.enabled
+        if shouldEvaluateGate {
+            let plane = RetaiLensARSession.shared.latchedPlaneTransform()
+            gateDecision = self.keyframeGate.evaluate(
+                pose: pose, latchedPlane: plane
+            )
+        }
         stateLock.unlock()
+
         // V16 Phase 1 — batch-keyframe is also a valid running mode
         // (no engine pointer, but the collector and gate are active).
         guard isRunning,
               (hybrid != nil || slit != nil || inBatchKeyframeMode)
         else { return }
 
-        // V16 — pose-driven keyframe gate.  When enabled, only frames
-        // that add ≥ overlapThreshold of new content vs the last
-        // accepted keyframe are forwarded to the engine.  Bounded to
-        // `maxCount` keyframes per capture.  When disabled (default)
-        // every frame passes through and the engine's existing time/
-        // pose-based gate decides.  See KeyframeGate.swift.
-        //
-        // We evaluate BEFORE the workInFlight check so a rejected
-        // frame doesn't burn workQueue slots — the gate is the cheap
-        // filter, the engine is the expensive one.
-        if self.keyframeGate.enabled {
-            let plane = RetaiLensARSession.shared.latchedPlaneTransform()
-            let decision = self.keyframeGate.evaluate(
-                pose: pose, latchedPlane: plane
-            )
-            if !decision.accept {
-                self.emitKeyframeRejectState(decision: decision)
-                return
-            }
+        // Surface the gate's reject decision (if any) outside the lock.
+        // emitKeyframeRejectState dispatches a JS bridge event which
+        // could itself acquire other locks; keeping it outside stateLock
+        // is the safe call.
+        if let decision = gateDecision, !decision.accept {
+            self.emitKeyframeRejectState(decision: decision)
+            return
         }
 
         // Compute yaw + pitch from the quaternion.  Convention:
