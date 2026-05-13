@@ -111,6 +111,40 @@ class RetaiLensIncrementalStitcher(
     private var batchKeyframeMode: Boolean = false
     private val batchKeyframePaths: MutableList<String> = mutableListOf()
     private var batchKeyframeFrameCounter: Int = 0
+    /// V16 Phase 2 (Android Fix-1) — per-capture-session subdirectory
+    /// under `cacheDir` where this capture's batch-keyframe JPEGs are
+    /// written.  Created on each batch-keyframe `start()` with a fresh
+    /// UUID.
+    ///
+    /// Why:
+    ///   The V16 Phase-1 MVP wrote every accepted keyframe to
+    ///   `cacheDir/rlis-keyframe-{N}.jpg` where N restarted at 0 on
+    ///   each capture.  Two captures in a row → second capture's
+    ///   `rlis-keyframe-0.jpg` overwrites the first's.  Worse, RN's
+    ///   `<Image>` component on Android caches decoded bitmaps keyed
+    ///   by URI string; the file:// URI was byte-identical across
+    ///   captures, so the previous capture's bitmap got served for
+    ///   the new capture's first thumbnail — Ram's "thumbnails come
+    ///   from the previous capture" symptom (2026-05-12).  Also a
+    ///   data-integrity hazard if a new capture starts while the
+    ///   previous one's stitcher is still reading the JPEGs from
+    ///   disk.
+    ///
+    /// Per-session UUID subdir fixes both:
+    ///   - Each capture's keyframes live at a unique path → no URI
+    ///     collision → no bitmap-cache reuse across captures.
+    ///   - Files survive past finalize for post-hoc reprocessing
+    ///     (Ram's request — same behaviour as iOS' OpenCVKeyframeCollector).
+    ///
+    /// Lifetime:
+    ///   • Created in `start()` batch-keyframe branch.
+    ///   • Used by `copyKeyframeToStore()`.
+    ///   • Persists past `finalize()` for reprocessing.
+    ///   • Cleaned up on `cancel()` and in `onCatalystInstanceDestroy()`.
+    ///
+    /// Parity: matches iOS `OpenCVKeyframeCollector.sessionDir`
+    /// (created with `Library/AppSupport/Captures/{NSUUID}/`).
+    private var captureSessionDir: java.io.File? = null
     /// Accept every Nth frame.  10 is the iOS default capture cadence
     /// (5-6 keyframes over a ~2-3 second pan = roughly one every 10
     /// frames at 30fps).
@@ -237,6 +271,17 @@ class RetaiLensIncrementalStitcher(
                 batchKeyframeMode = true
                 batchKeyframePaths.clear()
                 batchKeyframeFrameCounter = 0
+                // V16 Phase 2 (Android Fix-1) — fresh per-session subdir
+                // for this capture's keyframe JPEGs.  Replaces the
+                // V16-Phase-1 "rlis-keyframe-{N}.jpg in cacheDir"
+                // scheme that caused thumbnails from a previous capture
+                // to leak into the next one via RN's bitmap cache (see
+                // `captureSessionDir` declaration above for the full
+                // RCA).  Matches iOS' OpenCVKeyframeCollector behaviour.
+                captureSessionDir = java.io.File(
+                    reactContext.cacheDir,
+                    "rlis-capture-${java.util.UUID.randomUUID()}",
+                ).also { it.mkdirs() }
                 batchKeyframeMaxCount = configOverrides
                     ?.getIntOrDefault("keyframeMaxCount", 6) ?: 6
                 batchWarperType = configOverrides?.getString("warperType")
@@ -364,10 +409,22 @@ class RetaiLensIncrementalStitcher(
      * batch-keyframe work end-to-end on Android.
      */
     private fun copyKeyframeToStore(srcPath: String): String? {
-        val destFile = java.io.File(
-            reactContext.cacheDir,
-            "rlis-keyframe-${batchKeyframePaths.size}.jpg",
-        )
+        // V16 Phase 2 (Android Fix-1) — write into the per-session
+        // subdir created by start().  If start() didn't run (defensive
+        // — should never happen on the live ingest path), the
+        // captureSessionDir is null and we drop the frame; the older
+        // "rlis-keyframe-{N}.jpg in cacheDir" fallback is GONE because
+        // it was the source of the cross-capture cache bug.
+        val dir = captureSessionDir
+        if (dir == null) {
+            android.util.Log.w(
+                "RetaiLensIncrementalStitcher",
+                "copyKeyframeToStore: captureSessionDir is null — " +
+                    "start() should have created it; dropping frame",
+            )
+            return null
+        }
+        val destFile = java.io.File(dir, "keyframe-${batchKeyframePaths.size}.jpg")
         return try {
             java.io.File(srcPath).copyTo(destFile, overwrite = true).absolutePath
         } catch (e: Exception) {
@@ -688,12 +745,25 @@ class RetaiLensIncrementalStitcher(
         val firstwins = firstwinsEngine
         engine = null
         firstwinsEngine = null
-        // Defer engine release onto the work queue so we don't race
-        // with an ingest that already passed the null-check and is
-        // mid-execution on a captured local reference.
+        // V16 Phase 2 (Android Fix-1) — clean up the per-session
+        // batch-keyframe subdir.  iOS-parity: cancel removes the
+        // session's saved JPEGs because the operator explicitly
+        // aborted, so the keyframes aren't worth preserving for
+        // reprocessing.  (Successful finalize keeps them — see the
+        // ivar declaration.)
+        val sessionDirToCleanup = captureSessionDir
+        captureSessionDir = null
+        batchKeyframeMode = false
+        batchKeyframePaths.clear()
+        batchKeyframeFrameCounter = 0
+        // Defer engine release + session-dir cleanup onto the work
+        // queue so we don't race with an ingest that already passed
+        // the null-check and is mid-execution on a captured local
+        // reference.
         workScope.launch {
             hybrid?.release()
             firstwins?.reset()
+            sessionDirToCleanup?.deleteRecursively()
         }
         val map = Arguments.createMap()
         map.putBoolean("ok", true)
@@ -956,6 +1026,17 @@ class RetaiLensIncrementalStitcher(
                 "onCatalystInstanceDestroy: keyframeGate.close failed: ${t.message}",
             )
         }
+        // V16 Phase 2 (Android Fix-1) — best-effort cleanup of the
+        // current per-session subdir.  Prevents leftover dirs
+        // accumulating across dev-time RN reloads.  OS cache cleanup
+        // would eventually reclaim cacheDir entries anyway, but this
+        // makes the dev loop tidy.
+        try {
+            captureSessionDir?.deleteRecursively()
+        } catch (t: Throwable) {
+            // Ignore — not critical at teardown.
+        }
+        captureSessionDir = null
         super.onCatalystInstanceDestroy()
     }
 
