@@ -158,22 +158,46 @@ export interface PanoramaSettings {
    *  - 'time-based' (default): every ARFrame is forwarded to the
    *    engine; the engine's own gate (kMinAcceptDeltaPx etc.) decides.
    *    Backward-compatible with all prior versions.
-   *  - 'pose-based': frames are pre-filtered by a Swift KeyframeGate
-   *    that projects each onto the latched ARKit plane and accepts
-   *    only when overlap with the previous keyframe is < 1 −
+   *  - 'pose-based': frames are pre-filtered by a KeyframeGate that
+   *    projects each onto the latched ARKit plane and accepts only
+   *    when overlap with the previous keyframe is < 1 −
    *    overlapThreshold.  Bounded to keyframeMaxCount frames per
    *    capture (matches iOS Camera / Samsung Pano architecture).
-   *    Requires planeSource != 'Disabled' to engage. */
-  frameSelectionMode: 'time-based' | 'pose-based';
+   *    Requires planeSource != 'Disabled' to engage.
+   *  - 'flow-based' (V16 A2, DEFAULT): same KeyframeGate cap +
+   *    threshold but the novelty metric is sparse-Lucas-Kanade
+   *    optical flow on full-frame content instead of plane-projected
+   *    polygon overlap.  Plane-independent (scale-invariant — works
+   *    regardless of latched plane size); the metric is "median
+   *    pan-axis feature displacement / pan-axis frame dim", which is
+   *    a direct measure of % new content on the leading edge.  Falls
+   *    back to angular delta when feature tracking fails (texture-
+   *    poor scene / motion exceeds KLT pyramid window). */
+  frameSelectionMode: 'time-based' | 'pose-based' | 'flow-based';
   /** V16 — required NEW-content fraction for a keyframe to be
-   *  accepted (pose-based mode).  Default 0.40 (= ≤60% overlap with
-   *  the previous keyframe).  Tuneable from 0.20 to 0.60 in the
-   *  modal. */
+   *  accepted (pose-based AND flow-based modes share this knob;
+   *  both interpret 0.40 as "40 % new content").  Tuneable from
+   *  0.20 to 0.60 in the modal. */
   keyframeOverlapThreshold: number;
-  /** V16 — hard cap on keyframes per capture (pose-based mode).
-   *  Default 6.  Once reached, all further frames are rejected and
-   *  the host should auto-finalize. */
+  /** V16 — hard cap on keyframes per capture (pose-based + flow-
+   *  based modes).  Default 6.  Once reached, all further frames are
+   *  rejected and the host should auto-finalize. */
   keyframeMaxCount: number;
+  /** V16 A2 — flow-based mode: max Shi-Tomasi corners to detect per
+   *  accepted keyframe.  More = more robust median pan-axis
+   *  displacement but slower detect (~15-25 ms at 150 on iPhone 13
+   *  Pro).  Range 50 – 300, default 150. */
+  flowMaxCorners: number;
+  /** V16 A2 — flow-based mode: Shi-Tomasi quality level (0, 1].
+   *  Lower = more (weaker) corners detected; higher = fewer
+   *  (stronger) corners.  Default 0.01.  Range 0.005 – 0.05 in the
+   *  modal. */
+  flowQualityLevel: number;
+  /** V16 A2 — flow-based mode: minimum pixel distance between
+   *  detected corners at WORKING resolution (the gate internally
+   *  downscales the frame to 720 px longest side for KLT).  Higher
+   *  = more spatially-spread features.  Default 10. */
+  flowMinDistance: number;
 
   /** V15.0c — sliver position within the camera frame.  'Center' is
    *  V13.x default.  'Bottom' takes leading-edge content for top-to-
@@ -299,14 +323,29 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   ncc2dEmaAlpha: 0.4,
   enableNcc2dPanAxisLock: false,
   ncc2dCrossAxisLockPx: 5,
-  // V16 Phase 1 — pose-driven keyframe gate is now the default since
-  // batch-keyframe is the recommended engine and depends on it.
-  // Operators can flip back to time-based + slitscan-* in the modal
-  // for the older paths.  Defaults match the field-tested values
-  // (40% required new content, ≤6 keyframes per capture).
-  frameSelectionMode: 'pose-based',
+  // V16 A2 (2026-05-13) — flow-based is now the default.  Ram report
+  // 2026-05-13 13:05 showed that pose-based on a small latched plane
+  // produces "bursts" of accepts on small physical motion: a 0.64 m²
+  // plane at 2.7 m perpDist gave 6 accepts in 1 s over 12 cm of
+  // translation because the plane-projected polygon covers only a
+  // sliver of the frame, hyperinflating newContent.  Flow-based
+  // measures novelty from real image content (sparse KLT), is
+  // plane-independent, and is invariant to plane size.  Operators
+  // can still flip back to 'pose-based' or 'time-based' in the modal
+  // for A/B testing or low-texture scenes.  Same defaults shared
+  // between pose-based and flow-based (40 % new content per
+  // keyframe, ≤ 6 keyframes per capture).
+  frameSelectionMode: 'flow-based',
   keyframeOverlapThreshold: 0.40,
   keyframeMaxCount: 6,
+  // V16 A2 — flow-based mode tuning.  Defaults are the values that
+  // tested cleanly on iPhone 13 Pro / 14 Pro: 150 corners give a
+  // stable median across the frame; quality=0.01 + minDistance=10
+  // give spatially-spread, repeatable detection.  All three are
+  // tunable in the modal under "Flow tuning".
+  flowMaxCorners: 150,
+  flowQualityLevel: 0.01,
+  flowMinDistance: 10,
   // V15.0c — sliver tweaks: leading-edge sliver from BOTTOM for typical
   // top-to-bottom pan + full first-frame anchor produced the best
   // outputs in early iteration.
@@ -421,19 +460,20 @@ export function PanoramaSettingsModal({
               <>
                 <SectionHeader title="Frame selection (V16)" />
                 <SegmentedControl
-                  options={['time-based', 'pose-based']}
+                  options={['time-based', 'pose-based', 'flow-based']}
                   value={settings.frameSelectionMode}
                   onChange={(v) => update({ frameSelectionMode: v as PanoramaSettings['frameSelectionMode'] })}
-                  caption="pose-based (V16): KeyframeGate filters frames using AR plane-polygon overlap (or angular fallback when no plane). time-based: every ARFrame goes to the engine."
+                  caption="flow-based (V16 A2, default): KeyframeGate uses sparse-Lucas-Kanade optical flow on full frame — plane-independent, invariant to plane size. pose-based: plane-polygon overlap (oversensitive on small latched planes). time-based: every ARFrame goes to the engine."
                 />
-                {settings.frameSelectionMode === 'pose-based' && (
+                {(settings.frameSelectionMode === 'pose-based' ||
+                  settings.frameSelectionMode === 'flow-based') && (
                   <>
                     <SectionHeader title="Overlap threshold (new content per keyframe)" />
                     <SegmentedControl
                       options={['20%', '30%', '40%', '50%', '60%']}
                       value={`${Math.round(settings.keyframeOverlapThreshold * 100)}%`}
                       onChange={(v) => update({ keyframeOverlapThreshold: parseInt(v, 10) / 100 })}
-                      caption="Required NEW content per keyframe. 40% (default) ≈ 4–5 keyframes for a 90° pan."
+                      caption="Required NEW content per keyframe. 40% (default) ≈ 4–5 keyframes for a 90° pan. Same threshold semantics for both pose-based and flow-based."
                     />
                     <SectionHeader title="Max keyframes per capture" />
                     <SegmentedControl
@@ -441,6 +481,31 @@ export function PanoramaSettingsModal({
                       value={String(settings.keyframeMaxCount)}
                       onChange={(v) => update({ keyframeMaxCount: parseInt(v, 10) })}
                       caption="Hard cap. 6 (default) matches Samsung's behaviour. Once reached, host auto-finalizes."
+                    />
+                  </>
+                )}
+                {settings.frameSelectionMode === 'flow-based' && (
+                  <>
+                    <SectionHeader title="Flow tuning — max corners" />
+                    <SegmentedControl
+                      options={['50', '100', '150', '200', '300']}
+                      value={String(settings.flowMaxCorners)}
+                      onChange={(v) => update({ flowMaxCorners: parseInt(v, 10) })}
+                      caption="Max Shi-Tomasi corners detected per accepted keyframe. More = more robust median, slower detect. 150 = default."
+                    />
+                    <SectionHeader title="Flow tuning — quality level" />
+                    <SegmentedControl
+                      options={['0.005', '0.01', '0.02', '0.03', '0.05']}
+                      value={String(settings.flowQualityLevel)}
+                      onChange={(v) => update({ flowQualityLevel: parseFloat(v) })}
+                      caption="Shi-Tomasi corner quality threshold. Lower = more (weaker) corners; higher = fewer (stronger) corners. 0.01 = default."
+                    />
+                    <SectionHeader title="Flow tuning — min distance" />
+                    <SegmentedControl
+                      options={['5', '8', '10', '15', '20']}
+                      value={String(settings.flowMinDistance)}
+                      onChange={(v) => update({ flowMinDistance: parseInt(v, 10) })}
+                      caption="Min pixel distance between detected corners (working resolution = 720 px longest side). Higher = more spatially-spread features. 10 = default."
                     />
                   </>
                 )}

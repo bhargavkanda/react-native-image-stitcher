@@ -407,31 +407,50 @@ export interface StitcherConfig {
    *    is forwarded to the engine; the engine's existing internal
    *    gate (kMinAcceptDeltaPx, time-throttled snapshot) decides
    *    accept/reject.  Backward-compatible with all prior versions.
-   *  - 'pose-based': frames are pre-filtered by a Swift-side
-   *    KeyframeGate.  A frame is forwarded only when its projection
-   *    onto the latched ARKit plane has at least
-   *    `keyframeOverlapThreshold` of NEW area vs the last accepted
-   *    keyframe.  Bounded to `keyframeMaxCount` frames per capture.
-   *    Mirrors how iOS Camera and Samsung Pano actually work.
-   *
-   *  Pose-based requires `planeSource` != 'Disabled' for the gate to
-   *  engage; with no plane available the gate degrades silently to
-   *  passthrough. */
-  frameSelectionMode: 'time-based' | 'pose-based';
+   *  - 'pose-based': frames are pre-filtered by a KeyframeGate.  A
+   *    frame is forwarded only when its projection onto the latched
+   *    ARKit plane has at least `keyframeOverlapThreshold` of NEW
+   *    area vs the last accepted keyframe.  Bounded to
+   *    `keyframeMaxCount` frames per capture.  Mirrors how iOS
+   *    Camera and Samsung Pano actually work.  Requires
+   *    `planeSource` != 'Disabled'; degrades silently to passthrough
+   *    otherwise.
+   *  - 'flow-based' (V16 A2): same KeyframeGate cap + threshold but
+   *    the novelty metric is sparse-Lucas-Kanade optical flow on
+   *    full-frame content rather than plane-projected polygon
+   *    overlap.  Plane-independent — no `planeSource` requirement;
+   *    scale-invariant — works regardless of latched plane size.
+   *    Falls back to angular delta when KLT tracking fails. */
+  frameSelectionMode: 'time-based' | 'pose-based' | 'flow-based';
 
-  /** V16 — required fraction of NEW content per keyframe in pose-
-   *  based mode.  Range 0.10 – 0.80.  Default 0.40 (= the new frame
-   *  must share at most 60% of its plane footprint with the last
-   *  accepted keyframe).  Lower = more keyframes per capture +
-   *  more redundancy + better feature matching but higher memory.
+  /** V16 — required fraction of NEW content per keyframe (pose-based
+   *  AND flow-based modes share this knob).  Range 0.10 – 0.80.
+   *  Default 0.40.  Lower = more keyframes per capture + more
+   *  redundancy + better feature matching but higher memory.
    *  Higher = fewer keyframes + less margin for blurry frames. */
   keyframeOverlapThreshold: number;
 
-  /** V16 — hard cap on keyframes per capture in pose-based mode.
-   *  Range 3 – 10.  Default 6 (matches Samsung's typical behaviour).
-   *  Once reached, all subsequent frames are rejected and the host
-   *  should auto-finalize. */
+  /** V16 — hard cap on keyframes per capture (pose-based + flow-
+   *  based modes).  Range 3 – 10.  Default 6 (matches Samsung's
+   *  typical behaviour).  Once reached, all subsequent frames are
+   *  rejected and the host should auto-finalize. */
   keyframeMaxCount: number;
+
+  /** V16 A2 — flow-based mode: max Shi-Tomasi corners detected per
+   *  accepted keyframe.  Range 50 – 300, default 150.  Higher =
+   *  more robust median pan-axis displacement; slower detect. */
+  flowMaxCorners: number;
+
+  /** V16 A2 — flow-based mode: Shi-Tomasi quality level (0, 1].
+   *  Range 0.005 – 0.05, default 0.01.  Lower = more (weaker)
+   *  corners detected. */
+  flowQualityLevel: number;
+
+  /** V16 A2 — flow-based mode: minimum pixel distance between
+   *  detected corners at WORKING resolution (gate downscales the
+   *  frame to 720 px longest side internally).  Range 5 – 20,
+   *  default 10. */
+  flowMinDistance: number;
 
   // cv::Stitcher pipeline knobs (batch-keyframe engine, V16 Phase 1.fix3)
 

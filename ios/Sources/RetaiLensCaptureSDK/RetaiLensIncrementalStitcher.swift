@@ -671,7 +671,13 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // capture.  Values out of range are clamped silently.
         let frameMode = (configOverrides["frameSelectionMode"] as? String)
                         ?? "time-based"
-        self.keyframeGate.enabled = (frameMode == "pose-based")
+        // V16 A2 — both 'pose-based' and 'flow-based' enable the gate;
+        // they differ only in the novelty metric (plane-overlap vs
+        // sparse-flow).  'time-based' = passthrough.
+        self.keyframeGate.enabled =
+            (frameMode == "pose-based" || frameMode == "flow-based")
+        self.keyframeGate.strategy =
+            (frameMode == "flow-based") ? .flow : .pose
         if let v = configOverrides["keyframeOverlapThreshold"] as? Double {
             self.keyframeGate.overlapThreshold = max(0.10, min(0.80, v))
         } else {
@@ -682,12 +688,42 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         } else {
             self.keyframeGate.maxCount = 6
         }
+        // V16 A2 — flow tuning.  C++ side also clamps defensively
+        // (setFlowMaxCorners ≥ 30, setFlowQualityLevel ∈ (0, 1],
+        // setFlowMinDistance ≥ 1.0) so we layer the JS-side modal
+        // ranges over those minimum invariants.  Reading these
+        // unconditionally — they're cheap and the gate ignores them
+        // when strategy != .flow.
+        if let v = configOverrides["flowMaxCorners"] as? Int {
+            self.keyframeGate.flowMaxCorners = max(50, min(300, v))
+        } else {
+            self.keyframeGate.flowMaxCorners = 150
+        }
+        if let v = configOverrides["flowQualityLevel"] as? Double {
+            self.keyframeGate.flowQualityLevel = max(0.005, min(0.05, v))
+        } else {
+            self.keyframeGate.flowQualityLevel = 0.01
+        }
+        if let v = configOverrides["flowMinDistance"] as? Double {
+            self.keyframeGate.flowMinDistance = max(1.0, min(50.0, v))
+        } else if let v = configOverrides["flowMinDistance"] as? Int {
+            // JS sometimes ships Ints when the value happens to be
+            // an integer (SegmentedControl options are strings that
+            // parseInt into Ints).  Accept either shape.
+            self.keyframeGate.flowMinDistance = max(1.0, min(50.0, Double(v)))
+        } else {
+            self.keyframeGate.flowMinDistance = 10.0
+        }
         self.keyframeGate.reset()
         os_log(.fault, log: Self.diagLog,
-               "[V16-keyframe] start gate enabled=%d thr=%.2f max=%d",
+               "[V16-keyframe] start gate enabled=%d strategy=%{public}@ thr=%.2f max=%d flow(maxCorners=%d quality=%.3f minDist=%.1f)",
                self.keyframeGate.enabled ? 1 : 0,
+               self.keyframeGate.strategy == .flow ? "flow" : "pose",
                self.keyframeGate.overlapThreshold,
-               self.keyframeGate.maxCount)
+               self.keyframeGate.maxCount,
+               self.keyframeGate.flowMaxCorners,
+               self.keyframeGate.flowQualityLevel,
+               self.keyframeGate.flowMinDistance)
 
         stateLock.unlock()
 
