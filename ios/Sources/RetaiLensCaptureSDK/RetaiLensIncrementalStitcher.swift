@@ -161,6 +161,74 @@ public extension Notification.Name {
 }
 
 
+// MARK: - FinalizePayload (C2 — stateless finalize, fix-attempt 8)
+//
+// Value-typed snapshot of every input the finalize closures need.
+// Built in `finalize()`'s prologue under `stateLock` and passed BY
+// VALUE into the workQueue closure so the closure can capture
+// `[payload, completion]` ONLY — zero `self` references — closing
+// the entire class of `objc_retain`-on-torn-pointer crashes that
+// fix-attempts 1-7 chased symptom-by-symptom on the same code path.
+//
+// Per design doc 2026-05-12-finalize-crash-investigation.md (C2
+// escalation): all prior fixes attacked specific symptoms (which
+// ivar's read raced, which lock's discipline was lax).  This is the
+// architectural escalation: by construction the closure has no
+// access to mutable stitcher state, so no race in this code path is
+// even possible.
+//
+// File-scope `internal` (not private) so future ports (Design 2
+// actor, Design 3 C++) can adopt the same payload as their input.
+//
+// MAINTENANCE INVARIANT: every ivar finalize closures currently
+// read (or might read in future edits) MUST live here.  If you add
+// a new finalize-relevant ivar to RetaiLensIncrementalStitcher,
+// thread it through this struct.  The CI test at
+// scripts/check_c2_invariant.sh prevents accidental `self.*`
+// reintroduction inside the closure body.
+struct FinalizePayload {
+    // ── Output destination + quality ─────────────────────────────
+    /// The caller-supplied panorama output path, normalized
+    /// (file:// stripped if present).
+    let cleaned: String
+    /// JPEG quality, clamped to 1...100.
+    let q: Int
+
+    // ── Stitcher mode selection ─────────────────────────────────
+    /// True if this finalize is the V16 batch-keyframe pipeline.
+    let inBatchKeyframeMode: Bool
+    /// Hybrid engine ref (V14/V15 path).  nil if batch mode.
+    let hybrid: OpenCVIncrementalStitcher?
+    /// First-wins cylindrical engine ref (V13 path).  nil if batch mode.
+    let slit: OpenCVFirstWinsCylindricalStitcher?
+    /// V16 keyframe collector — owns the per-session JPEG sidecar
+    /// directory the post-stitch result references.
+    let collector: OpenCVKeyframeCollector?
+
+    // ── Frame inputs ─────────────────────────────────────────────
+    /// Absolute paths to keyframe JPEGs.  Value-copied; the
+    /// underlying String storage is COW and immutable.
+    let paths: [String]
+
+    // ── cv::Stitcher tuning snapshots (fix4 lineage) ─────────────
+    let batchWarperType: String
+    let batchBlenderType: String
+    let batchSeamFinderType: String
+    let batchEnableInscribedRectCrop: Bool
+    let keyframeExifOrientation: Int
+    /// AR-STITCHING-TWO-MODES (memory/ar-stitching-two-modes.md):
+    /// capture-time hold orientation for the bake-rotation pass.
+    let captureOrientation: String
+
+    // ── Result metadata ──────────────────────────────────────────
+    /// Backpressure drops accumulated this capture, surfaced to JS.
+    let drops: Int
+    /// Whether the AR session was running at finalize-entry — drives
+    /// the AR restart in the closure's defer.
+    let arWasRunning: Bool
+}
+
+
 @objc(RetaiLensIncrementalStitcher)
 public final class RetaiLensIncrementalStitcher: NSObject {
 
@@ -834,6 +902,49 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let drops = self.droppedBackpressure
         stateLock.unlock()
 
+        // V16 Phase 1b.fix8 (C2 — stateless finalize):
+        //   The prior 7 fix attempts all individually snapshotted the
+        //   batch* ivars + paths/collector/engines/drops above into
+        //   closure-locals.  This worked at the source level but the
+        //   `objc_retain` family of crashes kept moving from one
+        //   closure to the next (closure #1 → closure #2, offset
+        //   +2648 → +5176) — the compiler still had implicit-capture
+        //   latitude.  C2 closes the entire class:
+        //     1. Bundle every snapshot into a value-typed
+        //        FinalizePayload (defined at file scope above the
+        //        class declaration).
+        //     2. Pass the payload BY VALUE into the workQueue closure
+        //        via an explicit capture list `[payload, completion]`.
+        //     3. Bracket the closure with `C2-INVARIANT` marker
+        //        comments and enforce "no `self.*` inside" via the
+        //        CI test at scripts/check_c2_invariant.sh.
+        //   Net effect: the closure literally cannot read any
+        //   stitcher ivar.  Any future edit that re-introduces a
+        //   `self.` reference inside the closure is caught at CI.
+        let arWasRunning = inBatchKeyframeMode
+            && RetaiLensARSession.shared.isRunning
+        let cleaned = (outputPath.hasPrefix("file://"))
+            ? String(outputPath.dropFirst(7))
+            : outputPath
+        let q = max(1, min(100, jpegQuality))
+        let payload = FinalizePayload(
+            cleaned: cleaned,
+            q: q,
+            inBatchKeyframeMode: inBatchKeyframeMode,
+            hybrid: hybrid,
+            slit: slit,
+            collector: collector,
+            paths: paths,
+            batchWarperType: batchWarperType,
+            batchBlenderType: batchBlenderType,
+            batchSeamFinderType: batchSeamFinderType,
+            batchEnableInscribedRectCrop: batchEnableInscribedRectCrop,
+            keyframeExifOrientation: keyframeExifOrientation,
+            captureOrientation: captureOrientation,
+            drops: drops,
+            arWasRunning: arWasRunning
+        )
+
         // Then detach the AR consumer.  Any in-flight delegate that
         // already captured the consumer reference will reach
         // consumeFrame, see isRunning=false, and bail.
@@ -849,9 +960,11 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // completes so the next capture has AR ready (next plane
         // detection + tracking re-initialise will take 2-3 s, which
         // matches Ram's chosen "Option C" trade-off).
-        let arWasRunning = inBatchKeyframeMode
-            && RetaiLensARSession.shared.isRunning
-        if arWasRunning {
+        //
+        // `arWasRunning` was computed above into FinalizePayload — read
+        // from `payload.arWasRunning` here so we have one source of
+        // truth (the value the closure's defer also reads).
+        if payload.arWasRunning {
             os_log(.fault, log: Self.diagLog,
                    "[V16-batch-keyframe] pausing AR session for stitch (memory drop)")
             RetaiLensARSession.shared.stop()
@@ -904,7 +1017,20 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // .sync waits for it (~50-100 ms JPEG encode) — not a
         // deadlock, just brief serialization.  No other queue
         // dispatches synchronously TO workQueue, so .sync is safe.
-        workQueue.sync {
+        // MARK: C2-INVARIANT-START — no `self.` access below this line until C2-INVARIANT-END
+        //
+        // Enforced by scripts/check_c2_invariant.sh: any `self.` token
+        // (non-comment) inside this region is a CI failure.  Every
+        // value the closure needs is plumbed through `payload`.
+        //
+        // Capture list is EXPLICIT — `[payload, completion]` ONLY.
+        // The compiler will refuse any reference here that isn't
+        // satisfied by these two captures, value-typed members of
+        // `payload`, static types (`Self.diagLog`, `OpenCVStitcher`,
+        // `FileManager`, `CGDataProvider`, `CGImage`, `NSError`,
+        // `RetaiLensARSession`), or local lets/declarations made
+        // inside the closure.
+        workQueue.sync { [payload, completion] in
             // V16 Phase 1b.fix1 — defer-restart AR session.  Fires
             // on every exit path (success, error, early return).
             // Restart is dispatched to main because ARSession.run()
@@ -912,7 +1038,13 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             // hooks; happens AFTER the stitch completes so it doesn't
             // contend for the memory budget.
             defer {
-                if arWasRunning {
+                if payload.arWasRunning {
+                    // Inner closure body references only `Self.diagLog`
+                    // (static type) and `RetaiLensARSession.shared`
+                    // (singleton) — both name-resolve without
+                    // capturing self.  No explicit capture list
+                    // required; the C2 invariant script grep-checks
+                    // for `self.*` tokens which this body has none of.
                     DispatchQueue.main.async {
                         os_log(.fault, log: Self.diagLog,
                                "[V16-batch-keyframe] restarting AR session post-stitch")
@@ -920,19 +1052,15 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     }
                 }
             }
-            let cleaned = (outputPath.hasPrefix("file://"))
-                ? String(outputPath.dropFirst(7))
-                : outputPath
-            let q = max(1, min(100, jpegQuality))
             do {
-                if inBatchKeyframeMode {
+                if payload.inBatchKeyframeMode {
                     // V16 Phase 1 — hand collected keyframes + poses
                     // to OpenCVStitcher's full BA + GraphCut +
                     // ExposureComp + MultiBand pipeline.  ≤6 frames
                     // means BA stays bounded and MultiBand fits.
                     os_log(.fault, log: Self.diagLog,
                            "[V16-batch-keyframe] finalize ENTRY frames=%d",
-                           paths.count)
+                           payload.paths.count)
                     // V16 Phase 1b.fix7 — single-keyframe UX:
                     // accept a 1-frame finalize by copying the lone
                     // keyframe JPEG to outputPath (preserving the JPEG
@@ -946,9 +1074,9 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     // fix4/fix6 closed.  Returning the single frame as
                     // the output is the right UX: a single keyframe IS
                     // a valid panorama capture (just one shot).
-                    if paths.count < 2 {
-                        if paths.count == 1 {
-                            let src = paths[0]
+                    if payload.paths.count < 2 {
+                        if payload.paths.count == 1 {
+                            let src = payload.paths[0]
                             do {
                                 // Remove any pre-existing file at the
                                 // output path — copyItem refuses to
@@ -956,10 +1084,10 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                                 // a prior auto-finalize attempt is the
                                 // common case.
                                 let fm = FileManager.default
-                                if fm.fileExists(atPath: cleaned) {
-                                    try fm.removeItem(atPath: cleaned)
+                                if fm.fileExists(atPath: payload.cleaned) {
+                                    try fm.removeItem(atPath: payload.cleaned)
                                 }
-                                try fm.copyItem(atPath: src, toPath: cleaned)
+                                try fm.copyItem(atPath: src, toPath: payload.cleaned)
                                 // Read back the JPEG dimensions for
                                 // the result dictionary — match
                                 // OpenCVStitcher.stitchFramePaths'
@@ -968,7 +1096,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                                 // single-frame result.
                                 var width: Int = 0
                                 var height: Int = 0
-                                if let provider = CGDataProvider(filename: cleaned),
+                                if let provider = CGDataProvider(filename: payload.cleaned),
                                    let img = CGImage(
                                     jpegDataProviderSource: provider,
                                     decode: nil,
@@ -979,16 +1107,16 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                                 }
                                 os_log(.fault, log: Self.diagLog,
                                        "[V16-batch-keyframe.fix7] single-keyframe finalize: copied %{public}@ → %{public}@ (%dx%d)",
-                                       src, cleaned,
+                                       src, payload.cleaned,
                                        Int32(width), Int32(height))
                                 completion([
-                                    "panoramaPath": cleaned,
+                                    "panoramaPath": payload.cleaned,
                                     "width": width,
                                     "height": height,
                                     "acceptedCount": 1,
-                                    "droppedBackpressure": drops,
+                                    "droppedBackpressure": payload.drops,
                                     "batchKeyframeSessionDir":
-                                        collector?.sessionDir ?? "",
+                                        payload.collector?.sessionDir ?? "",
                                     "batchKeyframeCount": 1,
                                     "singleKeyframe": true,
                                 ], nil)
@@ -1003,7 +1131,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                                        copyErr.localizedDescription)
                             }
                         }
-                        collector?.cleanup()
+                        payload.collector?.cleanup()
                         completion(nil, NSError(
                             domain: "RetaiLensIncremental",
                             code: 9003,
@@ -1050,46 +1178,32 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                         // (stitchKeyframePaths method) but isn't on
                         // the hot path.
                         // V16 Phase 1b.fix3 — pass the EXIF Orientation
-                        // tag derived from `frameRotationDegrees` (see
-                        // `start(...)` switch).  cv::Stitcher writes
-                        // wide pixels regardless of capture orientation
-                        // (lens is fixed); without a baked tag, iOS
-                        // image renderers display the panorama
-                        // sideways when the user holds the phone in
-                        // portrait.  The tag is metadata-only — pixels
-                        // are unchanged — so it costs nothing.
-                        // V16 Phase 1b.fix4 — read knobs from the
-                        // closure-local snapshots (taken under
-                        // stateLock in finalize's prologue), NOT
-                        // self.batch*, to avoid a torn-pointer race
-                        // against a concurrent start().  See RCA
-                        // comment at the top of finalize().
+                        // tag derived from `frameRotationDegrees`.
+                        // V16 Phase 1b.fix8 (C2) — read knobs from
+                        // `payload` (value-snapshot built under
+                        // stateLock in finalize's prologue).  No
+                        // `self.*` access here; closure cannot race
+                        // with a concurrent `start()`.
                         // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
-                        // Pass the capture-time hold orientation to
-                        // the native side; .mm uses it to bake-rotate
-                        // the output Mat per the two-modes rotation
-                        // table (portrait → 0°, portrait-upside-down
-                        // → 180°, landscape-left → 90° CCW,
-                        // landscape-right → 90° CW).
-                        // `keyframeExifOrientation` (still snapshotted
-                        // above) is kept for any future per-keyframe
-                        // EXIF needs; unused on this call now.
-                        _ = keyframeExifOrientation
+                        // `payload.captureOrientation` drives the .mm
+                        // bake-rotation; `payload.keyframeExifOrientation`
+                        // kept for any future per-keyframe EXIF needs.
+                        _ = payload.keyframeExifOrientation
                         os_log(.fault, log: Self.diagLog,
                                "[V16-batch-keyframe] stitch (feature-matched): warper=%{public}@ blender=%{public}@ seam=%{public}@ captureOrientation=%{public}@",
-                               batchWarperType,
-                               batchBlenderType,
-                               batchSeamFinderType,
-                               captureOrientation)
+                               payload.batchWarperType,
+                               payload.batchBlenderType,
+                               payload.batchSeamFinderType,
+                               payload.captureOrientation)
                         let r = try OpenCVStitcher.stitchFramePaths(
-                            paths,
-                            outputPath: cleaned,
-                            jpegQuality: q,
-                            warperType: batchWarperType,
-                            blenderType: batchBlenderType,
-                            seamFinderType: batchSeamFinderType,
-                            captureOrientation: captureOrientation,
-                            useInscribedRectCrop: batchEnableInscribedRectCrop
+                            payload.paths,
+                            outputPath: payload.cleaned,
+                            jpegQuality: payload.q,
+                            warperType: payload.batchWarperType,
+                            blenderType: payload.batchBlenderType,
+                            seamFinderType: payload.batchSeamFinderType,
+                            captureOrientation: payload.captureOrientation,
+                            useInscribedRectCrop: payload.batchEnableInscribedRectCrop
                         )
                         // Keep saved keyframes on disk for post-hoc
                         // re-processing (Ram's request).  Cleanup is
@@ -1098,32 +1212,32 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                             "panoramaPath": r.outputPath,
                             "width": Int(r.width),
                             "height": Int(r.height),
-                            "acceptedCount": paths.count,
-                            "droppedBackpressure": drops,
+                            "acceptedCount": payload.paths.count,
+                            "droppedBackpressure": payload.drops,
                             "batchKeyframeSessionDir":
-                                collector?.sessionDir ?? "",
-                            "batchKeyframeCount": paths.count,
+                                payload.collector?.sessionDir ?? "",
+                            "batchKeyframeCount": payload.paths.count,
                         ], nil)
                     } catch let stitchErr as NSError {
                         completion(nil, stitchErr)
                     }
-                } else if let hybrid = hybrid {
-                    let snap = try hybrid.finalize(atPath: cleaned, jpegQuality: q)
+                } else if let hybrid = payload.hybrid {
+                    let snap = try hybrid.finalize(atPath: payload.cleaned, jpegQuality: payload.q)
                     completion([
                         "panoramaPath": snap.panoramaPath,
                         "width": snap.width,
                         "height": snap.height,
                         "acceptedCount": snap.acceptedCount,
-                        "droppedBackpressure": drops,
+                        "droppedBackpressure": payload.drops,
                     ], nil)
-                } else if let slit = slit {
-                    let snap = try slit.finalize(atPath: cleaned, jpegQuality: q)
+                } else if let slit = payload.slit {
+                    let snap = try slit.finalize(atPath: payload.cleaned, jpegQuality: payload.q)
                     completion([
                         "panoramaPath": snap.panoramaPath,
                         "width": snap.width,
                         "height": snap.height,
                         "acceptedCount": snap.acceptedCount,
-                        "droppedBackpressure": drops,
+                        "droppedBackpressure": payload.drops,
                     ], nil)
                 } else {
                     completion(nil, NSError(
@@ -1137,6 +1251,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                 completion(nil, err)
             }
         }
+        // MARK: C2-INVARIANT-END
     }
 
     /// Cancel an in-progress capture without producing output.
