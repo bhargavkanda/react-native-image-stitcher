@@ -1492,8 +1492,33 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         }
         // Re-use the previous state's pan-extent / orientation fields
         // so the band overlay doesn't flicker when a reject lands.
-        let prev = self.lastState
-        let acceptedCount = self.engineAcceptedCount
+        //
+        // V16 A2 (post-2026-05-13-14:41:57 .ips):
+        //   `self.lastState` is written from BOTH this method (main
+        //   thread, reject path) AND the engine accept-path
+        //   (workQueue, ~line 1908) — both under stateLock at the
+        //   write site, but these reads were unprotected.  Pre-A2
+        //   the reject rate was a few per second and the race was
+        //   latent; A2's flow-based default raised it to ~50/s.  At
+        //   that frequency the torn-pointer-on-class-ref race fires:
+        //     T0  workQueue prepares new state, about to replace
+        //         self.lastState
+        //     T1  main thread loads self.lastState — sees OLD ref
+        //     T2  workQueue writes new ref; ARC releases OLD
+        //         (refcount → 0 → freed)
+        //     T3  main thread's load completes; ARC tries to retain
+        //         OLD ref → objc_retain on freed memory →
+        //         EXC_BAD_ACCESS at frame 0 of emitKeyframeRejectState.
+        //   Fix: hold stateLock for the read.  Cheap (microseconds);
+        //   tighter scope than wrapping the whole function so we
+        //   don't hold during the NotificationCenter post that
+        //   follows.
+        let prev: RetaiLensIncrementalState?
+        let acceptedCount: Int
+        stateLock.lock()
+        prev = self.lastState
+        acceptedCount = self.engineAcceptedCount
+        stateLock.unlock()
         let overlapPercent = (decision.newContentFraction >= 0)
             ? (1.0 - decision.newContentFraction) * 100.0
             : (prev?.overlapPercent ?? -1.0)
