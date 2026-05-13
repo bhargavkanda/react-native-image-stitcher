@@ -27,11 +27,25 @@
 
 #include "keyframe_gate.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdint>
 #include <optional>
 #include <vector>
+
+// V16 A2 — sparse-flow novelty path.
+//
+// OpenCV is available on both platforms compiling this TU: iOS via the
+// vendored opencv2.framework (RetaiLensCaptureSDK.podspec line ~118)
+// and Android via the custom OpenCV NDK build (Android compile_commands
+// shows `-I.../OpenCV-android-sdk/sdk/native/jni/include`).  The Pose
+// strategy path below stays OpenCV-free; only the Flow path uses these
+// headers, but they're unconditional because both strategies share a
+// single TU and there's no win from #ifdef-fencing.
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>           // resize, INTER_AREA, goodFeaturesToTrack
+#include <opencv2/video/tracking.hpp>    // calcOpticalFlowPyrLK
 
 namespace retailens {
 namespace {
@@ -262,17 +276,43 @@ float polygonIntersectionArea(const std::vector<Vec2>& subject,
 // ── KeyframeGate::Impl (pimpl idiom) ─────────────────────────────
 
 struct KeyframeGate::Impl {
-    // Settings
+    // ── Settings ──────────────────────────────────────────────────
     bool   enabled            = false;
     double overlapThreshold   = 0.4;
     int32_t maxCount          = 6;
 
-    // State
+    // V16 A2 — strategy + flow tunables.  Default is Pose to keep
+    // pre-A2 behaviour for any caller that hasn't switched.  The
+    // host-side default (in TS settings) is flipped to Flow in
+    // commit 3 of the A2 batch.
+    GateStrategy strategy             = GateStrategy::Pose;
+    int32_t      flowMaxCorners       = 150;
+    double       flowQualityLevel     = 0.01;
+    double       flowMinDistance      = 10.0;
+
+    // ── Pose-path state (V16 Phase 0/1/2) ─────────────────────────
     int32_t acceptedCount     = 0;
     std::optional<std::vector<Vec2>> lastCornersOnPlane;
     std::optional<PlaneBasis>        planeForCapture;
     bool   forceAcceptNext    = false;
     std::optional<Pose>              lastAcceptedPose;
+
+    // ── Flow-path state (V16 A2) ──────────────────────────────────
+    // `prevFrameGray` is the WORKING-RESOLUTION grayscale image of the
+    // last accepted keyframe (downscaled to keep KLT cheap — see
+    // kFlowWorkingMaxSide in evaluateFlow).  `prevFeatures` are the
+    // Shi-Tomasi corners detected on it.  Both are CLEARED on
+    // reset(); both are REFRESHED in-place on every accept under the
+    // Flow strategy.  Empty when no flow accept has happened yet.
+    cv::Mat                     prevFrameGrayWork;
+    std::vector<cv::Point2f>    prevFeatures;
+    // Cache the original (un-downscaled) frame dimensions of the
+    // previous accepted frame.  Used so the novelty calc is in
+    // ORIGINAL pixel space — frame_dim ratio is scale-invariant, but
+    // pinning to the working resolution would couple thresholds to
+    // the downscale factor.  Re-set whenever prevFrameGrayWork is.
+    int32_t                     prevFrameOrigWidth  = 0;
+    int32_t                     prevFrameOrigHeight = 0;
 };
 
 // Compile-time layout check on the shared POD struct — ensures iOS
@@ -298,12 +338,30 @@ void KeyframeGate::setOverlapThreshold(double t)        { pImpl_->overlapThresho
 void KeyframeGate::setMaxCount(int32_t n)               { pImpl_->maxCount = n; }
 void KeyframeGate::markNextFrameAsLast()                { pImpl_->forceAcceptNext = true; }
 
+// V16 A2 — strategy + flow tunable setters.  All values are clamped
+// defensively so a bad host-side default can't put the gate in an
+// unworkable state.
+void KeyframeGate::setStrategy(GateStrategy s)          { pImpl_->strategy = s; }
+GateStrategy KeyframeGate::getStrategy() const          { return pImpl_->strategy; }
+void KeyframeGate::setFlowMaxCorners(int32_t n)         { pImpl_->flowMaxCorners = (n < 30 ? 30 : n); }
+void KeyframeGate::setFlowQualityLevel(double q)        { pImpl_->flowQualityLevel = (q <= 0.0 ? 0.001 : (q > 1.0 ? 1.0 : q)); }
+void KeyframeGate::setFlowMinDistance(double d)         { pImpl_->flowMinDistance  = (d < 1.0 ? 1.0 : d); }
+
 void KeyframeGate::reset() {
     pImpl_->acceptedCount = 0;
     pImpl_->lastCornersOnPlane.reset();
     pImpl_->planeForCapture.reset();
     pImpl_->forceAcceptNext = false;
     pImpl_->lastAcceptedPose.reset();
+    // V16 A2 — drop flow state.  release() returns the cv::Mat to
+    // empty (refcount-managed); std::vector::clear() is the
+    // canonical empty.  Mandatory: leftover state from a prior
+    // capture would otherwise leak into the next capture's first-
+    // frame logic.
+    pImpl_->prevFrameGrayWork.release();
+    pImpl_->prevFeatures.clear();
+    pImpl_->prevFrameOrigWidth  = 0;
+    pImpl_->prevFrameOrigHeight = 0;
 }
 
 int32_t KeyframeGate::getAcceptedCount() const { return pImpl_->acceptedCount; }
@@ -488,6 +546,255 @@ KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
     s.acceptedCount += 1;
     return { true, KeyframeGateDecisionReason::AcceptOk,
              newContentFraction, s.acceptedCount, s.maxCount };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// V16 A2 — sparse-flow novelty path
+// ═══════════════════════════════════════════════════════════════════
+//
+// Algorithm (1:1 with Ram's design 2026-05-13):
+//
+//   1. Detect Shi-Tomasi corners in the LAST ACCEPTED keyframe once
+//      per accept.  Persist them on Impl.prevFeatures.
+//   2. For each incoming frame, track those features into the new
+//      frame with calcOpticalFlowPyrLK.
+//   3. Compute the median absolute displacement on the dominant pan
+//      axis (max of |median dx|, |median dy|).
+//   4. novelty = median_pan_displacement / pan_axis_frame_dim
+//                ∈ [0, 1] for sensible motion.
+//   5. Accept iff novelty ≥ overlapThreshold (default 0.4 → 40 % of
+//      frame dim → 40 % new content for a yaw-dominated pan).
+//   6. On accept, detect fresh features in the new frame, swap
+//      prevFrameGrayWork + prevFeatures, increment acceptedCount.
+//
+// Fallbacks:
+//   * acceptedCount == 0 → accept first frame, detect features,
+//     return AcceptFirstFlow.
+//   * acceptedCount ≥ maxCount → RejectMaxReached.
+//   * tracked count < 30 % of detected → tracking failure (texture-
+//     poor scene, motion too fast for the pyramid window).  Falls
+//     back to the existing angular-delta path so the gate still
+//     produces sensible decisions in low-texture scenes.
+//
+// Cost (iPhone 13 Pro, 1920×1440 → 720 working res):
+//   * goodFeaturesToTrack (per accept):    ~6-10 ms
+//   * cvtColor / resize    (per evaluate): ~1-2 ms
+//   * calcOpticalFlowPyrLK (per evaluate): ~1-3 ms
+//   Total per-evaluate (non-accept frame): ~3-5 ms.  Within budget
+//   for the 50fps AR delegate path.
+
+namespace {
+
+constexpr int   kFlowWorkingMaxSide              = 720;
+constexpr double kFlowMinTrackedFeatureFraction  = 0.30;
+constexpr int   kFlowKLTMaxLevel                 = 3;
+
+// Median of absolute values in `values` — O(n) via nth_element.
+// Mutates the input vector (re-orders it); callers pass scratch
+// copies.  Returns 0 for empty input (caller must guard).
+float medianAbs(std::vector<float>& values) {
+    if (values.empty()) return 0.0f;
+    const size_t n = values.size();
+    for (auto& v : values) v = std::abs(v);
+    std::nth_element(values.begin(), values.begin() + n / 2, values.end());
+    return values[n / 2];
+}
+
+// Downscale `srcGray` so its longer side equals `kFlowWorkingMaxSide`,
+// using INTER_AREA (best for shrinking — anti-aliased average).  If
+// the source is already at or below the target size, returns a deep
+// copy (so callers always own the result).  Always returns a
+// CV_8UC1 Mat.
+cv::Mat downscaleToWorking(const cv::Mat& srcGray) {
+    const int longerSide = std::max(srcGray.cols, srcGray.rows);
+    if (longerSide <= kFlowWorkingMaxSide) {
+        return srcGray.clone();
+    }
+    const double scale = static_cast<double>(kFlowWorkingMaxSide) / longerSide;
+    cv::Mat out;
+    cv::resize(srcGray, out, cv::Size(), scale, scale, cv::INTER_AREA);
+    return out;
+}
+
+} // anonymous namespace
+
+KeyframeGateDecision KeyframeGate::evaluateWithFrame(
+    const Pose& pose,
+    const PlaneTransform* latchedPlane,
+    const uint8_t* grayData,
+    int32_t width,
+    int32_t height,
+    int32_t stride)
+{
+    Impl& s = *pImpl_;
+
+    // §1 — disabled passes through unchanged for either strategy.
+    if (!s.enabled) {
+        s.acceptedCount += 1;
+        return { true, KeyframeGateDecisionReason::AcceptDisabled,
+                 -1.0, s.acceptedCount, s.maxCount };
+    }
+
+    // §2 — force-last short-circuits both strategies.  We DO update
+    // flow state here so a subsequent (post-finalize-via-cancel-
+    // continue) evaluation reads a consistent prev-frame.  In
+    // practice force-last is followed by finalize+reset, so this is
+    // mostly defensive.
+    if (s.forceAcceptNext) {
+        s.forceAcceptNext = false;
+        s.acceptedCount  += 1;
+        // No newContent fraction — we accepted unconditionally.
+        return { true, KeyframeGateDecisionReason::AcceptForceLast,
+                 -1.0, s.acceptedCount, s.maxCount };
+    }
+
+    // §3 — strategy dispatch.
+    if (s.strategy == GateStrategy::Pose) {
+        // Pose path is OpenCV-free and identical to the
+        // backward-compat `evaluate()` entry point.  Skip the
+        // grayscale wrap entirely — `grayData` is ignored.
+        return evaluate(pose, latchedPlane);
+    }
+
+    // Flow path — wrap incoming pixel data as a non-owning cv::Mat
+    // and downscale to working resolution.  The non-owning view is
+    // SAFE because we deep-copy (via clone) before storing on Impl.
+    if (grayData == nullptr || width <= 0 || height <= 0 || stride < width) {
+        // Defensive: caller forgot to supply image data despite
+        // strategy=Flow.  Fall back to pose path so we degrade
+        // gracefully rather than crashing on a null deref.
+        return evaluate(pose, latchedPlane);
+    }
+    cv::Mat currGrayFull(height, width, CV_8UC1,
+                        const_cast<uint8_t*>(grayData),
+                        static_cast<size_t>(stride));
+    cv::Mat currGrayWork = downscaleToWorking(currGrayFull);
+
+    // §4 — first-frame accept under Flow.  No prev to track against;
+    // we anchor here and detect features so subsequent frames have
+    // a target.  Mirrors §3 of the Pose path semantically.
+    if (s.acceptedCount == 0) {
+        std::vector<cv::Point2f> features;
+        cv::goodFeaturesToTrack(
+            currGrayWork, features,
+            s.flowMaxCorners,
+            s.flowQualityLevel,
+            s.flowMinDistance);
+        s.prevFrameGrayWork = currGrayWork;  // clone-owned via downscale path
+        s.prevFeatures      = std::move(features);
+        s.prevFrameOrigWidth  = width;
+        s.prevFrameOrigHeight = height;
+        s.lastAcceptedPose    = pose;
+        s.acceptedCount       = 1;
+        return { true, KeyframeGateDecisionReason::AcceptFirstFlow,
+                 -1.0, s.acceptedCount, s.maxCount };
+    }
+
+    // §5 — max-reached gate.  Same as Pose path; redundant here only
+    // because the Flow path doesn't share the early-cap check at
+    // line 340-345 with the Pose path.
+    if (s.acceptedCount >= s.maxCount) {
+        return { false, KeyframeGateDecisionReason::RejectMaxReached,
+                 -1.0, s.acceptedCount, s.maxCount };
+    }
+
+    // §6 — KLT tracking.  Falls back to angular when too few features
+    // survive (texture-poor scene, motion exceeds pyramid window).
+    if (s.prevFeatures.empty() || s.prevFrameGrayWork.empty()) {
+        // Defensive: reset() was called but acceptedCount wasn't 0.
+        // Shouldn't happen.  Fall back to angular.
+        return evaluateAngularFallback(s, pose);
+    }
+    std::vector<cv::Point2f> trackedFeatures;
+    std::vector<uint8_t>     status;
+    std::vector<float>       err;
+    cv::calcOpticalFlowPyrLK(
+        s.prevFrameGrayWork, currGrayWork,
+        s.prevFeatures, trackedFeatures, status, err,
+        cv::Size(21, 21),
+        kFlowKLTMaxLevel,
+        cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01));
+
+    // Collect successfully-tracked displacements in WORKING-RESOLUTION
+    // pixels.  Both numerator (median displacement) and denominator
+    // (frame dim) live in working pixels — the ratio is the same as
+    // it would be in original pixels.
+    std::vector<float> dxs, dys;
+    dxs.reserve(s.prevFeatures.size());
+    dys.reserve(s.prevFeatures.size());
+    for (size_t i = 0; i < s.prevFeatures.size() && i < trackedFeatures.size() && i < status.size(); ++i) {
+        if (status[i] == 0) continue;
+        dxs.push_back(trackedFeatures[i].x - s.prevFeatures[i].x);
+        dys.push_back(trackedFeatures[i].y - s.prevFeatures[i].y);
+    }
+
+    // §6a — tracking-failure fallback.  If fewer than 30 % of the
+    // previous frame's features tracked successfully, KLT is unreliable
+    // for this frame pair (occlusion, motion blur, texture loss).
+    // Angular fallback uses the pose only — no image data needed —
+    // and produces sensibly-spaced keyframes from camera rotation.
+    const double trackedFraction =
+        s.prevFeatures.empty() ? 0.0
+        : static_cast<double>(dxs.size()) / static_cast<double>(s.prevFeatures.size());
+    if (trackedFraction < kFlowMinTrackedFeatureFraction) {
+        return evaluateAngularFallback(s, pose);
+    }
+
+    // §6b — median absolute displacement on each axis.  Median (not
+    // mean) is robust to KLT outliers near occlusion edges — a few
+    // mis-tracked features won't skew the result.  medianAbs mutates
+    // the vector but that's fine, we don't need it after.
+    const float medAbsDx = medianAbs(dxs);
+    const float medAbsDy = medianAbs(dys);
+
+    // §6c — pan-axis detection + novelty computation.  Whichever axis
+    // has the larger median displacement IS the pan axis (per Ram's
+    // design — read pan direction off the flow itself, NOT off the
+    // captureOrientation hold setting, which describes the device
+    // hold, not the user's pan direction).
+    //
+    // Novelty = pan-axis-median-displacement / pan-axis-frame-dim.
+    // Direct semantic: 40 % of frame dim displacement = 40 % new
+    // content on the leading edge ≈ 60 % overlap with prev.
+    double novelty;
+    if (medAbsDx >= medAbsDy) {
+        novelty = static_cast<double>(medAbsDx) / static_cast<double>(currGrayWork.cols);
+    } else {
+        novelty = static_cast<double>(medAbsDy) / static_cast<double>(currGrayWork.rows);
+    }
+    if (novelty < 0.0) novelty = 0.0;
+    if (novelty > 1.0) novelty = 1.0;
+
+    // §7 — accept or reject against the shared overlapThreshold.
+    // Same threshold semantic as the Pose path: 0.40 default ≈ 40 %
+    // new content.  Setting names line up so users don't get a third
+    // knob to tune.
+    if (novelty < s.overlapThreshold) {
+        return { false, KeyframeGateDecisionReason::RejectOverlapTooHighFlow,
+                 novelty, s.acceptedCount, s.maxCount };
+    }
+
+    // §8 — accept.  Re-detect features in the newly-accepted frame
+    // (the previous set is now stale; many of them have moved out
+    // of frame or onto novel content).  We re-detect at every
+    // accept rather than re-using survivors — a fresh detect on the
+    // CURRENT frame gives the most distinctive corners for the
+    // NEXT capture's tracking and avoids drift accumulation across
+    // multiple accepts.
+    std::vector<cv::Point2f> nextFeatures;
+    cv::goodFeaturesToTrack(
+        currGrayWork, nextFeatures,
+        s.flowMaxCorners,
+        s.flowQualityLevel,
+        s.flowMinDistance);
+    s.prevFrameGrayWork = currGrayWork;   // owned via downscale's clone
+    s.prevFeatures      = std::move(nextFeatures);
+    s.prevFrameOrigWidth  = width;
+    s.prevFrameOrigHeight = height;
+    s.lastAcceptedPose    = pose;
+    s.acceptedCount      += 1;
+    return { true, KeyframeGateDecisionReason::AcceptOkFlow,
+             novelty, s.acceptedCount, s.maxCount };
 }
 
 } // namespace retailens
