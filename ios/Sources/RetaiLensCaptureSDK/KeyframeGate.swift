@@ -88,6 +88,46 @@ final class KeyframeGate {
         set { bridge.setMaxCount(newValue) }
     }
 
+    // MARK: - V16 A2 — strategy + flow tunables
+
+    /// Mirror of `retailens::GateStrategy`.  Pose = the V16 Phase-0
+    /// plane-overlap path.  Flow = V16 A2 sparse-optical-flow novelty
+    /// (needs per-frame image data via the `evaluate(pose:plane:pixelBuffer:)`
+    /// overload below; the older pixel-buffer-free `evaluate(pose:plane:)`
+    /// silently falls back to Pose regardless of this setting).
+    enum GateStrategy: Int {
+        case pose = 0
+        case flow = 1
+    }
+
+    var strategy: GateStrategy {
+        get { GateStrategy(rawValue: bridge.strategy().rawValue) ?? .pose }
+        set { bridge.setStrategy(KGBStrategy(rawValue: newValue.rawValue) ?? .pose) }
+    }
+
+    /// Flow strategy — number of Shi-Tomasi corners to detect per
+    /// accepted keyframe.  Default 150; the C++ side clamps to ≥30.
+    /// Higher = more robust median, slower detect (~15-25 ms at 150
+    /// on iPhone 13 Pro).  Tunable from PanoramaSettingsModal.
+    var flowMaxCorners: Int = 150 {
+        didSet { bridge.setFlowMaxCorners(flowMaxCorners) }
+    }
+
+    /// Flow strategy — Shi-Tomasi quality level (0, 1].  Default
+    /// 0.01.  Lower = more (weaker) corners detected; higher = fewer
+    /// (stronger) corners.  C++ side clamps to (0.001, 1.0].
+    var flowQualityLevel: Double = 0.01 {
+        didSet { bridge.setFlowQualityLevel(flowQualityLevel) }
+    }
+
+    /// Flow strategy — minimum pixel distance between detected
+    /// corners (in WORKING-resolution pixels — gate downscales to
+    /// 720 px longest side internally).  Default 10.  Higher =
+    /// more spatially-spread features = more representative median.
+    var flowMinDistance: Double = 10.0 {
+        didSet { bridge.setFlowMinDistance(flowMinDistance) }
+    }
+
     /// One-shot flag: when set to `true`, the very next evaluate()
     /// accepts unconditionally and the flag self-resets.  Set by JS
     /// shutter-release path so we don't truncate the trailing edge
@@ -162,6 +202,66 @@ final class KeyframeGate {
 
         let result = bridge.evaluate(
             withTx: Float(pose.tx),
+            ty: Float(pose.ty),
+            tz: Float(pose.tz),
+            qx: Float(pose.qx),
+            qy: Float(pose.qy),
+            qz: Float(pose.qz),
+            qw: Float(pose.qw),
+            fx: Float(pose.fx),
+            fy: Float(pose.fy),
+            cx: Float(pose.cx),
+            cy: Float(pose.cy),
+            imageWidth: Int32(pose.imageWidth),
+            imageHeight: Int32(pose.imageHeight),
+            plane16: plane16
+        )
+
+        return KeyframeGateDecision(
+            accept: result.accept,
+            reason: result.reasonString,
+            newContentFraction: result.newContentFraction,
+            acceptedCount: result.acceptedCount,
+            maxCount: result.maxCount
+        )
+    }
+
+    /// V16 A2 — strategy-aware evaluate that also accepts the
+    /// frame's pixel buffer.  Required by `strategy = .flow` (sparse-
+    /// flow novelty needs the image content).  When `strategy = .pose`
+    /// the pixel buffer is ignored — same result + cost as
+    /// `evaluate(pose:latchedPlane:)`.
+    ///
+    /// The bridge handles all pixel-format handling (YUV-direct,
+    /// BGRA-via-cvtColor, unknown → pose fallback).
+    func evaluate(
+        pose: RetaiLensARFramePose,
+        latchedPlane: simd_float4x4?,
+        pixelBuffer: CVPixelBuffer
+    ) -> KeyframeGateDecision {
+        let plane16: [NSNumber]?
+        if let m = latchedPlane {
+            let c0 = m.columns.0
+            let c1 = m.columns.1
+            let c2 = m.columns.2
+            let c3 = m.columns.3
+            plane16 = [
+                NSNumber(value: c0.x), NSNumber(value: c0.y),
+                NSNumber(value: c0.z), NSNumber(value: c0.w),
+                NSNumber(value: c1.x), NSNumber(value: c1.y),
+                NSNumber(value: c1.z), NSNumber(value: c1.w),
+                NSNumber(value: c2.x), NSNumber(value: c2.y),
+                NSNumber(value: c2.z), NSNumber(value: c2.w),
+                NSNumber(value: c3.x), NSNumber(value: c3.y),
+                NSNumber(value: c3.z), NSNumber(value: c3.w),
+            ]
+        } else {
+            plane16 = nil
+        }
+
+        let result = bridge.evaluate(
+            pixelBuffer: pixelBuffer,
+            tx: Float(pose.tx),
             ty: Float(pose.ty),
             tz: Float(pose.tz),
             qx: Float(pose.qx),

@@ -1585,8 +1585,14 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             && self.keyframeGate.enabled
         if shouldEvaluateGate {
             let plane = RetaiLensARSession.shared.latchedPlaneTransform()
+            // V16 A2 — call the pixel-buffer-aware overload so Flow
+            // strategy gets the image content.  Pose strategy is
+            // routed to the fast pose-only path inside the bridge,
+            // so we don't pay the buffer-lock cost for Pose frames.
             gateDecision = self.keyframeGate.evaluate(
-                pose: pose, latchedPlane: plane
+                pose: pose,
+                latchedPlane: plane,
+                pixelBuffer: pixelBuffer
             )
         }
         stateLock.unlock()
