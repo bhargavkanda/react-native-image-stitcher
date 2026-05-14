@@ -166,6 +166,27 @@ class RetaiLensIncrementalStitcher(
     /// (passed from JS), falling back to "portrait".
     private var batchCaptureOrientation: String = "portrait"
 
+    // ── 2026-05-14: cv::Stitcher pipeline-mode auto-routing ──────────
+    //
+    // `batchStitchMode` is the JS-supplied setting from
+    // PanoramaSettings.stitchMode.  Three valid values:
+    //   'auto' (default) — at finalize() time, compute translation/
+    //                      rotation totals from the first and last
+    //                      accepted keyframe pose, pick PANORAMA or
+    //                      SCANS by the design-doc 0.55 threshold.
+    //   'panorama'       — force cv::Stitcher::PANORAMA mode at JNI.
+    //   'scans'          — force cv::Stitcher::SCANS mode at JNI.
+    //
+    // batchFirstAcceptedPose / batchLastAcceptedPose are populated by
+    // ingestFromARCameraView() on every accepted keyframe.  Cleared
+    // at start() and consumed at finalize().  They store (tx, ty, tz,
+    // qx, qy, qz, qw) — same shape as `KeyframeGate`'s internal
+    // last-accepted-pose tracker, but kept locally so we don't have
+    // to wire a new accessor through the C++ bridge.
+    private var batchStitchMode: String = "auto"
+    private var batchFirstAcceptedPose: DoubleArray? = null
+    private var batchLastAcceptedPose: DoubleArray? = null
+
     /// V16 Phase 1 / P3-F — shared-C++ KeyframeGate.  Replaces the
     /// V16-Phase-1 frame-counter MVP placeholder
     /// (handleBatchKeyframeFrame above) with the same pose-driven
@@ -294,6 +315,15 @@ class RetaiLensIncrementalStitcher(
                 batchUseInscribedRectCrop = configOverrides
                     ?.getBooleanOrDefault("enableMaxInscribedRectCrop", false)
                     ?: false
+                // 2026-05-14 — stitch-mode picker from JS Settings.
+                // Default 'auto'.  Validated against the closed set
+                // {auto, panorama, scans}; unknown values fall back
+                // to 'auto'.  Reset accumulated-pose state for the
+                // new capture so finalize() picks a fresh mode.
+                batchStitchMode = (configOverrides?.getString("stitchMode") ?: "auto")
+                    .let { if (it in setOf("auto", "panorama", "scans")) it else "auto" }
+                batchFirstAcceptedPose = null
+                batchLastAcceptedPose = null
                 // captureOrientation is JS-supplied here (Android
                 // doesn't yet have a native ARCore classifier
                 // equivalent to iOS' nativeCaptureOrientation; the
@@ -653,9 +683,39 @@ class RetaiLensIncrementalStitcher(
         val blenderTypeSnapshot = batchBlenderType
         val seamFinderTypeSnapshot = batchSeamFinderType
         val useInscribedRectCropSnapshot = batchUseInscribedRectCrop
+        // 2026-05-14 — resolve stitch-mode auto → concrete mode.
+        // 'auto' uses the pose deltas accumulated during capture to
+        // pick PANORAMA (rotation-heavy) vs SCANS (translation-heavy).
+        //
+        // Heuristic (matches design doc 2026-05-13-stitch-pipeline-mode-selection):
+        //   translation_score = ||t_last − t_first|| (meters) / 0.10
+        //   rotation_score    = angle(fwd_last, fwd_first) (radians) / 1.00
+        //   ratio = translation_score / (translation_score + rotation_score)
+        //   ratio ≥ 0.55 → SCANS  (translation-dominant)
+        //   ratio  < 0.55 → PANORAMA (rotation-dominant)
+        //   missing poses → SCANS (safer default: bounded canvas).
+        //
+        // Why biased toward SCANS: PANORAMA on translation diverges
+        // catastrophically (3.2 GB compositing canvas observed
+        // 2026-05-14 → lmkd kill).  SCANS on rotation degrades
+        // gracefully (slightly worse seams, never blows up).
+        val firstPose = batchFirstAcceptedPose
+        val lastPose = batchLastAcceptedPose
+        val stitchModeResolved: String = when (batchStitchMode) {
+            "panorama" -> "panorama"
+            "scans"    -> "scans"
+            else -> resolveStitchModeAuto(firstPose, lastPose)
+        }
+        android.util.Log.i(
+            "RetaiLensIncrementalStitcher",
+            "finalize stitch-mode: configured=$batchStitchMode resolved=$stitchModeResolved " +
+                "firstPose=${firstPose != null} lastPose=${lastPose != null}",
+        )
         batchKeyframeMode = false
         batchKeyframePaths.clear()
         batchKeyframeFrameCounter = 0
+        batchFirstAcceptedPose = null
+        batchLastAcceptedPose = null
 
         // Null the bridge refs synchronously NOW so any worker that's
         // about to run sees them as gone (V12.1 pattern).  We keep
@@ -702,6 +762,7 @@ class RetaiLensIncrementalStitcher(
                         seamFinderTypeSnapshot,
                         captureOrientationSnapshot,
                         useInscribedRectCropSnapshot,
+                        stitchMode = stitchModeResolved,
                     )
                     map.putString("panoramaPath", outputPath)
                     map.putInt("width", dims[0])
@@ -876,6 +937,14 @@ class RetaiLensIncrementalStitcher(
                 return
             }
             batchKeyframePaths.add(persistentPath)
+            // 2026-05-14 — capture pose at every accept for the
+            // stitch-mode auto-decision at finalize().  First accept
+            // anchors the "from" pose; every subsequent accept
+            // updates "to".  Cleared at start().  Order: tx, ty, tz,
+            // qx, qy, qz, qw (same as the Pose struct in C++ KeyframeGate).
+            val poseSnapshot = doubleArrayOf(tx, ty, tz, qx, qy, qz, qw)
+            if (batchFirstAcceptedPose == null) batchFirstAcceptedPose = poseSnapshot
+            batchLastAcceptedPose = poseSnapshot
             android.util.Log.i(
                 "RetaiLensIncrementalStitcher",
                 "ingestFromARCameraView batch: ACCEPTED keyframe #${batchKeyframePaths.size}" +
@@ -1144,6 +1213,99 @@ class RetaiLensIncrementalStitcher(
     }
 
     // ── OpenCV bootstrap ────────────────────────────────────────────
+
+    /**
+     * 2026-05-14 — stitch-mode auto-resolution.
+     *
+     * Inputs are the first and last accepted-keyframe poses captured
+     * during this batch capture.  Each pose is `[tx, ty, tz, qx, qy,
+     * qz, qw]` in the AR-session world frame.  When either pose is
+     * null (e.g., < 2 keyframes were accepted, OR the capture used a
+     * non-AR camera path where ARKit/ARCore poses aren't available)
+     * we default to 'scans' — that's the safer of the two: SCANS on
+     * pure rotation produces a slightly-less-sharp output, while
+     * PANORAMA on translation produces an unbounded compositing
+     * canvas and the lmkd kill we observed 2026-05-14.
+     *
+     * Heuristic (see design doc 2026-05-13-stitch-pipeline-mode-selection):
+     *   translation_score = ||t_last − t_first|| / 0.10           (10 cm → 1.0)
+     *   rotation_score    = angle(fwd_last, fwd_first) / 1.00     (1 rad ≈ 57° → 1.0)
+     *   ratio = translation_score / (translation_score + rotation_score)
+     *   ratio ≥ 0.55 → SCANS   (biased toward SCANS for safety)
+     *   ratio  < 0.55 → PANORAMA
+     *
+     * Returns "panorama" or "scans" — never "auto".
+     */
+    private fun resolveStitchModeAuto(
+        firstPose: DoubleArray?,
+        lastPose: DoubleArray?,
+    ): String {
+        if (firstPose == null || lastPose == null) return "scans"
+        if (firstPose.size != 7 || lastPose.size != 7) return "scans"
+
+        // Translation magnitude (Euclidean, in metres).
+        val dtx = lastPose[0] - firstPose[0]
+        val dty = lastPose[1] - firstPose[1]
+        val dtz = lastPose[2] - firstPose[2]
+        val tMeters = kotlin.math.sqrt(dtx * dtx + dty * dty + dtz * dtz)
+
+        // Rotation magnitude — angle between camera-forward vectors.
+        // Camera-forward in body frame is (0, 0, -1) for ARKit/ARCore
+        // conventions; rotated by the pose quaternion gives the world-
+        // frame forward direction.  Angle between the first and last
+        // camera-forward vectors is the total rotation around any axis.
+        val fwdFirst = qrotForward(firstPose[3], firstPose[4], firstPose[5], firstPose[6])
+        val fwdLast = qrotForward(lastPose[3], lastPose[4], lastPose[5], lastPose[6])
+        val dot = (fwdFirst[0] * fwdLast[0] + fwdFirst[1] * fwdLast[1] + fwdFirst[2] * fwdLast[2])
+            .coerceIn(-1.0, 1.0)
+        val rRadians = kotlin.math.acos(dot)
+
+        // Normalisation: 10 cm of translation ≈ 1 rad of rotation as
+        // "equivalent magnitude" for the ratio.  Empirically: shelf
+        // scans cover ~30 cm of translation with ~10° (0.17 rad) of
+        // rotation.  ratio = (0.30/0.10) / (3.0 + 0.17) = 0.95 → SCANS.
+        // Pure 90° rotation panorama: 0 translation, 1.57 rad rotation.
+        // ratio = 0 / (0 + 1.57) = 0.0 → PANORAMA.
+        val tScore = tMeters / 0.10
+        val rScore = rRadians / 1.00
+        val denom = tScore + rScore
+        if (denom <= 1e-9) return "scans"  // degenerate — no motion at all
+        val ratio = tScore / denom
+
+        android.util.Log.i(
+            "RetaiLensIncrementalStitcher",
+            "stitch-mode auto: t=${"%.3f".format(tMeters)}m " +
+                "r=${"%.3f".format(rRadians)}rad " +
+                "ratio=${"%.3f".format(ratio)} " +
+                "→ ${if (ratio >= 0.55) "scans" else "panorama"}",
+        )
+        return if (ratio >= 0.55) "scans" else "panorama"
+    }
+
+    /**
+     * Rotate the camera-forward unit vector (0, 0, -1) by a unit
+     * quaternion (qx, qy, qz, qw).  Closed-form expansion of
+     * v' = q · v · q⁻¹.  Same convention as `qrot` in
+     * cpp/keyframe_gate.cpp.
+     */
+    private fun qrotForward(qx: Double, qy: Double, qz: Double, qw: Double): DoubleArray {
+        // v = (0, 0, -1).  q · v · q⁻¹ closed-form:
+        // result = v + 2 * qw * (q_xyz × v) + 2 * q_xyz × (q_xyz × v)
+        // Pre-computed for v=(0,0,-1):
+        //   q_xyz × v = (qy * -1 - qz * 0, qz * 0 - qx * -1, qx * 0 - qy * 0)
+        //             = (-qy, qx, 0)
+        //   q_xyz × (q_xyz × v):
+        //     = (qy*0 - qz*qx, qz*(-qy) - qx*0, qx*qx - qy*(-qy))
+        //     = (-qz*qx, -qz*qy, qx² + qy²)
+        // result = (0 + 2*qw*(-qy) + 2*(-qz*qx),
+        //          0 + 2*qw*qx    + 2*(-qz*qy),
+        //          -1 + 2*qw*0    + 2*(qx² + qy²))
+        return doubleArrayOf(
+            -2.0 * (qw * qy + qz * qx),
+            2.0 * (qw * qx - qz * qy),
+            -1.0 + 2.0 * (qx * qx + qy * qy),
+        )
+    }
 
     private fun ensureOpenCv() {
         if (!opencvInitialised.get()) {

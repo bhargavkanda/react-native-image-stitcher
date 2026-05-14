@@ -260,7 +260,26 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
         // it uses the high-level cv::Stitcher::create() API.
         jdouble registrationResolMP,
         jdouble seamEstimationResolMP,
-        jdouble compositingResolMP) {
+        jdouble compositingResolMP,
+        // 2026-05-14 — cv::Stitcher pipeline mode picker.  String
+        // values:
+        //   "panorama" → cv::Stitcher::PANORAMA  — rotation-only
+        //                  pipeline (HomographyBasedEstimator,
+        //                  BundleAdjusterRay, SphericalWarper).
+        //                  Best for rotate-in-place captures; BAD
+        //                  for translation (rotation-only homography
+        //                  diverges → 3.2 GB canvas observed 2026-05-14).
+        //   "scans"    → cv::Stitcher::SCANS     — translational
+        //                  pipeline (AffineBestOf2NearestMatcher,
+        //                  BundleAdjusterAffine, PlaneWarper).  Best
+        //                  for walk-and-pan shelf captures; canvas
+        //                  size bounded by sum of frames.  Slightly
+        //                  worse on pure rotation.
+        // Caller (RetaiLensIncrementalStitcher.kt) resolves the JS
+        // 'auto' setting to a concrete mode before reaching here.
+        // Unknown input defaults to SCANS at runtime (the safer
+        // choice — bounded canvas, no lmkd-kill risk).
+        jstring stitchMode) {
 
     // ── 1.  Unmarshal Java args ─────────────────────────────────────
     if (framePaths == nullptr) {
@@ -280,12 +299,21 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
     const std::string blenderName    = jstring_to_string(env, blenderType);
     const std::string seamName       = jstring_to_string(env, seamFinderType);
     const std::string orientationStr = jstring_to_string(env, captureOrientation);
+    const std::string stitchModeStr  = jstring_to_string(env, stitchMode);
+
+    // Resolve stitch mode → cv::Stitcher::Mode.  Default SCANS on
+    // any unrecognised input (incl. nullptr).  See the arg-doc on
+    // `stitchMode` above for why SCANS is the safer default.
+    const cv::Stitcher::Mode stitchModeEnum =
+        (stitchModeStr == "panorama") ? cv::Stitcher::PANORAMA
+                                       : cv::Stitcher::SCANS;
 
     LOGI("nativeStitchFramePaths: frames=%d warper=%s blender=%s seam=%s "
-         "orientation=%s quality=%d inscribedRect=%d",
+         "orientation=%s quality=%d inscribedRect=%d stitchMode=%s (enum=%d)",
          frameCount, warperName.c_str(), blenderName.c_str(),
          seamName.c_str(), orientationStr.c_str(),
-         jpegQuality, useInscribedRectCrop ? 1 : 0);
+         jpegQuality, useInscribedRectCrop ? 1 : 0,
+         stitchModeStr.c_str(), static_cast<int>(stitchModeEnum));
     LOGI("[memstat] phase=entry rss=%.1f MB", rss_mb());
 
     // ── 2.  Load input frames ───────────────────────────────────────
@@ -318,16 +346,35 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
     LOGI("[memstat] phase=after_imread rss=%.1f MB", rss_mb());
 
     // ── 3.  Configure cv::Stitcher ──────────────────────────────────
+    //
+    // Stitcher mode is supplied by the caller via the `stitchMode` arg
+    // and resolved to a `cv::Stitcher::Mode` enum above.  PANORAMA is
+    // the cv::Stitcher legacy default that ships with OpenCV; SCANS is
+    // a hand-tuned alternative pipeline more suitable for translation-
+    // heavy shelf-scanning captures.  When the caller passes "auto"
+    // upstream (RetaiLensIncrementalStitcher.finalize), it's resolved
+    // to a concrete "panorama" / "scans" string before reaching this
+    // JNI based on accumulated pose deltas at capture time.
     cv::Ptr<cv::Stitcher> stitcher;
     try {
-        stitcher = cv::Stitcher::create(cv::Stitcher::PANORAMA);
+        stitcher = cv::Stitcher::create(stitchModeEnum);
     } catch (const cv::Exception& e) {
         throw_runtime(env, std::string("Stitcher::create threw: ") + e.what());
         return nullptr;
     }
 
-    if (auto warper = make_warper(warperName)) {
-        stitcher->setWarper(warper);
+    // Warper override only applies to PANORAMA mode.  SCANS mode in
+    // cv::Stitcher hard-wires the PlaneWarper internally (the affine
+    // pipeline is incoherent with cylindrical/spherical projection —
+    // see `2026-05-13-stitcher-pipeline-coherence.md` learning).
+    // Skip setWarper() under SCANS to avoid silently breaking the
+    // affine BA's assumptions.
+    if (stitchModeEnum == cv::Stitcher::PANORAMA) {
+        if (auto warper = make_warper(warperName)) {
+            stitcher->setWarper(warper);
+        }
+    } else {
+        LOGI("SCANS mode: skipping setWarper (PlaneWarper is hard-wired internally)");
     }
     stitcher->setBlender(make_blender(blenderName));
     stitcher->setSeamFinder(make_seam_finder(seamName));

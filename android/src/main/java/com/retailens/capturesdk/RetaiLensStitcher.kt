@@ -89,6 +89,16 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
         registrationResolMP: Double,
         seamEstimationResolMP: Double,
         compositingResolMP: Double,
+        // 2026-05-14 — cv::Stitcher pipeline mode picker.
+        //   "panorama" → cv::Stitcher::PANORAMA (rotation-only)
+        //   "scans"    → cv::Stitcher::SCANS    (translation/affine)
+        // Always a concrete mode at this layer; 'auto' is resolved
+        // upstream in RetaiLensIncrementalStitcher.finalize() based
+        // on accumulated translation/rotation totals.  Defaults to
+        // "scans" in the JNI on unknown input (safer fallback —
+        // SCANS canvas size is bounded by sum-of-frames; PANORAMA
+        // can diverge to multi-GB on translation-heavy input).
+        stitchMode: String,
     ): IntArray
 
     // ── Stitch frames → panorama ─────────────────────────────────
@@ -134,6 +144,15 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
             options.getDouble("seamEstimationResolMP") else -1.0
         val compositingResolMP = if (options.hasKey("compositingResolMP"))
             options.getDouble("compositingResolMP") else 1.0
+        // 2026-05-14 — cv::Stitcher pipeline mode.  Caller from
+        // RetaiLensIncrementalStitcher.finalize resolves 'auto' to
+        // 'panorama' or 'scans' before reaching here.  Direct
+        // @ReactMethod callers (CLI / tests) can pass 'auto' too;
+        // we default to 'scans' if missing/unrecognised since SCANS
+        // is the safer mode (bounded canvas; can't lmkd-kill on
+        // translation-heavy input).
+        val stitchMode = (options.getString("stitchMode") ?: "scans")
+            .let { if (it in setOf("panorama", "scans")) it else "scans" }
 
         CoroutineScope(Dispatchers.Default).launch {
             val start = System.currentTimeMillis()
@@ -151,6 +170,7 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
                     registrationResolMP,
                     seamEstimationResolMP,
                     compositingResolMP,
+                    stitchMode,
                 )
                 val duration = System.currentTimeMillis() - start
                 val result = WritableNativeMap().apply {
@@ -301,6 +321,12 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
         registrationResolMP: Double = -1.0,
         seamEstimationResolMP: Double = -1.0,
         compositingResolMP: Double = 1.0,
+        // 2026-05-14 — cv::Stitcher pipeline mode.  Caller resolves
+        // 'auto' upstream; "panorama" or "scans" only here.  Default
+        // 'scans' since SCANS handles both rotation-light and
+        // translation captures safely (PANORAMA on translation can
+        // diverge → multi-GB canvas → lmkd kill).
+        stitchMode: String = "scans",
     ): IntArray {
         ensureNativeStitcher()
         return nativeStitchFramePaths(
@@ -315,6 +341,7 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
             registrationResolMP,
             seamEstimationResolMP,
             compositingResolMP,
+            stitchMode,
         )
     }
 

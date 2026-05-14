@@ -24,12 +24,14 @@
  * still use the SDK's quality + stitching modules.
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   Camera,
   useCameraDevice,
+  useCameraDevices,
   useCameraPermission,
   type PhotoFile,
+  type PhysicalCameraDeviceType,
   type TakePhotoOptions,
 } from 'react-native-vision-camera';
 
@@ -58,6 +60,33 @@ export interface UseCaptureOptions {
    * The SDK merges these with its defaults; host-supplied values win.
    */
   takePhotoOptions?: TakePhotoOptions;
+  /**
+   * 2026-05-14 — preferred physical-lens type for the chosen
+   * `cameraPosition`.  Maps to vision-camera's `physicalDevices`
+   * filter on `useCameraDevice`.
+   *
+   *   undefined (default) — use vision-camera's selection algorithm,
+   *                         which picks the device that combines
+   *                         the most lenses (typically the "main"
+   *                         multi-lens virtual camera).  Existing
+   *                         behaviour; backwards-compatible.
+   *   'wide-angle-camera' — 1× physical lens (the standard rear
+   *                         camera most users think of as "the
+   *                         camera").
+   *   'ultra-wide-angle-camera' — 0.5× ultra-wide lens (only on
+   *                         devices with one; Samsung A35 has one;
+   *                         iPhone 11 Pro and later have one).
+   *   'telephoto-camera'  — 2× / 3× telephoto if the device has
+   *                         one.  Rare on field-rep deployments;
+   *                         exposed for symmetry.
+   *
+   * When the preferred type isn't available on the device, the
+   * hook falls back to vision-camera's default selection (i.e.,
+   * behaves as if `preferredPhysicalDevice` was undefined).  The
+   * returned `availablePhysicalDevices` exposes what the device
+   * actually offers so the host can render an appropriate switcher.
+   */
+  preferredPhysicalDevice?: PhysicalCameraDeviceType;
 }
 
 
@@ -86,6 +115,18 @@ export interface UseCaptureReturn {
    * when ``enableQualityChecks`` is on).
    */
   takePhoto: () => Promise<CaptureResult>;
+  /**
+   * 2026-05-14 — physical lens types available on the chosen
+   * `cameraPosition`.  Computed once at the first vision-camera
+   * device-list emission; useful for the host to decide whether to
+   * render a 0.5×/1× camera switcher chip (only show if both
+   * `wide-angle-camera` AND `ultra-wide-angle-camera` are present).
+   *
+   * Empty array on platforms that haven't enumerated devices yet
+   * (very brief — vision-camera resolves the device list at module
+   * load).  Always populated by the time the camera is mountable.
+   */
+  availablePhysicalDevices: PhysicalCameraDeviceType[];
 }
 
 
@@ -127,10 +168,43 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     enableQualityChecks = false,
     qualityThresholds,
     takePhotoOptions,
+    preferredPhysicalDevice,
   } = options;
 
   const cameraRef = useRef<Camera | null>(null);
-  const device = useCameraDevice(cameraPosition);
+
+  // 2026-05-14 — physical-lens-aware device picker.
+  //
+  // When `preferredPhysicalDevice` is supplied, ask vision-camera
+  // for a device that exposes that specific physical lens (e.g.,
+  // 'ultra-wide-angle-camera').  Falls back to the position-default
+  // when the device doesn't have that lens.  When undefined, behaves
+  // identically to the pre-2026-05-14 useCameraDevice(position) call.
+  const deviceWithPreferred = useCameraDevice(cameraPosition, {
+    physicalDevices: preferredPhysicalDevice ? [preferredPhysicalDevice] : undefined,
+  });
+  const deviceFallback = useCameraDevice(cameraPosition);
+  const device = deviceWithPreferred ?? deviceFallback;
+
+  // Enumerate ALL physical lens types available on the chosen
+  // position so the host can decide whether to render a switcher.
+  // Vision-camera's `useCameraDevices()` returns CameraDevice[]; each
+  // has `physicalDevices: PhysicalCameraDeviceType[]`.  We dedupe the
+  // union across all devices at `position` so the host sees the full
+  // set the platform exposes (some phones expose ultra-wide only via
+  // a separate logical camera, not the main one).
+  const allDevices = useCameraDevices();
+  const availablePhysicalDevices = useMemo<PhysicalCameraDeviceType[]>(() => {
+    const seen = new Set<PhysicalCameraDeviceType>();
+    for (const d of allDevices) {
+      if (d.position !== cameraPosition) continue;
+      for (const pd of d.physicalDevices ?? []) {
+        seen.add(pd);
+      }
+    }
+    return Array.from(seen);
+  }, [allDevices, cameraPosition]);
+
   const { hasPermission, requestPermission } = useCameraPermission();
   const [flash, setFlash] = useState<'off' | 'on'>('off');
   const [isCapturing, setIsCapturing] = useState(false);
@@ -199,5 +273,6 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     toggleFlash,
     isCapturing,
     takePhoto,
+    availablePhysicalDevices,
   };
 }

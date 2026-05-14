@@ -236,6 +236,74 @@ export interface PanoramaSettings {
   maxFrames: number;
   /** JPEG quality (0-100) for output panorama. */
   quality: number;
+
+  // ── 2026-05-14: capture-source + stitch-mode axes ─────────────────
+  //
+  // These two settings are independent from the existing
+  // `incrementalEngine` / `useARPreview` axes; together they decide
+  // (a) which camera + tracking the capture screen uses, and (b)
+  // which OpenCV pipeline mode the batch stitcher uses at finalize.
+
+  /**
+   * 2026-05-14 — capture-source picker for the panorama camera screen.
+   *
+   *   'auto' (DEFAULT) — Prefer AR (ARKit / ARCore) when the device
+   *                       supports it; silently fall back to 'wide'
+   *                       on devices that don't.  Best for field-rep
+   *                       deployments where hardware varies.
+   *   'ar'              — Force AR mode.  If the device doesn't
+   *                       support it, falls back to 'wide' with a
+   *                       toast.  Same as 'auto' in practice unless
+   *                       you want to be explicit.
+   *   'wide'            — Force the 1× physical (wide-angle) camera
+   *                       via react-native-vision-camera.  No AR
+   *                       session, no plane detection.  Pure
+   *                       vision-camera + IMU translation gate.
+   *   'ultrawide'       — Force the 0.5× physical (ultra-wide)
+   *                       camera if the device has one.  Falls back
+   *                       to 'wide' otherwise.  Useful for wide
+   *                       shelves where 1× requires too much pan.
+   *
+   * The on-screen toolbar shows a chip switcher between available
+   * physical cameras when captureSource ∈ { 'wide', 'ultrawide' }
+   * so operators can hot-swap per capture.  In 'auto' / 'ar' mode
+   * the chip is hidden — AR uses the camera ARKit/ARCore selects.
+   */
+  captureSource: 'auto' | 'ar' | 'wide' | 'ultrawide';
+
+  /**
+   * 2026-05-14 — `cv::Stitcher` pipeline mode for the batch stitch.
+   *
+   *   'auto' (DEFAULT)
+   *     The capture engine looks at the accumulated translation vs
+   *     rotation magnitudes between first and last accepted keyframe
+   *     poses (AR-mode) or the windowed IMU integration (non-AR
+   *     mode) and picks PANORAMA or SCANS at finalize time.
+   *
+   *   'panorama'
+   *     `cv::Stitcher::PANORAMA` — rotation-only pipeline.  Best for
+   *     "rotate phone in place to capture a wide field of view"
+   *     captures.  ORB feature matching + global BundleAdjusterRay +
+   *     SphericalWarper.  Sharp seams, expensive memory.  WARNING:
+   *     on translation-heavy input the rotation-only homography fit
+   *     diverges and the canvas can blow up to multi-GB on Android
+   *     (2026-05-14 lmkd kill observed).  Pick this only for genuine
+   *     rotation panoramas.
+   *
+   *   'scans'
+   *     `cv::Stitcher::SCANS` — translational pipeline.  Best for
+   *     "walk past a shelf and pan sideways" captures.  Affine
+   *     matcher + AffineBasedEstimator + BundleAdjusterAffine +
+   *     PlaneWarper.  Canvas size bounded by sum of frame areas.
+   *     Slight quality drop on pure rotations but works for them too.
+   *
+   * iOS NOTE: as of 2026-05-14 the iOS stitcher uses a hand-rolled
+   * PANORAMA-style pipeline (OpenCVStitcher.mm:600+) regardless of
+   * this setting.  Setting is passed through to iOS but ignored.
+   * Android honours it via retailens_stitcher.cpp.  Bridging iOS is
+   * a follow-up.
+   */
+  stitchMode: 'auto' | 'panorama' | 'scans';
 }
 
 
@@ -390,6 +458,13 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   minFrames: 6,
   maxFrames: 16,
   quality: 85,
+
+  // 2026-05-14 — capture source + stitch mode.  Both default to 'auto'
+  // so the SDK picks the right thing for the device + the actual
+  // motion of the capture without operator intervention.
+  // See the interface field docs above for the full rationale.
+  captureSource: 'auto',
+  stitchMode: 'auto',
 };
 
 
@@ -644,6 +719,35 @@ export function PanoramaSettingsModal({
              * ────────────────────────────────────────────── */}
             {timing === 'batch' && (
               <>
+                {/* 2026-05-14 — Capture source picker.  Sits at the
+                  * top of the batch section because it's the FIRST
+                  * decision an operator makes: AR-backed (plane
+                  * detection, gyro-corrected pose, depth), or the
+                  * non-AR vision-camera path (1× / 0.5× physical
+                  * lens, IMU-only translation gate).  See
+                  * PanoramaSettings.captureSource for the full
+                  * rationale on each value. */}
+                <SectionHeader title="Capture source" />
+                <SegmentedControl
+                  options={['auto', 'ar', 'wide', 'ultrawide']}
+                  value={settings.captureSource}
+                  onChange={(v) => update({ captureSource: v as PanoramaSettings['captureSource'] })}
+                  caption="auto (default): AR-backed when supported, falls back to 1× wide otherwise. ar: force AR (silently falls back on unsupported devices). wide: 1× physical lens via vision-camera + IMU translation gate. ultrawide: 0.5× physical lens if the device has one (falls back to wide otherwise)."
+                />
+                {/* 2026-05-14 — Stitch mode picker.  THE 2026-05-14
+                  * OOM root cause: cv::Stitcher PANORAMA mode breaks
+                  * down on translation-heavy input (rotation-only
+                  * homography fit diverges → 3.2 GB canvas → lmkd
+                  * kill).  'auto' (DEFAULT) routes between PANORAMA
+                  * and SCANS based on accumulated translation vs
+                  * rotation magnitudes at finalize time. */}
+                <SectionHeader title="Stitch mode" />
+                <SegmentedControl
+                  options={['auto', 'panorama', 'scans']}
+                  value={settings.stitchMode}
+                  onChange={(v) => update({ stitchMode: v as PanoramaSettings['stitchMode'] })}
+                  caption="auto (default): pick PANORAMA or SCANS based on translation/rotation totals at finalize. panorama: cv::Stitcher::PANORAMA — rotation-only (spherical warper, BA-ray); best for rotate-in-place captures, BAD on translation. scans: cv::Stitcher::SCANS — affine pipeline (plane warper, BA-affine); best for shelf-pan captures, slightly worse on pure rotation."
+                />
                 <SectionHeader title="Batch tuning — Warper" />
                 <SegmentedControl
                   options={['plane', 'cylindrical', 'spherical']}
