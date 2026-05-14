@@ -591,7 +591,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // hid this for prior diagnostic runs by extending object
   // lifetimes; the non-ASan production build re-exposed it.
   //
-  // See docs/site-content/learnings/objc-autoreleasepool-return-uaf.md
+  // See docs/site-content/learnings/react-native.md#autoreleasepool-return-uaf
   RetaiLensStitchResult *result = nil;
   NSError *capturedError = nil;
   @autoreleasepool {
@@ -1537,7 +1537,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
      // work-item boundary, comfortably after Swift retains it), or
      // fall through to the success path below.
      //
-     // See docs/site-content/learnings/objc-autoreleasepool-return-uaf.md
+     // See docs/site-content/learnings/react-native.md#autoreleasepool-return-uaf
      // for the full pattern + a checklist for future ObjC bridges.
 
   // V16 fix-10 — handle failure paths captured from inside the pool.
