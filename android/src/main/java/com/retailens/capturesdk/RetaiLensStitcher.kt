@@ -77,6 +77,18 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
         seamFinderType: String,
         captureOrientation: String,
         useInscribedRectCrop: Boolean,
+        // V16-followup (Android OOM fix): cv::Stitcher staged-resolution
+        // budgets in megapixels.  Pass any negative value to keep
+        // cv::Stitcher's library default for that stage.  See
+        // retailens_stitcher.cpp arg doc for the full rationale; the
+        // tl;dr is that the cv::Stitcher COMPOSITING default is
+        // ORIG_RESOL (no downscale) which on Android with 1920×1080
+        // sensor frames balloons MultiBand memory and triggers lmkd.
+        // Bounding compositing to ~1.0 MP keeps stitch peak < 200 MB
+        // on the A35.
+        registrationResolMP: Double,
+        seamEstimationResolMP: Double,
+        compositingResolMP: Double,
     ): IntArray
 
     // ── Stitch frames → panorama ─────────────────────────────────
@@ -108,6 +120,20 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
         val captureOrientation = options.getString("captureOrientation") ?: "portrait"
         val useInscribedRectCrop = options.hasKey("useInscribedRectCrop") &&
             options.getBoolean("useInscribedRectCrop")
+        // V16-followup (Android OOM fix): cv::Stitcher staged-resolution
+        // budgets in MP.  Defaults:
+        //   registrationResolMP   = -1.0 → keep cv::Stitcher default 0.6 MP
+        //   seamEstimationResolMP = -1.0 → keep cv::Stitcher default 0.1 MP
+        //   compositingResolMP    = 1.0  → OVERRIDE the dangerous
+        //                                  ORIG_RESOL (-1.0) default
+        // Caller-supplied negative values keep the library default;
+        // any positive value scales the stage to that target MP.
+        val registrationResolMP = if (options.hasKey("registrationResolMP"))
+            options.getDouble("registrationResolMP") else -1.0
+        val seamEstimationResolMP = if (options.hasKey("seamEstimationResolMP"))
+            options.getDouble("seamEstimationResolMP") else -1.0
+        val compositingResolMP = if (options.hasKey("compositingResolMP"))
+            options.getDouble("compositingResolMP") else 1.0
 
         CoroutineScope(Dispatchers.Default).launch {
             val start = System.currentTimeMillis()
@@ -122,6 +148,9 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
                     seamFinderType,
                     captureOrientation,
                     useInscribedRectCrop,
+                    registrationResolMP,
+                    seamEstimationResolMP,
+                    compositingResolMP,
                 )
                 val duration = System.currentTimeMillis() - start
                 val result = WritableNativeMap().apply {
@@ -264,6 +293,14 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
         seamFinderType: String,
         captureOrientation: String,
         useInscribedRectCrop: Boolean,
+        // V16-followup (Android OOM fix): MP budgets for the
+        // staged-resolution pipeline.  Negative = use cv::Stitcher
+        // library default.  Default param values here apply the OOM
+        // fix (compose=1.0 MP) by default for the internal-orchestrator
+        // call site — caller can override per capture if needed.
+        registrationResolMP: Double = -1.0,
+        seamEstimationResolMP: Double = -1.0,
+        compositingResolMP: Double = 1.0,
     ): IntArray {
         ensureNativeStitcher()
         return nativeStitchFramePaths(
@@ -275,6 +312,9 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
             seamFinderType,
             captureOrientation,
             useInscribedRectCrop,
+            registrationResolMP,
+            seamEstimationResolMP,
+            compositingResolMP,
         )
     }
 

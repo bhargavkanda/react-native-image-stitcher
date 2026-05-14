@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 package com.retailens.capturesdk
 
+import android.app.ActivityManager
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -1009,6 +1010,55 @@ class RetaiLensIncrementalStitcher(
         val map = Arguments.createMap()
         map.putBoolean("ok", true)
         promise.resolve(map)
+    }
+
+    /**
+     * Poll the process' memory footprint in MB.  Android parity for
+     * iOS' `getMemoryFootprintMB` (which polls Mach `phys_footprint`
+     * via `task_info(TASK_VM_INFO)` — see
+     * `IncrementalStitcherBridge.swift:231-259`).
+     *
+     * Returns the **total PSS** (proportional set size) of this
+     * process in MB.  PSS is the metric Android's Low-Memory-Killer
+     * (`lmkd`) ranks against, so it's the right one-true-number for
+     * the on-screen memory pill: it's "how close are we to being
+     * killed by the system?".
+     *
+     * Total PSS = USS (private) + sum(shared / refcount).  Read via
+     * `ActivityManager.getProcessMemoryInfo()`, which is the same API
+     * Android Studio's profiler uses.  Granularity is 1 KB; we
+     * divide by 1024 to MB so the JS side displays a number directly
+     * comparable to the iOS phys_footprint value.
+     *
+     * Returns -1.0 on failure (very rare — `getProcessMemoryInfo()`
+     * is generally infallible since Android 5.0 because PSS is read
+     * from `/proc/self/smaps` synchronously on the calling thread).
+     */
+    @ReactMethod
+    fun getMemoryFootprintMB(promise: Promise) {
+        try {
+            val am = reactContext.getSystemService(ActivityManager::class.java)
+            if (am == null) {
+                promise.resolve(-1.0)
+                return
+            }
+            val pid = android.os.Process.myPid()
+            val infos = am.getProcessMemoryInfo(intArrayOf(pid))
+            if (infos == null || infos.isEmpty()) {
+                promise.resolve(-1.0)
+                return
+            }
+            // totalPss is in KB.  Divide by 1024 → MB.  Use Double so
+            // the JS overlay can render fractional MB if it wants.
+            val mb = infos[0].totalPss.toDouble() / 1024.0
+            promise.resolve(mb)
+        } catch (t: Throwable) {
+            android.util.Log.w(
+                "RetaiLensIncrementalStitcher",
+                "getMemoryFootprintMB: failed: ${t.message}",
+            )
+            promise.resolve(-1.0)
+        }
     }
 
     /**

@@ -48,6 +48,8 @@
 #include <opencv2/stitching/detail/blenders.hpp>
 #include <opencv2/stitching/detail/seam_finders.hpp>
 #include <opencv2/stitching/warpers.hpp>
+#include <cstdio>
+#include <unistd.h>
 #include <string>
 #include <vector>
 
@@ -58,6 +60,48 @@
 
 
 namespace {
+
+// Read this process' resident set size (RSS) from /proc/self/statm.
+//
+// `statm` line is space-separated:
+//   total_pages  resident_pages  shared_pages  text_pages  data+stack_pages  ...
+//
+// We want the second field (resident).  Multiply by page size (4 KB on
+// every Android device we ship to) to get bytes.
+//
+// Returns -1.0 on read failure (very rare — procfs is always mounted
+// and the file is always readable by the owning process).
+//
+// Cheap enough to call inside a hot loop: ~20 µs (the kernel computes
+// the values lazily and caches them; the read is essentially a single
+// page-aligned copy).  We invoke it at major pipeline phase
+// boundaries only — not per Mat allocation — so cost is irrelevant.
+//
+// Note: this is RSS (resident set), NOT PSS.  PSS requires parsing
+// `/proc/self/smaps_rollup` which is ~10× slower.  For diagnostic
+// logging in the native stitch path, RSS is the right tradeoff;
+// PSS is exposed at the Kotlin layer via the memory-HUD bridge.
+double rss_mb() {
+    FILE* f = std::fopen("/proc/self/statm", "r");
+    if (f == nullptr) return -1.0;
+    long size_pages = 0, resident_pages = 0;
+    int n = std::fscanf(f, "%ld %ld", &size_pages, &resident_pages);
+    std::fclose(f);
+    if (n != 2) return -1.0;
+    long page_bytes = sysconf(_SC_PAGESIZE);
+    return (double) resident_pages * (double) page_bytes / (1024.0 * 1024.0);
+}
+
+// Return Mat's data footprint in MB.  Uses Mat::total() and
+// Mat::elemSize() so it's correct for any depth/channel combo.
+//
+// Note: this is the data buffer size only — NOT counting Mat header,
+// ROI parents, or refcount metadata.  Cheap.
+double mat_mb(const cv::Mat& m) {
+    if (m.empty()) return 0.0;
+    return (double)(m.total() * m.elemSize()) / (1024.0 * 1024.0);
+}
+
 
 // Convert a UTF-16 jstring to std::string.  Returns empty string for
 // nullptr inputs.
@@ -163,6 +207,12 @@ cv::Mat crop_bbox(const cv::Mat& panorama) {
 }  // namespace
 
 
+// Negative values mean "use cv::Stitcher's library default".  This
+// matches OpenCV's own ORIG_RESOL sentinel for compositing — the
+// public API accepts any negative number to opt out and keep the
+// default in place.
+constexpr double kUseLibraryDefault = -1.0;
+
 extern "C" JNIEXPORT jintArray JNICALL
 Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
         JNIEnv* env,
@@ -174,7 +224,43 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
         jstring blenderType,
         jstring seamFinderType,
         jstring captureOrientation,
-        jboolean useInscribedRectCrop) {
+        jboolean useInscribedRectCrop,
+        // V16-followup (Android OOM fix): three new params for
+        // cv::Stitcher's staged-resolution pipeline.  Each is a target
+        // MEGAPIXEL budget per frame.  Pass a negative value (e.g.
+        // -1.0) for any of them to fall back to OpenCV's default.
+        //
+        //   registrationResolMP — driver downsample for feature
+        //     detection / matching / bundle adjustment.  cv::Stitcher
+        //     default 0.6 MP.  Lower = faster, more false matches.
+        //
+        //   seamEstimationResolMP — driver downsample for the seam
+        //     finder (GraphCut / Voronoi).  Default 0.1 MP.  GraphCut
+        //     is roughly quadratic in pixel count, so going lower is
+        //     a big speed/RAM win — at cost of seam precision.
+        //
+        //   compositingResolMP — THIS IS THE BIG ONE.  cv::Stitcher's
+        //     default is ORIG_RESOL (-1.0) = compose at the ORIGINAL
+        //     input resolution.  On Android with 1920×1080 sensor
+        //     frames, that means MultiBand pyramid + per-frame warp
+        //     buffers all run at full res.  3 frames easily blow past
+        //     350 MB total native heap and trigger Android lmkd's
+        //     foreground-app kill ("vis TOP" classification in
+        //     logcat — observed 2026-05-14).  Setting this to 1.0 MP
+        //     scales the compositing stage down ~2× per axis on the
+        //     A35 (1920×1080 → ~1360×765), cutting compositing-stage
+        //     memory by ~4× without a visible quality drop.
+        //
+        // iOS-parity: iOS hand-rolls the equivalent pipeline at
+        // these same target resolutions (see OpenCVStitcher.mm
+        // comments around line 600 — "Two-stage resolution pipeline
+        // matches cv::Stitcher::PANORAMA: 0.6 MP registration / 0.1
+        // MP seam") — but iOS bounds compositing because it owns the
+        // pipeline.  Android needs these settings explicitly because
+        // it uses the high-level cv::Stitcher::create() API.
+        jdouble registrationResolMP,
+        jdouble seamEstimationResolMP,
+        jdouble compositingResolMP) {
 
     // ── 1.  Unmarshal Java args ─────────────────────────────────────
     if (framePaths == nullptr) {
@@ -200,10 +286,12 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
          frameCount, warperName.c_str(), blenderName.c_str(),
          seamName.c_str(), orientationStr.c_str(),
          jpegQuality, useInscribedRectCrop ? 1 : 0);
+    LOGI("[memstat] phase=entry rss=%.1f MB", rss_mb());
 
     // ── 2.  Load input frames ───────────────────────────────────────
     std::vector<cv::Mat> images;
     images.reserve(frameCount);
+    double totalInputMB = 0.0;
     for (jsize i = 0; i < frameCount; ++i) {
         jstring jPath = (jstring) env->GetObjectArrayElement(framePaths, i);
         if (jPath == nullptr) {
@@ -219,8 +307,15 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
                 "Failed to load frame: " + path);
             return nullptr;
         }
+        const double mb = mat_mb(img);
+        totalInputMB += mb;
+        LOGI("[dimstat] input[%d] %dx%d %dch elemSize=%zu data=%.2f MB",
+             i, img.cols, img.rows, img.channels(), img.elemSize(), mb);
         images.push_back(std::move(img));
     }
+    LOGI("[dimstat] loaded %d frames total_input_data=%.2f MB",
+         frameCount, totalInputMB);
+    LOGI("[memstat] phase=after_imread rss=%.1f MB", rss_mb());
 
     // ── 3.  Configure cv::Stitcher ──────────────────────────────────
     cv::Ptr<cv::Stitcher> stitcher;
@@ -237,7 +332,40 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
     stitcher->setBlender(make_blender(blenderName));
     stitcher->setSeamFinder(make_seam_finder(seamName));
 
+    // Apply caller-supplied resolution budgets.  Negative => keep
+    // cv::Stitcher's library default (which is sensible for
+    // registration + seam but pathological for compositing — see the
+    // arg doc on compositingResolMP for the OOM rationale).
+    if (registrationResolMP > 0.0) {
+        stitcher->setRegistrationResol(static_cast<double>(registrationResolMP));
+    }
+    if (seamEstimationResolMP > 0.0) {
+        stitcher->setSeamEstimationResol(static_cast<double>(seamEstimationResolMP));
+    }
+    if (compositingResolMP > 0.0) {
+        stitcher->setCompositingResol(static_cast<double>(compositingResolMP));
+    }
+
+    // Log cv::Stitcher's internal resolution settings BEFORE invoking
+    // stitch(), so we can correlate logged peak memory with the
+    // staging-resolution decisions OpenCV is about to make.  These
+    // are PER-FRAME megapixel budgets that drive how each stage
+    // downsamples the inputs:
+    //   registration_resol — feature detection / matching        (default 0.6 MP)
+    //   seam_estimation_resol — GraphCut / seam finding          (default 0.1 MP)
+    //   compositing_resol — MultiBand pyramid + final warps      (default ORIG_RESOL = -1.0 = NO downscale)
+    // The compositing_resol default of ORIG_RESOL is the OOM
+    // trigger on Android: composing at full 1920×1080 inflates the
+    // MultiBand pyramid by ~4× vs a 1.0 MP target.
+    LOGI("[dimstat] cv::Stitcher resol budgets (per frame, MP):"
+         " registration=%.3f seam=%.3f compositing=%.3f%s",
+         stitcher->registrationResol(),
+         stitcher->seamEstimationResol(),
+         stitcher->compositingResol(),
+         stitcher->compositingResol() < 0 ? " (ORIG_RESOL = no downscale!)" : "");
+
     // ── 4.  Stitch ──────────────────────────────────────────────────
+    LOGI("[memstat] phase=before_stitch rss=%.1f MB", rss_mb());
     cv::Mat panorama;
     cv::Stitcher::Status status;
     try {
@@ -252,6 +380,10 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
             std::to_string(static_cast<int>(status)));
         return nullptr;
     }
+    LOGI("[dimstat] post-stitch panorama %dx%d %dch data=%.2f MB",
+         panorama.cols, panorama.rows, panorama.channels(),
+         mat_mb(panorama));
+    LOGI("[memstat] phase=after_stitch rss=%.1f MB", rss_mb());
 
     // ── 5.  Crop ────────────────────────────────────────────────────
     // V16 Phase 1b: bbox-only by default (matches iOS' useInscribedRectCrop=false).
@@ -260,12 +392,18 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
     // capture, so we ship Android-side with bbox-only and skip the
     // inscribed-rect logic for now (can be added later if useful).
     cv::Mat cropped = crop_bbox(panorama);
-    LOGI("crop: bbox %dx%d → %dx%d (inscribedRect=%d, currently ignored)",
+    LOGI("[dimstat] post-crop_bbox %dx%d → %dx%d data=%.2f MB"
+         " (inscribedRect=%d, currently ignored)",
          panorama.cols, panorama.rows, cropped.cols, cropped.rows,
+         mat_mb(cropped),
          useInscribedRectCrop ? 1 : 0);
+    LOGI("[memstat] phase=after_crop rss=%.1f MB", rss_mb());
 
     // ── 6.  Bake rotation ───────────────────────────────────────────
     cv::Mat final_image = bake_rotation(cropped, orientationStr);
+    LOGI("[dimstat] post-bake_rotation %dx%d data=%.2f MB",
+         final_image.cols, final_image.rows, mat_mb(final_image));
+    LOGI("[memstat] phase=after_bake_rotation rss=%.1f MB", rss_mb());
 
     // ── 7.  Write JPEG ──────────────────────────────────────────────
     int q = std::max(0, std::min(100, static_cast<int>(jpegQuality)));
@@ -284,6 +422,7 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
 
     LOGI("output written: %s (%dx%d)",
          outPath.c_str(), final_image.cols, final_image.rows);
+    LOGI("[memstat] phase=after_imwrite rss=%.1f MB", rss_mb());
 
     // ── 8.  Return [width, height] to Kotlin ────────────────────────
     jintArray dims = env->NewIntArray(2);
