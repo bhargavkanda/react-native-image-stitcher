@@ -95,9 +95,10 @@ enum class KeyframeGateDecisionReason : int32_t {
     RejectOverlapTooHigh        = 10,  // "overlap-too-high"
     RejectOverlapTooHighAngular = 11,  // "overlap-too-high (angular)"
     // Flow strategy reasons (V16 A2)
-    AcceptOkFlow                = 12,  // "ok-flow" — flow median displacement crossed threshold
+    AcceptOkFlow                = 12,  // "ok-flow" — flow displacement-percentile crossed threshold
     AcceptFirstFlow             = 13,  // "first-flow" — first frame under flow strategy
     RejectOverlapTooHighFlow    = 14,  // "overlap-too-high (flow)"
+    AcceptFlowTranslation       = 15,  // "ok-flow-translation" — translation since last accept exceeded flowMaxTranslationM (force-accept even when novelty < threshold)
 };
 
 struct KeyframeGateDecision {
@@ -139,6 +140,28 @@ public:
     void setFlowMaxCorners(int32_t maxCorners);    // ≥ 30; default 150
     void setFlowQualityLevel(double quality);      // (0, 1]; default 0.01
     void setFlowMinDistance(double minDistance);   // ≥ 1.0; default 10.0 (working-resolution pixels)
+    /// V16 — translation budget for the Flow strategy.  When the camera's
+    /// 3D Euclidean translation since the last accepted keyframe exceeds
+    /// this value (metres), the gate force-accepts the current frame
+    /// even if novelty < `overlapThreshold`.  Purpose: prevent the
+    /// upstream stitcher's matcher from being fed two views with so
+    /// much parallax that even an affine match-confidence collapses
+    /// (Ram report 2026-05-13: captures with 25-60 cm of camera
+    /// translation between keyframes produced validPairs=0 even after
+    /// the matcher swap to AffineBestOf2NearestMatcher).  Default
+    /// 0.0 = disabled (back-compat).  Sensible production setting:
+    /// 0.08 (8 cm).  Clamped to ≥ 0.0.
+    void setFlowMaxTranslationM(double metres);
+    /// V16 — percentile (in [0.5, 0.99]) used to aggregate the tracked
+    /// features' absolute displacements into a per-axis novelty estimate.
+    /// Default 0.85.  Pre-V16 used median (0.50); the median under-
+    /// reports novelty when the user has rotated the camera enough that
+    /// the LEADING EDGE of new content is visible but most-existing-
+    /// features have moved less than half a frame.  85th-percentile picks
+    /// up the leading-edge motion sooner and lines up better with the
+    /// user's visual perception of "new content visible".  Clamped to
+    /// [0.5, 0.99].
+    void setFlowNoveltyPercentile(double percentile);
 
     // ── Per-frame evaluation ──────────────────────────────────────
     //

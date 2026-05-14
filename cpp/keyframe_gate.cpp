@@ -289,6 +289,16 @@ struct KeyframeGate::Impl {
     int32_t      flowMaxCorners       = 150;
     double       flowQualityLevel     = 0.01;
     double       flowMinDistance      = 10.0;
+    /// V16 — translation-budget force-accept (Flow strategy only).
+    /// 0.0 = disabled (default — preserves pre-V16 behaviour for
+    /// callers that don't opt in).  Metres.  See hpp for full
+    /// rationale.
+    double       flowMaxTranslationM   = 0.0;
+    /// V16 — percentile used to aggregate per-feature absolute
+    /// displacements into the novelty estimate.  0.85 default →
+    /// 85th-percentile-of-|Δx|, 85th-percentile-of-|Δy|, divided by
+    /// the dominant axis's frame dim.  See hpp for full rationale.
+    double       flowNoveltyPercentile = 0.85;
 
     // ── Pose-path state (V16 Phase 0/1/2) ─────────────────────────
     int32_t acceptedCount     = 0;
@@ -346,6 +356,14 @@ GateStrategy KeyframeGate::getStrategy() const          { return pImpl_->strateg
 void KeyframeGate::setFlowMaxCorners(int32_t n)         { pImpl_->flowMaxCorners = (n < 30 ? 30 : n); }
 void KeyframeGate::setFlowQualityLevel(double q)        { pImpl_->flowQualityLevel = (q <= 0.0 ? 0.001 : (q > 1.0 ? 1.0 : q)); }
 void KeyframeGate::setFlowMinDistance(double d)         { pImpl_->flowMinDistance  = (d < 1.0 ? 1.0 : d); }
+// V16 — translation budget.  Clamp to non-negative; 0.0 disables the
+// force-accept entirely (callers can opt-out by passing 0).
+void KeyframeGate::setFlowMaxTranslationM(double m)     { pImpl_->flowMaxTranslationM = (m < 0.0 ? 0.0 : m); }
+// V16 — novelty percentile.  Clamp to [0.5, 0.99].  Below 0.5 the
+// estimate becomes too sensitive to the BEST-tracked-features (under-
+// reports user-perceived novelty); above 0.99 it's effectively max-
+// over-features which is dominated by outliers.
+void KeyframeGate::setFlowNoveltyPercentile(double p)   { pImpl_->flowNoveltyPercentile = (p < 0.5 ? 0.5 : (p > 0.99 ? 0.99 : p)); }
 
 void KeyframeGate::reset() {
     pImpl_->acceptedCount = 0;
@@ -589,15 +607,38 @@ constexpr int   kFlowWorkingMaxSide              = 720;
 constexpr double kFlowMinTrackedFeatureFraction  = 0.30;
 constexpr int   kFlowKLTMaxLevel                 = 3;
 
-// Median of absolute values in `values` — O(n) via nth_element.
-// Mutates the input vector (re-orders it); callers pass scratch
-// copies.  Returns 0 for empty input (caller must guard).
-float medianAbs(std::vector<float>& values) {
+// V16 — percentile of absolute values in `values` — O(n) via
+// nth_element.  Mutates the input vector (takes absolute values
+// in-place AND partial-sorts to position the percentile element).
+// Returns 0 for empty input (caller must guard).
+//
+// `pct` is in [0, 1]; 0.5 → median, 0.85 → 85th percentile (current
+// default), 0.99 → near-max.  Callers pass scratch copies — the
+// vector is left in a partial-sort state, not the original ordering.
+//
+// Why percentile not median (V16 change): the median (50th-%ile) of
+// tracked-feature displacements under-reports novelty when the user
+// has rotated the camera enough that the LEADING-EDGE features show
+// large motion but the BULK of existing features (in the overlap
+// region) show small motion.  85th-%ile picks up the leading-edge
+// motion sooner and matches user perception of "new content visible"
+// better.  Exposed as a tunable `flowNoveltyPercentile` so the
+// behaviour is operator-configurable per use case.
+float percentileAbs(std::vector<float>& values, double pct) {
     if (values.empty()) return 0.0f;
     const size_t n = values.size();
     for (auto& v : values) v = std::abs(v);
-    std::nth_element(values.begin(), values.begin() + n / 2, values.end());
-    return values[n / 2];
+    // Clamp pct to [0, 1] then compute index.  At n=1 this just returns
+    // the single element.  At n=2 with pct=0.85, idx = floor(0.85 * 1)
+    // = 0 → returns the smaller of the two abs values (which is the
+    // 0th-percentile, not 85th — but with only 2 samples there is no
+    // meaningful 85th percentile, so this is a sensible degenerate).
+    if (pct < 0.0) pct = 0.0;
+    if (pct > 1.0) pct = 1.0;
+    size_t idx = static_cast<size_t>(pct * static_cast<double>(n - 1));
+    if (idx >= n) idx = n - 1;
+    std::nth_element(values.begin(), values.begin() + idx, values.end());
+    return values[idx];
 }
 
 // Downscale `srcGray` so its longer side equals `kFlowWorkingMaxSide`,
@@ -740,39 +781,87 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
         return evaluateAngularFallback(s, pose);
     }
 
-    // §6b — median absolute displacement on each axis.  Median (not
-    // mean) is robust to KLT outliers near occlusion edges — a few
-    // mis-tracked features won't skew the result.  medianAbs mutates
-    // the vector but that's fine, we don't need it after.
-    const float medAbsDx = medianAbs(dxs);
-    const float medAbsDy = medianAbs(dys);
+    // §6b — percentile absolute displacement on each axis.  V16
+    // changed from median (50th-%ile) to a configurable percentile
+    // (default 85th).  See percentileAbs() documentation above for
+    // the rationale — short version: median under-reports novelty
+    // when the leading edge has moved but most overlap-region
+    // features haven't.  The percentile is operator-tunable via
+    // setFlowNoveltyPercentile().
+    const double pctile = s.flowNoveltyPercentile;
+    const float pctAbsDx = percentileAbs(dxs, pctile);
+    const float pctAbsDy = percentileAbs(dys, pctile);
 
     // §6c — pan-axis detection + novelty computation.  Whichever axis
-    // has the larger median displacement IS the pan axis (per Ram's
-    // design — read pan direction off the flow itself, NOT off the
-    // captureOrientation hold setting, which describes the device
+    // has the larger percentile displacement IS the pan axis (per
+    // Ram's design — read pan direction off the flow itself, NOT off
+    // the captureOrientation hold setting, which describes the device
     // hold, not the user's pan direction).
     //
-    // Novelty = pan-axis-median-displacement / pan-axis-frame-dim.
-    // Direct semantic: 40 % of frame dim displacement = 40 % new
-    // content on the leading edge ≈ 60 % overlap with prev.
+    // Novelty = pan-axis-percentile-displacement / pan-axis-frame-dim.
+    // Direct semantic: 30 % of frame dim displacement at the 85th-%ile
+    // ≈ "leading 15 % of features have moved at least 30 % of frame
+    // dim" ≈ noticeable new-content sliver — matches user's visual
+    // perception better than the previous median-based metric.
     double novelty;
-    if (medAbsDx >= medAbsDy) {
-        novelty = static_cast<double>(medAbsDx) / static_cast<double>(currGrayWork.cols);
+    if (pctAbsDx >= pctAbsDy) {
+        novelty = static_cast<double>(pctAbsDx) / static_cast<double>(currGrayWork.cols);
     } else {
-        novelty = static_cast<double>(medAbsDy) / static_cast<double>(currGrayWork.rows);
+        novelty = static_cast<double>(pctAbsDy) / static_cast<double>(currGrayWork.rows);
     }
     if (novelty < 0.0) novelty = 0.0;
     if (novelty > 1.0) novelty = 1.0;
 
-    // §7 — accept or reject against the shared overlapThreshold.
-    // Same threshold semantic as the Pose path: 0.40 default ≈ 40 %
-    // new content.  Setting names line up so users don't get a third
-    // knob to tune.
-    if (novelty < s.overlapThreshold) {
+    // §6d — translation budget.  Compute the 3D Euclidean distance the
+    // camera has translated since the last accepted keyframe.  If the
+    // operator has set flowMaxTranslationM > 0 and the distance exceeds
+    // it, we force-accept this frame even when novelty < threshold.
+    //
+    // Why: even with the affine matcher swap in OpenCVStitcher.mm,
+    // very large parallax (Ram repro 2026-05-13: 25-60 cm between
+    // adjacent keyframes) starves the downstream BundleAdjusterRay of
+    // consistent inliers and ghosts the panorama.  Bounding the
+    // physical translation between keyframes keeps the matcher's
+    // inputs in a regime where it can actually produce a clean
+    // homography.  Default 0.0 → disabled (back-compat); operator
+    // opts-in via settings UI.
+    //
+    // We use the pose-path's lastAcceptedPose state field, which is
+    // ALREADY updated on every Flow-path accept (line ~798).  Pose
+    // and Flow strategies share `lastAcceptedPose` for this reason —
+    // post-V16 it's no longer Pose-strategy-exclusive.
+    double translationSinceLastAccept = 0.0;
+    if (s.lastAcceptedPose.has_value()) {
+        const Pose& last = s.lastAcceptedPose.value();
+        const float dtx = pose.tx - last.tx;
+        const float dty = pose.ty - last.ty;
+        const float dtz = pose.tz - last.tz;
+        translationSinceLastAccept =
+            std::sqrt(static_cast<double>(dtx) * dtx +
+                      static_cast<double>(dty) * dty +
+                      static_cast<double>(dtz) * dtz);
+    }
+    const bool translationBudgetCrossed =
+        (s.flowMaxTranslationM > 0.0) &&
+        (translationSinceLastAccept >= s.flowMaxTranslationM);
+
+    // §7 — accept-or-reject combined check.  Accept if EITHER the
+    // novelty crossed `overlapThreshold` (the original rule) OR the
+    // translation budget was exceeded (the V16 force-accept).  The
+    // decision reason distinguishes the two so telemetry can identify
+    // captures driven mostly by translation force-accepts vs. natural
+    // novelty accepts.
+    if (novelty < s.overlapThreshold && !translationBudgetCrossed) {
         return { false, KeyframeGateDecisionReason::RejectOverlapTooHighFlow,
                  novelty, s.acceptedCount, s.maxCount };
     }
+    // Pick the reason — novelty win takes precedence (we report what
+    // crossed the threshold first conceptually; if both crossed, the
+    // novelty path is the "natural" reason).
+    const KeyframeGateDecisionReason acceptReason =
+        (novelty >= s.overlapThreshold)
+            ? KeyframeGateDecisionReason::AcceptOkFlow
+            : KeyframeGateDecisionReason::AcceptFlowTranslation;
 
     // §8 — accept.  Re-detect features in the newly-accepted frame
     // (the previous set is now stale; many of them have moved out
@@ -793,7 +882,11 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
     s.prevFrameOrigHeight = height;
     s.lastAcceptedPose    = pose;
     s.acceptedCount      += 1;
-    return { true, KeyframeGateDecisionReason::AcceptOkFlow,
+    // `acceptReason` was decided in §7 — either AcceptOkFlow (novelty
+    // crossed) or AcceptFlowTranslation (translation budget forced
+    // the accept).  Reported back here so the host's telemetry can
+    // distinguish.
+    return { true, acceptReason,
              novelty, s.acceptedCount, s.maxCount };
 }
 
