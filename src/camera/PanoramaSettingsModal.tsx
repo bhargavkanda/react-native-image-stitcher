@@ -549,6 +549,42 @@ export function PanoramaSettingsModal({
                 + `isLowMem=${_isLowMem ? 'yes' : 'no'} · `
                 + `default blender=${_isLowMem ? 'feather' : 'multiband'}`}
             </Text>
+
+            {/* ──────────────────────────────────────────────
+             *  2026-05-14 — CAPTURE SOURCE picker.  Lifted to the
+             *  TOP of the modal because it's the FIRST decision an
+             *  operator makes: AR (plane + pose) vs non-AR (vision-
+             *  camera + IMU).  Switching this cascades into the
+             *  AR-dependent settings below (planeSource, frame
+             *  selection mode, useARPreview) via the host-side
+             *  useEffect in AuditCaptureScreen.tsx so an operator
+             *  flipping to non-AR doesn't have to know which other
+             *  settings to disable.
+             * ────────────────────────────────────────────── */}
+            <SectionHeader title="Capture source" />
+            <SegmentedControl
+              options={['auto', 'ar', 'wide', 'ultrawide']}
+              value={settings.captureSource}
+              onChange={(v) => update({ captureSource: v as PanoramaSettings['captureSource'] })}
+              caption="auto (default): AR-backed when supported, falls back to 1× wide otherwise. ar: force AR (silently falls back on unsupported devices). wide: 1× physical lens via vision-camera + IMU translation gate. ultrawide: 0.5× physical lens if the device has one. Picking wide/ultrawide auto-disables AR plane detection + flips frame-selection to flow-based."
+            />
+
+            {/* 2026-05-14 — Stitch-mode picker.  THE 2026-05-14 OOM
+             *  root cause: cv::Stitcher PANORAMA mode breaks down
+             *  on translation-heavy input.  'auto' (DEFAULT) routes
+             *  between PANORAMA and SCANS based on accumulated
+             *  translation vs rotation magnitudes at finalize time.
+             *  Lifted to the top of the modal alongside captureSource
+             *  for the same reason: it's a top-level pipeline
+             *  decision, not a per-engine tuning. */}
+            <SectionHeader title="Stitch mode" />
+            <SegmentedControl
+              options={['auto', 'panorama', 'scans']}
+              value={settings.stitchMode}
+              onChange={(v) => update({ stitchMode: v as PanoramaSettings['stitchMode'] })}
+              caption="auto (default): pick PANORAMA or SCANS based on translation/rotation totals at finalize. panorama: cv::Stitcher::PANORAMA — rotation-only (spherical warper, BA-ray); best for rotate-in-place captures, BAD on translation. scans: cv::Stitcher::SCANS — affine pipeline (plane warper, BA-affine); best for shelf-pan captures."
+            />
+
             {/* ──────────────────────────────────────────────
              *  STITCH TIMING — top-level decision.  Maps to the
              *  `incrementalEngine` storage field via setTiming().
@@ -719,35 +755,11 @@ export function PanoramaSettingsModal({
              * ────────────────────────────────────────────── */}
             {timing === 'batch' && (
               <>
-                {/* 2026-05-14 — Capture source picker.  Sits at the
-                  * top of the batch section because it's the FIRST
-                  * decision an operator makes: AR-backed (plane
-                  * detection, gyro-corrected pose, depth), or the
-                  * non-AR vision-camera path (1× / 0.5× physical
-                  * lens, IMU-only translation gate).  See
-                  * PanoramaSettings.captureSource for the full
-                  * rationale on each value. */}
-                <SectionHeader title="Capture source" />
-                <SegmentedControl
-                  options={['auto', 'ar', 'wide', 'ultrawide']}
-                  value={settings.captureSource}
-                  onChange={(v) => update({ captureSource: v as PanoramaSettings['captureSource'] })}
-                  caption="auto (default): AR-backed when supported, falls back to 1× wide otherwise. ar: force AR (silently falls back on unsupported devices). wide: 1× physical lens via vision-camera + IMU translation gate. ultrawide: 0.5× physical lens if the device has one (falls back to wide otherwise)."
-                />
-                {/* 2026-05-14 — Stitch mode picker.  THE 2026-05-14
-                  * OOM root cause: cv::Stitcher PANORAMA mode breaks
-                  * down on translation-heavy input (rotation-only
-                  * homography fit diverges → 3.2 GB canvas → lmkd
-                  * kill).  'auto' (DEFAULT) routes between PANORAMA
-                  * and SCANS based on accumulated translation vs
-                  * rotation magnitudes at finalize time. */}
-                <SectionHeader title="Stitch mode" />
-                <SegmentedControl
-                  options={['auto', 'panorama', 'scans']}
-                  value={settings.stitchMode}
-                  onChange={(v) => update({ stitchMode: v as PanoramaSettings['stitchMode'] })}
-                  caption="auto (default): pick PANORAMA or SCANS based on translation/rotation totals at finalize. panorama: cv::Stitcher::PANORAMA — rotation-only (spherical warper, BA-ray); best for rotate-in-place captures, BAD on translation. scans: cv::Stitcher::SCANS — affine pipeline (plane warper, BA-affine); best for shelf-pan captures, slightly worse on pure rotation."
-                />
+                {/* Capture source + stitch mode were lifted to the
+                 * TOP of the modal (above the timing picker) on
+                 * 2026-05-14 since they're pipeline-level decisions,
+                 * not batch-tuning knobs.  See the top of the
+                 * ScrollView for those controls. */}
                 <SectionHeader title="Batch tuning — Warper" />
                 <SegmentedControl
                   options={['plane', 'cylindrical', 'spherical']}
