@@ -685,39 +685,47 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // (counter-intuitively) hurt BA convergence by letting through
     // contradictory low-confidence matches that don't fit a
     // consistent rotation model.  Stick with the proven default.
-    // V16 — swapped BestOf2NearestMatcher → AffineBestOf2NearestMatcher
-    // (2026-05-13).  The plain matcher fits a rotation-only homography
-    // during RANSAC outlier rejection, which collapses MatchesInfo.
-    // confidence to 0 whenever the user has translated the camera
-    // (parallax breaks the rotation-only model).  Symptom:
-    // [RetaiLensStitcher] step2.5: 0 valid pairwise matches → sentinel
-    // → "Could not stitch" toast (or, before fix-9, EXC_BAD_ACCESS in
-    // Swift's try-bridge).  In Ram's repros the camera translates
-    // 25-60cm between adjacent keyframes — way past what rotation-
-    // only RANSAC can absorb.
+    // V16 fix-11 (2026-05-13) — REVERTED the AffineBestOf2NearestMatcher
+    // swap.  The swap (commit 505c6f1) targeted the validPairs=0
+    // symptom on translation-heavy captures, but produced a downstream
+    // regression: "Warp stage failed: matrix.cpp:246 setSize s >= 0".
     //
-    // AffineBestOf2NearestMatcher uses an affine model for inlier
-    // selection (full_affine=true → 6 DOF: rotation, non-uniform
-    // scale, shear, translation).  This tolerates the typical
-    // shelf-scanning translation pattern.  The downstream stitcher
-    // pipeline (HomographyBasedEstimator + BundleAdjusterRay) is
-    // unchanged; the swap only affects WHICH pairwise matches are
-    // accepted as inliers — the rest of the pipeline still computes
-    // a proper rotation-based camera placement on the surviving
-    // inliers.
+    // Root cause: cv::Stitcher's pipeline has TWO coherent end-to-end
+    // modes documented in OpenCV:
     //
-    // Trade-off: an affine inlier check is more permissive than a
-    // rotation-only one — false positives are theoretically possible
-    // when the two views are entirely unrelated.  In practice the
-    // gate has already vetted novelty/overlap, so the matcher only
-    // sees frames that genuinely overlap; permissiveness is the
-    // right side of the trade-off.
+    //   PANORAMA: BestOf2NearestMatcher → HomographyBasedEstimator →
+    //             BundleAdjusterRay → SphericalWarper/etc.
+    //             All stages assume rotation-only camera motion.
+    //
+    //   SCANS:    AffineBestOf2NearestMatcher → AffineBasedEstimator →
+    //             BundleAdjusterAffinePartial → AffineWarper.
+    //             All stages assume affine (rotation+translation+
+    //             scale+shear) camera motion.
+    //
+    // Swapping ONLY step 2 to affine while keeping the rotation-only
+    // estimator/BA/warper downstream produced incoherent camera
+    // parameters: the affine matcher passed inliers with parallax-
+    // induced inconsistencies that the rotation estimator turned into
+    // non-orthonormal "rotation" matrices.  The warper then computed
+    // negative destination canvas sizes and the cv::Mat::setSize
+    // assertion fired at step 8b.
+    //
+    // Fix: revert to BestOf2NearestMatcher so the WHOLE pipeline is
+    // coherent in PANORAMA mode.  Translation-heavy captures fall
+    // back to validPairs=0 → sentinel result → clean toast (no
+    // crash, thanks to fix-10's @autoreleasepool restructure).  The
+    // gate's translation-budget force-accept (`flowMaxTranslationCm`
+    // in Settings) is the operator's lever to keep per-pair
+    // translation small enough that BestOf2NearestMatcher's
+    // rotation-homography RANSAC produces useful inliers.
+    //
+    // Longer-term: see docs/site-content/design/2026-05-13-stitch-
+    // pipeline-mode-selection.md for the architectural answer —
+    // motion-classified per-capture routing between PANORAMA and
+    // SCANS modes at finalize() time.
     NSLog(@"[RetaiLensStitcher] step2: matching");
-    NSLog(@"[stitch-bc] step2 enter: AffineBestOf2Nearest matching (full_affine=YES)");
-    cv::detail::AffineBestOf2NearestMatcher matcher(/*full_affine=*/true,
-                                                    /*try_use_gpu=*/false,
-                                                    /*match_conf=*/0.65f,
-                                                    /*num_matches_thresh1=*/6);
+    NSLog(@"[stitch-bc] step2 enter: BestOf2Nearest matching (PANORAMA mode — coherent end-to-end)");
+    cv::detail::BestOf2NearestMatcher matcher(false, 0.65f);
     std::vector<cv::detail::MatchesInfo> pairwise;
     matcher(imgFeatures, pairwise);
     matcher.collectGarbage();
