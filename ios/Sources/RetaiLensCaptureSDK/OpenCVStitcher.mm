@@ -566,7 +566,36 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // here, peak memory during the stitch can be 100+ MB higher
   // than necessary — exactly the headroom we need to stay under
   // iOS' foreground jetsam threshold on long pans.
+  //
+  // V16 fix-10 (2026-05-13) — STRUCTURAL: NO return statement
+  // executes inside the @autoreleasepool block.  Failure paths
+  // capture the result/error into STRONG locals declared above the
+  // pool, then `break` out of the do/while(0) wrapper.  The pool
+  // drains; the strong locals survive (they're not autoreleased);
+  // after the pool we either return the sentinel `result`, surface
+  // `capturedError` via the outparameter, or fall through to the
+  // success path.
+  //
+  // Why this matters: the previous structure had `*error = [NSError
+  // errorWithDomain:…]; return nil;` (and similar sentinel `return
+  // [[RetaiLensStitchResult alloc] init…]`) executing while INSIDE
+  // the pool.  ARC autoreleases the return value (or the NSError
+  // factory's +0 return) into the pool.  When the pool drained at
+  // the closing brace AFTER the return statement was lexically
+  // inside it, the autoreleased object was freed.  Swift's caller-
+  // side `objc_retainAutoreleasedReturnValue` then dereferenced
+  // freed memory → EXC_BAD_ACCESS at objc_retain+16.  Documented
+  // in the comment block at the end of this pool — but the previous
+  // fix only moved the SUCCESS return out of the pool; the failure
+  // returns stayed inside and kept crashing.  ASan's quarantine
+  // hid this for prior diagnostic runs by extending object
+  // lifetimes; the non-ASan production build re-exposed it.
+  //
+  // See docs/site-content/learnings/objc-autoreleasepool-return-uaf.md
+  RetaiLensStitchResult *result = nil;
+  NSError *capturedError = nil;
   @autoreleasepool {
+  do {
   try {
     // Two-stage resolution pipeline (matches cv::Stitcher::PANORAMA):
     //
@@ -737,11 +766,12 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       //       (stitch on isolated DispatchQueue).
       //
       // See: docs/site-content/design/2026-05-12-finalize-crash-investigation.md
-      NSLog(@"[RetaiLensStitcher] step2.5: 0 valid pairs — returning sentinel (fix-9 NULL TEST)");
-      return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
-                                                         width:0
-                                                        height:0
-                                                    durationMs:0];
+      NSLog(@"[RetaiLensStitcher] step2.5: 0 valid pairs — sentinel result (fix-10: break out of pool to avoid drain UAF)");
+      result = [[RetaiLensStitchResult alloc] initWithOutputPath:@""
+                                                           width:0
+                                                          height:0
+                                                      durationMs:0];
+      break;
     }
 
     NSLog(@"[RetaiLensStitcher] step3: leave-biggest");
@@ -777,11 +807,12 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       // V16 fix-attempt 9 (NULL TEST) — same rationale as the
       // validPairs<1 sentinel above.  Bypass the *error→throw bridge
       // by returning a width=0/height=0 sentinel result instead.
-      NSLog(@"[RetaiLensStitcher] step3.5: <2 frames after leaveBiggestComponent — returning sentinel (fix-9 NULL TEST)");
-      return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
-                                                         width:0
-                                                        height:0
-                                                    durationMs:0];
+      NSLog(@"[RetaiLensStitcher] step3.5: <2 frames after leaveBiggestComponent — sentinel result (fix-10: break out of pool to avoid drain UAF)");
+      result = [[RetaiLensStitchResult alloc] initWithOutputPath:@""
+                                                           width:0
+                                                          height:0
+                                                      durationMs:0];
+      break;
     }
 
     // Step 4: estimator
@@ -797,11 +828,12 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       // mid-arc).  Returning sentinel keeps the failure surface clean
       // even though the immediate V16 batch-keyframe repro doesn't
       // typically reach this path.
-      NSLog(@"[RetaiLensStitcher] step4: HomographyBasedEstimator failed — returning sentinel (fix-9)");
-      return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
-                                                         width:0
-                                                        height:0
-                                                    durationMs:0];
+      NSLog(@"[RetaiLensStitcher] step4: HomographyBasedEstimator failed — sentinel result (fix-10: break out of pool to avoid drain UAF)");
+      result = [[RetaiLensStitchResult alloc] initWithOutputPath:@""
+                                                           width:0
+                                                          height:0
+                                                      durationMs:0];
+      break;
     }
     for (auto &cam : cameras) {
       cv::Mat R32;
@@ -1079,27 +1111,25 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
           "[stitch-bc] step7c: cv::resize threw cv::Exception: %{public}s",
           e.what());
-      if (error) {
-        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                     code:1007
-                                 userInfo:@{
-          NSLocalizedDescriptionKey:
-            [NSString stringWithFormat:@"Compose-stage resize failed: %s", e.what()],
-        }];
-      }
-      return nil;
+      // V16 fix-10 — capture error into strong local, break out of
+      // pool.  See pool-entry block at the top of this method.
+      capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                          code:1007
+                                      userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Compose-stage resize failed: %s", e.what()],
+      }];
+      break;
     } catch (...) {
       os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
           "[stitch-bc] step7c: cv::resize threw unknown exception");
-      if (error) {
-        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                     code:1007
-                                 userInfo:@{
-          NSLocalizedDescriptionKey:
-            @"Compose-stage resize failed (unknown).",
-        }];
-      }
-      return nil;
+      capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                          code:1007
+                                      userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Compose-stage resize failed (unknown).",
+      }];
+      break;
     }
     os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
         "[stitch-bc] step7d: composeFrames built (N=%lu)",
@@ -1243,26 +1273,23 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
             "[stitch-bc] step8b: warper->warp threw cv::Exception: %{public}s",
             e.what());
-        if (error) {
-          *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                       code:1008
-                                   userInfo:@{
-            NSLocalizedDescriptionKey:
-              [NSString stringWithFormat:@"Warp stage failed: %s", e.what()],
-          }];
-        }
-        return nil;
+        // V16 fix-10 — capture error into strong local, break out of pool.
+        capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                            code:1008
+                                        userInfo:@{
+          NSLocalizedDescriptionKey:
+            [NSString stringWithFormat:@"Warp stage failed: %s", e.what()],
+        }];
+        break;
       } catch (...) {
         os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
             "[stitch-bc] step8b: warper->warp threw unknown exception");
-        if (error) {
-          *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                       code:1008
-                                   userInfo:@{
-            NSLocalizedDescriptionKey: @"Warp stage failed (unknown).",
-          }];
-        }
-        return nil;
+        capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                            code:1008
+                                        userInfo:@{
+          NSLocalizedDescriptionKey: @"Warp stage failed (unknown).",
+        }];
+        break;
       }
       os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
           "[stitch-bc] step8c: warp loop done mem=%.1fMB",
@@ -1453,54 +1480,81 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         "[stitch-bc] step11c: panorama 8U conversion done (panorama=%dx%d) mem=%.1fMB",
         panorama.cols, panorama.rows, StitcherResidentMB());
   } catch (const cv::Exception &e) {
-    if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                   code:1100
-                               userInfo:@{
-        NSLocalizedDescriptionKey:
-          [NSString stringWithFormat:
-            @"OpenCV exception during stitch: %s", e.what()],
-      }];
-    }
-    return nil;
+    // V16 fix-10 — capture error into strong local, break out of pool.
+    capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                        code:1100
+                                    userInfo:@{
+      NSLocalizedDescriptionKey:
+        [NSString stringWithFormat:
+          @"OpenCV exception during stitch: %s", e.what()],
+    }];
+    break;
   } catch (const std::exception &e) {
-    if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                   code:1101
-                               userInfo:@{
-        NSLocalizedDescriptionKey:
-          [NSString stringWithFormat:
-            @"std exception during stitch: %s", e.what()],
-      }];
-    }
-    return nil;
+    capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                        code:1101
+                                    userInfo:@{
+      NSLocalizedDescriptionKey:
+        [NSString stringWithFormat:
+          @"std exception during stitch: %s", e.what()],
+    }];
+    break;
   } catch (...) {
-    if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                   code:1102
-                               userInfo:@{
-        NSLocalizedDescriptionKey:
-          @"Unknown exception during stitch.",
-      }];
-    }
-    return nil;
+    capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+                                        code:1102
+                                    userInfo:@{
+      NSLocalizedDescriptionKey:
+        @"Unknown exception during stitch.",
+    }];
+    break;
   }
+  } while (0);
   }  // end @autoreleasepool — drains OpenCV's autoreleased
      // temporaries before we run the cheap post-stitch work
      // (crop, JPEG encode) and construct the return value.
      //
-     // CRITICAL: this brace USED to live at the very bottom of the
-     // function, wrapping the `return [[RetaiLensStitchResult alloc]
-     // init…]` as well.  ARC inserts an autorelease for the return
-     // value, which then registered with this @autoreleasepool;
-     // the pool drained at the closing brace, deallocating the
-     // return object BEFORE the caller could `objc_retain` it.
-     // Caller's first interaction (the implicit retain that ARC
-     // inserts when receiving a returned object) hit freed memory
-     // → EXC_BAD_ACCESS at objc_retain.  Sentry confirmed this
-     // crash signature on the multi-res build.  Pulling the
-     // closing brace UP — so the return statement lives OUTSIDE
-     // the pool — fixes it.
+     // HISTORY (V16 fix-10, 2026-05-13): this brace USED to live at
+     // the very bottom of the function, wrapping the `return [[Retai-
+     // LensStitchResult alloc] init…]` as well.  ARC inserts an
+     // autorelease for the return value, which then registered with
+     // this @autoreleasepool; the pool drained at the closing brace,
+     // deallocating the return object BEFORE the caller could
+     // `objc_retain` it.  An earlier fix pulled the brace UP, which
+     // protected the SUCCESS-path return below — but the FAILURE-path
+     // returns (`*error = [NSError …]; return nil;`) and the fix-9
+     // sentinel returns (`return [[Result alloc] init…sentinel…]`)
+     // were still INSIDE the pool and kept crashing for the same
+     // reason.  ASan's allocator quarantine masked this on diagnostic
+     // builds; non-ASan production builds re-exposed it.
+     //
+     // Fix-10 restructure: every failure path now captures its
+     // return value into a STRONG LOCAL declared above the pool
+     // (`result` / `capturedError`) and `break`s out of the do/while(0)
+     // wrapper to fall past the pool's closing brace cleanly.  The
+     // strong locals survive the drain.  We then either return the
+     // sentinel `result`, surface `capturedError` via the outparameter
+     // (the outparameter is __autoreleasing — assigning to it puts
+     // the NSError into the OUTER pool, drained by the caller's GCD
+     // work-item boundary, comfortably after Swift retains it), or
+     // fall through to the success path below.
+     //
+     // See docs/site-content/learnings/objc-autoreleasepool-return-uaf.md
+     // for the full pattern + a checklist for future ObjC bridges.
+
+  // V16 fix-10 — handle failure paths captured from inside the pool.
+  if (result != nil) {
+    // Sentinel result (validPairs<1, workFrames<2, estimator fail).
+    // The Swift caller checks r.width == 0 / r.height == 0 and
+    // surfaces a clean error via completion(nil, NSError(...)).
+    return result;
+  }
+  if (capturedError != nil) {
+    // C++ exception caught inside the pool — surface via outparameter.
+    if (error) {
+      *error = capturedError;
+    }
+    return nil;
+  }
+
   if (panorama.empty()) {
     if (error) {
       *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
