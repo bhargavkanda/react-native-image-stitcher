@@ -198,6 +198,27 @@ export interface PanoramaSettings {
    *  downscales the frame to 720 px longest side for KLT).  Higher
    *  = more spatially-spread features.  Default 10. */
   flowMinDistance: number;
+  /** V16 — flow-based mode: translation budget in CENTIMETRES.
+   *  When > 0, the gate force-accepts a frame if the camera has
+   *  translated more than this distance (3D Euclidean) since the
+   *  last accepted keyframe — even when novelty < threshold.
+   *  Bounds the parallax between adjacent keyframes so the
+   *  downstream affine stitcher matcher can fit a homography.
+   *  Range 0 – 100 cm in the modal, default 0 = disabled.
+   *  Recommended starting value once enabled: 8 cm. */
+  flowMaxTranslationCm: number;
+  /** V16 — flow-based mode: percentile used to aggregate tracked-
+   *  feature absolute displacements into the novelty estimate.
+   *  Pre-V16 used median (0.50); 0.85 picks up leading-edge
+   *  motion sooner — matches user perception of "new content
+   *  visible" better.  Range 0.50 – 0.99, default 0.85. */
+  flowNoveltyPercentile: number;
+  /** V16 — flow-based mode: eval-throttle.  Gate evaluation runs
+   *  every Nth consumeFrame from the AR delegate instead of every
+   *  frame.  Pure CPU/battery savings — doesn't change WHICH
+   *  frames are accepted, just samples less frequently.  Range
+   *  1 – 10, default 1 (every frame). */
+  flowEvalEveryNFrames: number;
 
   /** V15.0c — sliver position within the camera frame.  'Center' is
    *  V13.x default.  'Bottom' takes leading-edge content for top-to-
@@ -346,6 +367,19 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   flowMaxCorners: 150,
   flowQualityLevel: 0.01,
   flowMinDistance: 10,
+  // V16 — translation-budget force-accept (Flow strategy only).
+  // 0 = disabled (default — back-compat).  Operator opts-in via the
+  // "Flow tuning — translation budget" segmented control below.
+  flowMaxTranslationCm: 0,
+  // V16 — novelty aggregation percentile.  0.85 picks up leading-
+  // edge motion sooner than the pre-V16 median (0.50).  Operator
+  // can dial down toward 0.5 for more-conservative captures or up
+  // toward 0.99 for more-aggressive.
+  flowNoveltyPercentile: 0.85,
+  // V16 — every-Nth-frame eval throttle.  1 = every frame (default,
+  // matches pre-V16 behaviour).  Set higher to cut CPU on long
+  // captures at the cost of acceptance latency.
+  flowEvalEveryNFrames: 1,
   // V15.0c — sliver tweaks: leading-edge sliver from BOTTOM for typical
   // top-to-bottom pan + full first-frame anchor produced the best
   // outputs in early iteration.
@@ -506,6 +540,27 @@ export function PanoramaSettingsModal({
                       value={String(settings.flowMinDistance)}
                       onChange={(v) => update({ flowMinDistance: parseInt(v, 10) })}
                       caption="Min pixel distance between detected corners (working resolution = 720 px longest side). Higher = more spatially-spread features. 10 = default."
+                    />
+                    <SectionHeader title="Flow tuning — translation budget (cm)" />
+                    <SegmentedControl
+                      options={['0', '5', '8', '12', '20', '50']}
+                      value={String(settings.flowMaxTranslationCm)}
+                      onChange={(v) => update({ flowMaxTranslationCm: parseInt(v, 10) })}
+                      caption="Force-accept when camera has moved this many cm since last keyframe, even if novelty < overlap threshold. Bounds parallax so the stitcher can match. 0 = disabled (default). 8 = recommended starting value."
+                    />
+                    <SectionHeader title="Flow tuning — novelty percentile" />
+                    <SegmentedControl
+                      options={['0.50', '0.70', '0.85', '0.95', '0.99']}
+                      value={settings.flowNoveltyPercentile.toFixed(2)}
+                      onChange={(v) => update({ flowNoveltyPercentile: parseFloat(v) })}
+                      caption="How tracked-feature displacements are aggregated into novelty. 0.50 = pre-V16 median behaviour (conservative). 0.85 = picks up leading-edge motion sooner (default, matches user perception). 0.99 = near-max, very aggressive."
+                    />
+                    <SectionHeader title="Flow tuning — eval every N frames" />
+                    <SegmentedControl
+                      options={['1', '2', '3', '5', '10']}
+                      value={String(settings.flowEvalEveryNFrames)}
+                      onChange={(v) => update({ flowEvalEveryNFrames: parseInt(v, 10) })}
+                      caption="Throttle gate evaluation to every Nth AR frame. 1 = every frame (default, no throttle). 3-5 = noticeable CPU/battery savings on long captures, up to N-1 frames of acceptance latency."
                     />
                   </>
                 )}

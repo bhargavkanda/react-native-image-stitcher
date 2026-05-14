@@ -452,6 +452,42 @@ export interface StitcherConfig {
    *  default 10. */
   flowMinDistance: number;
 
+  /** V16 — flow-based mode: translation budget in CENTIMETRES.  When
+   *  > 0, the gate force-accepts a frame if the camera has moved
+   *  more than this distance (3D Euclidean) since the last accepted
+   *  keyframe — even when novelty < keyframeOverlapThreshold.
+   *  Bounds the parallax between adjacent keyframes so the
+   *  downstream stitcher's matcher (AffineBestOf2NearestMatcher
+   *  post-V16) sees inputs it can fit a homography to.
+   *
+   *  Range 0 – 100 cm, default 0 = disabled.  Recommended starting
+   *  value once enabled: 8 cm.  Set higher for fast pans, lower for
+   *  precise multi-pass scans. */
+  flowMaxTranslationCm: number;
+
+  /** V16 — flow-based mode: percentile used to aggregate tracked-
+   *  feature absolute displacements into the novelty estimate.
+   *  Pre-V16 used median (0.50); 0.85 picks up the LEADING EDGE
+   *  motion sooner — better matches user perception of "new
+   *  content visible".  Range 0.50 – 0.99, default 0.85.  Set
+   *  closer to 1.0 for more sensitive (catches even small leading-
+   *  edge motion), closer to 0.5 for more conservative (needs
+   *  half the features to have moved). */
+  flowNoveltyPercentile: number;
+
+  /** V16 — flow-based mode: eval-throttle.  Gate evaluation runs
+   *  every Nth consumeFrame from the AR delegate instead of every
+   *  frame.  Pure CPU/battery savings — doesn't change WHICH frames
+   *  are accepted, just samples less frequently.  Trade-off: up to
+   *  N-1 frames of latency between "user moved enough" and "frame
+   *  accepted".  Range 1 – 10, default 1 (every frame).
+   *
+   *  Recommended for long captures on devices that overheat: set 3
+   *  for ~3× CPU reduction on the per-frame gate path.  Eval cost
+   *  is ~3-5 ms per call at 60 fps, so 3-5 ms / 16 ms ≈ 20-30 %
+   *  AR-delegate budget freed when N=3. */
+  flowEvalEveryNFrames: number;
+
   // cv::Stitcher pipeline knobs (batch-keyframe engine, V16 Phase 1.fix3)
 
   /** V16 Phase 1.fix3 — `cv::Stitcher`'s warper choice for the
