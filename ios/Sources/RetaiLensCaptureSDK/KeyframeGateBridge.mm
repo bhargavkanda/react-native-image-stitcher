@@ -39,6 +39,8 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
         case R::AcceptOkFlow:                return @"ok-flow";
         case R::AcceptFirstFlow:             return @"first-flow";
         case R::RejectOverlapTooHighFlow:    return @"overlap-too-high (flow)";
+        // V16 — translation-budget force-accept
+        case R::AcceptFlowTranslation:       return @"ok-flow-translation";
     }
     return @"unknown";
 }
@@ -114,6 +116,14 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
 
 - (void)setFlowMinDistance:(double)minDistance {
     _gate.setFlowMinDistance(minDistance);
+}
+
+- (void)setFlowMaxTranslationM:(double)metres {
+    _gate.setFlowMaxTranslationM(metres);
+}
+
+- (void)setFlowNoveltyPercentile:(double)percentile {
+    _gate.setFlowNoveltyPercentile(percentile);
 }
 
 - (KGBDecision *)evaluateWithTx:(float)tx ty:(float)ty tz:(float)tz

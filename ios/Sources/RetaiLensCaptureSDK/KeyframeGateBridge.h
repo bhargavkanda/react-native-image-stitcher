@@ -68,6 +68,13 @@ NS_SWIFT_NAME(KeyframeGateBridge)
 - (void)setFlowMaxCorners:(NSInteger)maxCorners;
 - (void)setFlowQualityLevel:(double)quality;
 - (void)setFlowMinDistance:(double)minDistance;
+/// V16 — translation budget (metres).  Set > 0 to force-accept on
+/// translation overflow even when novelty < threshold; 0 disables.
+/// See KeyframeGate.swift for the operator-facing description.
+- (void)setFlowMaxTranslationM:(double)metres;
+/// V16 — novelty aggregation percentile [0.5, 0.99].  Default 0.85.
+/// See KeyframeGate.swift for the operator-facing description.
+- (void)setFlowNoveltyPercentile:(double)percentile;
 
 // ── Read-only state ─────────────────────────────────────────────
 - (BOOL)isEnabled;

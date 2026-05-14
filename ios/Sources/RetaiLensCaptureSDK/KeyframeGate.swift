@@ -128,6 +128,45 @@ final class KeyframeGate {
         didSet { bridge.setFlowMinDistance(flowMinDistance) }
     }
 
+    /// V16 — translation budget for the Flow strategy, in CENTIMETRES
+    /// (UI-friendly unit; bridge converts to metres before crossing).
+    /// When > 0, the gate force-accepts a frame if the camera has
+    /// translated more than this distance (3D Euclidean) since the
+    /// last accepted keyframe — even when novelty < overlapThreshold.
+    /// Bounds the parallax between adjacent keyframes so the
+    /// downstream stitcher's matcher (even the affine one) sees
+    /// inputs it can handle.  Default 0 = disabled (back-compat);
+    /// operator opts-in via the capture-settings UI.  Recommended
+    /// starting value once enabled: 8 cm.
+    var flowMaxTranslationCm: Double = 0.0 {
+        didSet {
+            // Bridge takes metres; UI surface uses cm for legibility.
+            bridge.setFlowMaxTranslationM(flowMaxTranslationCm / 100.0)
+        }
+    }
+
+    /// V16 — percentile used to aggregate the tracked features'
+    /// absolute displacements into a per-axis novelty estimate.
+    /// Default 0.85.  Pre-V16 used median (0.50); the higher
+    /// percentile picks up leading-edge motion sooner — better
+    /// matches user perception of "new content visible".  Clamped
+    /// at the bridge to [0.5, 0.99].
+    var flowNoveltyPercentile: Double = 0.85 {
+        didSet { bridge.setFlowNoveltyPercentile(flowNoveltyPercentile) }
+    }
+
+    /// V16 — Swift-side throttle for gate evaluation cadence.  Default
+    /// 1 (evaluate on every consumeFrame).  Set higher to skip evals
+    /// on (N-1)/N frames — pure CPU/battery savings, no change to
+    /// WHICH frames are accepted (still subject to overlapThreshold
+    /// + translation budget).  Range 1-10 enforced at start() time.
+    ///
+    /// This knob lives in Swift, not C++, because it's about HOW
+    /// OFTEN we call into the gate, not about gate-internal logic.
+    /// Read by RetaiLensIncrementalStitcher.consumeFrame before
+    /// invoking `evaluate(...)`.
+    var flowEvalEveryNFrames: Int = 1
+
     /// One-shot flag: when set to `true`, the very next evaluate()
     /// accepts unconditionally and the flag self-resets.  Set by JS
     /// shutter-release path so we don't truncate the trailing edge

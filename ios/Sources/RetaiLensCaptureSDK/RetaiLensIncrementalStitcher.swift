@@ -714,16 +714,53 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         } else {
             self.keyframeGate.flowMinDistance = 10.0
         }
+        // V16 — translation-budget force-accept (Flow strategy).  cm
+        // on the JS side (UI-friendly), converted to metres by the
+        // KeyframeGate.swift setter.  Clamp to [0, 100] cm at start so
+        // a stray JS default can't put the gate in an unworkable
+        // state.  Default 0 = disabled (preserves pre-V16 behaviour
+        // for callers that don't opt in).
+        if let v = configOverrides["flowMaxTranslationCm"] as? Double {
+            self.keyframeGate.flowMaxTranslationCm = max(0.0, min(100.0, v))
+        } else if let v = configOverrides["flowMaxTranslationCm"] as? Int {
+            self.keyframeGate.flowMaxTranslationCm = max(0.0, min(100.0, Double(v)))
+        } else {
+            self.keyframeGate.flowMaxTranslationCm = 0.0
+        }
+        // V16 — novelty aggregation percentile.  Clamp at start to
+        // [0.5, 0.99]; the bridge re-clamps but matching it here
+        // means our state stays in-range for logging.  Default 0.85
+        // — picks up leading-edge motion sooner than the pre-V16
+        // median (0.5).
+        if let v = configOverrides["flowNoveltyPercentile"] as? Double {
+            self.keyframeGate.flowNoveltyPercentile = max(0.5, min(0.99, v))
+        } else {
+            self.keyframeGate.flowNoveltyPercentile = 0.85
+        }
+        // V16 — Swift-side eval throttle.  Default 1 (every consumeFrame
+        // runs evaluate).  Range 1-10.  At 1, identical to pre-V16
+        // behaviour; at higher N, evaluate runs every Nth frame to
+        // save CPU/battery on long captures.  Doesn't change WHICH
+        // frames are accepted (still subject to overlapThreshold +
+        // translation budget) — just samples less frequently.
+        if let v = configOverrides["flowEvalEveryNFrames"] as? Int {
+            self.keyframeGate.flowEvalEveryNFrames = max(1, min(10, v))
+        } else {
+            self.keyframeGate.flowEvalEveryNFrames = 1
+        }
         self.keyframeGate.reset()
         os_log(.fault, log: Self.diagLog,
-               "[V16-keyframe] start gate enabled=%d strategy=%{public}@ thr=%.2f max=%d flow(maxCorners=%d quality=%.3f minDist=%.1f)",
+               "[V16-keyframe] start gate enabled=%d strategy=%{public}@ thr=%.2f max=%d flow(maxCorners=%d quality=%.3f minDist=%.1f maxTransCm=%.1f pctile=%.2f evalEveryN=%d)",
                self.keyframeGate.enabled ? 1 : 0,
                self.keyframeGate.strategy == .flow ? "flow" : "pose",
                self.keyframeGate.overlapThreshold,
                self.keyframeGate.maxCount,
                self.keyframeGate.flowMaxCorners,
                self.keyframeGate.flowQualityLevel,
-               self.keyframeGate.flowMinDistance)
+               self.keyframeGate.flowMinDistance,
+               self.keyframeGate.flowMaxTranslationCm,
+               self.keyframeGate.flowNoveltyPercentile,
+               Int32(self.keyframeGate.flowEvalEveryNFrames))
 
         stateLock.unlock()
 
@@ -1684,10 +1721,30 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // doesn't burn workQueue slots — the gate is the cheap filter,
         // the engine is the expensive one.
         var gateDecision: KeyframeGateDecision? = nil
-        let shouldEvaluateGate =
+        // V16 — eval-throttle.  When flowEvalEveryNFrames > 1, run the
+        // gate every Nth consumeFrame instead of every frame.  Cuts
+        // CPU on the AR delegate path linearly with N at the cost of
+        // up to N-1 frames of acceptance latency.  Doesn't change
+        // WHICH frames are accepted — just when we check.
+        //
+        // `consumeFrameCounter` was already incremented above (line
+        // ~1596) so the first frame (counter=1) is always evaluated
+        // regardless of N: (1-1) % N == 0 for any N ≥ 1.  Subsequent
+        // evals land on counter = 1+N, 1+2N, ... — first frame
+        // triggers immediately, then every Nth one after.
+        let evalCadence = max(1, self.keyframeGate.flowEvalEveryNFrames)
+        let cadenceFires = ((self.consumeFrameCounter - 1) % evalCadence == 0)
+        let gateActive =
             isRunning
             && (hybrid != nil || slit != nil || inBatchKeyframeMode)
             && self.keyframeGate.enabled
+        let shouldEvaluateGate = gateActive && cadenceFires
+        // True iff the gate is active for this capture but we're
+        // skipping THIS specific frame due to the throttle.  In that
+        // case we must also skip the workQueue save path below —
+        // otherwise non-Nth frames would be unconditionally saved as
+        // keyframes, which would defeat the gate entirely.
+        let throttledThisFrame = gateActive && !cadenceFires
         if shouldEvaluateGate {
             let plane = RetaiLensARSession.shared.latchedPlaneTransform()
             // V16 A2 — call the pixel-buffer-aware overload so Flow
@@ -1701,6 +1758,15 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             )
         }
         stateLock.unlock()
+
+        // V16 eval-throttle bail.  If the gate is active but we
+        // skipped evaluation for this frame, drop the entire save
+        // pipeline.  We emit no event and don't burn the workQueue
+        // slot — the next AR-delegate frame that lands on the
+        // cadence will go through normally.
+        if throttledThisFrame {
+            return
+        }
 
         // V16 fix-attempt-7 verify (Ram report 2026-05-13): post-fix-7
         // bursting was still observed.  Per the design doc's Phase
