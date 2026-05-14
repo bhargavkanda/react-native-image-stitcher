@@ -151,6 +151,12 @@ export type {
   UseIncrementalAndroidDriverOptions,
   IncrementalAndroidDriverHandle,
 } from './stitching/useIncrementalAndroidDriver';
+// 2026-05-14 — IMU translation gate for non-AR mode.
+export { useIMUTranslationGate } from './sensors/useIMUTranslationGate';
+export type {
+  UseIMUTranslationGateOptions,
+  UseIMUTranslationGateReturn,
+} from './sensors/useIMUTranslationGate';
 export { IncrementalStitcherView } from './stitching/IncrementalStitcherView';
 export type { IncrementalStitcherViewProps } from './stitching/IncrementalStitcherView';
 
