@@ -163,6 +163,21 @@ public:
     /// [0.5, 0.99].
     void setFlowNoveltyPercentile(double percentile);
 
+    /// 2026-05-14 — disable the angular-delta fallback that the gate
+    /// otherwise uses when (a) the pose-strategy's plane-projection
+    /// is unavailable / degenerate, or (b) the flow-strategy's KLT
+    /// tracking fails.  When `true`, every angular-fallback path
+    /// returns `RejectOverlapTooHighAngular` regardless of the actual
+    /// pose, so the only path that can accept a frame is the strategy's
+    /// primary signal (plane-overlap for Pose, flow-displacement for
+    /// Flow).
+    ///
+    /// Set this to `true` in non-AR mode (captureSource ∈ {wide,
+    /// ultrawide}) where pose data is missing / IMU-derived — the
+    /// angular calc would produce nonsense in that environment.
+    /// Default `false` (back-compat — AR mode uses the fallback).
+    void setDisableAngularFallback(bool disabled);
+
     // ── Per-frame evaluation ──────────────────────────────────────
     //
     // Two overloads:

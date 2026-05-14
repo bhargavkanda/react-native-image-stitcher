@@ -86,6 +86,42 @@ internal class KeyframeGate : AutoCloseable {
             if (value) nativeMarkNextFrameAsLast(nativeHandle)
         }
 
+    /// 2026-05-14 — disable the angular-delta fallback.  See C++
+    /// `setDisableAngularFallback` doc for the full rationale.  In
+    /// short: set this to `true` in non-AR mode (captureSource ∈
+    /// {wide, ultrawide}) where pose data isn't available — the
+    /// gate's angular calculation would otherwise produce nonsense.
+    /// Default `false` (back-compat — AR mode uses the fallback).
+    /// Write-only; no read accessor on the C++ side.
+    var disableAngularFallback: Boolean = false
+        set(value) {
+            field = value
+            nativeSetDisableAngularFallback(nativeHandle, value)
+        }
+
+    /// 2026-05-14 — Flow strategy: novelty aggregation percentile
+    /// (same knob iOS exposes via setFlowNoveltyPercentile).  C++
+    /// clamps to [0.5, 0.99].  Stored locally for diagnostic
+    /// readback; the C++ side has no getter.
+    var flowNoveltyPercentile: Double = 0.85
+        set(value) {
+            field = value
+            nativeSetFlowNoveltyPercentile(nativeHandle, value)
+        }
+
+    /// 2026-05-14 — Flow strategy: max translation in METRES between
+    /// consecutive accepted keyframes before force-acceptance.  Same
+    /// knob iOS exposes via setFlowMaxTranslationM.  In non-AR mode
+    /// the JS host computes translation from react-native-sensors
+    /// IMU integration and pushes it through this setter so the
+    /// translation-budget logic in C++ kicks in even without ARKit/
+    /// ARCore pose.  0.0 (default) = disabled.
+    var flowMaxTranslationM: Double = 0.0
+        set(value) {
+            field = value
+            nativeSetFlowMaxTranslationM(nativeHandle, value)
+        }
+
     // ── Read-only state ─────────────────────────────────────────
 
     val acceptedCount: Int get() = nativeGetAcceptedCount(nativeHandle)
@@ -151,6 +187,12 @@ internal class KeyframeGate : AutoCloseable {
     private external fun nativeGetAcceptedCount(handle: Long): Int
     private external fun nativeGetMaxCount(handle: Long): Int
     private external fun nativeIsEnabled(handle: Long): Boolean
+    // 2026-05-14 — new setters for the non-AR mode plumbing + the
+    // setFlowNoveltyPercentile / setFlowMaxTranslationM iOS-parity
+    // setters (Android JNI was a P3-followup until 2026-05-14).
+    private external fun nativeSetDisableAngularFallback(handle: Long, disabled: Boolean)
+    private external fun nativeSetFlowNoveltyPercentile(handle: Long, percentile: Double)
+    private external fun nativeSetFlowMaxTranslationM(handle: Long, metres: Double)
     private external fun nativeEvaluate(
         handle: Long,
         tx: Float, ty: Float, tz: Float,

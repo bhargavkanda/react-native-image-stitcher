@@ -340,6 +340,30 @@ class RetaiLensIncrementalStitcher(
                     ?.getDoubleOrDefault("keyframeOverlapThreshold", 0.4) ?: 0.4
                 keyframeGate.overlapThreshold = threshold.coerceIn(0.10, 0.80)
                 keyframeGate.maxCount = batchKeyframeMaxCount.coerceIn(3, 10)
+
+                // 2026-05-14 — thread flow-strategy tunables through to the
+                // shared C++ gate.  Before this commit the Android JNI was
+                // missing setFlowNoveltyPercentile + setFlowMaxTranslationM
+                // bindings (iOS-only via KeyframeGateBridge), which meant
+                // operators flipping these in Settings only affected iOS
+                // captures.  Now both platforms honour them.
+                val pctile = configOverrides
+                    ?.getDoubleOrDefault("flowNoveltyPercentile", 0.85) ?: 0.85
+                keyframeGate.flowNoveltyPercentile = pctile.coerceIn(0.50, 0.99)
+                // Settings UI exposes flowMaxTranslationCm in CENTIMETRES;
+                // C++ API is in METRES.  Convert.  0 = disabled.
+                val txBudgetCm = configOverrides
+                    ?.getDoubleOrDefault("flowMaxTranslationCm", 0.0) ?: 0.0
+                keyframeGate.flowMaxTranslationM = (txBudgetCm / 100.0).coerceAtLeast(0.0)
+
+                // 2026-05-14 — non-AR mode opt-out for angular fallback.
+                // captureSource ∈ {wide, ultrawide} means the host is using
+                // vision-camera (no ARKit/ARCore pose).  Disable the gate's
+                // angular fallback so it doesn't compute on garbage pose.
+                val captureSource = configOverrides?.getString("captureSource") ?: "auto"
+                val isNonAR = (captureSource == "wide" || captureSource == "ultrawide")
+                keyframeGate.disableAngularFallback = isNonAR
+
                 keyframeGate.enabled = true
                 keyframeGate.reset()
             } else if (isFirstwins) {

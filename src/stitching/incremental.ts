@@ -534,6 +534,52 @@ export interface StitcherConfig {
    *  output on lopsided masks).  Surfaced as a settings toggle so
    *  the operator can A/B the two crop strategies on real scenes. */
   enableMaxInscribedRectCrop: boolean;
+
+  /** 2026-05-14 — `cv::Stitcher` pipeline mode for the batch-keyframe
+   *  finalize step.
+   *
+   *   'auto' (default) — Engine picks PANORAMA or SCANS at finalize
+   *                       time based on accumulated translation vs
+   *                       rotation magnitudes between first and last
+   *                       accepted keyframe poses (AR mode) or the
+   *                       windowed IMU integration (non-AR mode).
+   *   'panorama'        — Force cv::Stitcher::PANORAMA (rotation-only
+   *                       pipeline; ORB + HomographyBasedEstimator +
+   *                       BundleAdjusterRay + SphericalWarper).
+   *                       Best for rotate-in-place panoramas.
+   *                       WARNING: on translation-heavy input the
+   *                       rotation-only model diverges and the
+   *                       compositing canvas can grow to multi-GB
+   *                       (Android lmkd kill observed 2026-05-14).
+   *   'scans'           — Force cv::Stitcher::SCANS (affine pipeline;
+   *                       AffineBestOf2NearestMatcher +
+   *                       BundleAdjusterAffine + PlaneWarper).
+   *                       Best for walk-past-shelf captures.  Canvas
+   *                       size bounded by sum of frame areas.
+   *
+   * iOS note: as of 2026-05-14 iOS uses a hand-rolled PANORAMA-style
+   * pipeline regardless of this setting.  Setting is passed through
+   * to iOS but currently ignored; Android honours it via
+   * `retailens_stitcher.cpp` + `RetaiLensIncrementalStitcher.kt`. */
+  stitchMode: 'auto' | 'panorama' | 'scans';
+
+  /** 2026-05-14 — capture source axis resolved by the host.
+   *
+   *   'ar'         — ARKit / ARCore session feeds the engine.
+   *   'wide'       — vision-camera with 1× physical lens.
+   *   'ultrawide'  — vision-camera with 0.5× physical lens.
+   *
+   * Native side uses this to:
+   * 1. Decide whether the KeyframeGate should DISABLE its angular-
+   *    delta fallback path.  Non-AR has no usable pose data → the
+   *    angular calc would produce nonsense → set `disableAngularFallback`
+   *    true on the gate.
+   * 2. Decide whether to expect pose updates through the AR delegate
+   *    path (only meaningful when source='ar').
+   *
+   * Host resolves 'auto' / 'ar' from PanoramaSettings.captureSource to
+   * a concrete string before sending — native never sees 'auto'. */
+  captureSource: 'ar' | 'wide' | 'ultrawide';
 }
 
 

@@ -299,6 +299,22 @@ struct KeyframeGate::Impl {
     /// 85th-percentile-of-|Δx|, 85th-percentile-of-|Δy|, divided by
     /// the dominant axis's frame dim.  See hpp for full rationale.
     double       flowNoveltyPercentile = 0.85;
+    /// 2026-05-14 — disable the angular-delta fallback path.  When
+    /// `true`, `evaluateAngularFallback()` returns
+    /// `RejectOverlapTooHighAngular` regardless of the actual
+    /// angular delta — effectively making flow-based / pose-based
+    /// novelty the ONLY acceptance signal.
+    ///
+    /// Why this exists: in non-AR mode (captureSource ∈ {wide,
+    /// ultrawide}) we have no ARKit/ARCore pose data — only IMU.
+    /// The angular-delta calc relies on the pose quaternion to
+    /// derive camera-forward; with zero/garbage pose it produces
+    /// nonsense decisions.  Setting this flag prevents the gate
+    /// from accepting/rejecting based on that nonsense.
+    ///
+    /// Default `false` (back-compat — AR mode uses the fallback as
+    /// before).  Setter: `setDisableAngularFallback(bool)`.
+    bool         disableAngularFallback = false;
 
     // ── Pose-path state (V16 Phase 0/1/2) ─────────────────────────
     int32_t acceptedCount     = 0;
@@ -364,6 +380,9 @@ void KeyframeGate::setFlowMaxTranslationM(double m)     { pImpl_->flowMaxTransla
 // reports user-perceived novelty); above 0.99 it's effectively max-
 // over-features which is dominated by outliers.
 void KeyframeGate::setFlowNoveltyPercentile(double p)   { pImpl_->flowNoveltyPercentile = (p < 0.5 ? 0.5 : (p > 0.99 ? 0.99 : p)); }
+// 2026-05-14 — non-AR-mode opt-out for the angular-delta fallback.
+// See `disableAngularFallback` field doc in Impl for rationale.
+void KeyframeGate::setDisableAngularFallback(bool v)    { pImpl_->disableAngularFallback = v; }
 
 void KeyframeGate::reset() {
     pImpl_->acceptedCount = 0;
@@ -415,6 +434,16 @@ KeyframeGateDecision KeyframeGate::evaluateAngularFallback(
     }
     if (s.acceptedCount >= s.maxCount) {
         return { false, KeyframeGateDecisionReason::RejectMaxReached,
+                 -1.0, s.acceptedCount, s.maxCount };
+    }
+    // 2026-05-14 — non-AR-mode opt-out.  When `disableAngularFallback`
+    // is set, treat every angular-fallback call as a hard reject.
+    // The caller's flow strategy is then the only path that can
+    // accept frames.  See `disableAngularFallback` field doc for
+    // the rationale (no usable pose data in non-AR captures).
+    if (s.disableAngularFallback) {
+        return { false,
+                 KeyframeGateDecisionReason::RejectOverlapTooHighAngular,
                  -1.0, s.acceptedCount, s.maxCount };
     }
     Vec3 lastFwd = cameraForwardWorld(*s.lastAcceptedPose);

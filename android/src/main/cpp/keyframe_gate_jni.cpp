@@ -86,6 +86,40 @@ Java_com_retailens_capturesdk_KeyframeGate_nativeMarkNextFrameAsLast(
     gate(handle)->markNextFrameAsLast();
 }
 
+// 2026-05-14 — non-AR-mode opt-out for the angular-delta fallback.
+// See `setDisableAngularFallback` doc in keyframe_gate.hpp for the
+// rationale (no usable pose data in non-AR captures).
+JNIEXPORT void JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeSetDisableAngularFallback(
+    JNIEnv*, jclass, jlong handle, jboolean disabled)
+{
+    gate(handle)->setDisableAngularFallback(static_cast<bool>(disabled));
+}
+
+// 2026-05-14 — JS-driven IMU translation budget for non-AR mode.
+// In non-AR captures, the gate has no ARKit/ARCore pose; the JS
+// host computes translation via react-native-sensors accelerometer
+// integration and forwards it via this setter so the gate's
+// translation-budget logic still kicks in.  See setFlowMaxTranslationM
+// doc in keyframe_gate.hpp.  This is the Android JNI counterpart of
+// the iOS bridge method that already exists in KeyframeGateBridge.
+JNIEXPORT void JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeSetFlowMaxTranslationM(
+    JNIEnv*, jclass, jlong handle, jdouble metres)
+{
+    gate(handle)->setFlowMaxTranslationM(static_cast<double>(metres));
+}
+
+// 2026-05-14 — Android JNI for the percentile setter so JS Settings
+// can tune novelty aggregation on Android (was iOS-only until now).
+// See setFlowNoveltyPercentile doc in keyframe_gate.hpp.
+JNIEXPORT void JNICALL
+Java_com_retailens_capturesdk_KeyframeGate_nativeSetFlowNoveltyPercentile(
+    JNIEnv*, jclass, jlong handle, jdouble percentile)
+{
+    gate(handle)->setFlowNoveltyPercentile(static_cast<double>(percentile));
+}
+
 JNIEXPORT void JNICALL
 Java_com_retailens_capturesdk_KeyframeGate_nativeReset(
     JNIEnv*, jclass, jlong handle)
