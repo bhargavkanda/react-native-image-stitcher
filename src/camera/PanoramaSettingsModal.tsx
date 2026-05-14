@@ -245,31 +245,43 @@ export interface PanoramaSettings {
   // which OpenCV pipeline mode the batch stitcher uses at finalize.
 
   /**
-   * 2026-05-14 — capture-source picker for the panorama camera screen.
+   * 2026-05-14 (revised) — capture-source picker for the panorama
+   * camera screen.  Two options after the 2026-05-14 user-reported
+   * Galaxy A35 crash + simplification request:
    *
-   *   'auto' (DEFAULT) — Prefer AR (ARKit / ARCore) when the device
-   *                       supports it; silently fall back to 'wide'
-   *                       on devices that don't.  Best for field-rep
-   *                       deployments where hardware varies.
-   *   'ar'              — Force AR mode.  If the device doesn't
-   *                       support it, falls back to 'wide' with a
-   *                       toast.  Same as 'auto' in practice unless
-   *                       you want to be explicit.
-   *   'wide'            — Force the 1× physical (wide-angle) camera
-   *                       via react-native-vision-camera.  No AR
-   *                       session, no plane detection.  Pure
-   *                       vision-camera + IMU translation gate.
-   *   'ultrawide'       — Force the 0.5× physical (ultra-wide)
-   *                       camera if the device has one.  Falls back
-   *                       to 'wide' otherwise.  Useful for wide
-   *                       shelves where 1× requires too much pan.
+   *   'ar' (DEFAULT) — Use the AR stack (ARKit on iOS, ARCore on
+   *                    Android).  Plane detection, pose-aware
+   *                    capture, pose-driven gate.  Falls back to
+   *                    non-AR silently if the device doesn't
+   *                    support AR.
+   *   'non-ar'      — Use vision-camera.  Disables all AR-based
+   *                    services (planeSource=Disabled, no plane
+   *                    polling, no AR session, frameSelectionMode
+   *                    flipped to flow-based).  Lens-switcher chip
+   *                    on the capture screen lets the operator
+   *                    toggle 0.5× / 1× without re-opening Settings.
+   *                    The chip is hidden if the device has only
+   *                    one physical back lens.
    *
-   * The on-screen toolbar shows a chip switcher between available
-   * physical cameras when captureSource ∈ { 'wide', 'ultrawide' }
-   * so operators can hot-swap per capture.  In 'auto' / 'ar' mode
-   * the chip is hidden — AR uses the camera ARKit/ARCore selects.
+   * Cascade: switching from 'ar' → 'non-ar' triggers a useEffect
+   * in `AuditCaptureScreen` that patches dependent settings
+   * (planeSource, frameSelectionMode, useARPreview) to a coherent
+   * non-AR state.  Operators don't have to know which other
+   * settings to flip.
+   *
+   * Earlier draft (replaced 2026-05-14) had 4 values:
+   * 'auto' | 'ar' | 'wide' | 'ultrawide'.  The pre-mount
+   * physical-lens selection ('wide' / 'ultrawide') crashed the
+   * Galaxy A35 vision-camera CameraCaptureSession with a Parcel
+   * exception (physical_camera_id=null in AidlCamera3-Device
+   * configureStreams) — Camera2 can't be reliably steered to a
+   * specific physical lens via vision-camera's `physicalDevices`
+   * filter on this hardware.  The post-mount on-screen chip path
+   * works because vision-camera selects the safe multi-lens
+   * virtual device first, and the lens swap happens against an
+   * already-open camera.
    */
-  captureSource: 'auto' | 'ar' | 'wide' | 'ultrawide';
+  captureSource: 'ar' | 'non-ar';
 
   /**
    * 2026-05-14 — `cv::Stitcher` pipeline mode for the batch stitch.
@@ -459,11 +471,11 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   maxFrames: 16,
   quality: 85,
 
-  // 2026-05-14 — capture source + stitch mode.  Both default to 'auto'
-  // so the SDK picks the right thing for the device + the actual
-  // motion of the capture without operator intervention.
-  // See the interface field docs above for the full rationale.
-  captureSource: 'auto',
+  // 2026-05-14 (revised) — capture source defaults to 'ar' (AR-backed
+  // is the recommended path; non-AR is the explicit opt-out).  Stitch
+  // mode stays 'auto' — the auto-resolution heuristic between PANORAMA
+  // and SCANS is per-capture, not per-mode, so it's safe to leave on.
+  captureSource: 'ar',
   stitchMode: 'auto',
 };
 
@@ -551,22 +563,22 @@ export function PanoramaSettingsModal({
             </Text>
 
             {/* ──────────────────────────────────────────────
-             *  2026-05-14 — CAPTURE SOURCE picker.  Lifted to the
-             *  TOP of the modal because it's the FIRST decision an
-             *  operator makes: AR (plane + pose) vs non-AR (vision-
-             *  camera + IMU).  Switching this cascades into the
-             *  AR-dependent settings below (planeSource, frame
-             *  selection mode, useARPreview) via the host-side
-             *  useEffect in AuditCaptureScreen.tsx so an operator
-             *  flipping to non-AR doesn't have to know which other
-             *  settings to disable.
+             *  2026-05-14 (revised) — CAPTURE SOURCE picker.
+             *  Two options after the Galaxy A35 vision-camera
+             *  CameraCaptureSession crash on pre-mount physical-
+             *  lens selection: 'ar' (AR-backed, default) and
+             *  'non-ar' (vision-camera + lens-switcher chip on
+             *  the capture screen).  Switching to 'non-ar'
+             *  cascades to disable plane detection, flip frame-
+             *  selection to flow-based, and turn off useARPreview
+             *  (see useEffect in AuditCaptureScreen.tsx).
              * ────────────────────────────────────────────── */}
             <SectionHeader title="Capture source" />
             <SegmentedControl
-              options={['auto', 'ar', 'wide', 'ultrawide']}
+              options={['ar', 'non-ar']}
               value={settings.captureSource}
               onChange={(v) => update({ captureSource: v as PanoramaSettings['captureSource'] })}
-              caption="auto (default): AR-backed when supported, falls back to 1× wide otherwise. ar: force AR (silently falls back on unsupported devices). wide: 1× physical lens via vision-camera + IMU translation gate. ultrawide: 0.5× physical lens if the device has one. Picking wide/ultrawide auto-disables AR plane detection + flips frame-selection to flow-based."
+              caption="ar (default): ARKit / ARCore — plane detection, pose-aware capture, full AR stack.  non-ar: vision-camera only — disables AR plane detection, flips frame-selection to flow-based, runs IMU translation gate.  In non-ar mode, the on-screen lens-switcher chip lets you toggle 0.5× / 1× lens during capture (only shown when the device has both lenses)."
             />
 
             {/* 2026-05-14 — Stitch-mode picker.  THE 2026-05-14 OOM

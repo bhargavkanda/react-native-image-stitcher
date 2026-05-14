@@ -563,11 +563,14 @@ export interface StitcherConfig {
    * `retailens_stitcher.cpp` + `RetaiLensIncrementalStitcher.kt`. */
   stitchMode: 'auto' | 'panorama' | 'scans';
 
-  /** 2026-05-14 — capture source axis resolved by the host.
+  /** 2026-05-14 (revised) — capture source axis.
    *
-   *   'ar'         — ARKit / ARCore session feeds the engine.
-   *   'wide'       — vision-camera with 1× physical lens.
-   *   'ultrawide'  — vision-camera with 0.5× physical lens.
+   *   'ar'      — ARKit / ARCore session feeds the engine.
+   *   'non-ar'  — vision-camera feeds the engine via the gyro-driven
+   *               Android snapshot loop (or iOS equivalent — see
+   *               realtime-batch-fusion design doc Out-of-Scope).
+   *               Lens choice (0.5× / 1×) is handled by the on-screen
+   *               chip after mount, not by this setting.
    *
    * Native side uses this to:
    * 1. Decide whether the KeyframeGate should DISABLE its angular-
@@ -577,9 +580,13 @@ export interface StitcherConfig {
    * 2. Decide whether to expect pose updates through the AR delegate
    *    path (only meaningful when source='ar').
    *
-   * Host resolves 'auto' / 'ar' from PanoramaSettings.captureSource to
-   * a concrete string before sending — native never sees 'auto'. */
-  captureSource: 'ar' | 'wide' | 'ultrawide';
+   * Earlier draft (replaced 2026-05-14) had 4 values:
+   * 'ar' | 'wide' | 'ultrawide' | 'auto'.  Pre-mount physical-lens
+   * selection via vision-camera's `physicalDevices` filter crashed
+   * Galaxy A35's CameraCaptureSession with a Parcel exception
+   * (physical_camera_id=null in AidlCamera3-Device configureStreams).
+   * Switched to post-mount chip-driven lens swap. */
+  captureSource: 'ar' | 'non-ar';
 }
 
 
