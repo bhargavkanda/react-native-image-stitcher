@@ -598,6 +598,33 @@ export interface IncrementalFinalizeResult {
   acceptedCount: number;
   /** Frames the engine queue dropped due to backpressure (diagnostic). */
   droppedBackpressure: number;
+  /** 2026-05-15 (D) — batch-keyframe stitcher telemetry.  Populated
+   * by the cv::Stitcher PANORAMA / SCANS path.  Surfaces
+   * `leaveBiggestComponent` drops so the host UI can warn the
+   * operator when boundary frames were excluded due to weak feature-
+   * matching confidence.
+   *
+   * Undefined on the realtime (hybrid / firstwins) engines — those
+   * don't run leaveBiggestComponent.
+   *
+   *   framesRequested:        number of keyframes handed to the
+   *                            stitcher (== acceptedCount for batch).
+   *   framesIncluded:         number of keyframes retained after
+   *                            leaveBiggestComponent pruning.
+   *   framesDropped:          framesRequested − framesIncluded.
+   *                            > 0 means the stitcher silently
+   *                            dropped boundary frames; surface a
+   *                            "Stitched N of M frames" toast.
+   *   finalConfidenceThresh:  panoConfidenceThresh value used on
+   *                            the successful attempt (1.0 / 0.5 /
+   *                            0.3 — see retailens_stitcher.cpp
+   *                            retry loop).  Useful for debugging
+   *                            scenes that consistently need a
+   *                            lower threshold. */
+  framesRequested?: number;
+  framesIncluded?: number;
+  framesDropped?: number;
+  finalConfidenceThresh?: number;
 }
 
 

@@ -788,10 +788,29 @@ class RetaiLensIncrementalStitcher(
                         useInscribedRectCropSnapshot,
                         stitchMode = stitchModeResolved,
                     )
+                    // 2026-05-15 (D) — dims layout from native JNI:
+                    //   [0] width, [1] height, [2] framesRequested,
+                    //   [3] framesIncluded, [4] finalThresholdMilli
+                    // The framesIncluded count is the post-
+                    // leaveBiggestComponent retained subset.  Any
+                    // delta from acceptedCount = frames the stitcher
+                    // dropped due to weak feature-matching confidence.
+                    // Surfaced to JS so the capture-screen UX can
+                    // show "Stitched N of M frames" when drops > 0.
+                    val framesRequested =
+                        if (dims.size > 2) dims[2] else keyframePathsSnapshot.size
+                    val framesIncluded =
+                        if (dims.size > 3) dims[3] else keyframePathsSnapshot.size
+                    val finalConfidenceThresh =
+                        if (dims.size > 4) dims[4].toDouble() / 1000.0 else -1.0
                     map.putString("panoramaPath", outputPath)
                     map.putInt("width", dims[0])
                     map.putInt("height", dims[1])
                     map.putInt("acceptedCount", keyframePathsSnapshot.size)
+                    map.putInt("framesRequested", framesRequested)
+                    map.putInt("framesIncluded", framesIncluded)
+                    map.putInt("framesDropped", framesRequested - framesIncluded)
+                    map.putDouble("finalConfidenceThresh", finalConfidenceThresh)
                 } else if (firstwins != null) {
                     val snap = firstwins.finalize(outputPath, quality)
                         ?: throw IllegalStateException("firstwins.finalize returned null")

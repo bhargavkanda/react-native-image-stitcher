@@ -173,11 +173,25 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
                     stitchMode,
                 )
                 val duration = System.currentTimeMillis() - start
+                // 2026-05-15 (D) — dims layout from native JNI:
+                //   [0] width, [1] height, [2] framesRequested,
+                //   [3] framesIncluded, [4] finalThresholdMilli
+                // (see retailens_stitcher.cpp return site).
+                // dims.size >= 5 guards against older native libs
+                // (defensive — keeps Kotlin/native loosely versioned).
+                val framesRequested = if (dims.size > 2) dims[2] else framePaths.size
+                val framesIncluded = if (dims.size > 3) dims[3] else framePaths.size
+                val finalConfidenceThresh =
+                    if (dims.size > 4) dims[4].toDouble() / 1000.0 else -1.0
                 val result = WritableNativeMap().apply {
                     putString("outputPath", outputPath)
                     putInt("width", dims[0])
                     putInt("height", dims[1])
                     putInt("durationMs", duration.toInt())
+                    putInt("framesRequested", framesRequested)
+                    putInt("framesIncluded", framesIncluded)
+                    putInt("framesDropped", framesRequested - framesIncluded)
+                    putDouble("finalConfidenceThresh", finalConfidenceThresh)
                 }
                 promise.resolve(result)
             } catch (t: Throwable) {

@@ -411,25 +411,109 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
          stitcher->compositingResol(),
          stitcher->compositingResol() < 0 ? " (ORIG_RESOL = no downscale!)" : "");
 
-    // ── 4.  Stitch ──────────────────────────────────────────────────
+    // ── 4.  Stitch with progressive panoConfidenceThresh retry ──────
+    //
+    // 2026-05-15 (followup-D + C) — cv::Stitcher's
+    // `leaveBiggestComponent` step drops any frame whose pairwise
+    // feature-match confidence with all its neighbors is below the
+    // `panoConfidenceThresh` (PANORAMA default 1.0, SCANS default
+    // 0.3).  Boundary frames (first/last 1-2) are statistically most
+    // likely to fall below threshold because they have only ONE
+    // neighbor edge contributing to confidence (mid-frames have two).
+    //
+    // To keep user-visible content from being silently chopped off,
+    // we attempt the stitch up to 3 times with progressively-looser
+    // thresholds:
+    //   attempt 1: threshold = 1.0  (cv::Stitcher PANORAMA default)
+    //   attempt 2: threshold = 0.5  (moderate — tolerates weak
+    //                                 boundary matches)
+    //   attempt 3: threshold = 0.3  (cv::Stitcher SCANS default —
+    //                                 most permissive)
+    //
+    // After each attempt we check `stitcher->component()` (the
+    // indices of frames included after leaveBiggestComponent pruning).
+    // If component.size() == images.size() we stop early.  Otherwise
+    // we lower the threshold and re-run.  Cost: each retry re-runs
+    // the full PANORAMA pipeline (feature det → BA → warp → blend),
+    // so retries are expensive — but they only fire when frames were
+    // actually dropped (most captures are 1-pass).
+    //
+    // For SCANS mode the default threshold is already 0.3, so the
+    // retry list collapses to just [0.3] in practice.
+    //
+    // Telemetry: framesIncluded is returned to JS so the UI can show
+    // "Stitched N of M frames" if drops occurred.
     LOGI("[memstat] phase=before_stitch rss=%.1f MB", rss_mb());
+    const double kRetryThresholds[] = {1.0, 0.5, 0.3};
+    const int kNumAttempts = static_cast<int>(sizeof(kRetryThresholds) / sizeof(double));
     cv::Mat panorama;
-    cv::Stitcher::Status status;
-    try {
-        status = stitcher->stitch(images, panorama);
-    } catch (const cv::Exception& e) {
-        throw_runtime(env, std::string("Stitcher::stitch threw: ") + e.what());
-        return nullptr;
+    cv::Stitcher::Status status = cv::Stitcher::ERR_NEED_MORE_IMGS;
+    int framesIncluded = 0;
+    double finalThreshold = -1.0;
+    int finalAttempt = 0;
+    for (int attempt = 0; attempt < kNumAttempts; ++attempt) {
+        const double thresh = kRetryThresholds[attempt];
+        // SCANS mode default is already 0.3, so the threshold sequence
+        // [1.0, 0.5] effectively does nothing different from [0.3] for
+        // SCANS captures — the matcher's confidence calibration on
+        // affine matches is also different.  Skip attempts above the
+        // SCANS default to avoid wasted work.
+        if (stitchModeEnum == cv::Stitcher::SCANS && thresh > 0.31) {
+            continue;
+        }
+        stitcher->setPanoConfidenceThresh(thresh);
+        finalAttempt = attempt + 1;
+        finalThreshold = thresh;
+        LOGI("[stitch-retry] attempt %d/%d panoConfidenceThresh=%.2f",
+             finalAttempt, kNumAttempts, thresh);
+        try {
+            status = stitcher->stitch(images, panorama);
+        } catch (const cv::Exception& e) {
+            throw_runtime(env, std::string("Stitcher::stitch threw on attempt ") +
+                std::to_string(finalAttempt) + ": " + e.what());
+            return nullptr;
+        }
+        if (status != cv::Stitcher::OK) {
+            // Failed status (ERR_NEED_MORE_IMGS, ERR_HOMOGRAPHY_EST_FAIL,
+            // ERR_CAMERA_PARAMS_ADJUST_FAIL) — lowering the threshold
+            // is unlikely to help (different failure mode), but cheap
+            // to try once at the lower threshold before giving up.
+            LOGI("[stitch-retry] attempt %d FAILED with status=%d, trying next threshold",
+                 finalAttempt, static_cast<int>(status));
+            continue;
+        }
+        // stitcher->component() returns indices of frames retained
+        // after leaveBiggestComponent.  size() < requested → drops.
+        const std::vector<int>& component = stitcher->component();
+        framesIncluded = static_cast<int>(component.size());
+        LOGI("[stitch-retry] attempt %d OK: framesIncluded=%d of %d (thresh=%.2f)",
+             finalAttempt, framesIncluded, frameCount, thresh);
+        if (framesIncluded >= frameCount) {
+            // All frames retained — done.
+            break;
+        }
+        // Drops detected — retry with the next-lower threshold IF
+        // there's one left.  Otherwise this is the best we can do.
+        if (attempt + 1 < kNumAttempts) {
+            LOGI("[stitch-retry] %d frames dropped — retrying with lower threshold",
+                 frameCount - framesIncluded);
+        } else {
+            LOGI("[stitch-retry] %d frames dropped at lowest threshold %.2f — accepting result",
+                 frameCount - framesIncluded, thresh);
+        }
     }
     if (status != cv::Stitcher::OK) {
         throw_runtime(env,
-            "Stitcher::stitch failed with status code " +
+            "Stitcher::stitch failed at all " + std::to_string(finalAttempt) +
+            " thresholds, last status code " +
             std::to_string(static_cast<int>(status)));
         return nullptr;
     }
-    LOGI("[dimstat] post-stitch panorama %dx%d %dch data=%.2f MB",
+    LOGI("[dimstat] post-stitch panorama %dx%d %dch data=%.2f MB"
+         " (framesIncluded=%d/%d, finalThresh=%.2f, attempts=%d)",
          panorama.cols, panorama.rows, panorama.channels(),
-         mat_mb(panorama));
+         mat_mb(panorama),
+         framesIncluded, frameCount, finalThreshold, finalAttempt);
     LOGI("[memstat] phase=after_stitch rss=%.1f MB", rss_mb());
 
     // ── 5.  Crop ────────────────────────────────────────────────────
@@ -472,8 +556,25 @@ Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
     LOGI("[memstat] phase=after_imwrite rss=%.1f MB", rss_mb());
 
     // ── 8.  Return [width, height] to Kotlin ────────────────────────
-    jintArray dims = env->NewIntArray(2);
-    jint values[2] = { final_image.cols, final_image.rows };
-    env->SetIntArrayRegion(dims, 0, 2, values);
+    // Return [width, height, framesRequested, framesIncluded, finalThresholdMilli].
+    //
+    //   2026-05-15 (D) — framesRequested/framesIncluded surface
+    //   leaveBiggestComponent drops to the JS layer so the UI can
+    //   show "Stitched N of M frames" when drops occur.  Threshold
+    //   is multiplied by 1000 and rounded to int (kotlin doesn't
+    //   handle doubles in IntArray) — JS divides back by 1000.
+    //
+    //   Layout chosen over a returned WritableMap to keep the JNI
+    //   surface unchanged in shape (still IntArray) — Kotlin reads
+    //   the extra indices and packs them into the WritableMap there.
+    jintArray dims = env->NewIntArray(5);
+    jint values[5] = {
+        final_image.cols,
+        final_image.rows,
+        static_cast<jint>(frameCount),
+        static_cast<jint>(framesIncluded),
+        static_cast<jint>(finalThreshold * 1000.0),
+    };
+    env->SetIntArrayRegion(dims, 0, 5, values);
     return dims;
 }
