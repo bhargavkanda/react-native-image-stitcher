@@ -244,15 +244,34 @@ NSString *const RetaiLensStitcherErrorDomain = @"RetaiLensStitcherErrorDomain";
 - (instancetype)initWithOutputPath:(NSString *)outputPath
                              width:(NSInteger)width
                             height:(NSInteger)height
-                        durationMs:(double)durationMs {
+                        durationMs:(double)durationMs
+                   framesRequested:(NSInteger)framesRequested
+                    framesIncluded:(NSInteger)framesIncluded
+             finalConfidenceThresh:(double)finalConfidenceThresh {
   self = [super init];
   if (self) {
     _outputPath = [outputPath copy];
     _width = width;
     _height = height;
     _durationMs = durationMs;
+    _framesRequested = framesRequested;
+    _framesIncluded = framesIncluded;
+    _finalConfidenceThresh = finalConfidenceThresh;
   }
   return self;
+}
+
+- (instancetype)initWithOutputPath:(NSString *)outputPath
+                             width:(NSInteger)width
+                            height:(NSInteger)height
+                        durationMs:(double)durationMs {
+  return [self initWithOutputPath:outputPath
+                            width:width
+                           height:height
+                       durationMs:durationMs
+                  framesRequested:-1
+                   framesIncluded:-1
+            finalConfidenceThresh:-1.0];
 }
 
 @end
@@ -493,11 +512,21 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
     if (r.success) {
       const int64_t durationMs = r.durationMs;
+      // 2026-05-16 (Issue 5) — pass C+D retry telemetry up to Swift so
+      // the JS finalize dict can carry it.  framesRequested defaults
+      // to the input count when the cpp path didn't fill it (e.g. an
+      // early-return success path that bypassed the retry loop).
+      const NSInteger framesRequested =
+          r.framesRequested > 0 ? (NSInteger)r.framesRequested
+                                : (NSInteger)paths.size();
       result = [[RetaiLensStitchResult alloc]
           initWithOutputPath:outputPath
                        width:(NSInteger)r.width
                       height:(NSInteger)r.height
-                  durationMs:(double)durationMs];
+                  durationMs:(double)durationMs
+             framesRequested:framesRequested
+              framesIncluded:(NSInteger)r.framesIncluded
+       finalConfidenceThresh:r.finalConfidenceThresh];
     } else {
       // Map StitchErrorCode → NSError.code.  Preserves the existing
       // 9001/9002/9003/1001/9007 sentinels the JS UX layer already

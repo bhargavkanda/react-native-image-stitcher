@@ -1377,7 +1377,12 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                         // Keep saved keyframes on disk for post-hoc
                         // re-processing (Ram's request).  Cleanup is
                         // a follow-up debug-menu task.
-                        completion([
+                        // 2026-05-16 (Issue 5) — surface C+D
+                        // progressive-confidence retry telemetry to JS
+                        // so the host can render a debug toast.  -1
+                        // sentinels = "no retry data" (early-return
+                        // success paths bypass the retry loop).
+                        var batchDict: [String: Any] = [
                             "panoramaPath": r.outputPath,
                             "width": Int(r.width),
                             "height": Int(r.height),
@@ -1386,7 +1391,21 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                             "batchKeyframeSessionDir":
                                 payload.collector?.sessionDir ?? "",
                             "batchKeyframeCount": payload.paths.count,
-                        ], nil)
+                        ]
+                        if r.framesRequested >= 0 {
+                            batchDict["framesRequested"] = Int(r.framesRequested)
+                        }
+                        if r.framesIncluded >= 0 {
+                            batchDict["framesIncluded"] = Int(r.framesIncluded)
+                            if r.framesRequested >= 0 {
+                                batchDict["framesDropped"] =
+                                    Int(r.framesRequested - r.framesIncluded)
+                            }
+                        }
+                        if r.finalConfidenceThresh >= 0 {
+                            batchDict["finalConfidenceThresh"] = r.finalConfidenceThresh
+                        }
+                        completion(batchDict, nil)
                     } catch let stitchErr as NSError {
                         completion(nil, stitchErr)
                     }

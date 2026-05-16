@@ -284,6 +284,19 @@ export interface PanoramaSettings {
   captureSource: 'ar' | 'non-ar';
 
   /**
+   * 2026-05-16 (Issue 5) — diagnostic toast on every successful
+   * finalize.  When `true`, the host renders a transient toast
+   * summarising the C+D progressive-confidence retry telemetry:
+   *
+   *   "Stitch: 6/6 frames retained at thresh 1.00 (1 attempt)"
+   *
+   * Defaults to `false` so end-users don't see it.  Toggle from the
+   * Settings modal under "Debug".  Independent from any log-level
+   * controls — purely a UI affordance for field testing.
+   */
+  debug: boolean;
+
+  /**
    * 2026-05-14 — `cv::Stitcher` pipeline mode for the batch stitch.
    *
    *   'auto' (DEFAULT)
@@ -452,9 +465,11 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   flowQualityLevel: 0.01,
   flowMinDistance: 10,
   // V16 — translation-budget force-accept (Flow strategy only).
-  // 0 = disabled (default — back-compat).  Operator opts-in via the
-  // "Flow tuning — translation budget" segmented control below.
-  flowMaxTranslationCm: 0,
+  // 2026-05-16 (Issue 4a fix) — default flipped from 0 (disabled) to
+  // 25 cm so the "Rotate the camera instead of moving it sideways"
+  // warning fires out-of-the-box.  Set to 0 in Settings to disable
+  // both the warning AND the gate's force-accept on budget crossing.
+  flowMaxTranslationCm: 25,
   // V16 — novelty aggregation percentile.  0.85 picks up leading-
   // edge motion sooner than the pre-V16 median (0.50).  Operator
   // can dial down toward 0.5 for more-conservative captures or up
@@ -486,6 +501,7 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // and SCANS is per-capture, not per-mode, so it's safe to leave on.
   captureSource: 'ar',
   stitchMode: 'auto',
+  debug: false,
 };
 
 
@@ -967,6 +983,18 @@ export function PanoramaSettingsModal({
               value={String(settings.quality)}
               onChange={(v) => update({ quality: parseInt(v, 10) })}
               caption="Higher = bigger files, sharper detail. 85 is the recommended default."
+            />
+
+            {/* ──────────────────────────────────────────────
+             *  DEBUG — surfaces stitch telemetry to the operator on
+             *  every successful finalize.  See PanoramaSettings.debug.
+             * ────────────────────────────────────────────── */}
+            <SectionHeader title="Debug" />
+            <SegmentedControl
+              options={['off', 'on']}
+              value={settings.debug ? 'on' : 'off'}
+              onChange={(v) => update({ debug: v === 'on' })}
+              caption="When ON, every successful stitch shows a popup with the C+D progressive-confidence retry telemetry (frames included, final threshold, retry attempts). Off by default."
             />
 
             {/* ──────────────────────────────────────────────

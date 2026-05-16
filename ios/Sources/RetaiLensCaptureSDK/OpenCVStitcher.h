@@ -31,10 +31,33 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 @property (nonatomic, assign, readonly) NSInteger width;
 @property (nonatomic, assign, readonly) NSInteger height;
 @property (nonatomic, assign, readonly) double durationMs;
+/// 2026-05-16 (Issue 5) — C+D progressive-confidence retry telemetry
+/// sourced from `retailens::StitchResult`.  Surface in the JS finalize
+/// dict so the host can render a debug toast on retry.
+///
+///   framesRequested:        number of keyframes handed to the stitcher
+///   framesIncluded:         number retained after leaveBiggestComponent
+///   finalConfidenceThresh:  threshold the successful attempt used
+///                            (1.0 / 0.5 / 0.3); -1.0 when the
+///                            retry path didn't run (rare error paths)
+@property (nonatomic, assign, readonly) NSInteger framesRequested;
+@property (nonatomic, assign, readonly) NSInteger framesIncluded;
+@property (nonatomic, assign, readonly) double finalConfidenceThresh;
 - (instancetype)initWithOutputPath:(NSString *)outputPath
                              width:(NSInteger)width
                             height:(NSInteger)height
-                        durationMs:(double)durationMs NS_DESIGNATED_INITIALIZER;
+                        durationMs:(double)durationMs
+                   framesRequested:(NSInteger)framesRequested
+                    framesIncluded:(NSInteger)framesIncluded
+             finalConfidenceThresh:(double)finalConfidenceThresh NS_DESIGNATED_INITIALIZER;
+/// Convenience initializer for paths that don't carry C+D retry
+/// telemetry (e.g. stitchVideoAtPath / stitchKeyframePaths).  Sets
+/// the telemetry fields to sentinel values (-1) so JS callers can
+/// detect "no retry data available" cleanly.
+- (instancetype)initWithOutputPath:(NSString *)outputPath
+                             width:(NSInteger)width
+                            height:(NSInteger)height
+                        durationMs:(double)durationMs;
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
