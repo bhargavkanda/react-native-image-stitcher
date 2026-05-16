@@ -142,15 +142,21 @@ function layoutFor(isLandscape: boolean): Layout {
         right: 0,
         bottom: 12,
         height: BAND_THICKNESS,
-        flexDirection: 'row-reverse',
+        flexDirection: 'row',
         alignItems: 'center',
         paddingHorizontal: BAND_PADDING,
         paddingVertical: BAND_PADDING,
         backgroundColor: 'rgba(0, 0, 0, 0.55)',
       },
-      flexDirection: 'row-reverse',
-      // JS-left = user-bottom in landscape-left → arrow trails downward.
-      arrowGlyph: '←',
+      flexDirection: 'row',
+      // 2026-05-16 (Issue 3 fix) — in landscape the user sees the band
+      // as a VERTICAL strip on the right edge (the JS-horizontal row
+      // is rotated 90° in their view).  Oldest thumbnail should stick
+      // to the user's TOP (= JS-left) and grow DOWNWARD (= toward
+      // JS-right) so the arrow `→` glyph reads to the user as `↓`
+      // sitting BELOW the latest thumbnail.  The earlier `row-reverse`
+      // + `←` combination put oldest at user-bottom and grew upward.
+      arrowGlyph: '→',
     };
   }
   return {
@@ -202,22 +208,14 @@ export function PanoramaBandOverlay({
 
   const hasMultiThumb = cappedFrameUris.length > 0;
 
-  // Auto-scroll on content-size change.  With `row` flex direction
-  // the latest item is at JS-rightmost → scrollToEnd.  With
-  // `row-reverse` the latest item is at JS-leftmost (since row-reverse
-  // places the FIRST array item at JS-rightmost and grows leftward),
-  // so the default scrollX=0 already shows the latest — but we
-  // explicitly call scrollTo({x:0}) for clarity and to handle any
-  // residual scroll state from a previous capture.
+  // Auto-scroll on content-size change.  Both portrait and landscape
+  // now use `row` flex direction (post Issue 3 fix), so the latest
+  // item is always at JS-rightmost → scrollToEnd in both cases.
   const onContentSizeChange = useCallback(() => {
     const sv = scrollRef.current;
     if (!sv) return;
-    if (layout.flexDirection === 'row-reverse') {
-      sv.scrollTo({ x: 0, y: 0, animated: false });
-    } else {
-      sv.scrollToEnd({ animated: false });
-    }
-  }, [layout.flexDirection]);
+    sv.scrollToEnd({ animated: false });
+  }, []);
 
   // ── Single cumulative thumbnail (live-engine fallback) ──────────
   //
