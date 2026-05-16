@@ -340,16 +340,23 @@ StitchResult stitchFramePaths(
     stitcher->setBlender(make_blender(config.blenderType));
     stitcher->setSeamFinder(make_seam_finder(config.seamFinderType));
 
-    // Resolution budgets.  Negative => keep cv::Stitcher library default.
+    // Resolution budgets.  Negative => keep cv::Stitcher library default
+    // for registration / seam.  compositingResolMP is the exception:
+    // cv::Stitcher's library default is ORIG_RESOL (-1.0 = full sensor
+    // resolution), which trivially OOMs on Android — so for the high-
+    // level entry we substitute 1.0 MP when the caller leaves the
+    // sentinel.  (Manual entry uses a different fallback; see
+    // stitchFramePathsManual().)
     if (config.registrationResolMP > 0.0) {
         stitcher->setRegistrationResol(config.registrationResolMP);
     }
     if (config.seamEstimationResolMP > 0.0) {
         stitcher->setSeamEstimationResol(config.seamEstimationResolMP);
     }
-    if (config.compositingResolMP > 0.0) {
-        stitcher->setCompositingResol(config.compositingResolMP);
-    }
+    const double kHighLevelComposeFallbackMP = 1.0;
+    const double composeMP = (config.compositingResolMP > 0.0)
+        ? config.compositingResolMP : kHighLevelComposeFallbackMP;
+    stitcher->setCompositingResol(composeMP);
     log_info(logFn, "[dimstat]",
              "cv::Stitcher resol budgets (per frame, MP):"
              " registration=%.3f seam=%.3f compositing=%.3f%s",
@@ -586,29 +593,38 @@ StitchResult stitchFramePathsManual(
     //   6 GB device → 1800 MB
     //   8 GB device → 2400 MB
     //
-    // TODO[shared-stitcher-port-part-2]: read total RAM in a
-    // platform-agnostic way.  Original used
-    // `NSProcessInfo.processInfo.physicalMemory`.  Linux/Android side
-    // would use sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE).  For
-    // now, we use a conservative 4 GB assumption so the threshold is
-    // 1200 MB — high enough not to throttle real devices, low enough
-    // to still abort on degenerate baselines.  When iOS wires this
-    // up, plumb the actual physicalMemory through the bridge or add
-    // an `availableRamMB` field to StitchConfig.
+    // Total-RAM source: prefer the caller-provided StitchConfig::
+    // availableRamMB (plumbed via NSProcessInfo.processInfo.physicalMemory
+    // on iOS, ActivityManager.getMemoryInfo().totalMem or sysconf on
+    // Android — see the StitchConfig field doc in stitcher.hpp).  When
+    // the caller leaves the sentinel, fall back to the conservative
+    // 4 GB assumption so the threshold lands at 1200 MB — high enough
+    // not to throttle real devices, low enough to still abort on
+    // degenerate baselines.  Plumbing the actual physicalMemory is
+    // important on modern iOS hardware: iPhone 16 Pro has 8 GB → 2400
+    // MB threshold (real-device headroom) rather than 1200 MB (legacy
+    // protection that caps a high-RAM device at low-RAM headroom).
     const double kAssumedTotalRAMGB = 4.0;
-    const double kPreStitchAbortMB = std::max(700.0, kAssumedTotalRAMGB * 300.0);
+    const double availableRamMB = (config.availableRamMB > 0.0)
+        ? config.availableRamMB
+        : (kAssumedTotalRAMGB * 1024.0);
+    const double availableRamGB = availableRamMB / 1024.0;
+    const double kPreStitchAbortMB = std::max(700.0, availableRamGB * 300.0);
     if (kStartResidentMB > kPreStitchAbortMB) {
         log_error(logFn, "[stitch-bc]",
-                  "PRE-STITCH ABORT: mem=%.1fMB > %.1fMB threshold",
-                  kStartResidentMB, kPreStitchAbortMB);
+                  "PRE-STITCH ABORT: mem=%.1fMB > %.1fMB threshold (totalRamMB=%.0f)",
+                  kStartResidentMB, kPreStitchAbortMB, availableRamMB);
         // V16 fix-attempt 9 — sentinel return.  See validPairs<1 site
         // below for the full root-cause analysis.  In the iOS original
         // this returned an empty RetaiLensStitchResult; here we return
         // a StitchResult with success=false + a stable error code so
         // both bridges see a clean failure rather than an
         // ambiguous "output written but zero pixels" surface.
-        result.errorCode = StitchErrorCode::UnknownCvException;
+        result.errorCode = StitchErrorCode::PreStitchMemoryAbort;
         result.errorMessage = "Pre-stitch memory abort";
+        // framesIncluded reflects best-known retained count at the
+        // abort site — nothing has been loaded or matched yet.
+        result.framesIncluded = 0;
         return result;
     }
 
@@ -678,6 +694,9 @@ StitchResult stitchFramePathsManual(
             result.errorCode = StitchErrorCode::ImageReadFailed;
             result.errorMessage = "Could not read image at path: " + path;
             log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+            // framesIncluded reflects best-known retained count at the
+            // abort site — number of frames successfully loaded so far.
+            result.framesIncluded = static_cast<int32_t>(frames.size());
             return result;
         }
         frames.push_back(img);
@@ -934,6 +953,10 @@ StitchResult stitchFramePathsManual(
                       "step2.5: 0 valid pairs — sentinel result (port: signalling AllFramesDroppedByConfidence)");
             capturedErrorCode = StitchErrorCode::AllFramesDroppedByConfidence;
             capturedErrorMessage = "Stitcher found 0 valid pairwise matches — frames may not overlap enough.";
+            // framesIncluded reflects best-known retained count at the
+            // abort site — pre-prune so all loaded frames are still in
+            // play even though none have valid pairwise overlap.
+            result.framesIncluded = static_cast<int32_t>(imgFeatures.size());
             sentinelInsidePool = true;
             break;
         }
@@ -947,35 +970,89 @@ StitchResult stitchFramePathsManual(
         // imgFeatures) will be smaller than workFrames.size() and the
         // warp loop reads cameras[i] out of bounds.  That's a likely
         // root cause of the SIGABRT seen on second-stitch attempts.
-        std::vector<int> indices = cv::detail::leaveBiggestComponent(
-            imgFeatures, pairwise, 1.0f);
-        // Trim BOTH workFrames AND the full-res frames using the same
-        // indices.  workFrames feeds BA below; full-res frames feed the
-        // compose stage further down (re-warped at COMPOSE_MP).  Both
-        // must stay aligned with cameras[i] / imgFeatures[i] post-trim.
-        std::vector<cv::Mat> trimmedWorkFrames;
-        std::vector<cv::Mat> trimmedFrames;
-        trimmedWorkFrames.reserve(indices.size());
-        trimmedFrames.reserve(indices.size());
-        for (int idx : indices) {
-            if (idx >= 0 && idx < (int)workFrames.size()) {
-                trimmedWorkFrames.push_back(workFrames[idx]);
-                trimmedFrames.push_back(frames[idx]);
+        //
+        // C+D progressive-confidence retry at PRUNE granularity.
+        // Mirrors the high-level entry's [1.0, 0.5, 0.3] threshold
+        // sweep, but the retry only re-runs leaveBiggestComponent
+        // (cheap) rather than every stage of cv::Stitcher::stitch
+        // (5-10× more expensive).  cv::detail::leaveBiggestComponent
+        // MUTATES imgFeatures + pairwise in place, so we keep
+        // defensive backup copies and restore them before each retry
+        // (approach (a) — copy beats rematching, since
+        // BestOf2NearestMatcher is the dominant cost).
+        //
+        // SCANS mode skips thresholds > 0.31 — its default is already
+        // 0.3 and dropping pairs at 1.0 / 0.5 produces vacuous results.
+        const float kPruneThresholds[] = {1.0f, 0.5f, 0.3f};
+        const int kNumPruneAttempts =
+            sizeof(kPruneThresholds) / sizeof(kPruneThresholds[0]);
+        const std::vector<cv::detail::ImageFeatures> imgFeaturesBackup =
+            imgFeatures;
+        const std::vector<cv::detail::MatchesInfo> pairwiseBackup = pairwise;
+        const std::vector<cv::Mat> workFramesBackup = workFrames;
+        const std::vector<cv::Mat> framesBackup = frames;
+        float pruneThresholdUsed = -1.0f;
+        bool pruneSucceeded = false;
+        for (int attempt = 0; attempt < kNumPruneAttempts; ++attempt) {
+            const float thresh = kPruneThresholds[attempt];
+            if (config.stitchMode == StitchMode::Scans && thresh > 0.31f) {
+                continue;
             }
+            // Restore from backups before each attempt — leaveBiggest-
+            // Component mutated them last time.  First attempt sees the
+            // originals (backup == current), subsequent attempts get a
+            // clean slate.
+            if (attempt > 0) {
+                imgFeatures = imgFeaturesBackup;
+                pairwise    = pairwiseBackup;
+                workFrames  = workFramesBackup;
+                frames      = framesBackup;
+            }
+            log_info(logFn, "[stitch-bc]",
+                     "step3 prune-retry attempt %d: thresh=%.2f",
+                     attempt + 1, thresh);
+            std::vector<int> indices = cv::detail::leaveBiggestComponent(
+                imgFeatures, pairwise, thresh);
+            // Trim BOTH workFrames AND the full-res frames using the same
+            // indices.  workFrames feeds BA below; full-res frames feed the
+            // compose stage further down (re-warped at COMPOSE_MP).  Both
+            // must stay aligned with cameras[i] / imgFeatures[i] post-trim.
+            std::vector<cv::Mat> trimmedWorkFrames;
+            std::vector<cv::Mat> trimmedFrames;
+            trimmedWorkFrames.reserve(indices.size());
+            trimmedFrames.reserve(indices.size());
+            for (int idx : indices) {
+                if (idx >= 0 && idx < (int)workFrames.size()) {
+                    trimmedWorkFrames.push_back(workFrames[idx]);
+                    trimmedFrames.push_back(frames[idx]);
+                }
+            }
+            workFrames = std::move(trimmedWorkFrames);
+            frames     = std::move(trimmedFrames);
+            log_info(logFn, "[RetaiLensStitcher]",
+                     "step3.5: thresh=%.2f kept %zu frames in biggest component",
+                     thresh, workFrames.size());
+            if (workFrames.size() >= 2) {
+                pruneThresholdUsed = thresh;
+                pruneSucceeded = true;
+                break;
+            }
+            log_info(logFn, "[stitch-bc]",
+                     "step3 prune-retry attempt %d FAILED "
+                     "(only %zu frames) — trying next threshold",
+                     attempt + 1, workFrames.size());
         }
-        workFrames = std::move(trimmedWorkFrames);
-        frames = std::move(trimmedFrames);
-        log_info(logFn, "[RetaiLensStitcher]",
-                 "step3.5: kept %zu frames in biggest component",
-                 workFrames.size());
-        if (workFrames.size() < 2) {
+        if (!pruneSucceeded) {
             // V16 fix-attempt 9 (NULL TEST) — same rationale as the
             // validPairs<1 sentinel above.  Bypass the *error→throw bridge
             // by returning a width=0/height=0 sentinel result instead.
             log_error(logFn, "[RetaiLensStitcher]",
-                      "step3.5: <2 frames after leaveBiggestComponent — sentinel result");
+                      "step3.5: <2 frames after leaveBiggestComponent at all thresholds — sentinel result");
             capturedErrorCode = StitchErrorCode::AllFramesDroppedByConfidence;
-            capturedErrorMessage = "Less than 2 frames remain after leaveBiggestComponent.";
+            capturedErrorMessage = "Less than 2 frames remain after leaveBiggestComponent at all retry thresholds.";
+            // framesIncluded reflects best-known retained count at the
+            // abort site — the most recent attempt's trim outcome.
+            result.framesIncluded = static_cast<int32_t>(workFrames.size());
             sentinelInsidePool = true;
             break;
         }
@@ -997,6 +1074,9 @@ StitchResult stitchFramePathsManual(
                       "step4: HomographyBasedEstimator failed — sentinel result");
             capturedErrorCode = StitchErrorCode::HomographyEstimationFailed;
             capturedErrorMessage = "HomographyBasedEstimator failed.";
+            // framesIncluded reflects best-known retained count at the
+            // abort site — the post-prune workFrames count.
+            result.framesIncluded = static_cast<int32_t>(workFrames.size());
             sentinelInsidePool = true;
             break;
         }
@@ -1284,15 +1364,20 @@ StitchResult stitchFramePathsManual(
             log_error(logFn, "[stitch-bc]",
                       "step7c: cv::resize threw cv::Exception: %s",
                       e.what());
-            capturedErrorCode = StitchErrorCode::UnknownCvException;
+            capturedErrorCode = StitchErrorCode::ComposeResizeFailed;
             capturedErrorMessage = std::string("Compose-stage resize failed: ") + e.what();
+            // framesIncluded reflects best-known retained count at the
+            // abort site — cameras has been populated by step4 so it's
+            // the most accurate post-prune count.
+            result.framesIncluded = static_cast<int32_t>(cameras.size());
             failedInsidePool = true;
             break;
         } catch (...) {
             log_error(logFn, "[stitch-bc]",
                       "step7c: cv::resize threw unknown exception");
-            capturedErrorCode = StitchErrorCode::UnknownCvException;
+            capturedErrorCode = StitchErrorCode::ComposeResizeFailed;
             capturedErrorMessage = "Compose-stage resize failed (unknown).";
+            result.framesIncluded = static_cast<int32_t>(cameras.size());
             failedInsidePool = true;
             break;
         }
@@ -1436,15 +1521,19 @@ StitchResult stitchFramePathsManual(
                 log_error(logFn, "[stitch-bc]",
                           "step8b: warper->warp threw cv::Exception: %s",
                           e.what());
-                capturedErrorCode = StitchErrorCode::UnknownCvException;
+                capturedErrorCode = StitchErrorCode::WarpFailed;
                 capturedErrorMessage = std::string("Warp stage failed: ") + e.what();
+                // framesIncluded reflects best-known retained count at
+                // the abort site — cameras is fully populated by step6.
+                result.framesIncluded = static_cast<int32_t>(cameras.size());
                 failedInsidePool = true;
                 break;
             } catch (...) {
                 log_error(logFn, "[stitch-bc]",
                           "step8b: warper->warp threw unknown exception");
-                capturedErrorCode = StitchErrorCode::UnknownCvException;
+                capturedErrorCode = StitchErrorCode::WarpFailed;
                 capturedErrorMessage = "Warp stage failed (unknown).";
+                result.framesIncluded = static_cast<int32_t>(cameras.size());
                 failedInsidePool = true;
                 break;
             }
@@ -1636,12 +1725,17 @@ StitchResult stitchFramePathsManual(
 
         // Record retained-frame count for telemetry.  In the high-level
         // path this comes from stitcher->component().size() after retry;
-        // in the manual path it's whatever leaveBiggestComponent kept.
+        // in the manual path it's whatever leaveBiggestComponent kept
+        // at the threshold that succeeded.
         result.framesIncluded = static_cast<int32_t>(cameras.size());
-        // Manual path doesn't loop over confidence thresholds — it
-        // does ONE pass through leaveBiggestComponent at 1.0.  Report
-        // 1.0 for parity with the high-level path's telemetry.
-        result.finalConfidenceThresh = 1.0;
+        // Threshold from the C+D progressive-confidence retry at PRUNE
+        // granularity above.  Matches the high-level path's telemetry
+        // semantics: -1.0 means we never ran the prune (shouldn't
+        // happen on success-path), else the threshold that produced
+        // ≥ 2 frames in the biggest component.
+        result.finalConfidenceThresh = (pruneThresholdUsed > 0.0f)
+            ? static_cast<double>(pruneThresholdUsed)
+            : 1.0;
     } catch (const cv::Exception& e) {
         // Top-level catch: anything inside the pipeline that wasn't
         // caught by a stage-specific try/catch lands here.  Capture
@@ -1695,8 +1789,11 @@ StitchResult stitchFramePathsManual(
     }
 
     if (panorama.empty()) {
-        result.errorCode = StitchErrorCode::UnknownCvException;
+        result.errorCode = StitchErrorCode::EmptyPanorama;
         result.errorMessage = "Stitcher produced an empty panorama.";
+        // framesIncluded was already set above (line ~1640 in the
+        // success-path block).  Leave it as-is — it reflects the
+        // count of cameras that fed the blender.
         return result;
     }
 
