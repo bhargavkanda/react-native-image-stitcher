@@ -48,6 +48,11 @@
 #define YES ((BOOL)1)
 
 #import "OpenCVStitcher.h"
+// Phase 2 shared-stitcher port (2026-05-16): stitchFramePaths now
+// delegates to the cross-platform C++ pipeline in cpp/stitcher.cpp.
+// The header lives in the SDK's `cpp/` dir and is on the pod's
+// HEADER_SEARCH_PATHS (see RetaiLensCaptureSDK.podspec).
+#import "stitcher.hpp"
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <os/log.h>
@@ -407,1505 +412,202 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                   captureOrientation:(NSString *)captureOrientation
                                 useInscribedRectCrop:(BOOL)useInscribedRectCrop
                                                error:(NSError **)error {
-  // V12.14.2 — FAULT-level sentinel.  Survives Console.app rate-limit;
-  // proves the function entered.  If a future trace doesn't show this
-  // line for a crashed run, the crash is BEFORE stitchFramePaths
-  // (e.g., in extractFramesFromVideoAtPath or in the dispatch_async
-  // block in StitcherBridge).
-  const double kStartResidentMB = StitcherResidentMB();
-  os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-      "[stitch-bc] STITCH START: %lu frames mem=%.1fMB",
-      (unsigned long)framePaths.count, kStartResidentMB);
+  // ── Phase 2 (2026-05-16): delegated to shared C++ ───────────────────
+  //
+  // The hand-rolled cv::detail::* pipeline that used to live here
+  // (~1500 lines from the original implementation, covering frames-
+  // load → ORB features → BestOf2Nearest matching → leaveBiggest
+  // Component → HomographyBasedEstimator → BundleAdjusterRay → wave
+  // correct → median-focal warper-scale → seam find → multi-band
+  // blend → max-inscribed-rect crop → bake-rotate → JPEG write) was
+  // ported verbatim to `retailens::stitchFramePathsManual()` in
+  // cpp/stitcher.cpp during Phase 1 (commit 02534ac).  Android already
+  // routes through the same file via the high-level pipeline; iOS
+  // now routes through it via `useManualPipeline=true`.
+  //
+  // Git blame on commit 02534ac (and its parent) captures the full
+  // algorithm history with the original step-by-step comments.  The
+  // shared C++ file carries forward equivalent comments at each step.
+  //
+  // This wrapper's only job: marshal Obj-C args into the shared
+  // StitchConfig + std::vector<std::string>, route logs to os_log,
+  // map StitchErrorCode → NSError.code so the JS-side UX taxonomy
+  // (9001 / 9002 / … / 9007) is preserved.
 
-  // V16 Phase 1b.fix1 — device-aware pre-stitch memory abort.
-  //
-  // Original V12.14.8 fixed the threshold at 700 MB, sized for legacy
-  // iPhones (~2 GB total RAM, ~720 MB jetsam kill point on camera-
-  // active foreground apps).  That ceiling is irrelevant on modern
-  // hardware: iPhone 16 Pro has 8 GB RAM and a per-process limit of
-  // ~3 GB on iOS 26 (confirmed by JetsamEvent at 3.38 GB).
-  //
-  // Also, the V12.14.8 assumption — "vision-camera CameraView is
-  // unmounted before stitch, so baseline drops to ~350-450 MB" —
-  // doesn't hold for the V16 batch-keyframe flow, where the AR
-  // session keeps running during stitch (baseline naturally 600-800
-  // MB).  AR pause is now done at the bridge level (Phase 1b.fix1
-  // in RetaiLensIncrementalStitcher.swift), but even with that, the
-  // 700 MB threshold throttles modern devices for no reason.
-  //
-  // New formula: max(700, totalRAMGB × 300).  Leaves ~30% headroom
-  // below the per-process limit for the stitch peak.
-  //   2 GB device → 700  MB threshold (clamped, legacy protection)
-  //   4 GB device → 1200 MB
-  //   6 GB device → 1800 MB
-  //   8 GB device → 2400 MB
-  double kStartTotalRAMGB =
-      (double)NSProcessInfo.processInfo.physicalMemory
-      / (1024.0 * 1024.0 * 1024.0);
-  const double kPreStitchAbortMB = MAX(700.0, kStartTotalRAMGB * 300.0);
-  if (kStartResidentMB > kPreStitchAbortMB) {
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] PRE-STITCH ABORT: mem=%.1fMB > %.1fMB threshold",
-        kStartResidentMB, kPreStitchAbortMB);
-    // V16 fix-attempt 9 — sentinel return.  See validPairs<1 site
-    // below for the full root-cause analysis.  The Swift try-bridge
-    // crashes on this method's `return nil`+`*error` failure pattern;
-    // returning a non-nil sentinel result (width=0, height=0) bypasses
-    // it.  *error left unwritten — the Swift caller maps any sentinel
-    // to its own NSError, so a populated *error here would be ignored
-    // anyway.
-    NSLog(@"[RetaiLensStitcher] PRE-STITCH ABORT (mem %.1fMB > %.1fMB) — returning sentinel (fix-9)",
-          kStartResidentMB, kPreStitchAbortMB);
-    return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
-                                                       width:0
-                                                      height:0
-                                                  durationMs:0];
-  }
-
-  // Defaults if caller passed nil — keeps the old 3-arg call-sites
-  // working until we update them.
+  // Defaults if caller passed nil — keeps the older 3-arg call-sites
+  // working until they are updated.  The shared C++ has its own
+  // defaults but we want the wrapper to be tolerant of nil inputs
+  // from Swift / Obj-C callers that grew up against the legacy API.
   if (warperType == nil || warperType.length == 0) warperType = @"plane";
   if (blenderType == nil || blenderType.length == 0) blenderType = @"multiband";
   if (seamFinderType == nil || seamFinderType.length == 0) seamFinderType = @"graphcut";
-  if (framePaths.count < 2) {
-    // V16 fix-attempt 9 — sentinel return (see validPairs<1 site
-    // below for full RCA).  Defensive: the Swift caller intercepts
-    // count<2 before reaching here, but a future call-site could
-    // hit this without that guard, and we want the bridge-bypass
-    // applied consistently across every nil-return in this method.
-    NSLog(@"[RetaiLensStitcher] framePaths.count<2 (%lu) — returning sentinel (fix-9)",
-          (unsigned long)framePaths.count);
-    return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
-                                                       width:0
-                                                      height:0
-                                                  durationMs:0];
-  }
+  if (captureOrientation == nil || captureOrientation.length == 0) captureOrientation = @"portrait";
 
-  // V12.14.2 — defensive frame cap.  Ram's V12.14 traces showed a
-  // landscape capture with 12 frames (144 pairwise) crash inside
-  // BundleAdjusterRay.  A 7-frame capture (49 pairwise) succeeded.
-  // Above ~10 frames the BA solver becomes unstable on landscape
-  // inputs — most likely the Levenberg-Marquardt Jacobian conditions
-  // get bad with the wider aspect ratio + more pairwise constraints.
-  // Cap framePaths to kMaxFramesForStitch evenly-spaced indices
-  // BEFORE loadFramesOrFail so we don't even pay the imread cost
-  // for the discarded frames.  Trade-off: long pans get slightly
-  // less overlap (a 5-second pan at 3 fps = 15 frames is downsampled
-  // to 8 evenly-spaced).  Quality regression is minor; stability is
-  // huge — this kills the EXC_BAD_ACCESS deterministically.
-  static const NSUInteger kMaxFramesForStitch = 8;
-  NSArray<NSString *> *workFramePaths = framePaths;
-  if (workFramePaths.count > kMaxFramesForStitch) {
-    NSMutableArray<NSString *> *downsampled =
-        [NSMutableArray arrayWithCapacity:kMaxFramesForStitch];
-    NSUInteger origCount = workFramePaths.count;
-    for (NSUInteger i = 0; i < kMaxFramesForStitch; i++) {
-      NSUInteger idx = (i * (origCount - 1)) / (kMaxFramesForStitch - 1);
-      [downsampled addObject:workFramePaths[idx]];
+  // Build the shared-C++ config.  Sentinel resolution budgets (-1.0)
+  // let the manual entry point pick its own defaults (registration
+  // 0.6 MP / seam 0.1 MP / compose 0.6 MP per Phase 1 fixes).
+  retailens::StitchConfig cfg;
+  cfg.warperType           = warperType.UTF8String;
+  cfg.blenderType          = blenderType.UTF8String;
+  cfg.seamFinderType       = seamFinderType.UTF8String;
+  cfg.captureOrientation   = captureOrientation.UTF8String;
+  cfg.useInscribedRectCrop = (useInscribedRectCrop != NO);
+  cfg.jpegQuality          = (int)quality;
+  // The iOS API doesn't expose stitchMode yet; defaulting to Panorama
+  // matches the prior hand-rolled pipeline's BestOf2NearestMatcher +
+  // BundleAdjusterRay configuration (rotation-only end-to-end).
+  cfg.stitchMode           = retailens::StitchMode::Panorama;
+  // Pre-stitch memory-abort threshold inside the manual pipeline keys
+  // off this value.  Plumb the device's physical RAM through so the
+  // heuristic scales correctly across the iPhone fleet (~2 GB legacy
+  // → ~8 GB iPhone 16 Pro).
+  cfg.availableRamMB =
+      (double)NSProcessInfo.processInfo.physicalMemory
+      / (1024.0 * 1024.0);
+  // Route to the manual cv::detail::* pipeline; the high-level
+  // cv::Stitcher::create path (Android's default) is unsuitable for
+  // iOS's shelf-pan capture shape (compose-MP defaults, graphcut at
+  // compose-MP, BA convergence params — see stitcher.hpp comment
+  // block).
+  cfg.useManualPipeline = true;
+
+  // Marshal NSArray<NSString*> → std::vector<std::string>.  Strip the
+  // `file://` scheme that some callers attach so the shared C++ can
+  // cv::imread the raw filesystem path.
+  std::vector<std::string> paths;
+  paths.reserve(framePaths.count);
+  for (NSString *p in framePaths) {
+    NSString *cleaned = p;
+    if ([cleaned hasPrefix:@"file://"]) {
+      cleaned = [cleaned substringFromIndex:[@"file://" length]];
     }
-    workFramePaths = downsampled;
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] downsampled %lu -> %lu frames (BA stability cap)",
-        (unsigned long)origCount, (unsigned long)kMaxFramesForStitch);
+    paths.emplace_back(cleaned.UTF8String);
+  }
+  NSString *cleanedOutputPath = outputPath;
+  if ([cleanedOutputPath hasPrefix:@"file://"]) {
+    cleanedOutputPath = [cleanedOutputPath substringFromIndex:[@"file://" length]];
   }
 
-  // Load all input frames before invoking the stitcher.  Memory cost
-  // is N × frame size — for typical shelf captures (~2048×1536 RGB,
-  // ~9 MB / frame raw, but cv::imread decodes JPEG so resident
-  // footprint is bounded by the original sensor resolution).
-  std::vector<cv::Mat> frames;
-  if (!loadFramesOrFail(workFramePaths, frames, error)) {
-    // V16 fix-attempt 9 — sentinel return.  loadFramesOrFail may
-    // have populated *error with an NSError describing which path
-    // failed to read (e.g., bad JPEG, missing file).  That *error
-    // would crash Swift's try-bridge on `return nil` here (see
-    // validPairs<1 site below for full RCA).  Returning a sentinel
-    // RetaiLensStitchResult instead leaves *error harmlessly in the
-    // Swift autoreleasing pad — Swift only reads it on nil return,
-    // so the diagnostic is preserved in Console.app via NSLog from
-    // loadFramesOrFail but Swift never retains the dangerous pointer.
-    NSLog(@"[RetaiLensStitcher] loadFramesOrFail returned false — returning sentinel (fix-9)");
-    return [[RetaiLensStitchResult alloc] initWithOutputPath:@""
-                                                       width:0
-                                                      height:0
-                                                  durationMs:0];
-  }
+  // Logging callback: route shared-C++ logs to the same os_log
+  // subsystem the rest of this file uses, so Console.app shows them
+  // alongside the existing breadcrumbs.  Level mapping mirrors what
+  // the shared C++ already documents (0=info, 1=warn, 2=error).
+  retailens::LogFn logFn = [](int level, const char *tag, const char *msg) {
+    os_log_type_t logType;
+    switch (level) {
+      case 0:  logType = OS_LOG_TYPE_INFO;    break;
+      case 1:  logType = OS_LOG_TYPE_DEFAULT; break;
+      case 2:  logType = OS_LOG_TYPE_FAULT;   break;
+      default: logType = OS_LOG_TYPE_DEFAULT; break;
+    }
+    os_log_with_type(StitcherDiagLog(), logType, "%{public}s %{public}s",
+                     tag ? tag : "[stitch]", msg ? msg : "");
+  };
 
-  auto t0 = std::chrono::steady_clock::now();
-
-  // ── Hand-rolled stitch via cv::detail::* with CylindricalWarper ────
+  // ── Run the stitch under an @autoreleasepool ─────────────────────
   //
-  // The high-level cv::Stitcher::PANORAMA uses SphericalWarper, which
-  // produces the "panorama bowl" shape on short shelf-scan arcs.
-  // Calling setWarper(CylindricalWarper) on the high-level stitcher
-  // crashes (PANORAMA's BundleAdjusterRay's R-matrix outputs are
-  // structured for spherical warp).  So we drive the pipeline
-  // ourselves, replicating PANORAMA's algorithm exactly EXCEPT we
-  // swap the warper at the end.  This is also the same path
-  // Phase 5 will populate with AR-derived poses (skipping
-  // features→matching→BA when poses are known).
+  // fix-10 pattern (see line 599-ish of the prior file revision for
+  // the canonical comment block — preserved by git blame on the
+  // pre-Phase-2 commit): any NSError/NSString created INSIDE the
+  // pool would otherwise be autoreleased into the pool and freed at
+  // the closing brace BEFORE Swift's `objc_retainAutoreleasedReturn-
+  // Value` could retain it, producing the EXC_BAD_ACCESS the old
+  // implementation chased through fix-1 through fix-9.
   //
-  // Pipeline:
-  //   1. ORB features per frame
-  //   2. BestOf2NearestMatcher (PANORAMA's default)
-  //   3. HomographyBasedEstimator → camera initial guesses
-  //   4. BundleAdjusterRay (PANORAMA's default) refines cameras
-  //   5. CylindricalWarper warps each frame using cameras
-  //   6. GraphCutSeamFinder + MultiBandBlender produce final panorama
-  cv::Mat panorama;
-  // Breadcrumbs in the device console.  If the next stitch
-  // crashes, the last logged step pinpoints the failure point —
-  // makes debugging without Xcode much faster.  Prefix is
-  // grep-able in Console.app.
-  NSLog(@"[RetaiLensStitcher] start: %lu frames", (unsigned long)frames.size());
-
-  // Wrap the entire stitch in @autoreleasepool.  ObjC autoreleased
-  // temporaries (e.g. NSString objects produced inside the hot
-  // path, intermediate cv::Mat::data wrappers) accumulate until
-  // the runloop's outer pool drains.  Without an explicit pool
-  // here, peak memory during the stitch can be 100+ MB higher
-  // than necessary — exactly the headroom we need to stay under
-  // iOS' foreground jetsam threshold on long pans.
-  //
-  // V16 fix-10 (2026-05-13) — STRUCTURAL: NO return statement
-  // executes inside the @autoreleasepool block.  Failure paths
-  // capture the result/error into STRONG locals declared above the
-  // pool, then `break` out of the do/while(0) wrapper.  The pool
-  // drains; the strong locals survive (they're not autoreleased);
-  // after the pool we either return the sentinel `result`, surface
-  // `capturedError` via the outparameter, or fall through to the
-  // success path.
-  //
-  // Why this matters: the previous structure had `*error = [NSError
-  // errorWithDomain:…]; return nil;` (and similar sentinel `return
-  // [[RetaiLensStitchResult alloc] init…]`) executing while INSIDE
-  // the pool.  ARC autoreleases the return value (or the NSError
-  // factory's +0 return) into the pool.  When the pool drained at
-  // the closing brace AFTER the return statement was lexically
-  // inside it, the autoreleased object was freed.  Swift's caller-
-  // side `objc_retainAutoreleasedReturnValue` then dereferenced
-  // freed memory → EXC_BAD_ACCESS at objc_retain+16.  Documented
-  // in the comment block at the end of this pool — but the previous
-  // fix only moved the SUCCESS return out of the pool; the failure
-  // returns stayed inside and kept crashing.  ASan's quarantine
-  // hid this for prior diagnostic runs by extending object
-  // lifetimes; the non-ASan production build re-exposed it.
+  // For this wrapper the C++ call doesn't autorelease anything by
+  // itself, but ANY `[NSString stringWithUTF8String:]` or
+  // `[NSError errorWithDomain:…]` we build from the result IS
+  // autoreleased.  So we run the C++ call + the NSError build inside
+  // the pool, but capture the NSError into a STRONG LOCAL declared
+  // ABOVE the pool.  The pool drains; the strong local survives
+  // (ARC retain on the alloc, NOT autoreleased); after the pool we
+  // either return the success result, write `*error` from the strong
+  // local, or fall through.
   //
   // See docs/site-content/learnings/react-native.md#autoreleasepool-return-uaf
   RetaiLensStitchResult *result = nil;
   NSError *capturedError = nil;
   @autoreleasepool {
-  do {
-  try {
-    // Two-stage resolution pipeline (matches cv::Stitcher::PANORAMA):
-    //
-    //   REGISTRATION_MP (0.3): downscale used for features, matching,
-    //   BA, wave-correct.  The expensive optimisation stages run
-    //   here.  cv::Stitcher uses 0.6; we use 0.3 because BA still
-    //   converges reliably on shelf-scan inputs and the smaller
-    //   matrices make BA noticeably faster on iPhone.
-    //
-    //   COMPOSE_MP (1.0): RE-WARP + blend at this larger resolution
-    //   to produce the FINAL panorama.  cv::Stitcher uses ORIG_RESOL
-    //   (full input size) — gorgeous output but iPhones at 12 MP × N
-    //   frames blow past the jetsam threshold.  1.0 MP is the
-    //   sweet spot: ~2× linear sharpness over single-stage 0.3 MP,
-    //   with peak compose memory still under ~120 MB thanks to the
-    //   per-frame release pattern in the blender feed loop below.
-    //
-    // The cylindrical-era sharpness came from cv::Stitcher's
-    // automatic two-stage flow.  When we hand-rolled the pipeline
-    // to use PlaneWarper safely, we collapsed it to a single 0.3 MP
-    // stage — output went from ~1500×800 (cylindrical) to ~700×400
-    // (plane).  This restores the multi-stage structure while
-    // keeping the PlaneWarper that the host app actually wants.
-    constexpr double REGISTRATION_MP = 0.3;
-    // 0.6 MP matches cv::Stitcher::PANORAMA's registration_resol
-    // default and is the "safe sharp" setting on Debug builds —
-    // 1.0 MP was visibly sharper but pushed memory peak into iOS
-    // jetsam territory (Sentry caught WatchdogTermination + the
-    // EXC_BAD_ACCESS-during-tear-down variant under the same root
-    // cause).  Release builds free ~200-300 MB of RN baseline
-    // overhead and would tolerate 1.0 MP fine; if/when a Release
-    // build is the test target, bump this back up.
-    constexpr double COMPOSE_MP = 0.6;
+    retailens::StitchResult r = retailens::stitchFramePaths(
+        paths,
+        cleanedOutputPath.UTF8String,
+        cfg,
+        logFn);
 
-    // Capture original size BEFORE downscaling — we need it later
-    // to compute the compose scale relative to full-res input.
-    int origCols = frames[0].cols;
-    int origRows = frames[0].rows;
-    double origMp = (double)origCols * origRows / 1e6;
-
-    // Stage 1: downscale to REGISTRATION_MP for features+matching+BA.
-    std::vector<cv::Mat> workFrames;
-    workFrames.reserve(frames.size());
-    double work_scale = (origMp > REGISTRATION_MP)
-        ? std::sqrt(REGISTRATION_MP / origMp)
-        : 1.0;
-    if (work_scale < 1.0) {
-      for (const auto &f : frames) {
-        cv::Mat scaled;
-        cv::resize(f, scaled, cv::Size(), work_scale, work_scale,
-                   cv::INTER_AREA);
-        workFrames.push_back(scaled);
-      }
+    if (r.success) {
+      const int64_t durationMs = r.durationMs;
+      result = [[RetaiLensStitchResult alloc]
+          initWithOutputPath:outputPath
+                       width:(NSInteger)r.width
+                      height:(NSInteger)r.height
+                  durationMs:(double)durationMs];
     } else {
-      for (const auto &f : frames) workFrames.push_back(f);
-    }
-
-    NSLog(@"[RetaiLensStitcher] step1: features (work scale %d×%d)",
-          workFrames.empty() ? 0 : workFrames[0].cols,
-          workFrames.empty() ? 0 : workFrames[0].rows);
-    // V12.14 Commit B — paired fprintf(stderr) breadcrumb.  iOS'
-    // Console.app rate-limits NSLog under high-frequency emission
-    // (Ram's V12.13 trace had loadFrames 4-7 + step1 missing while
-    // loadFrames 0-3 + step2 made it through).  Stderr is not rate-
-    // limited and flushes promptly, so the LAST stderr line before
-    // the crash reliably pinpoints the failing stage.
-    NSLog(@"[stitch-bc] step1 enter (work %d×%d, %lu frames)",
-            workFrames.empty() ? 0 : workFrames[0].cols,
-            workFrames.empty() ? 0 : workFrames[0].rows,
-            (unsigned long)workFrames.size());
-    // Step 1: features.  800 ORB features is enough for matching
-    // ~50% overlap between adjacent frames; 1500 was overkill and
-    // doubled the matching work for marginal quality gain.
-    auto featuresFinder = cv::ORB::create(800);
-    std::vector<cv::detail::ImageFeatures> imgFeatures(workFrames.size());
-    for (size_t i = 0; i < workFrames.size(); i++) {
-      cv::detail::computeImageFeatures(featuresFinder, workFrames[i],
-                                        imgFeatures[i]);
-      imgFeatures[i].img_idx = (int)i;
-      NSLog(@"[stitch-bc] step1 frame %zu: %lu features",
-              i, (unsigned long)imgFeatures[i].keypoints.size());
-    }
-    NSLog(@"[stitch-bc] step1 done");
-
-    // Step 2: pairwise matching.  match_conf=0.65 matches what
-    // cv::Stitcher::PANORAMA uses internally — looser values
-    // (counter-intuitively) hurt BA convergence by letting through
-    // contradictory low-confidence matches that don't fit a
-    // consistent rotation model.  Stick with the proven default.
-    // V16 fix-11 (2026-05-13) — REVERTED the AffineBestOf2NearestMatcher
-    // swap.  The swap (commit 505c6f1) targeted the validPairs=0
-    // symptom on translation-heavy captures, but produced a downstream
-    // regression: "Warp stage failed: matrix.cpp:246 setSize s >= 0".
-    //
-    // Root cause: cv::Stitcher's pipeline has TWO coherent end-to-end
-    // modes documented in OpenCV:
-    //
-    //   PANORAMA: BestOf2NearestMatcher → HomographyBasedEstimator →
-    //             BundleAdjusterRay → SphericalWarper/etc.
-    //             All stages assume rotation-only camera motion.
-    //
-    //   SCANS:    AffineBestOf2NearestMatcher → AffineBasedEstimator →
-    //             BundleAdjusterAffinePartial → AffineWarper.
-    //             All stages assume affine (rotation+translation+
-    //             scale+shear) camera motion.
-    //
-    // Swapping ONLY step 2 to affine while keeping the rotation-only
-    // estimator/BA/warper downstream produced incoherent camera
-    // parameters: the affine matcher passed inliers with parallax-
-    // induced inconsistencies that the rotation estimator turned into
-    // non-orthonormal "rotation" matrices.  The warper then computed
-    // negative destination canvas sizes and the cv::Mat::setSize
-    // assertion fired at step 8b.
-    //
-    // Fix: revert to BestOf2NearestMatcher so the WHOLE pipeline is
-    // coherent in PANORAMA mode.  Translation-heavy captures fall
-    // back to validPairs=0 → sentinel result → clean toast (no
-    // crash, thanks to fix-10's @autoreleasepool restructure).  The
-    // gate's translation-budget force-accept (`flowMaxTranslationCm`
-    // in Settings) is the operator's lever to keep per-pair
-    // translation small enough that BestOf2NearestMatcher's
-    // rotation-homography RANSAC produces useful inliers.
-    //
-    // Longer-term: see docs/site-content/design/2026-05-13-stitch-
-    // pipeline-mode-selection.md for the architectural answer —
-    // motion-classified per-capture routing between PANORAMA and
-    // SCANS modes at finalize() time.
-    NSLog(@"[RetaiLensStitcher] step2: matching");
-    NSLog(@"[stitch-bc] step2 enter: BestOf2Nearest matching (PANORAMA mode — coherent end-to-end)");
-    cv::detail::BestOf2NearestMatcher matcher(false, 0.65f);
-    std::vector<cv::detail::MatchesInfo> pairwise;
-    matcher(imgFeatures, pairwise);
-    matcher.collectGarbage();
-    NSLog(@"[stitch-bc] step2 done: %lu pairwise entries",
-            (unsigned long)pairwise.size());
-
-    // Step 3: leave-best-of-2 keeps only well-connected images at
-    // confThresh=1.0 — also matches cv::Stitcher::PANORAMA's
-    // default.  Pairs with weaker overlap get dropped before BA.
-    // Pre-check: count how many pairwise matches actually have
-    // non-trivial features matched.  cv::Stitcher's
-    // leaveBiggestComponent / HomographyBasedEstimator fire
-    // CV_Assert internally if no useful pairwise data exists —
-    // and CV_Assert can SIGABRT in our build (signal not caught
-    // by C++ try/catch).  Throwing our own structured error here
-    // is the only way to fail-fast before that abort.
-    int validPairs = 0;
-    for (const auto &m : pairwise) {
-      if (m.confidence > 0.0 && m.matches.size() >= 6) {
-        validPairs++;
+      // Map StitchErrorCode → NSError.code.  Preserves the existing
+      // 9001/9002/9003/1001/9007 sentinels the JS UX layer already
+      // branches on; adds new codes 9100-9103 for manual-pipeline-
+      // specific failure modes that previously collapsed into
+      // 9007 / generic crashes.
+      NSInteger nsCode = 9999;
+      switch (r.errorCode) {
+        case retailens::StitchErrorCode::NeedMoreImages:
+          nsCode = 9001;
+          break;
+        case retailens::StitchErrorCode::HomographyEstimationFailed:
+          nsCode = 9002;
+          break;
+        case retailens::StitchErrorCode::CameraParamsAdjustFailed:
+          nsCode = 9003;
+          break;
+        case retailens::StitchErrorCode::ImageReadFailed:
+          nsCode = 1001;
+          break;
+        case retailens::StitchErrorCode::AllFramesDroppedByConfidence:
+          // 9007 preserves the existing sentinel the JS-side surfaces
+          // as "could not stitch — try recapturing with more overlap";
+          // changing this would silently flip the operator-facing
+          // copy across the app.
+          nsCode = 9007;
+          break;
+        case retailens::StitchErrorCode::PreStitchMemoryAbort:
+          nsCode = 9100;
+          break;
+        case retailens::StitchErrorCode::ComposeResizeFailed:
+          nsCode = 9101;
+          break;
+        case retailens::StitchErrorCode::WarpFailed:
+          nsCode = 9102;
+          break;
+        case retailens::StitchErrorCode::EmptyPanorama:
+          nsCode = 9103;
+          break;
+        case retailens::StitchErrorCode::InvalidArgument:
+          nsCode = 9000;
+          break;
+        default:
+          nsCode = 9999;
+          break;
       }
-    }
-    NSLog(@"[RetaiLensStitcher] step2.5: %d valid pairwise matches", validPairs);
-    if (validPairs < 1) {
-      // V16 fix-attempt 9 (NULL TEST, 2026-05-13).  Eight prior
-      // attempts chased a deterministic SEGV inside Swift's try-bridge
-      // on this *error→throw path.  ASan-on-device with Sentry
-      // disabled (RetaiLens-2026-05-13-172125.ips) showed
-      // EXC_BAD_ACCESS at 0x60007a530 (UNMAPPED VM, ASan
-      // ReportDeadlySignal — no shadow-memory match) firing inside
-      // objc_retain immediately after this return.  By returning a
-      // non-nil SENTINEL result (width=0, height=0) instead of
-      // populating *error and returning nil, we bypass Swift's
-      // autoreleasing NSError out-parameter retain entirely.  The
-      // Swift caller in RetaiLensIncrementalStitcher.finalize checks
-      // `r.width == 0` and constructs a Swift-native NSError to pass
-      // to its completion block.
-      //
-      // Hypothesis under test:
-      //   (A) If this path no longer crashes → the throw bridge IS
-      //       the proximate trigger.  Permanent: keep sentinel,
-      //       document why.
-      //   (B) If it still crashes the same way → corruption is
-      //       upstream of our return (likely inside opencv2.framework
-      //       stitcher allocator pool).  Revert and escalate to C3
-      //       (stitch on isolated DispatchQueue).
-      //
-      // See: docs/site-content/design/2026-05-12-finalize-crash-investigation.md
-      NSLog(@"[RetaiLensStitcher] step2.5: 0 valid pairs — sentinel result (fix-10: break out of pool to avoid drain UAF)");
-      result = [[RetaiLensStitchResult alloc] initWithOutputPath:@""
-                                                           width:0
-                                                          height:0
-                                                      durationMs:0];
-      break;
-    }
-
-    NSLog(@"[RetaiLensStitcher] step3: leave-biggest");
-    NSLog(@"[stitch-bc] step3 enter: leave-biggest");
-    // leaveBiggestComponent mutates imgFeatures and pairwise IN
-    // PLACE to drop frames that aren't part of the biggest
-    // connected component.  We MUST also subset workFrames to
-    // match — otherwise cameras.size() (built from the trimmed
-    // imgFeatures) will be smaller than workFrames.size() and the
-    // warp loop reads cameras[i] out of bounds.  That's a likely
-    // root cause of the SIGABRT seen on second-stitch attempts.
-    std::vector<int> indices = cv::detail::leaveBiggestComponent(
-        imgFeatures, pairwise, 1.0f);
-    // Trim BOTH workFrames AND the full-res frames using the same
-    // indices.  workFrames feeds BA below; full-res frames feed the
-    // compose stage further down (re-warped at COMPOSE_MP).  Both
-    // must stay aligned with cameras[i] / imgFeatures[i] post-trim.
-    std::vector<cv::Mat> trimmedWorkFrames;
-    std::vector<cv::Mat> trimmedFrames;
-    trimmedWorkFrames.reserve(indices.size());
-    trimmedFrames.reserve(indices.size());
-    for (int idx : indices) {
-      if (idx >= 0 && idx < (int)workFrames.size()) {
-        trimmedWorkFrames.push_back(workFrames[idx]);
-        trimmedFrames.push_back(frames[idx]);
-      }
-    }
-    workFrames = std::move(trimmedWorkFrames);
-    frames = std::move(trimmedFrames);
-    NSLog(@"[RetaiLensStitcher] step3.5: kept %lu frames in biggest component",
-          (unsigned long)workFrames.size());
-    if (workFrames.size() < 2) {
-      // V16 fix-attempt 9 (NULL TEST) — same rationale as the
-      // validPairs<1 sentinel above.  Bypass the *error→throw bridge
-      // by returning a width=0/height=0 sentinel result instead.
-      NSLog(@"[RetaiLensStitcher] step3.5: <2 frames after leaveBiggestComponent — sentinel result (fix-10: break out of pool to avoid drain UAF)");
-      result = [[RetaiLensStitchResult alloc] initWithOutputPath:@""
-                                                           width:0
-                                                          height:0
-                                                      durationMs:0];
-      break;
-    }
-
-    // Step 4: estimator
-    NSLog(@"[RetaiLensStitcher] step4: estimator");
-    NSLog(@"[stitch-bc] step4 enter: estimator");
-    cv::detail::HomographyBasedEstimator estimator;
-    std::vector<cv::detail::CameraParams> cameras;
-    if (!estimator(imgFeatures, pairwise, cameras)) {
-      // V16 fix-attempt 9 — sentinel return (see validPairs<1 site
-      // above for full RCA).  Estimator failures are a real production
-      // hazard on borderline-dissimilar frame sequences (typical mode:
-      // user pans through occluded regions or featureless walls
-      // mid-arc).  Returning sentinel keeps the failure surface clean
-      // even though the immediate V16 batch-keyframe repro doesn't
-      // typically reach this path.
-      NSLog(@"[RetaiLensStitcher] step4: HomographyBasedEstimator failed — sentinel result (fix-10: break out of pool to avoid drain UAF)");
-      result = [[RetaiLensStitchResult alloc] initWithOutputPath:@""
-                                                           width:0
-                                                          height:0
-                                                      durationMs:0];
-      break;
-    }
-    for (auto &cam : cameras) {
-      cv::Mat R32;
-      cam.R.convertTo(R32, CV_32F);
-      cam.R = R32;
-    }
-
-    // Step 5: bundle adjustment (the slow step).  BundleAdjusterRay
-    // is what cv::Stitcher::PANORAMA uses internally.  confThresh=1.0
-    // matches cv::Stitcher's default — drops weak match-pair
-    // constraints from the optimisation so BA converges reliably.
-    // Cap iterations at 100 (default 1000) so a poorly-conditioned
-    // problem can't run away into a 60s timeout.  BA typically
-    // converges in 20-50 iters on good input; if 100 isn't enough,
-    // the inputs themselves are unstitchable and we want to fail
-    // fast rather than spin.
-    {
-      auto _t = std::chrono::steady_clock::now();
-      double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-          _t - t0).count();
-      NSLog(@"[RetaiLensStitcher] step5: bundle adjustment (t+%.0fms)", _ms);
-      NSLog(@"[stitch-bc] step5 enter: bundle adjustment");
-    }
-    auto adjuster = cv::makePtr<cv::detail::BundleAdjusterRay>();
-    adjuster->setConfThresh(1.0f);
-    adjuster->setTermCriteria(cv::TermCriteria(
-        cv::TermCriteria::EPS + cv::TermCriteria::COUNT,
-        100,
-        DBL_EPSILON));
-
-    // V12.14.2 — FAULT-level sentinel + camera sanity dump.  These
-    // bracket the BA call so a future trace can pinpoint whether
-    // the crash is BEFORE BA invocation, INSIDE BA, or AFTER BA.
-    // Also dump the first camera's R[0,0] + focal so we can see if
-    // estimator produced NaN/Inf values that would crash BA's
-    // Levenberg-Marquardt.
-    {
-      double r00 = cameras.empty() ? 0.0 :
-          (cameras[0].R.empty() ? 0.0 : (double)cameras[0].R.at<float>(0, 0));
-      double focal = cameras.empty() ? 0.0 : cameras[0].focal;
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step5 BA INVOKE: cameras=%lu cam0.R[0,0]=%.4f cam0.focal=%.2f",
-          (unsigned long)cameras.size(), r00, focal);
-    }
-
-    // V12.14.2 — wrap BA in try/catch.  Catches cv::Exception (most
-    // likely if BA detects a bad input) and std::exception (defensive).
-    // On exception, fall back to the estimator cameras (skipping the
-    // BA refinement step).  Pano quality is slightly lower without
-    // BA but it WON'T CRASH.  Note: this catches C++ exceptions;
-    // raw SIGSEGV from BA's internal pointer deref would still
-    // terminate the process — for that, the kMaxFramesForStitch=8
-    // cap above is the primary defence.
-    bool baSucceeded = false;
-    try {
-      baSucceeded = (*adjuster)(imgFeatures, pairwise, cameras);
-    } catch (const cv::Exception &e) {
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step5 BA threw cv::Exception: %s — fallback to estimator cameras",
-          e.what());
-      baSucceeded = false;
-    } catch (const std::exception &e) {
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step5 BA threw std::exception: %s — fallback to estimator cameras",
-          e.what());
-      baSucceeded = false;
-    } catch (...) {
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step5 BA threw unknown exception — fallback to estimator cameras");
-      baSucceeded = false;
-    }
-
-    if (!baSucceeded) {
-      // Fall through with the cameras the estimator produced —
-      // step5.5 wave correction + step6+ compose can still run on
-      // unrefined cameras.  Result quality will be lower (no global
-      // optimisation) but the engine returns a panorama instead of
-      // crashing.
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step5 BA SKIPPED — proceeding with estimator cameras");
-    } else {
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step5 BA OK");
-    }
-
-    // Step 5.5: WAVE CORRECTION.  cv::Stitcher::PANORAMA does
-    // this automatically; my hand-rolled pipeline was missing it.
-    // After BA produces camera rotation matrices, waveCorrect
-    // globally rotates them so all cameras share a consistent
-    // up-vector.  Without this, the cylindrical (or spherical)
-    // projection produces visible "wavy" top / bottom edges where
-    // edge frames hit the projection surface at slightly
-    // different vertical angles.
-    //
-    // WAVE_CORRECT_HORIZ — this is what was working yesterday for
-    // BOTH portrait+horizontal-pan and landscape+vertical-pan.
-    // Why it works for both: HORIZ aligns each camera's "up" vector
-    // to the world Y axis (gravity).  vision-camera writes mp4s
-    // with `outputOrientation="device"` so the saved frames are
-    // already in the user's view orientation; after BA + waveCorrect
-    // HORIZ, the panorama's vertical axis matches world's vertical
-    // axis regardless of pan direction.
-    //
-    // I briefly switched to autoDetectWaveCorrectKind thinking it'd
-    // handle vertical pans better — it actually picked the wrong
-    // kind for portrait+horizontal pans, breaking yesterday's
-    // working normal-mode capture.  Reverting.
-    {
-      auto _t = std::chrono::steady_clock::now();
-      double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-          _t - t0).count();
-      NSLog(@"[RetaiLensStitcher] step5.5: wave correction (BA done, t+%.0fms)", _ms);
-      NSLog(@"[stitch-bc] step5.5 enter: wave correction");
-    }
-    std::vector<cv::Mat> rmats;
-    rmats.reserve(cameras.size());
-    for (const auto &cam : cameras) {
-      rmats.push_back(cam.R.clone());
-    }
-    try {
-      cv::detail::waveCorrect(rmats, cv::detail::WAVE_CORRECT_HORIZ);
-      for (size_t i = 0; i < cameras.size(); i++) {
-        cameras[i].R = rmats[i];
-      }
-    } catch (const cv::Exception &e) {
-      // Wave correction can fail on degenerate input (only 1-2
-      // cameras with collinear rotations).  Swallow the failure
-      // and continue without correction — the panorama will have
-      // the wave artifact but is still better than aborting.
-      NSLog(@"[RetaiLensStitcher] wave correction skipped: %s", e.what());
-    }
-
-    // Step 6: COMPOSE rescale.  This is the key step that gives us
-    // back the cylindrical-era sharpness.  cv::Stitcher does this
-    // internally as `composePanorama`: rescale camera intrinsics
-    // by (compose_scale / work_scale), recreate the warper at
-    // the new scale, then warp+blend on freshly-resized frames at
-    // COMPOSE_MP.  Without this step, output stays at REGISTRATION_MP
-    // and is visibly blurry.
-    double compose_scale = (origMp > COMPOSE_MP)
-        ? std::sqrt(COMPOSE_MP / origMp)
-        : 1.0;
-    double compose_work_aspect = compose_scale / work_scale;
-    NSLog(@"[RetaiLensStitcher] step6: compose rescale "
-          "(work_scale=%.3f → compose_scale=%.3f, aspect=%.3f)",
-          work_scale, compose_scale, compose_work_aspect);
-    for (auto &cam : cameras) {
-      cam.focal *= compose_work_aspect;
-      cam.ppx  *= compose_work_aspect;
-      cam.ppy  *= compose_work_aspect;
-    }
-
-    // Step 6.5: median focal length determines the warper scale.
-    // Computed AFTER compose rescale so warpedScale is already in
-    // compose units — matches cv::Stitcher's flow.
-    std::vector<double> focals;
-    for (const auto &cam : cameras) focals.push_back(cam.focal);
-    std::sort(focals.begin(), focals.end());
-    float warpedScale =
-        focals.empty() ? 1.0f
-                       : (float)focals[focals.size() / 2];
-
-    // Step 7: PLANE warper.  The crucial swap.
-    //
-    // For close-up shelf scans (~30° pan, mostly translational
-    // gesture across a planar product face), plane projection is
-    // the right choice — it produces a flat output with no
-    // cylindrical curve and no spherical bowl.
-    //
-    // Cylindrical/spherical only buy you something for wider arcs
-    // where the per-frame perspective curves matter.  Below ~45°
-    // arc, plane is empirically the most natural-looking option
-    // and exactly what SCANS mode used (just SCANS coupled it
-    // with affine BA which we just established was the wrong
-    // estimator for our motion).
-    NSLog(@"[RetaiLensStitcher] step7: warper (%s)", warperType.UTF8String);
-    NSLog(@"[stitch-bc] step7 enter: warper=%s", warperType.UTF8String);
-    // Plane / Cylindrical / Spherical — runtime-selectable so
-    // the host's settings UI can A/B test which projection looks
-    // best for the operator's actual gesture (close-up planar
-    // subject vs partial-arc rotation vs wide pan).
-    cv::Ptr<cv::WarperCreator> warperCreator;
-    if ([warperType isEqualToString:@"cylindrical"]) {
-      warperCreator = cv::makePtr<cv::CylindricalWarper>();
-    } else if ([warperType isEqualToString:@"spherical"]) {
-      warperCreator = cv::makePtr<cv::SphericalWarper>();
-    } else {
-      // "plane" is the default — straight verticals/horizontals,
-      // good for close-up subjects.  Hourglass shape produced
-      // by partial arcs is removed by the rectangular-crop step
-      // below.
-      warperCreator = cv::makePtr<cv::PlaneWarper>();
-    }
-    // V12.14.3 — FAULT breadcrumbs around each sub-step within
-    // step7 → step7.5.  Ram's V12.14.2 trace had the crash here
-    // (last visible log was step7 enter; step7.5 never fired).
-    // These pinpoint which sub-step actually crashes.
-    cv::Ptr<cv::detail::RotationWarper> warper =
-        warperCreator->create(warpedScale);
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] step7a: warper created (warpedScale=%.2f)", warpedScale);
-
-    // Step 7.5: build composeFrames at COMPOSE_MP from full-res
-    // input.  Warp + blend run at this resolution to produce the
-    // sharp final output.  Release workFrames first — BA is done,
-    // so we don't need the small set anymore.  Sequential release
-    // ensures the two big arrays never coexist at peak.
-    for (auto &wf : workFrames) wf.release();
-    workFrames.clear();
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] step7b: workFrames released, building composeFrames "
-        "(N=%lu, compose_scale=%.3f)",
-        (unsigned long)frames.size(), compose_scale);
-
-    // V12.14.3 — wrap the resize loop in try/catch so a bad input
-    // Mat doesn't terminate the process.  Per-frame resize on
-    // bogus/corrupt cv::Mat data has historically been a SIGSEGV
-    // source on consecutive captures.
-    std::vector<cv::Mat> composeFrames;
-    composeFrames.reserve(frames.size());
-    try {
-      for (size_t i = 0; i < frames.size(); i++) {
-        const auto &f = frames[i];
-        os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-            "[stitch-bc] step7c: resize frame %zu (%dx%d, channels=%d, "
-            "data=%p)", i, f.cols, f.rows, f.channels(), (void *)f.data);
-
-        // V12.14.4 — defensive validation.  Skip frames with NULL
-        // data ptr, zero dimensions, or non-positive total — they
-        // would SIGSEGV inside cv::resize regardless of interp mode.
-        if (f.data == nullptr || f.empty() || f.total() == 0
-            || f.cols <= 0 || f.rows <= 0) {
-          os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-              "[stitch-bc] step7c: SKIPPING frame %zu — invalid Mat "
-              "(data=%p empty=%d total=%zu)",
-              i, (void *)f.data, (int)f.empty(), (size_t)f.total());
-          continue;
-        }
-
-        // V12.14.4 — wrap each iteration in @autoreleasepool so any
-        // ObjC temporaries cv::resize might autorelease internally
-        // get drained between frames.  Doesn't hurt.
-        @autoreleasepool {
-          cv::Mat scaled;
-          if (std::abs(compose_scale - 1.0) > 1e-3) {
-            // V12.14.4 — pre-allocate `scaled` with explicit dims
-            // BEFORE cv::resize so the internal `dst.create()` is a
-            // no-op.  Skips the allocator state corruption Ram's
-            // V12.14.3 trace pointed at: cv::resize crashed on the
-            // 5th consecutive resize when iOS recycled mmap regions
-            // from a prior capture, suggesting cv::resize's internal
-            // allocator path was hitting stale state.
-            //
-            // Plus: switch INTER_AREA → INTER_LINEAR.  INTER_AREA
-            // uses precomputed cached interpolation tables that
-            // appear to be the corrupted state.  INTER_LINEAR uses
-            // a different code path (no cached table).  Slightly
-            // less crisp at extreme downscales but for our 0.538×
-            // shelf-image downscale the visual difference is
-            // negligible — and stability >> sharpness.
-            int newCols = (int)std::round(f.cols * compose_scale);
-            int newRows = (int)std::round(f.rows * compose_scale);
-            scaled.create(newRows, newCols, f.type());
-            cv::resize(f, scaled, scaled.size(), 0, 0, cv::INTER_LINEAR);
-          } else {
-            scaled = f.clone();
-          }
-          composeFrames.push_back(scaled);
-        }
-      }
-    } catch (const cv::Exception &e) {
-      // V12.14.7 — %{public}s so the message survives Console.app
-      // privacy redaction.  Without this, e.what() shows as "<private>"
-      // and we can't see which assertion fired.
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step7c: cv::resize threw cv::Exception: %{public}s",
-          e.what());
-      // V16 fix-10 — capture error into strong local, break out of
-      // pool.  See pool-entry block at the top of this method.
+      NSString *msg =
+          [NSString stringWithUTF8String:r.errorMessage.c_str()] ?: @"Stitch failed";
       capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                          code:1007
-                                      userInfo:@{
-        NSLocalizedDescriptionKey:
-          [NSString stringWithFormat:@"Compose-stage resize failed: %s", e.what()],
-      }];
-      break;
-    } catch (...) {
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step7c: cv::resize threw unknown exception");
-      capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                          code:1007
-                                      userInfo:@{
-        NSLocalizedDescriptionKey:
-          @"Compose-stage resize failed (unknown).",
-      }];
-      break;
+                                          code:nsCode
+                                      userInfo:@{NSLocalizedDescriptionKey: msg}];
     }
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] step7d: composeFrames built (N=%lu)",
-        (unsigned long)composeFrames.size());
+  }  // end @autoreleasepool — drains shared-C++ temporary NSStrings
+     // that we built from r.errorMessage / tag strings.  result and
+     // capturedError survive the drain because they were assigned
+     // to strong locals declared ABOVE the pool.
 
-    // Release full-res `frames` now that composeFrames has its
-    // own resized copies.  Frees ~50-100 MB for a typical 8-frame
-    // stitch — a critical part of staying under iOS' jetsam
-    // threshold (the ACTUAL cause of the "u != 0" /
-    // WatchdogTermination crashes we were debugging — Sentry
-    // confirmed those were OOM kills, not OpenCV bugs).
-    for (auto &f : frames) f.release();
-    frames.clear();
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] step7e: full-res frames released mem=%.1fMB",
-        StitcherResidentMB());
-    NSLog(@"[RetaiLensStitcher] step7.5: composeFrames %d×%d "
-          "(compose_scale=%.3f)",
-          composeFrames.empty() ? 0 : composeFrames[0].cols,
-          composeFrames.empty() ? 0 : composeFrames[0].rows,
-          compose_scale);
-
-    // Step 8: warp + (optional) seam finder + blender feed.
-    //
-    // Two paths based on caller's seamFinderType:
-    //
-    //   "graphcut" — BATCH path.  Warp all frames into memory,
-    //     run GraphCutSeamFinder for optimal seams, then feed
-    //     the blender.  Higher peak memory (all warped frames
-    //     coexist during seam finding) but produces clean seams
-    //     that pair beautifully with MultiBandBlender.  Same
-    //     algorithm cv::Stitcher::PANORAMA uses internally.
-    //
-    //   "skip"     — STREAM path.  Warp + feed each frame in the
-    //     same loop, releasing immediately.  Never holds more
-    //     than one warped frame in memory.  ~40-50 MB lower peak
-    //     at 1.0 MP × 8 frames.  Right choice for low-RAM
-    //     devices; the host's per-device defaults pick this
-    //     path on devices with <2 GB physical RAM.
-    //
-    // Both paths feed the SAME blender (selected per caller's
-    // blenderType).  Final blend happens after either path
-    // completes.
-    BOOL useSeam = [seamFinderType isEqualToString:@"graphcut"];
-    NSLog(@"[RetaiLensStitcher] step8: %s",
-          useSeam ? "BATCH (warp-all + seam + feed)"
-                  : "STREAM (warp+feed per frame)");
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] step8 enter: %s",
-        useSeam ? "BATCH" : "STREAM");
-
-    // Build the blender once — both paths feed into it.
-    //
-    // The "u != 0" UMat assertion we previously hit when running
-    // MultiBand or GraphCut was a SYMPTOM of iOS jetsam OOM-kill
-    // (confirmed via Sentry's WatchdogTermination signature),
-    // not a bug in MBB / GraphCut.  With the OOM fixes now in
-    // place (autoreleasepool wrapping, camera pause during
-    // stitch, per-frame Mat releases, plus this stream path for
-    // low-mem devices), both should run cleanly.
-    cv::Ptr<cv::detail::Blender> blender;
-    if ([blenderType isEqualToString:@"feather"]) {
-      blender = cv::detail::Blender::createDefault(
-          cv::detail::Blender::FEATHER, false);
-      auto fb = blender.dynamicCast<cv::detail::FeatherBlender>();
-      if (fb) fb->setSharpness(0.02f);
-    } else {
-      // "multiband" — Laplacian pyramids per fed frame.
-      // More memory than Feather but much sharper seams when
-      // paired with GraphCut.
-      blender = cv::detail::Blender::createDefault(
-          cv::detail::Blender::MULTI_BAND, false);
-      auto mbb = blender.dynamicCast<cv::detail::MultiBandBlender>();
-      if (mbb) mbb->setNumBands(5);
-    }
-    NSLog(@"[RetaiLensStitcher] step10: blender = %s",
-          blenderType.UTF8String);
-
-    if (useSeam) {
-      // ── BATCH path ─────────────────────────────────────────────
-      const size_t N = composeFrames.size();
-      std::vector<cv::Point> corners(N);
-      std::vector<cv::Mat> imagesWarped(N);
-      std::vector<cv::Mat> masksWarped(N);
-      std::vector<cv::Size> sizes(N);
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step8a: BATCH warp loop (N=%lu)",
-          (unsigned long)N);
-      // V12.14.6 — defensive measures around the warp loop.  Same
-      // recycled-mmap pattern that hit cv::resize in V12.14.3
-      // logs (Ram's 4th-capture crash).  cv::PlaneWarper::warp
-      // uses cv::remap internally which has its own cached state
-      // keyed on input addresses.
-      try {
-        for (size_t i = 0; i < N; i++) {
-          os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-              "[stitch-bc] step8b: warp frame %zu (%dx%d, data=%p)", i,
-              composeFrames[i].cols, composeFrames[i].rows,
-              (void *)composeFrames[i].data);
-          // Per-iteration @autoreleasepool drains any ObjC
-          // autoreleased temps cv::remap holds onto.
-          @autoreleasepool {
-            cv::Mat K;
-            cameras[i].K().convertTo(K, CV_32F);
-
-            // V12.14.6 — clone input to break any recycled-mmap
-            // link to prior captures' allocations.  cv::Mat::clone
-            // forces a fresh memcpy into a freshly-allocated buffer.
-            cv::Mat freshInput = composeFrames[i].clone();
-
-            // V12.14.6 — pre-allocate output Mats via warpRoi() so
-            // cv::remap doesn't need to call create() internally
-            // (the suspect path that crashed in cv::resize too).
-            cv::Rect roi = warper->warpRoi(
-                freshInput.size(), K, cameras[i].R);
-            imagesWarped[i].create(roi.size(), freshInput.type());
-            masksWarped[i].create(roi.size(), CV_8U);
-
-            cv::Mat mask(freshInput.size(), CV_8U, cv::Scalar(255));
-            corners[i] = warper->warp(
-                freshInput, K, cameras[i].R, cv::INTER_LINEAR,
-                cv::BORDER_CONSTANT, imagesWarped[i]);
-            warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
-                         cv::BORDER_CONSTANT, masksWarped[i]);
-            sizes[i] = imagesWarped[i].size();
-            // V12.14.7 — release composeFrames[i] inside the loop
-            // (was: released only after the entire loop at step8c).
-            // Frees ~14 MB per frame mid-loop, keeping peak working
-            // set ~50-100 MB lower for an 8-frame batch — directly
-            // targets the jetsam OOM kill that struck V12.14.6
-            // after cv::Exception was caught (process died despite
-            // managed throw).  composeFrames[i] is no longer needed
-            // after warp populates imagesWarped[i] / masksWarped[i].
-            composeFrames[i].release();
-          }
-        }
-      } catch (const cv::Exception &e) {
-        // V12.14.7 — %{public}s to unredact the message under
-        // Console.app privacy filtering.  e.what() was showing as
-        // "<private>" in V12.14.6's caught traces.
-        os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-            "[stitch-bc] step8b: warper->warp threw cv::Exception: %{public}s",
-            e.what());
-        // V16 fix-10 — capture error into strong local, break out of pool.
-        capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                            code:1008
-                                        userInfo:@{
-          NSLocalizedDescriptionKey:
-            [NSString stringWithFormat:@"Warp stage failed: %s", e.what()],
-        }];
-        break;
-      } catch (...) {
-        os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-            "[stitch-bc] step8b: warper->warp threw unknown exception");
-        capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                            code:1008
-                                        userInfo:@{
-          NSLocalizedDescriptionKey: @"Warp stage failed (unknown).",
-        }];
-        break;
-      }
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step8c: warp loop done mem=%.1fMB",
-          StitcherResidentMB());
-      // composeFrames has done its job — release before we
-      // allocate the float UMat shadow set for seam finding.
-      // V12.14.7: most/all of these are already released inside
-      // the warp loop above; the .clear() drops the now-empty
-      // Mat headers from the vector.
-      for (auto &cf : composeFrames) cf.release();
-      composeFrames.clear();
-
-      // Step 9: GraphCutSeamFinder at SEAM_MP (~0.1 MP).
-      //
-      // GraphCut's runtime is roughly quadratic in pixel count
-      // because it solves a max-flow on a per-pixel grid graph.
-      // Running it at compose scale (1.0 MP) takes ~100× longer
-      // than at the ~0.1 MP that cv::Stitcher::PANORAMA uses
-      // internally (`seam_est_resol_ = 0.1`).  At 1.0 MP we
-      // observed >60s stitch-timeouts in JS; at 0.1 MP it
-      // finishes in <1s.  Pattern matches cv::Stitcher's flow:
-      //   1. Downscale imagesWarped + masksWarped + corners to
-      //      seam scale.
-      //   2. Run seam finder on the small images.
-      //   3. Upscale the seam-optimised masks back to compose
-      //      scale.
-      //   4. Bitwise-AND with the original masks so we don't
-      //      include pixels outside each frame's warped region.
-      const double SEAM_MP = 0.1;
-      double seam_scale = std::min(1.0, std::sqrt(SEAM_MP / origMp));
-      // Aspect from compose scale → seam scale (the rescale we
-      // apply to existing compose-scale data, not the original).
-      double seam_compose_aspect = seam_scale / compose_scale;
-      {
-        auto _t = std::chrono::steady_clock::now();
-        double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            _t - t0).count();
-        NSLog(@"[RetaiLensStitcher] step9: graph-cut seam finder "
-              "(compose→seam aspect = %.3f, t+%.0fms)",
-              seam_compose_aspect, _ms);
-      }
-      auto _seamStart = std::chrono::steady_clock::now();
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step9a: seam-scale resize loop (aspect=%.3f)",
-          seam_compose_aspect);
-      std::vector<cv::UMat> imagesWarpedF_seam(N);
-      std::vector<cv::UMat> masksWarpedU_seam(N);
-      std::vector<cv::Point> corners_seam(N);
-      for (size_t i = 0; i < N; i++) {
-        cv::Mat seamImage, seamMask;
-        cv::resize(imagesWarped[i], seamImage, cv::Size(),
-                   seam_compose_aspect, seam_compose_aspect,
-                   cv::INTER_LINEAR);
-        cv::resize(masksWarped[i], seamMask, cv::Size(),
-                   seam_compose_aspect, seam_compose_aspect,
-                   cv::INTER_NEAREST);
-        seamImage.convertTo(imagesWarpedF_seam[i], CV_32F);
-        seamMask.copyTo(masksWarpedU_seam[i]);
-        corners_seam[i] = cv::Point(
-            cvRound(corners[i].x * seam_compose_aspect),
-            cvRound(corners[i].y * seam_compose_aspect));
-      }
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step9b: seam-scale resize done, GraphCut find starting");
-      cv::Ptr<cv::detail::SeamFinder> seamFinder =
-          cv::makePtr<cv::detail::GraphCutSeamFinder>(
-              cv::detail::GraphCutSeamFinder::COST_COLOR);
-      seamFinder->find(imagesWarpedF_seam, corners_seam,
-                       masksWarpedU_seam);
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step9c: GraphCut find done");
-      {
-        auto _t = std::chrono::steady_clock::now();
-        double _seamMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            _t - _seamStart).count();
-        NSLog(@"[RetaiLensStitcher] step9: graph-cut find took %.0fms", _seamMs);
-      }
-      imagesWarpedF_seam.clear();
-
-      // Upscale seam-optimised masks back to compose scale.
-      //
-      // CRITICAL: dilate each mask before upscaling so adjacent
-      // frames have a small OVERLAP region for the blender to
-      // feather across.  Without this, the seam-cut creates a
-      // strict pixel partition with NO overlap — MultiBand then
-      // has nothing to feather, producing visible HARD seams
-      // (the "cuts" we observed in the output).  cv::Stitcher
-      // does the same dilation step in its compose pipeline.
-      // A 3×3 default kernel at seam scale becomes ~10px of
-      // overlap at compose scale (since seam_aspect_compose ≈
-      // 0.1 → 10× upscale), which is plenty for MultiBand's
-      // Laplacian pyramids to blend smoothly across.
-      //
-      // The bitwise_and with the original mask keeps each frame's
-      // mask within its actual warped region (seam-cut + dilation
-      // can spill past edges, especially after linear upscale).
-      for (size_t i = 0; i < N; i++) {
-        cv::Mat seamMaskCpu, seamMaskDilated, seamMaskFull;
-        masksWarpedU_seam[i].copyTo(seamMaskCpu);
-        cv::dilate(seamMaskCpu, seamMaskDilated, cv::Mat());
-        cv::resize(seamMaskDilated, seamMaskFull,
-                   masksWarped[i].size(), 0, 0, cv::INTER_LINEAR);
-        cv::bitwise_and(seamMaskFull, masksWarped[i], masksWarped[i]);
-      }
-      masksWarpedU_seam.clear();
-
-      // Feed the blender, releasing each frame as we go.
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step10a: blender->prepare");
-      blender->prepare(corners, sizes);
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step10b: feeding blender (N=%lu)",
-          (unsigned long)N);
-      for (size_t i = 0; i < N; i++) {
-        os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-            "[stitch-bc] step10c: feed frame %zu", i);
-        cv::Mat imgS;
-        imagesWarped[i].convertTo(imgS, CV_16S);
-        blender->feed(imgS, masksWarped[i], corners[i]);
-        imagesWarped[i].release();
-        masksWarped[i].release();
-        imgS.release();
-      }
-      imagesWarped.clear();
-      masksWarped.clear();
-      os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-          "[stitch-bc] step10d: feed loop done");
-    } else {
-      // ── STREAM path ────────────────────────────────────────────
-      // Pre-pass: warp masks ONLY (single-channel, cheap) to
-      // compute corners + sizes.  blender->prepare() needs both
-      // BEFORE the first feed, so a tiny first pass is unavoidable.
-      const size_t N = composeFrames.size();
-      std::vector<cv::Point> corners(N);
-      std::vector<cv::Size> sizes(N);
-      for (size_t i = 0; i < N; i++) {
-        cv::Mat K;
-        cameras[i].K().convertTo(K, CV_32F);
-        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
-        cv::Mat tmpMaskWarped;
-        corners[i] = warper->warp(
-            mask, K, cameras[i].R, cv::INTER_NEAREST,
-            cv::BORDER_CONSTANT, tmpMaskWarped);
-        sizes[i] = tmpMaskWarped.size();
-      }
-
-      // Main pass: warp + feed + release per frame.  Never holds
-      // more than ONE warped image + ONE warped mask in memory.
-      // ~40-50 MB lower peak vs the BATCH path at 1.0 MP × 8
-      // frames — the difference between staying under iOS' jetsam
-      // threshold on a 2 GB device and getting WatchdogTermination.
-      blender->prepare(corners, sizes);
-      for (size_t i = 0; i < N; i++) {
-        cv::Mat K;
-        cameras[i].K().convertTo(K, CV_32F);
-        cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
-        cv::Mat imgWarped, maskWarped;
-        warper->warp(composeFrames[i], K, cameras[i].R,
-                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, imgWarped);
-        warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
-                     cv::BORDER_CONSTANT, maskWarped);
-        cv::Mat imgS;
-        imgWarped.convertTo(imgS, CV_16S);
-        blender->feed(imgS, maskWarped, corners[i]);
-        // Release the input compose frame too — done with it.
-        composeFrames[i].release();
-        // imgS / imgWarped / maskWarped release at scope exit.
-      }
-      composeFrames.clear();
-    }
-
-    cv::Mat panoramaS, panoramaMask;
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] step11a: blender->blend starting");
-    blender->blend(panoramaS, panoramaMask);
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] step11b: blend complete (panoramaS=%dx%d)",
-        panoramaS.cols, panoramaS.rows);
-    panoramaS.convertTo(panorama, CV_8U);
-    {
-      auto _t = std::chrono::steady_clock::now();
-      double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-          _t - t0).count();
-      NSLog(@"[RetaiLensStitcher] step11: blend complete (output %d×%d, t+%.0fms)",
-            panorama.cols, panorama.rows, _ms);
-    }
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-        "[stitch-bc] step11c: panorama 8U conversion done (panorama=%dx%d) mem=%.1fMB",
-        panorama.cols, panorama.rows, StitcherResidentMB());
-  } catch (const cv::Exception &e) {
-    // V16 fix-10 — capture error into strong local, break out of pool.
-    capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                        code:1100
-                                    userInfo:@{
-      NSLocalizedDescriptionKey:
-        [NSString stringWithFormat:
-          @"OpenCV exception during stitch: %s", e.what()],
-    }];
-    break;
-  } catch (const std::exception &e) {
-    capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                        code:1101
-                                    userInfo:@{
-      NSLocalizedDescriptionKey:
-        [NSString stringWithFormat:
-          @"std exception during stitch: %s", e.what()],
-    }];
-    break;
-  } catch (...) {
-    capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                        code:1102
-                                    userInfo:@{
-      NSLocalizedDescriptionKey:
-        @"Unknown exception during stitch.",
-    }];
-    break;
-  }
-  } while (0);
-  }  // end @autoreleasepool — drains OpenCV's autoreleased
-     // temporaries before we run the cheap post-stitch work
-     // (crop, JPEG encode) and construct the return value.
-     //
-     // HISTORY (V16 fix-10, 2026-05-13): this brace USED to live at
-     // the very bottom of the function, wrapping the `return [[Retai-
-     // LensStitchResult alloc] init…]` as well.  ARC inserts an
-     // autorelease for the return value, which then registered with
-     // this @autoreleasepool; the pool drained at the closing brace,
-     // deallocating the return object BEFORE the caller could
-     // `objc_retain` it.  An earlier fix pulled the brace UP, which
-     // protected the SUCCESS-path return below — but the FAILURE-path
-     // returns (`*error = [NSError …]; return nil;`) and the fix-9
-     // sentinel returns (`return [[Result alloc] init…sentinel…]`)
-     // were still INSIDE the pool and kept crashing for the same
-     // reason.  ASan's allocator quarantine masked this on diagnostic
-     // builds; non-ASan production builds re-exposed it.
-     //
-     // Fix-10 restructure: every failure path now captures its
-     // return value into a STRONG LOCAL declared above the pool
-     // (`result` / `capturedError`) and `break`s out of the do/while(0)
-     // wrapper to fall past the pool's closing brace cleanly.  The
-     // strong locals survive the drain.  We then either return the
-     // sentinel `result`, surface `capturedError` via the outparameter
-     // (the outparameter is __autoreleasing — assigning to it puts
-     // the NSError into the OUTER pool, drained by the caller's GCD
-     // work-item boundary, comfortably after Swift retains it), or
-     // fall through to the success path below.
-     //
-     // See docs/site-content/learnings/react-native.md#autoreleasepool-return-uaf
-     // for the full pattern + a checklist for future ObjC bridges.
-
-  // V16 fix-10 — handle failure paths captured from inside the pool.
-  if (result != nil) {
-    // Sentinel result (validPairs<1, workFrames<2, estimator fail).
-    // The Swift caller checks r.width == 0 / r.height == 0 and
-    // surfaces a clean error via completion(nil, NSError(...)).
-    return result;
-  }
+  // Failure path: outparameter assignment happens AFTER the pool
+  // drains so the NSError lives in the OUTER pool (drained by the
+  // GCD work item / Swift autoreleasing boundary).
   if (capturedError != nil) {
-    // C++ exception caught inside the pool — surface via outparameter.
     if (error) {
       *error = capturedError;
     }
     return nil;
   }
-
-  if (panorama.empty()) {
-    if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                   code:1003
-                               userInfo:@{
-        NSLocalizedDescriptionKey:
-          @"Stitcher produced an empty panorama.",
-      }];
-    }
-    return nil;
-  }
-
-  // Crop the panorama to the bounding box of non-black pixels.
-  //
-  // The default SphericalWarper from PANORAMA mode lays the
-  // captured patch into a much larger sphere-shaped canvas.  For
-  // a typical 30-45° shelf-scan arc, that means the actual scene
-  // occupies a small region of a much larger black-bordered
-  // image (the "panorama bowl" effect).  Cropping to the
-  // content's bounding box returns the actual stitched scene
-  // without the surrounding empty bowl.  Algorithm:
-  //   1. Convert to grayscale.
-  //   2. Threshold > 1 to find any non-black pixel.
-  //   3. boundingRect of all non-zero pixels.
-  //   4. Crop the panorama to that rect.
-  //
-  // V16 Phase 1b.fix3 — maximum-inscribed-rectangle crop (was bbox).
-  // cv::Stitcher's compose stage produces irregular black corners
-  // where the warped frames didn't fill; cv::boundingRect was
-  // including those.  MaxInscribedRectFromMask finds the largest
-  // axis-aligned rectangle entirely inside the non-zero region —
-  // clean output with no black corners.  Falls back to bbox
-  // (and ultimately the un-cropped panorama) on any OpenCV failure.
-  //
-  // V16 Phase 1b.fix5 — RCA from Ram's first fix3 capture: the
-  // raw inscribed-rect collapsed to a thin sliver in the
-  // landscape output.  Cause: cv::Stitcher's compose produces
-  // small scattered zero-pixels INSIDE the content region (graph-
-  // cut seam, exposure-comp rounding, multi-band blend artifacts).
-  // The inscribed-rect algorithm demands a strictly hole-free
-  // rectangle, so a single interior zero forces it to either
-  // avoid that pixel (collapsing to a thin strip) or skip the
-  // affected row entirely.  Python simulation on a realistic
-  // 800×200 mask with 0.5% scattered holes:
-  //
-  //     raw inscribed-rect    →   23×100 = 1.4% of original (BUG)
-  //     after 5×5 close       → 642×196 = 78.6% of original (clean)
-  //     bounding rect          → 800×200 = 100%
-  //
-  // Fix: morphologically CLOSE the mask before the inscribed-rect
-  // search — a 5×5 close fills holes ≤5 px (more than enough for
-  // compose artifacts) without bridging across legitimate concave
-  // gaps (which cv::Stitcher panoramas don't really have).  Keep
-  // the bbox safety floor: if the inscribed rect still came out
-  // < 50% of bbox area, use bbox — the mask shape is pathological
-  // and shipping bbox-with-corners is better than a sliver.
-  cv::Mat finalImage = panorama;
-  try {
-    cv::Mat gray;
-    cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
-    cv::Mat mask;
-    cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
-
-    // V16 Phase 1b.fix5c — operator-toggleable crop strategy.
-    //
-    //   useInscribedRectCrop = NO (default in settings modal):
-    //     Final crop is just cv::boundingRect(mask) — preserves all
-    //     stitched content at the cost of possible black corners
-    //     where cv::Stitcher's projection didn't fill.
-    //
-    //   useInscribedRectCrop = YES (operator opt-in):
-    //     Run the full inscribed-rect pipeline (morph-close + 50%
-    //     safety floor + column-projection second pass) for a clean
-    //     -cornered rectangle.  Can over-aggressively shrink the
-    //     output on lopsided masks (1146×1102 bbox → 602×1102 strip
-    //     in one field log).
-    cv::Rect bbox;
-    if (useInscribedRectCrop) {
-      cv::Mat closedMask;
-      cv::morphologyEx(
-          mask, closedMask, cv::MORPH_CLOSE,
-          cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)));
-      bbox = MaxInscribedRectFromMask(closedMask);
-      cv::Rect bboxFallback = cv::boundingRect(mask);
-      const long long inscribedArea =
-          (long long)bbox.width * bbox.height;
-      const long long fallbackArea =
-          (long long)bboxFallback.width * bboxFallback.height;
-      if (bbox.width <= 0 || bbox.height <= 0
-          || inscribedArea * 2 < fallbackArea) {
-        // Either degenerate, or inscribed < 50% of bbox area.
-        // Safety floor: ship bbox so the operator gets *something*
-        // usable (legacy behaviour pre-fix3) rather than a sliver.
-        NSLog(@"[RetaiLensStitcher] inscribed-rect rejected: "
-              "%dx%d (area=%lld) vs bbox %dx%d (area=%lld); "
-              "using bbox fallback.",
-              bbox.width, bbox.height, inscribedArea,
-              bboxFallback.width, bboxFallback.height, fallbackArea);
-        bbox = bboxFallback;
-      } else {
-        NSLog(@"[RetaiLensStitcher] inscribed-rect: %dx%d "
-              "(area=%lld, %.0f%% of bbox %dx%d)",
-              bbox.width, bbox.height, inscribedArea,
-              100.0 * (double)inscribedArea / (double)fallbackArea,
-              bboxFallback.width, bboxFallback.height);
-      }
-    } else {
-      bbox = cv::boundingRect(mask);
-      NSLog(@"[RetaiLensStitcher] crop: bbox-only %dx%d "
-            "(useInscribedRectCrop=NO via setting)",
-            bbox.width, bbox.height);
-    }
-    if (bbox.width > 0 && bbox.height > 0
-        && bbox.width <= panorama.cols && bbox.height <= panorama.rows) {
-      finalImage = panorama(bbox).clone();
-    }
-
-    // V16 Phase 1b.fix5c — column-projection second pass ALSO gated
-    // on the inscribed-rect toggle.  When OFF, skip directly to the
-    // write so the operator sees the full bbox-cropped panorama
-    // without further trimming.  When ON, keep the existing
-    // 95%-then-80%-then-skip relaxation chain.
-    if (!useInscribedRectCrop) {
-      // Skip the second-pass column-projection entirely.
-    } else
-
-    {
-    // Second pass: rectangular crop.  Find the column range where
-    // ≥95% of rows have content, crop to that × full height.
-    cv::Mat finalGray;
-    cv::cvtColor(finalImage, finalGray, cv::COLOR_BGR2GRAY);
-    cv::Mat finalMask;
-    cv::threshold(finalGray, finalMask, 30, 255, cv::THRESH_BINARY);
-    cv::erode(finalMask, finalMask,
-              cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)),
-              cv::Point(-1, -1), 1);
-
-    int rows = finalMask.rows, cols = finalMask.cols;
-    // Reduce mask to per-column content count.  Mask is 0 or 255,
-    // so column sum / 255 = number of content rows in that column.
-    cv::Mat colSum;
-    cv::reduce(finalMask, colSum, 0, cv::REDUCE_SUM, CV_32S);
-    const int contentThreshold = (int)(0.95 * rows * 255);
-    int cropLeft = -1, cropRight = -1;
-    const int *cs = colSum.ptr<int>(0);
-    for (int c = 0; c < cols; c++) {
-      if (cs[c] >= contentThreshold) {
-        if (cropLeft < 0) cropLeft = c;
-        cropRight = c;
-      }
-    }
-    NSLog(@"[RetaiLensStitcher] rectCrop col-proj: cols=%d rows=%d threshold=%d cropLeft=%d cropRight=%d",
-          cols, rows, contentThreshold, cropLeft, cropRight);
-    // Sanity floor: don't accept a column-projection crop that
-    // shrinks the image to less than 30% of the bbox-cropped width.
-    // Such an aggressive crop usually means the stitch was poorly
-    // aligned and only a tiny vertical band has full multi-frame
-    // coverage — applying it produces the "thin sliver" output
-    // we observed in the field.  Better to show the user the full
-    // bounding-box crop (still trims the all-black borders) than
-    // a sliver that's effectively useless.
-    const int minRectWidth = (int)(cols * 0.30);
-    if (cropLeft >= 0 && cropRight > cropLeft + 10
-        && (cropRight - cropLeft + 1) >= minRectWidth) {
-      cv::Rect rectCrop(cropLeft, 0,
-                        cropRight - cropLeft + 1, rows);
-      finalImage = finalImage(rectCrop).clone();
-      NSLog(@"[RetaiLensStitcher] rectCrop applied: %dx%d → %dx%d",
-            cols, rows, finalImage.cols, finalImage.rows);
-    } else {
-      // No column qualified at 95%, OR the qualifying band is too
-      // narrow to trust.  Try a relaxed 80% before giving up.
-      const int relaxedThreshold = (int)(0.80 * rows * 255);
-      cropLeft = -1;
-      cropRight = -1;
-      for (int c = 0; c < cols; c++) {
-        if (cs[c] >= relaxedThreshold) {
-          if (cropLeft < 0) cropLeft = c;
-          cropRight = c;
-        }
-      }
-      NSLog(@"[RetaiLensStitcher] rectCrop relaxed (80%%): cropLeft=%d cropRight=%d",
-            cropLeft, cropRight);
-      if (cropLeft >= 0 && cropRight > cropLeft + 10
-          && (cropRight - cropLeft + 1) >= minRectWidth) {
-        cv::Rect rectCrop(cropLeft, 0,
-                          cropRight - cropLeft + 1, rows);
-        finalImage = finalImage(rectCrop).clone();
-        NSLog(@"[RetaiLensStitcher] rectCrop relaxed applied: %dx%d → %dx%d",
-              cols, rows, finalImage.cols, finalImage.rows);
-      } else {
-        NSLog(@"[RetaiLensStitcher] rectCrop SKIPPED — best band is "
-              "narrower than 30%% of bbox (%d < %d).  Likely poor "
-              "stitch alignment; keeping bbox crop.",
-              cropRight >= 0 ? (cropRight - cropLeft + 1) : 0,
-              minRectWidth);
-      }
-    }
-    }
-  } catch (...) {
-    // Crop failed — fall back to the raw stitched output.
-    finalImage = panorama;
-  }
-
-  auto t1 = std::chrono::steady_clock::now();
-  double durationMs =
-      std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-
-  // Encode + write the JPEG.  Clamp quality into [0, 100] to defend
-  // against caller bugs.
-  //
-  // V16 Phase 1b.fix3 — write via ImageIO so we can bake the EXIF
-  // Orientation tag into the output.  cv::imwrite produces a plain
-  // JPEG with no metadata; iOS image renderers (UIImage / RN
-  // <Image>) display it in raw pixel orientation, which looks
-  // sideways when the user holds the phone in portrait.  The tag
-  // tells the renderer how to rotate for display without re-
-  // encoding the pixels.
-  NSInteger clampedQuality = MAX(0, MIN(100, quality));
-  NSString *cleanedOutPath = normalizeImagePath(outputPath);
-
-  // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
-  //
-  // Bake-rotation driven by the user's phone-hold orientation at
-  // capture start, NOT the output Mat's aspect ratio.  Reasoning:
-  //
-  //   - fix5d's earlier attempt to key off the same orientation used
-  //     `exifOrientation:NSInteger` (an EXIF tag 1/3/6/8), inferred
-  //     from frameRotationDegrees, which collapsed landscape-left
-  //     and landscape-right to the same value.  Ram's reports made
-  //     it clear the two landscape variants need OPPOSITE rotations
-  //     (they're mirror images of each other w.r.t. the sensor's
-  //     world-up direction), so the EXIF-tag intermediary was lossy.
-  //
-  //   - fix5e's aspect-ratio approach was correct for 3+ frame
-  //     horizontal pans but the threshold "cols > rows" was fragile
-  //     at 2 frames (output Mat near-square or even tall) and
-  //     conflated "wide because horizontal pan" with "tall because
-  //     vertical pan."  The user spec explicitly lists two modes;
-  //     using their classification is more robust than guessing
-  //     from output geometry.
-  //
-  // The two supported modes:
-  //
-  //   Mode A — landscape phone + vertical pan from top
-  //     landscape-left  → ROTATE_90_COUNTERCLOCKWISE
-  //     landscape-right → ROTATE_90_CLOCKWISE
-  //       (mirror-image directions because world-up sits on opposite
-  //        sensor edges between landscape-left and landscape-right;
-  //        opposite rotations land world-up at output-top for both)
-  //
-  //   Mode B — portrait phone + horizontal pan from left
-  //     portrait              → no rotation (cv::Stitcher's natural
-  //                              output already aligns world-up to
-  //                              output-top for portrait hold)
-  //     portrait-upside-down  → ROTATE_180
-  //
-  // Anything else: best-effort no rotation.  Unsupported combination
-  // (e.g., portrait phone + vertical pan) is treated as Mode B.
-  //
-  // Properties:
-  //   - Compose canvas geometry unchanged from baseline 437c763:
-  //     cv::imread default applies EXIF rotation at load time,
-  //     producing portrait Mats for portrait hold and landscape
-  //     Mats for landscape hold.  No fix5b-style 6-frame OOM.
-  //   - Output JPEG always EXIF=1.  Bake is in the pixels, so all
-  //     viewers (Photos.app, RN <Image>, share-sheet) agree.
-  //   - The cv::rotate happens AFTER BA / blend / seam-find when
-  //     their working sets are released — incremental memory cost.
-  //   - Per-keyframe JPEGs (OpenCVKeyframeCollector) untouched —
-  //     they still carry EXIF=6 so LiveFrameStrip thumbnails show
-  //     portrait-correct during capture.
-  cv::Mat finalImageRotated;
-  cv::Mat *imageToWrite = &finalImage;
-  NSString *normalisedOrientation = captureOrientation ?: @"portrait";
-  // os_log with %{public}@ — without `public` qualifier iOS redacts
-  // the string to "<private>" in the system log, making it impossible
-  // to read what orientation actually arrived from JS.  These two
-  // log lines are diagnostic-only and contain no PII, safe to mark
-  // public.
-  // Empirically calibrated (Ram's 2026-05-11 test, iteration 2):
-  // Iteration 1 swapped both the labels AND the directions — net
-  // visual rotation per roll-value was unchanged (output still
-  // looked "landscape-left oriented" to Ram).  Iteration 2 flips
-  // ONLY the directions; labels stay where they landed.
-  //   landscape-left  (roll ≈ -90°, Ram's L-left hold)  → 90° CCW
-  //   landscape-right (roll ≈ +90°, Ram's L-right hold) → 90° CW
-  // For a roll=-90° capture (what Ram tested), this rotates the
-  // OPPOSITE direction from iteration 1.  If iteration 1 put
-  // scene-up on the LEFT of the tall image, iteration 2 will put
-  // scene-up on the RIGHT.
-  if ([normalisedOrientation isEqualToString:@"landscape-left"]) {
-    cv::rotate(finalImage, finalImageRotated,
-               cv::ROTATE_90_COUNTERCLOCKWISE);
-    imageToWrite = &finalImageRotated;
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-                     "[RetaiLensStitcher] bake-rotated 90° CCW for landscape-left "
-                     "(%dx%d → %dx%d)",
-                     finalImage.cols, finalImage.rows,
-                     finalImageRotated.cols, finalImageRotated.rows);
-  } else if ([normalisedOrientation isEqualToString:@"landscape-right"]) {
-    cv::rotate(finalImage, finalImageRotated,
-               cv::ROTATE_90_CLOCKWISE);
-    imageToWrite = &finalImageRotated;
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-                     "[RetaiLensStitcher] bake-rotated 90° CW for landscape-right "
-                     "(%dx%d → %dx%d)",
-                     finalImage.cols, finalImage.rows,
-                     finalImageRotated.cols, finalImageRotated.rows);
-  } else if ([normalisedOrientation isEqualToString:@"portrait-upside-down"]) {
-    cv::rotate(finalImage, finalImageRotated, cv::ROTATE_180);
-    imageToWrite = &finalImageRotated;
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-                     "[RetaiLensStitcher] bake-rotated 180° for portrait-upside-down "
-                     "(%dx%d)", finalImage.cols, finalImage.rows);
-  } else {
-    os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
-                     "[RetaiLensStitcher] no bake-rotation (orientation=%{public}@, %dx%d)",
-                     normalisedOrientation, finalImage.cols, finalImage.rows);
-  }
-  BOOL wrote = WriteJPEGWithEXIFTag(*imageToWrite, cleanedOutPath,
-                                    1, clampedQuality);  // always EXIF=1 — rotation is baked
-  if (!wrote) {
-    if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                   code:1002
-                               userInfo:@{
-        NSLocalizedDescriptionKey:
-          [NSString stringWithFormat:
-            @"Stitch succeeded but could not write JPEG to %@", outputPath],
-      }];
-    }
-    return nil;
-  }
-
-  // V16 Phase 1b.fix5d — report the dimensions of the bytes we
-  // actually wrote (rotated, if we baked one in above), not the
-  // pre-rotate Mat.  JS-side consumers need the displayable shape.
-  return [[RetaiLensStitchResult alloc]
-      initWithOutputPath:outputPath
-                   width:(NSInteger)imageToWrite->cols
-                  height:(NSInteger)imageToWrite->rows
-              durationMs:durationMs];
+  return result;
 }
 
 
