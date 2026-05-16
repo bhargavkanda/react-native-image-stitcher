@@ -14,6 +14,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.opencv.calib3d.Calib3d
 import org.opencv.core.Core
@@ -226,8 +227,16 @@ class RetaiLensIncrementalStitcher(
     /// Serial: at most one refinement runs at a time (the design's
     /// "cancellation semantics if a new capture starts mid-refine"
     /// is out of scope for this MVP).
+    ///
+    /// 2026-05-16 (Phase 3 critic MED-1) — `SupervisorJob()` keeps
+    /// the scope alive when a single refinement coroutine fails.
+    /// Every `refineScope.launch { … }` already has a try/catch
+    /// around the throwing surface; SupervisorJob is defense-in-
+    /// depth for future code added outside that catch.
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private val refineScope = CoroutineScope(Dispatchers.Default.limitedParallelism(1))
+    private val refineScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default.limitedParallelism(1)
+    )
 
     /// Reference to a mounted ARCameraView (if any).  Set by the view
     /// when it attaches; the engine flips its `ingestActive` flag

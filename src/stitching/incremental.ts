@@ -676,7 +676,16 @@ export interface IncrementalFinalizeResult {
  *   captureOrientation = "portrait"
  *   useInscribedRectCrop = false
  *   stitchMode         = "auto" (Android only; iOS hand-rolled
- *                                pipeline is PANORAMA regardless)
+ *                                pipeline is PANORAMA regardless).
+ *                                NOTE: on the explicit `refinePanorama`
+ *                                path, Android collapses "auto" to
+ *                                "scans" — affine, not rotational —
+ *                                because refinement is the slow-path
+ *                                quality bake where SCANS' translation
+ *                                tolerance pays off. The "auto" name is
+ *                                kept for API symmetry with the live
+ *                                pipeline, but it is NOT cv::Stitcher's
+ *                                PANORAMA mode on this path.
  *   jpegQuality        = 90
  *
  * Resolution budgets (`*ResolMP`) keep cv::Stitcher's staged-pipeline
@@ -703,7 +712,19 @@ export interface IncrementalRefineOptions {
     | 'landscape-right';
   /** Crop to max-inscribed rectangle.  Default false (bbox crop only). */
   useInscribedRectCrop?: boolean;
-  /** Android: `cv::Stitcher` pipeline mode.  Default "auto". */
+  /**
+   * Android: `cv::Stitcher` pipeline mode.  Default "auto".
+   *
+   * On the explicit `refinePanorama` path, "auto" silently collapses
+   * to "scans" (affine).  This is intentional: refinement is the
+   * slow-path quality bake where SCANS' translation tolerance gives
+   * a noticeably better stitch than PANORAMA's rotation-only model.
+   * Pass "panorama" explicitly if you need rotational behaviour.
+   *
+   * iOS ignores this field — the hand-rolled `cv::detail::*` pipeline
+   * in `cpp/stitcher.cpp` is functionally equivalent to PANORAMA
+   * regardless of what you pass here.
+   */
   stitchMode?: 'auto' | 'panorama' | 'scans';
   /** JPEG quality 1..100, default 90. */
   jpegQuality?: number;
