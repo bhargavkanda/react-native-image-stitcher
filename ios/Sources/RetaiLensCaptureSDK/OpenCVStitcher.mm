@@ -6,20 +6,24 @@
 // sees the slim `OpenCVStitcher.h` interface above and stays in
 // Swift / Objective-C.
 //
-// Why `cv::Stitcher::SCANS` mode?
-//   OpenCV ships two stitcher presets: PANORAMA (the default) and
-//   SCANS.  PANORAMA assumes a rotational camera (e.g. spinning in
-//   place to capture a vista) and uses spherical projection.  SCANS
-//   assumes a TRANSLATIONAL camera moving across a roughly-planar
-//   subject — exactly the gesture our field reps use to walk along
-//   a shelf.  SCANS skips the spherical warp, runs faster on phones,
-//   and produces straighter shelf edges in the output.  Empirically:
-//   PANORAMA mode bends the shelf corners; SCANS keeps them right-
-//   angled.  Use SCANS.
+// History note (V12 → V16 → 2026-05-16 shared-C++ port):
+//   V12-era this file used `cv::Stitcher::SCANS` mode (translational,
+//   plane warp, ORB).  V16 fix-11 reverted that to PANORAMA after
+//   discovering the AffineBestOf2NearestMatcher swap broke the
+//   warper/blender pipeline coherence (see learning doc
+//   `stitcher-pipeline-coherence`).  2026-05-15 reintroduced SCANS
+//   as one of two modes selected per-capture via the shared
+//   `StitchMode` enum in `cpp/stitcher.hpp` (translation-heavy
+//   captures → SCANS; rotation-heavy → PANORAMA; auto-resolved by
+//   the KeyframeGate's accumulated motion totals).
+//   2026-05-16 commit 98b1a60 swapped this method body to delegate
+//   to the shared C++ at `cpp/stitcher.cpp` — both modes now live
+//   there, this file is just the Obj-C++ marshalling shim.
 //
 // References:
 //   * OpenCV docs: https://docs.opencv.org/4.x/d2/d8d/classcv_1_1Stitcher.html
-//   * SCANS mode: cv::Stitcher::SCANS — ORB features + plane warp.
+//   * Mode-selection design: docs/site-content/design/2026-05-13-stitch-pipeline-mode-selection.md
+//   * Pipeline coherence learning: docs/site-content/learnings/2026-05-13-stitcher-pipeline-coherence.md
 
 // OpenCV's stitching headers contain `enum { NO, ... }` and `enum { YES, ... }`
 // definitions.  Objective-C's `<objc/objc.h>` (transitively imported by every
@@ -269,65 +273,18 @@ NSString *normalizeImagePath(NSString *path) {
   return path;
 }
 
-// Read every input file as a cv::Mat.  Fail fast on the first
-// unreadable input so the caller gets a precise error rather than a
-// post-stitch "needs more images" verdict that hides the real cause.
-bool loadFramesOrFail(NSArray<NSString *> *framePaths,
-                      std::vector<cv::Mat> &frames,
-                      NSError **error) {
-  frames.reserve(framePaths.count);
-  // V12.13 — breadcrumb each load.  If the landscape-only crash is
-  // in cv::imread (e.g., decoding a JPEG produced by the new
-  // per-frame autoreleasepool extract) the LAST log line tells us
-  // which frame index + path triggered it.
-  NSInteger idx = 0;
-  for (NSString *path in framePaths) {
-    NSString *cleaned = normalizeImagePath(path);
-    cv::Mat img = cv::imread([cleaned UTF8String]);
-    NSLog(@"[stitch-bc] loadFrames %ld/%lu: %@ -> %dx%d (channels=%d, empty=%d)",
-          (long)idx, (unsigned long)framePaths.count,
-          path.lastPathComponent, img.cols, img.rows, img.channels(),
-          (int)img.empty());
-    if (img.empty()) {
-      if (error) {
-        *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                                     code:1001
-                                 userInfo:@{
-          NSLocalizedDescriptionKey:
-            [NSString stringWithFormat:@"Could not read image at path: %@", path],
-        }];
-      }
-      return false;
-    }
-    frames.push_back(img);
-    idx += 1;
-  }
-  return true;
-}
-
-// Translate cv::Stitcher::Status into a stable NSError.code so the JS
-// side can branch on classes of failure (need-more-frames vs.
-// homography-failed vs. camera-params-failed).  cv::Stitcher uses
-// magic ints; mapping them here keeps the call-site clean.
-NSError *errorForStitchStatus(cv::Stitcher::Status status) {
-  NSString *message = @"OpenCV stitch failed";
-  switch (status) {
-    case cv::Stitcher::ERR_NEED_MORE_IMGS:
-      message = @"Stitcher needs more overlapping frames — capture a few more across the shelf.";
-      break;
-    case cv::Stitcher::ERR_HOMOGRAPHY_EST_FAIL:
-      message = @"Stitcher could not estimate homography — frames may not overlap enough or have insufficient features.";
-      break;
-    case cv::Stitcher::ERR_CAMERA_PARAMS_ADJUST_FAIL:
-      message = @"Stitcher could not refine camera parameters — try recapturing with more overlap.";
-      break;
-    default:
-      break;
-  }
-  return [NSError errorWithDomain:RetaiLensStitcherErrorDomain
-                             code:(NSInteger)status
-                         userInfo:@{NSLocalizedDescriptionKey: message}];
-}
+// 2026-05-16 (post-Phase-2 cleanup): `loadFramesOrFail()` and
+// `errorForStitchStatus()` removed from this file.  Both were
+// called only by the prior `stitchFramePaths:` method body that
+// was replaced by the shared-C++ delegating wrapper in commit
+// 98b1a60.  Equivalents now live at:
+//   - frame loading: cpp/stitcher.cpp anonymous-namespace
+//     `loadAllFrames()` (called by both the high-level and manual
+//     entries)
+//   - error mapping: the explicit StitchErrorCode → NSError.code
+//     switch in this file at the new wrapper (lines ~528-595)
+// Removed to keep the anonymous namespace tight; sibling methods
+// (stitchKeyframePaths, stitchVideoAtPath) don't need them.
 
 // Phase 5: build a cv::detail::CameraParams from an ARKit pose.
 //
