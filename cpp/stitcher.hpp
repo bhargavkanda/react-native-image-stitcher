@@ -57,6 +57,29 @@ namespace retailens {
 // (NeedMoreImages, HomographyEstimationFailed, CameraParamsAdjustFailed)
 // + a few new codes for failure modes that cv::Stitcher itself
 // doesn't surface (image read/write failure, all-frames-dropped).
+//
+// Manual-pipeline-specific failure modes (added 2026-05-15 as part of
+// the V2 shared-port code-review pass; previously these all collapsed
+// into UnknownCvException, which made post-mortem triage from JS-side
+// telemetry impossible):
+//   PreStitchMemoryAbort        — manual pipeline detected RSS above
+//                                 the per-device pre-stitch threshold
+//                                 and bailed before allocating compose
+//                                 buffers.  Operator should retry on
+//                                 fresh app launch or lower compose MP.
+//   ComposeResizeFailed         — cv::resize threw inside the compose-
+//                                 stage downscale loop (Step 7c).  Most
+//                                 commonly a recycled-mmap allocator
+//                                 issue when stitching consecutively;
+//                                 a fresh process usually recovers.
+//   WarpFailed                  — warper->warp threw inside the warp
+//                                 loop (Step 8b).  Camera params from
+//                                 BA may be degenerate; check
+//                                 framesIncluded vs framesRequested.
+//   EmptyPanorama               — blender->blend completed but produced
+//                                 a 0×0 panorama.  Should never happen
+//                                 in practice; if it does, the failure
+//                                 is upstream in the warp/feed loop.
 enum class StitchErrorCode : int32_t {
     Ok                          = 0,
     NeedMoreImages              = 1,  // cv::Stitcher::ERR_NEED_MORE_IMGS
@@ -65,6 +88,10 @@ enum class StitchErrorCode : int32_t {
     ImageReadFailed             = 100,
     ImageWriteFailed            = 101,
     AllFramesDroppedByConfidence = 102,
+    PreStitchMemoryAbort        = 103,
+    ComposeResizeFailed         = 104,
+    WarpFailed                  = 105,
+    EmptyPanorama               = 106,
     InvalidArgument             = 200,
     UnknownCvException          = 300,
 };
@@ -93,13 +120,25 @@ enum class StitchMode : int32_t {
 // have safe defaults so callers only override what they care about.
 //
 // Resolution budgets (`*ResolMP`) are in megapixels per frame:
-//   < 0.0  → keep cv::Stitcher's library default
+//   < 0.0  → entry-point picks its own appropriate default
 //   ≥ 0.0  → cap at this MP target via cv::Stitcher::set*Resol()
 //
-// The compositingResolMP default of 1.0 is THE important non-cv-
-// default knob: cv::Stitcher's library default for compositing is
-// ORIG_RESOL (-1.0) which composes at full sensor resolution and
-// trivially OOMs on Android.  Always cap compositing.
+// compositingResolMP intentionally defaults to a NEGATIVE SENTINEL so
+// the two entry points can pick different appropriate defaults:
+//
+//   * High-level stitchFramePaths() (cv::Stitcher::create wrapper):
+//     falls back to 1.0 MP.  cv::Stitcher's library default for
+//     compositing is ORIG_RESOL (-1.0) which composes at full sensor
+//     resolution and trivially OOMs on Android — 1.0 MP caps that
+//     while preserving most of the sharpness.
+//
+//   * Manual stitchFramePathsManual() (cv::detail::* pipeline):
+//     falls back to 0.6 MP.  The hand-rolled pipeline blends at
+//     compose-MP DIRECTLY (rather than re-warping from features-
+//     resolution work frames as cv::Stitcher does internally), which
+//     means memory peak scales more aggressively with compose-MP.
+//     1.0 MP pushed iOS into jetsam territory; 0.6 MP is the "safe
+//     sharp" sweet spot documented in OpenCVStitcher.mm comments.
 struct StitchConfig {
     std::string warperType           = "plane";        // "plane"|"cylindrical"|"spherical"
     std::string blenderType          = "multiband";    // "multiband"|"feather"
@@ -109,8 +148,18 @@ struct StitchConfig {
     bool        useInscribedRectCrop = false;          // bbox-only crop is the default
     double      registrationResolMP  = -1.0;           // < 0 = cv default (0.6 MP)
     double      seamEstimationResolMP = -1.0;          // < 0 = cv default (0.1 MP)
-    double      compositingResolMP   = 1.0;            // 1.0 MP cap — THE OOM fix
+    double      compositingResolMP   = -1.0;           // < 0 = entry-specific default (high-level: 1.0 MP, manual: 0.6 MP)
     int         jpegQuality          = 85;
+
+    // Total device RAM in megabytes.  Used by the manual pipeline's
+    // pre-stitch memory abort heuristic to decide whether to short-
+    // circuit a stitch that would likely OOM.  When < 0 (default),
+    // falls back to a conservative assumption (4 GB = kAssumedTotalRAMGB
+    // in stitcher.cpp).  Callers should plumb:
+    //   iOS:     NSProcessInfo.processInfo.physicalMemory / (1024*1024)
+    //   Android: ActivityManager.getMemoryInfo().totalMem / (1024*1024)
+    //            or sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGE_SIZE) / (1024*1024)
+    double availableRamMB = -1.0;
 
     // Manual-pipeline opt-in (V2 of the shared port).
     //
