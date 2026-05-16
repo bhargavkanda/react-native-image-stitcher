@@ -2607,6 +2607,49 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 // poses are 1:1 with frames (KeyframeGate saved both as the user
 // panned).  Compose code is duplicated per the convention noted
 // above ("DRY when the new path is proven on real shelf captures").
+//
+// AUDIT NOTE (2026-05-15, sibling @autoreleasepool-return audit)
+// ──────────────────────────────────────────────────────────────
+//
+// This method (and the pose-driven `stitchVideoAtPath:withPoses:`
+// variant earlier in this file at ~line 2162) BOTH have the same
+// @autoreleasepool-return-UAF pattern that V16 fix-10 closed in
+// `stitchFramePaths:` at line 597 — autoreleased NSError* assigned
+// to the `error` outparameter from inside an @autoreleasepool, then
+// the function returns, the pool drains, the NSError dangles, the
+// caller crashes dereferencing.  See:
+//   docs/site-content/design/2026-05-12-finalize-crash-investigation.md
+//
+// CURRENT REACHABILITY: BOTH methods are dead code as of 2026-05-15.
+// Confirmed by grep — only referenced in dSYM debug symbols + comments,
+// never actually called from Swift/Obj-C/Kotlin source paths.  V16
+// batch-keyframe uses `stitchFramePaths:` exclusively; this method
+// was the earlier per-keyframe-with-pose design that was superseded.
+//
+// IF/WHEN RE-ENABLED, apply fix-10's pattern (also in this file
+// around `stitchFramePaths:` lines 562-571 + 1519-1527):
+//
+//   NSError *capturedError = nil;
+//   RetaiLensStitchResult *result = nil;
+//   @autoreleasepool {
+//     do {
+//       try { ... ; result = [[RetaiLensStitchResult alloc] init...]; break; }
+//       catch (cv::Exception &e) { capturedError = [NSError ...]; break; }
+//       catch (...) { capturedError = [NSError ...]; break; }
+//     } while (0);
+//   }
+//   if (capturedError) { if (error) *error = capturedError; return nil; }
+//   return result;
+//
+// Strong locals (`capturedError`, `result`) are declared OUTSIDE the
+// @autoreleasepool so their refcount survives the pool drain.  Both
+// success + failure paths exit the pool via `break` rather than
+// `return nil;` so the pool drains cleanly before the function
+// returns.
+//
+// Not applied now because the methods aren't called; risk is latent
+// not active.  Refactoring dead code carries its own risk (subtle
+// behaviour changes) without active testing.
 
 + (nullable RetaiLensStitchResult *)stitchKeyframePaths:(NSArray<NSString *> *)framePaths
                                             outputPath:(NSString *)outputPath
