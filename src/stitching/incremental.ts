@@ -151,6 +151,41 @@ export interface IncrementalState {
    * for the thumbnail strip.
    */
   batchKeyframeIndex?: number;
+  /**
+   * 2026-05-16 — realtime+batch fusion (Option A "Replace on
+   * completion").  True between the moment a hybrid-engine
+   * `finalize()` resolves with the live panorama AND the async
+   * refinement of the same keyframes through cv::Stitcher completes.
+   *
+   * During the refinement window the host should render a small
+   * "Refining…" pill so the operator knows a higher-quality result
+   * is on the way; the operator can continue browsing / starting
+   * another capture while the refinement runs.
+   *
+   * Stays false (or undefined) when the auto-trigger is a no-op —
+   * e.g. when the hybrid engine had nothing on disk to refine.
+   *
+   * See: docs/site-content/design/2026-05-14-realtime-batch-fusion.md
+   */
+  isRefining?: boolean;
+  /**
+   * 2026-05-16 — realtime+batch fusion (Option A).  Path to the
+   * refined panorama JPEG written by `cv::Stitcher`.  Emitted in a
+   * single state event when the async refinement completes (after
+   * the hybrid engine's `finalize()` has already returned the live
+   * `panoramaPath`).
+   *
+   * Host code should treat this as the canonical panorama for the
+   * remainder of the audit-capture flow when present, falling back
+   * to `panoramaPath` when absent.  The refined output replaces the
+   * live output in-place — operator UX-wise it's the same JPEG slot,
+   * just sharper.
+   *
+   * Undefined when no refinement is in flight, when refinement fails,
+   * or when the auto-trigger was skipped because there were no
+   * keyframes on disk.
+   */
+  refinedPanoramaPath?: string;
 }
 
 
@@ -629,6 +664,74 @@ export interface IncrementalFinalizeResult {
 
 
 /**
+ * 2026-05-16 — input to `refinePanorama`.  Mirrors the subset of
+ * `StitcherConfig` that affects the batch refinement step
+ * (`cv::Stitcher` pipeline knobs).  All fields optional — when
+ * omitted the native side picks production-tested defaults that
+ * match the existing batch-keyframe finalize path:
+ *
+ *   warperType         = "spherical" (handles any pan direction)
+ *   blenderType        = "multiband"
+ *   seamFinderType     = "graphcut"
+ *   captureOrientation = "portrait"
+ *   useInscribedRectCrop = false
+ *   stitchMode         = "auto" (Android only; iOS hand-rolled
+ *                                pipeline is PANORAMA regardless)
+ *   jpegQuality        = 90
+ *
+ * Resolution budgets (`*ResolMP`) keep cv::Stitcher's staged-pipeline
+ * memory bounded — see retailens_stitcher.cpp on Android and the
+ * shared C++ `StitchConfig` for the full rationale.  Passing a
+ * negative value or omitting the field keeps the per-platform safe
+ * default (Android compose-MP cap of 1.0, iOS manual-pipeline cap of
+ * 0.6).
+ *
+ * See: docs/site-content/design/2026-05-14-realtime-batch-fusion.md
+ */
+export interface IncrementalRefineOptions {
+  /** "plane" | "cylindrical" | "spherical".  Default "spherical". */
+  warperType?: 'plane' | 'cylindrical' | 'spherical';
+  /** "multiband" | "feather".  Default "multiband". */
+  blenderType?: 'multiband' | 'feather';
+  /** "graphcut" | "skip".  Default "graphcut". */
+  seamFinderType?: 'graphcut' | 'skip';
+  /** Drives the OUTPUT bake-rotation.  Default "portrait". */
+  captureOrientation?:
+    | 'portrait'
+    | 'portrait-upside-down'
+    | 'landscape-left'
+    | 'landscape-right';
+  /** Crop to max-inscribed rectangle.  Default false (bbox crop only). */
+  useInscribedRectCrop?: boolean;
+  /** Android: `cv::Stitcher` pipeline mode.  Default "auto". */
+  stitchMode?: 'auto' | 'panorama' | 'scans';
+  /** JPEG quality 1..100, default 90. */
+  jpegQuality?: number;
+}
+
+
+/**
+ * 2026-05-16 — result of an explicit `refinePanorama` call.  Mirrors
+ * `IncrementalFinalizeResult` so host code can treat refined results
+ * the same way it treats batch-keyframe finalize results.
+ */
+export interface IncrementalRefineResult {
+  /** Path to the refined panorama JPEG written to `outputPath`. */
+  panoramaPath: string;
+  width: number;
+  height: number;
+  /** Frames the stitcher saw (== framePaths.length). */
+  framesRequested: number;
+  /** Frames retained after `leaveBiggestComponent` (≤ framesRequested). */
+  framesIncluded: number;
+  /** framesRequested − framesIncluded.  > 0 = some frames dropped. */
+  framesDropped: number;
+  /** The confidence threshold that succeeded.  -1 when not applicable. */
+  finalConfidenceThresh: number;
+}
+
+
+/**
  * V15.0e — ARKit plane detection state, polled by the capture screen
  * UI when planeSource=ARKitDetected.  Used to render a status pill:
  *
@@ -687,6 +790,39 @@ interface NativeIncrementalModule {
    *  one-true-number for "how close are we to OOM?".  Returns -1
    *  on task_info failure (very rare).  Resolves immediately. */
   getMemoryFootprintMB(): Promise<number>;
+  /**
+   * 2026-05-16 — realtime+batch fusion API foundation.  Run the
+   * shared C++ `cv::Stitcher` pipeline over a caller-supplied list
+   * of keyframe JPEG paths and write a refined panorama to
+   * `outputPath`.
+   *
+   * Pre-conditions:
+   *   - `framePaths.length >= 2`
+   *   - Each path must exist on disk (the native side will read it
+   *     via cv::imread); rejected otherwise.
+   *
+   * Per-platform routing:
+   *   - iOS:     `OpenCVStitcher.stitchFramePaths(...)`
+   *              (manual cv::detail::* pipeline, useManualPipeline=true).
+   *   - Android: `RetaiLensStitcher.stitchSync(...)` →
+   *              `retailens_stitcher.cpp` (high-level
+   *              cv::Stitcher::create() pipeline).
+   *
+   * Reuses the same C++ stitcher both platforms use for the
+   * batch-keyframe `finalize()` path — so refinement quality on
+   * arbitrary keyframe sets matches what the batch-keyframe engine
+   * has been producing in production.
+   *
+   * The auto-trigger inside the hybrid engine's `finalize()` is a
+   * separate code path that internally calls `refinePanorama` when
+   * keyframes are on disk; host code may also call it explicitly to
+   * re-refine after editing the keyframe set.
+   */
+  refinePanorama(options: {
+    framePaths: string[];
+    outputPath: string;
+    config?: IncrementalRefineOptions;
+  }): Promise<IncrementalRefineResult>;
   /** PiP investigation only — write a JS-side message into the
    *  Swift-side rlis-debug.log so we get a single timeline. */
   appendDebugLog?(message: string): Promise<{ ok: true }>;

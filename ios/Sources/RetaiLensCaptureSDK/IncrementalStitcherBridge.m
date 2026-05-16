@@ -56,4 +56,13 @@ RCT_EXTERN_METHOD(markNextFrameAsLastKeyframe:(RCTPromiseResolveBlock)resolver
 RCT_EXTERN_METHOD(getMemoryFootprintMB:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// 2026-05-16 — realtime+batch fusion (Option A "Replace on completion").
+// Run the shared C++ stitcher over a caller-supplied list of keyframe
+// JPEG paths and write a refined panorama to `outputPath`.  See JS
+// `IncrementalRefineOptions` / `IncrementalRefineResult` types and the
+// design doc 2026-05-14-realtime-batch-fusion.md.
+RCT_EXTERN_METHOD(refinePanorama:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 @end
