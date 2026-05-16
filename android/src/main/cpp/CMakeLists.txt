@@ -84,7 +84,13 @@ endif()
 add_library(retailens_stitcher SHARED
     retailens_stitcher.cpp
     keyframe_gate_jni.cpp
-    "${SHARED_CPP_DIR}/keyframe_gate.cpp")
+    "${SHARED_CPP_DIR}/keyframe_gate.cpp"
+    # 2026-05-15 — shared stitcher.cpp, used by BOTH platforms.
+    # Owns the cv::Stitcher orchestration + C+D progressive-confidence
+    # retry + dimension/memory instrumentation.  Used to live in this
+    # file (retailens_stitcher.cpp).  See cpp/stitcher.hpp for design
+    # rationale.
+    "${SHARED_CPP_DIR}/stitcher.cpp")
 
 target_include_directories(retailens_stitcher PRIVATE
     "${OPENCV_INCLUDE_DIR}"
