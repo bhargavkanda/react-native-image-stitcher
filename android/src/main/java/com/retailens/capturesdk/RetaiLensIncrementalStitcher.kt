@@ -277,8 +277,33 @@ class RetaiLensIncrementalStitcher(
             // engine, frames are saved as JPEGs and handed to
             // cv::Stitcher (via the JNI shim) at finalize.
             val engineMode = options.getString("engine") ?: "hybrid"
-            val isFirstwins = engineMode.startsWith("firstwins")
-            val useRectilinear = engineMode == "firstwins-rectilinear"
+            // 2026-05-15 — Route 'slitscan*' engineModes to the same
+            // IncrementalFirstwinsEngine that handles 'firstwins*'.
+            // Per IncrementalFirstwinsEngine's docstring (lines 260,
+            // 431, 436, 672, 957): "Mirrors iOS' OpenCVSlitScanStitcher.mm
+            // exactly".  Before this change, 'slitscan' / 'slitscan-rotate'
+            // / 'slitscan-both' engineModes fell through to IncrementalEngine
+            // (the hybrid engine), producing identical output to picking
+            // 'hybrid' — silent platform divergence vs iOS.
+            //
+            // iOS-parity reference: RetaiLensIncrementalStitcher.swift:556
+            // computes `useFirstwinsClass = normalisedMode.hasPrefix("slitscan")`
+            // which routes BOTH 'slitscan-rotate' AND 'slitscan-both' AND
+            // the deprecated aliases to OpenCVFirstWinsCylindricalStitcher.
+            // We mirror that logic here so Android Settings → Engine
+            // dropdown actually toggles the underlying engine.
+            val isFirstwinsClass =
+                engineMode.startsWith("firstwins") ||
+                engineMode.startsWith("slitscan")
+            val isFirstwins = isFirstwinsClass    // legacy name kept
+                                                  // for the remainder of
+                                                  // start() — refactor to
+                                                  // isFirstwinsClass when
+                                                  // the engineMode taxonomy
+                                                  // is rationalised.
+            val useRectilinear =
+                engineMode == "firstwins-rectilinear" ||
+                engineMode == "slitscan-rotate"
             val isBatchKeyframe = engineMode == "batch-keyframe"
 
             val configOverrides: ReadableMap? =

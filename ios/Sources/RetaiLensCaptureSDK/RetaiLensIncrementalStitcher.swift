@@ -276,6 +276,18 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// Serial queue for the heavy per-frame work.  ARSession delegate
     /// only dispatches a pre-allocated cv::Mat onto this queue — the
     /// pixel buffer itself is consumed before return.
+    ///
+    /// 2026-05-15 (C3 deferral) — investigated splitting the batch-
+    /// keyframe stitch onto its own DispatchQueue so a slow stitch
+    /// doesn't block ARSession frame ingestion on this workQueue.
+    /// Backed out: the existing `workQueue.sync` finalize boundary
+    /// (V16 Phase 1b.fix6) is INTENTIONAL — it serialises finalize
+    /// against in-flight frame work to prevent state-event races.
+    /// Moving the stitch to a separate queue requires reworking the
+    /// completion handler + stateLock contract to provide the same
+    /// ordering guarantees the sync barrier currently gives.  Real
+    /// fix is non-trivial; deferred until pose-driven stitch work
+    /// lands (which will rework the queue topology anyway).
     private let workQueue = DispatchQueue(
         label: "com.retailens.incremental.stitcher",
         qos: .userInitiated
