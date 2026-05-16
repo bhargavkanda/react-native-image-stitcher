@@ -293,6 +293,23 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         qos: .userInitiated
     )
 
+    /// 2026-05-16 — realtime+batch fusion (Option A "Replace on
+    /// completion").  Dedicated queue for the async refinement run
+    /// that follows a hybrid-engine finalize().  Kept SEPARATE from
+    /// `workQueue` so the next capture's start/consumeFrame path
+    /// isn't gated on the prior capture's 2-5 s cv::Stitcher run —
+    /// the design doc explicitly calls out "operator can continue
+    /// browsing / starting another capture during refinement".
+    ///
+    /// Serial: at most one refinement runs at a time (the design's
+    /// "cancellation semantics if a new capture starts mid-refine"
+    /// is out of scope for this MVP — see prompt's "deliberately out
+    /// of scope" list).
+    private let refineQueue = DispatchQueue(
+        label: "com.retailens.incremental.refine",
+        qos: .utility
+    )
+
     /// Lock guarding `engine`/`isRunning` reads/writes.  ARSession
     /// delegate uses `try` to avoid blocking ARKit; if start/stop is
     /// mid-flight the frame is dropped.
@@ -409,6 +426,29 @@ public final class RetaiLensIncrementalStitcher: NSObject {
 
     private override init() {
         super.init()
+    }
+
+    /// 2026-05-16 — realtime+batch fusion (Option A) path derivation.
+    /// Given the live panorama path (which finalize() wrote inside
+    /// the app sandbox tmp or a host-supplied location), pick a path
+    /// for the refined output.  Pattern:
+    ///
+    ///   /…/RetaiLensIncremental-<uuid>.jpg
+    ///       → /…/RetaiLensIncremental-<uuid>-refined.jpg
+    ///
+    /// Same directory keeps cleanup discoverable (delete both when
+    /// the audit is discarded).  Different name avoids racing the
+    /// host UI that may still be reading the live file as the
+    /// refinement is writing.
+    fileprivate static func refinedPathFromLive(livePath: String) -> String {
+        let ns = livePath as NSString
+        let dir = ns.deletingLastPathComponent
+        let base = (ns.lastPathComponent as NSString).deletingPathExtension
+        let ext = (ns.lastPathComponent as NSString).pathExtension
+        let refinedName = ext.isEmpty
+            ? "\(base)-refined"
+            : "\(base)-refined.\(ext)"
+        return (dir as NSString).appendingPathComponent(refinedName)
     }
 
     // ── Native orientation classifier ────────────────────────────────
@@ -1359,6 +1399,62 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                         "acceptedCount": snap.acceptedCount,
                         "droppedBackpressure": payload.drops,
                     ], nil)
+                    // 2026-05-16 — realtime+batch fusion (Option A
+                    // "Replace on completion") hook.  The live
+                    // panorama has been written and the JS finalize
+                    // promise has resolved; now fire-and-forget an
+                    // async refinement over the hybrid engine's
+                    // accepted keyframes.
+                    //
+                    // Constraints honoured here (per the design doc
+                    // and the prompt's "Constraints" list):
+                    //   1. Hybrid realtime engine is NOT modified —
+                    //      `OpenCVIncrementalStitcher.mm` stays
+                    //      untouched; we only consult the existing
+                    //      keyframe-path ivar that finalize() already
+                    //      snapshotted into `payload.paths`.
+                    //   2. NO-OP when keyframes are not on disk.
+                    //      Today's hybrid engine does NOT save per-
+                    //      frame JPEGs (only batch-keyframe mode does
+                    //      via OpenCVKeyframeCollector), so
+                    //      `payload.paths` is empty for the hybrid
+                    //      branch.  `runHybridAutoRefine` detects
+                    //      that and emits `isRefining=false` without
+                    //      running cv::Stitcher.  When a future change
+                    //      hooks the hybrid engine up to a keyframe
+                    //      collector, the same code path lights up
+                    //      automatically.
+                    //   3. Refinement is fire-and-forget — finalize's
+                    //      promise has ALREADY been resolved above.
+                    //
+                    // Capture-list discipline (C2 invariant — see the
+                    // file-top markers).  No `self.*` references allowed
+                    // here; we route the dispatch through the type
+                    // (RetaiLensIncrementalStitcher.shared) so the
+                    // closure captures only value-typed locals + the
+                    // class type itself.  shared is a process-wide
+                    // singleton (initialised once at module load),
+                    // so this is lifecycle-safe.
+                    let refinedOut = Self.refinedPathFromLive(
+                        livePath: snap.panoramaPath
+                    )
+                    let pathsForRefine = payload.paths   // empty for hybrid today
+                    let capOri = payload.captureOrientation
+                    let warper = payload.batchWarperType
+                    let blender = payload.batchBlenderType
+                    let seam = payload.batchSeamFinderType
+                    let inscribed = payload.batchEnableInscribedRectCrop
+                    RetaiLensIncrementalStitcher.shared.refineQueue.async {
+                        RetaiLensIncrementalStitcher.shared.runHybridAutoRefine(
+                            framePaths: pathsForRefine,
+                            refinedOutputPath: refinedOut,
+                            captureOrientation: capOri,
+                            warperType: warper,
+                            blenderType: blender,
+                            seamFinderType: seam,
+                            useInscribedRectCrop: inscribed
+                        )
+                    }
                 } else if let slit = payload.slit {
                     let snap = try slit.finalize(atPath: payload.cleaned, jpegQuality: payload.q)
                     completion([
@@ -1381,6 +1477,261 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             }
         }
         // MARK: C2-INVARIANT-END
+    }
+
+    /// 2026-05-16 — realtime+batch fusion (Option A) entry point.
+    /// Runs the shared C++ stitcher over the supplied keyframe JPEGs
+    /// and writes a refined panorama to `outputPath`.
+    ///
+    /// Called by:
+    ///   1. The bridge layer (explicit JS `refinePanorama(...)` API).
+    ///   2. `runHybridAutoRefine(...)` below, the fire-and-forget hook
+    ///      from `finalize()` for the hybrid-engine path.
+    ///
+    /// Threading: the work itself dispatches onto `refineQueue` (NOT
+    /// `workQueue`).  That keeps the per-capture path completely
+    /// independent — a refinement in flight does not delay a fresh
+    /// start()/consumeFrame() pair the operator may have initiated
+    /// while the refinement runs.  Completion fires on `refineQueue`;
+    /// callers that need main-thread delivery (e.g. the bridge
+    /// promise resolver) re-dispatch as needed.
+    ///
+    /// Configuration: same option set the bridge sees from JS plus
+    /// production-tested defaults that match the existing
+    /// batch-keyframe finalize path:
+    ///   warperType         = "spherical"
+    ///   blenderType        = "multiband"
+    ///   seamFinderType     = "graphcut"
+    ///   captureOrientation = "portrait"
+    ///   useInscribedRectCrop = false
+    ///   jpegQuality        = 90
+    ///
+    /// Pre-conditions enforced here (in addition to bridge-level
+    /// validation): every input path must exist on disk; if any is
+    /// missing the call resolves with an NSError so the caller can
+    /// surface a clean error rather than letting cv::imread crash
+    /// inside the manual pipeline.
+    @objc public func refinePanorama(
+        framePaths: [String],
+        outputPath: String,
+        config: [String: Any],
+        completion: @escaping ([String: Any]?, NSError?) -> Void
+    ) {
+        guard framePaths.count >= 2 else {
+            completion(nil, NSError(
+                domain: "RetaiLensIncremental",
+                code: 9101,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "refinePanorama requires at least 2 framePaths (got \(framePaths.count))."]
+            ))
+            return
+        }
+        let fm = FileManager.default
+        for p in framePaths {
+            let cleaned = p.hasPrefix("file://") ? String(p.dropFirst(7)) : p
+            if !fm.fileExists(atPath: cleaned) {
+                completion(nil, NSError(
+                    domain: "RetaiLensIncremental",
+                    code: 9102,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "refinePanorama: keyframe missing on disk — \(cleaned)"]
+                ))
+                return
+            }
+        }
+        let warper      = (config["warperType"] as? String) ?? "spherical"
+        let blender     = (config["blenderType"] as? String) ?? "multiband"
+        let seam        = (config["seamFinderType"] as? String) ?? "graphcut"
+        let orientation = (config["captureOrientation"] as? String) ?? "portrait"
+        let useInscribed = (config["useInscribedRectCrop"] as? Bool) ?? false
+        let quality     = max(1, min(100, (config["jpegQuality"] as? Int) ?? 90))
+        let cleanedOutput = outputPath.hasPrefix("file://")
+            ? String(outputPath.dropFirst(7))
+            : outputPath
+
+        os_log(.fault, log: Self.diagLog,
+               "[refine] dispatch frames=%d output=%{public}@ warper=%{public}@ blender=%{public}@ seam=%{public}@",
+               framePaths.count,
+               cleanedOutput,
+               warper, blender, seam)
+
+        refineQueue.async {
+            // C2-style: closure captures only value-typed locals
+            // (paths, output path, config strings).  No `self` access
+            // is needed for the cv::Stitcher call — OpenCVStitcher is
+            // a class method, not an instance method, so we can call
+            // it directly via the type.
+            do {
+                let r = try OpenCVStitcher.stitchFramePaths(
+                    framePaths,
+                    outputPath: cleanedOutput,
+                    jpegQuality: quality,
+                    warperType: warper,
+                    blenderType: blender,
+                    seamFinderType: seam,
+                    captureOrientation: orientation,
+                    useInscribedRectCrop: useInscribed
+                )
+                // fix-9 sentinel detection — see the finalize() path
+                // for the full rationale.  A 0×0 result means
+                // OpenCVStitcher hit one of its six guarded failure
+                // returns; surface as a clean NSError.
+                if r.width == 0 && r.height == 0 {
+                    completion(nil, NSError(
+                        domain: "RetaiLensIncremental",
+                        code: 9107,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "refinePanorama: stitcher returned sentinel — see preceding [RetaiLensStitcher] log for cause."]
+                    ))
+                    return
+                }
+                completion([
+                    "panoramaPath": r.outputPath,
+                    "width": Int(r.width),
+                    "height": Int(r.height),
+                    "framesRequested": framePaths.count,
+                    "framesIncluded": framePaths.count,
+                    "framesDropped": 0,
+                    "finalConfidenceThresh": -1.0,
+                ], nil)
+            } catch let err as NSError {
+                completion(nil, err)
+            }
+        }
+    }
+
+    /// 2026-05-16 — realtime+batch fusion (Option A) auto-trigger.
+    /// Called from `finalize()` immediately after the hybrid engine
+    /// wrote its live panorama; fire-and-forget from finalize()'s
+    /// perspective so the JS-side finalize promise resolves with the
+    /// live result first.  Then this method:
+    ///
+    ///   1. Emits a state event with `isRefining = true` so the host
+    ///      can render its "Refining…" pill.
+    ///   2. Runs `refinePanorama(framePaths, refinedOutputPath, ...)`.
+    ///   3. On success: emits a state event with `isRefining = false`
+    ///      AND `refinedPanoramaPath = <path>` so the host swaps in
+    ///      the higher-quality output.
+    ///   4. On failure: emits a state event with `isRefining = false`
+    ///      AND NO refined path.  Host keeps showing the live
+    ///      panorama; the design doc's "Couldn't refine" toast UX is
+    ///      a follow-up.
+    ///
+    /// No-op when `framePaths.count < 2` or any framePath is missing
+    /// on disk.  Hybrid-engine captures DO NOT today save per-frame
+    /// JPEGs, so this method's most common call site (from finalize's
+    /// hybrid branch) currently produces a no-op + isRefining=false
+    /// emit — which is intentional (the design doc says "if
+    /// keyframes are NOT on disk, the auto-trigger is a no-op").
+    private func runHybridAutoRefine(
+        framePaths: [String],
+        refinedOutputPath: String,
+        captureOrientation: String,
+        warperType: String,
+        blenderType: String,
+        seamFinderType: String,
+        useInscribedRectCrop: Bool
+    ) {
+        if framePaths.count < 2 {
+            os_log(.info, log: Self.diagLog,
+                   "[refine.auto] skipped: framePaths.count=%d (< 2 — hybrid engine retains no per-frame JPEGs)",
+                   framePaths.count)
+            // Emit isRefining=false so any host that pre-seeded a
+            // pill on finalize doesn't get stuck.
+            self.emitRefinementState(isRefining: false, refinedPanoramaPath: nil)
+            return
+        }
+        // Pre-flight existence check so we degrade gracefully when
+        // a JPEG was unlinked between finalize and the dispatch
+        // landing on refineQueue.
+        let fm = FileManager.default
+        for p in framePaths {
+            let cleaned = p.hasPrefix("file://") ? String(p.dropFirst(7)) : p
+            if !fm.fileExists(atPath: cleaned) {
+                os_log(.info, log: Self.diagLog,
+                       "[refine.auto] skipped: missing keyframe %{public}@",
+                       cleaned)
+                self.emitRefinementState(isRefining: false, refinedPanoramaPath: nil)
+                return
+            }
+        }
+        // Signal the pill on before the stitcher work begins.  The
+        // emit goes through the same notification channel as every
+        // other state update; JS sees it asynchronously, which is
+        // fine — operator UX wants the pill within a few hundred ms,
+        // not synchronously with finalize's promise resolution.
+        self.emitRefinementState(isRefining: true, refinedPanoramaPath: nil)
+        let config: [String: Any] = [
+            "warperType": warperType,
+            "blenderType": blenderType,
+            "seamFinderType": seamFinderType,
+            "captureOrientation": captureOrientation,
+            "useInscribedRectCrop": useInscribedRectCrop,
+            "jpegQuality": 90,
+        ]
+        self.refinePanorama(
+            framePaths: framePaths,
+            outputPath: refinedOutputPath,
+            config: config
+        ) { [weak self] result, error in
+            guard let self = self else { return }
+            if let error = error {
+                os_log(.fault, log: Self.diagLog,
+                       "[refine.auto] refinement failed: %{public}@ — leaving live output in place",
+                       error.localizedDescription)
+                self.emitRefinementState(isRefining: false, refinedPanoramaPath: nil)
+                return
+            }
+            let path = (result?["panoramaPath"] as? String) ?? refinedOutputPath
+            os_log(.fault, log: Self.diagLog,
+                   "[refine.auto] success path=%{public}@",
+                   path)
+            self.emitRefinementState(isRefining: false, refinedPanoramaPath: path)
+        }
+    }
+
+    /// 2026-05-16 — emit a minimal state event carrying only the
+    /// refinement-related fields.  Mirrors the existing
+    /// `emitBatchKeyframeAcceptedState` pattern: build a fresh
+    /// RetaiLensIncrementalState, then add the new optional fields
+    /// directly to the userInfo dict so JS (which reads from the
+    /// raw event payload) picks them up without a schema change in
+    /// the Obj-C class.
+    private func emitRefinementState(
+        isRefining: Bool,
+        refinedPanoramaPath: String?
+    ) {
+        // Preserve the most-recent panoramaPath / dims / accepted
+        // count so the JS subscriber's sticky-snapshot merge keeps
+        // showing the live preview between the finalize and the
+        // refined swap.  All other fields default to "no-op" values.
+        stateLock.lock()
+        let prev = self.lastState
+        stateLock.unlock()
+        let state = RetaiLensIncrementalState(
+            panoramaPath: prev?.panoramaPath,
+            width: prev?.width ?? 0,
+            height: prev?.height ?? 0,
+            acceptedCount: prev?.acceptedCount ?? 0,
+            outcome: prev?.outcome ?? .acceptedHigh,
+            confidence: prev?.confidence ?? 1.0,
+            overlapPercent: prev?.overlapPercent ?? -1.0,
+            processingMs: 0,
+            isLandscape: prev?.isLandscape ?? false,
+            paintedExtent: prev?.paintedExtent ?? 0,
+            panExtent: prev?.panExtent ?? 0,
+            keyframeMax: prev?.keyframeMax ?? 0
+        )
+        var dict = state.asDictionary()
+        dict["isRefining"] = isRefining
+        if let p = refinedPanoramaPath {
+            dict["refinedPanoramaPath"] = p
+        }
+        NotificationCenter.default.post(
+            name: .retailensIncrementalStateUpdate,
+            object: nil,
+            userInfo: dict
+        )
     }
 
     /// Cancel an in-progress capture without producing output.

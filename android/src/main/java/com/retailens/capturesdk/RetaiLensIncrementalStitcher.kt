@@ -215,6 +215,20 @@ class RetaiLensIncrementalStitcher(
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val workScope = CoroutineScope(Dispatchers.Default.limitedParallelism(1))
 
+    /// 2026-05-16 — realtime+batch fusion (Option A "Replace on
+    /// completion") scope.  Kept SEPARATE from `workScope` so the
+    /// 2-5 s `cv::Stitcher` refinement run that follows a hybrid-
+    /// engine finalize() does NOT delay a new start()/processFrame()
+    /// that the operator may issue while the refinement is in flight.
+    /// The design doc explicitly calls out "operator can continue
+    /// browsing / starting another capture during refinement".
+    ///
+    /// Serial: at most one refinement runs at a time (the design's
+    /// "cancellation semantics if a new capture starts mid-refine"
+    /// is out of scope for this MVP).
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val refineScope = CoroutineScope(Dispatchers.Default.limitedParallelism(1))
+
     /// Reference to a mounted ARCameraView (if any).  Set by the view
     /// when it attaches; the engine flips its `ingestActive` flag
     /// on start/stop so the view feeds frames only during a capture.
@@ -852,6 +866,40 @@ class RetaiLensIncrementalStitcher(
                     map.putInt("height", snap.height)
                     map.putInt("acceptedCount", snap.acceptedCount)
                     hybrid.release()
+                    // 2026-05-16 — realtime+batch fusion (Option A
+                    // "Replace on completion") hook.  The live
+                    // panorama has been written to outputPath; now
+                    // fire-and-forget an async refinement on the
+                    // engine's accepted keyframes via the shared C++
+                    // stitcher.
+                    //
+                    // Today's `IncrementalEngine` (the hybrid live
+                    // engine) does NOT retain per-frame JPEGs — it
+                    // paints into a single persistent canvas Mat
+                    // that's torn down by `release()` above.  So the
+                    // keyframe-paths list passed to runHybridAutoRefine
+                    // is empty for the hybrid branch, which means
+                    // the auto-trigger detects "< 2 keyframes on
+                    // disk" and emits `isRefining=false` without
+                    // running cv::Stitcher.  Per the prompt's
+                    // "no-op when no keyframes on disk" constraint.
+                    //
+                    // When a future change wires the hybrid engine
+                    // to a keyframe collector (parallel to iOS'
+                    // OpenCVKeyframeCollector), the same hook will
+                    // light up automatically — just pass the
+                    // populated list here.
+                    val keyframePathsForHybrid: List<String> = emptyList()
+                    val refinedOutputPath = refinedPathFromLive(outputPath)
+                    runHybridAutoRefine(
+                        framePaths = keyframePathsForHybrid,
+                        refinedOutputPath = refinedOutputPath,
+                        captureOrientation = captureOrientationSnapshot,
+                        warperType = warperTypeSnapshot,
+                        blenderType = blenderTypeSnapshot,
+                        seamFinderType = seamFinderTypeSnapshot,
+                        useInscribedRectCrop = useInscribedRectCropSnapshot,
+                    )
                 }
                 map.putInt("droppedBackpressure", 0)
                 promise.resolve(map)
@@ -1147,6 +1195,267 @@ class RetaiLensIncrementalStitcher(
         val map = Arguments.createMap()
         map.putBoolean("ok", true)
         promise.resolve(map)
+    }
+
+    /**
+     * 2026-05-16 — realtime+batch fusion (Option A "Replace on
+     * completion") entry point.  Run the shared C++ `cv::Stitcher`
+     * pipeline over a caller-supplied list of keyframe JPEGs and
+     * write a refined panorama to `outputPath`.
+     *
+     * Pre-conditions:
+     *   - `framePaths.length >= 2`
+     *   - Each path must exist on disk
+     *
+     * Routing: delegates to `RetaiLensStitcher.stitchSync(...)` —
+     * the same shared-JNI shim the batch-keyframe finalize uses.
+     * Quality defaults match the batch-keyframe finalize:
+     *   warperType         = "spherical"
+     *   blenderType        = "multiband"
+     *   seamFinderType     = "graphcut"
+     *   captureOrientation = "portrait"
+     *   useInscribedRectCrop = false
+     *   stitchMode         = "auto"
+     *   jpegQuality        = 90
+     *
+     * Threading: dispatches onto `refineScope` so the JS promise
+     * doesn't block the @ReactMethod thread for the 2-5 s the
+     * stitcher takes.  iOS-parity behaviour.
+     *
+     * iOS sibling: `RetaiLensIncrementalStitcher.swift::refinePanorama`.
+     *
+     * See: docs/site-content/design/2026-05-14-realtime-batch-fusion.md
+     */
+    @ReactMethod
+    fun refinePanorama(options: ReadableMap, promise: Promise) {
+        val framePathsArr = options.getArray("framePaths")
+        if (framePathsArr == null || framePathsArr.size() < 2) {
+            promise.reject(
+                "incremental-refine-invalid-input",
+                "refinePanorama requires at least 2 framePaths (got " +
+                    "${framePathsArr?.size() ?: 0}).",
+            )
+            return
+        }
+        val framePaths = Array(framePathsArr.size()) {
+            stripFileScheme(framePathsArr.getString(it) ?: "")
+        }
+        val outputPathOpt = options.getString("outputPath")
+        if (outputPathOpt.isNullOrEmpty()) {
+            promise.reject(
+                "incremental-refine-invalid-input",
+                "refinePanorama requires a non-empty outputPath.",
+            )
+            return
+        }
+        val outputPath = stripFileScheme(outputPathOpt)
+        val config: ReadableMap? =
+            if (options.hasKey("config")) options.getMap("config") else null
+        val warperType = config?.getString("warperType") ?: "spherical"
+        val blenderType = config?.getString("blenderType") ?: "multiband"
+        val seamFinderType = config?.getString("seamFinderType") ?: "graphcut"
+        val captureOrientation = config?.getString("captureOrientation") ?: "portrait"
+        val useInscribedRectCrop =
+            config?.getBooleanOrDefault("useInscribedRectCrop", false) ?: false
+        val stitchMode = (config?.getString("stitchMode") ?: "auto")
+            .let { if (it in setOf("auto", "panorama", "scans")) it else "auto" }
+        val jpegQuality = max(1, min(100,
+            config?.getIntOrDefault("jpegQuality", 90) ?: 90))
+
+        // Pre-flight existence check — same defensive layer iOS has.
+        for (p in framePaths) {
+            if (!File(p).exists()) {
+                promise.reject(
+                    "incremental-refine-missing-keyframe",
+                    "refinePanorama: keyframe missing on disk — $p",
+                )
+                return
+            }
+        }
+
+        refineScope.launch {
+            try {
+                val stitcher = RetaiLensStitcher.bridgeInstance
+                    ?: throw IllegalStateException(
+                        "RetaiLensStitcher.bridgeInstance is null — " +
+                            "module hasn't been instantiated yet.",
+                    )
+                // "auto" mode is meaningful only when we have first/
+                // last keyframe poses to consult; the explicit
+                // refinePanorama entry point has no pose context, so
+                // collapse 'auto' → 'scans' here (the safer fallback,
+                // identical to resolveStitchModeAuto's null-pose
+                // branch).  Concrete modes pass through unchanged.
+                val effectiveMode = if (stitchMode == "auto") "scans" else stitchMode
+                val dims = stitcher.stitchSync(
+                    framePaths,
+                    outputPath,
+                    jpegQuality,
+                    warperType,
+                    blenderType,
+                    seamFinderType,
+                    captureOrientation,
+                    useInscribedRectCrop,
+                    stitchMode = effectiveMode,
+                )
+                val framesRequested =
+                    if (dims.size > 2) dims[2] else framePaths.size
+                val framesIncluded =
+                    if (dims.size > 3) dims[3] else framePaths.size
+                val finalConfidenceThresh =
+                    if (dims.size > 4) dims[4].toDouble() / 1000.0 else -1.0
+                val map = Arguments.createMap().apply {
+                    putString("panoramaPath", outputPath)
+                    putInt("width", dims[0])
+                    putInt("height", dims[1])
+                    putInt("framesRequested", framesRequested)
+                    putInt("framesIncluded", framesIncluded)
+                    putInt("framesDropped", framesRequested - framesIncluded)
+                    putDouble("finalConfidenceThresh", finalConfidenceThresh)
+                }
+                promise.resolve(map)
+            } catch (t: Throwable) {
+                promise.reject("incremental-refine-failed", t.message, t)
+            }
+        }
+    }
+
+    /**
+     * 2026-05-16 — realtime+batch fusion auto-trigger called from
+     * the hybrid-engine branch of `finalize()`.  Fire-and-forget;
+     * the finalize() promise has ALREADY resolved with the live
+     * panorama before this is invoked.
+     *
+     *   1. Emits a state event with `isRefining = true` so the
+     *      host renders a "Refining…" pill.
+     *   2. Runs `RetaiLensStitcher.stitchSync(...)` on the supplied
+     *      keyframe paths.
+     *   3. On success: emits a state event with `isRefining = false`
+     *      AND `refinedPanoramaPath = <path>`.
+     *   4. On failure: emits a state event with `isRefining = false`
+     *      and no refined path.  Host keeps showing the live
+     *      panorama; failure does not affect audit save.
+     *
+     * NO-OP when `framePaths.size < 2` or any path is missing on
+     * disk — matches the design doc's "if keyframes are NOT on
+     * disk, auto-trigger is a no-op" contract.  Today's hybrid
+     * engine retains no per-frame JPEGs so this is the
+     * always-no-op path; the hook is wired in advance of a future
+     * keyframe-collector enhancement.
+     */
+    internal fun runHybridAutoRefine(
+        framePaths: List<String>,
+        refinedOutputPath: String,
+        captureOrientation: String,
+        warperType: String,
+        blenderType: String,
+        seamFinderType: String,
+        useInscribedRectCrop: Boolean,
+    ) {
+        if (framePaths.size < 2) {
+            android.util.Log.i(
+                "RetaiLensIncrementalStitcher",
+                "[refine.auto] skipped: framePaths.size=${framePaths.size} " +
+                    "(hybrid engine retains no per-frame JPEGs)",
+            )
+            emitRefinementState(isRefining = false, refinedPanoramaPath = null)
+            return
+        }
+        for (p in framePaths) {
+            if (!File(p).exists()) {
+                android.util.Log.i(
+                    "RetaiLensIncrementalStitcher",
+                    "[refine.auto] skipped: missing keyframe $p",
+                )
+                emitRefinementState(isRefining = false, refinedPanoramaPath = null)
+                return
+            }
+        }
+        emitRefinementState(isRefining = true, refinedPanoramaPath = null)
+        refineScope.launch {
+            try {
+                val stitcher = RetaiLensStitcher.bridgeInstance
+                    ?: throw IllegalStateException(
+                        "RetaiLensStitcher.bridgeInstance is null at auto-refine time",
+                    )
+                stitcher.stitchSync(
+                    framePaths.toTypedArray(),
+                    refinedOutputPath,
+                    90,
+                    warperType,
+                    blenderType,
+                    seamFinderType,
+                    captureOrientation,
+                    useInscribedRectCrop,
+                    stitchMode = "scans",
+                )
+                android.util.Log.i(
+                    "RetaiLensIncrementalStitcher",
+                    "[refine.auto] success path=$refinedOutputPath",
+                )
+                emitRefinementState(
+                    isRefining = false,
+                    refinedPanoramaPath = refinedOutputPath,
+                )
+            } catch (t: Throwable) {
+                android.util.Log.w(
+                    "RetaiLensIncrementalStitcher",
+                    "[refine.auto] refinement failed (live output kept): ${t.message}",
+                )
+                emitRefinementState(isRefining = false, refinedPanoramaPath = null)
+            }
+        }
+    }
+
+    /**
+     * 2026-05-16 — emit a refinement-related state event.  Reuses
+     * the same RetaiLensIncrementalStateUpdate channel the live
+     * engines emit on; JS reads `isRefining` and `refinedPanoramaPath`
+     * directly from the event payload (no schema change required on
+     * the JS dispatch side).
+     */
+    private fun emitRefinementState(
+        isRefining: Boolean,
+        refinedPanoramaPath: String?,
+    ) {
+        val state = Arguments.createMap().apply {
+            putNull("panoramaPath")
+            putInt("width", 0)
+            putInt("height", 0)
+            putInt("acceptedCount", 0)
+            putInt("outcome", 0)              // AcceptedHigh
+            putDouble("confidence", 1.0)
+            putDouble("overlapPercent", -1.0)
+            putInt("processingMs", 0)
+            putBoolean("isLandscape", false)
+            putInt("paintedExtent", 0)
+            putInt("panExtent", 0)
+            putInt("keyframeMax", 0)
+            putBoolean("isRefining", isRefining)
+            if (refinedPanoramaPath != null) {
+                putString("refinedPanoramaPath", refinedPanoramaPath)
+            }
+        }
+        emitState(state)
+    }
+
+    /**
+     * 2026-05-16 — given the live panorama path, derive a sibling
+     * path for the refined output.  Same algorithm iOS uses:
+     *   /…/<base>.jpg → /…/<base>-refined.jpg
+     */
+    private fun refinedPathFromLive(livePath: String): String {
+        val cleaned = stripFileScheme(livePath)
+        val file = File(cleaned)
+        val parent = file.parentFile ?: File(reactContext.cacheDir, "panoramas")
+        val name = file.name
+        val dot = name.lastIndexOf('.')
+        val refinedName = if (dot >= 0) {
+            "${name.substring(0, dot)}-refined${name.substring(dot)}"
+        } else {
+            "$name-refined"
+        }
+        return File(parent, refinedName).absolutePath
     }
 
     /**

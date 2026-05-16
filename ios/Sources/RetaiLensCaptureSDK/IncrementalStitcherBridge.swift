@@ -258,6 +258,68 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver(mb)
     }
 
+    /// 2026-05-16 — realtime+batch fusion (Option A) bridge.  Marshal
+    /// the options dictionary into the engine layer, dispatch the
+    /// refinement off the bridge thread so the JS Promise doesn't block
+    /// the bridge queue for the 2-5 s the stitcher takes, and surface
+    /// the result/error back to JS.  The actual cv::Stitcher invocation
+    /// lives on the engine layer so the auto-trigger path (called from
+    /// inside `finalize()`) and the explicit JS path share one
+    /// implementation.
+    ///
+    /// `options` keys:
+    ///   - framePaths (NSArray<NSString *>, required, >= 2 entries)
+    ///   - outputPath (NSString, required, non-empty)
+    ///   - config (NSDictionary, optional) — warperType, blenderType,
+    ///       seamFinderType, captureOrientation, useInscribedRectCrop,
+    ///       jpegQuality.  Missing fields fall back to spherical /
+    ///       multiband / graphcut / portrait / false / 90.
+    @objc(refinePanorama:resolver:rejecter:)
+    public func refinePanorama(
+        options: NSDictionary,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        let framePathsAny = options["framePaths"]
+        guard let framePaths = framePathsAny as? [String], framePaths.count >= 2 else {
+            rejecter(
+                "incremental-refine-invalid-input",
+                "refinePanorama requires at least 2 framePaths (got "
+                    + "\(((framePathsAny as? [String])?.count) ?? 0)).",
+                nil
+            )
+            return
+        }
+        let outputPathRaw = (options["outputPath"] as? String) ?? ""
+        guard !outputPathRaw.isEmpty else {
+            rejecter(
+                "incremental-refine-invalid-input",
+                "refinePanorama requires a non-empty outputPath.",
+                nil
+            )
+            return
+        }
+        let outputPath = outputPathRaw.hasPrefix("file://")
+            ? String(outputPathRaw.dropFirst(7))
+            : outputPathRaw
+        let config = options["config"] as? [String: Any] ?? [:]
+        RetaiLensIncrementalStitcher.shared.refinePanorama(
+            framePaths: framePaths,
+            outputPath: outputPath,
+            config: config
+        ) { result, error in
+            if let error = error {
+                rejecter(
+                    "incremental-refine-failed",
+                    error.localizedDescription,
+                    error
+                )
+            } else {
+                resolver(result ?? [:])
+            }
+        }
+    }
+
     /// PiP investigation: write a JS-supplied message into the same
     /// rlis-debug.log file the Swift side uses, so we get a single
     /// timeline across native and JS.  Remove once PiP is fixed.

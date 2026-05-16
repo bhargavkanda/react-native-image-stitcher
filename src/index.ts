@@ -139,6 +139,8 @@ export type {
   IncrementalState,
   IncrementalStartOptions,
   IncrementalFinalizeResult,
+  IncrementalRefineOptions,
+  IncrementalRefineResult,
   ARPlaneStatus,
 } from './stitching/incremental';
 export { useIncrementalStitcher } from './stitching/useIncrementalStitcher';
