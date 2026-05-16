@@ -437,7 +437,11 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // between pose-based and flow-based (40 % new content per
   // keyframe, ≤ 6 keyframes per capture).
   frameSelectionMode: 'flow-based',
-  keyframeOverlapThreshold: 0.40,
+  // 2026-05-15 (U4) — flow-based default novelty 0.40 → 0.20.
+  // Accept frames with 20 % new content (was 40 %).  More inclusive
+  // selection for shelf-pan captures where panning slowly produces
+  // gradual content reveal.  Operator can still bump via Settings.
+  keyframeOverlapThreshold: 0.20,
   keyframeMaxCount: 6,
   // V16 A2 — flow-based mode tuning.  Defaults are the values that
   // tested cleanly on iPhone 13 Pro / 14 Pro: 150 corners give a
@@ -456,10 +460,15 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // can dial down toward 0.5 for more-conservative captures or up
   // toward 0.99 for more-aggressive.
   flowNoveltyPercentile: 0.85,
-  // V16 — every-Nth-frame eval throttle.  1 = every frame (default,
+  // V16 — every-Nth-frame eval throttle.  2026-05-15 (U4): default
+  // 1 → 5 to reduce per-frame KeyframeGate CPU cost (Shi-Tomasi +
+  // calcOpticalFlowPyrLK is ~3-5 ms per ARFrame on Galaxy A35; at
+  // 30 fps that's ~15 % CPU on flow alone).  Evaluating every 5th
+  // frame yields novelty samples at ~6 Hz which is still well above
+  // the 1-2 Hz keyframe-accept cadence.
   // matches pre-V16 behaviour).  Set higher to cut CPU on long
   // captures at the cost of acceptance latency.
-  flowEvalEveryNFrames: 1,
+  flowEvalEveryNFrames: 5,
   // V15.0c — sliver tweaks: leading-edge sliver from BOTTOM for typical
   // top-to-bottom pan + full first-frame anchor produced the best
   // outputs in early iteration.

@@ -278,7 +278,12 @@ float polygonIntersectionArea(const std::vector<Vec2>& subject,
 struct KeyframeGate::Impl {
     // ── Settings ──────────────────────────────────────────────────
     bool   enabled            = false;
-    double overlapThreshold   = 0.4;
+    // 2026-05-15 (U4) — default 0.4 → 0.2.  Accept frames with 20%
+    // new content (was 40%).  Operator can still tune higher via
+    // setOverlapThreshold for confidence-heavy captures.  JS layer
+    // also sets this explicitly on every start() so the C++ default
+    // only matters when the gate is used WITHOUT the JS bridge.
+    double overlapThreshold   = 0.2;
     int32_t maxCount          = 6;
 
     // V16 A2 — strategy + flow tunables.  Default is Pose to keep
