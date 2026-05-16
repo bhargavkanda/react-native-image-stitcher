@@ -5,6 +5,8 @@ import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.media.Image
+import android.view.Surface
+import androidx.exifinterface.media.ExifInterface
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -29,7 +31,35 @@ internal object YuvImageConverter {
     /// Convert + write JPEG.  Returns the path (no file:// prefix)
     /// or null on any encode/write error (caller-decides whether to
     /// log + drop the frame).
-    fun encodeToJpeg(image: Image, outputPath: String, jpegQuality: Int = 70): String? {
+    ///
+    /// 2026-05-15 (B3) — `displayRotation` parameter writes the
+    /// appropriate EXIF orientation tag so RN's Image loader (and
+    /// any other consumer that respects EXIF) displays the JPEG
+    /// upright regardless of how the device was held at capture.
+    ///
+    /// Without this, Android's image loaders display the raw sensor
+    /// pixels (typically landscape) as-is — so a portrait-held
+    /// capture's thumbnail appears sideways.  iOS's image loader
+    /// auto-respects EXIF orientation; Android's doesn't always
+    /// (depends on the loader path).  Setting the tag covers both.
+    ///
+    /// `displayRotation` should be the value returned from
+    /// `WindowManager.defaultDisplay.rotation` at capture time
+    /// (Surface.ROTATION_0/_90/_180/_270).  We assume a typical
+    /// back-camera sensor orientation of 90° — true for all
+    /// devices we ship to (Galaxy A35 verified).  Wire through
+    /// CameraCharacteristics.SENSOR_ORIENTATION in a follow-up
+    /// if we ever encounter a device that differs.
+    ///
+    /// Default `displayRotation = Surface.ROTATION_0` (portrait)
+    /// preserves the previous behaviour for legacy callsites that
+    /// haven't been updated yet.
+    fun encodeToJpeg(
+        image: Image,
+        outputPath: String,
+        jpegQuality: Int = 70,
+        displayRotation: Int = Surface.ROTATION_0,
+    ): String? {
         if (image.format != ImageFormat.YUV_420_888) return null
         val nv21 = yuv420toNV21(image) ?: return null
         val yuvImage = YuvImage(
@@ -50,6 +80,42 @@ internal object YuvImageConverter {
             FileOutputStream(File(outputPath)).use { it.write(baos.toByteArray()) }
         } catch (e: Throwable) {
             return null
+        }
+        // Write EXIF orientation tag based on display rotation.
+        // Sensor orientation 90° assumed (back camera).  The math:
+        //   ROTATION_0  (portrait, sensor 90° CW from screen-up)
+        //     → JPEG needs 90° CW to display upright → ROTATE_90 (6)
+        //   ROTATION_90 (landscape-left, sensor aligned with screen)
+        //     → no rotation → NORMAL (1)
+        //   ROTATION_180 (portrait-upside-down)
+        //     → 270° CW → ROTATE_270 (8)
+        //   ROTATION_270 (landscape-right)
+        //     → 180° → ROTATE_180 (3)
+        //
+        // EXIF tag set EVEN when the orientation is normal — keeps
+        // every output JPEG self-describing for downstream
+        // consumers (cv::Stitcher does NOT auto-honour EXIF, see
+        // RetaiLensStitcher.applyExifOrientation; this metadata
+        // exists primarily for the live thumbnail strip + future
+        // RN Image renderers).
+        val exifOrientation = when (displayRotation) {
+            Surface.ROTATION_0   -> ExifInterface.ORIENTATION_ROTATE_90
+            Surface.ROTATION_90  -> ExifInterface.ORIENTATION_NORMAL
+            Surface.ROTATION_180 -> ExifInterface.ORIENTATION_ROTATE_270
+            Surface.ROTATION_270 -> ExifInterface.ORIENTATION_ROTATE_180
+            else                 -> ExifInterface.ORIENTATION_NORMAL
+        }
+        try {
+            val exif = ExifInterface(outputPath)
+            exif.setAttribute(
+                ExifInterface.TAG_ORIENTATION,
+                exifOrientation.toString(),
+            )
+            exif.saveAttributes()
+        } catch (e: Throwable) {
+            // EXIF write failed — JPEG itself is still valid; just
+            // missing the orientation hint.  Caller doesn't need to
+            // know — non-fatal.
         }
         return outputPath
     }

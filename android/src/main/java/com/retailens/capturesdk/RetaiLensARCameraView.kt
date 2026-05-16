@@ -325,6 +325,17 @@ class RetaiLensARCameraView @JvmOverloads constructor(
                 image,
                 tmpJpegFile.absolutePath,
                 jpegQuality = 70,
+                // 2026-05-15 (B3) — pass current display rotation so
+                // the encoded JPEG gets an EXIF orientation tag.
+                // Without this, the live thumbnail strip shows
+                // sideways pictures when the device is held in
+                // portrait (sensor pixels are landscape by default).
+                // lastDisplayRotation is updated by the
+                // updateDisplayRotation() helper called from
+                // didMoveToWindow / the ARCore Session.setDisplayGeometry
+                // hook (see line ~410).
+                displayRotation = if (lastDisplayRotation >= 0)
+                    lastDisplayRotation else android.view.Surface.ROTATION_0,
             ) ?: return
 
             // Compute yaw + pitch from the ARCore quaternion using
