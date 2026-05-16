@@ -111,6 +111,42 @@ struct StitchConfig {
     double      seamEstimationResolMP = -1.0;          // < 0 = cv default (0.1 MP)
     double      compositingResolMP   = 1.0;            // 1.0 MP cap — THE OOM fix
     int         jpegQuality          = 85;
+
+    // Manual-pipeline opt-in (V2 of the shared port).
+    //
+    // Set true to route stitchFramePaths() through the hand-rolled
+    // cv::detail::* pipeline implemented in stitchFramePathsManual()
+    // instead of the high-level cv::Stitcher::create() wrapper.  The
+    // manual pipeline gives finer control that the high-level API
+    // hides behind defaults that don't fit our shelf-pan capture
+    // shape:
+    //
+    //   * Seam finder runs at a SEPARATE seam-MP budget (~0.1 MP
+    //     default) and the seam mask is upscaled back to compose-MP
+    //     before feeding the blender.  GraphCut is roughly O(N²) in
+    //     pixels — running it at compose-MP (1.0 MP) costs ~100× more
+    //     than at seam-MP and was timing out finalize() in JS.
+    //
+    //   * MultiBandBlender's Laplacian pyramid is built at compose-MP
+    //     directly (rather than re-warping from features-resolution
+    //     work frames).  Cylindrical-era sharpness restored on iOS.
+    //
+    //   * leaveBiggestComponent runs at PRUNE granularity (i.e., the
+    //     retry happens BEFORE the expensive BA / warp / blend), not
+    //     around the whole pipeline.  Retry cost is 5-10× cheaper than
+    //     the high-level cv::Stitcher's C+D loop that re-runs every
+    //     stage at each threshold.
+    //
+    //   * Explicit BundleAdjusterRay + wave correction + median focal
+    //     length scale determination — all features cv::Stitcher does
+    //     internally but with parameters we can't override (iter cap,
+    //     wave-correct kind, confidence threshold).
+    //
+    // Android currently leaves this false (the high-level pipeline
+    // works fine on Android's pre-V16 keyframe budgets).  iOS will
+    // flip it to true once the manual port is verified — separate
+    // commit from this V2 introduction.
+    bool        useManualPipeline    = false;
 };
 
 
@@ -149,12 +185,39 @@ using LogFn = std::function<void(int level, const char* tag, const char* msg)>;
 // per the config, runs the C+D progressive-confidence retry loop,
 // crops, bake-rotates, writes the output JPEG.
 //
+// When `config.useManualPipeline` is true the call is routed to
+// `stitchFramePathsManual()` instead — see below for the manual
+// pipeline's structural differences.
+//
 // Thread-safe per-call (no shared state); caller must serialise
 // concurrent calls.
 //
 // On failure (StitchResult::success == false) the output file is
 // not written.  errorCode + errorMessage tell why.
 StitchResult stitchFramePaths(
+    const std::vector<std::string>& framePaths,
+    const std::string&              outputPath,
+    const StitchConfig&             config,
+    LogFn                           logFn = nullptr);
+
+
+// Manual cv::detail::* pipeline entry point.  Same input/output
+// contract as stitchFramePaths(), but uses the hand-rolled stitching
+// pipeline ported from OpenCVStitcher.mm (ORB → BestOf2NearestMatcher
+// → HomographyBasedEstimator → BundleAdjusterRay → wave correct →
+// median-focal warper scale → two-stage resolution (registration_MP
+// / compose_MP) → GraphCutSeamFinder at seam_MP → MultiBandBlender).
+//
+// Use via config.useManualPipeline = true to get this entry point
+// indirectly from stitchFramePaths().  Also callable directly if a
+// future caller wants to bypass the high-level wrapper entirely.
+//
+// Thread-safe per-call (no shared state); caller must serialise
+// concurrent calls.
+//
+// On failure (StitchResult::success == false) the output file is
+// not written.  errorCode + errorMessage tell why.
+StitchResult stitchFramePathsManual(
     const std::vector<std::string>& framePaths,
     const std::string&              outputPath,
     const StitchConfig&             config,
