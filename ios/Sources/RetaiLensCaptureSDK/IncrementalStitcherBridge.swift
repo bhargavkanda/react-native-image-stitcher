@@ -20,6 +20,9 @@
 import Foundation
 import React
 import os.log
+import UIKit          // 2026-05-17 (#2) — UIImage decode for processFrameAtPath
+import CoreVideo      // CVPixelBuffer helpers
+import CoreGraphics   // CGContext for the BGRA conversion
 
 @objc(RetaiLensIncrementalStitcherBridge)
 public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
@@ -221,6 +224,129 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
     ) {
         RetaiLensIncrementalStitcher.shared.markNextFrameAsLastKeyframe()
         resolver(["ok": true])
+    }
+
+    /// 2026-05-17 (Issue #2) — JS-driven frame ingestion for iOS
+    /// non-AR mode.  Mirrors the Android `processFrameAtPath` entry
+    /// point.  Loads the JPEG at `path`, builds a synthetic
+    /// RetaiLensARFramePose from the JS-supplied quaternion +
+    /// intrinsics, and feeds it to the engine via consumeFrame.
+    ///
+    /// Translation is hard-coded to (0, 0, 0) because vision-camera +
+    /// gyro can give us rotation but not translation.  Acceptable for
+    /// the keyframe gate's "any new content" path; not acceptable for
+    /// translation-budget force-accept (which is independently driven
+    /// by the JS-side IMU hook).
+    ///
+    /// `options` keys:
+    ///   - path (NSString, required) — local file path (no file://)
+    ///   - qx, qy, qz, qw (Double, required) — quaternion, JS-side
+    ///     gyro-integrated
+    ///   - fx, fy, cx, cy (Double, required) — intrinsics in sensor px
+    ///   - imageWidth, imageHeight (Int, required)
+    ///   - trackingPoor (Bool, optional, default false)
+    ///   - timestampMs (Double, optional, default = now)
+    @objc(processFrameAtPath:resolver:rejecter:)
+    public func processFrameAtPath(
+        options: NSDictionary,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let path = options["path"] as? String, !path.isEmpty else {
+            rejecter("E_NO_PATH", "processFrameAtPath: missing 'path'", nil)
+            return
+        }
+        // Strip optional file:// prefix — JS callers sometimes send
+        // file URIs, native APIs want filesystem paths.
+        let cleanPath = path.hasPrefix("file://")
+            ? String(path.dropFirst("file://".count))
+            : path
+
+        guard let image = UIImage(contentsOfFile: cleanPath),
+              let pixelBuffer = Self.pixelBuffer(from: image) else {
+            rejecter("E_DECODE_FAILED",
+                     "processFrameAtPath: could not decode JPEG at \(cleanPath)",
+                     nil)
+            return
+        }
+
+        let qx = (options["qx"] as? Double) ?? 0
+        let qy = (options["qy"] as? Double) ?? 0
+        let qz = (options["qz"] as? Double) ?? 0
+        let qw = (options["qw"] as? Double) ?? 1   // identity quat default
+        let fx = (options["fx"] as? Double) ?? Double(image.size.width)
+        let fy = (options["fy"] as? Double) ?? Double(image.size.height)
+        let cx = (options["cx"] as? Double) ?? Double(image.size.width) / 2.0
+        let cy = (options["cy"] as? Double) ?? Double(image.size.height) / 2.0
+        let imageWidth =
+            (options["imageWidth"] as? Int) ?? Int(image.size.width)
+        let imageHeight =
+            (options["imageHeight"] as? Int) ?? Int(image.size.height)
+        let trackingPoor = (options["trackingPoor"] as? Bool) ?? false
+        let timestampMs = (options["timestampMs"] as? Double)
+            ?? (Date().timeIntervalSince1970 * 1000.0)
+        let trackingState: RetaiLensARTrackingState =
+            trackingPoor ? .limited : .tracking
+
+        let pose = RetaiLensARFramePose(
+            tx: 0, ty: 0, tz: 0,           // no translation in non-AR
+            qx: qx, qy: qy, qz: qz, qw: qw,
+            fx: fx, fy: fy, cx: cx, cy: cy,
+            imageWidth: imageWidth, imageHeight: imageHeight,
+            timestampMs: timestampMs,
+            trackingState: trackingState
+        )
+
+        RetaiLensIncrementalStitcher.shared.consumeFrame(
+            pixelBuffer: pixelBuffer,
+            pose: pose
+        )
+        resolver(["ok": true])
+    }
+
+    /// Decode a UIImage into a BGRA CVPixelBuffer.  Used by
+    /// `processFrameAtPath` so the engine's consumeFrame path (built
+    /// around CVPixelBuffer) can ingest non-AR snapshots.  Returns nil
+    /// on allocation failure.
+    private static func pixelBuffer(from image: UIImage) -> CVPixelBuffer? {
+        guard let cgImage = image.cgImage else { return nil }
+        let width = cgImage.width
+        let height = cgImage.height
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+        ]
+        var pb: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width, height,
+            kCVPixelFormatType_32BGRA,
+            attrs as CFDictionary,
+            &pb
+        )
+        guard status == kCVReturnSuccess, let buffer = pb else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else {
+            return nil
+        }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue
+            | CGImageAlphaInfo.premultipliedFirst.rawValue
+        guard let context = CGContext(
+            data: base,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            return nil
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0,
+                                          width: width, height: height))
+        return buffer
     }
 
     /// V16 Phase 1b.fix2 — JS-callable poll for the process'

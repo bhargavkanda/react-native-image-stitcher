@@ -1,28 +1,32 @@
 /**
- * useIncrementalAndroidDriver — Android-only frame driver for the
- * incremental panorama engine.
+ * useIncrementalAndroidDriver — vision-camera + gyro frame driver for
+ * the incremental panorama engine, used in non-AR captures.
+ *
+ * 2026-05-17 (Issue #2): now also drives iOS non-AR captures.  The
+ * hook's name is kept for backwards-compat; despite the "Android" in
+ * the name, the implementation is platform-agnostic and the native
+ * `processFrameAtPath` entry point now exists on both iOS and
+ * Android.  Consider this hook the canonical "feed the engine from
+ * vision-camera snapshots" driver.
  *
  * Why this exists
- *   On iOS, `RetaiLensIncrementalStitcher` wires itself into the
- *   ARSession's per-frame stream natively (60 Hz pose + image
- *   delivery, zero JS involvement once started).  On Android, ARCore
- *   demands exclusive camera access — the same constraint as ARKit on
- *   iOS — but the Android side of the SDK doesn't yet have an
- *   ARCore-backed CameraView.  Until that lands (Phase 0 follow-up),
- *   Android drives the engine from JS:
+ *   In AR captures the engine consumes frames from the ARSession
+ *   stream natively (60 Hz pose + image delivery, zero JS
+ *   involvement once started).  In NON-AR captures there is no AR
+ *   session — vision-camera owns the camera — so the engine needs
+ *   another frame source.  This hook fills the gap:
  *
- *     - vision-camera keeps the camera viewport (no AR conflict)
+ *     - vision-camera keeps the camera viewport
  *     - `takeSnapshot()` runs at ~250 ms intervals during press-hold
  *     - `react-native-sensors` gyroscope is integrated to estimate
- *       cumulative yaw/pitch (drives the FoV-overlap gate, same as
- *       ARKit pose on iOS)
+ *       cumulative yaw/pitch (drives the FoV-overlap gate)
  *     - Each snapshot path + integrated pose is fed to
  *       `RetaiLensIncrementalStitcher.processFrameAtPath()`
  *
- * Trade-off vs Path 1 (proper ARCore integration)
+ * Trade-off vs the AR path
  *   Gyro integration drifts ~1–2° per minute.  Acceptable for the
  *   typical 5–15 s shelf pan; not great for ambitious 360° captures.
- *   Snapshot rate is ~4 Hz (vs 60 Hz on iOS).  Pose drives
+ *   Snapshot rate is ~4 Hz (vs 60 Hz in AR mode).  Pose drives
  *   frame-selection only — the actual image alignment is feature-
  *   matched + RANSAC-fit, so quality of the panorama itself isn't
  *   bounded by gyro accuracy.
@@ -30,12 +34,12 @@
  * Lifecycle
  *   `start({ cameraRef })` enables the loop; `stop()` tears down.
  *   Both should be called by the host's hold-start / hold-complete
- *   handlers.  The hook is a no-op on iOS so callers can use it
- *   unconditionally.
+ *   handlers.  Safe to call on either platform; the hook only
+ *   activates inside the start/stop block.
  */
 
 import { useCallback, useRef } from 'react';
-import { NativeModules, Platform } from 'react-native';
+import { NativeModules } from 'react-native';
 import {
   gyroscope,
   setUpdateIntervalForType,
@@ -149,7 +153,10 @@ export function useIncrementalAndroidDriver(
 
   const start = useCallback(
     (cameraRefArg: React.RefObject<Camera | null>) => {
-      if (Platform.OS !== 'android') return;
+      // 2026-05-17 (Issue #2) — removed the Android-only platform
+      // guard.  iOS now also exposes `processFrameAtPath` (see the
+      // Swift bridge), so the same driver feeds both platforms in
+      // non-AR mode.
       if (isRunningRef.current) return;
       const native = getNativeIncremental();
       if (!native) return;
