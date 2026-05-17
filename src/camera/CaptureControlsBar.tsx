@@ -39,6 +39,14 @@ export interface CaptureControlsBarProps {
   flashMode: 'off' | 'on';
   /** Called when the flash button is pressed. */
   onToggleFlash: () => void;
+  /**
+   * 2026-05-16 — disable the flash button.  Pass `true` when the
+   * active camera surface doesn't honour torch state — currently the
+   * AR camera (ARKit / ARCore own AVCaptureDevice and don't expose
+   * torch control through the JS bridge; toggling would silently
+   * no-op).  Renders the button at reduced opacity + ignores presses.
+   */
+  flashDisabled?: boolean;
 
   // ── Shutter callbacks (forwarded to <CameraShutter>) ───────────────
   /** Tap → take photo. */
@@ -98,6 +106,7 @@ export interface CaptureControlsBarProps {
 export function CaptureControlsBar({
   flashMode,
   onToggleFlash,
+  flashDisabled = false,
   onShutterTap,
   onShutterHoldStart,
   onShutterHoldComplete,
@@ -122,15 +131,26 @@ export function CaptureControlsBar({
         style,
       ]}
     >
-      {/* Flash button — colour shifts when active. */}
+      {/* Flash button — colour shifts when active.  Greyed out and
+       *  inert when `flashDisabled` (e.g. AR mode owns the camera and
+       *  doesn't expose torch). */}
       <Pressable
-        onPress={onToggleFlash}
+        onPress={flashDisabled ? undefined : onToggleFlash}
         accessibilityRole="button"
-        accessibilityLabel={`Flash ${flashMode === 'on' ? 'on' : 'off'}`}
-        accessibilityState={{ selected: flashMode === 'on' }}
+        accessibilityLabel={
+          flashDisabled
+            ? 'Flash unavailable in AR mode'
+            : `Flash ${flashMode === 'on' ? 'on' : 'off'}`
+        }
+        accessibilityState={{
+          selected: flashMode === 'on',
+          disabled: flashDisabled,
+        }}
+        disabled={flashDisabled}
         style={[
           styles.iconButton,
           { backgroundColor: flashMode === 'on' ? iconActiveBg : iconButtonBg },
+          flashDisabled ? { opacity: 0.35 } : null,
         ]}
         hitSlop={8}
       >
