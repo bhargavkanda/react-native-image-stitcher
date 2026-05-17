@@ -469,7 +469,14 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   // 25 cm so the "Rotate the camera instead of moving it sideways"
   // warning fires out-of-the-box.  Set to 0 in Settings to disable
   // both the warning AND the gate's force-accept on budget crossing.
-  flowMaxTranslationCm: 25,
+  // 2026-05-17 (Issue 4-A v2) — raised 25 → 50 cm.  The 25-cm budget
+  // was too tight given IMU double-integration drift (the
+  // accelerometer's noise floor accumulates several cm of bogus
+  // "translation" per second even when the phone is held still).
+  // Combined with the new `resetAnchor` at handleHoldStart (so drift
+  // doesn't compound across captures), 50 cm gives the warning real
+  // headroom for genuine sideways motion without false positives.
+  flowMaxTranslationCm: 50,
   // V16 — novelty aggregation percentile.  0.85 picks up leading-
   // edge motion sooner than the pre-V16 median (0.50).  Operator
   // can dial down toward 0.5 for more-conservative captures or up
