@@ -641,22 +641,44 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             // The slit-scan and hybrid engines continue to receive
             // `frameRotationDegrees` unchanged.
             self.keyframeRotationDegrees = 0
-            // V16 Phase 1.fix2 — encode the user's perceived
-            // orientation as EXIF Orientation in the saved JPEG.
-            // cv::imread (with IMREAD_IGNORE_ORIENTATION, set in
-            // stitchKeyframePaths) ignores it for the stitcher, but
-            // RN's <Image>, Files.app, etc. honour it for display.
-            // Mapping (frameRotationDegrees → EXIF tag):
-            //   0   = landscape-left      → 1 (no rotation)
-            //   90  = portrait            → 6 (rotate 90° CW for view)
-            //   180 = landscape-right     → 3 (rotate 180°)
-            //   270 = portrait-up-down    → 8 (rotate 90° CCW)
-            switch frameRotationDegrees {
-            case 90:  self.keyframeExifOrientation = 6
-            case 180: self.keyframeExifOrientation = 3
-            case 270: self.keyframeExifOrientation = 8
-            default:  self.keyframeExifOrientation = 1
-            }
+            // 2026-05-18 (Issue #1a fix) — keyframe EXIF Orientation
+            // is hardcoded to 6 ("rotate 90° CW for display") regardless
+            // of physical capture orientation.
+            //
+            // RCA: the earlier V16 Phase 1.fix2 mapping branched on
+            // `frameRotationDegrees` to "encode the user's perceived
+            // orientation".  That was written for a hypothetical
+            // app whose orientation locks WITH the user's hold.  Our
+            // host app is PORTRAIT-LOCKED: the rendering surface
+            // never rotates, regardless of how the operator holds
+            // the phone.
+            //
+            // RN's <Image> + Files.app honour EXIF when rendering.
+            // Sensor-native pixels are landscape-aspect (long axis =
+            // phone-Y).  In a portrait-locked UI, displaying with
+            // EXIF=1 leaves the JPEG in landscape pixels rendered
+            // INTO portrait UI — the operator, head tilted to view
+            // their landscape capture, then sees the band thumbnails
+            // rotated 90° from their world view ("sideways").  Pre-
+            // bug-fix, the broken useDeviceOrientation hook always
+            // reported 'portrait' so `frameRotationDegrees=90` was
+            // always selected and EXIF=6 was always written — the
+            // operator never saw the misalignment because EXIF=6's
+            // 90° CW display rotation cancelled their physical 90°
+            // CCW head tilt in landscape-left view.  Fixing the hook
+            // exposed the underlying portrait-lock mismatch.
+            //
+            // EXIF=6 (always) keeps the band thumbnails consistent
+            // with the portrait-locked UI in every hold.  The FINAL
+            // panorama bake is independent — it consumes
+            // `config.captureOrientation` in cpp/stitcher.cpp's
+            // bake_rotation pass and is unaffected by this constant.
+            //
+            // If we ever unlock the host app's orientation (so the
+            // UI rotates with the user), this should revert to the
+            // 4-way switch.  Tracked as a follow-up in the design
+            // doc.
+            self.keyframeExifOrientation = 6
             // V16 Phase 1.fix4 — read cv::Stitcher knobs from JS config.
             // Defaults to "plane" / "multiband" / "graphcut" — the
             // proven combo cv::Stitcher::PANORAMA uses internally.
