@@ -983,6 +983,24 @@ StitchResult stitchFramePathsManual(
         //
         // SCANS mode skips thresholds > 0.31 — its default is already
         // 0.3 and dropping pairs at 1.0 / 0.5 produces vacuous results.
+        // 2026-05-18 (Issue #2 RCA): the previous break condition was
+        // `workFrames.size() >= 2` which exited on the FIRST attempt
+        // that retained the minimum-stitchable count.  But
+        // leaveBiggestComponent is monotonic in inclusion: lower
+        // threshold = MORE frames retained.  So if attempt 1
+        // (thresh=1.0) retains 2/4, attempts 2/3 (thresh=0.5/0.3)
+        // might retain 3/4 or 4/4.  The early break threw away that
+        // signal, so user-visible captures of 4 keyframes
+        // consistently shipped with only 2 in the panorama at
+        // thresh=1.0, never benefiting from the retry sweep.
+        //
+        // New behaviour: ONLY break early when all input frames are
+        // retained (no point trying lower thresholds — they can't do
+        // better).  Otherwise let the loop run to its lowest
+        // threshold; the resulting workFrames carries the most
+        // inclusive prune at the end.  pruneSucceeded flips true on
+        // any attempt that yields >=2 frames; pruneThresholdUsed
+        // tracks the threshold of the latest successful attempt.
         const float kPruneThresholds[] = {1.0f, 0.5f, 0.3f};
         const int kNumPruneAttempts =
             sizeof(kPruneThresholds) / sizeof(kPruneThresholds[0]);
@@ -991,6 +1009,7 @@ StitchResult stitchFramePathsManual(
         const std::vector<cv::detail::MatchesInfo> pairwiseBackup = pairwise;
         const std::vector<cv::Mat> workFramesBackup = workFrames;
         const std::vector<cv::Mat> framesBackup = frames;
+        const size_t initialFrameCount = imgFeatures.size();
         float pruneThresholdUsed = -1.0f;
         bool pruneSucceeded = false;
         for (int attempt = 0; attempt < kNumPruneAttempts; ++attempt) {
@@ -1030,17 +1049,36 @@ StitchResult stitchFramePathsManual(
             workFrames = std::move(trimmedWorkFrames);
             frames     = std::move(trimmedFrames);
             log_info(logFn, "[RetaiLensStitcher]",
-                     "step3.5: thresh=%.2f kept %zu frames in biggest component",
-                     thresh, workFrames.size());
+                     "step3.5: thresh=%.2f kept %zu of %zu frames in biggest component",
+                     thresh, workFrames.size(), initialFrameCount);
             if (workFrames.size() >= 2) {
                 pruneThresholdUsed = thresh;
                 pruneSucceeded = true;
+            }
+            if (workFrames.size() == initialFrameCount) {
+                // All retained — no point trying lower thresholds.
+                log_info(logFn, "[stitch-bc]",
+                         "step3 prune-retry attempt %d: all %zu frames "
+                         "retained — stopping retry sweep",
+                         attempt + 1, initialFrameCount);
                 break;
             }
-            log_info(logFn, "[stitch-bc]",
-                     "step3 prune-retry attempt %d FAILED "
-                     "(only %zu frames) — trying next threshold",
-                     attempt + 1, workFrames.size());
+            // Partial retention.  Either keep trying lower thresholds
+            // (might retain more), or — if this is the last attempt
+            // — accept the partial result that pruneSucceeded captured.
+            if (attempt + 1 < kNumPruneAttempts) {
+                log_info(logFn, "[stitch-bc]",
+                         "step3 prune-retry attempt %d kept only %zu/%zu "
+                         "frames — retrying with lower threshold",
+                         attempt + 1, workFrames.size(), initialFrameCount);
+            } else {
+                log_info(logFn, "[stitch-bc]",
+                         "step3 prune-retry attempt %d kept %zu/%zu "
+                         "frames at lowest threshold %.2f — accepting "
+                         "(success=%d)",
+                         attempt + 1, workFrames.size(), initialFrameCount,
+                         thresh, pruneSucceeded ? 1 : 0);
+            }
         }
         if (!pruneSucceeded) {
             // V16 fix-attempt 9 (NULL TEST) — same rationale as the
@@ -1494,6 +1532,41 @@ StitchResult stitchFramePathsManual(
                     // (the suspect path that crashed in cv::resize too).
                     cv::Rect roi = warper->warpRoi(
                         freshInput.size(), K, cameras[i].R);
+                    // 2026-05-18 (Issue #1 guard): cv::Stitcher's estimator
+                    // + BA can produce wildly wrong camera parameters on
+                    // degenerate input (low feature count, near-duplicate
+                    // frames, poor texture).  warpRoi() then returns an
+                    // absurd rectangle (we observed 191 GB allocation on a
+                    // standard 4-frame capture).  Without this guard the
+                    // imagesWarped[i].create() below tries to allocate
+                    // hundreds of GB and either OOMs or hard-OOMs the
+                    // process.  Cap at 100 MP (~400 MB at 3 channels) —
+                    // any panorama frame requiring more than 100 MP of
+                    // intermediate storage is from a broken estimator,
+                    // not a real capture worth completing.
+                    constexpr int64_t kMaxWarpPixels = 100ll * 1000ll * 1000ll;
+                    const int64_t roiPixels =
+                        static_cast<int64_t>(roi.width)
+                        * static_cast<int64_t>(roi.height);
+                    if (roi.width <= 0 || roi.height <= 0
+                        || roiPixels > kMaxWarpPixels) {
+                        log_error(logFn, "[stitch-bc]",
+                                  "step8b: warpRoi degenerate for frame "
+                                  "%zu (%dx%d = %lld px > %lld limit) — "
+                                  "treating as warp failure",
+                                  i, roi.width, roi.height,
+                                  (long long)roiPixels,
+                                  (long long)kMaxWarpPixels);
+                        throw cv::Exception(
+                            cv::Error::StsOutOfRange,
+                            std::string("warpRoi too large (")
+                                + std::to_string(roi.width) + "x"
+                                + std::to_string(roi.height)
+                                + ") — estimator produced degenerate "
+                                + "camera params on this frame",
+                            "stitchFramePathsManual",
+                            __FILE__, __LINE__);
+                    }
                     imagesWarped[i].create(roi.size(), freshInput.type());
                     masksWarped[i].create(roi.size(), CV_8U);
 

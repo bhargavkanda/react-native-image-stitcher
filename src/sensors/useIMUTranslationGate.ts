@@ -195,6 +195,13 @@ export function useIMUTranslationGate(
     [onBudgetExceeded]);
 
   useEffect(() => {
+    if (debug) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[IMUTransGate] effect re-run: enabled=${enabled} `
+        + `budget=${budgetMeters.toFixed(2)}m sampleIntervalMs=${sampleIntervalMs}`,
+      );
+    }
     if (!enabled) return;
 
     // Lock in the DeviceMotion update rate.  Other expo-sensors
@@ -213,9 +220,46 @@ export function useIMUTranslationGate(
     sampleCount.current = 0;
     anchorMs.current = Date.now();
 
+    // 2026-05-18 (Issue #3 diagnostics) — track whether we've ever
+    // received a non-null `acceleration` for this subscription.  If
+    // the user reports "no logs" we can correlate with these
+    // start-of-subscription and first-real-data markers.
+    let everGotData = false;
+    let nullSampleCount = 0;
+    if (debug) {
+      // eslint-disable-next-line no-console
+      console.log('[IMUTransGate] subscribing to DeviceMotion');
+    }
+
     const sub: DeviceMotionSubscription = DeviceMotion.addListener((m: DeviceMotionMeasurement) => {
       const a = m.acceleration;       // gravity-subtracted (m/s²)
-      if (!a) return;                 // can be null briefly on cold start
+      if (!a) {
+        nullSampleCount += 1;
+        if (debug && nullSampleCount === 1) {
+          // eslint-disable-next-line no-console
+          console.log(
+            '[IMUTransGate] first sample: acceleration=null '
+            + '(CoreMotion warming up; will retry on next sample)',
+          );
+        }
+        if (debug && nullSampleCount > 0 && nullSampleCount % 100 === 0) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[IMUTransGate] STILL receiving null acceleration after `
+            + `${nullSampleCount} samples — sensor source may be broken`,
+          );
+        }
+        return;                 // can be null briefly on cold start
+      }
+      if (debug && !everGotData) {
+        everGotData = true;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[IMUTransGate] first real sample: ax=${a.x.toFixed(3)} `
+          + `ay=${a.y.toFixed(3)} az=${a.z.toFixed(3)} m/s² `
+          + `(after ${nullSampleCount} null sample(s))`,
+        );
+      }
       const now = Date.now();
       if (lastMs.current === 0) {
         lastMs.current = now;
@@ -268,6 +312,13 @@ export function useIMUTranslationGate(
     });
 
     return () => {
+      if (debug) {
+        // eslint-disable-next-line no-console
+        console.log(
+          `[IMUTransGate] unsubscribing (everGotData=${everGotData}, `
+          + `nullSamples=${nullSampleCount}, realSamples=${sampleCount.current})`,
+        );
+      }
       sub.remove();
     };
   }, [enabled, budgetMeters, sampleIntervalMs, debug]);

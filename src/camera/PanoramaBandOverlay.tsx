@@ -295,14 +295,24 @@ export function PanoramaBandOverlay({
 
   const hasMultiThumb = cappedFrameUris.length > 0;
 
-  // Auto-scroll on content-size change.  Both portrait and landscape
-  // now use `row` flex direction (post Issue 3 fix), so the latest
-  // item is always at JS-rightmost → scrollToEnd in both cases.
+  // Auto-scroll on content-size change.
+  //
+  // 2026-05-18 (Issue #4 fix-b): the direction depends on flex
+  // direction.  In `row` (portrait, landscape-right) the LATEST
+  // item is at JS-rightmost → scrollToEnd shows it.  In
+  // `row-reverse` (landscape-left) the latest is at JS-leftmost →
+  // scrollTo({x: 0}) shows it.  The earlier always-scrollToEnd
+  // behaviour scrolled to OLDEST in row-reverse, which hid the
+  // just-captured frame off-screen at user-bottom.
   const onContentSizeChange = useCallback(() => {
     const sv = scrollRef.current;
     if (!sv) return;
-    sv.scrollToEnd({ animated: false });
-  }, []);
+    if (layout.flexDirection === 'row-reverse') {
+      sv.scrollTo({ x: 0, y: 0, animated: false });
+    } else {
+      sv.scrollToEnd({ animated: false });
+    }
+  }, [layout.flexDirection]);
 
   // ── Single cumulative thumbnail (live-engine fallback) ──────────
   //
@@ -428,6 +438,17 @@ const styles = StyleSheet.create({
   thumbScrollContent: {
     alignItems: 'center',
     paddingHorizontal: BAND_PADDING,
+    // 2026-05-18 (Issue #4 fix-a): contentContainer must FILL the
+    // ScrollView width so flexDirection aligns items at the correct
+    // end of the viewport.  Without flexGrow, contentContainer
+    // takes the natural width of its items (e.g. 150 px for 3
+    // thumbs) and anchors at JS-leftmost of the ScrollView, leaving
+    // a big empty gap on JS-right.  In landscape-left that gap is
+    // on user-TOP — exactly what the operator reports as "thumbs
+    // clump at the bottom".  flexGrow:1 makes the contentContainer
+    // span the viewport so items align at the END of the row-
+    // direction (JS-right for `row`, JS-left for `row-reverse`).
+    flexGrow: 1,
   },
   multiThumb: {
     width: MULTI_THUMB_LEN,
