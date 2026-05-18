@@ -29,7 +29,8 @@
       "react-native-sensors": [
         "../retailens-mobile/node_modules/react-native-sensors"
       ],
-      "rxjs": ["../retailens-mobile/node_modules/rxjs"]
+      "rxjs": ["../retailens-mobile/node_modules/rxjs"],
+      "expo-sensors": ["../retailens-mobile/node_modules/expo-sensors"]
     },
     "types": ["react"]
   },
