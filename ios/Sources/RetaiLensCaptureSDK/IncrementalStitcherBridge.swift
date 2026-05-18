@@ -74,23 +74,31 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
     ///   - snapshotJpegQuality (Int, default 75)
     ///   - snapshotEveryNAccepts (Int, default 1)
     ///
-    /// Resolves with `{ ok: true }`.  Rejects only if AR session is
-    /// not running — the engine needs an active session to receive
-    /// frames from.
+    /// Resolves with `{ ok: true }`.  Rejects when `frameSourceMode`
+    /// (options dict) is 'arSession' (the default) AND the AR session
+    /// isn't running — that path needs ARKit to deliver frames.
+    /// When `frameSourceMode` is 'jsDriver' the AR-session check is
+    /// skipped and the engine expects JS to feed frames via
+    /// `processFrameAtPath` (used by iOS non-AR captures since
+    /// 2026-05-18 / Issue #2 regression fix).
     @objc(start:resolver:rejecter:)
     public func start(
         options: NSDictionary,
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        guard RetaiLensARSession.shared.isRunning else {
-            rejecter(
-                "ar-session-not-running",
-                "RetaiLensARSession.start() must be called before "
-                + "the incremental stitcher.",
-                nil
-            )
-            return
+        let frameSourceMode =
+            (options["frameSourceMode"] as? String) ?? "arSession"
+        if frameSourceMode == "arSession" {
+            guard RetaiLensARSession.shared.isRunning else {
+                rejecter(
+                    "ar-session-not-running",
+                    "RetaiLensARSession.start() must be called before "
+                    + "the incremental stitcher.",
+                    nil
+                )
+                return
+            }
         }
         let composeW = (options["composeWidth"] as? Int) ?? 0
         let composeH = (options["composeHeight"] as? Int) ?? 0
@@ -155,7 +163,8 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
             frameRotationDegrees: rotation,
             engineMode: engineMode,
             captureOrientation: captureOrientation,
-            configOverrides: configOverrides
+            configOverrides: configOverrides,
+            frameSourceMode: frameSourceMode
         )
         resolver(["ok": true])
     }

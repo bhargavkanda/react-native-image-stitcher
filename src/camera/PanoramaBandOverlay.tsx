@@ -69,11 +69,28 @@ import {
 import type { IncrementalState } from '../stitching/incremental';
 
 
+/**
+ * 2026-05-18 (Issue #3 fix) — 4-way capture orientation classifier.
+ * Replaces the 2-way `state.isLandscape` boolean which couldn't
+ * distinguish landscape-LEFT (home button on user's right) from
+ * landscape-RIGHT (home button on user's left).  Required because
+ * the JS-coordinate mapping to user-perceived directions inverts
+ * between the two landscape rotations — `flexDirection: 'row'`
+ * gives oldest-at-user-top in landscape-LEFT but oldest-at-user-
+ * bottom in landscape-RIGHT, so we need to branch the layout.
+ */
+export type BandCaptureOrientation =
+  | 'portrait'
+  | 'portrait-upside-down'
+  | 'landscape-left'
+  | 'landscape-right';
+
 export interface PanoramaBandOverlayProps {
   /**
    * Latest engine state.  Pass `useIncrementalStitcher().state`.
-   * Used for orientation detection, single-thumb fallback URI, and
-   * fill-ratio when no per-keyframe URIs are provided.
+   * Used for single-thumb fallback URI and fill-ratio when no
+   * per-keyframe URIs are provided.  `state.isLandscape` is now
+   * superseded by `captureOrientation` below for layout selection.
    */
   state: IncrementalState | null;
   /**
@@ -90,6 +107,17 @@ export interface PanoramaBandOverlayProps {
    * emission doesn't blow up the scroll view.
    */
   frameUris?: string[];
+  /**
+   * 2026-05-18 (Issue #3) — capture orientation passed from the host.
+   * Drives a 4-way layout switch so the band reads correctly in
+   * either landscape rotation (the 2-way `state.isLandscape` boolean
+   * collapses landscape-LEFT and landscape-RIGHT to the same render
+   * path, which inverts the user's perceived "oldest-top, grows
+   * down" intent in one of them).  Pass
+   * `panoramaSettings.captureOrientation` from the host.  Defaults
+   * to `'portrait'` when omitted (back-compat).
+   */
+  captureOrientation?: BandCaptureOrientation;
 }
 
 
@@ -117,23 +145,50 @@ interface Layout {
 
 
 /**
- * Resolve band layout from engine-detected orientation.  Two cases:
+ * Resolve band layout from capture orientation.  2026-05-18 (Issue #3)
+ * — uses the 4-way `BandCaptureOrientation` instead of the 2-way
+ * `state.isLandscape` so we can pick the right flex direction +
+ * arrow glyph in EACH landscape rotation.
  *
- *   • LANDSCAPE (engine sees landscape capture, e.g. user is panning
- *     vertically).  Phone held landscape-left + app portrait-locked
- *     means JS-bottom appears on the user's RIGHT, so we anchor the
- *     band to JS-bottom and use `row-reverse` so the latest keyframe
- *     ends up on the user's BOTTOM (which is JS-left in this case),
- *     right next to the arrow.
+ * The two landscape rotations require different JS-coordinate setups
+ * because the phone tilts the JS coordinate system relative to the
+ * user differently:
  *
- *   • PORTRAIT (engine sees portrait capture OR no first-frame
- *     decision yet).  Anchor to JS-bottom (= user-bottom) so the
- *     band hovers above the controls bar without covering the
- *     operator's framing area.  Use `row` so the latest keyframe
- *     sits at JS-right (= user-right), abutting the arrow.
+ *   LANDSCAPE-LEFT  (Apple: home indicator on user's RIGHT; phone
+ *                    rotated 90° CCW from portrait).
+ *     JS-left  = user-top
+ *     JS-right = user-bottom
+ *     Band at JS-bottom edge appears on user's RIGHT edge.
+ *     For "oldest at user-top, newest at user-bottom":
+ *       flexDirection = 'row' (array[0] at JS-left = user-top).
+ *     For arrow appearing as user-DOWN-arrow:
+ *       glyph `←` (rotated 90° CCW = points user-down).
+ *
+ *   LANDSCAPE-RIGHT (Apple: home indicator on user's LEFT; phone
+ *                    rotated 90° CW from portrait).
+ *     JS-left  = user-bottom
+ *     JS-right = user-top
+ *     Band at JS-TOP edge appears on user's RIGHT edge (so we move
+ *     the band to JS-top here, not JS-bottom).
+ *     For "oldest at user-top, newest at user-bottom":
+ *       flexDirection = 'row-reverse' (array[0] at JS-right = user-top).
+ *     For arrow appearing as user-DOWN-arrow:
+ *       glyph `→` (rotated 90° CW = points user-down).
+ *
+ *   PORTRAIT (and portrait-upside-down — collapsed because the band's
+ *             bottom-anchored position remains sensible either way):
+ *     Band at JS-bottom = user-bottom.  Row left-to-right.  Arrow `→`
+ *     reads as user-right-arrow (pointing along the horizontal pan
+ *     direction).
  */
-function layoutFor(isLandscape: boolean): Layout {
-  if (isLandscape) {
+function layoutFor(orientation: BandCaptureOrientation): Layout {
+  const commonInner: ViewStyle = {
+    alignItems: 'center',
+    paddingHorizontal: BAND_PADDING,
+    paddingVertical: BAND_PADDING,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+  };
+  if (orientation === 'landscape-left') {
     return {
       kind: 'landscape',
       band: {
@@ -143,38 +198,47 @@ function layoutFor(isLandscape: boolean): Layout {
         bottom: 12,
         height: BAND_THICKNESS,
         flexDirection: 'row',
-        alignItems: 'center',
-        paddingHorizontal: BAND_PADDING,
-        paddingVertical: BAND_PADDING,
-        backgroundColor: 'rgba(0, 0, 0, 0.55)',
+        ...commonInner,
       },
       flexDirection: 'row',
-      // 2026-05-16 (Issue 3 fix) — in landscape the user sees the band
-      // as a VERTICAL strip on the right edge (the JS-horizontal row
-      // is rotated 90° in their view).  Oldest thumbnail should stick
-      // to the user's TOP (= JS-left) and grow DOWNWARD (= toward
-      // JS-right) so the arrow `→` glyph reads to the user as `↓`
-      // sitting BELOW the latest thumbnail.  The earlier `row-reverse`
-      // + `←` combination put oldest at user-bottom and grew upward.
+      // JS `←` rotated 90° CCW (with the device into landscape-left)
+      // appears to the user as a DOWN-arrow — what we want, below
+      // the last (most-recent) thumbnail in their view.
+      arrowGlyph: '←',
+    };
+  }
+  if (orientation === 'landscape-right') {
+    return {
+      kind: 'landscape',
+      band: {
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        // Anchor the JS-coords differently here: in landscape-right
+        // the phone's JS-TOP edge maps to user-RIGHT.  Putting the
+        // band at JS-top keeps it on the user's right edge.
+        top: 12,
+        height: BAND_THICKNESS,
+        flexDirection: 'row-reverse',
+        ...commonInner,
+      },
+      flexDirection: 'row-reverse',
+      // JS `→` rotated 90° CW (with the device into landscape-right)
+      // appears to the user as a DOWN-arrow.
       arrowGlyph: '→',
     };
   }
+  // portrait / portrait-upside-down / default.
   return {
     kind: 'portrait',
     band: {
       position: 'absolute',
       left: 16,
       right: 16,
-      // Edge-pinned to bottom in portrait (user's Q2 answer).
-      // 16 px of breathing room above the host's controls bar so
-      // the band doesn't visually fuse with the shutter row.
       bottom: 16,
       height: BAND_THICKNESS,
       flexDirection: 'row',
-      alignItems: 'center',
-      paddingHorizontal: BAND_PADDING,
-      paddingVertical: BAND_PADDING,
-      backgroundColor: 'rgba(0, 0, 0, 0.55)',
+      ...commonInner,
     },
     flexDirection: 'row',
     arrowGlyph: '→',
@@ -185,13 +249,22 @@ function layoutFor(isLandscape: boolean): Layout {
 export function PanoramaBandOverlay({
   state,
   frameUris,
+  captureOrientation,
 }: PanoramaBandOverlayProps): React.JSX.Element | null {
-  // Engine-detected orientation (single source of truth — see
-  // IncrementalState.isLandscape docs).  Defaults to false (portrait)
-  // before the first frame lands, which is fine because the band's
-  // bottom-pinned anchor reads sensibly in either layout.
-  const isLandscape = state?.isLandscape ?? false;
-  const layout = useMemo(() => layoutFor(isLandscape), [isLandscape]);
+  // 2026-05-18 (Issue #3 fix) — orientation source priority:
+  //   1. `captureOrientation` prop from the host (4-way; correct
+  //      for landscape-left vs landscape-right disambiguation).
+  //   2. Fallback to `state.isLandscape` (2-way; collapses both
+  //      landscape rotations to landscape-left semantics).
+  //   3. Default `portrait` (the band's bottom-anchor still reads
+  //      sensibly before any orientation info is available).
+  const resolvedOrientation: BandCaptureOrientation =
+    captureOrientation
+    ?? (state?.isLandscape ? 'landscape-left' : 'portrait');
+  const layout = useMemo(
+    () => layoutFor(resolvedOrientation),
+    [resolvedOrientation],
+  );
 
   const scrollRef = useRef<ScrollView | null>(null);
 
@@ -243,12 +316,22 @@ export function PanoramaBandOverlay({
   // view.  See original comment in the pre-V16 PanoramaBandOverlay for
   // the full reasoning.  Portrait+horizontal-pan mode (the other
   // supported mode) doesn't need rotation.
+  //
+  // 2026-05-18 (Issue #3) — derive from `resolvedOrientation` instead
+  // of the deprecated 2-way `isLandscape`.  In landscape-RIGHT we
+  // rotate −90° so the captured scene still reads upright (the
+  // opposite sense from landscape-LEFT).
   const singleImageStyle = useMemo(
-    () =>
-      isLandscape
-        ? [StyleSheet.absoluteFill, { transform: [{ rotate: '90deg' }] }]
-        : StyleSheet.absoluteFill,
-    [isLandscape],
+    () => {
+      if (resolvedOrientation === 'landscape-left') {
+        return [StyleSheet.absoluteFill, { transform: [{ rotate: '90deg' }] }];
+      }
+      if (resolvedOrientation === 'landscape-right') {
+        return [StyleSheet.absoluteFill, { transform: [{ rotate: '-90deg' }] }];
+      }
+      return StyleSheet.absoluteFill;
+    },
+    [resolvedOrientation],
   );
 
   return (
