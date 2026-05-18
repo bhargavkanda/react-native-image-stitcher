@@ -74,7 +74,7 @@
 //     persistent noise-floor offset doesn't slowly drift the axis —
 //     low cost, high robustness).
 
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { DeviceMotion } from 'expo-sensors';
 import type { DeviceMotionMeasurement } from 'expo-sensors';
 
@@ -323,15 +323,25 @@ export function useIMUTranslationGate(
     };
   }, [enabled, budgetMeters, sampleIntervalMs, debug]);
 
-  return {
-    resetAnchor: () => {
-      velX.current = 0;
-      posX.current = 0;
-      lastMs.current = 0;
-      budgetCrossed.current = false;
-      sampleCount.current = 0;
-      anchorMs.current = Date.now();
-    },
-    getCurrentTranslationM: () => Math.abs(posX.current),
-  };
+  // 2026-05-18 (Issue B meta-bug fix): wrap the returned functions in
+  // useCallback so the hook's return value is REFERENTIALLY STABLE
+  // across renders.  Consumer code (AuditCaptureScreen) puts `imuGate`
+  // in a useEffect dep array; without stability that effect re-runs
+  // every render, wiping out the prevAcceptedCount delta-tracker
+  // (which is what caused the resetAnchor-too-often bug we just
+  // diagnosed).  These functions only touch refs, so empty-deps
+  // useCallback is safe — no stale-closure risk.
+  const resetAnchor = useCallback(() => {
+    velX.current = 0;
+    posX.current = 0;
+    lastMs.current = 0;
+    budgetCrossed.current = false;
+    sampleCount.current = 0;
+    anchorMs.current = Date.now();
+  }, []);
+  const getCurrentTranslationM = useCallback(
+    () => Math.abs(posX.current),
+    [],
+  );
+  return { resetAnchor, getCurrentTranslationM };
 }
