@@ -190,6 +190,23 @@ export interface IncrementalState {
 
 
 export interface IncrementalStartOptions {
+  /**
+   * 2026-05-18 (Issue #2 regression fix) — frame source for the
+   * iOS engine.
+   *
+   *   - 'arSession' (default) — engine registers as the
+   *     ARSession's frame consumer.  Use in AR captures.  iOS
+   *     bridge.start() requires `RetaiLensARSession.start()` to
+   *     have already been called.
+   *
+   *   - 'jsDriver' — engine skips AR-session registration; JS
+   *     feeds frames via `processFrameAtPath`.  Use in iOS non-AR
+   *     captures (vision-camera + gyro).  No AR session required.
+   *
+   * Android ignores this option — its engine always accepts
+   * JS-driven frames.
+   */
+  frameSourceMode?: 'arSession' | 'jsDriver';
   /** Compose-resolution width in pixels (default 720 for portrait, 960 for landscape). */
   composeWidth?: number;
   /** Compose-resolution height in pixels (default 960 for portrait, 720 for landscape). */

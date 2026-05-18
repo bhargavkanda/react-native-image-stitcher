@@ -548,7 +548,13 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         frameRotationDegrees: Int,
         engineMode: String,
         captureOrientation: String = "portrait",
-        configOverrides: [String: Any] = [:]
+        configOverrides: [String: Any] = [:],
+        // 2026-05-18 (Issue #2 regression fix): "arSession" (default,
+        // legacy) registers as the ARSession's frame consumer.
+        // "jsDriver" skips that registration — frames will come in
+        // via processFrameAtPath instead.  Used by iOS non-AR
+        // captures (the vision-camera + gyro driver path).
+        frameSourceMode: String = "arSession"
     ) {
         stateLock.lock()
         if isRunning {
@@ -816,9 +822,16 @@ public final class RetaiLensIncrementalStitcher: NSObject {
 
         stateLock.unlock()
 
-        // Register with the AR session.  Weak so the singleton is the
-        // owner of lifetime; we de-register on stop.
-        RetaiLensARSession.shared.incrementalConsumer = self
+        // Register with the AR session — only when running in the
+        // AR-frame-stream-driven mode.  In jsDriver mode (iOS non-AR
+        // captures) the AR session is intentionally stopped so the
+        // vision-camera holds the camera; frames arrive via
+        // processFrameAtPath from JS instead.  Registering as the
+        // consumer here would either crash (no running session) or
+        // mis-route frames once an AR session somewhere else came up.
+        if frameSourceMode != "jsDriver" {
+            RetaiLensARSession.shared.incrementalConsumer = self
+        }
     }
 
     /// Stop ingestion + write the final panorama to `outputPath`.

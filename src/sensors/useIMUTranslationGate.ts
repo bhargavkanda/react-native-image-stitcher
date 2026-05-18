@@ -120,6 +120,16 @@ export interface UseIMUTranslationGateOptions {
    * keyframe actually accepts, so the integrator restarts from zero.
    */
   onBudgetExceeded: () => void;
+
+  /**
+   * 2026-05-18 (Issue #4 investigation) — when true, log every Nth
+   * accelerometer sample (default N=20 ≈ 400 ms at 50 Hz) showing
+   * the current `acceleration.x`, accumulated `posX`, and time
+   * since anchor reset.  Helps diagnose drift behaviour vs real
+   * translation magnitude in field testing.  Defaults to false —
+   * production captures stay quiet.
+   */
+  debug?: boolean;
 }
 
 
@@ -159,6 +169,7 @@ export function useIMUTranslationGate(
     budgetMeters = 0.40,
     sampleIntervalMs = 20,
     onBudgetExceeded,
+    debug = false,
   } = options;
 
   // Integrator state, kept in refs so the listener can write without
@@ -167,10 +178,15 @@ export function useIMUTranslationGate(
   // ─ posX  : position along device-X (m)
   // ─ lastMs: epoch ms of the previous sample (for dt)
   // ─ budgetCrossed: debounce flag — clears on resetAnchor
+  // ─ sampleCount: rolling counter for debug log throttle
+  // ─ anchorMs: timestamp of the most recent resetAnchor (or first
+  //             sample) — gives "time since anchor" in debug output
   const velX = useRef<number>(0);
   const posX = useRef<number>(0);
   const lastMs = useRef<number>(0);
   const budgetCrossed = useRef<boolean>(false);
+  const sampleCount = useRef<number>(0);
+  const anchorMs = useRef<number>(0);
 
   // Keep the callback in a ref so we don't tear down + re-subscribe
   // on every prop change.  React idiom for stable callback identity.
@@ -194,6 +210,8 @@ export function useIMUTranslationGate(
     posX.current = 0;
     lastMs.current = 0;
     budgetCrossed.current = false;
+    sampleCount.current = 0;
+    anchorMs.current = Date.now();
 
     const sub: DeviceMotionSubscription = DeviceMotion.addListener((m: DeviceMotionMeasurement) => {
       const a = m.acceleration;       // gravity-subtracted (m/s²)
@@ -216,10 +234,35 @@ export function useIMUTranslationGate(
 
       const mag = Math.abs(posX.current);
 
+      // 2026-05-18 (Issue #4 investigation) — debug-gated diagnostic
+      // log.  Throttled to every 20th sample (~400 ms at 50 Hz) so
+      // the log isn't a firehose.  When this runs and we still see
+      // posX hovering at < 5 cm during a real translation, the
+      // sensor source isn't capturing what we think it is.
+      sampleCount.current += 1;
+      if (debug && sampleCount.current % 20 === 0) {
+        const secs = (now - anchorMs.current) / 1000.0;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[IMUTransGate] t+${secs.toFixed(2)}s `
+          + `ax=${a.x.toFixed(3)}m/s² `
+          + `velX=${velX.current.toFixed(4)}m/s `
+          + `posX=${posX.current.toFixed(4)}m `
+          + `(|mag|=${mag.toFixed(4)}m, budget=${budgetMeters.toFixed(2)}m, crossed=${budgetCrossed.current})`,
+        );
+      }
+
       // Budget crossing — fire exactly once per crossing (the
       // `budgetCrossed` flag clears on `resetAnchor`).
       if (!budgetCrossed.current && mag >= budgetMeters) {
         budgetCrossed.current = true;
+        if (debug) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[IMUTransGate] BUDGET CROSSED at posX=${posX.current.toFixed(4)}m `
+            + `(budget=${budgetMeters.toFixed(2)}m)`,
+          );
+        }
         onBudgetExceededRef.current();
       }
     });
@@ -227,7 +270,7 @@ export function useIMUTranslationGate(
     return () => {
       sub.remove();
     };
-  }, [enabled, budgetMeters, sampleIntervalMs]);
+  }, [enabled, budgetMeters, sampleIntervalMs, debug]);
 
   return {
     resetAnchor: () => {
@@ -235,6 +278,8 @@ export function useIMUTranslationGate(
       posX.current = 0;
       lastMs.current = 0;
       budgetCrossed.current = false;
+      sampleCount.current = 0;
+      anchorMs.current = Date.now();
     },
     getCurrentTranslationM: () => Math.abs(posX.current),
   };
