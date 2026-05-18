@@ -11,19 +11,43 @@
  * the app is orientation-locked: window dimensions don't change
  * when only the device rotates.
  *
- * This hook subscribes to the accelerometer and classifies the
- * gravity vector into one of four states.  Lightweight enough to
- * leave running for the screen lifetime; the accelerometer is
- * already on for inertial-aware features in modern iPhones.
+ * 2026-05-18 (Issue #3) — rewritten on top of `expo-sensors`
+ * `DeviceMotion` (CoreMotion-fused on iOS, SensorManager on
+ * Android).  The previous implementation used
+ * `react-native-sensors` raw accelerometer with an Android-only
+ * sign convention (`y > 0` ⇒ portrait), which silently failed on
+ * iOS — Apple's CoreMotion convention is `y < 0` ⇒ portrait
+ * because device-Y points from the phone's bottom to the top,
+ * and gravity in that frame is `-Y`.  Users on iOS saw the hook
+ * stuck at its initial value ('portrait') regardless of physical
+ * rotation, which cascaded into wrong panorama bake-rotation and
+ * a broken landscape band layout.
+ *
+ * Sign conventions used here (per platform docs):
+ *
+ *   iOS (CMDeviceMotion.accelerationIncludingGravity, reported in
+ *   m/s² in the device reference frame):
+ *     portrait              → y ≈ -9.8
+ *     portrait-upside-down  → y ≈ +9.8
+ *     landscape-left  (home indicator on user's RIGHT) → x ≈ +9.8
+ *     landscape-right (home indicator on user's LEFT)  → x ≈ -9.8
+ *
+ *   Android (Sensor.TYPE_ACCELEROMETER, reaction-force convention):
+ *     portrait              → y ≈ +9.8   ← opposite sign vs iOS
+ *     portrait-upside-down  → y ≈ -9.8
+ *     landscape-left        → x ≈ -9.8
+ *     landscape-right       → x ≈ +9.8
+ *
+ *   We flip the Android x/y to match the iOS convention before
+ *   classification so the rest of the logic stays platform-
+ *   independent.  The classification then unambiguously maps to
+ *   the user-visible `DeviceOrientation` enum.
  */
 
 import { useEffect, useState } from 'react';
-import {
-  accelerometer,
-  setUpdateIntervalForType,
-  SensorTypes,
-} from 'react-native-sensors';
-import type { Subscription } from 'rxjs';
+import { Platform } from 'react-native';
+import { DeviceMotion } from 'expo-sensors';
+import type { DeviceMotionMeasurement } from 'expo-sensors';
 
 
 export type DeviceOrientation =
@@ -33,34 +57,41 @@ export type DeviceOrientation =
   | 'landscape-right';
 
 
-/// Threshold above which gravity dominance is considered conclusive.
-/// 5 m/s² out of ~9.8 means the phone is at least ~30° tilted toward
-/// that axis — comfortable for stable orientation classification
-/// without flipping on minor wobbles.
+/// Threshold (m/s²) above which gravity dominance is considered
+/// conclusive.  5 m/s² out of ~9.8 means the phone is at least ~30°
+/// tilted toward that axis — comfortable for stable orientation
+/// classification without flipping on minor wobbles.
 const DOMINANT_AXIS_THRESHOLD = 5.0;
 
 /// Sample at ~10 Hz — plenty for orientation detection (phones
-/// don't physically flip faster than this) and an order of magnitude
-/// less data than the 60 Hz gyro stream the pan-speed indicator uses.
+/// don't physically flip faster than this).
 const SAMPLE_INTERVAL_MS = 100;
 
 
 function classify(x: number, y: number): DeviceOrientation | null {
-  // y > threshold: phone upright (top-of-screen UP) → portrait.
-  // y < -threshold: top-of-screen DOWN → upside-down portrait.
-  // x > threshold: right edge of screen UP → landscape-LEFT
-  //   (phone rotated 90° CCW from portrait; the camera/lens is
-  //    on the user's right; status bar appears on the left edge).
-  // x < -threshold: left edge UP → landscape-RIGHT.
-  // Below threshold on both: phone is face-up or face-down — keep
-  // the previous orientation rather than flicker.
-  if (Math.abs(y) > Math.abs(x)) {
-    if (y > DOMINANT_AXIS_THRESHOLD) return 'portrait';
-    if (y < -DOMINANT_AXIS_THRESHOLD) return 'portrait-upside-down';
+  // Normalize Android's reaction-force convention to iOS's
+  // gravity-vector convention by flipping the sign.  After this,
+  // `ax` and `ay` always satisfy the iOS rule "+/- 9.8 means
+  // gravity is pointing along that axis".
+  const ax = Platform.OS === 'ios' ? x : -x;
+  const ay = Platform.OS === 'ios' ? y : -y;
+
+  // Pick the dominant axis: whichever component of gravity has
+  // larger magnitude wins.  Avoids ambiguity when the phone is
+  // tilted between two cardinal orientations.
+  if (Math.abs(ay) > Math.abs(ax)) {
+    if (ay < -DOMINANT_AXIS_THRESHOLD) return 'portrait';
+    if (ay > DOMINANT_AXIS_THRESHOLD) return 'portrait-upside-down';
   } else {
-    if (x > DOMINANT_AXIS_THRESHOLD) return 'landscape-left';
-    if (x < -DOMINANT_AXIS_THRESHOLD) return 'landscape-right';
+    // landscape-left = home indicator on user's right
+    //                = device rotated 90° CCW from portrait
+    //                = phone's bottom edge on user's right
+    //                = in iOS gravity-vector frame, gravity along +X
+    if (ax > DOMINANT_AXIS_THRESHOLD) return 'landscape-left';
+    if (ax < -DOMINANT_AXIS_THRESHOLD) return 'landscape-right';
   }
+  // Phone face-up or face-down (z dominates): keep the previous
+  // orientation rather than flicker.
   return null;
 }
 
@@ -69,24 +100,21 @@ export function useDeviceOrientation(): DeviceOrientation {
   const [orientation, setOrientation] = useState<DeviceOrientation>('portrait');
 
   useEffect(() => {
-    setUpdateIntervalForType(SensorTypes.accelerometer, SAMPLE_INTERVAL_MS);
+    DeviceMotion.setUpdateInterval(SAMPLE_INTERVAL_MS);
 
     let last: DeviceOrientation = 'portrait';
-    const sub: Subscription = accelerometer.subscribe({
-      next: ({ x, y }) => {
-        const next = classify(x, y);
-        if (next && next !== last) {
-          last = next;
-          setOrientation(next);
-        }
-      },
-      error: (err) => {
-        // eslint-disable-next-line no-console
-        console.warn('[useDeviceOrientation] accelerometer error', err);
-      },
+    const sub = DeviceMotion.addListener((m: DeviceMotionMeasurement) => {
+      const g = m.accelerationIncludingGravity;
+      // First emissions can be null on cold start while CoreMotion
+      // warms up; skip until data arrives.
+      if (!g) return;
+      const next = classify(g.x, g.y);
+      if (next && next !== last) {
+        last = next;
+        setOrientation(next);
+      }
     });
-
-    return () => sub.unsubscribe();
+    return () => sub.remove();
   }, []);
 
   return orientation;
