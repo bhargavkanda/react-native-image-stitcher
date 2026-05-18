@@ -189,6 +189,18 @@ function layoutFor(orientation: BandCaptureOrientation): Layout {
     backgroundColor: 'rgba(0, 0, 0, 0.55)',
   };
   if (orientation === 'landscape-left') {
+    // 2026-05-18 (Issue #3 round 2) re-derived from scratch:
+    // Phone rotated 90° CCW from portrait.  JS-coord mapping to
+    // user view:
+    //   JS-bottom = phone-bottom = user-RIGHT  → band sits here
+    //   JS-left   = phone-left   = user-BOTTOM
+    //   JS-right  = phone-right  = user-TOP
+    // For "oldest at user-TOP, growth toward user-BOTTOM":
+    //   array[0] needs to land at user-TOP = JS-right
+    //   → flexDirection: 'row-reverse' (array[0] at JS-rightmost).
+    // For arrow appearing as user-DOWN:
+    //   `←` glyph (JS-direction -X) after 90° CCW rotation maps to
+    //   user-down direction.
     return {
       kind: 'landscape',
       band: {
@@ -197,34 +209,36 @@ function layoutFor(orientation: BandCaptureOrientation): Layout {
         right: 0,
         bottom: 12,
         height: BAND_THICKNESS,
-        flexDirection: 'row',
+        flexDirection: 'row-reverse',
         ...commonInner,
       },
-      flexDirection: 'row',
-      // JS `←` rotated 90° CCW (with the device into landscape-left)
-      // appears to the user as a DOWN-arrow — what we want, below
-      // the last (most-recent) thumbnail in their view.
+      flexDirection: 'row-reverse',
       arrowGlyph: '←',
     };
   }
   if (orientation === 'landscape-right') {
+    // Phone rotated 90° CW from portrait.  JS-coord mapping:
+    //   JS-top    = phone-top    = user-RIGHT  → band sits here
+    //   JS-left   = phone-left   = user-TOP
+    //   JS-right  = phone-right  = user-BOTTOM
+    // For "oldest at user-TOP, growth toward user-BOTTOM":
+    //   array[0] needs to land at user-TOP = JS-left
+    //   → flexDirection: 'row' (array[0] at JS-leftmost).
+    // For arrow appearing as user-DOWN:
+    //   `→` glyph (JS-direction +X) after 90° CW rotation maps to
+    //   user-down direction.
     return {
       kind: 'landscape',
       band: {
         position: 'absolute',
         left: 0,
         right: 0,
-        // Anchor the JS-coords differently here: in landscape-right
-        // the phone's JS-TOP edge maps to user-RIGHT.  Putting the
-        // band at JS-top keeps it on the user's right edge.
         top: 12,
         height: BAND_THICKNESS,
-        flexDirection: 'row-reverse',
+        flexDirection: 'row',
         ...commonInner,
       },
-      flexDirection: 'row-reverse',
-      // JS `→` rotated 90° CW (with the device into landscape-right)
-      // appears to the user as a DOWN-arrow.
+      flexDirection: 'row',
       arrowGlyph: '→',
     };
   }

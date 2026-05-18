@@ -45,7 +45,6 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Platform } from 'react-native';
 import { DeviceMotion } from 'expo-sensors';
 import type { DeviceMotionMeasurement } from 'expo-sensors';
 
@@ -69,26 +68,45 @@ const SAMPLE_INTERVAL_MS = 100;
 
 
 function classify(x: number, y: number): DeviceOrientation | null {
-  // Normalize Android's reaction-force convention to iOS's
-  // gravity-vector convention by flipping the sign.  After this,
-  // `ax` and `ay` always satisfy the iOS rule "+/- 9.8 means
-  // gravity is pointing along that axis".
-  const ax = Platform.OS === 'ios' ? x : -x;
-  const ay = Platform.OS === 'ios' ? y : -y;
-
-  // Pick the dominant axis: whichever component of gravity has
-  // larger magnitude wins.  Avoids ambiguity when the phone is
-  // tilted between two cardinal orientations.
-  if (Math.abs(ay) > Math.abs(ax)) {
-    if (ay < -DOMINANT_AXIS_THRESHOLD) return 'portrait';
-    if (ay > DOMINANT_AXIS_THRESHOLD) return 'portrait-upside-down';
+  // 2026-05-18 (Issue #3 round 2) — re-derived sign convention.
+  //
+  // Through expo-sensors, BOTH platforms normalize to the iOS
+  // CoreMotion gravity-vector convention: stationary phone reports
+  // the gravity vector itself in the device frame.  Device axes:
+  // +X points from phone-left to phone-right; +Y from phone-bottom
+  // to phone-top; +Z out of the screen toward the viewer.
+  //
+  // Per-orientation gravity-vector signs in the device frame:
+  //
+  //   portrait (upright)      → y ≈ -9.8
+  //     Phone-Y points up in world; gravity is along device -Y.
+  //
+  //   portrait-upside-down    → y ≈ +9.8
+  //     Phone-Y points down in world; gravity is along device +Y.
+  //
+  //   landscape-left  (Apple: home indicator on user's RIGHT;
+  //                    phone rotated 90° CCW from portrait):
+  //     phone-X axis points from user-bottom to user-top in this
+  //     orientation, so gravity (world-down) is along device -X.
+  //     → x ≈ -9.8
+  //
+  //   landscape-right (Apple: home indicator on user's LEFT;
+  //                    phone rotated 90° CW from portrait):
+  //     phone-X axis points from user-top to user-bottom, so
+  //     gravity is along device +X.
+  //     → x ≈ +9.8
+  //
+  // The earlier implementation had an Android-specific axis flip
+  // baked in.  Removed — expo-sensors normalizes Android signs to
+  // match iOS, and the platform branch was producing wrong values
+  // (Android portrait → reported as portrait-upside-down; iOS
+  // landscape-left → reported as landscape-right).
+  if (Math.abs(y) > Math.abs(x)) {
+    if (y < -DOMINANT_AXIS_THRESHOLD) return 'portrait';
+    if (y > DOMINANT_AXIS_THRESHOLD) return 'portrait-upside-down';
   } else {
-    // landscape-left = home indicator on user's right
-    //                = device rotated 90° CCW from portrait
-    //                = phone's bottom edge on user's right
-    //                = in iOS gravity-vector frame, gravity along +X
-    if (ax > DOMINANT_AXIS_THRESHOLD) return 'landscape-left';
-    if (ax < -DOMINANT_AXIS_THRESHOLD) return 'landscape-right';
+    if (x < -DOMINANT_AXIS_THRESHOLD) return 'landscape-left';
+    if (x > DOMINANT_AXIS_THRESHOLD) return 'landscape-right';
   }
   // Phone face-up or face-down (z dominates): keep the previous
   // orientation rather than flicker.
