@@ -365,6 +365,13 @@ export function PanoramaBandOverlay({
         // horizontally (in JS-coords) within the band.  Content
         // flex-direction matches the outer band so OLDEST is at the
         // pan-start side and LATEST sits next to the arrow.
+        //
+        // 2026-05-18 (Issue A — arrow placement) — the arrow is the
+        // LAST child of contentContainer (after the thumbnail map)
+        // so it flows with the scroll content and always sits
+        // adjacent to the newest thumbnail.  Previously it was a
+        // sibling of the ScrollView at the band's far end, which
+        // looked detached when there were only a few thumbnails.
         <ScrollView
           ref={scrollRef}
           horizontal
@@ -389,36 +396,39 @@ export function PanoramaBandOverlay({
               fadeDuration={0}
             />
           ))}
+          <View style={styles.arrowTrack}>
+            <Text style={styles.arrowGlyph}>{layout.arrowGlyph}</Text>
+          </View>
         </ScrollView>
       ) : (
-        // Single-thumb path: cumulative panorama image, width grows
-        // with the pan extent.  Visually identical to pre-V16
-        // PanoramaBandOverlay so live-engine UX is unchanged.
-        <View
-          style={[
-            styles.thumbBox,
-            { width: singleThumbPanLen, height: SINGLE_THUMB_INNER },
-          ]}
-        >
-          {cumulativeUri ? (
-            <Image
-              key={state?.acceptedCount ?? 0}
-              source={{ uri: cumulativeUri }}
-              style={singleImageStyle}
-              resizeMode="cover"
-              fadeDuration={0}
-            />
-          ) : null}
-        </View>
+        <>
+          {/* Single-thumb path: cumulative panorama image, width
+           *  grows with the pan extent.  Visually identical to
+           *  pre-V16 PanoramaBandOverlay so live-engine UX is
+           *  unchanged.  Arrow stays a sibling here so it sits at
+           *  the band's end (the single-thumb View is fixed-width
+           *  so the layout is naturally "thumb + arrow"). */}
+          <View
+            style={[
+              styles.thumbBox,
+              { width: singleThumbPanLen, height: SINGLE_THUMB_INNER },
+            ]}
+          >
+            {cumulativeUri ? (
+              <Image
+                key={state?.acceptedCount ?? 0}
+                source={{ uri: cumulativeUri }}
+                style={singleImageStyle}
+                resizeMode="cover"
+                fadeDuration={0}
+              />
+            ) : null}
+          </View>
+          <View style={styles.arrowTrack}>
+            <Text style={styles.arrowGlyph}>{layout.arrowGlyph}</Text>
+          </View>
+        </>
       )}
-
-      {/* Arrow trailing the latest thumbnail along the pan axis.  Fixed
-       *  slot width so it doesn't get squeezed when the scroll view's
-       *  content grows.  The outer band's flex direction puts this on
-       *  the JS-end-side of the row regardless of orientation. */}
-      <View style={styles.arrowTrack}>
-        <Text style={styles.arrowGlyph}>{layout.arrowGlyph}</Text>
-      </View>
     </View>
   );
 }
