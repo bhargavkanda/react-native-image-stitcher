@@ -20,9 +20,6 @@
 import Foundation
 import React
 import os.log
-import UIKit          // 2026-05-17 (#2) — UIImage decode for processFrameAtPath
-import CoreVideo      // CVPixelBuffer helpers
-import CoreGraphics   // CGContext for the BGRA conversion
 
 @objc(RetaiLensIncrementalStitcherBridge)
 public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
@@ -235,17 +232,32 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver(["ok": true])
     }
 
-    /// 2026-05-17 (Issue #2) — JS-driven frame ingestion for iOS
-    /// non-AR mode.  Mirrors the Android `processFrameAtPath` entry
-    /// point.  Loads the JPEG at `path`, builds a synthetic
-    /// RetaiLensARFramePose from the JS-supplied quaternion +
-    /// intrinsics, and feeds it to the engine via consumeFrame.
+    /// 2026-05-18 (Issue #2 v2) — JS-driven frame ingestion for iOS
+    /// non-AR mode.  Mirrors Android's `processFrameAtPath` exactly:
+    /// the JPEG at `path` is already saved on disk by vision-camera
+    /// in its native EXIF-correct orientation.  We DO NOT decode the
+    /// image here.  Instead:
     ///
-    /// Translation is hard-coded to (0, 0, 0) because vision-camera +
-    /// gyro can give us rotation but not translation.  Acceptable for
-    /// the keyframe gate's "any new content" path; not acceptable for
-    /// translation-budget force-accept (which is independently driven
-    /// by the JS-side IMU hook).
+    ///   - Build a synthetic `RetaiLensARFramePose` from the
+    ///     JS-supplied quaternion + intrinsics (no translation;
+    ///     non-AR captures don't have it).
+    ///   - Hand the path + pose to
+    ///     `RetaiLensIncrementalStitcher.addBatchKeyframePath`, which
+    ///     evaluates the shared-C++ KeyframeGate and (if accepted)
+    ///     records the path in the finalize-time keyframe list +
+    ///     emits the same state event the AR-delegate path emits.
+    ///   - `cv::imread` at finalize handles EXIF orientation
+    ///     natively, so the output panorama reads upright with no
+    ///     iOS-specific orientation handling needed in this bridge.
+    ///
+    /// History: Issue #2 v1 (commit 0e40f17) tried to decode the
+    /// JPEG into a CVPixelBuffer and reuse the existing AR
+    /// `consumeFrame(pixelBuffer:pose:)` path.  That introduced two
+    /// orientation bugs (CGContext Y-flip + UIImage.size vs
+    /// cgImage.width dim swap) → upside-down output AND canvas-
+    /// dimension overflow → OOM crashes (user-reported 2026-05-18).
+    /// Architecturally Android never decoded the image either, so
+    /// the right fix was to mirror that.
     ///
     /// `options` keys:
     ///   - path (NSString, required) — local file path (no file://)
@@ -255,26 +267,35 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
     ///   - imageWidth, imageHeight (Int, required)
     ///   - trackingPoor (Bool, optional, default false)
     ///   - timestampMs (Double, optional, default = now)
+    ///
+    /// Only batch-keyframe captures are supported on this path right
+    /// now — other engines (hybrid / firstwins) need real pixel data
+    /// during the live phase, which isn't trivially derivable from a
+    /// JPEG path.  Reject with `E_NOT_BATCH_KEYFRAME` so the JS host
+    /// can fall back to the legacy stitchVideo path if needed.
     @objc(processFrameAtPath:resolver:rejecter:)
     public func processFrameAtPath(
         options: NSDictionary,
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        guard let path = options["path"] as? String, !path.isEmpty else {
+        guard let pathRaw = options["path"] as? String, !pathRaw.isEmpty else {
             rejecter("E_NO_PATH", "processFrameAtPath: missing 'path'", nil)
             return
         }
         // Strip optional file:// prefix — JS callers sometimes send
         // file URIs, native APIs want filesystem paths.
-        let cleanPath = path.hasPrefix("file://")
-            ? String(path.dropFirst("file://".count))
-            : path
+        let cleanPath = pathRaw.hasPrefix("file://")
+            ? String(pathRaw.dropFirst("file://".count))
+            : pathRaw
 
-        guard let image = UIImage(contentsOfFile: cleanPath),
-              let pixelBuffer = Self.pixelBuffer(from: image) else {
-            rejecter("E_DECODE_FAILED",
-                     "processFrameAtPath: could not decode JPEG at \(cleanPath)",
+        let engine = RetaiLensIncrementalStitcher.shared
+        guard engine.isBatchKeyframeMode else {
+            rejecter("E_NOT_BATCH_KEYFRAME",
+                     "processFrameAtPath only supports batch-keyframe "
+                     + "engine mode on iOS.  Configure "
+                     + "incrementalEngine='batch-keyframe' in start() "
+                     + "options, or fall back to the stitchVideo path.",
                      nil)
             return
         }
@@ -283,14 +304,12 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         let qy = (options["qy"] as? Double) ?? 0
         let qz = (options["qz"] as? Double) ?? 0
         let qw = (options["qw"] as? Double) ?? 1   // identity quat default
-        let fx = (options["fx"] as? Double) ?? Double(image.size.width)
-        let fy = (options["fy"] as? Double) ?? Double(image.size.height)
-        let cx = (options["cx"] as? Double) ?? Double(image.size.width) / 2.0
-        let cy = (options["cy"] as? Double) ?? Double(image.size.height) / 2.0
-        let imageWidth =
-            (options["imageWidth"] as? Int) ?? Int(image.size.width)
-        let imageHeight =
-            (options["imageHeight"] as? Int) ?? Int(image.size.height)
+        let fx = (options["fx"] as? Double) ?? 1000.0
+        let fy = (options["fy"] as? Double) ?? 1000.0
+        let cx = (options["cx"] as? Double) ?? 540.0
+        let cy = (options["cy"] as? Double) ?? 960.0
+        let imageWidth = (options["imageWidth"] as? Int) ?? 1080
+        let imageHeight = (options["imageHeight"] as? Int) ?? 1920
         let trackingPoor = (options["trackingPoor"] as? Bool) ?? false
         let timestampMs = (options["timestampMs"] as? Double)
             ?? (Date().timeIntervalSince1970 * 1000.0)
@@ -306,56 +325,8 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
             trackingState: trackingState
         )
 
-        RetaiLensIncrementalStitcher.shared.consumeFrame(
-            pixelBuffer: pixelBuffer,
-            pose: pose
-        )
-        resolver(["ok": true])
-    }
-
-    /// Decode a UIImage into a BGRA CVPixelBuffer.  Used by
-    /// `processFrameAtPath` so the engine's consumeFrame path (built
-    /// around CVPixelBuffer) can ingest non-AR snapshots.  Returns nil
-    /// on allocation failure.
-    private static func pixelBuffer(from image: UIImage) -> CVPixelBuffer? {
-        guard let cgImage = image.cgImage else { return nil }
-        let width = cgImage.width
-        let height = cgImage.height
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
-        ]
-        var pb: CVPixelBuffer?
-        let status = CVPixelBufferCreate(
-            kCFAllocatorDefault,
-            width, height,
-            kCVPixelFormatType_32BGRA,
-            attrs as CFDictionary,
-            &pb
-        )
-        guard status == kCVReturnSuccess, let buffer = pb else { return nil }
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-        guard let base = CVPixelBufferGetBaseAddress(buffer) else {
-            return nil
-        }
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue
-            | CGImageAlphaInfo.premultipliedFirst.rawValue
-        guard let context = CGContext(
-            data: base,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-            space: colorSpace,
-            bitmapInfo: bitmapInfo
-        ) else {
-            return nil
-        }
-        context.draw(cgImage, in: CGRect(x: 0, y: 0,
-                                          width: width, height: height))
-        return buffer
+        let accepted = engine.addBatchKeyframePath(path: cleanPath, pose: pose)
+        resolver(["ok": true, "accepted": accepted])
     }
 
     /// V16 Phase 1b.fix2 — JS-callable poll for the process'

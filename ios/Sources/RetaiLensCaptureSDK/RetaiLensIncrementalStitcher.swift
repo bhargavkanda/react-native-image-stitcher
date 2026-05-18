@@ -1823,6 +1823,88 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                self.keyframeGate.acceptedCount, self.keyframeGate.maxCount)
     }
 
+    /// Whether the engine is currently in batch-keyframe mode.
+    /// Bridge reads this to decide whether the JS-driven
+    /// `processFrameAtPath` path can use the lightweight
+    /// `addBatchKeyframePath` (path-only) entry below.
+    @objc public var isBatchKeyframeMode: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return batchKeyframeMode
+    }
+
+    /// 2026-05-18 (Issue #2 v2) — JS-driver entry-point for
+    /// batch-keyframe captures.  Mirrors Android's behaviour: the
+    /// caller (JS side via the IncrementalStitcherBridge) hands us a
+    /// JPEG file path that already exists on disk (saved by
+    /// vision-camera's takeSnapshot), plus a synthetic pose derived
+    /// from gyro integration.  We:
+    ///
+    ///   1. Validate state (running + batchKeyframeMode).
+    ///   2. Ask the shared C++ KeyframeGate whether to accept this
+    ///      frame.  Pass `latchedPlane: nil` — non-AR captures have
+    ///      no plane; the C++ gate falls back to a pose-only
+    ///      angular-delta strategy.  We do NOT pass a pixel buffer:
+    ///      the Pose strategy doesn't need one, and avoiding the
+    ///      JPEG → CVPixelBuffer round-trip dodges the iOS
+    ///      orientation bugs that broke Issue 2 v1
+    ///      (UIImage/CGContext Y-flip + EXIF-vs-CGImage dimension
+    ///      mismatch — see the symptom in 2026-05-18 user report).
+    ///   3. If accepted, append the existing path + pose to the
+    ///      finalize-time lists.  No JPEG re-encode — the file on
+    ///      disk IS the keyframe.  `retailens::stitchFramePaths()`
+    ///      at finalize uses `cv::imread` which natively handles
+    ///      EXIF orientation, so the output panorama reads upright.
+    ///   4. Emit the same state-event the AR delegate path emits so
+    ///      the JS live band populates identically.
+    ///
+    /// Architecture note: this is structurally parallel to Android's
+    /// `RetaiLensIncrementalStitcher.kt::processFrameAtPath`
+    /// `batchKeyframeMode` branch (lines 573-627).  A follow-up
+    /// should extract the dispatch (gate-eval + path-append + emit)
+    /// into shared cpp/ so both platforms become 5-line wrappers
+    /// around a single C++ entry point.
+    @objc public func addBatchKeyframePath(
+        path: String,
+        pose: RetaiLensARFramePose
+    ) -> Bool {
+        stateLock.lock()
+        guard self.isRunning, self.batchKeyframeMode else {
+            stateLock.unlock()
+            return false
+        }
+        stateLock.unlock()
+
+        // Pose-only gate evaluation — no pixel buffer, no plane.
+        let decision = self.keyframeGate.evaluate(
+            pose: pose,
+            latchedPlane: nil
+        )
+        if !decision.accept {
+            self.emitKeyframeRejectState(decision: decision)
+            return false
+        }
+
+        // Append path + pose to the finalize lists.  Take the lock
+        // briefly — these mutate state read by `finalize()`.
+        stateLock.lock()
+        self.keyframePaths.append(path)
+        self.keyframePoses.append(pose.asDictionary())
+        let count = self.keyframePaths.count
+        stateLock.unlock()
+        os_log(.fault, log: Self.diagLog,
+               "[V16-batch-keyframe.js] accepted path #%d → %{public}@",
+               Int32(count), path)
+        self.emitBatchKeyframeAcceptedState(
+            thumbnailPath: path,
+            keyframeIndex: count - 1,
+            keyframeCount: count,
+            keyframeMax: self.keyframeGate.maxCount,
+            isLandscape: pose.imageWidth >= pose.imageHeight
+        )
+        return true
+    }
+
     /// V16 Phase 1 — emit a state event when a batch-keyframe is
     /// saved.  Carries the on-disk thumbnail path so JS can render it
     /// in LiveFrameStrip + advance the "Keyframes: N/M" pill.
