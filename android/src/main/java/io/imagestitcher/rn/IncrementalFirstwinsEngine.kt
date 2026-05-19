@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-package com.retailens.capturesdk
+package io.imagestitcher.rn
 
 import android.util.Log
 import com.facebook.react.bridge.WritableMap

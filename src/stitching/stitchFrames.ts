@@ -5,7 +5,7 @@
  *   - iOS: Swift native module that vendors upstream OpenCV's iOS
  *     framework and calls `cv::Stitcher::SCANS` mode (designed for
  *     translational shelf captures).  Lives in
- *     `retailens-capture-sdk/ios/Sources/RetaiLensCaptureSDK/`.
+ *     `retailens-capture-sdk/ios/Sources/RNImageStitcher/`.
  *   - Android: deferred to Phase 3 — same OpenCV surface, different
  *     build (NDK + Gradle).  Until that lands, Android calls hit the
  *     `StitchNotImplementedError` path below.
@@ -70,7 +70,7 @@ export async function stitchFrames(
 
   throw new StitchNotImplementedError(
     `stitchFrames is not yet implemented on ${Platform.OS}. `
-    + 'The @retailens/capture-sdk native stitcher module is expected '
+    + 'The react-native-image-stitcher native stitcher module is expected '
     + 'but not registered — the JS shim is throwing by design so the '
     + 'host app can fall back to single-frame mode rather than ship '
     + 'broken panoramas.',

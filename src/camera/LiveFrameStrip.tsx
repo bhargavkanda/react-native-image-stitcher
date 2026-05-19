@@ -8,7 +8,7 @@
  *   component, iOS + Android parity).  New host code should mount
  *   `<PanoramaBandOverlay state={...} frameUris={...} />` and skip
  *   `<LiveFrameStrip />` entirely.  This file is kept exported so
- *   external consumers of @retailens/capture-sdk don't break on
+ *   external consumers of react-native-image-stitcher don't break on
  *   upgrade; it will be deleted in a future major version.
  *
  *   ┌──────────────────────────────────────────────────────────┐

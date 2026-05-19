@@ -6,7 +6,7 @@
 # inside the workQueue.sync closure in finalize(), there must be ZERO
 # `self.*` references.  All state the closure needs is plumbed through
 # the `FinalizePayload` value struct (see top of
-# RetaiLensIncrementalStitcher.swift).
+# IncrementalStitcher.swift).
 #
 # Why a script and not a Swift compiler check?  Swift's compiler does
 # not have a "forbid self capture in this specific closure" pragma.
@@ -28,7 +28,7 @@ set -euo pipefail
 # Resolve the Swift file path relative to this script — works from
 # any CWD.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-SWIFT_FILE="$SCRIPT_DIR/../ios/Sources/RetaiLensCaptureSDK/RetaiLensIncrementalStitcher.swift"
+SWIFT_FILE="$SCRIPT_DIR/../ios/Sources/RNImageStitcher/IncrementalStitcher.swift"
 
 if [[ ! -f "$SWIFT_FILE" ]]; then
     echo "FATAL: source file not found: $SWIFT_FILE" >&2
@@ -63,7 +63,7 @@ if [[ -n "$VIOLATIONS" ]]; then
 $VIOLATIONS
 
 All state used in the workQueue.sync closure must be plumbed through
-FinalizePayload (see top of RetaiLensIncrementalStitcher.swift).
+FinalizePayload (see top of IncrementalStitcher.swift).
 Re-introducing self.* in this closure has caused EXC_BAD_ACCESS
 \`objc_retain\` crashes in 7 prior fix attempts; this invariant is
 the architectural escalation per design-doc

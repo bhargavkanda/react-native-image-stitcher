@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-package com.retailens.capturesdk
+package io.imagestitcher.rn
 
 /**
  * Kotlin facade over the shared C++ KeyframeGate (in
@@ -204,10 +204,10 @@ internal class KeyframeGate : AutoCloseable {
 
     companion object {
         init {
-            // libretailens_stitcher.so contains both the OpenCV stitcher
+            // libimage_stitcher.so contains both the OpenCV stitcher
             // shim AND the C++ KeyframeGate + JNI bindings (single .so
             // keeps APK lean and avoids a second System.loadLibrary).
-            System.loadLibrary("retailens_stitcher")
+            System.loadLibrary("image_stitcher")
         }
 
         /**

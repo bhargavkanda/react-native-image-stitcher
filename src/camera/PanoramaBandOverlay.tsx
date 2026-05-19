@@ -48,7 +48,7 @@
  *   flight.  We therefore don't render any "no frames yet"
  *   placeholder — the empty period is sub-perceptual.
  *
- * Why this component is in @retailens/capture-sdk (not host):
+ * Why this component is in react-native-image-stitcher (not host):
  *   It's the same JSX shipped to iOS and Android.  Differences in
  *   what shows up come only from native-emitted data
  *   (`state.batchKeyframeThumbnailPath` / `state.panoramaPath`),

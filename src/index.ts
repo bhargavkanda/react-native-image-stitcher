@@ -1,5 +1,5 @@
 /**
- * @retailens/capture-sdk — public API surface.
+ * react-native-image-stitcher — public API surface.
  *
  * This file is the ONLY module host apps import from.  Everything
  * downstream (camera, quality, stitching) is wired through here so

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-package com.retailens.capturesdk
+package io.imagestitcher.rn
 
 import android.content.Context
 import android.opengl.GLES20
@@ -16,8 +16,8 @@ import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.SessionPausedException
-import com.retailens.capturesdk.ar.BackgroundRenderer
-import com.retailens.capturesdk.ar.YuvImageConverter
+import io.imagestitcher.rn.ar.BackgroundRenderer
+import io.imagestitcher.rn.ar.YuvImageConverter
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 import javax.microedition.khronos.egl.EGLConfig

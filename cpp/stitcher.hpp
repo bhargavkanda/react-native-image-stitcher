@@ -2,7 +2,7 @@
 //
 // stitcher.hpp — shared cv::Stitcher orchestration used by both
 // iOS (via Obj-C++ bridge in OpenCVStitcherBridge.mm) and Android
-// (via JNI in retailens_stitcher.cpp).
+// (via JNI in image_stitcher_jni.cpp).
 //
 // Why this exists
 // ───────────────
@@ -10,7 +10,7 @@
 // Before 2026-05-15, iOS had a hand-rolled cv::detail::* pipeline
 // (~3,000 lines in OpenCVStitcher.mm) while Android used the
 // high-level cv::Stitcher::create() API (~600 lines in
-// retailens_stitcher.cpp).  Two implementations of the same algorithm
+// image_stitcher_jni.cpp).  Two implementations of the same algorithm
 // drifted independently — fixes landed on one platform and didn't on
 // the other.  This file collapses that into a single source of truth.
 //

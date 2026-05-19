@@ -325,7 +325,7 @@ export interface PanoramaSettings {
    * iOS NOTE: as of 2026-05-14 the iOS stitcher uses a hand-rolled
    * PANORAMA-style pipeline (OpenCVStitcher.mm:600+) regardless of
    * this setting.  Setting is passed through to iOS but ignored.
-   * Android honours it via retailens_stitcher.cpp.  Bridging iOS is
+   * Android honours it via image_stitcher_jni.cpp.  Bridging iOS is
    * a follow-up.
    */
   stitchMode: 'auto' | 'panorama' | 'scans';

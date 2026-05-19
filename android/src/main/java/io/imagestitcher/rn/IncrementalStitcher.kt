@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-package com.retailens.capturesdk
+package io.imagestitcher.rn
 
 import android.app.ActivityManager
 import com.facebook.react.bridge.Arguments
@@ -102,7 +102,7 @@ class IncrementalStitcher(
     // Selected for engineMode == 'batch-keyframe'.  No live engine
     // runs — instead, accepted frames are collected as keyframe paths,
     // and at finalize() time we hand them all to the JNI shim
-    // (libretailens_stitcher.so) for one-shot cv::Stitcher processing.
+    // (libimage_stitcher.so) for one-shot cv::Stitcher processing.
     //
     // The MVP gate is frame-count-based ("accept every Nth frame
     // until cap").  iOS uses a pose-based gate (overlap < threshold)

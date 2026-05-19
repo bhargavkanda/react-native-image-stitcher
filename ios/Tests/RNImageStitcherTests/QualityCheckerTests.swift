@@ -4,7 +4,7 @@
 // Run from the command line:
 //
 //   cd retailens-capture-sdk/ios
-//   swift test --filter RetaiLensCaptureSDKTests
+//   swift test --filter RNImageStitcherTests
 //
 // Why synthesised fixtures instead of checked-in JPEGs?
 //   * Binary fixtures bloat the git history and make diffs noisy.
@@ -17,7 +17,7 @@
 //     ad-hoc reference image of unknown provenance.
 
 import XCTest
-@testable import RetaiLensCaptureSDK
+@testable import RNImageStitcher
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers

@@ -146,7 +146,7 @@ export async function stitchVideo(
 
   throw new StitchNotImplementedError(
     `stitchVideo is not yet implemented on ${Platform.OS}. `
-    + 'The @retailens/capture-sdk native stitcher module is expected '
+    + 'The react-native-image-stitcher native stitcher module is expected '
     + 'but not registered (or the build predates Phase 2.5 of #8).',
   );
 }
