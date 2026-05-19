@@ -21,7 +21,7 @@
  *     - `react-native-sensors` gyroscope is integrated to estimate
  *       cumulative yaw/pitch (drives the FoV-overlap gate)
  *     - Each snapshot path + integrated pose is fed to
- *       `RetaiLensIncrementalStitcher.processFrameAtPath()`
+ *       `IncrementalStitcher.processFrameAtPath()`
  *
  * Trade-off vs the AR path
  *   Gyro integration drifts ~1–2° per minute.  Acceptable for the
@@ -104,7 +104,7 @@ interface NativeProcessFrame {
 
 
 function getNativeIncremental(): NativeProcessFrame | null {
-  const m = (NativeModules as Record<string, unknown>)['RetaiLensIncrementalStitcher'];
+  const m = (NativeModules as Record<string, unknown>)['IncrementalStitcher'];
   if (!m || typeof m !== 'object') return null;
   return m as NativeProcessFrame;
 }

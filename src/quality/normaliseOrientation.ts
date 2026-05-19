@@ -40,7 +40,7 @@ export async function normaliseOrientation(
   fallback?: { width: number; height: number },
 ): Promise<NormaliseOrientationResult> {
   const native: unknown =
-    (NativeModules as Record<string, unknown>)['RetaiLensStitcher'];
+    (NativeModules as Record<string, unknown>)['BatchStitcher'];
   const fn =
     native
     && typeof native === 'object'

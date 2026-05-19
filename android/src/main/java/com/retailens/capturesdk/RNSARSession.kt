@@ -23,7 +23,7 @@ import kotlin.concurrent.read
 import kotlin.concurrent.write
 
 /**
- * Android twin of iOS's `RetaiLensARSession`.
+ * Android twin of iOS's `RNSARSession`.
  *
  * Phase 4 foundation for the AR measurement plan
  * (docs/site-content/design/2026-04-29-ar-measurement-and-detection.md).
@@ -45,17 +45,17 @@ import kotlin.concurrent.write
  *     each frame (caller drives the polling — typically the
  *     ARCore-backed CameraView).  Phase 4.4 wires that up.
  */
-class RetaiLensARSession(reactContext: ReactApplicationContext)
+class RNSARSession(reactContext: ReactApplicationContext)
     : ReactContextBaseJavaModule(reactContext) {
 
-    override fun getName(): String = "RetaiLensARSession"
+    override fun getName(): String = "RNSARSession"
 
     /// Tracking state values mirror the iOS enum exactly.
     /// 0 = notAvailable, 1 = initialising, 2 = tracking, 3 = limited.
     /// JS code does not need conditional branching across platforms.
     private val trackingStateRef = AtomicReference(TRACKING_NOT_AVAILABLE)
     private val sessionRef = AtomicReference<Session?>(null)
-    private val poseLog = mutableListOf<RetaiLensARFramePose>()
+    private val poseLog = mutableListOf<RNSARFramePose>()
     private val poseLogLock = ReentrantReadWriteLock()
 
     @ReactMethod
@@ -159,8 +159,8 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
 
     // ── Internal lifecycle hooks for the AR camera view ──────────────────
     //
-    // Mirror of iOS' `RetaiLensARSession.shared.start()` /
-    // `.stop()` calls from `RetaiLensARCameraView.didMoveToWindow`.
+    // Mirror of iOS' `RNSARSession.shared.start()` /
+    // `.stop()` calls from `RNSARCameraView.didMoveToWindow`.
     // The Promise-based `start(promise)` / `stop(promise)` above
     // remain the canonical JS-facing API; these synchronous twins
     // exist so the native view can self-bootstrap its session
@@ -182,7 +182,7 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
 
     /**
      * Ensure the AR session is running.  Called from
-     * [RetaiLensARCameraView.onAttachedToWindow].  Returns true
+     * [RNSARCameraView.onAttachedToWindow].  Returns true
      * iff a session is now running.
      *
      * Return-value semantics:
@@ -277,7 +277,7 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
 
     /**
      * Pause + release the AR session.  Called from
-     * [RetaiLensARCameraView.onDetachedFromWindow].  Frees the
+     * [RNSARCameraView.onDetachedFromWindow].  Frees the
      * hardware camera so other consumers (vision-camera, packaged
      * camera app via picker, etc.) can claim it.
      *
@@ -330,7 +330,7 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
      * the GL render thread once per frame.  Bounded by
      * MAX_POSE_LOG.
      */
-    internal fun appendPose(pose: RetaiLensARFramePose) {
+    internal fun appendPose(pose: RNSARFramePose) {
         poseLogLock.write {
             poseLog.add(pose)
             if (poseLog.size > MAX_POSE_LOG) {
@@ -344,8 +344,8 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
      * Find the pose closest to `targetMs` (timestamps in ms since
      * session start), within `maxToleranceMs`.
      */
-    internal fun poseClosestTo(targetMs: Double, maxToleranceMs: Double = 50.0): RetaiLensARFramePose? {
-        var best: RetaiLensARFramePose? = null
+    internal fun poseClosestTo(targetMs: Double, maxToleranceMs: Double = 50.0): RNSARFramePose? {
+        var best: RNSARFramePose? = null
         var bestDelta = Double.POSITIVE_INFINITY
         poseLogLock.read {
             for (p in poseLog) {
@@ -374,12 +374,12 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
 
     // ── V15.0e — Vertical plane detection (iOS parity) ────────────────
     //
-    // Mirror of iOS' RetaiLensARSession.swift planar-detection state +
+    // Mirror of iOS' RNSARSession.swift planar-detection state +
     // relatchPlaneFromCurrentAnchors algorithm.  iOS runs evaluation
     // continuously via ARKit's ARSessionDelegate didUpdate callbacks;
     // ARCore on Android exposes per-frame plane trackables only from
     // session.update() (which the camera view drives).  We therefore
-    // run evaluatePlanesForFrame() from RetaiLensARCameraView.onDrawFrame.
+    // run evaluatePlanesForFrame() from RNSARCameraView.onDrawFrame.
     //
     // State is read by JS via getARPlaneStatus() at 2 Hz; the shutter
     // gate in AuditCaptureScreen.tsx (planeShutterGate) flips to enabled
@@ -403,7 +403,7 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
     //      "found plane but off-axis (best 0.45)" guidance.
 
     /// Minimum plane area to be considered for latching.
-    /// Matches iOS' kMinPlaneArea in RetaiLensARSession.swift.
+    /// Matches iOS' kMinPlaneArea in RNSARSession.swift.
     private val minPlaneAreaM2: Float = 0.20f  // 0.45m × 0.45m
 
     /// V15.0d — minimum |planeNormal · cameraForward| for a plane to
@@ -440,9 +440,9 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
 
     /**
      * Per-frame plane evaluation — called from
-     * [RetaiLensARCameraView.onDrawFrame] AFTER session.update().
+     * [RNSARCameraView.onDrawFrame] AFTER session.update().
      *
-     * Mirrors iOS' RetaiLensARSession.swift::relatchPlaneFromCurrentAnchors,
+     * Mirrors iOS' RNSARSession.swift::relatchPlaneFromCurrentAnchors,
      * but runs every frame (ARKit re-runs internally on iOS; we mirror
      * by polling every ARCore frame at ~60 Hz).  Continuous evaluation
      * means the JS 2 Hz getARPlaneStatus poll sees a live answer
@@ -560,7 +560,7 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
         // Surfaces WHY plane detection is or isn't latching.  Logs
         // once every planeEvalLogStride frames (default ~2 Hz).  Field
         // testing protocol: tail logcat with `adb logcat -s
-        // RetaiLensARSession:V`, navigate to AuditCapture, watch this
+        // RNSARSession:V`, navigate to AuditCapture, watch this
         // tick to understand whether ARCore is finding planes at all,
         // and if it is, why they're being rejected.
         if (planeEvalLogTick++ % planeEvalLogStride == 0) {
@@ -607,17 +607,17 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
         bestRejectedAlignment = -1.0f
     }
 
-    // ── Helpers consumed by RetaiLensIncrementalStitcher's @ReactMethod ─
+    // ── Helpers consumed by IncrementalStitcher's @ReactMethod ─
     //
     // iOS exposes getARPlaneStatus / relatchARPlane on the JS module
-    // `RetaiLensIncrementalStitcher` (the IncrementalStitcherBridge —
+    // `IncrementalStitcher` (the IncrementalStitcherBridge —
     // see iOS IncrementalStitcherBridge.swift); both methods delegate
-    // to `RetaiLensARSession.shared`.  We mirror that JS-callable
+    // to `RNSARSession.shared`.  We mirror that JS-callable
     // surface: the `@ReactMethod` versions live on
-    // RetaiLensIncrementalStitcher.kt and call these helpers.  This
+    // IncrementalStitcher.kt and call these helpers.  This
     // keeps JS unchanged across platforms (it calls
     // `NativeIncrementalModule.getARPlaneStatus()`, not
-    // `RetaiLensARSession.getARPlaneStatus()`).
+    // `RNSARSession.getARPlaneStatus()`).
 
     /**
      * Build the plane-status payload — caller resolves the Promise.
@@ -640,7 +640,7 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
         return map
     }
 
-    /// Used by `RetaiLensARCameraView` to borrow the underlying
+    /// Used by `RNSARCameraView` to borrow the underlying
     /// ARCore Session for rendering + per-frame `update()`.  Returns
     /// null when the session hasn't been started yet (the view will
     /// retry on the next render frame).
@@ -650,13 +650,13 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
     /// keep track of who's actively rendering.  Currently used only
     /// for diagnostics (the view feeds frames into the engine via
     /// the bridge module's static reference, no fan-out needed yet).
-    @Volatile private var attachedView: RetaiLensARCameraView? = null
+    @Volatile private var attachedView: RNSARCameraView? = null
 
-    internal fun bindCameraView(view: RetaiLensARCameraView) {
+    internal fun bindCameraView(view: RNSARCameraView) {
         attachedView = view
     }
 
-    internal fun unbindCameraView(view: RetaiLensARCameraView) {
+    internal fun unbindCameraView(view: RNSARCameraView) {
         if (attachedView === view) attachedView = null
     }
 
@@ -665,14 +665,14 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
     }
 
     companion object {
-        // Mirrors RetaiLensARTrackingState on iOS for cross-platform
+        // Mirrors RNSARTrackingState on iOS for cross-platform
         // identical JS behaviour.
         const val TRACKING_NOT_AVAILABLE = 0
         const val TRACKING_INITIALISING = 1
         const val TRACKING_TRACKING = 2
         const val TRACKING_LIMITED = 3
 
-        private const val TAG = "RetaiLensARSession"
+        private const val TAG = "RNSARSession"
         private const val MAX_POSE_LOG = 600  // ~10 s @ 60Hz
 
         /**
@@ -685,7 +685,7 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
          */
         @JvmStatic
         @Volatile
-        var instance: RetaiLensARSession? = null
+        var instance: RNSARSession? = null
             private set
     }
 
@@ -701,10 +701,10 @@ class RetaiLensARSession(reactContext: ReactApplicationContext)
 
 /**
  * Plain data class for a single frame's pose.  Mirror of iOS'
- * `RetaiLensARFramePose`; same JSON shape so the JS bridge sees
+ * `RNSARFramePose`; same JSON shape so the JS bridge sees
  * identical data on both platforms.
  */
-internal data class RetaiLensARFramePose(
+internal data class RNSARFramePose(
     val tx: Double, val ty: Double, val tz: Double,
     val qx: Double, val qy: Double, val qz: Double, val qw: Double,
     val fx: Double, val fy: Double, val cx: Double, val cy: Double,

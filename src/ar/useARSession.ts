@@ -27,7 +27,7 @@ import { NativeModules } from 'react-native';
 
 /**
  * AR tracking state.  Numeric values mirror iOS' enum and the
- * Android constants in `RetaiLensARSession.companion`.  Cross-
+ * Android constants in `RNSARSession.companion`.  Cross-
  * platform identical; no branching needed in JS.
  */
 export enum ARTrackingState {
@@ -112,7 +112,7 @@ interface NativeARSessionModule {
 
 
 function getNativeModule(): NativeARSessionModule | null {
-  const m = (NativeModules as Record<string, unknown>)['RetaiLensARSession'];
+  const m = (NativeModules as Record<string, unknown>)['RNSARSession'];
   if (!m || typeof m !== 'object') return null;
   return m as NativeARSessionModule;
 }
@@ -172,7 +172,7 @@ export function useARSession(): UseARSessionReturn {
 
   const start = useCallback(async () => {
     if (!native) {
-      throw new Error('useARSession: RetaiLensARSession native module unavailable');
+      throw new Error('useARSession: RNSARSession native module unavailable');
     }
     await native.start();
     setIsRunning(true);

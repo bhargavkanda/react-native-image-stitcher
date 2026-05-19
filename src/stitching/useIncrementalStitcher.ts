@@ -167,7 +167,7 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
     async (options: IncrementalStartOptions = {}) => {
       if (!native) {
         throw new Error(
-          'useIncrementalStitcher: RetaiLensIncrementalStitcher native '
+          'useIncrementalStitcher: IncrementalStitcher native '
           + 'module is not registered.  Ensure the SDK pod has been '
           + 'rebuilt against the host app.',
         );

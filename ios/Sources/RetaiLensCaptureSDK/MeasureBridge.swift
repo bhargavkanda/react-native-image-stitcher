@@ -22,7 +22,7 @@ public final class RetaiLensMeasureBridge: NSObject {
     /// Expected `options` keys:
     ///   panoramaWidth: Int (px)
     ///   panoramaHeight: Int (px)
-    ///   framePoses: NSArray of pose dicts (RetaiLensARFramePose.asDictionary())
+    ///   framePoses: NSArray of pose dicts (RNSARFramePose.asDictionary())
     ///   pointA: { x: Double, y: Double } in panorama pixel coords
     ///   pointB: { x: Double, y: Double }
     ///   sceneDepthMeters: Double (optional, default 0.70 m)

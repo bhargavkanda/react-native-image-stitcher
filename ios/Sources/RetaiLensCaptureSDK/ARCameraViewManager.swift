@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 //
-// ARCameraViewManager — RCTViewManager that vends RetaiLensARCameraView
+// ARCameraViewManager — RCTViewManager that vends RNSARCameraView
 // instances to React Native.
 //
 // React Native discovers native UI components via subclasses of
@@ -13,7 +13,7 @@
 //
 // The class itself does almost nothing — view lifecycle (start/stop AR
 // session) lives on the view, props are bridged via the .m file.  Most
-// of the value here is the @objc(RetaiLensARCameraViewManager) name
+// of the value here is the @objc(RNSARCameraViewManager) name
 // matching the JS-side `requireNativeComponent` call.
 
 #if canImport(React)
@@ -22,14 +22,14 @@ import React
 import UIKit
 
 
-@objc(RetaiLensARCameraViewManager)
-public final class RetaiLensARCameraViewManager: RCTViewManager {
+@objc(RNSARCameraViewManager)
+public final class RNSARCameraViewManager: RCTViewManager {
 
     /// Vends a new view instance per React Native mount.  RN reuses
     /// view instances when possible (recycler) but during initial
     /// hookup this is called once per `<ARCameraView>` element.
     public override func view() -> UIView! {
-        return RetaiLensARCameraView()
+        return RNSARCameraView()
     }
 
     /// AR-camera view setup needs the main thread (UIKit + ARSCNView).

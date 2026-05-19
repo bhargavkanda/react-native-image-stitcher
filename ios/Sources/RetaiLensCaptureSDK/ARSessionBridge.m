@@ -1,26 +1,26 @@
 // SPDX-License-Identifier: UNLICENSED
 //
-// ObjC shim that registers RetaiLensARSessionBridge as the
-// "RetaiLensARSession" RN native module — this is what JS
-// imports as `NativeModules.RetaiLensARSession`.
+// ObjC shim that registers RNSARSessionBridge as the
+// "RNSARSession" RN native module — this is what JS
+// imports as `NativeModules.RNSARSession`.
 
 #import <React/RCTBridgeModule.h>
 
 // REMAP form, NOT EXTERN_MODULE.  The Swift singleton in
-// RetaiLensARSession.swift takes the @objc name "RetaiLensARSession"
+// RNSARSession.swift takes the @objc name "RNSARSession"
 // for itself (so ARSessionDelegate dispatch works against a stable
-// ObjC name).  Our RN-facing bridge class is `RetaiLensARSessionBridge`.
-// `RCT_EXTERN_MODULE(RetaiLensARSession, ...)` would attach the
+// ObjC name).  Our RN-facing bridge class is `RNSARSessionBridge`.
+// `RCT_EXTERN_MODULE(RNSARSession, ...)` would attach the
 // bridge category to the singleton class — RN would then invoke
 // selectors like `takePhoto:resolver:rejecter:` on the singleton,
 // which doesn't have them, and silently drop the calls.
 //
 // REMAP_MODULE keeps the JS-visible module name as
-// "RetaiLensARSession" but tells RN to instantiate
-// `RetaiLensARSessionBridge` and dispatch methods against THAT
+// "RNSARSession" but tells RN to instantiate
+// `RNSARSessionBridge` and dispatch methods against THAT
 // class — where takePhoto / startRecording / stopRecording etc.
 // actually live.
-@interface RCT_EXTERN_REMAP_MODULE(RetaiLensARSession, RetaiLensARSessionBridge, NSObject)
+@interface RCT_EXTERN_REMAP_MODULE(RNSARSession, RNSARSessionBridge, NSObject)
 
 RCT_EXTERN_METHOD(isSupported:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)

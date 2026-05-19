@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: UNLICENSED
 //
-// ObjC shim that registers RetaiLensIncrementalStitcherBridge as the
-// "RetaiLensIncrementalStitcher" RN module.  REMAP form, same
+// ObjC shim that registers IncrementalStitcherBridge as the
+// "IncrementalStitcher" RN module.  REMAP form, same
 // rationale as ARSessionBridge.m: the Swift singleton already takes
-// the @objc name "RetaiLensIncrementalStitcher" so attaching the
+// the @objc name "IncrementalStitcher" so attaching the
 // bridge category to that class would shadow the singleton's
 // methods.  REMAP_MODULE keeps the JS-visible name stable while
 // telling RN to instantiate the bridge class.
@@ -12,8 +12,8 @@
 #import <React/RCTEventEmitter.h>
 
 @interface RCT_EXTERN_REMAP_MODULE(
-    RetaiLensIncrementalStitcher,
-    RetaiLensIncrementalStitcherBridge,
+    IncrementalStitcher,
+    IncrementalStitcherBridge,
     RCTEventEmitter
 )
 

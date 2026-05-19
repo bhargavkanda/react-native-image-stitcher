@@ -17,7 +17,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Android twin of the iOS RetaiLensStitcher.  Mirrors the JS-facing
+ * Android twin of the iOS BatchStitcher.  Mirrors the JS-facing
  * surface exactly:
  *
  *   stitch({ framePaths, outputPath, quality })
@@ -41,10 +41,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * fast (~30-50 ms) and the API blocks per-frame, so we run the
  * whole pipeline on a background coroutine.
  */
-class RetaiLensStitcher(reactContext: ReactApplicationContext)
+class BatchStitcher(reactContext: ReactApplicationContext)
     : ReactContextBaseJavaModule(reactContext) {
 
-    override fun getName(): String = "RetaiLensStitcher"
+    override fun getName(): String = "BatchStitcher"
 
     /**
      * JNI bridge to our custom-built OpenCV stitcher.  Mirrors iOS'
@@ -93,7 +93,7 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
         //   "panorama" → cv::Stitcher::PANORAMA (rotation-only)
         //   "scans"    → cv::Stitcher::SCANS    (translation/affine)
         // Always a concrete mode at this layer; 'auto' is resolved
-        // upstream in RetaiLensIncrementalStitcher.finalize() based
+        // upstream in IncrementalStitcher.finalize() based
         // on accumulated translation/rotation totals.  Defaults to
         // "scans" in the JNI on unknown input (safer fallback —
         // SCANS canvas size is bounded by sum-of-frames; PANORAMA
@@ -145,7 +145,7 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
         val compositingResolMP = if (options.hasKey("compositingResolMP"))
             options.getDouble("compositingResolMP") else 1.0
         // 2026-05-14 — cv::Stitcher pipeline mode.  Caller from
-        // RetaiLensIncrementalStitcher.finalize resolves 'auto' to
+        // IncrementalStitcher.finalize resolves 'auto' to
         // 'panorama' or 'scans' before reaching here.  Direct
         // @ReactMethod callers (CLI / tests) can pass 'auto' too;
         // we default to 'scans' if missing/unrecognised since SCANS
@@ -313,7 +313,7 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
 
     /**
      * Internal-visibility synchronous stitch entry point so the
-     * orchestrator (RetaiLensIncrementalStitcher) can drive the V16
+     * orchestrator (IncrementalStitcher) can drive the V16
      * batch-keyframe finalize without re-marshalling through the
      * @ReactMethod surface.  Loads the JNI shim if not yet loaded,
      * then calls straight into native.  Throws on error.
@@ -387,22 +387,22 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
 
     init {
         // Singleton-style accessor for callers that need the
-        // RetaiLensStitcher instance from outside the @ReactMethod
-        // path (e.g. RetaiLensIncrementalStitcher.finalize() during
+        // BatchStitcher instance from outside the @ReactMethod
+        // path (e.g. IncrementalStitcher.finalize() during
         // batch-keyframe stitching).
         //
         // Why this exists:
-        //   reactContext.getNativeModule(RetaiLensStitcher::class.java)
+        //   reactContext.getNativeModule(BatchStitcher::class.java)
         //   returns null under bridgeless / new-architecture mode for
         //   modules registered the legacy way (ReactPackage +
         //   createNativeModules), even when the module is fully
         //   registered.  Empirically confirmed by Galaxy A35
         //   capture session 2026-05-13: stitcher IS registered (see
         //   RetaiLensCapturePackage.kt) but lookup returned null →
-        //   "RetaiLensStitcher module not registered" IllegalState
+        //   "BatchStitcher module not registered" IllegalState
         //   at finalize time.
         //
-        // Same pattern RetaiLensIncrementalStitcher uses (its
+        // Same pattern IncrementalStitcher uses (its
         // `bridgeInstance` companion).
         bridgeInstance = this
     }
@@ -414,13 +414,13 @@ class RetaiLensStitcher(reactContext: ReactApplicationContext)
         @JvmStatic
         private val stitcherInitialised = AtomicBoolean(false)
 
-        /// Direct access to the last-constructed RetaiLensStitcher.
+        /// Direct access to the last-constructed BatchStitcher.
         /// RN may rebuild modules across reloads; the lookup always
         /// returns the latest reference.  Read-only from outside;
         /// only the init {} above sets it.
         @JvmStatic
         @Volatile
-        var bridgeInstance: RetaiLensStitcher? = null
+        var bridgeInstance: BatchStitcher? = null
             private set
     }
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 //
-// ARSessionBridge — RN bridge for RetaiLensARSession.
+// ARSessionBridge — RN bridge for RNSARSession.
 //
 // JS surface (mirrored on Android via the analogous ARCore bridge):
 //
@@ -11,14 +11,14 @@
 //   snapshotPoseLog() → Promise<FramePose[]>
 //
 // Phase 5+ APIs (stitchVideoWithPoses, measureRegion) are added on
-// the existing RetaiLensStitcher bridge, not here — keeps each
+// the existing BatchStitcher bridge, not here — keeps each
 // module focused on one ARKit/OpenCV concern.
 
 import Foundation
 import React
 
-@objc(RetaiLensARSessionBridge)
-public final class RetaiLensARSessionBridge: NSObject {
+@objc(RNSARSessionBridge)
+public final class RNSARSessionBridge: NSObject {
 
     @objc public static func requiresMainQueueSetup() -> Bool {
         // ARSession.start() must be called on the main thread —
@@ -31,7 +31,7 @@ public final class RetaiLensARSessionBridge: NSObject {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        resolver(RetaiLensARSession.isSupported)
+        resolver(RNSARSession.isSupported)
     }
 
     @objc(start:rejecter:)
@@ -40,7 +40,7 @@ public final class RetaiLensARSessionBridge: NSObject {
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
         DispatchQueue.main.async {
-            RetaiLensARSession.shared.start()
+            RNSARSession.shared.start()
             resolver(nil)
         }
     }
@@ -51,7 +51,7 @@ public final class RetaiLensARSessionBridge: NSObject {
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
         DispatchQueue.main.async {
-            RetaiLensARSession.shared.stop()
+            RNSARSession.shared.stop()
             resolver(nil)
         }
     }
@@ -61,7 +61,7 @@ public final class RetaiLensARSessionBridge: NSObject {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        let s = RetaiLensARSession.shared
+        let s = RNSARSession.shared
         resolver([
             "isRunning": s.isRunning,
             "trackingState": s.currentTrackingState.rawValue,
@@ -73,7 +73,7 @@ public final class RetaiLensARSessionBridge: NSObject {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        let poses = RetaiLensARSession.shared.snapshotPoseLog()
+        let poses = RNSARSession.shared.snapshotPoseLog()
         resolver(poses.map { $0.asDictionary() })
     }
 
@@ -82,7 +82,7 @@ public final class RetaiLensARSessionBridge: NSObject {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        RetaiLensARSession.shared.clearPoseLog()
+        RNSARSession.shared.clearPoseLog()
         resolver(nil)
     }
 
@@ -99,7 +99,7 @@ public final class RetaiLensARSessionBridge: NSObject {
     ) {
         let path = (options["path"] as? String) ?? ""
         let quality = (options["quality"] as? Int) ?? 90
-        RetaiLensARSession.shared.takePhoto(
+        RNSARSession.shared.takePhoto(
             toPath: path,
             quality: quality
         ) { result, error in
@@ -122,7 +122,7 @@ public final class RetaiLensARSessionBridge: NSObject {
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
         let path = (options["path"] as? String) ?? ""
-        RetaiLensARSession.shared.startRecording(toPath: path) { resolvedPath, error in
+        RNSARSession.shared.startRecording(toPath: path) { resolvedPath, error in
             if let error = error {
                 rejecter("ar-recording-failed", error.localizedDescription, error)
             } else {
@@ -138,7 +138,7 @@ public final class RetaiLensARSessionBridge: NSObject {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        RetaiLensARSession.shared.stopRecording { result, error in
+        RNSARSession.shared.stopRecording { result, error in
             if let error = error {
                 rejecter("ar-stop-failed", error.localizedDescription, error)
             } else {

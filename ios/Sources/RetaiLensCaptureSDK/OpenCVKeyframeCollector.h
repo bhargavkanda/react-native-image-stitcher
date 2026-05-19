@@ -7,7 +7,7 @@
 //
 // Why a separate class:
 //   - CVPixelBuffer → cv::Mat → cv::imwrite has to live in ObjC++ /
-//     OpenCV-aware code.  RetaiLensIncrementalStitcher.swift can't
+//     OpenCV-aware code.  IncrementalStitcher.swift can't
 //     call it directly.
 //   - The frame collection state (session dir, accepted-frame
 //     counter) is small and capture-scoped; isolating it from the
@@ -87,7 +87,7 @@ NS_ASSUME_NONNULL_BEGIN
                                           error:(NSError **)error;
 
 /// Remove the session directory and any saved keyframes.  Idempotent.
-/// Called from RetaiLensIncrementalStitcher's `cancel` / on
+/// Called from IncrementalStitcher's `cancel` / on
 /// successful finalize when the operator hasn't opted into
 /// "keep-for-reprocess" mode.
 - (void)cleanup;

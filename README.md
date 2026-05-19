@@ -96,7 +96,7 @@ the SDK's `dist/` so tests see the TypeScript source directly.
 
 - **Native stitcher (iOS)**: OpenCV for iOS + Swift bridging header
   that wraps `cv::Stitcher::stitch`.  Registers as
-  `NativeModules.RetaiLensStitcher`.  Unlocks both `stitchFrames`
+  `NativeModules.BatchStitcher`.  Unlocks both `stitchFrames`
   and `useVideoCapture.extractFrames` in one go.
 - **Native stitcher (Android)**: JNI binding to OpenCV for Android.
   Blocked on iOS validating the panorama UX first.

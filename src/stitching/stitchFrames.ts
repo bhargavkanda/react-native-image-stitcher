@@ -62,7 +62,7 @@ export async function stitchFrames(
   // this function to "implemented" simply by registering the module
   // in AppDelegate / MainApplication.
   const native: unknown =
-    (NativeModules as Record<string, unknown>)['RetaiLensStitcher'];
+    (NativeModules as Record<string, unknown>)['BatchStitcher'];
   if (native && typeof native === 'object' && 'stitch' in (native as object)) {
     const fn = (native as { stitch: (o: StitchFramesOptions) => Promise<StitchFramesResult> }).stitch;
     return fn(options);

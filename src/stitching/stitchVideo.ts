@@ -80,7 +80,7 @@ export interface StitchVideoOptions {
    * the native stitcher skips features → matching → BundleAdjuster
    * and builds cv::detail::CameraParams directly from each pose's
    * intrinsics + quaternion.  Each entry has the shape returned
-   * by `NativeModules.RetaiLensARSession.snapshotPoseLog()`:
+   * by `NativeModules.RNSARSession.snapshotPoseLog()`:
    *
    *   { tx, ty, tz, qx, qy, qz, qw,
    *     fx, fy, cx, cy,
@@ -118,7 +118,7 @@ export async function stitchVideo(
   options: StitchVideoOptions,
 ): Promise<StitchFramesResult> {
   const native: unknown =
-    (NativeModules as Record<string, unknown>)['RetaiLensStitcher'];
+    (NativeModules as Record<string, unknown>)['BatchStitcher'];
   if (
     native
     && typeof native === 'object'

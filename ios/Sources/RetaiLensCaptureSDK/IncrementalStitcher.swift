@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: UNLICENSED
 //
-// RetaiLensIncrementalStitcher — Swift-side engine for the live
+// IncrementalStitcher — Swift-side engine for the live
 // panorama-stitching pipeline introduced in
 // docs/site-content/design/2026-04-30-realtime-incremental-stitching.md.
 //
 // What this file does:
 //   - Owns a single `OpenCVIncrementalStitcher` instance
-//   - Subscribes to `RetaiLensARSession`'s per-frame ARFrame delivery
+//   - Subscribes to `RNSARSession`'s per-frame ARFrame delivery
 //   - Converts ARKit pose → yaw/pitch + horizontal FoV
 //   - Dispatches addPixelBuffer onto a serial queue
 //   - Posts state updates as Notifications so the RN bridge can fan
@@ -31,7 +31,7 @@
 //
 // Pixel-buffer lifetime:
 //   Apple guarantees ARFrame.capturedImage stays valid only within
-//   the delegate callback (see the comment on RetaiLensARSession's
+//   the delegate callback (see the comment on RNSARSession's
 //   recording-append path).  We therefore consume the buffer
 //   inside the delegate (the .mm copies pixels into a cv::Mat — the
 //   Mat owns its own heap memory) before returning, even when the
@@ -74,8 +74,8 @@ import os.log
 
 /// State snapshot the bridge re-emits to JS on every accepted frame
 /// (and on rejects when there's a hint to surface).
-@objc(RetaiLensIncrementalState)
-public final class RetaiLensIncrementalState: NSObject {
+@objc(IncrementalStateObject)
+public final class IncrementalStateObject: NSObject {
     @objc public let panoramaPath: String?
     @objc public let width: Int
     @objc public let height: Int
@@ -157,7 +157,7 @@ public final class RetaiLensIncrementalState: NSObject {
 /// keeps Swift unit tests viable.
 public extension Notification.Name {
     static let retailensIncrementalStateUpdate =
-        Notification.Name("RetaiLensIncrementalStateUpdate")
+        Notification.Name("IncrementalStateUpdate")
 }
 
 
@@ -182,7 +182,7 @@ public extension Notification.Name {
 //
 // MAINTENANCE INVARIANT: every ivar finalize closures currently
 // read (or might read in future edits) MUST live here.  If you add
-// a new finalize-relevant ivar to RetaiLensIncrementalStitcher,
+// a new finalize-relevant ivar to IncrementalStitcher,
 // thread it through this struct.  The CI test at
 // scripts/check_c2_invariant.sh prevents accidental `self.*`
 // reintroduction inside the closure body.
@@ -229,8 +229,8 @@ struct FinalizePayload {
 }
 
 
-@objc(RetaiLensIncrementalStitcher)
-public final class RetaiLensIncrementalStitcher: NSObject {
+@objc(IncrementalStitcher)
+public final class IncrementalStitcher: NSObject {
 
     /// V13.0c.1.1 — same os_log subsystem as the slit-scan engine's
     /// SlitDiagLog so Console.app sees both V13.0b-gate and V13.0c-trans
@@ -242,7 +242,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     )
 
 
-    @objc public static let shared = RetaiLensIncrementalStitcher()
+    @objc public static let shared = IncrementalStitcher()
 
     /// Underlying OpenCV engine.  Created on `start`, torn down on
     /// `finalize`/`reset`.  Holding it across captures would keep the
@@ -257,10 +257,10 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     private var firstwinsEngine: OpenCVFirstWinsCylindricalStitcher?
 
     /// V15.0b — true once we've forwarded the latched plane transform
-    /// from RetaiLensARSession to the slit-scan engine.  Reset on
+    /// from RNSARSession to the slit-scan engine.  Reset on
     /// every start() so the next capture re-propagates.  We only
     /// forward once per capture: the plane transform is latched
-    /// (RetaiLensARSession ignores subsequent ARKit refinements),
+    /// (RNSARSession ignores subsequent ARKit refinements),
     /// so re-propagating each frame is wasted work.
     private var havePropagatedPlane: Bool = false
 
@@ -320,7 +320,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
 
     /// The most recent state snapshot — readable by JS via the
     /// bridge's `getState`.
-    private var lastState: RetaiLensIncrementalState?
+    private var lastState: IncrementalStateObject?
 
     /// Cumulative drop counter — frames the work queue couldn't keep
     /// up with.  Diagnostic only; not surfaced to JS.
@@ -377,7 +377,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     private var batchKeyframeMode: Bool = false
     private var keyframeCollector: OpenCVKeyframeCollector?
     /// Poses recorded 1:1 with `keyframeCollector`'s saved JPEGs.
-    /// Each entry is `RetaiLensARFramePose.asDictionary()`.  Reset
+    /// Each entry is `RNSARFramePose.asDictionary()`.  Reset
     /// on every `start()`.
     private var keyframePoses: [[String: Any]] = []
     /// Saved JPEG paths in capture order.  Tracked separately from
@@ -620,7 +620,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         rollDegrees: Double,
         hadFrame: Bool
     ) {
-        guard let frame = RetaiLensARSession.shared.arSession.currentFrame else {
+        guard let frame = RNSARSession.shared.arSession.currentFrame else {
             // No AR frame yet — falls back to "portrait" (Mode B start
             // state).  Should be rare: incremental.start() requires
             // ARSession to be running, which means frames are flowing.
@@ -981,7 +981,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // consumer here would either crash (no running session) or
         // mis-route frames once an AR session somewhere else came up.
         if frameSourceMode != "jsDriver" {
-            RetaiLensARSession.shared.incrementalConsumer = self
+            RNSARSession.shared.incrementalConsumer = self
         }
     }
 
@@ -1095,7 +1095,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // Propagate the alignment threshold to the AR session so its
         // didAdd / didUpdate filter uses the operator-chosen value.
         // (planeAlignmentThreshold is a Float on the AR session.)
-        RetaiLensARSession.shared.planeAlignmentThreshold =
+        RNSARSession.shared.planeAlignmentThreshold =
             Float(config.arkitPlaneAlignmentThreshold)
     }
 
@@ -1211,7 +1211,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         //   stitcher ivar.  Any future edit that re-introduces a
         //   `self.` reference inside the closure is caught at CI.
         let arWasRunning = inBatchKeyframeMode
-            && RetaiLensARSession.shared.isRunning
+            && RNSARSession.shared.isRunning
         let cleaned = (outputPath.hasPrefix("file://"))
             ? String(outputPath.dropFirst(7))
             : outputPath
@@ -1237,7 +1237,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // Then detach the AR consumer.  Any in-flight delegate that
         // already captured the consumer reference will reach
         // consumeFrame, see isRunning=false, and bail.
-        RetaiLensARSession.shared.incrementalConsumer = nil
+        RNSARSession.shared.incrementalConsumer = nil
 
         // V16 Phase 1b.fix1 — pause the AR session for the duration
         // of the stitch (batch-keyframe path only).  ARSession holds
@@ -1256,7 +1256,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         if payload.arWasRunning {
             os_log(.fault, log: Self.diagLog,
                    "[V16-batch-keyframe] pausing AR session for stitch (memory drop)")
-            RetaiLensARSession.shared.stop()
+            RNSARSession.shared.stop()
         }
 
         // V16 Phase 1b.fix6 — ARCHITECTURAL: workQueue.sync (not async)
@@ -1295,7 +1295,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // on 4-6 keyframes at iPhone 16 Pro).  The bridge thread is
         // NOT main (RCTEventEmitter.requiresMainQueueSetup() is false
         // and we don't override methodQueue) so UI stays responsive.
-        // Other RetaiLensIncrementalStitcher bridge calls queue up
+        // Other IncrementalStitcher bridge calls queue up
         // for ~3 s — acceptable since the JS side is awaiting the
         // finalize promise anyway and isn't issuing other calls
         // during that interval.
@@ -1317,7 +1317,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // satisfied by these two captures, value-typed members of
         // `payload`, static types (`Self.diagLog`, `OpenCVStitcher`,
         // `FileManager`, `CGDataProvider`, `CGImage`, `NSError`,
-        // `RetaiLensARSession`), or local lets/declarations made
+        // `RNSARSession`), or local lets/declarations made
         // inside the closure.
         workQueue.sync { [payload, completion] in
             // V16 Phase 1b.fix1 — defer-restart AR session.  Fires
@@ -1329,7 +1329,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             defer {
                 if payload.arWasRunning {
                     // Inner closure body references only `Self.diagLog`
-                    // (static type) and `RetaiLensARSession.shared`
+                    // (static type) and `RNSARSession.shared`
                     // (singleton) — both name-resolve without
                     // capturing self.  No explicit capture list
                     // required; the C2 invariant script grep-checks
@@ -1337,7 +1337,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     DispatchQueue.main.async {
                         os_log(.fault, log: Self.diagLog,
                                "[V16-batch-keyframe] restarting AR session post-stitch")
-                        RetaiLensARSession.shared.start()
+                        RNSARSession.shared.start()
                     }
                 }
             }
@@ -1529,7 +1529,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                         // See: docs/site-content/design/2026-05-12-finalize-crash-investigation.md
                         if r.width == 0 && r.height == 0 {
                             os_log(.fault, log: Self.diagLog,
-                                   "[V16-batch-keyframe.fix9] sentinel result from stitchFramePaths — see preceding [RetaiLensStitcher] NSLog for cause; emitting clean error to JS")
+                                   "[V16-batch-keyframe.fix9] sentinel result from stitchFramePaths — see preceding [BatchStitcher] NSLog for cause; emitting clean error to JS")
                             completion(nil, NSError(
                                 domain: "RetaiLensIncremental",
                                 code: 9007,
@@ -1613,7 +1613,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     // Capture-list discipline (C2 invariant — see the
                     // file-top markers).  No `self.*` references allowed
                     // here; we route the dispatch through the type
-                    // (RetaiLensIncrementalStitcher.shared) so the
+                    // (IncrementalStitcher.shared) so the
                     // closure captures only value-typed locals + the
                     // class type itself.  shared is a process-wide
                     // singleton (initialised once at module load),
@@ -1627,8 +1627,8 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                     let blender = payload.batchBlenderType
                     let seam = payload.batchSeamFinderType
                     let inscribed = payload.batchEnableInscribedRectCrop
-                    RetaiLensIncrementalStitcher.shared.refineQueue.async {
-                        RetaiLensIncrementalStitcher.shared.runHybridAutoRefine(
+                    IncrementalStitcher.shared.refineQueue.async {
+                        IncrementalStitcher.shared.runHybridAutoRefine(
                             framePaths: pathsForRefine,
                             refinedOutputPath: refinedOut,
                             captureOrientation: capOri,
@@ -1764,7 +1764,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                         domain: "RetaiLensIncremental",
                         code: 9107,
                         userInfo: [NSLocalizedDescriptionKey:
-                            "refinePanorama: stitcher returned sentinel — see preceding [RetaiLensStitcher] log for cause."]
+                            "refinePanorama: stitcher returned sentinel — see preceding [BatchStitcher] log for cause."]
                     ))
                     return
                 }
@@ -1876,7 +1876,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// 2026-05-16 — emit a minimal state event carrying only the
     /// refinement-related fields.  Mirrors the existing
     /// `emitBatchKeyframeAcceptedState` pattern: build a fresh
-    /// RetaiLensIncrementalState, then add the new optional fields
+    /// IncrementalStateObject, then add the new optional fields
     /// directly to the userInfo dict so JS (which reads from the
     /// raw event payload) picks them up without a schema change in
     /// the Obj-C class.
@@ -1891,7 +1891,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         stateLock.lock()
         let prev = self.lastState
         stateLock.unlock()
-        let state = RetaiLensIncrementalState(
+        let state = IncrementalStateObject(
             panoramaPath: prev?.panoramaPath,
             width: prev?.width ?? 0,
             height: prev?.height ?? 0,
@@ -1942,7 +1942,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // /markNextFrameAsLastKeyframe), all serialized via this lock.
         self.keyframeGate.reset()
         stateLock.unlock()
-        RetaiLensARSession.shared.incrementalConsumer = nil
+        RNSARSession.shared.incrementalConsumer = nil
         // Reset on the work queue so we don't race with an in-flight
         // ingest that's still touching the engine's canvas.  Cancel
         // ALSO removes the collector's session directory — the
@@ -2010,14 +2010,14 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     ///      the JS live band populates identically.
     ///
     /// Architecture note: this is structurally parallel to Android's
-    /// `RetaiLensIncrementalStitcher.kt::processFrameAtPath`
+    /// `IncrementalStitcher.kt::processFrameAtPath`
     /// `batchKeyframeMode` branch (lines 573-627).  A follow-up
     /// should extract the dispatch (gate-eval + path-append + emit)
     /// into shared cpp/ so both platforms become 5-line wrappers
     /// around a single C++ entry point.
     @objc public func addBatchKeyframePath(
         path: String,
-        pose: RetaiLensARFramePose
+        pose: RNSARFramePose
     ) -> Bool {
         stateLock.lock()
         guard self.isRunning, self.batchKeyframeMode else {
@@ -2066,7 +2066,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         keyframeMax: Int,
         isLandscape: Bool
     ) {
-        let state = RetaiLensIncrementalState(
+        let state = IncrementalStateObject(
             panoramaPath: nil,
             width: 0,
             height: 0,
@@ -2222,7 +2222,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         //   tighter scope than wrapping the whole function so we
         //   don't hold during the NotificationCenter post that
         //   follows.
-        let prev: RetaiLensIncrementalState?
+        let prev: IncrementalStateObject?
         let acceptedCount: Int
         stateLock.lock()
         prev = self.lastState
@@ -2231,7 +2231,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         let overlapPercent = (decision.newContentFraction >= 0)
             ? (1.0 - decision.newContentFraction) * 100.0
             : (prev?.overlapPercent ?? -1.0)
-        let state = RetaiLensIncrementalState(
+        let state = IncrementalStateObject(
             panoramaPath: nil,
             width: 0,
             height: 0,
@@ -2266,10 +2266,10 @@ public final class RetaiLensIncrementalStitcher: NSObject {
 
     /// Called from the ARSession delegate while the engine is active.
     /// MUST consume the pixel buffer before returning (Apple's pool
-    /// reuse contract — see comments in RetaiLensARSession).
+    /// reuse contract — see comments in RNSARSession).
     @objc public func consumeFrame(
         pixelBuffer: CVPixelBuffer,
-        pose: RetaiLensARFramePose
+        pose: RNSARFramePose
     ) {
         guard stateLock.try() else {
             // start/stop in flight — drop this frame.
@@ -2374,7 +2374,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // keyframes, which would defeat the gate entirely.
         let throttledThisFrame = gateActive && !cadenceFires
         if shouldEvaluateGate {
-            let plane = RetaiLensARSession.shared.latchedPlaneTransform()
+            let plane = RNSARSession.shared.latchedPlaneTransform()
             // V16 A2 — call the pixel-buffer-aware overload so Flow
             // strategy gets the image content.  Pose strategy is
             // routed to the fast pose-only path inside the bridge,
@@ -2547,9 +2547,9 @@ public final class RetaiLensIncrementalStitcher: NSObject {
             // V15.0b — if a vertical plane has just been detected and
             // we haven't propagated it to the slit-scan engine yet,
             // do so now.  Propagated only once per latched plane;
-            // RetaiLensARSession resets on stop().
+            // RNSARSession resets on stop().
             if !self.havePropagatedPlane,
-               let plane = RetaiLensARSession.shared.planeTransformFlat() {
+               let plane = RNSARSession.shared.planeTransformFlat() {
                 slit?.setPlaneTransformFlat(plane)
                 self.havePropagatedPlane = true
                 // V15.0c.4 — fault log so we can see the propagation
@@ -2635,7 +2635,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         // active so JS can render "Keyframes: n/max".  Zero signals
         // "gate disabled" to the JS pill.
         let kfMax = self.keyframeGate.enabled ? self.keyframeGate.maxCount : 0
-        let state = RetaiLensIncrementalState(
+        let state = IncrementalStateObject(
             panoramaPath: snapshotPath,
             width: snapW,
             height: snapH,
@@ -2721,7 +2721,7 @@ public final class RetaiLensIncrementalStitcher: NSObject {
     /// Called on the ARSession delegate's queue.  The pixel buffer is
     /// only valid for the duration of this call (Apple's ARKit pool
     /// reuse contract); consumers must copy out before returning.
-    func consumeFrame(pixelBuffer: CVPixelBuffer, pose: RetaiLensARFramePose)
+    func consumeFrame(pixelBuffer: CVPixelBuffer, pose: RNSARFramePose)
 }
 
-extension RetaiLensIncrementalStitcher: RetaiLensARFrameConsumer {}
+extension IncrementalStitcher: RetaiLensARFrameConsumer {}

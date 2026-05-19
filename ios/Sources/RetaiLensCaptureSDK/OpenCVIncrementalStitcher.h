@@ -20,7 +20,7 @@
 //
 // Threading:
 //   Methods on this class are NOT thread-safe internally.  The Swift
-//   layer (`RetaiLensIncrementalStitcher`) owns a serial queue and
+//   layer (`IncrementalStitcher`) owns a serial queue and
 //   funnels all calls through it.  The lock is intentional: live
 //   capture wants ordered frame ingestion, not parallel mutation of
 //   the canvas.
@@ -336,7 +336,7 @@ typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
 /// V15.0d new: minimum dot product between the candidate plane's
 /// surface normal and the camera's negative-forward direction
 /// (i.e. the direction the camera is facing).  Used by
-/// `RetaiLensARSession.didAdd` to filter ARKit-detected planes for
+/// `RNSARSession.didAdd` to filter ARKit-detected planes for
 /// `planeSource = ARKitDetected`.  1.0 = plane perfectly facing
 /// camera; 0.0 = plane edge-on to camera; -1.0 = facing away.
 /// Range 0.0 – 1.0.  Default 0.6 (≈53° max angle off-camera).

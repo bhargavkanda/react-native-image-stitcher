@@ -18,7 +18,7 @@ package com.retailens.capturesdk
  *   handle.  Caller MUST call [close] before the instance is GC'd,
  *   otherwise we leak a small heap allocation per gate-instance.
  *   Practice on Android: KeyframeGate is held by
- *   RetaiLensIncrementalStitcher as a member; we add cleanup hook
+ *   IncrementalStitcher as a member; we add cleanup hook
  *   in `onCatalystInstanceDestroy()` so the JNI native heap stays
  *   bounded across RN reloads.
  *
@@ -149,7 +149,7 @@ internal class KeyframeGate : AutoCloseable {
      *   layout as iOS simd_float4x4.
      */
     fun evaluate(
-        pose: RetaiLensARFramePose,
+        pose: RNSARFramePose,
         latchedPlaneMatrix: FloatArray?,
     ): KeyframeGateDecision {
         val result = nativeEvaluate(

@@ -333,7 +333,7 @@ export interface PanoramaSettings {
 
 
 // Per-device default selection.  We read the iPhone's physical
-// RAM at SDK module load (exposed by `RetaiLensStitcher`'s
+// RAM at SDK module load (exposed by `BatchStitcher`'s
 // `constantsToExport`) and pick the heaviest blender + seam
 // finder combo that fits.  Threshold (2 GB) is conservative —
 // iPhone 6s through iPhone X have 2 GB exactly; below that
@@ -341,7 +341,7 @@ export interface PanoramaSettings {
 // can still flip ANY of these in the settings modal at runtime;
 // this only chooses the INITIAL default.
 const _physicalMemoryBytes: number = (() => {
-  const m = (NativeModules as Record<string, unknown>).RetaiLensStitcher;
+  const m = (NativeModules as Record<string, unknown>).BatchStitcher;
   const bytes =
     m && typeof m === 'object'
       ? (m as { physicalMemoryBytes?: number }).physicalMemoryBytes

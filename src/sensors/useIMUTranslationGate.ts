@@ -115,7 +115,7 @@ export interface UseIMUTranslationGateOptions {
    * Fired exactly once per "budget crossing" — i.e., when the
    * running translation along device-X crosses `budgetMeters` from
    * below.  The host is responsible for both (a) calling
-   * `RetaiLensIncrementalStitcher.markNextFrameAsLastKeyframe()` and
+   * `IncrementalStitcher.markNextFrameAsLastKeyframe()` and
    * (b) invoking the returned `resetAnchor()` once the next
    * keyframe actually accepts, so the integrator restarts from zero.
    */
@@ -137,7 +137,7 @@ export interface UseIMUTranslationGateReturn {
   /**
    * Reset the running translation to zero.  Call this at recording
    * start AND after each confirmed keyframe accept — the typical
-   * wiring is to subscribe to `RetaiLensIncrementalStateUpdate` and
+   * wiring is to subscribe to `IncrementalStateUpdate` and
    * call `resetAnchor()` from inside the listener AND from the host's
    * `handleHoldStart`.
    */

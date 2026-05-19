@@ -9,8 +9,8 @@
 // that:
 //
 //   1. Preserves the original public Swift API exactly so the 13
-//      callsites in RetaiLensIncrementalStitcher.swift don't change.
-//   2. Marshals the Swift `RetaiLensARFramePose` + `simd_float4x4?`
+//      callsites in IncrementalStitcher.swift don't change.
+//   2. Marshals the Swift `RNSARFramePose` + `simd_float4x4?`
 //      into the primitive types the Obj-C++ bridge expects.
 //   3. Maps the Obj-C++ bridge's return shape back into the original
 //      `KeyframeGateDecision` struct.
@@ -163,7 +163,7 @@ final class KeyframeGate {
     ///
     /// This knob lives in Swift, not C++, because it's about HOW
     /// OFTEN we call into the gate, not about gate-internal logic.
-    /// Read by RetaiLensIncrementalStitcher.consumeFrame before
+    /// Read by IncrementalStitcher.consumeFrame before
     /// invoking `evaluate(...)`.
     var flowEvalEveryNFrames: Int = 1
 
@@ -206,12 +206,12 @@ final class KeyframeGate {
     /// Decide whether to accept this ARFrame as a keyframe.
     ///
     /// Same call shape as the original Swift gate so callers in
-    /// RetaiLensIncrementalStitcher.swift don't change.  Internally
+    /// IncrementalStitcher.swift don't change.  Internally
     /// marshals the pose + optional plane matrix into the Obj-C++
     /// bridge's primitive args, calls into shared C++, then unwraps
     /// the result.
     func evaluate(
-        pose: RetaiLensARFramePose,
+        pose: RNSARFramePose,
         latchedPlane: simd_float4x4?
     ) -> KeyframeGateDecision {
         // Flatten the 4×4 plane matrix into a 16-element NSNumber
@@ -274,7 +274,7 @@ final class KeyframeGate {
     /// The bridge handles all pixel-format handling (YUV-direct,
     /// BGRA-via-cvtColor, unknown → pose fallback).
     func evaluate(
-        pose: RetaiLensARFramePose,
+        pose: RNSARFramePose,
         latchedPlane: simd_float4x4?,
         pixelBuffer: CVPixelBuffer
     ) -> KeyframeGateDecision {
