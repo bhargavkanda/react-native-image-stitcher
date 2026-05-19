@@ -33,7 +33,6 @@ import {
   Easing,
   StyleSheet,
   Text,
-  useWindowDimensions,
   View,
   type StyleProp,
   type ViewStyle,
@@ -142,11 +141,6 @@ export function CaptureStatusOverlay({
   // hook-order rule isn't violated.  The accelerometer subscription
   // is cheap and stays alive for the screen's lifetime.
   const deviceOrientation = useDeviceOrientation();
-  // useWindowDimensions hook also must be called before any early-
-  // return — same hook-order rule.  W/H reflect the OS-reported
-  // window in portrait (the host app is portrait-locked at OS
-  // level), so for landscape we'll swap W/H when sizing the wrapper.
-  const { width: winW, height: winH } = useWindowDimensions();
 
   if (phase === 'idle') return null;
 
@@ -184,21 +178,22 @@ export function CaptureStatusOverlay({
   }
   const message = baseMessage;
 
-  // Orientation-aware banner placement via a rotated full-screen
-  // wrapper.  Inside the wrapper the banner sits at its natural
-  // "top-center" (top: topInset+8, alignSelf: 'center') — when the
-  // wrapper rotates to match the user-perceived orientation, the
-  // banner moves with it and ends up at user-perceived top-center
-  // regardless of how the user is holding the phone.
+  // Orientation-aware banner placement via DIRECT absolute positioning
+  // + percentage transforms.
   //
-  // Border is rendered OUTSIDE the wrapper because it should hug the
-  // physical camera preview (which is fixed to portrait layout coords
-  // by the OS-level orientation lock); rotating it would put it on
-  // the wrong edges of the screen.
-  const wrapperStyle = bannerWrapperStyleForOrientation(
+  // Why this instead of a rotated-wrapper approach: the previous
+  // wrapper approach (sized to user-view dims, positioned to align
+  // center, rotated) is geometrically correct on paper but rendered
+  // off-center on device (probably a RN flex+rotation interaction).
+  // Direct absolute positioning of the banner with translateX/Y('-50%')
+  // for self-centering is simpler, doesn't depend on useWindowDimensions,
+  // and uses only well-trodden RN style features.
+  //
+  // Border is rendered separately because it hugs the physical camera
+  // preview (in layout coords) — it must not rotate with the banner.
+  const bannerOrientationStyle = bannerStyleForOrientation(
     deviceOrientation,
-    winW,
-    winH,
+    topInset,
   );
 
   return (
@@ -214,33 +209,27 @@ export function CaptureStatusOverlay({
         <View pointerEvents="none" style={styles.recordBorder} />
       ) : null}
 
-      <View pointerEvents="box-none" style={wrapperStyle}>
-        <View
-          pointerEvents="none"
-          style={[
-            styles.banner,
-            phase === 'recording' ? styles.bannerRecording : styles.bannerStitching,
-            // marginTop (not `top`) — `top` is ignored on non-absolute
-            // flex children in RN.  Horizontal centering via
-            // alignSelf works because the banner IS a flex child here
-            // (it's no longer position:absolute).
-            { marginTop: topInset + 8, alignSelf: 'center' },
-          ]}
-        >
-          {phase === 'recording' ? (
-            <Animated.View
-              style={[
-                styles.recDot,
-                { opacity: dotOpacity, transform: [{ scale: dotScale }] },
-              ]}
-            />
-          ) : (
-            <View style={styles.stitchSpinner} />
-          )}
-          <Text style={styles.bannerText} numberOfLines={1}>
-            {phase === 'recording' ? 'REC' : '•••'}{'  '}{message}
-          </Text>
-        </View>
+      <View
+        pointerEvents="none"
+        style={[
+          styles.banner,
+          phase === 'recording' ? styles.bannerRecording : styles.bannerStitching,
+          bannerOrientationStyle,
+        ]}
+      >
+        {phase === 'recording' ? (
+          <Animated.View
+            style={[
+              styles.recDot,
+              { opacity: dotOpacity, transform: [{ scale: dotScale }] },
+            ]}
+          />
+        ) : (
+          <View style={styles.stitchSpinner} />
+        )}
+        <Text style={styles.bannerText} numberOfLines={1}>
+          {phase === 'recording' ? 'REC' : '•••'}{'  '}{message}
+        </Text>
       </View>
     </View>
   );
@@ -248,83 +237,89 @@ export function CaptureStatusOverlay({
 
 
 /**
- * Compute the style for a full-screen wrapper View that, after its
- * rotation transform is applied, covers the screen with its local
- * "top" axis pointing toward the user's perceived top.
+ * Compute the style placing the banner at user-perceived top-center
+ * with text reading in the user's view direction.
  *
- * Why this approach (instead of positioning the banner directly):
- * positioning + rotating the banner alone forced us to compute,
- * for each orientation, "which layout edge corresponds to the
- * user's top, and what does `alignSelf: 'center'` actually do to
- * a `position: absolute` element" — the latter answer being "it's
- * ignored", which silently broke centering in landscape.
+ * Approach: direct absolute positioning + percentage-translate self-
+ * centering (works on the banner's own measured dimensions, so the
+ * banner's text content can be any width).
  *
- * The wrapper trick: the banner lives at the wrapper's natural
- * top-center (top: 8, alignSelf: 'center').  Rotating the wrapper
- * carries the banner along.  Sizing the wrapper to user-view
- * dimensions (swap W↔H for landscape) + translating it so its
- * center sits over the screen center means that after the
- * rotation, the wrapper covers the screen and the banner ends up
- * exactly at user-top-center.
+ * For each orientation, anchor the banner to the layout edge that
+ * corresponds to user-perceived top:
  *
- *   portrait              → wrapper W×H,  no rotation
- *   portrait-upside-down  → wrapper W×H,  180° rotation
- *   landscape-left        → wrapper H×W,  90° CW rotation
- *   landscape-right       → wrapper H×W, -90° CCW rotation
+ *   portrait              → layout-top    + horizontally centered + 0°
+ *   portrait-upside-down  → layout-bottom + horizontally centered + 180°
+ *   landscape-left        → layout-right  + vertically centered   + 90°
+ *   landscape-right       → layout-left   + vertically centered   + -90°
  *
- * The H×W wrapper is offset by ((W-H)/2, (H-W)/2) so its center
- * aligns with screen center; after rotation it covers the screen
- * exactly.
+ * In landscape, the banner is rotated around its center so its text
+ * (originally horizontal in layout) reads horizontally in the user's
+ * view.  The translateY('-50%') aligns the banner's center with the
+ * layout's vertical center, which maps to user-horizontal-center
+ * post-rotation.
  *
- * Rotation direction (CW vs CCW): the user-facing orientation hook
- * uses iOS' "home-indicator-on-right = landscape-left" convention
- * (the phone was rotated 90° CCW from portrait to get here).  To
- * keep content upright in the user's view, the content needs to
- * rotate 90° CW.  Mirror logic for landscape-right.
+ * RN supports `'50%'` for absolute positions and percentage values in
+ * translateX/Y since 0.70 — the percentage in a translate is relative
+ * to the element's OWN dimensions, which is exactly what self-
+ * centering an unknown-width element needs.
  */
-function bannerWrapperStyleForOrientation(
+function bannerStyleForOrientation(
   orientation: DeviceOrientation,
-  winW: number,
-  winH: number,
+  topInset: number,
 ): ViewStyle {
   switch (orientation) {
     case 'landscape-left':
       return {
         position: 'absolute',
-        width: winH,
-        height: winW,
-        left: (winW - winH) / 2,
-        top: (winH - winW) / 2,
-        transform: [{ rotate: '90deg' }],
+        right: topInset + 8,
+        top: '50%',
+        transform: [
+          { translateY: '-50%' },
+          { rotate: '90deg' },
+        ],
       };
     case 'landscape-right':
       return {
         position: 'absolute',
-        width: winH,
-        height: winW,
-        left: (winW - winH) / 2,
-        top: (winH - winW) / 2,
-        transform: [{ rotate: '-90deg' }],
+        left: topInset + 8,
+        top: '50%',
+        transform: [
+          { translateY: '-50%' },
+          { rotate: '-90deg' },
+        ],
       };
     case 'portrait-upside-down':
       return {
-        ...StyleSheet.absoluteFillObject,
-        transform: [{ rotate: '180deg' }],
+        position: 'absolute',
+        bottom: topInset + 8,
+        left: '50%',
+        transform: [
+          { translateX: '-50%' },
+          { rotate: '180deg' },
+        ],
       };
     case 'portrait':
     default:
-      return StyleSheet.absoluteFillObject;
+      return {
+        position: 'absolute',
+        top: topInset + 8,
+        left: '50%',
+        transform: [
+          { translateX: '-50%' },
+        ],
+      };
   }
 }
 
 
 const styles = StyleSheet.create({
   banner: {
-    // No `position: 'absolute'` here.  The banner is a normal flex
-    // child of the rotated wrapper; `alignSelf: 'center'` (applied
-    // inline at the JSX site) only works when the element is part
-    // of the parent's flex flow.  Top offset is `top: <topInset>+8`
-    // inline since it's a runtime value from props.
+    // position: 'absolute' is added back so the orientation-specific
+    // style (returned by bannerStyleForOrientation) can position the
+    // banner at the layout edge for that orientation using top/right/
+    // bottom/left.  The transform array on the same style does the
+    // self-centering via translateX/Y('-50%') and applies rotation.
+    position: 'absolute',
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 14,
