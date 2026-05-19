@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 #
-# build-opencv-android.sh — produce per-ABI .so files for Android
-# matching the iOS xcframework's module set.
+# build-opencv-android.sh — produce OpenCV's Android SDK distribution
+# (the `OpenCV-android-sdk/` directory tree) with the modules this
+# library needs.
 #
-# Invoked by `.github/workflows/release-binaries.yml` on a tag push;
-# also runnable locally for development (requires Android NDK r25+).
+# This script wraps OpenCV's stock `platforms/android/build_sdk.py`,
+# which is the right tool for producing a layout that matches what
+# the JNI shim CMakeLists.txt expects:
 #
-# Modules built:  core imgproc features2d calib3d flann stitching video photo
-# Modules SKIPPED: dnn ml objdetect gapi videoio ffmpeg highgui
+#   OpenCV-android-sdk/
+#     sdk/
+#       native/
+#         libs/{ABI}/libopencv_java4.so        ← dynamically linked fat lib
+#         staticlibs/{ABI}/libopencv_*.a       ← static archives per module
+#         3rdparty/libs/{ABI}/*.a              ← 3rd-party static archives
+#         jni/include/opencv2/                 ← public headers
 #
-# Output structure:
-#   dist/android/jniLibs/
-#     arm64-v8a/libopencv_java4.so
-#     armeabi-v7a/libopencv_java4.so
-#     x86/libopencv_java4.so
-#     x86_64/libopencv_java4.so
+# Module filter:
+#   The default `ndk-18.config.py` (which ships with OpenCV's
+#   build_sdk.py) builds the full module set.  We pass --without to
+#   trim everything we don't use; final binary is ~50% smaller.
 #
 # Inputs (env):
 #   OPENCV_VERSION   — pinned in scripts/opencv-version.txt
@@ -32,80 +37,134 @@ BUILD_DIR="$(mktemp -d -t opencv-android-build-XXXX)"
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
     echo "[build-opencv-android] ERROR: ANDROID_NDK_HOME is not set." >&2
-    echo "[build-opencv-android] Install Android NDK r25+ and export ANDROID_NDK_HOME." >&2
     exit 1
 fi
 
-echo "[build-opencv-android] OpenCV ${OPENCV_VERSION} → ${OUTPUT_DIR}/android/jniLibs/"
+echo "[build-opencv-android] OpenCV ${OPENCV_VERSION} → ${OUTPUT_DIR}/OpenCV-android-sdk/"
 echo "[build-opencv-android] NDK: ${ANDROID_NDK_HOME}"
 echo "[build-opencv-android] Build dir: ${BUILD_DIR}"
 
-mkdir -p "${OUTPUT_DIR}/android/jniLibs"
+mkdir -p "${OUTPUT_DIR}"
 
 # ── 1. Fetch OpenCV source ────────────────────────────────────────────
 OPENCV_SRC="${BUILD_DIR}/opencv-${OPENCV_VERSION}"
 if [ ! -d "${OPENCV_SRC}" ]; then
-    curl -fsSL --retry 3 "https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.tar.gz" \
+    curl -fsSL --retry 3 \
+        "https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.tar.gz" \
         -o "${BUILD_DIR}/opencv-src.tgz"
     tar -xzf "${BUILD_DIR}/opencv-src.tgz" -C "${BUILD_DIR}"
 fi
 
-# ── 2. Build per-ABI via OpenCV's build_sdk.py ───────────────────────
+# ── 2. Build the Android SDK distribution via build_sdk.py ───────────
 #
-# `--config ndk-15.config.py` is OpenCV's stock per-ABI configuration.
-# We override BUILD_LIST to limit to our modules.
+# build_sdk.py runs CMake per ABI with OpenCV's official Android
+# config + bundles the output into the SDK layout.  We pass --extra_pack
+# for nothing; ABI list is fixed by the ndk-18.config.py we'd otherwise
+# point at — leaving it default produces all 4 ABIs:
+# arm64-v8a, armeabi-v7a, x86, x86_64.
+#
+# `--config` is required — points to one of OpenCV's stock ABI configs.
+# `--no_samples_build` skips example app builds (fast win).
+
+cd "${OPENCV_SRC}/platforms/android"
+
+# Build each ABI separately.  build_sdk.py is documented as supporting
+# all-in-one but does parallel cmake invocations under the hood and
+# the disk + CPU pressure on a GH runner causes the parallel build to
+# OOM.  Sequential per-ABI is safer.
 ABIS=("arm64-v8a" "armeabi-v7a" "x86" "x86_64")
 for ABI in "${ABIS[@]}"; do
     echo "[build-opencv-android] === Building ABI ${ABI} ==="
-    ABI_BUILD_DIR="${BUILD_DIR}/build-${ABI}"
-    mkdir -p "${ABI_BUILD_DIR}"
-    cd "${ABI_BUILD_DIR}"
+    BUILD_OUT="${BUILD_DIR}/sdk-${ABI}"
+    mkdir -p "${BUILD_OUT}"
 
-    cmake "${OPENCV_SRC}" \
-        -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake" \
-        -DANDROID_ABI="${ABI}" \
-        -DANDROID_PLATFORM=android-24 \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_SHARED_LIBS=OFF \
-        -DBUILD_JAVA=OFF \
-        -DBUILD_ANDROID_EXAMPLES=OFF \
-        -DBUILD_TESTS=OFF \
-        -DBUILD_PERF_TESTS=OFF \
-        -DBUILD_EXAMPLES=OFF \
-        -DBUILD_DOCS=OFF \
-        -DBUILD_opencv_apps=OFF \
+    python3 build_sdk.py \
+        --abi "${ABI}" \
+        --no_samples_build \
+        --build_doc=OFF \
+        --extra_modules_path "" \
+        "${BUILD_OUT}" \
+        "${OPENCV_SRC}" \
+        -- \
+        -DBUILD_opencv_world=ON \
         -DBUILD_opencv_dnn=OFF \
         -DBUILD_opencv_ml=OFF \
         -DBUILD_opencv_objdetect=OFF \
         -DBUILD_opencv_gapi=OFF \
         -DBUILD_opencv_videoio=OFF \
         -DBUILD_opencv_highgui=OFF \
-        -DBUILD_opencv_java=OFF \
+        -DBUILD_opencv_calib=OFF \
         -DWITH_ITT=OFF \
         -DWITH_FFMPEG=OFF \
-        -DWITH_GSTREAMER=OFF
+        -DWITH_GSTREAMER=OFF \
+        -DBUILD_PERF_TESTS=OFF \
+        -DBUILD_TESTS=OFF \
+        -DBUILD_DOCS=OFF \
+        -DBUILD_EXAMPLES=OFF \
+        -DBUILD_ANDROID_EXAMPLES=OFF
+done
 
-    cmake --build . --config Release -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+# ── 3. Merge per-ABI outputs into one SDK tree ───────────────────────
+#
+# build_sdk.py produces a per-ABI OpenCV-android-sdk/ tree at each
+# build dir.  Merging combines the {libs,staticlibs,3rdparty/libs}
+# per-ABI subdirectories while sharing the jni/include/ tree (which
+# is ABI-agnostic).
 
-    # The build emits a per-ABI libopencv_world.a (static).  We need
-    # a single libopencv_java4.so per ABI; build_sdk.py does this
-    # in one shot — but to keep this script CMake-only we adapt the
-    # per-ABI output here.
-    #
-    # For now, point downstream at the static `.a` archive; consumers
-    # link statically into their own .so via Gradle's externalNativeBuild.
-    mkdir -p "${OUTPUT_DIR}/android/jniLibs/${ABI}"
-    cp "${ABI_BUILD_DIR}/lib/${ABI}/libopencv_world.a" \
-       "${OUTPUT_DIR}/android/jniLibs/${ABI}/libopencv_world.a" || true
+SDK_OUT="${OUTPUT_DIR}/OpenCV-android-sdk"
+rm -rf "${SDK_OUT}"
+mkdir -p "${SDK_OUT}/sdk/native/jni/include"
+mkdir -p "${SDK_OUT}/sdk/native/libs"
+mkdir -p "${SDK_OUT}/sdk/native/staticlibs"
+mkdir -p "${SDK_OUT}/sdk/native/3rdparty/libs"
+
+# Copy the include tree once from any ABI (they're identical).
+cp -r "${BUILD_DIR}/sdk-arm64-v8a/OpenCV-android-sdk/sdk/native/jni/include/." \
+      "${SDK_OUT}/sdk/native/jni/include/"
+
+# Copy per-ABI libs.
+for ABI in "${ABIS[@]}"; do
+    ABI_LIBS_SRC="${BUILD_DIR}/sdk-${ABI}/OpenCV-android-sdk/sdk/native/libs/${ABI}"
+    ABI_STATIC_SRC="${BUILD_DIR}/sdk-${ABI}/OpenCV-android-sdk/sdk/native/staticlibs/${ABI}"
+    ABI_3RD_SRC="${BUILD_DIR}/sdk-${ABI}/OpenCV-android-sdk/sdk/native/3rdparty/libs/${ABI}"
+
+    if [ -d "${ABI_LIBS_SRC}" ]; then
+        mkdir -p "${SDK_OUT}/sdk/native/libs/${ABI}"
+        cp -r "${ABI_LIBS_SRC}/." "${SDK_OUT}/sdk/native/libs/${ABI}/"
+    fi
+    if [ -d "${ABI_STATIC_SRC}" ]; then
+        mkdir -p "${SDK_OUT}/sdk/native/staticlibs/${ABI}"
+        cp -r "${ABI_STATIC_SRC}/." "${SDK_OUT}/sdk/native/staticlibs/${ABI}/"
+    fi
+    if [ -d "${ABI_3RD_SRC}" ]; then
+        mkdir -p "${SDK_OUT}/sdk/native/3rdparty/libs/${ABI}"
+        cp -r "${ABI_3RD_SRC}/." "${SDK_OUT}/sdk/native/3rdparty/libs/${ABI}/"
+    fi
 done
 
 rm -rf "${BUILD_DIR}"
 
-# ── 3. Zip for release upload ────────────────────────────────────────
+# ── 4. Verify expected outputs exist before zipping ──────────────────
+#
+# Fail-loud if the build silently produced an empty tree.  The
+# previous version of this script had `|| true` after a cp and the
+# resulting empty zip slipped past CI.
+for ABI in "${ABIS[@]}"; do
+    SO_PATH="${SDK_OUT}/sdk/native/libs/${ABI}/libopencv_java4.so"
+    if [ ! -f "${SO_PATH}" ]; then
+        echo "[build-opencv-android] FATAL: expected ${SO_PATH} not produced." >&2
+        echo "[build-opencv-android] Listing what's in ${SDK_OUT}/sdk/native/:" >&2
+        find "${SDK_OUT}/sdk/native/" -maxdepth 4 -type f 2>&1 | head -30 >&2 || true
+        exit 1
+    fi
+done
+echo "[build-opencv-android] Per-ABI libopencv_java4.so all present."
+
+# ── 5. Zip for release upload ────────────────────────────────────────
 cd "${OUTPUT_DIR}"
-zip -ry "RNImageStitcher-android.zip" "android/jniLibs"
+zip -ry "RNImageStitcher-android.zip" "OpenCV-android-sdk"
 
 echo "[build-opencv-android] Done."
-echo "[build-opencv-android] Output: ${OUTPUT_DIR}/android/jniLibs/"
+echo "[build-opencv-android] Output: ${OUTPUT_DIR}/OpenCV-android-sdk/"
 echo "[build-opencv-android] Archive: ${OUTPUT_DIR}/RNImageStitcher-android.zip"
-du -sh "${OUTPUT_DIR}/android/jniLibs/" "${OUTPUT_DIR}/RNImageStitcher-android.zip"
+du -sh "${OUTPUT_DIR}/OpenCV-android-sdk/" "${OUTPUT_DIR}/RNImageStitcher-android.zip"
