@@ -20,6 +20,7 @@
 import Foundation
 import React
 import os.log
+import ImageIO        // CGImageSource + kCGImagePropertyOrientation for EXIF read in processFrameAtPath
 
 @objc(RetaiLensIncrementalStitcherBridge)
 public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
@@ -324,6 +325,31 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
             timestampMs: timestampMs,
             trackingState: trackingState
         )
+
+        // 2026-05-18 (Iss #1 diag) — read EXIF Orientation tag from the
+        // keyframe JPEG before handing it to the engine.  vision-camera
+        // writes a JPEG with an EXIF tag matching the physical capture
+        // orientation (1=no rotation, 3=180°, 6=90°CW, 8=90°CCW).  The
+        // bake-rotation table in cpp/stitcher.cpp assumes the post-imread
+        // Mat is in user-view orientation (post-EXIF apply).  If the EXIF
+        // tag isn't what we expect for a given physical orientation, the
+        // input Mat to cv::Stitcher will be a different shape than the AR
+        // path produces (AR keyframes hardcode EXIF=6, commit 7b828f1) —
+        // which would explain why iOS non-AR landscape captures stitch
+        // but bake the wrong way.  CGImageSource is cheap (metadata-only;
+        // no decode).
+        var exifOrientation: Int = -1
+        if let src = CGImageSourceCreateWithURL(
+            URL(fileURLWithPath: cleanPath) as CFURL, nil
+        ),
+           let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+           let o = props[kCGImagePropertyOrientation] as? Int {
+            exifOrientation = o
+        }
+        os_log(.fault, log: OSLog(subsystem: "com.tiger.retailens",
+                                  category: "stitcher.diag"),
+               "[V16-batch-keyframe.js] processFrameAtPath EXIF=%d imageW=%d imageH=%d path=%{public}@",
+               Int32(exifOrientation), Int32(imageWidth), Int32(imageHeight), cleanPath)
 
         let accepted = engine.addBatchKeyframePath(path: cleanPath, pose: pose)
         resolver(["ok": true, "accepted": accepted])
