@@ -428,6 +428,30 @@ public final class RetaiLensIncrementalStitcher: NSObject {
         super.init()
     }
 
+    /// 2026-05-18 (iOS cross-orientation fix) — bridge entry-point
+    /// that the bridge calls in finalize() when JS supplies a fresh
+    /// orientation.  Overrides whatever start() snapshotted
+    /// (native ARKit query OR JS fallback).  Used to close the bug
+    /// where the user opens the screen in orientation A, captures
+    /// in orientation B, and the bake_rotation table runs against
+    /// orientation A (the start-time value).
+    ///
+    /// Caller responsibility: this should only be called BEFORE
+    /// finalize() begins the stitch.  Calling concurrently with an
+    /// in-flight stitch is a race on `self.captureOrientation`
+    /// (which the stitcher reads through the payload snapshot at
+    /// finalize() prologue).  The bridge enforces "update then
+    /// finalize" sequentially on the workQueue.
+    @objc public func updateCaptureOrientation(_ orientation: String) {
+        stateLock.lock()
+        let prev = self.captureOrientation
+        self.captureOrientation = orientation
+        stateLock.unlock()
+        os_log(.fault, log: Self.diagLog,
+               "[V16-orchestrator] updateCaptureOrientation: %{public}@ → %{public}@",
+               prev, orientation)
+    }
+
     /// 2026-05-16 — realtime+batch fusion (Option A) path derivation.
     /// Given the live panorama path (which finalize() wrote inside
     /// the app sandbox tmp or a host-supplied location), pick a path

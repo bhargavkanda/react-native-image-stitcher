@@ -192,6 +192,16 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
             outputPath = outputPathRaw
         }
         let quality = (options["quality"] as? Int) ?? 90
+        // 2026-05-18 (iOS cross-orientation fix) — JS may pass a
+        // fresh deviceOrientation at finalize time; if so, override
+        // the engine's start-time snapshot before the stitch + bake.
+        // Empty / missing → keep legacy behaviour (start-time value).
+        let freshOrientation = (options["captureOrientation"] as? String) ?? ""
+        if !freshOrientation.isEmpty {
+            RetaiLensIncrementalStitcher.shared.updateCaptureOrientation(
+                freshOrientation
+            )
+        }
         RetaiLensIncrementalStitcher.shared.finalize(
             toPath: outputPath,
             jpegQuality: quality

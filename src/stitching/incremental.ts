@@ -803,7 +803,22 @@ interface NativeIncrementalModule {
    * creates a path under the app's tmp directory and returns it
    * inside the `panoramaPath` field of the result.
    */
-  finalize(options: { outputPath?: string; quality?: number }): Promise<IncrementalFinalizeResult>;
+  finalize(options: {
+    outputPath?: string;
+    quality?: number;
+    /**
+     * 2026-05-18 (iOS cross-orientation fix) — JS-supplied current
+     * device orientation at finalize time.  When provided, the
+     * engine uses this for the bake-rotation pass in place of the
+     * orientation captured at start().  Closes the cross-orientation
+     * hole where the user starts in one orientation and pans/
+     * captures in another — the start-time snapshot would otherwise
+     * bake to the wrong direction.  Valid values match
+     * IncrementalStartOptions.captureOrientation; omit/empty to keep
+     * legacy start-time behaviour.
+     */
+    captureOrientation?: string;
+  }): Promise<IncrementalFinalizeResult>;
   cancel(): Promise<{ ok: true }>;
   getState(): Promise<IncrementalState | null>;
   /** V15.0e — poll AR plane detection state.  Polled at ~2 Hz when

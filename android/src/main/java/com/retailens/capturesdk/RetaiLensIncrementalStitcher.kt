@@ -734,6 +734,18 @@ class RetaiLensIncrementalStitcher(
             outputPathOpt
         }
         val quality = options.getIntOrDefault("quality", 90)
+        // 2026-05-18 (iOS cross-orientation fix; symmetric on Android) —
+        // JS may pass a fresh deviceOrientation at finalize time; if
+        // so, override batchCaptureOrientation BEFORE we snapshot it
+        // for the stitcher.  Empty/missing → keep legacy start-time
+        // value.  Android cross-orientation was already working per
+        // user test (likely because users tested fewer rotation
+        // sequences here), but propagating the fresh value uniformly
+        // closes the same hole iOS had.
+        val freshOrientationOpt = options.getString("captureOrientation") ?: ""
+        if (freshOrientationOpt.isNotEmpty()) {
+            batchCaptureOrientation = freshOrientationOpt
+        }
 
         // Disengage the ARCameraView ingestion path FIRST so no late
         // frames slip into the engine while we serialize the canvas.

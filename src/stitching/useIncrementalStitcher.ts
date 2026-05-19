@@ -61,8 +61,19 @@ export interface UseIncrementalStitcherReturn {
    * End the capture and write the final panorama.  When `outputPath`
    * is omitted or empty, the native side picks a path under the
    * app's tmp directory and returns it in the result.
+   *
+   * `captureOrientation` (optional) — pass the user's CURRENT
+   * device orientation at finalize time.  The engine prefers this
+   * value over the start-time snapshot for the bake-rotation pass,
+   * so cross-orientation captures (user opened screen in portrait,
+   * captured in landscape) bake correctly.  Omit to keep the legacy
+   * behaviour (start-time orientation).
    */
-  finalize: (outputPath?: string, quality?: number) => Promise<IncrementalFinalizeResult>;
+  finalize: (
+    outputPath?: string,
+    quality?: number,
+    captureOrientation?: string,
+  ) => Promise<IncrementalFinalizeResult>;
   /** Abort the capture without producing output. */
   cancel: () => Promise<void>;
 }
@@ -173,6 +184,7 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
     async (
       outputPath?: string,
       quality = 90,
+      captureOrientation?: string,
     ): Promise<IncrementalFinalizeResult> => {
       if (!native) {
         throw new Error('useIncrementalStitcher: native module unavailable');
@@ -180,6 +192,11 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
       const result = await native.finalize({
         outputPath: outputPath ?? '',
         quality,
+        // 2026-05-18 (iOS cross-orientation fix) — fresh orientation
+        // at finalize time.  Engine uses this for bake-rotation
+        // instead of the start-time snapshot.  Undefined = keep
+        // legacy start-time behaviour.
+        captureOrientation,
       });
       setIsRunning(false);
       // Clear React state on finalize so the next start doesn't
