@@ -44,6 +44,16 @@ if [ -z "${ANDROID_NDK_HOME:-}" ]; then
     exit 1
 fi
 
+# build_sdk.py needs the Android SDK path too (for build tools that
+# integrate with the SDK).  GitHub Actions ubuntu-22.04 runners have
+# it preinstalled at $ANDROID_HOME / $ANDROID_SDK_ROOT.  Allow either.
+ANDROID_SDK_PATH="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+if [ -z "${ANDROID_SDK_PATH}" ]; then
+    echo "[build-opencv-android] ERROR: ANDROID_HOME / ANDROID_SDK_ROOT not set." >&2
+    exit 1
+fi
+echo "[build-opencv-android] Android SDK: ${ANDROID_SDK_PATH}"
+
 echo "[build-opencv-android] OpenCV ${OPENCV_VERSION} → ${OUTPUT_DIR}/OpenCV-android-sdk/"
 echo "[build-opencv-android] NDK: ${ANDROID_NDK_HOME}"
 echo "[build-opencv-android] Build dir: ${BUILD_DIR}"
@@ -78,6 +88,7 @@ mkdir -p "${SDK_BUILD_OUT}"
 
 python3 build_sdk.py \
     --ndk_path "${ANDROID_NDK_HOME}" \
+    --sdk_path "${ANDROID_SDK_PATH}" \
     --no_samples_build \
     --no_kotlin \
     --no_media_ndk \
