@@ -30,7 +30,10 @@
         "../retailens-mobile/node_modules/react-native-sensors"
       ],
       "rxjs": ["../retailens-mobile/node_modules/rxjs"],
-      "expo-sensors": ["../retailens-mobile/node_modules/expo-sensors"]
+      "expo-sensors": ["../retailens-mobile/node_modules/expo-sensors"],
+      "react-native-safe-area-context": [
+        "../retailens-mobile/node_modules/react-native-safe-area-context"
+      ]
     },
     "types": ["react"]
   },

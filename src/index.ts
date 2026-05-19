@@ -29,6 +29,29 @@ export { CameraView } from './camera/CameraView';
 export type { CameraViewProps } from './camera/CameraView';
 export { ARCameraView } from './camera/ARCameraView';
 export type { ARCameraViewProps, ARCameraViewHandle } from './camera/ARCameraView';
+
+/*
+ * 2026-05-19 (Step 2 of the SDK-extract plan, design doc
+ * 2026-05-15-react-native-image-stitcher-publication.md) — the
+ * public, props-based `<Camera>` component.  Combines tap-to-photo +
+ * hold-to-panorama into one surface; replaces the host's hand-rolled
+ * composition of CameraView/ARCameraView + CameraShutter + the various
+ * overlays.  Existing exports remain for back-compat during the
+ * transition; AuditCaptureScreen migrates to `<Camera>` in step 8.
+ */
+export { Camera, CameraError } from './camera/Camera';
+export type {
+  CameraProps,
+  CameraCaptureResult,
+  CameraErrorCode,
+  CaptureSource,
+  CameraLens,
+  StitchMode,
+  Blender,
+  SeamFinder,
+  Warper,
+  FramesDroppedInfo,
+} from './camera/Camera';
 export { CameraShutter } from './camera/CameraShutter';
 export type {
   CameraShutterProps,
