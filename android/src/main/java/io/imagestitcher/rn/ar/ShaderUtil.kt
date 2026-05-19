@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-package com.retailens.capturesdk.ar
+package io.imagestitcher.rn.ar
 
 import android.opengl.GLES20
 

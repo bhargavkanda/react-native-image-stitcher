@@ -20,21 +20,6 @@
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "moduleResolution": "node",
-    "baseUrl": ".",
-    "paths": {
-      "react-native": ["../retailens-mobile/node_modules/react-native"],
-      "react-native-vision-camera": [
-        "../retailens-mobile/node_modules/react-native-vision-camera"
-      ],
-      "react-native-sensors": [
-        "../retailens-mobile/node_modules/react-native-sensors"
-      ],
-      "rxjs": ["../retailens-mobile/node_modules/rxjs"],
-      "expo-sensors": ["../retailens-mobile/node_modules/expo-sensors"],
-      "react-native-safe-area-context": [
-        "../retailens-mobile/node_modules/react-native-safe-area-context"
-      ]
-    },
     "types": ["react"]
   },
   "include": ["src"],

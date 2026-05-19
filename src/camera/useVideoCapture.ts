@@ -214,7 +214,7 @@ export function useVideoCapture(): UseVideoCaptureReturn {
       setState('extracting');
       try {
         throw new Error(
-          '[@retailens/capture-sdk] useVideoCapture.extractFrames is not '
+          '[react-native-image-stitcher] useVideoCapture.extractFrames is not '
           + 'available — use `stitchVideo()` from the SDK index, which '
           + 'combines extract + stitch in a single native call.',
         );

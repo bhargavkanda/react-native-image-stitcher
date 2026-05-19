@@ -4,7 +4,7 @@
 # Rebuild OpenCV 4.5.5 for Android arm64-v8a from source with
 # BUILD_opencv_stitching=ON, then copy the artifacts into
 # android/vendor/OpenCV-android-sdk/ so the JNI shim
-# (src/main/cpp/retailens_stitcher.cpp) can link against it.
+# (src/main/cpp/image_stitcher_jni.cpp) can link against it.
 #
 # Why we need this
 # ────────────────
@@ -145,4 +145,4 @@ fi
 
 echo "→ Artifacts copied into vendor/OpenCV-android-sdk/."
 echo "→ Done.  Next step: \`./gradlew :retailens_capture-sdk:assembleDebug\`"
-echo "  should now build the JNI shim (libretailens_stitcher.so) successfully."
+echo "  should now build the JNI shim (libimage_stitcher.so) successfully."
