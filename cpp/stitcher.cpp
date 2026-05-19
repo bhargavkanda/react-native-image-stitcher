@@ -598,7 +598,7 @@ StitchResult stitchFramePathsManual(
     // doesn't hold for the V16 batch-keyframe flow, where the AR
     // session keeps running during stitch (baseline naturally 600-800
     // MB).  AR pause is now done at the bridge level (Phase 1b.fix1
-    // in RetaiLensIncrementalStitcher.swift), but even with that, the
+    // in IncrementalStitcher.swift), but even with that, the
     // 700 MB threshold throttles modern devices for no reason.
     //
     // New formula: max(700, totalRAMGB × 300).  Leaves ~30% headroom
@@ -741,7 +741,7 @@ StitchResult stitchFramePathsManual(
     // crashes, the last logged step pinpoints the failure point —
     // makes debugging without Xcode much faster.  Prefix is
     // grep-able in Console.app / logcat.
-    log_info(logFn, "[RetaiLensStitcher]", "start: %zu frames", frames.size());
+    log_info(logFn, "[BatchStitcher]", "start: %zu frames", frames.size());
 
     // V16 fix-10 (2026-05-13) — STRUCTURAL: NO return statement
     // executes inside the @autoreleasepool block.  Failure paths
@@ -823,7 +823,7 @@ StitchResult stitchFramePathsManual(
             for (const auto& f : frames) workFrames.push_back(f);
         }
 
-        log_info(logFn, "[RetaiLensStitcher]",
+        log_info(logFn, "[BatchStitcher]",
                  "step1: features (work scale %d×%d)",
                  workFrames.empty() ? 0 : workFrames[0].cols,
                  workFrames.empty() ? 0 : workFrames[0].rows);
@@ -902,7 +902,7 @@ StitchResult stitchFramePathsManual(
         // pipeline-mode-selection.md for the architectural answer —
         // motion-classified per-capture routing between PANORAMA and
         // SCANS modes at finalize() time.
-        log_info(logFn, "[RetaiLensStitcher]", "step2: matching");
+        log_info(logFn, "[BatchStitcher]", "step2: matching");
         log_info(logFn, "[stitch-bc]",
                  "step2 enter: BestOf2Nearest matching (PANORAMA mode — coherent end-to-end)");
         cv::detail::BestOf2NearestMatcher matcher(false, 0.65f);
@@ -928,7 +928,7 @@ StitchResult stitchFramePathsManual(
                 validPairs++;
             }
         }
-        log_info(logFn, "[RetaiLensStitcher]",
+        log_info(logFn, "[BatchStitcher]",
                  "step2.5: %d valid pairwise matches", validPairs);
         if (validPairs < 1) {
             // V16 fix-attempt 9 (NULL TEST, 2026-05-13).  Eight prior
@@ -941,7 +941,7 @@ StitchResult stitchFramePathsManual(
             // non-nil SENTINEL result (width=0, height=0) instead of
             // populating *error and returning nil, we bypass Swift's
             // autoreleasing NSError out-parameter retain entirely.  The
-            // Swift caller in RetaiLensIncrementalStitcher.finalize checks
+            // Swift caller in IncrementalStitcher.finalize checks
             // `r.width == 0` and constructs a Swift-native NSError to pass
             // to its completion block.
             //
@@ -964,7 +964,7 @@ StitchResult stitchFramePathsManual(
             // "all frames dropped" toast).  Kept the long comment
             // because it explains WHY the iOS bridge added a
             // sentinel-path check — historically valuable.
-            log_error(logFn, "[RetaiLensStitcher]",
+            log_error(logFn, "[BatchStitcher]",
                       "step2.5: 0 valid pairs — sentinel result (port: signalling AllFramesDroppedByConfidence)");
             capturedErrorCode = StitchErrorCode::AllFramesDroppedByConfidence;
             capturedErrorMessage = "Stitcher found 0 valid pairwise matches — frames may not overlap enough.";
@@ -976,7 +976,7 @@ StitchResult stitchFramePathsManual(
             break;
         }
 
-        log_info(logFn, "[RetaiLensStitcher]", "step3: leave-biggest");
+        log_info(logFn, "[BatchStitcher]", "step3: leave-biggest");
         log_info(logFn, "[stitch-bc]", "step3 enter: leave-biggest");
         // leaveBiggestComponent mutates imgFeatures and pairwise IN
         // PLACE to drop frames that aren't part of the biggest
@@ -1063,7 +1063,7 @@ StitchResult stitchFramePathsManual(
             }
             workFrames = std::move(trimmedWorkFrames);
             frames     = std::move(trimmedFrames);
-            log_info(logFn, "[RetaiLensStitcher]",
+            log_info(logFn, "[BatchStitcher]",
                      "step3.5: thresh=%.2f kept %zu of %zu frames in biggest component",
                      thresh, workFrames.size(), initialFrameCount);
             if (workFrames.size() >= 2) {
@@ -1099,7 +1099,7 @@ StitchResult stitchFramePathsManual(
             // V16 fix-attempt 9 (NULL TEST) — same rationale as the
             // validPairs<1 sentinel above.  Bypass the *error→throw bridge
             // by returning a width=0/height=0 sentinel result instead.
-            log_error(logFn, "[RetaiLensStitcher]",
+            log_error(logFn, "[BatchStitcher]",
                       "step3.5: <2 frames after leaveBiggestComponent at all thresholds — sentinel result");
             capturedErrorCode = StitchErrorCode::AllFramesDroppedByConfidence;
             capturedErrorMessage = "Less than 2 frames remain after leaveBiggestComponent at all retry thresholds.";
@@ -1111,7 +1111,7 @@ StitchResult stitchFramePathsManual(
         }
 
         // Step 4: estimator
-        log_info(logFn, "[RetaiLensStitcher]", "step4: estimator");
+        log_info(logFn, "[BatchStitcher]", "step4: estimator");
         log_info(logFn, "[stitch-bc]", "step4 enter: estimator");
         cv::detail::HomographyBasedEstimator estimator;
         std::vector<cv::detail::CameraParams> cameras;
@@ -1123,7 +1123,7 @@ StitchResult stitchFramePathsManual(
             // mid-arc).  Returning sentinel keeps the failure surface clean
             // even though the immediate V16 batch-keyframe repro doesn't
             // typically reach this path.
-            log_error(logFn, "[RetaiLensStitcher]",
+            log_error(logFn, "[BatchStitcher]",
                       "step4: HomographyBasedEstimator failed — sentinel result");
             capturedErrorCode = StitchErrorCode::HomographyEstimationFailed;
             capturedErrorMessage = "HomographyBasedEstimator failed.";
@@ -1152,7 +1152,7 @@ StitchResult stitchFramePathsManual(
             auto _t = std::chrono::steady_clock::now();
             double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 _t - t0).count();
-            log_info(logFn, "[RetaiLensStitcher]",
+            log_info(logFn, "[BatchStitcher]",
                      "step5: bundle adjustment (t+%.0fms)", _ms);
             log_info(logFn, "[stitch-bc]", "step5 enter: bundle adjustment");
         }
@@ -1243,7 +1243,7 @@ StitchResult stitchFramePathsManual(
             auto _t = std::chrono::steady_clock::now();
             double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 _t - t0).count();
-            log_info(logFn, "[RetaiLensStitcher]",
+            log_info(logFn, "[BatchStitcher]",
                      "step5.5: wave correction (BA done, t+%.0fms)", _ms);
             log_info(logFn, "[stitch-bc]", "step5.5 enter: wave correction");
         }
@@ -1262,7 +1262,7 @@ StitchResult stitchFramePathsManual(
             // cameras with collinear rotations).  Swallow the failure
             // and continue without correction — the panorama will have
             // the wave artifact but is still better than aborting.
-            log_info(logFn, "[RetaiLensStitcher]",
+            log_info(logFn, "[BatchStitcher]",
                      "wave correction skipped: %s", e.what());
         }
 
@@ -1277,7 +1277,7 @@ StitchResult stitchFramePathsManual(
             ? std::sqrt(COMPOSE_MP / origMp)
             : 1.0;
         double compose_work_aspect = compose_scale / work_scale;
-        log_info(logFn, "[RetaiLensStitcher]",
+        log_info(logFn, "[BatchStitcher]",
                  "step6: compose rescale "
                  "(work_scale=%.3f → compose_scale=%.3f, aspect=%.3f)",
                  work_scale, compose_scale, compose_work_aspect);
@@ -1310,7 +1310,7 @@ StitchResult stitchFramePathsManual(
         // and exactly what SCANS mode used (just SCANS coupled it
         // with affine BA which we just established was the wrong
         // estimator for our motion).
-        log_info(logFn, "[RetaiLensStitcher]",
+        log_info(logFn, "[BatchStitcher]",
                  "step7: warper (%s)", config.warperType.c_str());
         log_info(logFn, "[stitch-bc]",
                  "step7 enter: warper=%s", config.warperType.c_str());
@@ -1449,7 +1449,7 @@ StitchResult stitchFramePathsManual(
         log_info(logFn, "[stitch-bc]",
                  "step7e: full-res frames released mem=%.1fMB",
                  rss_mb());
-        log_info(logFn, "[RetaiLensStitcher]",
+        log_info(logFn, "[BatchStitcher]",
                  "step7.5: composeFrames %d×%d "
                  "(compose_scale=%.3f)",
                  composeFrames.empty() ? 0 : composeFrames[0].cols,
@@ -1478,7 +1478,7 @@ StitchResult stitchFramePathsManual(
         // blenderType).  Final blend happens after either path
         // completes.
         const bool useSeam = (config.seamFinderType == "graphcut");
-        log_info(logFn, "[RetaiLensStitcher]",
+        log_info(logFn, "[BatchStitcher]",
                  "step8: %s",
                  useSeam ? "BATCH (warp-all + seam + feed)"
                          : "STREAM (warp+feed per frame)");
@@ -1509,7 +1509,7 @@ StitchResult stitchFramePathsManual(
             auto mbb = blender.dynamicCast<cv::detail::MultiBandBlender>();
             if (mbb) mbb->setNumBands(5);
         }
-        log_info(logFn, "[RetaiLensStitcher]",
+        log_info(logFn, "[BatchStitcher]",
                  "step10: blender = %s", config.blenderType.c_str());
 
         if (useSeam) {
@@ -1661,7 +1661,7 @@ StitchResult stitchFramePathsManual(
                 auto _t = std::chrono::steady_clock::now();
                 double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     _t - t0).count();
-                log_info(logFn, "[RetaiLensStitcher]",
+                log_info(logFn, "[BatchStitcher]",
                          "step9: graph-cut seam finder "
                          "(compose→seam aspect = %.3f, t+%.0fms)",
                          seam_compose_aspect, _ms);
@@ -1699,7 +1699,7 @@ StitchResult stitchFramePathsManual(
                 auto _t = std::chrono::steady_clock::now();
                 double _seamMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     _t - _seamStart).count();
-                log_info(logFn, "[RetaiLensStitcher]",
+                log_info(logFn, "[BatchStitcher]",
                          "step9: graph-cut find took %.0fms", _seamMs);
             }
             imagesWarpedF_seam.clear();
@@ -1803,7 +1803,7 @@ StitchResult stitchFramePathsManual(
             auto _t = std::chrono::steady_clock::now();
             double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 _t - t0).count();
-            log_info(logFn, "[RetaiLensStitcher]",
+            log_info(logFn, "[BatchStitcher]",
                      "step11: blend complete (output %d×%d, t+%.0fms)",
                      panorama.cols, panorama.rows, _ms);
         }
@@ -1966,7 +1966,7 @@ StitchResult stitchFramePathsManual(
                 // Either degenerate, or inscribed < 50% of bbox area.
                 // Safety floor: ship bbox so the operator gets *something*
                 // usable (legacy behaviour pre-fix3) rather than a sliver.
-                log_info(logFn, "[RetaiLensStitcher]",
+                log_info(logFn, "[BatchStitcher]",
                          "inscribed-rect rejected: "
                          "%dx%d (area=%lld) vs bbox %dx%d (area=%lld); "
                          "using bbox fallback.",
@@ -1974,7 +1974,7 @@ StitchResult stitchFramePathsManual(
                          bboxFallback.width, bboxFallback.height, fallbackArea);
                 bbox = bboxFallback;
             } else {
-                log_info(logFn, "[RetaiLensStitcher]",
+                log_info(logFn, "[BatchStitcher]",
                          "inscribed-rect: %dx%d "
                          "(area=%lld, %.0f%% of bbox %dx%d)",
                          bbox.width, bbox.height, inscribedArea,
@@ -1983,7 +1983,7 @@ StitchResult stitchFramePathsManual(
             }
         } else {
             bbox = cv::boundingRect(mask);
-            log_info(logFn, "[RetaiLensStitcher]",
+            log_info(logFn, "[BatchStitcher]",
                      "crop: bbox-only %dx%d "
                      "(useInscribedRectCrop=NO via setting)",
                      bbox.width, bbox.height);
@@ -2023,7 +2023,7 @@ StitchResult stitchFramePathsManual(
                     cropRight = c;
                 }
             }
-            log_info(logFn, "[RetaiLensStitcher]",
+            log_info(logFn, "[BatchStitcher]",
                      "rectCrop col-proj: cols=%d rows=%d threshold=%d cropLeft=%d cropRight=%d",
                      cols, rows, contentThreshold, cropLeft, cropRight);
             // Sanity floor: don't accept a column-projection crop that
@@ -2040,7 +2040,7 @@ StitchResult stitchFramePathsManual(
                 cv::Rect rectCrop(cropLeft, 0,
                                   cropRight - cropLeft + 1, rows);
                 finalImage = finalImage(rectCrop).clone();
-                log_info(logFn, "[RetaiLensStitcher]",
+                log_info(logFn, "[BatchStitcher]",
                          "rectCrop applied: %dx%d → %dx%d",
                          cols, rows, finalImage.cols, finalImage.rows);
             } else {
@@ -2055,7 +2055,7 @@ StitchResult stitchFramePathsManual(
                         cropRight = c;
                     }
                 }
-                log_info(logFn, "[RetaiLensStitcher]",
+                log_info(logFn, "[BatchStitcher]",
                          "rectCrop relaxed (80%%): cropLeft=%d cropRight=%d",
                          cropLeft, cropRight);
                 if (cropLeft >= 0 && cropRight > cropLeft + 10
@@ -2063,11 +2063,11 @@ StitchResult stitchFramePathsManual(
                     cv::Rect rectCrop(cropLeft, 0,
                                       cropRight - cropLeft + 1, rows);
                     finalImage = finalImage(rectCrop).clone();
-                    log_info(logFn, "[RetaiLensStitcher]",
+                    log_info(logFn, "[BatchStitcher]",
                              "rectCrop relaxed applied: %dx%d → %dx%d",
                              cols, rows, finalImage.cols, finalImage.rows);
                 } else {
-                    log_info(logFn, "[RetaiLensStitcher]",
+                    log_info(logFn, "[BatchStitcher]",
                              "rectCrop SKIPPED — best band is "
                              "narrower than 30%% of bbox (%d < %d).  Likely poor "
                              "stitch alignment; keeping bbox crop.",

@@ -5,9 +5,9 @@
 //
 // Both platforms marshal their native pose representation into this
 // flat struct:
-//   - iOS:    RetaiLensARFramePose (Swift) → KeyframeGateBridge.mm
+//   - iOS:    RNSARFramePose (Swift) → KeyframeGateBridge.mm
 //             unmarshals Swift Doubles → C++ floats.
-//   - Android: RetaiLensARFramePose (Kotlin data class) → JNI
+//   - Android: RNSARFramePose (Kotlin data class) → JNI
 //             unmarshals JVM doubles → C++ floats.
 //
 // Layout MUST stay stable across both platforms.  Field order /

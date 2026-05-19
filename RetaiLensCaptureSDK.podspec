@@ -15,7 +15,7 @@
 #     for this layer.
 #
 # Phase 2 (next, sibling commit) adds:
-#   * RetaiLensStitcher — opencv-mobile pod for OpenCV's cv::Stitcher.
+#   * BatchStitcher — opencv-mobile pod for OpenCV's cv::Stitcher.
 #     Will add ~10 MB to the IPA, paid for by the cloud-sync
 #     stitched-image requirement (single panoramic JPEG per audit).
 #

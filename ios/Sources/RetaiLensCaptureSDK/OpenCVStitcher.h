@@ -152,7 +152,7 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 
 /// Phase 5: pose-driven stitch.  Same end-to-end shape as
 /// `stitchVideoAtPath` but consumes pre-computed camera poses
-/// (from ARKit/ARCore via RetaiLensARSession) and skips the
+/// (from ARKit/ARCore via RNSARSession) and skips the
 /// brittle features → matching → BundleAdjuster steps.  Internally:
 ///
 ///   1. Extract maxFrames evenly-spaced frames from the video.
@@ -166,7 +166,7 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 ///   5. Hand cameras to the existing warp + seam + blend pipeline.
 ///
 /// `poses` is an NSArray of NSDictionary; each entry has the keys
-/// matching `RetaiLensARFramePose.asDictionary()`:
+/// matching `RNSARFramePose.asDictionary()`:
 ///   tx, ty, tz, qx, qy, qz, qw, fx, fy, cx, cy,
 ///   imageWidth, imageHeight, timestampMs, trackingState
 /// Frames whose closest pose is missing or beyond tolerance fall
@@ -199,7 +199,7 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 /// `framePaths.count` MUST equal `poses.count` (1:1 mapping; any
 /// downstream filtering happens inside this method).  `framePaths`
 /// must be at least 2 entries.  Pose dictionaries follow the same
-/// shape as `RetaiLensARFramePose.asDictionary()`.
+/// shape as `RNSARFramePose.asDictionary()`.
 + (nullable RetaiLensStitchResult *)stitchKeyframePaths:(NSArray<NSString *> *)framePaths
                                             outputPath:(NSString *)outputPath
                                            jpegQuality:(NSInteger)quality

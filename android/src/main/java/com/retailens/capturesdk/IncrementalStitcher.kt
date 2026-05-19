@@ -39,7 +39,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Android twin of iOS' OpenCVIncrementalStitcher + RetaiLensIncrementalStitcher.
+ * Android twin of iOS' OpenCVIncrementalStitcher + IncrementalStitcher.
  *
  * Why a single file (vs the iOS three-file split):
  *   On iOS we cross C++↔ObjC↔Swift boundaries, so the .h/.mm/.swift
@@ -62,7 +62,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   - finalize(options)     — write the final panorama and reset
  *   - cancel()              — abort without producing output
  *   - getState()            — pull the latest state on demand
- *   - Event "RetaiLensIncrementalStateUpdate" emitted on every
+ *   - Event "IncrementalStateUpdate" emitted on every
  *     processFrameAtPath call
  *
  * What's missing for true live capture on Android:
@@ -72,11 +72,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   ARCore's per-frame `Frame.acquireCameraImage()` directly into
  *   the engine the same way iOS uses ARSession.
  */
-class RetaiLensIncrementalStitcher(
+class IncrementalStitcher(
     private val reactContext: ReactApplicationContext,
 ) : ReactContextBaseJavaModule(reactContext) {
 
-    override fun getName(): String = "RetaiLensIncrementalStitcher"
+    override fun getName(): String = "IncrementalStitcher"
 
     /// Required by RCTEventEmitter contract.  No-op on Android because
     /// `DeviceEventManagerModule` does its own listener tracking; we
@@ -241,10 +241,10 @@ class RetaiLensIncrementalStitcher(
     /// Reference to a mounted ARCameraView (if any).  Set by the view
     /// when it attaches; the engine flips its `ingestActive` flag
     /// on start/stop so the view feeds frames only during a capture.
-    @Volatile private var arCameraViewRef: RetaiLensARCameraView? = null
+    @Volatile private var arCameraViewRef: RNSARCameraView? = null
 
     init {
-        // Static back-pointer so `RetaiLensARCameraView` can call into
+        // Static back-pointer so `RNSARCameraView` can call into
         // the singleton-style bridge module without a DI dance.  RN
         // may rebuild module instances across reloads; the view always
         // uses the latest reference.
@@ -253,7 +253,7 @@ class RetaiLensIncrementalStitcher(
 
     /// View calls this on attach so the engine can route ingestion
     /// without searching the view tree on every frame.
-    internal fun bindArCameraView(view: RetaiLensARCameraView) {
+    internal fun bindArCameraView(view: RNSARCameraView) {
         arCameraViewRef = view
         // If a capture is already running when the view mounts, hot-
         // engage ingestion so the user gets a partial panorama
@@ -263,7 +263,7 @@ class RetaiLensIncrementalStitcher(
         }
     }
 
-    internal fun unbindArCameraView(view: RetaiLensARCameraView) {
+    internal fun unbindArCameraView(view: RNSARCameraView) {
         if (arCameraViewRef === view) {
             view.setIncrementalIngestionActive(false)
             arCameraViewRef = null
@@ -309,7 +309,7 @@ class RetaiLensIncrementalStitcher(
             // (the hybrid engine), producing identical output to picking
             // 'hybrid' — silent platform divergence vs iOS.
             //
-            // iOS-parity reference: RetaiLensIncrementalStitcher.swift:556
+            // iOS-parity reference: IncrementalStitcher.swift:556
             // computes `useFirstwinsClass = normalisedMode.hasPrefix("slitscan")`
             // which routes BOTH 'slitscan-rotate' AND 'slitscan-both' AND
             // the deprecated aliases to OpenCVFirstWinsCylindricalStitcher.
@@ -383,7 +383,7 @@ class RetaiLensIncrementalStitcher(
                 //   overlapThreshold default 0.4 (40% new content)
                 //   maxCount         default 6
                 // Both clamped to safe ranges that iOS also uses (see
-                // RetaiLensIncrementalStitcher.swift:608-615).
+                // IncrementalStitcher.swift:608-615).
                 val threshold = configOverrides
                     ?.getDoubleOrDefault("keyframeOverlapThreshold", 0.4) ?: 0.4
                 keyframeGate.overlapThreshold = threshold.coerceIn(0.10, 0.80)
@@ -463,7 +463,7 @@ class RetaiLensIncrementalStitcher(
             // view is bound.  Each of these is a potential failure
             // point for the "0 keyframes captured" symptom.
             android.util.Log.i(
-                "RetaiLensIncrementalStitcher",
+                "IncrementalStitcher",
                 "start() ENTRY: engineMode=$engineMode " +
                     "batchKeyframeMode=$batchKeyframeMode " +
                     "gate.enabled=${keyframeGate.enabled} " +
@@ -521,7 +521,7 @@ class RetaiLensIncrementalStitcher(
         val dir = captureSessionDir
         if (dir == null) {
             android.util.Log.w(
-                "RetaiLensIncrementalStitcher",
+                "IncrementalStitcher",
                 "copyKeyframeToStore: captureSessionDir is null — " +
                     "start() should have created it; dropping frame",
             )
@@ -532,7 +532,7 @@ class RetaiLensIncrementalStitcher(
             java.io.File(srcPath).copyTo(destFile, overwrite = true).absolutePath
         } catch (e: Exception) {
             android.util.Log.w(
-                "RetaiLensIncrementalStitcher",
+                "IncrementalStitcher",
                 "copyKeyframeToStore: failed to copy $srcPath → " +
                     "${destFile.absolutePath}: ${e.message}",
                 e,
@@ -573,7 +573,7 @@ class RetaiLensIncrementalStitcher(
         if (batchKeyframeMode) {
             val path = options.getString("path")
                 ?: return promise.reject("invalid-options", "path required")
-            val pose = RetaiLensARFramePose(
+            val pose = RNSARFramePose(
                 tx = options.getDoubleOrDefault("tx", 0.0) ?: 0.0,
                 ty = options.getDoubleOrDefault("ty", 0.0) ?: 0.0,
                 tz = options.getDoubleOrDefault("tz", 0.0) ?: 0.0,
@@ -588,7 +588,7 @@ class RetaiLensIncrementalStitcher(
                 imageWidth = options.getIntOrDefault("imageWidth", 1080),
                 imageHeight = options.getIntOrDefault("imageHeight", 1920),
                 timestampMs = 0.0,
-                trackingState = RetaiLensARSession.TRACKING_TRACKING,
+                trackingState = RNSARSession.TRACKING_TRACKING,
             )
             // Vision-camera path: no plane available (gyro can't fit
             // planes).  Pass null → C++ uses angular fallback.
@@ -791,7 +791,7 @@ class RetaiLensIncrementalStitcher(
             else -> resolveStitchModeAuto(firstPose, lastPose)
         }
         android.util.Log.i(
-            "RetaiLensIncrementalStitcher",
+            "IncrementalStitcher",
             "finalize stitch-mode: configured=$batchStitchMode resolved=$stitchModeResolved " +
                 "firstPose=${firstPose != null} lastPose=${lastPose != null}",
         )
@@ -821,19 +821,19 @@ class RetaiLensIncrementalStitcher(
                         )
                     }
                     // Use the static `bridgeInstance` accessor on
-                    // RetaiLensStitcher rather than
+                    // BatchStitcher rather than
                     // reactContext.getNativeModule — the latter
                     // returns null under bridgeless / new-architecture
                     // mode even for legacy-registered modules.
                     // Empirically: getNativeModule failed on Galaxy
-                    // A35 with `RetaiLensStitcher module not
+                    // A35 with `BatchStitcher module not
                     // registered`, despite the module being present
                     // in RetaiLensCapturePackage.createNativeModules.
                     // Same pattern that already works for
-                    // RetaiLensIncrementalStitcher.bridgeInstance.
-                    val stitcher = RetaiLensStitcher.bridgeInstance
+                    // IncrementalStitcher.bridgeInstance.
+                    val stitcher = BatchStitcher.bridgeInstance
                         ?: throw IllegalStateException(
-                            "RetaiLensStitcher.bridgeInstance is null " +
+                            "BatchStitcher.bridgeInstance is null " +
                                 "— module hasn't been instantiated yet. " +
                                 "Check RetaiLensCapturePackage registration."
                         )
@@ -970,7 +970,7 @@ class RetaiLensIncrementalStitcher(
     }
 
     /**
-     * Called by `RetaiLensARCameraView` per ARCore frame when it has
+     * Called by `RNSARCameraView` per ARCore frame when it has
      * a fresh JPEG + pose to ingest.  Synchronous-feeling from the
      * caller's perspective but actually dispatched onto the engine's
      * own queue so we don't stall the GL render thread.  Drops the
@@ -1015,13 +1015,13 @@ class RetaiLensIncrementalStitcher(
             // they're required for the plane-overlap math.  Falling
             // back to the angular path when no plane is latched is
             // handled internally by the gate (latchedPlane=null arg).
-            val pose = RetaiLensARFramePose(
+            val pose = RNSARFramePose(
                 tx = tx, ty = ty, tz = tz,
                 qx = qx, qy = qy, qz = qz, qw = qw,
                 fx = fx, fy = fy, cx = cx, cy = cy,
                 imageWidth = imageWidth, imageHeight = imageHeight,
                 timestampMs = 0.0,           // not used by the gate
-                trackingState = RetaiLensARSession.TRACKING_TRACKING,
+                trackingState = RNSARSession.TRACKING_TRACKING,
             )
             // Fetch the latched plane (if any) from the AR session
             // and convert to a column-major 16-float matrix matching
@@ -1029,7 +1029,7 @@ class RetaiLensIncrementalStitcher(
             // Pose.toMatrix(out, offset) gives us exactly that layout
             // (same as iOS simd_float4x4).
             val planeMatrix: FloatArray? =
-                RetaiLensARSession.instance?.latchedPlaneTransform?.let { p ->
+                RNSARSession.instance?.latchedPlaneTransform?.let { p ->
                     FloatArray(16).also { p.toMatrix(it, 0) }
                 }
 
@@ -1041,7 +1041,7 @@ class RetaiLensIncrementalStitcher(
             // log accepts (rare, important signal).
             if (decision.accept || (frameIngestLogTick++ % 30 == 0)) {
                 android.util.Log.i(
-                    "RetaiLensIncrementalStitcher",
+                    "IncrementalStitcher",
                     "ingestFromARCameraView batch: " +
                         "accept=${decision.accept} reason=${decision.reason} " +
                         "newContent=${"%.3f".format(decision.newContentFraction)} " +
@@ -1064,7 +1064,7 @@ class RetaiLensIncrementalStitcher(
             val persistentPath = copyKeyframeToStore(path)
             if (persistentPath == null) {
                 android.util.Log.w(
-                    "RetaiLensIncrementalStitcher",
+                    "IncrementalStitcher",
                     "ingestFromARCameraView batch: ACCEPTED but copy FAILED — frame dropped",
                 )
                 // Copy failed — drop the frame.  Logged inside
@@ -1083,7 +1083,7 @@ class RetaiLensIncrementalStitcher(
             if (batchFirstAcceptedPose == null) batchFirstAcceptedPose = poseSnapshot
             batchLastAcceptedPose = poseSnapshot
             android.util.Log.i(
-                "RetaiLensIncrementalStitcher",
+                "IncrementalStitcher",
                 "ingestFromARCameraView batch: ACCEPTED keyframe #${batchKeyframePaths.size}" +
                     " → $persistentPath",
             )
@@ -1091,7 +1091,7 @@ class RetaiLensIncrementalStitcher(
             // renders the thumbnail strip + the "Keyframes: n/max"
             // pill updates in real time.  iOS counterpart:
             // emitBatchKeyframeAcceptedState in
-            // RetaiLensIncrementalStitcher.swift — same field set
+            // IncrementalStitcher.swift — same field set
             // so the JS subscriber doesn't branch on platform.
             emitBatchKeyframeAcceptedState(
                 thumbnailPath = persistentPath,
@@ -1165,7 +1165,7 @@ class RetaiLensIncrementalStitcher(
      */
     @ReactMethod
     fun getARPlaneStatus(promise: Promise) {
-        val session = RetaiLensARSession.instance
+        val session = RNSARSession.instance
         if (session == null) {
             // Safe default: no AR session = no plane to lock onto.
             // Shape MUST match the iOS contract so JS doesn't branch.
@@ -1187,11 +1187,11 @@ class RetaiLensIncrementalStitcher(
      * synchronously; JS sees the new state on the next 2 Hz
      * getARPlaneStatus poll (~16 ms later, when the GL render thread
      * runs evaluatePlanesForFrame on the next ARCore frame).  See
-     * detailed semantic note in RetaiLensARSession.buildARPlaneStatusMap.
+     * detailed semantic note in RNSARSession.buildARPlaneStatusMap.
      */
     @ReactMethod
     fun relatchARPlane(promise: Promise) {
-        RetaiLensARSession.instance?.clearPlaneLatch()
+        RNSARSession.instance?.clearPlaneLatch()
         val map = Arguments.createMap()
         map.putBoolean("latched", false)
         promise.resolve(map)
@@ -1224,7 +1224,7 @@ class RetaiLensIncrementalStitcher(
      * subdirectories (created by start() above) and removes those whose
      * newest file mtime is older than `olderThanMs` (default 24h).
      *
-     * iOS sibling: `RetaiLensIncrementalStitcher.swift::cleanupKeyframes`.
+     * iOS sibling: `IncrementalStitcher.swift::cleanupKeyframes`.
      *
      * Resolves with `{ sessionsDeleted, bytesFreed }`.  Never rejects —
      * filesystem failures (missing dir, permission errors) resolve with
@@ -1271,7 +1271,7 @@ class RetaiLensIncrementalStitcher(
             }
         } catch (e: Exception) {
             android.util.Log.w(
-                "RetaiLensIncrementalStitcher",
+                "IncrementalStitcher",
                 "cleanupKeyframes: ${e.message}",
             )
         }
@@ -1286,7 +1286,7 @@ class RetaiLensIncrementalStitcher(
      * session directory.  Empty string when no capture is in flight
      * (or not in batch-keyframe mode).
      *
-     * iOS sibling: `RetaiLensIncrementalStitcher.swift::currentKeyframeDir`.
+     * iOS sibling: `IncrementalStitcher.swift::currentKeyframeDir`.
      */
     @ReactMethod
     fun getKeyframeDir(promise: Promise) {
@@ -1310,7 +1310,7 @@ class RetaiLensIncrementalStitcher(
      *   - `framePaths.length >= 2`
      *   - Each path must exist on disk
      *
-     * Routing: delegates to `RetaiLensStitcher.stitchSync(...)` —
+     * Routing: delegates to `BatchStitcher.stitchSync(...)` —
      * the same shared-JNI shim the batch-keyframe finalize uses.
      * Quality defaults match the batch-keyframe finalize:
      *   warperType         = "spherical"
@@ -1325,7 +1325,7 @@ class RetaiLensIncrementalStitcher(
      * doesn't block the @ReactMethod thread for the 2-5 s the
      * stitcher takes.  iOS-parity behaviour.
      *
-     * iOS sibling: `RetaiLensIncrementalStitcher.swift::refinePanorama`.
+     * iOS sibling: `IncrementalStitcher.swift::refinePanorama`.
      *
      * See: docs/site-content/design/2026-05-14-realtime-batch-fusion.md
      */
@@ -1378,9 +1378,9 @@ class RetaiLensIncrementalStitcher(
 
         refineScope.launch {
             try {
-                val stitcher = RetaiLensStitcher.bridgeInstance
+                val stitcher = BatchStitcher.bridgeInstance
                     ?: throw IllegalStateException(
-                        "RetaiLensStitcher.bridgeInstance is null — " +
+                        "BatchStitcher.bridgeInstance is null — " +
                             "module hasn't been instantiated yet.",
                     )
                 // "auto" mode is meaningful only when we have first/
@@ -1431,7 +1431,7 @@ class RetaiLensIncrementalStitcher(
      *
      *   1. Emits a state event with `isRefining = true` so the
      *      host renders a "Refining…" pill.
-     *   2. Runs `RetaiLensStitcher.stitchSync(...)` on the supplied
+     *   2. Runs `BatchStitcher.stitchSync(...)` on the supplied
      *      keyframe paths.
      *   3. On success: emits a state event with `isRefining = false`
      *      AND `refinedPanoramaPath = <path>`.
@@ -1457,7 +1457,7 @@ class RetaiLensIncrementalStitcher(
     ) {
         if (framePaths.size < 2) {
             android.util.Log.i(
-                "RetaiLensIncrementalStitcher",
+                "IncrementalStitcher",
                 "[refine.auto] skipped: framePaths.size=${framePaths.size} " +
                     "(hybrid engine retains no per-frame JPEGs)",
             )
@@ -1467,7 +1467,7 @@ class RetaiLensIncrementalStitcher(
         for (p in framePaths) {
             if (!File(p).exists()) {
                 android.util.Log.i(
-                    "RetaiLensIncrementalStitcher",
+                    "IncrementalStitcher",
                     "[refine.auto] skipped: missing keyframe $p",
                 )
                 emitRefinementState(isRefining = false, refinedPanoramaPath = null)
@@ -1477,9 +1477,9 @@ class RetaiLensIncrementalStitcher(
         emitRefinementState(isRefining = true, refinedPanoramaPath = null)
         refineScope.launch {
             try {
-                val stitcher = RetaiLensStitcher.bridgeInstance
+                val stitcher = BatchStitcher.bridgeInstance
                     ?: throw IllegalStateException(
-                        "RetaiLensStitcher.bridgeInstance is null at auto-refine time",
+                        "BatchStitcher.bridgeInstance is null at auto-refine time",
                     )
                 stitcher.stitchSync(
                     framePaths.toTypedArray(),
@@ -1493,7 +1493,7 @@ class RetaiLensIncrementalStitcher(
                     stitchMode = "scans",
                 )
                 android.util.Log.i(
-                    "RetaiLensIncrementalStitcher",
+                    "IncrementalStitcher",
                     "[refine.auto] success path=$refinedOutputPath",
                 )
                 emitRefinementState(
@@ -1502,7 +1502,7 @@ class RetaiLensIncrementalStitcher(
                 )
             } catch (t: Throwable) {
                 android.util.Log.w(
-                    "RetaiLensIncrementalStitcher",
+                    "IncrementalStitcher",
                     "[refine.auto] refinement failed (live output kept): ${t.message}",
                 )
                 emitRefinementState(isRefining = false, refinedPanoramaPath = null)
@@ -1512,7 +1512,7 @@ class RetaiLensIncrementalStitcher(
 
     /**
      * 2026-05-16 — emit a refinement-related state event.  Reuses
-     * the same RetaiLensIncrementalStateUpdate channel the live
+     * the same IncrementalStateUpdate channel the live
      * engines emit on; JS reads `isRefining` and `refinedPanoramaPath`
      * directly from the event payload (no schema change required on
      * the JS dispatch side).
@@ -1603,7 +1603,7 @@ class RetaiLensIncrementalStitcher(
             promise.resolve(mb)
         } catch (t: Throwable) {
             android.util.Log.w(
-                "RetaiLensIncrementalStitcher",
+                "IncrementalStitcher",
                 "getMemoryFootprintMB: failed: ${t.message}",
             )
             promise.resolve(-1.0)
@@ -1621,7 +1621,7 @@ class RetaiLensIncrementalStitcher(
             keyframeGate.close()
         } catch (t: Throwable) {
             android.util.Log.w(
-                "RetaiLensIncrementalStitcher",
+                "IncrementalStitcher",
                 "onCatalystInstanceDestroy: keyframeGate.close failed: ${t.message}",
             )
         }
@@ -1646,7 +1646,7 @@ class RetaiLensIncrementalStitcher(
         // need our own gating.
         reactContext
             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-            .emit("RetaiLensIncrementalStateUpdate", state)
+            .emit("IncrementalStateUpdate", state)
     }
 
     /**
@@ -1655,7 +1655,7 @@ class RetaiLensIncrementalStitcher(
      * LiveFrameStrip + advance the "Keyframes: N/M" pill.
      *
      * iOS-parity field set — mirrors
-     * RetaiLensIncrementalStitcher.swift::emitBatchKeyframeAcceptedState
+     * IncrementalStitcher.swift::emitBatchKeyframeAcceptedState
      * exactly (same field names, types, order) so the JS subscriber
      * in incremental.ts doesn't need to branch on platform.
      */
@@ -1753,7 +1753,7 @@ class RetaiLensIncrementalStitcher(
         val ratio = tScore / denom
 
         android.util.Log.i(
-            "RetaiLensIncrementalStitcher",
+            "IncrementalStitcher",
             "stitch-mode auto: t=${"%.3f".format(tMeters)}m " +
                 "r=${"%.3f".format(rRadians)}rad " +
                 "ratio=${"%.3f".format(ratio)} " +
@@ -1810,7 +1810,7 @@ class RetaiLensIncrementalStitcher(
         /// in `init {}` of the most recently constructed instance.
         @JvmStatic
         @Volatile
-        var bridgeInstance: RetaiLensIncrementalStitcher? = null
+        var bridgeInstance: IncrementalStitcher? = null
             private set
     }
 }

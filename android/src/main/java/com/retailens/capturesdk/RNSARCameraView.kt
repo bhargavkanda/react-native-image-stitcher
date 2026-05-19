@@ -27,7 +27,7 @@ import kotlin.math.atan2
 import kotlin.math.asin
 
 /**
- * Android twin of `RetaiLensARCameraView.swift` (iOS Phase 4.4).
+ * Android twin of `RNSARCameraView.swift` (iOS Phase 4.4).
  *
  * Embeds a `GLSurfaceView` that renders the ARCore camera feed and
  * drives the AR session's per-frame `update()` loop on the GL render
@@ -45,7 +45,7 @@ import kotlin.math.asin
  *
  * Lifecycle:
  *   onAttachedToWindow      → mark "wants to render", borrow Session
- *                              from RetaiLensARSession.instance
+ *                              from RNSARSession.instance
  *   onSurfaceCreated (GL)   → create OES texture, build BackgroundRenderer
  *   onSurfaceChanged (GL)   → notify session of display geometry
  *   onDrawFrame (GL)        → session.update(); pose → log;
@@ -53,7 +53,7 @@ import kotlin.math.asin
  *   onDetachedFromWindow    → pause render thread; do NOT pause Session
  *                              (other views may still be using it)
  */
-class RetaiLensARCameraView @JvmOverloads constructor(
+class RNSARCameraView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyle: Int = 0,
@@ -84,7 +84,7 @@ class RetaiLensARCameraView @JvmOverloads constructor(
     }
 
     /// Whether to feed the AR session's frames into the incremental
-    /// engine.  Toggled by RetaiLensIncrementalStitcher.start/stop
+    /// engine.  Toggled by IncrementalStitcher.start/stop
     /// via setIncrementalIngestionActive() below.
     @Volatile private var ingestActive: Boolean = false
 
@@ -110,11 +110,11 @@ class RetaiLensARCameraView @JvmOverloads constructor(
         // throwing — if it returns false the view falls through to
         // the borrow logic below, which then renders empty.  Worst-
         // case the user navigates away + back to retry.
-        RetaiLensARSession.instance?.startForView()
+        RNSARSession.instance?.startForView()
 
         glView.onResume()
-        // Try to borrow the session from the running RetaiLensARSession.
-        val session = RetaiLensARSession.instance?.getSessionForView()
+        // Try to borrow the session from the running RNSARSession.
+        val session = RNSARSession.instance?.getSessionForView()
         if (session != null) {
             sessionRef.set(session)
             // ARCore's `Session.resume()` must be called on the main
@@ -135,11 +135,11 @@ class RetaiLensARCameraView @JvmOverloads constructor(
                 "onAttachedToWindow: session is still null after startForView; " +
                     "preview will stay black until the view re-mounts " +
                     "(possible reasons: no Activity, ARCore install in progress, " +
-                    "device unsupported — see RetaiLensARSession logs)",
+                    "device unsupported — see RNSARSession logs)",
             )
         }
-        RetaiLensARSession.instance?.bindCameraView(this)
-        RetaiLensIncrementalStitcher.bridgeInstance?.bindArCameraView(this)
+        RNSARSession.instance?.bindCameraView(this)
+        IncrementalStitcher.bridgeInstance?.bindArCameraView(this)
     }
 
     override fun onDetachedFromWindow() {
@@ -148,8 +148,8 @@ class RetaiLensARCameraView @JvmOverloads constructor(
         // Pause the GL thread so we stop drawing frames.
         glView.onPause()
         sessionTextureBound = false
-        RetaiLensIncrementalStitcher.bridgeInstance?.unbindArCameraView(this)
-        RetaiLensARSession.instance?.unbindCameraView(this)
+        IncrementalStitcher.bridgeInstance?.unbindArCameraView(this)
+        RNSARSession.instance?.unbindCameraView(this)
         // iOS parity (didMoveToWindow else-branch): stop the session
         // so the hardware camera is freed for vision-camera or other
         // consumers when the user navigates away.  Updated from the
@@ -162,10 +162,10 @@ class RetaiLensARCameraView @JvmOverloads constructor(
         // The JS-facing `start(promise)` / `stop(promise)` continue
         // to work for hosts that prefer explicit control — the
         // refs/state are shared.
-        RetaiLensARSession.instance?.stopForView()
+        RNSARSession.instance?.stopForView()
     }
 
-    /// Called by RetaiLensIncrementalStitcher.start/stop.  When true,
+    /// Called by IncrementalStitcher.start/stop.  When true,
     /// each ARCore frame's camera image is encoded to JPEG + handed
     /// to the engine; when false, the per-frame work skips ingestion
     /// (the camera feed continues to render either way).
@@ -201,7 +201,7 @@ class RetaiLensARCameraView @JvmOverloads constructor(
             // Session not yet attached (start() hasn't run, or
             // the bridge module instance was rebuilt).  Try once
             // more in case the bridge resolved it after onAttach.
-            val late = RetaiLensARSession.instance?.getSessionForView()
+            val late = RNSARSession.instance?.getSessionForView()
             if (late != null) sessionRef.set(late)
             return
         }
@@ -243,13 +243,13 @@ class RetaiLensARCameraView @JvmOverloads constructor(
         val zAxis = pose.zAxis
         val cameraForwardWorld = floatArrayOf(-zAxis[0], -zAxis[1], -zAxis[2])
         val cameraPosWorld = floatArrayOf(pose.tx(), pose.ty(), pose.tz())
-        RetaiLensARSession.instance?.evaluatePlanesForFrame(
+        RNSARSession.instance?.evaluatePlanesForFrame(
             cameraForwardWorld,
             cameraPosWorld,
         )
 
         // Push pose into the AR session log.  Mirrors iOS' delegate
-        // path; the existing RetaiLensARFramePose / appendPose
+        // path; the existing RNSARFramePose / appendPose
         // contract was already in place for Phase 4.
         appendPose(camera, frame.timestamp)
 
@@ -269,13 +269,13 @@ class RetaiLensARCameraView @JvmOverloads constructor(
         val dims = intrinsics.imageDimensions
 
         val tracking = when (camera.trackingState) {
-            TrackingState.TRACKING -> RetaiLensARSession.TRACKING_TRACKING
-            TrackingState.PAUSED   -> RetaiLensARSession.TRACKING_LIMITED
-            TrackingState.STOPPED  -> RetaiLensARSession.TRACKING_NOT_AVAILABLE
-            else -> RetaiLensARSession.TRACKING_NOT_AVAILABLE
+            TrackingState.TRACKING -> RNSARSession.TRACKING_TRACKING
+            TrackingState.PAUSED   -> RNSARSession.TRACKING_LIMITED
+            TrackingState.STOPPED  -> RNSARSession.TRACKING_NOT_AVAILABLE
+            else -> RNSARSession.TRACKING_NOT_AVAILABLE
         }
 
-        val framePose = RetaiLensARFramePose(
+        val framePose = RNSARFramePose(
             tx = translation[0].toDouble(),
             ty = translation[1].toDouble(),
             tz = translation[2].toDouble(),
@@ -292,8 +292,8 @@ class RetaiLensARCameraView @JvmOverloads constructor(
             timestampMs = timestampNs / 1_000_000.0,
             trackingState = tracking,
         )
-        RetaiLensARSession.instance?.appendPose(framePose)
-        RetaiLensARSession.instance?.updateTrackingState(camera.trackingState)
+        RNSARSession.instance?.appendPose(framePose)
+        RNSARSession.instance?.updateTrackingState(camera.trackingState)
     }
 
     /// P3-G diagnostic — rate-limit the per-frame log so we can see
@@ -401,7 +401,7 @@ class RetaiLensARCameraView @JvmOverloads constructor(
         fovVertDegrees: Double,
         trackingPoor: Boolean,
     ) {
-        val module = RetaiLensIncrementalStitcher.bridgeInstance ?: return
+        val module = IncrementalStitcher.bridgeInstance ?: return
         module.ingestFromARCameraView(
             path = path,
             tx = tx, ty = ty, tz = tz,
@@ -454,6 +454,6 @@ class RetaiLensARCameraView @JvmOverloads constructor(
     }
 
     companion object {
-        private const val TAG = "RetaiLensARCameraView"
+        private const val TAG = "RNSARCameraView"
     }
 }

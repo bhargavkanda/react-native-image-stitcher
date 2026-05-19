@@ -2,8 +2,8 @@
  * ARCameraView — AR-backed alternative to ``<CameraView>`` for
  * audits that need pose-aware capture (panorama mode, packet
  * detection).  Renders the ARKit camera feed via the native
- * `RetaiLensARCameraView` UIView; the underlying ARSession is the
- * SDK singleton (`RetaiLensARSession.shared`), shared between the
+ * `RNSARCameraView` UIView; the underlying ARSession is the
+ * SDK singleton (`RNSARSession.shared`), shared between the
  * preview and the pose log that feeds Phase 5 stitching + Phase 6
  * measurement.
  *
@@ -43,13 +43,13 @@ import {
 
 // React Native looks up the component by its NATIVE name.
 //   iOS: comes from `ARCameraViewManager.m`'s
-//        `RCT_EXTERN_MODULE(RetaiLensARCameraViewManager, RCTViewManager)`.
-//   Android: comes from `RetaiLensARCameraViewManager.kt`'s
-//        `getName() = "RetaiLensARCameraView"`.
+//        `RCT_EXTERN_MODULE(RNSARCameraViewManager, RCTViewManager)`.
+//   Android: comes from `RNSARCameraViewManager.kt`'s
+//        `getName() = "RNSARCameraView"`.
 // Both expose the same name; same JS lookup works on both platforms.
 const NativeARCameraView =
   Platform.OS === 'ios' || Platform.OS === 'android'
-    ? requireNativeComponent<{ style?: ViewStyle }>('RetaiLensARCameraView')
+    ? requireNativeComponent<{ style?: ViewStyle }>('RNSARCameraView')
     : null;
 
 
@@ -139,10 +139,10 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
     useImperativeHandle(ref, () => ({
       takePhoto: async (options = {}) => {
         const native: any =
-          (NativeModules as Record<string, unknown>).RetaiLensARSession;
+          (NativeModules as Record<string, unknown>).RNSARSession;
         if (!native?.takePhoto) {
           throw new Error(
-            'ARCameraView.takePhoto: native RetaiLensARSession module not registered',
+            'ARCameraView.takePhoto: native RNSARSession module not registered',
           );
         }
         return native.takePhoto({
@@ -152,10 +152,10 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       },
       startRecording: (options) => {
         const native: any =
-          (NativeModules as Record<string, unknown>).RetaiLensARSession;
+          (NativeModules as Record<string, unknown>).RNSARSession;
         if (!native?.startRecording) {
           options.onRecordingError?.(new Error(
-            'ARCameraView.startRecording: native RetaiLensARSession module not registered',
+            'ARCameraView.startRecording: native RNSARSession module not registered',
           ));
           return;
         }
@@ -174,7 +174,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       },
       stopRecording: async () => {
         const native: any =
-          (NativeModules as Record<string, unknown>).RetaiLensARSession;
+          (NativeModules as Record<string, unknown>).RNSARSession;
         const callbacks = recordingCallbacksRef.current;
         recordingCallbacksRef.current = null;
         if (!native?.stopRecording || !callbacks) {

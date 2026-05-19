@@ -95,7 +95,7 @@ internal object YuvImageConverter {
         // EXIF tag set EVEN when the orientation is normal — keeps
         // every output JPEG self-describing for downstream
         // consumers (cv::Stitcher does NOT auto-honour EXIF, see
-        // RetaiLensStitcher.applyExifOrientation; this metadata
+        // BatchStitcher.applyExifOrientation; this metadata
         // exists primarily for the live thumbnail strip + future
         // RN Image renderers).
         val exifOrientation = when (displayRotation) {

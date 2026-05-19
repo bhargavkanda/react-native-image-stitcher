@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 //
-// RetaiLensARCameraView — native UIView that renders the AR camera
+// RNSARCameraView — native UIView that renders the AR camera
 // feed for the SDK's pose-aware capture surface.
 //
 // Phase 4.4 of the AR measurement plan.  This is the camera-access
@@ -34,8 +34,8 @@ import ARKit
 import UIKit
 
 
-@objc(RetaiLensARCameraView)
-public final class RetaiLensARCameraView: UIView {
+@objc(RNSARCameraView)
+public final class RNSARCameraView: UIView {
 
     /// The ARSCNView that does the actual rendering.  Bound to the
     /// singleton's ARSession so all preview surfaces share the same
@@ -60,10 +60,10 @@ public final class RetaiLensARCameraView: UIView {
         // line — without it, ARSCNView would try to create its own
         // session and we'd lose the pose log.  Sharing means:
         //   - The host's `useARSession` hook still drives lifecycle.
-        //   - Pose data captured via `RetaiLensARSession.shared`'s
+        //   - Pose data captured via `RNSARSession.shared`'s
         //     delegate callbacks remains intact; this view is purely
         //     a renderer.
-        arSCNView.session = RetaiLensARSession.shared.arSession
+        arSCNView.session = RNSARSession.shared.arSession
 
         // We don't draw any 3D content in Phase 4.4.  Disable
         // SceneKit's automatic statistics overlay and lighting model
@@ -96,16 +96,16 @@ public final class RetaiLensARCameraView: UIView {
         // each other (last-mount-wins semantics).  In practice the
         // host only mounts one at a time.
         if window != nil {
-            if !RetaiLensARSession.shared.isRunning {
-                RetaiLensARSession.shared.start()
+            if !RNSARSession.shared.isRunning {
+                RNSARSession.shared.start()
             }
         } else {
             // Removed from window — stop the session.  Don't clear
             // the pose log here; the host explicitly clears between
-            // captures via `RetaiLensARSession.shared.clearPoseLog()`
+            // captures via `RNSARSession.shared.clearPoseLog()`
             // so the JS layer controls when poses get discarded.
-            if RetaiLensARSession.shared.isRunning {
-                RetaiLensARSession.shared.stop()
+            if RNSARSession.shared.isRunning {
+                RNSARSession.shared.stop()
             }
         }
     }

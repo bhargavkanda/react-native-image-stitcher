@@ -18,7 +18,7 @@ import Foundation
 import React
 import UIKit
 
-@objc(RetaiLensStitcher)
+@objc(BatchStitcher)
 public class RetaiLensStitcherBridge: NSObject {
 
   // Stitching is a CPU-bound background operation; let RN drop the
@@ -27,7 +27,7 @@ public class RetaiLensStitcherBridge: NSObject {
   @objc public static func requiresMainQueueSetup() -> Bool { return false }
 
   /// Constants exposed to JS at module load time.  Read via
-  /// `NativeModules.RetaiLensStitcher.physicalMemoryBytes`.
+  /// `NativeModules.BatchStitcher.physicalMemoryBytes`.
   ///
   /// Used by the SDK's `DEFAULT_PANORAMA_SETTINGS` to pick
   /// memory-appropriate defaults: high-quality MultiBand+GraphCut
@@ -54,7 +54,7 @@ public class RetaiLensStitcherBridge: NSObject {
   /// which is exactly what RN's `constantsToExport` declares.
   @objc public static func constantsToExport() -> [String: Any] {
     let bytes = ProcessInfo.processInfo.physicalMemory
-    NSLog("[RetaiLensStitcher] constantsToExport: physicalMemoryBytes=%llu",
+    NSLog("[BatchStitcher] constantsToExport: physicalMemoryBytes=%llu",
           bytes)
     return [
       "physicalMemoryBytes": NSNumber(value: bytes),
@@ -94,7 +94,7 @@ public class RetaiLensStitcherBridge: NSObject {
     let warperType = (options["warperType"] as? String) ?? "plane"
     let blenderType = (options["blenderType"] as? String) ?? "multiband"
     let seamFinderType = (options["seamFinderType"] as? String) ?? "graphcut"
-    // Optional pose log from the host's RetaiLensARSession snapshot.
+    // Optional pose log from the host's RNSARSession snapshot.
     // When present and non-empty, the native stitcher routes to the
     // pose-driven path (skips features → matching → BA).
     let poses = options["poses"] as? [[String: Any]]

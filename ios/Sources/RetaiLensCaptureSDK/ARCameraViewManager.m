@@ -1,8 +1,8 @@
 //
 // ARCameraViewManager.m
 //
-// RN bridge declaration for the Swift `RetaiLensARCameraViewManager`.
-// Without this file the JS side's `requireNativeComponent('RetaiLensARCameraView')`
+// RN bridge declaration for the Swift `RNSARCameraViewManager`.
+// Without this file the JS side's `requireNativeComponent('RNSARCameraView')`
 // would resolve to undefined because RN's component registry is
 // populated by RCT_EXTERN_MODULE / RCT_EXPORT_VIEW_PROPERTY macros,
 // not Swift @objc decorators alone.
@@ -11,14 +11,14 @@
 //   `RCT_EXTERN_MODULE(<ManagerName>, RCTViewManager)` registers the
 //   Swift manager class.  RN auto-derives the JS-visible component
 //   name by stripping the trailing "Manager" — so this manager
-//   exposes a component named "RetaiLensARCameraView" on the JS side.
+//   exposes a component named "RNSARCameraView" on the JS side.
 //   That name MUST match what `requireNativeComponent('...')` looks
 //   up in `ARCameraView.tsx`.
 //
 
 #import <React/RCTViewManager.h>
 
-@interface RCT_EXTERN_MODULE(RetaiLensARCameraViewManager, RCTViewManager)
+@interface RCT_EXTERN_MODULE(RNSARCameraViewManager, RCTViewManager)
 
 // No exposed view props for Phase 4.4 — the view's behaviour is
 // fully driven by mount/unmount lifecycle (the AR session

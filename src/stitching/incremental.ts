@@ -196,7 +196,7 @@ export interface IncrementalStartOptions {
    *
    *   - 'arSession' (default) — engine registers as the
    *     ARSession's frame consumer.  Use in AR captures.  iOS
-   *     bridge.start() requires `RetaiLensARSession.start()` to
+   *     bridge.start() requires `RNSARSession.start()` to
    *     have already been called.
    *
    *   - 'jsDriver' — engine skips AR-session registration; JS
@@ -555,9 +555,9 @@ export interface StitcherConfig {
    *    symmetric, handles any pan direction.  Mild uniform curvature.
    *
    *  Native default is "spherical" specifically for batch-keyframe
-   *  (overrides this prop's value in `RetaiLensIncrementalStitcher.start`
+   *  (overrides this prop's value in `IncrementalStitcher.start`
    *  unless explicitly provided).  Same field is also consumed by the
-   *  legacy non-AR batch path (`RetaiLensStitcher.stitchVideo`) where
+   *  legacy non-AR batch path (`BatchStitcher.stitchVideo`) where
    *  the historical default is "plane". */
   warperType: 'plane' | 'cylindrical' | 'spherical';
 
@@ -612,7 +612,7 @@ export interface StitcherConfig {
    * iOS note: as of 2026-05-14 iOS uses a hand-rolled PANORAMA-style
    * pipeline regardless of this setting.  Setting is passed through
    * to iOS but currently ignored; Android honours it via
-   * `retailens_stitcher.cpp` + `RetaiLensIncrementalStitcher.kt`. */
+   * `retailens_stitcher.cpp` + `IncrementalStitcher.kt`. */
   stitchMode: 'auto' | 'panorama' | 'scans';
 
   /** 2026-05-14 (revised) — capture source axis.
@@ -876,7 +876,7 @@ interface NativeIncrementalModule {
    * Per-platform routing:
    *   - iOS:     `OpenCVStitcher.stitchFramePaths(...)`
    *              (manual cv::detail::* pipeline, useManualPipeline=true).
-   *   - Android: `RetaiLensStitcher.stitchSync(...)` →
+   *   - Android: `BatchStitcher.stitchSync(...)` →
    *              `retailens_stitcher.cpp` (high-level
    *              cv::Stitcher::create() pipeline).
    *
@@ -949,7 +949,7 @@ interface NativeIncrementalModule {
  * case.
  */
 export function getIncrementalNativeModule(): NativeIncrementalModule | null {
-  const m = (NativeModules as Record<string, unknown>)['RetaiLensIncrementalStitcher'];
+  const m = (NativeModules as Record<string, unknown>)['IncrementalStitcher'];
   if (!m || typeof m !== 'object') return null;
   // The cast is safe — RN runtime sees only `Function` for each
   // method but TypeScript's structural type system is happy with
@@ -1014,7 +1014,7 @@ export function subscribeIncrementalState(
   // addListener/removeListeners as part of the contract.  TS just
   // can't see the iOS side's class hierarchy.
   const emitter = new NativeEventEmitter(
-    NativeModules.RetaiLensIncrementalStitcher as unknown as NativeModule,
+    NativeModules.IncrementalStitcher as unknown as NativeModule,
   );
-  return emitter.addListener('RetaiLensIncrementalStateUpdate', listener);
+  return emitter.addListener('IncrementalStateUpdate', listener);
 }

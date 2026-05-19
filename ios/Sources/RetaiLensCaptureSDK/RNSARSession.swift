@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 //
-// RetaiLensARSession — iOS ARKit wrapper that drives the SDK's
+// RNSARSession — iOS ARKit wrapper that drives the SDK's
 // pose-aware capture path.
 //
 // Phase 4 of the AR measurement plan
@@ -44,7 +44,7 @@ fileprivate let arSessionDiagLog = OSLog(
 /// Track state mirrors `ARCamera.TrackingState`.  We mirror it
 /// rather than re-export the ARKit enum so the JS bridge sees a
 /// stable shape that doesn't drift with iOS SDK updates.
-@objc public enum RetaiLensARTrackingState: Int {
+@objc public enum RNSARTrackingState: Int {
     /// AR isn't running on this device or session was never started.
     case notAvailable = 0
     /// Session is running but tracking quality is too low to use.
@@ -62,8 +62,8 @@ fileprivate let arSessionDiagLog = OSLog(
 /// JSON for the JS bridge.  Values are in ARKit's right-handed
 /// world coordinate frame (Y-up, -Z forward), translation in
 /// metres.
-@objc(RetaiLensARFramePose)
-public final class RetaiLensARFramePose: NSObject {
+@objc(RNSARFramePose)
+public final class RNSARFramePose: NSObject {
     /// Translation in world coordinates, metres.
     @objc public let tx: Double
     @objc public let ty: Double
@@ -93,7 +93,7 @@ public final class RetaiLensARFramePose: NSObject {
     @objc public let timestampMs: Double
 
     /// Tracking quality at the time of this frame.
-    @objc public let trackingState: RetaiLensARTrackingState
+    @objc public let trackingState: RNSARTrackingState
 
     @objc public init(
         tx: Double, ty: Double, tz: Double,
@@ -101,7 +101,7 @@ public final class RetaiLensARFramePose: NSObject {
         fx: Double, fy: Double, cx: Double, cy: Double,
         imageWidth: Int, imageHeight: Int,
         timestampMs: Double,
-        trackingState: RetaiLensARTrackingState
+        trackingState: RNSARTrackingState
     ) {
         self.tx = tx; self.ty = ty; self.tz = tz
         self.qx = qx; self.qy = qy; self.qz = qz; self.qw = qw
@@ -131,14 +131,14 @@ public final class RetaiLensARFramePose: NSObject {
 /// We use a singleton because the iOS hardware constraint is global:
 /// only one ARSession can be active per process.  A singleton avoids
 /// accidentally starting two sessions from different SDK call sites.
-@objc(RetaiLensARSession)
-public final class RetaiLensARSession: NSObject, ARSessionDelegate {
+@objc(RNSARSession)
+public final class RNSARSession: NSObject, ARSessionDelegate {
 
     /// Shared instance.  All callers MUST go through this.
-    @objc public static let shared = RetaiLensARSession()
+    @objc public static let shared = RNSARSession()
 
     /// The underlying ARKit session.  Module-internal (not `private`)
-    /// so RetaiLensARCameraView (same module) can bind its ARSCNView
+    /// so RNSARCameraView (same module) can bind its ARSCNView
     /// to this exact session — sharing is critical so the pose log
     /// (driven by this object's `ARSessionDelegate` callbacks) stays
     /// populated while the view renders frames.  Lifecycle is still
@@ -148,7 +148,7 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     /// Rolling log of poses, keyed by ARFrame timestamp (TimeInterval).
     /// Capped at MAX_POSE_LOG entries to bound memory under long
     /// recordings.  Phase 5 stitching will query by timestamp.
-    private var poseLog: [(TimeInterval, RetaiLensARFramePose)] = []
+    private var poseLog: [(TimeInterval, RNSARFramePose)] = []
     private let poseLogQueue = DispatchQueue(
         label: "com.retailens.arsession.poselog",
         attributes: .concurrent
@@ -156,7 +156,7 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     private static let MAX_POSE_LOG = 600  // ~10 s @ 60Hz
 
     /// Latest tracking state.  Read by JS for UI feedback.
-    @objc public private(set) var currentTrackingState: RetaiLensARTrackingState = .notAvailable
+    @objc public private(set) var currentTrackingState: RNSARTrackingState = .notAvailable
 
     /// Whether the session is currently running.
     @objc public private(set) var isRunning: Bool = false
@@ -355,7 +355,7 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
 
     /// V16 keyframe-gate accessor — returns the latched plane as a
     /// `simd_float4x4`, the form Swift code (`KeyframeGate`,
-    /// `RetaiLensIncrementalStitcher`) needs for in-process polygon
+    /// `IncrementalStitcher`) needs for in-process polygon
     /// math.  Distinct from `planeTransformFlat()` which exists only
     /// to bridge the same data into ObjC++ as an NSNumber array.
     /// Nil until a plane is latched (via the AR delegate's didAdd
@@ -410,7 +410,7 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
 
     /// Optional consumer that receives each ARFrame's pixel buffer +
     /// pose for the live incremental-stitching path.  Set by
-    /// `RetaiLensIncrementalStitcher.start()` and cleared on
+    /// `IncrementalStitcher.start()` and cleared on
     /// `finalize()` / `cancel()`.
     ///
     /// Weak so the consumer's lifetime is owned by whoever set it
@@ -514,8 +514,8 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
 
     /// Get all poses in the log, in capture order.
     /// Phase 5 stitcher calls this after recording stops.
-    @objc public func snapshotPoseLog() -> [RetaiLensARFramePose] {
-        var result: [RetaiLensARFramePose] = []
+    @objc public func snapshotPoseLog() -> [RNSARFramePose] {
+        var result: [RNSARFramePose] = []
         poseLogQueue.sync {
             result = poseLog.map { $0.1 }
         }
@@ -529,8 +529,8 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     @objc public func poseClosestToTimestamp(
         _ targetMs: Double,
         maxToleranceMs: Double = 50
-    ) -> RetaiLensARFramePose? {
-        var best: (TimeInterval, RetaiLensARFramePose)?
+    ) -> RNSARFramePose? {
+        var best: (TimeInterval, RNSARFramePose)?
         var bestDelta: Double = .infinity
         poseLogQueue.sync {
             for entry in poseLog {
@@ -565,7 +565,7 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         // consumer if one is registered.  The consumer MUST consume
         // the pixel buffer before returning (Apple's ARKit pool
         // reuse contract — same constraint as the recording-append
-        // path below) — `RetaiLensIncrementalStitcher` does this by
+        // path below) — `IncrementalStitcher` does this by
         // converting NV12 → cv::Mat synchronously inside the call,
         // then doing the heavy work on its own queue.
         if let consumer = self.incrementalConsumer {
@@ -630,7 +630,7 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     }
 
     public func session(_ session: ARSession, didFailWithError error: Error) {
-        NSLog("[RetaiLensARSession] failed: \(error.localizedDescription)")
+        NSLog("[RNSARSession] failed: \(error.localizedDescription)")
         currentTrackingState = .notAvailable
         isRunning = false
     }
@@ -1061,7 +1061,7 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
     // MARK: - Helpers
 
     /// Strip a `file://` scheme some callers attach — same logic
-    /// the OpenCV stitcher uses, kept local here so RetaiLensARSession
+    /// the OpenCV stitcher uses, kept local here so RNSARSession
     /// stays independent of the OpenCV path.
     private static func normalisePath(_ path: String) -> String {
         if path.hasPrefix("file://") {
@@ -1070,7 +1070,7 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         return path
     }
 
-    private func makePose(from frame: ARFrame) -> RetaiLensARFramePose {
+    private func makePose(from frame: ARFrame) -> RNSARFramePose {
         // ARKit's transform is a 4x4 matrix; extract translation
         // (last column) and rotation (top-left 3x3 → quaternion).
         let t = frame.camera.transform
@@ -1083,14 +1083,14 @@ public final class RetaiLensARSession: NSObject, ARSessionDelegate {
         let k = frame.camera.intrinsics
         let imageRes = frame.camera.imageResolution
 
-        let mappedState: RetaiLensARTrackingState
+        let mappedState: RNSARTrackingState
         switch frame.camera.trackingState {
         case .normal:        mappedState = .tracking
         case .limited:       mappedState = .limited
         case .notAvailable:  mappedState = .notAvailable
         }
 
-        return RetaiLensARFramePose(
+        return RNSARFramePose(
             tx: Double(translation.x),
             ty: Double(translation.y),
             tz: Double(translation.z),

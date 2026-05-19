@@ -147,13 +147,13 @@ public enum Stitcher {
         // Generic Stitcher API doesn't carry capture orientation;
         // pass nil → .mm treats as "portrait" → no bake-rotation.
         // Callers that care about output orientation (e.g.
-        // RetaiLensIncrementalStitcher) hit the method directly with
+        // IncrementalStitcher) hit the method directly with
         // the right value.
         captureOrientation: nil,
         // V16 Phase 1b.fix5c — generic Stitcher API defaults the
         // crop strategy to bbox-only (matches the operator-default
         // in the panorama settings modal).  Callers that want
-        // inscribed-rect can use RetaiLensIncrementalStitcher with
+        // inscribed-rect can use IncrementalStitcher with
         // the toggle on.
         useInscribedRectCrop: false
       )

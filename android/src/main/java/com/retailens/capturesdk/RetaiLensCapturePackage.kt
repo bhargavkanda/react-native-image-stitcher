@@ -13,11 +13,11 @@ import com.facebook.react.uimanager.ViewManager
  *
  * Modules registered:
  *   - RetaiLensQualityChecker: blur + brightness scoring
- *   - RetaiLensStitcher:       stitch / stitchVideo / normaliseImage
+ *   - BatchStitcher:       stitch / stitchVideo / normaliseImage
  *
  * The Android JS surface mirrors iOS exactly so any code using
  * `NativeModules.RetaiLensQualityChecker.runQualityCheck(...)` or
- * `NativeModules.RetaiLensStitcher.stitch(...)` works the same on
+ * `NativeModules.BatchStitcher.stitch(...)` works the same on
  * both platforms — no conditional branching needed in the SDK's
  * JS layer.
  */
@@ -26,14 +26,14 @@ class RetaiLensCapturePackage : ReactPackage {
         reactContext: ReactApplicationContext,
     ): List<NativeModule> = listOf(
         RetaiLensQualityChecker(reactContext),
-        RetaiLensStitcher(reactContext),
-        RetaiLensARSession(reactContext),
-        RetaiLensIncrementalStitcher(reactContext),
+        BatchStitcher(reactContext),
+        RNSARSession(reactContext),
+        IncrementalStitcher(reactContext),
     )
 
     override fun createViewManagers(
         reactContext: ReactApplicationContext,
     ): List<ViewManager<*, *>> = listOf(
-        RetaiLensARCameraViewManager(),
+        RNSARCameraViewManager(),
     )
 }

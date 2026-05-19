@@ -811,7 +811,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // we pass nil for captureOrientation → the .mm side treats nil as
   // "portrait" → no bake-rotation.  Callers wanting rotation should
   // use the keyframe-driven Swift path which carries the orientation
-  // from the JS accelerometer hook through RetaiLensIncrementalStitcher.
+  // from the JS accelerometer hook through IncrementalStitcher.
   RetaiLensStitchResult *result =
       [self stitchFramePaths:frames
                   outputPath:outputPath
@@ -839,7 +839,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 //
 // Same end-to-end shape as `stitchVideoAtPath` but consumes
 // pre-computed camera poses (from ARKit/ARCore via the host's
-// RetaiLensARSession) and skips the brittle features → matching
+// RNSARSession) and skips the brittle features → matching
 // → BundleAdjuster steps that the feature-matched path runs.
 // The compose stage (warp + seam + blend + crop) is duplicated
 // from `stitchFramePaths` rather than refactored — keeps the
@@ -959,7 +959,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     cameras.push_back(cameraParamsFromPose(bestPose));
     matched++;
   }
-  NSLog(@"[RetaiLensStitcher] pose-driven: matched=%d dropped=%d",
+  NSLog(@"[BatchStitcher] pose-driven: matched=%d dropped=%d",
         matched, dropped);
 
   if (frames.size() < 2) {
@@ -1024,7 +1024,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         cameras[i].R = rmats[i];
       }
     } catch (const cv::Exception &e) {
-      NSLog(@"[RetaiLensStitcher] pose: wave correction skipped: %s", e.what());
+      NSLog(@"[BatchStitcher] pose: wave correction skipped: %s", e.what());
     }
 
     // Rescale intrinsics for compose-scale warping.
@@ -1416,7 +1416,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     cameras.push_back(cameraParamsFromPose(poses[i]));
     loaded++;
   }
-  NSLog(@"[RetaiLensStitcher] keyframe-stitch: loaded=%d dropped=%d",
+  NSLog(@"[BatchStitcher] keyframe-stitch: loaded=%d dropped=%d",
         loaded, dropped);
   if (!frames.empty()) {
     os_log_with_type(StitcherDiagLog(), OS_LOG_TYPE_FAULT,
@@ -1503,7 +1503,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         cameras[i].R = rmats[i];
       }
     } catch (const cv::Exception &e) {
-      NSLog(@"[RetaiLensStitcher] keyframe: wave correction skipped: %s",
+      NSLog(@"[BatchStitcher] keyframe: wave correction skipped: %s",
             e.what());
     }
 

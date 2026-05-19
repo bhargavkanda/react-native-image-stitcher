@@ -11,7 +11,7 @@
 //   React Native pattern; subclassing it is a one-time investment
 //   that buys clean event-driven UX with no polling overhead.
 //
-// JS-visible module name: `RetaiLensIncrementalStitcher`.  Mapped via
+// JS-visible module name: `IncrementalStitcher`.  Mapped via
 // `RCT_EXTERN_REMAP_MODULE` in IncrementalStitcherBridge.m so the
 // JS-facing name stays stable while the bridge class itself can be
 // renamed without touching JS.
@@ -22,15 +22,15 @@ import React
 import os.log
 import ImageIO        // CGImageSource + kCGImagePropertyOrientation for EXIF read in processFrameAtPath
 
-@objc(RetaiLensIncrementalStitcherBridge)
-public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
+@objc(IncrementalStitcherBridge)
+public final class IncrementalStitcherBridge: RCTEventEmitter {
 
     /// Whether at least one JS listener is attached.  RN's
     /// EventEmitter contract: don't emit when no listeners are
     /// registered (the events would be dropped with a console warning).
     private var hasListeners: Bool = false
 
-    private static let stateUpdateEvent = "RetaiLensIncrementalStateUpdate"
+    private static let stateUpdateEvent = "IncrementalStateUpdate"
 
     public override init() {
         super.init()
@@ -88,10 +88,10 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         let frameSourceMode =
             (options["frameSourceMode"] as? String) ?? "arSession"
         if frameSourceMode == "arSession" {
-            guard RetaiLensARSession.shared.isRunning else {
+            guard RNSARSession.shared.isRunning else {
                 rejecter(
                     "ar-session-not-running",
-                    "RetaiLensARSession.start() must be called before "
+                    "RNSARSession.start() must be called before "
                     + "the incremental stitcher.",
                     nil
                 )
@@ -150,7 +150,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         // fields use mode defaults from +[RLISStitcherConfig configForMode:].
         let configOverrides = options["config"] as? [String: Any] ?? [:]
 
-        RetaiLensIncrementalStitcher.shared.start(
+        IncrementalStitcher.shared.start(
             composeWidth: composeW,
             composeHeight: composeH,
             canvasWidth: canvasW,
@@ -181,7 +181,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         let outputPathRaw = (options["outputPath"] as? String) ?? ""
         let outputPath: String
         if outputPathRaw.isEmpty {
-            // Mirror RetaiLensARSession's path-generation behaviour
+            // Mirror RNSARSession's path-generation behaviour
             // — host code can call finalize() with no path and a
             // tmp file is created in the app's sandbox tmp dir.
             let dir = NSTemporaryDirectory()
@@ -198,11 +198,11 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         // Empty / missing → keep legacy behaviour (start-time value).
         let freshOrientation = (options["captureOrientation"] as? String) ?? ""
         if !freshOrientation.isEmpty {
-            RetaiLensIncrementalStitcher.shared.updateCaptureOrientation(
+            IncrementalStitcher.shared.updateCaptureOrientation(
                 freshOrientation
             )
         }
-        RetaiLensIncrementalStitcher.shared.finalize(
+        IncrementalStitcher.shared.finalize(
             toPath: outputPath,
             jpegQuality: quality
         ) { result, error in
@@ -223,7 +223,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        RetaiLensIncrementalStitcher.shared.cancel()
+        IncrementalStitcher.shared.cancel()
         resolver(["ok": true])
     }
 
@@ -239,7 +239,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        RetaiLensIncrementalStitcher.shared.markNextFrameAsLastKeyframe()
+        IncrementalStitcher.shared.markNextFrameAsLastKeyframe()
         resolver(["ok": true])
     }
 
@@ -249,11 +249,11 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
     /// in its native EXIF-correct orientation.  We DO NOT decode the
     /// image here.  Instead:
     ///
-    ///   - Build a synthetic `RetaiLensARFramePose` from the
+    ///   - Build a synthetic `RNSARFramePose` from the
     ///     JS-supplied quaternion + intrinsics (no translation;
     ///     non-AR captures don't have it).
     ///   - Hand the path + pose to
-    ///     `RetaiLensIncrementalStitcher.addBatchKeyframePath`, which
+    ///     `IncrementalStitcher.addBatchKeyframePath`, which
     ///     evaluates the shared-C++ KeyframeGate and (if accepted)
     ///     records the path in the finalize-time keyframe list +
     ///     emits the same state event the AR-delegate path emits.
@@ -300,7 +300,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
             ? String(pathRaw.dropFirst("file://".count))
             : pathRaw
 
-        let engine = RetaiLensIncrementalStitcher.shared
+        let engine = IncrementalStitcher.shared
         guard engine.isBatchKeyframeMode else {
             rejecter("E_NOT_BATCH_KEYFRAME",
                      "processFrameAtPath only supports batch-keyframe "
@@ -324,10 +324,10 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         let trackingPoor = (options["trackingPoor"] as? Bool) ?? false
         let timestampMs = (options["timestampMs"] as? Double)
             ?? (Date().timeIntervalSince1970 * 1000.0)
-        let trackingState: RetaiLensARTrackingState =
+        let trackingState: RNSARTrackingState =
             trackingPoor ? .limited : .tracking
 
-        let pose = RetaiLensARFramePose(
+        let pose = RNSARFramePose(
             tx: 0, ty: 0, tz: 0,           // no translation in non-AR
             qx: qx, qy: qy, qz: qz, qw: qw,
             fx: fx, fy: fy, cx: cx, cy: cy,
@@ -378,7 +378,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
     ) {
         let olderThanMs = (options["olderThanMs"] as? Double)
             ?? Double(24 * 3600 * 1000)
-        let result = RetaiLensIncrementalStitcher.shared
+        let result = IncrementalStitcher.shared
             .cleanupKeyframes(olderThanMs: olderThanMs)
         resolver(result)
     }
@@ -392,7 +392,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        let path = RetaiLensIncrementalStitcher.shared.currentKeyframeDir() ?? ""
+        let path = IncrementalStitcher.shared.currentKeyframeDir() ?? ""
         resolver(["path": path])
     }
 
@@ -476,7 +476,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
             ? String(outputPathRaw.dropFirst(7))
             : outputPathRaw
         let config = options["config"] as? [String: Any] ?? [:]
-        RetaiLensIncrementalStitcher.shared.refinePanorama(
+        IncrementalStitcher.shared.refinePanorama(
             framePaths: framePaths,
             outputPath: outputPath,
             config: config
@@ -502,7 +502,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        RetaiLensIncrementalStitcher.fileLog("JS: \(message)")
+        IncrementalStitcher.fileLog("JS: \(message)")
         resolver(["ok": true])
     }
 
@@ -511,7 +511,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        let dict = RetaiLensIncrementalStitcher.shared.currentStateDictionary()
+        let dict = IncrementalStitcher.shared.currentStateDictionary()
         resolver(dict ?? NSNull())
     }
 
@@ -552,7 +552,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
         DispatchQueue.main.async {
-            let latched = RetaiLensARSession.shared.relatchPlaneFromCurrentAnchors()
+            let latched = RNSARSession.shared.relatchPlaneFromCurrentAnchors()
             resolver(["latched": latched])
         }
     }
@@ -562,7 +562,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        let session = RetaiLensARSession.shared
+        let session = RNSARSession.shared
         let hasPlane = session.hasPlaneDetected
         let best = Double(session.bestRejectedAlignment)
         let threshold = Double(session.planeAlignmentThreshold)
@@ -590,7 +590,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
     @objc private func handleStateUpdate(_ notification: Notification) {
         let hasPath = (notification.userInfo?["panoramaPath"] != nil)
         if hasPath {
-            RetaiLensIncrementalStitcher.fileLog(
+            IncrementalStitcher.fileLog(
                 "bridge handleStateUpdate hasListeners=\(hasListeners) hasPath=\(hasPath) thread=\(Thread.isMainThread ? "main" : "bg")"
             )
         }
@@ -604,7 +604,7 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             if hasPath {
-                RetaiLensIncrementalStitcher.fileLog(
+                IncrementalStitcher.fileLog(
                     "bridge sendEvent (main queue) body.panoramaPath=\(userInfo["panoramaPath"] ?? "MISSING")"
                 )
             }
@@ -614,12 +614,12 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
 
     public override func startObserving() {
         hasListeners = true
-        RetaiLensIncrementalStitcher.fileLog("bridge startObserving (hasListeners=true)")
+        IncrementalStitcher.fileLog("bridge startObserving (hasListeners=true)")
     }
 
     public override func stopObserving() {
         hasListeners = false
-        RetaiLensIncrementalStitcher.fileLog("bridge stopObserving (hasListeners=false)")
+        IncrementalStitcher.fileLog("bridge stopObserving (hasListeners=false)")
     }
 }
 #endif
