@@ -1,20 +1,29 @@
 #!/usr/bin/env bash
 #
-# build-opencv-android.sh — produce per-ABI .so files for Android
-# matching the iOS xcframework's module set.
+# build-opencv-android.sh — slim custom OpenCV Android SDK build via
+# OpenCV's official `platforms/android/build_sdk.py`.  Matches the
+# design doc's "Custom build" approach (NF1: ~10-15 MB per ABI,
+# ~40-55 MB total Android).
 #
-# Invoked by `.github/workflows/release-binaries.yml` on a tag push;
-# also runnable locally for development (requires Android NDK r25+).
+# build_sdk.py is OpenCV's own scripted Android build:
+#   - Reads `--ndk_path` for the toolchain.
+#   - Builds all 4 ABIs (arm64-v8a, armeabi-v7a, x86, x86_64) in one
+#     invocation.
+#   - Output: <work_dir>/OpenCV-android-sdk/ with
+#     `sdk/native/{libs,staticlibs,jni/include}/` layout that our JNI
+#     shim's CMakeLists expects.
 #
-# Modules built:  core imgproc features2d calib3d flann stitching video photo
-# Modules SKIPPED: dnn ml objdetect gapi videoio ffmpeg highgui
+# Module filter:
+#   --modules_list passes a comma-separated allow-list to the build.
+#   We list only modules the stitcher needs.  Everything else is
+#   skipped — saves ~50 % vs the full prebuilt SDK.
 #
-# Output structure:
-#   dist/android/jniLibs/
-#     arm64-v8a/libopencv_java4.so
-#     armeabi-v7a/libopencv_java4.so
-#     x86/libopencv_java4.so
-#     x86_64/libopencv_java4.so
+# Flag caveats (the v0.0.2 trip-ups):
+#   - `--build_doc` / `--no_samples_build` etc are STORE-TRUE flags;
+#     pass them WITHOUT `=value`.  Passing `=OFF` errors with
+#     "ignored explicit argument 'OFF'".
+#   - `--abi` is NOT a valid argument.  build_sdk.py builds all ABIs
+#     defined in the config file in a single invocation.
 #
 # Inputs (env):
 #   OPENCV_VERSION   — pinned in scripts/opencv-version.txt
@@ -32,80 +41,100 @@ BUILD_DIR="$(mktemp -d -t opencv-android-build-XXXX)"
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
     echo "[build-opencv-android] ERROR: ANDROID_NDK_HOME is not set." >&2
-    echo "[build-opencv-android] Install Android NDK r25+ and export ANDROID_NDK_HOME." >&2
     exit 1
 fi
 
-echo "[build-opencv-android] OpenCV ${OPENCV_VERSION} → ${OUTPUT_DIR}/android/jniLibs/"
+# build_sdk.py needs the Android SDK path too (for build tools that
+# integrate with the SDK).  GitHub Actions ubuntu-22.04 runners have
+# it preinstalled at $ANDROID_HOME / $ANDROID_SDK_ROOT.  Allow either.
+ANDROID_SDK_PATH="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+if [ -z "${ANDROID_SDK_PATH}" ]; then
+    echo "[build-opencv-android] ERROR: ANDROID_HOME / ANDROID_SDK_ROOT not set." >&2
+    exit 1
+fi
+echo "[build-opencv-android] Android SDK: ${ANDROID_SDK_PATH}"
+
+echo "[build-opencv-android] OpenCV ${OPENCV_VERSION} → ${OUTPUT_DIR}/OpenCV-android-sdk/"
 echo "[build-opencv-android] NDK: ${ANDROID_NDK_HOME}"
 echo "[build-opencv-android] Build dir: ${BUILD_DIR}"
 
-mkdir -p "${OUTPUT_DIR}/android/jniLibs"
+mkdir -p "${OUTPUT_DIR}"
 
 # ── 1. Fetch OpenCV source ────────────────────────────────────────────
 OPENCV_SRC="${BUILD_DIR}/opencv-${OPENCV_VERSION}"
 if [ ! -d "${OPENCV_SRC}" ]; then
-    curl -fsSL --retry 3 "https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.tar.gz" \
+    curl -fsSL --retry 3 \
+        "https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.tar.gz" \
         -o "${BUILD_DIR}/opencv-src.tgz"
     tar -xzf "${BUILD_DIR}/opencv-src.tgz" -C "${BUILD_DIR}"
 fi
 
-# ── 2. Build per-ABI via OpenCV's build_sdk.py ───────────────────────
+# ── 2. Build via build_sdk.py (single invocation, all 4 ABIs) ─────────
+cd "${OPENCV_SRC}/platforms/android"
+
+SDK_BUILD_OUT="${BUILD_DIR}/sdk-output"
+mkdir -p "${SDK_BUILD_OUT}"
+
+# Notes on flags:
+#   --ndk_path "${ANDROID_NDK_HOME}"  — explicit NDK location
+#   --no_samples_build                — skip example app builds (faster)
+#   --no_kotlin                       — skip the Kotlin SDK wrappers
+#                                        (we use Java API via JNI directly)
+#   --no_media_ndk                    — skip media NDK (we don't decode video)
+#   --modules_list                    — allow-list; everything else is
+#                                        excluded from the build
 #
-# `--config ndk-15.config.py` is OpenCV's stock per-ABI configuration.
-# We override BUILD_LIST to limit to our modules.
-ABIS=("arm64-v8a" "armeabi-v7a" "x86" "x86_64")
-for ABI in "${ABIS[@]}"; do
-    echo "[build-opencv-android] === Building ABI ${ABI} ==="
-    ABI_BUILD_DIR="${BUILD_DIR}/build-${ABI}"
-    mkdir -p "${ABI_BUILD_DIR}"
-    cd "${ABI_BUILD_DIR}"
+# Positional args: <work_dir> <opencv_dir>
 
-    cmake "${OPENCV_SRC}" \
-        -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake" \
-        -DANDROID_ABI="${ABI}" \
-        -DANDROID_PLATFORM=android-24 \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_SHARED_LIBS=OFF \
-        -DBUILD_JAVA=OFF \
-        -DBUILD_ANDROID_EXAMPLES=OFF \
-        -DBUILD_TESTS=OFF \
-        -DBUILD_PERF_TESTS=OFF \
-        -DBUILD_EXAMPLES=OFF \
-        -DBUILD_DOCS=OFF \
-        -DBUILD_opencv_apps=OFF \
-        -DBUILD_opencv_dnn=OFF \
-        -DBUILD_opencv_ml=OFF \
-        -DBUILD_opencv_objdetect=OFF \
-        -DBUILD_opencv_gapi=OFF \
-        -DBUILD_opencv_videoio=OFF \
-        -DBUILD_opencv_highgui=OFF \
-        -DBUILD_opencv_java=OFF \
-        -DWITH_ITT=OFF \
-        -DWITH_FFMPEG=OFF \
-        -DWITH_GSTREAMER=OFF
+python3 build_sdk.py \
+    --ndk_path "${ANDROID_NDK_HOME}" \
+    --sdk_path "${ANDROID_SDK_PATH}" \
+    --no_samples_build \
+    --no_kotlin \
+    --no_media_ndk \
+    --modules_list "core,imgproc,imgcodecs,features2d,calib3d,flann,stitching,video,videoio,photo,java" \
+    "${SDK_BUILD_OUT}" \
+    "${OPENCV_SRC}"
 
-    cmake --build . --config Release -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+# ── 3. Move output into the final location ───────────────────────────
+SDK_OUT="${OUTPUT_DIR}/OpenCV-android-sdk"
+rm -rf "${SDK_OUT}"
 
-    # The build emits a per-ABI libopencv_world.a (static).  We need
-    # a single libopencv_java4.so per ABI; build_sdk.py does this
-    # in one shot — but to keep this script CMake-only we adapt the
-    # per-ABI output here.
-    #
-    # For now, point downstream at the static `.a` archive; consumers
-    # link statically into their own .so via Gradle's externalNativeBuild.
-    mkdir -p "${OUTPUT_DIR}/android/jniLibs/${ABI}"
-    cp "${ABI_BUILD_DIR}/lib/${ABI}/libopencv_world.a" \
-       "${OUTPUT_DIR}/android/jniLibs/${ABI}/libopencv_world.a" || true
-done
+# build_sdk.py writes the SDK tree at SDK_BUILD_OUT/OpenCV-android-sdk/
+if [ -d "${SDK_BUILD_OUT}/OpenCV-android-sdk" ]; then
+    mv "${SDK_BUILD_OUT}/OpenCV-android-sdk" "${SDK_OUT}"
+else
+    echo "[build-opencv-android] FATAL: build_sdk.py did not produce OpenCV-android-sdk dir" >&2
+    echo "[build-opencv-android] Looked for: ${SDK_BUILD_OUT}/OpenCV-android-sdk" >&2
+    echo "[build-opencv-android] Contents of ${SDK_BUILD_OUT}:" >&2
+    ls -la "${SDK_BUILD_OUT}" 2>&1 >&2 | head -20 || true
+    exit 1
+fi
 
 rm -rf "${BUILD_DIR}"
 
-# ── 3. Zip for release upload ────────────────────────────────────────
+# ── 4. Verify expected layout (fail loud, no `|| true`) ──────────────
+for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
+    SO_PATH="${SDK_OUT}/sdk/native/libs/${ABI}/libopencv_java4.so"
+    STITCHING_A="${SDK_OUT}/sdk/native/staticlibs/${ABI}/libopencv_stitching.a"
+    if [ ! -f "${SO_PATH}" ]; then
+        echo "[build-opencv-android] FATAL: ${SO_PATH} not produced." >&2
+        echo "[build-opencv-android] Listing ${SDK_OUT}/sdk/native/:" >&2
+        find "${SDK_OUT}/sdk/native/" -maxdepth 4 -type f 2>&1 >&2 | head -40 || true
+        exit 1
+    fi
+    if [ ! -f "${STITCHING_A}" ]; then
+        echo "[build-opencv-android] FATAL: ${STITCHING_A} not produced (stitching staticlib missing)." >&2
+        exit 1
+    fi
+done
+echo "[build-opencv-android] All ABIs produced libopencv_java4.so + libopencv_stitching.a."
+
+# ── 5. Zip for release upload ────────────────────────────────────────
 cd "${OUTPUT_DIR}"
-zip -ry "RNImageStitcher-android.zip" "android/jniLibs"
+zip -ry "RNImageStitcher-android.zip" "OpenCV-android-sdk"
 
 echo "[build-opencv-android] Done."
-echo "[build-opencv-android] Output: ${OUTPUT_DIR}/android/jniLibs/"
+echo "[build-opencv-android] Output: ${SDK_OUT}/"
 echo "[build-opencv-android] Archive: ${OUTPUT_DIR}/RNImageStitcher-android.zip"
-du -sh "${OUTPUT_DIR}/android/jniLibs/" "${OUTPUT_DIR}/RNImageStitcher-android.zip"
+du -sh "${SDK_OUT}" "${OUTPUT_DIR}/RNImageStitcher-android.zip"
