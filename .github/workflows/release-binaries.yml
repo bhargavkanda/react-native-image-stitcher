@@ -1,0 +1,144 @@
+name: Build OpenCV binaries on tag
+
+# Fires when a release tag is pushed (semver convention v*.*.*).  Two
+# parallel jobs build the iOS xcframework + Android per-ABI .so/.a
+# artifacts, then a release job creates / updates the matching GH
+# Release and attaches both archives.
+#
+# The npm package's `postinstall` script fetches these archives by
+# `package.json` version → tag mapping, so a `npm install
+# react-native-image-stitcher@0.1.0` triggers a download of
+# `RNImageStitcher-v0.1.0-ios.zip` and `RNImageStitcher-v0.1.0-android.zip`
+# from this release.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  # Manual trigger so we can rebuild artifacts for an existing tag
+  # without bumping (e.g. CI infrastructure failure recovery).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to (re)build, e.g. v0.1.0'
+        required: true
+
+jobs:
+  # ── iOS xcframework ───────────────────────────────────────────────
+  build-ios:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Build OpenCV xcframework
+        run: bash scripts/build-opencv-ios.sh
+        env:
+          OUTPUT_DIR: ${{ github.workspace }}/dist
+
+      - name: Compute tag-stamped artifact name
+        id: name
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [ -z "$TAG" ] || [[ "$TAG" == "main" ]]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          mv dist/RNImageStitcher-ios.zip "dist/RNImageStitcher-${TAG}-ios.zip"
+          echo "asset_path=dist/RNImageStitcher-${TAG}-ios.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-binary
+          path: ${{ steps.name.outputs.asset_path }}
+          retention-days: 7
+
+  # ── Android per-ABI binaries ──────────────────────────────────────
+  build-android:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: 'r25c'
+
+      - name: Install cmake + ninja
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      - name: Build OpenCV Android per-ABI
+        run: bash scripts/build-opencv-android.sh
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          OUTPUT_DIR: ${{ github.workspace }}/dist
+
+      - name: Compute tag-stamped artifact name
+        id: name
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [ -z "$TAG" ] || [[ "$TAG" == "main" ]]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          mv dist/RNImageStitcher-android.zip "dist/RNImageStitcher-${TAG}-android.zip"
+          echo "asset_path=dist/RNImageStitcher-${TAG}-android.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-binary
+          path: ${{ steps.name.outputs.asset_path }}
+          retention-days: 7
+
+  # ── Create / update GH Release with both artifacts ─────────────────
+  release:
+    needs: [build-ios, build-android]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write   # to create / update releases + upload assets
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [ -z "$TAG" ] || [[ "$TAG" == "main" ]]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download iOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-binary
+          path: ./assets
+
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-binary
+          path: ./assets
+
+      - name: List artifacts
+        run: ls -la ./assets
+
+      - name: Create / update release with binaries attached
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            ./assets/*.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
