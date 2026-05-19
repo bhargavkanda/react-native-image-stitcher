@@ -1,0 +1,21 @@
+react-native-image-stitcher
+Copyright 2026 Tiger Analytics
+
+This product includes software developed at Tiger Analytics
+(https://www.tigeranalytics.com/).
+
+Bundled third-party components:
+
+  • OpenCV (https://opencv.org/) — Apache License 2.0
+    Used for image stitching, feature detection, and homography
+    estimation in the panorama pipeline.  The npm package's
+    `postinstall` script fetches a custom-built OpenCV 4.10.0
+    distribution as a runtime dependency; see
+    `scripts/postinstall-fetch-binaries.js`.
+
+  • React Native, vision-camera, expo-sensors, react-native-safe-area-context
+    Peer dependencies declared in `package.json#peerDependencies`.
+    Each retains its own license.
+
+Per the Apache 2.0 License § 4(d), this NOTICE must be reproduced in
+derivative works that ship a NOTICE file.

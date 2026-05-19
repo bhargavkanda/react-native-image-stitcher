@@ -1,107 +1,175 @@
-# @retailens/capture-sdk
+# react-native-image-stitcher
 
-Camera capture + quality scoring + (stubbed) video stitching, extracted
-from `retailens-mobile` so we can ship it to partners and white-label
-it later.  Lives in this monorepo and is consumed by `retailens-mobile`
-as a `file:` dependency.
+**Pose-aware panorama capture + stitching for React Native (iOS + Android).**
+One `<Camera>` component, both tap-to-photo and hold-to-pan modes, both
+AR-backed and IMU-fallback capture paths.
 
-## Status
+> [!NOTE]
+> This package lives in the [RetaiLens monorepo](https://github.com/bhargav-kanda/RetaiLens)
+> under `retailens-capture-sdk/` during development.  At publication
+> (see [`2026-05-15-react-native-image-stitcher-publication.md`](https://github.com/bhargav-kanda/RetaiLens/blob/main/docs/site-content/design/2026-05-15-react-native-image-stitcher-publication.md))
+> the public subset is `git subtree split` extracted to a standalone
+> repo at `github.com/bhargavkanda/react-native-image-stitcher` and
+> published to npm.  This README describes the **public lib** as it
+> will look post-extraction.
 
-| Surface                 | Status                                           |
-| ----------------------- | ------------------------------------------------ |
-| `useCapture` hook       | ✅ shipped — used by `AuditCaptureScreen`        |
-| `<CameraView>`          | ✅ shipped — used by `AuditCaptureScreen`        |
-| `useVideoCapture` hook  | ⚠️ recording works; `extractFrames` stub         |
-| `runQualityCheck`       | ⚠️ JS shim — returns optimistic pass until native|
-| `stitchFrames`          | ⚠️ stub — throws `StitchNotImplementedError`    |
+## What it does
 
-The real OpenCV-backed quality + stitching native modules are the next
-increment (roadmap item #8, second-half).
+| Feature | Behaviour |
+|---|---|
+| **Tap shutter** | Single photo via vision-camera's `takePhoto` (non-AR) or `ARFrame.capturedImage` (AR). |
+| **Hold shutter** | Panorama capture — pan and release.  Engine accumulates keyframes; stitches via `cv::Stitcher::PANORAMA` (or `SCANS` if the pose suggests a flat-translation scan). |
+| **Lens chip** | 1× / 0.5× toggle above the shutter.  Selecting 0.5× forces non-AR (AR sessions can't switch physical lenses mid-session). |
+| **AR toggle** | Bottom-right corner, conditional on the 1× lens.  Toggles between AR-pose-driven and IMU-driven capture paths. |
+| **Internal settings panel** | Opt-in gear icon (top-right) via `showSettingsButton` prop.  Exposes blender, seam finder, warper, flow-gate tunables — useful for internal testers; hidden from public consumers by default. |
 
-## Usage (from a React Native host app)
+## Installation
+
+```sh
+npm install react-native-image-stitcher
+# or
+yarn add react-native-image-stitcher
+```
+
+Peer dependencies (the host app provides these):
+
+```jsonc
+{
+  "react": ">=18.0.0",
+  "react-native": ">=0.72.0",
+  "react-native-vision-camera": ">=4.0.0",
+  "react-native-sensors": ">=7.0.0",
+  "expo-sensors": ">=14.0.0",
+  "react-native-safe-area-context": ">=4.0.0"
+}
+```
+
+On install, a `postinstall` script downloads the matching custom
+OpenCV build (`RNImageStitcher.xcframework` for iOS + per-ABI `.so`
+files for Android) from the package's GitHub Releases — about 100 MB
+of binaries fetched once and cached locally.  Set
+`SKIP_OPENCV_FETCH=1` to bypass the download (e.g., in CI where the
+binaries are pre-staged).
+
+After install run the standard React Native native-build steps:
+
+```sh
+cd ios && pod install   # iOS
+cd android && ./gradlew :app:assembleDebug   # Android
+```
+
+## Quick start
 
 ```tsx
 import {
-  CameraView,
-  useCapture,
-} from '@retailens/capture-sdk';
+  Camera,
+  type CameraCaptureResult,
+  type CameraError,
+} from 'react-native-image-stitcher';
 
-export function ShelfCaptureScreen() {
-  const { cameraRef, device, hasPermission, requestPermission,
-          flash, toggleFlash, isCapturing, takePhoto } = useCapture({
-    cameraPosition: 'back',
-  });
+export function CaptureScreen() {
+  const handleCapture = (result: CameraCaptureResult) => {
+    if (result.type === 'photo') {
+      console.log('Photo:', result.uri, result.width, result.height);
+    } else {
+      console.log(
+        'Panorama:',
+        result.uri,
+        `${result.framesIncluded}/${result.framesRequested} frames`,
+      );
+    }
+  };
 
-  if (!hasPermission) {
-    return <Button title="Grant camera" onPress={requestPermission} />;
-  }
+  const handleError = (err: CameraError) => {
+    console.warn(err.code, err.message);
+  };
 
   return (
-    <View style={{ flex: 1 }}>
-      <CameraView ref={cameraRef} device={device} flash={flash} />
-      <Button title="Flash"   onPress={toggleFlash} />
-      <Button title="Capture" onPress={takePhoto} disabled={isCapturing} />
-    </View>
+    <Camera
+      defaultCaptureSource="ar"
+      defaultLens="1x"
+      enablePhotoMode
+      enablePanoramaMode
+      onCapture={handleCapture}
+      onError={handleError}
+    />
   );
 }
 ```
 
-## Peer dependencies
+## `<Camera>` props (summary)
 
-Host apps MUST provide:
+See `src/camera/Camera.tsx` for the full TSDoc.  Highlights:
 
-- `react ≥ 18.0.0`
-- `react-native ≥ 0.72.0`
-- `react-native-vision-camera ≥ 4.0.0`
+### Initial values (uncontrolled — read once at mount)
 
-This is intentional.  Nesting them here causes a duplicate
-TurboModule registry when the host app runs Jest tests — the
-`.npmrc` uses `legacy-peer-deps=true` to stop npm v7+ from
-auto-installing them.
+| Prop | Default | Notes |
+|---|---|---|
+| `defaultCaptureSource` | `'ar'` | `'ar'` ↔ `'non-ar'` |
+| `defaultLens` | `'1x'` | `'1x'` ↔ `'0.5x'` |
+| `defaultStitchMode` | `'auto'` | `'auto'`, `'panorama'`, `'scans'` |
+| `defaultBlender` | `'multiband'` | `'multiband'`, `'feather'` |
+| `defaultSeamFinder` | `'graphcut'` | `'graphcut'`, `'skip'` |
+| `defaultWarper` | `'plane'` | `'plane'`, `'cylindrical'`, `'spherical'` |
+| `defaultFlowNoveltyPercentile` | `0.85` | Range 0.50 – 0.99 |
+| `defaultFlowEvalEveryNFrames` | `5` | Range 1 – 10 |
+| `defaultFlowMaxTranslationCm` | `8` | 0 = disabled |
+| `defaultKeyframeMaxCount` | `6` | Range 3 – 10 |
+| `defaultKeyframeOverlapThreshold` | `0.20` | Range 0.20 – 0.60 |
 
-## Building
+### UI toggles
 
-```sh
-cd retailens-capture-sdk
-npm install          # installs typescript + @types/react only
-npm run build        # tsc → dist/
-npm run typecheck    # tsc --noEmit
-```
+| Prop | Default | Notes |
+|---|---|---|
+| `enablePhotoMode` | `true` | Tap-to-photo |
+| `enablePanoramaMode` | `true` | Hold-to-pan |
+| `showSettingsButton` | `false` | Internal-tester only; OFF for public consumers |
 
-The TypeScript config uses `paths` to resolve `react-native` and
-`react-native-vision-camera` types from the sibling `retailens-mobile`
-install.  That means you need `retailens-mobile` to be bootstrapped
-(`npm install` there) before the SDK's own build succeeds.
+### Callbacks
 
-## Host-app Jest integration
+| Prop | Fires when |
+|---|---|
+| `onCapture(result)` | Photo OR panorama capture completes successfully.  `result.type` discriminates. |
+| `onCaptureSourceChange(source)` | Effective capture source changes (e.g., user toggles AR, or selecting 0.5× forces non-AR). |
+| `onLensChange(lens)` | User taps the 1×/0.5× chip. |
+| `onFramesDropped(info)` | cv::Stitcher's confidence retry loop dropped one or more input frames. |
+| `onError(err)` | Classified error.  `err.code` from a known taxonomy (`STITCH_NEED_MORE_IMGS`, `STITCH_HOMOGRAPHY_FAIL`, `STITCH_CAMERA_PARAMS_FAIL`, `STITCH_OOM`, `CAMERA_PERMISSION_DENIED`, etc.). |
 
-Jest resolving a symlinked local dep (this package via `file:`)
-won't walk up to the host's `node_modules` on its own, so the host
-must set:
+## Lens ↔ AR interaction
 
-```js
-// retailens-mobile/jest.config.js
-modulePaths: ['<rootDir>/node_modules'],
-moduleNameMapper: {
-  '^@retailens/capture-sdk$':
-    '<rootDir>/../retailens-capture-sdk/src/index.ts',
-},
-```
+| Action | `arPreference` | `lens` | UI |
+|---|---|---|---|
+| Initial mount with defaults | `true` | `1x` | AR toggle ON |
+| User switches to 0.5× | unchanged (`true`) | `0.5x` | AR toggle HIDDEN, forced non-AR |
+| User switches back to 1× | unchanged (`true`) | `1x` | AR toggle visible at its previous state |
+| User taps AR toggle off (on 1×) | `false` | `1x` | AR toggle OFF |
 
-The first line makes transitive `react-native` / `vision-camera`
-imports land on the host's single copy; the second short-circuits
-the SDK's `dist/` so tests see the TypeScript source directly.
+The component owns the runtime state; the parent persists across launches via the `on*Change` callbacks if desired.
 
-## Roadmap
+## Architecture notes
 
-- **Native stitcher (iOS)**: OpenCV for iOS + Swift bridging header
-  that wraps `cv::Stitcher::stitch`.  Registers as
-  `NativeModules.BatchStitcher`.  Unlocks both `stitchFrames`
-  and `useVideoCapture.extractFrames` in one go.
-- **Native stitcher (Android)**: JNI binding to OpenCV for Android.
-  Blocked on iOS validating the panorama UX first.
-- **Native quality module**: Laplacian variance + mean intensity
-  sampling on a downscaled copy of the capture.  Same native module
-  surface as the stitcher, so they ship together.
-- **Framing overlay**: a themed bounding-box / rule-of-thirds
-  overlay layered on top of `<CameraView>`.  Pure-JS, separate PR.
+| Concern | Approach |
+|---|---|
+| **OpenCV** | Custom build (modules: `core`, `imgproc`, `features2d`, `calib3d`, `flann`, `stitching`, `video`, `photo`).  Hosted as GitHub Release assets; fetched at install time.  ~75 MB iOS, ~40 MB Android. |
+| **iOS framework** | `RNImageStitcher.xcframework` (arm64 device + arm64+x86_64 simulator). |
+| **Android namespace** | `io.imagestitcher.rn`. |
+| **Stitching pipeline** | Shared C++ under `cpp/stitcher.cpp` invoked from both iOS Obj-C++ and Android JNI.  PANORAMA + SCANS modes; C+D progressive-confidence retry over keyframes. |
+| **Two capture-source paths** | AR uses ARKit (iOS) / ARCore (Android) pose stream.  Non-AR uses vision-camera + IMU integration via `useIMUTranslationGate`. |
+| **Two supported pan modes** | Landscape phone + vertical pan; portrait phone + horizontal pan.  Any other combination is a user deviation, not a supported mode. |
+
+## License
+
+Apache License 2.0.  See [LICENSE](LICENSE) for the full text and
+[NOTICE](NOTICE) for the third-party attribution required by § 4(d).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).  All contributors sign a CLA
+(automated on first PR) so the project retains the right to relicense
+future versions.
+
+## Related design documents
+
+- [`2026-05-15-react-native-image-stitcher-publication.md`](https://github.com/bhargav-kanda/RetaiLens/blob/main/docs/site-content/design/2026-05-15-react-native-image-stitcher-publication.md) — publication plan + public/private split.
+- [`2026-05-14-realtime-batch-fusion.md`](https://github.com/bhargav-kanda/RetaiLens/blob/main/docs/site-content/design/2026-05-14-realtime-batch-fusion.md) — realtime + batch convergence design.
+- [`2026-05-13-stitch-pipeline-mode-selection.md`](https://github.com/bhargav-kanda/RetaiLens/blob/main/docs/site-content/design/2026-05-13-stitch-pipeline-mode-selection.md) — PANORAMA vs SCANS auto-routing.
