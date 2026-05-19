@@ -799,9 +799,28 @@ interface NativeIncrementalModule {
   start(options: IncrementalStartOptions): Promise<{ ok: true }>;
   /**
    * Finalize the running capture and write the final panorama JPEG.
-   * `outputPath` is optional — when empty/omitted the native side
+   *
+   * `outputPath` (optional) — when empty/omitted the native side
    * creates a path under the app's tmp directory and returns it
-   * inside the `panoramaPath` field of the result.
+   * inside the `panoramaPath` field of the result.  Host apps that
+   * want the stitched panorama to be USER-VISIBLE (e.g., browsable
+   * via iOS Files.app) should pass a path under the app's
+   * Documents directory, e.g.
+   * `${RNFS.DocumentDirectoryPath}/captures/${auditId}.jpg`
+   * (or the platform-equivalent on Android).  Two host-side
+   * requirements for Files.app exposure on iOS:
+   *
+   *   1. Info.plist must set `UIFileSharingEnabled = true` so the
+   *      app's Documents directory is exposed via the Files
+   *      browser at all.
+   *   2. Info.plist must set `LSSupportsOpeningDocumentsInPlace
+   *      = true` so users can open the files in-place rather than
+   *      requiring a copy.
+   *
+   * Frames (intermediate keyframe JPEGs) are saved by the engine
+   * to its own private directory and are NOT auto-cleaned — see
+   * `cleanupKeyframes` for the GC hook host apps should call on
+   * launch or via a lifecycle event.
    */
   finalize(options: {
     outputPath?: string;
@@ -879,6 +898,47 @@ interface NativeIncrementalModule {
   /** PiP investigation only — write a JS-side message into the
    *  Swift-side rlis-debug.log so we get a single timeline. */
   appendDebugLog?(message: string): Promise<{ ok: true }>;
+  /**
+   * 2026-05-18 (Iss 3) — delete keyframe JPEGs older than the cutoff
+   * from the SDK's intermediate-keyframe storage directory.
+   *
+   * Background: the batch-keyframe capture mode saves accepted
+   * frames as JPEGs in a per-session directory (iOS:
+   * `Library/Application Support/Captures/{uuid}/`, Android: app's
+   * private files dir under `captures/{uuid}/`).  These are kept
+   * across runs so post-hoc re-stitching is possible from the
+   * debug menu — but they accumulate over time and bloat user
+   * storage.  Host apps should call this on launch or on a
+   * lifecycle hook to garbage-collect old sessions.
+   *
+   * `olderThanMs` is the staleness cutoff in milliseconds.  Sessions
+   * whose newest file mtime is older than `Date.now() - olderThanMs`
+   * are deleted in full.  Default if omitted: 24 hours.  Pass 0 to
+   * delete every keyframe session unconditionally (use with care).
+   *
+   * Resolves with the count of deleted sessions + total bytes freed,
+   * so the host can surface a "freed 42 MB of old captures"
+   * confirmation if desired.  Rejects on filesystem errors (e.g.,
+   * the captures dir does not exist — which is also fine; pass 0
+   * sessions back) — implementations should swallow ENOENT-style
+   * errors and resolve with zero counts.
+   */
+  cleanupKeyframes?(options?: {
+    olderThanMs?: number;
+  }): Promise<{ sessionsDeleted: number; bytesFreed: number }>;
+  /**
+   * 2026-05-18 (Iss 3) — return the absolute filesystem path of the
+   * directory where keyframe JPEGs for the CURRENT (running)
+   * capture are being saved.  Returns an empty string when no
+   * capture is in flight or when the engine isn't using a per-
+   * session keyframe directory (e.g., hybrid mode without the
+   * batch-keyframe collector).
+   *
+   * Mainly useful for debugging — e.g., the host can dump the
+   * directory's contents to the on-screen log, or copy it to
+   * /Documents for post-hoc inspection.
+   */
+  getKeyframeDir?(): Promise<{ path: string }>;
 }
 
 
@@ -905,6 +965,36 @@ export function getIncrementalNativeModule(): NativeIncrementalModule | null {
  */
 export function incrementalStitcherIsAvailable(): boolean {
   return getIncrementalNativeModule() !== null;
+}
+
+
+/**
+ * 2026-05-18 (Iss 3) — host-callable helper to clean up old
+ * keyframe sessions.  Wraps the native `cleanupKeyframes` with a
+ * sensible default (24 hours) and a noop fallback when the native
+ * method isn't implemented (older SDK builds).
+ *
+ * Typical use: call this in App.tsx's mount effect or from a
+ * background-task hook so storage stays bounded between captures.
+ *
+ * Resolves with the count of sessions deleted + bytes freed so the
+ * host can log / surface a "cleaned up X MB" message.  Never
+ * rejects — filesystem failures (including ENOENT on the captures
+ * dir) resolve as `{ sessionsDeleted: 0, bytesFreed: 0 }`.
+ */
+export async function cleanupOldKeyframes(
+  options?: { olderThanMs?: number },
+): Promise<{ sessionsDeleted: number; bytesFreed: number }> {
+  const native = getIncrementalNativeModule();
+  if (!native?.cleanupKeyframes) {
+    return { sessionsDeleted: 0, bytesFreed: 0 };
+  }
+  try {
+    const olderThanMs = options?.olderThanMs ?? 24 * 3600 * 1000;
+    return await native.cleanupKeyframes({ olderThanMs });
+  } catch {
+    return { sessionsDeleted: 0, bytesFreed: 0 };
+  }
 }
 
 

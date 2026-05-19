@@ -452,6 +452,111 @@ public final class RetaiLensIncrementalStitcher: NSObject {
                prev, orientation)
     }
 
+    /// 2026-05-18 (Iss 3) — return the current capture's keyframe
+    /// session directory, or nil if no capture is in flight / engine
+    /// isn't using a per-session keyframe collector.
+    @objc public func currentKeyframeDir() -> String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard self.isRunning, self.batchKeyframeMode else { return nil }
+        return self.keyframeCollector?.sessionDir
+    }
+
+    /// 2026-05-18 (Iss 3) — GC stale keyframe-session directories.
+    ///
+    /// Scans `Library/Application Support/Captures/` for subdirectories
+    /// whose newest file mtime is older than `cutoffMs` (ms past epoch).
+    /// Each stale subdirectory is removed in full (it's a session UUID
+    /// dir with N keyframe JPEGs).  Sessions whose newest file is newer
+    /// than the cutoff are LEFT ALONE — even if they look stale by some
+    /// other heuristic — because they might belong to a capture that's
+    /// still in flight (the engine writes incremental frames to the
+    /// same dir).
+    ///
+    /// Returns a tuple of (sessionsDeleted, bytesFreed) so the bridge
+    /// can surface those numbers to JS for an optional UX toast.  All
+    /// filesystem errors are swallowed and counted as "not deleted";
+    /// host should NEVER see a thrown error from this — at worst it
+    /// gets back zero counts and can investigate Console.app logs.
+    @objc public func cleanupKeyframes(
+        olderThanMs: Double
+    ) -> [String: NSNumber] {
+        let cutoff = Date().timeIntervalSince1970 - (olderThanMs / 1000.0)
+        let fm = FileManager.default
+        guard let appSupport = try? fm.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false  // don't create if missing — that means nothing to clean
+        ) else {
+            return ["sessionsDeleted": 0, "bytesFreed": 0]
+        }
+        let capturesURL = appSupport.appendingPathComponent("Captures", isDirectory: true)
+        guard fm.fileExists(atPath: capturesURL.path) else {
+            return ["sessionsDeleted": 0, "bytesFreed": 0]
+        }
+        guard let sessions = try? fm.contentsOfDirectory(
+            at: capturesURL,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return ["sessionsDeleted": 0, "bytesFreed": 0]
+        }
+
+        var sessionsDeleted = 0
+        var bytesFreed: UInt64 = 0
+        for sessionURL in sessions {
+            // Only dirs are real sessions; skip stray files.
+            let isDir = (try? sessionURL.resourceValues(
+                forKeys: [.isDirectoryKey]
+            ))?.isDirectory ?? false
+            if !isDir { continue }
+            // Newest mtime across the session's files (recursive — though
+            // the collector writes a flat dir today, future-proof).
+            var newestMtime: TimeInterval = 0
+            var sessionBytes: UInt64 = 0
+            if let enumerator = fm.enumerator(
+                at: sessionURL,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) {
+                for case let fileURL as URL in enumerator {
+                    let r = try? fileURL.resourceValues(
+                        forKeys: [.contentModificationDateKey, .fileSizeKey]
+                    )
+                    if let mtime = r?.contentModificationDate?.timeIntervalSince1970 {
+                        if mtime > newestMtime { newestMtime = mtime }
+                    }
+                    if let bytes = r?.fileSize {
+                        sessionBytes += UInt64(bytes)
+                    }
+                }
+            }
+            // Use the directory's own mtime as a fallback if no files
+            // matched (an empty session dir is also stale).
+            if newestMtime == 0 {
+                if let dirMtime = (try? sessionURL.resourceValues(
+                    forKeys: [.contentModificationDateKey]
+                ))?.contentModificationDate?.timeIntervalSince1970 {
+                    newestMtime = dirMtime
+                }
+            }
+            if newestMtime > 0 && newestMtime < cutoff {
+                if (try? fm.removeItem(at: sessionURL)) != nil {
+                    sessionsDeleted += 1
+                    bytesFreed += sessionBytes
+                }
+            }
+        }
+        os_log(.fault, log: Self.diagLog,
+               "[V16-orchestrator] cleanupKeyframes olderThanMs=%.0f sessions=%d bytes=%llu",
+               olderThanMs, Int32(sessionsDeleted), bytesFreed)
+        return [
+            "sessionsDeleted": NSNumber(value: sessionsDeleted),
+            "bytesFreed": NSNumber(value: bytesFreed),
+        ]
+    }
+
     /// 2026-05-16 — realtime+batch fusion (Option A) path derivation.
     /// Given the live panorama path (which finalize() wrote inside
     /// the app sandbox tmp or a host-supplied location), pick a path
