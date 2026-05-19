@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 //
 // keyframe_gate.cpp — direct port of KeyframeGate.swift.  See
-// keyframe_gate.hpp + ../ios/Sources/RetaiLensCaptureSDK/KeyframeGate.swift
+// keyframe_gate.hpp + ../ios/Sources/RNImageStitcher/KeyframeGate.swift
 // for design rationale.
 //
 // Math conventions
@@ -37,7 +37,7 @@
 // V16 A2 — sparse-flow novelty path.
 //
 // OpenCV is available on both platforms compiling this TU: iOS via the
-// vendored opencv2.framework (RetaiLensCaptureSDK.podspec line ~118)
+// vendored opencv2.framework (RNImageStitcher.podspec line ~118)
 // and Android via the custom OpenCV NDK build (Android compile_commands
 // shows `-I.../OpenCV-android-sdk/sdk/native/jni/include`).  The Pose
 // strategy path below stays OpenCV-free; only the Flow path uses these

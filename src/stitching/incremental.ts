@@ -612,7 +612,7 @@ export interface StitcherConfig {
    * iOS note: as of 2026-05-14 iOS uses a hand-rolled PANORAMA-style
    * pipeline regardless of this setting.  Setting is passed through
    * to iOS but currently ignored; Android honours it via
-   * `retailens_stitcher.cpp` + `IncrementalStitcher.kt`. */
+   * `image_stitcher_jni.cpp` + `IncrementalStitcher.kt`. */
   stitchMode: 'auto' | 'panorama' | 'scans';
 
   /** 2026-05-14 (revised) — capture source axis.
@@ -669,7 +669,7 @@ export interface IncrementalFinalizeResult {
    *                            "Stitched N of M frames" toast.
    *   finalConfidenceThresh:  panoConfidenceThresh value used on
    *                            the successful attempt (1.0 / 0.5 /
-   *                            0.3 — see retailens_stitcher.cpp
+   *                            0.3 — see image_stitcher_jni.cpp
    *                            retry loop).  Useful for debugging
    *                            scenes that consistently need a
    *                            lower threshold. */
@@ -706,7 +706,7 @@ export interface IncrementalFinalizeResult {
  *   jpegQuality        = 90
  *
  * Resolution budgets (`*ResolMP`) keep cv::Stitcher's staged-pipeline
- * memory bounded — see retailens_stitcher.cpp on Android and the
+ * memory bounded — see image_stitcher_jni.cpp on Android and the
  * shared C++ `StitchConfig` for the full rationale.  Passing a
  * negative value or omitting the field keeps the per-platform safe
  * default (Android compose-MP cap of 1.0, iOS manual-pipeline cap of
@@ -877,7 +877,7 @@ interface NativeIncrementalModule {
    *   - iOS:     `OpenCVStitcher.stitchFramePaths(...)`
    *              (manual cv::detail::* pipeline, useManualPipeline=true).
    *   - Android: `BatchStitcher.stitchSync(...)` →
-   *              `retailens_stitcher.cpp` (high-level
+   *              `image_stitcher_jni.cpp` (high-level
    *              cv::Stitcher::create() pipeline).
    *
    * Reuses the same C++ stitcher both platforms use for the

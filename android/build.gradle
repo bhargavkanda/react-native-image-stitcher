@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Tiger Analytics
 // SPDX-License-Identifier: UNLICENSED
 //
-// Gradle module for the Android side of @retailens/capture-sdk.
+// Gradle module for the Android side of react-native-image-stitcher.
 //
 // What lives here:
 //   - RetaiLensQualityChecker.kt — Laplacian-variance blur scoring
@@ -59,7 +59,7 @@ if (!opencvSdkDir.exists()) {
 }
 
 android {
-    namespace 'com.retailens.capturesdk'
+    namespace 'io.imagestitcher.rn'
     compileSdkVersion safeExtGet('compileSdkVersion', 34)
     // Pin NDK to a known-good install — the host machine has a
     // broken 27.0.12077973 (missing source.properties) sitting next
@@ -84,7 +84,7 @@ android {
             abiFilters 'arm64-v8a'
         }
 
-        // ── JNI shim (retailens_stitcher) build args ─────────────
+        // ── JNI shim (image_stitcher) build args ─────────────
         // Hands the cpp/CMakeLists.txt the location of the vendored
         // OpenCV (with stitching symbols) so the shim can link.
         externalNativeBuild {
@@ -97,8 +97,8 @@ android {
     }
 
     // ── JNI shim build path ─────────────────────────────────────────
-    // Gradle compiles cpp/retailens_stitcher.cpp into
-    // libretailens_stitcher.so for the ABIs filtered above.  The shim
+    // Gradle compiles cpp/image_stitcher_jni.cpp into
+    // libimage_stitcher.so for the ABIs filtered above.  The shim
     // is what bridges Kotlin's `external fun nativeStitchFramePaths`
     // to the cv::Stitcher C++ API inside our custom libopencv_java4.so.
     externalNativeBuild {

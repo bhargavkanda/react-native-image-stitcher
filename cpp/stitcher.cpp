@@ -3,7 +3,7 @@
 // stitcher.cpp — shared cv::Stitcher orchestration.  See stitcher.hpp
 // for design rationale.
 //
-// V1 (2026-05-15): ported from retailens_stitcher.cpp (Android JNI
+// V1 (2026-05-15): ported from image_stitcher_jni.cpp (Android JNI
 // shim) verbatim with the platform-specific Obj-C / JNI marshalling
 // stripped.  Both platforms now call this through thin bridges.
 //
@@ -116,7 +116,7 @@ cv::Ptr<cv::detail::SeamFinder> make_seam_finder(const std::string& name) {
 
 // Bake an output rotation per the capture orientation.  Rotation
 // table mirrors OpenCVStitcher.mm and the previous
-// retailens_stitcher.cpp — kept verbatim so behaviour is unchanged.
+// image_stitcher_jni.cpp — kept verbatim so behaviour is unchanged.
 cv::Mat bake_rotation(const cv::Mat& src, const std::string& orientation,
                       const LogFn& logFn) {
     cv::Mat rotated;

@@ -55,7 +55,7 @@
 // Phase 2 shared-stitcher port (2026-05-16): stitchFramePaths now
 // delegates to the cross-platform C++ pipeline in cpp/stitcher.cpp.
 // The header lives in the SDK's `cpp/` dir and is on the pod's
-// HEADER_SEARCH_PATHS (see RetaiLensCaptureSDK.podspec).
+// HEADER_SEARCH_PATHS (see RNImageStitcher.podspec).
 #import "stitcher.hpp"
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>

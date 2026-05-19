@@ -45,12 +45,12 @@ extern "C" {
 // ── Lifecycle ────────────────────────────────────────────────────
 
 JNIEXPORT jlong JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeCreate(JNIEnv*, jclass) {
+Java_io_imagestitcher_rn_KeyframeGate_nativeCreate(JNIEnv*, jclass) {
     return reinterpret_cast<jlong>(new retailens::KeyframeGate());
 }
 
 JNIEXPORT void JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeDestroy(
+Java_io_imagestitcher_rn_KeyframeGate_nativeDestroy(
     JNIEnv*, jclass, jlong handle)
 {
     delete gate(handle);
@@ -59,28 +59,28 @@ Java_com_retailens_capturesdk_KeyframeGate_nativeDestroy(
 // ── Settings ─────────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeSetEnabled(
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetEnabled(
     JNIEnv*, jclass, jlong handle, jboolean enabled)
 {
     gate(handle)->setEnabled(enabled);
 }
 
 JNIEXPORT void JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeSetOverlapThreshold(
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetOverlapThreshold(
     JNIEnv*, jclass, jlong handle, jdouble t)
 {
     gate(handle)->setOverlapThreshold(t);
 }
 
 JNIEXPORT void JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeSetMaxCount(
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetMaxCount(
     JNIEnv*, jclass, jlong handle, jint n)
 {
     gate(handle)->setMaxCount(static_cast<int32_t>(n));
 }
 
 JNIEXPORT void JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeMarkNextFrameAsLast(
+Java_io_imagestitcher_rn_KeyframeGate_nativeMarkNextFrameAsLast(
     JNIEnv*, jclass, jlong handle)
 {
     gate(handle)->markNextFrameAsLast();
@@ -90,7 +90,7 @@ Java_com_retailens_capturesdk_KeyframeGate_nativeMarkNextFrameAsLast(
 // See `setDisableAngularFallback` doc in keyframe_gate.hpp for the
 // rationale (no usable pose data in non-AR captures).
 JNIEXPORT void JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeSetDisableAngularFallback(
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetDisableAngularFallback(
     JNIEnv*, jclass, jlong handle, jboolean disabled)
 {
     gate(handle)->setDisableAngularFallback(static_cast<bool>(disabled));
@@ -104,7 +104,7 @@ Java_com_retailens_capturesdk_KeyframeGate_nativeSetDisableAngularFallback(
 // doc in keyframe_gate.hpp.  This is the Android JNI counterpart of
 // the iOS bridge method that already exists in KeyframeGateBridge.
 JNIEXPORT void JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeSetFlowMaxTranslationM(
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetFlowMaxTranslationM(
     JNIEnv*, jclass, jlong handle, jdouble metres)
 {
     gate(handle)->setFlowMaxTranslationM(static_cast<double>(metres));
@@ -114,14 +114,14 @@ Java_com_retailens_capturesdk_KeyframeGate_nativeSetFlowMaxTranslationM(
 // can tune novelty aggregation on Android (was iOS-only until now).
 // See setFlowNoveltyPercentile doc in keyframe_gate.hpp.
 JNIEXPORT void JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeSetFlowNoveltyPercentile(
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetFlowNoveltyPercentile(
     JNIEnv*, jclass, jlong handle, jdouble percentile)
 {
     gate(handle)->setFlowNoveltyPercentile(static_cast<double>(percentile));
 }
 
 JNIEXPORT void JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeReset(
+Java_io_imagestitcher_rn_KeyframeGate_nativeReset(
     JNIEnv*, jclass, jlong handle)
 {
     gate(handle)->reset();
@@ -130,21 +130,21 @@ Java_com_retailens_capturesdk_KeyframeGate_nativeReset(
 // ── Read-only state ──────────────────────────────────────────────
 
 JNIEXPORT jint JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeGetAcceptedCount(
+Java_io_imagestitcher_rn_KeyframeGate_nativeGetAcceptedCount(
     JNIEnv*, jclass, jlong handle)
 {
     return static_cast<jint>(gate(handle)->getAcceptedCount());
 }
 
 JNIEXPORT jint JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeGetMaxCount(
+Java_io_imagestitcher_rn_KeyframeGate_nativeGetMaxCount(
     JNIEnv*, jclass, jlong handle)
 {
     return static_cast<jint>(gate(handle)->getMaxCount());
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeIsEnabled(
+Java_io_imagestitcher_rn_KeyframeGate_nativeIsEnabled(
     JNIEnv*, jclass, jlong handle)
 {
     return static_cast<jboolean>(gate(handle)->isEnabled());
@@ -157,7 +157,7 @@ Java_com_retailens_capturesdk_KeyframeGate_nativeIsEnabled(
 // described in the file header.
 
 JNIEXPORT jdoubleArray JNICALL
-Java_com_retailens_capturesdk_KeyframeGate_nativeEvaluate(
+Java_io_imagestitcher_rn_KeyframeGate_nativeEvaluate(
     JNIEnv* env, jclass, jlong handle,
     jfloat tx, jfloat ty, jfloat tz,
     jfloat qx, jfloat qy, jfloat qz, jfloat qw,

@@ -3,7 +3,7 @@
 // Package.swift — SwiftPM manifest used **only for command-line testing**
 // of the algorithm layer (QualityChecker.swift).  Production builds
 // don't go through SwiftPM; the host iOS app pulls these same source
-// files via the `RetaiLensCaptureSDK.podspec` at the SDK package
+// files via the `RNImageStitcher.podspec` at the SDK package
 // root.
 //
 // Why bother with SwiftPM at all when production uses CocoaPods?
@@ -22,7 +22,7 @@
 import PackageDescription
 
 let package = Package(
-  name: "RetaiLensCaptureSDK",
+  name: "RNImageStitcher",
   platforms: [
     .iOS(.v14),
     // macOS target needed so `swift test` can run on a Mac without
@@ -31,13 +31,13 @@ let package = Package(
     .macOS(.v12),
   ],
   products: [
-    .library(name: "RetaiLensCaptureSDK", targets: ["RetaiLensCaptureSDK"]),
+    .library(name: "RNImageStitcher", targets: ["RNImageStitcher"]),
   ],
   dependencies: [],
   targets: [
     .target(
-      name: "RetaiLensCaptureSDK",
-      path: "Sources/RetaiLensCaptureSDK",
+      name: "RNImageStitcher",
+      path: "Sources/RNImageStitcher",
       // Excluded from `swift test` because they depend on either
       // React (which isn't a SwiftPM dep) or OpenCV (which only
       // ships as an iOS XCFramework via the podspec — no macOS
@@ -61,9 +61,9 @@ let package = Package(
       ]
     ),
     .testTarget(
-      name: "RetaiLensCaptureSDKTests",
-      dependencies: ["RetaiLensCaptureSDK"],
-      path: "Tests/RetaiLensCaptureSDKTests",
+      name: "RNImageStitcherTests",
+      dependencies: ["RNImageStitcher"],
+      path: "Tests/RNImageStitcherTests",
       resources: [
         .copy("Fixtures"),
       ]
