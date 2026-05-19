@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 //
-// retailens_stitcher.cpp — JNI shim that marshals Java/Kotlin args
+// image_stitcher_jni.cpp — JNI shim that marshals Java/Kotlin args
 // into the shared C++ `retailens::stitchFramePaths` function in
 // cpp/stitcher.{hpp,cpp}.
 //
@@ -67,7 +67,7 @@ void androidLogBridge(int level, const char* tag, const char* msg) {
 
 
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_retailens_capturesdk_RetaiLensStitcher_nativeStitchFramePaths(
+Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         JNIEnv* env,
         jobject /*thiz*/,
         jobjectArray framePaths,

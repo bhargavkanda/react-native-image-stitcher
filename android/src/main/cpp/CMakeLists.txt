@@ -1,4 +1,4 @@
-# CMakeLists.txt — builds `libretailens_stitcher.so`, the JNI shim that
+# CMakeLists.txt — builds `libimage_stitcher.so`, the JNI shim that
 # exposes our custom-built OpenCV's `cv::Stitcher` to the Kotlin SDK.
 #
 # Architecture
@@ -14,7 +14,7 @@
 # Our shim closes that gap:
 #   - libopencv_stitching.a is STATICALLY linked into our shim, so
 #     `cv::Stitcher::create()` and related code lives inside
-#     `libretailens_stitcher.so`.
+#     `libimage_stitcher.so`.
 #   - libopencv_java4.so is DYNAMICALLY linked, providing cv::Mat,
 #     cv::imread/imwrite, cv::features2d, cv::calib3d, cv::flann, etc.
 #     at runtime — the fat lib already exports all the C++ symbols
@@ -24,7 +24,7 @@
 # already-bundled fat .so for core OpenCV.
 
 cmake_minimum_required(VERSION 3.18)
-project(retailens_stitcher CXX)
+project(image_stitcher CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -81,18 +81,18 @@ if(NOT EXISTS "${SHARED_CPP_DIR}/keyframe_gate.hpp")
 endif()
 
 # ── Our shim ───────────────────────────────────────────────────────
-add_library(retailens_stitcher SHARED
-    retailens_stitcher.cpp
+add_library(image_stitcher SHARED
+    image_stitcher_jni.cpp
     keyframe_gate_jni.cpp
     "${SHARED_CPP_DIR}/keyframe_gate.cpp"
     # 2026-05-15 — shared stitcher.cpp, used by BOTH platforms.
     # Owns the cv::Stitcher orchestration + C+D progressive-confidence
     # retry + dimension/memory instrumentation.  Used to live in this
-    # file (retailens_stitcher.cpp).  See cpp/stitcher.hpp for design
+    # file (image_stitcher_jni.cpp).  See cpp/stitcher.hpp for design
     # rationale.
     "${SHARED_CPP_DIR}/stitcher.cpp")
 
-target_include_directories(retailens_stitcher PRIVATE
+target_include_directories(image_stitcher PRIVATE
     "${OPENCV_INCLUDE_DIR}"
     # cpp/ holds keyframe_gate.hpp + ar_frame_pose.h that the JNI
     # bindings include without relative-path spelunking.
@@ -112,13 +112,13 @@ target_include_directories(retailens_stitcher PRIVATE
 # needed.  Without it, cv::Stitcher::create() may be eliminated as
 # dead code (it's called via the JNI dispatch which the linker can't
 # trace at static-link time).
-target_link_libraries(retailens_stitcher
+target_link_libraries(image_stitcher
     -Wl,--whole-archive
     opencv_stitching
     -Wl,--no-whole-archive
     opencv_java
     log)
 
-target_compile_options(retailens_stitcher PRIVATE
+target_compile_options(image_stitcher PRIVATE
     -fvisibility=hidden
     -Wno-deprecated-declarations)

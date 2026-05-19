@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-package com.retailens.capturesdk
+package io.imagestitcher.rn
 
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -50,7 +50,7 @@ class BatchStitcher(reactContext: ReactApplicationContext)
      * JNI bridge to our custom-built OpenCV stitcher.  Mirrors iOS'
      * OpenCVStitcher.stitchFramePaths so the batch-keyframe flow has
      * parity across platforms.  Implementation:
-     *   retailens-capture-sdk/android/src/main/cpp/retailens_stitcher.cpp
+     *   retailens-capture-sdk/android/src/main/cpp/image_stitcher_jni.cpp
      *
      * @param framePaths  input JPEG paths in capture order (≥2 required)
      * @param outputPath  destination JPEG path
@@ -80,7 +80,7 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         // V16-followup (Android OOM fix): cv::Stitcher staged-resolution
         // budgets in megapixels.  Pass any negative value to keep
         // cv::Stitcher's library default for that stage.  See
-        // retailens_stitcher.cpp arg doc for the full rationale; the
+        // image_stitcher_jni.cpp arg doc for the full rationale; the
         // tl;dr is that the cv::Stitcher COMPOSITING default is
         // ORIG_RESOL (no downscale) which on Android with 1920×1080
         // sensor frames balloons MultiBand memory and triggers lmkd.
@@ -176,7 +176,7 @@ class BatchStitcher(reactContext: ReactApplicationContext)
                 // 2026-05-15 (D) — dims layout from native JNI:
                 //   [0] width, [1] height, [2] framesRequested,
                 //   [3] framesIncluded, [4] finalThresholdMilli
-                // (see retailens_stitcher.cpp return site).
+                // (see image_stitcher_jni.cpp return site).
                 // dims.size >= 5 guards against older native libs
                 // (defensive — keeps Kotlin/native loosely versioned).
                 val framesRequested = if (dims.size > 2) dims[2] else framePaths.size
@@ -369,11 +369,11 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         ensureOpenCv()
         if (!stitcherInitialised.get()) {
             try {
-                System.loadLibrary("retailens_stitcher")
+                System.loadLibrary("image_stitcher")
                 stitcherInitialised.set(true)
             } catch (e: UnsatisfiedLinkError) {
                 throw IllegalStateException(
-                    "JNI shim 'retailens_stitcher' failed to load. " +
+                    "JNI shim 'image_stitcher' failed to load. " +
                         "Check that the custom OpenCV build artifacts " +
                         "(libopencv_java4.so + libopencv_stitching.a) " +
                         "are in vendor/OpenCV-android-sdk/sdk/native/.",

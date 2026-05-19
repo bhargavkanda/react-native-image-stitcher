@@ -2,8 +2,8 @@
  * react-native.config.js — describe this SDK's native surface to RN
  * autolinking.  Without this file autolinking would look for a
  * podspec named `CaptureSdk.podspec` (the slug of the package name
- * `@retailens/capture-sdk`) and miss our actual file
- * `RetaiLensCaptureSDK.podspec` at the package root.
+ * `react-native-image-stitcher`) and miss our actual file
+ * `RNImageStitcher.podspec` at the package root.
  *
  * Declaring the explicit paths here also lets autolinking find the
  * Android source directory once Phase 3 lands (currently absent —
@@ -16,7 +16,7 @@ module.exports = {
   dependency: {
     platforms: {
       ios: {
-        podspecPath: path.join(__dirname, 'RetaiLensCaptureSDK.podspec'),
+        podspecPath: path.join(__dirname, 'RNImageStitcher.podspec'),
       },
       android: {
         // RELATIVE path on purpose.  RN's autolinking computes

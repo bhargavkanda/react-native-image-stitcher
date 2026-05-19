@@ -23,7 +23,7 @@
 //   1. Convert stock YOLOv8n.pt → yolov8n.onnx (`yolo export
 //      model=yolov8n.pt format=onnx imgsz=640`).
 //   2. Drop `yolov8n.onnx` into `retailens-capture-sdk/ios/Sources/
-//      RetaiLensCaptureSDK/Resources/`.
+//      RNImageStitcher/Resources/`.
 //   3. Add `pod 'onnxruntime-objc'` to the host's Podfile.
 //   4. Replace the `runYOLOInference` stub below with a call into
 //      `ORTSession` (see the Apple docs for the full pattern).

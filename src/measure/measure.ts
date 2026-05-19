@@ -101,7 +101,7 @@ function getNative(): {
     || typeof (native as { measureDistance?: unknown }).measureDistance !== 'function'
   ) {
     throw new MeasurementNotAvailableError(
-      '@retailens/capture-sdk: RetaiLensMeasure native module is not '
+      'react-native-image-stitcher: RetaiLensMeasure native module is not '
       + 'registered.  Phase 6 ships iOS first; Android port comes alongside '
       + 'the ARCore catch-up.',
     );
