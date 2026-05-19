@@ -569,6 +569,21 @@ StitchResult stitchFramePathsManual(
     log_info(logFn, "[stitch-bc]",
              "STITCH START: %zu frames mem=%.1fMB",
              framePaths.size(), kStartResidentMB);
+    // 2026-05-18 (Iss #1 diag): mirror the high-level path's entry log so we
+    // can verify captureOrientation propagation through the manual pipeline.
+    // The high-level entry logs "orientation=" at line 280-290; the manual
+    // path was silent on this field, leaving us unable to tell, from a
+    // device-log dump alone, whether bake_rotation got the right input.
+    log_info(logFn, "[stitch]",
+             "stitchFramePathsManual: frames=%zu warper=%s blender=%s seam=%s "
+             "orientation=%s quality=%d inscribedRect=%d",
+             framePaths.size(),
+             config.warperType.c_str(),
+             config.blenderType.c_str(),
+             config.seamFinderType.c_str(),
+             config.captureOrientation.c_str(),
+             config.jpegQuality,
+             config.useInscribedRectCrop ? 1 : 0);
 
     // V16 Phase 1b.fix1 — device-aware pre-stitch memory abort.
     //
@@ -2134,6 +2149,17 @@ StitchResult stitchFramePathsManual(
     // OPPOSITE direction from iteration 1.  If iteration 1 put
     // scene-up on the LEFT of the tall image, iteration 2 will put
     // scene-up on the RIGHT.
+    // 2026-05-18 (Iss #1 diag): log pre-bake Mat shape so we can
+    // tell, from a device-log dump alone, whether the stitcher output
+    // is landscape-aspect or portrait-aspect BEFORE the rotation is
+    // applied.  bake_rotation already logs the rotated path's input
+    // and output dims; the no-rotation branch logs only one pair.
+    // Either way, this line is the source-of-truth for the pre-bake
+    // shape and the captureOrientation that will be matched against.
+    log_info(logFn, "[stitch]",
+             "pre-bake finalImage %dx%d orientation=%s",
+             finalImage.cols, finalImage.rows,
+             config.captureOrientation.c_str());
     cv::Mat finalImageRotated = bake_rotation(finalImage,
                                               config.captureOrientation,
                                               logFn);
