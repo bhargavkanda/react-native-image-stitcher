@@ -1219,6 +1219,88 @@ class RetaiLensIncrementalStitcher(
     }
 
     /**
+     * 2026-05-18 (Iss 3) — GC stale keyframe-session directories under
+     * the SDK's cacheDir.  Scans `cacheDir` for `rlis-capture-*`
+     * subdirectories (created by start() above) and removes those whose
+     * newest file mtime is older than `olderThanMs` (default 24h).
+     *
+     * iOS sibling: `RetaiLensIncrementalStitcher.swift::cleanupKeyframes`.
+     *
+     * Resolves with `{ sessionsDeleted, bytesFreed }`.  Never rejects —
+     * filesystem failures (missing dir, permission errors) resolve with
+     * zero counts so the host can call this unconditionally on launch.
+     *
+     * Note: Android's OS already evicts cacheDir entries under storage
+     * pressure, so this is a "be a good citizen and free space sooner"
+     * helper rather than a hard requirement.  Still useful so the user's
+     * disk-usage report doesn't show 100s of MB of stale captures.
+     */
+    @ReactMethod
+    fun cleanupKeyframes(options: ReadableMap?, promise: Promise) {
+        val olderThanMs = options?.getDoubleOrDefault(
+            "olderThanMs", 24.0 * 3600.0 * 1000.0,
+        ) ?: (24.0 * 3600.0 * 1000.0)
+        val cutoffMs = System.currentTimeMillis() - olderThanMs.toLong()
+        var sessionsDeleted = 0
+        var bytesFreed = 0L
+        try {
+            val cache = reactContext.cacheDir ?: throw IllegalStateException("no cacheDir")
+            val sessions = cache.listFiles { f -> f.isDirectory && f.name.startsWith("rlis-capture-") }
+                ?: emptyArray()
+            for (sessionDir in sessions) {
+                // Newest mtime across the session's files (flat tree today,
+                // walked recursively for future-proofing).
+                var newestMtime = 0L
+                var bytes = 0L
+                sessionDir.walkTopDown().forEach { f ->
+                    if (f.isFile) {
+                        if (f.lastModified() > newestMtime) newestMtime = f.lastModified()
+                        bytes += f.length()
+                    }
+                }
+                if (newestMtime == 0L) {
+                    // Empty session — fall back to the dir's own mtime.
+                    newestMtime = sessionDir.lastModified()
+                }
+                if (newestMtime in 1 until cutoffMs) {
+                    if (sessionDir.deleteRecursively()) {
+                        sessionsDeleted += 1
+                        bytesFreed += bytes
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(
+                "RetaiLensIncrementalStitcher",
+                "cleanupKeyframes: ${e.message}",
+            )
+        }
+        val map = Arguments.createMap()
+        map.putInt("sessionsDeleted", sessionsDeleted)
+        map.putDouble("bytesFreed", bytesFreed.toDouble())
+        promise.resolve(map)
+    }
+
+    /**
+     * 2026-05-18 (Iss 3) — return the current capture's keyframe
+     * session directory.  Empty string when no capture is in flight
+     * (or not in batch-keyframe mode).
+     *
+     * iOS sibling: `RetaiLensIncrementalStitcher.swift::currentKeyframeDir`.
+     */
+    @ReactMethod
+    fun getKeyframeDir(promise: Promise) {
+        val path = if (batchKeyframeMode) {
+            captureSessionDir?.absolutePath ?: ""
+        } else {
+            ""
+        }
+        val map = Arguments.createMap()
+        map.putString("path", path)
+        promise.resolve(map)
+    }
+
+    /**
      * 2026-05-16 — realtime+batch fusion (Option A "Replace on
      * completion") entry point.  Run the shared C++ `cv::Stitcher`
      * pipeline over a caller-supplied list of keyframe JPEGs and

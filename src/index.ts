@@ -134,6 +134,7 @@ export {
   incrementalStitcherIsAvailable,
   subscribeIncrementalState,
   getIncrementalNativeModule,
+  cleanupOldKeyframes,
 } from './stitching/incremental';
 export type {
   IncrementalState,

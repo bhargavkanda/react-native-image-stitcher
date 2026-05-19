@@ -73,4 +73,13 @@ RCT_EXTERN_METHOD(processFrameAtPath:(NSDictionary *)options
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// 2026-05-18 (Iss 3) — keyframe storage management.  cleanupKeyframes
+// GCs stale per-session directories under Library/Application Support/
+// Captures; getKeyframeDir returns the active capture's session dir.
+RCT_EXTERN_METHOD(cleanupKeyframes:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+RCT_EXTERN_METHOD(getKeyframeDir:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 @end

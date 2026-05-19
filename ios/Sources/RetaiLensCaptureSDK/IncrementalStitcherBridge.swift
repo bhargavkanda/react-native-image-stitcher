@@ -365,6 +365,37 @@ public final class RetaiLensIncrementalStitcherBridge: RCTEventEmitter {
         resolver(["ok": true, "accepted": accepted])
     }
 
+    /// 2026-05-18 (Iss 3) — bridge for `cleanupKeyframes`.  See the
+    /// Swift method's docstring for behaviour.  Options dict keys:
+    ///   - olderThanMs (Double / NSNumber, optional, default 24h):
+    ///       cutoff staleness in ms.
+    /// Resolves with { sessionsDeleted, bytesFreed }.  Never rejects.
+    @objc(cleanupKeyframes:resolver:rejecter:)
+    public func cleanupKeyframes(
+        options: NSDictionary,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        let olderThanMs = (options["olderThanMs"] as? Double)
+            ?? Double(24 * 3600 * 1000)
+        let result = RetaiLensIncrementalStitcher.shared
+            .cleanupKeyframes(olderThanMs: olderThanMs)
+        resolver(result)
+    }
+
+    /// 2026-05-18 (Iss 3) — bridge for `getKeyframeDir`.  Returns the
+    /// session dir of the currently-running batch-keyframe capture,
+    /// or empty string if no capture is in flight / engine isn't in
+    /// batch-keyframe mode.
+    @objc(getKeyframeDir:rejecter:)
+    public func getKeyframeDir(
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        let path = RetaiLensIncrementalStitcher.shared.currentKeyframeDir() ?? ""
+        resolver(["path": path])
+    }
+
     /// V16 Phase 1b.fix2 — JS-callable poll for the process'
     /// phys_footprint in MB.  This is the SAME metric iOS jetsam
     /// evaluates against, so it's the right number for an on-screen
