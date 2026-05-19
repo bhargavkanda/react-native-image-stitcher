@@ -92,7 +92,7 @@ python3 build_sdk.py \
     --no_samples_build \
     --no_kotlin \
     --no_media_ndk \
-    --modules_list "core,imgproc,features2d,calib3d,flann,stitching,video,photo" \
+    --modules_list "core,imgproc,features2d,calib3d,flann,stitching,video,photo,java" \
     "${SDK_BUILD_OUT}" \
     "${OPENCV_SRC}"
 
