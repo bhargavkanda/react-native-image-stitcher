@@ -16,6 +16,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-20
+
+### Fixed
+
+- **iOS modular-header build under `use_frameworks!`** — host apps
+  that opt into modular framework linkage (Expo + `use_frameworks!`,
+  RetaiLens-mobile is the immediate example) hit
+  ``'cstdint' file not found / could not build Objective-C module
+  'RNImageStitcher'`` because CocoaPods defaulted EVERY header in
+  `source_files` (including the shared `cpp/*.hpp` C++ headers) to
+  public.  The auto-generated `RNImageStitcher-umbrella.h` then
+  `#import`ed `keyframe_gate.hpp` / `stitcher.hpp` from a pure
+  Obj-C context and tripped on the C++ stdlib.  Pin
+  `s.public_header_files = ['ios/Sources/**/*.h']` so the umbrella
+  exposes only the iOS-side Obj-C `.h` files; the `.mm` source files
+  still locate the C++ headers via `HEADER_SEARCH_PATHS` set in
+  `pod_target_xcconfig`, so behaviour is unchanged for non-modular
+  hosts.  The umbrella now contains: `KeyframeGateBridge.h`,
+  `OpenCVIncrementalStitcher.h`, `OpenCVKeyframeCollector.h`,
+  `OpenCVSlitScanStitcher.h`, `OpenCVStitcher.h` — all Foundation /
+  CoreVideo-only declarations (the OpenCV C++ types stay inside the
+  `.mm` implementations).
+
 ## [0.1.1] — 2026-05-20
 
 ### Added
