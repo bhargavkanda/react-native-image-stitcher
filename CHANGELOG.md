@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Android `cv::imwrite` rejected `file://`-scheme output paths.**
+  `IncrementalStitcher.finalize` (Kotlin) was passing the host-
+  provided `outputPath` straight to `cv::imwrite` without
+  normalisation, so consumers using `expo-file-system`'s
+  `documentDirectory` (which always prefixes `file://`) hit
+  "Stitch failed: cv::imwrite returned false (code=101)" on every
+  panorama capture.  iOS already stripped at the same boundary
+  (`IncrementalStitcher.swift:1215`); now Android does too via
+  `stripFileScheme()`, which already exists in the same file and
+  is used by `refinePanorama`.  The fix has zero behaviour impact
+  on hosts that were already passing bare paths.
 - **iOS modular-header build under `use_frameworks!`** — host apps
   that opt into modular framework linkage (Expo + `use_frameworks!`,
   RetaiLens-mobile is the immediate example) hit
