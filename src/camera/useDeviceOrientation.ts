@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * useDeviceOrientation — physical device orientation hook.
  *

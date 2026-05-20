@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 package io.imagestitcher.rn
 
 import com.facebook.react.bridge.Promise
@@ -18,7 +18,7 @@ import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 
 /**
- * Android twin of the iOS RetaiLensQualityChecker.
+ * Android twin of the iOS QualityChecker (`RNImageStitcherQualityChecker` native module).
  *
  * Algorithm:
  *   - Blur score: variance of the Laplacian of the grayscale image.
@@ -35,10 +35,10 @@ import org.opencv.imgproc.Imgproc
  * (no native loader prompts in OpenCV 4.x) and the result is
  * cached.
  */
-class RetaiLensQualityChecker(reactContext: ReactApplicationContext)
+class QualityChecker(reactContext: ReactApplicationContext)
     : ReactContextBaseJavaModule(reactContext) {
 
-    override fun getName(): String = "RetaiLensQualityChecker"
+    override fun getName(): String = "RNImageStitcherQualityChecker"
 
     @ReactMethod
     fun runQualityCheck(options: ReadableMap, promise: Promise) {

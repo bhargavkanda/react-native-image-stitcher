@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * CaptureStatusOverlay — screen-level visual feedback for the
  * panorama capture lifecycle.

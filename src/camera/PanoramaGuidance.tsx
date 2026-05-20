@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * PanoramaGuidance — gyroscope-driven pan-speed indicator for the
  * tap-and-hold panorama flow.

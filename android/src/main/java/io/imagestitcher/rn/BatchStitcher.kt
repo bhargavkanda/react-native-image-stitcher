@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 package io.imagestitcher.rn
 
 import com.facebook.react.bridge.Promise
@@ -398,7 +398,7 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         //   createNativeModules), even when the module is fully
         //   registered.  Empirically confirmed by Galaxy A35
         //   capture session 2026-05-13: stitcher IS registered (see
-        //   RetaiLensCapturePackage.kt) but lookup returned null →
+        //   RNImageStitcherPackage.kt) but lookup returned null →
         //   "BatchStitcher module not registered" IllegalState
         //   at finalize time.
         //

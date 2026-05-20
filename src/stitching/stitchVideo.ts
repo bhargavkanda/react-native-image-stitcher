@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * stitchVideo — end-to-end "video → panorama" API.
  *

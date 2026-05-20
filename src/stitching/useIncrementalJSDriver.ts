@@ -1,13 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
- * useIncrementalAndroidDriver — vision-camera + gyro frame driver for
- * the incremental panorama engine, used in non-AR captures.
+ * useIncrementalJSDriver — vision-camera + gyro frame driver for
+ * the incremental panorama engine, used in non-AR captures on both
+ * iOS and Android.
  *
- * 2026-05-17 (Issue #2): now also drives iOS non-AR captures.  The
- * hook's name is kept for backwards-compat; despite the "Android" in
- * the name, the implementation is platform-agnostic and the native
- * `processFrameAtPath` entry point now exists on both iOS and
- * Android.  Consider this hook the canonical "feed the engine from
- * vision-camera snapshots" driver.
+ * History: previously called `useIncrementalAndroidDriver` because
+ * it was Android-only.  As of 2026-05-17 (Issue #2), the native
+ * `processFrameAtPath` entry point exists on both platforms and the
+ * hook drives non-AR on iOS too; renamed 2026-05-19 to reflect
+ * that.
  *
  * Why this exists
  *   In AR captures the engine consumes frames from the ARSession
@@ -49,7 +50,7 @@ import type { Subscription } from 'rxjs';
 import type { Camera } from 'react-native-vision-camera';
 
 
-export interface UseIncrementalAndroidDriverOptions {
+export interface UseIncrementalJSDriverOptions {
   /**
    * Snapshot interval in ms.  Default 250 (≈ 4 Hz).  Lower = more
    * candidate frames + more disk I/O.  Don't go below 200 — vision-
@@ -78,7 +79,7 @@ export interface UseIncrementalAndroidDriverOptions {
 }
 
 
-export interface IncrementalAndroidDriverHandle {
+export interface IncrementalJSDriverHandle {
   start: (cameraRef: React.RefObject<Camera | null>) => void;
   stop: () => void;
   isRunning: boolean;
@@ -110,9 +111,9 @@ function getNativeIncremental(): NativeProcessFrame | null {
 }
 
 
-export function useIncrementalAndroidDriver(
-  options: UseIncrementalAndroidDriverOptions = {},
-): IncrementalAndroidDriverHandle {
+export function useIncrementalJSDriver(
+  options: UseIncrementalJSDriverOptions = {},
+): IncrementalJSDriverHandle {
   const {
     snapshotIntervalMs = 250,
     gyroIntervalMs = 33,
@@ -190,7 +191,7 @@ export function useIncrementalAndroidDriver(
         },
         error: (err) => {
           // eslint-disable-next-line no-console
-          console.warn('[useIncrementalAndroidDriver] gyro error', err);
+          console.warn('[useIncrementalJSDriver] gyro error', err);
         },
       });
 
@@ -248,7 +249,7 @@ export function useIncrementalAndroidDriver(
           // Swallow per-frame errors so the loop keeps running.
           // eslint-disable-next-line no-console
           console.warn(
-            '[useIncrementalAndroidDriver] processFrame failed', err,
+            '[useIncrementalJSDriver] processFrame failed', err,
           );
         } finally {
           snapshotInFlightRef.current = false;

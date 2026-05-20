@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // ar_frame_pose.h — POD struct shared between iOS and Android for AR
 // frame pose data crossing the C++ boundary.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * useIncrementalStitcher — React hook driving the live panorama
  * engine.

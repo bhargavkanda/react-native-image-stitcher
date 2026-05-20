@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // RNSARCameraView — native UIView that renders the AR camera
 // feed for the SDK's pose-aware capture surface.

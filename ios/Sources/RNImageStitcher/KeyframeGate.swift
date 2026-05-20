@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // KeyframeGate — Swift facade over the shared C++ KeyframeGate.
 //
@@ -166,6 +166,7 @@ final class KeyframeGate {
     /// Read by IncrementalStitcher.consumeFrame before
     /// invoking `evaluate(...)`.
     var flowEvalEveryNFrames: Int = 1
+
 
     /// One-shot flag: when set to `true`, the very next evaluate()
     /// accepts unconditionally and the flag self-resets.  Set by JS

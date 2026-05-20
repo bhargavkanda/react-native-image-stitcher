@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //
 // OpenCVStitcher.mm
 //
@@ -233,13 +234,13 @@ static BOOL WriteJPEGWithEXIFTag(const cv::Mat &bgr,
 }
 
 
-NSString *const RetaiLensStitcherErrorDomain = @"RetaiLensStitcherErrorDomain";
+NSString *const RNImageStitcherErrorDomain = @"RNImageStitcherErrorDomain";
 
 // ─────────────────────────────────────────────────────────────────────
-// RetaiLensStitchResult
+// RNStitchResult
 // ─────────────────────────────────────────────────────────────────────
 
-@implementation RetaiLensStitchResult
+@implementation RNStitchResult
 
 - (instancetype)initWithOutputPath:(NSString *)outputPath
                              width:(NSInteger)width
@@ -379,7 +380,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
 @implementation OpenCVStitcher
 
-+ (nullable RetaiLensStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
++ (nullable RNStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
                                           outputPath:(NSString *)outputPath
                                          jpegQuality:(NSInteger)quality
                                           warperType:(NSString *)warperType
@@ -501,7 +502,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // local, or fall through.
   //
   // See docs/site-content/learnings/react-native.md#autoreleasepool-return-uaf
-  RetaiLensStitchResult *result = nil;
+  RNStitchResult *result = nil;
   NSError *capturedError = nil;
   @autoreleasepool {
     retailens::StitchResult r = retailens::stitchFramePaths(
@@ -519,7 +520,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       const NSInteger framesRequested =
           r.framesRequested > 0 ? (NSInteger)r.framesRequested
                                 : (NSInteger)paths.size();
-      result = [[RetaiLensStitchResult alloc]
+      result = [[RNStitchResult alloc]
           initWithOutputPath:outputPath
                        width:(NSInteger)r.width
                       height:(NSInteger)r.height
@@ -575,7 +576,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       }
       NSString *msg =
           [NSString stringWithUTF8String:r.errorMessage.c_str()] ?: @"Stitch failed";
-      capturedError = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      capturedError = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                           code:nsCode
                                       userInfo:@{NSLocalizedDescriptionKey: msg}];
     }
@@ -608,7 +609,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                                          error:(NSError **)error {
   if (maxFrames < 2) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1010
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -622,7 +623,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   NSURL *videoURL = [NSURL fileURLWithPath:cleanedVideoPath];
   if (![[NSFileManager defaultManager] fileExistsAtPath:cleanedVideoPath]) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1011
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -644,7 +645,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   Float64 totalSeconds = CMTimeGetSeconds(duration);
   if (!isfinite(totalSeconds) || totalSeconds <= 0) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1012
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -754,7 +755,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
   if (paths.count < 2) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1013
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -775,7 +776,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 // Combined pipeline: video → stitched panorama
 // ─────────────────────────────────────────────────────────────────────
 
-+ (nullable RetaiLensStitchResult *)stitchVideoAtPath:(NSString *)videoPath
++ (nullable RNStitchResult *)stitchVideoAtPath:(NSString *)videoPath
                                            outputPath:(NSString *)outputPath
                                             maxFrames:(NSInteger)maxFrames
                                           jpegQuality:(NSInteger)quality
@@ -787,7 +788,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // can't clobber each other's working state.
   NSString *tmpDir =
       [NSTemporaryDirectory() stringByAppendingPathComponent:
-          [NSString stringWithFormat:@"RetaiLensStitch-%@",
+          [NSString stringWithFormat:@"RNImageStitcherStitch-%@",
               [[NSUUID UUID] UUIDString]]];
 
   NSError *extractErr = nil;
@@ -812,7 +813,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // "portrait" → no bake-rotation.  Callers wanting rotation should
   // use the keyframe-driven Swift path which carries the orientation
   // from the JS accelerometer hook through IncrementalStitcher.
-  RetaiLensStitchResult *result =
+  RNStitchResult *result =
       [self stitchFramePaths:frames
                   outputPath:outputPath
                  jpegQuality:quality
@@ -847,7 +848,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 // pose path; both paths can be DRY'd into a shared helper once
 // the new code is proven on real shelf captures.
 
-+ (nullable RetaiLensStitchResult *)stitchVideoAtPath:(NSString *)videoPath
++ (nullable RNStitchResult *)stitchVideoAtPath:(NSString *)videoPath
                                            outputPath:(NSString *)outputPath
                                             maxFrames:(NSInteger)maxFrames
                                           jpegQuality:(NSInteger)quality
@@ -861,7 +862,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   if (seamFinderType == nil || seamFinderType.length == 0) seamFinderType = @"graphcut";
   if (poses.count < 2) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1030
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -873,7 +874,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
   NSString *tmpDir =
       [NSTemporaryDirectory() stringByAppendingPathComponent:
-          [NSString stringWithFormat:@"RetaiLensStitchAR-%@",
+          [NSString stringWithFormat:@"RNImageStitcherStitchAR-%@",
               [[NSUUID UUID] UUIDString]]];
 
   // Extract evenly-spaced frames from the video (same helper the
@@ -905,7 +906,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   if (!isfinite(totalSeconds) || totalSeconds <= 0) {
     [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1031
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -965,7 +966,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   if (frames.size() < 2) {
     [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1032
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1193,7 +1194,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   } catch (const cv::Exception &e) {
     [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1100
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1205,7 +1206,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   } catch (...) {
     [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1102
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1219,7 +1220,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   if (panorama.empty()) {
     [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1003
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1265,7 +1266,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
   if (!wrote) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1002
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1277,7 +1278,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   }
 
-  return [[RetaiLensStitchResult alloc]
+  return [[RNStitchResult alloc]
       initWithOutputPath:outputPath
                    width:(NSInteger)finalImage.cols
                   height:(NSInteger)finalImage.rows
@@ -1318,10 +1319,10 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 // around `stitchFramePaths:` lines 562-571 + 1519-1527):
 //
 //   NSError *capturedError = nil;
-//   RetaiLensStitchResult *result = nil;
+//   RNStitchResult *result = nil;
 //   @autoreleasepool {
 //     do {
-//       try { ... ; result = [[RetaiLensStitchResult alloc] init...]; break; }
+//       try { ... ; result = [[RNStitchResult alloc] init...]; break; }
 //       catch (cv::Exception &e) { capturedError = [NSError ...]; break; }
 //       catch (...) { capturedError = [NSError ...]; break; }
 //     } while (0);
@@ -1339,7 +1340,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 // not active.  Refactoring dead code carries its own risk (subtle
 // behaviour changes) without active testing.
 
-+ (nullable RetaiLensStitchResult *)stitchKeyframePaths:(NSArray<NSString *> *)framePaths
++ (nullable RNStitchResult *)stitchKeyframePaths:(NSArray<NSString *> *)framePaths
                                             outputPath:(NSString *)outputPath
                                            jpegQuality:(NSInteger)quality
                                             warperType:(NSString *)warperType
@@ -1352,7 +1353,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   if (seamFinderType == nil || seamFinderType.length == 0) seamFinderType = @"graphcut";
   if (framePaths.count < 2) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1030
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1363,7 +1364,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   }
   if (framePaths.count != poses.count) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1033
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1430,7 +1431,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
   if (frames.size() < 2) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1032
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1725,7 +1726,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
            "[V16-stitch-mem] cv::Exception: %{public}s phys=%.1fMB",
            e.what(), StitcherResidentMB());
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1100
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1736,7 +1737,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   } catch (...) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1102
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1749,7 +1750,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
   if (panorama.empty()) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1003
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1796,7 +1797,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
 
   if (!wrote) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1002
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1808,7 +1809,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   }
 
-  return [[RetaiLensStitchResult alloc]
+  return [[RNStitchResult alloc]
       initWithOutputPath:outputPath
                    width:(NSInteger)finalImage.cols
                   height:(NSInteger)finalImage.rows
@@ -1829,7 +1830,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   NSString *cleaned = normalizeImagePath(imagePath);
   if (![[NSFileManager defaultManager] fileExistsAtPath:cleaned]) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1020
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1843,7 +1844,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   cv::Mat img = cv::imread(nativePath, cv::IMREAD_COLOR);
   if (img.empty()) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1021
                                userInfo:@{
         NSLocalizedDescriptionKey:
@@ -1859,7 +1860,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   bool ok = cv::imwrite(nativePath, img, writeParams);
   if (!ok) {
     if (error) {
-      *error = [NSError errorWithDomain:RetaiLensStitcherErrorDomain
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1022
                                userInfo:@{
         NSLocalizedDescriptionKey:

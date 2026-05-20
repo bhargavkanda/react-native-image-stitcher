@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * Camera — the public, props-based camera component for the
  * `react-native-image-stitcher` library (publication target per the
@@ -46,7 +47,6 @@ import React, {
   useState,
 } from 'react';
 import {
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -57,6 +57,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { Camera as VisionCamera } from 'react-native-vision-camera';
 
+import { useARSession } from '../ar/useARSession';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
@@ -75,7 +76,7 @@ import {
   subscribeIncrementalState,
   type IncrementalState,
 } from '../stitching/incremental';
-import { useIncrementalAndroidDriver } from '../stitching/useIncrementalAndroidDriver';
+import { useIncrementalJSDriver } from '../stitching/useIncrementalJSDriver';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
 
@@ -100,7 +101,7 @@ export type Warper = 'plane' | 'cylindrical' | 'spherical';
  * CaptureResult shape has SDK-specific fields (deviceMetadata,
  * qualityReport, deviceUuid) that don't belong in the public RN
  * library's surface.  Step 3 (symbol rename) will retire the
- * `RetaiLens*` / SDK-specific names; for now we keep both types
+ * historical SDK-specific names; for now we keep both types
  * side-by-side so the existing host code continues to work.
  */
 export type CameraCaptureResult =
@@ -399,12 +400,19 @@ const settingsButtonStyles = StyleSheet.create({
 // ─── Main component ─────────────────────────────────────────────────
 
 /**
- * Effective capture source derived from arPreference + lens.
+ * Effective capture source derived from arPreference + lens + the
+ * device's AR support.  On a device without ARKit / ARCore, AR mode
+ * is unavailable regardless of the user's preference, and the AR
+ * toggle is hidden in the UI (see the bottom-bar JSX).  Selecting
+ * the 0.5x lens also forces non-AR because ARKit / ARCore sessions
+ * don't expose the ultra-wide camera.
  */
 function deriveEffectiveCaptureSource(
   arPreference: boolean,
   lens: CameraLens,
+  isARSupportedOnDevice: boolean,
 ): CaptureSource {
+  if (!isARSupportedOnDevice) return 'non-ar';
   if (lens === '0.5x') return 'non-ar';
   return arPreference ? 'ar' : 'non-ar';
 }
@@ -487,10 +495,23 @@ export function Camera(props: CameraProps): React.JSX.Element {
     string[]
   >([]);
 
-  const effectiveCaptureSource = deriveEffectiveCaptureSource(arPreference, lens);
+  // ARKit / ARCore device-support probe.  `isAvailable` is `false`
+  // initially and becomes `true` after the native isSupported() check
+  // resolves (~50-200 ms after mount).  Devices without ARKit / ARCore
+  // (older iPhones, ARCore-less Androids, simulators) stay `false`
+  // forever, which forces non-AR capture everywhere and hides the
+  // AR toggle in the bottom bar (see JSX below).
+  const { isAvailable: isARSupportedOnDevice } = useARSession();
+
+  const effectiveCaptureSource = deriveEffectiveCaptureSource(
+    arPreference,
+    lens,
+    isARSupportedOnDevice,
+  );
   const isAR = effectiveCaptureSource === 'ar';
   const isNonAR = !isAR;
   const deviceOrientation = useDeviceOrientation();
+
 
   // ── Notify parent of capture-source changes ─────────────────────
   const lastEmittedSourceRef = useRef<CaptureSource | null>(null);
@@ -533,19 +554,21 @@ export function Camera(props: CameraProps): React.JSX.Element {
     },
   });
 
-  // Android non-AR driver — starts/stops with recording.
-  const androidDriver = useIncrementalAndroidDriver();
+  // JS-driver for non-AR captures (iOS + Android).  Starts/stops with
+  // recording.  In AR mode the engine consumes frames from the
+  // ARSession stream natively, so this hook stays idle.
+  const jsDriver = useIncrementalJSDriver();
   useEffect(() => {
-    if (Platform.OS !== 'android' || !isNonAR) return undefined;
+    if (!isNonAR) return undefined;
     if (statusPhase === 'recording') {
-      androidDriver.start(visionCameraRef);
+      jsDriver.start(visionCameraRef);
     } else {
-      androidDriver.stop();
+      jsDriver.stop();
     }
     return () => {
-      androidDriver.stop();
+      jsDriver.stop();
     };
-  }, [statusPhase, isNonAR, androidDriver]);
+  }, [statusPhase, isNonAR, jsDriver]);
 
   // ── Subscribe to engine state for live keyframe thumbs ──────────
   useEffect(() => {
@@ -743,9 +766,13 @@ export function Camera(props: CameraProps): React.JSX.Element {
   }, []);
 
   // ── JSX ─────────────────────────────────────────────────────────
+
   return (
     <View style={[styles.container, style]}>
-      {/* Preview — AR or non-AR */}
+      {/* Preview — AR or non-AR.  Conditional mount so only ONE
+          camera component is alive at a time; this matches the
+          monorepo's working pattern and avoids the Camera2-in-use
+          conflict that "always mount both" caused on Android. */}
       {isAR ? (
         <ARCameraView
           ref={arViewRef}
@@ -769,15 +796,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
         recordingStartedAt={recordingStartedAt ?? undefined}
       />
 
-      {/* Live-frame band (panorama only).  Only visible while recording. */}
-      {statusPhase === 'recording' && (
-        <PanoramaBandOverlay
-          state={incrementalState}
-          frameUris={batchKeyframeThumbnails}
-          captureOrientation={deviceOrientation}
-        />
-      )}
-
       {/* Settings gear (top-right), gated on showSettingsButton. */}
       {showSettingsButton && (
         <SettingsButton
@@ -786,11 +804,30 @@ export function Camera(props: CameraProps): React.JSX.Element {
         />
       )}
 
-      {/* Bottom bar: lens chip + AR toggle + shutter. */}
+      {/*
+        Bottom area: stacks the live-frame band ABOVE the shutter row
+        so the band is tethered to the shutter on the viewport side
+        (the operator's eye is drawn from the camera preview, down
+        the band, into the shutter — a single continuous reading
+        path).  With the SDK's orientation lock holding the UI in
+        portrait, this stack works the same regardless of how the
+        device is physically held.
+      */}
       <View
         pointerEvents="box-none"
-        style={[styles.bottomBar, { paddingBottom: insets.bottom + 12 }]}
+        style={[styles.bottomArea, { paddingBottom: insets.bottom + 12 }]}
       >
+        {/* Live-frame band — only visible while recording. */}
+        {statusPhase === 'recording' && (
+          <PanoramaBandOverlay
+            state={incrementalState}
+            frameUris={batchKeyframeThumbnails}
+            captureOrientation={deviceOrientation}
+          />
+        )}
+
+        {/* Shutter row: lens chip (left), shutter (centre), AR toggle (right). */}
+        <View style={styles.bottomBar}>
         <View style={styles.bottomBarLeft} />
         <View style={styles.bottomBarCenter}>
           <LensChip
@@ -809,9 +846,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
           </View>
         </View>
         <View style={styles.bottomBarRight}>
-          {lens === '1x' && (
+          {lens === '1x' && isARSupportedOnDevice && (
             <ARToggle arEnabled={arPreference} onToggle={handleARToggle} />
           )}
+        </View>
         </View>
       </View>
 
@@ -837,11 +875,15 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000',
   },
-  bottomBar: {
+  bottomArea: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
+    flexDirection: 'column',
+    alignItems: 'stretch',
+  },
+  bottomBar: {
     flexDirection: 'row',
     paddingHorizontal: 18,
     alignItems: 'flex-end',

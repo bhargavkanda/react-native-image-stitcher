@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // useIMUTranslationGate.ts — JS-side IMU translation tracker for the
 // non-AR translation-warning banner + (optional) gate force-accept.

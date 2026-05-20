@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * CapturePreview — shared full-screen image preview used for BOTH:
  *   1. Tap-to-preview from <CaptureThumbnailStrip> (existing thumbnails)

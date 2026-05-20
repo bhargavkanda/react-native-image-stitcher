@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // stitcher.cpp — shared cv::Stitcher orchestration.  See stitcher.hpp
 // for design rationale.
@@ -631,7 +631,7 @@ StitchResult stitchFramePathsManual(
                   kStartResidentMB, kPreStitchAbortMB, availableRamMB);
         // V16 fix-attempt 9 — sentinel return.  See validPairs<1 site
         // below for the full root-cause analysis.  In the iOS original
-        // this returned an empty RetaiLensStitchResult; here we return
+        // this returned an empty RNStitchResult; here we return
         // a StitchResult with success=false + a stable error code so
         // both bridges see a clean failure rather than an
         // ambiguous "output written but zero pixels" surface.
@@ -934,7 +934,7 @@ StitchResult stitchFramePathsManual(
             // V16 fix-attempt 9 (NULL TEST, 2026-05-13).  Eight prior
             // attempts chased a deterministic SEGV inside Swift's try-bridge
             // on this *error→throw path.  ASan-on-device with Sentry
-            // disabled (RetaiLens-2026-05-13-172125.ips) showed
+            // disabled (incident-2026-05-13-172125.ips) showed
             // EXC_BAD_ACCESS at 0x60007a530 (UNMAPPED VM, ASan
             // ReportDeadlySignal — no shadow-memory match) firing inside
             // objc_retain immediately after this return.  By returning a
