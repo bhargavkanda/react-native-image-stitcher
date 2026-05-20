@@ -18,6 +18,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.2] — 2026-05-20
 
+### Added
+
+- **`outputDir` prop on `<Camera>`** + **`outputPath` per-call
+  option on `useCapture.takePhoto`** — captures (both tap-photos
+  and hold-panoramas) can now land at a host-controlled file
+  location instead of vision-camera's tmp dir.  Filename is
+  composed internally as `${outputDir}/photo-${ts}.jpg` /
+  `${outputDir}/panorama-${ts}.jpg` for `<Camera>`; per-call
+  `outputPath` on `useCapture` lets layer-2 hosts compose their
+  own filenames.
+  - On disk failure the capture rejects with
+    `CameraError('OUTPUT_WRITE_FAILED', ...)`.  **No silent
+    fallback** to tmp — that hides bugs.
+  - Host owns *picking* the path.  The lib treats the value as an
+    opaque writable filesystem path; it does not know about iOS
+    `UIFileSharingEnabled`, Android MediaStore, SAF, or any other
+    platform-specific shared-storage mechanism.  That's the host's
+    domain.
+  - Requires `expo-file-system` — added as an **OPTIONAL** peer
+    dep (`peerDependenciesMeta`), so consumers that don't use
+    `outputDir`/`outputPath` don't have to install it.
+
 ### Fixed
 
 - **Android `cv::imwrite` rejected `file://`-scheme output paths.**
