@@ -1,9 +1,12 @@
-name: Build OpenCV binaries on tag
+name: Release on tag (OpenCV binaries + npm publish)
 
 # Fires when a release tag is pushed (semver convention v*.*.*).  Two
 # parallel jobs build the iOS xcframework + Android per-ABI .so/.a
 # artifacts, then a release job creates / updates the matching GH
-# Release and attaches both archives.
+# Release and attaches both archives.  Finally, the publish-npm job
+# fires (only AFTER the binaries are on the GH Release) so that
+# consumers who run `npm install react-native-image-stitcher@X` get
+# a postinstall that can successfully download the binaries.
 #
 # The npm package's `postinstall` script fetches these archives by
 # `package.json` version → tag mapping, so a `npm install
@@ -142,3 +145,51 @@ jobs:
             ./assets/*.zip
           fail_on_unmatched_files: true
           generate_release_notes: true
+
+  # ── Publish to npm ─────────────────────────────────────────────────
+  # Runs AFTER the binaries are attached to the GH Release.  Order
+  # matters: the postinstall script in this very package fetches those
+  # binaries by URL, so the binaries must exist on the release BEFORE
+  # any consumer can `npm install` the version we're publishing.
+  #
+  # We `--ignore-scripts` the install here because:
+  #   (a) we don't need the binaries on the CI runner to publish, and
+  #   (b) postinstall would try to download them while the release-
+  #       binary upload is still settling on GitHub's CDN — flaky.
+  # The package's tarball doesn't include the binaries either (they're
+  # in .npmignore), so the consumer-side postinstall is the only path
+  # that downloads them.
+  publish-npm:
+    needs: release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies (skip postinstall binary fetch)
+        run: npm install --ignore-scripts
+
+      - name: Build dist/
+        run: npm run build
+
+      - name: Sanity-check tarball contents (no binaries, no node_modules)
+        run: |
+          npm pack --dry-run
+          # Hard fail if any binary leaks into the tarball.
+          if npm pack --dry-run --json | grep -E '\.xcframework|\.so|OpenCV-android-sdk' ; then
+            echo "ERROR: binary leaked into tarball" >&2
+            exit 1
+          fi
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
