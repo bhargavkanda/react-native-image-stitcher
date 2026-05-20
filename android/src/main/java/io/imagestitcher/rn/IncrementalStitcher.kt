@@ -731,7 +731,15 @@ class IncrementalStitcher(
         val outputPath = if (outputPathOpt.isEmpty()) {
             File(reactContext.cacheDir, "RNImageStitcherIncremental-${System.nanoTime()}.jpg").absolutePath
         } else {
-            outputPathOpt
+            // Strip the `file://` scheme — hosts commonly pass paths
+            // sourced from `expo-file-system`'s `documentDirectory`,
+            // which always prefixes `file://`.  cv::imwrite (used
+            // downstream by the batch-keyframe + hybrid + slit-scan
+            // engines) silently returns false on URI-scheme paths,
+            // surfacing as "Stitch failed: cv::imwrite returned
+            // false".  iOS already strips at the same boundary —
+            // see IncrementalStitcher.swift:1215.
+            stripFileScheme(outputPathOpt)
         }
         val quality = options.getIntOrDefault("quality", 90)
         // 2026-05-18 (iOS cross-orientation fix; symmetric on Android) —
