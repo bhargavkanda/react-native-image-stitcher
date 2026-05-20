@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * PanoramaBandOverlay — V16 Phase 2 (merged band + strip).
  *
@@ -5,7 +6,7 @@
  * top of the camera preview during a panorama hold.  Replaces what
  * was previously TWO components rendered side-by-side:
  *
- *   1. <LiveFrameStrip />        — fed by per-keyframe thumbnail URIs
+ *   1. live per-keyframe thumbnail strip — fed by accepted-frame URIs
  *                                  (batch-keyframe engine) OR by
  *                                  periodic vision-camera snapshots.
  *   2. <PanoramaBandOverlay />   — a single cumulative-panorama
@@ -188,26 +189,34 @@ function layoutFor(orientation: BandCaptureOrientation): Layout {
     paddingVertical: BAND_PADDING,
     backgroundColor: 'rgba(0, 0, 0, 0.55)',
   };
+  // 2026-05-19 — repositioned tethered to the shutter (no longer
+  // edge-pinned via absolute positioning).  The parent stack in
+  // Camera.tsx now puts this band in a vertical column immediately
+  // above the shutter row.  The SDK's orientation lock holds the UI
+  // in portrait regardless of physical device rotation, so the band
+  // is ALWAYS a horizontal strip in JS coordinates.  In landscape
+  // (physically held), the rendered strip visually appears as a
+  // vertical column on the viewport-side of the shutter.
+  //
+  // What still varies by physical orientation: the order in which
+  // thumbnails should appear so newest is at the user-perceived
+  // "leading edge" of the pan.  That's the flexDirection (row vs
+  // row-reverse) and the arrow glyph.
   if (orientation === 'landscape-left') {
-    // 2026-05-18 (Issue #3 round 2) re-derived from scratch:
-    // Phone rotated 90° CCW from portrait.  JS-coord mapping to
-    // user view:
-    //   JS-bottom = phone-bottom = user-RIGHT  → band sits here
-    //   JS-left   = phone-left   = user-BOTTOM
-    //   JS-right  = phone-right  = user-TOP
-    // For "oldest at user-TOP, growth toward user-BOTTOM":
-    //   array[0] needs to land at user-TOP = JS-right
-    //   → flexDirection: 'row-reverse' (array[0] at JS-rightmost).
-    // For arrow appearing as user-DOWN:
-    //   `←` glyph (JS-direction -X) after 90° CCW rotation maps to
-    //   user-down direction.
+    // Phone rotated 90° CCW from portrait (home indicator on the
+    // user's RIGHT).  With UI orientation-locked to portrait:
+    //   JS-left  (band horizontal start) = user-BOTTOM
+    //   JS-right (band horizontal end)   = user-TOP
+    // For the canonical "oldest at user-TOP, growth toward user-
+    // BOTTOM" reading direction the monorepo established, we want:
+    //   array[0] (oldest) at user-TOP = JS-rightmost
+    //   newest        at user-BOTTOM = JS-leftmost
+    //   → flexDirection: 'row-reverse'  (array[0] at JS-rightmost)
     return {
       kind: 'landscape',
       band: {
-        position: 'absolute',
-        left: 0,
-        right: 0,
-        bottom: 12,
+        marginHorizontal: 16,
+        marginVertical: 8,
         height: BAND_THICKNESS,
         flexDirection: 'row-reverse',
         ...commonInner,
@@ -217,23 +226,18 @@ function layoutFor(orientation: BandCaptureOrientation): Layout {
     };
   }
   if (orientation === 'landscape-right') {
-    // Phone rotated 90° CW from portrait.  JS-coord mapping:
-    //   JS-top    = phone-top    = user-RIGHT  → band sits here
-    //   JS-left   = phone-left   = user-TOP
-    //   JS-right  = phone-right  = user-BOTTOM
-    // For "oldest at user-TOP, growth toward user-BOTTOM":
-    //   array[0] needs to land at user-TOP = JS-left
-    //   → flexDirection: 'row' (array[0] at JS-leftmost).
-    // For arrow appearing as user-DOWN:
-    //   `→` glyph (JS-direction +X) after 90° CW rotation maps to
-    //   user-down direction.
+    // Phone rotated 90° CW from portrait (home indicator on the
+    // user's LEFT).  Mirror of landscape-left:
+    //   JS-left  = user-TOP
+    //   JS-right = user-BOTTOM
+    // For "oldest at user-TOP, newest at user-BOTTOM":
+    //   array[0] (oldest) at user-TOP = JS-leftmost
+    //   → flexDirection: 'row'  (array[0] at JS-leftmost)
     return {
       kind: 'landscape',
       band: {
-        position: 'absolute',
-        left: 0,
-        right: 0,
-        top: 12,
+        marginHorizontal: 16,
+        marginVertical: 8,
         height: BAND_THICKNESS,
         flexDirection: 'row',
         ...commonInner,
@@ -242,14 +246,14 @@ function layoutFor(orientation: BandCaptureOrientation): Layout {
       arrowGlyph: '→',
     };
   }
-  // portrait / portrait-upside-down / default.
+  // portrait / portrait-upside-down / default.  Held portrait, pan
+  // is horizontal left→right (or right→left for left-handed scans;
+  // the band doesn't enforce a direction).  newest at JS-rightmost.
   return {
     kind: 'portrait',
     band: {
-      position: 'absolute',
-      left: 16,
-      right: 16,
-      bottom: 16,
+      marginHorizontal: 16,
+      marginVertical: 8,
       height: BAND_THICKNESS,
       flexDirection: 'row',
       ...commonInner,

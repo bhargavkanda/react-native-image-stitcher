@@ -1,16 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Tiger Analytics
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // Gradle module for the Android side of react-native-image-stitcher.
 //
 // What lives here:
-//   - RetaiLensQualityChecker.kt — Laplacian-variance blur scoring
+//   - QualityChecker.kt — Laplacian-variance blur scoring
 //     and mean-luminance brightness scoring via OpenCV.  Mirror of
 //     the iOS Phase 1 implementation (which used vImage + vDSP).
-//   - RetaiLensStitcher.kt — extractFrames + stitchFrames +
+//   - Stitcher.kt — extractFrames + stitchFrames +
 //     stitchVideo + normaliseImage, mirroring the iOS Phase 2 / 2.5
 //     ObjC++ surface.
-//   - RetaiLensCapturePackage.kt — ReactPackage that surfaces the
+//   - RNImageStitcherPackage.kt — ReactPackage that surfaces the
 //     two RN modules to the host app via Android autolinking.
 //
 // OpenCV vendor:
@@ -27,45 +27,43 @@ def reactNativeRoot = rootProject.findProperty("reactNativeRoot") ?: project.fil
 
 // ── OpenCV Android SDK download ──────────────────────────────────────
 //
-// We download the official OpenCV release zip (4.9.0) and unpack it
-// into `vendor/`.  Same idea as the iOS Phase 2 prepare_command —
-// no Maven artifact ships the full module set (most community
-// publications strip `stitching` / `imgcodecs` / `calib3d` to keep
-// the AAR small), but we need stitching, so we vendor it.
+// The OpenCV custom Android SDK is delivered by the package's
+// postinstall script (`scripts/postinstall-fetch-binaries.js`).  It
+// downloads the version-matched release asset from GitHub Releases
+// and extracts it into `android/vendor/OpenCV-android-sdk/` — exactly
+// where this build.gradle (and `cpp/CMakeLists.txt`) read it from.
 //
-// The download is idempotent: if `vendor/OpenCV-android-sdk/sdk/`
-// exists we skip.  ~80 MB compressed → ~250 MB extracted, gitignored.
-def opencvVersion = '4.5.5'
+// We deliberately do NOT have a fallback that fetches stock OpenCV
+// from upstream: stock 4.x ships WITHOUT `BUILD_opencv_stitching=ON`,
+// so the static lib `libopencv_stitching.a` that CMake links isn't
+// in the upstream archive.  If we silently downloaded the upstream
+// release, the build would explode with a confusing CMake "static
+// archive not found" error.  Better to fail FAST here with a clear
+// message pointing at the actual cause.
 def opencvVendorDir = file("$projectDir/vendor")
 def opencvSdkDir = file("$opencvVendorDir/OpenCV-android-sdk/sdk")
-def opencvZipUrl = "https://github.com/opencv/opencv/releases/download/${opencvVersion}/opencv-${opencvVersion}-android-sdk.zip"
-def opencvZipFile = file("$opencvVendorDir/opencv-${opencvVersion}.zip")
-
-// Download at configuration time (before sourceSets evaluate) so
-// the java/src and native/libs paths exist when Gradle reads the
-// android {} block below.  Idempotent: skips if the SDK is already
-// present.
 if (!opencvSdkDir.exists()) {
-    opencvVendorDir.mkdirs()
-    if (!opencvZipFile.exists()) {
-        println "Downloading OpenCV ${opencvVersion} from ${opencvZipUrl}…"
-        new URL(opencvZipUrl).withInputStream { i ->
-            opencvZipFile.withOutputStream { o -> o << i }
-        }
-    }
-    println "Extracting OpenCV ${opencvVersion} to ${opencvVendorDir}…"
-    ant.unzip(src: opencvZipFile, dest: opencvVendorDir, overwrite: true)
-    opencvZipFile.delete()
+    throw new GradleException(
+        "OpenCV custom SDK missing at ${opencvSdkDir.absolutePath}.\n" +
+        "Did `npm install` succeed?  The package's postinstall script\n" +
+        "(scripts/postinstall-fetch-binaries.js) downloads the binaries\n" +
+        "from GitHub Releases on install.  Recovery:\n" +
+        "  - `npm install --force` to re-run postinstall\n" +
+        "  - Or set OPENCV_BINARY_BASE_URL env var to an internal mirror\n" +
+        "  - Or run `SKIP_OPENCV_FETCH=1 npm install` and stage the SDK manually"
+    )
 }
 
 android {
     namespace 'io.imagestitcher.rn'
     compileSdkVersion safeExtGet('compileSdkVersion', 34)
-    // Pin NDK to a known-good install — the host machine has a
-    // broken 27.0.12077973 (missing source.properties) sitting next
-    // to a working 27.1.12297006; without this, Gradle picks the
-    // broken one alphabetically and fails configuration.
-    ndkVersion "27.1.12297006"
+    // Inherit the host's NDK pin (Expo apps expose `ndkVersion` on
+    // rootProject.ext) so AGP doesn't fall back to its built-in default
+    // (which on AGP 8.6+ is 27.0.12077973, a version that's commonly
+    // half-installed on developer machines and trips [CXX1101]
+    // "source.properties missing").  27.1.12297006 is the
+    // last-known-good fallback for raw RN hosts without an Expo pin.
+    ndkVersion safeExtGet('ndkVersion', '27.1.12297006')
 
     defaultConfig {
         minSdkVersion safeExtGet('minSdkVersion', 24)
@@ -125,7 +123,7 @@ android {
     // bindings.  Re-enabling Android-side stitching requires
     // building OpenCV Android from source with `BUILD_opencv_stitching=ON`,
     // which is a hours-long build job out of scope for the SDK
-    // package itself.  See the Kotlin RetaiLensStitcher for the
+    // package itself.  See the Kotlin BatchStitcher for the
     // current "iOS-only" stitch behaviour.
 
     sourceSets {

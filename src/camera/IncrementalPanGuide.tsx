@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * IncrementalPanGuide — V12.11 Step 2 (item 2 of the four-step
  * preview-UX overhaul).

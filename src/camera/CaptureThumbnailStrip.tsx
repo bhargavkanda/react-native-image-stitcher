@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * CaptureThumbnailStrip — horizontal thumbnail strip with built-in
  * tap-to-preview modal, designed for the audit capture surface.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 
 #import "OpenCVKeyframeCollector.h"
 #import <ImageIO/ImageIO.h>

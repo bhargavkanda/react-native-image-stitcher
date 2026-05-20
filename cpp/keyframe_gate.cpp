@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // keyframe_gate.cpp — direct port of KeyframeGate.swift.  See
 // keyframe_gate.hpp + ../ios/Sources/RNImageStitcher/KeyframeGate.swift

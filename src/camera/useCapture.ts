@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * useCapture — React hook that encapsulates the camera capture state
  * machine so host apps get a drop-in replacement for the ad-hoc

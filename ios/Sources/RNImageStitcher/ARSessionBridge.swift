@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // ARSessionBridge — RN bridge for RNSARSession.
 //
@@ -10,9 +10,9 @@
 //   getState() → Promise<{ isRunning, trackingState }>
 //   snapshotPoseLog() → Promise<FramePose[]>
 //
-// Phase 5+ APIs (stitchVideoWithPoses, measureRegion) are added on
-// the existing BatchStitcher bridge, not here — keeps each
-// module focused on one ARKit/OpenCV concern.
+// Phase 5+ APIs (stitchVideoWithPoses) are added on the existing
+// BatchStitcher bridge, not here — keeps each module focused on
+// one ARKit/OpenCV concern.
 
 import Foundation
 import React

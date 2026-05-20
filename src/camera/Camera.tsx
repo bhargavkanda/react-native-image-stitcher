@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * Camera — the public, props-based camera component for the
  * `react-native-image-stitcher` library (publication target per the
@@ -46,7 +47,7 @@ import React, {
   useState,
 } from 'react';
 import {
-  Platform,
+  NativeModules,
   Pressable,
   StyleSheet,
   Text,
@@ -57,6 +58,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { Camera as VisionCamera } from 'react-native-vision-camera';
 
+import { useARSession } from '../ar/useARSession';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
@@ -75,7 +77,7 @@ import {
   subscribeIncrementalState,
   type IncrementalState,
 } from '../stitching/incremental';
-import { useIncrementalAndroidDriver } from '../stitching/useIncrementalAndroidDriver';
+import { useIncrementalJSDriver } from '../stitching/useIncrementalJSDriver';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
 
@@ -100,7 +102,7 @@ export type Warper = 'plane' | 'cylindrical' | 'spherical';
  * CaptureResult shape has SDK-specific fields (deviceMetadata,
  * qualityReport, deviceUuid) that don't belong in the public RN
  * library's surface.  Step 3 (symbol rename) will retire the
- * `RetaiLens*` / SDK-specific names; for now we keep both types
+ * historical SDK-specific names; for now we keep both types
  * side-by-side so the existing host code continues to work.
  */
 export type CameraCaptureResult =
@@ -399,12 +401,19 @@ const settingsButtonStyles = StyleSheet.create({
 // ─── Main component ─────────────────────────────────────────────────
 
 /**
- * Effective capture source derived from arPreference + lens.
+ * Effective capture source derived from arPreference + lens + the
+ * device's AR support.  On a device without ARKit / ARCore, AR mode
+ * is unavailable regardless of the user's preference, and the AR
+ * toggle is hidden in the UI (see the bottom-bar JSX).  Selecting
+ * the 0.5x lens also forces non-AR because ARKit / ARCore sessions
+ * don't expose the ultra-wide camera.
  */
 function deriveEffectiveCaptureSource(
   arPreference: boolean,
   lens: CameraLens,
+  isARSupportedOnDevice: boolean,
 ): CaptureSource {
+  if (!isARSupportedOnDevice) return 'non-ar';
   if (lens === '0.5x') return 'non-ar';
   return arPreference ? 'ar' : 'non-ar';
 }
@@ -450,6 +459,31 @@ function buildInitialSettings(props: CameraProps): PanoramaSettings {
 
 
 /**
+ * Normalise a native-side file path into the `file://...` URI form
+ * that React Native's `<Image>` requires on Android.  iOS is lenient,
+ * but Android rejects bare `/data/...` paths and renders a blank
+ * Image with no error in the JS layer.
+ *
+ * Native code in this lib emits paths in two flavours:
+ *   - useCapture.compressedUri already includes `file://` (it's
+ *     normalised in `makeCaptureResult`).
+ *   - ARCameraView.takePhoto, IncrementalStitcher.finalize, and the
+ *     `batchKeyframeThumbnailPath` from `IncrementalStateUpdate` all
+ *     return bare paths.  Those are the cases this helper handles.
+ *
+ * Already-prefixed inputs are passed through unchanged, so it's safe
+ * to call defensively at every public-API boundary.
+ */
+function ensureFileUri(path: string | null | undefined): string {
+  if (!path) return '';
+  if (path.startsWith('file://') || path.startsWith('content://') || path.startsWith('http')) {
+    return path;
+  }
+  return `file://${path}`;
+}
+
+
+/**
  * The public `<Camera>` component.
  */
 export function Camera(props: CameraProps): React.JSX.Element {
@@ -486,11 +520,55 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const [batchKeyframeThumbnails, setBatchKeyframeThumbnails] = useState<
     string[]
   >([]);
+  const [cameraTransitioning, setCameraTransitioning] = useState(false);
 
-  const effectiveCaptureSource = deriveEffectiveCaptureSource(arPreference, lens);
+  // ARKit / ARCore device-support probe.  `isAvailable` is `false`
+  // initially and becomes `true` after the native isSupported() check
+  // resolves (~50-200 ms after mount).  Devices without ARKit / ARCore
+  // (older iPhones, ARCore-less Androids, simulators) stay `false`
+  // forever, which forces non-AR capture everywhere and hides the
+  // AR toggle in the bottom bar (see JSX below).
+  const { isAvailable: isARSupportedOnDevice } = useARSession();
+
+  const effectiveCaptureSource = deriveEffectiveCaptureSource(
+    arPreference,
+    lens,
+    isARSupportedOnDevice,
+  );
   const isAR = effectiveCaptureSource === 'ar';
   const isNonAR = !isAR;
   const deviceOrientation = useDeviceOrientation();
+
+  // ── Camera handoff gate ─────────────────────────────────────────
+  //
+  // The placeholder rendered while the underlying camera identity
+  // changes (AR toggle, lens swap).  Without this gap, Android
+  // vision-camera v4 races the new session's open against the old
+  // session's teardown → "Session has been closed"
+  // IllegalStateException OR "Maximum cameras in use"
+  // CameraAccessException.
+  //
+  // CRITICAL: A naive useState + useEffect approach DOESN'T WORK.
+  // useEffect runs AFTER the commit phase — so on the render where
+  // isAR/lens flips, the effect hasn't yet set the gate flag, the
+  // render branch already evaluated `flag ? placeholder : camera`
+  // against the STALE flag=false → the new camera mounts in that
+  // commit → race → crash.
+  //
+  // Fix (mirrors AuditCaptureScreen.tsx ~L695-766): track the
+  // "last fully settled" identity in refs and compare them
+  // SYNCHRONOUSLY during render.  The gate closes on the FIRST
+  // render where isAR/lens differs from the settled refs.  The
+  // useEffect below does the async work (explicit AR session stop +
+  // 250 ms grace) and then updates the refs + clears the flag
+  // together to drop the gate.
+  const settledIsARRef = useRef(isAR);
+  const settledLensRef = useRef(lens);
+  const inFlightTransition =
+    settledIsARRef.current !== isAR
+    || settledLensRef.current !== lens
+    || cameraTransitioning;
+
 
   // ── Notify parent of capture-source changes ─────────────────────
   const lastEmittedSourceRef = useRef<CaptureSource | null>(null);
@@ -520,6 +598,46 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);
 
+  // Effect that does the async transition work whenever the settled
+  // refs disagree with the current isAR/lens.  Order matters:
+  //   1. Set the cameraTransitioning state so the gate stays closed
+  //      after the synchronous compare flips back to "settled" once
+  //      we update the refs.
+  //   2. Explicitly stop the AR session if we were in AR mode — this
+  //      releases ARCore's grip on Camera2 BEFORE vision-camera tries
+  //      to open it.  Without this on Android the next openCamera()
+  //      call hits "Maximum cameras in use".  The promise is ignored
+  //      if RNSARSession.stop fails or isn't available.
+  //   3. Wait 250 ms (Camera2's HAL onClosed is async; this gives it
+  //      time to fully release the handle).
+  //   4. Update settled refs + clear cameraTransitioning together so
+  //      the gate opens on the same commit.
+  useEffect(() => {
+    if (settledIsARRef.current === isAR && settledLensRef.current === lens) {
+      return undefined;
+    }
+    setCameraTransitioning(true);
+    let cancelled = false;
+    const finishTransition = () => {
+      if (cancelled) return;
+      settledIsARRef.current = isAR;
+      settledLensRef.current = lens;
+      setCameraTransitioning(false);
+    };
+    const wasAR = settledIsARRef.current;
+    const arModule = (NativeModules as Record<string, unknown>).RNSARSession as
+      | { stop?: () => Promise<void> }
+      | undefined;
+    const stopPromise: Promise<unknown> =
+      wasAR && arModule?.stop ? arModule.stop() : Promise.resolve();
+    stopPromise
+      .catch(() => undefined)
+      .then(() => {
+        setTimeout(finishTransition, 250);
+      });
+    return () => { cancelled = true; };
+  }, [isAR, lens]);
+
   // IMU translation gate — only in non-AR mode.
   const imuGate = useIMUTranslationGate({
     enabled:
@@ -533,19 +651,28 @@ export function Camera(props: CameraProps): React.JSX.Element {
     },
   });
 
-  // Android non-AR driver — starts/stops with recording.
-  const androidDriver = useIncrementalAndroidDriver();
-  useEffect(() => {
-    if (Platform.OS !== 'android' || !isNonAR) return undefined;
-    if (statusPhase === 'recording') {
-      androidDriver.start(visionCameraRef);
-    } else {
-      androidDriver.stop();
-    }
-    return () => {
-      androidDriver.stop();
-    };
-  }, [statusPhase, isNonAR, androidDriver]);
+  // JS-driver for non-AR captures (iOS + Android).  In AR mode the
+  // engine consumes frames from the ARSession stream natively, so this
+  // hook stays idle.
+  //
+  // IMPORTANT: start()/stop() are called imperatively from the hold
+  // handlers below — NOT from a useEffect driven by statusPhase.  The
+  // hook returns a fresh object identity on every render, and during
+  // a recording the engine emits IncrementalStateUpdate events that
+  // cause re-renders multiple times per second.  An effect with
+  // `jsDriver` in its deps would teardown + restart the driver on
+  // every event, resetting the gyro accumulator (yaw/pitch) to zero
+  // each cycle and nulling the cameraRef during the brief gap.  The
+  // user-visible symptom was "only the first keyframe is accepted,
+  // every subsequent snapshot sees pose=(0,0) and is rejected as a
+  // duplicate of the first".  Matching AuditCaptureScreen's proven
+  // imperative pattern (start on hold-start, stop on hold-end) avoids
+  // the re-render churn entirely.
+  const jsDriver = useIncrementalJSDriver();
+  // Safety: ensure the driver is stopped if the component unmounts
+  // mid-recording.  Empty deps so this only fires on unmount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => () => { jsDriver.stop(); }, []);
 
   // ── Subscribe to engine state for live keyframe thumbs ──────────
   useEffect(() => {
@@ -554,7 +681,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
       if (state?.batchKeyframeThumbnailPath) {
         setBatchKeyframeThumbnails((prev) => {
           // De-dupe — same path may emit on subsequent ticks.
-          const path = state.batchKeyframeThumbnailPath!;
+          // Normalise to `file://...` so Android <Image> in the band
+          // overlay can actually render the thumbnail.
+          const path = ensureFileUri(state.batchKeyframeThumbnailPath!);
           if (prev.includes(path)) return prev;
           return [...prev, path];
         });
@@ -579,7 +708,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
       let height: number;
       if (isAR && arViewRef.current) {
         const photo = await arViewRef.current.takePhoto({ quality: 90 });
-        uri = photo.path;
+        // Native side returns a bare `/data/.../foo.jpg` path.  Android
+        // <Image> needs the `file://` scheme to render it; iOS is OK
+        // either way.
+        uri = ensureFileUri(photo.path);
         width = photo.width;
         height = photo.height;
       } else {
@@ -658,6 +790,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
         },
       });
       imuGate.resetAnchor();
+      // Start pumping vision-camera snapshots into the engine for
+      // non-AR captures.  AR mode feeds frames natively from the
+      // ARSession, so the JS driver stays idle in that path.  This
+      // mirrors AuditCaptureScreen.handleHoldStart's `androidDriver.start`
+      // imperative call — see the comment near `useIncrementalJSDriver`
+      // for why this is NOT done via useEffect.
+      if (isNonAR) {
+        jsDriver.start(visionCameraRef);
+      }
     } catch (err) {
       setStatusPhase('idle');
       onError?.(
@@ -675,12 +816,17 @@ export function Camera(props: CameraProps): React.JSX.Element {
     deviceOrientation,
     settings,
     imuGate,
+    jsDriver,
     onError,
   ]);
 
   const handleHoldEnd = useCallback(async () => {
     if (statusPhase !== 'recording') return;
     setStatusPhase('stitching');
+    // Stop pumping new snapshots before finalizing so the engine isn't
+    // racing the final cv::Stitcher pass against late-arriving keyframes.
+    // No-op in AR mode where jsDriver was never started.
+    jsDriver.stop();
     try {
       const result = await incremental.finalize(
         undefined,
@@ -699,7 +845,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
       }
       onCapture?.({
         type: 'panorama',
-        uri: result.panoramaPath,
+        // Native finalize() returns a bare `/data/.../foo.jpg` path;
+        // normalise to `file://` for Android <Image>.
+        uri: ensureFileUri(result.panoramaPath),
         width: result.width,
         height: result.height,
         framesRequested: result.framesRequested ?? -1,
@@ -730,6 +878,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onFramesDropped,
     onError,
     recordingStartedAt,
+    jsDriver,
   ]);
 
   // ── Lens / AR-toggle handlers ───────────────────────────────────
@@ -743,10 +892,19 @@ export function Camera(props: CameraProps): React.JSX.Element {
   }, []);
 
   // ── JSX ─────────────────────────────────────────────────────────
+
   return (
     <View style={[styles.container, style]}>
-      {/* Preview — AR or non-AR */}
-      {isAR ? (
+      {/* Preview — AR or non-AR (or the brief "switching…" placeholder
+          while the previous session tears down).  Conditional mount so
+          only ONE camera component is alive at a time; matches the
+          monorepo's working pattern and avoids the Camera2-in-use
+          conflict that "always mount both" caused on Android. */}
+      {inFlightTransition ? (
+        <View style={[StyleSheet.absoluteFill, styles.transitionPlaceholder]}>
+          <Text style={styles.transitionLabel}>Switching camera…</Text>
+        </View>
+      ) : isAR ? (
         <ARCameraView
           ref={arViewRef}
           style={StyleSheet.absoluteFill}
@@ -756,7 +914,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
           ref={visionCameraRef}
           device={capture.device}
           isActive
-          video={false}
+          // `video={true}` is REQUIRED for takeSnapshot to work on iOS.
+          // vision-camera v4's iOS implementation of takeSnapshot waits
+          // for a frame on the video pipeline; with video disabled, the
+          // promise never resolves and the JS frame-driver stalls after
+          // the very first buffered preview frame.  Android takeSnapshot
+          // works either way.  Pattern matches AuditCaptureScreen.tsx
+          // which has run on `video` (true) for months without issue.
+          video
           flash="off"
           style={StyleSheet.absoluteFill}
         />
@@ -769,15 +934,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
         recordingStartedAt={recordingStartedAt ?? undefined}
       />
 
-      {/* Live-frame band (panorama only).  Only visible while recording. */}
-      {statusPhase === 'recording' && (
-        <PanoramaBandOverlay
-          state={incrementalState}
-          frameUris={batchKeyframeThumbnails}
-          captureOrientation={deviceOrientation}
-        />
-      )}
-
       {/* Settings gear (top-right), gated on showSettingsButton. */}
       {showSettingsButton && (
         <SettingsButton
@@ -786,11 +942,30 @@ export function Camera(props: CameraProps): React.JSX.Element {
         />
       )}
 
-      {/* Bottom bar: lens chip + AR toggle + shutter. */}
+      {/*
+        Bottom area: stacks the live-frame band ABOVE the shutter row
+        so the band is tethered to the shutter on the viewport side
+        (the operator's eye is drawn from the camera preview, down
+        the band, into the shutter — a single continuous reading
+        path).  With the SDK's orientation lock holding the UI in
+        portrait, this stack works the same regardless of how the
+        device is physically held.
+      */}
       <View
         pointerEvents="box-none"
-        style={[styles.bottomBar, { paddingBottom: insets.bottom + 12 }]}
+        style={[styles.bottomArea, { paddingBottom: insets.bottom + 12 }]}
       >
+        {/* Live-frame band — only visible while recording. */}
+        {statusPhase === 'recording' && (
+          <PanoramaBandOverlay
+            state={incrementalState}
+            frameUris={batchKeyframeThumbnails}
+            captureOrientation={deviceOrientation}
+          />
+        )}
+
+        {/* Shutter row: lens chip (left), shutter (centre), AR toggle (right). */}
+        <View style={styles.bottomBar}>
         <View style={styles.bottomBarLeft} />
         <View style={styles.bottomBarCenter}>
           <LensChip
@@ -809,9 +984,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
           </View>
         </View>
         <View style={styles.bottomBarRight}>
-          {lens === '1x' && (
+          {lens === '1x' && isARSupportedOnDevice && (
             <ARToggle arEnabled={arPreference} onToggle={handleARToggle} />
           )}
+        </View>
         </View>
       </View>
 
@@ -837,11 +1013,24 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000',
   },
-  bottomBar: {
+  transitionPlaceholder: {
+    backgroundColor: '#000',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  transitionLabel: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 13,
+  },
+  bottomArea: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
+    flexDirection: 'column',
+    alignItems: 'stretch',
+  },
+  bottomBar: {
     flexDirection: 'row',
     paddingHorizontal: 18,
     alignItems: 'flex-end',

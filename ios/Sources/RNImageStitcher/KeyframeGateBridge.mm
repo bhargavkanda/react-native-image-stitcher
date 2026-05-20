@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // KeyframeGateBridge.mm — Obj-C++ glue between Swift and the shared
 // C++ KeyframeGate.  See header for design rationale.

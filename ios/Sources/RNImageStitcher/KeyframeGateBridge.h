@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // KeyframeGateBridge.h — Obj-C++ wrapper exposing the shared C++
 // KeyframeGate (in retailens-capture-sdk/cpp/) to Swift.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * IncrementalStitcherView — live preview component for the panorama
  * engine.  Renders the latest snapshot JPEG written by the native
