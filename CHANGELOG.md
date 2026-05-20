@@ -16,7 +16,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] — TBD
+## [0.1.1] — 2026-05-20
+
+### Added
+
+- **Layer 2 building blocks now public.**  The lower-level views,
+  hooks, and stitching-engine bindings that previously lived behind
+  the `<Camera>` wrapper are now exported from the package root.
+  Use these when `<Camera>` doesn't give you enough control — e.g.,
+  when you're hand-composing your own capture screen on top of the
+  same proven primitives.  Full list:
+  - Views: `ARCameraView`, `CameraView` (+ their handle/prop types).
+  - UI components: `CaptureHeader`, `CaptureControlsBar`,
+    `CapturePreview`, `CaptureStatusOverlay`, `CaptureThumbnailStrip`,
+    `IncrementalPanGuide`, `PanoramaBandOverlay`, `PanoramaGuidance`,
+    `PanoramaSettingsModal` (+ `DEFAULT_PANORAMA_SETTINGS` constant +
+    `PanoramaSettings` type), `ViewportCropOverlay`.
+  - Hooks: `useCapture`, `useVideoCapture`, `useDeviceOrientation`,
+    `useIncrementalStitcher`, `useIncrementalJSDriver`.
+  - Engine: `IncrementalOutcome`, `incrementalStitcherIsAvailable`,
+    `subscribeIncrementalState`, `getIncrementalNativeModule`,
+    `cleanupOldKeyframes`, `IncrementalState` (type).
+  - Batch stitching: `stitchVideo`.
+- The 0.1.0 → 1.0 stability gate still applies — the goal of
+  surfacing layer 2 is to support advanced consumers (e.g.,
+  `retailens-camera-sdk`) without forcing them to deep-import
+  package internals.  These are likely to keep their shape through
+  1.0, but the contract is not formally stable until then.
+
+### Changed
+
+- README now documents both layers and recommends `<Camera>` as the
+  default starting point.
+
+### Fixed
+
+(No bug fixes in this release — see 0.1.0 for the device-verified
+camera lifecycle fixes that shipped with the initial release.)
+
+## [0.1.0] — 2026-05-20
 
 First public release.
 
