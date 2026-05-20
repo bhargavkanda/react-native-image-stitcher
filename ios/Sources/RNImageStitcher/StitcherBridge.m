@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
 //
 // StitcherBridge.m
 //
-// RN bridge declaration for the Swift `RetaiLensStitcherBridge`.
+// RN bridge declaration for the Swift `StitcherBridge`.
 // Same pattern as `QualityCheckerBridge.m`.  Without this file the
 // JS side's `NativeModules.BatchStitcher` would resolve to
 // `undefined` because RN's module map is populated by RCT_EXTERN_*

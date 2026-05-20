@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // StitcherBridge.swift
 //
 // React Native bridge for the SDK's image stitcher.  Mirrors the
@@ -19,7 +20,7 @@ import React
 import UIKit
 
 @objc(BatchStitcher)
-public class RetaiLensStitcherBridge: NSObject {
+public class StitcherBridge: NSObject {
 
   // Stitching is a CPU-bound background operation; let RN drop the
   // module setup to a background queue too so the main thread isn't

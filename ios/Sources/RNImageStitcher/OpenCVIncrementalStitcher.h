@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //
 // OpenCVIncrementalStitcher.h
 //
@@ -32,7 +33,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 /// NSError domain raised by incremental stitcher errors.
-extern NSString *const RetaiLensIncrementalStitcherErrorDomain;
+extern NSString *const RNImageStitcherIncrementalErrorDomain;
 
 /// Per-frame outcome — drives the JS-side UX (silent accept, subtle
 /// flag, explicit hint).

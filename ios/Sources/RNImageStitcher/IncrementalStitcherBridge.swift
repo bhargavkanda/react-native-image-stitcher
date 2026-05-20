@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // IncrementalStitcherBridge — RN bridge for the live panorama engine.
 //
@@ -186,7 +186,7 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
             // tmp file is created in the app's sandbox tmp dir.
             let dir = NSTemporaryDirectory()
             outputPath = (dir as NSString).appendingPathComponent(
-                "RetaiLensIncremental-\(UUID().uuidString).jpg"
+                "RNImageStitcherIncremental-\(UUID().uuidString).jpg"
             )
         } else {
             outputPath = outputPathRaw

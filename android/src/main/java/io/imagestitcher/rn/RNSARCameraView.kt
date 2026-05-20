@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 package io.imagestitcher.rn
 
 import android.content.Context
@@ -87,6 +87,39 @@ class RNSARCameraView @JvmOverloads constructor(
     /// engine.  Toggled by IncrementalStitcher.start/stop
     /// via setIncrementalIngestionActive() below.
     @Volatile private var ingestActive: Boolean = false
+
+    /// Pending takePhoto request, populated by `requestTakePhoto`
+    /// from the bridge thread and consumed by the GL render thread
+    /// on the next `onDrawFrame` so the latest ARCore frame is
+    /// captured.  Cleared atomically so concurrent shutter taps
+    /// don't double-fire — the second tap's promise rejects the
+    /// older request before replacing it.
+    internal data class TakePhotoRequest(
+        val outputPath: String,
+        val quality: Int,
+        val promise: com.facebook.react.bridge.Promise,
+    )
+    private val pendingTakePhoto =
+        AtomicReference<TakePhotoRequest?>(null)
+
+    /// Called from the bridge (RNSARSession.takePhoto @ReactMethod).
+    /// Stores a request that will be fulfilled on the next render
+    /// tick.  If another request is already queued, that one is
+    /// rejected (the JS layer should serialise its own calls).
+    internal fun requestTakePhoto(
+        outputPath: String,
+        quality: Int,
+        promise: com.facebook.react.bridge.Promise,
+    ) {
+        val req = TakePhotoRequest(outputPath, quality, promise)
+        val previous = pendingTakePhoto.getAndSet(req)
+        previous?.promise?.reject(
+            "ar-photo-superseded",
+            "takePhoto: superseded by a newer call before the frame was captured.",
+        )
+        // Wake the render loop in case it's idle.
+        glView.requestRender()
+    }
 
     init {
         addView(
@@ -256,6 +289,72 @@ class RNSARCameraView @JvmOverloads constructor(
         // Forward to the incremental stitcher if engaged.
         if (ingestActive) {
             forwardToIncremental(frame, camera)
+        }
+
+        // takePhoto consumer — runs on EVERY render tick (not just
+        // when ingest is active), since the host calls takePhoto in
+        // photo mode where ingest is off.  No-op when no request is
+        // pending; cheap atomic CAS on the hot path.
+        pendingTakePhoto.getAndSet(null)?.let { req ->
+            fulfilTakePhoto(frame, req)
+        }
+    }
+
+    /// Capture the current ARCore frame to JPEG and resolve / reject
+    /// `req.promise`.  Runs on the GL render thread, called from
+    /// `onDrawFrame` after the frame has been obtained via
+    /// `session.update()`.  Mirrors iOS' `RNSARSession.takePhoto`
+    /// resolution shape: `{ path, width, height, isMirrored,
+    /// isRawPhoto }` so JS code is platform-agnostic.
+    private fun fulfilTakePhoto(
+        frame: com.google.ar.core.Frame,
+        req: TakePhotoRequest,
+    ) {
+        val image = try {
+            frame.acquireCameraImage()
+        } catch (t: Throwable) {
+            req.promise.reject(
+                "ar-photo-no-frame",
+                "takePhoto: acquireCameraImage failed: ${t.message}",
+            )
+            return
+        }
+        val width = image.width
+        val height = image.height
+        try {
+            val written = YuvImageConverter.encodeToJpeg(
+                image,
+                req.outputPath,
+                jpegQuality = req.quality.coerceIn(1, 100),
+                displayRotation = if (lastDisplayRotation >= 0)
+                    lastDisplayRotation
+                else
+                    Surface.ROTATION_0,
+            )
+            if (written == null) {
+                req.promise.reject(
+                    "ar-photo-encode-failed",
+                    "takePhoto: YuvImageConverter.encodeToJpeg returned null.",
+                )
+                return
+            }
+            val result = com.facebook.react.bridge.Arguments.createMap().apply {
+                putString("path", written)
+                putInt("width", width)
+                putInt("height", height)
+                putBoolean("isMirrored", false)
+                putBoolean("isRawPhoto", false)
+            }
+            req.promise.resolve(result)
+        } catch (t: Throwable) {
+            req.promise.reject(
+                "ar-photo-failed",
+                "takePhoto: unexpected error: ${t.message}",
+                t,
+            )
+        } finally {
+            // Image must always be closed or ARCore will starve.
+            try { image.close() } catch (_: Throwable) {}
         }
     }
 

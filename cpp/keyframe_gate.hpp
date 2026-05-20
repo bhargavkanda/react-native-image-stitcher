@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // keyframe_gate.hpp — shared C++ port of KeyframeGate.swift.
 //

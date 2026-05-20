@@ -47,7 +47,7 @@ set(OPENCV_STITCHING_A  "${OPENCV_ANDROID_SDK}/sdk/native/staticlibs/${ANDROID_A
 if(NOT EXISTS "${OPENCV_FAT_SO}")
     message(FATAL_ERROR
         "OpenCV fat shared lib not found at:\n  ${OPENCV_FAT_SO}\n"
-        "Run the OpenCV custom build (see docs/scripts/build-opencv-android.sh) "
+        "Run the OpenCV custom build (see scripts/build-opencv-android.sh) "
         "and copy artifacts into vendor/OpenCV-android-sdk/.")
 endif()
 if(NOT EXISTS "${OPENCV_STITCHING_A}")
@@ -77,7 +77,7 @@ set(SHARED_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp")
 if(NOT EXISTS "${SHARED_CPP_DIR}/keyframe_gate.hpp")
     message(FATAL_ERROR
         "Shared C++ port missing at:\n  ${SHARED_CPP_DIR}\n"
-        "Expected retailens-capture-sdk/cpp/ — was it moved or deleted?")
+        "Expected react-native-image-stitcher/cpp/ — was the package layout broken?")
 endif()
 
 # ── Our shim ───────────────────────────────────────────────────────

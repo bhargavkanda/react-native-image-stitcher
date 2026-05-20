@@ -28,14 +28,23 @@
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-	  <!-- Do not change NSAllowsArbitraryLoads to true, or you will risk app rejection! -->
 		<key>NSAllowsArbitraryLoads</key>
-		<false/>
+		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string></string>
+	<key>NSCameraUsageDescription</key>
+	<string>This example uses the camera to demonstrate panorama capture.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Required by Vision Camera even in photo-only mode.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Reads device motion to drive pose-aware panorama capture.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Saves captured demo images to the photo library.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Saves captured demo images to the photo library.</string>
+	<key>RCTNewArchEnabled</key>
+	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIRequiredDeviceCapabilities</key>

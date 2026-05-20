@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * CaptureHeader — top-of-screen header for any capture surface.
  *

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * ARCameraView — AR-backed alternative to ``<CameraView>`` for
  * audits that need pose-aware capture (panorama mode, packet

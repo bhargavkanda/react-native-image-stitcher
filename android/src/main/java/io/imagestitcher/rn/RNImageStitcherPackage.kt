@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 package io.imagestitcher.rn
 
 import com.facebook.react.ReactPackage
@@ -12,20 +12,20 @@ import com.facebook.react.uimanager.ViewManager
  * sourceDir entry in `react-native.config.js`.
  *
  * Modules registered:
- *   - RetaiLensQualityChecker: blur + brightness scoring
+ *   - QualityChecker: blur + brightness scoring
  *   - BatchStitcher:       stitch / stitchVideo / normaliseImage
  *
  * The Android JS surface mirrors iOS exactly so any code using
- * `NativeModules.RetaiLensQualityChecker.runQualityCheck(...)` or
+ * `NativeModules.RNImageStitcherQualityChecker.runQualityCheck(...)` or
  * `NativeModules.BatchStitcher.stitch(...)` works the same on
  * both platforms — no conditional branching needed in the SDK's
  * JS layer.
  */
-class RetaiLensCapturePackage : ReactPackage {
+class RNImageStitcherPackage : ReactPackage {
     override fun createNativeModules(
         reactContext: ReactApplicationContext,
     ): List<NativeModule> = listOf(
-        RetaiLensQualityChecker(reactContext),
+        QualityChecker(reactContext),
         BatchStitcher(reactContext),
         RNSARSession(reactContext),
         IncrementalStitcher(reactContext),

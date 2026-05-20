@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Stitcher.swift
 //
 // Pure-Swift wrapper around the Objective-C(++) `OpenCVStitcher`.
@@ -200,7 +201,7 @@ public enum Stitcher {
     poses: [[String: Any]]? = nil
   ) throws -> StitchResult {
     do {
-      let result: RetaiLensStitchResult
+      let result: RNStitchResult
       if let poses = poses, !poses.isEmpty {
         // Phase 5: pose-driven path.  Skips features → matching →
         // BundleAdjuster on the native side; cv::detail::CameraParams

@@ -1,0 +1,56 @@
+# .npmignore — controls what ships in the npm tarball.
+#
+# npm prefers .npmignore over .gitignore when present.  We keep this
+# file separate from .gitignore because the goals differ:
+#   - .gitignore  : what NOT to commit (build artefacts, caches, …)
+#   - .npmignore  : what NOT to ship to consumers (above + local dev
+#                   conveniences like the example app, test fixtures,
+#                   scripts only useful to maintainers)
+#
+# Also note: when `files` in package.json is present, npm uses BOTH
+# `files` AND `.npmignore` — the tarball is the intersection of
+# (everything under `files`) MINUS (everything matched by .npmignore).
+# We list `files` in package.json AS WELL as keep this .npmignore
+# tight so that future additions to `files` don't accidentally leak
+# huge generated trees (the OpenCV Android SDK is 865 MB on its own).
+
+# ── Build artefacts and caches (never ship) ────────────────────────
+android/vendor/
+android/build/
+android/.gradle/
+android/.cxx/
+android/src/main/jniLibs/
+ios/Vendor/
+ios/.build/
+ios/.swiftpm/
+ios/Frameworks/
+ios/Pods/
+
+# ── Development & local-only state ─────────────────────────────────
+node_modules/
+.opencv-fetched
+.tmp/
+*.tsbuildinfo
+.DS_Store
+
+# ── Example host app — not part of the library ─────────────────────
+example/
+
+# ── Maintainer-only scripts (the npm package only needs
+#     postinstall-fetch-binaries.js and opencv-version.txt) ─────────
+scripts/build-opencv-android.sh
+scripts/build-opencv-ios.sh
+scripts/build_asan_ios.sh
+scripts/check_c2_invariant.sh
+
+# ── CI & repo plumbing (lives on GitHub, not in the tarball) ───────
+.github/
+
+# ── Documentation that lives on the GitHub repo (not consumer-facing) ──
+docs/
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+
+# ── Source maps (consumers don't need them; bigger tarball for no benefit) ──
+dist/**/*.js.map
+dist/**/*.d.ts.map

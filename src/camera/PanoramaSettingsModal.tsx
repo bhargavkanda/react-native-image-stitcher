@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * PanoramaSettingsModal — runtime A/B testing surface for the
  * stitcher pipeline.  Operators in the field can toggle warper,

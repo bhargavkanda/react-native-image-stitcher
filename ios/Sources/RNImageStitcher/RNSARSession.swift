@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // RNSARSession — iOS ARKit wrapper that drives the SDK's
 // pose-aware capture path.
@@ -417,7 +417,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     /// (currently the incremental-stitcher singleton); this just
     /// prevents the AR session from outliving a consumer that's
     /// been torn down.
-    @objc public weak var incrementalConsumer: RetaiLensARFrameConsumer?
+    @objc public weak var incrementalConsumer: ARFrameConsumer?
 
     private override init() {
         super.init()
@@ -783,14 +783,14 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         if rawPath.isEmpty {
             let dir = NSTemporaryDirectory()
             resolvedPath = (dir as NSString).appendingPathComponent(
-                "RetaiLensAR-\(UUID().uuidString).jpg"
+                "RNImageStitcherAR-\(UUID().uuidString).jpg"
             )
         } else {
             resolvedPath = rawPath
         }
         guard let frame = arSession.currentFrame else {
             completion(nil, NSError(
-                domain: "RetaiLensARCapture",
+                domain: "RNImageStitcherARCapture",
                 code: 2001,
                 userInfo: [NSLocalizedDescriptionKey:
                     "AR session has no current frame — start the session first."]
@@ -813,7 +813,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             from: ciImage.extent
         ) else {
             completion(nil, NSError(
-                domain: "RetaiLensARCapture",
+                domain: "RNImageStitcherARCapture",
                 code: 2002,
                 userInfo: [NSLocalizedDescriptionKey:
                     "Failed to render AR frame to CGImage."]
@@ -826,7 +826,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             compressionQuality: CGFloat(clamped) / 100.0
         ) else {
             completion(nil, NSError(
-                domain: "RetaiLensARCapture",
+                domain: "RNImageStitcherARCapture",
                 code: 2003,
                 userInfo: [NSLocalizedDescriptionKey:
                     "Failed to encode AR frame as JPEG."]
@@ -869,7 +869,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         if rawPath.isEmpty {
             let dir = NSTemporaryDirectory()
             resolvedPath = (dir as NSString).appendingPathComponent(
-                "RetaiLensAR-\(UUID().uuidString).mp4"
+                "RNImageStitcherAR-\(UUID().uuidString).mp4"
             )
         } else {
             resolvedPath = rawPath
@@ -880,7 +880,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         writerLock.unlock()
         if alreadyRecording {
             completion(nil, NSError(
-                domain: "RetaiLensARCapture",
+                domain: "RNImageStitcherARCapture",
                 code: 2010,
                 userInfo: [NSLocalizedDescriptionKey:
                     "A recording is already in progress."]
@@ -890,7 +890,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
 
         guard let frame = self.arSession.currentFrame else {
             completion(nil, NSError(
-                domain: "RetaiLensARCapture",
+                domain: "RNImageStitcherARCapture",
                 code: 2011,
                 userInfo: [NSLocalizedDescriptionKey:
                     "AR session has no current frame — start the session first."]
@@ -962,7 +962,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
 
                 guard writer.canAdd(input) else {
                     completion(nil, NSError(
-                        domain: "RetaiLensARCapture",
+                        domain: "RNImageStitcherARCapture",
                         code: 2012,
                         userInfo: [NSLocalizedDescriptionKey:
                             "AVAssetWriter rejected the video input — codec/format mismatch."]
@@ -996,7 +996,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
                     self?.poseLog.removeAll(keepingCapacity: true)
                 }
 
-                NSLog("[RetaiLensARCapture] startRecording: %dx%d → %@",
+                NSLog("[RNImageStitcherARCapture] startRecording: %dx%d → %@",
                       width, height, cleanedPath)
                 completion(cleanedPath, nil)
         } catch {
@@ -1028,7 +1028,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
 
         guard let writer = writer, let input = input else {
             completion(nil, NSError(
-                domain: "RetaiLensARCapture",
+                domain: "RNImageStitcherARCapture",
                 code: 2020,
                 userInfo: [NSLocalizedDescriptionKey:
                     "No active recording to stop."]
@@ -1046,7 +1046,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
                 .attributesOfItem(atPath: path))?[.size] as? Int ?? 0
             let track = asset.tracks(withMediaType: .video).first
             let naturalSize = track?.naturalSize ?? .zero
-            NSLog("[RetaiLensARCapture] stopRecording: %.2fs, %lld bytes",
+            NSLog("[RNImageStitcherARCapture] stopRecording: %.2fs, %lld bytes",
                   durationSec, Int64(fileSize))
             completion([
                 "path": path,

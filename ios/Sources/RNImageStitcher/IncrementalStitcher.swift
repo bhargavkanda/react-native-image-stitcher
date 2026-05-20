@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // IncrementalStitcher — Swift-side engine for the live
 // panorama-stitching pipeline introduced in
@@ -50,7 +50,7 @@ import os.log
 /// Values 7+ are emitted from the Swift gate layer (KeyframeGate),
 /// not from the native engine.  Keep numeric values in lockstep with
 /// `IncrementalOutcome` in incremental.ts.
-@objc public enum RetaiLensIncrementalOutcome: Int {
+@objc public enum IncrementalOutcome: Int {
     case acceptedHigh = 0
     case acceptedMedium = 1
     case skippedTooClose = 2
@@ -80,7 +80,7 @@ public final class IncrementalStateObject: NSObject {
     @objc public let width: Int
     @objc public let height: Int
     @objc public let acceptedCount: Int
-    @objc public let outcome: RetaiLensIncrementalOutcome
+    @objc public let outcome: IncrementalOutcome
     @objc public let confidence: Double
     @objc public let overlapPercent: Double
     @objc public let processingMs: Double
@@ -110,7 +110,7 @@ public final class IncrementalStateObject: NSObject {
         width: Int,
         height: Int,
         acceptedCount: Int,
-        outcome: RetaiLensIncrementalOutcome,
+        outcome: IncrementalOutcome,
         confidence: Double,
         overlapPercent: Double,
         processingMs: Double,
@@ -562,8 +562,8 @@ public final class IncrementalStitcher: NSObject {
     /// the app sandbox tmp or a host-supplied location), pick a path
     /// for the refined output.  Pattern:
     ///
-    ///   /…/RetaiLensIncremental-<uuid>.jpg
-    ///       → /…/RetaiLensIncremental-<uuid>-refined.jpg
+    ///   /…/RNImageStitcherIncremental-<uuid>.jpg
+    ///       → /…/RNImageStitcherIncremental-<uuid>-refined.jpg
     ///
     /// Same directory keeps cleanup discoverable (delete both when
     /// the audit is discarded).  Different name avoids racing the
@@ -1422,7 +1422,7 @@ public final class IncrementalStitcher: NSObject {
                         }
                         payload.collector?.cleanup()
                         completion(nil, NSError(
-                            domain: "RetaiLensIncremental",
+                            domain: "RNImageStitcherIncremental",
                             code: 9003,
                             userInfo: [NSLocalizedDescriptionKey:
                                 "Batch-keyframe finalize: 0 keyframes saved — capture didn't accept any frames."]
@@ -1531,7 +1531,7 @@ public final class IncrementalStitcher: NSObject {
                             os_log(.fault, log: Self.diagLog,
                                    "[V16-batch-keyframe.fix9] sentinel result from stitchFramePaths — see preceding [BatchStitcher] NSLog for cause; emitting clean error to JS")
                             completion(nil, NSError(
-                                domain: "RetaiLensIncremental",
+                                domain: "RNImageStitcherIncremental",
                                 code: 9007,
                                 userInfo: [NSLocalizedDescriptionKey:
                                     "Could not stitch the captured frames into a panorama. Please try recapturing with a slower, more deliberate pan that overlaps each section by at least 50%."]
@@ -1649,7 +1649,7 @@ public final class IncrementalStitcher: NSObject {
                     ], nil)
                 } else {
                     completion(nil, NSError(
-                        domain: "RetaiLensIncremental",
+                        domain: "RNImageStitcherIncremental",
                         code: 9002,
                         userInfo: [NSLocalizedDescriptionKey:
                             "No active capture — call start() first."]
@@ -1702,7 +1702,7 @@ public final class IncrementalStitcher: NSObject {
     ) {
         guard framePaths.count >= 2 else {
             completion(nil, NSError(
-                domain: "RetaiLensIncremental",
+                domain: "RNImageStitcherIncremental",
                 code: 9101,
                 userInfo: [NSLocalizedDescriptionKey:
                     "refinePanorama requires at least 2 framePaths (got \(framePaths.count))."]
@@ -1714,7 +1714,7 @@ public final class IncrementalStitcher: NSObject {
             let cleaned = p.hasPrefix("file://") ? String(p.dropFirst(7)) : p
             if !fm.fileExists(atPath: cleaned) {
                 completion(nil, NSError(
-                    domain: "RetaiLensIncremental",
+                    domain: "RNImageStitcherIncremental",
                     code: 9102,
                     userInfo: [NSLocalizedDescriptionKey:
                         "refinePanorama: keyframe missing on disk — \(cleaned)"]
@@ -1761,7 +1761,7 @@ public final class IncrementalStitcher: NSObject {
                 // returns; surface as a clean NSError.
                 if r.width == 0 && r.height == 0 {
                     completion(nil, NSError(
-                        domain: "RetaiLensIncremental",
+                        domain: "RNImageStitcherIncremental",
                         code: 9107,
                         userInfo: [NSLocalizedDescriptionKey:
                             "refinePanorama: stitcher returned sentinel — see preceding [BatchStitcher] log for cause."]
@@ -2193,7 +2193,7 @@ public final class IncrementalStitcher: NSObject {
     private func emitKeyframeRejectState(decision: KeyframeGateDecision) {
         // Pick the right outcome value for JS; defaults match the
         // intent (overlap-too-high vs cap-reached).
-        let outcome: RetaiLensIncrementalOutcome
+        let outcome: IncrementalOutcome
         switch decision.reason {
         case "max-reached":      outcome = .skippedKeyframeMaxReached
         case "overlap-too-high": outcome = .skippedKeyframeOverlap
@@ -2602,7 +2602,7 @@ public final class IncrementalStitcher: NSObject {
     ) {
         var snapshotPath: String?
         var snapW = 0, snapH = 0
-        let outcome = RetaiLensIncrementalOutcome(rawValue: telemetry.outcome.rawValue)
+        let outcome = IncrementalOutcome(rawValue: telemetry.outcome.rawValue)
             ?? .skippedTrackingPoor
 
         let isAccept = (telemetry.outcome == .acceptedHigh ||
@@ -2717,11 +2717,11 @@ public final class IncrementalStitcher: NSObject {
 // to a consumer it knows nothing about.  The Stitcher implements the
 // protocol and registers itself.
 
-@objc public protocol RetaiLensARFrameConsumer: AnyObject {
+@objc public protocol ARFrameConsumer: AnyObject {
     /// Called on the ARSession delegate's queue.  The pixel buffer is
     /// only valid for the duration of this call (Apple's ARKit pool
     /// reuse contract); consumers must copy out before returning.
     func consumeFrame(pixelBuffer: CVPixelBuffer, pose: RNSARFramePose)
 }
 
-extension IncrementalStitcher: RetaiLensARFrameConsumer {}
+extension IncrementalStitcher: ARFrameConsumer {}

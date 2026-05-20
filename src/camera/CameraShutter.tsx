@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * CameraShutter — dual-mode shutter button for the SDK's panorama UX.
  *

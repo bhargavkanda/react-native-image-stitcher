@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * useARSession — React hook for the SDK's ARKit (iOS) / ARCore
  * (Android) session foundation.

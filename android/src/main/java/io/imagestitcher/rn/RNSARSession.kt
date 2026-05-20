@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 package io.imagestitcher.rn
 
 import android.app.Activity
@@ -322,6 +322,65 @@ class RNSARSession(reactContext: ReactApplicationContext)
     fun clearPoseLog(promise: Promise) {
         clearPoseLogInternal()
         promise.resolve(null)
+    }
+
+    // ── Phase 5 (Android parity) — AR-backed photo + video capture ──
+    //
+    // iOS exposes takePhoto / startRecording / stopRecording on
+    // RNSARSession.shared.  These are the matching @ReactMethods.
+    //
+    // For `takePhoto`, the actual frame capture happens on the GL
+    // render thread inside RNSARCameraView (because ARCore Frame
+    // objects can't be safely accessed from arbitrary threads).
+    // We delegate via the bound camera view; the view's
+    // `requestTakePhoto` stores the request, the next render tick
+    // consumes it.
+    //
+    // startRecording / stopRecording are stubbed pending Android
+    // AVAssetWriter equivalent (MediaRecorder + Surface ingest from
+    // the GL background renderer).  Until that lands they reject
+    // with a clear "not yet supported" message — better than the
+    // generic "method not found" the bridge would otherwise emit.
+    @ReactMethod
+    fun takePhoto(options: com.facebook.react.bridge.ReadableMap, promise: Promise) {
+        val view = attachedView
+        if (view == null) {
+            promise.reject(
+                "ar-photo-no-view",
+                "takePhoto: no RNSARCameraView is currently bound — mount the AR camera view first.",
+            )
+            return
+        }
+        val rawPath = if (options.hasKey("path")) options.getString("path") ?: "" else ""
+        val quality = if (options.hasKey("quality")) options.getInt("quality") else 90
+        val resolvedPath: String = if (rawPath.isNotEmpty()) {
+            rawPath
+        } else {
+            val tmpDir = reactApplicationContext.cacheDir
+            java.io.File(
+                tmpDir,
+                "RNImageStitcher-ar-${java.util.UUID.randomUUID()}.jpg",
+            ).absolutePath
+        }
+        view.requestTakePhoto(resolvedPath, quality, promise)
+    }
+
+    @ReactMethod
+    fun startRecording(options: com.facebook.react.bridge.ReadableMap, promise: Promise) {
+        promise.reject(
+            "ar-recording-unsupported-android",
+            "startRecording is not yet implemented on Android.  Use the photo capture path " +
+                "(takePhoto) or the non-AR sweep-video recorder (via vision-camera).  Tracking " +
+                "issue: react-native-image-stitcher#android-ar-video.",
+        )
+    }
+
+    @ReactMethod
+    fun stopRecording(promise: Promise) {
+        promise.reject(
+            "ar-recording-unsupported-android",
+            "stopRecording is not yet implemented on Android (see startRecording).",
+        )
     }
 
     /**

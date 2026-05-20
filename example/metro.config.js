@@ -33,6 +33,17 @@ const config = {
     nodeModulesPaths: [
       path.resolve(__dirname, 'node_modules'),
     ],
+    // Hard-block the SDK root's node_modules from Metro's resolution
+    // graph.  nodeModulesPaths only ADDS a search root — it doesn't
+    // stop Metro from walking up from /tmp/.../dist/index.js into a
+    // sibling node_modules.  If `npm install` is ever run at the SDK
+    // root (e.g. to run `tsc` for the dist/ build), it produces a
+    // nested copy of react + react-native at a DIFFERENT version, and
+    // Metro silently loads both — the symptom is "Cannot read property
+    // useContext of null" because the SDK's React instance has no
+    // provider in its tree.  Block it explicitly so the footgun can't
+    // come back.
+    blockList: [new RegExp(`${sdkRoot}/node_modules/.*`)],
   },
 };
 

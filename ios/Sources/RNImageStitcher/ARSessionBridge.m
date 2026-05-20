@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // ObjC shim that registers RNSARSessionBridge as the
 // "RNSARSession" RN native module — this is what JS

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * Incremental panorama-stitching native module bindings.
  *
@@ -141,7 +142,7 @@ export interface IncrementalState {
    * V16 Phase 1 — populated by the `batch-keyframe` engine on each
    * keyframe-accepted event.  Path to the JPEG saved under the
    * session directory.  Host can render a thumbnail from this path
-   * in `LiveFrameStrip` so the operator sees what the gate accepted.
+   * in the live-frame strip overlay so the operator sees what the gate accepted.
    * Undefined for other engines and for non-accept events.
    */
   batchKeyframeThumbnailPath?: string;
