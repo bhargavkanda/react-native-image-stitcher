@@ -80,6 +80,7 @@ import {
 import { useIncrementalJSDriver } from '../stitching/useIncrementalJSDriver';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
+import { toFileUri } from '../utils/paths';
 
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -458,29 +459,14 @@ function buildInitialSettings(props: CameraProps): PanoramaSettings {
 }
 
 
-/**
- * Normalise a native-side file path into the `file://...` URI form
- * that React Native's `<Image>` requires on Android.  iOS is lenient,
- * but Android rejects bare `/data/...` paths and renders a blank
- * Image with no error in the JS layer.
- *
- * Native code in this lib emits paths in two flavours:
- *   - useCapture.compressedUri already includes `file://` (it's
- *     normalised in `makeCaptureResult`).
- *   - ARCameraView.takePhoto, IncrementalStitcher.finalize, and the
- *     `batchKeyframeThumbnailPath` from `IncrementalStateUpdate` all
- *     return bare paths.  Those are the cases this helper handles.
- *
- * Already-prefixed inputs are passed through unchanged, so it's safe
- * to call defensively at every public-API boundary.
- */
-function ensureFileUri(path: string | null | undefined): string {
-  if (!path) return '';
-  if (path.startsWith('file://') || path.startsWith('content://') || path.startsWith('http')) {
-    return path;
-  }
-  return `file://${path}`;
-}
+// `toFileUri` (used to be an inline `toFileUri` here) lives in
+// `../utils/paths.ts` so every call-site in this lib funnels through
+// one canonical implementation.  Native bridges return paths in
+// mixed shapes — useCapture.compressedUri already has `file://`,
+// while ARCameraView.takePhoto + IncrementalStitcher.finalize +
+// `batchKeyframeThumbnailPath` events all return bare paths — and we
+// normalise to the URI form on the way out to JS consumers (Android
+// `<Image>` requires the scheme; iOS is lenient).
 
 
 /**
@@ -683,7 +669,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
           // De-dupe — same path may emit on subsequent ticks.
           // Normalise to `file://...` so Android <Image> in the band
           // overlay can actually render the thumbnail.
-          const path = ensureFileUri(state.batchKeyframeThumbnailPath!);
+          const path = toFileUri(state.batchKeyframeThumbnailPath!);
           if (prev.includes(path)) return prev;
           return [...prev, path];
         });
@@ -711,7 +697,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         // Native side returns a bare `/data/.../foo.jpg` path.  Android
         // <Image> needs the `file://` scheme to render it; iOS is OK
         // either way.
-        uri = ensureFileUri(photo.path);
+        uri = toFileUri(photo.path);
         width = photo.width;
         height = photo.height;
       } else {
@@ -847,7 +833,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         type: 'panorama',
         // Native finalize() returns a bare `/data/.../foo.jpg` path;
         // normalise to `file://` for Android <Image>.
-        uri: ensureFileUri(result.panoramaPath),
+        uri: toFileUri(result.panoramaPath),
         width: result.width,
         height: result.height,
         framesRequested: result.framesRequested ?? -1,
