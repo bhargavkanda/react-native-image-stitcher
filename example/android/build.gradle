@@ -1,0 +1,29 @@
+buildscript {
+    ext {
+        buildToolsVersion = "36.0.0"
+        minSdkVersion = 24
+        compileSdkVersion = 36
+        targetSdkVersion = 36
+        ndkVersion = "27.1.12297006"
+        kotlinVersion = "2.1.20"
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    }
+}
+
+apply plugin: "com.facebook.react.rootproject"
+// ── Expo root project plugin ─────────────────────────────────────────
+// Provides default values for buildToolsVersion / minSdk / compileSdk /
+// targetSdk / ndkVersion / kotlinVersion / kspVersion via
+// `extra.setIfNotExist`.  The ext{} block above always takes
+// precedence; this plugin only fills in anything we forgot to set.
+// Required so autolinked Expo subprojects can resolve `rootProject
+// .ext.kotlinVersion` etc. when their build.gradle files read those.
+apply plugin: "expo-root-project"

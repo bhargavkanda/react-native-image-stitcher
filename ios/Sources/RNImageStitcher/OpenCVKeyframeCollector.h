@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // OpenCVKeyframeCollector — V16 Phase 1 helper that accumulates the
 // AR-keyframe-gate's accepted CVPixelBuffers as on-disk JPEGs while

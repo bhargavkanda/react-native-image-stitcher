@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //
 // OpenCVFirstWinsCylindricalStitcher.mm
 //
@@ -3206,7 +3207,7 @@ static const double kPanAxisFractionRect = 0.30;
 {
     if (_accepted == 0) {
         if (error) {
-            *error = [NSError errorWithDomain:RetaiLensIncrementalStitcherErrorDomain
+            *error = [NSError errorWithDomain:RNImageStitcherIncrementalErrorDomain
                                          code:1
                                      userInfo:@{NSLocalizedDescriptionKey:
                                        @"No strips painted yet."}];
@@ -3265,7 +3266,7 @@ static const double kPanAxisFractionRect = 0.30;
         ? [outputPath substringFromIndex:7] : outputPath;
     if (!cv::imwrite(std::string([cleanPath UTF8String]), out, params)) {
         if (error) {
-            *error = [NSError errorWithDomain:RetaiLensIncrementalStitcherErrorDomain
+            *error = [NSError errorWithDomain:RNImageStitcherIncrementalErrorDomain
                                          code:2
                                      userInfo:@{NSLocalizedDescriptionKey:
                                        @"imwrite failed"}];

@@ -37,7 +37,10 @@ Pod::Spec.new do |s|
   # (cpp/) that both iOS and Android compile from a single source.
   s.source_files = ['ios/Sources/**/*.{swift,h,m,mm}',
                     'cpp/**/*.{h,hpp,cpp}']
-  s.public_header_files = ['ios/Sources/**/*.h']
+  # public_header_files intentionally omitted — React Native's
+  # @objc(...) dispatch doesn't need umbrella headers, and exposing
+  # all OpenCV*.h headers to consumers locks us into supporting
+  # internal Obj-C++ classes as public API.  See CHANGELOG v0.1.0.
 
   # Frameworks shipped with iOS itself — no binary cost.
   s.frameworks = ['Accelerate', 'CoreImage', 'UIKit', 'ARKit']
@@ -49,7 +52,7 @@ Pod::Spec.new do |s|
   # ─────────────────────────────────────────────────────────────────────
   #
   # The npm `postinstall` script (`scripts/postinstall-fetch-binaries.js`)
-  # downloads `RNImageStitcher.xcframework` from the matching GitHub
+  # downloads `opencv2.xcframework` from the matching GitHub
   # Release into `ios/Frameworks/`.  This podspec just declares the
   # vendored framework so the linker picks it up at `pod install` time.
   #
@@ -62,7 +65,7 @@ Pod::Spec.new do |s|
   # forgot to `npm install` (or set SKIP_OPENCV_FETCH=1).  pod install
   # will fail with "framework not found" — the JS postinstall script
   # emits a clear error message in that case pointing users to re-run.
-  s.vendored_frameworks = 'ios/Frameworks/RNImageStitcher.xcframework'
+  s.vendored_frameworks = 'ios/Frameworks/opencv2.xcframework'
 
   s.pod_target_xcconfig = {
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',

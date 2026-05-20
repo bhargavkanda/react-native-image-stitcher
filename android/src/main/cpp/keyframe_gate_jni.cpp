@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // keyframe_gate_jni.cpp — JNI bindings exposing the shared C++
 // retailens::KeyframeGate (in ../../../../cpp/) to the Kotlin side

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * CameraView — the SDK's drop-in replacement for the raw
  * vision-camera ``<Camera />``.

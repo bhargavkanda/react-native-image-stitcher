@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# build-opencv-ios.sh — produce RNImageStitcher.xcframework with the
+# build-opencv-ios.sh — produce opencv2.xcframework with the
 # OpenCV modules this library actually needs.
 #
 # Invoked by `.github/workflows/release-binaries.yml` on a tag push;
@@ -13,7 +13,7 @@
 # Modules SKIPPED (saves ~50 % of the binary size):
 #   dnn ml objdetect gapi videoio_ffmpeg
 #
-# Output: dist/RNImageStitcher.xcframework (arm64 device +
+# Output: dist/opencv2.xcframework (arm64 device +
 #   arm64+x86_64 simulator slices).  Approx. 55-75 MB stripped.
 #
 # Inputs (env):
@@ -35,7 +35,7 @@ OPENCV_VERSION="${OPENCV_VERSION:-$(cat "${SCRIPT_DIR}/opencv-version.txt")}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SDK_ROOT}/dist}"
 BUILD_DIR="$(mktemp -d -t opencv-ios-build-XXXX)"
 
-echo "[build-opencv-ios] OpenCV ${OPENCV_VERSION} → ${OUTPUT_DIR}/RNImageStitcher.xcframework"
+echo "[build-opencv-ios] OpenCV ${OPENCV_VERSION} → ${OUTPUT_DIR}/opencv2.xcframework"
 echo "[build-opencv-ios] Build dir: ${BUILD_DIR}"
 
 mkdir -p "${OUTPUT_DIR}"
@@ -66,19 +66,19 @@ ${PY_CMD} \
     --without gapi \
     --without videoio \
     --without highgui \
-    --framework_name RNImageStitcher
+    --framework_name opencv2
 
 # ── 3. Move + clean ──────────────────────────────────────────────────
-mv "${OUTPUT_DIR}/xcframework-build/RNImageStitcher.xcframework" \
-   "${OUTPUT_DIR}/RNImageStitcher.xcframework"
+mv "${OUTPUT_DIR}/xcframework-build/opencv2.xcframework" \
+   "${OUTPUT_DIR}/opencv2.xcframework"
 rm -rf "${OUTPUT_DIR}/xcframework-build"
 rm -rf "${BUILD_DIR}"
 
 # ── 4. Zip for release upload ────────────────────────────────────────
 cd "${OUTPUT_DIR}"
-zip -ry "RNImageStitcher-ios.zip" "RNImageStitcher.xcframework"
+zip -ry "RNImageStitcher-ios.zip" "opencv2.xcframework"
 
 echo "[build-opencv-ios] Done."
-echo "[build-opencv-ios] Output: ${OUTPUT_DIR}/RNImageStitcher.xcframework"
+echo "[build-opencv-ios] Output: ${OUTPUT_DIR}/opencv2.xcframework"
 echo "[build-opencv-ios] Archive: ${OUTPUT_DIR}/RNImageStitcher-ios.zip"
-du -sh "${OUTPUT_DIR}/RNImageStitcher.xcframework" "${OUTPUT_DIR}/RNImageStitcher-ios.zip"
+du -sh "${OUTPUT_DIR}/opencv2.xcframework" "${OUTPUT_DIR}/RNImageStitcher-ios.zip"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // QualityChecker.swift
 //
 // Pure-Swift implementations of the on-device quality scores the SDK

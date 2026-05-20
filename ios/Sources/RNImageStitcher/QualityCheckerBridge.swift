@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // QualityCheckerBridge.swift
 //
 // React Native bridge for `QualityChecker`.  This file does NOT contain
@@ -8,8 +9,8 @@
 // Pairing pattern:
 //   * QualityChecker.swift    — pure Swift, XCTest-able, no RN.
 //   * QualityCheckerBridge.swift (this file) — RN-aware, registered
-//     via `@objc(RetaiLensQualityChecker)` so the JS shim can find it
-//     at NativeModules.RetaiLensQualityChecker.
+//     via `@objc(RNImageStitcherQualityChecker)` so the JS shim can find it
+//     at NativeModules.RNImageStitcherQualityChecker.
 //
 // Why two files instead of one?
 //   The bridge depends on React (RCTPromiseResolveBlock,
@@ -23,8 +24,8 @@
 import Foundation
 import React
 
-@objc(RetaiLensQualityChecker)
-public class RetaiLensQualityCheckerBridge: NSObject {
+@objc(RNImageStitcherQualityChecker)
+public class QualityCheckerBridge: NSObject {
 
   // RCT_EXPORT_MODULE — the Obj-C bridge file picks up this name and
   // registers it with the JS module map.  Returning false here means

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //
 // OpenCVIncrementalStitcher.mm
 //
@@ -60,8 +61,8 @@
 
 #import <UIKit/UIKit.h>
 
-NSString *const RetaiLensIncrementalStitcherErrorDomain =
-    @"RetaiLensIncrementalStitcherErrorDomain";
+NSString *const RNImageStitcherIncrementalErrorDomain =
+    @"RNImageStitcherIncrementalErrorDomain";
 
 // ── Private telemetry result class ──────────────────────────────────
 
@@ -755,7 +756,7 @@ constexpr double kRansacReprojThresh = 5.0;
 {
     if (_accepted == 0) {
         if (error) {
-            *error = [NSError errorWithDomain:RetaiLensIncrementalStitcherErrorDomain
+            *error = [NSError errorWithDomain:RNImageStitcherIncrementalErrorDomain
                                          code:1
                                      userInfo:@{NSLocalizedDescriptionKey:
                                        @"No frames have been accepted yet."}];
@@ -810,7 +811,7 @@ constexpr double kRansacReprojThresh = 5.0;
           cleanPath, out.cols, out.rows, q, (int)ok);
     if (!ok) {
         if (error) {
-            *error = [NSError errorWithDomain:RetaiLensIncrementalStitcherErrorDomain
+            *error = [NSError errorWithDomain:RNImageStitcherIncrementalErrorDomain
                                          code:2
                                      userInfo:@{NSLocalizedDescriptionKey:
                                        [NSString stringWithFormat:

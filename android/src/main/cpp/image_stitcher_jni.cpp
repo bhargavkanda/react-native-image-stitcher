@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // image_stitcher_jni.cpp — JNI shim that marshals Java/Kotlin args
 // into the shared C++ `retailens::stitchFramePaths` function in

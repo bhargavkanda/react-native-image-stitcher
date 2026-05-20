@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // ObjC shim that registers IncrementalStitcherBridge as the
 // "IncrementalStitcher" RN module.  REMAP form, same

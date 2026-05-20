@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // QualityCheckerTests.swift
 //
 // Unit tests for the pure-Swift `QualityChecker` algorithm layer.

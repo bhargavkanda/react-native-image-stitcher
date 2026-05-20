@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 package io.imagestitcher.rn
 
 import android.app.ActivityManager
@@ -729,7 +729,7 @@ class IncrementalStitcher(
         }
         val outputPathOpt = options.getString("outputPath") ?: ""
         val outputPath = if (outputPathOpt.isEmpty()) {
-            File(reactContext.cacheDir, "RetaiLensIncremental-${System.nanoTime()}.jpg").absolutePath
+            File(reactContext.cacheDir, "RNImageStitcherIncremental-${System.nanoTime()}.jpg").absolutePath
         } else {
             outputPathOpt
         }
@@ -828,14 +828,14 @@ class IncrementalStitcher(
                     // Empirically: getNativeModule failed on Galaxy
                     // A35 with `BatchStitcher module not
                     // registered`, despite the module being present
-                    // in RetaiLensCapturePackage.createNativeModules.
+                    // in RNImageStitcherPackage.createNativeModules.
                     // Same pattern that already works for
                     // IncrementalStitcher.bridgeInstance.
                     val stitcher = BatchStitcher.bridgeInstance
                         ?: throw IllegalStateException(
                             "BatchStitcher.bridgeInstance is null " +
                                 "— module hasn't been instantiated yet. " +
-                                "Check RetaiLensCapturePackage registration."
+                                "Check RNImageStitcherPackage registration."
                         )
                     val dims = stitcher.stitchSync(
                         keyframePathsSnapshot.toTypedArray(),
@@ -1673,7 +1673,7 @@ class IncrementalStitcher(
         state.putInt("acceptedCount", keyframeCount)
         // Outcome 0 = AcceptedHigh — matches the FrameOutcome enum
         // ordinal that the live engines emit.  Keeps the iOS
-        // RetaiLensIncrementalOutcome contract: batch-keyframe
+        // IncrementalOutcome contract: batch-keyframe
         // accepts all carry outcome=acceptedHigh.
         state.putInt("outcome", 0)
         state.putDouble("confidence", 1.0)

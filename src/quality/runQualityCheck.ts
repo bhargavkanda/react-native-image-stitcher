@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * runQualityCheck — public entry point for the SDK's blur + brightness
  * quality gate.  Delegates to the native module
- * `RetaiLensQualityChecker` when registered (iOS today via
+ * `RNImageStitcherQualityChecker` when registered (iOS today via
  * `ios/Sources/RNImageStitcher/QualityChecker.swift`, Android in
  * Phase 3); falls back to a conservative pass-through shim when the
  * native module is absent so dev / Jest runs don't crash on a missing
@@ -43,7 +44,7 @@ export async function runQualityCheck(
   imagePath: string,
   thresholds: QualityThresholds,
 ): Promise<QualityReport> {
-  const native = (NativeModules as Record<string, unknown>)['RetaiLensQualityChecker'];
+  const native = (NativeModules as Record<string, unknown>)['RNImageStitcherQualityChecker'];
 
   // Native path: registered + has the bridged `measure` method.
   if (
@@ -63,7 +64,7 @@ export async function runQualityCheck(
   if (!warnedOnce && __DEV__) {
     // eslint-disable-next-line no-console
     console.warn(
-      '[react-native-image-stitcher] RetaiLensQualityChecker native module not '
+      '[react-native-image-stitcher] QualityChecker native module not '
       + `found on ${Platform.OS}; falling back to optimistic shim.  Check `
       + 'autolinking + a clean `pod install` (iOS) / `gradle clean` (Android).',
     );

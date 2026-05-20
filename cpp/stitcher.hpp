@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 //
 // stitcher.hpp — shared cv::Stitcher orchestration used by both
 // iOS (via Obj-C++ bridge in OpenCVStitcherBridge.mm) and Android

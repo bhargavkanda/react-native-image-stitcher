@@ -6,7 +6,7 @@ expectations for issues, pull requests, and the contributor agreement.
 ## Issues
 
 Open issues at
-https://github.com/bhargav-kanda/react-native-image-stitcher/issues.
+https://github.com/bhargavkanda/react-native-image-stitcher/issues.
 
 Useful information to include:
 
@@ -23,12 +23,13 @@ Useful information to include:
 
 1. Fork → branch (`feature/short-description` or
    `fix/short-description`).
-2. Run the relevant verification:
-   - `npm run build` in `retailens-capture-sdk/` for TypeScript changes.
-   - `pod install && xcodebuild -destination 'generic/platform=iOS' build`
-     for native iOS changes.
-   - `./gradlew :retailens_capture-sdk:compileDebugKotlin` for native
-     Android changes.
+2. Run the relevant verification from the cloned repo root:
+   - `npm run build` for TypeScript changes (rebuilds `dist/`).
+   - For native iOS changes: `cd example/ios && pod install`, then
+     open `example/ios/RNImageStitcherExample.xcworkspace` in Xcode
+     and build the example app on a connected device or simulator.
+   - For native Android changes: `cd example && npx react-native run-android`
+     against an attached device or emulator.
 3. Open the PR against `main`.  Include a "Test plan" checklist —
    anything you exercised manually on a real device.
 4. CI runs the same builds.  If CI fails, the build log links from

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //
 // OpenCVStitcher.h
 //
@@ -22,11 +23,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// NSError domain raised by OpenCVStitcher errors.  Codes match the
 /// `cv::Stitcher::Status` enum values so callers can branch on
 /// "needs more images" vs. "homography failed".
-extern NSString *const RetaiLensStitcherErrorDomain;
+extern NSString *const RNImageStitcherErrorDomain;
 
 /// Result of a successful stitch — pixel dimensions of the panorama
 /// plus the path it was written to (host app passed it in).
-@interface RetaiLensStitchResult : NSObject
+@interface RNStitchResult : NSObject
 @property (nonatomic, copy, readonly) NSString *outputPath;
 @property (nonatomic, assign, readonly) NSInteger width;
 @property (nonatomic, assign, readonly) NSInteger height;
@@ -71,7 +72,7 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 /// be coerced into range by the impl.
 ///
 /// On success returns the result object; on failure populates
-/// `error` (NSError, RetaiLensStitcherErrorDomain) and returns nil.
+/// `error` (NSError, RNImageStitcherErrorDomain) and returns nil.
 /// `warperType`: one of @"plane" / @"cylindrical" / @"spherical".
 ///   Pass nil/empty for the default (@"plane").  Different
 ///   projections suit different gestures — see the field A/B
@@ -107,7 +108,7 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 ///     them.  With `useInscribedRectCrop:YES` we find the largest
 ///     axis-aligned rectangle entirely inside the non-zero region
 ///     and crop to that — clean output with no black corners.
-+ (nullable RetaiLensStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
++ (nullable RNStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
                                           outputPath:(NSString *)outputPath
                                          jpegQuality:(NSInteger)quality
                                           warperType:(nullable NSString *)warperType
@@ -141,7 +142,7 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 /// return the result.  This is what the JS shutter-hold flow calls;
 /// callers don't have to manage their own tmp directory or clean
 /// up partial state on failure.
-+ (nullable RetaiLensStitchResult *)stitchVideoAtPath:(NSString *)videoPath
++ (nullable RNStitchResult *)stitchVideoAtPath:(NSString *)videoPath
                                            outputPath:(NSString *)outputPath
                                             maxFrames:(NSInteger)maxFrames
                                           jpegQuality:(NSInteger)quality
@@ -174,7 +175,7 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 /// functional).  When ALL poses are missing the method returns
 /// the same NSError code (1030) so the host can opt to retry via
 /// the non-pose path.
-+ (nullable RetaiLensStitchResult *)stitchVideoAtPath:(NSString *)videoPath
++ (nullable RNStitchResult *)stitchVideoAtPath:(NSString *)videoPath
                                            outputPath:(NSString *)outputPath
                                             maxFrames:(NSInteger)maxFrames
                                           jpegQuality:(NSInteger)quality
@@ -200,7 +201,7 @@ extern NSString *const RetaiLensStitcherErrorDomain;
 /// downstream filtering happens inside this method).  `framePaths`
 /// must be at least 2 entries.  Pose dictionaries follow the same
 /// shape as `RNSARFramePose.asDictionary()`.
-+ (nullable RetaiLensStitchResult *)stitchKeyframePaths:(NSArray<NSString *> *)framePaths
++ (nullable RNStitchResult *)stitchKeyframePaths:(NSArray<NSString *> *)framePaths
                                             outputPath:(NSString *)outputPath
                                            jpegQuality:(NSInteger)quality
                                             warperType:(nullable NSString *)warperType
