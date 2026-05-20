@@ -37,10 +37,16 @@ Pod::Spec.new do |s|
   # (cpp/) that both iOS and Android compile from a single source.
   s.source_files = ['ios/Sources/**/*.{swift,h,m,mm}',
                     'cpp/**/*.{h,hpp,cpp}']
-  # public_header_files intentionally omitted — React Native's
-  # @objc(...) dispatch doesn't need umbrella headers, and exposing
-  # all OpenCV*.h headers to consumers locks us into supporting
-  # internal Obj-C++ classes as public API.  See CHANGELOG v0.1.0.
+  # Restrict the umbrella header to ONLY the iOS-side Obj-C `.h`
+  # files.  Without this, CocoaPods defaults every header in
+  # `source_files` (including the C++ `.hpp` files under cpp/) to
+  # public — which is fine for non-modular builds, but breaks any
+  # host app using `use_frameworks!` (as RetaiLens does): the
+  # umbrella module is compiled in pure Obj-C context and chokes on
+  # `#import "keyframe_gate.hpp"` with `'cstdint' file not found`.
+  # The .mm files still find the C++ headers via HEADER_SEARCH_PATHS
+  # below; they just don't get pulled into the umbrella.
+  s.public_header_files = ['ios/Sources/**/*.h']
 
   # Frameworks shipped with iOS itself — no binary cost.
   s.frameworks = ['Accelerate', 'CoreImage', 'UIKit', 'ARKit']
