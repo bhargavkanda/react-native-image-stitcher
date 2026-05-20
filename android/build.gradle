@@ -57,6 +57,13 @@ if (!opencvSdkDir.exists()) {
 android {
     namespace 'io.imagestitcher.rn'
     compileSdkVersion safeExtGet('compileSdkVersion', 34)
+    // Inherit the host's NDK pin (Expo apps expose `ndkVersion` on
+    // rootProject.ext) so AGP doesn't fall back to its built-in default
+    // (which on AGP 8.6+ is 27.0.12077973, a version that's commonly
+    // half-installed on developer machines and trips [CXX1101]
+    // "source.properties missing").  27.1.12297006 is the
+    // last-known-good fallback for raw RN hosts without an Expo pin.
+    ndkVersion safeExtGet('ndkVersion', '27.1.12297006')
 
     defaultConfig {
         minSdkVersion safeExtGet('minSdkVersion', 24)
