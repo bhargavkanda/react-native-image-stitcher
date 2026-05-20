@@ -98,6 +98,7 @@ export { ViewportCropOverlay } from './camera/ViewportCropOverlay';
 // vision-camera wrappers (useCapture / useVideoCapture) + a
 // device-orientation reader that works under iOS portrait-lock.
 export { useCapture } from './camera/useCapture';
+export type { TakePhotoCallOptions } from './camera/useCapture';
 export { useVideoCapture } from './camera/useVideoCapture';
 export { useDeviceOrientation } from './camera/useDeviceOrientation';
 
