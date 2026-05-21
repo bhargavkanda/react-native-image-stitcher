@@ -19,8 +19,7 @@
     "react-native-vision-camera": "^4.0.0",
     "expo": "55.0.5",
     "expo-modules-core": "55.0.14",
-    "expo-modules-autolinking": "55.0.8",
-    "expo-sensors": "55.0.15"
+    "expo-modules-autolinking": "55.0.8"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

@@ -16,6 +16,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-21
+
+> [!IMPORTANT]
+> This release changes the peer-dependency contract in a
+> backward-incompatible way (semver-minor in 0.x).  The public hook
+> surface is preserved — no JS code changes are required for any
+> host that doesn't directly import `expo-sensors`.  Verified end-
+> to-end on iPhone 16 Pro (iOS 26.4.2) + Samsung Galaxy A35
+> (Android, SM_A356U1).
+
+### Removed
+
+- **`expo-sensors` is no longer a peer dependency.**  The SDK used to
+  pull in the entire Expo modules runtime (`expo`, `expo-modules-core`,
+  `expo-modules-autolinking`, `expo-sensors`) just for two hooks —
+  `useDeviceOrientation` and `useIMUTranslationGate`.  That tax was
+  disproportionate to the value (see the host-integration burden in
+  [`docs/host-app-integration.md`](docs/host-app-integration.md)).
+  Both hooks have been re-homed onto `react-native-sensors` (already
+  a peer dep), so the SDK now works on bare React Native with no
+  Expo modules infrastructure.
+
+### Changed
+
+- **`useDeviceOrientation` rewritten on `react-native-sensors`
+  accelerometer.**  Same `DeviceOrientation` return type, same
+  threshold-based dominant-axis classifier, same public signature.
+  The internal-only change is the source: instead of
+  `expo-sensors`' `DeviceMotion` (which normalised Android signs to
+  iOS convention for us), we now subscribe to
+  `react-native-sensors`' accelerometer and do the platform sign-
+  flip explicitly in JS (`Platform.OS === 'android' ? -value : value`).
+  Threshold is now platform-dependent because iOS reports in G's
+  and Android in m/s² — see the file header for the per-platform
+  numbers and the Issue #3 history that motivated keeping iOS as
+  the reference convention.
+- **`useIMUTranslationGate` rewritten on `react-native-sensors`
+  accelerometer + JS-side IIR gravity subtraction.**  Same public
+  signature, same options, same return shape, same on-budget-
+  exceeded callback semantics, same anchor-reset behaviour.  The
+  internal change: in 0.1.x the hook consumed `DeviceMotion.accel-
+  eration` (gravity-subtracted via CoreMotion's native fusion on iOS
+  / Android's `TYPE_LINEAR_ACCELERATION` on Android — both produced
+  by hardware sensor fusion).  v0.2 consumes raw accelerometer and
+  estimates the gravity vector with a JS IIR low-pass (alpha = 0.9
+  at 50 Hz → ~200 ms time constant), then subtracts.  **Noise
+  trade-off**: the JS IIR is measurably noisier than CoreMotion's
+  native fusion — expect a few extra cm of apparent drift on a
+  stationary phone over several seconds.  With the per-sample
+  velocity damping (5 %) and the anchor reset on every accepted
+  keyframe, the drift stays bounded inside a 0.3-2 s integration
+  window, which is comfortably under the default 8 cm budget.  If
+  the IIR floor becomes a problem in practice, we'll consider
+  moving the fusion into a small native module rather than re-
+  introducing the Expo modules dependency.
+
+### Migration from 0.1.x
+
+No JS code changes are required for any host — the public surface
+that survives 0.1.x → 0.2.0 is source-compatible.
+
+Native-side, you can now optionally rip out the entire Expo modules
+host wiring (Podfile `use_expo_modules!` macro, `AppDelegate.swift`
+Expo factory, `MainApplication.kt` `ExpoReactHostFactory`, the gradle
+`expo-root-project` plugin, the two `patch-package` patches for Expo
+SDK 55 on RN 0.84) — that whole section of
+[`docs/host-app-integration.md`](docs/host-app-integration.md) is
+optional from 0.2.0 onward and will be removed from the doc in a
+follow-up commit.
+
 ## [0.1.3] — 2026-05-21
 
 ### Changed
@@ -241,7 +311,8 @@ Native module names also changed:
 - iOS pod: `RetaiLensCaptureSDK` → `RNImageStitcher`
 - iOS xcframework: shipped as `opencv2.xcframework` (linked from `RNImageStitcher.podspec`)
 
-[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.0...v0.1.1
