@@ -80,6 +80,13 @@ import {
 import { useIncrementalJSDriver } from '../stitching/useIncrementalJSDriver';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
+import { toBareFilePath, toFileUri } from '../utils/paths';
+import {
+  defaultPanoramaFilename,
+  defaultPhotoFilename,
+  getDefaultCaptureDir,
+  moveFile,
+} from '../utils/files';
 
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -139,6 +146,7 @@ export type CameraErrorCode =
   | 'STITCH_HOMOGRAPHY_FAIL'
   | 'STITCH_CAMERA_PARAMS_FAIL'
   | 'STITCH_OOM'
+  | 'OUTPUT_WRITE_FAILED'
   | 'UNKNOWN';
 
 
@@ -195,6 +203,35 @@ export interface CameraProps {
   enablePanoramaMode?: boolean;
   showSettingsButton?: boolean;
   style?: StyleProp<ViewStyle>;
+
+  /**
+   * Optional destination directory for captures.  When set, the lib
+   * lands tap-photos at `${outputDir}/photo-${ts}.jpg` and panoramas
+   * at `${outputDir}/panorama-${ts}.jpg` and the returned uri points
+   * at the persisted file (vs. vision-camera's tmp dir, which is
+   * what you get when this prop is omitted).
+   *
+   * The host is solely responsible for:
+   *   - Choosing a writable directory (the lib does NOT pick this for
+   *     you on either platform — particularly relevant on Android,
+   *     where scoped-storage rules differ between app-private storage
+   *     and user-visible Documents/Pictures dirs).
+   *   - Ensuring the directory exists.  The lib will create it if it
+   *     doesn't, but only inside paths the OS lets it write to.
+   *   - Making the path user-visible if that matters (`UIFileSharingEnabled`
+   *     on iOS for `FileSystem.documentDirectory`; MediaStore /
+   *     `Documents/...` on Android — see your platform's docs).
+   *
+   * On disk failure the capture promise rejects via `onError` with
+   * `CameraError('OUTPUT_WRITE_FAILED', ...)`.  No silent fallback to
+   * tmp — that hides bugs.
+   *
+   * Requires `expo-file-system` (declared as an OPTIONAL peer dep;
+   * only needed when this prop is set).
+   *
+   * Format: bare path or `file://` URI.  Both accepted.
+   */
+  outputDir?: string;
 
   // ── Callbacks ─────────────────────────────────────────────────────
   onCapture?: (result: CameraCaptureResult) => void;
@@ -458,29 +495,14 @@ function buildInitialSettings(props: CameraProps): PanoramaSettings {
 }
 
 
-/**
- * Normalise a native-side file path into the `file://...` URI form
- * that React Native's `<Image>` requires on Android.  iOS is lenient,
- * but Android rejects bare `/data/...` paths and renders a blank
- * Image with no error in the JS layer.
- *
- * Native code in this lib emits paths in two flavours:
- *   - useCapture.compressedUri already includes `file://` (it's
- *     normalised in `makeCaptureResult`).
- *   - ARCameraView.takePhoto, IncrementalStitcher.finalize, and the
- *     `batchKeyframeThumbnailPath` from `IncrementalStateUpdate` all
- *     return bare paths.  Those are the cases this helper handles.
- *
- * Already-prefixed inputs are passed through unchanged, so it's safe
- * to call defensively at every public-API boundary.
- */
-function ensureFileUri(path: string | null | undefined): string {
-  if (!path) return '';
-  if (path.startsWith('file://') || path.startsWith('content://') || path.startsWith('http')) {
-    return path;
-  }
-  return `file://${path}`;
-}
+// `toFileUri` (used to be an inline `toFileUri` here) lives in
+// `../utils/paths.ts` so every call-site in this lib funnels through
+// one canonical implementation.  Native bridges return paths in
+// mixed shapes — useCapture.compressedUri already has `file://`,
+// while ARCameraView.takePhoto + IncrementalStitcher.finalize +
+// `batchKeyframeThumbnailPath` events all return bare paths — and we
+// normalise to the URI form on the way out to JS consumers (Android
+// `<Image>` requires the scheme; iOS is lenient).
 
 
 /**
@@ -494,6 +516,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     enablePanoramaMode = true,
     showSettingsButton = false,
     style,
+    outputDir,
     onCapture,
     onCaptureSourceChange,
     onLensChange,
@@ -683,7 +706,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
           // De-dupe — same path may emit on subsequent ticks.
           // Normalise to `file://...` so Android <Image> in the band
           // overlay can actually render the thumbnail.
-          const path = ensureFileUri(state.batchKeyframeThumbnailPath!);
+          const path = toFileUri(state.batchKeyframeThumbnailPath!);
           if (prev.includes(path)) return prev;
           return [...prev, path];
         });
@@ -706,12 +729,32 @@ export function Camera(props: CameraProps): React.JSX.Element {
       let uri: string;
       let width: number;
       let height: number;
+      // Compose the destination path BEFORE the capture so both the
+      // AR and non-AR branches land at the same predictable location.
+      // If `outputDir` is set, the lib lands the file at a host-
+      // controlled path; otherwise, in the lib's canonical capture
+      // dir (`<cache>/react-native-image-stitcher/photo-<ms>.jpg`).
+      const photoOutputPath = outputDir
+        ? `${toBareFilePath(outputDir).replace(/\/$/, '')}/${defaultPhotoFilename()}`
+        : `${await getDefaultCaptureDir()}/${defaultPhotoFilename()}`;
       if (isAR && arViewRef.current) {
+        // ARCameraView writes to its own tmp location; relocate to
+        // photoOutputPath via the native FileBridge so both branches
+        // return paths under the same dir.
         const photo = await arViewRef.current.takePhoto({ quality: 90 });
-        // Native side returns a bare `/data/.../foo.jpg` path.  Android
-        // <Image> needs the `file://` scheme to render it; iOS is OK
-        // either way.
-        uri = ensureFileUri(photo.path);
+        try {
+          await moveFile(photo.path, photoOutputPath);
+        } catch (moveErr) {
+          throw new CameraError(
+            'OUTPUT_WRITE_FAILED',
+            `Failed to move AR photo to ${photoOutputPath}.  The destination `
+            + 'directory must be writable.',
+            moveErr,
+          );
+        }
+        // Android <Image> needs the `file://` scheme to render the
+        // returned uri; iOS is OK either way.  Normalise once here.
+        uri = toFileUri(photoOutputPath);
         width = photo.width;
         height = photo.height;
       } else {
@@ -724,12 +767,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
         // useCapture.takePhoto wraps the cameraRef internally;
         // attach via assignment so the hook's ref points at our
         // local ref.  This works because RefObject is just { current }.
-        // Effect: capture.takePhoto() resolves with the SDK's
-        // CaptureResult (with compressedUri / width / height).
-        // We adapt to the public CameraCaptureResult shape.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (capture.cameraRef as any).current = visionCameraRef.current;
-        const result = await capture.takePhoto();
+        // useCapture handles the move internally; the returned
+        // `compressedUri` already points at `photoOutputPath`.
+        const result = await capture.takePhoto({ outputPath: photoOutputPath });
         uri = result.compressedUri;
         width = result.width;
         height = result.height;
@@ -745,7 +787,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         );
       onError?.(e);
     }
-  }, [enablePhotoMode, isAR, capture, onCapture, onError]);
+  }, [enablePhotoMode, isAR, capture, outputDir, onCapture, onError]);
 
   const handleHoldStart = useCallback(async () => {
     if (!enablePanoramaMode) return;
@@ -828,8 +870,16 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // No-op in AR mode where jsDriver was never started.
     jsDriver.stop();
     try {
+      // Compose the panorama output path: host-controlled if
+      // `outputDir` is set, else the lib's canonical capture dir
+      // (`<cache>/react-native-image-stitcher/panorama-<ms>.jpg`).
+      // `incremental.finalize` writes the stitched JPEG straight to
+      // this path natively (no JS-side move needed for panoramas).
+      const panoOutputPath = outputDir
+        ? `${toBareFilePath(outputDir).replace(/\/$/, '')}/${defaultPanoramaFilename()}`
+        : `${await getDefaultCaptureDir()}/${defaultPanoramaFilename()}`;
       const result = await incremental.finalize(
-        undefined,
+        panoOutputPath,
         90,
         deviceOrientation,
       );
@@ -847,7 +897,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         type: 'panorama',
         // Native finalize() returns a bare `/data/.../foo.jpg` path;
         // normalise to `file://` for Android <Image>.
-        uri: ensureFileUri(result.panoramaPath),
+        uri: toFileUri(result.panoramaPath),
         width: result.width,
         height: result.height,
         framesRequested: result.framesRequested ?? -1,
