@@ -38,3 +38,7 @@ android/.cxx/
 
 # Local-only download cache (release-binary zips, build artefacts)
 .tmp/
+
+# Implementation plans — working documents, not part of the published source.
+# Kept locally for in-flight planning; release-time intent goes into CHANGELOG.md.
+docs/plans/

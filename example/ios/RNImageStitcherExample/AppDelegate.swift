@@ -2,21 +2,20 @@ import UIKit
 import React
 import React_RCTAppDelegate
 import ReactAppDependencyProvider
-internal import Expo
 
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
   var window: UIWindow?
 
   var reactNativeDelegate: ReactNativeDelegate?
-  var reactNativeFactory: ExpoReactNativeFactory?
+  var reactNativeFactory: RCTReactNativeFactory?
 
   func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
     let delegate = ReactNativeDelegate()
-    let factory = ExpoReactNativeFactory(delegate: delegate)
+    let factory = RCTReactNativeFactory(delegate: delegate)
     delegate.dependencyProvider = RCTAppDependencyProvider()
 
     reactNativeDelegate = delegate
@@ -34,12 +33,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
   }
 }
 
-// ExpoReactNativeFactoryDelegate extends RCTDefaultReactNativeFactoryDelegate
-// and is required by ExpoReactNativeFactory (it casts the delegate to this
-// type internally).  It wires ExpoAppDelegateSubscriberRepository into
-// customizeRootView and createRootViewController, which expo modules use
-// for their own AppDelegate hooks.
-class ReactNativeDelegate: ExpoReactNativeFactoryDelegate {
+class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
   override func sourceURL(for bridge: RCTBridge) -> URL? {
     self.bundleURL()
   }
