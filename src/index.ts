@@ -49,17 +49,6 @@ export type {
   FramePose,
 } from './ar/useARSession';
 
-// ─────────────────────────────────────────────────────────────────────
-// IMU translation gate (public since 0.1.0)
-// ─────────────────────────────────────────────────────────────────────
-// Hosts running their own non-AR capture flow can reuse this hook to
-// get the same translation-budget gating logic <Camera> uses internally.
-export { useIMUTranslationGate } from './sensors/useIMUTranslationGate';
-export type {
-  UseIMUTranslationGateOptions,
-  UseIMUTranslationGateReturn,
-} from './sensors/useIMUTranslationGate';
-
 // ═════════════════════════════════════════════════════════════════════
 // Layer 2 — composable building blocks (added in 0.1.1)
 // ═════════════════════════════════════════════════════════════════════

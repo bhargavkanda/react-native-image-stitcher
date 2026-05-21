@@ -16,6 +16,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> [!IMPORTANT]
+> The next release will be **v0.2.0** (semver-minor) because the
+> peer-dependency contract and the public hook surface both change in
+> a backward-incompatible way.  Hosts upgrading from 0.1.x should
+> follow the migration notes below.
+
+### Removed
+
+- **`expo-sensors` is no longer a peer dependency.**  The SDK used to
+  pull in the entire Expo modules runtime (`expo`, `expo-modules-core`,
+  `expo-modules-autolinking`, `expo-sensors`) just for two hooks —
+  `useDeviceOrientation` and `useIMUTranslationGate`.  That tax was
+  disproportionate to the value: the orientation hook only needed a
+  fused gravity vector for portrait/landscape detection, and the
+  translation gate was invisible from `<Camera>`'s UX.  Both have now
+  been re-homed (see below) so the SDK works on bare React Native
+  with no Expo modules infrastructure.
+- **`useIMUTranslationGate` removed from the public API** (was public
+  since 0.1.0).  In `<Camera>`'s wiring it only ever called
+  `markNextFrameAsLastKeyframe()` as a back-end side effect with no
+  user-visible warning UI — so removing it changes nothing the user
+  could see, only the precise moment at which the last keyframe is
+  selected during a non-AR pan where the operator translates more
+  than ~6 cm laterally.  Hosts that want the "rotate, don't translate"
+  warning banner the original hook was designed to drive can now
+  build it directly on top of `react-native-sensors`' raw streams.
+
+### Changed
+
+- **`useDeviceOrientation` rewritten on `react-native-sensors`
+  accelerometer.**  Same `DeviceOrientation` return type, same
+  threshold-based dominant-axis classifier, same public signature.
+  The internal-only change is the source: instead of
+  `expo-sensors`' `DeviceMotion` (which normalised Android signs to
+  iOS convention for us), we now subscribe to
+  `react-native-sensors`' accelerometer and do the platform sign-
+  flip explicitly in JS (`Platform.OS === 'android' ? -value : value`).
+  Threshold is now platform-dependent because iOS reports in G's
+  and Android in m/s² — see the file header for the per-platform
+  numbers and the Issue #3 history that motivated keeping iOS as
+  the reference convention.
+
+### Migration from 0.1.x
+
+For hosts that **only used `<Camera>` or the public hooks except
+`useIMUTranslationGate`** — there is no code change required.  The
+public surface that survives 0.1.x → 0.2.0 is source-compatible.
+Native-side, you can now optionally rip out the entire Expo modules
+host wiring (Podfile `use_expo_modules!` macro, `AppDelegate.swift`
+Expo factory, `MainApplication.kt` `ExpoReactHostFactory`, the gradle
+`expo-root-project` plugin, the two `patch-package` patches for Expo
+SDK 55 on RN 0.84) — that whole section of
+[`docs/host-app-integration.md`](docs/host-app-integration.md) is
+optional from 0.2.0 onward and will be removed from the doc in a
+follow-up.
+
+For hosts that **imported `useIMUTranslationGate` directly**:
+re-implement on top of `react-native-sensors` accelerometer + a JS
+IIR for gravity subtraction, or open an issue describing the
+non-AR-capture-with-translation-warning use case and we'll consider
+re-introducing it as a thin wrapper.
+
 ## [0.1.3] — 2026-05-21
 
 ### Changed
