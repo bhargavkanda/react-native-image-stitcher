@@ -661,7 +661,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
     return () => { cancelled = true; };
   }, [isAR, lens]);
 
-  // IMU translation gate — only in non-AR mode.
+  // IMU translation gate — only engaged in non-AR mode.  Fires when
+  // the operator's lateral hand motion exceeds the budget, telling
+  // the C++ engine to force-accept the next frame.  This is what
+  // keeps non-AR captures producing keyframes at all (the flow-
+  // novelty algorithm alone is too strict in practice).
   const imuGate = useIMUTranslationGate({
     enabled:
       isNonAR

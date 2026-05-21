@@ -1,113 +1,97 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// useIMUTranslationGate.ts — JS-side IMU translation tracker for the
-// non-AR translation-warning banner + (optional) gate force-accept.
+// useIMUTranslationGate — JS-side IMU translation tracker that fires
+// a callback when integrated lateral displacement on the device-X
+// axis exceeds a budget.  Drives `<Camera>`'s non-AR keyframe-
+// acceptance path: every time the gate fires, the host calls the
+// C++ engine's `markNextFrameAsLastKeyframe()` so the trailing frame
+// lands as a keyframe regardless of what the flow-novelty algorithm
+// alone would decide.
 //
-// 2026-05-17 (Issue #4-A v3): rewritten on top of `expo-sensors`
-// `DeviceMotion` (which returns gravity-subtracted linear
-// acceleration via Apple's CoreMotion fusion on iOS and Android's
-// `TYPE_LINEAR_ACCELERATION` sensor on Android — both significantly
-// less noisy than raw accel + JS-side IIR gravity subtraction).
-// Tracks a SINGLE device-frame axis (device-X — the phone's lateral /
-// short side) rather than the 3D translation magnitude.
-//
-// Why exists
-// ──────────
-//
-// In non-AR mode the SDK has no ARSession pose stream, so the shared
-// C++ `KeyframeGate`'s translation-budget feature stays at zero and
-// never trips.  This hook fills the gap on the JS side and emits a
-// budget-crossed callback the host can wire to either:
-//
-//   (a) `markNextFrameAsLastKeyframe()` — tell the gate "force-accept
-//       the next frame regardless of overlap", so the trailing-edge
-//       frame still lands when the operator translates instead of
-//       rotates.
-//
-//   (b) A user-facing warning banner ("Rotate the camera instead of
-//       moving it sideways" — see AuditCaptureScreen).
-//
-// AuditCaptureScreen wires it to both.
+// V0.2 history note
+// ─────────────────
+// 0.1.x used `expo-sensors`' `DeviceMotion.acceleration`, which
+// returned gravity-subtracted linear acceleration via CoreMotion's
+// native fusion (iOS) / Android's `TYPE_LINEAR_ACCELERATION` sensor
+// (Android) — both significantly less noisy than raw accel + JS-side
+// gravity subtraction.  v0.2 drops the Expo modules dependency
+// (see CHANGELOG / docs/host-app-integration.md), so the gate is now
+// implemented on `react-native-sensors`' raw `accelerometer` with a
+// JS-side IIR low-pass to estimate the gravity vector.  The IIR
+// version is noisier — expect a few extra cm of apparent drift on a
+// stationary phone over several seconds — but the budget threshold
+// (~8 cm at default `flowMaxTranslationCm = 8`) and the anchor
+// resets (every accepted keyframe + recording start) keep the
+// per-interval drift window short enough that the budget still
+// meaningfully discriminates real translation from noise.
 //
 // Why device-X (the shorter side)
 // ───────────────────────────────
-//
 // We track motion ALONG the pan axis (the direction the operator is
 // supposed to be rotating-through but might be translating-through
-// instead) because translation orthogonal to the pan axis is
-// acceptable — vertical translation while panning horizontally in
-// portrait, for example, doesn't cause horizontal parallax.
-//
-// The pan axis maps to device-X in BOTH supported orientations
-// (per memory/ar-stitching-two-modes.md):
-//
-//   Portrait  + horizontal pan: device-X = user-left/right = pan axis.
+// instead).  In BOTH supported pan modes the pan axis maps to
+// device-X:
+//   Portrait  + horizontal pan: device-X = user-left/right.
 //   Landscape + vertical   pan: device-X has rotated 90° into the
-//                                user's up/down direction = pan axis.
-//
-// The lateral axis of the phone (its short side) always aligns with
-// the pan direction in either supported mode, so a single-axis
-// tracker works without needing to know which orientation we're in.
+//                                user's up/down direction.
+// So a single-axis tracker works without knowing the orientation.
 //
 // Drift mitigation
 // ────────────────
+// 1. IIR low-pass on the raw X accel estimates the gravity offset.
+//    Subtracting that gives linear-acceleration-on-X.  Alpha = 0.9
+//    at the default 50 Hz sample rate → ~200 ms gravity tracking
+//    time constant.  Slow enough that hand motion (>1 Hz) gets
+//    through; fast enough to converge after device rotations within
+//    ~1 second.
+// 2. Per-sample velocity damping at 5 % so a constant noise-floor
+//    offset decays to ~1 % of its initial value in 2 s.  This caps
+//    apparent drift for a stationary phone.
+// 3. Anchor reset on recording start AND every accepted keyframe
+//    (callers do this) — bounds the integration window to typically
+//    0.3-2 s, well inside the regime where IIR-estimated linear
+//    accel is usable.
 //
-// `DeviceMotion.acceleration` (gravity removed in native code via
-// IMU fusion) has a noise floor roughly 30-50 % lower than what the
-// previous raw-accel + JS IIR pipeline produced.  Single-axis math
-// further reduces apparent drift by ≈√3 vs the prior 3D magnitude.
-// Together they should keep the typical "stationary phone" reading
-// below ~5-10 cm even after several seconds.
-//
-// Anchor resets happen at (a) recording start (via the host calling
-// `resetAnchor()` from handleHoldStart) and (b) every accepted
-// keyframe — these bound the per-interval drift window to typically
-// 0.3-2 s.
-//
-// What we no longer do
-// ────────────────────
-//
-//   - JS-side 1-pole IIR for gravity subtraction (native API gives
-//     gravity-subtracted accel directly).
-//   - 3D vector magnitude (now single device-X axis).
-//   - Velocity damping (kept as a safety net at 5%/sample so a
-//     persistent noise-floor offset doesn't slowly drift the axis —
-//     low cost, high robustness).
+// Platform unit handling
+// ──────────────────────
+// `react-native-sensors`' accelerometer reports:
+//   iOS:     values in G's (multiples of 9.81 m/s²), via CoreMotion.
+//   Android: values in m/s², via Sensor.TYPE_ACCELEROMETER.
+// We scale iOS by `G_TO_MPS2` so the integration math stays in
+// standard m/s², m/s, m units.  Sign convention doesn't matter for
+// the gate because the gravity offset is estimated and subtracted
+// per-axis; what's left is the platform-agnostic linear acceleration.
 
 import { useCallback, useEffect, useRef } from 'react';
-import { DeviceMotion } from 'expo-sensors';
-import type { DeviceMotionMeasurement } from 'expo-sensors';
-
-// expo-sensors doesn't re-export Subscription from its index, but
-// `addListener` returns one — use the inferred return type so we
-// don't have to chase the right deep-import path.
-type DeviceMotionSubscription = ReturnType<typeof DeviceMotion.addListener>;
+import { Platform } from 'react-native';
+import {
+  accelerometer,
+  setUpdateIntervalForType,
+  SensorTypes,
+} from 'react-native-sensors';
+import type { Subscription } from 'rxjs';
 
 
 export interface UseIMUTranslationGateOptions {
   /**
-   * Whether the gate is engaged.  Pass `false` to skip the subscription
-   * entirely — useful when the host is in AR mode (where the gate
-   * gets pose-derived translation natively).  Hot-toggleable;
-   * subscribing/unsubscribing is cheap.
+   * Whether the gate is engaged.  Pass `false` to skip the
+   * subscription entirely — useful when the host is in AR mode
+   * (where the gate gets pose-derived translation natively).
+   * Hot-toggleable; subscribing/unsubscribing is cheap.
    */
   enabled: boolean;
 
   /**
    * Translation budget in METRES along the device-X (pan) axis.
-   * When the integrated displacement magnitude exceeds this since
-   * the last accept, the hook fires `onBudgetExceeded`.  Default
-   * 0.40 m / 40 cm (80 % of the 50 cm default
-   * `flowMaxTranslationCm`).  Caller typically passes
-   * `panoramaSettings.flowMaxTranslationCm * 0.8 / 100`.
+   * Default 0.40 m / 40 cm.  Callers in `<Camera>` typically pass
+   * `panoramaSettings.flowMaxTranslationCm / 100.0` (default 8 cm).
    */
   budgetMeters?: number;
 
   /**
-   * Update interval in MILLISECONDS for the DeviceMotion sensor.
-   * Default 20 ms ≈ 50 Hz.  Lower (faster sampling) = more accurate
-   * integration; higher = lower CPU + battery.  Matches the previous
-   * raw-accel cadence so reset/integrate behaviour stays comparable.
+   * Update interval in MILLISECONDS for the accelerometer.
+   * Default 20 ms ≈ 50 Hz.  Lower = more accurate integration;
+   * higher = lower CPU + battery.
    */
   sampleIntervalMs?: number;
 
@@ -115,233 +99,110 @@ export interface UseIMUTranslationGateOptions {
    * Fired exactly once per "budget crossing" — i.e., when the
    * running translation along device-X crosses `budgetMeters` from
    * below.  The host is responsible for both (a) calling
-   * `IncrementalStitcher.markNextFrameAsLastKeyframe()` and
-   * (b) invoking the returned `resetAnchor()` once the next
-   * keyframe actually accepts, so the integrator restarts from zero.
+   * `IncrementalStitcher.markNextFrameAsLastKeyframe()` to force-
+   * accept the next frame, and (b) invoking the returned
+   * `resetAnchor()` once that next keyframe actually accepts, so
+   * the integrator restarts from zero.
    */
   onBudgetExceeded: () => void;
-
-  /**
-   * 2026-05-18 (Issue #4 investigation) — when true, log every Nth
-   * accelerometer sample (default N=20 ≈ 400 ms at 50 Hz) showing
-   * the current `acceleration.x`, accumulated `posX`, and time
-   * since anchor reset.  Helps diagnose drift behaviour vs real
-   * translation magnitude in field testing.  Defaults to false —
-   * production captures stay quiet.
-   */
-  debug?: boolean;
 }
 
 
 export interface UseIMUTranslationGateReturn {
   /**
-   * Reset the running translation to zero.  Call this at recording
-   * start AND after each confirmed keyframe accept — the typical
-   * wiring is to subscribe to `IncrementalStateUpdate` and
-   * call `resetAnchor()` from inside the listener AND from the host's
-   * `handleHoldStart`.
+   * Reset the position + velocity integrators to zero AND clear the
+   * "already fired" latch so `onBudgetExceeded` can fire again.
+   * The gravity IIR estimate is intentionally preserved — it
+   * benefits from continuous history across anchors.
    */
   resetAnchor: () => void;
-
-  /**
-   * Read the current running displacement along device-X in METRES.
-   * Returns the absolute value (sign is uninteresting — either left
-   * or right counts the same toward the budget).
-   * Useful for the on-screen debug HUD ("translation since last
-   * accept: 0.07 m").  Not exposed via state — host polls if needed.
-   */
-  getCurrentTranslationM: () => number;
 }
 
 
-/**
- * IMU-based translation tracker — single-axis (device-X / pan axis),
- * fused IMU via `expo-sensors` `DeviceMotion`.  See file header for
- * algorithm + rationale.  No platform-specific code; the underlying
- * native fusion is platform-aware (CoreMotion on iOS, fused
- * `TYPE_LINEAR_ACCELERATION` on Android).
- */
-export function useIMUTranslationGate(
-  options: UseIMUTranslationGateOptions,
-): UseIMUTranslationGateReturn {
-  const {
-    enabled,
-    budgetMeters = 0.40,
-    sampleIntervalMs = 20,
-    onBudgetExceeded,
-    debug = false,
-  } = options;
+const DEFAULT_BUDGET_METERS = 0.40;
+const DEFAULT_SAMPLE_INTERVAL_MS = 20;
+/// Per-sample multiplicative damping on the velocity integrator.
+/// 5 % at 50 Hz → constant offset decays to ~1 % in 2 s.  Bounds
+/// the apparent-drift window for a stationary phone.
+const VELOCITY_DAMPING_PER_SAMPLE = 0.05;
+/// IIR low-pass coefficient for the gravity estimate.  At 50 Hz
+/// this gives ~200 ms time constant.  Higher = slower gravity
+/// tracking (more lag during device rotation, less hand-motion
+/// bleed into the gravity estimate); lower = faster.
+const GRAVITY_IIR_ALPHA = 0.9;
+/// 1 G in m/s².  Standard gravity per CGPM 1901 (good to all the
+/// digits anyone cares about for this application).
+const G_TO_MPS2 = 9.81;
 
-  // Integrator state, kept in refs so the listener can write without
-  // re-creating its closure on every render.
-  // ─ velX  : velocity along device-X (m/s)
-  // ─ posX  : position along device-X (m)
-  // ─ lastMs: epoch ms of the previous sample (for dt)
-  // ─ budgetCrossed: debounce flag — clears on resetAnchor
-  // ─ sampleCount: rolling counter for debug log throttle
-  // ─ anchorMs: timestamp of the most recent resetAnchor (or first
-  //             sample) — gives "time since anchor" in debug output
-  const velX = useRef<number>(0);
-  const posX = useRef<number>(0);
-  const lastMs = useRef<number>(0);
-  const budgetCrossed = useRef<boolean>(false);
-  const sampleCount = useRef<number>(0);
-  const anchorMs = useRef<number>(0);
 
-  // Keep the callback in a ref so we don't tear down + re-subscribe
-  // on every prop change.  React idiom for stable callback identity.
-  const onBudgetExceededRef = useRef(onBudgetExceeded);
-  useEffect(() => { onBudgetExceededRef.current = onBudgetExceeded; },
-    [onBudgetExceeded]);
+export function useIMUTranslationGate({
+  enabled,
+  budgetMeters = DEFAULT_BUDGET_METERS,
+  sampleIntervalMs = DEFAULT_SAMPLE_INTERVAL_MS,
+  onBudgetExceeded,
+}: UseIMUTranslationGateOptions): UseIMUTranslationGateReturn {
+  // All running-integrator state lives in a single ref so the
+  // subscription callback can update it without forcing a re-render
+  // every frame (50 Hz worth of re-renders would tank performance).
+  const stateRef = useRef({
+    posX: 0,
+    velX: 0,
+    /// NaN sentinel for "uninitialised"; first sample seeds it.
+    gravityX: NaN,
+    fired: false,
+  });
+
+  // Latest onBudgetExceeded callback in a ref so callers can pass
+  // an inline closure that captures fresh state without us re-
+  // subscribing the sensor (which would reset the integrators).
+  const onExceededRef = useRef(onBudgetExceeded);
+  onExceededRef.current = onBudgetExceeded;
+
+  const resetAnchor = useCallback(() => {
+    const s = stateRef.current;
+    s.posX = 0;
+    s.velX = 0;
+    s.fired = false;
+    // s.gravityX is intentionally preserved — see header.
+  }, []);
 
   useEffect(() => {
-    if (debug) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `[IMUTransGate] effect re-run: enabled=${enabled} `
-        + `budget=${budgetMeters.toFixed(2)}m sampleIntervalMs=${sampleIntervalMs}`,
-      );
-    }
     if (!enabled) return;
 
-    // Lock in the DeviceMotion update rate.  Other expo-sensors
-    // consumers in the SDK can override later; the LAST setter wins
-    // per Expo's docs, which is fine because our budget logic
-    // tolerates a wide range of cadences.
-    DeviceMotion.setUpdateInterval(sampleIntervalMs);
+    setUpdateIntervalForType(SensorTypes.accelerometer, sampleIntervalMs);
+    const scale = Platform.OS === 'ios' ? G_TO_MPS2 : 1;
+    const dt = sampleIntervalMs / 1000.0;
 
-    // Reset state on (re-)engage so the first measurement after
-    // enabled-toggles-true doesn't carry stale velocity from a
-    // previous capture session.
-    velX.current = 0;
-    posX.current = 0;
-    lastMs.current = 0;
-    budgetCrossed.current = false;
-    sampleCount.current = 0;
-    anchorMs.current = Date.now();
+    const sub: Subscription = accelerometer.subscribe(({ x }) => {
+      const ax = x * scale;  // device-X acceleration in m/s²
+      const s = stateRef.current;
 
-    // 2026-05-18 (Issue #3 diagnostics) — track whether we've ever
-    // received a non-null `acceleration` for this subscription.  If
-    // the user reports "no logs" we can correlate with these
-    // start-of-subscription and first-real-data markers.
-    let everGotData = false;
-    let nullSampleCount = 0;
-    if (debug) {
-      // eslint-disable-next-line no-console
-      console.log('[IMUTransGate] subscribing to DeviceMotion');
-    }
-
-    const sub: DeviceMotionSubscription = DeviceMotion.addListener((m: DeviceMotionMeasurement) => {
-      const a = m.acceleration;       // gravity-subtracted (m/s²)
-      if (!a) {
-        nullSampleCount += 1;
-        if (debug && nullSampleCount === 1) {
-          // eslint-disable-next-line no-console
-          console.log(
-            '[IMUTransGate] first sample: acceleration=null '
-            + '(CoreMotion warming up; will retry on next sample)',
-          );
-        }
-        if (debug && nullSampleCount > 0 && nullSampleCount % 100 === 0) {
-          // eslint-disable-next-line no-console
-          console.log(
-            `[IMUTransGate] STILL receiving null acceleration after `
-            + `${nullSampleCount} samples — sensor source may be broken`,
-          );
-        }
-        return;                 // can be null briefly on cold start
-      }
-      if (debug && !everGotData) {
-        everGotData = true;
-        // eslint-disable-next-line no-console
-        console.log(
-          `[IMUTransGate] first real sample: ax=${a.x.toFixed(3)} `
-          + `ay=${a.y.toFixed(3)} az=${a.z.toFixed(3)} m/s² `
-          + `(after ${nullSampleCount} null sample(s))`,
-        );
-      }
-      const now = Date.now();
-      if (lastMs.current === 0) {
-        lastMs.current = now;
+      // First sample: seed gravity from this reading.  Assumes the
+      // phone is roughly stationary at recording start — true in
+      // practice because the operator just tap-and-held the shutter.
+      if (Number.isNaN(s.gravityX)) {
+        s.gravityX = ax;
         return;
       }
-      const dt = Math.max(0, Math.min(0.1, (now - lastMs.current) / 1000.0));
-      lastMs.current = now;
-      if (dt === 0) return;
 
-      // Single-axis integration along device-X (lateral / pan axis).
-      // See file header for why device-X is the right axis in both
-      // portrait and landscape captures.
-      velX.current += a.x * dt;
-      velX.current *= 0.95;            // 5%/sample damping — see file header
-      posX.current += velX.current * dt;
+      // IIR low-pass to track the gravity component on device-X.
+      s.gravityX = GRAVITY_IIR_ALPHA * s.gravityX + (1 - GRAVITY_IIR_ALPHA) * ax;
 
-      const mag = Math.abs(posX.current);
+      // Linear acceleration on X = raw - gravity estimate.
+      const linX = ax - s.gravityX;
 
-      // 2026-05-18 (Issue #4 investigation) — debug-gated diagnostic
-      // log.  Throttled to every 20th sample (~400 ms at 50 Hz) so
-      // the log isn't a firehose.  When this runs and we still see
-      // posX hovering at < 5 cm during a real translation, the
-      // sensor source isn't capturing what we think it is.
-      sampleCount.current += 1;
-      if (debug && sampleCount.current % 20 === 0) {
-        const secs = (now - anchorMs.current) / 1000.0;
-        // eslint-disable-next-line no-console
-        console.log(
-          `[IMUTransGate] t+${secs.toFixed(2)}s `
-          + `ax=${a.x.toFixed(3)}m/s² `
-          + `velX=${velX.current.toFixed(4)}m/s `
-          + `posX=${posX.current.toFixed(4)}m `
-          + `(|mag|=${mag.toFixed(4)}m, budget=${budgetMeters.toFixed(2)}m, crossed=${budgetCrossed.current})`,
-        );
-      }
+      // Single integration with per-sample velocity damping.
+      s.velX = (s.velX + linX * dt) * (1 - VELOCITY_DAMPING_PER_SAMPLE);
+      s.posX += s.velX * dt;
 
-      // Budget crossing — fire exactly once per crossing (the
-      // `budgetCrossed` flag clears on `resetAnchor`).
-      if (!budgetCrossed.current && mag >= budgetMeters) {
-        budgetCrossed.current = true;
-        if (debug) {
-          // eslint-disable-next-line no-console
-          console.log(
-            `[IMUTransGate] BUDGET CROSSED at posX=${posX.current.toFixed(4)}m `
-            + `(budget=${budgetMeters.toFixed(2)}m)`,
-          );
-        }
-        onBudgetExceededRef.current();
+      if (!s.fired && Math.abs(s.posX) > budgetMeters) {
+        s.fired = true;
+        onExceededRef.current();
       }
     });
 
-    return () => {
-      if (debug) {
-        // eslint-disable-next-line no-console
-        console.log(
-          `[IMUTransGate] unsubscribing (everGotData=${everGotData}, `
-          + `nullSamples=${nullSampleCount}, realSamples=${sampleCount.current})`,
-        );
-      }
-      sub.remove();
-    };
-  }, [enabled, budgetMeters, sampleIntervalMs, debug]);
+    return () => sub.unsubscribe();
+  }, [enabled, budgetMeters, sampleIntervalMs]);
 
-  // 2026-05-18 (Issue B meta-bug fix): wrap the returned functions in
-  // useCallback so the hook's return value is REFERENTIALLY STABLE
-  // across renders.  Consumer code (AuditCaptureScreen) puts `imuGate`
-  // in a useEffect dep array; without stability that effect re-runs
-  // every render, wiping out the prevAcceptedCount delta-tracker
-  // (which is what caused the resetAnchor-too-often bug we just
-  // diagnosed).  These functions only touch refs, so empty-deps
-  // useCallback is safe — no stale-closure risk.
-  const resetAnchor = useCallback(() => {
-    velX.current = 0;
-    posX.current = 0;
-    lastMs.current = 0;
-    budgetCrossed.current = false;
-    sampleCount.current = 0;
-    anchorMs.current = Date.now();
-  }, []);
-  const getCurrentTranslationM = useCallback(
-    () => Math.abs(posX.current),
-    [],
-  );
-  return { resetAnchor, getCurrentTranslationM };
+  return { resetAnchor };
 }

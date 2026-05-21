@@ -54,6 +54,9 @@ export type {
 // ─────────────────────────────────────────────────────────────────────
 // Hosts running their own non-AR capture flow can reuse this hook to
 // get the same translation-budget gating logic <Camera> uses internally.
+// As of v0.2 this hook is implemented on `react-native-sensors` raw
+// accelerometer + JS IIR gravity subtraction (was `expo-sensors`'
+// fused DeviceMotion through 0.1.x — see the hook's file header).
 export { useIMUTranslationGate } from './sensors/useIMUTranslationGate';
 export type {
   UseIMUTranslationGateOptions,
