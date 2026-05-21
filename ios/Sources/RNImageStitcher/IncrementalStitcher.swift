@@ -289,7 +289,7 @@ public final class IncrementalStitcher: NSObject {
     /// fix is non-trivial; deferred until pose-driven stitch work
     /// lands (which will rework the queue topology anyway).
     private let workQueue = DispatchQueue(
-        label: "com.retailens.incremental.stitcher",
+        label: "io.imagestitcher.incremental.stitcher",
         qos: .userInitiated
     )
 
@@ -306,7 +306,7 @@ public final class IncrementalStitcher: NSObject {
     /// is out of scope for this MVP — see prompt's "deliberately out
     /// of scope" list).
     private let refineQueue = DispatchQueue(
-        label: "com.retailens.incremental.refine",
+        label: "io.imagestitcher.incremental.refine",
         qos: .utility
     )
 
@@ -1136,7 +1136,7 @@ public final class IncrementalStitcher: NSObject {
         // Why this matters (RCA from Sentry crashes 2026-05-09
         // 21:59-22:03, all 3 .ips traces):
         //   EXC_BAD_ACCESS at objc_retain+16, frame 1 = closure #1
-        //   in finalize+2648, queue = com.retailens.incremental.
+        //   in finalize+2648, queue = io.imagestitcher.incremental.
         //   stitcher.  +2648 lands inside the os_log call that
         //   bridges self.batchWarperType → NSString via
         //   swift_bridgeObjectRetain → objc_retain.  The retain
@@ -1269,7 +1269,7 @@ public final class IncrementalStitcher: NSObject {
         // under stateLock, closing the visible torn-pointer race.
         // Three Sentry traces post-fix4 still showed the same crash
         // signature (frame 1 = closure #1 in finalize+N, queue =
-        // com.retailens.incremental.stitcher), which per the
+        // io.imagestitcher.incremental.stitcher), which per the
         // systematic-debugging skill (3+ fixes failed on the same
         // symptom = wrong architecture) means the workQueue.async
         // pattern itself is the problem, not any specific captured

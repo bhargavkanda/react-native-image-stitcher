@@ -50,7 +50,7 @@ class BatchStitcher(reactContext: ReactApplicationContext)
      * JNI bridge to our custom-built OpenCV stitcher.  Mirrors iOS'
      * OpenCVStitcher.stitchFramePaths so the batch-keyframe flow has
      * parity across platforms.  Implementation:
-     *   retailens-capture-sdk/android/src/main/cpp/image_stitcher_jni.cpp
+     *   react-native-image-stitcher/android/src/main/cpp/image_stitcher_jni.cpp
      *
      * @param framePaths  input JPEG paths in capture order (≥2 required)
      * @param outputPath  destination JPEG path

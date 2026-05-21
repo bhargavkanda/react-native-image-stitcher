@@ -6,7 +6,7 @@
  *   - iOS: Swift native module that vendors upstream OpenCV's iOS
  *     framework and calls `cv::Stitcher::SCANS` mode (designed for
  *     translational shelf captures).  Lives in
- *     `retailens-capture-sdk/ios/Sources/RNImageStitcher/`.
+ *     `react-native-image-stitcher/ios/Sources/RNImageStitcher/`.
  *   - Android: deferred to Phase 3 — same OpenCV surface, different
  *     build (NDK + Gradle).  Until that lands, Android calls hit the
  *     `StitchNotImplementedError` path below.
