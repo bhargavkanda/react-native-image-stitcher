@@ -18,9 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > [!IMPORTANT]
 > The next release will be **v0.2.0** (semver-minor) because the
-> peer-dependency contract and the public hook surface both change in
-> a backward-incompatible way.  Hosts upgrading from 0.1.x should
-> follow the migration notes below.
+> peer-dependency contract changes in a backward-incompatible way.
+> The public hook surface is preserved.
 
 ### Removed
 
@@ -28,20 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pull in the entire Expo modules runtime (`expo`, `expo-modules-core`,
   `expo-modules-autolinking`, `expo-sensors`) just for two hooks —
   `useDeviceOrientation` and `useIMUTranslationGate`.  That tax was
-  disproportionate to the value: the orientation hook only needed a
-  fused gravity vector for portrait/landscape detection, and the
-  translation gate was invisible from `<Camera>`'s UX.  Both have now
-  been re-homed (see below) so the SDK works on bare React Native
-  with no Expo modules infrastructure.
-- **`useIMUTranslationGate` removed from the public API** (was public
-  since 0.1.0).  In `<Camera>`'s wiring it only ever called
-  `markNextFrameAsLastKeyframe()` as a back-end side effect with no
-  user-visible warning UI — so removing it changes nothing the user
-  could see, only the precise moment at which the last keyframe is
-  selected during a non-AR pan where the operator translates more
-  than ~6 cm laterally.  Hosts that want the "rotate, don't translate"
-  warning banner the original hook was designed to drive can now
-  build it directly on top of `react-native-sensors`' raw streams.
+  disproportionate to the value (see the host-integration burden in
+  [`docs/host-app-integration.md`](docs/host-app-integration.md)).
+  Both hooks have been re-homed onto `react-native-sensors` (already
+  a peer dep), so the SDK now works on bare React Native with no
+  Expo modules infrastructure.
 
 ### Changed
 
@@ -57,12 +47,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Android in m/s² — see the file header for the per-platform
   numbers and the Issue #3 history that motivated keeping iOS as
   the reference convention.
+- **`useIMUTranslationGate` rewritten on `react-native-sensors`
+  accelerometer + JS-side IIR gravity subtraction.**  Same public
+  signature, same options, same return shape, same on-budget-
+  exceeded callback semantics, same anchor-reset behaviour.  The
+  internal change: in 0.1.x the hook consumed `DeviceMotion.accel-
+  eration` (gravity-subtracted via CoreMotion's native fusion on iOS
+  / Android's `TYPE_LINEAR_ACCELERATION` on Android — both produced
+  by hardware sensor fusion).  v0.2 consumes raw accelerometer and
+  estimates the gravity vector with a JS IIR low-pass (alpha = 0.9
+  at 50 Hz → ~200 ms time constant), then subtracts.  **Noise
+  trade-off**: the JS IIR is measurably noisier than CoreMotion's
+  native fusion — expect a few extra cm of apparent drift on a
+  stationary phone over several seconds.  With the per-sample
+  velocity damping (5 %) and the anchor reset on every accepted
+  keyframe, the drift stays bounded inside a 0.3-2 s integration
+  window, which is comfortably under the default 8 cm budget.  If
+  the IIR floor becomes a problem in practice, we'll consider
+  moving the fusion into a small native module rather than re-
+  introducing the Expo modules dependency.
 
 ### Migration from 0.1.x
 
-For hosts that **only used `<Camera>` or the public hooks except
-`useIMUTranslationGate`** — there is no code change required.  The
-public surface that survives 0.1.x → 0.2.0 is source-compatible.
+No JS code changes are required for any host — the public surface
+that survives 0.1.x → 0.2.0 is source-compatible.
+
 Native-side, you can now optionally rip out the entire Expo modules
 host wiring (Podfile `use_expo_modules!` macro, `AppDelegate.swift`
 Expo factory, `MainApplication.kt` `ExpoReactHostFactory`, the gradle
@@ -70,13 +79,7 @@ Expo factory, `MainApplication.kt` `ExpoReactHostFactory`, the gradle
 SDK 55 on RN 0.84) — that whole section of
 [`docs/host-app-integration.md`](docs/host-app-integration.md) is
 optional from 0.2.0 onward and will be removed from the doc in a
-follow-up.
-
-For hosts that **imported `useIMUTranslationGate` directly**:
-re-implement on top of `react-native-sensors` accelerometer + a JS
-IIR for gravity subtraction, or open an issue describing the
-non-AR-capture-with-translation-warning use case and we'll consider
-re-introducing it as a thin wrapper.
+follow-up commit.
 
 ## [0.1.3] — 2026-05-21
 
