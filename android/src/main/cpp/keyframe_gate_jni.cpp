@@ -201,4 +201,102 @@ Java_io_imagestitcher_rn_KeyframeGate_nativeEvaluate(
     return out;
 }
 
+// ── Per-frame evaluate WITH PIXEL DATA ──────────────────────────
+//
+// 2026-05-21 (v0.3) — pixel-aware Flow-strategy entry point.  The
+// `nativeEvaluate` above hands the gate pose + plane only, which
+// forces the C++ side to silently fall back from Flow strategy to
+// Pose strategy in cpp/keyframe_gate.cpp's evaluateWithFrame()
+// (defensive fallback at the grayData==nullptr branch).  This thunk
+// is the proper Flow-strategy entry point: the caller supplies the
+// frame's grayscale plane (Y plane for YUV camera images, or a
+// JPEG-decode result for the JS-driver path), and the C++ Flow
+// path actually runs feature tracking on it.
+//
+// grayBytes:  Java byte[] holding the grayscale plane.  Accessed via
+//             GetPrimitiveArrayCritical (no copy, pins GC briefly for
+//             the duration of the gate.evaluateWithFrame call —
+//             evaluation is ~1-5 ms so the pin window is tight).
+// width:      grayscale image width in pixels.
+// height:     grayscale image height in pixels.
+// stride:     bytes per row.  May exceed width when the plane has
+//             padding (ARCore's Image.Plane.getRowStride() can pad).
+//
+// plane16OrNull: same as nativeEvaluate — column-major 4×4 plane
+//             transform, or null for angular-delta fallback.
+//
+// Returns DoubleArray[5] identical to nativeEvaluate.
+JNIEXPORT jdoubleArray JNICALL
+Java_io_imagestitcher_rn_KeyframeGate_nativeEvaluateWithFrame(
+    JNIEnv* env, jclass, jlong handle,
+    jfloat tx, jfloat ty, jfloat tz,
+    jfloat qx, jfloat qy, jfloat qz, jfloat qw,
+    jfloat fx, jfloat fy, jfloat cx, jfloat cy,
+    jint imageWidth, jint imageHeight,
+    jfloatArray plane16OrNull,
+    jbyteArray grayBytes,
+    jint grayWidth, jint grayHeight, jint grayStride)
+{
+    retailens::Pose pose;
+    pose.tx = tx; pose.ty = ty; pose.tz = tz;
+    pose.qx = qx; pose.qy = qy; pose.qz = qz; pose.qw = qw;
+    pose.fx = fx; pose.fy = fy; pose.cx = cx; pose.cy = cy;
+    pose.imageWidth  = static_cast<int32_t>(imageWidth);
+    pose.imageHeight = static_cast<int32_t>(imageHeight);
+
+    retailens::PlaneTransform planeStorage;
+    const retailens::PlaneTransform* planePtr = nullptr;
+    if (plane16OrNull) {
+        jsize len = env->GetArrayLength(plane16OrNull);
+        if (len == 16) {
+            jfloat* src = env->GetFloatArrayElements(plane16OrNull, nullptr);
+            if (src) {
+                std::memcpy(planeStorage.m, src, sizeof(float) * 16);
+                env->ReleaseFloatArrayElements(plane16OrNull, src, JNI_ABORT);
+                planePtr = &planeStorage;
+            }
+        }
+    }
+
+    // Pin the byte[] for the duration of the gate evaluate.  Use
+    // GetPrimitiveArrayCritical (zero-copy, JVM pins the GC) over
+    // GetByteArrayElements (may copy on some VMs) because at 30-60
+    // Hz of 2 MB Y-planes, the copy cost adds up.  Evaluate is
+    // ~1-5 ms so the pin window is short.  Always paired with
+    // ReleasePrimitiveArrayCritical even on the error paths below.
+    retailens::KeyframeGateDecision d;
+    if (grayBytes && grayWidth > 0 && grayHeight > 0 && grayStride >= grayWidth) {
+        void* raw = env->GetPrimitiveArrayCritical(grayBytes, nullptr);
+        if (raw) {
+            d = gate(handle)->evaluateWithFrame(
+                pose, planePtr,
+                static_cast<const uint8_t*>(raw),
+                static_cast<int32_t>(grayWidth),
+                static_cast<int32_t>(grayHeight),
+                static_cast<int32_t>(grayStride));
+            env->ReleasePrimitiveArrayCritical(grayBytes, raw, JNI_ABORT);
+        } else {
+            // GetPrimitiveArrayCritical failed (rare, but defensive).
+            // Fall back to pose-only path so we degrade gracefully
+            // rather than crashing the whole capture pipeline.
+            d = gate(handle)->evaluate(pose, planePtr);
+        }
+    } else {
+        // Caller passed null / invalid dims — defensive fall-through
+        // to pose-only path (matches the C++ side's own defensive
+        // fallback in evaluateWithFrame when grayData == nullptr).
+        d = gate(handle)->evaluate(pose, planePtr);
+    }
+
+    jdoubleArray out = env->NewDoubleArray(5);
+    jdouble values[5];
+    values[0] = d.accept ? 1.0 : 0.0;
+    values[1] = static_cast<jdouble>(static_cast<int32_t>(d.reason));
+    values[2] = d.newContentFraction;
+    values[3] = static_cast<jdouble>(d.acceptedCount);
+    values[4] = static_cast<jdouble>(d.maxCount);
+    env->SetDoubleArrayRegion(out, 0, 5, values);
+    return out;
+}
+
 } // extern "C"

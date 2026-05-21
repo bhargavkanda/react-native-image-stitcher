@@ -2026,11 +2026,37 @@ public final class IncrementalStitcher: NSObject {
         }
         stateLock.unlock()
 
-        // Pose-only gate evaluation — no pixel buffer, no plane.
-        let decision = self.keyframeGate.evaluate(
-            pose: pose,
-            latchedPlane: nil
-        )
+        // 2026-05-21 (v0.3) — pixel-aware Flow-strategy evaluation.
+        // Pre-0.3 this was `evaluate(pose:latchedPlane:)` with no pixel
+        // buffer, which forced the C++ gate to silently fall back to
+        // Pose strategy (same bug as Android non-AR; both fixed in
+        // v0.3).  We now decode the JPEG snapshot at `path` to a
+        // single-channel grayscale CVPixelBuffer and pass it through,
+        // so the gate's Flow strategy actually runs sparse-flow
+        // novelty on real image content.
+        //
+        // CGImageSource → CGContext into a OneComponent8 CVPixelBuffer.
+        // ~10-20 ms per snapshot on iPhone 13/16 Pro; well under the
+        // ~250 ms non-AR snapshot interval (~4 FPS cadence).  v0.4
+        // will replace this path entirely by moving non-AR capture to
+        // vision-camera's Frame Processor API (tracked at issue #11).
+        let decision: KeyframeGateDecision
+        if let grayBuffer = Self.decodeJpegToGrayscalePixelBuffer(path: path) {
+            decision = self.keyframeGate.evaluate(
+                pose: pose,
+                latchedPlane: nil,
+                pixelBuffer: grayBuffer
+            )
+        } else {
+            // JPEG decode failed (corrupt file, OOM, etc.).  Fall back
+            // to pose-only so the capture doesn't lock up — matches
+            // the C++ side's defensive grayData==nullptr handling
+            // inside evaluateWithFrame.
+            decision = self.keyframeGate.evaluate(
+                pose: pose,
+                latchedPlane: nil
+            )
+        }
         if !decision.accept {
             self.emitKeyframeRejectState(decision: decision)
             return false
@@ -2054,6 +2080,76 @@ public final class IncrementalStitcher: NSObject {
             isLandscape: pose.imageWidth >= pose.imageHeight
         )
         return true
+    }
+
+    /// 2026-05-21 (v0.3) — decode a JPEG file at the given path into a
+    /// single-channel grayscale CVPixelBuffer (`kCVPixelFormatType_-
+    /// OneComponent8`) suitable for feeding into the C++ KeyframeGate's
+    /// Flow-strategy evaluate path.  The bridge's `evaluatePixelBuffer:`
+    /// has explicit OneComponent8 handling (added in v0.3) that reads
+    /// the base address as the Y plane directly, so no extra conversion
+    /// happens on the C++ side.
+    ///
+    /// Used by `addBatchKeyframePath` (the JS-driver non-AR path) so the
+    /// Flow strategy actually runs on real pixel data — pre-0.3 this
+    /// path called `evaluate(pose:latchedPlane:)` with no buffer and
+    /// the C++ side silently fell back to Pose strategy.
+    ///
+    /// Performance: ~10-20 ms for a 1920×1080 JPEG on iPhone 13/16 Pro.
+    /// Well under the ~250 ms non-AR snapshot interval (~4 FPS).
+    /// v0.4 will replace this path entirely via Frame Processor — see
+    /// issue #11.
+    ///
+    /// Returns nil on any failure (file missing, corrupt JPEG, OOM
+    /// on the CVPixelBufferCreate).  Callers fall back to the
+    /// pose-only evaluate so the capture doesn't lock up.
+    private static func decodeJpegToGrayscalePixelBuffer(
+        path: String
+    ) -> CVPixelBuffer? {
+        let url = URL(fileURLWithPath: path)
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+        else {
+            return nil
+        }
+        let width = cgImage.width
+        let height = cgImage.height
+
+        var pixelBuffer: CVPixelBuffer?
+        let attrs: NSDictionary = [
+            kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width, height,
+            kCVPixelFormatType_OneComponent8,
+            attrs,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
+            return nil
+        }
+
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(buffer) else {
+            return nil
+        }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        guard let context = CGContext(
+            data: baseAddress,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            return nil
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return buffer
     }
 
     /// V16 Phase 1 — emit a state event when a batch-keyframe is

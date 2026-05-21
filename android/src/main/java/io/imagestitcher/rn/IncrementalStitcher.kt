@@ -243,6 +243,17 @@ class IncrementalStitcher(
     /// on start/stop so the view feeds frames only during a capture.
     @Volatile private var arCameraViewRef: RNSARCameraView? = null
 
+    /// 2026-05-21 (v0.3) — public-to-the-view-file getter so
+    /// `RNSARCameraView.forwardToIncremental` can ask whether the
+    /// currently-running engine is the batch-keyframe path (v0.3
+    /// Y-plane pixel-data flow) or the legacy hybrid/firstwins live
+    /// engine (which still needs a per-frame JPEG path).  Used to
+    /// elide the eager JPEG encode for batchKeyframe mode (the
+    /// production Camera component's path); the legacy live engine
+    /// still pays the per-frame JPEG cost.
+    internal val isBatchKeyframeMode: Boolean
+        get() = batchKeyframeMode
+
     init {
         // Static back-pointer so `RNSARCameraView` can call into
         // the singleton-style bridge module without a DI dance.  RN
@@ -511,6 +522,67 @@ class IncrementalStitcher(
      * for a Phase 3 follow-up; this MVP is just enough to make
      * batch-keyframe work end-to-end on Android.
      */
+    /**
+     * 2026-05-21 (v0.3) — JPEG-to-grayscale decode for the JS-driver
+     * (non-AR) keyframe-gate path.  Used by the batch-keyframe branch
+     * of processFrameAtPath to feed the C++ KeyframeGate with real
+     * pixel data so its Flow strategy actually runs (pre-0.3 the
+     * non-AR call was `evaluate(pose, null)` which silently fell back
+     * to the Pose strategy because no pixel data was supplied).
+     *
+     * Uses OpenCV's Imgcodecs.imread with IMREAD_GRAYSCALE, which
+     * decodes the JPEG straight into a single-channel CV_8UC1 Mat —
+     * faster than BitmapFactory + manual luma loop (~10-20 ms here
+     * vs ~100+ ms in interpreted Kotlin for a 1920×1080 image).
+     *
+     * The non-AR snapshot cadence is ~4 FPS so the per-call cost is
+     * well under the inter-snapshot interval.  v0.4 will replace
+     * this code path entirely by moving non-AR capture to
+     * vision-camera's Frame Processor API (which delivers raw
+     * pixels directly with no JPEG roundtrip).  Tracked at issue #11.
+     *
+     * Returns null when the decode fails (corrupt JPEG, OOM, etc.);
+     * caller is expected to fall back to the pose-only evaluate
+     * path so the capture doesn't lock up.
+     */
+    private data class GrayscaleFrame(
+        val bytes: ByteArray,
+        val width: Int,
+        val height: Int,
+        val stride: Int,
+    )
+
+    private fun decodeJpegToGrayscale(path: String): GrayscaleFrame? {
+        val mat = Imgcodecs.imread(path, Imgcodecs.IMREAD_GRAYSCALE)
+        if (mat.empty()) {
+            android.util.Log.w(
+                "IncrementalStitcher",
+                "decodeJpegToGrayscale: imread returned empty Mat for $path"
+            )
+            return null
+        }
+        return try {
+            val width = mat.cols()
+            val height = mat.rows()
+            // step1() returns bytes-per-row for a CV_8UC1 Mat.  For a
+            // continuous Mat from imread (no ROI) stride == width.
+            val stride = mat.step1().toInt()
+            val size = stride * height
+            val bytes = ByteArray(size)
+            mat.get(0, 0, bytes)
+            GrayscaleFrame(bytes, width, height, stride)
+        } catch (e: Exception) {
+            android.util.Log.w(
+                "IncrementalStitcher",
+                "decodeJpegToGrayscale: failed to copy Mat bytes for $path: ${e.message}",
+                e,
+            )
+            null
+        } finally {
+            mat.release()
+        }
+    }
+
     private fun copyKeyframeToStore(srcPath: String): String? {
         // V16 Phase 2 (Android Fix-1) — write into the per-session
         // subdir created by start().  If start() didn't run (defensive
@@ -591,8 +663,34 @@ class IncrementalStitcher(
                 trackingState = RNSARSession.TRACKING_TRACKING,
             )
             // Vision-camera path: no plane available (gyro can't fit
-            // planes).  Pass null → C++ uses angular fallback.
-            val decision = keyframeGate.evaluate(pose, null)
+            // planes).  Pass null → C++ skips the plane-overlap math.
+            //
+            // 2026-05-21 (v0.3) — pixel-aware Flow-strategy evaluation.
+            // The JS driver hands us a JPEG file path; we decode it to
+            // grayscale here so the C++ gate actually runs sparse-flow
+            // novelty (pre-0.3 the call was `evaluate(pose, null)` and
+            // the C++ side silently fell back to Pose strategy because
+            // no pixel data was supplied — same bug as Android AR
+            // mode, both fixed in v0.3).  BitmapFactory + manual luma
+            // is fine here — non-AR snapshot cadence is ~4 FPS, the
+            // ~15-30 ms JPEG-decode-to-grayscale per call is well
+            // under the inter-snapshot interval.  (v0.4 will move
+            // non-AR to vision-camera's Frame Processor API, at which
+            // point the JPEG step goes away entirely.  Tracked at
+            // https://github.com/bhargavkanda/react-native-image-stitcher/issues/11)
+            val gray = decodeJpegToGrayscale(path)
+            val decision = if (gray != null) {
+                keyframeGate.evaluateWithFrame(
+                    pose, null,
+                    gray.bytes, gray.width, gray.height, gray.stride,
+                )
+            } else {
+                // JPEG decode failed (corrupt file? OOM?).  Fall back
+                // to pose-only path so the capture doesn't lock up;
+                // this matches the C++ side's own defensive fallback
+                // for null grayData.
+                keyframeGate.evaluate(pose, null)
+            }
             val result = Arguments.createMap()
             // Outcome mapping for iOS-parity JS contract:
             //   1 = accepted, 2 = rejected (gate), 3 = rejected (cap).
@@ -979,14 +1077,47 @@ class IncrementalStitcher(
 
     /**
      * Called by `RNSARCameraView` per ARCore frame when it has
-     * a fresh JPEG + pose to ingest.  Synchronous-feeling from the
-     * caller's perspective but actually dispatched onto the engine's
-     * own queue so we don't stall the GL render thread.  Drops the
-     * frame silently if no engine is running (race between view
-     * lifecycle and stitcher start/stop).
+     * a fresh Y-plane + pose to ingest.  Synchronous from the
+     * caller's perspective.  Drops the frame silently if no engine
+     * is running (race between view lifecycle and stitcher start/stop).
+     *
+     * 2026-05-21 (v0.3) — pixel-data path.  Pre-0.3 this method took
+     * a `path: String` argument pointing at a JPEG that the camera
+     * view had already encoded for every ARCore frame whether the
+     * gate would accept it or not (~25 ms of JPEG-encode + disk I/O
+     * per frame at ~60 Hz).  The gate then ran a pose-only
+     * evaluation because it had no pixel data, so the C++ Flow
+     * strategy silently fell back to Pose.
+     *
+     * The new contract: caller hands us the frame's grayscale Y
+     * plane bytes (already in memory from the YUV camera image —
+     * zero new JPEG cost) and an `onAccept` lambda that knows how
+     * to encode + persist a JPEG given a target path.  The lambda
+     * runs ONLY if the gate accepts.  Net wins:
+     *   • Flow strategy actually runs on accepted-or-not decisions.
+     *   • Per-frame disk I/O eliminated for rejected frames
+     *     (the typical 95%+ of frames in a capture).
+     *   • Lazy JPEG encode + write happens at most ~6 times per
+     *     capture (the gate's keyframeMaxCount), inside the lambda
+     *     while the caller still holds the ARCore Image open.
+     *
+     * @param grayData    Y-plane (or otherwise grayscale) bytes.
+     *                    Length must be ≥ grayStride * grayHeight.
+     * @param grayWidth   Image width in pixels.
+     * @param grayHeight  Image height in pixels.
+     * @param grayStride  Bytes per row; may exceed grayWidth when
+     *                    the source plane has padding (ARCore can pad).
+     * @param onAccept    Invoked ONLY if the gate accepts this frame.
+     *                    Receives the absolute target path
+     *                    `<captureSessionDir>/keyframe-N.jpg` that the
+     *                    callee MUST write a full-resolution JPEG of
+     *                    the current camera image to.  Returns true
+     *                    on success, false if the encode/write
+     *                    failed (the frame is then dropped; gate
+     *                    counter was already incremented, next
+     *                    acceptable frame still lands on its own).
      */
     internal fun ingestFromARCameraView(
-        path: String,
         tx: Double, ty: Double, tz: Double,
         qx: Double, qy: Double, qz: Double, qw: Double,
         fx: Double, fy: Double, cx: Double, cy: Double,
@@ -996,6 +1127,19 @@ class IncrementalStitcher(
         fovHorizDegrees: Double,
         fovVertDegrees: Double,
         trackingPoor: Boolean,
+        grayData: ByteArray,
+        grayWidth: Int,
+        grayHeight: Int,
+        grayStride: Int,
+        onAccept: (targetPath: String) -> Boolean,
+        // 2026-05-21 (v0.3) — only required when batchKeyframeMode
+        // is false (the legacy hybrid/firstwins live-engine path,
+        // which feeds JPEG paths into addFrameAtPath for each ARCore
+        // frame).  Pass null when batchKeyframeMode is true; the
+        // batch path uses `grayData` + `onAccept` instead.  Callers
+        // can check `isBatchKeyframeMode` to elide the per-frame
+        // JPEG encode for the batch path.
+        legacyJpegPath: String? = null,
     ) {
         // ── V16 batch-keyframe: AR-driven path ─────────────────────
         //
@@ -1041,7 +1185,16 @@ class IncrementalStitcher(
                     FloatArray(16).also { p.toMatrix(it, 0) }
                 }
 
-            val decision = keyframeGate.evaluate(pose, planeMatrix)
+            // 2026-05-21 (v0.3) — pixel-aware evaluation.  Hands the
+            // gate the Y-plane bytes so the Flow strategy actually
+            // runs sparse-flow novelty on real image content (pre-0.3
+            // this fell back to Pose strategy because the JS-bridge
+            // path supplied no pixel data — same bug as the iOS
+            // non-AR path; both fixed in v0.3).
+            val decision = keyframeGate.evaluateWithFrame(
+                pose, planeMatrix,
+                grayData, grayWidth, grayHeight, grayStride,
+            )
 
             // ── P3-G diagnostic ──────────────────────────────────
             // Rate-limit at the same cadence as the plane evaluator
@@ -1061,24 +1214,43 @@ class IncrementalStitcher(
             if (!decision.accept) {
                 // Frame rejected by the gate — could be overlap-too-
                 // high (most common), max-reached, or projection-
-                // degenerate.  Drop silently; the next frame will be
-                // evaluated.  TODO(P1-followup): emit a state event
-                // so the JS UI can surface the reason in the pill.
+                // degenerate.  Drop silently — no disk I/O cost (the
+                // onAccept lambda is never invoked).  TODO(P1-followup):
+                // emit a state event so the JS UI can surface the
+                // reason in the pill.
                 return
             }
-            // Accepted — copy the (reused) tmp JPEG to a persistent
-            // per-keyframe path so subsequent frames overwriting the
-            // source don't clobber it.
-            val persistentPath = copyKeyframeToStore(path)
-            if (persistentPath == null) {
+            // Accepted — generate the per-keyframe target path and
+            // invoke the caller's onAccept lambda for the lazy JPEG
+            // encode + write.  The caller (the AR camera view) still
+            // holds the ARCore Image open at this point, so it can
+            // encode raw camera pixels directly to disk without any
+            // redundant copy.  Single disk write per accepted frame
+            // (pre-0.3 was: write to tmp, then copy to store = two
+            // disk writes; now we write to the final path directly).
+            val dir = captureSessionDir
+            if (dir == null) {
                 android.util.Log.w(
                     "IncrementalStitcher",
-                    "ingestFromARCameraView batch: ACCEPTED but copy FAILED — frame dropped",
+                    "ingestFromARCameraView batch: ACCEPTED but " +
+                        "captureSessionDir is null — frame dropped " +
+                        "(start() should have created it)",
                 )
-                // Copy failed — drop the frame.  Logged inside
-                // copyKeyframeToStore.  Counter was already incremented
-                // inside the gate; that's fine — the next acceptable
-                // frame will still be accepted on its own merits.
+                return
+            }
+            val persistentPath = java.io.File(
+                dir, "keyframe-${batchKeyframePaths.size}.jpg"
+            ).absolutePath
+            val ok = onAccept(persistentPath)
+            if (!ok) {
+                android.util.Log.w(
+                    "IncrementalStitcher",
+                    "ingestFromARCameraView batch: ACCEPTED but onAccept returned false — frame dropped",
+                )
+                // Encode/persist failed — drop the frame.  Counter
+                // was already incremented inside the gate; that's
+                // fine — the next acceptable frame still lands on
+                // its own merits.
                 return
             }
             batchKeyframePaths.add(persistentPath)
@@ -1114,6 +1286,23 @@ class IncrementalStitcher(
         val hybrid = this.engine
         val firstwins = this.firstwinsEngine
         if (hybrid == null && firstwins == null) return
+        // 2026-05-21 (v0.3) — legacy live-engine path requires a JPEG
+        // path (hybrid/firstwins addFrameAtPath feeds the cv::Mat
+        // pipeline).  The batch-keyframe path above lazily encodes
+        // only on accept and reaches `return` before this point, so
+        // we only get here when batchKeyframeMode == false.  Caller
+        // (RNSARCameraView) was expected to supply legacyJpegPath in
+        // that case — defensively drop the frame if it didn't.
+        val path = legacyJpegPath ?: run {
+            android.util.Log.w(
+                "IncrementalStitcher",
+                "ingestFromARCameraView legacy: batchKeyframeMode=false " +
+                    "but legacyJpegPath is null — dropping frame.  " +
+                    "Caller should have encoded a JPEG when " +
+                    "isBatchKeyframeMode == false.",
+            )
+            return
+        }
         workScope.launch {
             val state: WritableMap? = if (firstwins != null) {
                 val tele = firstwins.addFrameAtPath(

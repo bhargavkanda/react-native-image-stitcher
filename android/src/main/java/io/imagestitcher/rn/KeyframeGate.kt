@@ -175,6 +175,56 @@ internal class KeyframeGate : AutoCloseable {
         )
     }
 
+    /**
+     * Pixel-aware evaluate.  Hands the gate the frame's grayscale
+     * plane so the C++ Flow strategy (sparse optical-flow novelty)
+     * actually runs — without grayData, the gate silently falls back
+     * to the Pose strategy (angular-delta).  iOS parity: see
+     * `KeyframeGateBridge.mm::evaluateWithPixelBuffer:...`.
+     *
+     * 2026-05-21 (v0.3) added.  Two call-site categories:
+     *
+     *  - AR mode (`RNSARCameraView.forwardToIncremental`): extracts
+     *    the Y plane from the ARCore camera image (YUV_420_888) and
+     *    hands it through.  Zero-copy on the way in (the byte[] is
+     *    pinned via GetPrimitiveArrayCritical in the JNI).
+     *  - Non-AR mode (`IncrementalStitcher.processFrameAtPath`): the
+     *    JS-driver path supplies a JPEG path; the caller decodes the
+     *    JPEG to grayscale before calling this method.
+     *
+     * @param grayData    The grayscale plane bytes.  Length must be
+     *                    at least `grayStride * grayHeight`.
+     * @param grayWidth   Image width in pixels (≤ grayStride).
+     * @param grayHeight  Image height in pixels.
+     * @param grayStride  Bytes per row.  May exceed `grayWidth` when
+     *                    the plane has padding (ARCore can pad).
+     */
+    fun evaluateWithFrame(
+        pose: RNSARFramePose,
+        latchedPlaneMatrix: FloatArray?,
+        grayData: ByteArray,
+        grayWidth: Int,
+        grayHeight: Int,
+        grayStride: Int,
+    ): KeyframeGateDecision {
+        val result = nativeEvaluateWithFrame(
+            nativeHandle,
+            pose.tx.toFloat(), pose.ty.toFloat(), pose.tz.toFloat(),
+            pose.qx.toFloat(), pose.qy.toFloat(), pose.qz.toFloat(), pose.qw.toFloat(),
+            pose.fx.toFloat(), pose.fy.toFloat(), pose.cx.toFloat(), pose.cy.toFloat(),
+            pose.imageWidth, pose.imageHeight,
+            latchedPlaneMatrix,
+            grayData, grayWidth, grayHeight, grayStride,
+        )
+        return KeyframeGateDecision(
+            accept = result[0] >= 0.5,
+            reason = reasonFromCode(result[1].toInt()),
+            newContentFraction = result[2],
+            acceptedCount = result[3].toInt(),
+            maxCount = result[4].toInt(),
+        )
+    }
+
     // ── JNI thunks ──────────────────────────────────────────────
 
     private external fun nativeCreate(): Long
@@ -200,6 +250,16 @@ internal class KeyframeGate : AutoCloseable {
         fx: Float, fy: Float, cx: Float, cy: Float,
         imageWidth: Int, imageHeight: Int,
         plane16: FloatArray?,
+    ): DoubleArray
+    private external fun nativeEvaluateWithFrame(
+        handle: Long,
+        tx: Float, ty: Float, tz: Float,
+        qx: Float, qy: Float, qz: Float, qw: Float,
+        fx: Float, fy: Float, cx: Float, cy: Float,
+        imageWidth: Int, imageHeight: Int,
+        plane16: FloatArray?,
+        grayData: ByteArray,
+        grayWidth: Int, grayHeight: Int, grayStride: Int,
     ): DoubleArray
 
     companion object {
