@@ -31,9 +31,9 @@ import Foundation
 import React
 
 @objc(RNImageStitcherFileUtils)
-class FileBridge: NSObject {
+public class FileBridge: NSObject {
 
-  @objc static func requiresMainQueueSetup() -> Bool {
+  @objc public static func requiresMainQueueSetup() -> Bool {
     return false
   }
 
@@ -43,10 +43,10 @@ class FileBridge: NSObject {
   /// parent directory tree if missing.  Resolves to the bare
   /// destination path.
   @objc(moveFile:to:resolver:rejecter:)
-  func moveFile(_ from: String,
-                to dst: String,
-                resolver: @escaping RCTPromiseResolveBlock,
-                rejecter: @escaping RCTPromiseRejectBlock) {
+  public func moveFile(_ from: String,
+                       to dst: String,
+                       resolver: @escaping RCTPromiseResolveBlock,
+                       rejecter: @escaping RCTPromiseRejectBlock) {
     let fm = FileManager.default
     let cleanFrom = from.hasPrefix("file://") ? String(from.dropFirst(7)) : from
     let cleanTo = dst.hasPrefix("file://") ? String(dst.dropFirst(7)) : dst
@@ -84,8 +84,8 @@ class FileBridge: NSObject {
   /// Resolve the lib's canonical default capture dir, creating it on
   /// demand.  Returns a bare absolute path.
   @objc(defaultCaptureDir:rejecter:)
-  func defaultCaptureDir(_ resolver: @escaping RCTPromiseResolveBlock,
-                         rejecter: @escaping RCTPromiseRejectBlock) {
+  public func defaultCaptureDir(_ resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
     let caches = NSSearchPathForDirectoriesInDomains(
       .cachesDirectory, .userDomainMask, true,
     ).first ?? NSTemporaryDirectory()
