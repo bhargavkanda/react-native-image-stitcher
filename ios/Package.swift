@@ -16,7 +16,7 @@
 //
 // Run from this directory:
 //
-//   cd retailens-capture-sdk/ios
+//   cd react-native-image-stitcher/ios
 //   swift test
 
 import PackageDescription

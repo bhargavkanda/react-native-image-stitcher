@@ -18,7 +18,7 @@
 // Single source of truth for the reason-code → string mapping.  These
 // strings MUST stay 1:1 with the labels emitted by the original
 // KeyframeGate.swift (and read by the JS telemetry layer in
-// retailens-capture-sdk/src/stitching/incremental.ts).  Drift will
+// react-native-image-stitcher/src/stitching/incremental.ts).  Drift will
 // silently break the JS UI's pill text.
 static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
     using R = retailens::KeyframeGateDecisionReason;

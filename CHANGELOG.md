@@ -16,6 +16,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-21
+
+### Changed
+
+- **Docs / source-comment cleanup.** Removed the leftover
+  pre-extraction RetaiLens-monorepo framing from the README — this repo
+  is now the canonical, self-contained source of `react-native-image-
+  stitcher`, not a downstream subtree of anything.  Source-file path
+  comments and iOS GCD queue labels now use the canonical
+  `io.imagestitcher.*` namespace and `react-native-image-stitcher/`
+  repo path instead of the leftover `com.retailens.*` /
+  `retailens-capture-sdk/` references that survived the 0.1.0 rename.
+  GCD label change affects: `RNSARSession.poseLogQueue`,
+  `IncrementalStitcher.workQueue`, `IncrementalStitcher.refineQueue` —
+  labels are diagnostic-only (Instruments / crash-report symbolication),
+  no public-API or behaviour impact.  The CHANGELOG.md migration table
+  for [0.1.0] retains the historical `com.retailens.capturesdk` name
+  intentionally — it documents the rename that shipped, not the
+  current state.
+- **CHANGELOG.** Added compare-links for [0.1.1] and [0.1.2] and fixed
+  the [Unreleased] compare base.  Annotated the [0.1.0] "Deliberately
+  NOT exported" section with a header note explaining that most of
+  those entries were promoted to public in [0.1.1] — see the 0.1.1
+  *Added* list for the current public surface.
+
 ## [0.1.2] — 2026-05-20
 
 ### Added
@@ -160,6 +185,16 @@ The following are intentionally internal so the public surface stays
 small.  If you have a real use-case for any of these, please open an
 issue describing it.
 
+> [!NOTE]
+> **This list reflects the v0.1.0 surface as shipped.**  Most of the
+> entries below — the layer-2 hooks, views, UI components, and
+> incremental-engine primitives — were subsequently promoted to public
+> in [0.1.1].  See the 0.1.1 *Added* section for the current public
+> surface; only a few items below remain internal in later releases
+> (`CameraShutter`, `PanoramaConfirmModal`, `IncrementalStitcherView`,
+> `stitchFrames`, `StitchNotImplementedError`, `runQualityCheck`,
+> `normaliseOrientation`).
+
 - `useCapture`, `useDeviceOrientation` — internal hooks `<Camera>`
   composes; expose these only after we have a story for what their
   separate-from-`<Camera>` use-case looks like.
@@ -206,5 +241,8 @@ Native module names also changed:
 - iOS pod: `RetaiLensCaptureSDK` → `RNImageStitcher`
 - iOS xcframework: shipped as `opencv2.xcframework` (linked from `RNImageStitcher.podspec`)
 
-[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/bhargavkanda/react-native-image-stitcher/releases/tag/v0.1.0

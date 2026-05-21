@@ -4,15 +4,6 @@
 One `<Camera>` component, both tap-to-photo and hold-to-pan modes, both
 AR-backed and IMU-fallback capture paths.
 
-> [!NOTE]
-> This package lives in the [RetaiLens monorepo](https://github.com/bhargav-kanda/RetaiLens)
-> under `retailens-capture-sdk/` during development.  At publication
-> (see [`2026-05-15-react-native-image-stitcher-publication.md`](https://github.com/bhargav-kanda/RetaiLens/blob/main/docs/site-content/design/2026-05-15-react-native-image-stitcher-publication.md))
-> the public subset is `git subtree split` extracted to a standalone
-> repo at `github.com/bhargavkanda/react-native-image-stitcher` and
-> published to npm.  This README describes the **public lib** as it
-> will look post-extraction.
-
 ## What it does
 
 | Feature | Behaviour |

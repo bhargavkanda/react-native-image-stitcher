@@ -193,7 +193,7 @@ class IncrementalStitcher(
     /// (handleBatchKeyframeFrame above) with the same pose-driven
     /// 40%-new-content algorithm iOS has used since the V16 ship.
     /// Both platforms call into retailens::KeyframeGate (in
-    /// retailens-capture-sdk/cpp/keyframe_gate.cpp) — see that file
+    /// react-native-image-stitcher/cpp/keyframe_gate.cpp) — see that file
     /// for the algorithm.
     ///
     /// Lifetime: owned for the life of the module.  Closed in
@@ -1159,7 +1159,7 @@ class IncrementalStitcher(
     // iOS exposes these on the IncrementalStitcherBridge (NOT on the
     // ARSession module) so the JS code calls
     //   getIncrementalNativeModule().getARPlaneStatus()
-    // (see retailens-capture-sdk/src/stitching/incremental.ts:535).
+    // (see react-native-image-stitcher/src/stitching/incremental.ts:535).
     // Both methods delegate to the AR session singleton — same pattern
     // as iOS' IncrementalStitcherBridge.swift, where the bridge holds
     // the RN @objc surface and the singleton holds the AR algorithm.
