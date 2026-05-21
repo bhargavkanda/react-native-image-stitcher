@@ -19,11 +19,3 @@ buildscript {
 }
 
 apply plugin: "com.facebook.react.rootproject"
-// ── Expo root project plugin ─────────────────────────────────────────
-// Provides default values for buildToolsVersion / minSdk / compileSdk /
-// targetSdk / ndkVersion / kotlinVersion / kspVersion via
-// `extra.setIfNotExist`.  The ext{} block above always takes
-// precedence; this plugin only fills in anything we forgot to set.
-// Required so autolinked Expo subprojects can resolve `rootProject
-// .ext.kotlinVersion` etc. when their build.gradle files read those.
-apply plugin: "expo-root-project"
