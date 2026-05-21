@@ -2,7 +2,7 @@
 //
 // keyframe_gate_jni.cpp — JNI bindings exposing the shared C++
 // retailens::KeyframeGate (in ../../../../cpp/) to the Kotlin side
-// (com.retailens.capturesdk.KeyframeGate).
+// (io.imagestitcher.rn.KeyframeGate).
 //
 // Architecture parity with iOS:
 //   iOS uses an Obj-C++ bridge (KeyframeGateBridge.mm) to wrap the

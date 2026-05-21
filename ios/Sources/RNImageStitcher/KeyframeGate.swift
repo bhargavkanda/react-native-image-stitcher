@@ -4,7 +4,7 @@
 //
 // This file used to BE the algorithm (~545 lines of Swift simd math).
 // As of P3-B of the Android-iOS parity work, the algorithm lives in
-// retailens-capture-sdk/cpp/keyframe_gate.{hpp,cpp} and is shared with
+// react-native-image-stitcher/cpp/keyframe_gate.{hpp,cpp} and is shared with
 // the Android side via JNI.  This Swift class is now a thin facade
 // that:
 //
