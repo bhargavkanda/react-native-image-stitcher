@@ -72,14 +72,12 @@ import {
 import { useCapture } from './useCapture';
 import { useDeviceOrientation } from './useDeviceOrientation';
 import {
-  getIncrementalNativeModule,
   incrementalStitcherIsAvailable,
   subscribeIncrementalState,
   type IncrementalState,
 } from '../stitching/incremental';
 import { useIncrementalJSDriver } from '../stitching/useIncrementalJSDriver';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
-import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
 import { toBareFilePath, toFileUri } from '../utils/paths';
 import {
   defaultPanoramaFilename,
@@ -661,19 +659,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
     return () => { cancelled = true; };
   }, [isAR, lens]);
 
-  // IMU translation gate — only in non-AR mode.
-  const imuGate = useIMUTranslationGate({
-    enabled:
-      isNonAR
-      && statusPhase === 'recording'
-      && settings.flowMaxTranslationCm > 0,
-    budgetMeters: Math.max(0.001, settings.flowMaxTranslationCm / 100.0),
-    onBudgetExceeded: () => {
-      const mod = getIncrementalNativeModule();
-      mod?.markNextFrameAsLastKeyframe?.().catch(() => undefined);
-    },
-  });
-
   // JS-driver for non-AR captures (iOS + Android).  In AR mode the
   // engine consumes frames from the ARSession stream natively, so this
   // hook stays idle.
@@ -831,7 +816,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
           frameSelectionMode: 'flow-based',
         },
       });
-      imuGate.resetAnchor();
       // Start pumping vision-camera snapshots into the engine for
       // non-AR captures.  AR mode feeds frames natively from the
       // ARSession, so the JS driver stays idle in that path.  This
@@ -857,7 +841,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
     isNonAR,
     deviceOrientation,
     settings,
-    imuGate,
     jsDriver,
     onError,
   ]);
