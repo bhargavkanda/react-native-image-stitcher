@@ -16,6 +16,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-21
+
+> [!IMPORTANT]
+> **Behaviour change on Android AR mode and on both platforms' non-AR
+> mode.**  Keyframe selection now actually runs the **Flow strategy**
+> (sparse optical-flow novelty) on these paths, where pre-0.3 the
+> C++ KeyframeGate silently fell back to the Pose strategy
+> (angular-delta) because no pixel data was supplied.  Hosts that
+> tuned `keyframeOverlapThreshold` on these paths were tuning a
+> different algorithm than is now active — see the migration note
+> below before re-validating capture quality.  iOS AR mode is
+> unchanged (already ran Flow with pixel data via the AR delegate).
+
+### Fixed
+
+- **[#9](https://github.com/bhargavkanda/react-native-image-stitcher/issues/9): Android AR mode — first keyframe thumbnail no longer delayed
+  several hundred milliseconds.**  Pre-0.3 the AR ingest pipeline
+  encoded every ARCore frame to JPEG and wrote it to disk on the
+  GL render thread (~25 ms per frame at ~60 Hz) regardless of
+  whether the gate would accept it.  Then the gate ran a pose-only
+  evaluation (no pixel data) which silently fell back to the
+  stricter Pose strategy, masking the result by force-accepting via
+  the IMU translation gate.  Net effect: noticeable lag before
+  frame 1 thumbnail rendered, and frame 1 / frame 2 spacing
+  visually too large.
+  - v0.3 rewires the AR ingest path to extract just the **Y plane
+    bytes** from the ARCore camera image (zero-copy via
+    DirectByteBuffer → JVM byte[] + JNI `GetPrimitiveArrayCritical`)
+    and feeds them directly to the C++ gate's existing
+    `evaluateWithFrame` overload.  Per-frame cost on the GL render
+    thread drops from ~25-40 ms to ~2-5 ms for rejected frames.
+  - JPEG encode + disk write is **deferred to only accepted frames**
+    (typically 3-6 per capture) via an `onAccept` lambda the gate
+    invokes if-and-only-if it keeps the frame.  Single disk write
+    per accepted keyframe (pre-0.3 was: encode-then-copy = two
+    writes).
+  - Gate now runs Flow strategy with real pixel content — feature-
+    tracking-based novelty, not the strict angular-delta proxy.
+- **iOS non-AR + Android non-AR Flow strategy regression** —
+  related to #9 but not user-reported.  Both non-AR paths previously
+  called `evaluate(pose, plane: nil)` with no pixel data, which
+  silently fell back to Pose strategy on both platforms.  v0.3
+  decodes the JPEG snapshot to grayscale before the gate call so
+  Flow strategy runs:
+  - iOS: `CGImageSource → CGContext` into a single-channel
+    `CVPixelBuffer` (`kCVPixelFormatType_OneComponent8`).  The
+    `KeyframeGateBridge.mm` got OneComponent8 case-handling
+    (parallel to the existing NV12 / BGRA cases).  ~10-20 ms per
+    snapshot on iPhone 13/16 Pro.
+  - Android: `Imgcodecs.imread(path, IMREAD_GRAYSCALE)` decodes
+    the JPEG straight to a CV_8UC1 Mat which we marshal into a
+    ByteArray for the new `nativeEvaluateWithFrame` JNI thunk.
+    ~10-20 ms per snapshot on Galaxy A35.
+
+### Added
+
+- **`KeyframeGate.evaluateWithFrame(pose, plane, grayData, w, h, stride)`**
+  (Kotlin) — pixel-aware Flow-strategy gate-evaluate entry point,
+  parity with the existing iOS `KeyframeGateBridge.evaluatePixelBuffer:…`.
+- **`nativeEvaluateWithFrame`** JNI thunk in `keyframe_gate_jni.cpp`.
+  Uses `GetPrimitiveArrayCritical` for zero-copy access to the
+  JVM-side byte[] during the gate evaluate.
+- **`kCVPixelFormatType_OneComponent8` handling** in iOS
+  `KeyframeGateBridge.mm` — base address is read directly as the
+  Y plane with no conversion cost.
+
+### Changed
+
+- **`IncrementalStitcher.ingestFromARCameraView` signature** (Android,
+  internal):
+  - **Removed**: `path: String` parameter.  AR camera view no longer
+    encodes a JPEG to feed this method — it hands over Y-plane bytes
+    instead.
+  - **Added**: `grayData: ByteArray, grayWidth: Int, grayHeight: Int,
+    grayStride: Int, onAccept: (targetPath: String) -> Boolean`.
+    The lambda is invoked only on gate-accept and is expected to
+    write a JPEG of the current camera image to the supplied target
+    path.  Returns true on success.
+  - `RNSARCameraView.forwardToIncremental` updated accordingly.
+- **`RNSARCameraView.postFrameToEngine` removed.**  The thin wrapper
+  was only used to wrap the old positional call to
+  `ingestFromARCameraView`; the new lambda-based call shape is
+  inline in `forwardToIncremental`.
+
+### Migration from 0.2.x
+
+**Most consumers**: no code change required.  The public JS API
+(`<Camera>`, `useCapture`, `useIMUTranslationGate`,
+`useDeviceOrientation`, everything) is byte-identical to 0.2.1.
+
+**Hosts that tuned `keyframeOverlapThreshold` against Android AR or
+either non-AR path**: the threshold now controls **Flow novelty
+percentile** instead of **Pose angular delta**.  Same setting, very
+different metric — re-tune against your typical captures.  The
+default (`0.20`) was chosen to roughly match the pre-0.3 visible
+behaviour; most hosts shouldn't need to change anything, but
+quality-sensitive hosts should re-validate before shipping.
+
+**Hosts that observed the Android-AR first-frame delay**: the bug
+is fixed — first thumbnail should render within ~50 ms of shutter
+hold (was ~200+ ms).
+
+### Deferred to v0.4 ([#11](https://github.com/bhargavkanda/react-native-image-stitcher/issues/11))
+
+Non-AR capture currently still goes through vision-camera's
+`takeSnapshot()` API at ~4 FPS with a per-snapshot JPEG-encode +
+disk-write + decode-to-grayscale round-trip.  v0.4 will migrate
+non-AR to vision-camera's Frame Processor API: raw pixel data
+direct from the camera, no JPEG, no disk, full camera frame rate.
+At that point the JPEG-decode-to-grayscale workaround added in
+v0.3's iOS/Android non-AR paths becomes redundant and will be
+removed.  See issue #11 for the full scope.
+
 ## [0.2.1] — 2026-05-21
 
 ### Changed
@@ -357,7 +470,8 @@ Native module names also changed:
 - iOS pod: `RetaiLensCaptureSDK` → `RNImageStitcher`
 - iOS xcframework: shipped as `opencv2.xcframework` (linked from `RNImageStitcher.podspec`)
 
-[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.2...v0.1.3

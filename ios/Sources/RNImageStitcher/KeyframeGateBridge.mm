@@ -254,6 +254,16 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
         grayWidth  = static_cast<int32_t>(bgraToGrayHolder.cols);
         grayHeight = static_cast<int32_t>(bgraToGrayHolder.rows);
         grayStride = static_cast<int32_t>(bgraToGrayHolder.step);
+    } else if (format == kCVPixelFormatType_OneComponent8) {
+        // Single-channel grayscale — used by the non-AR
+        // batch-keyframe path (v0.3+) which decodes the JPEG snapshot
+        // directly to grayscale before evaluating.  Base address IS
+        // the Y plane; no conversion cost.
+        grayData   = static_cast<const uint8_t *>(
+            CVPixelBufferGetBaseAddress(pixelBuffer));
+        grayWidth  = static_cast<int32_t>(CVPixelBufferGetWidth(pixelBuffer));
+        grayHeight = static_cast<int32_t>(CVPixelBufferGetHeight(pixelBuffer));
+        grayStride = static_cast<int32_t>(CVPixelBufferGetBytesPerRow(pixelBuffer));
     }
     // else: grayData stays nullptr.  The C++ gate detects this and
     // falls back to the pose-only path inside evaluateWithFrame —

@@ -420,22 +420,38 @@ class RNSARCameraView @JvmOverloads constructor(
             return
         }
         try {
-            val written = YuvImageConverter.encodeToJpeg(
-                image,
-                tmpJpegFile.absolutePath,
-                jpegQuality = 70,
-                // 2026-05-15 (B3) — pass current display rotation so
-                // the encoded JPEG gets an EXIF orientation tag.
-                // Without this, the live thumbnail strip shows
-                // sideways pictures when the device is held in
-                // portrait (sensor pixels are landscape by default).
-                // lastDisplayRotation is updated by the
-                // updateDisplayRotation() helper called from
-                // didMoveToWindow / the ARCore Session.setDisplayGeometry
-                // hook (see line ~410).
-                displayRotation = if (lastDisplayRotation >= 0)
-                    lastDisplayRotation else android.view.Surface.ROTATION_0,
-            ) ?: return
+            // 2026-05-21 (v0.3) — pixel-data path.  Pre-0.3 this code
+            // unconditionally encoded the YUV camera image to JPEG and
+            // wrote it to disk for EVERY ARCore frame at ~60 Hz (~25 ms
+            // per frame of JPEG encode + disk I/O on the GL render
+            // thread), regardless of whether the C++ KeyframeGate would
+            // accept it.  Now we extract the Y plane bytes (cheap
+            // memcpy from a DirectByteBuffer), feed them to the gate
+            // for proper Flow-strategy evaluation, and defer the JPEG
+            // encode + disk write to the `onAccept` lambda so it only
+            // runs on the rare frames the gate actually keeps
+            // (typically ~6 per capture).
+            //
+            // Y-plane extraction for ARCore's YUV_420_888 format:
+            // plane[0] is the luminance channel at full resolution,
+            // pixelStride=1, rowStride may equal width OR be padded.
+            // We pass rowStride as the C++ side's `stride` so the gate
+            // skips padding correctly.
+            val yPlane = image.planes[0]
+            val yBuffer = yPlane.buffer
+            val yStride = yPlane.rowStride
+            val yWidth = image.width
+            val yHeight = image.height
+            // Copy Y bytes into a JVM-side ByteArray.  Using
+            // duplicate() so we don't mutate the original buffer's
+            // position state (ARCore may have other readers).
+            // For 1920×1080 Y plane that's ~2 MB; on Galaxy A35 the
+            // memcpy itself is < 1 ms.  JNI side pins via
+            // GetPrimitiveArrayCritical so the byte[] stays a single
+            // copy through the entire frame's lifecycle.
+            val ySize = yStride * yHeight
+            val yBytes = ByteArray(ySize)
+            yBuffer.duplicate().apply { rewind() }.get(yBytes, 0, ySize)
 
             // Compute yaw + pitch from the ARCore quaternion using
             // the same convention the iOS Swift side uses (camera-
@@ -469,8 +485,32 @@ class RNSARCameraView @JvmOverloads constructor(
             val tArr = camera.pose.translation
 
             val trackingPoor = camera.trackingState != TrackingState.TRACKING
-            postFrameToEngine(
-                path = written,
+            val module = IncrementalStitcher.bridgeInstance ?: return
+            // 2026-05-15 (B3) — pass current display rotation so the
+            // encoded JPEG gets an EXIF orientation tag.  Captured into
+            // a local val so the lambda below closes over a primitive
+            // (avoids re-reading lastDisplayRotation if it shifts
+            // between gate-evaluate and lambda invocation).
+            val rotationForEncode = if (lastDisplayRotation >= 0)
+                lastDisplayRotation else android.view.Surface.ROTATION_0
+            // 2026-05-21 (v0.3) — eager JPEG encode is only needed when
+            // the engine is in the legacy hybrid/firstwins live-engine
+            // mode (which feeds JPEG paths into addFrameAtPath every
+            // frame).  In batch-keyframe mode (the production Camera
+            // component's path), the JPEG is encoded LAZILY inside
+            // the onAccept lambda below — only on the ~6 frames per
+            // capture that the C++ KeyframeGate actually keeps.
+            val legacyJpegPath: String? = if (module.isBatchKeyframeMode) {
+                null
+            } else {
+                YuvImageConverter.encodeToJpeg(
+                    image,
+                    tmpJpegFile.absolutePath,
+                    jpegQuality = 70,
+                    displayRotation = rotationForEncode,
+                )
+            }
+            module.ingestFromARCameraView(
                 tx = tArr[0].toDouble(),
                 ty = tArr[1].toDouble(),
                 tz = tArr[2].toDouble(),
@@ -482,37 +522,30 @@ class RNSARCameraView @JvmOverloads constructor(
                 yaw = yaw, pitch = pitch,
                 fovHorizDegrees = fovHDeg, fovVertDegrees = fovVDeg,
                 trackingPoor = trackingPoor,
+                grayData = yBytes,
+                grayWidth = yWidth,
+                grayHeight = yHeight,
+                grayStride = yStride,
+                legacyJpegPath = legacyJpegPath,
+                onAccept = { targetPath ->
+                    // Lazy JPEG encode.  Runs ONLY if the C++ KeyframeGate
+                    // accepted the frame.  The ARCore Image is still open
+                    // at this point (we haven't reached `image.close()`
+                    // in the surrounding `finally` block yet), so the
+                    // encode reads raw camera pixels directly into a
+                    // JPEG at the final persistent path — no tmp file,
+                    // no second copy.
+                    YuvImageConverter.encodeToJpeg(
+                        image,
+                        targetPath,
+                        jpegQuality = 70,
+                        displayRotation = rotationForEncode,
+                    ) != null
+                },
             )
         } finally {
             image.close()
         }
-    }
-
-    private fun postFrameToEngine(
-        path: String,
-        tx: Double, ty: Double, tz: Double,
-        qx: Double, qy: Double, qz: Double, qw: Double,
-        fx: Double, fy: Double, cx: Double, cy: Double,
-        imageWidth: Int, imageHeight: Int,
-        yaw: Double,
-        pitch: Double,
-        fovHorizDegrees: Double,
-        fovVertDegrees: Double,
-        trackingPoor: Boolean,
-    ) {
-        val module = IncrementalStitcher.bridgeInstance ?: return
-        module.ingestFromARCameraView(
-            path = path,
-            tx = tx, ty = ty, tz = tz,
-            qx = qx, qy = qy, qz = qz, qw = qw,
-            fx = fx, fy = fy, cx = cx, cy = cy,
-            imageWidth = imageWidth, imageHeight = imageHeight,
-            yaw = yaw,
-            pitch = pitch,
-            fovHorizDegrees = fovHorizDegrees,
-            fovVertDegrees = fovVertDegrees,
-            trackingPoor = trackingPoor,
-        )
     }
 
     private fun applyDisplayGeometry() {
