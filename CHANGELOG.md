@@ -16,6 +16,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-20
+
+### Added
+
+- **`outputDir` prop on `<Camera>`** + **`outputPath` per-call
+  option on `useCapture.takePhoto`** — captures (both tap-photos
+  and hold-panoramas) can now land at a host-controlled file
+  location instead of vision-camera's tmp dir.  Filename is
+  composed internally as `${outputDir}/photo-${ts}.jpg` /
+  `${outputDir}/panorama-${ts}.jpg` for `<Camera>`; per-call
+  `outputPath` on `useCapture` lets layer-2 hosts compose their
+  own filenames.
+  - On disk failure the capture rejects with
+    `CameraError('OUTPUT_WRITE_FAILED', ...)`.  **No silent
+    fallback** to a different path — that hides bugs.
+  - Host owns *picking* the path.  The lib treats the value as an
+    opaque writable filesystem path; it does not know about iOS
+    `UIFileSharingEnabled`, Android MediaStore, SAF, or any other
+    platform-specific shared-storage mechanism.  That's the host's
+    domain.
+  - **No peer deps required** — the move is handled by a small
+    native bridge (`RNImageStitcherFileUtils`) that ships with
+    the lib.
+- **Canonical default capture directory** — when neither
+  `outputDir` nor `outputPath` is set, the lib now writes captures
+  to a predictable per-platform location instead of vision-camera's
+  auto-generated tmp paths:
+  - iOS: `<NSCachesDirectory>/react-native-image-stitcher/photo-<ms>.jpg`
+    (and `panorama-<ms>.jpg`).
+  - Android: `<context.cacheDir>/react-native-image-stitcher/...`.
+  - Both are app-private, evictable by the OS under storage
+    pressure, not backed up.  Captures live here until the host
+    moves them somewhere durable — the lib doesn't promise
+    persistence beyond the immediate capture flow.
+  - This applies to BOTH tap-photo and panorama, so call-sites can
+    rely on a single naming + parent-dir convention regardless of
+    capture type.
+- **`RNImageStitcherFileUtils` native module** (internal) —
+  small Swift + Kotlin bridge exposing `moveFile(from, to)` and
+  `defaultCaptureDir()`.  Used by the lib's own JS layer to relocate
+  vision-camera's auto-named output into the canonical default dir
+  / `outputDir` without forcing a peer dep on `expo-file-system`
+  for every consumer.  Not re-exported from `src/index.ts`.
+
+### Fixed
+
+- **Android `cv::imwrite` rejected `file://`-scheme output paths.**
+  `IncrementalStitcher.finalize` (Kotlin) was passing the host-
+  provided `outputPath` straight to `cv::imwrite` without
+  normalisation, so consumers using `expo-file-system`'s
+  `documentDirectory` (which always prefixes `file://`) hit
+  "Stitch failed: cv::imwrite returned false (code=101)" on every
+  panorama capture.  iOS already stripped at the same boundary
+  (`IncrementalStitcher.swift:1215`); now Android does too via
+  `stripFileScheme()`, which already exists in the same file and
+  is used by `refinePanorama`.  The fix has zero behaviour impact
+  on hosts that were already passing bare paths.
+- **iOS modular-header build under `use_frameworks!`** — host apps
+  that opt into modular framework linkage (Expo + `use_frameworks!`,
+  RetaiLens-mobile is the immediate example) hit
+  ``'cstdint' file not found / could not build Objective-C module
+  'RNImageStitcher'`` because CocoaPods defaulted EVERY header in
+  `source_files` (including the shared `cpp/*.hpp` C++ headers) to
+  public.  The auto-generated `RNImageStitcher-umbrella.h` then
+  `#import`ed `keyframe_gate.hpp` / `stitcher.hpp` from a pure
+  Obj-C context and tripped on the C++ stdlib.  Pin
+  `s.public_header_files = ['ios/Sources/**/*.h']` so the umbrella
+  exposes only the iOS-side Obj-C `.h` files; the `.mm` source files
+  still locate the C++ headers via `HEADER_SEARCH_PATHS` set in
+  `pod_target_xcconfig`, so behaviour is unchanged for non-modular
+  hosts.  The umbrella now contains: `KeyframeGateBridge.h`,
+  `OpenCVIncrementalStitcher.h`, `OpenCVKeyframeCollector.h`,
+  `OpenCVSlitScanStitcher.h`, `OpenCVStitcher.h` — all Foundation /
+  CoreVideo-only declarations (the OpenCV C++ types stay inside the
+  `.mm` implementations).
+
 ## [0.1.1] — 2026-05-20
 
 ### Added

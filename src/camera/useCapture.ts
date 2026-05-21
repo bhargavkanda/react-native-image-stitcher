@@ -38,6 +38,12 @@ import {
 
 import { runQualityCheck } from '../quality/runQualityCheck';
 import { normaliseOrientation } from '../quality/normaliseOrientation';
+import { toBareFilePath } from '../utils/paths';
+import {
+  defaultPhotoFilename,
+  getDefaultCaptureDir,
+  moveFile,
+} from '../utils/files';
 import type {
   CaptureResult,
   QualityReport,
@@ -92,6 +98,27 @@ export interface UseCaptureOptions {
 
 
 /**
+ * Per-call options for `takePhoto`.  Separate from `UseCaptureOptions`
+ * (the hook-level config) so callers can vary the destination
+ * filename per capture without re-creating the hook.
+ */
+export interface TakePhotoCallOptions {
+  /**
+   * Move the captured JPEG to this fully-resolved path after EXIF
+   * orientation correction.  Requires `expo-file-system` in the
+   * host (declared as an OPTIONAL peer — only needed when
+   * `outputPath` is set).  Host is responsible for the destination
+   * directory's existence and writability; lib rejects loudly on
+   * disk failure rather than silently falling back to a tmp path.
+   *
+   * Format: bare path (e.g. `/data/.../foo.jpg`) or `file://`-prefixed
+   * URI — both accepted; lib normalises internally.
+   */
+  outputPath?: string;
+}
+
+
+/**
  * Hook output.  Intentionally flat so destructuring a subset is
  * cheap and the API doesn't force callers to drill into nested
  * objects for common concerns.
@@ -114,8 +141,19 @@ export interface UseCaptureReturn {
    * Take a photo.  Single-flight: parallel calls return the in-flight
    * promise.  Returns a CaptureResult (with an optional QualityReport
    * when ``enableQualityChecks`` is on).
+   *
+   * `outputPath` (optional): a fully-resolved destination path.  When
+   * set, the lib moves the captured JPEG to that path after EXIF
+   * orientation correction, and the returned `compressedUri` points
+   * at the moved file.  The host is responsible for ensuring the
+   * destination directory exists and is writable; on disk failure,
+   * the promise rejects with an error referencing `outputPath`.
+   *
+   * Requires `expo-file-system` to be installed in the host app
+   * (declared as an OPTIONAL peer dep — consumers that don't pass
+   * `outputPath` aren't required to have it).
    */
-  takePhoto: () => Promise<CaptureResult>;
+  takePhoto: (options?: TakePhotoCallOptions) => Promise<CaptureResult>;
   /**
    * 2026-05-14 — physical lens types available on the chosen
    * `cameraPosition`.  Computed once at the first vision-camera
@@ -217,7 +255,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     setFlash((prev) => (prev === 'off' ? 'on' : 'off'));
   }, []);
 
-  const takePhoto = useCallback(async (): Promise<CaptureResult> => {
+  const takePhoto = useCallback(async (callOptions?: TakePhotoCallOptions): Promise<CaptureResult> => {
     if (inFlightRef.current) {
       return inFlightRef.current;
     }
@@ -245,11 +283,32 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
           width: photo.width,
           height: photo.height,
         });
-        const orientedPhoto: PhotoFile = {
+        let orientedPhoto: PhotoFile = {
           ...photo,
           width: normalised.width || photo.width,
           height: normalised.height || photo.height,
         };
+
+        // Move the orientation-corrected file to its final location.
+        // If the caller passed `outputPath`, use that.  Otherwise, the
+        // lib publishes captures into its canonical default dir so
+        // returned paths are predictable across consumers (vs.
+        // vision-camera's auto-generated UUID-named tmp file).  The
+        // move is performed via the `RNImageStitcherFileUtils` native
+        // bridge — no peer-dep on `expo-file-system` etc.
+        try {
+          const dstPath = callOptions?.outputPath
+            ? toBareFilePath(callOptions.outputPath)
+            : `${await getDefaultCaptureDir()}/${defaultPhotoFilename()}`;
+          await moveFile(orientedPhoto.path, dstPath);
+          orientedPhoto = { ...orientedPhoto, path: dstPath };
+        } catch (e) {
+          throw new Error(
+            'useCapture.takePhoto: failed to move captured photo to its '
+            + `destination${callOptions?.outputPath ? ` (${callOptions.outputPath})` : ' (default capture dir)'}. `
+            + `Underlying: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
 
         let report: QualityReport | undefined;
         if (enableQualityChecks && qualityThresholds) {
