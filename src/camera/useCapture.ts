@@ -38,7 +38,12 @@ import {
 
 import { runQualityCheck } from '../quality/runQualityCheck';
 import { normaliseOrientation } from '../quality/normaliseOrientation';
-import { toFileUri, toBareFilePath } from '../utils/paths';
+import { toBareFilePath } from '../utils/paths';
+import {
+  defaultPhotoFilename,
+  getDefaultCaptureDir,
+  moveFile,
+} from '../utils/files';
 import type {
   CaptureResult,
   QualityReport,
@@ -284,37 +289,25 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
           height: normalised.height || photo.height,
         };
 
-        // If the caller asked for a specific destination path, move
-        // the captured + orientation-corrected file there.  expo-
-        // file-system is loaded via a dynamic require so consumers
-        // that never pass `outputPath` don't have to install it.
-        if (callOptions?.outputPath) {
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const FileSystem = require('expo-file-system');
-            const dstBare = toBareFilePath(callOptions.outputPath);
-            const dstDir = dstBare.substring(0, dstBare.lastIndexOf('/'));
-            if (dstDir) {
-              await FileSystem.makeDirectoryAsync(
-                toFileUri(dstDir),
-                { intermediates: true },
-              ).catch(() => undefined);
-            }
-            await FileSystem.moveAsync({
-              from: toFileUri(orientedPhoto.path),
-              to: toFileUri(callOptions.outputPath),
-            });
-            orientedPhoto = { ...orientedPhoto, path: dstBare };
-          } catch (e) {
-            throw new Error(
-              'useCapture.takePhoto: failed to move photo to outputPath '
-              + `(${callOptions.outputPath}). outputPath requires `
-              + '`expo-file-system` to be installed in the host app, and the '
-              + `destination directory must be writable. Underlying: ${
-                e instanceof Error ? e.message : String(e)
-              }`,
-            );
-          }
+        // Move the orientation-corrected file to its final location.
+        // If the caller passed `outputPath`, use that.  Otherwise, the
+        // lib publishes captures into its canonical default dir so
+        // returned paths are predictable across consumers (vs.
+        // vision-camera's auto-generated UUID-named tmp file).  The
+        // move is performed via the `RNImageStitcherFileUtils` native
+        // bridge — no peer-dep on `expo-file-system` etc.
+        try {
+          const dstPath = callOptions?.outputPath
+            ? toBareFilePath(callOptions.outputPath)
+            : `${await getDefaultCaptureDir()}/${defaultPhotoFilename()}`;
+          await moveFile(orientedPhoto.path, dstPath);
+          orientedPhoto = { ...orientedPhoto, path: dstPath };
+        } catch (e) {
+          throw new Error(
+            'useCapture.takePhoto: failed to move captured photo to its '
+            + `destination${callOptions?.outputPath ? ` (${callOptions.outputPath})` : ' (default capture dir)'}. `
+            + `Underlying: ${e instanceof Error ? e.message : String(e)}`,
+          );
         }
 
         let report: QualityReport | undefined;
