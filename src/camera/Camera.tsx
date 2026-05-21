@@ -81,6 +81,12 @@ import { useIncrementalJSDriver } from '../stitching/useIncrementalJSDriver';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
 import { toBareFilePath, toFileUri } from '../utils/paths';
+import {
+  defaultPanoramaFilename,
+  defaultPhotoFilename,
+  getDefaultCaptureDir,
+  moveFile,
+} from '../utils/files';
 
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -723,46 +729,32 @@ export function Camera(props: CameraProps): React.JSX.Element {
       let uri: string;
       let width: number;
       let height: number;
-      // Compose a photo filename if outputDir is set so the lib lands
-      // the file at a host-controlled location.  Native takePhoto
-      // calls below either accept the path directly (useCapture) or
-      // are followed by a move (AR path).
+      // Compose the destination path BEFORE the capture so both the
+      // AR and non-AR branches land at the same predictable location.
+      // If `outputDir` is set, the lib lands the file at a host-
+      // controlled path; otherwise, in the lib's canonical capture
+      // dir (`<cache>/react-native-image-stitcher/photo-<ms>.jpg`).
       const photoOutputPath = outputDir
-        ? `${toBareFilePath(outputDir).replace(/\/$/, '')}/photo-${Date.now()}.jpg`
-        : undefined;
+        ? `${toBareFilePath(outputDir).replace(/\/$/, '')}/${defaultPhotoFilename()}`
+        : `${await getDefaultCaptureDir()}/${defaultPhotoFilename()}`;
       if (isAR && arViewRef.current) {
+        // ARCameraView writes to its own tmp location; relocate to
+        // photoOutputPath via the native FileBridge so both branches
+        // return paths under the same dir.
         const photo = await arViewRef.current.takePhoto({ quality: 90 });
-        // Native side returns a bare `/data/.../foo.jpg` path.  Android
-        // <Image> needs the `file://` scheme to render it; iOS is OK
-        // either way.
-        let finalPath = photo.path;
-        if (photoOutputPath) {
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const FileSystem = require('expo-file-system');
-            const dstDir = photoOutputPath.substring(0, photoOutputPath.lastIndexOf('/'));
-            if (dstDir) {
-              await FileSystem.makeDirectoryAsync(
-                toFileUri(dstDir),
-                { intermediates: true },
-              ).catch(() => undefined);
-            }
-            await FileSystem.moveAsync({
-              from: toFileUri(photo.path),
-              to: toFileUri(photoOutputPath),
-            });
-            finalPath = photoOutputPath;
-          } catch (moveErr) {
-            throw new CameraError(
-              'OUTPUT_WRITE_FAILED',
-              `Failed to move AR photo to outputDir (${photoOutputPath}).  `
-              + 'outputDir requires `expo-file-system` to be installed in the '
-              + 'host app, and the destination directory must be writable.',
-              moveErr,
-            );
-          }
+        try {
+          await moveFile(photo.path, photoOutputPath);
+        } catch (moveErr) {
+          throw new CameraError(
+            'OUTPUT_WRITE_FAILED',
+            `Failed to move AR photo to ${photoOutputPath}.  The destination `
+            + 'directory must be writable.',
+            moveErr,
+          );
         }
-        uri = toFileUri(finalPath);
+        // Android <Image> needs the `file://` scheme to render the
+        // returned uri; iOS is OK either way.  Normalise once here.
+        uri = toFileUri(photoOutputPath);
         width = photo.width;
         height = photo.height;
       } else {
@@ -775,17 +767,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
         // useCapture.takePhoto wraps the cameraRef internally;
         // attach via assignment so the hook's ref points at our
         // local ref.  This works because RefObject is just { current }.
-        // Effect: capture.takePhoto() resolves with the SDK's
-        // CaptureResult (with compressedUri / width / height).
-        // We adapt to the public CameraCaptureResult shape.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (capture.cameraRef as any).current = visionCameraRef.current;
-        // useCapture handles the outputPath move internally — the
-        // returned `compressedUri` already points at `photoOutputPath`
-        // when we pass it.
-        const result = await capture.takePhoto(
-          photoOutputPath ? { outputPath: photoOutputPath } : undefined,
-        );
+        // useCapture handles the move internally; the returned
+        // `compressedUri` already points at `photoOutputPath`.
+        const result = await capture.takePhoto({ outputPath: photoOutputPath });
         uri = result.compressedUri;
         width = result.width;
         height = result.height;
@@ -884,13 +870,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // No-op in AR mode where jsDriver was never started.
     jsDriver.stop();
     try {
-      // Compose a panorama filename if outputDir is set so the final
-      // stitched JPEG lands at a host-controlled location instead of
-      // the lib's tmp dir.  `incremental.finalize`'s first arg is the
-      // output file path (undefined → tmp default).
+      // Compose the panorama output path: host-controlled if
+      // `outputDir` is set, else the lib's canonical capture dir
+      // (`<cache>/react-native-image-stitcher/panorama-<ms>.jpg`).
+      // `incremental.finalize` writes the stitched JPEG straight to
+      // this path natively (no JS-side move needed for panoramas).
       const panoOutputPath = outputDir
-        ? `${toBareFilePath(outputDir).replace(/\/$/, '')}/panorama-${Date.now()}.jpg`
-        : undefined;
+        ? `${toBareFilePath(outputDir).replace(/\/$/, '')}/${defaultPanoramaFilename()}`
+        : `${await getDefaultCaptureDir()}/${defaultPanoramaFilename()}`;
       const result = await incremental.finalize(
         panoOutputPath,
         90,

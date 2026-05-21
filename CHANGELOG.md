@@ -30,15 +30,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own filenames.
   - On disk failure the capture rejects with
     `CameraError('OUTPUT_WRITE_FAILED', ...)`.  **No silent
-    fallback** to tmp — that hides bugs.
+    fallback** to a different path — that hides bugs.
   - Host owns *picking* the path.  The lib treats the value as an
     opaque writable filesystem path; it does not know about iOS
     `UIFileSharingEnabled`, Android MediaStore, SAF, or any other
     platform-specific shared-storage mechanism.  That's the host's
     domain.
-  - Requires `expo-file-system` — added as an **OPTIONAL** peer
-    dep (`peerDependenciesMeta`), so consumers that don't use
-    `outputDir`/`outputPath` don't have to install it.
+  - **No peer deps required** — the move is handled by a small
+    native bridge (`RNImageStitcherFileUtils`) that ships with
+    the lib.
+- **Canonical default capture directory** — when neither
+  `outputDir` nor `outputPath` is set, the lib now writes captures
+  to a predictable per-platform location instead of vision-camera's
+  auto-generated tmp paths:
+  - iOS: `<NSCachesDirectory>/react-native-image-stitcher/photo-<ms>.jpg`
+    (and `panorama-<ms>.jpg`).
+  - Android: `<context.cacheDir>/react-native-image-stitcher/...`.
+  - Both are app-private, evictable by the OS under storage
+    pressure, not backed up.  Captures live here until the host
+    moves them somewhere durable — the lib doesn't promise
+    persistence beyond the immediate capture flow.
+  - This applies to BOTH tap-photo and panorama, so call-sites can
+    rely on a single naming + parent-dir convention regardless of
+    capture type.
+- **`RNImageStitcherFileUtils` native module** (internal) —
+  small Swift + Kotlin bridge exposing `moveFile(from, to)` and
+  `defaultCaptureDir()`.  Used by the lib's own JS layer to relocate
+  vision-camera's auto-named output into the canonical default dir
+  / `outputDir` without forcing a peer dep on `expo-file-system`
+  for every consumer.  Not re-exported from `src/index.ts`.
 
 ### Fixed
 

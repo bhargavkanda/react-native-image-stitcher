@@ -29,6 +29,7 @@ class RNImageStitcherPackage : ReactPackage {
         BatchStitcher(reactContext),
         RNSARSession(reactContext),
         IncrementalStitcher(reactContext),
+        FileBridge(reactContext),
     )
 
     override fun createViewManagers(
