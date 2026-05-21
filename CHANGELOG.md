@@ -16,6 +16,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-21
+
+### Changed
+
+- **Example app no longer wires Expo modules.**  The deferred v0.2
+  follow-up landed: the example app now uses the standard React
+  Native 0.84 host wiring throughout — `RCTReactNativeFactory` in
+  `AppDelegate.swift`, `DefaultReactHost.getDefaultReactHost` in
+  `MainApplication.kt`, no `use_expo_modules!` macro in `Podfile`,
+  no `expo-root-project` plugin or `expoAutolinking.useExpoModules()`
+  call in the gradle files, and no `expo`/`expo-modules-core`/
+  `expo-modules-autolinking` packages in `example/package.json`.
+  The two inline `patch-package`-style Podfile patches for Expo
+  SDK 55 on RN 0.84 are also gone — they were only needed because
+  we were dragging Expo in.  Verified by clean build + install on
+  iPhone 16 Pro and Galaxy A35 (with `LANG=en_US.UTF-8 pod install`
+  + `JAVA_HOME` set to OpenJDK 17, both required workarounds for
+  unrelated tooling bugs we now document in the troubleshooting
+  table).
+- **`docs/host-app-integration.md` rewritten** for the post-Expo
+  posture.  Dropped ~340 lines describing Podfile macros,
+  AppDelegate Expo factory wiring, MainApplication Expo factory
+  wiring, gradle `expo-root-project` plugin, and the
+  `expo-modules-core+55.0.14.patch` patch-package patch.  The
+  remaining content (vision-camera permission strings, ARCore
+  manifest entries, the one `react-native-sensors+7.3.6.patch`
+  patch for the jcenter→mavenCentral swap, network access from
+  devices to Metro, troubleshooting) is preserved.  The README's
+  IMPORTANT block at [README.md:53-66](README.md:53) and the
+  pre-existing setup walkthrough still apply.
+
+### Migration from 0.2.0
+
+Hosts upgrading from 0.2.0 with their existing Expo modules host
+wiring **don't have to change anything** — Expo modules are
+additive, so the wiring keeps working even though the SDK no
+longer requires it.  But the wiring is now strictly optional, and
+[`docs/host-app-integration.md`](docs/host-app-integration.md)
+describes the simpler post-Expo path.  If you want to follow the
+simpler path: drop the four Expo packages from your
+`package.json`, revert your `AppDelegate.swift` /
+`MainApplication.kt` / Podfile / gradle / patches to the standard
+RN 0.84 templates documented in that file, run
+`pod deintegrate && pod install` (the CocoaPods 1.16 bug needs
+`LANG=en_US.UTF-8`), and rebuild.
+
 ## [0.2.0] — 2026-05-21
 
 > [!IMPORTANT]
@@ -311,7 +357,8 @@ Native module names also changed:
 - iOS pod: `RetaiLensCaptureSDK` → `RNImageStitcher`
 - iOS xcframework: shipped as `opencv2.xcframework` (linked from `RNImageStitcher.podspec`)
 
-[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.1...v0.1.2

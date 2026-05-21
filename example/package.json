@@ -16,10 +16,7 @@
     "react-native-image-stitcher": "file:..",
     "react-native-safe-area-context": "^5.5.2",
     "react-native-sensors": "^7.3.4",
-    "react-native-vision-camera": "^4.0.0",
-    "expo": "55.0.5",
-    "expo-modules-core": "55.0.14",
-    "expo-modules-autolinking": "55.0.8"
+    "react-native-vision-camera": "^4.0.0"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

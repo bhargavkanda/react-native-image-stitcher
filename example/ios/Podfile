@@ -5,9 +5,6 @@ require Pod::Executable.execute_command('node', ['-p',
     {paths: [process.argv[1]]},
   )', __dir__]).strip
 
-# expo-modules-core: load the Expo pods helper.  Needed by use_expo_modules!.
-require File.join(File.dirname(`node --print "require.resolve('expo/package.json')"`), "scripts/autolinking")
-
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 
@@ -20,11 +17,6 @@ end
 target 'RNImageStitcherExample' do
   config = use_native_modules!
 
-  # expo-modules-core + every expo-* package with native code.
-  # ExpoReactNativeFactory must be part of the app delegate chain so
-  # expo-sensors' DeviceMotion is registered before JS first touches it.
-  use_expo_modules!(exclude: ['@expo/log-box'])
-
   use_react_native!(
     :path => config[:reactNativePath],
     # An absolute path to your application root.
@@ -36,49 +28,6 @@ target 'RNImageStitcherExample' do
       installer,
       config[:reactNativePath],
       :mac_catalyst_enabled => false,
-      # :ccache_enabled => true
     )
-
-    # ─────────────────────────────────────────────────────────────────
-    # Patch EXReactRootViewFactory.mm for React Native 0.84 compatibility.
-    # expo SDK 55 calls a 4-arg viewWithModuleName: that RN 0.84 removed
-    # (only 3-arg and 5-arg overloads exist).  Replace with 3-arg.
-    # ─────────────────────────────────────────────────────────────────
-    expo_factory_mm = File.join(File.dirname(__FILE__), '..', 'node_modules', 'expo',
-                                'ios', 'AppDelegates', 'EXReactRootViewFactory.mm')
-    if File.exist?(expo_factory_mm)
-      mm_content = File.read(expo_factory_mm)
-      mm_patched = mm_content.gsub(
-        "return [super viewWithModuleName:moduleName initialProperties:initialProperties launchOptions:launchOptions devMenuConfiguration:devMenuConfiguration];",
-        "return [super viewWithModuleName:moduleName initialProperties:initialProperties launchOptions:launchOptions];"
-      )
-      if mm_patched != mm_content
-        File.write(expo_factory_mm, mm_patched)
-        Pod::UI.puts '[example] Patched EXReactRootViewFactory.mm for RN 0.84'.green
-      end
-    end
-
-    # ─────────────────────────────────────────────────────────────────
-    # Patch ExpoReactNativeFactory.swift for React Native 0.84 compatibility.
-    # Two recreateRootView() call sites use overloads RN 0.84 removed.
-    # ─────────────────────────────────────────────────────────────────
-    expo_factory = File.join(File.dirname(__FILE__), '..', 'node_modules', 'expo',
-                             'ios', 'AppDelegates', 'ExpoReactNativeFactory.swift')
-    if File.exist?(expo_factory)
-      content = File.read(expo_factory)
-      patched = content.
-        gsub(
-          "launchOptions: launchOptions ?? [:],\n        devMenuConfiguration: self.devMenuConfiguration",
-          "launchOptions: launchOptions ?? [:],\n        devMenuConfiguration: nil"
-        ).
-        gsub(
-          "launchOptions: launchOptions,\n        devMenuConfiguration: self.devMenuConfiguration",
-          "launchOptions: launchOptions"
-        )
-      if patched != content
-        File.write(expo_factory, patched)
-        Pod::UI.puts '[example] Patched ExpoReactNativeFactory.swift for RN 0.84'.green
-      end
-    end
   end
 end

@@ -19,44 +19,36 @@ SDK.  To do its job it depends on:
 | Dependency | What we use it for |
 |---|---|
 | `react-native-vision-camera` | The actual camera preview + frame capture |
-| `expo-sensors` | `DeviceMotion` (fused IMU) for the AR-fallback translation gate |
-| `react-native-sensors` | Per-axis gyroscope on Android (more responsive than expo's fused stream for that one signal) |
+| `react-native-sensors` | Accelerometer (orientation detection + IMU translation gate) and gyroscope (non-AR pose integration) |
 | `react-native-safe-area-context` | UI insets so the shutter sits above the home bar |
 
-The first three each impose their own host-app native setup
-requirements: Vision Camera wants permission strings and a podfile
-declaration; the Expo module system requires the host's
-`AppDelegate` + `MainApplication` to use Expo's factory rather than
-RN's default; `react-native-sensors` is a legacy bridge module that
-needs interop wiring on RN 0.84+.
+Each one imposes a small amount of native-side wiring: Vision Camera
+wants permission strings and a podfile declaration; `react-native-
+sensors` is a legacy bridge module that needs a `mavenCentral()` swap
+on RN 0.84+ (one `patch-package` patch).  That's it — **no Expo
+modules infrastructure required** as of v0.2.0.
 
 The good news: every step below is mechanical and the example app
 demonstrates each one.  Reading through this page once should be a
-~15 minute exercise.  The bad news: skipping any single step
-produces a runtime crash, not a build error, so the failure can
-look mysterious.
+~10 minute exercise.
 
 ## Supported React Native versions
 
 This SDK is currently tested against **React Native 0.84.x** with
 the New Architecture enabled (`newArchEnabled=true` /
-`RCTNewArchEnabled=true`).  Older RN versions may work but several
-of the patches below are RN 0.84-specific.
+`RCTNewArchEnabled=true`).  Older RN versions may work but the
+`react-native-sensors` `jcenter()` patch below is RN-0.84 / Gradle-9
+specific.
 
-## Required peer dependencies — pin these exact versions
+## Required peer dependencies
 
-The SDK declares these as peer dependencies.  We strongly recommend
-pinning to the exact versions below in your host app's
-`package.json` — patch-version drift in the Expo SDK has bitten us
-multiple times (see [Troubleshooting](#troubleshooting)).
+The SDK declares these as peer dependencies in `package.json`.
+Pin the exact versions or use a `^` range as your taste dictates —
+the SDK doesn't require a specific patch version of any of them.
 
 ```json
 {
   "dependencies": {
-    "expo": "55.0.5",
-    "expo-modules-core": "55.0.14",
-    "expo-modules-autolinking": "55.0.8",
-    "expo-sensors": "55.0.15",
     "react-native-sensors": "^7.3.4",
     "react-native-vision-camera": "^4.0.0",
     "react-native-safe-area-context": "^5.5.2"
@@ -75,11 +67,8 @@ cd ios && pod install && cd ..
 
 ### 1. `ios/Podfile`
 
-The Podfile must (a) `require` Expo's autolinking helper, and (b)
-call `use_expo_modules!`.  On React Native 0.84 we also patch two
-Expo SDK 55 files that call into APIs that 0.84 removed.  All of
-this is in the post_install hook, idempotent — pasting it twice
-or running pod install repeatedly is safe.
+Standard React Native 0.84 Podfile.  No extra plugin macros, no
+post-install patches.
 
 ```ruby
 # Resolve react_native_pods.rb with node to allow for hoisting
@@ -89,17 +78,17 @@ require Pod::Executable.execute_command('node', ['-p',
     {paths: [process.argv[1]]},
   )', __dir__]).strip
 
-# expo-modules-core: load the Expo pods helper.  Needed by use_expo_modules!.
-require File.join(File.dirname(`node --print "require.resolve('expo/package.json')"`), "scripts/autolinking")
-
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 
+linkage = ENV['USE_FRAMEWORKS']
+if linkage != nil
+  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
+  use_frameworks! :linkage => linkage.to_sym
+end
+
 target 'YourApp' do
   config = use_native_modules!
-
-  # MUST come before use_react_native!
-  use_expo_modules!(exclude: ['@expo/log-box'])
 
   use_react_native!(
     :path => config[:reactNativePath],
@@ -112,73 +101,33 @@ target 'YourApp' do
       config[:reactNativePath],
       :mac_catalyst_enabled => false,
     )
-
-    # ─── React Native 0.84 compatibility patches for Expo SDK 55 ────
-    # expo SDK 55 was written for RN 0.83; two of its files call
-    # 4-arg overloads of RCTReactNativeFactory APIs that 0.84
-    # removed.  These two gsubs replace them with the 3-arg form.
-    # Idempotent — if the target string is absent (already patched
-    # or fixed in a future expo release), they're no-ops.
-
-    expo_factory_mm = File.join(File.dirname(__FILE__), '..', 'node_modules', 'expo',
-                                'ios', 'AppDelegates', 'EXReactRootViewFactory.mm')
-    if File.exist?(expo_factory_mm)
-      mm_content = File.read(expo_factory_mm)
-      mm_patched = mm_content.gsub(
-        "return [super viewWithModuleName:moduleName initialProperties:initialProperties launchOptions:launchOptions devMenuConfiguration:devMenuConfiguration];",
-        "return [super viewWithModuleName:moduleName initialProperties:initialProperties launchOptions:launchOptions];"
-      )
-      File.write(expo_factory_mm, mm_patched) if mm_patched != mm_content
-    end
-
-    expo_factory = File.join(File.dirname(__FILE__), '..', 'node_modules', 'expo',
-                             'ios', 'AppDelegates', 'ExpoReactNativeFactory.swift')
-    if File.exist?(expo_factory)
-      content = File.read(expo_factory)
-      patched = content.
-        gsub(
-          "launchOptions: launchOptions ?? [:],\n        devMenuConfiguration: self.devMenuConfiguration",
-          "launchOptions: launchOptions ?? [:],\n        devMenuConfiguration: nil"
-        ).
-        gsub(
-          "launchOptions: launchOptions,\n        devMenuConfiguration: self.devMenuConfiguration",
-          "launchOptions: launchOptions"
-        )
-      File.write(expo_factory, patched) if patched != content
-    end
   end
 end
 ```
 
 ### 2. `ios/<YourApp>/AppDelegate.swift`
 
-Replace your project's `AppDelegate.swift` with the version below.
-The key differences from a stock RN 0.84 template:
-
-- `internal import Expo` (Swift 5.9+ syntax)
-- `reactNativeFactory: ExpoReactNativeFactory?` (not `RCTReactNativeFactory`)
-- `ReactNativeDelegate: ExpoReactNativeFactoryDelegate`
+Standard React Native 0.84 AppDelegate using `RCTReactNativeFactory`.
 
 ```swift
 import UIKit
 import React
 import React_RCTAppDelegate
 import ReactAppDependencyProvider
-internal import Expo
 
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
   var window: UIWindow?
 
   var reactNativeDelegate: ReactNativeDelegate?
-  var reactNativeFactory: ExpoReactNativeFactory?
+  var reactNativeFactory: RCTReactNativeFactory?
 
   func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
     let delegate = ReactNativeDelegate()
-    let factory = ExpoReactNativeFactory(delegate: delegate)
+    let factory = RCTReactNativeFactory(delegate: delegate)
     delegate.dependencyProvider = RCTAppDependencyProvider()
 
     reactNativeDelegate = delegate
@@ -187,7 +136,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     window = UIWindow(frame: UIScreen.main.bounds)
 
     factory.startReactNative(
-      withModuleName: "YourApp",  // ← match your app's module name
+      withModuleName: "YourApp",
       in: window,
       launchOptions: launchOptions
     )
@@ -196,7 +145,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
   }
 }
 
-class ReactNativeDelegate: ExpoReactNativeFactoryDelegate {
+class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
   override func sourceURL(for bridge: RCTBridge) -> URL? {
     self.bundleURL()
   }
@@ -211,20 +160,13 @@ class ReactNativeDelegate: ExpoReactNativeFactoryDelegate {
 }
 ```
 
-**Why this matters:** `ExpoReactNativeFactory` pre-initialises
-`AppContext._runtime` on the correct Swift `JavaScriptActor` before
-`RCTTurboModuleManager` calls `setBridge:`.  Without it,
-`JavaScriptSerialExecutor.checkIsolated()` crashes at launch with
-SIGABRT.  Using the default `RCTReactNativeFactory` will also leave
-`DeviceMotion` undefined in JS even after a successful build.
-
 ### 3. `ios/<YourApp>/Info.plist` — required permission strings
 
 iOS **force-kills** any app that accesses the camera, motion
 sensors, or photo library without a declared usage description.
 Every key below is required — even if your app never uses that
-subsystem directly, Vision Camera or Expo Sensors will touch it
-during init and your app will SIGABRT on launch.
+subsystem directly, Vision Camera or `react-native-sensors` will
+touch it during init and your app will SIGABRT on launch.
 
 ```xml
 <key>NSCameraUsageDescription</key>
@@ -272,28 +214,21 @@ production build.
 
 ### 1. `android/settings.gradle`
 
+Standard React Native 0.84 settings file.
+
 ```gradle
 pluginManagement {
     includeBuild("../node_modules/@react-native/gradle-plugin")
-    includeBuild("../node_modules/expo-modules-autolinking/android/expo-gradle-plugin")
 }
 plugins {
     id("com.facebook.react.settings")
-    id("expo-autolinking-settings")
 }
 extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
-expoAutolinking.useExpoModules()
 
 rootProject.name = 'YourApp'
 include ':app'
 includeBuild('../node_modules/@react-native/gradle-plugin')
 ```
-
-The two `includeBuild` lines in `pluginManagement` and the
-`expoAutolinking.useExpoModules()` line are the Android analogue of
-iOS's `use_expo_modules!` Podfile macro — they discover every
-`expo-*` package in `node_modules` and pull its native code into the
-Gradle build.
 
 ### 2. `android/build.gradle` (top-level)
 
@@ -319,13 +254,7 @@ buildscript {
 }
 
 apply plugin: "com.facebook.react.rootproject"
-apply plugin: "expo-root-project"
 ```
-
-The `expo-root-project` plugin contributes default values for
-`kotlinVersion`, `kspVersion`, etc. via `extra.setIfNotExist` so
-autolinked Expo subprojects can resolve them.  Your explicit `ext{}`
-values always win — this only fills gaps.
 
 ### 3. `android/gradle.properties`
 
@@ -337,28 +266,25 @@ hermesEnabled=true
 
 ### 4. `android/app/src/main/java/<your.pkg>/MainApplication.kt`
 
+Standard React Native 0.84 MainApplication using
+`DefaultReactHost.getDefaultReactHost`.
+
 ```kotlin
 package your.pkg
 
 import android.app.Application
-import android.content.res.Configuration
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
 import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
-import expo.modules.ApplicationLifecycleDispatcher
-import expo.modules.ExpoReactHostFactory
+import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 
 class MainApplication : Application(), ReactApplication {
 
   override val reactHost: ReactHost by lazy {
-    val packages = PackageList(this).packages
-    // Override jsMainModulePath: ExpoReactHostFactory defaults to
-    // ".expo/.virtual-metro-entry" (only present in `expo prebuild`
-    // projects).  Bare RN apps use "index".
-    ExpoReactHostFactory.getDefaultReactHost(
+    getDefaultReactHost(
       context = applicationContext,
-      packageList = packages,
+      packageList = PackageList(this).packages,
       jsMainModulePath = "index",
     )
   }
@@ -366,22 +292,9 @@ class MainApplication : Application(), ReactApplication {
   override fun onCreate() {
     super.onCreate()
     loadReactNative(this)
-    ApplicationLifecycleDispatcher.onApplicationCreate(this)
-  }
-
-  override fun onConfigurationChanged(newConfig: Configuration) {
-    super.onConfigurationChanged(newConfig)
-    ApplicationLifecycleDispatcher.onConfigurationChanged(this, newConfig)
   }
 }
 ```
-
-The key swap is `DefaultReactHost.getDefaultReactHost` →
-`ExpoReactHostFactory.getDefaultReactHost`.  The latter wires in the
-`ReactNativeHostHandlers` contributed by each expo module so they
-get a chance to register native modules during host creation.  The
-two `ApplicationLifecycleDispatcher` calls are the Android analogue
-of iOS's `ExpoAppDelegateSubscriberRepository.subscribers` chain.
 
 ### 5. `android/app/src/main/AndroidManifest.xml` — permissions + ARCore meta-data
 
@@ -437,69 +350,14 @@ app install on devices that don't have a gyroscope; Play Store won't
 filter them out, and the SDK gracefully falls back to non-AR
 capture.
 
-## `patch-package` — required patches
+## `patch-package` — one required patch
 
-Two upstream packages need patches to compile cleanly against React
-Native 0.84.  We strongly recommend setting up
+One upstream package needs a patch to compile cleanly against React
+Native 0.84.  We recommend setting up
 [`patch-package`](https://github.com/ds300/patch-package) in your
-host app and committing both patches under `patches/`.
+host app and committing the patch under `patches/`.
 
-### 1. `patches/expo-modules-core+55.0.14.patch`
-
-RN 0.84 made `code` nullable on every `reject(...)` overload in
-`com.facebook.react.bridge.Promise`.  `expo-modules-core@55.0.14`
-still declares them as non-null `String`, so `override` fails at
-compile time with `'reject' overrides nothing`.
-
-```diff
-diff --git a/node_modules/expo-modules-core/android/src/main/java/expo/modules/kotlin/Promise.kt b/node_modules/expo-modules-core/android/src/main/java/expo/modules/kotlin/Promise.kt
-@@ -45,16 +45,22 @@ fun Promise.toBridgePromise(): com.facebook.react.bridge.Promise {
-       resolveMethod(value)
-     }
- 
--    override fun reject(code: String, message: String?) {
--      expoPromise.reject(code, message, null)
-+    override fun reject(code: String?, message: String?) {
-+      expoPromise.reject(code ?: unknownCode, message, null)
-     }
- 
--    override fun reject(code: String, throwable: Throwable?) {
--      expoPromise.reject(code, null, throwable)
-+    override fun reject(code: String?, throwable: Throwable?) {
-+      expoPromise.reject(code ?: unknownCode, null, throwable)
-     }
- 
--    override fun reject(code: String, message: String?, throwable: Throwable?) {
--      expoPromise.reject(code, message, throwable)
-+    override fun reject(code: String?, message: String?, throwable: Throwable?) {
-+      expoPromise.reject(code ?: unknownCode, message, throwable)
-     }
- 
-     override fun reject(throwable: Throwable) {
-@@ -65,16 +71,16 @@ fun Promise.toBridgePromise(): com.facebook.react.bridge.Promise {
-       expoPromise.reject(unknownCode, null, throwable)
-     }
- 
--    override fun reject(code: String, userInfo: WritableMap) {
--      expoPromise.reject(code, null, null)
-+    override fun reject(code: String?, userInfo: WritableMap) {
-+      expoPromise.reject(code ?: unknownCode, null, null)
-     }
- 
--    override fun reject(code: String, throwable: Throwable?, userInfo: WritableMap) {
--      expoPromise.reject(code, null, throwable)
-+    override fun reject(code: String?, throwable: Throwable?, userInfo: WritableMap) {
-+      expoPromise.reject(code ?: unknownCode, null, throwable)
-     }
- 
--    override fun reject(code: String, message: String?, userInfo: WritableMap) {
--      expoPromise.reject(code, message, null)
-+    override fun reject(code: String?, message: String?, userInfo: WritableMap) {
-+      expoPromise.reject(code ?: unknownCode, message, null)
-     }
-```
-
-### 2. `patches/react-native-sensors+7.3.6.patch`
+### `patches/react-native-sensors+7.3.6.patch`
 
 `react-native-sensors@7.3.6` references `jcenter()` in its
 `build.gradle` — Bintray retired jcenter in 2022 and Gradle 9
@@ -538,7 +396,7 @@ Add to your host app's `package.json`:
 }
 ```
 
-Now every `npm install` automatically re-applies both patches.
+Now every `npm install` automatically re-applies the patch.
 
 ## Network access from devices to Metro
 
@@ -559,15 +417,15 @@ DHCP changes.
 | Symptom | Most likely cause | Fix |
 |---|---|---|
 | `Cannot read property 'useContext' of null` at runtime | Two copies of React in the bundle (commonly: a nested `node_modules/react` in the SDK or a `file:` linked package).  Both Reacts have independent context registries. | Ensure only ONE `react` in `find node_modules -name react -type d -path '*node_modules/react'`.  Add `resolver.blockList` to Metro config if needed. |
-| `Cannot read property 'eventEmitter' of undefined` or `Cannot read property 'DeviceMotion' of undefined` | Either: Expo not initialized natively, OR `react-native-sensors` not registered on New Arch. | Confirm `use_expo_modules!` in Podfile, `ExpoReactNativeFactory` in AppDelegate, and `ExpoReactHostFactory` in MainApplication.kt. |
+| `Cannot read property 'eventEmitter' of undefined` | `react-native-sensors` not registered on New Arch.  Usually a stale `pod install` or autolinking cache. | Run `cd ios && pod deintegrate && pod install` and rebuild.  For Android, `cd android && ./gradlew clean && cd .. && npx react-native run-android`. |
 | iOS app SIGABRTs on launch immediately | Missing `NSCameraUsageDescription` / `NSMotionUsageDescription` in `Info.plist`. | Add the keys per "iOS — Info.plist permission strings" above.  iOS will not even log this — the only signature is `App terminated due to signal 6.` in `devicectl --console` output. The `.ips` crash log in `Settings → Privacy & Security → Analytics & Improvements → Analytics Data` will say verbatim *"The app's Info.plist must contain an NSCameraUsageDescription key..."*. |
 | Android: SDK shows "Camera permission denied" but no system dialog ever appeared | Missing `<uses-permission android:name="android.permission.CAMERA" />` in `AndroidManifest.xml`.  Android silently auto-denies any permission not declared in the manifest — `requestPermissions()` returns *denied* without prompting the user. | Add the `<uses-permission>` line per "Android — AndroidManifest.xml" above and rebuild.  This **is not a runtime bug** — the manifest is the contract for what the app can request. |
 | Android: AR mode crashes deep in native (`android_sensors.cc`) | Missing `<uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />`.  ARCore polls IMU at ≥200 Hz and Android 12+ rate-limits that without the permission. | Add the `<uses-permission>` line.  This is a normal-protection-level permission, no runtime prompt. |
 | Android: AR mode crashes on `ArCoreApk.requestInstall()` | Missing `<meta-data android:name="com.google.ar.core" android:value="optional" />` inside `<application>`. | Add the meta-data tag per the manifest section above. |
 | Android Gradle: `Could not find method jcenter()` | `react-native-sensors@7.3.6` references the retired Bintray jcenter. | Apply the `react-native-sensors+7.3.6.patch` from above. |
-| Android Kotlin: `'reject' overrides nothing` in `expo-modules-core/.../Promise.kt` | RN 0.84 made `code` nullable; expo-modules-core 55.0.14 still declares it non-null. | Apply the `expo-modules-core+55.0.14.patch` from above. |
+| Android Gradle: `Gradle requires JVM 17 or later to run. Your build is currently configured to use JVM 11.` | Default JDK on macOS/Linux is often Java 11 even when 17 is installed. | Set `JAVA_HOME` to a Java 17 install before running gradle.  Homebrew: `export JAVA_HOME=/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home`. |
 | iOS Pod install:  `framework not found 'opencv2'` | The npm postinstall fetcher hasn't downloaded the OpenCV xcframework. | Re-run `npm install`.  If you're offline, set `SKIP_OPENCV_FETCH=1` and place the framework manually under `node_modules/react-native-image-stitcher/ios/Frameworks/`. |
-| iOS Pod install:  `EXReactRootViewFactory.mm:NN:M: no matching member function for call to 'viewWithModuleName'` | RN 0.84 patch in the Podfile post_install didn't run (or expo upgraded the source). | Confirm the two `gsub` blocks in the Podfile post_install are present.  If expo released a new version that fixed this, the gsub is a no-op (idempotent). |
+| iOS Pod install: `Unicode Normalization not appropriate for ASCII-8BIT` (Ruby 3.4 + CocoaPods 1.16) | Known Ruby-stdlib / CocoaPods interaction bug. | Prepend `LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8` to the `pod install` command. |
 | iOS:  `dyld: Library not loaded: @rpath/React.framework/React` at launch | CocoaPods didn't embed `React.framework` (a known intermittent issue with the prebuilt `React-Core-prebuilt` pod). | Run `pod deintegrate && pod install` from `ios/`. |
 | iOS Build: `Signing for "YourApp" requires a development team` | Xcode signing not configured. | In `your.xcodeproj` → target settings → Signing & Capabilities, pick your team and ensure `CODE_SIGN_STYLE=Automatic`.  For headless builds, pass `-allowProvisioningUpdates` to `xcodebuild`. |
 | `react-native run-ios --device` exits with `No simulator available with udid "undefined"` | RN CLI bug: when no fallback simulator (iPhone 14/13/12/11) is installed, `getFallbackSimulator` throws even on the device code path. | `xcrun simctl create "iPhone 14" "com.apple.CoreSimulator.SimDeviceType.iPhone-14" "com.apple.CoreSimulator.SimRuntime.iOS-17-5"` to create a dummy simulator. |
@@ -578,10 +436,10 @@ After everything above is in place, a clean `npm install &&
 cd ios && pod install && cd .. && npx react-native run-ios` on a
 **fresh** clone should:
 
-1. Run `patch-package` automatically as part of postinstall, applying both required patches.
+1. Run `patch-package` automatically as part of postinstall, applying the `react-native-sensors+7.3.6.patch`.
 2. Run the SDK's own postinstall fetcher, pulling the OpenCV
    xcframework + Android per-ABI `.so` files into `node_modules/react-native-image-stitcher/`.
-3. Run `pod install`, which applies the RN 0.84 expo factory patches via the post_install hook and installs ~80 pods (including `Expo`, `ExpoSensors`, `ExpoModulesCore`, `VisionCamera`, `RNSensors`, `react-native-image-stitcher`).
+3. Run `pod install`, installing ~75 pods (including `VisionCamera`, `RNSensors`, `react-native-image-stitcher`, and all the standard RN 0.84 pods).
 4. Build + install + launch the iPhone app, which shows the `<Camera>` preview.
 5. Tap shutter → photo captured.  Hold + pan → panorama stitched.
 

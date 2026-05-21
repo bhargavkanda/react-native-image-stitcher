@@ -1,25 +1,10 @@
-// ── Plugin classpath ─────────────────────────────────────────────────
-// Both the React Native settings plugin and the Expo autolinking
-// settings plugin live in node_modules as composite-buildable Gradle
-// projects.  pluginManagement.includeBuild makes them findable in the
-// plugins {} block below.
 pluginManagement {
     includeBuild("../node_modules/@react-native/gradle-plugin")
-    includeBuild("../node_modules/expo-modules-autolinking/android/expo-gradle-plugin")
 }
 plugins {
     id("com.facebook.react.settings")
-    id("expo-autolinking-settings")
 }
 extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
-// ── Expo modules autolinking ─────────────────────────────────────────
-// Discovers every package under node_modules that declares an
-// `expoModulesAutolinking` config (expo-sensors, expo-modules-core, the
-// `expo` package itself, etc.), `include`s it as a Gradle subproject,
-// pulls in its native code, and makes ExpoModulesPackage.packageList
-// resolve to the full list at runtime.  Android analogue of iOS'
-// `use_expo_modules!` Podfile macro.
-expoAutolinking.useExpoModules()
 
 rootProject.name = 'RNImageStitcherExample'
 include ':app'
