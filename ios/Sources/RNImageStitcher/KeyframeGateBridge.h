@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // KeyframeGateBridge.h — Obj-C++ wrapper exposing the shared C++
-// KeyframeGate (in retailens-capture-sdk/cpp/) to Swift.
+// KeyframeGate (in react-native-image-stitcher/cpp/) to Swift.
 //
 // Why this exists:
 //   The pose-driven keyframe-selection algorithm is the single most

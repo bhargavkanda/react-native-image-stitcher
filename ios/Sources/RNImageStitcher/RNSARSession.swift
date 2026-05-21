@@ -150,7 +150,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     /// recordings.  Phase 5 stitching will query by timestamp.
     private var poseLog: [(TimeInterval, RNSARFramePose)] = []
     private let poseLogQueue = DispatchQueue(
-        label: "com.retailens.arsession.poselog",
+        label: "io.imagestitcher.arsession.poselog",
         attributes: .concurrent
     )
     private static let MAX_POSE_LOG = 600  // ~10 s @ 60Hz

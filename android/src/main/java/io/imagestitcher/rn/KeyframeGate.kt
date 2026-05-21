@@ -3,7 +3,7 @@ package io.imagestitcher.rn
 
 /**
  * Kotlin facade over the shared C++ KeyframeGate (in
- * retailens-capture-sdk/cpp/keyframe_gate.{hpp,cpp}).
+ * react-native-image-stitcher/cpp/keyframe_gate.{hpp,cpp}).
  *
  * Architecture parity with iOS:
  *   iOS uses an Obj-C++ bridge (KeyframeGateBridge.mm) to wrap the
