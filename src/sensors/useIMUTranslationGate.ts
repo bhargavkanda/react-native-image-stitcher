@@ -181,6 +181,38 @@ export function useIMUTranslationGate({
   useEffect(() => {
     if (!enabled) return;
 
+    // 2026-05-22 (audit follow-up) — reset ALL integrator state when
+    // the subscription is (re)established, not just on the host's
+    // resetAnchor() call.  Two reasons:
+    //
+    // 1. Race with statusPhase update: handleHoldStart sets
+    //    `statusPhase='recording'` synchronously, which flips
+    //    `enabled` and re-runs this effect immediately.  Samples
+    //    start arriving before the awaited `incremental.start()`
+    //    returns + the host gets a chance to call `resetAnchor()`.
+    //    During that window `posX` accumulates drift, and the
+    //    operator sees a non-zero starting `imuΔ` in the debug
+    //    overlay.
+    //
+    // 2. Stale gravity bias: `gravityX` was intentionally preserved
+    //    across `resetAnchor` calls to keep IIR history.  But
+    //    between captures the phone might be at a different
+    //    orientation; the stale gravity estimate biases `linX` for
+    //    the ~200ms IIR convergence window, and that bias compounds
+    //    into `posX` each capture.  Forcing NaN here makes the
+    //    first sample re-seed gravity cleanly — costs us one
+    //    sample of accuracy but eliminates the cross-capture drift.
+    //
+    // The host's `resetAnchor()` remains as the in-capture reset
+    // (called after each force-accept fire, etc).
+    {
+      const s = stateRef.current;
+      s.posX = 0;
+      s.velX = 0;
+      s.fired = false;
+      s.gravityX = NaN;
+    }
+
     setUpdateIntervalForType(SensorTypes.accelerometer, sampleIntervalMs);
     const scale = Platform.OS === 'ios' ? G_TO_MPS2 : 1;
     const dt = sampleIntervalMs / 1000.0;
