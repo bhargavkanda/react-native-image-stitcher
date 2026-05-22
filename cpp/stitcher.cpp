@@ -244,7 +244,93 @@ cv::Rect maxInscribedRectFromMask(const cv::Mat& mask) {
 }  // namespace
 
 
+// Forward declaration — body is the renamed inner entry point further
+// down.  The public `stitchFramePaths` wraps this with the
+// mode-fallback retry logic added in the 2026-05-22 audit.
+static StitchResult stitchFramePathsImpl_(
+    const std::vector<std::string>& framePaths,
+    const std::string&              outputPath,
+    const StitchConfig&             config,
+    LogFn                           logFn);
+
+
 StitchResult stitchFramePaths(
+    const std::vector<std::string>& framePaths,
+    const std::string&              outputPath,
+    const StitchConfig&             config,
+    LogFn                           logFn)
+{
+    // 2026-05-22 (audit follow-up) — mode-fallback retry.  When the
+    // configured stitchMode produces degenerate camera params (the
+    // "warpRoi too large" crash users hit on translation-heavy
+    // captures stitched as PANORAMA, or low-texture inputs stitched
+    // as SCANS), automatically retry once with the OPPOSITE mode
+    // before giving up.  Symmetric: PANORAMA-then-SCANS or
+    // SCANS-then-PANORAMA depending on configured mode.
+    //
+    // Why this is safe to enable unconditionally:
+    //   - The retry only fires on a failed attempt (no perf hit on
+    //     happy paths).
+    //   - Both modes share the load-images and write-output stages,
+    //     so the per-frame I/O cost isn't duplicated — only the
+    //     estimator/BA/warp middle is re-run.
+    //   - Result reflects whichever mode succeeded (returned via
+    //     StitchResult.stitchModeUsed, populated below).
+    auto runOnce = [&](StitchMode modeOverride) -> StitchResult {
+        StitchConfig cfg = config;
+        cfg.stitchMode = modeOverride;
+        return stitchFramePathsImpl_(framePaths, outputPath, cfg, logFn);
+    };
+    StitchResult firstAttempt = runOnce(config.stitchMode);
+    if (firstAttempt.errorCode == StitchErrorCode::Ok) {
+        firstAttempt.stitchModeUsed = config.stitchMode;
+        return firstAttempt;
+    }
+    // First attempt failed.  Try the opposite mode unless the error
+    // is something the opposite mode wouldn't fix (e.g. invalid
+    // argument count, file-read failure, OOM).
+    bool worthRetrying =
+        firstAttempt.errorCode == StitchErrorCode::UnknownCvException
+        || firstAttempt.errorCode == StitchErrorCode::HomographyEstimationFailed
+        || firstAttempt.errorCode == StitchErrorCode::CameraParamsAdjustFailed
+        || firstAttempt.errorCode == StitchErrorCode::WarpFailed
+        || firstAttempt.errorCode == StitchErrorCode::EmptyPanorama;
+    if (!worthRetrying) {
+        firstAttempt.stitchModeUsed = config.stitchMode;
+        return firstAttempt;
+    }
+    StitchMode fallbackMode =
+        (config.stitchMode == StitchMode::Panorama) ? StitchMode::Scans
+                                                    : StitchMode::Panorama;
+    log_info(logFn, "[stitch-fallback]",
+             "primary mode (%s) failed with code=%d msg=%s — retrying with %s",
+             config.stitchMode == StitchMode::Scans ? "scans" : "panorama",
+             static_cast<int>(firstAttempt.errorCode),
+             firstAttempt.errorMessage.c_str(),
+             fallbackMode == StitchMode::Scans ? "scans" : "panorama");
+    StitchResult secondAttempt = runOnce(fallbackMode);
+    if (secondAttempt.errorCode == StitchErrorCode::Ok) {
+        secondAttempt.stitchModeUsed = fallbackMode;
+        log_info(logFn, "[stitch-fallback]",
+                 "fallback mode (%s) succeeded",
+                 fallbackMode == StitchMode::Scans ? "scans" : "panorama");
+        return secondAttempt;
+    }
+    // Both attempts failed.  Return the FIRST attempt's error (it's
+    // what the operator's chosen mode produced — more useful for
+    // diagnosis than the fallback's failure).
+    log_info(logFn, "[stitch-fallback]",
+             "fallback mode (%s) also failed with code=%d — returning primary error",
+             fallbackMode == StitchMode::Scans ? "scans" : "panorama",
+             static_cast<int>(secondAttempt.errorCode));
+    firstAttempt.stitchModeUsed = config.stitchMode;
+    return firstAttempt;
+}
+
+// 2026-05-22 (audit follow-up) — renamed inner entry point so the
+// public `stitchFramePaths` wrapper above can layer the mode-fallback
+// retry on top.  This used to be the public function.
+static StitchResult stitchFramePathsImpl_(
     const std::vector<std::string>& framePaths,
     const std::string&              outputPath,
     const StitchConfig&             config,
@@ -1572,13 +1658,27 @@ StitchResult stitchFramePathsManual(
                                   i, roi.width, roi.height,
                                   (long long)roiPixels,
                                   (long long)kMaxWarpPixels);
+                        // 2026-05-22 (audit follow-up) — include
+                        // stitchMode + frame index in the error message
+                        // so the JS host can correlate the failure with
+                        // operator behaviour.  Pre-fix the error said
+                        // nothing about which pipeline diverged.  The
+                        // value tells you: PANORAMA usually fails on
+                        // translation-heavy input (homography + BA-Ray
+                        // assume pure rotation); SCANS usually fails on
+                        // low-texture or low-overlap input (affine needs
+                        // enough matches).
+                        const char* modeStr =
+                            (config.stitchMode == StitchMode::Scans) ? "scans" : "panorama";
                         throw cv::Exception(
                             cv::Error::StsOutOfRange,
                             std::string("warpRoi too large (")
                                 + std::to_string(roi.width) + "x"
                                 + std::to_string(roi.height)
                                 + ") — estimator produced degenerate "
-                                + "camera params on this frame",
+                                + "camera params on this frame (stitchMode="
+                                + modeStr + ", frameIdx="
+                                + std::to_string(i) + ")",
                             "stitchFramePathsManual",
                             __FILE__, __LINE__);
                     }

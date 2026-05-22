@@ -163,7 +163,7 @@ function App(): React.JSX.Element {
                 <Text style={styles.previewSub}>
                   {preview.width}×{preview.height}
                   {preview.type === 'panorama'
-                    ? `  •  ${preview.framesIncluded}/${preview.framesRequested} frames  •  ${preview.durationMs} ms`
+                    ? `  •  ${preview.framesIncluded}/${preview.framesRequested} frames  •  ${preview.durationMs} ms${preview.stitchModeResolved ? `  •  ${preview.stitchModeResolved}` : ''}`
                     : ''}
                 </Text>
               </View>
