@@ -323,11 +323,12 @@ export interface PanoramaSettings {
    *     PlaneWarper.  Canvas size bounded by sum of frame areas.
    *     Slight quality drop on pure rotations but works for them too.
    *
-   * iOS NOTE: as of 2026-05-14 the iOS stitcher uses a hand-rolled
-   * PANORAMA-style pipeline (OpenCVStitcher.mm:600+) regardless of
-   * this setting.  Setting is passed through to iOS but ignored.
-   * Android honours it via image_stitcher_jni.cpp.  Bridging iOS is
-   * a follow-up.
+   * Both platforms honour this as of 2026-05-22 (audit F2).  Android
+   * routes through `image_stitcher_jni.cpp` → `cpp/stitcher.cpp`;
+   * iOS routes through `OpenCVStitcher.stitchFramePaths(stitchMode:)`
+   * → `cpp/stitcher.cpp`.  Both 'auto' resolutions use the same
+   * translation/rotation ratio heuristic
+   * (`resolveStitchModeAuto` on each side).
    */
   stitchMode: 'auto' | 'panorama' | 'scans';
 }

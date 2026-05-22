@@ -156,7 +156,12 @@ public enum Stitcher {
         // in the panorama settings modal).  Callers that want
         // inscribed-rect can use IncrementalStitcher with
         // the toggle on.
-        useInscribedRectCrop: false
+        useInscribedRectCrop: false,
+        // 2026-05-22 (audit F2) — legacy video-stitch API doesn't
+        // expose stitchMode in its options dict yet.  nil falls
+        // through to Panorama in OpenCVStitcher.mm (preserves
+        // historical behaviour).
+        stitchMode: nil
       )
       return StitchResult(
         outputPath: result.outputPath,

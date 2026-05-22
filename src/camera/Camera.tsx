@@ -823,16 +823,35 @@ export function Camera(props: CameraProps): React.JSX.Element {
         canvasHeight: 5000,
         engine: 'batch-keyframe',
         config: {
+          // ── cv::Stitcher (batch finalize) ─────────────────────────
           stitchMode: settings.stitchMode,
           warperType: settings.warperType,
           blenderType: settings.blenderType,
           seamFinderType: settings.seamFinderType,
+          enableMaxInscribedRectCrop: settings.enableMaxInscribedRectCrop,
+          // ── KeyframeGate (per-frame selection) ────────────────────
+          // F6 audit fix: pass settings.frameSelectionMode through
+          // instead of hardcoding 'flow-based' (which silently made the
+          // time-based / pose-based modal options no-ops).
+          frameSelectionMode: settings.frameSelectionMode,
+          keyframeMaxCount: settings.keyframeMaxCount,
+          keyframeOverlapThreshold: settings.keyframeOverlapThreshold,
+          // ── Flow-strategy tunables ────────────────────────────────
+          // F4 audit fix: previously omitted, which made the modal
+          // sliders for these three a complete no-op (only iOS native
+          // even read them, and only when JS sent them).
           flowNoveltyPercentile: settings.flowNoveltyPercentile,
           flowEvalEveryNFrames: settings.flowEvalEveryNFrames,
           flowMaxTranslationCm: settings.flowMaxTranslationCm,
-          keyframeMaxCount: settings.keyframeMaxCount,
-          keyframeOverlapThreshold: settings.keyframeOverlapThreshold,
-          frameSelectionMode: 'flow-based',
+          flowMaxCorners: settings.flowMaxCorners,
+          flowQualityLevel: settings.flowQualityLevel,
+          flowMinDistance: settings.flowMinDistance,
+          // ── Engine-routing flags consumed by native ───────────────
+          // F1 audit fix: Android keyframe gate's disableAngularFallback
+          // opt-out reads this to decide whether to skip the angular
+          // fallback (gyro pose is too noisy for the FoV-overlap calc
+          // in non-AR mode, causing degenerate cv::Stitcher params).
+          captureSource: settings.captureSource,
         },
       });
       imuGate.resetAnchor();

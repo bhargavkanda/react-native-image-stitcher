@@ -16,6 +16,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (audit follow-up — all from the 2026-05-22 PanoramaSettings ground-truth audit)
+
+- **F1 — Android `disableAngularFallback` was always false.** The
+  Android JNI's non-AR opt-out for the angular-delta gate fallback
+  tested `captureSource ∈ {"wide", "ultrawide"}` against a JS API
+  that has been sending `"ar"` / `"non-ar"` since 2026-05-14.  The
+  string mismatch silently nullified the opt-out for the entire
+  Android non-AR path, letting gyro drift accumulate into the
+  integrated yaw/pitch and produce near-identical "accepted"
+  frames — which is what blew up cv::Stitcher with the "warpRoi too
+  large (43039×55525) — estimator produced degenerate camera params"
+  error on shelf-scan captures.  Fix: read `"non-ar"`.
+- **F2 — iOS `stitchMode` setting is now honoured end-to-end.**  Pre-
+  audit, `OpenCVStitcher.mm:436` hardcoded `cv::Stitcher::PANORAMA`
+  regardless of the JS setting, so operators picking `'scans'` or
+  `'auto'` from the modal saw no effect on iOS.  iOS now reads
+  `configOverrides["stitchMode"]`, tracks first + last accepted
+  keyframe poses, and implements `resolveStitchModeAuto` (port of
+  Android's translation/rotation magnitude-ratio heuristic) at
+  finalize time.  Both platforms now resolve `'auto'` identically.
+- **F4 — Camera.tsx now passes settings the modal exposed but Camera
+  silently dropped.**  Pre-audit, the `config` block passed to
+  `incremental.start()` omitted four fields that iOS native already
+  read: `flowMaxCorners`, `flowQualityLevel`, `flowMinDistance`,
+  `enableMaxInscribedRectCrop`.  Modal sliders for these were
+  silent no-ops on every platform.  Now wired.  Also added
+  `captureSource` to the config so F1's Android opt-out has
+  something to read.
+- **F5 — Android KeyframeGate now exposes the full Flow tunable
+  surface.**  Pre-audit, the Android KeyframeGate facade lacked
+  Kotlin properties + JNI thunks for `setFlowMaxCorners` /
+  `setFlowQualityLevel` / `setFlowMinDistance` / `setStrategy`,
+  even though the underlying C++ gate has had them since 0.2.0.
+  Added the missing JNI bindings + Kotlin facade fields.  Android
+  IncrementalStitcher now reads `flowMaxCorners`, `flowQualityLevel`,
+  `flowMinDistance`, `flowEvalEveryNFrames`, and `frameSelectionMode`
+  from configOverrides with clamp ranges matching iOS.
+- **F6 — Camera.tsx no longer hardcodes `frameSelectionMode`.**  Pre-
+  audit, line 835 hardcoded `'flow-based'`, so the modal's
+  `time-based` / `pose-based` / `flow-based` toggle had no runtime
+  effect.  Now passes `settings.frameSelectionMode` through.  Both
+  platforms honour the setting: `time-based` disables the gate
+  (passthrough), `pose-based` enables Pose strategy, `flow-based`
+  enables Flow strategy.  Android additionally now applies the
+  eval-throttle (`flowEvalEveryNFrames`) to the AR ingest path,
+  matching iOS' `IncrementalStitcher.swift:2459-2471` behaviour.
+- **F7 — README documented `defaultFlowMaxTranslationCm` default as
+  `8`.**  Actual `DEFAULT_PANORAMA_SETTINGS.flowMaxTranslationCm` is
+  `50`; 6× off.  Corrected.
+
+### Audit ground-truth (no code change, doc-only)
+
+The full audit traced every `PanoramaSettings` field through Camera.tsx,
+the iOS bridge (`IncrementalStitcher.swift::applyConfigOverrides` and
+the cv::Stitcher path), the Android bridge
+(`IncrementalStitcher.kt::start`), the C++ gate (`cpp/keyframe_gate.cpp`),
+and the live-engine config type (`RLISStitcherConfig`).  Conclusions:
+
+- Batch-keyframe and the live engines (hybrid + slit-scan) share
+  **zero settings**.  All RLISStitcherConfig fields (NCC, plane
+  projection, paint mode, slit-scan painting) flow only through
+  Layer 2 entry points (`incremental.start({ engine: 'slitscan-…' })`),
+  never through `<Camera>` (which hardcodes `engine: 'batch-keyframe'`).
+- ~10 fields in `PanoramaSettings` are confirmed dead (no native
+  consumer at all): `useARPreview`, `incrementalEngine`,
+  `slitWidthFraction`, `acceptGate`, `maxRecordingMs`,
+  `framesPerSecond`, `minFrames`, `maxFrames`, `quality`, and the
+  legacy `useDetectedPlane` alias.  These are scheduled for removal
+  in v0.4.0 as part of the engine-discriminated typed-settings
+  rewrite (F10 follow-up).
+
 ## [0.3.0] — 2026-05-21
 
 > [!IMPORTANT]

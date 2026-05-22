@@ -215,6 +215,12 @@ struct FinalizePayload {
     let batchBlenderType: String
     let batchSeamFinderType: String
     let batchEnableInscribedRectCrop: Bool
+    /// 2026-05-22 (audit F2) — resolved stitcher mode for this finalize
+    /// pass.  String form ("panorama" / "scans") matches Android's
+    /// JNI string and the Obj-C++ method signature.  'auto' is
+    /// resolved upstream by `resolveStitchModeAuto` before this snapshot
+    /// is captured; this field never carries 'auto'.
+    let batchStitchModeResolved: String
     let keyframeExifOrientation: Int
     /// AR-STITCHING-TWO-MODES (memory/ar-stitching-two-modes.md):
     /// capture-time hold orientation for the bake-rotation pass.
@@ -409,6 +415,21 @@ public final class IncrementalStitcher: NSObject {
     // the inscribed-rect + morph-close + col-projection pipeline
     // runs.
     private var batchEnableInscribedRectCrop: Bool = false
+    /// 2026-05-22 (audit F2) — cv::Stitcher pipeline mode for the
+    /// batch finalize.  Mirrors Android's `batchStitchMode` (kt:187).
+    /// Valid values: 'auto' / 'panorama' / 'scans'.  'auto' is
+    /// resolved at finalize time via [resolveStitchModeAuto] using
+    /// the translation/rotation magnitudes between first + last
+    /// accepted keyframe poses.  Default 'auto'.
+    private var batchStitchMode: String = "auto"
+    /// 2026-05-22 (audit F2) — first + last accepted keyframe poses
+    /// in the current batch capture.  7 doubles each: [tx, ty, tz,
+    /// qx, qy, qz, qw].  Both nil until at least one keyframe has
+    /// been accepted.  Reset on every start().  Used only by the
+    /// auto-resolver; the keyframe-gate's own pose tracking lives
+    /// separately in cpp/keyframe_gate.cpp.
+    private var batchFirstAcceptedPose: [Double]? = nil
+    private var batchLastAcceptedPose: [Double]? = nil
     /// AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
     ///
     /// Physical phone orientation at start() time, sourced from the
@@ -823,6 +844,19 @@ public final class IncrementalStitcher: NSObject {
             // to FALSE if not provided by JS.
             self.batchEnableInscribedRectCrop =
                 (configOverrides["enableMaxInscribedRectCrop"] as? Bool) ?? false
+            // 2026-05-22 (audit F2) — read stitchMode from JS.  Pre-
+            // audit, iOS hardcoded Panorama at OpenCVStitcher.mm:436
+            // regardless of the JS setting.  Now mirrors Android's
+            // batchStitchMode + auto-resolver heuristic.  Validate
+            // against the closed set; unknown values fall back to 'auto'.
+            let rawMode = (configOverrides["stitchMode"] as? String) ?? "auto"
+            self.batchStitchMode =
+                (["auto", "panorama", "scans"].contains(rawMode))
+                ? rawMode : "auto"
+            // Reset accumulated-pose state for the new capture so
+            // finalize() picks a fresh mode.
+            self.batchFirstAcceptedPose = nil
+            self.batchLastAcceptedPose = nil
             self.batchKeyframeMode = true
             self.hybridEngine = nil
             self.firstwinsEngine = nil
@@ -1216,6 +1250,25 @@ public final class IncrementalStitcher: NSObject {
             ? String(outputPath.dropFirst(7))
             : outputPath
         let q = max(1, min(100, jpegQuality))
+        // 2026-05-22 (audit F2) — resolve 'auto' stitchMode now, while
+        // we still have access to first/last pose ivars.  The resolver
+        // mirrors Android's resolveStitchModeAuto (IncrementalStitcher.kt:1727):
+        // translation/rotation magnitude ratio between first + last
+        // accepted keyframe poses → SCANS (translation-heavy) or
+        // PANORAMA (rotation-heavy).  Non-auto values pass through.
+        let stitchModeResolved: String
+        switch batchStitchMode {
+        case "panorama": stitchModeResolved = "panorama"
+        case "scans":    stitchModeResolved = "scans"
+        default:         stitchModeResolved = resolveStitchModeAuto(
+                            first: batchFirstAcceptedPose,
+                            last:  batchLastAcceptedPose
+                         )
+        }
+        os_log(.fault, log: Self.diagLog,
+               "[V16-batch-keyframe.stitchMode] configured=%{public}@ resolved=%{public}@ paths=%d",
+               batchStitchMode, stitchModeResolved, Int32(paths.count))
+
         let payload = FinalizePayload(
             cleaned: cleaned,
             q: q,
@@ -1228,6 +1281,7 @@ public final class IncrementalStitcher: NSObject {
             batchBlenderType: batchBlenderType,
             batchSeamFinderType: batchSeamFinderType,
             batchEnableInscribedRectCrop: batchEnableInscribedRectCrop,
+            batchStitchModeResolved: stitchModeResolved,
             keyframeExifOrientation: keyframeExifOrientation,
             captureOrientation: captureOrientation,
             drops: drops,
@@ -1492,7 +1546,8 @@ public final class IncrementalStitcher: NSObject {
                             blenderType: payload.batchBlenderType,
                             seamFinderType: payload.batchSeamFinderType,
                             captureOrientation: payload.captureOrientation,
-                            useInscribedRectCrop: payload.batchEnableInscribedRectCrop
+                            useInscribedRectCrop: payload.batchEnableInscribedRectCrop,
+                            stitchMode: payload.batchStitchModeResolved
                         )
                         // V16 fix-attempt 9 (verified on device,
                         // 2026-05-13) — sentinel-result detection.
@@ -1727,6 +1782,17 @@ public final class IncrementalStitcher: NSObject {
         let seam        = (config["seamFinderType"] as? String) ?? "graphcut"
         let orientation = (config["captureOrientation"] as? String) ?? "portrait"
         let useInscribed = (config["useInscribedRectCrop"] as? Bool) ?? false
+        // 2026-05-22 (audit F2) — refine path reads stitchMode too.
+        // The refine flow doesn't have access to first/last accepted
+        // pose ivars (this is a separate JS-driven entry point that
+        // may be called against a saved keyframe set), so we accept
+        // an explicit 'panorama' / 'scans' value here.  Default
+        // 'scans' for the refine path since it's typically called on
+        // shelf-scan captures (the slow-path quality bake where SCANS'
+        // translation tolerance gives best results — see docstring
+        // at line 738 of src/stitching/incremental.ts).  JS callers
+        // can override by passing config["stitchMode"].
+        let refineStitchMode = (config["stitchMode"] as? String) ?? "scans"
         let quality     = max(1, min(100, (config["jpegQuality"] as? Int) ?? 90))
         let cleanedOutput = outputPath.hasPrefix("file://")
             ? String(outputPath.dropFirst(7))
@@ -1753,7 +1819,8 @@ public final class IncrementalStitcher: NSObject {
                     blenderType: blender,
                     seamFinderType: seam,
                     captureOrientation: orientation,
-                    useInscribedRectCrop: useInscribed
+                    useInscribedRectCrop: useInscribed,
+                    stitchMode: refineStitchMode
                 )
                 // fix-9 sentinel detection — see the finalize() path
                 // for the full rationale.  A 0×0 result means
@@ -2067,6 +2134,13 @@ public final class IncrementalStitcher: NSObject {
         stateLock.lock()
         self.keyframePaths.append(path)
         self.keyframePoses.append(pose.asDictionary())
+        // 2026-05-22 (audit F2) — track first + last pose for the
+        // stitchMode auto-resolver.  iOS parity: Android records
+        // these in IncrementalStitcher.kt at the same accept points.
+        let poseArr = [pose.tx, pose.ty, pose.tz,
+                       pose.qx, pose.qy, pose.qz, pose.qw]
+        if self.batchFirstAcceptedPose == nil { self.batchFirstAcceptedPose = poseArr }
+        self.batchLastAcceptedPose = poseArr
         let count = self.keyframePaths.count
         stateLock.unlock()
         os_log(.fault, log: Self.diagLog,
@@ -2618,6 +2692,13 @@ public final class IncrementalStitcher: NSObject {
                     self.stateLock.lock()
                     self.keyframePaths.append(record.path)
                     self.keyframePoses.append(pose.asDictionary())
+                    // 2026-05-22 (audit F2) — track first + last pose
+                    // for the stitchMode auto-resolver.  Same as the
+                    // non-AR JS-driver site above.
+                    let poseArr = [pose.tx, pose.ty, pose.tz,
+                                   pose.qx, pose.qy, pose.qz, pose.qw]
+                    if self.batchFirstAcceptedPose == nil { self.batchFirstAcceptedPose = poseArr }
+                    self.batchLastAcceptedPose = poseArr
                     let count = self.keyframePaths.count
                     self.stateLock.unlock()
                     os_log(.fault, log: Self.diagLog,
@@ -2803,6 +2884,78 @@ public final class IncrementalStitcher: NSObject {
         let yaw = Double(atan2(forward.x, -forward.z))
         let pitch = Double(asin(forward.y))
         return (yaw, pitch)
+    }
+
+    /// 2026-05-22 (audit F2) — stitchMode auto-resolver.  Port of
+    /// Android's `resolveStitchModeAuto` (IncrementalStitcher.kt:1727).
+    /// Picks PANORAMA vs SCANS based on the magnitude ratio of
+    /// translation to rotation between first and last accepted
+    /// keyframe poses:
+    ///
+    ///   translation_score = ‖t_last - t_first‖ / 0.10          (10cm ≈ 1.0)
+    ///   rotation_score    = angle(fwd_last, fwd_first) / 1.00  (1 rad ≈ 1.0)
+    ///   ratio = translation_score / (translation_score + rotation_score)
+    ///   ratio ≥ 0.55 → "scans"   (biased toward SCANS for safety)
+    ///   ratio  < 0.55 → "panorama"
+    ///
+    /// Returns "panorama" or "scans" — never "auto".  Degenerate
+    /// inputs (nil poses, no motion) default to "scans" (safer choice
+    /// for translation-dominant captures).
+    private func resolveStitchModeAuto(
+        first: [Double]?,
+        last:  [Double]?
+    ) -> String {
+        guard let firstPose = first, firstPose.count == 7,
+              let lastPose  = last,  lastPose.count == 7  else {
+            return "scans"
+        }
+        // Translation magnitude (Euclidean, in metres).
+        let dtx = lastPose[0] - firstPose[0]
+        let dty = lastPose[1] - firstPose[1]
+        let dtz = lastPose[2] - firstPose[2]
+        let tMeters = (dtx*dtx + dty*dty + dtz*dtz).squareRoot()
+        // Rotation magnitude — angle between camera-forward vectors.
+        // Camera-forward in body frame is (0, 0, -1) for ARKit/ARCore.
+        let fwdFirst = qrotForwardZneg(
+            firstPose[3], firstPose[4], firstPose[5], firstPose[6])
+        let fwdLast = qrotForwardZneg(
+            lastPose[3], lastPose[4], lastPose[5], lastPose[6])
+        let dot = max(-1.0, min(1.0,
+            fwdFirst.0 * fwdLast.0 + fwdFirst.1 * fwdLast.1 + fwdFirst.2 * fwdLast.2))
+        let rRadians = acos(dot)
+        // Normalisation: 10 cm of translation ≈ 1 rad of rotation as
+        // "equivalent magnitude" for the ratio.  Shelf scans cover
+        // ~30 cm translation with ~10° (0.17 rad) rotation:
+        //   ratio = (0.30/0.10) / (3.0 + 0.17) = 0.95 → SCANS.
+        // Pure 90° rotation panorama: 0 translation, 1.57 rad rotation:
+        //   ratio = 0 / (0 + 1.57) = 0.0 → PANORAMA.
+        let tScore = tMeters / 0.10
+        let rScore = rRadians / 1.00
+        let denom = tScore + rScore
+        if denom <= 1e-9 { return "scans" }  // degenerate — no motion
+        let ratio = tScore / denom
+        os_log(.fault, log: Self.diagLog,
+               "[stitchMode.auto] t=%.3fm r=%.3frad ratio=%.3f → %{public}@",
+               tMeters, rRadians, ratio,
+               ratio >= 0.55 ? "scans" : "panorama")
+        return ratio >= 0.55 ? "scans" : "panorama"
+    }
+
+    /// Closed-form q · (0,0,-1) · q⁻¹ — rotates the camera-forward
+    /// unit vector by a unit quaternion (qx, qy, qz, qw).  Same
+    /// convention as `qrot` in cpp/keyframe_gate.cpp and
+    /// `qrotForward` in IncrementalStitcher.kt.
+    private func qrotForwardZneg(
+        _ qx: Double, _ qy: Double, _ qz: Double, _ qw: Double
+    ) -> (Double, Double, Double) {
+        // v = (0, 0, -1).  Expansion:
+        //   v' = (-2(qx*qz + qw*qy),
+        //         -2(qy*qz - qw*qx),
+        //         -1 + 2(qx*qx + qy*qy))
+        let x = -2.0 * (qx * qz + qw * qy)
+        let y = -2.0 * (qy * qz - qw * qx)
+        let z = -1.0 + 2.0 * (qx * qx + qy * qy)
+        return (x, y, z)
     }
 }
 

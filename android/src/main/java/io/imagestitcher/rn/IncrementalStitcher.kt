@@ -207,6 +207,15 @@ class IncrementalStitcher(
     /// specific failure mode.
     private var frameIngestLogTick: Int = 0
 
+    /// 2026-05-22 (audit F5) — Frame counter for the flowEvalEveryNFrames
+    /// throttle.  Incremented on every per-frame entry point
+    /// (ingestFromARCameraView for AR, processFrameAtPath for non-AR);
+    /// gate evaluation only runs when (counter - 1) % evalCadence == 0
+    /// so frame #1 always evaluates regardless of cadence.  iOS parity:
+    /// IncrementalStitcher.swift:2459-2471 (`consumeFrameCounter`).
+    /// Reset to 0 on each `start()` call.
+    private var consumeFrameCounter: Long = 0L
+
     private val isRunning = AtomicBoolean(false)
     /// Critic #5 fix: serial dispatcher so concurrent
     /// processFrameAtPath() calls can't race on the engine's canvas.
@@ -414,17 +423,67 @@ class IncrementalStitcher(
                 val txBudgetCm = configOverrides
                     ?.getDoubleOrDefault("flowMaxTranslationCm", 0.0) ?: 0.0
                 keyframeGate.flowMaxTranslationM = (txBudgetCm / 100.0).coerceAtLeast(0.0)
+                // 2026-05-22 (audit F5) — flow-strategy Shi-Tomasi
+                // tunables.  Pre-audit, Android had no JNI for these
+                // (iOS-only via KeyframeGateBridge); JS Settings sliders
+                // were silent no-ops.  Now both platforms honour them.
+                // Clamp ranges match iOS (IncrementalStitcher.swift:907-924).
+                val maxCorners = configOverrides
+                    ?.getIntOrDefault("flowMaxCorners", 150) ?: 150
+                keyframeGate.flowMaxCorners = maxCorners.coerceIn(50, 300)
+                val quality = configOverrides
+                    ?.getDoubleOrDefault("flowQualityLevel", 0.01) ?: 0.01
+                keyframeGate.flowQualityLevel = quality.coerceIn(0.005, 0.05)
+                val minDist = configOverrides
+                    ?.getDoubleOrDefault("flowMinDistance", 10.0) ?: 10.0
+                keyframeGate.flowMinDistance = minDist.coerceIn(1.0, 50.0)
+                // Eval throttle: caller (this class) applies the cadence
+                // at the per-frame call sites.  iOS parity at
+                // IncrementalStitcher.swift:2459-2471.
+                val evalCadence = configOverrides
+                    ?.getIntOrDefault("flowEvalEveryNFrames", 1) ?: 1
+                keyframeGate.flowEvalEveryNFrames = evalCadence.coerceIn(1, 10)
 
-                // 2026-05-14 — non-AR mode opt-out for angular fallback.
-                // captureSource ∈ {wide, ultrawide} means the host is using
+                // 2026-05-22 — non-AR mode opt-out for angular fallback.
+                // captureSource = 'non-ar' means the host is using
                 // vision-camera (no ARKit/ARCore pose).  Disable the gate's
-                // angular fallback so it doesn't compute on garbage pose.
-                val captureSource = configOverrides?.getString("captureSource") ?: "auto"
-                val isNonAR = (captureSource == "wide" || captureSource == "ultrawide")
+                // angular fallback so it doesn't compute on garbage pose
+                // (gyro drift accumulating into the integrated angle was
+                // making the gate accept near-identical frames → degenerate
+                // cv::Stitcher params → "warpRoi too large" crash).
+                //
+                // Audit fix: pre-v0.3 the check tested the legacy
+                // 'wide'/'ultrawide' enum (replaced 2026-05-14 by 'ar'/'non-ar').
+                // The string mismatch silently nullified this opt-out for the
+                // entire Android non-AR path.  See PanoramaSettings audit
+                // table row `captureSource`.
+                val captureSource = configOverrides?.getString("captureSource") ?: "ar"
+                val isNonAR = (captureSource == "non-ar")
                 keyframeGate.disableAngularFallback = isNonAR
 
-                keyframeGate.enabled = true
+                // 2026-05-22 (audit F6) — honour frameSelectionMode.
+                // Pre-audit Android force-enabled the gate with the C++
+                // default (Pose) strategy regardless of the JS setting,
+                // making `frameSelectionMode = 'flow-based'` silently
+                // ineffective on Android (the Flow KLT path was never
+                // taken — only on iOS).  Match iOS' mapping:
+                //   'time-based' → gate disabled (passthrough)
+                //   'pose-based' → gate enabled, Pose strategy
+                //   'flow-based' → gate enabled, Flow strategy
+                val frameMode = configOverrides?.getString("frameSelectionMode")
+                    ?: "flow-based"
+                keyframeGate.enabled =
+                    (frameMode == "pose-based" || frameMode == "flow-based")
+                keyframeGate.strategy = if (frameMode == "flow-based") {
+                    KeyframeGate.Strategy.Flow
+                } else {
+                    KeyframeGate.Strategy.Pose
+                }
                 keyframeGate.reset()
+                // 2026-05-22 (audit F5) — reset the eval-throttle frame
+                // counter so the first frame of every capture is
+                // ALWAYS evaluated regardless of evalCadence.
+                consumeFrameCounter = 0L
             } else if (isFirstwins) {
                 batchKeyframeMode = false
                 batchKeyframePaths.clear()
@@ -1184,6 +1243,21 @@ class IncrementalStitcher(
                 RNSARSession.instance?.latchedPlaneTransform?.let { p ->
                     FloatArray(16).also { p.toMatrix(it, 0) }
                 }
+
+            // 2026-05-22 (audit F5) — eval-throttle.  When
+            // flowEvalEveryNFrames > 1, evaluate the gate every Nth
+            // ARCore frame instead of every frame.  Cuts CPU on the
+            // 30-60Hz delegate path linearly with N.  First frame
+            // (counter=1) always evaluates regardless of N because
+            // (1 - 1) % N == 0 for any N ≥ 1.  iOS parity:
+            // IncrementalStitcher.swift:2459-2471.  Skipped frames
+            // are dropped entirely — NOT saved as keyframes, NOT
+            // counted toward the keyframe budget.
+            consumeFrameCounter += 1L
+            val evalCadence = keyframeGate.flowEvalEveryNFrames.coerceAtLeast(1)
+            if ((consumeFrameCounter - 1) % evalCadence != 0L) {
+                return
+            }
 
             // 2026-05-21 (v0.3) — pixel-aware evaluation.  Hands the
             // gate the Y-plane bytes so the Flow strategy actually

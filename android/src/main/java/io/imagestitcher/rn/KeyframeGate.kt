@@ -62,6 +62,24 @@ internal class KeyframeGate : AutoCloseable {
         get() = nativeIsEnabled(nativeHandle)
         set(value) = nativeSetEnabled(nativeHandle, value)
 
+    /// 2026-05-22 (audit F6) — Gate strategy.  Matches the C++ enum
+    /// retailens::GateStrategy (0 = Pose, 1 = Flow).  Pose strategy
+    /// uses plane-projection / angular novelty; Flow strategy uses
+    /// sparse optical-flow KLT.  iOS parity: Swift facade's
+    /// `keyframeGate.strategy = .flow / .pose`.  Default `Pose`
+    /// (matches C++ default).  Write-only; the C++ side has a getter
+    /// but the Kotlin facade caches locally to avoid JNI round-trip.
+    enum class Strategy(val nativeValue: Int) {
+        Pose(0),
+        Flow(1);
+    }
+
+    var strategy: Strategy = Strategy.Pose
+        set(value) {
+            field = value
+            nativeSetStrategy(nativeHandle, value.nativeValue)
+        }
+
     /// Required new-content fraction (0…1).  Default 0.4.  No getter
     /// — the C++ side has no read accessor (Swift side never needed
     /// to read this back either).  Stored locally for diagnostic
@@ -120,6 +138,47 @@ internal class KeyframeGate : AutoCloseable {
         set(value) {
             field = value
             nativeSetFlowMaxTranslationM(nativeHandle, value)
+        }
+
+    /// 2026-05-22 (audit F5) — Flow strategy: Shi-Tomasi max corners
+    /// to track per frame.  Same knob iOS exposes via setFlowMaxCorners.
+    /// C++ clamps to ≥ 30.  Higher = more sensitive to fine detail but
+    /// CPU-quadratic in the KLT step.  Default 150 (matches iOS).
+    var flowMaxCorners: Int = 150
+        set(value) {
+            field = value
+            nativeSetFlowMaxCorners(nativeHandle, value)
+        }
+
+    /// 2026-05-22 (audit F5) — Flow strategy: Shi-Tomasi minimum
+    /// eigenvalue threshold (0, 1].  C++ default 0.01.  Lower lets
+    /// weaker corners in (more candidate points, more KLT noise);
+    /// higher demands stronger corners (fewer points, more robust).
+    var flowQualityLevel: Double = 0.01
+        set(value) {
+            field = value
+            nativeSetFlowQualityLevel(nativeHandle, value)
+        }
+
+    /// 2026-05-22 (audit F5) — Flow strategy: Shi-Tomasi minimum
+    /// distance between accepted corners, in working-resolution
+    /// pixels.  C++ clamps to ≥ 1.0.  Default 10.0 (matches iOS).
+    var flowMinDistance: Double = 10.0
+        set(value) {
+            field = value
+            nativeSetFlowMinDistance(nativeHandle, value)
+        }
+
+    /// 2026-05-22 (audit F5) — Eval cadence: caller-side throttle so
+    /// the Flow strategy runs every Nth frame instead of every frame.
+    /// iOS parity with `IncrementalStitcher.swift:2459-2471` —
+    /// the GATE doesn't enforce the throttle itself; it just stores
+    /// the value here.  The caller (`IncrementalStitcher.kt`) reads
+    /// this and decides per-frame whether to evaluate.  Default 1
+    /// (no throttle).  Caller is responsible for clamping to [1, 10].
+    var flowEvalEveryNFrames: Int = 1
+        set(value) {
+            field = value.coerceAtLeast(1)
         }
 
     // ── Read-only state ─────────────────────────────────────────
@@ -243,6 +302,15 @@ internal class KeyframeGate : AutoCloseable {
     private external fun nativeSetDisableAngularFallback(handle: Long, disabled: Boolean)
     private external fun nativeSetFlowNoveltyPercentile(handle: Long, percentile: Double)
     private external fun nativeSetFlowMaxTranslationM(handle: Long, metres: Double)
+    // 2026-05-22 (audit F5) — flow-strategy tunables that were
+    // previously iOS-only.  Add Android JNI parity so the Settings UI
+    // sliders work on both platforms.
+    private external fun nativeSetFlowMaxCorners(handle: Long, maxCorners: Int)
+    private external fun nativeSetFlowQualityLevel(handle: Long, quality: Double)
+    private external fun nativeSetFlowMinDistance(handle: Long, minDistance: Double)
+    // 2026-05-22 (audit F6) — gate-strategy selector.  Maps to C++
+    // retailens::GateStrategy (Pose=0, Flow=1).
+    private external fun nativeSetStrategy(handle: Long, strategy: Int)
     private external fun nativeEvaluate(
         handle: Long,
         tx: Float, ty: Float, tz: Float,
