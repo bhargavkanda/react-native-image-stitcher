@@ -240,8 +240,25 @@ export function useIMUTranslationGate({
       s.posX += s.velX * dt;
 
       if (!s.fired && Math.abs(s.posX) > budgetMeters) {
+        // Fire the callback (host-side force-accept hook).
         s.fired = true;
         onExceededRef.current();
+        // 2026-05-22 (audit follow-up) — auto-rearm the integrator
+        // so the gate fires EVERY `budgetMeters` of translation, not
+        // just once per capture.  Pre-audit behaviour was "fire once,
+        // wait for host to call resetAnchor()" — but Camera.tsx only
+        // calls resetAnchor at the start of a capture, so the gate
+        // latched after the first force-accept and never re-fired,
+        // even though the operator kept translating further (user
+        // observation: 8cm fires once, then 16cm/24cm/… don't
+        // re-trigger).  Reset posX + velX + fired here so the next
+        // budget interval starts clean.  The gravity IIR estimate is
+        // preserved across fires — it's tracking the device's
+        // gravity component, which doesn't reset at frame-accept
+        // boundaries.
+        s.posX = 0;
+        s.velX = 0;
+        s.fired = false;
       }
     });
 

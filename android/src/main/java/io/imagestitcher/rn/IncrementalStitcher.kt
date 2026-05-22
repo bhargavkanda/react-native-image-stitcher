@@ -760,6 +760,19 @@ class IncrementalStitcher(
                 else -> 2
             }
             result.putInt("outcome", outcome)
+            if (!decision.accept) {
+                // 2026-05-22 (audit follow-up) — emit reject-state on
+                // the non-AR JS-driver path too so the debug overlay
+                // sees overlap % update on every snapshot (~4 Hz).
+                // Same rationale as the AR path's reject emission
+                // above; iOS parity.
+                emitBatchKeyframeRejectState(
+                    decision = decision,
+                    keyframeCount = batchKeyframePaths.size,
+                    keyframeMax = keyframeGate.maxCount,
+                    isLandscape = pose.imageWidth >= pose.imageHeight,
+                )
+            }
             if (decision.accept) {
                 batchKeyframePaths.add(path)  // vision-camera path
                                               // gives us a unique
@@ -776,6 +789,7 @@ class IncrementalStitcher(
                     keyframeCount = batchKeyframePaths.size,
                     keyframeMax = keyframeGate.maxCount,
                     isLandscape = pose.imageWidth >= pose.imageHeight,
+                    newContentFraction = decision.newContentFraction,
                 )
             }
             result.putInt("acceptedCount", batchKeyframePaths.size)
@@ -1296,12 +1310,20 @@ class IncrementalStitcher(
                 )
             }
             if (!decision.accept) {
-                // Frame rejected by the gate — could be overlap-too-
-                // high (most common), max-reached, or projection-
-                // degenerate.  Drop silently — no disk I/O cost (the
-                // onAccept lambda is never invoked).  TODO(P1-followup):
-                // emit a state event so the JS UI can surface the
-                // reason in the pill.
+                // 2026-05-22 (audit follow-up) — emit a reject-state
+                // event so the JS debug overlay sees a live overlap %
+                // (matches iOS' emitKeyframeRejectState at
+                // IncrementalStitcher.swift:2143).  No disk I/O — the
+                // onAccept lambda is NOT invoked.  Cost: one extra
+                // JS event per evaluated frame; with the F5 eval-
+                // throttle at default 5, that's ~6 events/sec at
+                // 30 Hz ARCore — fine.
+                emitBatchKeyframeRejectState(
+                    decision = decision,
+                    keyframeCount = batchKeyframePaths.size,
+                    keyframeMax = keyframeGate.maxCount,
+                    isLandscape = imageWidth >= imageHeight,
+                )
                 return
             }
             // Accepted — generate the per-keyframe target path and
@@ -1363,6 +1385,7 @@ class IncrementalStitcher(
                 keyframeCount = batchKeyframePaths.size,
                 keyframeMax = keyframeGate.maxCount,
                 isLandscape = imageWidth >= imageHeight,
+                newContentFraction = decision.newContentFraction,
             )
             return
         }
@@ -1940,12 +1963,62 @@ class IncrementalStitcher(
      * exactly (same field names, types, order) so the JS subscriber
      * in incremental.ts doesn't need to branch on platform.
      */
+    /**
+     * 2026-05-22 (audit follow-up) — emit a state event when the gate
+     * REJECTS a frame in batch-keyframe mode.  iOS does this via
+     * `emitKeyframeRejectState` so the debug overlay's overlap %
+     * updates continuously as the operator pans (even when no new
+     * keyframe is being accepted).  Without this, Android's overlay
+     * was frozen between accepts — operator could see "5 / 6
+     * frames" but not "currently 92% overlap, need to pan more".
+     *
+     * Outcome enum: 5 = RejectedOverlap (matches iOS' RLISFrameOutcomeRejectedOverlap).
+     */
+    private fun emitBatchKeyframeRejectState(
+        decision: KeyframeGateDecision,
+        keyframeCount: Int,
+        keyframeMax: Int,
+        isLandscape: Boolean,
+    ) {
+        val state = Arguments.createMap()
+        state.putNull("panoramaPath")
+        state.putInt("width", 0)
+        state.putInt("height", 0)
+        state.putInt("acceptedCount", keyframeCount)
+        // Map gate-reject reason → numeric outcome.  "max-reached" is
+        // its own outcome (6 = RejectedMaxKeyframes); everything else
+        // is the generic overlap-rejected (5).
+        val outcome = if (decision.reason == "max-reached") 6 else 5
+        state.putInt("outcome", outcome)
+        state.putDouble("confidence", 0.0)
+        val overlapPercent = if (decision.newContentFraction >= 0.0) {
+            (1.0 - decision.newContentFraction) * 100.0
+        } else {
+            -1.0
+        }
+        state.putDouble("overlapPercent", overlapPercent)
+        state.putInt("processingMs", 0)
+        state.putBoolean("isLandscape", isLandscape)
+        state.putInt("paintedExtent", 0)
+        state.putInt("panExtent", 0)
+        state.putInt("keyframeMax", keyframeMax)
+        emitState(state)
+    }
+
     private fun emitBatchKeyframeAcceptedState(
         thumbnailPath: String,
         keyframeIndex: Int,
         keyframeCount: Int,
         keyframeMax: Int,
         isLandscape: Boolean,
+        // 2026-05-22 (audit follow-up) — overlap % was hardcoded to
+        // -1 here, so the debug overlay's `overlap` row was blank
+        // on Android.  iOS computes overlapPercent from the gate's
+        // newContentFraction via `(1 - newContent) * 100`.  Match
+        // that conversion here.  Pass -1.0 to keep the legacy
+        // "unknown" behaviour for call sites that don't have a
+        // decision in hand.
+        newContentFraction: Double,
     ) {
         val state = Arguments.createMap()
         state.putNull("panoramaPath")
@@ -1958,7 +2031,12 @@ class IncrementalStitcher(
         // accepts all carry outcome=acceptedHigh.
         state.putInt("outcome", 0)
         state.putDouble("confidence", 1.0)
-        state.putDouble("overlapPercent", -1.0)
+        val overlapPercent = if (newContentFraction >= 0.0) {
+            (1.0 - newContentFraction) * 100.0
+        } else {
+            -1.0
+        }
+        state.putDouble("overlapPercent", overlapPercent)
         state.putInt("processingMs", 0)
         state.putBoolean("isLandscape", isLandscape)
         state.putInt("paintedExtent", 0)   // batch-keyframe doesn't
