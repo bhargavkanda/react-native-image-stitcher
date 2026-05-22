@@ -1663,6 +1663,14 @@ public final class IncrementalStitcher: NSObject {
                         if r.finalConfidenceThresh >= 0 {
                             batchDict["finalConfidenceThresh"] = r.finalConfidenceThresh
                         }
+                        // 2026-05-22 (audit F2g) — surface the
+                        // auto-resolver's choice (or the operator's
+                        // explicit setting) so JS can show "scans"/
+                        // "panorama" on the output preview + debug
+                        // toast.  Always set on the batch path —
+                        // helps the operator understand why the
+                        // panorama looks the way it does.
+                        batchDict["stitchModeResolved"] = payload.batchStitchModeResolved
                         completion(batchDict, nil)
                     } catch let stitchErr as NSError {
                         completion(nil, stitchErr)
