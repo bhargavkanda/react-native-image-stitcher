@@ -678,6 +678,21 @@ export interface IncrementalFinalizeResult {
   framesIncluded?: number;
   framesDropped?: number;
   finalConfidenceThresh?: number;
+  /**
+   * 2026-05-22 (audit F2g) — which cv::Stitcher pipeline the batch
+   * finalize actually ran, after the engine's `auto` resolution
+   * heuristic (or the operator's explicit choice).  Values: `'panorama'`
+   * (rotation-only, ORB + BundleAdjusterRay + SphericalWarper) or
+   * `'scans'` (translational, affine + BundleAdjusterAffine +
+   * PlaneWarper).  Undefined on non-batch engines (hybrid/slit-scan)
+   * which don't go through cv::Stitcher at finalize.
+   *
+   * Host code can surface this on the output preview (e.g. a small
+   * pill labelled "scans" / "panorama") and in the debug toast to
+   * help operators understand what choice the auto-resolver made
+   * on the just-completed capture.
+   */
+  stitchModeResolved?: 'panorama' | 'scans';
 }
 
 

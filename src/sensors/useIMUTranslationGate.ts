@@ -128,6 +128,20 @@ export interface UseIMUTranslationGateReturn {
    * or use a frame-driven re-render trigger.
    */
   getTranslationMetres: () => number;
+  /**
+   * 2026-05-22 (audit F2f) — cumulative |segment displacement|
+   * across the entire capture, in METRES.  Includes:
+   *   (a) magnitudes banked at every prior anchor reset (whether
+   *       triggered by IMU budget auto-rearm or by host-side
+   *       resetAnchor on a non-IMU frame accept), PLUS
+   *   (b) the magnitude of the current (unfinished) segment.
+   *
+   * This is the right input for the stitchMode auto-resolver in
+   * non-AR mode — it captures total operator travel regardless of
+   * which gate accepted intermediate frames.  Resets to 0 only on
+   * subscription start (new capture).
+   */
+  getTotalAbsMetres: () => number;
 }
 
 
@@ -156,12 +170,27 @@ export function useIMUTranslationGate({
   // All running-integrator state lives in a single ref so the
   // subscription callback can update it without forcing a re-render
   // every frame (50 Hz worth of re-renders would tank performance).
+  //
+  // 2026-05-22 (audit F2f) — `totalAbsMetres` is a separate, never-
+  // reset-within-capture accumulator of the |segment displacement|
+  // that's banked each time the current segment ends (either by
+  // auto-rearm on budget fire, or by host-side `resetAnchor` on a
+  // non-IMU frame accept).  This decouples the display-side
+  // segment integrator (`posX`, resets on every accept) from the
+  // measurement-side cumulative translation (`totalAbsMetres`,
+  // resets only on subscription start).  Pre-F2f the cumulative
+  // translation was reconstructed as `fires × budget + |residual|`
+  // — that undercounted whenever a non-IMU accept reset the
+  // integrator before the budget threshold was reached.
   const stateRef = useRef({
     posX: 0,
     velX: 0,
     /// NaN sentinel for "uninitialised"; first sample seeds it.
     gravityX: NaN,
     fired: false,
+    /// Cumulative |segment displacement| banked across all anchor
+    /// resets in this capture.  Reset only on subscription start.
+    totalAbsMetres: 0,
   });
 
   // Latest onBudgetExceeded callback in a ref so callers can pass
@@ -172,6 +201,13 @@ export function useIMUTranslationGate({
 
   const resetAnchor = useCallback(() => {
     const s = stateRef.current;
+    // 2026-05-22 (audit F2f) — bank current segment magnitude into
+    // the cumulative accumulator BEFORE zeroing.  This preserves
+    // total translation across non-IMU-driven anchor resets (e.g.
+    // when a flow-novelty accept arrives at 5 cm — short of the
+    // IMU budget — we want the 5 cm to count toward the
+    // auto-resolver's total, not be lost).
+    s.totalAbsMetres += Math.abs(s.posX);
     s.posX = 0;
     s.velX = 0;
     s.fired = false;
@@ -211,6 +247,9 @@ export function useIMUTranslationGate({
       s.velX = 0;
       s.fired = false;
       s.gravityX = NaN;
+      // 2026-05-22 (audit F2f) — new subscription = new capture =
+      // zero the cumulative accumulator too.
+      s.totalAbsMetres = 0;
     }
 
     setUpdateIntervalForType(SensorTypes.accelerometer, sampleIntervalMs);
@@ -251,11 +290,13 @@ export function useIMUTranslationGate({
         // latched after the first force-accept and never re-fired,
         // even though the operator kept translating further (user
         // observation: 8cm fires once, then 16cm/24cm/… don't
-        // re-trigger).  Reset posX + velX + fired here so the next
-        // budget interval starts clean.  The gravity IIR estimate is
-        // preserved across fires — it's tracking the device's
-        // gravity component, which doesn't reset at frame-accept
-        // boundaries.
+        // re-trigger).
+        //
+        // 2026-05-22 (audit F2f) — bank the segment magnitude into
+        // the cumulative accumulator BEFORE zeroing (matches the
+        // resetAnchor path for symmetry — both paths represent
+        // anchor transitions, just driven by different triggers).
+        s.totalAbsMetres += Math.abs(s.posX);
         s.posX = 0;
         s.velX = 0;
         s.fired = false;
@@ -269,5 +310,10 @@ export function useIMUTranslationGate({
     return stateRef.current.posX;
   }, []);
 
-  return { resetAnchor, getTranslationMetres };
+  const getTotalAbsMetres = useCallback(() => {
+    const s = stateRef.current;
+    return s.totalAbsMetres + Math.abs(s.posX);
+  }, []);
+
+  return { resetAnchor, getTranslationMetres, getTotalAbsMetres };
 }

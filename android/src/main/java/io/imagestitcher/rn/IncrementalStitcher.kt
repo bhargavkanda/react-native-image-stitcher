@@ -1060,6 +1060,10 @@ class IncrementalStitcher(
                     map.putInt("framesIncluded", framesIncluded)
                     map.putInt("framesDropped", framesRequested - framesIncluded)
                     map.putDouble("finalConfidenceThresh", finalConfidenceThresh)
+                    // 2026-05-22 (audit F2g) — iOS parity.  Echo the
+                    // resolved cv::Stitcher mode so JS can surface it
+                    // on the output preview + debug toast.
+                    map.putString("stitchModeResolved", stitchModeResolved)
                 } else if (firstwins != null) {
                     val snap = firstwins.finalize(outputPath, quality)
                         ?: throw IllegalStateException("firstwins.finalize returned null")

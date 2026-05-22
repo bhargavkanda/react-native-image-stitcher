@@ -141,7 +141,11 @@ export function CaptureDebugOverlay({
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    top: 110,
+    // 2026-05-22 — moved from top-left to left-middle so it doesn't
+    // collide with the orientation pill (top-left) or the keyframe
+    // pill (top-center) when all three are mounted together in
+    // <Camera>'s debug mode.
+    top: 160,
     left: 12,
     backgroundColor: 'rgba(0, 0, 0, 0.65)',
     paddingHorizontal: 10,
