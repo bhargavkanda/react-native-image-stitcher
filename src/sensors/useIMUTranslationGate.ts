@@ -116,6 +116,18 @@ export interface UseIMUTranslationGateReturn {
    * benefits from continuous history across anchors.
    */
   resetAnchor: () => void;
+  /**
+   * 2026-05-22 (audit follow-up) — read the latest integrated
+   * translation magnitude in METRES.  Useful for debug overlays
+   * that want to surface "how much translation has the operator
+   * accumulated since the last keyframe accept" so they can sanity-
+   * check whether the budget is going to fire.  Cheap: returns the
+   * ref value, no React state subscription (the integrator runs at
+   * 50 Hz and we don't want to force a re-render every sample).
+   * Callers that want a live UI value should poll on an interval
+   * or use a frame-driven re-render trigger.
+   */
+  getTranslationMetres: () => number;
 }
 
 
@@ -204,5 +216,9 @@ export function useIMUTranslationGate({
     return () => sub.unsubscribe();
   }, [enabled, budgetMeters, sampleIntervalMs]);
 
-  return { resetAnchor };
+  const getTranslationMetres = useCallback(() => {
+    return stateRef.current.posX;
+  }, []);
+
+  return { resetAnchor, getTranslationMetres };
 }

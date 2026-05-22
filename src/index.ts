@@ -85,6 +85,8 @@ export { CapturePreview } from './camera/CapturePreview';
 export type { CapturePreviewAction } from './camera/CapturePreview';
 export { CaptureStatusOverlay } from './camera/CaptureStatusOverlay';
 export type { CaptureStatusPhase } from './camera/CaptureStatusOverlay';
+export { CaptureDebugOverlay } from './camera/CaptureDebugOverlay';
+export type { CaptureDebugOverlayProps } from './camera/CaptureDebugOverlay';
 export { CaptureThumbnailStrip } from './camera/CaptureThumbnailStrip';
 export type { CaptureThumbnailItem } from './camera/CaptureThumbnailStrip';
 export { IncrementalPanGuide } from './camera/IncrementalPanGuide';
