@@ -120,6 +120,46 @@ Java_io_imagestitcher_rn_KeyframeGate_nativeSetFlowNoveltyPercentile(
     gate(handle)->setFlowNoveltyPercentile(static_cast<double>(percentile));
 }
 
+// 2026-05-22 (audit F5) — Android JNI parity for the Shi-Tomasi
+// corner tunables.  Pre-audit, iOS bridges these via KeyframeGateBridge
+// but Android had no equivalent — JS Settings sliders for
+// flowMaxCorners / flowQualityLevel / flowMinDistance were no-ops on
+// Android.  See setFlowMaxCorners / setFlowQualityLevel /
+// setFlowMinDistance docs in keyframe_gate.hpp.
+JNIEXPORT void JNICALL
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetFlowMaxCorners(
+    JNIEnv*, jclass, jlong handle, jint maxCorners)
+{
+    gate(handle)->setFlowMaxCorners(static_cast<int32_t>(maxCorners));
+}
+
+JNIEXPORT void JNICALL
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetFlowQualityLevel(
+    JNIEnv*, jclass, jlong handle, jdouble quality)
+{
+    gate(handle)->setFlowQualityLevel(static_cast<double>(quality));
+}
+
+JNIEXPORT void JNICALL
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetFlowMinDistance(
+    JNIEnv*, jclass, jlong handle, jdouble minDistance)
+{
+    gate(handle)->setFlowMinDistance(static_cast<double>(minDistance));
+}
+
+// 2026-05-22 (audit F6) — gate strategy selector.  Maps the Kotlin
+// enum's int value back to the C++ GateStrategy enum.  Pre-audit
+// Android had no way to flip strategy → was stuck on the C++ default
+// (Pose), making `frameSelectionMode = 'flow-based'` a silent no-op
+// on Android.
+JNIEXPORT void JNICALL
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetStrategy(
+    JNIEnv*, jclass, jlong handle, jint strategyInt)
+{
+    auto strategy = static_cast<retailens::GateStrategy>(strategyInt);
+    gate(handle)->setStrategy(strategy);
+}
+
 JNIEXPORT void JNICALL
 Java_io_imagestitcher_rn_KeyframeGate_nativeReset(
     JNIEnv*, jclass, jlong handle)
