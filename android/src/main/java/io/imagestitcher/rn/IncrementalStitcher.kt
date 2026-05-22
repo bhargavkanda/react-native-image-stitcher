@@ -950,15 +950,25 @@ class IncrementalStitcher(
         // gracefully (slightly worse seams, never blows up).
         val firstPose = batchFirstAcceptedPose
         val lastPose = batchLastAcceptedPose
+        // 2026-05-22 (audit F2b) — JS-supplied IMU translation
+        // magnitude (metres).  In non-AR mode the JS-driver path
+        // never carries pose tx/ty/tz so resolveStitchModeAuto's
+        // pose-only signal is always 0 → resolver always picks
+        // panorama.  The IMU translation gate's measured displacement
+        // fills the gap.  Defaults to 0 (back-compat) → resolver
+        // falls back to pose data only.  Always non-negative.
+        val imuTranslationMetres = (options.getDoubleOrDefault("imuTranslationMetres", 0.0) ?: 0.0)
+            .coerceAtLeast(0.0)
         val stitchModeResolved: String = when (batchStitchMode) {
             "panorama" -> "panorama"
             "scans"    -> "scans"
-            else -> resolveStitchModeAuto(firstPose, lastPose)
+            else -> resolveStitchModeAuto(firstPose, lastPose, imuTranslationMetres)
         }
         android.util.Log.i(
             "IncrementalStitcher",
             "finalize stitch-mode: configured=$batchStitchMode resolved=$stitchModeResolved " +
-                "firstPose=${firstPose != null} lastPose=${lastPose != null}",
+                "firstPose=${firstPose != null} lastPose=${lastPose != null} " +
+                "imuT=${"%.3f".format(imuTranslationMetres)}m",
         )
         batchKeyframeMode = false
         batchKeyframePaths.clear()
@@ -1990,15 +2000,31 @@ class IncrementalStitcher(
     private fun resolveStitchModeAuto(
         firstPose: DoubleArray?,
         lastPose: DoubleArray?,
+        // 2026-05-22 (audit F2b) — JS-measured cumulative IMU
+        // translation in METRES.  Used as a fallback when pose-derived
+        // translation is 0 (non-AR mode).
+        imuTranslationMetres: Double = 0.0,
     ): String {
-        if (firstPose == null || lastPose == null) return "scans"
-        if (firstPose.size != 7 || lastPose.size != 7) return "scans"
+        if (firstPose == null || lastPose == null) {
+            // No pose data at all — fall back on the IMU signal.  IMU
+            // > 5 cm hints SCANS; everything else hints PANORAMA.
+            return if (imuTranslationMetres > 0.05) "scans" else "panorama"
+        }
+        if (firstPose.size != 7 || lastPose.size != 7) {
+            return if (imuTranslationMetres > 0.05) "scans" else "panorama"
+        }
 
-        // Translation magnitude (Euclidean, in metres).
+        // Translation magnitude (Euclidean, in metres) — pose-derived.
         val dtx = lastPose[0] - firstPose[0]
         val dty = lastPose[1] - firstPose[1]
         val dtz = lastPose[2] - firstPose[2]
-        val tMeters = kotlin.math.sqrt(dtx * dtx + dty * dty + dtz * dtz)
+        val tPose = kotlin.math.sqrt(dtx * dtx + dty * dty + dtz * dtz)
+        // 2026-05-22 (audit F2b) — non-AR mode delivers pose-derived
+        // translation = 0 because the JS-driver path doesn't carry
+        // tx/ty/tz.  Take the larger of pose-derived and IMU-measured
+        // so AR (accurate pose) and non-AR (IMU only) both produce a
+        // meaningful ratio.
+        val tMeters = kotlin.math.max(tPose, imuTranslationMetres)
 
         // Rotation magnitude — angle between camera-forward vectors.
         // Camera-forward in body frame is (0, 0, -1) for ARKit/ARCore
@@ -2020,12 +2046,13 @@ class IncrementalStitcher(
         val tScore = tMeters / 0.10
         val rScore = rRadians / 1.00
         val denom = tScore + rScore
-        if (denom <= 1e-9) return "scans"  // degenerate — no motion at all
+        if (denom <= 1e-9) return "panorama"  // no motion either way
         val ratio = tScore / denom
 
         android.util.Log.i(
             "IncrementalStitcher",
-            "stitch-mode auto: t=${"%.3f".format(tMeters)}m " +
+            "stitch-mode auto: tPose=${"%.3f".format(tPose)}m " +
+                "tImu=${"%.3f".format(imuTranslationMetres)}m " +
                 "r=${"%.3f".format(rRadians)}rad " +
                 "ratio=${"%.3f".format(ratio)} " +
                 "→ ${if (ratio >= 0.55) "scans" else "panorama"}",
