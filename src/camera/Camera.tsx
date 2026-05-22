@@ -732,18 +732,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // ── Subscribe to engine state for live keyframe thumbs ──────────
   useEffect(() => {
     const sub = subscribeIncrementalState((state) => {
-      // 2026-05-23 (debug) — log every emit so we can correlate
-      // native-side accepts with JS-side thumbnail-strip state.
-      // Logs gated on debug to keep production noise-free.
-      // eslint-disable-next-line no-console
-      if (state) {
-        console.log(
-          `[incremental.state] outcome=${state.outcome} acceptedCount=${state.acceptedCount}`
-          + ` kfMax=${state.keyframeMax} overlap=${state.overlapPercent?.toFixed?.(1) ?? '?'}`
-          + ` thumbPath=${state.batchKeyframeThumbnailPath ?? '(none)'}`
-          + ` thumbIdx=${state.batchKeyframeIndex ?? '(none)'}`,
-        );
-      }
       setIncrementalState(state);
       if (state?.batchKeyframeThumbnailPath) {
         setBatchKeyframeThumbnails((prev) => {
@@ -752,10 +740,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
           // overlay can actually render the thumbnail.
           const path = toFileUri(state.batchKeyframeThumbnailPath!);
           if (prev.includes(path)) return prev;
-          const next = [...prev, path];
-          // eslint-disable-next-line no-console
-          console.log(`[incremental.thumbs] adding ${path} → [${next.join(', ')}]`);
-          return next;
+          return [...prev, path];
         });
       }
     });
