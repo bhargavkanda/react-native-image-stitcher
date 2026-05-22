@@ -838,6 +838,16 @@ interface NativeIncrementalModule {
      * legacy start-time behaviour.
      */
     captureOrientation?: string;
+    /**
+     * 2026-05-22 (audit F2b) — JS-measured cumulative IMU translation
+     * magnitude in METRES.  Used by the auto-resolver in non-AR mode
+     * where the engine has no pose-driven translation source.  In AR
+     * mode native uses pose-derived translation and ignores this
+     * signal.  Defaults to 0 (back-compat) — auto-resolver always
+     * picks `panorama` when both pose-derived and IMU translation
+     * are zero, matching legacy behaviour.
+     */
+    imuTranslationMetres?: number;
   }): Promise<IncrementalFinalizeResult>;
   cancel(): Promise<{ ok: true }>;
   getState(): Promise<IncrementalState | null>;

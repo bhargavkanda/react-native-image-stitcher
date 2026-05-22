@@ -667,6 +667,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // the C++ engine to force-accept the next frame.  This is what
   // keeps non-AR captures producing keyframes at all (the flow-
   // novelty algorithm alone is too strict in practice).
+  //
+  // 2026-05-22 (audit F2b) — count budget-exceeded fires across the
+  // capture so we can feed measured translation distance into the
+  // native finalize-time auto-resolver.  In non-AR mode the engine
+  // has no other source of translation magnitude (JS driver only
+  // sends yaw/pitch/quaternion), so without this signal the
+  // resolver always picks `panorama` even for shelf scans.  Reset
+  // to 0 in handleHoldStart.
+  const imuFireCountRef = useRef(0);
   const imuGate = useIMUTranslationGate({
     enabled:
       isNonAR
@@ -674,6 +683,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
       && settings.flowMaxTranslationCm > 0,
     budgetMeters: Math.max(0.001, settings.flowMaxTranslationCm / 100.0),
     onBudgetExceeded: () => {
+      imuFireCountRef.current += 1;
       const mod = getIncrementalNativeModule();
       mod?.markNextFrameAsLastKeyframe?.().catch(() => undefined);
     },
@@ -856,6 +866,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
         },
       });
       imuGate.resetAnchor();
+      // 2026-05-22 (audit F2b) — reset the IMU-fire counter so the
+      // auto-resolver only sees fires from THIS capture.
+      imuFireCountRef.current = 0;
       // Start pumping vision-camera snapshots into the engine for
       // non-AR captures.  AR mode feeds frames natively from the
       // ARSession, so the JS driver stays idle in that path.  This
@@ -902,10 +915,24 @@ export function Camera(props: CameraProps): React.JSX.Element {
       const panoOutputPath = outputDir
         ? `${toBareFilePath(outputDir).replace(/\/$/, '')}/${defaultPanoramaFilename()}`
         : `${await getDefaultCaptureDir()}/${defaultPanoramaFilename()}`;
+      // 2026-05-22 (audit F2b) — compute total IMU translation for the
+      // native auto-resolver.  The imuGate fires `flowMaxTranslationCm`
+      // every budget interval and resets its accumulator; we
+      // reconstruct the total from (fires × budget) + current
+      // residual.  Magnitude only — direction doesn't matter for the
+      // resolver's translation-vs-rotation ratio comparison.  Always
+      // ≥ 0 (Math.abs on residual covers the case where the
+      // accumulator went negative for left-pans).
+      const imuFires = imuFireCountRef.current;
+      const imuBudgetM = Math.max(0.001, settings.flowMaxTranslationCm / 100.0);
+      const imuResidualM = Math.abs(imuGate.getTranslationMetres());
+      const imuTotalTranslationM =
+        isNonAR ? (imuFires * imuBudgetM + imuResidualM) : 0;
       const result = await incremental.finalize(
         panoOutputPath,
         90,
         deviceOrientation,
+        imuTotalTranslationM,
       );
       if (
         typeof result.framesRequested === 'number'

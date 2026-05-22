@@ -74,6 +74,17 @@ export interface UseIncrementalStitcherReturn {
     outputPath?: string,
     quality?: number,
     captureOrientation?: string,
+    /**
+     * 2026-05-22 (audit F2b) — measured cumulative translation
+     * magnitude in METRES from the JS-side IMU translation gate.
+     * Used by the auto-resolver in non-AR mode where the engine has
+     * no pose-driven translation source — without this signal the
+     * auto-resolver always picks `panorama` even for shelf scans.
+     * Omit (or pass 0) when no IMU translation data is available
+     * (e.g. in AR mode the native side has its own pose-driven
+     * translation magnitude and prefers that).
+     */
+    imuTranslationMetres?: number,
   ) => Promise<IncrementalFinalizeResult>;
   /** Abort the capture without producing output. */
   cancel: () => Promise<void>;
@@ -186,6 +197,7 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
       outputPath?: string,
       quality = 90,
       captureOrientation?: string,
+      imuTranslationMetres?: number,
     ): Promise<IncrementalFinalizeResult> => {
       if (!native) {
         throw new Error('useIncrementalStitcher: native module unavailable');
@@ -198,6 +210,12 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
         // instead of the start-time snapshot.  Undefined = keep
         // legacy start-time behaviour.
         captureOrientation,
+        // 2026-05-22 (audit F2b) — fold JS-side IMU translation into
+        // the native auto-resolver.  In non-AR mode this is the only
+        // translation signal the resolver has (the JS-driver path
+        // doesn't carry tx/ty/tz, so pose-derived translation is 0).
+        // Native side treats it as a magnitude (always ≥ 0).
+        imuTranslationMetres: Math.max(0, imuTranslationMetres ?? 0),
       });
       setIsRunning(false);
       // Clear React state on finalize so the next start doesn't

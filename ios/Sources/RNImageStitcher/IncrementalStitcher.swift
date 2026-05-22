@@ -430,6 +430,12 @@ public final class IncrementalStitcher: NSObject {
     /// separately in cpp/keyframe_gate.cpp.
     private var batchFirstAcceptedPose: [Double]? = nil
     private var batchLastAcceptedPose: [Double]? = nil
+    /// 2026-05-22 (audit F2b) — JS-measured cumulative IMU translation
+    /// magnitude in METRES, set by the bridge at finalize time.  Used
+    /// by the auto-resolver as a fallback translation signal in non-
+    /// AR mode (where pose-derived tx/ty/tz is always 0).  Set to 0
+    /// at start() and overwritten at finalize() entry.
+    private var batchImuTranslationMetres: Double = 0.0
     /// AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
     ///
     /// Physical phone orientation at start() time, sourced from the
@@ -471,6 +477,18 @@ public final class IncrementalStitcher: NSObject {
         os_log(.fault, log: Self.diagLog,
                "[V16-orchestrator] updateCaptureOrientation: %{public}@ → %{public}@",
                prev, orientation)
+    }
+
+    /// 2026-05-22 (audit F2b) — JS calls this at finalize() entry to
+    /// hand over the cumulative IMU translation magnitude in METRES.
+    /// Stored in batchImuTranslationMetres for the auto-resolver to
+    /// consume in non-AR mode (where pose-derived translation is 0).
+    /// 0.0 is the back-compat default (resolver falls back to pose
+    /// translation; PANORAMA when both are 0).
+    @objc public func updateImuTranslationMetres(_ metres: Double) {
+        stateLock.lock()
+        self.batchImuTranslationMetres = max(0.0, metres)
+        stateLock.unlock()
     }
 
     /// 2026-05-18 (Iss 3) — return the current capture's keyframe
@@ -857,6 +875,10 @@ public final class IncrementalStitcher: NSObject {
             // finalize() picks a fresh mode.
             self.batchFirstAcceptedPose = nil
             self.batchLastAcceptedPose = nil
+            // 2026-05-22 (audit F2b) — reset IMU translation snapshot
+            // too.  Updated at finalize() entry from JS-supplied
+            // option value.
+            self.batchImuTranslationMetres = 0.0
             self.batchKeyframeMode = true
             self.hybridEngine = nil
             self.firstwinsEngine = nil
@@ -1277,12 +1299,14 @@ public final class IncrementalStitcher: NSObject {
         case "scans":    stitchModeResolved = "scans"
         default:         stitchModeResolved = resolveStitchModeAuto(
                             first: batchFirstAcceptedPose,
-                            last:  batchLastAcceptedPose
+                            last:  batchLastAcceptedPose,
+                            imuTranslationMetres: batchImuTranslationMetres
                          )
         }
         os_log(.fault, log: Self.diagLog,
-               "[V16-batch-keyframe.stitchMode] configured=%{public}@ resolved=%{public}@ paths=%d",
-               batchStitchMode, stitchModeResolved, Int32(paths.count))
+               "[V16-batch-keyframe.stitchMode] configured=%{public}@ resolved=%{public}@ paths=%d imuT=%.3fm",
+               batchStitchMode, stitchModeResolved, Int32(paths.count),
+               batchImuTranslationMetres)
 
         let payload = FinalizePayload(
             cleaned: cleaned,
@@ -2913,22 +2937,40 @@ public final class IncrementalStitcher: NSObject {
     ///   ratio ≥ 0.55 → "scans"   (biased toward SCANS for safety)
     ///   ratio  < 0.55 → "panorama"
     ///
+    /// 2026-05-22 (audit F2b) — non-AR mode has no pose-derived
+    /// translation (JS driver only sends yaw/pitch/quaternion), so
+    /// the pose-only resolver always picked `panorama` even for
+    /// shelf scans.  Fold the JS-measured IMU translation magnitude
+    /// into the resolver: use the LARGER of pose-translation and
+    /// IMU-translation as `tMeters`.  In AR mode pose-translation
+    /// will dominate (accurate); in non-AR mode pose-translation is
+    /// 0 and IMU translation provides the signal.
+    ///
     /// Returns "panorama" or "scans" — never "auto".  Degenerate
-    /// inputs (nil poses, no motion) default to "scans" (safer choice
-    /// for translation-dominant captures).
+    /// inputs (nil poses, no motion either source) default to
+    /// "panorama" (safer for pure-rotation captures; SCANS on a
+    /// translation-free input produces unbounded canvas growth).
     private func resolveStitchModeAuto(
         first: [Double]?,
-        last:  [Double]?
+        last:  [Double]?,
+        imuTranslationMetres: Double
     ) -> String {
         guard let firstPose = first, firstPose.count == 7,
               let lastPose  = last,  lastPose.count == 7  else {
-            return "scans"
+            // No pose data at all — fall back on whichever signal we
+            // do have.  imuTranslationMetres > 0 hints "scans"; 0
+            // hints "panorama".
+            return imuTranslationMetres > 0.05 ? "scans" : "panorama"
         }
         // Translation magnitude (Euclidean, in metres).
         let dtx = lastPose[0] - firstPose[0]
         let dty = lastPose[1] - firstPose[1]
         let dtz = lastPose[2] - firstPose[2]
-        let tMeters = (dtx*dtx + dty*dty + dtz*dtz).squareRoot()
+        let tPose = (dtx*dtx + dty*dty + dtz*dtz).squareRoot()
+        // Take the larger of pose-derived and IMU-measured.  In AR
+        // mode pose is accurate; in non-AR mode pose is 0 and IMU is
+        // the only signal we have.
+        let tMeters = max(tPose, imuTranslationMetres)
         // Rotation magnitude — angle between camera-forward vectors.
         // Camera-forward in body frame is (0, 0, -1) for ARKit/ARCore.
         let fwdFirst = qrotForwardZneg(
@@ -2947,11 +2989,11 @@ public final class IncrementalStitcher: NSObject {
         let tScore = tMeters / 0.10
         let rScore = rRadians / 1.00
         let denom = tScore + rScore
-        if denom <= 1e-9 { return "scans" }  // degenerate — no motion
+        if denom <= 1e-9 { return "panorama" }  // no motion either way
         let ratio = tScore / denom
         os_log(.fault, log: Self.diagLog,
-               "[stitchMode.auto] t=%.3fm r=%.3frad ratio=%.3f → %{public}@",
-               tMeters, rRadians, ratio,
+               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f → %{public}@",
+               tPose, imuTranslationMetres, rRadians, ratio,
                ratio >= 0.55 ? "scans" : "panorama")
         return ratio >= 0.55 ? "scans" : "panorama"
     }
