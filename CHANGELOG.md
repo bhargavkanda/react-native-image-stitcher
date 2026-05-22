@@ -16,7 +16,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed (audit follow-up — all from the 2026-05-22 PanoramaSettings ground-truth audit)
+## [0.3.0] — 2026-05-23
+
+> [!IMPORTANT]
+> **v0.3.0 is the audit-follow-up release.**  After v0.2.x we ran an
+> exhaustive PanoramaSettings ground-truth audit and shipped the
+> v0.3-pixel-data work alongside ~15 follow-up correctness fixes,
+> two crash fixes, a stitcher mode-fallback retry, and the
+> RetaiLens-parity debug UI port.  Detailed entries below.
+>
+> **Behaviour changes**
+>   - Android AR mode + both platforms' non-AR mode now actually run
+>     the Flow strategy (sparse optical-flow novelty) end-to-end.
+>     Pre-0.3 they silently fell back to Pose strategy because no
+>     pixel data was supplied — hosts who tuned
+>     `keyframeOverlapThreshold` on those paths were tuning a
+>     different algorithm than is now active.
+>   - `stitchMode: 'auto'` now resolves correctly on iOS (was
+>     silently hardcoded to Panorama) and uses IMU-measured
+>     translation in non-AR mode.
+>   - `frameSelectionMode` is now honoured on both platforms;
+>     previously hardcoded to `'flow-based'`.
+>   - Mode-fallback retry: if the resolved cv::Stitcher mode fails
+>     with degenerate camera params, the stitcher automatically
+>     retries with the opposite mode before giving up.
+
+### Added
+
+- **Pixel-aware Flow strategy across all four capture paths** —
+  iOS AR, iOS non-AR, Android AR, Android non-AR.  The C++
+  KeyframeGate's `evaluateWithFrame` overload is now reached from
+  every entry point with real grayscale pixel data (Y plane bytes
+  on AR paths, decoded JPEG luma on non-AR paths).
+- **Debug UI suite** (gated by `settings.debug`):
+  `CaptureMemoryPill` (top-right), `CaptureKeyframePill` (top-center),
+  `CaptureOrientationPill` (top-left), `CaptureStitchStatsToast` +
+  `useStitchStatsToast` hook, plus a detailed metrics block
+  (`CaptureDebugOverlay`).  All exported individually for Layer 2
+  hosts to compose their own debug surface.
+- **`stitchModeResolved`** in `IncrementalFinalizeResult` +
+  `CameraCaptureResult.panorama` — surfaces which cv::Stitcher
+  pipeline actually ran (`panorama` / `scans`), useful for
+  displaying on the output preview.
+
+### Fixed
+
+- **F1 — Android `disableAngularFallback` was always false.**
+  The non-AR opt-out tested `captureSource ∈ {"wide", "ultrawide"}`
+  against a JS API that has been sending `"ar"` / `"non-ar"` since
+  v0.2.  String mismatch silently nullified the opt-out → gyro
+  drift accepted near-identical frames → `STITCH_CAMERA_PARAMS_FAIL
+  — warpRoi too large (43039×55525)` on shelf-scan captures.
+- **F1b — iOS `disableAngularFallback` wasn't wired at all.**  The
+  C++ setter existed but the Swift facade had no property, the
+  Obj-C++ bridge had no method, and IncrementalStitcher never
+  called it.  Same crash class as F1, just hidden until now.
+- **F2 — iOS `stitchMode` was hardcoded to Panorama.**  Now reads
+  the JS setting and resolves 'auto' via translation/rotation
+  magnitude-ratio (port of Android's resolveStitchModeAuto).
+- **F2b — Auto-resolver uses IMU translation in non-AR mode.**  The
+  JS-driver path doesn't carry pose tx/ty/tz, so the pose-only
+  resolver always picked 'panorama' even for shelf scans.  Now
+  folds the IMU translation gate's measured displacement into the
+  resolver (`tMeters = max(tPose, tImu)`).
+- **F2c — Cross-capture IMU drift bias.**  Pre-fix the gravityX IIR
+  estimate was preserved across capture boundaries; if the phone
+  was at a different orientation between captures, the stale
+  estimate biased the linear-acceleration calculation for the
+  ~200 ms IIR convergence window, integrating into posX and
+  compounding per-capture.  Now reseed gravityX on every
+  subscription start (= every capture).
+- **F2d — IMU gate auto-rearms on every budget interval.**  Pre-fix
+  the gate latched after the first `markNextFrameAsLastKeyframe`
+  fire and never re-triggered.  Now resets posX + velX + fired
+  internally so it fires every `flowMaxTranslationCm` of measured
+  translation.
+- **F2e — Android batch-keyframe now emits overlap %.**  Pre-fix
+  `overlapPercent` was hardcoded to -1 in the accept emit, and
+  reject events emitted nothing at all — debug overlay was frozen
+  between accepts.  Now reflects the gate's actual newContent
+  fraction on both accepts and rejects.
+- **F2f — IMU delta resets on ANY frame accept.**  Pre-fix the
+  `imuΔ` debug indicator only reset when the IMU gate itself
+  fired; a flow-novelty accept left posX ticking up indefinitely.
+  Now Camera.tsx watches `acceptedCount` and resets the gate on
+  every increment.  A separate `totalAbsMetres` accumulator banks
+  the magnitude across resets so the finalize-time auto-resolver
+  still sees full translation history.
+- **F4 — Camera.tsx now passes the four flow-tunable fields and
+  `captureSource`.**  Pre-fix `flowMaxCorners`, `flowQualityLevel`,
+  `flowMinDistance`, `enableMaxInscribedRectCrop`, and
+  `captureSource` were silently dropped between the modal and the
+  native bridge.  Now all five reach the engine.
+- **F5 — Android KeyframeGate gained the missing Flow-tunable
+  surface.**  Added Kotlin facade properties + JNI thunks for
+  `setFlowMaxCorners`, `setFlowQualityLevel`, `setFlowMinDistance`,
+  `setStrategy`.  Android now mirrors iOS for the gate's full
+  knob set.  Added the eval-throttle (`flowEvalEveryNFrames`)
+  to the AR ingest path.
+- **F6 — `frameSelectionMode` is no longer hardcoded to
+  'flow-based'.**  Camera.tsx now passes the JS setting through;
+  both platforms honour `time-based` (gate disabled),
+  `pose-based` (Pose strategy), and `flow-based` (Flow strategy).
+- **F7 — README documented `defaultFlowMaxTranslationCm` as 8
+  cm.**  Actual default is 50 cm; 6× off.
+- **ARCore Session.close() on AR-off** (Android-only crash fix).
+  Pre-fix `RNSARSession.stop()` and `stopForView()` called
+  `Session.pause()` then nulled the session reference.  ARCore's
+  `pause()` only stops frame production — its native worker
+  threads stay alive.  Orphaned, those threads kept running and
+  crashed under memory pressure with SIGSEGV in
+  `tango_pool_lp4`/`libarcore_c.so` (tombstone-confirmed).  Now
+  calls `pause()` then `close()` (ARCore's documented full
+  teardown), and the camera-view drops its own stale reference.
+- **Stitcher mode-fallback retry.**  When the configured stitchMode
+  fails with degenerate camera params, the stitcher now
+  automatically retries with the opposite mode before giving up
+  (panorama → scans or scans → panorama).  Result type carries
+  `stitchModeUsed` so callers can see which mode succeeded.  The
+  warpRoi-too-large error message now includes the configured
+  mode + frame index for diagnostics.
+- **Thumbnail strip first-frame race.**  Pre-fix the `useEffect`
+  that cleared `batchKeyframeThumbnails` on statusPhase change
+  could race ahead of the JS subscriber: the AR camera's GL
+  thread could emit an ACCEPT during handleHoldStart's
+  `await incremental.start(...)` window, the subscriber would
+  add frame 0 to thumbnails, THEN React's queued statusPhase
+  effect would wipe the array — frame 0 was missing from the
+  strip.  Fixed by moving the reset synchronously to the top of
+  handleHoldStart, before any await.
+
+### Audit ground-truth findings (no code change, doc-only)
 
 - **F1 — Android `disableAngularFallback` was always false.** The
   Android JNI's non-AR opt-out for the angular-delta gate fallback
@@ -66,7 +196,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `8`.**  Actual `DEFAULT_PANORAMA_SETTINGS.flowMaxTranslationCm` is
   `50`; 6× off.  Corrected.
 
-### Audit ground-truth (no code change, doc-only)
+### Audit ground-truth findings (doc-only)
 
 The full audit traced every `PanoramaSettings` field through Camera.tsx,
 the iOS bridge (`IncrementalStitcher.swift::applyConfigOverrides` and
@@ -85,9 +215,9 @@ and the live-engine config type (`RLISStitcherConfig`).  Conclusions:
   `framesPerSecond`, `minFrames`, `maxFrames`, `quality`, and the
   legacy `useDetectedPlane` alias.  These are scheduled for removal
   in v0.4.0 as part of the engine-discriminated typed-settings
-  rewrite (F10 follow-up).
+  rewrite.
 
-## [0.3.0] — 2026-05-21
+## [0.3.0-pre-audit] — 2026-05-21
 
 > [!IMPORTANT]
 > **Behaviour change on Android AR mode and on both platforms' non-AR
