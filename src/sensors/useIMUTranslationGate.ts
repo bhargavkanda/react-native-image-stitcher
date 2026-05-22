@@ -116,6 +116,32 @@ export interface UseIMUTranslationGateReturn {
    * benefits from continuous history across anchors.
    */
   resetAnchor: () => void;
+  /**
+   * 2026-05-22 (audit follow-up) — read the latest integrated
+   * translation magnitude in METRES.  Useful for debug overlays
+   * that want to surface "how much translation has the operator
+   * accumulated since the last keyframe accept" so they can sanity-
+   * check whether the budget is going to fire.  Cheap: returns the
+   * ref value, no React state subscription (the integrator runs at
+   * 50 Hz and we don't want to force a re-render every sample).
+   * Callers that want a live UI value should poll on an interval
+   * or use a frame-driven re-render trigger.
+   */
+  getTranslationMetres: () => number;
+  /**
+   * 2026-05-22 (audit F2f) — cumulative |segment displacement|
+   * across the entire capture, in METRES.  Includes:
+   *   (a) magnitudes banked at every prior anchor reset (whether
+   *       triggered by IMU budget auto-rearm or by host-side
+   *       resetAnchor on a non-IMU frame accept), PLUS
+   *   (b) the magnitude of the current (unfinished) segment.
+   *
+   * This is the right input for the stitchMode auto-resolver in
+   * non-AR mode — it captures total operator travel regardless of
+   * which gate accepted intermediate frames.  Resets to 0 only on
+   * subscription start (new capture).
+   */
+  getTotalAbsMetres: () => number;
 }
 
 
@@ -144,12 +170,27 @@ export function useIMUTranslationGate({
   // All running-integrator state lives in a single ref so the
   // subscription callback can update it without forcing a re-render
   // every frame (50 Hz worth of re-renders would tank performance).
+  //
+  // 2026-05-22 (audit F2f) — `totalAbsMetres` is a separate, never-
+  // reset-within-capture accumulator of the |segment displacement|
+  // that's banked each time the current segment ends (either by
+  // auto-rearm on budget fire, or by host-side `resetAnchor` on a
+  // non-IMU frame accept).  This decouples the display-side
+  // segment integrator (`posX`, resets on every accept) from the
+  // measurement-side cumulative translation (`totalAbsMetres`,
+  // resets only on subscription start).  Pre-F2f the cumulative
+  // translation was reconstructed as `fires × budget + |residual|`
+  // — that undercounted whenever a non-IMU accept reset the
+  // integrator before the budget threshold was reached.
   const stateRef = useRef({
     posX: 0,
     velX: 0,
     /// NaN sentinel for "uninitialised"; first sample seeds it.
     gravityX: NaN,
     fired: false,
+    /// Cumulative |segment displacement| banked across all anchor
+    /// resets in this capture.  Reset only on subscription start.
+    totalAbsMetres: 0,
   });
 
   // Latest onBudgetExceeded callback in a ref so callers can pass
@@ -160,6 +201,13 @@ export function useIMUTranslationGate({
 
   const resetAnchor = useCallback(() => {
     const s = stateRef.current;
+    // 2026-05-22 (audit F2f) — bank current segment magnitude into
+    // the cumulative accumulator BEFORE zeroing.  This preserves
+    // total translation across non-IMU-driven anchor resets (e.g.
+    // when a flow-novelty accept arrives at 5 cm — short of the
+    // IMU budget — we want the 5 cm to count toward the
+    // auto-resolver's total, not be lost).
+    s.totalAbsMetres += Math.abs(s.posX);
     s.posX = 0;
     s.velX = 0;
     s.fired = false;
@@ -168,6 +216,41 @@ export function useIMUTranslationGate({
 
   useEffect(() => {
     if (!enabled) return;
+
+    // 2026-05-22 (audit follow-up) — reset ALL integrator state when
+    // the subscription is (re)established, not just on the host's
+    // resetAnchor() call.  Two reasons:
+    //
+    // 1. Race with statusPhase update: handleHoldStart sets
+    //    `statusPhase='recording'` synchronously, which flips
+    //    `enabled` and re-runs this effect immediately.  Samples
+    //    start arriving before the awaited `incremental.start()`
+    //    returns + the host gets a chance to call `resetAnchor()`.
+    //    During that window `posX` accumulates drift, and the
+    //    operator sees a non-zero starting `imuΔ` in the debug
+    //    overlay.
+    //
+    // 2. Stale gravity bias: `gravityX` was intentionally preserved
+    //    across `resetAnchor` calls to keep IIR history.  But
+    //    between captures the phone might be at a different
+    //    orientation; the stale gravity estimate biases `linX` for
+    //    the ~200ms IIR convergence window, and that bias compounds
+    //    into `posX` each capture.  Forcing NaN here makes the
+    //    first sample re-seed gravity cleanly — costs us one
+    //    sample of accuracy but eliminates the cross-capture drift.
+    //
+    // The host's `resetAnchor()` remains as the in-capture reset
+    // (called after each force-accept fire, etc).
+    {
+      const s = stateRef.current;
+      s.posX = 0;
+      s.velX = 0;
+      s.fired = false;
+      s.gravityX = NaN;
+      // 2026-05-22 (audit F2f) — new subscription = new capture =
+      // zero the cumulative accumulator too.
+      s.totalAbsMetres = 0;
+    }
 
     setUpdateIntervalForType(SensorTypes.accelerometer, sampleIntervalMs);
     const scale = Platform.OS === 'ios' ? G_TO_MPS2 : 1;
@@ -196,13 +279,41 @@ export function useIMUTranslationGate({
       s.posX += s.velX * dt;
 
       if (!s.fired && Math.abs(s.posX) > budgetMeters) {
+        // Fire the callback (host-side force-accept hook).
         s.fired = true;
         onExceededRef.current();
+        // 2026-05-22 (audit follow-up) — auto-rearm the integrator
+        // so the gate fires EVERY `budgetMeters` of translation, not
+        // just once per capture.  Pre-audit behaviour was "fire once,
+        // wait for host to call resetAnchor()" — but Camera.tsx only
+        // calls resetAnchor at the start of a capture, so the gate
+        // latched after the first force-accept and never re-fired,
+        // even though the operator kept translating further (user
+        // observation: 8cm fires once, then 16cm/24cm/… don't
+        // re-trigger).
+        //
+        // 2026-05-22 (audit F2f) — bank the segment magnitude into
+        // the cumulative accumulator BEFORE zeroing (matches the
+        // resetAnchor path for symmetry — both paths represent
+        // anchor transitions, just driven by different triggers).
+        s.totalAbsMetres += Math.abs(s.posX);
+        s.posX = 0;
+        s.velX = 0;
+        s.fired = false;
       }
     });
 
     return () => sub.unsubscribe();
   }, [enabled, budgetMeters, sampleIntervalMs]);
 
-  return { resetAnchor };
+  const getTranslationMetres = useCallback(() => {
+    return stateRef.current.posX;
+  }, []);
+
+  const getTotalAbsMetres = useCallback(() => {
+    const s = stateRef.current;
+    return s.totalAbsMetres + Math.abs(s.posX);
+  }, []);
+
+  return { resetAnchor, getTranslationMetres, getTotalAbsMetres };
 }

@@ -118,7 +118,7 @@ See `src/camera/Camera.tsx` for the full TSDoc.  Highlights:
 | `defaultWarper` | `'plane'` | `'plane'`, `'cylindrical'`, `'spherical'` |
 | `defaultFlowNoveltyPercentile` | `0.85` | Range 0.50 – 0.99 |
 | `defaultFlowEvalEveryNFrames` | `5` | Range 1 – 10 |
-| `defaultFlowMaxTranslationCm` | `8` | 0 = disabled |
+| `defaultFlowMaxTranslationCm` | `50` | 0 = disabled |
 | `defaultKeyframeMaxCount` | `6` | Range 3 – 10 |
 | `defaultKeyframeOverlapThreshold` | `0.20` | Range 0.20 – 0.60 |
 

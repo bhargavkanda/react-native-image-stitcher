@@ -148,7 +148,34 @@ class RNSARSession(reactContext: ReactApplicationContext)
     @ReactMethod
     fun stop(promise: Promise) {
         try {
-            sessionRef.getAndSet(null)?.pause()
+            // 2026-05-23 (crash fix) — Session.pause() stops frame
+            // production but keeps the native session ALIVE: its
+            // internal worker threads (tango_pool_lp4, etc.) keep
+            // running.  Once the session reference is nulled here,
+            // those threads become orphaned — still alive, but with
+            // no owner to clean them up.  Under later memory
+            // pressure scudo unmaps freed pages and an in-flight
+            // tango_pool_lp4 memcpy SEGVs on an unmapped destination
+            // (the crash we diagnosed from tombstone_03, with
+            // libarcore_c.so internal `ImageBlockData` frames).
+            //
+            // Session.close() shuts down those threads AND releases
+            // native resources, which is what we actually want for
+            // an explicit "AR off" toggle.  Pause+close together is
+            // ARCore's documented full-teardown sequence.  The next
+            // start() recreates the Session from scratch (see
+            // line 105's `sessionRef.get() ?: Session(...)` path).
+            val prev = sessionRef.getAndSet(null)
+            try {
+                prev?.pause()
+            } catch (t: Throwable) {
+                Log.w(TAG, "stop: pause failed (ignoring): ${t.message}")
+            }
+            try {
+                prev?.close()
+            } catch (t: Throwable) {
+                Log.w(TAG, "stop: close failed (ignoring): ${t.message}")
+            }
             trackingStateRef.set(TRACKING_NOT_AVAILABLE)
             clearPoseLogInternal()
             promise.resolve(null)
@@ -291,11 +318,26 @@ class RNSARSession(reactContext: ReactApplicationContext)
                 // Common on first-attach failures (no Activity, etc.).
                 return
             }
-            prev.pause()
+            // 2026-05-23 (crash fix) — pause + close, not just pause.
+            // See the matching fix in `stop()` above for the full
+            // rationale.  Short version: pause() leaves ARCore's
+            // internal worker threads alive but orphaned; close()
+            // tears them down.  Required for the AR-off toggle path
+            // (ARCameraView unmount → onDetachedFromWindow → here).
+            try {
+                prev.pause()
+            } catch (t: Throwable) {
+                Log.w(TAG, "stopForView: pause failed (ignoring): ${t.message}")
+            }
+            try {
+                prev.close()
+            } catch (t: Throwable) {
+                Log.w(TAG, "stopForView: close failed (ignoring): ${t.message}")
+            }
             trackingStateRef.set(TRACKING_NOT_AVAILABLE)
-            Log.i(TAG, "stopForView: AR session paused")
+            Log.i(TAG, "stopForView: AR session paused + closed")
         } catch (t: Throwable) {
-            Log.w(TAG, "stopForView: pause failed: ${t.message}", t)
+            Log.w(TAG, "stopForView: teardown failed: ${t.message}", t)
         }
     }
 

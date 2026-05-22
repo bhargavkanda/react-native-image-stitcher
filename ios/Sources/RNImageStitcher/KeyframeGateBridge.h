@@ -76,6 +76,19 @@ NS_SWIFT_NAME(KeyframeGateBridge)
 /// See KeyframeGate.swift for the operator-facing description.
 - (void)setFlowNoveltyPercentile:(double)percentile;
 
+/// 2026-05-22 (audit F1b) — non-AR-mode opt-out for the angular-
+/// delta fallback path.  In non-AR captures there is no
+/// ARKit/ARCore pose, so the gate's angular-delta computation runs
+/// on gyro-integrated yaw/pitch which drifts ~1–2°/min.  Drift
+/// accumulates past the overlap threshold even when the camera
+/// hasn't moved → near-identical frames get accepted → cv::Stitcher
+/// camera-param estimator goes degenerate → "warpRoi too large"
+/// crash on finalize.  Set this to `true` in non-AR mode to disable
+/// the angular-delta fallback entirely (the Flow strategy still
+/// works when pixel data is supplied).  Default `false`
+/// (back-compat — AR mode uses the fallback).
+- (void)setDisableAngularFallback:(BOOL)disabled;
+
 // ── Read-only state ─────────────────────────────────────────────
 - (BOOL)isEnabled;
 - (NSInteger)acceptedCount;

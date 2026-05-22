@@ -202,6 +202,14 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
                 freshOrientation
             )
         }
+        // 2026-05-22 (audit F2b) — JS may pass cumulative IMU
+        // translation in METRES so the stitchMode auto-resolver has a
+        // translation signal in non-AR mode (where the JS-driver path
+        // doesn't carry pose tx/ty/tz).  Always ≥ 0; defaults to 0 if
+        // unset (back-compat — auto-resolver falls back to pose data
+        // and to PANORAMA when both are 0).
+        let imuT = (options["imuTranslationMetres"] as? Double) ?? 0.0
+        IncrementalStitcher.shared.updateImuTranslationMetres(imuT)
         IncrementalStitcher.shared.finalize(
             toPath: outputPath,
             jpegQuality: quality

@@ -85,6 +85,25 @@ export { CapturePreview } from './camera/CapturePreview';
 export type { CapturePreviewAction } from './camera/CapturePreview';
 export { CaptureStatusOverlay } from './camera/CaptureStatusOverlay';
 export type { CaptureStatusPhase } from './camera/CaptureStatusOverlay';
+export { CaptureDebugOverlay } from './camera/CaptureDebugOverlay';
+export type { CaptureDebugOverlayProps } from './camera/CaptureDebugOverlay';
+// 2026-05-22 (audit F9) — composable debug pills.  Layer-1 <Camera>
+// mounts all of them automatically when settings.debug is on;
+// Layer-2 hosts compose their own debug surface from these primitives.
+export { CaptureMemoryPill } from './camera/CaptureMemoryPill';
+export type { CaptureMemoryPillProps } from './camera/CaptureMemoryPill';
+export { CaptureKeyframePill } from './camera/CaptureKeyframePill';
+export type { CaptureKeyframePillProps } from './camera/CaptureKeyframePill';
+export { CaptureOrientationPill } from './camera/CaptureOrientationPill';
+export type { CaptureOrientationPillProps } from './camera/CaptureOrientationPill';
+export {
+  CaptureStitchStatsToast,
+  useStitchStatsToast,
+} from './camera/CaptureStitchStatsToast';
+export type {
+  CaptureStitchStatsToastProps,
+  UseStitchStatsToastReturn,
+} from './camera/CaptureStitchStatsToast';
 export { CaptureThumbnailStrip } from './camera/CaptureThumbnailStrip';
 export type { CaptureThumbnailItem } from './camera/CaptureThumbnailStrip';
 export { IncrementalPanGuide } from './camera/IncrementalPanGuide';

@@ -63,6 +63,11 @@ import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
 import { CaptureStatusOverlay, type CaptureStatusPhase } from './CaptureStatusOverlay';
+import { CaptureDebugOverlay } from './CaptureDebugOverlay';
+import { CaptureMemoryPill } from './CaptureMemoryPill';
+import { CaptureKeyframePill } from './CaptureKeyframePill';
+import { CaptureOrientationPill } from './CaptureOrientationPill';
+import { CaptureStitchStatsToast, useStitchStatsToast } from './CaptureStitchStatsToast';
 import { PanoramaBandOverlay } from './PanoramaBandOverlay';
 import {
   DEFAULT_PANORAMA_SETTINGS,
@@ -129,6 +134,15 @@ export type CameraCaptureResult =
       framesDropped: number;
       finalConfidenceThresh: number;
       durationMs: number;
+      /**
+       * 2026-05-22 (audit F2g) — which cv::Stitcher pipeline the
+       * batch finalize ran (after auto-resolution if applicable).
+       * Useful for displaying a "Stitched as: scans" pill on the
+       * output preview.  Undefined when the engine wasn't
+       * batch-keyframe (hybrid / slit-scan don't go through
+       * cv::Stitcher at finalize).
+       */
+      stitchModeResolved?: 'panorama' | 'scans';
     };
 
 
@@ -540,6 +554,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
     null,
   );
   const [incrementalState, setIncrementalState] = useState<IncrementalState | null>(null);
+  // 2026-05-22 (audit F9 + F3) — debug stitch-stats toast.  Hook
+  // exposes an imperative API; we fire `showResult(finalizeResult)`
+  // on every successful finalize when settings.debug is on (gated
+  // a few hundred lines below in handleHoldEnd's onCapture branch).
+  const stitchToast = useStitchStatsToast();
   const [batchKeyframeThumbnails, setBatchKeyframeThumbnails] = useState<
     string[]
   >([]);
@@ -666,6 +685,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // the C++ engine to force-accept the next frame.  This is what
   // keeps non-AR captures producing keyframes at all (the flow-
   // novelty algorithm alone is too strict in practice).
+  //
+  // 2026-05-22 (audit F2f) — IMU translation gate.  The gate's own
+  // `totalAbsMetres` accumulator (banks each segment's |displacement|
+  // at every anchor reset) is the right input for the finalize-time
+  // auto-resolver in non-AR mode (where pose-derived translation is
+  // 0).  Pre-F2f this was reconstructed from `fires × budget +
+  // |residual|` — which undercounted any time a non-IMU accept
+  // (flow novelty, force-last) reset the integrator before the
+  // budget threshold was reached.
   const imuGate = useIMUTranslationGate({
     enabled:
       isNonAR
@@ -718,12 +746,52 @@ export function Camera(props: CameraProps): React.JSX.Element {
     });
     return () => { sub?.remove?.(); };
   }, []);
+  // 2026-05-23 (race fix) — Previously this useEffect cleared
+  // `batchKeyframeThumbnails` + `incrementalState` when statusPhase
+  // transitioned to 'recording'.  But handleHoldStart is async
+  // (`await incremental.start(...)`), and on Android the ARSession
+  // was already alive on the GL thread — it could emit an ACCEPT
+  // event during the await window, BEFORE the effect ran.  Order
+  // observed in logcat:
+  //   1. setStatusPhase('recording') queued
+  //   2. await incremental.start() yields
+  //   3. ARCore frame → ingest → JS [state] emit
+  //   4. setBatchKeyframeThumbnails((prev=[]) => [keyframe-0.jpg])
+  //   5. React commits statusPhase change → THIS effect ran
+  //   6. setBatchKeyframeThumbnails([])  ← WIPED frame 0!
+  //   7. Frame 1 arrives → updater sees prev=[] → adds only frame 1
+  //   ⇒ final array missing keyframe-0.jpg
+  // The reset is now done synchronously at the top of
+  // handleHoldStart, before any await, so the GL thread can't race
+  // ahead.  This effect is intentionally removed.
+
+  // 2026-05-22 (audit F2f) — every accepted keyframe is a fresh
+  // anchor for the IMU translation gate, regardless of which
+  // mechanism qualified the frame (flow novelty, plane-overlap,
+  // angular fallback, IMU-budget force-accept, force-last).  Reset
+  // the gate's per-segment integrator on every acceptedCount
+  // increment so the operator sees `imuΔ` reset to 0 in the debug
+  // overlay after every accept — consistent UX regardless of WHY
+  // the gate took the frame.  Pre-F2f only the IMU-budget path
+  // reset the integrator; flow accepts left `posX` ticking up
+  // forever, which surprised the user.
+  //
+  // The gate's `totalAbsMetres` cumulative accumulator banks the
+  // |segment displacement| before zeroing, so finalize-time
+  // translation magnitude is preserved across non-IMU accepts.
+  const lastAcceptedCountRef = useRef(0);
   useEffect(() => {
-    if (statusPhase === 'recording') {
-      setBatchKeyframeThumbnails([]);
-      setIncrementalState(null);
+    const accepted = incrementalState?.acceptedCount ?? 0;
+    if (accepted > lastAcceptedCountRef.current) {
+      lastAcceptedCountRef.current = accepted;
+      if (isNonAR) {
+        imuGate.resetAnchor();
+      }
+    } else if (accepted === 0) {
+      // New capture (state cleared) — reset our edge-detect ref.
+      lastAcceptedCountRef.current = 0;
     }
-  }, [statusPhase]);
+  }, [incrementalState?.acceptedCount, isNonAR, imuGate]);
 
   // ── Shutter handlers ────────────────────────────────────────────
 
@@ -805,6 +873,17 @@ export function Camera(props: CameraProps): React.JSX.Element {
       return;
     }
     try {
+      // 2026-05-23 (race fix) — synchronously clear thumbnails +
+      // engine state at the top of handleHoldStart, BEFORE awaiting
+      // incremental.start().  In the previous effect-based design
+      // the GL thread could ingest an AR frame during the await
+      // window and add to thumbnails BEFORE React's
+      // statusPhase-effect ran and wiped them.  See the removed
+      // useEffect a few hundred lines above for the full log trace.
+      // Synchronous reset here means any racing frame ingest sees
+      // an empty array and accumulates from there.
+      setBatchKeyframeThumbnails([]);
+      setIncrementalState(null);
       setStatusPhase('recording');
       setRecordingStartedAt(Date.now());
       const orientationRotation: 0 | 90 | 180 | 270 =
@@ -823,16 +902,35 @@ export function Camera(props: CameraProps): React.JSX.Element {
         canvasHeight: 5000,
         engine: 'batch-keyframe',
         config: {
+          // ── cv::Stitcher (batch finalize) ─────────────────────────
           stitchMode: settings.stitchMode,
           warperType: settings.warperType,
           blenderType: settings.blenderType,
           seamFinderType: settings.seamFinderType,
+          enableMaxInscribedRectCrop: settings.enableMaxInscribedRectCrop,
+          // ── KeyframeGate (per-frame selection) ────────────────────
+          // F6 audit fix: pass settings.frameSelectionMode through
+          // instead of hardcoding 'flow-based' (which silently made the
+          // time-based / pose-based modal options no-ops).
+          frameSelectionMode: settings.frameSelectionMode,
+          keyframeMaxCount: settings.keyframeMaxCount,
+          keyframeOverlapThreshold: settings.keyframeOverlapThreshold,
+          // ── Flow-strategy tunables ────────────────────────────────
+          // F4 audit fix: previously omitted, which made the modal
+          // sliders for these three a complete no-op (only iOS native
+          // even read them, and only when JS sent them).
           flowNoveltyPercentile: settings.flowNoveltyPercentile,
           flowEvalEveryNFrames: settings.flowEvalEveryNFrames,
           flowMaxTranslationCm: settings.flowMaxTranslationCm,
-          keyframeMaxCount: settings.keyframeMaxCount,
-          keyframeOverlapThreshold: settings.keyframeOverlapThreshold,
-          frameSelectionMode: 'flow-based',
+          flowMaxCorners: settings.flowMaxCorners,
+          flowQualityLevel: settings.flowQualityLevel,
+          flowMinDistance: settings.flowMinDistance,
+          // ── Engine-routing flags consumed by native ───────────────
+          // F1 audit fix: Android keyframe gate's disableAngularFallback
+          // opt-out reads this to decide whether to skip the angular
+          // fallback (gyro pose is too noisy for the FoV-overlap calc
+          // in non-AR mode, causing degenerate cv::Stitcher params).
+          captureSource: settings.captureSource,
         },
       });
       imuGate.resetAnchor();
@@ -882,10 +980,19 @@ export function Camera(props: CameraProps): React.JSX.Element {
       const panoOutputPath = outputDir
         ? `${toBareFilePath(outputDir).replace(/\/$/, '')}/${defaultPanoramaFilename()}`
         : `${await getDefaultCaptureDir()}/${defaultPanoramaFilename()}`;
+      // 2026-05-22 (audit F2f) — total IMU translation directly from
+      // the gate's cumulative accumulator (banks |segment displacement|
+      // at every anchor reset, including non-IMU-driven resets like
+      // flow-novelty accepts).  No more fires × budget + residual
+      // reconstruction.  Only meaningful in non-AR mode (in AR the
+      // native side uses pose-derived translation and ignores this).
+      const imuTotalTranslationM =
+        isNonAR ? imuGate.getTotalAbsMetres() : 0;
       const result = await incremental.finalize(
         panoOutputPath,
         90,
         deviceOrientation,
+        imuTotalTranslationM,
       );
       if (
         typeof result.framesRequested === 'number'
@@ -910,7 +1017,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
           (result.framesRequested ?? 0) - (result.framesIncluded ?? 0),
         finalConfidenceThresh: result.finalConfidenceThresh ?? -1,
         durationMs: Date.now() - (recordingStartedAt ?? Date.now()),
+        stitchModeResolved: result.stitchModeResolved,
       });
+      // 2026-05-22 (audit F9) — fire the debug stitch-stats toast on
+      // every successful finalize when settings.debug is on.  Shows
+      // the leaveBiggestComponent retry telemetry + resolved mode so
+      // the operator can see what choice the auto-resolver made.
+      if (settings.debug) {
+        stitchToast.showResult(result);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const code: CameraErrorCode =
@@ -986,6 +1101,49 @@ export function Camera(props: CameraProps): React.JSX.Element {
         phase={statusPhase}
         topInset={insets.top}
         recordingStartedAt={recordingStartedAt ?? undefined}
+      />
+
+      {/*
+        2026-05-22 (audit F9 + F3) — debug UI suite, all gated on
+        settings.debug.  Mounts in <Camera> automatically; Layer-2
+        hosts can import the individual components from the public
+        API and compose their own debug surface.  Layout:
+          - top-left:    orientation pill (purple)
+          - top-center:  keyframes pill (green/amber)
+          - top-right:   memory pill (green/amber/red)
+          - top-center:  stitch-stats toast (dark capsule, transient)
+          - left-mid:    detailed metrics block (overlap, processing,
+                         imuΔ, etc.) — uses CaptureDebugOverlay
+       */}
+      {settings.debug && (
+        <>
+          <CaptureOrientationPill
+            orientation={deviceOrientation}
+            topInset={insets.top}
+          />
+          <CaptureKeyframePill
+            state={incrementalState}
+            topInset={insets.top}
+          />
+          <CaptureMemoryPill topInset={insets.top} />
+          <CaptureDebugOverlay
+            incrementalState={incrementalState}
+            imuTranslationMetres={
+              isNonAR ? imuGate.getTranslationMetres() : null
+            }
+            captureSource={effectiveCaptureSource}
+            frameSelectionMode={settings.frameSelectionMode}
+            stitchMode={settings.stitchMode}
+          />
+        </>
+      )}
+      {/* Toast renders regardless of `settings.debug` — toast hook
+       *  is only ever fired from the debug-gated path, but mounting
+       *  unconditionally lets Layer-2 hosts wire their own showFor()
+       *  callers without needing a separate mount. */}
+      <CaptureStitchStatsToast
+        message={stitchToast.message}
+        topInset={insets.top}
       />
 
       {/* Settings gear (top-right), gated on showSettingsButton. */}

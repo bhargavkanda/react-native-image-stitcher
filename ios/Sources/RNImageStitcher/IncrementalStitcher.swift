@@ -215,6 +215,12 @@ struct FinalizePayload {
     let batchBlenderType: String
     let batchSeamFinderType: String
     let batchEnableInscribedRectCrop: Bool
+    /// 2026-05-22 (audit F2) — resolved stitcher mode for this finalize
+    /// pass.  String form ("panorama" / "scans") matches Android's
+    /// JNI string and the Obj-C++ method signature.  'auto' is
+    /// resolved upstream by `resolveStitchModeAuto` before this snapshot
+    /// is captured; this field never carries 'auto'.
+    let batchStitchModeResolved: String
     let keyframeExifOrientation: Int
     /// AR-STITCHING-TWO-MODES (memory/ar-stitching-two-modes.md):
     /// capture-time hold orientation for the bake-rotation pass.
@@ -409,6 +415,27 @@ public final class IncrementalStitcher: NSObject {
     // the inscribed-rect + morph-close + col-projection pipeline
     // runs.
     private var batchEnableInscribedRectCrop: Bool = false
+    /// 2026-05-22 (audit F2) — cv::Stitcher pipeline mode for the
+    /// batch finalize.  Mirrors Android's `batchStitchMode` (kt:187).
+    /// Valid values: 'auto' / 'panorama' / 'scans'.  'auto' is
+    /// resolved at finalize time via [resolveStitchModeAuto] using
+    /// the translation/rotation magnitudes between first + last
+    /// accepted keyframe poses.  Default 'auto'.
+    private var batchStitchMode: String = "auto"
+    /// 2026-05-22 (audit F2) — first + last accepted keyframe poses
+    /// in the current batch capture.  7 doubles each: [tx, ty, tz,
+    /// qx, qy, qz, qw].  Both nil until at least one keyframe has
+    /// been accepted.  Reset on every start().  Used only by the
+    /// auto-resolver; the keyframe-gate's own pose tracking lives
+    /// separately in cpp/keyframe_gate.cpp.
+    private var batchFirstAcceptedPose: [Double]? = nil
+    private var batchLastAcceptedPose: [Double]? = nil
+    /// 2026-05-22 (audit F2b) — JS-measured cumulative IMU translation
+    /// magnitude in METRES, set by the bridge at finalize time.  Used
+    /// by the auto-resolver as a fallback translation signal in non-
+    /// AR mode (where pose-derived tx/ty/tz is always 0).  Set to 0
+    /// at start() and overwritten at finalize() entry.
+    private var batchImuTranslationMetres: Double = 0.0
     /// AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
     ///
     /// Physical phone orientation at start() time, sourced from the
@@ -450,6 +477,18 @@ public final class IncrementalStitcher: NSObject {
         os_log(.fault, log: Self.diagLog,
                "[V16-orchestrator] updateCaptureOrientation: %{public}@ → %{public}@",
                prev, orientation)
+    }
+
+    /// 2026-05-22 (audit F2b) — JS calls this at finalize() entry to
+    /// hand over the cumulative IMU translation magnitude in METRES.
+    /// Stored in batchImuTranslationMetres for the auto-resolver to
+    /// consume in non-AR mode (where pose-derived translation is 0).
+    /// 0.0 is the back-compat default (resolver falls back to pose
+    /// translation; PANORAMA when both are 0).
+    @objc public func updateImuTranslationMetres(_ metres: Double) {
+        stateLock.lock()
+        self.batchImuTranslationMetres = max(0.0, metres)
+        stateLock.unlock()
     }
 
     /// 2026-05-18 (Iss 3) — return the current capture's keyframe
@@ -823,6 +862,23 @@ public final class IncrementalStitcher: NSObject {
             // to FALSE if not provided by JS.
             self.batchEnableInscribedRectCrop =
                 (configOverrides["enableMaxInscribedRectCrop"] as? Bool) ?? false
+            // 2026-05-22 (audit F2) — read stitchMode from JS.  Pre-
+            // audit, iOS hardcoded Panorama at OpenCVStitcher.mm:436
+            // regardless of the JS setting.  Now mirrors Android's
+            // batchStitchMode + auto-resolver heuristic.  Validate
+            // against the closed set; unknown values fall back to 'auto'.
+            let rawMode = (configOverrides["stitchMode"] as? String) ?? "auto"
+            self.batchStitchMode =
+                (["auto", "panorama", "scans"].contains(rawMode))
+                ? rawMode : "auto"
+            // Reset accumulated-pose state for the new capture so
+            // finalize() picks a fresh mode.
+            self.batchFirstAcceptedPose = nil
+            self.batchLastAcceptedPose = nil
+            // 2026-05-22 (audit F2b) — reset IMU translation snapshot
+            // too.  Updated at finalize() entry from JS-supplied
+            // option value.
+            self.batchImuTranslationMetres = 0.0
             self.batchKeyframeMode = true
             self.hybridEngine = nil
             self.firstwinsEngine = nil
@@ -887,6 +943,21 @@ public final class IncrementalStitcher: NSObject {
             (frameMode == "pose-based" || frameMode == "flow-based")
         self.keyframeGate.strategy =
             (frameMode == "flow-based") ? .flow : .pose
+        // 2026-05-22 (audit F1b) — non-AR-mode opt-out for the angular-
+        // delta fallback.  iOS parity with Android IncrementalStitcher.kt:461.
+        // captureSource = 'non-ar' means the host is using vision-camera
+        // (no ARKit pose) — disable the gate's angular fallback so it
+        // doesn't compute on gyro-drift-driven garbage pose.  Without
+        // this opt-out, gyro drift accumulates past the overlap
+        // threshold even on a stationary camera → near-identical
+        // frames get accepted → cv::Stitcher's camera-param estimator
+        // goes degenerate → "warpRoi too large (9581×12332) — estimator
+        // produced degenerate camera params" crash on finalize.
+        // Pre-audit iOS had this bug because the Swift facade had no
+        // disableAngularFallback property at all — the C++ setter
+        // existed but nothing on iOS ever called it.
+        let captureSource = (configOverrides["captureSource"] as? String) ?? "ar"
+        self.keyframeGate.disableAngularFallback = (captureSource == "non-ar")
         if let v = configOverrides["keyframeOverlapThreshold"] as? Double {
             self.keyframeGate.overlapThreshold = max(0.10, min(0.80, v))
         } else {
@@ -1216,6 +1287,27 @@ public final class IncrementalStitcher: NSObject {
             ? String(outputPath.dropFirst(7))
             : outputPath
         let q = max(1, min(100, jpegQuality))
+        // 2026-05-22 (audit F2) — resolve 'auto' stitchMode now, while
+        // we still have access to first/last pose ivars.  The resolver
+        // mirrors Android's resolveStitchModeAuto (IncrementalStitcher.kt:1727):
+        // translation/rotation magnitude ratio between first + last
+        // accepted keyframe poses → SCANS (translation-heavy) or
+        // PANORAMA (rotation-heavy).  Non-auto values pass through.
+        let stitchModeResolved: String
+        switch batchStitchMode {
+        case "panorama": stitchModeResolved = "panorama"
+        case "scans":    stitchModeResolved = "scans"
+        default:         stitchModeResolved = resolveStitchModeAuto(
+                            first: batchFirstAcceptedPose,
+                            last:  batchLastAcceptedPose,
+                            imuTranslationMetres: batchImuTranslationMetres
+                         )
+        }
+        os_log(.fault, log: Self.diagLog,
+               "[V16-batch-keyframe.stitchMode] configured=%{public}@ resolved=%{public}@ paths=%d imuT=%.3fm",
+               batchStitchMode, stitchModeResolved, Int32(paths.count),
+               batchImuTranslationMetres)
+
         let payload = FinalizePayload(
             cleaned: cleaned,
             q: q,
@@ -1228,6 +1320,7 @@ public final class IncrementalStitcher: NSObject {
             batchBlenderType: batchBlenderType,
             batchSeamFinderType: batchSeamFinderType,
             batchEnableInscribedRectCrop: batchEnableInscribedRectCrop,
+            batchStitchModeResolved: stitchModeResolved,
             keyframeExifOrientation: keyframeExifOrientation,
             captureOrientation: captureOrientation,
             drops: drops,
@@ -1492,7 +1585,8 @@ public final class IncrementalStitcher: NSObject {
                             blenderType: payload.batchBlenderType,
                             seamFinderType: payload.batchSeamFinderType,
                             captureOrientation: payload.captureOrientation,
-                            useInscribedRectCrop: payload.batchEnableInscribedRectCrop
+                            useInscribedRectCrop: payload.batchEnableInscribedRectCrop,
+                            stitchMode: payload.batchStitchModeResolved
                         )
                         // V16 fix-attempt 9 (verified on device,
                         // 2026-05-13) — sentinel-result detection.
@@ -1569,6 +1663,14 @@ public final class IncrementalStitcher: NSObject {
                         if r.finalConfidenceThresh >= 0 {
                             batchDict["finalConfidenceThresh"] = r.finalConfidenceThresh
                         }
+                        // 2026-05-22 (audit F2g) — surface the
+                        // auto-resolver's choice (or the operator's
+                        // explicit setting) so JS can show "scans"/
+                        // "panorama" on the output preview + debug
+                        // toast.  Always set on the batch path —
+                        // helps the operator understand why the
+                        // panorama looks the way it does.
+                        batchDict["stitchModeResolved"] = payload.batchStitchModeResolved
                         completion(batchDict, nil)
                     } catch let stitchErr as NSError {
                         completion(nil, stitchErr)
@@ -1727,6 +1829,17 @@ public final class IncrementalStitcher: NSObject {
         let seam        = (config["seamFinderType"] as? String) ?? "graphcut"
         let orientation = (config["captureOrientation"] as? String) ?? "portrait"
         let useInscribed = (config["useInscribedRectCrop"] as? Bool) ?? false
+        // 2026-05-22 (audit F2) — refine path reads stitchMode too.
+        // The refine flow doesn't have access to first/last accepted
+        // pose ivars (this is a separate JS-driven entry point that
+        // may be called against a saved keyframe set), so we accept
+        // an explicit 'panorama' / 'scans' value here.  Default
+        // 'scans' for the refine path since it's typically called on
+        // shelf-scan captures (the slow-path quality bake where SCANS'
+        // translation tolerance gives best results — see docstring
+        // at line 738 of src/stitching/incremental.ts).  JS callers
+        // can override by passing config["stitchMode"].
+        let refineStitchMode = (config["stitchMode"] as? String) ?? "scans"
         let quality     = max(1, min(100, (config["jpegQuality"] as? Int) ?? 90))
         let cleanedOutput = outputPath.hasPrefix("file://")
             ? String(outputPath.dropFirst(7))
@@ -1753,7 +1866,8 @@ public final class IncrementalStitcher: NSObject {
                     blenderType: blender,
                     seamFinderType: seam,
                     captureOrientation: orientation,
-                    useInscribedRectCrop: useInscribed
+                    useInscribedRectCrop: useInscribed,
+                    stitchMode: refineStitchMode
                 )
                 // fix-9 sentinel detection — see the finalize() path
                 // for the full rationale.  A 0×0 result means
@@ -2026,11 +2140,37 @@ public final class IncrementalStitcher: NSObject {
         }
         stateLock.unlock()
 
-        // Pose-only gate evaluation — no pixel buffer, no plane.
-        let decision = self.keyframeGate.evaluate(
-            pose: pose,
-            latchedPlane: nil
-        )
+        // 2026-05-21 (v0.3) — pixel-aware Flow-strategy evaluation.
+        // Pre-0.3 this was `evaluate(pose:latchedPlane:)` with no pixel
+        // buffer, which forced the C++ gate to silently fall back to
+        // Pose strategy (same bug as Android non-AR; both fixed in
+        // v0.3).  We now decode the JPEG snapshot at `path` to a
+        // single-channel grayscale CVPixelBuffer and pass it through,
+        // so the gate's Flow strategy actually runs sparse-flow
+        // novelty on real image content.
+        //
+        // CGImageSource → CGContext into a OneComponent8 CVPixelBuffer.
+        // ~10-20 ms per snapshot on iPhone 13/16 Pro; well under the
+        // ~250 ms non-AR snapshot interval (~4 FPS cadence).  v0.4
+        // will replace this path entirely by moving non-AR capture to
+        // vision-camera's Frame Processor API (tracked at issue #11).
+        let decision: KeyframeGateDecision
+        if let grayBuffer = Self.decodeJpegToGrayscalePixelBuffer(path: path) {
+            decision = self.keyframeGate.evaluate(
+                pose: pose,
+                latchedPlane: nil,
+                pixelBuffer: grayBuffer
+            )
+        } else {
+            // JPEG decode failed (corrupt file, OOM, etc.).  Fall back
+            // to pose-only so the capture doesn't lock up — matches
+            // the C++ side's defensive grayData==nullptr handling
+            // inside evaluateWithFrame.
+            decision = self.keyframeGate.evaluate(
+                pose: pose,
+                latchedPlane: nil
+            )
+        }
         if !decision.accept {
             self.emitKeyframeRejectState(decision: decision)
             return false
@@ -2041,6 +2181,13 @@ public final class IncrementalStitcher: NSObject {
         stateLock.lock()
         self.keyframePaths.append(path)
         self.keyframePoses.append(pose.asDictionary())
+        // 2026-05-22 (audit F2) — track first + last pose for the
+        // stitchMode auto-resolver.  iOS parity: Android records
+        // these in IncrementalStitcher.kt at the same accept points.
+        let poseArr = [pose.tx, pose.ty, pose.tz,
+                       pose.qx, pose.qy, pose.qz, pose.qw]
+        if self.batchFirstAcceptedPose == nil { self.batchFirstAcceptedPose = poseArr }
+        self.batchLastAcceptedPose = poseArr
         let count = self.keyframePaths.count
         stateLock.unlock()
         os_log(.fault, log: Self.diagLog,
@@ -2054,6 +2201,76 @@ public final class IncrementalStitcher: NSObject {
             isLandscape: pose.imageWidth >= pose.imageHeight
         )
         return true
+    }
+
+    /// 2026-05-21 (v0.3) — decode a JPEG file at the given path into a
+    /// single-channel grayscale CVPixelBuffer (`kCVPixelFormatType_-
+    /// OneComponent8`) suitable for feeding into the C++ KeyframeGate's
+    /// Flow-strategy evaluate path.  The bridge's `evaluatePixelBuffer:`
+    /// has explicit OneComponent8 handling (added in v0.3) that reads
+    /// the base address as the Y plane directly, so no extra conversion
+    /// happens on the C++ side.
+    ///
+    /// Used by `addBatchKeyframePath` (the JS-driver non-AR path) so the
+    /// Flow strategy actually runs on real pixel data — pre-0.3 this
+    /// path called `evaluate(pose:latchedPlane:)` with no buffer and
+    /// the C++ side silently fell back to Pose strategy.
+    ///
+    /// Performance: ~10-20 ms for a 1920×1080 JPEG on iPhone 13/16 Pro.
+    /// Well under the ~250 ms non-AR snapshot interval (~4 FPS).
+    /// v0.4 will replace this path entirely via Frame Processor — see
+    /// issue #11.
+    ///
+    /// Returns nil on any failure (file missing, corrupt JPEG, OOM
+    /// on the CVPixelBufferCreate).  Callers fall back to the
+    /// pose-only evaluate so the capture doesn't lock up.
+    private static func decodeJpegToGrayscalePixelBuffer(
+        path: String
+    ) -> CVPixelBuffer? {
+        let url = URL(fileURLWithPath: path)
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+        else {
+            return nil
+        }
+        let width = cgImage.width
+        let height = cgImage.height
+
+        var pixelBuffer: CVPixelBuffer?
+        let attrs: NSDictionary = [
+            kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width, height,
+            kCVPixelFormatType_OneComponent8,
+            attrs,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
+            return nil
+        }
+
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(buffer) else {
+            return nil
+        }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        guard let context = CGContext(
+            data: baseAddress,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            return nil
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return buffer
     }
 
     /// V16 Phase 1 — emit a state event when a batch-keyframe is
@@ -2522,6 +2739,13 @@ public final class IncrementalStitcher: NSObject {
                     self.stateLock.lock()
                     self.keyframePaths.append(record.path)
                     self.keyframePoses.append(pose.asDictionary())
+                    // 2026-05-22 (audit F2) — track first + last pose
+                    // for the stitchMode auto-resolver.  Same as the
+                    // non-AR JS-driver site above.
+                    let poseArr = [pose.tx, pose.ty, pose.tz,
+                                   pose.qx, pose.qy, pose.qz, pose.qw]
+                    if self.batchFirstAcceptedPose == nil { self.batchFirstAcceptedPose = poseArr }
+                    self.batchLastAcceptedPose = poseArr
                     let count = self.keyframePaths.count
                     self.stateLock.unlock()
                     os_log(.fault, log: Self.diagLog,
@@ -2707,6 +2931,96 @@ public final class IncrementalStitcher: NSObject {
         let yaw = Double(atan2(forward.x, -forward.z))
         let pitch = Double(asin(forward.y))
         return (yaw, pitch)
+    }
+
+    /// 2026-05-22 (audit F2) — stitchMode auto-resolver.  Port of
+    /// Android's `resolveStitchModeAuto` (IncrementalStitcher.kt:1727).
+    /// Picks PANORAMA vs SCANS based on the magnitude ratio of
+    /// translation to rotation between first and last accepted
+    /// keyframe poses:
+    ///
+    ///   translation_score = ‖t_last - t_first‖ / 0.10          (10cm ≈ 1.0)
+    ///   rotation_score    = angle(fwd_last, fwd_first) / 1.00  (1 rad ≈ 1.0)
+    ///   ratio = translation_score / (translation_score + rotation_score)
+    ///   ratio ≥ 0.55 → "scans"   (biased toward SCANS for safety)
+    ///   ratio  < 0.55 → "panorama"
+    ///
+    /// 2026-05-22 (audit F2b) — non-AR mode has no pose-derived
+    /// translation (JS driver only sends yaw/pitch/quaternion), so
+    /// the pose-only resolver always picked `panorama` even for
+    /// shelf scans.  Fold the JS-measured IMU translation magnitude
+    /// into the resolver: use the LARGER of pose-translation and
+    /// IMU-translation as `tMeters`.  In AR mode pose-translation
+    /// will dominate (accurate); in non-AR mode pose-translation is
+    /// 0 and IMU translation provides the signal.
+    ///
+    /// Returns "panorama" or "scans" — never "auto".  Degenerate
+    /// inputs (nil poses, no motion either source) default to
+    /// "panorama" (safer for pure-rotation captures; SCANS on a
+    /// translation-free input produces unbounded canvas growth).
+    private func resolveStitchModeAuto(
+        first: [Double]?,
+        last:  [Double]?,
+        imuTranslationMetres: Double
+    ) -> String {
+        guard let firstPose = first, firstPose.count == 7,
+              let lastPose  = last,  lastPose.count == 7  else {
+            // No pose data at all — fall back on whichever signal we
+            // do have.  imuTranslationMetres > 0 hints "scans"; 0
+            // hints "panorama".
+            return imuTranslationMetres > 0.05 ? "scans" : "panorama"
+        }
+        // Translation magnitude (Euclidean, in metres).
+        let dtx = lastPose[0] - firstPose[0]
+        let dty = lastPose[1] - firstPose[1]
+        let dtz = lastPose[2] - firstPose[2]
+        let tPose = (dtx*dtx + dty*dty + dtz*dtz).squareRoot()
+        // Take the larger of pose-derived and IMU-measured.  In AR
+        // mode pose is accurate; in non-AR mode pose is 0 and IMU is
+        // the only signal we have.
+        let tMeters = max(tPose, imuTranslationMetres)
+        // Rotation magnitude — angle between camera-forward vectors.
+        // Camera-forward in body frame is (0, 0, -1) for ARKit/ARCore.
+        let fwdFirst = qrotForwardZneg(
+            firstPose[3], firstPose[4], firstPose[5], firstPose[6])
+        let fwdLast = qrotForwardZneg(
+            lastPose[3], lastPose[4], lastPose[5], lastPose[6])
+        let dot = max(-1.0, min(1.0,
+            fwdFirst.0 * fwdLast.0 + fwdFirst.1 * fwdLast.1 + fwdFirst.2 * fwdLast.2))
+        let rRadians = acos(dot)
+        // Normalisation: 10 cm of translation ≈ 1 rad of rotation as
+        // "equivalent magnitude" for the ratio.  Shelf scans cover
+        // ~30 cm translation with ~10° (0.17 rad) rotation:
+        //   ratio = (0.30/0.10) / (3.0 + 0.17) = 0.95 → SCANS.
+        // Pure 90° rotation panorama: 0 translation, 1.57 rad rotation:
+        //   ratio = 0 / (0 + 1.57) = 0.0 → PANORAMA.
+        let tScore = tMeters / 0.10
+        let rScore = rRadians / 1.00
+        let denom = tScore + rScore
+        if denom <= 1e-9 { return "panorama" }  // no motion either way
+        let ratio = tScore / denom
+        os_log(.fault, log: Self.diagLog,
+               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f → %{public}@",
+               tPose, imuTranslationMetres, rRadians, ratio,
+               ratio >= 0.55 ? "scans" : "panorama")
+        return ratio >= 0.55 ? "scans" : "panorama"
+    }
+
+    /// Closed-form q · (0,0,-1) · q⁻¹ — rotates the camera-forward
+    /// unit vector by a unit quaternion (qx, qy, qz, qw).  Same
+    /// convention as `qrot` in cpp/keyframe_gate.cpp and
+    /// `qrotForward` in IncrementalStitcher.kt.
+    private func qrotForwardZneg(
+        _ qx: Double, _ qy: Double, _ qz: Double, _ qw: Double
+    ) -> (Double, Double, Double) {
+        // v = (0, 0, -1).  Expansion:
+        //   v' = (-2(qx*qz + qw*qy),
+        //         -2(qy*qz - qw*qx),
+        //         -1 + 2(qx*qx + qy*qy))
+        let x = -2.0 * (qx * qz + qw * qy)
+        let y = -2.0 * (qy * qz - qw * qx)
+        let z = -1.0 + 2.0 * (qx * qx + qy * qy)
+        return (x, y, z)
     }
 }
 

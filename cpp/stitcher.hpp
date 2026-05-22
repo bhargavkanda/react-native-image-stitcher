@@ -217,6 +217,14 @@ struct StitchResult {
     double   finalConfidenceThresh   = -1.0;  // The threshold value that succeeded; -1 if not relevant.
 
     int64_t  durationMs              = 0;
+
+    // 2026-05-22 (audit follow-up) — the stitchMode that actually
+    // produced the output, after the auto-fallback in `stitchFramePaths`
+    // (which retries with the opposite mode when the configured one
+    // fails with degenerate camera params).  May differ from
+    // StitchConfig::stitchMode iff the fallback ran.  Defaults to
+    // Panorama for back-compat in code paths that don't set it.
+    StitchMode stitchModeUsed         = StitchMode::Panorama;
 };
 
 
