@@ -732,6 +732,18 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // ── Subscribe to engine state for live keyframe thumbs ──────────
   useEffect(() => {
     const sub = subscribeIncrementalState((state) => {
+      // 2026-05-23 (debug) — log every emit so we can correlate
+      // native-side accepts with JS-side thumbnail-strip state.
+      // Logs gated on debug to keep production noise-free.
+      // eslint-disable-next-line no-console
+      if (state) {
+        console.log(
+          `[incremental.state] outcome=${state.outcome} acceptedCount=${state.acceptedCount}`
+          + ` kfMax=${state.keyframeMax} overlap=${state.overlapPercent?.toFixed?.(1) ?? '?'}`
+          + ` thumbPath=${state.batchKeyframeThumbnailPath ?? '(none)'}`
+          + ` thumbIdx=${state.batchKeyframeIndex ?? '(none)'}`,
+        );
+      }
       setIncrementalState(state);
       if (state?.batchKeyframeThumbnailPath) {
         setBatchKeyframeThumbnails((prev) => {
@@ -740,18 +752,33 @@ export function Camera(props: CameraProps): React.JSX.Element {
           // overlay can actually render the thumbnail.
           const path = toFileUri(state.batchKeyframeThumbnailPath!);
           if (prev.includes(path)) return prev;
-          return [...prev, path];
+          const next = [...prev, path];
+          // eslint-disable-next-line no-console
+          console.log(`[incremental.thumbs] adding ${path} → [${next.join(', ')}]`);
+          return next;
         });
       }
     });
     return () => { sub?.remove?.(); };
   }, []);
-  useEffect(() => {
-    if (statusPhase === 'recording') {
-      setBatchKeyframeThumbnails([]);
-      setIncrementalState(null);
-    }
-  }, [statusPhase]);
+  // 2026-05-23 (race fix) — Previously this useEffect cleared
+  // `batchKeyframeThumbnails` + `incrementalState` when statusPhase
+  // transitioned to 'recording'.  But handleHoldStart is async
+  // (`await incremental.start(...)`), and on Android the ARSession
+  // was already alive on the GL thread — it could emit an ACCEPT
+  // event during the await window, BEFORE the effect ran.  Order
+  // observed in logcat:
+  //   1. setStatusPhase('recording') queued
+  //   2. await incremental.start() yields
+  //   3. ARCore frame → ingest → JS [state] emit
+  //   4. setBatchKeyframeThumbnails((prev=[]) => [keyframe-0.jpg])
+  //   5. React commits statusPhase change → THIS effect ran
+  //   6. setBatchKeyframeThumbnails([])  ← WIPED frame 0!
+  //   7. Frame 1 arrives → updater sees prev=[] → adds only frame 1
+  //   ⇒ final array missing keyframe-0.jpg
+  // The reset is now done synchronously at the top of
+  // handleHoldStart, before any await, so the GL thread can't race
+  // ahead.  This effect is intentionally removed.
 
   // 2026-05-22 (audit F2f) — every accepted keyframe is a fresh
   // anchor for the IMU translation gate, regardless of which
@@ -861,6 +888,17 @@ export function Camera(props: CameraProps): React.JSX.Element {
       return;
     }
     try {
+      // 2026-05-23 (race fix) — synchronously clear thumbnails +
+      // engine state at the top of handleHoldStart, BEFORE awaiting
+      // incremental.start().  In the previous effect-based design
+      // the GL thread could ingest an AR frame during the await
+      // window and add to thumbnails BEFORE React's
+      // statusPhase-effect ran and wiped them.  See the removed
+      // useEffect a few hundred lines above for the full log trace.
+      // Synchronous reset here means any racing frame ingest sees
+      // an empty array and accumulates from there.
+      setBatchKeyframeThumbnails([]);
+      setIncrementalState(null);
       setStatusPhase('recording');
       setRecordingStartedAt(Date.now());
       const orientationRotation: 0 | 90 | 180 | 270 =
