@@ -921,6 +921,21 @@ public final class IncrementalStitcher: NSObject {
             (frameMode == "pose-based" || frameMode == "flow-based")
         self.keyframeGate.strategy =
             (frameMode == "flow-based") ? .flow : .pose
+        // 2026-05-22 (audit F1b) — non-AR-mode opt-out for the angular-
+        // delta fallback.  iOS parity with Android IncrementalStitcher.kt:461.
+        // captureSource = 'non-ar' means the host is using vision-camera
+        // (no ARKit pose) — disable the gate's angular fallback so it
+        // doesn't compute on gyro-drift-driven garbage pose.  Without
+        // this opt-out, gyro drift accumulates past the overlap
+        // threshold even on a stationary camera → near-identical
+        // frames get accepted → cv::Stitcher's camera-param estimator
+        // goes degenerate → "warpRoi too large (9581×12332) — estimator
+        // produced degenerate camera params" crash on finalize.
+        // Pre-audit iOS had this bug because the Swift facade had no
+        // disableAngularFallback property at all — the C++ setter
+        // existed but nothing on iOS ever called it.
+        let captureSource = (configOverrides["captureSource"] as? String) ?? "ar"
+        self.keyframeGate.disableAngularFallback = (captureSource == "non-ar")
         if let v = configOverrides["keyframeOverlapThreshold"] as? Double {
             self.keyframeGate.overlapThreshold = max(0.10, min(0.80, v))
         } else {

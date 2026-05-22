@@ -63,6 +63,7 @@ import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
 import { CaptureStatusOverlay, type CaptureStatusPhase } from './CaptureStatusOverlay';
+import { CaptureDebugOverlay } from './CaptureDebugOverlay';
 import { PanoramaBandOverlay } from './PanoramaBandOverlay';
 import {
   DEFAULT_PANORAMA_SETTINGS,
@@ -1006,6 +1007,26 @@ export function Camera(props: CameraProps): React.JSX.Element {
         topInset={insets.top}
         recordingStartedAt={recordingStartedAt ?? undefined}
       />
+
+      {/*
+        2026-05-22 (audit follow-up F3 + partial F9) — diagnostic
+        overlay for debug builds.  Gated on settings.debug so it
+        stays off by default for end-users and consumes zero CPU
+        when off (component returns null on undefined state).  Mount
+        below the status overlay so the REC banner still owns the
+        very top of the screen.
+       */}
+      {settings.debug && (
+        <CaptureDebugOverlay
+          incrementalState={incrementalState}
+          imuTranslationMetres={
+            isNonAR ? imuGate.getTranslationMetres() : null
+          }
+          captureSource={effectiveCaptureSource}
+          frameSelectionMode={settings.frameSelectionMode}
+          stitchMode={settings.stitchMode}
+        />
+      )}
 
       {/* Settings gear (top-right), gated on showSettingsButton. */}
       {showSettingsButton && (

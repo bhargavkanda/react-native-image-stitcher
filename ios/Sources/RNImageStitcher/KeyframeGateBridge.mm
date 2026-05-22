@@ -126,6 +126,11 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
     _gate.setFlowNoveltyPercentile(percentile);
 }
 
+- (void)setDisableAngularFallback:(BOOL)disabled {
+    // 2026-05-22 (audit F1b) — see header doc for rationale.
+    _gate.setDisableAngularFallback(disabled ? true : false);
+}
+
 - (KGBDecision *)evaluateWithTx:(float)tx ty:(float)ty tz:(float)tz
                               qx:(float)qx qy:(float)qy qz:(float)qz qw:(float)qw
                               fx:(float)fx fy:(float)fy cx:(float)cx cy:(float)cy
