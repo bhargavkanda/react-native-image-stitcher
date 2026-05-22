@@ -62,6 +62,24 @@ internal class KeyframeGate : AutoCloseable {
         get() = nativeIsEnabled(nativeHandle)
         set(value) = nativeSetEnabled(nativeHandle, value)
 
+    /// 2026-05-22 (audit F6) — Gate strategy.  Matches the C++ enum
+    /// retailens::GateStrategy (0 = Pose, 1 = Flow).  Pose strategy
+    /// uses plane-projection / angular novelty; Flow strategy uses
+    /// sparse optical-flow KLT.  iOS parity: Swift facade's
+    /// `keyframeGate.strategy = .flow / .pose`.  Default `Pose`
+    /// (matches C++ default).  Write-only; the C++ side has a getter
+    /// but the Kotlin facade caches locally to avoid JNI round-trip.
+    enum class Strategy(val nativeValue: Int) {
+        Pose(0),
+        Flow(1);
+    }
+
+    var strategy: Strategy = Strategy.Pose
+        set(value) {
+            field = value
+            nativeSetStrategy(nativeHandle, value.nativeValue)
+        }
+
     /// Required new-content fraction (0…1).  Default 0.4.  No getter
     /// — the C++ side has no read accessor (Swift side never needed
     /// to read this back either).  Stored locally for diagnostic
@@ -122,6 +140,47 @@ internal class KeyframeGate : AutoCloseable {
             nativeSetFlowMaxTranslationM(nativeHandle, value)
         }
 
+    /// 2026-05-22 (audit F5) — Flow strategy: Shi-Tomasi max corners
+    /// to track per frame.  Same knob iOS exposes via setFlowMaxCorners.
+    /// C++ clamps to ≥ 30.  Higher = more sensitive to fine detail but
+    /// CPU-quadratic in the KLT step.  Default 150 (matches iOS).
+    var flowMaxCorners: Int = 150
+        set(value) {
+            field = value
+            nativeSetFlowMaxCorners(nativeHandle, value)
+        }
+
+    /// 2026-05-22 (audit F5) — Flow strategy: Shi-Tomasi minimum
+    /// eigenvalue threshold (0, 1].  C++ default 0.01.  Lower lets
+    /// weaker corners in (more candidate points, more KLT noise);
+    /// higher demands stronger corners (fewer points, more robust).
+    var flowQualityLevel: Double = 0.01
+        set(value) {
+            field = value
+            nativeSetFlowQualityLevel(nativeHandle, value)
+        }
+
+    /// 2026-05-22 (audit F5) — Flow strategy: Shi-Tomasi minimum
+    /// distance between accepted corners, in working-resolution
+    /// pixels.  C++ clamps to ≥ 1.0.  Default 10.0 (matches iOS).
+    var flowMinDistance: Double = 10.0
+        set(value) {
+            field = value
+            nativeSetFlowMinDistance(nativeHandle, value)
+        }
+
+    /// 2026-05-22 (audit F5) — Eval cadence: caller-side throttle so
+    /// the Flow strategy runs every Nth frame instead of every frame.
+    /// iOS parity with `IncrementalStitcher.swift:2459-2471` —
+    /// the GATE doesn't enforce the throttle itself; it just stores
+    /// the value here.  The caller (`IncrementalStitcher.kt`) reads
+    /// this and decides per-frame whether to evaluate.  Default 1
+    /// (no throttle).  Caller is responsible for clamping to [1, 10].
+    var flowEvalEveryNFrames: Int = 1
+        set(value) {
+            field = value.coerceAtLeast(1)
+        }
+
     // ── Read-only state ─────────────────────────────────────────
 
     val acceptedCount: Int get() = nativeGetAcceptedCount(nativeHandle)
@@ -175,6 +234,56 @@ internal class KeyframeGate : AutoCloseable {
         )
     }
 
+    /**
+     * Pixel-aware evaluate.  Hands the gate the frame's grayscale
+     * plane so the C++ Flow strategy (sparse optical-flow novelty)
+     * actually runs — without grayData, the gate silently falls back
+     * to the Pose strategy (angular-delta).  iOS parity: see
+     * `KeyframeGateBridge.mm::evaluateWithPixelBuffer:...`.
+     *
+     * 2026-05-21 (v0.3) added.  Two call-site categories:
+     *
+     *  - AR mode (`RNSARCameraView.forwardToIncremental`): extracts
+     *    the Y plane from the ARCore camera image (YUV_420_888) and
+     *    hands it through.  Zero-copy on the way in (the byte[] is
+     *    pinned via GetPrimitiveArrayCritical in the JNI).
+     *  - Non-AR mode (`IncrementalStitcher.processFrameAtPath`): the
+     *    JS-driver path supplies a JPEG path; the caller decodes the
+     *    JPEG to grayscale before calling this method.
+     *
+     * @param grayData    The grayscale plane bytes.  Length must be
+     *                    at least `grayStride * grayHeight`.
+     * @param grayWidth   Image width in pixels (≤ grayStride).
+     * @param grayHeight  Image height in pixels.
+     * @param grayStride  Bytes per row.  May exceed `grayWidth` when
+     *                    the plane has padding (ARCore can pad).
+     */
+    fun evaluateWithFrame(
+        pose: RNSARFramePose,
+        latchedPlaneMatrix: FloatArray?,
+        grayData: ByteArray,
+        grayWidth: Int,
+        grayHeight: Int,
+        grayStride: Int,
+    ): KeyframeGateDecision {
+        val result = nativeEvaluateWithFrame(
+            nativeHandle,
+            pose.tx.toFloat(), pose.ty.toFloat(), pose.tz.toFloat(),
+            pose.qx.toFloat(), pose.qy.toFloat(), pose.qz.toFloat(), pose.qw.toFloat(),
+            pose.fx.toFloat(), pose.fy.toFloat(), pose.cx.toFloat(), pose.cy.toFloat(),
+            pose.imageWidth, pose.imageHeight,
+            latchedPlaneMatrix,
+            grayData, grayWidth, grayHeight, grayStride,
+        )
+        return KeyframeGateDecision(
+            accept = result[0] >= 0.5,
+            reason = reasonFromCode(result[1].toInt()),
+            newContentFraction = result[2],
+            acceptedCount = result[3].toInt(),
+            maxCount = result[4].toInt(),
+        )
+    }
+
     // ── JNI thunks ──────────────────────────────────────────────
 
     private external fun nativeCreate(): Long
@@ -193,6 +302,15 @@ internal class KeyframeGate : AutoCloseable {
     private external fun nativeSetDisableAngularFallback(handle: Long, disabled: Boolean)
     private external fun nativeSetFlowNoveltyPercentile(handle: Long, percentile: Double)
     private external fun nativeSetFlowMaxTranslationM(handle: Long, metres: Double)
+    // 2026-05-22 (audit F5) — flow-strategy tunables that were
+    // previously iOS-only.  Add Android JNI parity so the Settings UI
+    // sliders work on both platforms.
+    private external fun nativeSetFlowMaxCorners(handle: Long, maxCorners: Int)
+    private external fun nativeSetFlowQualityLevel(handle: Long, quality: Double)
+    private external fun nativeSetFlowMinDistance(handle: Long, minDistance: Double)
+    // 2026-05-22 (audit F6) — gate-strategy selector.  Maps to C++
+    // retailens::GateStrategy (Pose=0, Flow=1).
+    private external fun nativeSetStrategy(handle: Long, strategy: Int)
     private external fun nativeEvaluate(
         handle: Long,
         tx: Float, ty: Float, tz: Float,
@@ -200,6 +318,16 @@ internal class KeyframeGate : AutoCloseable {
         fx: Float, fy: Float, cx: Float, cy: Float,
         imageWidth: Int, imageHeight: Int,
         plane16: FloatArray?,
+    ): DoubleArray
+    private external fun nativeEvaluateWithFrame(
+        handle: Long,
+        tx: Float, ty: Float, tz: Float,
+        qx: Float, qy: Float, qz: Float, qw: Float,
+        fx: Float, fy: Float, cx: Float, cy: Float,
+        imageWidth: Int, imageHeight: Int,
+        plane16: FloatArray?,
+        grayData: ByteArray,
+        grayWidth: Int, grayHeight: Int, grayStride: Int,
     ): DoubleArray
 
     companion object {

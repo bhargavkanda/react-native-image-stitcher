@@ -678,6 +678,21 @@ export interface IncrementalFinalizeResult {
   framesIncluded?: number;
   framesDropped?: number;
   finalConfidenceThresh?: number;
+  /**
+   * 2026-05-22 (audit F2g) — which cv::Stitcher pipeline the batch
+   * finalize actually ran, after the engine's `auto` resolution
+   * heuristic (or the operator's explicit choice).  Values: `'panorama'`
+   * (rotation-only, ORB + BundleAdjusterRay + SphericalWarper) or
+   * `'scans'` (translational, affine + BundleAdjusterAffine +
+   * PlaneWarper).  Undefined on non-batch engines (hybrid/slit-scan)
+   * which don't go through cv::Stitcher at finalize.
+   *
+   * Host code can surface this on the output preview (e.g. a small
+   * pill labelled "scans" / "panorama") and in the debug toast to
+   * help operators understand what choice the auto-resolver made
+   * on the just-completed capture.
+   */
+  stitchModeResolved?: 'panorama' | 'scans';
 }
 
 
@@ -838,6 +853,16 @@ interface NativeIncrementalModule {
      * legacy start-time behaviour.
      */
     captureOrientation?: string;
+    /**
+     * 2026-05-22 (audit F2b) — JS-measured cumulative IMU translation
+     * magnitude in METRES.  Used by the auto-resolver in non-AR mode
+     * where the engine has no pose-driven translation source.  In AR
+     * mode native uses pose-derived translation and ignores this
+     * signal.  Defaults to 0 (back-compat) — auto-resolver always
+     * picks `panorama` when both pose-derived and IMU translation
+     * are zero, matching legacy behaviour.
+     */
+    imuTranslationMetres?: number;
   }): Promise<IncrementalFinalizeResult>;
   cancel(): Promise<{ ok: true }>;
   getState(): Promise<IncrementalState | null>;

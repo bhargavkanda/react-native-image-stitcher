@@ -388,6 +388,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                       seamFinderType:(NSString *)seamFinderType
                                   captureOrientation:(NSString *)captureOrientation
                                 useInscribedRectCrop:(BOOL)useInscribedRectCrop
+                                          stitchMode:(NSString *)stitchMode
                                                error:(NSError **)error {
   // ── Phase 2 (2026-05-16): delegated to shared C++ ───────────────────
   //
@@ -430,10 +431,19 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   cfg.captureOrientation   = captureOrientation.UTF8String;
   cfg.useInscribedRectCrop = (useInscribedRectCrop != NO);
   cfg.jpegQuality          = (int)quality;
-  // The iOS API doesn't expose stitchMode yet; defaulting to Panorama
-  // matches the prior hand-rolled pipeline's BestOf2NearestMatcher +
-  // BundleAdjusterRay configuration (rotation-only end-to-end).
-  cfg.stitchMode           = retailens::StitchMode::Panorama;
+  // 2026-05-22 (audit F2) — stitchMode is now wired through.  Caller
+  // (IncrementalStitcher.swift) reads the JS setting and, when set
+  // to 'auto', resolves to 'panorama' or 'scans' based on accumulated
+  // translation/rotation ratio (mirroring Android's
+  // resolveStitchModeAuto at IncrementalStitcher.kt:1727).
+  // Unknown / nil values fall through to Panorama (the historical
+  // hardcoded default — preserves behaviour for callers that haven't
+  // updated yet).
+  if ([stitchMode isEqualToString:@"scans"]) {
+    cfg.stitchMode         = retailens::StitchMode::Scans;
+  } else {
+    cfg.stitchMode         = retailens::StitchMode::Panorama;
+  }
   // Pre-stitch memory-abort threshold inside the manual pipeline keys
   // off this value.  Plumb the device's physical RAM through so the
   // heuristic scales correctly across the iPhone fleet (~2 GB legacy
@@ -813,6 +823,8 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // "portrait" → no bake-rotation.  Callers wanting rotation should
   // use the keyframe-driven Swift path which carries the orientation
   // from the JS accelerometer hook through IncrementalStitcher.
+  // 2026-05-22 (audit F2) — legacy video path passes nil stitchMode,
+  // which falls through to Panorama (preserves prior behaviour).
   RNStitchResult *result =
       [self stitchFramePaths:frames
                   outputPath:outputPath
@@ -822,6 +834,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
               seamFinderType:seamFinderType
           captureOrientation:nil
         useInscribedRectCrop:NO
+                  stitchMode:nil
                        error:&stitchErr];
 
   // Always tear down the tmp dir, success or fail — leaving

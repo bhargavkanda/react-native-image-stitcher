@@ -167,6 +167,18 @@ final class KeyframeGate {
     /// invoking `evaluate(...)`.
     var flowEvalEveryNFrames: Int = 1
 
+    /// 2026-05-22 (audit F1b) — non-AR-mode opt-out for the angular-
+    /// delta fallback.  See the bridge doc for the full rationale.
+    /// In short: set this to `true` in non-AR mode (captureSource =
+    /// 'non-ar') where there's no AR pose — the gate's angular-delta
+    /// computation would otherwise run on gyro-integrated drift and
+    /// accept near-identical frames → cv::Stitcher degenerate-param
+    /// crash.  Default `false` (back-compat — AR mode uses the
+    /// fallback).  Write-only; no read accessor on the C++ side.
+    var disableAngularFallback: Bool = false {
+        didSet { bridge.setDisableAngularFallback(disableAngularFallback) }
+    }
+
 
     /// One-shot flag: when set to `true`, the very next evaluate()
     /// accepts unconditionally and the flag self-resets.  Set by JS

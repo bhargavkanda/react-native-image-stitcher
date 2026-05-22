@@ -116,6 +116,7 @@ extern NSString *const RNImageStitcherErrorDomain;
                                       seamFinderType:(nullable NSString *)seamFinderType
                                   captureOrientation:(nullable NSString *)captureOrientation
                                 useInscribedRectCrop:(BOOL)useInscribedRectCrop
+                                          stitchMode:(nullable NSString *)stitchMode
                                                error:(NSError **)error;
 
 /// Extract `maxFrames` evenly-spaced frames from the video at
