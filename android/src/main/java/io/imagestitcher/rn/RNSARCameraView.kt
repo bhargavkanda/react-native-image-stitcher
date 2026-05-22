@@ -196,6 +196,15 @@ class RNSARCameraView @JvmOverloads constructor(
         // to work for hosts that prefer explicit control — the
         // refs/state are shared.
         RNSARSession.instance?.stopForView()
+        // 2026-05-23 (crash fix) — drop our local Session reference
+        // too.  stopForView() above pause+close'd the session and
+        // nulled the singleton's ref, but our own sessionRef still
+        // pointed at the closed Session.  If the view ever got
+        // re-used (re-attach without recreating), the next
+        // session.resume() / forwardToIncremental call would
+        // dereference a closed Session → SEGV in libarcore_c.so's
+        // internal cleanup, exactly the tombstone we saw.
+        sessionRef.set(null)
     }
 
     /// Called by IncrementalStitcher.start/stop.  When true,
