@@ -33,6 +33,14 @@ node_modules/
 *.tsbuildinfo
 .DS_Store
 
+# ── Test infra & test files (not shipped to consumers) ─────────────
+jest.config.js
+jest.mocks/
+tsconfig.test.json
+tsconfig.build.json
+src/**/__tests__/
+dist-test/
+
 # ── Example host app — not part of the library ─────────────────────
 example/
 

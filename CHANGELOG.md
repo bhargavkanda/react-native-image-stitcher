@@ -16,6 +16,199 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### v0.4 settings revamp (F10) — in progress
+
+> [!WARNING]
+> **Breaking type change.**  The flat 45-field `PanoramaSettings`
+> interface from v0.3 has been replaced with three engine-discriminated
+> hierarchical types (`PanoramaSettings`, `SlitscanSettings`,
+> `HybridSettings`).  Consumers passing custom settings literals to
+> `<Camera>` or to a Layer 2 modal must migrate to the new shape; the
+> v0.3 type is deleted, not aliased.  The C++ engine wire format is
+> unchanged — only the JS-side type surface moved.
+>
+> **Migration guide:** [`docs/migrations/v0.3-to-v0.4-panorama-settings.md`](docs/migrations/v0.3-to-v0.4-panorama-settings.md)
+> walks through every recipe (default-only hosts, custom-literal
+> hosts, slit-scan / hybrid hosts, storage migration for persisted
+> settings).
+
+#### Why
+
+The 2026-05-22 audit (entry below in v0.3.0) traced every
+`PanoramaSettings` field's native consumer and proved the flat type
+mixed three engines' (batch-keyframe, slit-scan, hybrid) settings into
+one bag of disjoint subsets.  Hosts had no way to know at the type
+level which settings their chosen engine would even read; the modal
+exposed knobs that were silently ignored on the active engine.  The
+revamp splits the type along engine boundaries so the types match what
+each engine actually consumes.
+
+#### What changed
+
+- **New file:** `src/camera/PanoramaSettings.ts` — `CaptureBaseSettings`
+  + three top-level types (`PanoramaSettings`, `SlitscanSettings`,
+  `HybridSettings`), each with co-located `DEFAULT_*_SETTINGS`.  Sub-trees
+  group related knobs: `stitcher` / `frameSelection.flow` (panorama);
+  `painting` / `registration.ncc1d` / `registration.ncc2d.emaSmoothing` /
+  `registration.ncc2d.panAxisLock` / `plane` / `advanced` (slitscan).
+- **New file:** `src/camera/PanoramaSettingsBridge.ts` — three pure
+  adapter functions (`panoramaSettingsToNativeConfig`,
+  `slitscanSettingsToNativeConfig`, `hybridSettingsToNativeConfig`)
+  that translate the typed JS tree → the flat
+  `Record<string, primitive>` the native bridges consume.  Handles
+  presence-as-enable (`ncc1d` defined ⇒ `enable1dNcc: true` on the
+  wire) and source-conditional plane optionals.
+- **New file:** `src/camera/buildPanoramaInitialSettings.ts` — pure
+  helper that translates `<Camera>`'s `default*` props into the
+  initial `PanoramaSettings` snapshot.  Takes the device's low-mem
+  classification as an argument so the function stays pure and
+  testable.
+- **Rewritten:** `src/camera/PanoramaSettingsModal.tsx` — now consumes
+  the new `PanoramaSettings` shape.  UI sections mirror the type tree
+  (Capture source, Debug, Stitcher accordion, Frame Selection
+  accordion with nested Flow tunables).  ~600 LOC smaller than v0.3
+  because dead slit-scan / hybrid / video-recording fields are gone.
+- **Rewired:** `src/camera/Camera.tsx` — settings state uses the new
+  type; `incremental.start({ config })` now passes
+  `panoramaSettingsToNativeConfig(settings)` instead of an inline flat
+  dict.  IMU translation gate reads
+  `settings.frameSelection.flow?.maxTranslationCm`.  Debug overlay
+  reads `settings.frameSelection.mode` + `settings.stitcher.stitchMode`.
+- **Updated:** `src/index.ts` — exports the new types + adapters; drops
+  the deleted v0.3 type.
+- **Test infra:** added `jest` + `ts-jest` + `@types/jest` devDeps; new
+  `jest.config.js`, `tsconfig.test.json`, `tsconfig.build.json` (the
+  latter excludes `__tests__/` from the shipped `dist/`).  19 tests
+  across two suites cover the bridge round-trips, presence-as-enable
+  cases, plane-source variants, and prop→settings-tree translation.
+
+#### Migration table — v0.3 flat → v0.4 hierarchical
+
+For `<Camera>`-consuming hosts (the only public path that took
+`PanoramaSettings` in v0.3):
+
+| v0.3 field                       | v0.4 path                                       |
+|----------------------------------|-------------------------------------------------|
+| `captureSource`                  | `captureSource` (unchanged)                     |
+| `debug`                          | `debug` (unchanged)                             |
+| `stitchMode`                     | `stitcher.stitchMode`                           |
+| `warperType`                     | `stitcher.warperType`                           |
+| `blenderType`                    | `stitcher.blenderType`                          |
+| `seamFinderType`                 | `stitcher.seamFinderType`                       |
+| `enableMaxInscribedRectCrop`     | `stitcher.enableMaxInscribedRectCrop`           |
+| `frameSelectionMode`             | `frameSelection.mode`                           |
+| `keyframeMaxCount`               | `frameSelection.maxKeyframes`                   |
+| `keyframeOverlapThreshold`       | `frameSelection.overlapThreshold`               |
+| `flowNoveltyPercentile`          | `frameSelection.flow.noveltyPercentile`         |
+| `flowEvalEveryNFrames`           | `frameSelection.flow.evalEveryNFrames`          |
+| `flowMaxTranslationCm`           | `frameSelection.flow.maxTranslationCm`          |
+| `flowMaxCorners`                 | `frameSelection.flow.maxCorners`                |
+| `flowQualityLevel`               | `frameSelection.flow.qualityLevel`              |
+| `flowMinDistance`                | `frameSelection.flow.minDistance`               |
+
+#### Deleted from the public type surface
+
+These fields were consumed only by slit-scan or hybrid engines (or
+not consumed at all per the audit) and were dead surface on
+`<Camera>`'s batch-keyframe path:
+
+- `incrementalEngine` — `<Camera>` always uses `batch-keyframe`; the
+  knob never reached this component.  Hosts that want slit-scan or
+  hybrid build their own capture flow on `incremental.start()` and
+  pass `SlitscanSettings` / `HybridSettings` instead.
+- `useARPreview` — superseded by `captureSource` ('ar' / 'non-ar').
+- `useDetectedPlane` — superseded by `SlitscanSettings.plane.source`.
+- `planeSource`, `virtualPlaneDepthMeters`, `arkitPlaneAlignmentThreshold`,
+  `planeProjectionStyle` — slit-scan only; on `SlitscanSettings.plane.*`.
+- `slitWidthFraction`, `sliverPosition`, `firstFrameFullFrame`,
+  `paintMode` — slit-scan only; on `SlitscanSettings.painting.*`.
+- `acceptGate`, `enableTriangulation`, `enableTriAccumulator`,
+  `enable2dNcc`, `enableRansacHomography`, `nccSearchRadius1d`,
+  `nccSearchMargin2d`, `nccConfidenceThreshold2d`,
+  `enableNcc2dEmaSmoothing`, `ncc2dEmaAlpha`,
+  `enableNcc2dPanAxisLock`, `ncc2dCrossAxisLockPx` — slit-scan only;
+  on `SlitscanSettings.registration.*`.
+- `hybridProjection` — hybrid only; on `HybridSettings.projection`.
+- `maxRecordingMs`, `framesPerSecond`, `minFrames`, `maxFrames`,
+  `quality` — historical video-recording fallback fields with no
+  consumer on `<Camera>`'s batch-keyframe path.
+
+#### Latent v0.3 bug fixed in passing
+
+The v0.3 `<Camera>` accepted a `defaultCaptureSource` prop but the
+internal `buildInitialSettings` function never copied it into
+`settings.captureSource` — only into `arPreference` state.  The
+discrepancy meant the wire dict sent to native always reported
+`captureSource: 'ar'` even when the operator's effective source was
+`'non-ar'`, which silently disabled Android's `disableAngularFallback`
+opt-out (audit fix F1).  v0.4's `extractPanoramaOverrides` +
+`buildPanoramaInitialSettings` route the prop through correctly.
+Hosts using `defaultCaptureSource="non-ar"` will see native receive
+the matching value for the first time.
+
+#### Known limitation — modal Capture-source field vs. AR toggle
+
+The on-screen AR toggle button at the bottom of `<Camera>` updates
+`arPreference` state (and through it `effectiveCaptureSource`),
+which decides which preview component mounts.  The Capture-source
+segmented control inside the settings modal updates
+`settings.captureSource`, which only affects what's reported to the
+native engine via `panoramaSettingsToNativeConfig` (gates Android's
+angular-fallback opt-out per audit fix F1).  These two values can
+drift if the operator toggles the AR button without re-opening
+settings, OR flips the modal field without touching the AR button.
+The on-screen toggle is the canonical UI affordance for the live
+preview path; the modal field is best thought of as a tester escape
+hatch for the wire-format consequence.  A future cleanup is to make
+both update the same source of truth — out of scope for v0.4.
+
+#### Migration example
+
+```ts
+// Before (v0.3)
+const settings: PanoramaSettings = {
+  captureSource: 'ar',
+  stitchMode: 'auto',
+  blenderType: 'multiband',
+  flowMaxTranslationCm: 50,
+  flowNoveltyPercentile: 0.85,
+  keyframeMaxCount: 6,
+  frameSelectionMode: 'flow-based',
+  // … 40+ more fields
+};
+
+// After (v0.4)
+const settings: PanoramaSettings = {
+  captureSource: 'ar',
+  debug: false,
+  stitcher: {
+    stitchMode: 'auto',
+    warperType: 'plane',
+    blenderType: 'multiband',
+    seamFinderType: 'graphcut',
+    enableMaxInscribedRectCrop: false,
+  },
+  frameSelection: {
+    mode: 'flow-based',
+    maxKeyframes: 6,
+    overlapThreshold: 0.20,
+    flow: {
+      noveltyPercentile: 0.85,
+      evalEveryNFrames: 5,
+      maxTranslationCm: 50,
+      maxCorners: 150,
+      qualityLevel: 0.01,
+      minDistance: 10,
+    },
+  },
+};
+
+// Or just use the default:
+import { DEFAULT_PANORAMA_SETTINGS } from 'react-native-image-stitcher';
+const settings = { ...DEFAULT_PANORAMA_SETTINGS, captureSource: 'non-ar' };
+```
+
+
 ## [0.3.0] — 2026-05-23
 
 > [!IMPORTANT]
