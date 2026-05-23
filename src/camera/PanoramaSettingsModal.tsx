@@ -52,7 +52,6 @@
 import React, { useState } from 'react';
 import {
   Modal,
-  NativeModules,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -69,29 +68,23 @@ import {
   type FrameSelectionSettings,
   type PanoramaSettings,
 } from './PanoramaSettings';
+import {
+  getPhysicalMemoryBytes,
+  isLowMemDevice,
+} from './lowMemDevice';
 
 
 // ─── Device-memory diagnostic (informational only) ─────────────────
 //
-// Read once at module load.  We surface this as a single Menlo-monospace
-// line at the top of the modal body so operators can see what the
-// SDK detected — useful for diagnosing "why am I OOMing on this
-// device?" questions.  The value also feeds <Camera>'s low-memory
-// blender/seam fallback (see Camera.tsx `getIsLowMemDevice`), but
-// that lives there since it influences the initial `useState`, not
-// the modal's running display.
+// Read once at module load via the shared `lowMemDevice` helper.  We
+// surface this as a single Menlo-monospace line at the top of the
+// modal body so operators can see what the SDK detected — useful for
+// diagnosing "why am I OOMing on this device?" questions.  The same
+// helper feeds <Camera>'s initial-settings device adaptation; they
+// were duplicated implementations pre-Phase-2-fix.
 
-const _physicalMemoryBytes: number = (() => {
-  const m = (NativeModules as Record<string, unknown>).BatchStitcher;
-  const bytes =
-    m && typeof m === 'object'
-      ? (m as { physicalMemoryBytes?: number }).physicalMemoryBytes
-      : undefined;
-  return typeof bytes === 'number' ? bytes : 0;
-})();
-
-const _isLowMem = _physicalMemoryBytes > 0
-  && _physicalMemoryBytes < 2 * 1024 * 1024 * 1024;
+const _physicalMemoryBytes = getPhysicalMemoryBytes();
+const _isLowMem = isLowMemDevice();
 
 
 export interface PanoramaSettingsModalProps {
