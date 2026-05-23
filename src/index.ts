@@ -109,11 +109,49 @@ export type { CaptureThumbnailItem } from './camera/CaptureThumbnailStrip';
 export { IncrementalPanGuide } from './camera/IncrementalPanGuide';
 export { PanoramaBandOverlay } from './camera/PanoramaBandOverlay';
 export { PanoramaGuidance } from './camera/PanoramaGuidance';
+// Settings modal — the modal is in `PanoramaSettingsModal.tsx`, but
+// the type tree + defaults + JS↔native bridge live in dedicated
+// files since v0.4 (F10).  The modal is now a thin presentational
+// component over the typed structure.
+export { PanoramaSettingsModal } from './camera/PanoramaSettingsModal';
+export type { PanoramaSettingsModalProps } from './camera/PanoramaSettingsModal';
+
+// Settings types — the v0.4 engine-discriminated structures.  Three
+// disjoint top-level types (one per stitching engine), each composed
+// of named sub-trees the corresponding native engine actually reads.
+// See `./camera/PanoramaSettings.ts` for the rationale and the
+// field-by-field native-consumer references.
 export {
-  PanoramaSettingsModal,
   DEFAULT_PANORAMA_SETTINGS,
-} from './camera/PanoramaSettingsModal';
-export type { PanoramaSettings } from './camera/PanoramaSettingsModal';
+  DEFAULT_SLITSCAN_SETTINGS,
+  DEFAULT_HYBRID_SETTINGS,
+} from './camera/PanoramaSettings';
+export type {
+  CaptureBaseSettings,
+  PanoramaSettings,
+  BatchStitcherSettings,
+  FrameSelectionSettings,
+  FlowGateSettings,
+  SlitscanSettings,
+  SlitscanPaintingSettings,
+  SlitscanRegistrationSettings,
+  SlitscanAdvancedSettings,
+  Ncc1dSettings,
+  Ncc2dSettings,
+  PlaneProjectionSettings,
+  HybridSettings,
+} from './camera/PanoramaSettings';
+
+// Settings → native config adapters.  Layer 2 hosts building their
+// own capture flow on top of `incremental.start()` should always
+// pass the result of the matching adapter as `config`; the bridge is
+// the single source of truth for the JS↔native wire format.
+export {
+  panoramaSettingsToNativeConfig,
+  slitscanSettingsToNativeConfig,
+  hybridSettingsToNativeConfig,
+} from './camera/PanoramaSettingsBridge';
+export type { NativeConfigDict } from './camera/PanoramaSettingsBridge';
 export { ViewportCropOverlay } from './camera/ViewportCropOverlay';
 
 // ── Capture hooks ─────────────────────────────────────────────────────
