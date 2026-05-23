@@ -69,11 +69,13 @@ import { CaptureKeyframePill } from './CaptureKeyframePill';
 import { CaptureOrientationPill } from './CaptureOrientationPill';
 import { CaptureStitchStatsToast, useStitchStatsToast } from './CaptureStitchStatsToast';
 import { PanoramaBandOverlay } from './PanoramaBandOverlay';
+import { type PanoramaSettings } from './PanoramaSettings';
+import { panoramaSettingsToNativeConfig } from './PanoramaSettingsBridge';
+import { PanoramaSettingsModal } from './PanoramaSettingsModal';
 import {
-  DEFAULT_PANORAMA_SETTINGS,
-  PanoramaSettingsModal,
-  type PanoramaSettings,
-} from './PanoramaSettingsModal';
+  buildPanoramaInitialSettings,
+  type PanoramaPropOverrides,
+} from './buildPanoramaInitialSettings';
 import { useCapture } from './useCapture';
 import { useDeviceOrientation } from './useDeviceOrientation';
 import {
@@ -471,40 +473,59 @@ function deriveEffectiveCaptureSource(
 
 
 /**
- * Apply per-prop defaults to build the initial settings snapshot.
- * The settings live in component state from there; the prop values
- * never re-flow.
+ * Whether the host device's physical memory is below the threshold
+ * where the multiband+graphcut blender/seam-finder combo risks
+ * jetsam (iOS) or lmkd (Android) kills mid-stitch.  Read once from
+ * the native bridge at module load (the BatchStitcher iOS module
+ * exposes `physicalMemoryBytes` via `constantsToExport`).  Returns
+ * `false` if the bridge hasn't surfaced the value — the safe default
+ * is to use the higher-quality blender combo on unknown devices and
+ * let the operator switch in the settings modal if they OOM.
  *
- * Note: the `default*ResolMP` props don't have a home on PanoramaSettings
- * yet — they're accepted on the prop interface for forward compatibility
- * but ignored here.  Wiring is a follow-up once PanoramaSettings is
- * extended.
+ * v0.3 had this as a module-load mutation that rewrote a `let`-bound
+ * `DEFAULT_PANORAMA_SETTINGS`.  v0.4 keeps the type defaults
+ * side-effect-free; the device-adaptation lives here, at the mount
+ * site that actually needs it.  Same observable behaviour; cleaner
+ * separation.
  */
-function buildInitialSettings(props: CameraProps): PanoramaSettings {
+function getIsLowMemDevice(): boolean {
+  const m = (NativeModules as Record<string, unknown>).BatchStitcher;
+  const bytes =
+    m && typeof m === 'object'
+      ? (m as { physicalMemoryBytes?: number }).physicalMemoryBytes
+      : undefined;
+  return typeof bytes === 'number'
+    && bytes > 0
+    && bytes < 2 * 1024 * 1024 * 1024;
+}
+
+
+/**
+ * Pluck the props that influence the initial PanoramaSettings tree.
+ * Kept inline (vs. a wide structural type) so future Camera prop
+ * additions don't accidentally widen the settings-translation
+ * surface — the pure builder in `./buildPanoramaInitialSettings.ts`
+ * has the canonical interface; this just forwards the relevant
+ * fields.
+ *
+ * The `default*ResolMP` props on `CameraProps` are documented as
+ * forward-looking no-ops; the new PanoramaSettings tree has no home
+ * for them yet (the v0.3 audit found cv::Stitcher's resol knobs
+ * aren't reached by either platform's bridge).  They're accepted on
+ * the prop interface for API stability and ignored here.
+ */
+function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
   return {
-    ...DEFAULT_PANORAMA_SETTINGS,
-    stitchMode: props.defaultStitchMode ?? DEFAULT_PANORAMA_SETTINGS.stitchMode,
-    blenderType:
-      props.defaultBlender ?? DEFAULT_PANORAMA_SETTINGS.blenderType,
-    seamFinderType:
-      props.defaultSeamFinder ?? DEFAULT_PANORAMA_SETTINGS.seamFinderType,
-    warperType:
-      props.defaultWarper ?? DEFAULT_PANORAMA_SETTINGS.warperType,
-    flowNoveltyPercentile:
-      props.defaultFlowNoveltyPercentile ??
-      DEFAULT_PANORAMA_SETTINGS.flowNoveltyPercentile,
-    flowEvalEveryNFrames:
-      props.defaultFlowEvalEveryNFrames ??
-      DEFAULT_PANORAMA_SETTINGS.flowEvalEveryNFrames,
-    flowMaxTranslationCm:
-      props.defaultFlowMaxTranslationCm ??
-      DEFAULT_PANORAMA_SETTINGS.flowMaxTranslationCm,
-    keyframeMaxCount:
-      props.defaultKeyframeMaxCount ??
-      DEFAULT_PANORAMA_SETTINGS.keyframeMaxCount,
-    keyframeOverlapThreshold:
-      props.defaultKeyframeOverlapThreshold ??
-      DEFAULT_PANORAMA_SETTINGS.keyframeOverlapThreshold,
+    defaultCaptureSource: props.defaultCaptureSource,
+    defaultStitchMode: props.defaultStitchMode,
+    defaultBlender: props.defaultBlender,
+    defaultSeamFinder: props.defaultSeamFinder,
+    defaultWarper: props.defaultWarper,
+    defaultFlowNoveltyPercentile: props.defaultFlowNoveltyPercentile,
+    defaultFlowEvalEveryNFrames: props.defaultFlowEvalEveryNFrames,
+    defaultFlowMaxTranslationCm: props.defaultFlowMaxTranslationCm,
+    defaultKeyframeMaxCount: props.defaultKeyframeMaxCount,
+    defaultKeyframeOverlapThreshold: props.defaultKeyframeOverlapThreshold,
   };
 }
 
@@ -546,7 +567,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
   );
   const [lens, setLens] = useState<CameraLens>(defaultLens);
   const [settings, setSettings] = useState<PanoramaSettings>(() =>
-    buildInitialSettings(props),
+    buildPanoramaInitialSettings(
+      extractPanoramaOverrides(props),
+      getIsLowMemDevice(),
+    ),
   );
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
   const [statusPhase, setStatusPhase] = useState<CaptureStatusPhase>('idle');
@@ -694,12 +718,18 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // |residual|` — which undercounted any time a non-IMU accept
   // (flow novelty, force-last) reset the integrator before the
   // budget threshold was reached.
+  // The translation budget lives at `frameSelection.flow.maxTranslationCm`
+  // in the new hierarchical settings shape.  When `flow` is undefined
+  // (the consumer opted out of the flow strategy entirely), the gate
+  // stays disabled — same observable behaviour as v0.3's `0` default.
+  const flowMaxTranslationCm =
+    settings.frameSelection.flow?.maxTranslationCm ?? 0;
   const imuGate = useIMUTranslationGate({
     enabled:
       isNonAR
       && statusPhase === 'recording'
-      && settings.flowMaxTranslationCm > 0,
-    budgetMeters: Math.max(0.001, settings.flowMaxTranslationCm / 100.0),
+      && flowMaxTranslationCm > 0,
+    budgetMeters: Math.max(0.001, flowMaxTranslationCm / 100.0),
     onBudgetExceeded: () => {
       const mod = getIncrementalNativeModule();
       mod?.markNextFrameAsLastKeyframe?.().catch(() => undefined);
@@ -890,6 +920,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
         deviceOrientation === 'portrait' ? 90
           : deviceOrientation === 'portrait-upside-down' ? 270
             : 0;
+      // v0.4 — the inline-flat config dict that v0.3 maintained here
+      // moved into `panoramaSettingsToNativeConfig` (see
+      // PanoramaSettingsBridge.ts).  That adapter is the single source
+      // of truth for the JS→native wire format; both this call site
+      // AND the modal's reset-to-defaults preview agree on the same
+      // mapping.  Audit fixes F1 / F4 / F6 from v0.3 are now properties
+      // of the bridge (verified by the unit tests in
+      // src/camera/__tests__/PanoramaSettingsBridge.test.ts).
       await incremental.start({
         snapshotJpegQuality: 75,
         snapshotEveryNAccepts: 1,
@@ -901,37 +939,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         canvasWidth: 5000,
         canvasHeight: 5000,
         engine: 'batch-keyframe',
-        config: {
-          // ── cv::Stitcher (batch finalize) ─────────────────────────
-          stitchMode: settings.stitchMode,
-          warperType: settings.warperType,
-          blenderType: settings.blenderType,
-          seamFinderType: settings.seamFinderType,
-          enableMaxInscribedRectCrop: settings.enableMaxInscribedRectCrop,
-          // ── KeyframeGate (per-frame selection) ────────────────────
-          // F6 audit fix: pass settings.frameSelectionMode through
-          // instead of hardcoding 'flow-based' (which silently made the
-          // time-based / pose-based modal options no-ops).
-          frameSelectionMode: settings.frameSelectionMode,
-          keyframeMaxCount: settings.keyframeMaxCount,
-          keyframeOverlapThreshold: settings.keyframeOverlapThreshold,
-          // ── Flow-strategy tunables ────────────────────────────────
-          // F4 audit fix: previously omitted, which made the modal
-          // sliders for these three a complete no-op (only iOS native
-          // even read them, and only when JS sent them).
-          flowNoveltyPercentile: settings.flowNoveltyPercentile,
-          flowEvalEveryNFrames: settings.flowEvalEveryNFrames,
-          flowMaxTranslationCm: settings.flowMaxTranslationCm,
-          flowMaxCorners: settings.flowMaxCorners,
-          flowQualityLevel: settings.flowQualityLevel,
-          flowMinDistance: settings.flowMinDistance,
-          // ── Engine-routing flags consumed by native ───────────────
-          // F1 audit fix: Android keyframe gate's disableAngularFallback
-          // opt-out reads this to decide whether to skip the angular
-          // fallback (gyro pose is too noisy for the FoV-overlap calc
-          // in non-AR mode, causing degenerate cv::Stitcher params).
-          captureSource: settings.captureSource,
-        },
+        config: panoramaSettingsToNativeConfig(settings),
       });
       imuGate.resetAnchor();
       // Start pumping vision-camera snapshots into the engine for
@@ -1132,8 +1140,8 @@ export function Camera(props: CameraProps): React.JSX.Element {
               isNonAR ? imuGate.getTranslationMetres() : null
             }
             captureSource={effectiveCaptureSource}
-            frameSelectionMode={settings.frameSelectionMode}
-            stitchMode={settings.stitchMode}
+            frameSelectionMode={settings.frameSelection.mode}
+            stitchMode={settings.stitcher.stitchMode}
           />
         </>
       )}
