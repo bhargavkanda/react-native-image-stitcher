@@ -428,133 +428,146 @@ class RNSARCameraView @JvmOverloads constructor(
             }
             return
         }
-        try {
-            // 2026-05-21 (v0.3) — pixel-data path.  Pre-0.3 this code
-            // unconditionally encoded the YUV camera image to JPEG and
-            // wrote it to disk for EVERY ARCore frame at ~60 Hz (~25 ms
-            // per frame of JPEG encode + disk I/O on the GL render
-            // thread), regardless of whether the C++ KeyframeGate would
-            // accept it.  Now we extract the Y plane bytes (cheap
-            // memcpy from a DirectByteBuffer), feed them to the gate
-            // for proper Flow-strategy evaluation, and defer the JPEG
-            // encode + disk write to the `onAccept` lambda so it only
-            // runs on the rare frames the gate actually keeps
-            // (typically ~6 per capture).
-            //
-            // Y-plane extraction for ARCore's YUV_420_888 format:
-            // plane[0] is the luminance channel at full resolution,
-            // pixelStride=1, rowStride may equal width OR be padded.
-            // We pass rowStride as the C++ side's `stride` so the gate
-            // skips padding correctly.
-            val yPlane = image.planes[0]
-            val yBuffer = yPlane.buffer
-            val yStride = yPlane.rowStride
-            val yWidth = image.width
-            val yHeight = image.height
-            // Copy Y bytes into a JVM-side ByteArray.  Using
-            // duplicate() so we don't mutate the original buffer's
-            // position state (ARCore may have other readers).
-            // For 1920×1080 Y plane that's ~2 MB; on Galaxy A35 the
-            // memcpy itself is < 1 ms.  JNI side pins via
-            // GetPrimitiveArrayCritical so the byte[] stays a single
-            // copy through the entire frame's lifecycle.
-            val ySize = yStride * yHeight
-            val yBytes = ByteArray(ySize)
-            yBuffer.duplicate().apply { rewind() }.get(yBytes, 0, ySize)
 
-            // Compute yaw + pitch from the ARCore quaternion using
-            // the same convention the iOS Swift side uses (camera-
-            // forward in world space).  This keeps the two platforms
-            // numerically aligned for the FoV-overlap gate.
-            val q = camera.pose.rotationQuaternion  // x, y, z, w
-            val (yaw, pitch) = quaternionYawPitch(q)
+        // 2026-05-22 (audit follow-up #19) — minimise ARCore Image
+        // hold time.
+        //
+        // Pre-#19 the Image stayed open through the entire JNI
+        // ingest call AND any subsequent JPEG encode (~25 ms in
+        // legacy hybrid mode where every frame is encoded eagerly;
+        // ~25 ms in batch-keyframe mode for the ~5/60 frames the
+        // gate accepts).  At 60 Hz ARCore that meant the Image was
+        // held 25-30 ms per frame on accepts, starving the Camera2
+        // ImageReader's circular buffer pool and risking
+        // "BufferQueue has been abandoned" stalls.
+        //
+        // The fix is mechanical: pack the YUV planes into a
+        // JVM-side NV21 byte array (~3 ms), close the Image, and
+        // run all subsequent work (JNI ingest + JPEG encode) on
+        // the copied bytes.  ARCore Camera2 buffer pool stays
+        // healthier; latency-sensitive ARCore frames flow through
+        // their fixed pool instead of waiting on our JPEG path.
+        //
+        // The packed.nv21 array's first `width*height` bytes are
+        // the Y plane (densely packed, stride = width) — these go
+        // to the C++ gate as grayscale.  The full array is the
+        // input to YuvImageConverter.encodeJpegFromNV21 if the
+        // gate accepts (or if we're in legacy eager-encode mode).
+        val packed = try {
+            YuvImageConverter.packNV21(image)
+        } finally {
+            // Close ASAP — every microsecond reduces buffer-pool
+            // pressure on Camera2.  Even if packNV21 returns null
+            // (unsupported format), we still need to close.
+            try { image.close() } catch (_: Throwable) {}
+        } ?: run {
+            if (forwardLogTick % 30 == 1) {
+                Log.w(TAG, "forwardToIncremental: packNV21 returned null (unexpected format?)")
+            }
+            return
+        }
 
-            // Both FoVs + the full quaternion + intrinsics go to the
-            // engine.  V6 pose-driven path uses (qx, qy, qz, qw, fx,
-            // fy, cx, cy, w, h) to compute the geometrically-exact
-            // homography.
-            val intrinsics = camera.imageIntrinsics
-            val fx = intrinsics.focalLength[0].toDouble()
-            val fy = intrinsics.focalLength[1].toDouble()
-            val cxIntr = intrinsics.principalPoint[0].toDouble()
-            val cyIntr = intrinsics.principalPoint[1].toDouble()
-            val w = intrinsics.imageDimensions[0].toDouble()
-            val h = intrinsics.imageDimensions[1].toDouble()
-            val fovHRad = 2.0 * atan(w / (2.0 * fx))
-            val fovVRad = 2.0 * atan(h / (2.0 * fy))
-            val fovHDeg = fovHRad * 180.0 / Math.PI
-            val fovVDeg = fovVRad * 180.0 / Math.PI
+        // Compute yaw + pitch from the ARCore quaternion using
+        // the same convention the iOS Swift side uses (camera-
+        // forward in world space).  This keeps the two platforms
+        // numerically aligned for the FoV-overlap gate.  `camera`
+        // (and `camera.pose`) remain valid after image.close() —
+        // they're ARCore Frame metadata, not pixel buffers.
+        val q = camera.pose.rotationQuaternion  // x, y, z, w
+        val (yaw, pitch) = quaternionYawPitch(q)
 
-            // ARCore quaternion comes back in (x, y, z, w) order.
-            val qarr = camera.pose.rotationQuaternion
-            // P3-F: also extract translation so the KeyframeGate's
-            // plane-based ray-projection can compute polygon overlap.
-            // Previously these were dropped, forcing the gate into
-            // angular-fallback even when a plane was latched.
-            val tArr = camera.pose.translation
+        // Both FoVs + the full quaternion + intrinsics go to the
+        // engine.  V6 pose-driven path uses (qx, qy, qz, qw, fx,
+        // fy, cx, cy, w, h) to compute the geometrically-exact
+        // homography.
+        val intrinsics = camera.imageIntrinsics
+        val fx = intrinsics.focalLength[0].toDouble()
+        val fy = intrinsics.focalLength[1].toDouble()
+        val cxIntr = intrinsics.principalPoint[0].toDouble()
+        val cyIntr = intrinsics.principalPoint[1].toDouble()
+        val w = intrinsics.imageDimensions[0].toDouble()
+        val h = intrinsics.imageDimensions[1].toDouble()
+        val fovHRad = 2.0 * atan(w / (2.0 * fx))
+        val fovVRad = 2.0 * atan(h / (2.0 * fy))
+        val fovHDeg = fovHRad * 180.0 / Math.PI
+        val fovVDeg = fovVRad * 180.0 / Math.PI
 
-            val trackingPoor = camera.trackingState != TrackingState.TRACKING
-            val module = IncrementalStitcher.bridgeInstance ?: return
-            // 2026-05-15 (B3) — pass current display rotation so the
-            // encoded JPEG gets an EXIF orientation tag.  Captured into
-            // a local val so the lambda below closes over a primitive
-            // (avoids re-reading lastDisplayRotation if it shifts
-            // between gate-evaluate and lambda invocation).
-            val rotationForEncode = if (lastDisplayRotation >= 0)
-                lastDisplayRotation else android.view.Surface.ROTATION_0
-            // 2026-05-21 (v0.3) — eager JPEG encode is only needed when
-            // the engine is in the legacy hybrid/firstwins live-engine
-            // mode (which feeds JPEG paths into addFrameAtPath every
-            // frame).  In batch-keyframe mode (the production Camera
-            // component's path), the JPEG is encoded LAZILY inside
-            // the onAccept lambda below — only on the ~6 frames per
-            // capture that the C++ KeyframeGate actually keeps.
-            val legacyJpegPath: String? = if (module.isBatchKeyframeMode) {
-                null
-            } else {
-                YuvImageConverter.encodeToJpeg(
-                    image,
-                    tmpJpegFile.absolutePath,
+        // ARCore quaternion comes back in (x, y, z, w) order.
+        val qarr = camera.pose.rotationQuaternion
+        // P3-F: also extract translation so the KeyframeGate's
+        // plane-based ray-projection can compute polygon overlap.
+        // Previously these were dropped, forcing the gate into
+        // angular-fallback even when a plane was latched.
+        val tArr = camera.pose.translation
+
+        val trackingPoor = camera.trackingState != TrackingState.TRACKING
+        val module = IncrementalStitcher.bridgeInstance ?: return
+        // 2026-05-15 (B3) — pass current display rotation so the
+        // encoded JPEG gets an EXIF orientation tag.  Captured into
+        // a local val so the lambda below closes over a primitive
+        // (avoids re-reading lastDisplayRotation if it shifts
+        // between gate-evaluate and lambda invocation).
+        val rotationForEncode = if (lastDisplayRotation >= 0)
+            lastDisplayRotation else android.view.Surface.ROTATION_0
+
+        // 2026-05-21 (v0.3) — eager JPEG encode is only needed when
+        // the engine is in the legacy hybrid/firstwins live-engine
+        // mode (which feeds JPEG paths into addFrameAtPath every
+        // frame).  In batch-keyframe mode (the production Camera
+        // component's path), the JPEG is encoded LAZILY inside
+        // the onAccept lambda below — only on the ~6 frames per
+        // capture that the C++ KeyframeGate actually keeps.
+        //
+        // 2026-05-22 (#19) — the encode now reads from the already-
+        // packed NV21 bytes (`packed`), NOT from the live Image
+        // (which has been closed above).  Same output, no Image
+        // hold time.
+        val legacyJpegPath: String? = if (module.isBatchKeyframeMode) {
+            null
+        } else {
+            YuvImageConverter.encodeJpegFromNV21(
+                packed,
+                tmpJpegFile.absolutePath,
+                jpegQuality = 70,
+                displayRotation = rotationForEncode,
+            )
+        }
+        module.ingestFromARCameraView(
+            tx = tArr[0].toDouble(),
+            ty = tArr[1].toDouble(),
+            tz = tArr[2].toDouble(),
+            qx = qarr[0].toDouble(), qy = qarr[1].toDouble(),
+            qz = qarr[2].toDouble(), qw = qarr[3].toDouble(),
+            fx = fx, fy = fy, cx = cxIntr, cy = cyIntr,
+            imageWidth = intrinsics.imageDimensions[0],
+            imageHeight = intrinsics.imageDimensions[1],
+            yaw = yaw, pitch = pitch,
+            fovHorizDegrees = fovHDeg, fovVertDegrees = fovVDeg,
+            trackingPoor = trackingPoor,
+            // The Y plane lives at packed.nv21[0 .. width*height).
+            // C++ keyframe_gate reads `height * stride` bytes and
+            // ignores anything past that, so passing the full NV21
+            // array with `grayStride = width` reads exactly the Y
+            // plane (UV bytes at the tail are not touched).
+            grayData = packed.nv21,
+            grayWidth = packed.width,
+            grayHeight = packed.height,
+            grayStride = packed.width,
+            legacyJpegPath = legacyJpegPath,
+            onAccept = { targetPath ->
+                // Lazy JPEG encode.  Runs ONLY if the C++ KeyframeGate
+                // accepted the frame.  Encodes from the pre-packed
+                // NV21 bytes — the ARCore Image has been closed since
+                // ~25 ms ago (right after packNV21), so no
+                // Image-hold cost on this slow path.
+                YuvImageConverter.encodeJpegFromNV21(
+                    packed,
+                    targetPath,
                     jpegQuality = 70,
                     displayRotation = rotationForEncode,
-                )
-            }
-            module.ingestFromARCameraView(
-                tx = tArr[0].toDouble(),
-                ty = tArr[1].toDouble(),
-                tz = tArr[2].toDouble(),
-                qx = qarr[0].toDouble(), qy = qarr[1].toDouble(),
-                qz = qarr[2].toDouble(), qw = qarr[3].toDouble(),
-                fx = fx, fy = fy, cx = cxIntr, cy = cyIntr,
-                imageWidth = intrinsics.imageDimensions[0],
-                imageHeight = intrinsics.imageDimensions[1],
-                yaw = yaw, pitch = pitch,
-                fovHorizDegrees = fovHDeg, fovVertDegrees = fovVDeg,
-                trackingPoor = trackingPoor,
-                grayData = yBytes,
-                grayWidth = yWidth,
-                grayHeight = yHeight,
-                grayStride = yStride,
-                legacyJpegPath = legacyJpegPath,
-                onAccept = { targetPath ->
-                    // Lazy JPEG encode.  Runs ONLY if the C++ KeyframeGate
-                    // accepted the frame.  The ARCore Image is still open
-                    // at this point (we haven't reached `image.close()`
-                    // in the surrounding `finally` block yet), so the
-                    // encode reads raw camera pixels directly into a
-                    // JPEG at the final persistent path — no tmp file,
-                    // no second copy.
-                    YuvImageConverter.encodeToJpeg(
-                        image,
-                        targetPath,
-                        jpegQuality = 70,
-                        displayRotation = rotationForEncode,
-                    ) != null
-                },
-            )
-        } finally {
-            image.close()
-        }
+                ) != null
+            },
+        )
     }
 
     private fun applyDisplayGeometry() {
