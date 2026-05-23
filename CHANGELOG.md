@@ -128,6 +128,35 @@ not consumed at all per the audit) and were dead surface on
   `quality` — historical video-recording fallback fields with no
   consumer on `<Camera>`'s batch-keyframe path.
 
+#### Latent v0.3 bug fixed in passing
+
+The v0.3 `<Camera>` accepted a `defaultCaptureSource` prop but the
+internal `buildInitialSettings` function never copied it into
+`settings.captureSource` — only into `arPreference` state.  The
+discrepancy meant the wire dict sent to native always reported
+`captureSource: 'ar'` even when the operator's effective source was
+`'non-ar'`, which silently disabled Android's `disableAngularFallback`
+opt-out (audit fix F1).  v0.4's `extractPanoramaOverrides` +
+`buildPanoramaInitialSettings` route the prop through correctly.
+Hosts using `defaultCaptureSource="non-ar"` will see native receive
+the matching value for the first time.
+
+#### Known limitation — modal Capture-source field vs. AR toggle
+
+The on-screen AR toggle button at the bottom of `<Camera>` updates
+`arPreference` state (and through it `effectiveCaptureSource`),
+which decides which preview component mounts.  The Capture-source
+segmented control inside the settings modal updates
+`settings.captureSource`, which only affects what's reported to the
+native engine via `panoramaSettingsToNativeConfig` (gates Android's
+angular-fallback opt-out per audit fix F1).  These two values can
+drift if the operator toggles the AR button without re-opening
+settings, OR flips the modal field without touching the AR button.
+The on-screen toggle is the canonical UI affordance for the live
+preview path; the modal field is best thought of as a tester escape
+hatch for the wire-format consequence.  A future cleanup is to make
+both update the same source of truth — out of scope for v0.4.
+
 #### Migration example
 
 ```ts

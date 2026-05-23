@@ -181,7 +181,8 @@ export function PanoramaSettingsModal({
               {`device: physicalMemoryBytes=${_physicalMemoryBytes} `
                 + `(${(_physicalMemoryBytes / (1024 ** 3)).toFixed(2)} GB) · `
                 + `isLowMem=${_isLowMem ? 'yes' : 'no'} · `
-                + `default blender=${_isLowMem ? 'feather' : 'multiband'}`}
+                + `current blender=${settings.stitcher.blenderType} `
+                + `(low-mem fallback=${_isLowMem ? 'feather' : 'multiband'})`}
             </Text>
 
             {/* ──────────────────────────────────────────────
