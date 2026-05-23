@@ -23,6 +23,16 @@ const sdkRoot = path.resolve(__dirname, '..');
 
 const config = {
   watchFolders: [sdkRoot],
+  // Pin Metro to port 8082 to avoid colliding with Tug's Expo dev
+  // server (which holds 8081 on this machine).  The pinning is
+  // mirrored in three other places — keep them in sync if you ever
+  // change it:
+  //
+  //   - example/package.json   → `--port 8082` on android/ios/start
+  //   - example/ios/RNImageStitcherExample/AppDelegate.swift
+  //         → `RCTBundleURLProvider.sharedSettings().port = 8082`
+  //   - example/android/gradle.properties → `reactNativeDevServerPort=8082`
+  server: { port: 8082 },
   resolver: {
     extraNodeModules: {
       'react-native-image-stitcher': sdkRoot,
