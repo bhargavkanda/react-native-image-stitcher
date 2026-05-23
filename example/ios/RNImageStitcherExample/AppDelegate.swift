@@ -40,9 +40,14 @@ class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
 
   override func bundleURL() -> URL? {
 #if DEBUG
-    RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: "index")
+    // Pin Metro to port 8082 (project-wide convention; 8081 is held
+    // by Tug's Expo dev server on this machine).  Mirrors the same
+    // pin in example/metro.config.js, example/package.json scripts,
+    // and example/android/gradle.properties.
+    RCTBundleURLProvider.sharedSettings().port = 8082
+    return RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: "index")
 #else
-    Bundle.main.url(forResource: "main", withExtension: "jsbundle")
+    return Bundle.main.url(forResource: "main", withExtension: "jsbundle")
 #endif
   }
 }
