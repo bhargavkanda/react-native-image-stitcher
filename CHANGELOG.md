@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `<Camera>` or to a Layer 2 modal must migrate to the new shape; the
 > v0.3 type is deleted, not aliased.  The C++ engine wire format is
 > unchanged — only the JS-side type surface moved.
+>
+> **Migration guide:** [`docs/migrations/v0.3-to-v0.4-panorama-settings.md`](docs/migrations/v0.3-to-v0.4-panorama-settings.md)
+> walks through every recipe (default-only hosts, custom-literal
+> hosts, slit-scan / hybrid hosts, storage migration for persisted
+> settings).
 
 #### Why
 
