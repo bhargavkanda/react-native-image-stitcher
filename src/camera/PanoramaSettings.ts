@@ -270,6 +270,33 @@ export interface FlowGateSettings {
 }
 
 
+/**
+ * Canonical FlowGateSettings defaults, exported as a standalone
+ * constant so consumers (the bridge, the modal, prop translators)
+ * can reach the values WITHOUT typing
+ * `DEFAULT_PANORAMA_SETTINGS.frameSelection.flow!.X` — the
+ * non-null-assertion form is brittle (will start crashing at
+ * runtime the moment someone "cleans up" the default tree and
+ * makes `flow` undefined in `DEFAULT_PANORAMA_SETTINGS`).  Lifted
+ * out 2026-05-22 in the F10 Phase 2 review (NIT-4).
+ *
+ * Numerical values mirror the v0.3 defaults; they're verified
+ * against the native engine's compiled-in fallback values
+ * (`IncrementalStitcher.swift:1003-1029`, `IncrementalStitcher.kt:419-445`)
+ * — discrepancies are flagged in the v0.3.0 audit and resolved by
+ * the bridge always-emitting these on the wire (see
+ * `PanoramaSettingsBridge.ts:panoramaSettingsToNativeConfig`).
+ */
+export const DEFAULT_FLOW_GATE_SETTINGS: FlowGateSettings = {
+  noveltyPercentile: 0.85,
+  evalEveryNFrames: 5,
+  maxTranslationCm: 50,
+  maxCorners: 150,
+  qualityLevel: 0.01,
+  minDistance: 10,
+};
+
+
 export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   captureSource: 'ar',
   debug: false,
@@ -284,14 +311,7 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     mode: 'flow-based',
     maxKeyframes: 6,
     overlapThreshold: 0.20,
-    flow: {
-      noveltyPercentile: 0.85,
-      evalEveryNFrames: 5,
-      maxTranslationCm: 50,
-      maxCorners: 150,
-      qualityLevel: 0.01,
-      minDistance: 10,
-    },
+    flow: DEFAULT_FLOW_GATE_SETTINGS,
   },
 };
 

@@ -123,6 +123,7 @@ export type { PanoramaSettingsModalProps } from './camera/PanoramaSettingsModal'
 // field-by-field native-consumer references.
 export {
   DEFAULT_PANORAMA_SETTINGS,
+  DEFAULT_FLOW_GATE_SETTINGS,
   DEFAULT_SLITSCAN_SETTINGS,
   DEFAULT_HYBRID_SETTINGS,
 } from './camera/PanoramaSettings';
