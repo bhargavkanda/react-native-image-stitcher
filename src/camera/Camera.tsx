@@ -901,6 +901,17 @@ export function Camera(props: CameraProps): React.JSX.Element {
       // mapping.  Audit fixes F1 / F4 / F6 from v0.3 are now properties
       // of the bridge (verified by the unit tests in
       // src/camera/__tests__/PanoramaSettingsBridge.test.ts).
+      //
+      // 2026-05-23 — override `captureSource` with the runtime-derived
+      // `effectiveCaptureSource` (from `arPreference + lens +
+      // AR-device-support`).  Pre-this change the camera-screen AR
+      // toggle wrote ONLY to local `arPreference` state while the
+      // bridge read `settings.captureSource` — so native could think
+      // the capture was AR while the operator had toggled it off (or
+      // vice-versa).  Single source of truth now: whatever camera the
+      // operator can see is what native is told it is.  The settings
+      // modal's `captureSource` control has been removed for the same
+      // reason — see PanoramaSettingsModal.tsx for the rationale.
       await incremental.start({
         snapshotJpegQuality: 75,
         snapshotEveryNAccepts: 1,
@@ -912,7 +923,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
         canvasWidth: 5000,
         canvasHeight: 5000,
         engine: 'batch-keyframe',
-        config: panoramaSettingsToNativeConfig(settings),
+        config: panoramaSettingsToNativeConfig({
+          ...settings,
+          captureSource: effectiveCaptureSource,
+        }),
       });
       imuGate.resetAnchor();
       // Start pumping vision-camera snapshots into the engine for
@@ -940,6 +954,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     isNonAR,
     deviceOrientation,
     settings,
+    effectiveCaptureSource,
     imuGate,
     jsDriver,
     onError,

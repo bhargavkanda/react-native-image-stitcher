@@ -22,15 +22,8 @@
  *
  * UI structure (matches the type tree):
  *
- *   - Capture source              (top-level, `captureSource`)
  *   - Debug                       (top-level, `debug`)
- *   - Stitcher                    (`stitcher`, expanded by default)
- *       - Stitch mode
- *       - Warper type
- *       - Blender
- *       - Seam finder
- *       - Inscribed-rect crop
- *   - Frame selection             (`frameSelection`, expanded by default)
+ *   - Frame selection             (`frameSelection`, closed by default)
  *       - Mode
  *       - Max keyframes
  *       - Overlap threshold
@@ -42,7 +35,18 @@
  *           - Max translation cm
  *           - Novelty percentile
  *           - Eval every N frames
+ *   - Stitcher                    (`stitcher`, closed by default)
+ *       - Stitch mode
+ *       - Warper type
+ *       - Blender
+ *       - Seam finder
+ *       - Inscribed-rect crop
  *   - Reset to defaults           (button)
+ *
+ * Note: `captureSource` (AR vs non-AR) is NOT surfaced here.  The
+ * camera-screen AR toggle owns that state — Camera.tsx overrides the
+ * native bridge's `captureSource` with the derived
+ * `effectiveCaptureSource` so settings and runtime stay in sync.
  *
  * The reusable `Accordion` + `SectionHeader` + `SegmentedControl` +
  * `Tag` helpers from the v0.3 modal are preserved verbatim — only the
@@ -186,20 +190,17 @@ export function PanoramaSettingsModal({
             </Text>
 
             {/* ──────────────────────────────────────────────
-             *  CAPTURE SOURCE (top-level, `captureSource`)
-             * ────────────────────────────────────────────── */}
-            <SectionHeader title="Capture source" />
-            <SegmentedControl
-              options={['ar', 'non-ar']}
-              value={settings.captureSource}
-              onChange={(v) => updateBase({
-                captureSource: v as CaptureBaseSettings['captureSource'],
-              })}
-              caption="ar (default): ARKit / ARCore — plane detection, pose-aware capture, full AR stack.  Falls back to non-AR silently if the device doesn't support AR.  non-ar: vision-camera + IMU-translation gate — required when the 0.5× ultra-wide lens is in use (AR sessions are tied to a single physical lens)."
-            />
-
-            {/* ──────────────────────────────────────────────
              *  DEBUG (top-level, `debug`)
+             *
+             *  Note: `captureSource` (AR vs non-AR) is intentionally
+             *  NOT surfaced here — the camera-screen AR toggle is the
+             *  sole source of truth.  Camera.tsx computes
+             *  `effectiveCaptureSource` from `arPreference + lens +
+             *  AR-device-support` and overrides `settings.captureSource`
+             *  on the bridge call, so the native engine always agrees
+             *  with the runtime preview.  Exposing a second control
+             *  here led to silent split-state where the modal value
+             *  disagreed with the on-screen toggle.
              * ────────────────────────────────────────────── */}
             <SectionHeader title="Debug" />
             <SegmentedControl
@@ -210,64 +211,18 @@ export function PanoramaSettingsModal({
             />
 
             {/* ──────────────────────────────────────────────
-             *  STITCHER (`stitcher` sub-tree, expanded by default)
-             * ────────────────────────────────────────────── */}
-            <Accordion title="Stitcher (cv::Stitcher knobs)" initiallyOpen>
-              <SectionHeader title="Stitch mode" />
-              <SegmentedControl
-                options={['auto', 'panorama', 'scans']}
-                value={settings.stitcher.stitchMode}
-                onChange={(v) => updateStitcher({
-                  stitchMode: v as BatchStitcherSettings['stitchMode'],
-                })}
-                caption="auto (default): pick PANORAMA or SCANS based on translation/rotation totals at finalize.  panorama: rotation-only (spherical warper, BA-Ray) — best for rotate-in-place captures; BAD on translation.  scans: affine pipeline (plane warper, BA-affine) — best for shelf-pan captures; never diverges on rotation either.  Both modes auto-retry with the opposite if camera params come out degenerate."
-              />
-              <SectionHeader title="Warper" />
-              <SegmentedControl
-                options={['plane', 'cylindrical', 'spherical']}
-                value={settings.stitcher.warperType}
-                onChange={(v) => updateStitcher({
-                  warperType: v as BatchStitcherSettings['warperType'],
-                })}
-                caption="plane (default): flat rectangular output, best for retail shelves.  cylindrical: rotational mid-arc.  spherical: wide pans (180°+), always curved.  Only consulted in panorama mode; scans hardwires PlaneWarper."
-              />
-              <SectionHeader title="Blender" />
-              <SegmentedControl
-                options={['multiband', 'feather']}
-                value={settings.stitcher.blenderType}
-                onChange={(v) => updateStitcher({
-                  blenderType: v as BatchStitcherSettings['blenderType'],
-                })}
-                caption="multiband (default): Laplacian-pyramid blending; cleanest seams, holds all warped frames in memory.  feather: streams warp+feed (lower peak memory, no halo with varied exposure).  <Camera> auto-picks feather on low-memory devices."
-              />
-              <SectionHeader title="Seam finder" />
-              <SegmentedControl
-                options={['graphcut', 'skip']}
-                value={settings.stitcher.seamFinderType}
-                onChange={(v) => updateStitcher({
-                  seamFinderType: v as BatchStitcherSettings['seamFinderType'],
-                })}
-                caption="graphcut (default): cv::detail::GraphCutSeamFinder for optimal seams; pairs with multiband.  skip: stream warp+feed (lowest-memory configuration; pair with feather)."
-              />
-              <SectionHeader title="Inscribed-rect crop" />
-              <SegmentedControl
-                options={['off', 'on']}
-                value={settings.stitcher.enableMaxInscribedRectCrop ? 'on' : 'off'}
-                onChange={(v) => updateStitcher({
-                  enableMaxInscribedRectCrop: v === 'on',
-                })}
-                caption="off (default): crop to cv::boundingRect of non-black pixels — preserves all stitched content; may leave black corners.  on: run MaxInscribedRectFromMask + column-projection second-pass for a clean rectangle (can shrink output if mask is lopsided)."
-              />
-            </Accordion>
-
-            {/* ──────────────────────────────────────────────
-             *  FRAME SELECTION (`frameSelection` sub-tree, open by default)
+             *  FRAME SELECTION (`frameSelection` sub-tree, closed by default)
+             *
+             *  Placed above Stitcher because keyframe-gate tuning is
+             *  the more frequently touched control surface during
+             *  capture-quality troubleshooting.  Stitcher knobs are
+             *  rarely changed at runtime.
              *
              *  Nested Flow-tunables section reveals when mode is
              *  flow-based (mirrors the `frameSelection.flow` optional
              *  on the type).
              * ────────────────────────────────────────────── */}
-            <Accordion title="Frame selection (KeyframeGate)" initiallyOpen>
+            <Accordion title="Frame selection (KeyframeGate)">
               <SectionHeader title="Mode" />
               <SegmentedControl
                 options={['time-based', 'pose-based', 'flow-based']}
@@ -355,6 +310,57 @@ export function PanoramaSettingsModal({
                   />
                 </View>
               )}
+            </Accordion>
+
+            {/* ──────────────────────────────────────────────
+             *  STITCHER (`stitcher` sub-tree, closed by default)
+             * ────────────────────────────────────────────── */}
+            <Accordion title="Stitcher (cv::Stitcher knobs)">
+              <SectionHeader title="Stitch mode" />
+              <SegmentedControl
+                options={['auto', 'panorama', 'scans']}
+                value={settings.stitcher.stitchMode}
+                onChange={(v) => updateStitcher({
+                  stitchMode: v as BatchStitcherSettings['stitchMode'],
+                })}
+                caption="auto (default): pick PANORAMA or SCANS based on translation/rotation totals at finalize.  panorama: rotation-only (spherical warper, BA-Ray) — best for rotate-in-place captures; BAD on translation.  scans: affine pipeline (plane warper, BA-affine) — best for shelf-pan captures; never diverges on rotation either.  Both modes auto-retry with the opposite if camera params come out degenerate."
+              />
+              <SectionHeader title="Warper" />
+              <SegmentedControl
+                options={['plane', 'cylindrical', 'spherical']}
+                value={settings.stitcher.warperType}
+                onChange={(v) => updateStitcher({
+                  warperType: v as BatchStitcherSettings['warperType'],
+                })}
+                caption="plane (default): flat rectangular output, best for retail shelves.  cylindrical: rotational mid-arc.  spherical: wide pans (180°+), always curved.  Only consulted in panorama mode; scans hardwires PlaneWarper."
+              />
+              <SectionHeader title="Blender" />
+              <SegmentedControl
+                options={['multiband', 'feather']}
+                value={settings.stitcher.blenderType}
+                onChange={(v) => updateStitcher({
+                  blenderType: v as BatchStitcherSettings['blenderType'],
+                })}
+                caption="multiband (default): Laplacian-pyramid blending; cleanest seams, holds all warped frames in memory.  feather: streams warp+feed (lower peak memory, no halo with varied exposure).  <Camera> auto-picks feather on low-memory devices."
+              />
+              <SectionHeader title="Seam finder" />
+              <SegmentedControl
+                options={['graphcut', 'skip']}
+                value={settings.stitcher.seamFinderType}
+                onChange={(v) => updateStitcher({
+                  seamFinderType: v as BatchStitcherSettings['seamFinderType'],
+                })}
+                caption="graphcut (default): cv::detail::GraphCutSeamFinder for optimal seams; pairs with multiband.  skip: stream warp+feed (lowest-memory configuration; pair with feather)."
+              />
+              <SectionHeader title="Inscribed-rect crop" />
+              <SegmentedControl
+                options={['off', 'on']}
+                value={settings.stitcher.enableMaxInscribedRectCrop ? 'on' : 'off'}
+                onChange={(v) => updateStitcher({
+                  enableMaxInscribedRectCrop: v === 'on',
+                })}
+                caption="off (default): crop to cv::boundingRect of non-black pixels — preserves all stitched content; may leave black corners.  on: run MaxInscribedRectFromMask + column-projection second-pass for a clean rectangle (can shrink output if mask is lopsided)."
+              />
             </Accordion>
 
             {/* ──────────────────────────────────────────────
