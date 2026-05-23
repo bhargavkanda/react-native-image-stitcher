@@ -61,6 +61,7 @@ import {
 } from 'react-native';
 
 import {
+  DEFAULT_FLOW_GATE_SETTINGS,
   DEFAULT_PANORAMA_SETTINGS,
   type BatchStitcherSettings,
   type CaptureBaseSettings,
@@ -138,21 +139,17 @@ export function PanoramaSettingsModal({
     });
 
   // Flow has an extra wrinkle: `frameSelection.flow` is optional.
-  // We materialise it from the DEFAULT when patching from "undefined"
-  // — happens if a host starts with a custom settings literal that
-  // omits the sub-tree.  Static type forces a defined value here.
+  // We materialise it from `DEFAULT_FLOW_GATE_SETTINGS` (the
+  // canonical FlowGateSettings defaults — see PanoramaSettings.ts)
+  // when patching from "undefined" — happens if a host starts with
+  // a custom settings literal that omits the sub-tree.
   const updateFlow = (patch: Partial<FlowGateSettings>) =>
     onChange({
       ...settings,
       frameSelection: {
         ...settings.frameSelection,
         flow: {
-          // Fallback chain: existing flow → default flow → (the
-          // default's `flow` is guaranteed defined in
-          // `DEFAULT_PANORAMA_SETTINGS`, so this is type-narrowed
-          // by the `!` assertion below).
-          ...(settings.frameSelection.flow
-            ?? DEFAULT_PANORAMA_SETTINGS.frameSelection.flow!),
+          ...(settings.frameSelection.flow ?? DEFAULT_FLOW_GATE_SETTINGS),
           ...patch,
         },
       },
@@ -312,7 +309,7 @@ export function PanoramaSettingsModal({
                   <SegmentedControl
                     options={['50', '100', '150', '200', '300']}
                     value={String(settings.frameSelection.flow?.maxCorners
-                      ?? DEFAULT_PANORAMA_SETTINGS.frameSelection.flow!.maxCorners)}
+                      ?? DEFAULT_FLOW_GATE_SETTINGS.maxCorners)}
                     onChange={(v) => updateFlow({ maxCorners: parseInt(v, 10) })}
                     caption="More corners = more robust median displacement, slower detect.  150 (default) ~ 15–25 ms / frame on Galaxy A35.  Native clamps to [50, 300]."
                   />
@@ -320,7 +317,7 @@ export function PanoramaSettingsModal({
                   <SegmentedControl
                     options={['0.005', '0.01', '0.02', '0.03', '0.05']}
                     value={String(settings.frameSelection.flow?.qualityLevel
-                      ?? DEFAULT_PANORAMA_SETTINGS.frameSelection.flow!.qualityLevel)}
+                      ?? DEFAULT_FLOW_GATE_SETTINGS.qualityLevel)}
                     onChange={(v) => updateFlow({ qualityLevel: parseFloat(v) })}
                     caption="Lower lets weaker corners in; higher demands stronger corners.  0.01 (default).  Clamped to [0.005, 0.05]."
                   />
@@ -328,7 +325,7 @@ export function PanoramaSettingsModal({
                   <SegmentedControl
                     options={['5', '8', '10', '15', '20']}
                     value={String(settings.frameSelection.flow?.minDistance
-                      ?? DEFAULT_PANORAMA_SETTINGS.frameSelection.flow!.minDistance)}
+                      ?? DEFAULT_FLOW_GATE_SETTINGS.minDistance)}
                     onChange={(v) => updateFlow({ minDistance: parseInt(v, 10) })}
                     caption="Min pixel distance between detected corners (working res = 720 px longest side).  10 (default).  Clamped to [1, 50]."
                   />
@@ -336,7 +333,7 @@ export function PanoramaSettingsModal({
                   <SegmentedControl
                     options={['0', '5', '8', '12', '20', '50']}
                     value={String(settings.frameSelection.flow?.maxTranslationCm
-                      ?? DEFAULT_PANORAMA_SETTINGS.frameSelection.flow!.maxTranslationCm)}
+                      ?? DEFAULT_FLOW_GATE_SETTINGS.maxTranslationCm)}
                     onChange={(v) => updateFlow({
                       maxTranslationCm: parseInt(v, 10),
                     })}
@@ -346,7 +343,7 @@ export function PanoramaSettingsModal({
                   <SegmentedControl
                     options={['0.50', '0.70', '0.85', '0.95', '0.99']}
                     value={(settings.frameSelection.flow?.noveltyPercentile
-                      ?? DEFAULT_PANORAMA_SETTINGS.frameSelection.flow!.noveltyPercentile).toFixed(2)}
+                      ?? DEFAULT_FLOW_GATE_SETTINGS.noveltyPercentile).toFixed(2)}
                     onChange={(v) => updateFlow({
                       noveltyPercentile: parseFloat(v),
                     })}
@@ -356,7 +353,7 @@ export function PanoramaSettingsModal({
                   <SegmentedControl
                     options={['1', '2', '3', '5', '10']}
                     value={String(settings.frameSelection.flow?.evalEveryNFrames
-                      ?? DEFAULT_PANORAMA_SETTINGS.frameSelection.flow!.evalEveryNFrames)}
+                      ?? DEFAULT_FLOW_GATE_SETTINGS.evalEveryNFrames)}
                     onChange={(v) => updateFlow({
                       evalEveryNFrames: parseInt(v, 10),
                     })}

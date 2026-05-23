@@ -41,10 +41,11 @@
  * before reaching `incremental.start()`.
  */
 
-import type {
-  PanoramaSettings,
-  SlitscanSettings,
-  HybridSettings,
+import {
+  DEFAULT_FLOW_GATE_SETTINGS,
+  type PanoramaSettings,
+  type SlitscanSettings,
+  type HybridSettings,
 } from './PanoramaSettings';
 
 
@@ -87,19 +88,39 @@ export function panoramaSettingsToNativeConfig(
     keyframeOverlapThreshold: s.frameSelection.overlapThreshold,
   };
 
-  // Flow strategy knobs — only meaningful when mode === 'flow-based',
-  // but harmless to always emit (native ignores them in other
-  // strategies, and consumers can switch modes mid-session without
-  // restart so we always serialise).
-  if (s.frameSelection.flow) {
-    const f = s.frameSelection.flow;
-    cfg.flowNoveltyPercentile = f.noveltyPercentile;
-    cfg.flowEvalEveryNFrames = f.evalEveryNFrames;
-    cfg.flowMaxTranslationCm = f.maxTranslationCm;
-    cfg.flowMaxCorners = f.maxCorners;
-    cfg.flowQualityLevel = f.qualityLevel;
-    cfg.flowMinDistance = f.minDistance;
-  }
+  // Flow strategy knobs — always serialised, regardless of
+  // `frameSelection.mode`.  Two reasons:
+  //
+  //   1. Mode-flip-mid-session: hosts can change `mode` without
+  //      restarting capture; consistent flow serialisation means
+  //      `'time-based' → 'flow-based'` mid-session doesn't slip
+  //      back to stale native-side defaults.  Native ignores these
+  //      keys when the active mode doesn't use them.
+  //
+  //   2. **Native compiled-in defaults disagree with the JS
+  //      defaults.**  Specifically: native sets `flowMaxTranslationCm
+  //      = 0` and `flowEvalEveryNFrames = 1` when the keys are
+  //      missing (iOS `IncrementalStitcher.swift:1003-1029`,
+  //      Android `IncrementalStitcher.kt:419-445`), whereas the JS
+  //      `DEFAULT_PANORAMA_SETTINGS.frameSelection.flow` values are
+  //      `50` and `5`.  Hosts who write sparse settings literals
+  //      (omitted `flow` sub-tree, legal per the optional `?`)
+  //      would silently get IMU translation gate disabled and
+  //      ~5× CPU on flow evaluation — a v0.3-style behaviour
+  //      regression on the wire that the type system can't catch.
+  //      Filling from `DEFAULT_FLOW_GATE_SETTINGS` here closes the
+  //      gap; the JS defaults become the canonical defaults across
+  //      both layers.
+  //
+  // See the F10 Phase 2 review (B1 + N3 + N6) for the full
+  // discussion of why this matters.
+  const f = s.frameSelection.flow ?? DEFAULT_FLOW_GATE_SETTINGS;
+  cfg.flowNoveltyPercentile = f.noveltyPercentile;
+  cfg.flowEvalEveryNFrames = f.evalEveryNFrames;
+  cfg.flowMaxTranslationCm = f.maxTranslationCm;
+  cfg.flowMaxCorners = f.maxCorners;
+  cfg.flowQualityLevel = f.qualityLevel;
+  cfg.flowMinDistance = f.minDistance;
 
   return cfg;
 }

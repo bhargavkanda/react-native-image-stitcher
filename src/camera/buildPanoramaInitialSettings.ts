@@ -30,6 +30,7 @@
  */
 
 import {
+  DEFAULT_FLOW_GATE_SETTINGS,
   DEFAULT_PANORAMA_SETTINGS,
   type PanoramaSettings,
 } from './PanoramaSettings';
@@ -94,10 +95,12 @@ export function buildPanoramaInitialSettings(
     }
     : base.stitcher;
 
-  // The base `flow` sub-tree is always defined in the defaults; we
-  // patch it from props non-destructively so undefined props leave
-  // the default value in place.
-  const flowDefaults = base.frameSelection.flow!;
+  // Use the standalone DEFAULT_FLOW_GATE_SETTINGS constant rather
+  // than `base.frameSelection.flow!` — the non-null assertion would
+  // crash silently if a future refactor un-defines the default's
+  // flow sub-tree, but the constant lives at the same level as the
+  // type and is type-checked.  See F10 Phase 2 review (NIT-4).
+  const flowDefaults = DEFAULT_FLOW_GATE_SETTINGS;
 
   return {
     captureSource: overrides.defaultCaptureSource ?? base.captureSource,

@@ -38,6 +38,7 @@
  */
 
 import {
+  DEFAULT_FLOW_GATE_SETTINGS,
   DEFAULT_HYBRID_SETTINGS,
   DEFAULT_PANORAMA_SETTINGS,
   DEFAULT_SLITSCAN_SETTINGS,
@@ -84,7 +85,12 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.flowMinDistance).toBe(10);
   });
 
-  it('omits every flow.* key when frameSelection.flow is undefined', () => {
+  it('falls back to DEFAULT_FLOW_GATE_SETTINGS when frameSelection.flow is undefined', () => {
+    // F10 Phase 2 review B1 — native compiled-in defaults disagree
+    // with the JS defaults for two flow knobs (maxTranslationCm and
+    // evalEveryNFrames).  The bridge must always emit every flow key
+    // so sparse-literal hosts get the JS defaults on the wire, not
+    // the native fallbacks.
     const noFlow: PanoramaSettings = {
       ...DEFAULT_PANORAMA_SETTINGS,
       frameSelection: {
@@ -94,19 +100,67 @@ describe('panoramaSettingsToNativeConfig', () => {
     };
     const cfg = panoramaSettingsToNativeConfig(noFlow);
 
-    // Top-level FrameSelection knobs still emitted
     expect(cfg.frameSelectionMode).toBe('flow-based');
     expect(cfg.keyframeMaxCount).toBe(6);
     expect(cfg.keyframeOverlapThreshold).toBe(0.2);
 
-    // Every flow.* native key must be absent (not undefined,
-    // not present — the dict must not even have the property).
-    expect(cfg).not.toHaveProperty('flowNoveltyPercentile');
-    expect(cfg).not.toHaveProperty('flowEvalEveryNFrames');
-    expect(cfg).not.toHaveProperty('flowMaxTranslationCm');
-    expect(cfg).not.toHaveProperty('flowMaxCorners');
-    expect(cfg).not.toHaveProperty('flowQualityLevel');
-    expect(cfg).not.toHaveProperty('flowMinDistance');
+    // Every flow.* native key present, matching DEFAULT_FLOW_GATE_SETTINGS.
+    expect(cfg.flowNoveltyPercentile).toBe(DEFAULT_FLOW_GATE_SETTINGS.noveltyPercentile);
+    expect(cfg.flowEvalEveryNFrames).toBe(DEFAULT_FLOW_GATE_SETTINGS.evalEveryNFrames);
+    expect(cfg.flowMaxTranslationCm).toBe(DEFAULT_FLOW_GATE_SETTINGS.maxTranslationCm);
+    expect(cfg.flowMaxCorners).toBe(DEFAULT_FLOW_GATE_SETTINGS.maxCorners);
+    expect(cfg.flowQualityLevel).toBe(DEFAULT_FLOW_GATE_SETTINGS.qualityLevel);
+    expect(cfg.flowMinDistance).toBe(DEFAULT_FLOW_GATE_SETTINGS.minDistance);
+  });
+
+  it('emits flow defaults to the wire when frameSelection.flow is undefined AND mode is flow-based', () => {
+    // F10 Phase 2 review N3 — the realistic user-facing case:
+    // host writes `mode: 'flow-based'` but omits the flow sub-tree.
+    // Pre-B1-fix, the gate would silently run with native fallbacks
+    // (flowMaxTranslationCm=0, flowEvalEveryNFrames=1) instead of
+    // the JS defaults (50 cm budget, 5× throttle).
+    const s: PanoramaSettings = {
+      ...DEFAULT_PANORAMA_SETTINGS,
+      frameSelection: {
+        mode: 'flow-based',
+        maxKeyframes: 6,
+        overlapThreshold: 0.20,
+        // flow omitted — legal per the optional `?` in the type
+      },
+    };
+    const cfg = panoramaSettingsToNativeConfig(s);
+
+    expect(cfg.flowMaxTranslationCm).toBe(50);
+    expect(cfg.flowEvalEveryNFrames).toBe(5);
+    expect(cfg.flowNoveltyPercentile).toBe(0.85);
+    expect(cfg.flowMaxCorners).toBe(150);
+    expect(cfg.flowQualityLevel).toBe(0.01);
+    expect(cfg.flowMinDistance).toBe(10);
+  });
+
+  it('locks down the full wire-key set for DEFAULT_PANORAMA_SETTINGS', () => {
+    // F10 Phase 2 review N4 — mirror the hybrid test below.  Lock
+    // down which keys leave the bridge so a future field accidentally
+    // riding along (e.g. `debug` being treated as a wire knob) fails
+    // this test immediately.
+    const cfg = panoramaSettingsToNativeConfig(DEFAULT_PANORAMA_SETTINGS);
+    expect(Object.keys(cfg).sort()).toEqual([
+      'blenderType',
+      'captureSource',
+      'enableMaxInscribedRectCrop',
+      'flowEvalEveryNFrames',
+      'flowMaxCorners',
+      'flowMaxTranslationCm',
+      'flowMinDistance',
+      'flowNoveltyPercentile',
+      'flowQualityLevel',
+      'frameSelectionMode',
+      'keyframeMaxCount',
+      'keyframeOverlapThreshold',
+      'seamFinderType',
+      'stitchMode',
+      'warperType',
+    ]);
   });
 
   it('honours captureSource and stitcher overrides', () => {
