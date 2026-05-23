@@ -76,6 +76,7 @@ import {
   buildPanoramaInitialSettings,
   type PanoramaPropOverrides,
 } from './buildPanoramaInitialSettings';
+import { isLowMemDevice } from './lowMemDevice';
 import { useCapture } from './useCapture';
 import { useDeviceOrientation } from './useDeviceOrientation';
 import {
@@ -473,34 +474,6 @@ function deriveEffectiveCaptureSource(
 
 
 /**
- * Whether the host device's physical memory is below the threshold
- * where the multiband+graphcut blender/seam-finder combo risks
- * jetsam (iOS) or lmkd (Android) kills mid-stitch.  Read once from
- * the native bridge at module load (the BatchStitcher iOS module
- * exposes `physicalMemoryBytes` via `constantsToExport`).  Returns
- * `false` if the bridge hasn't surfaced the value — the safe default
- * is to use the higher-quality blender combo on unknown devices and
- * let the operator switch in the settings modal if they OOM.
- *
- * v0.3 had this as a module-load mutation that rewrote a `let`-bound
- * `DEFAULT_PANORAMA_SETTINGS`.  v0.4 keeps the type defaults
- * side-effect-free; the device-adaptation lives here, at the mount
- * site that actually needs it.  Same observable behaviour; cleaner
- * separation.
- */
-function getIsLowMemDevice(): boolean {
-  const m = (NativeModules as Record<string, unknown>).BatchStitcher;
-  const bytes =
-    m && typeof m === 'object'
-      ? (m as { physicalMemoryBytes?: number }).physicalMemoryBytes
-      : undefined;
-  return typeof bytes === 'number'
-    && bytes > 0
-    && bytes < 2 * 1024 * 1024 * 1024;
-}
-
-
-/**
  * Pluck the props that influence the initial PanoramaSettings tree.
  * Kept inline (vs. a wide structural type) so future Camera prop
  * additions don't accidentally widen the settings-translation
@@ -569,7 +542,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const [settings, setSettings] = useState<PanoramaSettings>(() =>
     buildPanoramaInitialSettings(
       extractPanoramaOverrides(props),
-      getIsLowMemDevice(),
+      isLowMemDevice(),
     ),
   );
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
