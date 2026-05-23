@@ -1029,6 +1029,18 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onError,
     recordingStartedAt,
     jsDriver,
+    // F10 Phase 2 review N1 — these four were missing pre-fix.  The
+    // callback reads `settings.debug` (to gate the stitchToast),
+    // `isNonAR` (to decide whether to read IMU totalAbs translation),
+    // `imuGate` (the read itself), and `stitchToast` (the toast hook
+    // object).  If any of those identities change between the user
+    // pressing-and-holding the shutter and the release, the stale-
+    // closure read could disagree with the actual current state.
+    // Pre-existing v0.3 bug; v0.4 was the natural time to address it.
+    settings,
+    isNonAR,
+    imuGate,
+    stitchToast,
   ]);
 
   // ── Lens / AR-toggle handlers ───────────────────────────────────
