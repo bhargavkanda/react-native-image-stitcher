@@ -56,7 +56,11 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import type { Camera as VisionCamera } from 'react-native-vision-camera';
+import type {
+  Camera as VisionCamera,
+  DrawableFrameProcessor,
+  ReadonlyFrameProcessor,
+} from 'react-native-vision-camera';
 
 import { useARSession } from '../ar/useARSession';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
@@ -256,6 +260,23 @@ export interface CameraProps {
   onLensChange?: (lens: CameraLens) => void;
   onFramesDropped?: (info: FramesDroppedInfo) => void;
   onError?: (err: CameraError) => void;
+
+  /**
+   * Optional vision-camera frame processor.  Only attached to the
+   * non-AR preview (AR mode uses ARCameraView, which doesn't expose
+   * a worklet seam).  Build the worklet on the host side with
+   * `useFrameProcessor` from `react-native-vision-camera`.
+   *
+   * Introduced for F8 (FrameProcessor port) — see
+   * `docs/f8-frame-processor-plan.md`.  F8.0 uses this for the
+   * worklet-path smoke test; F8.3 will move the in-SDK
+   * `useFrameProcessorDriver` hook to set this implicitly.
+   *
+   * Until F8.3 lands, hosts that wire their own frameProcessor here
+   * coexist with the legacy `useIncrementalJSDriver`; both will run
+   * concurrently in non-AR captures.
+   */
+  frameProcessor?: ReadonlyFrameProcessor | DrawableFrameProcessor;
 }
 
 
@@ -530,6 +551,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onLensChange,
     onFramesDropped,
     onError,
+    frameProcessor,
   } = props;
 
   const insets = useSafeAreaInsets();
@@ -1101,6 +1123,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
           video
           flash="off"
           style={StyleSheet.absoluteFill}
+          // F8 (FrameProcessor port) — host-supplied worklet runs on
+          // the camera producer thread for every frame.  Only wired
+          // in non-AR mode; AR mode uses ARCameraView which doesn't
+          // expose a frame-processor seam.  See
+          // docs/f8-frame-processor-plan.md.
+          cameraProps={frameProcessor ? { frameProcessor } : undefined}
         />
       )}
 
