@@ -870,14 +870,19 @@ export function Camera(props: CameraProps): React.JSX.Element {
     const accepted = incrementalState?.acceptedCount ?? 0;
     if (accepted > lastAcceptedCountRef.current) {
       lastAcceptedCountRef.current = accepted;
-      if (isNonAR) {
+      // IMU gate is only meaningful for the legacy `useIncrementalJSDriver`
+      // path; the Frame Processor driver has its own gyro->shared-value
+      // pose pipeline that doesn't consult `imuGate`.  Skipping the
+      // reset in the modern path avoids muddying diagnostics
+      // (adversarial-review M3).
+      if (isNonAR && legacyDriver) {
         imuGate.resetAnchor();
       }
     } else if (accepted === 0) {
       // New capture (state cleared) — reset our edge-detect ref.
       lastAcceptedCountRef.current = 0;
     }
-  }, [incrementalState?.acceptedCount, isNonAR, imuGate]);
+  }, [incrementalState?.acceptedCount, isNonAR, imuGate, legacyDriver]);
 
   // ── Shutter handlers ────────────────────────────────────────────
 
@@ -1017,7 +1022,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
           captureSource: effectiveCaptureSource,
         }),
       });
-      imuGate.resetAnchor();
+      // IMU gate is only consulted by the legacy `useIncrementalJSDriver`
+      // path; reset is a no-op for AR mode and for the new Frame
+      // Processor driver (adversarial-review M3).
+      if (legacyDriver) {
+        imuGate.resetAnchor();
+      }
       // Start the non-AR frame source.  AR mode feeds natively from
       // ARSession so both drivers stay idle in that path.
       //   * Default: Frame Processor driver — worklet runs on the

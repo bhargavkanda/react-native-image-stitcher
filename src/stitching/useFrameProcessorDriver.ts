@@ -48,6 +48,17 @@
  *     q_pitch = (sin(pitch/2), 0, 0, cos(pitch/2))
  *     q       = (cy*sp, sy*cp, -sy*sp, cy*cp)
  *
+ *   TODO (F8.3-followup-roll, adversarial-review M2): integrate
+ *   gyro Z (roll) into the quaternion.  Today's hand-held captures
+ *   with wrist-twist (level-pan + slight roll wobble) produce a
+ *   pose stream that lies about camera orientation.  The Flow
+ *   strategy gate is roll-tolerant (operates on the Y plane) so
+ *   keyframe selection is unaffected, but the cv::Stitcher's
+ *   intrinsic estimator may pick a worse projection mode on field
+ *   captures.  Fix is ~8 lines (`q = q_yaw * q_pitch * q_roll`)
+ *   but quaternion-convention bugs are silent; verify field
+ *   captures don't regress before shipping.
+ *
  *   Intrinsics are synthesised from the actual frame dimensions
  *   (`frame.width`, `frame.height`) plus the host-provided
  *   horizontal/vertical FoV defaults.  The stitcher derives its FoV-
@@ -178,19 +189,41 @@ export function useFrameProcessorDriver(
   //
   // `initFrameProcessorPlugin` can return `undefined` if called
   // before vision-camera's plugin registry has finished initialising
-  // (race observed in F8.1.a).  Retry on every render until we get a
-  // non-null plugin, then freeze.  The useEffect with no deps array
-  // is intentional — it's a render-driven retry, and the early-
-  // return makes it cheap once acquired.
+  // (race observed in F8.1.a).  We retry on a fixed timer instead of
+  // firing on every render — the earlier render-driven pattern
+  // (adversarial-review H3) re-invoked `initFrameProcessorPlugin`
+  // 60+ times per second during recording, and the vision-camera
+  // contract for repeated lookups is undocumented.
+  //
+  // Pattern: mount-once useEffect, try synchronously, fall back to a
+  // 16-ms retry timer until success or unmount.
   const [plugin, setPlugin] = useState<FrameProcessorPlugin | null>(null);
   useEffect(() => {
-    if (plugin != null) return;
-    const p = VisionCameraProxy.initFrameProcessorPlugin(
-      'cv_flow_gate_process_frame',
-      {},
-    );
-    if (p != null) setPlugin(p);
-  });
+    let cancelled = false;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    const tryAcquire = () => {
+      if (cancelled) return;
+      const p = VisionCameraProxy.initFrameProcessorPlugin(
+        'cv_flow_gate_process_frame',
+        {},
+      );
+      if (p != null) {
+        setPlugin(p);
+        return;
+      }
+      // ~one display-frame retry — matches the F8.1.a observation
+      // that the registry becomes ready by the next render tick.
+      timerId = setTimeout(tryAcquire, 16);
+    };
+    tryAcquire();
+    return () => {
+      cancelled = true;
+      if (timerId != null) clearTimeout(timerId);
+    };
+    // Empty deps on purpose — runs ONCE on mount.  Re-acquiring on
+    // re-render would race with worklet binding.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Shared values (worklet ↔ JS thread) ─────────────────────────
   //
@@ -198,17 +231,38 @@ export function useFrameProcessorDriver(
   // We write yaw/pitch on the JS thread (gyro callbacks); the worklet
   // reads them every frame.  No round-trip cost — these are mapped
   // into the worklet's runtime by the Reanimated bridge.
+  //
+  // FoV-derived values (the "half-angle tangent reciprocal"
+  // f-numerators) are pre-computed on the JS thread + published via
+  // shared values so the worklet's dependency array shrinks to just
+  // `[plugin]`.  Earlier draft baked `fovHorizDegrees` /
+  // `fovVertDegrees` into the closure → worklet re-serialised on
+  // every host re-render that changed the prop refs (adversarial-
+  // review M1).
   const sharedYaw = useSharedValue(0);
   const sharedPitch = useSharedValue(0);
   const sharedFrameCounter = useSharedValue(0);
   const sharedEvalEveryN = useSharedValue(Math.max(1, evalEveryNFrames));
+  const sharedFxNumerator = useSharedValue(
+    1.0 / (2.0 * Math.tan((fovHorizDegrees * Math.PI / 180) / 2)),
+  );
+  const sharedFyNumerator = useSharedValue(
+    1.0 / (2.0 * Math.tan((fovVertDegrees * Math.PI / 180) / 2)),
+  );
 
-  // Keep the throttle shared value in sync with the prop.  Cheaper
-  // than rebuilding the worklet (which would re-run dep checks +
-  // re-serialise the closure into the producer-thread runtime).
+  // Keep prop-derived shared values in sync.  Cheap re-renders;
+  // these don't trigger worklet rebuild.
   useEffect(() => {
     sharedEvalEveryN.value = Math.max(1, evalEveryNFrames);
   }, [evalEveryNFrames, sharedEvalEveryN]);
+  useEffect(() => {
+    sharedFxNumerator.value =
+      1.0 / (2.0 * Math.tan((fovHorizDegrees * Math.PI / 180) / 2));
+  }, [fovHorizDegrees, sharedFxNumerator]);
+  useEffect(() => {
+    sharedFyNumerator.value =
+      1.0 / (2.0 * Math.tan((fovVertDegrees * Math.PI / 180) / 2));
+  }, [fovVertDegrees, sharedFyNumerator]);
 
   // ── Lifecycle state (JS thread only) ────────────────────────────
   const gyroSubRef = useRef<Subscription | null>(null);
@@ -291,12 +345,13 @@ export function useFrameProcessorDriver(
     const qz = -sy_ * sp;
     const qw = cy_ * cp;
 
-    // Intrinsics from FoV + actual frame dims.  fx = w / (2*tan(h/2))
-    // where h is the horizontal FoV in radians.
+    // Intrinsics from FoV + actual frame dims.
+    //   fx = w * (1 / (2 * tan(fovH/2)))   (the parenthesised half
+    // is the precomputed `sharedFxNumerator` — see M1 fix).
     const w = frame.width;
     const h = frame.height;
-    const fx = w / (2.0 * Math.tan((fovHorizDegrees * Math.PI / 180) / 2));
-    const fy = h / (2.0 * Math.tan((fovVertDegrees * Math.PI / 180) / 2));
+    const fx = w * sharedFxNumerator.value;
+    const fy = h * sharedFyNumerator.value;
 
     plugin.call(frame, {
       tx: 0, ty: 0, tz: 0,
@@ -310,8 +365,12 @@ export function useFrameProcessorDriver(
       // (matches legacy useIncrementalJSDriver semantics).
       trackingStateRaw: 2,
     });
-  }, [plugin, sharedYaw, sharedPitch, sharedFrameCounter,
-      sharedEvalEveryN, fovHorizDegrees, fovVertDegrees]);
+    // Deps array intentionally minimal: only `plugin` actually
+    // requires worklet rebuild.  All FoV / pose / counter / cadence
+    // values flow through stable shared-value refs that Reanimated
+    // wires through the producer-thread runtime independently of
+    // React's render cycle.  (Adversarial-review M1.)
+  }, [plugin]);
 
   // ── Return handle ───────────────────────────────────────────────
   //
