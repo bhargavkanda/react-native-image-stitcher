@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// KeyframeGateFrameProcessor.mm — F8.1 vision-camera Frame Processor
-// Plugin that runs on the camera producer thread (not the JS bridge).
+// KeyframeGateFrameProcessor.mm — F8.3 vision-camera Frame Processor
+// plugin: a thin pose-injector that hands every producer-thread frame
+// to `IncrementalStitcher.consumeFrameFromPlugin`.
 //
 // JS-side usage (from a worklet):
 //
@@ -9,22 +10,33 @@
 //       'react-native-vision-camera';
 //
 //     const plugin = VisionCameraProxy.initFrameProcessorPlugin(
-//       'cv_flow_gate_process_frame',
-//       { overlapThreshold: 0.2, maxCount: 32 },  // optional tunables
+//       'cv_flow_gate_process_frame', {},
 //     );
 //
 //     const fp = useFrameProcessor((frame) => {
 //       'worklet';
 //       if (plugin == null) return;
-//       const result = plugin.call(frame, { /* optional pose */ });
-//       // result is { accepted, novelty, acceptedCount, reason, ... }
+//       plugin.call(frame, {
+//         qx, qy, qz, qw,         // gyro-integrated quaternion
+//         fx, fy, cx, cy,         // synthesised intrinsics
+//         imageWidth, imageHeight,
+//         // tx/ty/tz default to 0 (no AR translation in non-AR mode)
+//         // trackingStateRaw default = 2 (= .tracking)
+//       });
 //     }, [plugin]);
 //
-// F8.1.b SCOPE — calls into `KeyframeGateBridge::evaluatePixelBuffer:`
-// (which wraps `cpp/keyframe_gate.cpp`).  The bridge handles pixel-
-// format dispatch: YUV biplanar → Y-plane direct, BGRA → cv::cvtColor.
-// Configured for Flow strategy + angular-fallback disabled so the
-// non-AR producer thread never falls into the gyro-integration path.
+// F8.3 SCOPE — the plugin owns NO gate state and NO per-frame
+// decision logic.  It just:
+//   1. Extracts `CVPixelBuffer` from the vision-camera frame.
+//   2. Builds a pose from the worklet's `arguments` dict (with
+//      defaults safe for non-AR mode).
+//   3. Calls `[IncrementalStitcher.shared consumeFrameFromPlugin:…]`
+//      which routes into the SAME entry point AR mode uses
+//      (`consumeFrame(pixelBuffer:pose:)`).
+//
+// The KeyframeGate evaluation, work-queue dispatch, deep-copy, and
+// engine ingest all happen INSIDE `consumeFrame` — exactly as they
+// already do for AR mode.  Single source of truth, no duplication.
 //
 // CONDITIONAL COMPILATION — this file imports vision-camera headers.
 // The SDK's podspec does NOT declare a Pod dependency on VisionCamera
@@ -43,16 +55,41 @@
 #import <VisionCamera/FrameProcessorPluginRegistry.h>
 #import <VisionCamera/VisionCameraProxyHolder.h>
 #import <CoreVideo/CoreVideo.h>
-#import "KeyframeGateBridge.h"
 
-// Helpers for reading typed values out of an NSDictionary with a
-// default.  Used to pull pose params from per-call `arguments` and
-// tunables from plugin-init `options`.
-static float kg_argFloat(NSDictionary* args, NSString* key, float defaultValue) {
-  if (args == nil) return defaultValue;
-  NSNumber* n = args[key];
-  return [n isKindOfClass:[NSNumber class]] ? n.floatValue : defaultValue;
-}
+// Forward-declare only the Swift APIs we use here.  Importing the
+// full `RNImageStitcher-Swift.h` would force this TU to also import
+// React (`RCTEventEmitter`, `RCTViewManager`) and ARKit
+// (`ARSessionDelegate`), because the generated header exposes every
+// `@objc` symbol in the module.  We don't need any of those.
+//
+// Risk: this declaration must stay in sync with the Swift extension
+// at the bottom of `IncrementalStitcher.swift`.  Both files are
+// committed together; signature drift would be caught at link time
+// (unresolved selector) and at the next build.
+@class IncrementalStitcher;
+@interface IncrementalStitcher : NSObject
++ (IncrementalStitcher * _Nonnull)shared;
+- (void)consumeFrameFromPluginWithPixelBuffer:(CVPixelBufferRef _Nonnull)pixelBuffer
+                                           tx:(double)tx
+                                           ty:(double)ty
+                                           tz:(double)tz
+                                           qx:(double)qx
+                                           qy:(double)qy
+                                           qz:(double)qz
+                                           qw:(double)qw
+                                           fx:(double)fx
+                                           fy:(double)fy
+                                           cx:(double)cx
+                                           cy:(double)cy
+                                   imageWidth:(NSInteger)imageWidth
+                                  imageHeight:(NSInteger)imageHeight
+                                  timestampMs:(double)timestampMs
+                             trackingStateRaw:(NSInteger)trackingStateRaw;
+@end
+
+// Read a Double from the per-call `arguments` dict with a default.
+// Used to extract pose params; tolerant of missing keys (non-AR mode
+// may send only the rotation fields, not translation/intrinsics).
 static double kg_argDouble(NSDictionary* args, NSString* key, double defaultValue) {
   if (args == nil) return defaultValue;
   NSNumber* n = args[key];
@@ -67,100 +104,82 @@ static NSInteger kg_argInt(NSDictionary* args, NSString* key, NSInteger defaultV
 @interface KeyframeGateFrameProcessor : FrameProcessorPlugin
 @end
 
-@implementation KeyframeGateFrameProcessor {
-  KeyframeGateBridge* _bridge;
-}
+@implementation KeyframeGateFrameProcessor
 
 - (instancetype)initWithProxy:(VisionCameraProxyHolder*)proxy
                   withOptions:(NSDictionary* _Nullable)options {
-  if (self = [super initWithProxy:proxy withOptions:options]) {
-    _bridge = [[KeyframeGateBridge alloc] init];
-
-    // F8.1.b — configure for non-AR Flow strategy.  Flow runs sparse
-    // optical flow on the Y plane to measure new content fraction
-    // between consecutive accepted keyframes; it does not require an
-    // ARKit pose.  Disable the angular-delta fallback so a missing or
-    // zero pose can never silently flip to the gyro-integration path.
-    [_bridge setStrategy:KGBStrategyFlow];
-    [_bridge setEnabled:YES];
-    [_bridge setDisableAngularFallback:YES];
-
-    // Allow the JS host to override the gate's tunables once at
-    // plugin-init time (via the second arg of
-    // VisionCameraProxy.initFrameProcessorPlugin).  Defaults match
-    // what F6/F7 used in production AR captures.
-    [_bridge setOverlapThreshold:kg_argDouble(options, @"overlapThreshold", 0.2)];
-    [_bridge setMaxCount:kg_argInt(options, @"maxCount", 32)];
-    [_bridge setFlowMaxCorners:kg_argInt(options, @"flowMaxCorners", 200)];
-    [_bridge setFlowQualityLevel:kg_argDouble(options, @"flowQualityLevel", 0.01)];
-    [_bridge setFlowMinDistance:kg_argDouble(options, @"flowMinDistance", 10.0)];
-    [_bridge setFlowMaxTranslationM:kg_argDouble(options, @"flowMaxTranslationM", 0.0)];
-    [_bridge setFlowNoveltyPercentile:kg_argDouble(options, @"flowNoveltyPercentile", 0.85)];
-  }
-  return self;
+  // No per-instance setup.  All gate tunables (overlapThreshold,
+  // maxCount, flow params, strategy, ...) live on
+  // `IncrementalStitcher` and are configured at its `start()` time
+  // from the host-app settings.  The plugin is a stateless
+  // pose-injector.
+  return [super initWithProxy:proxy withOptions:options];
 }
 
 - (id)callback:(Frame*)frame withArguments:(NSDictionary* _Nullable)arguments {
   CMSampleBufferRef sampleBuffer = frame.buffer;
   if (sampleBuffer == NULL) {
-    return @{@"error": @"no sample buffer"};
+    return @{@"submitted": @NO, @"error": @"no sample buffer"};
   }
 
   CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
   if (pixelBuffer == NULL) {
-    return @{@"error": @"no pixel buffer"};
+    return @{@"submitted": @NO, @"error": @"no pixel buffer"};
   }
 
-  // Frame dims used by both the bridge call below and the response.
-  // The bridge re-locks the buffer internally; we don't need to lock
-  // here.  We read dims via the plane-aware accessors so this works
-  // for YUV biplanar AND single-plane BGRA without branching.
+  // Frame dims for the pose.  Read from plane 0 if planar (YUV) else
+  // whole buffer; this is the dimensionality the stitcher expects.
   size_t planeCount = CVPixelBufferGetPlaneCount(pixelBuffer);
-  int32_t width  = planeCount >= 1
-      ? (int32_t)CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
-      : (int32_t)CVPixelBufferGetWidth(pixelBuffer);
-  int32_t height = planeCount >= 1
-      ? (int32_t)CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
-      : (int32_t)CVPixelBufferGetHeight(pixelBuffer);
+  NSInteger width  = (NSInteger)(planeCount >= 1
+      ? CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+      : CVPixelBufferGetWidth(pixelBuffer));
+  NSInteger height = (NSInteger)(planeCount >= 1
+      ? CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+      : CVPixelBufferGetHeight(pixelBuffer));
 
-  // Pose params — Flow strategy ignores these but the bridge call
-  // signature is shared with Pose strategy.  Defaults: identity
-  // quaternion (qw=1), zero translation, zero intrinsics.  Callers
-  // in AR mode (future) can override via `arguments`.
-  float tx = kg_argFloat(arguments, @"tx", 0.0f);
-  float ty = kg_argFloat(arguments, @"ty", 0.0f);
-  float tz = kg_argFloat(arguments, @"tz", 0.0f);
-  float qx = kg_argFloat(arguments, @"qx", 0.0f);
-  float qy = kg_argFloat(arguments, @"qy", 0.0f);
-  float qz = kg_argFloat(arguments, @"qz", 0.0f);
-  float qw = kg_argFloat(arguments, @"qw", 1.0f);
-  float fx = kg_argFloat(arguments, @"fx", 0.0f);
-  float fy = kg_argFloat(arguments, @"fy", 0.0f);
-  float cx = kg_argFloat(arguments, @"cx", 0.0f);
-  float cy = kg_argFloat(arguments, @"cy", 0.0f);
+  // Pose from worklet args.  Defaults are safe non-AR values:
+  //   * tx/ty/tz = 0 (no translation in non-AR; gyro only gives rot)
+  //   * qw = 1 (identity quaternion if JS hasn't supplied rotation)
+  //   * fx/fy/cx/cy = 0 → JS-driver caller MUST supply these (the
+  //     engine derives FoV from intrinsics; 0 would yield NaN FoV).
+  //     We default the principal point to image centre as a safer
+  //     fallback if only fx/fy are missing.
+  //   * trackingStateRaw = 2 → `.tracking` (non-AR captures don't
+  //     have a real tracking-quality signal; engine's `trackingPoor`
+  //     path stays inactive, matching legacy `useIncrementalJSDriver`).
+  double tx = kg_argDouble(arguments, @"tx", 0.0);
+  double ty = kg_argDouble(arguments, @"ty", 0.0);
+  double tz = kg_argDouble(arguments, @"tz", 0.0);
+  double qx = kg_argDouble(arguments, @"qx", 0.0);
+  double qy = kg_argDouble(arguments, @"qy", 0.0);
+  double qz = kg_argDouble(arguments, @"qz", 0.0);
+  double qw = kg_argDouble(arguments, @"qw", 1.0);
+  double fx = kg_argDouble(arguments, @"fx", 0.0);
+  double fy = kg_argDouble(arguments, @"fy", 0.0);
+  double cx = kg_argDouble(arguments, @"cx", (double)width  / 2.0);
+  double cy = kg_argDouble(arguments, @"cy", (double)height / 2.0);
+  double timestampMs = kg_argDouble(arguments, @"timestampMs", 0.0);
+  NSInteger trackingState = kg_argInt(arguments, @"trackingStateRaw", 2);
 
-  KGBDecision* decision = [_bridge evaluatePixelBuffer:pixelBuffer
-                                                    tx:tx ty:ty tz:tz
-                                                    qx:qx qy:qy qz:qz qw:qw
-                                                    fx:fx fy:fy cx:cx cy:cy
-                                            imageWidth:width
-                                           imageHeight:height
-                                               plane16:nil];
+  // Submit.  consumeFrame internally early-returns if isRunning ==
+  // false, so it's safe to call every producer-thread frame whether
+  // or not a capture is in progress.  ~1-2 µs of overhead per
+  // "stitcher not running" frame; negligible at 30 fps.
+  [IncrementalStitcher.shared
+      consumeFrameFromPluginWithPixelBuffer:pixelBuffer
+                                         tx:tx ty:ty tz:tz
+                                         qx:qx qy:qy qz:qz qw:qw
+                                         fx:fx fy:fy cx:cx cy:cy
+                                 imageWidth:width
+                                imageHeight:height
+                                timestampMs:timestampMs
+                           trackingStateRaw:trackingState];
 
-  return @{
-    @"accepted":          @(decision.accept),
-    @"reason":            decision.reasonString ?: @"",
-    @"reasonCode":        @(decision.reasonCode),
-    @"novelty":           @(decision.newContentFraction),
-    @"acceptedCount":     @(decision.acceptedCount),
-    @"maxCount":          @(decision.maxCount),
-    @"width":             @(width),
-    @"height":            @(height),
-  };
+  return @{@"submitted": @YES};
 }
 
-// Auto-register the plugin at class-load time.  The name passed here
-// is what JS uses with `VisionCameraProxy.initFrameProcessorPlugin`.
+// Auto-register the plugin at class-load time.  Name must match what
+// JS passes to `VisionCameraProxy.initFrameProcessorPlugin(...)`.
 + (void)load {
   [FrameProcessorPluginRegistry
     addFrameProcessorPlugin:@"cv_flow_gate_process_frame"
