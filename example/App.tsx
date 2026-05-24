@@ -19,7 +19,7 @@
  * chip, AR toggle, settings modal) is owned by `<Camera>`.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import {
   Alert,
   Image,
@@ -34,10 +34,7 @@ import {
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import {
   useCameraPermission,
-  useFrameProcessor,
-  VisionCameraProxy,
 } from 'react-native-vision-camera';
-import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
   type CameraCaptureResult,
@@ -127,88 +124,11 @@ function App(): React.JSX.Element {
     );
   }
 
-  // F8.0.c — hello-world frame processor smoke test.  Confirms the
-  // vision-camera v4 + react-native-worklets-core + RN 0.84 bridgeless
-  // stack actually dispatches worklets onto the camera producer
-  // thread.  Logs one line per frame (`[fp-smoke] WxH px=<fmt>`),
-  // visible in Metro stdout.  Only fires in non-AR mode (the SDK
-  // attaches frameProcessor only to the vision-camera <Camera>; AR
-  // mode uses ARCameraView which has no worklet seam).  Toggle the
-  // on-screen AR switch off (or pick the 0.5x lens) to exercise.
-  // Will be removed/replaced when F8.3 lands the in-SDK driver.
-  // JS-side throttle.  We don't trust worklet-local timestamp math
-  // (vision-camera's `frame.timestamp` unit/origin varies between
-  // versions, which caused the throttle to silently never fire).
-  // Cheaper than runOnJS-on-every-frame because the round-trip is
-  // gated here, not on the producer thread.
-  const lastLogAtRef = React.useRef(0);
-  const logFrameToJS = React.useMemo(
-    () => Worklets.createRunOnJS((w: number, h: number, fmt: string) => {
-      const now = Date.now();
-      if (now - lastLogAtRef.current < 1000) return;
-      lastLogAtRef.current = now;
-      // eslint-disable-next-line no-console
-      console.log(`[fp-smoke] ${w}x${h} px=${fmt}`);
-    }),
-    [],
-  );
-  // F8.1.a — wire up the native Frame Processor Plugin (defined in
-  // ios/Sources/RNImageStitcher/KeyframeGateFrameProcessor.mm).  The
-  // plugin is registered at +load time under the name below.
-  //
-  // RACE-AVOIDANCE NOTE: `initFrameProcessorPlugin` can return
-  // `undefined` if called before vision-camera's plugin registry has
-  // finished initializing.  A naive `useMemo(..., [])` then caches
-  // the undefined forever.  We retry on every render until we get a
-  // non-null plugin, then freeze.
-  const [cvFlowGatePlugin, setCvFlowGatePlugin] = useState<
-    ReturnType<typeof VisionCameraProxy.initFrameProcessorPlugin> | null
-  >(null);
-  useEffect(() => {
-    if (cvFlowGatePlugin != null) return;
-    const p = VisionCameraProxy.initFrameProcessorPlugin(
-      'cv_flow_gate_process_frame',
-      {},
-    );
-    if (p != null) {
-      // eslint-disable-next-line no-console
-      console.log('[fp-plugin-init] plugin acquired');
-      setCvFlowGatePlugin(p);
-    }
-  });
-  // Separate JS-side throttle for the plugin-result log so its
-  // ~30 Hz rate doesn't flood DevTools.
-  const lastPluginLogAtRef = React.useRef(0);
-  const logPluginResult = React.useMemo(
-    () => Worklets.createRunOnJS(
-      (result: Record<string, unknown> | null | undefined) => {
-        const now = Date.now();
-        if (now - lastPluginLogAtRef.current < 1000) return;
-        lastPluginLogAtRef.current = now;
-        // eslint-disable-next-line no-console
-        console.log('[fp-plugin]', result);
-      },
-    ),
-    [],
-  );
-
-  const frameProcessor = useFrameProcessor((frame) => {
-    'worklet';
-    // No worklet-side throttle — `frame.timestamp` unit/origin
-    // varies between vision-camera versions, so we rely on the
-    // JS-side `lastLogAtRef` / `lastPluginLogAtRef` throttles
-    // inside the runOnJS callbacks.  Cheap because the runOnJS
-    // round-trip is the only cost we add per frame.
-    logFrameToJS(frame.width, frame.height, String(frame.pixelFormat));
-    if (cvFlowGatePlugin != null) {
-      const result = cvFlowGatePlugin.call(frame, {
-        yaw: 0,
-        pitch: 0,
-        marker: 'F8.1.b',
-      });
-      logPluginResult(result as Record<string, unknown> | null | undefined);
-    }
-  }, [logFrameToJS, cvFlowGatePlugin, logPluginResult]);
+  // F8.3 — the SDK's <Camera> now owns the Frame Processor worklet
+  // internally via `useFrameProcessorDriver`.  The F8.0.c/F8.1
+  // hand-rolled diagnostic worklet that lived here is gone; the
+  // SDK's driver supplies real gyro-integrated pose to the plugin
+  // and pipes frames straight into the incremental stitcher.
 
   return (
     <SafeAreaProvider>
@@ -228,7 +148,6 @@ function App(): React.JSX.Element {
           onLensChange={handleLensChange}
           onFramesDropped={handleFramesDropped}
           onError={handleError}
-          frameProcessor={frameProcessor}
         />
 
         {/*
