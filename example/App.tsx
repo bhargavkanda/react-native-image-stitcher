@@ -19,7 +19,7 @@
  * chip, AR toggle, settings modal) is owned by `<Camera>`.
  */
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Alert,
   Image,
