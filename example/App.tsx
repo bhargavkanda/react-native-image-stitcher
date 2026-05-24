@@ -32,7 +32,9 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { useCameraPermission } from 'react-native-vision-camera';
+import {
+  useCameraPermission,
+} from 'react-native-vision-camera';
 import {
   Camera,
   type CameraCaptureResult,
@@ -121,6 +123,12 @@ function App(): React.JSX.Element {
       </SafeAreaProvider>
     );
   }
+
+  // F8.3 — the SDK's <Camera> now owns the Frame Processor worklet
+  // internally via `useFrameProcessorDriver`.  The F8.0.c/F8.1
+  // hand-rolled diagnostic worklet that lived here is gone; the
+  // SDK's driver supplies real gyro-integrated pose to the plugin
+  // and pipes frames straight into the incremental stitcher.
 
   return (
     <SafeAreaProvider>
