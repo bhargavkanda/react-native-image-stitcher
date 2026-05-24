@@ -16,6 +16,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-05-23
+
+### Fixed
+- **ARCore Image hold time** (PR #15) — `forwardToIncremental` on
+  Android now packs the ARCore `Image` payload synchronously and
+  closes the image immediately, rather than holding it across the JNI
+  hand-off.  Eliminates the "ImageReader: maxImages exceeded" backlog
+  that throttled non-keyframe processing on the A35 at high pan
+  rates.
+
+### Tooling
+- **Example app Metro port pinned to 8082** (cherry-pick from
+  `feature/f8-frame-processor-yuv`).  Mirrored across
+  `example/metro.config.js`, `example/package.json` scripts,
+  `example/ios/RNImageStitcherExample/AppDelegate.swift`, and
+  `example/android/gradle.properties` to keep CLI builds, IDE
+  builds, and Gradle invocations consistent on machines where 8081
+  is already taken.
+
+### Internal
+- Lockfile sync after the v0.4.0 version bump (Podfile.lock spec
+  checksum + npm prune of transitive deps that had drifted from
+  branch experimentation).  No impact on consumers — example-app
+  tooling only.
+
 ## [0.4.0] — 2026-05-23
 
 ### v0.4 settings revamp (F10)
