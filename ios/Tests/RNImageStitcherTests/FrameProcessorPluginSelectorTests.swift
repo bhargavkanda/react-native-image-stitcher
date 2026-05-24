@@ -4,6 +4,19 @@
 // for the Swift⇄ObjC++ contract that KeyframeGateFrameProcessor.mm
 // depends on.
 //
+// ⚠️  CURRENT LIMITATION (F8.3 review-of-review H2): this file lives
+// in a SwiftPM test target inside a module that also contains .mm
+// sources.  SwiftPM does not support mixed-language sources, so
+// `swift test` aborts with "target contains mixed language source
+// files" before this file ever runs.  Tracked as F8.3.h-followup
+// (see task #16).  Until that's fixed, treat this file as a
+// **documentation artifact**: the assertions are correct and would
+// catch the drift if they ran, but right now they're only verified
+// when a human runs `xcodebuild test` against an Xcode-generated
+// scheme.  Do NOT remove the file — it's the canonical pinning of
+// the selector strings the .mm depends on, and it WILL start running
+// when the target setup is fixed.
+//
 // Background (adversarial-review H2): the .mm file forward-declares
 // `IncrementalStitcher` instead of importing the auto-generated
 // `RNImageStitcher-Swift.h` (which would force this TU to also import

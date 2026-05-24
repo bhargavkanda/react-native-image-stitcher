@@ -870,19 +870,25 @@ export function Camera(props: CameraProps): React.JSX.Element {
     const accepted = incrementalState?.acceptedCount ?? 0;
     if (accepted > lastAcceptedCountRef.current) {
       lastAcceptedCountRef.current = accepted;
-      // IMU gate is only meaningful for the legacy `useIncrementalJSDriver`
-      // path; the Frame Processor driver has its own gyro->shared-value
-      // pose pipeline that doesn't consult `imuGate`.  Skipping the
-      // reset in the modern path avoids muddying diagnostics
-      // (adversarial-review M3).
-      if (isNonAR && legacyDriver) {
+      // F8.3 review-of-review (M3 revert): originally gated this to
+      // `legacyDriver` because the Frame Processor driver doesn't
+      // consult `imuGate` for its own pose synthesis.  That ignored a
+      // load-bearing side effect: `imuGate.resetAnchor()` bounds the
+      // IIR-integrator drift window per-accept, and
+      // `imuGate.getTotalAbsMetres()` is read at finalize time
+      // (Camera.tsx:1097) as `imuTranslationMetres` into the native
+      // stitchMode auto-resolver (PANORAMA vs SCANS).  Without the
+      // per-accept reset, long FP-driver captures let IIR drift
+      // compound → inflated metres → biased toward SCANS.  Keep the
+      // reset firing for ALL non-AR modes.
+      if (isNonAR) {
         imuGate.resetAnchor();
       }
     } else if (accepted === 0) {
       // New capture (state cleared) — reset our edge-detect ref.
       lastAcceptedCountRef.current = 0;
     }
-  }, [incrementalState?.acceptedCount, isNonAR, imuGate, legacyDriver]);
+  }, [incrementalState?.acceptedCount, isNonAR, imuGate]);
 
   // ── Shutter handlers ────────────────────────────────────────────
 
@@ -1022,12 +1028,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
           captureSource: effectiveCaptureSource,
         }),
       });
-      // IMU gate is only consulted by the legacy `useIncrementalJSDriver`
-      // path; reset is a no-op for AR mode and for the new Frame
-      // Processor driver (adversarial-review M3).
-      if (legacyDriver) {
-        imuGate.resetAnchor();
-      }
+      // F8.3 review-of-review (M3 revert): `imuGate.resetAnchor()`
+      // is load-bearing for the stitchMode auto-resolver (see the
+      // matching comment on the per-accept reset useEffect above).
+      // Keep firing it on every capture start, not just legacy mode.
+      imuGate.resetAnchor();
       // Start the non-AR frame source.  AR mode feeds natively from
       // ARSession so both drivers stay idle in that path.
       //   * Default: Frame Processor driver — worklet runs on the
