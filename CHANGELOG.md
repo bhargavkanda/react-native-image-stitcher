@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### v0.4 settings revamp (F10) — in progress
+## [0.4.0] — 2026-05-23
+
+### v0.4 settings revamp (F10)
 
 > [!WARNING]
 > **Breaking type change.**  The flat 45-field `PanoramaSettings`
