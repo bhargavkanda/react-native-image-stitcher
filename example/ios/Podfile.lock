@@ -1854,7 +1854,7 @@ PODS:
     - React-utils (= 0.84.1)
     - ReactNativeDependencies
   - ReactNativeDependencies (0.84.1)
-  - RNImageStitcher (0.3.0):
+  - RNImageStitcher (0.4.0):
     - React-Core
   - RNSensors (7.3.6):
     - React-Core
@@ -2177,7 +2177,7 @@ SPEC CHECKSUMS:
   ReactCodegen: 797de5178718324c6eba3327b07f9a423fbd5787
   ReactCommon: 07572bf9e687c8a52fbe4a3641e9e3a1a477c78e
   ReactNativeDependencies: 0d25fdf19925ab4900f57f8c6603896ee59b5ba0
-  RNImageStitcher: 173f86cf1964eac60e3bfa8994bab485a4cd3201
+  RNImageStitcher: 5fab5f2595c4ef9656408d295e58df9587ef6a39
   RNSensors: 111159597ac51505df10413c61b28bcd28e88983
   VisionCamera: 7187b3dac1ff3071234ead959ce311875748e14f
   Yoga: c0b3f2c7e8d3e327e450223a2414ca3fa296b9a2
