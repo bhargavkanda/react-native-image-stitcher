@@ -32,7 +32,8 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { useCameraPermission } from 'react-native-vision-camera';
+import { useCameraPermission, useFrameProcessor } from 'react-native-vision-camera';
+import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
   type CameraCaptureResult,
@@ -122,6 +123,34 @@ function App(): React.JSX.Element {
     );
   }
 
+  // F8.0.c — hello-world frame processor smoke test.  Confirms the
+  // vision-camera v4 + react-native-worklets-core + RN 0.84 bridgeless
+  // stack actually dispatches worklets onto the camera producer
+  // thread.  Logs one line per frame (`[fp-smoke] WxH px=<fmt>`),
+  // visible in Metro stdout.  Only fires in non-AR mode (the SDK
+  // attaches frameProcessor only to the vision-camera <Camera>; AR
+  // mode uses ARCameraView which has no worklet seam).  Toggle the
+  // on-screen AR switch off (or pick the 0.5x lens) to exercise.
+  // Will be removed/replaced when F8.3 lands the in-SDK driver.
+  const logFrameToJS = React.useMemo(
+    () => Worklets.createRunOnJS((w: number, h: number, fmt: string) => {
+      // eslint-disable-next-line no-console
+      console.log(`[fp-smoke] ${w}x${h} px=${fmt}`);
+    }),
+    [],
+  );
+  const frameProcessor = useFrameProcessor((frame) => {
+    'worklet';
+    // Throttle to ~1 log/sec so Metro doesn't drown.  `frame.timestamp`
+    // is monotonic ns since boot.  Firing whenever the ns value falls
+    // in the first ~50 ms of any given 1-second bucket reliably hits
+    // exactly once per second at any frame rate >= ~20 fps (each frame
+    // is sub-50ms apart, so one will land in the window every second).
+    if (frame.timestamp % 1_000_000_000 < 50_000_000) {
+      logFrameToJS(frame.width, frame.height, String(frame.pixelFormat));
+    }
+  }, [logFrameToJS]);
+
   return (
     <SafeAreaProvider>
       <StatusBar barStyle="light-content" />
@@ -140,6 +169,7 @@ function App(): React.JSX.Element {
           onLensChange={handleLensChange}
           onFramesDropped={handleFramesDropped}
           onError={handleError}
+          frameProcessor={frameProcessor}
         />
 
         {/*
