@@ -215,6 +215,33 @@ dependencies {
     // on demand (~30 MB) the first time the user opens an AR
     // capture screen on a supported device.
     implementation "com.google.ar:core:1.45.0"
+
+    // F8.4 — vision-camera as a compile-time peer dep.  Same
+    // `compileOnly` pattern as React Native above: host apps that
+    // wire `<Camera>` already include the autolinked
+    // `:react-native-vision-camera` Gradle project; we just need
+    // `com.mrousavy.camera.frameprocessors.*` types on the compile
+    // classpath to build `CvFlowGateFrameProcessor.kt` + the
+    // registration in `RNImageStitcherPackage`.  Runtime
+    // resolution is the host's responsibility —
+    // `RNImageStitcherPackage`'s static initialiser catches
+    // `NoClassDefFoundError` so the SDK still loads if a non-
+    // camera consumer omits the dep.
+    //
+    // `findProject(...)` guard: lets the SDK still compile in
+    // hosts that haven't installed react-native-vision-camera.
+    // The plugin file's import resolution will fail in that case,
+    // which is fine — we conditionally exclude the plugin sources
+    // below.
+    if (findProject(':react-native-vision-camera') != null) {
+        compileOnly project(':react-native-vision-camera')
+    } else {
+        // Without vision-camera on the classpath the Frame
+        // Processor plugin source can't compile (imports unresolved).
+        // Exclude it from the source set so the rest of the SDK
+        // still builds for non-camera consumers.
+        android.sourceSets.main.java.exclude '**/CvFlowGateFrameProcessor.kt'
+    }
 }
 
 // Helper from the React Native gradle convention to read host-app
