@@ -32,7 +32,11 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { useCameraPermission, useFrameProcessor } from 'react-native-vision-camera';
+import {
+  useCameraPermission,
+  useFrameProcessor,
+  VisionCameraProxy,
+} from 'react-native-vision-camera';
 import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
@@ -132,24 +136,79 @@ function App(): React.JSX.Element {
   // mode uses ARCameraView which has no worklet seam).  Toggle the
   // on-screen AR switch off (or pick the 0.5x lens) to exercise.
   // Will be removed/replaced when F8.3 lands the in-SDK driver.
+  // JS-side throttle.  We don't trust worklet-local timestamp math
+  // (vision-camera's `frame.timestamp` unit/origin varies between
+  // versions, which caused the throttle to silently never fire).
+  // Cheaper than runOnJS-on-every-frame because the round-trip is
+  // gated here, not on the producer thread.
+  const lastLogAtRef = React.useRef(0);
   const logFrameToJS = React.useMemo(
     () => Worklets.createRunOnJS((w: number, h: number, fmt: string) => {
+      const now = Date.now();
+      if (now - lastLogAtRef.current < 1000) return;
+      lastLogAtRef.current = now;
       // eslint-disable-next-line no-console
       console.log(`[fp-smoke] ${w}x${h} px=${fmt}`);
     }),
     [],
   );
+  // F8.1.a — wire up the native Frame Processor Plugin (defined in
+  // ios/Sources/RNImageStitcher/KeyframeGateFrameProcessor.mm).  The
+  // plugin is registered at +load time under the name below.
+  //
+  // RACE-AVOIDANCE NOTE: `initFrameProcessorPlugin` can return
+  // `undefined` if called before vision-camera's plugin registry has
+  // finished initializing.  A naive `useMemo(..., [])` then caches
+  // the undefined forever.  We retry on every render until we get a
+  // non-null plugin, then freeze.
+  const [cvFlowGatePlugin, setCvFlowGatePlugin] = useState<
+    ReturnType<typeof VisionCameraProxy.initFrameProcessorPlugin> | null
+  >(null);
+  useEffect(() => {
+    if (cvFlowGatePlugin != null) return;
+    const p = VisionCameraProxy.initFrameProcessorPlugin(
+      'cv_flow_gate_process_frame',
+      {},
+    );
+    if (p != null) {
+      // eslint-disable-next-line no-console
+      console.log('[fp-plugin-init] plugin acquired');
+      setCvFlowGatePlugin(p);
+    }
+  });
+  // Separate JS-side throttle for the plugin-result log so its
+  // ~30 Hz rate doesn't flood DevTools.
+  const lastPluginLogAtRef = React.useRef(0);
+  const logPluginResult = React.useMemo(
+    () => Worklets.createRunOnJS(
+      (result: Record<string, unknown> | null | undefined) => {
+        const now = Date.now();
+        if (now - lastPluginLogAtRef.current < 1000) return;
+        lastPluginLogAtRef.current = now;
+        // eslint-disable-next-line no-console
+        console.log('[fp-plugin]', result);
+      },
+    ),
+    [],
+  );
+
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
-    // Throttle to ~1 log/sec so Metro doesn't drown.  `frame.timestamp`
-    // is monotonic ns since boot.  Firing whenever the ns value falls
-    // in the first ~50 ms of any given 1-second bucket reliably hits
-    // exactly once per second at any frame rate >= ~20 fps (each frame
-    // is sub-50ms apart, so one will land in the window every second).
-    if (frame.timestamp % 1_000_000_000 < 50_000_000) {
-      logFrameToJS(frame.width, frame.height, String(frame.pixelFormat));
+    // No worklet-side throttle — `frame.timestamp` unit/origin
+    // varies between vision-camera versions, so we rely on the
+    // JS-side `lastLogAtRef` / `lastPluginLogAtRef` throttles
+    // inside the runOnJS callbacks.  Cheap because the runOnJS
+    // round-trip is the only cost we add per frame.
+    logFrameToJS(frame.width, frame.height, String(frame.pixelFormat));
+    if (cvFlowGatePlugin != null) {
+      const result = cvFlowGatePlugin.call(frame, {
+        yaw: 0,
+        pitch: 0,
+        marker: 'F8.1.a',
+      });
+      logPluginResult(result as Record<string, unknown> | null | undefined);
     }
-  }, [logFrameToJS]);
+  }, [logFrameToJS, cvFlowGatePlugin, logPluginResult]);
 
   return (
     <SafeAreaProvider>
