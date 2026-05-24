@@ -17,7 +17,8 @@
     "react-native-image-stitcher": "file:..",
     "react-native-safe-area-context": "^5.5.2",
     "react-native-sensors": "^7.3.4",
-    "react-native-vision-camera": "^4.0.0"
+    "react-native-vision-camera": "^4.0.0",
+    "react-native-worklets-core": "^1.6.3"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
