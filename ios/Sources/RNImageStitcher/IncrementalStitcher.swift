@@ -373,12 +373,16 @@ public final class IncrementalStitcher: NSObject {
     /// drop the producer-thread call.
     ///
     /// Set under `stateLock` in `start()`, cleared under `stateLock`
-    /// in `cancel()` and `finalize()`.  Read WITHOUT the lock from
-    /// `consumeFrameFromPlugin` (producer thread, hot path) — Bool
-    /// reads are atomic on all supported arches; worst case is a
-    /// one-frame staleness during mode switch, which is harmless
-    /// because `consumeFrame` itself also early-returns on
-    /// `!isRunning`.
+    /// in `cancel()` and `finalize()`, ALSO read under `stateLock`
+    /// from `consumeFrameFromPlugin`.  The lock-protected read is
+    /// the simplest correctness story under Swift's
+    /// implementation-defined memory model — an earlier draft did an
+    /// unlocked read on the assumption "Bool loads are atomic on
+    /// arm64", but that's only true for the *instruction*, not for
+    /// compiler reordering / CSE if the property dispatch ever
+    /// changes from `@objc` (Obj-C dynamic, opaque to the optimiser)
+    /// to a Swift-only call (where the load could be hoisted).
+    /// Adversarial-review H1.
     @objc public private(set) var frameProcessorIngestEnabled: Bool = false
 
     /// V16 — pose-driven keyframe gate.  When `enabled` (set from the
@@ -1068,22 +1072,30 @@ public final class IncrementalStitcher: NSObject {
 
         stateLock.unlock()
 
-        // Register with the AR session's consumer registry — for any
-        // mode that actually feeds frames into `consumeFrame`.
+        // Register with the AR session's consumer registry — ONLY
+        // for AR mode.  Other modes don't need it:
         //
-        //   * `arSession`      — ARKit's frame delegate calls us
-        //                        (RNSARSession.swift:572).
-        //   * `frameProcessor` — F8.3+ vision-camera Frame Processor
-        //                        plugin calls us via
-        //                        `consumeFrameFromPlugin` on the
-        //                        producer thread.
-        //   * `jsDriver`       — LEGACY non-AR path that uses
+        //   * `arSession`      — REGISTER.  ARKit's frame delegate
+        //                        (RNSARSession.swift:572) calls
+        //                        `consumer.consumeFrame(...)`.
+        //   * `frameProcessor` — DO NOT register.  The vision-
+        //                        camera plugin calls us directly via
+        //                        `consumeFrameFromPlugin`; we own
+        //                        the camera, ARKit is intentionally
+        //                        stopped.  Registering here would
+        //                        let any sibling code that briefly
+        //                        starts an `ARSession` mid-capture
+        //                        (analytics SDK, future "AR preview"
+        //                        toggle, etc.) silently feed frames
+        //                        in parallel with our producer-
+        //                        thread plugin, racing on
+        //                        `stateLock.try()` and corrupting
+        //                        the gate's novelty math.
+        //                        (Adversarial-review C1.)
+        //   * `jsDriver`       — DO NOT register.  Legacy path uses
         //                        `processFrameAtPath`; bypasses
-        //                        consumeFrame entirely, so no
-        //                        registration is needed (and could
-        //                        mis-route frames if a stray AR
-        //                        session were to come up).
-        if frameSourceMode != "jsDriver" {
+        //                        consumeFrame entirely.
+        if frameSourceMode == "arSession" {
             RNSARSession.shared.incrementalConsumer = self
         }
     }
@@ -3119,14 +3131,23 @@ extension IncrementalStitcher {
         trackingStateRaw: Int
     ) {
         // F8.3 — drop the call unless this capture was started in
-        // frameProcessor mode.  Otherwise the plugin would
-        // double-feed the engine alongside the legacy jsDriver path,
-        // racing on the workQueue and corrupting engine state.
-        // Safe to read without the lock; see the ivar comment.
-        guard self.frameProcessorIngestEnabled else { return }
+        // frameProcessor mode.  Read under stateLock so the producer
+        // thread can't observe a stale TRUE during a cancel/finalize
+        // teardown (adversarial-review H1).  The lock-protected
+        // read costs ~1 µs at producer-thread rate; negligible vs
+        // the deep-copy that follows on accepts.
+        stateLock.lock()
+        let enabled = self.frameProcessorIngestEnabled
+        stateLock.unlock()
+        guard enabled else { return }
 
+        // Map the raw enum integer.  Unknown values fall back to
+        // `.notAvailable` so the engine's existing tracking-poor
+        // branches catch them — failing CLOSED is safer than
+        // silently claiming healthy tracking when the JS side sent
+        // garbage (adversarial-review C2).
         let trackingState =
-            RNSARTrackingState(rawValue: trackingStateRaw) ?? .tracking
+            RNSARTrackingState(rawValue: trackingStateRaw) ?? .notAvailable
         let pose = RNSARFramePose(
             tx: tx, ty: ty, tz: tz,
             qx: qx, qy: qy, qz: qz, qw: qw,
