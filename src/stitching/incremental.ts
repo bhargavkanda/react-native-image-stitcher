@@ -203,11 +203,20 @@ export interface IncrementalStartOptions {
    *   - 'jsDriver' — engine skips AR-session registration; JS
    *     feeds frames via `processFrameAtPath`.  Use in iOS non-AR
    *     captures (vision-camera + gyro).  No AR session required.
+   *     LEGACY; deprecated in v0.5, removed in v0.6.
+   *
+   *   - 'frameProcessor' (F8.3+, v0.5+) — engine registers as the
+   *     AR-session consumer AND flips on
+   *     `frameProcessorIngestEnabled` so the vision-camera Frame
+   *     Processor plugin (`cv_flow_gate_process_frame`) can feed
+   *     pixel buffers directly into `consumeFrame`.  Use in iOS
+   *     non-AR captures driven by `useFrameProcessorDriver`.  Pairs
+   *     with `Camera`'s `frameProcessor` prop.
    *
    * Android ignores this option — its engine always accepts
    * JS-driven frames.
    */
-  frameSourceMode?: 'arSession' | 'jsDriver';
+  frameSourceMode?: 'arSession' | 'jsDriver' | 'frameProcessor';
   /** Compose-resolution width in pixels (default 720 for portrait, 960 for landscape). */
   composeWidth?: number;
   /** Compose-resolution height in pixels (default 960 for portrait, 720 for landscape). */

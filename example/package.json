@@ -17,11 +17,15 @@
     "react-native-image-stitcher": "file:..",
     "react-native-safe-area-context": "^5.5.2",
     "react-native-sensors": "^7.3.4",
-    "react-native-vision-camera": "^4.0.0"
+    "react-native-vision-camera": "^4.0.0",
+    "react-native-worklets-core": "^1.6.3"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
+    "@babel/plugin-proposal-nullish-coalescing-operator": "^7.18.6",
+    "@babel/plugin-proposal-optional-chaining": "^7.21.0",
     "@babel/preset-env": "^7.25.3",
+    "@babel/preset-typescript": "^7.28.5",
     "@babel/runtime": "^7.25.0",
     "@react-native-community/cli": "20.1.0",
     "@react-native-community/cli-platform-android": "20.1.0",
