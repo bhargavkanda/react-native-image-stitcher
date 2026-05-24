@@ -204,7 +204,7 @@ function App(): React.JSX.Element {
       const result = cvFlowGatePlugin.call(frame, {
         yaw: 0,
         pitch: 0,
-        marker: 'F8.1.a',
+        marker: 'F8.1.b',
       });
       logPluginResult(result as Record<string, unknown> | null | undefined);
     }
