@@ -33,7 +33,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
   }
 }
 
-class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
+// F8.0.d — inherit from ReactNativeBridgeDelegate (Obj-C class) which
+// overrides the C++-gated `getModuleClassFromName:` to bridge to
+// RCTCoreModulesClassProvider.  Without this override, RN 0.84
+// bridgeless cannot resolve core ObjC modules (PlatformConstants,
+// RCTNetworking, etc.) in non-Expo projects with an empty
+// RCTAppDependencyProvider.moduleProviders map.  See
+// ReactNativeBridgeDelegate.h for the full rationale.
+class ReactNativeDelegate: ReactNativeBridgeDelegate {
   override func sourceURL(for bridge: RCTBridge) -> URL? {
     self.bundleURL()
   }
