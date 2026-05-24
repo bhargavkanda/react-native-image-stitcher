@@ -44,8 +44,33 @@ class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
     // by Tug's Expo dev server on this machine).  Mirrors the same
     // pin in example/metro.config.js, example/package.json scripts,
     // and example/android/gradle.properties.
-    RCTBundleURLProvider.sharedSettings().port = 8082
-    return RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: "index")
+    //
+    // Why mutate `jsLocation` instead of a hypothetical `.port`?
+    // RN 0.84's RCTBundleURLProvider bakes the port into a compile-
+    // time constant `kRCTBundleURLProviderDefaultPort = RCT_METRO_PORT`
+    // (see node_modules/react-native/React/Base/RCTBundleURLProvider.mm:19)
+    // and exposes NO Swift-bridged setter for it — we can't change
+    // the constant without recompiling React.framework.  But the
+    // internal `serverRootWithHostPort` helper checks whether the
+    // stored `jsLocation` contains a ":" and, if so, uses it as
+    // `host:port` directly, bypassing the constant.  So overriding
+    // `jsLocation` to `"<host>:8082"` is the cleanest runtime knob.
+    //
+    // Preserve any existing host the dev menu may have set (e.g.
+    // dev-machine IP for physical-device builds); fall back to
+    // "localhost" for simulator + first-launch device builds.
+    let provider = RCTBundleURLProvider.sharedSettings()
+    let existing = provider.jsLocation ?? ""
+    let host: String
+    if let colon = existing.firstIndex(of: ":"), !existing.isEmpty {
+      host = String(existing[..<colon])
+    } else if !existing.isEmpty {
+      host = existing
+    } else {
+      host = "localhost"
+    }
+    provider.jsLocation = "\(host):8082"
+    return provider.jsBundleURL(forBundleRoot: "index")
 #else
     return Bundle.main.url(forResource: "main", withExtension: "jsbundle")
 #endif
