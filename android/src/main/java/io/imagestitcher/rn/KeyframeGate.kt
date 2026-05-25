@@ -247,9 +247,12 @@ internal class KeyframeGate : AutoCloseable {
      *    the Y plane from the ARCore camera image (YUV_420_888) and
      *    hands it through.  Zero-copy on the way in (the byte[] is
      *    pinned via GetPrimitiveArrayCritical in the JNI).
-     *  - Non-AR mode (`IncrementalStitcher.processFrameAtPath`): the
-     *    JS-driver path supplies a JPEG path; the caller decodes the
-     *    JPEG to grayscale before calling this method.
+     *  - Non-AR mode (`CvFlowGateFrameProcessor` via
+     *    `IncrementalStitcher.consumeFrameFromPlugin`): extracts the
+     *    Y plane from the vision-camera Frame's YUV_420_888 image on
+     *    the producer thread and hands it through.  (Pre-v0.6 a
+     *    JS-driver `processFrameAtPath` path also called this with
+     *    JPEG-decoded grayscale; both were removed in v0.6.)
      *
      * @param grayData    The grayscale plane bytes.  Length must be
      *                    at least `grayStride * grayHeight`.

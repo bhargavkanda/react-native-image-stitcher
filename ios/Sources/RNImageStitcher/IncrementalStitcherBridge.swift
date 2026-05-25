@@ -20,7 +20,6 @@
 import Foundation
 import React
 import os.log
-import ImageIO        // CGImageSource + kCGImagePropertyOrientation for EXIF read in processFrameAtPath
 
 @objc(IncrementalStitcherBridge)
 public final class IncrementalStitcherBridge: RCTEventEmitter {
@@ -75,10 +74,12 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
     /// Resolves with `{ ok: true }`.  Rejects when `frameSourceMode`
     /// (options dict) is 'arSession' (the default) AND the AR session
     /// isn't running — that path needs ARKit to deliver frames.
-    /// When `frameSourceMode` is 'jsDriver' the AR-session check is
-    /// skipped and the engine expects JS to feed frames via
-    /// `processFrameAtPath` (used by iOS non-AR captures since
-    /// 2026-05-18 / Issue #2 regression fix).
+    /// When `frameSourceMode` is 'frameProcessor' the AR-session check
+    /// is skipped and the engine expects the vision-camera Frame
+    /// Processor plugin (`CvFlowGateFrameProcessor`) to feed frames
+    /// via `consumeFrameFromPlugin`.  The pre-v0.6 'jsDriver' mode
+    /// (push frames in from JS via `processFrameAtPath`) has been
+    /// removed.
     @objc(start:resolver:rejecter:)
     public func start(
         options: NSDictionary,
@@ -251,127 +252,6 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
         resolver(["ok": true])
     }
 
-    /// 2026-05-18 (Issue #2 v2) — JS-driven frame ingestion for iOS
-    /// non-AR mode.  Mirrors Android's `processFrameAtPath` exactly:
-    /// the JPEG at `path` is already saved on disk by vision-camera
-    /// in its native EXIF-correct orientation.  We DO NOT decode the
-    /// image here.  Instead:
-    ///
-    ///   - Build a synthetic `RNSARFramePose` from the
-    ///     JS-supplied quaternion + intrinsics (no translation;
-    ///     non-AR captures don't have it).
-    ///   - Hand the path + pose to
-    ///     `IncrementalStitcher.addBatchKeyframePath`, which
-    ///     evaluates the shared-C++ KeyframeGate and (if accepted)
-    ///     records the path in the finalize-time keyframe list +
-    ///     emits the same state event the AR-delegate path emits.
-    ///   - `cv::imread` at finalize handles EXIF orientation
-    ///     natively, so the output panorama reads upright with no
-    ///     iOS-specific orientation handling needed in this bridge.
-    ///
-    /// History: Issue #2 v1 (commit 0e40f17) tried to decode the
-    /// JPEG into a CVPixelBuffer and reuse the existing AR
-    /// `consumeFrame(pixelBuffer:pose:)` path.  That introduced two
-    /// orientation bugs (CGContext Y-flip + UIImage.size vs
-    /// cgImage.width dim swap) → upside-down output AND canvas-
-    /// dimension overflow → OOM crashes (user-reported 2026-05-18).
-    /// Architecturally Android never decoded the image either, so
-    /// the right fix was to mirror that.
-    ///
-    /// `options` keys:
-    ///   - path (NSString, required) — local file path (no file://)
-    ///   - qx, qy, qz, qw (Double, required) — quaternion, JS-side
-    ///     gyro-integrated
-    ///   - fx, fy, cx, cy (Double, required) — intrinsics in sensor px
-    ///   - imageWidth, imageHeight (Int, required)
-    ///   - trackingPoor (Bool, optional, default false)
-    ///   - timestampMs (Double, optional, default = now)
-    ///
-    /// Only batch-keyframe captures are supported on this path right
-    /// now — other engines (hybrid / firstwins) need real pixel data
-    /// during the live phase, which isn't trivially derivable from a
-    /// JPEG path.  Reject with `E_NOT_BATCH_KEYFRAME` so the JS host
-    /// can fall back to the legacy stitchVideo path if needed.
-    @objc(processFrameAtPath:resolver:rejecter:)
-    public func processFrameAtPath(
-        options: NSDictionary,
-        resolver: @escaping RCTPromiseResolveBlock,
-        rejecter: @escaping RCTPromiseRejectBlock
-    ) {
-        guard let pathRaw = options["path"] as? String, !pathRaw.isEmpty else {
-            rejecter("E_NO_PATH", "processFrameAtPath: missing 'path'", nil)
-            return
-        }
-        // Strip optional file:// prefix — JS callers sometimes send
-        // file URIs, native APIs want filesystem paths.
-        let cleanPath = pathRaw.hasPrefix("file://")
-            ? String(pathRaw.dropFirst("file://".count))
-            : pathRaw
-
-        let engine = IncrementalStitcher.shared
-        guard engine.isBatchKeyframeMode else {
-            rejecter("E_NOT_BATCH_KEYFRAME",
-                     "processFrameAtPath only supports batch-keyframe "
-                     + "engine mode on iOS.  Configure "
-                     + "incrementalEngine='batch-keyframe' in start() "
-                     + "options, or fall back to the stitchVideo path.",
-                     nil)
-            return
-        }
-
-        let qx = (options["qx"] as? Double) ?? 0
-        let qy = (options["qy"] as? Double) ?? 0
-        let qz = (options["qz"] as? Double) ?? 0
-        let qw = (options["qw"] as? Double) ?? 1   // identity quat default
-        let fx = (options["fx"] as? Double) ?? 1000.0
-        let fy = (options["fy"] as? Double) ?? 1000.0
-        let cx = (options["cx"] as? Double) ?? 540.0
-        let cy = (options["cy"] as? Double) ?? 960.0
-        let imageWidth = (options["imageWidth"] as? Int) ?? 1080
-        let imageHeight = (options["imageHeight"] as? Int) ?? 1920
-        let trackingPoor = (options["trackingPoor"] as? Bool) ?? false
-        let timestampMs = (options["timestampMs"] as? Double)
-            ?? (Date().timeIntervalSince1970 * 1000.0)
-        let trackingState: RNSARTrackingState =
-            trackingPoor ? .limited : .tracking
-
-        let pose = RNSARFramePose(
-            tx: 0, ty: 0, tz: 0,           // no translation in non-AR
-            qx: qx, qy: qy, qz: qz, qw: qw,
-            fx: fx, fy: fy, cx: cx, cy: cy,
-            imageWidth: imageWidth, imageHeight: imageHeight,
-            timestampMs: timestampMs,
-            trackingState: trackingState
-        )
-
-        // 2026-05-18 (Iss #1 diag) — read EXIF Orientation tag from the
-        // keyframe JPEG before handing it to the engine.  vision-camera
-        // writes a JPEG with an EXIF tag matching the physical capture
-        // orientation (1=no rotation, 3=180°, 6=90°CW, 8=90°CCW).  The
-        // bake-rotation table in cpp/stitcher.cpp assumes the post-imread
-        // Mat is in user-view orientation (post-EXIF apply).  If the EXIF
-        // tag isn't what we expect for a given physical orientation, the
-        // input Mat to cv::Stitcher will be a different shape than the AR
-        // path produces (AR keyframes hardcode EXIF=6, commit 7b828f1) —
-        // which would explain why iOS non-AR landscape captures stitch
-        // but bake the wrong way.  CGImageSource is cheap (metadata-only;
-        // no decode).
-        var exifOrientation: Int = -1
-        if let src = CGImageSourceCreateWithURL(
-            URL(fileURLWithPath: cleanPath) as CFURL, nil
-        ),
-           let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
-           let o = props[kCGImagePropertyOrientation] as? Int {
-            exifOrientation = o
-        }
-        os_log(.fault, log: OSLog(subsystem: "com.tiger.retailens",
-                                  category: "stitcher.diag"),
-               "[V16-batch-keyframe.js] processFrameAtPath EXIF=%d imageW=%d imageH=%d path=%{public}@",
-               Int32(exifOrientation), Int32(imageWidth), Int32(imageHeight), cleanPath)
-
-        let accepted = engine.addBatchKeyframePath(path: cleanPath, pose: pose)
-        resolver(["ok": true, "accepted": accepted])
-    }
 
     /// 2026-05-18 (Iss 3) — bridge for `cleanupKeyframes`.  See the
     /// Swift method's docstring for behaviour.  Options dict keys:

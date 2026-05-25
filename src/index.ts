@@ -177,14 +177,9 @@ export {
 } from './stitching/incremental';
 export type { IncrementalState } from './stitching/incremental';
 export { useIncrementalStitcher } from './stitching/useIncrementalStitcher';
-export { useIncrementalJSDriver } from './stitching/useIncrementalJSDriver';
-export type {
-  UseIncrementalJSDriverOptions,
-  IncrementalJSDriverHandle,
-} from './stitching/useIncrementalJSDriver';
-// F8.3 — vision-camera Frame Processor variant of the non-AR
-// driver.  Preferred over `useIncrementalJSDriver` in v0.5+; the
-// JS driver stays exported as a deprecated fallback until v0.6.
+// vision-camera Frame Processor driver for non-AR captures.  As
+// of v0.6 the only non-AR driver exported (the legacy
+// `useIncrementalJSDriver` was removed; was deprecated in v0.5).
 export { useFrameProcessorDriver } from './stitching/useFrameProcessorDriver';
 export type {
   UseFrameProcessorDriverOptions,

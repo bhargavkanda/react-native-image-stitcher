@@ -65,14 +65,6 @@ RCT_EXTERN_METHOD(refinePanorama:(NSDictionary *)options
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
-// 2026-05-17 (Issue #2) — iOS non-AR frame ingestion.  JS-side driver
-// hands snapshot file paths + gyro-derived pose to the engine so the
-// live band populates in non-AR mode (parity with Android).  See JS
-// `useIncrementalVisionCameraDriver`.
-RCT_EXTERN_METHOD(processFrameAtPath:(NSDictionary *)options
-                  resolver:(RCTPromiseResolveBlock)resolver
-                  rejecter:(RCTPromiseRejectBlock)rejecter)
-
 // 2026-05-18 (Iss 3) — keyframe storage management.  cleanupKeyframes
 // GCs stale per-session directories under Library/Application Support/
 // Captures; getKeyframeDir returns the active capture's session dir.

@@ -18,7 +18,6 @@ import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.SessionPausedException
 import io.imagestitcher.rn.ar.BackgroundRenderer
 import io.imagestitcher.rn.ar.YuvImageConverter
-import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
@@ -75,13 +74,6 @@ class RNSARCameraView @JvmOverloads constructor(
     private var lastDisplayRotation: Int = -1
     private var surfaceWidth: Int = 0
     private var surfaceHeight: Int = 0
-
-    /// Tmp directory for the per-frame JPEG file we hand to the
-    /// incremental engine.  Created lazily and reused across frames
-    /// — no per-frame allocation.
-    private val tmpJpegFile: File by lazy {
-        File(context.cacheDir, "rlis-arframe.jpg")
-    }
 
     /// Whether to feed the AR session's frames into the incremental
     /// engine.  Toggled by IncrementalStitcher.start/stop
@@ -510,28 +502,18 @@ class RNSARCameraView @JvmOverloads constructor(
         val rotationForEncode = if (lastDisplayRotation >= 0)
             lastDisplayRotation else android.view.Surface.ROTATION_0
 
-        // 2026-05-21 (v0.3) — eager JPEG encode is only needed when
-        // the engine is in the legacy hybrid/firstwins live-engine
-        // mode (which feeds JPEG paths into addFrameAtPath every
-        // frame).  In batch-keyframe mode (the production Camera
-        // component's path), the JPEG is encoded LAZILY inside
-        // the onAccept lambda below — only on the ~6 frames per
-        // capture that the C++ KeyframeGate actually keeps.
+        // F8.6 (v0.6) — the eager JPEG encode for live-engine mode
+        // is gone.  Pass the already-packed NV21 directly via
+        // `nv21PixelData`; the engine's new `addFramePixelData`
+        // path builds the BGR cv::Mat in-process via cvtColor,
+        // skipping the JPEG decode round-trip downstream.  In
+        // batch-keyframe mode the engine ignores `nv21PixelData`
+        // (it uses `grayData` + `onAccept` lazily); no behaviour
+        // change there.
         //
-        // 2026-05-22 (#19) — the encode now reads from the already-
-        // packed NV21 bytes (`packed`), NOT from the live Image
-        // (which has been closed above).  Same output, no Image
-        // hold time.
-        val legacyJpegPath: String? = if (module.isBatchKeyframeMode) {
-            null
-        } else {
-            YuvImageConverter.encodeJpegFromNV21(
-                packed,
-                tmpJpegFile.absolutePath,
-                jpegQuality = 70,
-                displayRotation = rotationForEncode,
-            )
-        }
+        // (Was: eager JPEG encode for non-batch-keyframe modes,
+        //  written to `tmpJpegFile`, passed as `legacyJpegPath`.
+        //  See the v0.3 / F8.6 entries in CHANGELOG.md.)
         module.ingestFromARCameraView(
             tx = tArr[0].toDouble(),
             ty = tArr[1].toDouble(),
@@ -553,7 +535,12 @@ class RNSARCameraView @JvmOverloads constructor(
             grayWidth = packed.width,
             grayHeight = packed.height,
             grayStride = packed.width,
-            legacyJpegPath = legacyJpegPath,
+            legacyJpegPath = null,
+            // F8.6 — pixel-data path for live engines.  Batch-
+            // keyframe mode ignores these (bails earlier).
+            nv21PixelData = packed.nv21,
+            nv21PixelWidth = packed.width,
+            nv21PixelHeight = packed.height,
             onAccept = { targetPath ->
                 // Lazy JPEG encode.  Runs ONLY if the C++ KeyframeGate
                 // accepted the frame.  Encodes from the pre-packed

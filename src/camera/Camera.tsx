@@ -89,7 +89,6 @@ import {
   subscribeIncrementalState,
   type IncrementalState,
 } from '../stitching/incremental';
-import { useIncrementalJSDriver } from '../stitching/useIncrementalJSDriver';
 import { useFrameProcessorDriver } from '../stitching/useFrameProcessorDriver';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
@@ -303,37 +302,20 @@ export interface CameraProps {
    * Introduced for F8 (FrameProcessor port) — see
    * `docs/f8-frame-processor-plan.md`.
    *
-   * As of v0.5 (F8.3) this prop is **deprecated for the standard
-   * non-AR capture flow**: the SDK now installs its own frame
-   * processor via `useFrameProcessorDriver` that pipes pixel
-   * buffers into the incremental stitcher with synthesised pose.
-   * Setting this prop in the default mode will be IGNORED with a
-   * one-time console.warn — supplying your own worklet would race
-   * with the SDK's pixel-buffer feed.
+   * The SDK installs its own frame processor via
+   * `useFrameProcessorDriver`.  Setting this prop is ignored with
+   * a one-time `console.warn` — supplying a host worklet would
+   * race with the SDK's pixel-buffer feed.  Either remove the prop
+   * or fork the SDK if you genuinely need a custom worklet.
    *
-   * Three coexistence rules:
-   *   * Default (modern non-AR): SDK owns the worklet, this prop
-   *     is ignored.
-   *   * `legacyDriver={true}`: SDK uses the old `useIncrementalJSDriver`
-   *     (takeSnapshot path).  Honoured for diagnostics or as an
-   *     escape hatch.
-   *   * AR mode: vision-camera Camera isn't mounted, this prop is
-   *     irrelevant.
+   * AR mode is irrelevant: vision-camera's Camera isn't mounted.
+   *
+   * (v0.5 had a `legacyDriver` escape hatch that routed back to
+   * `useIncrementalJSDriver`.  That hook + prop were removed in
+   * v0.6 per the deprecation timeline announced in the v0.5.0
+   * CHANGELOG.)
    */
   frameProcessor?: ReadonlyFrameProcessor | DrawableFrameProcessor;
-
-  /**
-   * Opt back into the legacy `useIncrementalJSDriver` for non-AR
-   * captures (the v0.4 path: `takeSnapshot` → JPEG → cache file →
-   * `IncrementalStitcher.processFrameAtPath`).
-   *
-   * Default `false` (use the new `useFrameProcessorDriver`, which
-   * runs the gate on the camera producer thread at native frame
-   * rate via a vision-camera Frame Processor plugin).  The legacy
-   * path will be removed in v0.6 — set this only if you hit a
-   * specific issue with the new driver and need to ship a fix.
-   */
-  legacyDriver?: boolean;
 }
 
 
@@ -609,7 +591,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onFramesDropped,
     onError,
     frameProcessor: hostFrameProcessor,
-    legacyDriver = false,
     engine = 'batch-keyframe',
   } = props;
 
@@ -790,63 +771,49 @@ export function Camera(props: CameraProps): React.JSX.Element {
     },
   });
 
-  // JS-driver for non-AR captures (iOS + Android).  In AR mode the
-  // engine consumes frames from the ARSession stream natively, so this
-  // hook stays idle.
+  // Frame Processor driver for non-AR captures (iOS + Android).
+  // In AR mode the engine consumes frames from the ARSession stream
+  // natively, so this hook stays idle.
   //
   // IMPORTANT: start()/stop() are called imperatively from the hold
   // handlers below — NOT from a useEffect driven by statusPhase.  The
   // hook returns a fresh object identity on every render, and during
   // a recording the engine emits IncrementalStateUpdate events that
-  // cause re-renders multiple times per second.  An effect with
-  // `jsDriver` in its deps would teardown + restart the driver on
-  // every event, resetting the gyro accumulator (yaw/pitch) to zero
-  // each cycle and nulling the cameraRef during the brief gap.  The
-  // user-visible symptom was "only the first keyframe is accepted,
-  // every subsequent snapshot sees pose=(0,0) and is rejected as a
-  // duplicate of the first".  Matching AuditCaptureScreen's proven
-  // imperative pattern (start on hold-start, stop on hold-end) avoids
-  // the re-render churn entirely.
-  const jsDriver = useIncrementalJSDriver();
-  // F8.3 — vision-camera Frame Processor variant.  Always
-  // instantiated so we don't have conditional hook calls; only one
-  // of the two drivers actually .start()s per capture.  Stop() on
-  // an idle driver is a no-op.
+  // cause re-renders multiple times per second.  An effect with the
+  // driver in its deps would teardown + restart on every event,
+  // resetting the gyro accumulator (yaw/pitch) to zero each cycle.
+  // User-visible symptom: "only the first keyframe is accepted, every
+  // subsequent ingest sees pose=(0,0) and is rejected as a duplicate".
+  // The imperative pattern (start on hold-start, stop on hold-end)
+  // avoids the re-render churn entirely.
   const fpDriver = useFrameProcessorDriver();
-  // Safety: ensure both drivers are stopped if the component unmounts
-  // mid-recording.  Empty deps so this only fires on unmount.
+  // Safety: stop the driver if the component unmounts mid-recording.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => () => { jsDriver.stop(); fpDriver.stop(); }, []);
+  useEffect(() => () => { fpDriver.stop(); }, []);
 
-  // F8.3 — one-shot deprecation warning when the host supplies their
-  // own `frameProcessor` while running in the default (Frame
-  // Processor driver) mode.  Two worklets racing on the same
-  // producer thread would corrupt the engine's workQueue ordering;
-  // the SDK's own worklet wins and the host's is ignored.  Hosts
-  // that *need* a custom worklet must opt into `legacyDriver={true}`
-  // (which switches off the SDK's worklet entirely).
+  // One-shot deprecation warning when the host supplies their own
+  // `frameProcessor` prop.  Two worklets racing on the same
+  // producer thread would corrupt the engine's workQueue ordering,
+  // so the SDK's own worklet wins and the host's is silently
+  // ignored.  (v0.5 had a `legacyDriver` opt-out for hosts that
+  // wanted to route around the SDK driver; that was removed in
+  // v0.6 along with `useIncrementalJSDriver`.)
   const hostFrameProcessorIgnoredWarnedRef = useRef(false);
   if (
     hostFrameProcessor != null
-    && !legacyDriver
     && !hostFrameProcessorIgnoredWarnedRef.current
   ) {
     hostFrameProcessorIgnoredWarnedRef.current = true;
     // eslint-disable-next-line no-console
     console.warn(
       '[react-native-image-stitcher] The `frameProcessor` prop on '
-      + '<Camera> is ignored when the default driver is active '
-      + '(legacyDriver=false).  Either remove the prop or set '
-      + 'legacyDriver={true} to opt into the legacy path.',
+      + '<Camera> is ignored — the SDK installs its own worklet '
+      + 'via useFrameProcessorDriver.  Remove the prop, or fork '
+      + 'the SDK if you genuinely need a custom worklet.',
     );
   }
-  // The Frame Processor worklet actually bound to vision-camera's
-  // Camera.  Resolution order:
-  //   1. Legacy mode: honor the host's prop (or null).
-  //   2. Modern mode: SDK driver's worklet, regardless of host's prop.
-  const effectiveFrameProcessor = legacyDriver
-    ? (hostFrameProcessor ?? null)
-    : fpDriver.frameProcessor;
+  // The Frame Processor worklet bound to vision-camera's Camera.
+  const effectiveFrameProcessor = fpDriver.frameProcessor;
 
   // ── Subscribe to engine state for live keyframe thumbs ──────────
   useEffect(() => {
@@ -903,17 +870,17 @@ export function Camera(props: CameraProps): React.JSX.Element {
     const accepted = incrementalState?.acceptedCount ?? 0;
     if (accepted > lastAcceptedCountRef.current) {
       lastAcceptedCountRef.current = accepted;
-      // F8.3 review-of-review (M3 revert): originally gated this to
-      // `legacyDriver` because the Frame Processor driver doesn't
-      // consult `imuGate` for its own pose synthesis.  That ignored a
-      // load-bearing side effect: `imuGate.resetAnchor()` bounds the
-      // IIR-integrator drift window per-accept, and
-      // `imuGate.getTotalAbsMetres()` is read at finalize time
-      // (Camera.tsx:1097) as `imuTranslationMetres` into the native
+      // F8.3 review-of-review (M3 revert): an earlier draft gated
+      // this on the pre-v0.6 `legacyDriver` prop because the Frame
+      // Processor driver doesn't consult `imuGate` for its own pose
+      // synthesis.  That ignored a load-bearing side effect:
+      // `imuGate.resetAnchor()` bounds the IIR-integrator drift
+      // window per-accept, and `imuGate.getTotalAbsMetres()` is read
+      // at finalize time as `imuTranslationMetres` into the native
       // stitchMode auto-resolver (PANORAMA vs SCANS).  Without the
       // per-accept reset, long FP-driver captures let IIR drift
-      // compound → inflated metres → biased toward SCANS.  Keep the
-      // reset firing for ALL non-AR modes.
+      // compound → inflated metres → biased toward SCANS.  Now fires
+      // for ALL non-AR captures (the only non-AR driver post-v0.6).
       if (isNonAR) {
         imuGate.resetAnchor();
       }
@@ -1044,13 +1011,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
         snapshotEveryNAccepts: 1,
         frameRotationDegrees: orientationRotation,
         captureOrientation: deviceOrientation,
-        // F8.3 — non-AR captures pick between the new Frame Processor
-        // driver (default) and the legacy JS-snapshot driver (opt-in
-        // via `legacyDriver={true}`).  AR captures always use the
-        // ARSession-driven path.
-        frameSourceMode: isNonAR
-          ? (legacyDriver ? 'jsDriver' : 'frameProcessor')
-          : 'arSession',
+        // Non-AR captures use the Frame Processor driver
+        // (vision-camera producer-thread worklet → cv_flow_gate
+        // plugin → IncrementalStitcher.consumeFrame).  AR captures
+        // use the ARSession-driven path.
+        frameSourceMode: isNonAR ? 'frameProcessor' : 'arSession',
         composeWidth: 1920,
         composeHeight: 1080,
         canvasWidth: 5000,
@@ -1066,21 +1031,13 @@ export function Camera(props: CameraProps): React.JSX.Element {
       // matching comment on the per-accept reset useEffect above).
       // Keep firing it on every capture start, not just legacy mode.
       imuGate.resetAnchor();
-      // Start the non-AR frame source.  AR mode feeds natively from
-      // ARSession so both drivers stay idle in that path.
-      //   * Default: Frame Processor driver — worklet runs on the
-      //     producer thread, plugin calls `consumeFrameFromPlugin`
-      //     directly.  No camera ref needed (vision-camera owns it).
-      //   * Legacy: JS driver — `takeSnapshot` + `processFrameAtPath`
-      //     via the cameraRef.
-      // Imperative-pattern rationale: see the useIncrementalJSDriver
-      // comment above re. why this isn't a useEffect.
+      // Start the Frame Processor driver for non-AR captures.  AR
+      // mode feeds natively from ARSession so the driver stays idle.
+      // Imperative pattern (vs useEffect) because the driver's start
+      // resets pose accumulators that should only fire at the
+      // hold-start moment, not on every re-render.
       if (isNonAR) {
-        if (legacyDriver) {
-          jsDriver.start(visionCameraRef);
-        } else {
-          fpDriver.start();
-        }
+        fpDriver.start();
       }
     } catch (err) {
       setStatusPhase('idle');
@@ -1100,9 +1057,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     settings,
     effectiveCaptureSource,
     imuGate,
-    jsDriver,
     fpDriver,
-    legacyDriver,
     engine,
     onError,
   ]);
@@ -1112,10 +1067,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     setStatusPhase('stitching');
     // Stop pumping new frames before finalizing so the engine isn't
     // racing the final cv::Stitcher pass against late-arriving
-    // keyframes.  Both stop() calls are no-ops when the
-    // corresponding driver wasn't started (AR mode, or the inactive
-    // driver in non-AR mode).
-    jsDriver.stop();
+    // keyframes.  No-op in AR mode (the driver was never started).
     fpDriver.stop();
     try {
       // Compose the panorama output path: host-controlled if
@@ -1193,7 +1145,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onFramesDropped,
     onError,
     recordingStartedAt,
-    jsDriver,
     fpDriver,
     // F10 Phase 2 review N1 — these four were missing pre-fix.  The
     // callback reads `settings.debug` (to gate the stitchToast),
