@@ -42,22 +42,22 @@
  *   with the legacy driver — drift ~1–2°/min over a 30 s capture is
  *   below the gate's overlap threshold and rarely matters).
  *
- *   Quaternion synthesis (q_yaw * q_pitch, same convention as the
- *   legacy driver):
+ *   Quaternion synthesis (q = q_yaw * q_pitch * q_roll, Tait-Bryan
+ *   YPR order to match the legacy driver's body-frame intent):
  *     q_yaw   = (0, sin(yaw/2), 0, cos(yaw/2))
  *     q_pitch = (sin(pitch/2), 0, 0, cos(pitch/2))
- *     q       = (cy*sp, sy*cp, -sy*sp, cy*cp)
+ *     q_roll  = (0, 0, sin(roll/2), cos(roll/2))
  *
- *   TODO (F8.3-followup-roll, adversarial-review M2): integrate
- *   gyro Z (roll) into the quaternion.  Today's hand-held captures
- *   with wrist-twist (level-pan + slight roll wobble) produce a
- *   pose stream that lies about camera orientation.  The Flow
- *   strategy gate is roll-tolerant (operates on the Y plane) so
- *   keyframe selection is unaffected, but the cv::Stitcher's
- *   intrinsic estimator may pick a worse projection mode on field
- *   captures.  Fix is ~8 lines (`q = q_yaw * q_pitch * q_roll`)
- *   but quaternion-convention bugs are silent; verify field
- *   captures don't regress before shipping.
+ *   Expanded (cy, sy = cos/sin(yaw/2); analogous for cp/sp, cr/sr):
+ *     qx = cy*sp*cr + sy*cp*sr
+ *     qy = sy*cp*cr - cy*sp*sr
+ *     qz = cy*cp*sr - sy*sp*cr
+ *     qw = cy*cp*cr + sy*sp*sr
+ *
+ *   When roll=0 this collapses to the 2-axis form
+ *   `(cy*sp, sy*cp, -sy*sp, cy*cp)` the legacy driver used, so
+ *   captures held perfectly level produce identical poses to the
+ *   pre-roll behaviour.
  *
  *   Intrinsics are synthesised from the actual frame dimensions
  *   (`frame.width`, `frame.height`) plus the host-provided
@@ -241,6 +241,12 @@ export function useFrameProcessorDriver(
   // review M1).
   const sharedYaw = useSharedValue(0);
   const sharedPitch = useSharedValue(0);
+  // F8.3-followup-roll — integrate gyroscope Z (out-of-screen for a
+  // portrait device) to track wrist-twist roll.  Field captures with
+  // casual hand-hold rarely stay perfectly level; without this the
+  // pose stream lies and the cv::Stitcher's intrinsic estimator may
+  // pick a worse projection mode.
+  const sharedRoll = useSharedValue(0);
   const sharedFrameCounter = useSharedValue(0);
   const sharedEvalEveryN = useSharedValue(Math.max(1, evalEveryNFrames));
   const sharedFxNumerator = useSharedValue(
@@ -277,26 +283,32 @@ export function useFrameProcessorDriver(
     isRunningRef.current = false;
     sharedYaw.value = 0;
     sharedPitch.value = 0;
+    sharedRoll.value = 0;
     sharedFrameCounter.value = 0;
     lastGyroAtRef.current = null;
-  }, [sharedYaw, sharedPitch, sharedFrameCounter]);
+  }, [sharedYaw, sharedPitch, sharedRoll, sharedFrameCounter]);
 
   const start = useCallback(() => {
     if (isRunningRef.current) return;
     sharedYaw.value = 0;
     sharedPitch.value = 0;
+    sharedRoll.value = 0;
     sharedFrameCounter.value = 0;
     lastGyroAtRef.current = null;
     isRunningRef.current = true;
 
     // Gyro integration.  Each sample carries angular velocity in
-    // rad/s; multiply by dt to accumulate displacement.  Axes match
-    // the legacy useIncrementalJSDriver convention for a device held
-    // in portrait: y = horizontal pan (yaw), x = vertical tilt
-    // (pitch).
+    // rad/s; multiply by dt to accumulate displacement.  Axes for a
+    // device held portrait:
+    //   y = horizontal pan (yaw, about world-Y)
+    //   x = vertical tilt (pitch, about world-X)
+    //   z = wrist-twist roll (about world-Z, normal to the screen)
+    // Signs match the legacy `useIncrementalJSDriver` for x/y; z
+    // follows the same right-hand-rule convention.  If field
+    // captures show inverted roll, flip the sign on `z * dt` below.
     setUpdateIntervalForType(SensorTypes.gyroscope, gyroIntervalMs);
     gyroSubRef.current = gyroscope.subscribe({
-      next: ({ x, y }) => {
+      next: ({ x, y, z }) => {
         const now = Date.now();
         if (lastGyroAtRef.current === null) {
           lastGyroAtRef.current = now;
@@ -306,13 +318,14 @@ export function useFrameProcessorDriver(
         lastGyroAtRef.current = now;
         sharedYaw.value += y * dt;
         sharedPitch.value += x * dt;
+        sharedRoll.value += z * dt;
       },
       error: (err) => {
         // eslint-disable-next-line no-console
         console.warn('[useFrameProcessorDriver] gyro error', err);
       },
     });
-  }, [gyroIntervalMs, sharedYaw, sharedPitch, sharedFrameCounter]);
+  }, [gyroIntervalMs, sharedYaw, sharedPitch, sharedRoll, sharedFrameCounter]);
 
   // ── Worklet ─────────────────────────────────────────────────────
   //
@@ -333,17 +346,25 @@ export function useFrameProcessorDriver(
     const N = sharedEvalEveryN.value;
     if (N > 1 && (sharedFrameCounter.value % N) !== 0) return;
 
-    // Synthesise quaternion from accumulated yaw + pitch.
+    // Synthesise quaternion from accumulated yaw + pitch + roll.
+    // YPR Tait-Bryan order: q = q_yaw * q_pitch * q_roll.  When
+    // roll=0 this reduces to the legacy 2-axis form (cy*sp, sy*cp,
+    // -sy*sp, cy*cp), so captures held level produce identical
+    // poses to the pre-F8.3-followup-roll behaviour.  See the
+    // expanded math in the file header doc-comment.
     const halfYaw = sharedYaw.value / 2;
     const halfPitch = sharedPitch.value / 2;
+    const halfRoll = sharedRoll.value / 2;
     const cy_ = Math.cos(halfYaw);
     const sy_ = Math.sin(halfYaw);
     const cp = Math.cos(halfPitch);
     const sp = Math.sin(halfPitch);
-    const qx = cy_ * sp;
-    const qy = sy_ * cp;
-    const qz = -sy_ * sp;
-    const qw = cy_ * cp;
+    const cr = Math.cos(halfRoll);
+    const sr = Math.sin(halfRoll);
+    const qx = cy_ * sp * cr + sy_ * cp * sr;
+    const qy = sy_ * cp * cr - cy_ * sp * sr;
+    const qz = cy_ * cp * sr - sy_ * sp * cr;
+    const qw = cy_ * cp * cr + sy_ * sp * sr;
 
     // Intrinsics from FoV + actual frame dims.
     //   fx = w * (1 / (2 * tan(fovH/2)))   (the parenthesised half
