@@ -16,6 +16,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-05-25
+
+### Added — F8.6 Android pixel-buffer engine parity
+
+Closes the v0.5.0 follow-up tracked in the [0.5.0] section.
+
+**Live engine ingest no longer requires a JPEG round-trip.**
+The `IncrementalFirstwinsEngine` (slit-scan / first-wins) and the
+hybrid `IncrementalEngine` both gained a new
+`addFramePixelData(nv21, w, h, ...)` method.  It builds the BGR
+`cv::Mat` in-process via
+`Imgproc.cvtColor(yuv, COLOR_YUV2BGR_NV21)`, then delegates to a
+newly-extracted shared `addFrameMat` helper that runs the original
+engine pipeline verbatim.  The legacy `addFrameAtPath(path, ...)`
+is now a thin wrapper: `imread → downsample → addFrameMat`.
+
+**Routing.**  `IncrementalStitcher.ingestFromARCameraView` got
+three optional parameters — `nv21PixelData: ByteArray?`,
+`nv21PixelWidth: Int`, `nv21PixelHeight: Int`.  When supplied (and
+`batchKeyframeMode == false`), the live engine ingests via
+`addFramePixelData`; otherwise falls back to `addFrameAtPath` with
+`legacyJpegPath`.  Backwards-compatible — all-null defaults
+preserve every existing caller.
+
+**Frame Processor wiring.**  `consumeFrameFromPlugin` now packs the
+incoming `Image` NV21 once at the top (was twice — gate consumed
+Y only, then the `onAccept` lambda re-packed for JPEG encode) and
+threads the bytes through to both the gate (which reads only the
+Y subset) AND the new `nv21PixelData` parameter.  Net: single
+`packNV21` per producer-thread frame.
+
+**Measured on Galaxy A35, `engine: 'firstwins-rectilinear'`,
+non-AR Frame Processor capture:**
+
+| Outcome | F8.6 pixel-data | Legacy JPEG path (estimated) |
+|---|---|---|
+| `AcceptedHigh` (first-frame init) | 7–11 ms | 50–70 ms |
+| `SkippedTooClose` (gate bail) | 0.5–2 ms | 50–60 ms (imread is unconditional) |
+
+`SkippedTooClose` dominates the producer-thread frame budget
+(~95% of frames at 30 fps with a slow pan).  Eliminating the
+imread on those frames is the bulk of the F8.6 win.
+
+### Added
+
+* New `<Camera engine={...}>` prop exposes the live engine
+  selection (`'batch-keyframe'` (default) / `'firstwins-rectilinear'`
+  / `'hybrid'` / `'slitscan-*'`).  Lets hosts opt into in-flight
+  stitching for low-latency previews; previously the choice was
+  hardcoded.
+
+### Changed
+
+* `New: F8.6 perf-diagnostic logs` (`F8.6-route`, `F8.6-perf`) fire
+  in live-engine mode only — inert under the default
+  `batch-keyframe`.  Will be removed in v0.6 once F8.6 is baked in
+  production.
+
+### Fixed
+
+* In `IncrementalStitcher.consumeFrameFromPlugin`, the `onAccept`
+  lambda was re-packing the live `Image` instead of reusing the
+  already-packed NV21 from the outer scope.  Now it reuses the
+  outer `packed` — saves a redundant `packNV21` call on every
+  accepted frame.
+
 ## [0.5.0] — 2026-05-25
 
 ### Added — F8 Frame Processor port
