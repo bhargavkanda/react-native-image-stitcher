@@ -236,6 +236,29 @@ export interface CameraProps {
   style?: StyleProp<ViewStyle>;
 
   /**
+   * Which incremental stitcher engine to drive.  Default
+   * `'batch-keyframe'` — collects accepted JPEGs and runs
+   * `cv::Stitcher` once at finalize time.  This is the v0.4+
+   * production default and what the v0.5 Frame Processor migration
+   * exercises.
+   *
+   * Switch to a live engine (`'firstwins-rectilinear'` or
+   * `'hybrid'`) for low-latency in-flight stitching.  Live engines
+   * exercise the F8.6 pixel-buffer ingest path (skipping the JPEG
+   * encode/decode round-trip; ~30–50 ms saved per accept) when the
+   * Frame Processor driver is active.
+   *
+   * See `docs/f8-frame-processor-plan.md` and the v0.5.0
+   * CHANGELOG for the trade-offs between batch-keyframe and live
+   * engines.
+   */
+  engine?: 'batch-keyframe'
+    | 'hybrid'
+    | 'slitscan-rotate' | 'slitscan-both'
+    | 'firstwins' | 'firstwins-zoomed' | 'firstwins-rectilinear'
+    | 'slitscan';
+
+  /**
    * Optional destination directory for captures.  When set, the lib
    * lands tap-photos at `${outputDir}/photo-${ts}.jpg` and panoramas
    * at `${outputDir}/panorama-${ts}.jpg` and the returned uri points
@@ -587,6 +610,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onError,
     frameProcessor: hostFrameProcessor,
     legacyDriver = false,
+    engine = 'batch-keyframe',
   } = props;
 
   const insets = useSafeAreaInsets();
@@ -1031,7 +1055,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         composeHeight: 1080,
         canvasWidth: 5000,
         canvasHeight: 5000,
-        engine: 'batch-keyframe',
+        engine,
         config: panoramaSettingsToNativeConfig({
           ...settings,
           captureSource: effectiveCaptureSource,
@@ -1079,6 +1103,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     jsDriver,
     fpDriver,
     legacyDriver,
+    engine,
     onError,
   ]);
 
