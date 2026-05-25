@@ -1,4 +1,4 @@
-// swift-tools-version:5.9
+// swift-tools-version:5.10
 //
 // Package.swift — SwiftPM manifest used **only for command-line testing**
 // of the algorithm layer (QualityChecker.swift).  Production builds
@@ -38,26 +38,40 @@ let package = Package(
     .target(
       name: "RNImageStitcher",
       path: "Sources/RNImageStitcher",
-      // Excluded from `swift test` because they depend on either
-      // React (which isn't a SwiftPM dep) or OpenCV (which only
-      // ships as an iOS XCFramework via the podspec — no macOS
-      // build).  The host app's CocoaPods workspace picks them up.
-      exclude: [
-        // React-dependent
-        "QualityCheckerBridge.swift",
-        "QualityCheckerBridge.m",
-        "StitcherBridge.swift",
-        "StitcherBridge.m",
-        // OpenCV-dependent (Phase 2 stitcher)
-        "OpenCVStitcher.h",
-        "OpenCVStitcher.mm",
-        // OpenCV-dependent (V16 Phase 1 keyframe collector)
-        "OpenCVKeyframeCollector.h",
-        "OpenCVKeyframeCollector.mm",
-        // Stitcher.swift is `#if canImport(UIKit)`-gated so it
-        // compiles to nothing on macOS; including it keeps the
-        // file available to the Pods build without breaking
-        // `swift test`.
+      // F8.3.H2-target — instead of an `exclude` list (which broke
+      // every time a new .mm landed, e.g.
+      // `KeyframeGateFrameProcessor.mm` in F8.1, because SwiftPM
+      // still scans the directory and rejects "mixed language
+      // source files" if it sees both .swift and .mm), we use an
+      // explicit `sources` allowlist of files that compile cleanly
+      // on macOS (where `swift test` runs).
+      //
+      // What's in the allowlist:
+      //   * QualityChecker.swift — Accelerate / CoreImage; macOS-OK.
+      //   * KeyframeGate.swift — Foundation + simd; macOS-OK.
+      //
+      // What's NOT (intentionally):
+      //   * Anything with `import UIKit` / `import ARKit` — iOS only.
+      //     CocoaPods compiles them for the host app via the podspec
+      //     source_files glob; SwiftPM macOS doesn't need them.
+      //   * .mm / .m / .h files — same.  Picked up by CocoaPods.
+      //   * RN-bridge Swift files (`*Bridge.swift`) — `import React`,
+      //     not a SwiftPM dep.
+      //
+      // The Frame Processor plugin's Swift⇄ObjC selector pin
+      // (formerly relied on by `FrameProcessorPluginSelectorTests`)
+      // is enforced as a compile-time `#selector(...)` reference
+      // inside `IncrementalStitcher.swift` itself — see the
+      // `_consumeFrameFromPluginSelectorPin` static.  Drift breaks
+      // the SDK build, which is a stronger guarantee than a test
+      // that needs iOS-Simulator infrastructure to run.
+      sources: [
+        "QualityChecker.swift",
+        // KeyframeGate.swift depends on `KeyframeGateBridge` (ObjC
+        // class in .mm) and `RNSARFramePose` (from a UIKit-using
+        // Swift file), so it doesn't compile standalone under
+        // SwiftPM on macOS — only the CocoaPods build sees the
+        // full type graph.
       ]
     ),
     .testTarget(

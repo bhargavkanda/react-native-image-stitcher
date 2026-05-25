@@ -476,6 +476,13 @@ public final class IncrementalStitcher: NSObject {
 
     private override init() {
         super.init()
+        // F8.3.H2 — runtime check that Swift's auto-bridged ObjC
+        // selector for `consumeFrameFromPlugin(...)` matches the
+        // selector string the plugin's .mm dispatches.  Asserts in
+        // dev builds; no-ops in release.  See the
+        // `_consumeFrameFromPluginSelectorPin` declaration below for
+        // the full rationale.
+        IncrementalStitcher._verifyConsumeFrameFromPluginSelector()
     }
 
     /// 2026-05-18 (iOS cross-orientation fix) — bridge entry-point
@@ -3157,5 +3164,58 @@ extension IncrementalStitcher {
             trackingState: trackingState
         )
         consumeFrame(pixelBuffer: pixelBuffer, pose: pose)
+    }
+
+    // F8.3.H2 — compile-time + runtime guard for the Swift⇄ObjC
+    // selector contract that `KeyframeGateFrameProcessor.mm`
+    // depends on.
+    //
+    // The .mm file forward-declares `IncrementalStitcher` and
+    // dispatches `[shared consumeFrameFromPluginWithPixelBuffer:tx:
+    // …:trackingStateRaw:]` by NAME — ObjC's late-binding means
+    // signature drift would silently link but crash at runtime
+    // with `NSInvalidArgumentException: unrecognized selector`
+    // on the first non-AR frame.
+    //
+    // This `#selector(...)` reference forces the Swift compiler
+    // to resolve the exact method signature.  If anyone renames a
+    // parameter label or adds/removes an argument, the
+    // `_consumeFrameFromPluginSelectorPin` expression fails to
+    // compile — the SDK won't build until the .mm's forward
+    // declaration is updated to match.  Stronger guarantee than a
+    // test that needs iOS-Simulator infrastructure to run.
+    //
+    // The runtime check below additionally pins the exact
+    // SELECTOR STRING the .mm dispatches.  In dev/debug builds it
+    // asserts; in release builds it's a no-op (the static let is
+    // initialised lazily and never read otherwise, so the runtime
+    // cost is one-time + tiny).  Drift between Swift's auto-
+    // generated selector name and the .mm's expected string
+    // (e.g., if Swift's bridging rules change) trips the assert.
+    private static let _consumeFrameFromPluginSelectorPin: Selector =
+        #selector(IncrementalStitcher.consumeFrameFromPlugin(
+            pixelBuffer:
+            tx: ty: tz:
+            qx: qy: qz: qw:
+            fx: fy: cx: cy:
+            imageWidth: imageHeight:
+            timestampMs:
+            trackingStateRaw:))
+
+    @inline(never)
+    private static func _verifyConsumeFrameFromPluginSelector() {
+        let expected =
+            "consumeFrameFromPluginWithPixelBuffer:tx:ty:tz:"
+            + "qx:qy:qz:qw:fx:fy:cx:cy:"
+            + "imageWidth:imageHeight:timestampMs:trackingStateRaw:"
+        let actual = NSStringFromSelector(_consumeFrameFromPluginSelectorPin)
+        assert(
+            actual == expected,
+            "Frame Processor selector drift — Swift's auto-bridged "
+            + "ObjC selector for consumeFrameFromPlugin is "
+            + "\(actual) but KeyframeGateFrameProcessor.mm's "
+            + "forward declaration expects \(expected).  Update the "
+            + ".mm to match (or fix the assumption here).",
+        )
     }
 }

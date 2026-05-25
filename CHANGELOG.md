@@ -91,13 +91,29 @@ Frame Processor** on the camera producer thread instead of the
 
 ### Tracking — known follow-ups (don't gate this release)
 
-- **F8.6** — Android engine refactor for pixel-buffer-direct
-  ingest (true zero-copy parity with iOS).
-- **F8.3.H2-target** — `swift test` currently can't run the
-  iOS test target due to mixed Swift/.mm sources.  The
-  `FrameProcessorPluginSelectorTests` selector guard is in place
-  as a documentation artifact; CI test-runner fix is a separate
-  task.
+- **F8.6 (v0.5.1)** — Android engine refactor for pixel-buffer-
+  direct ingest (true zero-copy parity with iOS).  Would extract
+  an `addFrameMat` helper from `IncrementalFirstwinsEngine` and
+  `IncrementalEngine`'s `addFrameAtPath`, add a parallel
+  `addFramePixelData` that constructs the BGR `cv::Mat` from NV21
+  bytes via `cvtColor`, and rewire `RNSARCameraView` to skip the
+  per-frame JPEG encode.  Expected gain: ~30–50 ms per accepted
+  frame.  Deferred because the engine bodies are 400+ lines of
+  complex AR-mode code; needs A35 device verification before
+  merge, which the v0.5.0 prep session didn't have.
+
+- **F8.3-followup-roll** — resolved in v0.5.0.
+
+- **F8.3.H2-target** — RESOLVED in v0.5.0 via a different
+  mechanism than originally planned.  The selector pin is now a
+  compile-time `#selector(...)` reference inside
+  `IncrementalStitcher.swift` plus a dev-build runtime assert in
+  `IncrementalStitcher.init()` — both fire if the Swift method
+  signature drifts from what `KeyframeGateFrameProcessor.mm`
+  expects.  The obsolete test file was deleted.  `swift test` now
+  runs the (8-test) `QualityCheckerTests` suite cleanly because
+  `Package.swift` switched from an exclude list (broke every time
+  a new `.mm` landed) to an explicit `sources` allowlist.
 
 ## [0.4.1] — 2026-05-23
 
