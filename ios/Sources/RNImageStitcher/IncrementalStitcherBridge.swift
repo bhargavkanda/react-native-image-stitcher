@@ -74,10 +74,12 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
     /// Resolves with `{ ok: true }`.  Rejects when `frameSourceMode`
     /// (options dict) is 'arSession' (the default) AND the AR session
     /// isn't running — that path needs ARKit to deliver frames.
-    /// When `frameSourceMode` is 'jsDriver' the AR-session check is
-    /// skipped and the engine expects JS to feed frames via
-    /// `processFrameAtPath` (used by iOS non-AR captures since
-    /// 2026-05-18 / Issue #2 regression fix).
+    /// When `frameSourceMode` is 'frameProcessor' the AR-session check
+    /// is skipped and the engine expects the vision-camera Frame
+    /// Processor plugin (`CvFlowGateFrameProcessor`) to feed frames
+    /// via `consumeFrameFromPlugin`.  The pre-v0.6 'jsDriver' mode
+    /// (push frames in from JS via `processFrameAtPath`) has been
+    /// removed.
     @objc(start:resolver:rejecter:)
     public func start(
         options: NSDictionary,

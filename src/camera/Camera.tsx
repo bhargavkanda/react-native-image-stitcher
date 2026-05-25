@@ -870,17 +870,17 @@ export function Camera(props: CameraProps): React.JSX.Element {
     const accepted = incrementalState?.acceptedCount ?? 0;
     if (accepted > lastAcceptedCountRef.current) {
       lastAcceptedCountRef.current = accepted;
-      // F8.3 review-of-review (M3 revert): originally gated this to
-      // `legacyDriver` because the Frame Processor driver doesn't
-      // consult `imuGate` for its own pose synthesis.  That ignored a
-      // load-bearing side effect: `imuGate.resetAnchor()` bounds the
-      // IIR-integrator drift window per-accept, and
-      // `imuGate.getTotalAbsMetres()` is read at finalize time
-      // (Camera.tsx:1097) as `imuTranslationMetres` into the native
+      // F8.3 review-of-review (M3 revert): an earlier draft gated
+      // this on the pre-v0.6 `legacyDriver` prop because the Frame
+      // Processor driver doesn't consult `imuGate` for its own pose
+      // synthesis.  That ignored a load-bearing side effect:
+      // `imuGate.resetAnchor()` bounds the IIR-integrator drift
+      // window per-accept, and `imuGate.getTotalAbsMetres()` is read
+      // at finalize time as `imuTranslationMetres` into the native
       // stitchMode auto-resolver (PANORAMA vs SCANS).  Without the
       // per-accept reset, long FP-driver captures let IIR drift
-      // compound → inflated metres → biased toward SCANS.  Keep the
-      // reset firing for ALL non-AR modes.
+      // compound → inflated metres → biased toward SCANS.  Now fires
+      // for ALL non-AR captures (the only non-AR driver post-v0.6).
       if (isNonAR) {
         imuGate.resetAnchor();
       }
