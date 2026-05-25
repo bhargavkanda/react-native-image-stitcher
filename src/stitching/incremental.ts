@@ -200,23 +200,22 @@ export interface IncrementalStartOptions {
    *     bridge.start() requires `RNSARSession.start()` to
    *     have already been called.
    *
-   *   - 'jsDriver' — engine skips AR-session registration; JS
-   *     feeds frames via `processFrameAtPath`.  Use in iOS non-AR
-   *     captures (vision-camera + gyro).  No AR session required.
-   *     LEGACY; deprecated in v0.5, removed in v0.6.
-   *
    *   - 'frameProcessor' (F8.3 iOS / F8.4 Android, v0.5+) — engine
    *     flips on `frameProcessorIngestEnabled` so the vision-camera
    *     Frame Processor plugin (`cv_flow_gate_process_frame`) can
    *     feed pixel data directly into the engine's gate path.  iOS
    *     passes the `CVPixelBuffer` straight to `consumeFrame`;
-   *     Android extracts the Y plane to a ByteArray and encodes
-   *     accepted frames to JPEG inline (the platform-specific
-   *     engine-input divergence is tracked as F8.6).  Use in non-AR
-   *     captures driven by `useFrameProcessorDriver`.  Pairs with
-   *     `Camera`'s default driver mode.
+   *     Android extracts the Y plane to a ByteArray and (since
+   *     F8.6, v0.5.1) routes live-engine ingest through
+   *     `addFramePixelData` without a JPEG round-trip.  Use in
+   *     non-AR captures driven by `useFrameProcessorDriver`.  Pairs
+   *     with `Camera`'s default driver mode.
+   *
+   * `'jsDriver'` was removed in v0.6 (deprecated in v0.5).  Hosts
+   * that used it should switch to `useFrameProcessorDriver` (or
+   * just let `<Camera>` use its default).
    */
-  frameSourceMode?: 'arSession' | 'jsDriver' | 'frameProcessor';
+  frameSourceMode?: 'arSession' | 'frameProcessor';
   /** Compose-resolution width in pixels (default 720 for portrait, 960 for landscape). */
   composeWidth?: number;
   /** Compose-resolution height in pixels (default 960 for portrait, 720 for landscape). */

@@ -16,6 +16,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-25
+
+> [!WARNING]
+> **Breaking changes.**  v0.6.0 retires the deprecated JS-driver
+> non-AR path that was marked for removal in v0.5.0's *Deprecated*
+> section.  Hosts using the default `<Camera>` flow (`legacyDriver`
+> unset) are not affected — they were already on
+> `useFrameProcessorDriver`.  Hosts that opted into the legacy
+> driver (`legacyDriver={true}` on `<Camera>`, or a direct
+> `useIncrementalJSDriver()` consumer) MUST migrate to the Frame
+> Processor driver — see *Migration from 0.5.x* below.
+
+### Removed (breaking)
+
+- **`useIncrementalJSDriver` hook** + its `UseIncrementalJSDriverOptions`
+  / `IncrementalJSDriverHandle` types.  Deprecated in v0.5.0; the
+  v0.5 deprecation warning has now been replaced by deletion.
+- **`legacyDriver?: boolean` prop on `<Camera>`**.  The escape hatch
+  back to the JS driver is gone.  Hosts that set this prop will
+  get a TS-level error; at runtime the prop is silently ignored.
+- **`frameSourceMode: 'jsDriver'`** enum value in
+  `IncrementalStartOptions`.  The TS type is now narrowed to
+  `'arSession' | 'frameProcessor'`.  Passing `'jsDriver'` is a
+  compile error; at the native bridge layer the value falls through
+  to the default (now `'arSession'`).
+- **`IncrementalStitcher.processFrameAtPath` native method** on both
+  iOS and Android.  The only JS caller was `useIncrementalJSDriver`,
+  also deleted.  Hosts calling
+  `NativeModules.IncrementalStitcher.processFrameAtPath(...)` via
+  raw `NativeModules` access will get a runtime "method does not
+  exist" error.  Use the Frame Processor driver instead.
+
+### Changed (breaking)
+
+- **Android `frameSourceMode` default switched from `"jsDriver"` to
+  `"arSession"`** for parity with iOS.  Raw `NativeModules` callers
+  that omitted `frameSourceMode` were previously getting an inert
+  capture (the "jsDriver" branch dropped all engine input on
+  Android since v0.5.0); they now get AR-mode behaviour, matching
+  iOS.  The production `<Camera>` is unaffected — it always passes
+  `frameSourceMode: 'arSession'` explicitly for AR captures.
+
+### Changed (non-breaking)
+
+- **`RNSARCameraView` (AR mode) no longer eager-encodes a JPEG per
+  ARCore frame.**  Migrated to the pixel-data path introduced for
+  the Frame Processor in v0.5.1's F8.6 work.  AR-mode captures now
+  pass `nv21PixelData` / `nv21PixelWidth` / `nv21PixelHeight`
+  through `ingestFromARCameraView`; `legacyJpegPath` is always null
+  on this path.  Expected gain on Galaxy A35: ~30-50 ms per
+  accepted frame, with the dominant savings on rejected frames
+  (no JPEG encode → no imread round-trip).  Closes the v0.5.0
+  follow-up.
+
+### Removed (internal cleanup; no external API impact)
+
+- **F8.6 perf-diagnostic logs** (`F8.6-route`, `F8.6-perf`)
+  introduced in v0.5.1 stripped from `IncrementalStitcher` +
+  `IncrementalFirstwinsEngine` — F8.6 is now baked in for
+  production and the diagnostic spam is no longer informative.
+- **Orphaned native helpers** dropped after `processFrameAtPath`
+  removal:
+  - iOS: `addBatchKeyframePath(path:pose:)`, `isBatchKeyframeMode`
+    getter, `decodeJpegToGrayscalePixelBuffer` (only callers were
+    `processFrameAtPath`).
+  - Android: `decodeJpegToGrayscale` + `GrayscaleFrame` data class,
+    `isBatchKeyframeMode` getter (only callers were
+    `processFrameAtPath` and the AR-mode eager-encode branch).
+- **Stale comments** referencing removed code paths swept across
+  Kotlin/Swift/Obj-C/TS.  Historical "removed in v0.6" markers
+  retained; comments that described live code in terms of the
+  removed names rewritten to describe current behaviour.
+
+### Migration from 0.5.x
+
+**Default `<Camera>` hosts (no `legacyDriver` prop set):** no
+action required.  `<Camera>` already used `useFrameProcessorDriver`
+in non-AR mode and `RNSARSession` in AR mode since v0.5.0.
+
+**Hosts with `legacyDriver={true}` on `<Camera>`:** remove the
+prop.  `<Camera>` will use the Frame Processor driver, which has
+been the default since v0.5.0 and the only path since this release.
+
+```tsx
+// Before (v0.5.x)
+<Camera legacyDriver={true} ... />
+
+// After (v0.6.0)
+<Camera ... />
+```
+
+**Hosts directly using `useIncrementalJSDriver`:** migrate to
+`useFrameProcessorDriver`.  The handle shape (`{ start, stop,
+frameProcessor, isRunning }`) is preserved, but the new hook is a
+Frame Processor + gyro driver instead of a `takeSnapshot` + JS
+interval driver.  See
+[`src/stitching/useFrameProcessorDriver.ts`](src/stitching/useFrameProcessorDriver.ts)
+for the migration mapping; the gyro pose synthesis convention
+(`q = q_yaw * q_pitch * q_roll`) is identical, so existing pose
+math at call sites continues to work.
+
+**Hosts passing `frameSourceMode: 'jsDriver'` to
+`incremental.start(...)`:** change to `'frameProcessor'`.  The
+TypeScript type now rejects `'jsDriver'` at compile time.
+
 ## [0.5.1] — 2026-05-25
 
 ### Added — F8.6 Android pixel-buffer engine parity
@@ -1056,7 +1161,12 @@ Native module names also changed:
 - iOS pod: `RetaiLensCaptureSDK` → `RNImageStitcher`
 - iOS xcframework: shipped as `opencv2.xcframework` (linked from `RNImageStitcher.podspec`)
 
-[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.1.3...v0.2.0

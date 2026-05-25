@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * useFrameProcessorDriver — vision-camera Frame Processor + gyro
- * driver for the incremental panorama engine.  Replaces
- * `useIncrementalJSDriver` in non-AR captures.
+ * driver for the incremental panorama engine.  Sole non-AR driver
+ * from v0.6 onward (replaced the deprecated `useIncrementalJSDriver`
+ * hook, which was removed in v0.6).
  *
- * Why this exists (vs the JS-driver predecessor)
+ * Why this exists (vs the pre-v0.6 JS-driver predecessor)
  *
- *   The JS driver takes a JPEG snapshot every ~250 ms and feeds the
- *   path to `IncrementalStitcher.processFrameAtPath`.  That path
- *   has three costs:
+ *   The old JS driver took a JPEG snapshot every ~250 ms and fed the
+ *   path to `IncrementalStitcher.processFrameAtPath` (both removed in
+ *   v0.6).  That path had three costs:
  *
  *     1. JPEG encode (`takeSnapshot` ≈ 30–80 ms on iPhone 16 Pro)
  *     2. Disk write of the JPEG
@@ -303,9 +304,9 @@ export function useFrameProcessorDriver(
     //   y = horizontal pan (yaw, about world-Y)
     //   x = vertical tilt (pitch, about world-X)
     //   z = wrist-twist roll (about world-Z, normal to the screen)
-    // Signs match the legacy `useIncrementalJSDriver` for x/y; z
-    // follows the same right-hand-rule convention.  If field
-    // captures show inverted roll, flip the sign on `z * dt` below.
+    // Right-hand-rule convention throughout — same signs the pre-v0.6
+    // `useIncrementalJSDriver` produced.  If field captures show
+    // inverted roll, flip the sign on `z * dt` below.
     setUpdateIntervalForType(SensorTypes.gyroscope, gyroIntervalMs);
     gyroSubRef.current = gyroscope.subscribe({
       next: ({ x, y, z }) => {
@@ -382,8 +383,8 @@ export function useFrameProcessorDriver(
       imageWidth: w, imageHeight: h,
       timestampMs: 0,
       // 2 == RNSARTrackingState.tracking — we always claim "good
-      // tracking" because there's no ARKit signal to differentiate
-      // (matches legacy useIncrementalJSDriver semantics).
+      // tracking" because there's no ARKit signal to differentiate.
+      // (Same contract as the pre-v0.6 useIncrementalJSDriver.)
       trackingStateRaw: 2,
     });
     // Deps array intentionally minimal: only `plugin` actually

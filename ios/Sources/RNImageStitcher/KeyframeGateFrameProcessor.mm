@@ -140,13 +140,13 @@ static NSInteger kg_argInt(NSDictionary* args, NSString* key, NSInteger defaultV
   // Pose from worklet args.  Defaults are safe non-AR values:
   //   * tx/ty/tz = 0 (no translation in non-AR; gyro only gives rot)
   //   * qw = 1 (identity quaternion if JS hasn't supplied rotation)
-  //   * fx/fy/cx/cy = 0 → JS-driver caller MUST supply these (the
-  //     engine derives FoV from intrinsics; 0 would yield NaN FoV).
-  //     We default the principal point to image centre as a safer
-  //     fallback if only fx/fy are missing.
+  //   * fx/fy/cx/cy = 0 → the Frame Processor worklet caller MUST
+  //     supply these (the engine derives FoV from intrinsics; 0 would
+  //     yield NaN FoV).  We default the principal point to image
+  //     centre as a safer fallback if only fx/fy are missing.
   //   * trackingStateRaw = 2 → `.tracking` (non-AR captures don't
-  //     have a real tracking-quality signal; engine's `trackingPoor`
-  //     path stays inactive, matching legacy `useIncrementalJSDriver`).
+  //     have a real tracking-quality signal; reporting `.tracking`
+  //     keeps the engine's `trackingPoor` path inactive).
   double tx = kg_argDouble(arguments, @"tx", 0.0);
   double ty = kg_argDouble(arguments, @"ty", 0.0);
   double tz = kg_argDouble(arguments, @"tz", 0.0);
