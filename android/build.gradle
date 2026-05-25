@@ -235,6 +235,12 @@ dependencies {
     // below.
     if (findProject(':react-native-vision-camera') != null) {
         compileOnly project(':react-native-vision-camera')
+        // CameraX `ImageProxy` / `ImageInfo` types — vision-camera
+        // exposes them through `Frame.getImageProxy()` and we need
+        // the compile-time class for `imageInfo.rotationDegrees`.
+        // `compileOnly` because the host app already ships these via
+        // vision-camera's transitive runtime dep.
+        compileOnly "androidx.camera:camera-core:1.5.0-alpha03"
     } else {
         // Without vision-camera on the classpath the Frame
         // Processor plugin source can't compile (imports unresolved).

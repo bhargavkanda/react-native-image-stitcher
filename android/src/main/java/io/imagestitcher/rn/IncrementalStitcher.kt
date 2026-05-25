@@ -36,6 +36,7 @@ import org.opencv.features2d.ORB
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import java.io.File
+import io.imagestitcher.rn.ar.YuvImageConverter
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -1524,6 +1525,12 @@ class IncrementalStitcher(
         fx: Double, fy: Double, cx: Double, cy: Double,
         timestampMs: Double,
         trackingStateRaw: Int,
+        // F8.4-Android-c rotation fix: how many degrees the sensor
+        // data needs to be rotated CW to display upright.  Comes
+        // from vision-camera's `Frame.imageProxy.imageInfo.rotationDegrees`.
+        // Typically 90 for a portrait-held back camera on Samsung
+        // devices (sensor mounted 90° rotated from screen-up).
+        sensorRotationDegrees: Int,
     ) {
         // F8.4 — drop the call unless this capture was started in
         // frameProcessor mode.  Otherwise the plugin would double-
@@ -1590,98 +1597,59 @@ class IncrementalStitcher(
             grayHeight = height,
             grayStride = yRowStride,
             onAccept = { targetPath ->
-                // Synchronous JPEG encode.  Returning `true` tells
-                // the engine the keyframe was persisted; `false`
-                // tells it to drop the accept (caller's
-                // responsibility per the existing
-                // ingestFromARCameraView contract).
+                // Synchronous JPEG encode via the existing
+                // YuvImageConverter (also used by RNSARCameraView's
+                // ARCore path).  Handles both the NV21 conversion
+                // (stride / pixelStride aware) and the EXIF
+                // Orientation tag write so the JPEG displays upright
+                // in the UI thumbnail strip + any RN Image consumer.
+                //
+                // EXIF rotation is BAKED-AS-METADATA, not pixel-
+                // rotated.  cv::imread in the stitcher ignores EXIF
+                // by default (see BatchStitcher.applyExifOrientation),
+                // so the engine's stored `frameRotationDegrees` still
+                // governs how the cv::Mat is interpreted downstream.
+                // No double-rotation.
+                //
+                // Returning `true` tells the engine the keyframe was
+                // persisted; `false` tells it to drop the accept.
                 try {
-                    encodeYuvImageToJpeg(image, targetPath, jpegQuality = 80)
-                    true
+                    val packed = YuvImageConverter.packNV21(image)
+                        ?: run {
+                            android.util.Log.w(
+                                "IncrementalStitcher",
+                                "consumeFrameFromPlugin: packNV21 returned null for $targetPath",
+                            )
+                            return@run null
+                        }
+                    if (packed == null) {
+                        false
+                    } else {
+                        val displayRotation = when (sensorRotationDegrees) {
+                            0   -> android.view.Surface.ROTATION_90
+                            90  -> android.view.Surface.ROTATION_0
+                            180 -> android.view.Surface.ROTATION_270
+                            270 -> android.view.Surface.ROTATION_180
+                            else -> android.view.Surface.ROTATION_0
+                        }
+                        val outPath = YuvImageConverter.encodeJpegFromNV21(
+                            packed,
+                            targetPath,
+                            jpegQuality = 80,
+                            displayRotation = displayRotation,
+                        )
+                        outPath != null
+                    }
                 } catch (e: Throwable) {
                     android.util.Log.w(
                         "IncrementalStitcher",
-                        "consumeFrameFromPlugin: JPEG encode failed for $targetPath: ${e.message}",
+                        "consumeFrameFromPlugin: JPEG encode failed for $targetPath: ${e.javaClass.simpleName}: ${e.message}",
+                        e,
                     )
                     false
                 }
             },
         )
-    }
-
-    /**
-     * F8.4 helper — encode a vision-camera `android.media.Image`
-     * (YUV_420_888) to a JPEG file at `targetPath`.  Synchronous;
-     * uses Android's stock `YuvImage` encoder via the standard
-     * NV21 conversion path.  No external native deps.
-     *
-     * Performance: ~30–50 ms at 1920×1080 on an A35-class device.
-     * Hot enough to matter at 30 fps producer-thread rate; the
-     * keyframe gate's 5–10% accept rate keeps the average load
-     * below ~5 ms / 33 ms frame budget.
-     */
-    private fun encodeYuvImageToJpeg(
-        image: android.media.Image,
-        targetPath: String,
-        jpegQuality: Int,
-    ) {
-        val width = image.width
-        val height = image.height
-        val yPlane = image.planes[0]
-        val uPlane = image.planes[1]
-        val vPlane = image.planes[2]
-
-        val ySize = width * height
-        val uvSize = ySize / 2
-        val nv21 = ByteArray(ySize + uvSize)
-
-        // Y plane — stride-aware row copy.
-        val yBuffer = yPlane.buffer
-        val yRowStride = yPlane.rowStride
-        if (yRowStride == width) {
-            yBuffer.get(nv21, 0, ySize)
-        } else {
-            var pos = 0
-            for (row in 0 until height) {
-                yBuffer.position(row * yRowStride)
-                yBuffer.get(nv21, pos, width)
-                pos += width
-            }
-        }
-
-        // Interleave V then U into the second plane (NV21 = Y + VU).
-        // YUV_420_888 spec: pixelStride may be 1 (planar) or 2
-        // (semi-planar/interleaved already).  Treat both.
-        val uBuffer = uPlane.buffer
-        val vBuffer = vPlane.buffer
-        val uPixelStride = uPlane.pixelStride
-        val uRowStride = uPlane.rowStride
-        val vPixelStride = vPlane.pixelStride
-        val vRowStride = vPlane.rowStride
-        val chromaWidth = width / 2
-        val chromaHeight = height / 2
-        var pos = ySize
-        for (row in 0 until chromaHeight) {
-            for (col in 0 until chromaWidth) {
-                val vIdx = row * vRowStride + col * vPixelStride
-                val uIdx = row * uRowStride + col * uPixelStride
-                nv21[pos++] = vBuffer.get(vIdx)
-                nv21[pos++] = uBuffer.get(uIdx)
-            }
-        }
-
-        val yuvImage = android.graphics.YuvImage(
-            nv21,
-            android.graphics.ImageFormat.NV21,
-            width, height, null,
-        )
-        java.io.FileOutputStream(targetPath).use { out ->
-            yuvImage.compressToJpeg(
-                android.graphics.Rect(0, 0, width, height),
-                jpegQuality.coerceIn(1, 100),
-                out,
-            )
-        }
     }
 
     @ReactMethod

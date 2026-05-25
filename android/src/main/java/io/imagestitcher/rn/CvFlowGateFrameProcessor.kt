@@ -96,6 +96,30 @@ class CvFlowGateFrameProcessor(
             return mapOf("submitted" to false, "error" to "stitcher not registered")
         }
 
+        // F8.4-Android-c rotation fix: read CameraX's authoritative
+        // "rotation needed to display upright" value via
+        // `imageProxy.imageInfo.rotationDegrees`.
+        //
+        // The earlier attempt used `Frame.orientation` (the enum),
+        // but vision-camera's `getOrientation()` returns the REVERSE
+        // of the rotation-needed value (see Frame.java:88, the
+        // "Reverse it" comment).  Trying to invert the enum
+        // ourselves was off by 90° on the A35.  The raw
+        // `imageInfo.rotationDegrees` is unambiguous.
+        //
+        // Used by the engine's JPEG encoder to write the correct
+        // EXIF Orientation tag so thumbnails (and any other
+        // EXIF-honoring viewer) display upright.  The raw cv::Mat
+        // the stitcher sees is unaffected — see consumeFrameFromPlugin
+        // docstring for the no-double-rotation rationale.
+        val sensorRotationDegrees = try {
+            frame.imageProxy.imageInfo.rotationDegrees
+        } catch (_: Throwable) {
+            // FrameInvalidError or null mid-callback — treat as
+            // portrait back-camera default (sensor mounted 90° CW).
+            90
+        }
+
         stitcher.consumeFrameFromPlugin(
             image = image,
             tx = argDouble(params, "tx", 0.0),
@@ -113,6 +137,7 @@ class CvFlowGateFrameProcessor(
             // Default 2 == `.tracking` so the worklet doesn't need
             // to send a tracking-state field on every frame.
             trackingStateRaw = argInt(params, "trackingStateRaw", 2),
+            sensorRotationDegrees = sensorRotationDegrees,
         )
 
         return mapOf("submitted" to true)
