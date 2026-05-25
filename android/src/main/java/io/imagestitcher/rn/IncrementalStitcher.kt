@@ -240,11 +240,6 @@ class IncrementalStitcher(
     /// (start/cancel/finalize) writes via `set()`/`compareAndSet()`.
     /// Mirror of iOS' `frameProcessorIngestEnabled` ivar.
     private val frameProcessorIngestEnabled = AtomicBoolean(false)
-
-    /// F8.6 perf-diagnostic — one-shot guard so the "live-engine
-    /// route" log fires exactly once per capture session.  Reset
-    /// in start().
-    private val f8_6_routeLoggedThisCapture = AtomicBoolean(false)
     /// Critic #5 fix: serial dispatcher so concurrent
     /// processFrameAtPath() calls can't race on the engine's canvas.
     /// `limitedParallelism(1)` guarantees one-at-a-time execution
@@ -338,9 +333,6 @@ class IncrementalStitcher(
             // / ARCore paths run unmodified.
             val frameSourceMode = options.getString("frameSourceMode") ?: "jsDriver"
             frameProcessorIngestEnabled.set(frameSourceMode == "frameProcessor")
-            // F8.6 perf-diagnostic — re-arm the route log for the
-            // new capture.
-            f8_6_routeLoggedThisCapture.set(false)
             val rotation = options.getIntOrDefault("frameRotationDegrees", 90)
             val composeW = options.getIntOrDefault("composeWidth",  960)
             val composeH = options.getIntOrDefault("composeHeight", 720)
@@ -730,204 +722,6 @@ class IncrementalStitcher(
     // we ever add a "force every Nth frame regardless of overlap"
     // override.
 
-    @ReactMethod
-    fun processFrameAtPath(options: ReadableMap, promise: Promise) {
-        val hybrid = this.engine
-        val firstwins = this.firstwinsEngine
-        // batch-keyframe mode runs without a live engine — handle it
-        // up-front before the null-check rejects.
-        //
-        // P3-F: this path uses the same shared-C++ KeyframeGate as
-        // the AR view path, but with translation = 0 (gyro-derived
-        // poses have only rotation, not position).  The gate's
-        // internal logic detects the missing plane and uses the
-        // camera-forward angular-delta fallback automatically.
-        if (batchKeyframeMode) {
-            val path = options.getString("path")
-                ?: return promise.reject("invalid-options", "path required")
-            val pose = RNSARFramePose(
-                tx = options.getDoubleOrDefault("tx", 0.0) ?: 0.0,
-                ty = options.getDoubleOrDefault("ty", 0.0) ?: 0.0,
-                tz = options.getDoubleOrDefault("tz", 0.0) ?: 0.0,
-                qx = options.getDoubleOrDefault("qx", 0.0) ?: 0.0,
-                qy = options.getDoubleOrDefault("qy", 0.0) ?: 0.0,
-                qz = options.getDoubleOrDefault("qz", 0.0) ?: 0.0,
-                qw = options.getDoubleOrDefault("qw", 1.0) ?: 1.0,
-                fx = options.getDoubleOrDefault("fx", 1000.0) ?: 1000.0,
-                fy = options.getDoubleOrDefault("fy", 1000.0) ?: 1000.0,
-                cx = options.getDoubleOrDefault("cx", 540.0) ?: 540.0,
-                cy = options.getDoubleOrDefault("cy", 960.0) ?: 960.0,
-                imageWidth = options.getIntOrDefault("imageWidth", 1080),
-                imageHeight = options.getIntOrDefault("imageHeight", 1920),
-                timestampMs = 0.0,
-                trackingState = RNSARSession.TRACKING_TRACKING,
-            )
-            // Vision-camera path: no plane available (gyro can't fit
-            // planes).  Pass null → C++ skips the plane-overlap math.
-            //
-            // 2026-05-21 (v0.3) — pixel-aware Flow-strategy evaluation.
-            // The JS driver hands us a JPEG file path; we decode it to
-            // grayscale here so the C++ gate actually runs sparse-flow
-            // novelty (pre-0.3 the call was `evaluate(pose, null)` and
-            // the C++ side silently fell back to Pose strategy because
-            // no pixel data was supplied — same bug as Android AR
-            // mode, both fixed in v0.3).  BitmapFactory + manual luma
-            // is fine here — non-AR snapshot cadence is ~4 FPS, the
-            // ~15-30 ms JPEG-decode-to-grayscale per call is well
-            // under the inter-snapshot interval.  (v0.4 will move
-            // non-AR to vision-camera's Frame Processor API, at which
-            // point the JPEG step goes away entirely.  Tracked at
-            // https://github.com/bhargavkanda/react-native-image-stitcher/issues/11)
-            val gray = decodeJpegToGrayscale(path)
-            val decision = if (gray != null) {
-                keyframeGate.evaluateWithFrame(
-                    pose, null,
-                    gray.bytes, gray.width, gray.height, gray.stride,
-                )
-            } else {
-                // JPEG decode failed (corrupt file? OOM?).  Fall back
-                // to pose-only path so the capture doesn't lock up;
-                // this matches the C++ side's own defensive fallback
-                // for null grayData.
-                keyframeGate.evaluate(pose, null)
-            }
-            val result = Arguments.createMap()
-            // Outcome mapping for iOS-parity JS contract:
-            //   1 = accepted, 2 = rejected (gate), 3 = rejected (cap).
-            // C++ enum → outcome int:
-            val outcome = when {
-                decision.accept -> 1
-                decision.reason == "max-reached" -> 3
-                else -> 2
-            }
-            result.putInt("outcome", outcome)
-            if (!decision.accept) {
-                // 2026-05-22 (audit follow-up) — emit reject-state on
-                // the non-AR JS-driver path too so the debug overlay
-                // sees overlap % update on every snapshot (~4 Hz).
-                // Same rationale as the AR path's reject emission
-                // above; iOS parity.
-                emitBatchKeyframeRejectState(
-                    decision = decision,
-                    keyframeCount = batchKeyframePaths.size,
-                    keyframeMax = keyframeGate.maxCount,
-                    isLandscape = pose.imageWidth >= pose.imageHeight,
-                )
-            }
-            if (decision.accept) {
-                batchKeyframePaths.add(path)  // vision-camera path
-                                              // gives us a unique
-                                              // per-snapshot file
-                                              // already (no copy
-                                              // needed).
-                // Emit the same state event the AR path emits so
-                // the JS LiveFrameStrip + "Keyframes n/max" pill
-                // work identically on the vision-camera fallback
-                // path.
-                emitBatchKeyframeAcceptedState(
-                    thumbnailPath = path,
-                    keyframeIndex = batchKeyframePaths.size - 1,
-                    keyframeCount = batchKeyframePaths.size,
-                    keyframeMax = keyframeGate.maxCount,
-                    isLandscape = pose.imageWidth >= pose.imageHeight,
-                    newContentFraction = decision.newContentFraction,
-                )
-            }
-            result.putInt("acceptedCount", batchKeyframePaths.size)
-            promise.resolve(result)
-            return
-        }
-        if (hybrid == null && firstwins == null) {
-            return promise.reject(
-                "incremental-not-running",
-                "Call start() before processFrameAtPath().",
-            )
-        }
-        val path = options.getString("path")
-            ?: return promise.reject("invalid-options", "path required")
-        val yaw = options.getDoubleOrDefault("yaw", 0.0)
-        val pitch = options.getDoubleOrDefault("pitch", 0.0)
-        val fovH = options.getDoubleOrDefault("fovHorizDegrees", 65.0)
-        val fovV = options.getDoubleOrDefault("fovVertDegrees", 50.0)
-        // V6 pose-driven params.  Defaults removed per critic finding
-        // #3: previously qw=1.0 default meant frames without explicit
-        // quaternion produced an identity rotation, and EVERY
-        // subsequent frame had R_rel = R_first^T (constant), so
-        // strip placement never advanced and `acceptedCount` froze
-        // at 1 after the first frame.  Now every quaternion field is
-        // required; missing → reject as RejectedAlignmentLost so the
-        // gyro driver upstream notices instantly.
-        if (!options.hasKey("qx") || !options.hasKey("qy")
-            || !options.hasKey("qz") || !options.hasKey("qw")) {
-            return promise.reject(
-                "invalid-options",
-                "qx/qy/qz/qw all required (no identity-quaternion fallback)",
-            )
-        }
-        val qx = options.getDouble("qx")
-        val qy = options.getDouble("qy")
-        val qz = options.getDouble("qz")
-        val qw = options.getDouble("qw")
-        val fx = options.getDoubleOrDefault("fx", 0.0)
-        val fy = options.getDoubleOrDefault("fy", 0.0)
-        val cx = options.getDoubleOrDefault("cx", 0.0)
-        val cy = options.getDoubleOrDefault("cy", 0.0)
-        val imageWidth = options.getIntOrDefault("imageWidth", 0)
-        val imageHeight = options.getIntOrDefault("imageHeight", 0)
-        val trackingPoor = options.getBooleanOrDefault("trackingPoor", false)
-
-        workScope.launch {
-            // Critic #4 fix: re-check isRunning synchronously here in
-            // case finalize/cancel ran on the JS thread between the
-            // null-check above and this dispatch landing.  Skip the
-            // ingest if we're no longer running — matches iOS' V12.1
-            // pattern (synchronous-stop + worker re-check).
-            if (!isRunning.get()) {
-                promise.resolve(Arguments.createMap().apply { putInt("outcome", -1) })
-                return@launch
-            }
-            try {
-                val telemetry: FrameTelemetry
-                val state: WritableMap?
-                val accepted: Int
-                if (firstwins != null) {
-                    telemetry = firstwins.addFrameAtPath(
-                        path = path,
-                        qx = qx, qy = qy, qz = qz, qw = qw,
-                        fx = fx, fy = fy, cx = cx, cy = cy,
-                        imageWidth = imageWidth, imageHeight = imageHeight,
-                        yaw = yaw, pitch = pitch,
-                        fovHorizDegrees = fovH, fovVertDegrees = fovV,
-                        trackingPoor = trackingPoor,
-                    )
-                    state = firstwins.snapshotIfDue(telemetry)
-                    accepted = firstwins.acceptedCount
-                } else {
-                    telemetry = hybrid!!.addFrameAtPath(
-                        path = path,
-                        qx = qx, qy = qy, qz = qz, qw = qw,
-                        fx = fx, fy = fy, cx = cx, cy = cy,
-                        imageWidth = imageWidth, imageHeight = imageHeight,
-                        yaw = yaw, pitch = pitch,
-                        fovHorizDegrees = fovH, fovVertDegrees = fovV,
-                        trackingPoor = trackingPoor,
-                    )
-                    state = hybrid.snapshotIfDue(telemetry)
-                    accepted = hybrid.acceptedCount
-                }
-                emitState(state)
-                val result = Arguments.createMap()
-                result.putInt("outcome", telemetry.outcome.ordinal)
-                result.putDouble("confidence", telemetry.confidence)
-                result.putDouble("overlapPercent", telemetry.overlapPercent)
-                result.putDouble("processingMs", telemetry.processingMs)
-                result.putInt("acceptedCount", accepted)
-                promise.resolve(result)
-            } catch (t: Throwable) {
-                promise.reject("incremental-process-failed", t.message, t)
-            }
-        }
-    }
 
     @ReactMethod
     fun finalize(options: ReadableMap, promise: Promise) {
@@ -1473,18 +1267,6 @@ class IncrementalStitcher(
         val hasPixelData = nv21PixelData != null
             && nv21PixelWidth > 0
             && nv21PixelHeight > 0
-        // F8.6 perf-diagnostic — log route choice once per capture
-        // so logcat shows whether the new pixel-data path is
-        // actually getting exercised.  Throttled to first-hit per
-        // capture (counter resets in start()/cancel()).
-        if (!f8_6_routeLoggedThisCapture.getAndSet(true)) {
-            android.util.Log.i(
-                "F8.6-route",
-                "ingestFromARCameraView live-engine route: "
-                + if (hasPixelData) "pixel-data (F8.6, no JPEG round-trip)"
-                  else "jpeg-path (legacy, JPEG decode round-trip)",
-            )
-        }
         val path = if (hasPixelData) null else legacyJpegPath ?: run {
             android.util.Log.w(
                 "IncrementalStitcher",
@@ -2635,7 +2417,7 @@ internal class IncrementalEngine(
         // See iOS' equivalent fix for the architectural rationale.
         val frame = downsampleToCompose(srcRaw)
         if (frame !== srcRaw) srcRaw.release()
-        val tele = addFrameMat(
+        return addFrameMat(
             frame,
             qx, qy, qz, qw,
             fx, fy, cx, cy,
@@ -2644,8 +2426,6 @@ internal class IncrementalEngine(
             fovHorizDegrees, fovVertDegrees,
             t0,
         )
-        f8_6_logPerf("hybrid/jpeg", t0, tele.outcome)
-        return tele
     }
 
     /**
@@ -2695,7 +2475,7 @@ internal class IncrementalEngine(
         }
         val frame = downsampleToCompose(srcRaw)
         if (frame !== srcRaw) srcRaw.release()
-        val tele = addFrameMat(
+        return addFrameMat(
             frame,
             qx, qy, qz, qw,
             fx, fy, cx, cy,
@@ -2704,27 +2484,6 @@ internal class IncrementalEngine(
             fovHorizDegrees, fovVertDegrees,
             t0,
         )
-        f8_6_logPerf("hybrid/pixel", t0, tele.outcome)
-        return tele
-    }
-
-    /**
-     * F8.6 perf-diagnostic counter (mirror of the firstwins one).
-     * Remove after v0.5.1 ships and the numbers are baked in.
-     */
-    @Volatile private var f8_6_perfCallCounter: Long = 0L
-    private fun f8_6_logPerf(
-        path: String,
-        t0Nanos: Long,
-        outcome: FrameOutcome,
-    ) {
-        val n = ++f8_6_perfCallCounter
-        if (n == 1L || n % 5L == 0L) {
-            android.util.Log.i(
-                "F8.6-perf",
-                "$path took ${msSince(t0Nanos)}ms outcome=$outcome (call #$n)",
-            )
-        }
     }
 
     /**

@@ -197,7 +197,7 @@ internal class IncrementalFirstwinsEngine(
         }
         val frameBGR = downsampleToCompose(srcRaw)
         if (frameBGR !== srcRaw) srcRaw.release()
-        val tele = addFrameMat(
+        return addFrameMat(
             frameBGR,
             qx, qy, qz, qw,
             fx, fy, cx, cy,
@@ -206,8 +206,6 @@ internal class IncrementalFirstwinsEngine(
             fovHorizDegrees, fovVertDegrees,
             t0,
         )
-        f8_6_logPerf("firstwins/jpeg", t0, tele.outcome)
-        return tele
     }
 
     /**
@@ -283,7 +281,7 @@ internal class IncrementalFirstwinsEngine(
         }
         val frameBGR = downsampleToCompose(srcRaw)
         if (frameBGR !== srcRaw) srcRaw.release()
-        val tele = addFrameMat(
+        return addFrameMat(
             frameBGR,
             qx, qy, qz, qw,
             fx, fy, cx, cy,
@@ -292,32 +290,6 @@ internal class IncrementalFirstwinsEngine(
             fovHorizDegrees, fovVertDegrees,
             t0,
         )
-        f8_6_logPerf("firstwins/pixel", t0, tele.outcome)
-        return tele
-    }
-
-    /**
-     * F8.6 perf-diagnostic counter.  Logs ingest timing every Nth
-     * call so a single capture session yields enough samples to
-     * eyeball the JPEG-path vs pixel-data-path delta.  Remove this
-     * once F8.6 is verified in production.
-     */
-    @Volatile private var f8_6_perfCallCounter: Long = 0L
-    private fun f8_6_logPerf(
-        path: String,
-        t0Nanos: Long,
-        outcome: FrameOutcome,
-    ) {
-        val n = ++f8_6_perfCallCounter
-        // Every 5th call ≈ ~1 line/sec at 5 Hz live-engine rate;
-        // first call always logs so we see something on capture
-        // start without waiting.
-        if (n == 1L || n % 5L == 0L) {
-            Log.i(
-                "F8.6-perf",
-                "$path took ${msSince(t0Nanos)}ms outcome=$outcome (call #$n)",
-            )
-        }
     }
 
     /**
