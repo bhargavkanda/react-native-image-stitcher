@@ -5,6 +5,7 @@ import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.NativeModule
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.uimanager.ViewManager
+import com.mrousavy.camera.frameprocessors.FrameProcessorPluginRegistry
 
 /**
  * ReactPackage that registers the SDK's two native modules with
@@ -22,15 +23,72 @@ import com.facebook.react.uimanager.ViewManager
  * JS layer.
  */
 class RNImageStitcherPackage : ReactPackage {
+
+    companion object {
+        @Volatile
+        private var fpPluginRegistered = false
+
+        /**
+         * F8.4 — register the vision-camera Frame Processor plugin.
+         * Called lazily from `createNativeModules` (which fires
+         * AFTER the React bridge has booted, side-stepping the
+         * bridgeless TurboModule init race we'd hit if we did this
+         * in a class-level static initialiser).
+         *
+         * No-op when vision-camera isn't on the runtime classpath
+         * (the SDK doesn't hard-depend on it — consumers that don't
+         * use `<Camera>` don't pay the dep).  Catches
+         * `NoClassDefFoundError` defensively because the runtime
+         * classpath is what matters, not the compile-time one.
+         *
+         * Idempotent: guarded by `fpPluginRegistered` so a host
+         * with multiple React instances doesn't double-register
+         * (would throw "name already exists" from the registry).
+         */
+        @JvmStatic
+        @Synchronized
+        fun ensureFrameProcessorPluginRegistered() {
+            if (fpPluginRegistered) return
+            try {
+                FrameProcessorPluginRegistry.addFrameProcessorPlugin(
+                    "cv_flow_gate_process_frame",
+                ) { proxy, options ->
+                    CvFlowGateFrameProcessor(proxy, options)
+                }
+                fpPluginRegistered = true
+            } catch (e: NoClassDefFoundError) {
+                android.util.Log.i(
+                    "RNImageStitcherPackage",
+                    "vision-camera FrameProcessorPluginRegistry not on classpath — "
+                    + "skipping cv_flow_gate_process_frame plugin registration "
+                    + "(host app doesn't appear to use Frame Processors).",
+                )
+                fpPluginRegistered = true  // don't retry every package init
+            } catch (e: Throwable) {
+                android.util.Log.w(
+                    "RNImageStitcherPackage",
+                    "Failed to register cv_flow_gate_process_frame plugin: ${e.message}",
+                )
+                fpPluginRegistered = true
+            }
+        }
+    }
+
     override fun createNativeModules(
         reactContext: ReactApplicationContext,
-    ): List<NativeModule> = listOf(
-        QualityChecker(reactContext),
-        BatchStitcher(reactContext),
-        RNSARSession(reactContext),
-        IncrementalStitcher(reactContext),
-        FileBridge(reactContext),
-    )
+    ): List<NativeModule> {
+        // F8.4 — register the Frame Processor plugin here, after the
+        // bridge is fully booted.  See `ensureFrameProcessorPluginRegistered`
+        // for the rationale (vs. a class-load-time static init).
+        ensureFrameProcessorPluginRegistered()
+        return listOf(
+            QualityChecker(reactContext),
+            BatchStitcher(reactContext),
+            RNSARSession(reactContext),
+            IncrementalStitcher(reactContext),
+            FileBridge(reactContext),
+        )
+    }
 
     override fun createViewManagers(
         reactContext: ReactApplicationContext,

@@ -36,6 +36,7 @@ import org.opencv.features2d.ORB
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import java.io.File
+import io.imagestitcher.rn.ar.YuvImageConverter
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -75,6 +76,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 class IncrementalStitcher(
     private val reactContext: ReactApplicationContext,
 ) : ReactContextBaseJavaModule(reactContext) {
+
+    // F8.4 note: the static singleton accessor for cross-thread
+    // lookup (used by `CvFlowGateFrameProcessor` running on vision-
+    // camera's producer thread) is the existing `bridgeInstance`
+    // companion field below — same pattern that `RNSARCameraView`
+    // uses to call back into the bridge.  No new companion object
+    // needed.
 
     override fun getName(): String = "IncrementalStitcher"
 
@@ -217,6 +225,21 @@ class IncrementalStitcher(
     private var consumeFrameCounter: Long = 0L
 
     private val isRunning = AtomicBoolean(false)
+
+    /// F8.4 — gate for `consumeFrameFromPlugin` (the vision-camera
+    /// Frame Processor producer-thread entry point on Android).
+    /// TRUE only when the current capture was started with
+    /// `frameSourceMode == "frameProcessor"`.  In other modes
+    /// (especially the legacy `"jsDriver"` path that feeds via
+    /// `processFrameAtPath`), the plugin would double-feed the
+    /// engine — bytes from the producer thread + JPEG paths from
+    /// the JS interval, racing on the same workScope serial
+    /// dispatcher — so we drop the producer-thread call.
+    ///
+    /// AtomicBoolean: producer thread reads lock-free, JS thread
+    /// (start/cancel/finalize) writes via `set()`/`compareAndSet()`.
+    /// Mirror of iOS' `frameProcessorIngestEnabled` ivar.
+    private val frameProcessorIngestEnabled = AtomicBoolean(false)
     /// Critic #5 fix: serial dispatcher so concurrent
     /// processFrameAtPath() calls can't race on the engine's canvas.
     /// `limitedParallelism(1)` guarantees one-at-a-time execution
@@ -301,6 +324,15 @@ class IncrementalStitcher(
         }
         try {
             ensureOpenCv()
+            // F8.4 — frameSourceMode honoured on Android.  Pre-F8.4,
+            // Android ignored this option (only iOS interpreted it).
+            // Now `"frameProcessor"` unlocks `consumeFrameFromPlugin`'s
+            // producer-thread ingest path; everything else (the
+            // implicit default + the legacy `"jsDriver"`) keeps the
+            // ingest path dormant so the existing `processFrameAtPath`
+            // / ARCore paths run unmodified.
+            val frameSourceMode = options.getString("frameSourceMode") ?: "jsDriver"
+            frameProcessorIngestEnabled.set(frameSourceMode == "frameProcessor")
             val rotation = options.getIntOrDefault("frameRotationDegrees", 90)
             val composeW = options.getIntOrDefault("composeWidth",  960)
             val composeH = options.getIntOrDefault("composeHeight", 720)
@@ -548,6 +580,7 @@ class IncrementalStitcher(
             promise.resolve(map)
         } catch (t: Throwable) {
             isRunning.set(false)
+            frameProcessorIngestEnabled.set(false)  // F8.4 — symmetric clear on error path
             promise.reject("incremental-start-failed", t.message, t)
         }
     }
@@ -935,6 +968,7 @@ class IncrementalStitcher(
         // bail at the re-check (see processFrameAtPath above).
         // Matches iOS V12.1 fix.
         isRunning.set(false)
+        frameProcessorIngestEnabled.set(false)  // F8.4 — cut producer-thread ingest at finalize
 
         // V16 batch-keyframe finalize: snapshot the keyframe state
         // synchronously under the same "stop ingestion before
@@ -1133,6 +1167,7 @@ class IncrementalStitcher(
         // iOS V12.1 cancel path.
         arCameraViewRef?.setIncrementalIngestionActive(false)
         isRunning.set(false)
+        frameProcessorIngestEnabled.set(false)  // F8.4 — cut producer-thread ingest at cancel
         val hybrid = engine
         val firstwins = firstwinsEngine
         engine = null
@@ -1442,6 +1477,179 @@ class IncrementalStitcher(
             }
             emitState(state)
         }
+    }
+
+    // ─── F8.4 — Frame Processor entry point ──────────────────────
+    //
+    // `consumeFrameFromPlugin` is the producer-thread ingress for
+    // the vision-camera Frame Processor plugin
+    // (`CvFlowGateFrameProcessor`).  It takes a live
+    // `android.media.Image` (held open by vision-camera for the
+    // duration of the plugin callback) plus pose primitives, and
+    // delegates to the existing `ingestFromARCameraView` after
+    // extracting the Y plane bytes and wiring an inline JPEG
+    // encoder for the on-accept lambda.
+    //
+    // ## Why this lives here (not on the plugin class)
+    //
+    // The plugin needs zero knowledge of the engine's internals
+    // (batchKeyframeMode, eval-throttling, plane-latching, etc.)
+    // — that's all in `ingestFromARCameraView`.  Mirroring iOS'
+    // `consumeFrameFromPlugin`, the wrapper just maps the public
+    // primitive contract to the existing engine entry point.
+    //
+    // ## Why pass `Image` (not just the Y bytes)
+    //
+    // The engine's `ingestFromARCameraView` uses Y-only for the
+    // keyframe gate.  But when the gate ACCEPTS, the host (us) is
+    // responsible for encoding the accepted frame as JPEG before
+    // `ingestFromARCameraView` returns.  YuvImage / NV21 needs the
+    // full Y + interleaved VU planes, so we keep the Image
+    // reachable through the lambda.  Image's lifetime is bounded
+    // by the plugin callback's return — vision-camera closes the
+    // ImageProxy automatically — so the encode MUST be synchronous.
+    //
+    // ## Threading
+    //
+    // Called on vision-camera's frame-processor thread (a single-
+    // thread executor).  `frameProcessorIngestEnabled` is read
+    // lock-free via AtomicBoolean.  `ingestFromARCameraView`
+    // dispatches the heavy engine work to `workScope` (serial),
+    // so producer-thread blocking is bounded to the synchronous
+    // gate evaluation + (on accept) JPEG encode — typically
+    // 5–10 ms reject, 30–50 ms accept on a mid-tier device.
+    fun consumeFrameFromPlugin(
+        image: android.media.Image,
+        tx: Double, ty: Double, tz: Double,
+        qx: Double, qy: Double, qz: Double, qw: Double,
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        timestampMs: Double,
+        trackingStateRaw: Int,
+        // F8.4-Android-c rotation fix: how many degrees the sensor
+        // data needs to be rotated CW to display upright.  Comes
+        // from vision-camera's `Frame.imageProxy.imageInfo.rotationDegrees`.
+        // Typically 90 for a portrait-held back camera on Samsung
+        // devices (sensor mounted 90° rotated from screen-up).
+        sensorRotationDegrees: Int,
+    ) {
+        // F8.4 — drop the call unless this capture was started in
+        // frameProcessor mode.  Otherwise the plugin would double-
+        // feed the engine alongside the legacy jsDriver /
+        // processFrameAtPath path.  See the flag's declaration
+        // for the full reasoning.  Mirrors iOS H1.
+        if (!frameProcessorIngestEnabled.get()) return
+
+        val width = image.width
+        val height = image.height
+        val yPlane = image.planes[0]
+        val yRowStride = yPlane.rowStride
+
+        // Read Y plane bytes.  ByteBuffer.get() advances position;
+        // copy into our own ByteArray so the engine's downstream
+        // workScope can safely outlive this method (the Image
+        // closes after callback returns, but we've already copied).
+        val yBuffer = yPlane.buffer
+        val yBytes = ByteArray(yBuffer.remaining())
+        yBuffer.get(yBytes)
+
+        // Compute derived params expected by the existing ingest
+        // API.  Quaternion-to-yaw/pitch follows the same convention
+        // useFrameProcessorDriver synthesises on JS (q_yaw * q_pitch).
+        //
+        //   yaw   = atan2(2(qw*qy + qx*qz), 1 - 2(qy² + qz²))
+        //   pitch = asin(clamp(2(qw*qx - qz*qy), -1, 1))
+        val yaw = kotlin.math.atan2(
+            2.0 * (qw * qy + qx * qz),
+            1.0 - 2.0 * (qy * qy + qz * qz),
+        )
+        val pitch = kotlin.math.asin(
+            (2.0 * (qw * qx - qz * qy)).coerceIn(-1.0, 1.0),
+        )
+
+        // FoV from intrinsics + dims.  fx == 0 is the "JS didn't
+        // supply" signal (the iOS wrapper has the same default);
+        // fall back to a 65°×50° estimate so the engine doesn't
+        // see NaN.
+        val fovHorizDegrees = if (fx > 0.0)
+            2.0 * kotlin.math.atan(width.toDouble() / (2.0 * fx)) * 180.0 / Math.PI
+        else 65.0
+        val fovVertDegrees = if (fy > 0.0)
+            2.0 * kotlin.math.atan(height.toDouble() / (2.0 * fy)) * 180.0 / Math.PI
+        else 50.0
+
+        // `2` == `.tracking` per the iOS RNSARTrackingState enum.
+        // Anything else maps to trackingPoor=true, routing the
+        // frame through the engine's degraded-tracking branches
+        // (failing closed; symmetric with iOS C2).
+        val trackingPoor = trackingStateRaw != 2
+
+        ingestFromARCameraView(
+            tx = tx, ty = ty, tz = tz,
+            qx = qx, qy = qy, qz = qz, qw = qw,
+            fx = fx, fy = fy, cx = cx, cy = cy,
+            imageWidth = width, imageHeight = height,
+            yaw = yaw, pitch = pitch,
+            fovHorizDegrees = fovHorizDegrees,
+            fovVertDegrees = fovVertDegrees,
+            trackingPoor = trackingPoor,
+            grayData = yBytes,
+            grayWidth = width,
+            grayHeight = height,
+            grayStride = yRowStride,
+            onAccept = { targetPath ->
+                // Synchronous JPEG encode via the existing
+                // YuvImageConverter (also used by RNSARCameraView's
+                // ARCore path).  Handles both the NV21 conversion
+                // (stride / pixelStride aware) and the EXIF
+                // Orientation tag write so the JPEG displays upright
+                // in the UI thumbnail strip + any RN Image consumer.
+                //
+                // EXIF rotation is BAKED-AS-METADATA, not pixel-
+                // rotated.  cv::imread in the stitcher ignores EXIF
+                // by default (see BatchStitcher.applyExifOrientation),
+                // so the engine's stored `frameRotationDegrees` still
+                // governs how the cv::Mat is interpreted downstream.
+                // No double-rotation.
+                //
+                // Returning `true` tells the engine the keyframe was
+                // persisted; `false` tells it to drop the accept.
+                try {
+                    val packed = YuvImageConverter.packNV21(image)
+                        ?: run {
+                            android.util.Log.w(
+                                "IncrementalStitcher",
+                                "consumeFrameFromPlugin: packNV21 returned null for $targetPath",
+                            )
+                            return@run null
+                        }
+                    if (packed == null) {
+                        false
+                    } else {
+                        val displayRotation = when (sensorRotationDegrees) {
+                            0   -> android.view.Surface.ROTATION_90
+                            90  -> android.view.Surface.ROTATION_0
+                            180 -> android.view.Surface.ROTATION_270
+                            270 -> android.view.Surface.ROTATION_180
+                            else -> android.view.Surface.ROTATION_0
+                        }
+                        val outPath = YuvImageConverter.encodeJpegFromNV21(
+                            packed,
+                            targetPath,
+                            jpegQuality = 80,
+                            displayRotation = displayRotation,
+                        )
+                        outPath != null
+                    }
+                } catch (e: Throwable) {
+                    android.util.Log.w(
+                        "IncrementalStitcher",
+                        "consumeFrameFromPlugin: JPEG encode failed for $targetPath: ${e.javaClass.simpleName}: ${e.message}",
+                        e,
+                    )
+                    false
+                }
+            },
+        )
     }
 
     @ReactMethod
@@ -1944,6 +2152,12 @@ class IncrementalStitcher(
             // Ignore — not critical at teardown.
         }
         captureSessionDir = null
+        // F8.4 — release the static back-pointer so the Frame
+        // Processor plugin sees a clean nil after bridge teardown.
+        // A new bridge will set it again via the init block.
+        if (bridgeInstance === this) {
+            bridgeInstance = null
+        }
         super.onCatalystInstanceDestroy()
     }
 
