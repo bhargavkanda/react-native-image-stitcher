@@ -240,6 +240,11 @@ class IncrementalStitcher(
     /// (start/cancel/finalize) writes via `set()`/`compareAndSet()`.
     /// Mirror of iOS' `frameProcessorIngestEnabled` ivar.
     private val frameProcessorIngestEnabled = AtomicBoolean(false)
+
+    /// F8.6 perf-diagnostic — one-shot guard so the "live-engine
+    /// route" log fires exactly once per capture session.  Reset
+    /// in start().
+    private val f8_6_routeLoggedThisCapture = AtomicBoolean(false)
     /// Critic #5 fix: serial dispatcher so concurrent
     /// processFrameAtPath() calls can't race on the engine's canvas.
     /// `limitedParallelism(1)` guarantees one-at-a-time execution
@@ -333,6 +338,9 @@ class IncrementalStitcher(
             // / ARCore paths run unmodified.
             val frameSourceMode = options.getString("frameSourceMode") ?: "jsDriver"
             frameProcessorIngestEnabled.set(frameSourceMode == "frameProcessor")
+            // F8.6 perf-diagnostic — re-arm the route log for the
+            // new capture.
+            f8_6_routeLoggedThisCapture.set(false)
             val rotation = options.getIntOrDefault("frameRotationDegrees", 90)
             val composeW = options.getIntOrDefault("composeWidth",  960)
             val composeH = options.getIntOrDefault("composeHeight", 720)
@@ -1465,6 +1473,18 @@ class IncrementalStitcher(
         val hasPixelData = nv21PixelData != null
             && nv21PixelWidth > 0
             && nv21PixelHeight > 0
+        // F8.6 perf-diagnostic — log route choice once per capture
+        // so logcat shows whether the new pixel-data path is
+        // actually getting exercised.  Throttled to first-hit per
+        // capture (counter resets in start()/cancel()).
+        if (!f8_6_routeLoggedThisCapture.getAndSet(true)) {
+            android.util.Log.i(
+                "F8.6-route",
+                "ingestFromARCameraView live-engine route: "
+                + if (hasPixelData) "pixel-data (F8.6, no JPEG round-trip)"
+                  else "jpeg-path (legacy, JPEG decode round-trip)",
+            )
+        }
         val path = if (hasPixelData) null else legacyJpegPath ?: run {
             android.util.Log.w(
                 "IncrementalStitcher",
@@ -2615,7 +2635,7 @@ internal class IncrementalEngine(
         // See iOS' equivalent fix for the architectural rationale.
         val frame = downsampleToCompose(srcRaw)
         if (frame !== srcRaw) srcRaw.release()
-        return addFrameMat(
+        val tele = addFrameMat(
             frame,
             qx, qy, qz, qw,
             fx, fy, cx, cy,
@@ -2624,6 +2644,8 @@ internal class IncrementalEngine(
             fovHorizDegrees, fovVertDegrees,
             t0,
         )
+        f8_6_logPerf("hybrid/jpeg", t0, tele.outcome)
+        return tele
     }
 
     /**
@@ -2673,7 +2695,7 @@ internal class IncrementalEngine(
         }
         val frame = downsampleToCompose(srcRaw)
         if (frame !== srcRaw) srcRaw.release()
-        return addFrameMat(
+        val tele = addFrameMat(
             frame,
             qx, qy, qz, qw,
             fx, fy, cx, cy,
@@ -2682,6 +2704,27 @@ internal class IncrementalEngine(
             fovHorizDegrees, fovVertDegrees,
             t0,
         )
+        f8_6_logPerf("hybrid/pixel", t0, tele.outcome)
+        return tele
+    }
+
+    /**
+     * F8.6 perf-diagnostic counter (mirror of the firstwins one).
+     * Remove after v0.5.1 ships and the numbers are baked in.
+     */
+    @Volatile private var f8_6_perfCallCounter: Long = 0L
+    private fun f8_6_logPerf(
+        path: String,
+        t0Nanos: Long,
+        outcome: FrameOutcome,
+    ) {
+        val n = ++f8_6_perfCallCounter
+        if (n == 1L || n % 5L == 0L) {
+            android.util.Log.i(
+                "F8.6-perf",
+                "$path took ${msSince(t0Nanos)}ms outcome=$outcome (call #$n)",
+            )
+        }
     }
 
     /**
