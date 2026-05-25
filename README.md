@@ -160,6 +160,7 @@ The component owns the runtime state; the parent persists across launches via th
 | **Android namespace** | `io.imagestitcher.rn`. |
 | **Stitching pipeline** | Shared C++ under `cpp/stitcher.cpp` invoked from both iOS Obj-C++ and Android JNI.  PANORAMA + SCANS modes; C+D progressive-confidence retry over keyframes. |
 | **Two capture-source paths** | AR uses ARKit (iOS) / ARCore (Android) pose stream.  Non-AR uses vision-camera + IMU integration via `useIMUTranslationGate`. |
+| **Frame Processor driver (v0.5+)** | Non-AR captures evaluate the keyframe gate on the camera producer thread at native frame rate via a vision-camera Frame Processor (`cv_flow_gate_process_frame`).  iOS passes `CVPixelBuffer` end-to-end; Android writes a Y-plane-derived JPEG on accept.  Opt-out via `<Camera legacyDriver />` for one minor cycle.  See `docs/f8-frame-processor-plan.md` for the design. |
 | **Two supported pan modes** | Landscape phone + vertical pan; portrait phone + horizontal pan.  Any other combination is a user deviation, not a supported mode. |
 
 ## License
