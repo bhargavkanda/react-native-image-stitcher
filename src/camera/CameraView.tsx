@@ -60,6 +60,24 @@ export interface CameraViewProps {
    * preferences (focus-on-tap vs. tap-to-lock).
    */
   onPreviewTap?: (event: { x: number; y: number }) => void;
+
+  /**
+   * Forwarded from vision-camera's `<Camera onError>` AFTER lifecycle
+   * errors are filtered.  The SDK's built-in filter swallows:
+   *
+   *   * `system/camera-is-restricted` — screen-lock / DoNotDisturb
+   *     temporarily revokes camera access; vision-camera re-acquires
+   *     on resume.  Logged to console.warn, NOT surfaced.
+   *   * `system/camera-has-been-disconnected` — another app grabbed
+   *     the camera.  Same auto-recovery.
+   *   * `device/camera-already-in-use` — same class as above.
+   *
+   * Real errors (permission denials, hardware failures, malformed
+   * format requests) are forwarded.  Hosts can therefore safely
+   * pipe this to a redbox / Crashlytics without getting paged on
+   * routine screen-lock events.
+   */
+  onError?: (error: unknown) => void;
 }
 
 
@@ -68,6 +86,19 @@ export interface CameraViewProps {
  * to callers (so ``cameraRef.current.takePhoto()`` keeps working),
  * while presenting a smaller API on the outside.
  */
+// Error codes vision-camera reports for transient lifecycle events.
+// Filtered out of the SDK's onError forward (see `handleVcError` in
+// the body): the camera self-recovers when the device comes back into
+// the foreground / regains permission / the other app releases the
+// device.  Surfacing these as host errors causes spurious crash
+// reports during routine phone-lock / app-switch operations.
+const VC_LIFECYCLE_ERROR_CODES: ReadonlySet<string> = new Set([
+  'system/camera-is-restricted',         // screen lock, DoNotDisturb, MDM policy
+  'system/camera-has-been-disconnected', // another app grabbed the camera
+  'device/camera-already-in-use',        // same class as above
+]);
+
+
 export const CameraView = forwardRef<Camera | null, CameraViewProps>(function CameraView(
   {
     device,
@@ -77,9 +108,27 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     guidance,
     style,
     cameraProps,
+    onError,
   },
   ref,
 ): React.JSX.Element {
+  // Error filter — see `VC_LIFECYCLE_ERROR_CODES` for the swallow
+  // list rationale.  `code` on vision-camera's `CameraRuntimeError`
+  // is typed as a string; treat any non-string defensively as a
+  // "forward it" so we don't accidentally swallow unknown errors.
+  const handleVcError = (err: unknown): void => {
+    const code = (err as { code?: unknown })?.code;
+    if (typeof code === 'string' && VC_LIFECYCLE_ERROR_CODES.has(code)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[react-native-image-stitcher] vision-camera reported a '
+        + `transient lifecycle error (${code}); the camera will `
+        + 'auto-recover on resume.  Not forwarding to onError.',
+      );
+      return;
+    }
+    onError?.(err);
+  };
   // Internal ref so we can both attach to <Camera> and forward outward.
   const innerRef = useRef<Camera>(null);
   useImperativeHandle(ref, () => innerRef.current as Camera);
@@ -112,6 +161,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         // "what you see is what was taken".
         outputOrientation="device"
         torch={flash === 'on' ? 'on' : 'off'}
+        onError={handleVcError}
         {...cameraProps}
       />
       {guidance ? (
