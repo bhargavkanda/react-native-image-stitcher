@@ -1262,6 +1262,24 @@ class IncrementalStitcher(
         // can check `isBatchKeyframeMode` to elide the per-frame
         // JPEG encode for the batch path.
         legacyJpegPath: String? = null,
+        // F8.6 — pixel-data path for live engines.  When supplied
+        // (and `batchKeyframeMode == false`), takes precedence over
+        // `legacyJpegPath`: the live engine ingests via
+        // `addFramePixelData` (NV21 → BGR Mat in-process) instead of
+        // `addFrameAtPath` (JPEG decode round-trip).  Saves ~30-50 ms
+        // per accepted frame on a mid-tier device.  Pass null to use
+        // the legacy JPEG path.
+        //
+        // OWNERSHIP: the engine retains a reference to `nv21PixelData`
+        // until `workScope`'s coroutine consumes it (~50 ms later).
+        // Callers MUST treat the array as transferred — do not
+        // mutate it or return it to a buffer pool after calling
+        // this method.  If a caller needs to recycle the buffer,
+        // pass `.copyOf()` (currently no caller does — the F8.4
+        // Frame Processor plugin allocates a fresh array per frame).
+        nv21PixelData: ByteArray? = null,
+        nv21PixelWidth: Int = 0,
+        nv21PixelHeight: Int = 0,
     ) {
         // ── V16 batch-keyframe: AR-driven path ─────────────────────
         //
@@ -1439,40 +1457,79 @@ class IncrementalStitcher(
         // we only get here when batchKeyframeMode == false.  Caller
         // (RNSARCameraView) was expected to supply legacyJpegPath in
         // that case — defensively drop the frame if it didn't.
-        val path = legacyJpegPath ?: run {
+        // F8.6 — prefer the pixel-data path when the caller supplied
+        // NV21 bytes (Frame Processor / refactored ARCore path),
+        // otherwise fall back to legacyJpegPath (un-migrated ARCore
+        // path).  At least one of them must be present; drop the
+        // frame defensively otherwise.
+        val hasPixelData = nv21PixelData != null
+            && nv21PixelWidth > 0
+            && nv21PixelHeight > 0
+        val path = if (hasPixelData) null else legacyJpegPath ?: run {
             android.util.Log.w(
                 "IncrementalStitcher",
                 "ingestFromARCameraView legacy: batchKeyframeMode=false " +
-                    "but legacyJpegPath is null — dropping frame.  " +
-                    "Caller should have encoded a JPEG when " +
+                    "but both legacyJpegPath and nv21PixelData are null — " +
+                    "dropping frame.  Caller should have encoded a JPEG " +
+                    "OR supplied NV21 pixel data when " +
                     "isBatchKeyframeMode == false.",
             )
             return
         }
         workScope.launch {
             val state: WritableMap? = if (firstwins != null) {
-                val tele = firstwins.addFrameAtPath(
-                    path = path,
-                    qx = qx, qy = qy, qz = qz, qw = qw,
-                    fx = fx, fy = fy, cx = cx, cy = cy,
-                    imageWidth = imageWidth, imageHeight = imageHeight,
-                    yaw = yaw, pitch = pitch,
-                    fovHorizDegrees = fovHorizDegrees,
-                    fovVertDegrees = fovVertDegrees,
-                    trackingPoor = trackingPoor,
-                )
+                val tele = if (hasPixelData) {
+                    firstwins.addFramePixelData(
+                        nv21 = nv21PixelData!!,
+                        nv21Width = nv21PixelWidth,
+                        nv21Height = nv21PixelHeight,
+                        qx = qx, qy = qy, qz = qz, qw = qw,
+                        fx = fx, fy = fy, cx = cx, cy = cy,
+                        imageWidth = imageWidth, imageHeight = imageHeight,
+                        yaw = yaw, pitch = pitch,
+                        fovHorizDegrees = fovHorizDegrees,
+                        fovVertDegrees = fovVertDegrees,
+                        trackingPoor = trackingPoor,
+                    )
+                } else {
+                    firstwins.addFrameAtPath(
+                        path = path!!,
+                        qx = qx, qy = qy, qz = qz, qw = qw,
+                        fx = fx, fy = fy, cx = cx, cy = cy,
+                        imageWidth = imageWidth, imageHeight = imageHeight,
+                        yaw = yaw, pitch = pitch,
+                        fovHorizDegrees = fovHorizDegrees,
+                        fovVertDegrees = fovVertDegrees,
+                        trackingPoor = trackingPoor,
+                    )
+                }
                 firstwins.snapshotIfDue(tele)
             } else {
-                val tele = hybrid!!.addFrameAtPath(
-                    path = path,
-                    qx = qx, qy = qy, qz = qz, qw = qw,
-                    fx = fx, fy = fy, cx = cx, cy = cy,
-                    imageWidth = imageWidth, imageHeight = imageHeight,
-                    yaw = yaw, pitch = pitch,
-                    fovHorizDegrees = fovHorizDegrees,
-                    fovVertDegrees = fovVertDegrees,
-                    trackingPoor = trackingPoor,
-                )
+                val tele = if (hasPixelData) {
+                    hybrid!!.addFramePixelData(
+                        nv21 = nv21PixelData!!,
+                        nv21Width = nv21PixelWidth,
+                        nv21Height = nv21PixelHeight,
+                        qx = qx, qy = qy, qz = qz, qw = qw,
+                        fx = fx, fy = fy, cx = cx, cy = cy,
+                        imageWidth = imageWidth, imageHeight = imageHeight,
+                        yaw = yaw, pitch = pitch,
+                        fovHorizDegrees = fovHorizDegrees,
+                        fovVertDegrees = fovVertDegrees,
+                        trackingPoor = trackingPoor,
+                    )
+                } else {
+                    hybrid!!.addFrameAtPath(
+                        path = path!!,
+                        qx = qx, qy = qy, qz = qz, qw = qw,
+                        fx = fx, fy = fy, cx = cx, cy = cy,
+                        imageWidth = imageWidth, imageHeight = imageHeight,
+                        yaw = yaw, pitch = pitch,
+                        fovHorizDegrees = fovHorizDegrees,
+                        fovVertDegrees = fovVertDegrees,
+                        trackingPoor = trackingPoor,
+                    )
+                }
                 hybrid.snapshotIfDue(tele)
             }
             emitState(state)
@@ -1539,18 +1596,31 @@ class IncrementalStitcher(
         // for the full reasoning.  Mirrors iOS H1.
         if (!frameProcessorIngestEnabled.get()) return
 
-        val width = image.width
-        val height = image.height
-        val yPlane = image.planes[0]
-        val yRowStride = yPlane.rowStride
-
-        // Read Y plane bytes.  ByteBuffer.get() advances position;
-        // copy into our own ByteArray so the engine's downstream
-        // workScope can safely outlive this method (the Image
-        // closes after callback returns, but we've already copied).
-        val yBuffer = yPlane.buffer
-        val yBytes = ByteArray(yBuffer.remaining())
-        yBuffer.get(yBytes)
+        // F8.6 — pack the full NV21 (Y + interleaved VU) once,
+        // then reuse it for BOTH the gate's Y-plane read AND the
+        // live engine's pixel-data ingest.  Previously the plugin
+        // only extracted Y; the live engine then had to JPEG-decode
+        // a separately-encoded path to recover BGR colour.  Now we
+        // skip both round-trips: the packed NV21 → BGR cvtColor
+        // inside `addFramePixelData` produces the BGR Mat directly.
+        //
+        // YuvImageConverter.packNV21 is stride-aware and densely
+        // repacks Y (so the gate's `grayStride = grayWidth = width`
+        // works), then interleaves VU per the standard NV21 layout
+        // [Y...][VU...].  Returns null only on degenerate Images
+        // (closed mid-callback or non-YUV format).
+        val packed = io.imagestitcher.rn.ar.YuvImageConverter.packNV21(image)
+            ?: return
+        val width = packed.width
+        val height = packed.height
+        val nv21Bytes = packed.nv21
+        // The gate reads `grayHeight` rows of `grayWidth` pixels
+        // at stride=width starting from offset 0.  That's exactly
+        // the Y plane region of nv21Bytes — the gate naturally
+        // stops before the UV bytes start.  No need to slice into
+        // a separate ByteArray.
+        val yBytes = nv21Bytes
+        val yRowStride = width
 
         // Compute derived params expected by the existing ingest
         // API.  Quaternion-to-yaw/pitch follows the same convention
@@ -1596,13 +1666,22 @@ class IncrementalStitcher(
             grayWidth = width,
             grayHeight = height,
             grayStride = yRowStride,
+            // F8.6 — pass the already-packed NV21 so the live
+            // engine branch (hybrid / firstwins) can ingest via
+            // `addFramePixelData` instead of JPEG-decoding a
+            // separately-written path.  Batch-keyframe mode
+            // ignores these (it uses `grayData` + `onAccept`).
+            nv21PixelData = nv21Bytes,
+            nv21PixelWidth = width,
+            nv21PixelHeight = height,
             onAccept = { targetPath ->
                 // Synchronous JPEG encode via the existing
                 // YuvImageConverter (also used by RNSARCameraView's
-                // ARCore path).  Handles both the NV21 conversion
-                // (stride / pixelStride aware) and the EXIF
-                // Orientation tag write so the JPEG displays upright
-                // in the UI thumbnail strip + any RN Image consumer.
+                // ARCore path).  Reuses the NV21 already packed at
+                // the top of `consumeFrameFromPlugin` — F8.6 saves
+                // a duplicate packNV21 call here (the previous
+                // version repacked the live `image` inside the
+                // lambda).
                 //
                 // EXIF rotation is BAKED-AS-METADATA, not pixel-
                 // rotated.  cv::imread in the stitcher ignores EXIF
@@ -1614,32 +1693,20 @@ class IncrementalStitcher(
                 // Returning `true` tells the engine the keyframe was
                 // persisted; `false` tells it to drop the accept.
                 try {
-                    val packed = YuvImageConverter.packNV21(image)
-                        ?: run {
-                            android.util.Log.w(
-                                "IncrementalStitcher",
-                                "consumeFrameFromPlugin: packNV21 returned null for $targetPath",
-                            )
-                            return@run null
-                        }
-                    if (packed == null) {
-                        false
-                    } else {
-                        val displayRotation = when (sensorRotationDegrees) {
-                            0   -> android.view.Surface.ROTATION_90
-                            90  -> android.view.Surface.ROTATION_0
-                            180 -> android.view.Surface.ROTATION_270
-                            270 -> android.view.Surface.ROTATION_180
-                            else -> android.view.Surface.ROTATION_0
-                        }
-                        val outPath = YuvImageConverter.encodeJpegFromNV21(
-                            packed,
-                            targetPath,
-                            jpegQuality = 80,
-                            displayRotation = displayRotation,
-                        )
-                        outPath != null
+                    val displayRotation = when (sensorRotationDegrees) {
+                        0   -> android.view.Surface.ROTATION_90
+                        90  -> android.view.Surface.ROTATION_0
+                        180 -> android.view.Surface.ROTATION_270
+                        270 -> android.view.Surface.ROTATION_180
+                        else -> android.view.Surface.ROTATION_0
                     }
+                    val outPath = YuvImageConverter.encodeJpegFromNV21(
+                        packed,
+                        targetPath,
+                        jpegQuality = 80,
+                        displayRotation = displayRotation,
+                    )
+                    outPath != null
                 } catch (e: Throwable) {
                     android.util.Log.w(
                         "IncrementalStitcher",
@@ -2548,7 +2615,91 @@ internal class IncrementalEngine(
         // See iOS' equivalent fix for the architectural rationale.
         val frame = downsampleToCompose(srcRaw)
         if (frame !== srcRaw) srcRaw.release()
+        return addFrameMat(
+            frame,
+            qx, qy, qz, qw,
+            fx, fy, cx, cy,
+            imageWidth, imageHeight,
+            yaw, pitch,
+            fovHorizDegrees, fovVertDegrees,
+            t0,
+        )
+    }
 
+    /**
+     * F8.6 — pixel-data twin of [addFrameAtPath].  Accepts the
+     * camera frame as an NV21 byte buffer instead of a JPEG file
+     * path; skips the JPEG decode round-trip.  See
+     * `IncrementalFirstwinsEngine.addFramePixelData` for the
+     * sibling implementation rationale.
+     */
+    fun addFramePixelData(
+        nv21: ByteArray,
+        nv21Width: Int,
+        nv21Height: Int,
+        qx: Double, qy: Double, qz: Double, qw: Double,
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        imageWidth: Int, imageHeight: Int,
+        yaw: Double, pitch: Double,
+        fovHorizDegrees: Double, fovVertDegrees: Double,
+        trackingPoor: Boolean,
+    ): FrameTelemetry {
+        val t0 = System.nanoTime()
+        if (trackingPoor) {
+            return FrameTelemetry(
+                FrameOutcome.SkippedTrackingPoor, -1.0, 0, 0.0, 0.0,
+                msSince(t0),
+            )
+        }
+        // F8.6 IS-1 — length guard; see
+        // `IncrementalFirstwinsEngine.addFramePixelData` for the
+        // failure-mode rationale.
+        val expectedBytes = nv21Width * nv21Height * 3 / 2
+        require(nv21.size >= expectedBytes) {
+            "addFramePixelData: nv21 buffer too small " +
+                "(${nv21.size} bytes < $expectedBytes for " +
+                "${nv21Width}x${nv21Height})"
+        }
+        val yuv = Mat(nv21Height + nv21Height / 2, nv21Width, CvType.CV_8UC1)
+        yuv.put(0, 0, nv21)
+        val srcRaw = Mat()
+        Imgproc.cvtColor(yuv, srcRaw, Imgproc.COLOR_YUV2BGR_NV21)
+        yuv.release()
+        if (srcRaw.empty()) {
+            return FrameTelemetry(
+                FrameOutcome.SkippedTrackingPoor, -1.0, 0, 0.0, 0.0,
+                msSince(t0),
+            )
+        }
+        val frame = downsampleToCompose(srcRaw)
+        if (frame !== srcRaw) srcRaw.release()
+        return addFrameMat(
+            frame,
+            qx, qy, qz, qw,
+            fx, fy, cx, cy,
+            imageWidth, imageHeight,
+            yaw, pitch,
+            fovHorizDegrees, fovVertDegrees,
+            t0,
+        )
+    }
+
+    /**
+     * F8.6 — the body extracted from [addFrameAtPath].  Takes a
+     * BGR `Mat` (already downsampled to compose dims) and runs the
+     * pose-driven homography paste pipeline.  Behaviour is
+     * identical to the pre-F8.6 `addFrameAtPath` — the body is a
+     * verbatim move.
+     */
+    private fun addFrameMat(
+        frame: Mat,
+        qx: Double, qy: Double, qz: Double, qw: Double,
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        imageWidth: Int, imageHeight: Int,
+        yaw: Double, pitch: Double,
+        fovHorizDegrees: Double, fovVertDegrees: Double,
+        t0: Long,
+    ): FrameTelemetry {
         // Build R_new from quaternion.
         val rNew = quaternionToRotationMat(qx, qy, qz, qw)
 
