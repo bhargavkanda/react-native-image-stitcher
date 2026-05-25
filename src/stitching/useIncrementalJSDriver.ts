@@ -49,6 +49,12 @@ import {
 import type { Subscription } from 'rxjs';
 import type { Camera } from 'react-native-vision-camera';
 
+// One-shot deprecation flag — module-scoped so multiple host
+// instances of the hook all share the same gate and we only emit
+// the warning the first time anyone calls .start() in this
+// process.
+let deprecationWarningEmitted = false;
+
 
 export interface UseIncrementalJSDriverOptions {
   /**
@@ -159,6 +165,24 @@ export function useIncrementalJSDriver(
       // Swift bridge), so the same driver feeds both platforms in
       // non-AR mode.
       if (isRunningRef.current) return;
+      // F8.5 — one-shot deprecation warning.  v0.5.0 introduced
+      // `useFrameProcessorDriver` (vision-camera producer-thread
+      // path, native frame rate, no JPEG round-trip).  The legacy
+      // takeSnapshot path stays available for one minor cycle to
+      // give hosts time to migrate, then is removed in v0.6.
+      if (!deprecationWarningEmitted) {
+        deprecationWarningEmitted = true;
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[react-native-image-stitcher] `useIncrementalJSDriver` '
+          + 'is DEPRECATED as of v0.5.0 and will be REMOVED in '
+          + 'v0.6.0.  Migrate to `useFrameProcessorDriver` (or '
+          + 'simply let `<Camera>` use its default driver — no host '
+          + 'code change needed).  Opt-out via the `legacyDriver` '
+          + 'prop on `<Camera>` if you need to stay on the legacy '
+          + 'path temporarily.',
+        );
+      }
       const native = getNativeIncremental();
       if (!native) return;
 
