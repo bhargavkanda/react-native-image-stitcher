@@ -16,6 +16,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-25
+
+### Added — F8 Frame Processor port
+
+`<Camera>` now drives **non-AR captures through a vision-camera
+Frame Processor** on the camera producer thread instead of the
+4 Hz `takeSnapshot` → JPEG → cache-file path the v0.4 series used.
+
+- **`useFrameProcessorDriver`** (`src/stitching/useFrameProcessorDriver.ts`)
+  — new hook with the same `{ start, stop, frameProcessor,
+  isRunning }` shape as the legacy `useIncrementalJSDriver`.  Gyro
+  yaw / pitch / **roll** are integrated on the JS thread and
+  published via `useSharedValue` so the worklet reads pose
+  zero-hop.  Plugin acquisition uses a mount-once + 16 ms
+  setTimeout retry pattern to side-step the vision-camera
+  registry init race.
+- **`cv_flow_gate_process_frame` JSI plugin** — registered on both
+  platforms:
+  - iOS: `ios/Sources/RNImageStitcher/KeyframeGateFrameProcessor.mm`
+    + `@objc IncrementalStitcher.consumeFrameFromPlugin(...)`
+    wrapper.  `CVPixelBuffer` flows end-to-end into
+    `IncrementalStitcher.consumeFrame` — the SAME entry point AR
+    mode already uses.  Zero JPEG round-trip on accept.
+  - Android: `android/src/main/java/io/imagestitcher/rn/CvFlowGateFrameProcessor.kt`
+    + Kotlin `consumeFrameFromPlugin(...)` wrapper.  Extracts the
+    Y plane on the producer thread, encodes inline JPEG on accept
+    via the existing `YuvImageConverter`, hands the path to
+    `ingestFromARCameraView`.  Pixel-buffer parity tracked as F8.6.
+- **`frameSourceMode: 'frameProcessor'`** in
+  `IncrementalStitcher.start()` options — flips
+  `frameProcessorIngestEnabled` ON so the plugin's producer-thread
+  feed reaches the engine.  Default for non-AR captures from v0.5.
+- **`legacyDriver?: boolean`** prop on `<Camera>` — opt-in escape
+  hatch back to `useIncrementalJSDriver` for hosts that hit a
+  vision-camera incompatibility.  Will be removed in v0.6.
+- **`VISION_CAMERA_RUNTIME` error code** for vision-camera
+  runtime errors that aren't transient lifecycle events.
+- **Roll axis** (gyro-Z) in the synthesised pose quaternion —
+  `q = q_yaw * q_pitch * q_roll`.  Field captures with wrist-twist
+  no longer lie to the cv::Stitcher's intrinsic estimator.
+
+### Changed
+
+- Default non-AR driver is now `useFrameProcessorDriver`.  Hosts
+  using `<Camera>` opt in transparently — no code change needed
+  unless you want the legacy path (`legacyDriver={true}`).
+- `host-supplied frameProcessor` prop on `<Camera>` is now treated
+  as a legacy escape hatch: silently overridden by the SDK driver
+  in default mode with a one-shot `console.warn`.
+
+### Deprecated
+
+- **`useIncrementalJSDriver`** — works through v0.5, removed in
+  v0.6.  Hosts that drove non-AR captures with this hook should
+  migrate to letting `<Camera>` do it by default
+  (`legacyDriver` unset).  The hook now emits a one-shot
+  `console.warn` from its `start()` call.
+
+### Fixed
+
+- **Vision-camera transient lifecycle errors** (screen-lock,
+  app-switch, DoNotDisturb, MDM camera restriction) are now
+  filtered inside `<CameraView>` instead of propagating to the
+  host's `onError`.  Auto-recovery happens on resume; hosts no
+  longer get spurious crash reports on every phone-lock.
+
+### Added — peer dependency
+
+- **`react-native-worklets-core`** is now a declared peer
+  dependency (`>=1.3.0`).  It was already required transitively
+  via `react-native-vision-camera@^4`; the explicit declaration
+  documents the contract.
+
+### Tracking — known follow-ups (don't gate this release)
+
+- **F8.6** — Android engine refactor for pixel-buffer-direct
+  ingest (true zero-copy parity with iOS).
+- **F8.3.H2-target** — `swift test` currently can't run the
+  iOS test target due to mixed Swift/.mm sources.  The
+  `FrameProcessorPluginSelectorTests` selector guard is in place
+  as a documentation artifact; CI test-runner fix is a separate
+  task.
+
 ## [0.4.1] — 2026-05-23
 
 ### Fixed
