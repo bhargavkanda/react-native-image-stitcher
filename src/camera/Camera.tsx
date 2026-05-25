@@ -169,6 +169,15 @@ export type CameraErrorCode =
   | 'STITCH_CAMERA_PARAMS_FAIL'
   | 'STITCH_OOM'
   | 'OUTPUT_WRITE_FAILED'
+  /**
+   * Vision-camera surfaced a runtime error that isn't a known
+   * transient lifecycle event (those are swallowed inside the SDK's
+   * `<CameraView>`).  Examples that DO reach the host as this code:
+   * `format/invalid-format`, `capture/recording-canceled`,
+   * `device/microphone-permission-denied`, ...  The full error
+   * object is on `.cause` for inspection.
+   */
+  | 'VISION_CAMERA_RUNTIME'
   | 'UNKNOWN';
 
 
@@ -1226,6 +1235,22 @@ export function Camera(props: CameraProps): React.JSX.Element {
           cameraProps={effectiveFrameProcessor != null
             ? { frameProcessor: effectiveFrameProcessor }
             : undefined}
+          onError={(err) => {
+            // CameraView already filters known transient lifecycle
+            // errors (screen-lock, etc.) before invoking this.  What
+            // reaches here is a real vision-camera runtime issue:
+            // pull `code`/`message` defensively (the type is
+            // `unknown` from CameraView's perspective) and wrap in
+            // a SDK-typed `CameraError` so hosts get a stable shape.
+            const e = err as { code?: string; message?: string };
+            const codeStr = e?.code ?? 'unknown';
+            const msg = e?.message ?? String(err);
+            onError?.(new CameraError(
+              'VISION_CAMERA_RUNTIME',
+              `${codeStr}: ${msg}`,
+              err,
+            ));
+          }}
         />
       )}
 
