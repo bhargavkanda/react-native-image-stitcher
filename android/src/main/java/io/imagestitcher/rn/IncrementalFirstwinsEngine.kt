@@ -197,7 +197,127 @@ internal class IncrementalFirstwinsEngine(
         }
         val frameBGR = downsampleToCompose(srcRaw)
         if (frameBGR !== srcRaw) srcRaw.release()
+        return addFrameMat(
+            frameBGR,
+            qx, qy, qz, qw,
+            fx, fy, cx, cy,
+            imageWidth, imageHeight,
+            yaw, pitch,
+            fovHorizDegrees, fovVertDegrees,
+            t0,
+        )
+    }
 
+    /**
+     * F8.6 — pixel-data twin of [addFrameAtPath].  Accepts the
+     * camera frame as an NV21 byte buffer instead of a JPEG file
+     * path; skips the JPEG decode round-trip (~30–50 ms per
+     * accepted frame on a mid-tier device).
+     *
+     * Use this from the vision-camera Frame Processor path (where
+     * we already have direct producer-thread access to YUV bytes)
+     * and from the ARCore path (where the previous
+     * JPEG-encode-on-every-frame in `RNSARCameraView` was a
+     * measurable hot-spot).
+     *
+     * The body matches [addFrameAtPath] one-for-one except for the
+     * Mat construction: an `Mat(h*3/2, w, CV_8UC1)` wraps the
+     * NV21 bytes, then `Imgproc.cvtColor` produces the BGR Mat the
+     * engine pipeline already expects.  Everything downstream is
+     * the shared [addFrameMat] helper.
+     *
+     * `nv21Width`/`nv21Height` describe the buffer's actual
+     * dimensions.  `imageWidth`/`imageHeight` describe the
+     * camera's reported sensor dims used for intrinsics scaling —
+     * these can differ when the camera is downsampling for Frame
+     * Processor output.
+     */
+    fun addFramePixelData(
+        nv21: ByteArray,
+        nv21Width: Int,
+        nv21Height: Int,
+        qx: Double, qy: Double, qz: Double, qw: Double,
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        imageWidth: Int, imageHeight: Int,
+        yaw: Double, pitch: Double,
+        fovHorizDegrees: Double, fovVertDegrees: Double,
+        trackingPoor: Boolean,
+    ): FrameTelemetry {
+        val t0 = System.nanoTime()
+        if (trackingPoor) {
+            return FrameTelemetry(
+                FrameOutcome.SkippedTrackingPoor, -1.0, 0, yaw, pitch,
+                msSince(t0),
+                isLandscape = isLandscape,
+            )
+        }
+        // NV21 layout: Y plane (w*h bytes) + interleaved VU
+        // (w*h/2 bytes).  A single CV_8UC1 Mat of height h*3/2
+        // packs the whole thing; cvtColor with COLOR_YUV2BGR_NV21
+        // does the planar-aware decode in one call.
+        //
+        // F8.6 IS-1 — length guard.  If the caller supplied a
+        // short buffer, `yuv.put(0,0,nv21)` would copy only
+        // `nv21.size` bytes and leave the rest zero-init; cvtColor
+        // would then read stale/zero UV and produce silently
+        // corrupt colour.  Fail fast instead.
+        val expectedBytes = nv21Width * nv21Height * 3 / 2
+        require(nv21.size >= expectedBytes) {
+            "addFramePixelData: nv21 buffer too small " +
+                "(${nv21.size} bytes < $expectedBytes for " +
+                "${nv21Width}x${nv21Height})"
+        }
+        val yuv = Mat(nv21Height + nv21Height / 2, nv21Width, CvType.CV_8UC1)
+        yuv.put(0, 0, nv21)
+        val srcRaw = Mat()
+        Imgproc.cvtColor(yuv, srcRaw, Imgproc.COLOR_YUV2BGR_NV21)
+        yuv.release()
+        if (srcRaw.empty()) {
+            return FrameTelemetry(
+                FrameOutcome.RejectedAlignmentLost, -1.0, 0, yaw, pitch,
+                msSince(t0),
+                isLandscape = isLandscape,
+            )
+        }
+        val frameBGR = downsampleToCompose(srcRaw)
+        if (frameBGR !== srcRaw) srcRaw.release()
+        return addFrameMat(
+            frameBGR,
+            qx, qy, qz, qw,
+            fx, fy, cx, cy,
+            imageWidth, imageHeight,
+            yaw, pitch,
+            fovHorizDegrees, fovVertDegrees,
+            t0,
+        )
+    }
+
+    /**
+     * F8.6 — the body extracted from [addFrameAtPath].  Takes a
+     * BGR `Mat` (downsampled to compose dims) and runs the full
+     * engine pipeline: first-frame init or subsequent-frame paste
+     * via either rectilinear or cylindrical warp.
+     *
+     * Behaviour is identical to the pre-F8.6 `addFrameAtPath`
+     * (the body is a verbatim move).  Both `addFrameAtPath` and
+     * `addFramePixelData` delegate here after their respective
+     * Mat constructions.
+     */
+    private fun addFrameMat(
+        frameBGR: Mat,
+        qx: Double, qy: Double, qz: Double, qw: Double,
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        imageWidth: Int, imageHeight: Int,
+        yaw: Double, pitch: Double,
+        // FOV params kept for symmetry with `IncrementalEngine.addFrameMat`
+        // (the hybrid engine, which uses them in `computeOverlapPct`).
+        // The firstwins/slit-scan engine here doesn't consume them —
+        // its paste decision is driven by pose-projected pixel
+        // displacement, not FoV-overlap percent.
+        @Suppress("UNUSED_PARAMETER") fovHorizDegrees: Double,
+        @Suppress("UNUSED_PARAMETER") fovVertDegrees: Double,
+        t0: Long,
+    ): FrameTelemetry {
         val rNew = quaternionToRotationMat(qx, qy, qz, qw)
 
         if (!hasFirstFrame) {
