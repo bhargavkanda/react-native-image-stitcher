@@ -365,12 +365,12 @@ public final class IncrementalStitcher: NSObject {
     /// F8.3 — gate for `consumeFrameFromPlugin` (the vision-camera
     /// Frame Processor producer-thread entry point).  TRUE only when
     /// the current capture was started with
-    /// `frameSourceMode == "frameProcessor"`.  In any other mode
-    /// (especially the legacy `"jsDriver"` path which feeds via
-    /// `processFrameAtPath`), the plugin would double-feed the
-    /// engine — pixel buffers from the producer thread + JPEG paths
-    /// from the JS interval, racing on the same workQueue — so we
-    /// drop the producer-thread call.
+    /// `frameSourceMode == "frameProcessor"`.  In AR mode
+    /// (`frameSourceMode == "arSession"`) the plugin would double-feed
+    /// the engine alongside ARKit's `consumeFrame` delegate path —
+    /// pixel buffers from the producer thread + pixel buffers from the
+    /// ARSession delegate, racing on the same workQueue — so we drop
+    /// the producer-thread call.
     ///
     /// Set under `stateLock` in `start()`, cleared under `stateLock`
     /// in `cancel()` and `finalize()`, ALSO read under `stateLock`
@@ -747,11 +747,13 @@ public final class IncrementalStitcher: NSObject {
         engineMode: String,
         captureOrientation: String = "portrait",
         configOverrides: [String: Any] = [:],
-        // 2026-05-18 (Issue #2 regression fix): "arSession" (default,
-        // legacy) registers as the ARSession's frame consumer.
-        // "jsDriver" skips that registration — frames will come in
-        // via processFrameAtPath instead.  Used by iOS non-AR
-        // captures (the vision-camera + gyro driver path).
+        // 2026-05-18 (Issue #2 regression fix): "arSession" (default)
+        // registers as the ARSession's frame consumer.
+        // "frameProcessor" skips that registration — frames come in
+        // via the vision-camera Frame Processor plugin's
+        // `consumeFrameFromPlugin` path instead.  The pre-v0.6
+        // "jsDriver" mode (push frames in from JS via
+        // processFrameAtPath) has been removed.
         frameSourceMode: String = "arSession"
     ) {
         stateLock.lock()
@@ -947,9 +949,9 @@ public final class IncrementalStitcher: NSObject {
         }
         self.isRunning = true
         // F8.3 — enable the Frame Processor plugin's producer-thread
-        // ingest only for the new "frameProcessor" mode.  Any other
-        // mode (arSession, jsDriver) keeps it OFF; see the ivar's
-        // declaration comment for why.
+        // ingest only for the new "frameProcessor" mode.  AR mode
+        // ("arSession") keeps it OFF; see the ivar's declaration
+        // comment for why.
         self.frameProcessorIngestEnabled = (frameSourceMode == "frameProcessor")
         self.snapshotJpegQuality = max(1, min(100, snapshotJpegQuality))
         self.snapshotEveryNAccepts = max(1, snapshotEveryNAccepts)
@@ -1099,9 +1101,10 @@ public final class IncrementalStitcher: NSObject {
         //                        `stateLock.try()` and corrupting
         //                        the gate's novelty math.
         //                        (Adversarial-review C1.)
-        //   * `jsDriver`       — DO NOT register.  Legacy path uses
-        //                        `processFrameAtPath`; bypasses
-        //                        consumeFrame entirely.
+        //
+        // The pre-v0.6 `jsDriver` mode (which pushed frames via
+        // `processFrameAtPath` and also skipped registration) has
+        // been removed.
         if frameSourceMode == "arSession" {
             RNSARSession.shared.incrementalConsumer = self
         }
@@ -2149,191 +2152,6 @@ public final class IncrementalStitcher: NSObject {
                self.keyframeGate.acceptedCount, self.keyframeGate.maxCount)
     }
 
-    /// Whether the engine is currently in batch-keyframe mode.
-    /// Bridge reads this to decide whether the JS-driven
-    /// `processFrameAtPath` path can use the lightweight
-    /// `addBatchKeyframePath` (path-only) entry below.
-    @objc public var isBatchKeyframeMode: Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return batchKeyframeMode
-    }
-
-    /// 2026-05-18 (Issue #2 v2) — JS-driver entry-point for
-    /// batch-keyframe captures.  Mirrors Android's behaviour: the
-    /// caller (JS side via the IncrementalStitcherBridge) hands us a
-    /// JPEG file path that already exists on disk (saved by
-    /// vision-camera's takeSnapshot), plus a synthetic pose derived
-    /// from gyro integration.  We:
-    ///
-    ///   1. Validate state (running + batchKeyframeMode).
-    ///   2. Ask the shared C++ KeyframeGate whether to accept this
-    ///      frame.  Pass `latchedPlane: nil` — non-AR captures have
-    ///      no plane; the C++ gate falls back to a pose-only
-    ///      angular-delta strategy.  We do NOT pass a pixel buffer:
-    ///      the Pose strategy doesn't need one, and avoiding the
-    ///      JPEG → CVPixelBuffer round-trip dodges the iOS
-    ///      orientation bugs that broke Issue 2 v1
-    ///      (UIImage/CGContext Y-flip + EXIF-vs-CGImage dimension
-    ///      mismatch — see the symptom in 2026-05-18 user report).
-    ///   3. If accepted, append the existing path + pose to the
-    ///      finalize-time lists.  No JPEG re-encode — the file on
-    ///      disk IS the keyframe.  `retailens::stitchFramePaths()`
-    ///      at finalize uses `cv::imread` which natively handles
-    ///      EXIF orientation, so the output panorama reads upright.
-    ///   4. Emit the same state-event the AR delegate path emits so
-    ///      the JS live band populates identically.
-    ///
-    /// Architecture note: this is structurally parallel to Android's
-    /// `IncrementalStitcher.kt::processFrameAtPath`
-    /// `batchKeyframeMode` branch (lines 573-627).  A follow-up
-    /// should extract the dispatch (gate-eval + path-append + emit)
-    /// into shared cpp/ so both platforms become 5-line wrappers
-    /// around a single C++ entry point.
-    @objc public func addBatchKeyframePath(
-        path: String,
-        pose: RNSARFramePose
-    ) -> Bool {
-        stateLock.lock()
-        guard self.isRunning, self.batchKeyframeMode else {
-            stateLock.unlock()
-            return false
-        }
-        stateLock.unlock()
-
-        // 2026-05-21 (v0.3) — pixel-aware Flow-strategy evaluation.
-        // Pre-0.3 this was `evaluate(pose:latchedPlane:)` with no pixel
-        // buffer, which forced the C++ gate to silently fall back to
-        // Pose strategy (same bug as Android non-AR; both fixed in
-        // v0.3).  We now decode the JPEG snapshot at `path` to a
-        // single-channel grayscale CVPixelBuffer and pass it through,
-        // so the gate's Flow strategy actually runs sparse-flow
-        // novelty on real image content.
-        //
-        // CGImageSource → CGContext into a OneComponent8 CVPixelBuffer.
-        // ~10-20 ms per snapshot on iPhone 13/16 Pro; well under the
-        // ~250 ms non-AR snapshot interval (~4 FPS cadence).  v0.4
-        // will replace this path entirely by moving non-AR capture to
-        // vision-camera's Frame Processor API (tracked at issue #11).
-        let decision: KeyframeGateDecision
-        if let grayBuffer = Self.decodeJpegToGrayscalePixelBuffer(path: path) {
-            decision = self.keyframeGate.evaluate(
-                pose: pose,
-                latchedPlane: nil,
-                pixelBuffer: grayBuffer
-            )
-        } else {
-            // JPEG decode failed (corrupt file, OOM, etc.).  Fall back
-            // to pose-only so the capture doesn't lock up — matches
-            // the C++ side's defensive grayData==nullptr handling
-            // inside evaluateWithFrame.
-            decision = self.keyframeGate.evaluate(
-                pose: pose,
-                latchedPlane: nil
-            )
-        }
-        if !decision.accept {
-            self.emitKeyframeRejectState(decision: decision)
-            return false
-        }
-
-        // Append path + pose to the finalize lists.  Take the lock
-        // briefly — these mutate state read by `finalize()`.
-        stateLock.lock()
-        self.keyframePaths.append(path)
-        self.keyframePoses.append(pose.asDictionary())
-        // 2026-05-22 (audit F2) — track first + last pose for the
-        // stitchMode auto-resolver.  iOS parity: Android records
-        // these in IncrementalStitcher.kt at the same accept points.
-        let poseArr = [pose.tx, pose.ty, pose.tz,
-                       pose.qx, pose.qy, pose.qz, pose.qw]
-        if self.batchFirstAcceptedPose == nil { self.batchFirstAcceptedPose = poseArr }
-        self.batchLastAcceptedPose = poseArr
-        let count = self.keyframePaths.count
-        stateLock.unlock()
-        os_log(.fault, log: Self.diagLog,
-               "[V16-batch-keyframe.js] accepted path #%d → %{public}@",
-               Int32(count), path)
-        self.emitBatchKeyframeAcceptedState(
-            thumbnailPath: path,
-            keyframeIndex: count - 1,
-            keyframeCount: count,
-            keyframeMax: self.keyframeGate.maxCount,
-            isLandscape: pose.imageWidth >= pose.imageHeight
-        )
-        return true
-    }
-
-    /// 2026-05-21 (v0.3) — decode a JPEG file at the given path into a
-    /// single-channel grayscale CVPixelBuffer (`kCVPixelFormatType_-
-    /// OneComponent8`) suitable for feeding into the C++ KeyframeGate's
-    /// Flow-strategy evaluate path.  The bridge's `evaluatePixelBuffer:`
-    /// has explicit OneComponent8 handling (added in v0.3) that reads
-    /// the base address as the Y plane directly, so no extra conversion
-    /// happens on the C++ side.
-    ///
-    /// Used by `addBatchKeyframePath` (the JS-driver non-AR path) so the
-    /// Flow strategy actually runs on real pixel data — pre-0.3 this
-    /// path called `evaluate(pose:latchedPlane:)` with no buffer and
-    /// the C++ side silently fell back to Pose strategy.
-    ///
-    /// Performance: ~10-20 ms for a 1920×1080 JPEG on iPhone 13/16 Pro.
-    /// Well under the ~250 ms non-AR snapshot interval (~4 FPS).
-    /// v0.4 will replace this path entirely via Frame Processor — see
-    /// issue #11.
-    ///
-    /// Returns nil on any failure (file missing, corrupt JPEG, OOM
-    /// on the CVPixelBufferCreate).  Callers fall back to the
-    /// pose-only evaluate so the capture doesn't lock up.
-    private static func decodeJpegToGrayscalePixelBuffer(
-        path: String
-    ) -> CVPixelBuffer? {
-        let url = URL(fileURLWithPath: path)
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
-        else {
-            return nil
-        }
-        let width = cgImage.width
-        let height = cgImage.height
-
-        var pixelBuffer: CVPixelBuffer?
-        let attrs: NSDictionary = [
-            kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
-        ]
-        let status = CVPixelBufferCreate(
-            kCFAllocatorDefault,
-            width, height,
-            kCVPixelFormatType_OneComponent8,
-            attrs,
-            &pixelBuffer
-        )
-        guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
-            return nil
-        }
-
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-        guard let baseAddress = CVPixelBufferGetBaseAddress(buffer) else {
-            return nil
-        }
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
-        let colorSpace = CGColorSpaceCreateDeviceGray()
-        guard let context = CGContext(
-            data: baseAddress,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else {
-            return nil
-        }
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return buffer
-    }
-
     /// V16 Phase 1 — emit a state event when a batch-keyframe is
     /// saved.  Carries the on-disk thumbnail path so JS can render it
     /// in LiveFrameStrip + advance the "Keyframes: N/M" pill.
@@ -3119,14 +2937,15 @@ extension IncrementalStitcher: ARFrameConsumer {}
 //   * `pixelBuffer` from `frame.buffer` (vision-camera YUV biplanar)
 //   * `tx`/`ty`/`tz` = 0 (no AR translation; gyro only gives rotation)
 //   * `qx,qy,qz,qw` from JS-thread gyro-integrated yaw+pitch (synthesised
-//     as `q = q_yaw * q_pitch` — same convention as
-//     `useIncrementalJSDriver`'s pose synthesis)
+//     as `q = q_yaw * q_pitch`).  `useFrameProcessorDriver` and (pre-v0.6)
+//     `useIncrementalJSDriver` both produced quaternions with this layout.
 //   * `fx`/`fy` from frame dims + assumed FoV
 //   * `cx`/`cy` at image centre
 //   * `trackingStateRaw = 2` (= `.tracking`) — non-AR captures don't have
 //     a real ARKit tracking-quality signal; reporting `.tracking` keeps
-//     the engine's `trackingPoor` path inactive, matching the legacy
-//     `useIncrementalJSDriver` contract.
+//     the engine's `trackingPoor` path inactive.  Both the v0.6+
+//     `useFrameProcessorDriver` and the pre-v0.6 `useIncrementalJSDriver`
+//     follow(ed) this contract.
 extension IncrementalStitcher {
     @objc public func consumeFrameFromPlugin(
         pixelBuffer: CVPixelBuffer,

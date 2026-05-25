@@ -58,20 +58,20 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * What the bridge exposes to JS:
  *   - start(options)        — spin up the engine
- *   - processFrameAtPath()  — feed a JPEG path + pose; engine returns
- *                             the same outcome enum iOS emits as events
  *   - finalize(options)     — write the final panorama and reset
  *   - cancel()              — abort without producing output
  *   - getState()            — pull the latest state on demand
- *   - Event "IncrementalStateUpdate" emitted on every
- *     processFrameAtPath call
+ *   - refinePanorama()      — re-run the C++ stitcher over saved keyframes
+ *   - cleanupKeyframes()    — GC stale per-capture keyframe directories
+ *   - Event "IncrementalStateUpdate" emitted on every accepted frame
  *
- * What's missing for true live capture on Android:
- *   ARCore-backed live frame delivery.  The engine itself doesn't
- *   care where frames come from; today the only Android caller is
- *   the `processFrameAtPath` bridge method.  A follow-up will plumb
- *   ARCore's per-frame `Frame.acquireCameraImage()` directly into
- *   the engine the same way iOS uses ARSession.
+ * How frames reach the engine (no JS-driven path post-v0.6):
+ *   - AR mode: `RNSARCameraView` calls `ingestFromARCameraView(...)`
+ *     once per ARCore Frame from its scene-update listener.
+ *   - Non-AR mode: the vision-camera Frame Processor plugin
+ *     (`CvFlowGateFrameProcessor`) calls `consumeFrameFromPlugin(...)`
+ *     on the producer thread, gated by `frameProcessorIngestEnabled`.
+ *   The pre-v0.6 `processFrameAtPath` JS-driver entry point is gone.
  */
 class IncrementalStitcher(
     private val reactContext: ReactApplicationContext,
@@ -115,9 +115,9 @@ class IncrementalStitcher(
     // The MVP gate is frame-count-based ("accept every Nth frame
     // until cap").  iOS uses a pose-based gate (overlap < threshold)
     // — adding that here is a follow-up that needs ARCore-pose
-    // accumulation across processFrameAtPath calls.  For now, every
-    // N-th frame is good enough to validate end-to-end stitching
-    // parity.
+    // accumulation across `ingestFromARCameraView` calls.  For now,
+    // every N-th frame is good enough to validate end-to-end
+    // stitching parity.
     private var batchKeyframeMode: Boolean = false
     private val batchKeyframePaths: MutableList<String> = mutableListOf()
     private var batchKeyframeFrameCounter: Int = 0
@@ -217,9 +217,10 @@ class IncrementalStitcher(
 
     /// 2026-05-22 (audit F5) — Frame counter for the flowEvalEveryNFrames
     /// throttle.  Incremented on every per-frame entry point
-    /// (ingestFromARCameraView for AR, processFrameAtPath for non-AR);
-    /// gate evaluation only runs when (counter - 1) % evalCadence == 0
-    /// so frame #1 always evaluates regardless of cadence.  iOS parity:
+    /// (`ingestFromARCameraView` for AR mode, `consumeFrameFromPlugin`
+    /// for non-AR Frame Processor mode); gate evaluation only runs when
+    /// (counter - 1) % evalCadence == 0 so frame #1 always evaluates
+    /// regardless of cadence.  iOS parity:
     /// IncrementalStitcher.swift:2459-2471 (`consumeFrameCounter`).
     /// Reset to 0 on each `start()` call.
     private var consumeFrameCounter: Long = 0L
@@ -229,22 +230,23 @@ class IncrementalStitcher(
     /// F8.4 — gate for `consumeFrameFromPlugin` (the vision-camera
     /// Frame Processor producer-thread entry point on Android).
     /// TRUE only when the current capture was started with
-    /// `frameSourceMode == "frameProcessor"`.  In other modes
-    /// (especially the legacy `"jsDriver"` path that feeds via
-    /// `processFrameAtPath`), the plugin would double-feed the
-    /// engine — bytes from the producer thread + JPEG paths from
-    /// the JS interval, racing on the same workScope serial
-    /// dispatcher — so we drop the producer-thread call.
+    /// `frameSourceMode == "frameProcessor"`.  In AR mode
+    /// (`frameSourceMode == "arSession"`) the plugin would double-feed
+    /// the engine alongside `ingestFromARCameraView` — bytes from the
+    /// producer thread + bytes from the ARCore Frame listener, racing
+    /// on the same workScope serial dispatcher — so we drop the
+    /// producer-thread call.
     ///
     /// AtomicBoolean: producer thread reads lock-free, JS thread
     /// (start/cancel/finalize) writes via `set()`/`compareAndSet()`.
     /// Mirror of iOS' `frameProcessorIngestEnabled` ivar.
     private val frameProcessorIngestEnabled = AtomicBoolean(false)
-    /// Critic #5 fix: serial dispatcher so concurrent
-    /// processFrameAtPath() calls can't race on the engine's canvas.
-    /// `limitedParallelism(1)` guarantees one-at-a-time execution
-    /// while still backing onto the Default pool — matches iOS'
-    /// `workQueue` (DispatchQueue.serial).
+    /// Critic #5 fix: serial dispatcher so concurrent per-frame
+    /// ingest calls (today: `ingestFromARCameraView` in AR mode,
+    /// `consumeFrameFromPlugin` in frame-processor mode) can't race
+    /// on the engine's canvas.  `limitedParallelism(1)` guarantees
+    /// one-at-a-time execution while still backing onto the Default
+    /// pool — matches iOS' `workQueue` (DispatchQueue.serial).
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val workScope = CoroutineScope(Dispatchers.Default.limitedParallelism(1))
 
@@ -274,17 +276,6 @@ class IncrementalStitcher(
     /// when it attaches; the engine flips its `ingestActive` flag
     /// on start/stop so the view feeds frames only during a capture.
     @Volatile private var arCameraViewRef: RNSARCameraView? = null
-
-    /// 2026-05-21 (v0.3) — public-to-the-view-file getter so
-    /// `RNSARCameraView.forwardToIncremental` can ask whether the
-    /// currently-running engine is the batch-keyframe path (v0.3
-    /// Y-plane pixel-data flow) or the legacy hybrid/firstwins live
-    /// engine (which still needs a per-frame JPEG path).  Used to
-    /// elide the eager JPEG encode for batchKeyframe mode (the
-    /// production Camera component's path); the legacy live engine
-    /// still pays the per-frame JPEG cost.
-    internal val isBatchKeyframeMode: Boolean
-        get() = batchKeyframeMode
 
     init {
         // Static back-pointer so `RNSARCameraView` can call into
@@ -327,11 +318,16 @@ class IncrementalStitcher(
             // F8.4 — frameSourceMode honoured on Android.  Pre-F8.4,
             // Android ignored this option (only iOS interpreted it).
             // Now `"frameProcessor"` unlocks `consumeFrameFromPlugin`'s
-            // producer-thread ingest path; everything else (the
-            // implicit default + the legacy `"jsDriver"`) keeps the
-            // ingest path dormant so the existing `processFrameAtPath`
-            // / ARCore paths run unmodified.
-            val frameSourceMode = options.getString("frameSourceMode") ?: "jsDriver"
+            // producer-thread ingest path; `"arSession"` (the default)
+            // keeps it dormant so the ARCore-driven
+            // `ingestFromARCameraView` path runs unmodified.
+            // Default to "arSession" for parity with iOS — pre-v0.6 this
+            // defaulted to "jsDriver", but that mode (the JS-driver
+            // processFrameAtPath path) was removed in v0.6.  Raw
+            // NativeModules callers that omit `frameSourceMode` get the
+            // AR-mode behaviour (the production <Camera> always sets
+            // 'arSession' explicitly for AR captures anyway).
+            val frameSourceMode = options.getString("frameSourceMode") ?: "arSession"
             frameProcessorIngestEnabled.set(frameSourceMode == "frameProcessor")
             val rotation = options.getIntOrDefault("frameRotationDegrees", 90)
             val composeW = options.getIntOrDefault("composeWidth",  960)
@@ -586,14 +582,6 @@ class IncrementalStitcher(
     }
 
     /**
-     * Feed one frame at a JPEG path into the engine.  Pose inputs
-     * drive the same FoV-overlap gate as iOS.  When a pose source
-     * isn't available pass yaw=0, pitch=0, fovHorizDegrees=0 — the
-     * engine treats fov<=0 as a sentinel for "no intrinsics" and
-     * substitutes a 65° default, so frames will still be processed,
-     * just less gated.
-     */
-    /**
      * Copy a (non-persistent) source JPEG to a persistent per-keyframe
      * path under the React context's cache dir.  The ARCameraView's
      * forwardToIncremental writes every frame to a SINGLE reused tmp
@@ -614,67 +602,6 @@ class IncrementalStitcher(
      * for a Phase 3 follow-up; this MVP is just enough to make
      * batch-keyframe work end-to-end on Android.
      */
-    /**
-     * 2026-05-21 (v0.3) — JPEG-to-grayscale decode for the JS-driver
-     * (non-AR) keyframe-gate path.  Used by the batch-keyframe branch
-     * of processFrameAtPath to feed the C++ KeyframeGate with real
-     * pixel data so its Flow strategy actually runs (pre-0.3 the
-     * non-AR call was `evaluate(pose, null)` which silently fell back
-     * to the Pose strategy because no pixel data was supplied).
-     *
-     * Uses OpenCV's Imgcodecs.imread with IMREAD_GRAYSCALE, which
-     * decodes the JPEG straight into a single-channel CV_8UC1 Mat —
-     * faster than BitmapFactory + manual luma loop (~10-20 ms here
-     * vs ~100+ ms in interpreted Kotlin for a 1920×1080 image).
-     *
-     * The non-AR snapshot cadence is ~4 FPS so the per-call cost is
-     * well under the inter-snapshot interval.  v0.4 will replace
-     * this code path entirely by moving non-AR capture to
-     * vision-camera's Frame Processor API (which delivers raw
-     * pixels directly with no JPEG roundtrip).  Tracked at issue #11.
-     *
-     * Returns null when the decode fails (corrupt JPEG, OOM, etc.);
-     * caller is expected to fall back to the pose-only evaluate
-     * path so the capture doesn't lock up.
-     */
-    private data class GrayscaleFrame(
-        val bytes: ByteArray,
-        val width: Int,
-        val height: Int,
-        val stride: Int,
-    )
-
-    private fun decodeJpegToGrayscale(path: String): GrayscaleFrame? {
-        val mat = Imgcodecs.imread(path, Imgcodecs.IMREAD_GRAYSCALE)
-        if (mat.empty()) {
-            android.util.Log.w(
-                "IncrementalStitcher",
-                "decodeJpegToGrayscale: imread returned empty Mat for $path"
-            )
-            return null
-        }
-        return try {
-            val width = mat.cols()
-            val height = mat.rows()
-            // step1() returns bytes-per-row for a CV_8UC1 Mat.  For a
-            // continuous Mat from imread (no ROI) stride == width.
-            val stride = mat.step1().toInt()
-            val size = stride * height
-            val bytes = ByteArray(size)
-            mat.get(0, 0, bytes)
-            GrayscaleFrame(bytes, width, height, stride)
-        } catch (e: Exception) {
-            android.util.Log.w(
-                "IncrementalStitcher",
-                "decodeJpegToGrayscale: failed to copy Mat bytes for $path: ${e.message}",
-                e,
-            )
-            null
-        } finally {
-            mat.release()
-        }
-    }
-
     private fun copyKeyframeToStore(srcPath: String): String? {
         // V16 Phase 2 (Android Fix-1) — write into the per-session
         // subdir created by start().  If start() didn't run (defensive
@@ -708,8 +635,8 @@ class IncrementalStitcher(
     // ── V16 Phase 1 → P3-F migration note ────────────────────────
     // The frame-counter placeholder gate `handleBatchKeyframeFrame`
     // that lived here has been REMOVED.  Both the AR-driven path
-    // (ingestFromARCameraView) and the vision-camera fallback path
-    // (processFrameAtPath) now route through the shared-C++
+    // (`ingestFromARCameraView`) and the Frame Processor path
+    // (`consumeFrameFromPlugin`) now route through the shared-C++
     // `KeyframeGate` (cpp/keyframe_gate.{hpp,cpp}) — same algorithm
     // iOS has used since the V16 ship.  See
     // `private val keyframeGate = KeyframeGate()` above for the
@@ -765,9 +692,10 @@ class IncrementalStitcher(
         // frames slip into the engine while we serialize the canvas.
         arCameraViewRef?.setIncrementalIngestionActive(false)
         // Critic #4 fix: synchronously flip isRunning=false BEFORE
-        // dispatching the finalize body, so any in-flight
-        // processFrameAtPath workers that are about to launch will
-        // bail at the re-check (see processFrameAtPath above).
+        // dispatching the finalize body, so any in-flight per-frame
+        // ingest workers about to launch on workScope (today:
+        // `ingestFromARCameraView` or `consumeFrameFromPlugin`) bail
+        // at the re-check inside their workScope.launch blocks.
         // Matches iOS V12.1 fix.
         isRunning.set(false)
         frameProcessorIngestEnabled.set(false)  // F8.4 — cut producer-thread ingest at finalize
@@ -1060,9 +988,10 @@ class IncrementalStitcher(
         // is false (the legacy hybrid/firstwins live-engine path,
         // which feeds JPEG paths into addFrameAtPath for each ARCore
         // frame).  Pass null when batchKeyframeMode is true; the
-        // batch path uses `grayData` + `onAccept` instead.  Callers
-        // can check `isBatchKeyframeMode` to elide the per-frame
-        // JPEG encode for the batch path.
+        // batch path uses `grayData` + `onAccept` instead.  Modern
+        // callers prefer `nv21PixelData` below — `legacyJpegPath` is
+        // kept only as a defensive fallback for older call sites
+        // that have not yet been migrated.
         legacyJpegPath: String? = null,
         // F8.6 — pixel-data path for live engines.  When supplied
         // (and `batchKeyframeMode == false`), takes precedence over
@@ -1272,9 +1201,8 @@ class IncrementalStitcher(
                 "IncrementalStitcher",
                 "ingestFromARCameraView legacy: batchKeyframeMode=false " +
                     "but both legacyJpegPath and nv21PixelData are null — " +
-                    "dropping frame.  Caller should have encoded a JPEG " +
-                    "OR supplied NV21 pixel data when " +
-                    "isBatchKeyframeMode == false.",
+                    "dropping frame.  Caller must supply NV21 pixel data " +
+                    "(preferred) or a JPEG path for the live engine path.",
             )
             return
         }
@@ -1393,8 +1321,8 @@ class IncrementalStitcher(
     ) {
         // F8.4 — drop the call unless this capture was started in
         // frameProcessor mode.  Otherwise the plugin would double-
-        // feed the engine alongside the legacy jsDriver /
-        // processFrameAtPath path.  See the flag's declaration
+        // feed the engine alongside the AR-mode
+        // `ingestFromARCameraView` path.  See the flag's declaration
         // for the full reasoning.  Mirrors iOS H1.
         if (!frameProcessorIngestEnabled.get()) return
 

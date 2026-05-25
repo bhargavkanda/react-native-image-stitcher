@@ -29,8 +29,8 @@ import com.mrousavy.camera.frameprocessors.VisionCameraProxy
  *   3. Call `IncrementalStitcher.consumeFrameFromPlugin(image, …)`
  *      which:
  *        - Drops the call if `frameSourceMode != "frameProcessor"`
- *          (prevents double-feeding the engine alongside the legacy
- *          `processFrameAtPath` path).
+ *          (prevents double-feeding the engine alongside the
+ *          AR-mode `ingestFromARCameraView` path).
  *        - Otherwise: extracts the Y plane, evaluates the keyframe
  *          gate via `KeyframeGate.evaluateWithFrame`, encodes the
  *          accepted frame to JPEG synchronously, and hands the path
