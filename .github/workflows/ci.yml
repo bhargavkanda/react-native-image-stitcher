@@ -47,26 +47,40 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        # `--ignore-scripts` skips the postinstall fetcher for the
-        # OpenCV binaries.  CI doesn't need them — we're not
-        # building native code here.  Saves ~70 MB of download +
-        # 30s of unpack on every run.
+        # `--ignore-scripts` skips ALL npm scripts (preinstall /
+        # install / postinstall / prepare).  Today's only relevant
+        # script is `postinstall`, which fetches the OpenCV
+        # binaries (~70 MB) — not needed for tsc / jest.  If a
+        # future preinstall or prepare script becomes load-bearing
+        # for CI, revisit this flag.
         run: npm ci --ignore-scripts
 
-      - name: TypeScript type check (lib + tests)
-        # `tsc --noEmit` against the root tsconfig.json validates
-        # the lib's TS surface AND test files (per
-        # tsconfig.test.json's include).  Fails on any type error.
+      - name: TypeScript type check — src + tests
+        # Root `tsconfig.json` includes `src/**`, which covers the
+        # test files under `src/camera/__tests__/` transitively.
+        # `tsconfig.test.json` adds `jest.config.js` + `jest.mocks/`
+        # — those are checked separately in the next step.
         run: npx tsc --noEmit
+
+      - name: TypeScript type check — jest config + mocks
+        # `tsconfig.test.json` adds `jest.config.js` + `jest.mocks/`
+        # to the include set.  Catches drift in the test
+        # infrastructure that the root config doesn't see.
+        run: npx tsc -p tsconfig.test.json --noEmit
 
       - name: Jest unit tests
         # The lib's existing tests under src/camera/__tests__/
         # cover PanoramaSettings bridge round-trips + initial-
         # settings construction.  As v0.10.x adds more test
         # coverage (audit findings #9A C++ tests, #11A Android
-        # JUnit), those will land in this same job via different
-        # commands.
-        run: npm test --silent
+        # JUnit), those land in this same job via different commands.
+        #
+        # `-- --ci` (passed THROUGH npm to jest, not consumed by
+        # npm) disables snapshot creation (only allows matching)
+        # + makes the runner deterministic.  Standard CI practice.
+        # `--silent` (also passed to jest) suppresses test-side
+        # console.log noise.
+        run: npm test -- --ci --silent
 
       - name: Build dist/
         # Confirm the published-package contents would compile
