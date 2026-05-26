@@ -88,10 +88,28 @@ android {
         externalNativeBuild {
             cmake {
                 arguments "-DOPENCV_ANDROID_SDK=${file("$projectDir/vendor/OpenCV-android-sdk").absolutePath}",
-                          "-DANDROID_STL=c++_static"
+                          // v0.8.0 Phase 3 — switched from c++_static
+                          // to c++_shared.  Required for linking
+                          // ReactAndroid::jsi (RN's prefab uses
+                          // shared libc++).  STL probe at
+                          // android/src/main/cpp/CMakeLists.txt:99-118
+                          // confirms OpenCV's libopencv_stitching.a is
+                          // already built with __ndk1 (c++_shared), so
+                          // the static archive link continues to
+                          // work cleanly.  Pre-Phase-3 it worked only
+                          // because the JNI shim's .so boundary used
+                          // POD types — fragile.  Now properly aligned.
+                          "-DANDROID_STL=c++_shared"
                 cppFlags "-std=c++17"
             }
         }
+    }
+
+    // v0.8.0 Phase 3 — consume React Native's prefab packages
+    // (ReactAndroid::jsi + fbjni::fbjni) for the JSI host object.
+    // RN 0.71+ ships these as prefabs; this lib targets RN 0.84.
+    buildFeatures {
+        prefab true
     }
 
     // ── JNI shim build path ─────────────────────────────────────────
