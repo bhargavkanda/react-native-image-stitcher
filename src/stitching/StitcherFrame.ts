@@ -54,11 +54,35 @@ export interface StitcherFrame {
    * Pixel format identifier.  Both modes today emit `'yuv'` (NV12 on
    * iOS, NV21 on Android).  Other vision-camera formats may appear
    * in future releases.
+   *
+   * **`'unknown'` semantics:** the lib reached a code path that
+   * doesn't recognise the underlying camera buffer's pixel format
+   * (e.g., a future ARKit version emits BGRA when historically it
+   * only emitted NV12).  Worklets that depend on a known layout
+   * should treat `'unknown'` as "skip this frame".  `toArrayBuffer()`
+   * still returns bytes when the format is `'unknown'`, but the
+   * layout is undefined — the bytes are the underlying buffer's
+   * first plane and may not be interpretable.  When this happens
+   * the native side also emits an `os_log` / logcat warning.
    */
   pixelFormat: 'yuv' | 'rgb' | 'unknown';
 
   /**
-   * Display orientation tag, matching vision-camera's `Frame.orientation`.
+   * Display orientation tag, matching vision-camera's
+   * `Frame.orientation`.
+   *
+   * **AR-mode limitation (v0.8.0):** AR-source frames return only
+   * the coarse two-value set `'landscape-right' | 'portrait'` (the
+   * lib reads `pose.imageWidth >= pose.imageHeight` as the
+   * discriminator since ARKit's `capturedImage` is always in the
+   * camera's native landscape-right orientation regardless of
+   * device pose).  Worklets that need to distinguish
+   * `landscape-left` (upside-down landscape) or
+   * `portrait-upside-down` should consult device-orientation sensors
+   * separately while running in AR mode.  Non-AR frames (vc source)
+   * return the full four-value set.  Fixing the AR side requires
+   * threading `UIDevice.current.orientation` through; deferred to
+   * v0.8.1+ unless a consumer hits it.
    */
   orientation:
     | 'portrait'
@@ -102,17 +126,15 @@ export interface StitcherFrame {
   };
 
   /**
-   * Discriminator for the frame source.  Lets worklets branch on
-   * mode without try/catch on AR-only field access.
+   * Discriminator for the frame source.  Worklets branch on this to
+   * gate AR-only field access without try/catch.  Standard TS
+   * discriminated-union pattern.
    *
    *   - `'vc'` — vision-camera Frame Processor (non-AR mode)
-   *   - `'ar'` — AR-session frame (AR mode); arDepth / arAnchors /
-   *     arTrackingState fields may be populated
-   *
-   * Prefixed with `__` to signal "library-internal discriminator;
-   * worklets may read it but should not invent values for it".
+   *   - `'ar'` — AR-session frame (AR mode); `arDepth` / `arAnchors` /
+   *     `arTrackingState` fields may be populated
    */
-  __source: 'vc' | 'ar';
+  source: 'vc' | 'ar';
 
   // ── AR-only optional fields ───────────────────────────────────
   // Always undefined in `__source === 'vc'` mode.

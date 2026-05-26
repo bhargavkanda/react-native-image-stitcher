@@ -45,7 +45,7 @@ std::vector<PropNameID> StitcherFrameJsiHostObject::getPropertyNames(
   names.push_back(PropNameID::forUtf8(rt, "orientation"));
   names.push_back(PropNameID::forUtf8(rt, "timestamp"));
   names.push_back(PropNameID::forUtf8(rt, "pose"));
-  names.push_back(PropNameID::forUtf8(rt, "__source"));
+  names.push_back(PropNameID::forUtf8(rt, "source"));
   names.push_back(PropNameID::forUtf8(rt, "toArrayBuffer"));
   if (!_data.arTrackingState.empty()) {
     names.push_back(PropNameID::forUtf8(rt, "arTrackingState"));
@@ -76,7 +76,7 @@ Value StitcherFrameJsiHostObject::get(Runtime& rt,
   if (name == "pixelFormat") return String::createFromUtf8(rt, _data.pixelFormat);
   if (name == "orientation") return String::createFromUtf8(rt, _data.orientation);
   if (name == "timestamp") return Value(_data.timestampNs);
-  if (name == "__source") return String::createFromUtf8(rt, _data.source);
+  if (name == "source") return String::createFromUtf8(rt, _data.source);
 
   if (name == "pose") {
     Object pose(rt);
@@ -114,16 +114,92 @@ Value StitcherFrameJsiHostObject::get(Runtime& rt,
       auto self = weakSelf.lock();
       if (!self || !self->_isValid || !self->_data.pixelReader) {
         throw JSError(runtime,
-            "[StitcherFrame] toArrayBuffer() called on invalidated frame");
+            "[StitcherFrame] toArrayBuffer() called on invalidated frame "
+            "(host object was released after the worklet dispatch returned)");
       }
-      std::size_t bufSize = self->_data.pixelReader->byteSize();
-      auto owning = std::make_shared<OwningPixelBuffer>(bufSize);
-      std::size_t written = self->_data.pixelReader->copyTo(owning->bytes(), bufSize);
+      const std::size_t bufSize = self->_data.pixelReader->byteSize();
+
+      // Per-runtime ArrayBuffer cache.  Pattern from vision-camera's
+      // FrameHostObject.mm:124-149.  Without this, every per-frame
+      // worklet call to toArrayBuffer() allocates a fresh ~2MB
+      // vector (1920x1080 NV12 Y-plane) — ~60 MB/s of GC churn at
+      // 30 fps that defeats the point of having a worklet at all.
+      // Caching on `runtime.global()` is safe because (a) each
+      // worklet runtime has its own global, and (b) every call
+      // overwrites the cached buffer before returning, so there's
+      // no time-window for cross-worklet data leaks.
+      static constexpr const char* kCacheKey =
+          "__stitcherFrameArrayBufferCache";
+      auto global = runtime.global();
+      std::shared_ptr<OwningPixelBuffer> owning;
+
+      bool needsAlloc = true;
+      if (global.hasProperty(runtime, kCacheKey)) {
+        auto cached = global.getPropertyAsObject(runtime, kCacheKey);
+        if (cached.isArrayBuffer(runtime)) {
+          auto cachedBuffer = cached.getArrayBuffer(runtime);
+          // Hermes JSI exposes the underlying MutableBuffer via the
+          // shared_ptr the ArrayBuffer was constructed with — but
+          // there's no public getter once handed to JSI.  We retain
+          // a parallel shared_ptr below via a hidden global slot.
+          if (cachedBuffer.size(runtime) == bufSize) {
+            // Size matches — reuse.  Pull the parallel
+            // OwningPixelBuffer ref out of its hidden slot.
+            static constexpr const char* kRefKey =
+                "__stitcherFrameArrayBufferCacheRef";
+            if (global.hasProperty(runtime, kRefKey)) {
+              // The hidden ref is stored as a HostObject wrapping
+              // the shared_ptr; pull it back.  See alloc path below.
+              auto refObj = global.getPropertyAsObject(runtime, kRefKey);
+              if (refObj.isHostObject(runtime)) {
+                struct RefHolder : facebook::jsi::HostObject {
+                  std::shared_ptr<OwningPixelBuffer> buf;
+                  explicit RefHolder(std::shared_ptr<OwningPixelBuffer> b)
+                      : buf(std::move(b)) {}
+                };
+                auto holder =
+                    refObj.getHostObject<RefHolder>(runtime);
+                if (holder && holder->buf) {
+                  owning = holder->buf;
+                  needsAlloc = false;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (needsAlloc) {
+        owning = std::make_shared<OwningPixelBuffer>(bufSize);
+        // Store the ArrayBuffer + a parallel ref-holder on global.
+        // The ArrayBuffer's MutableBuffer is the same `owning`; the
+        // ref-holder lets us pull `owning` back out on cache hits.
+        global.setProperty(runtime, kCacheKey,
+            facebook::jsi::ArrayBuffer(runtime, owning));
+        struct RefHolder : facebook::jsi::HostObject {
+          std::shared_ptr<OwningPixelBuffer> buf;
+          explicit RefHolder(std::shared_ptr<OwningPixelBuffer> b)
+              : buf(std::move(b)) {}
+        };
+        global.setProperty(runtime, "__stitcherFrameArrayBufferCacheRef",
+            facebook::jsi::Object::createFromHostObject(runtime,
+                std::make_shared<RefHolder>(owning)));
+      }
+
+      std::size_t written =
+          self->_data.pixelReader->copyTo(owning->bytes(), bufSize);
       if (written == 0 && bufSize > 0) {
         throw JSError(runtime,
-            "[StitcherFrame] toArrayBuffer() pixel copy failed (reader returned 0 bytes)");
+            "[StitcherFrame] toArrayBuffer() pixel copy failed "
+            "(reader returned 0 bytes — likely the underlying "
+            "camera buffer was NULL or unreadable; see native log)");
       }
-      return facebook::jsi::ArrayBuffer(runtime, owning);
+
+      // Re-fetch the cached ArrayBuffer to return.  Cheap (just a
+      // property lookup); avoids constructing a new jsi::ArrayBuffer
+      // that wraps the same MutableBuffer (which would be wasteful).
+      return global.getPropertyAsObject(runtime, kCacheKey)
+          .getArrayBuffer(runtime);
     };
     return Function::createFromHostFunction(rt,
         PropNameID::forUtf8(rt, "toArrayBuffer"), 0, fn);

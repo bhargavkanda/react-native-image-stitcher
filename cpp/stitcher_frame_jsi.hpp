@@ -24,9 +24,16 @@ namespace retailens {
 
 /// Owning byte buffer that satisfies the `jsi::MutableBuffer`
 /// contract.  Backs the `ArrayBuffer` returned by
-/// `StitcherFrame.toArrayBuffer()`.  Lifetime is tied to the JSI
-/// object: when JS releases the ArrayBuffer, JSI drops the shared
-/// pointer and the underlying vector frees.
+/// `StitcherFrame.toArrayBuffer()`.
+///
+/// **Lifetime:** tied to the JSI ArrayBuffer's GC root.  The buffer
+/// persists until Hermes / JSC garbage-collects the ArrayBuffer
+/// (not deterministic with frame timing).  To avoid per-frame
+/// allocation churn (30 fps × 2 MB = ~60 MB/s in the AR-mode pan
+/// case), `toArrayBuffer()` caches a single instance per JSI
+/// runtime on `runtime.global()` and reuses it across frames —
+/// reallocating only when the requested size changes.  Pattern
+/// adopted from vision-camera's `FrameHostObject.mm:124-149`.
 class OwningPixelBuffer : public facebook::jsi::MutableBuffer {
  public:
   explicit OwningPixelBuffer(std::size_t sizeBytes)
@@ -56,7 +63,25 @@ class StitcherFrameJsiHostObject
     : public facebook::jsi::HostObject,
       public std::enable_shared_from_this<StitcherFrameJsiHostObject> {
  public:
-  explicit StitcherFrameJsiHostObject(StitcherFrameData data);
+  /// Factory.  ALWAYS use this — `shared_from_this()` (called inside
+  /// `get` for `toArrayBuffer`) requires the instance to be owned
+  /// by a `shared_ptr` from the moment of construction.  A raw
+  /// `new StitcherFrameJsiHostObject(...)` would throw
+  /// `std::bad_weak_ptr` on the first `toArrayBuffer()` JSI call.
+  ///
+  /// Private constructor + public factory enforces this at the
+  /// language level; callers can't accidentally construct without
+  /// `std::make_shared`.
+  static std::shared_ptr<StitcherFrameJsiHostObject> create(
+      StitcherFrameData data) {
+    // `std::make_shared` would require a public ctor; route through
+    // a tagged-dispatch private constructor instead.
+    struct EnableMakeShared : StitcherFrameJsiHostObject {
+      explicit EnableMakeShared(StitcherFrameData d)
+          : StitcherFrameJsiHostObject(std::move(d)) {}
+    };
+    return std::make_shared<EnableMakeShared>(std::move(data));
+  }
 
   // jsi::HostObject interface
   facebook::jsi::Value get(
@@ -74,6 +99,8 @@ class StitcherFrameJsiHostObject
   bool isValid() const { return _isValid; }
 
  private:
+  explicit StitcherFrameJsiHostObject(StitcherFrameData data);
+
   StitcherFrameData _data;
   bool _isValid;
 };
