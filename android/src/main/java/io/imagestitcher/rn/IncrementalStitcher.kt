@@ -1001,14 +1001,17 @@ class IncrementalStitcher(
         // per accepted frame on a mid-tier device.  Pass null to use
         // the legacy JPEG path.
         //
-        // OWNERSHIP: the engine retains a reference to `nv21PixelData`
-        // until `workScope`'s coroutine consumes it (~50 ms later).
-        // Callers MUST treat the array as transferred — do not
-        // mutate it or return it to a buffer pool after calling
-        // this method.  If a caller needs to recycle the buffer,
-        // pass `.copyOf()` (currently no caller does — the F8.4
-        // Frame Processor plugin allocates a fresh array per frame).
-        nv21PixelData: ByteArray? = null,
+        // OWNERSHIP: wrapped in `TransferredNV21` (audit #4A,
+        // v0.10.0).  The wrapper enforces single-use: the engine
+        // calls `.takeOnce()` on the producer thread before
+        // dispatching to `workScope`; subsequent attempts to extract
+        // the bytes throw.  Callers MUST construct a fresh
+        // `TransferredNV21` per frame and MUST NOT hand the same
+        // instance to two consumers (e.g., a sync gate-eval + an
+        // async workScope.launch).  The Frame Processor plugin and
+        // the AR camera view both allocate fresh NV21 arrays per
+        // frame; the wrapper is a defensive-programming guard.
+        nv21PixelData: TransferredNV21? = null,
         nv21PixelWidth: Int = 0,
         nv21PixelHeight: Int = 0,
     ) {
@@ -1215,11 +1218,20 @@ class IncrementalStitcher(
             )
             return
         }
+        // v0.10.0 audit #4A — extract the wrapped bytes ONCE on the
+        // producer thread before dispatching to workScope.  This
+        // makes the transfer-of-ownership explicit + caught early:
+        // if a caller accidentally passes the same TransferredNV21
+        // instance to a sync consumer earlier, takeOnce() would
+        // have already thrown there.  Capturing `pixelBytes` by
+        // value inside the coroutine sidesteps any chance of the
+        // wrapper being read from two threads.
+        val pixelBytes: ByteArray? = if (hasPixelData) nv21PixelData!!.takeOnce() else null
         workScope.launch {
             val state: WritableMap? = if (firstwins != null) {
                 val tele = if (hasPixelData) {
                     firstwins.addFramePixelData(
-                        nv21 = nv21PixelData!!,
+                        nv21 = pixelBytes!!,
                         nv21Width = nv21PixelWidth,
                         nv21Height = nv21PixelHeight,
                         qx = qx, qy = qy, qz = qz, qw = qw,
@@ -1246,7 +1258,7 @@ class IncrementalStitcher(
             } else {
                 val tele = if (hasPixelData) {
                     hybrid!!.addFramePixelData(
-                        nv21 = nv21PixelData!!,
+                        nv21 = pixelBytes!!,
                         nv21Width = nv21PixelWidth,
                         nv21Height = nv21PixelHeight,
                         qx = qx, qy = qy, qz = qz, qw = qw,
@@ -1410,7 +1422,14 @@ class IncrementalStitcher(
             // `addFramePixelData` instead of JPEG-decoding a
             // separately-written path.  Batch-keyframe mode
             // ignores these (it uses `grayData` + `onAccept`).
-            nv21PixelData = nv21Bytes,
+            //
+            // v0.10.0 audit #4A — wrap in TransferredNV21 so the
+            // engine takes ownership exactly once on the producer
+            // thread (engine calls `.takeOnce()` before workScope).
+            // Misuse (handing this same instance to two consumers)
+            // throws at the second `.takeOnce()` site, not silently
+            // corrupting frames.
+            nv21PixelData = TransferredNV21(nv21Bytes),
             nv21PixelWidth = width,
             nv21PixelHeight = height,
             onAccept = { targetPath ->

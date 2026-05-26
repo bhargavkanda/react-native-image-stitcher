@@ -538,7 +538,17 @@ class RNSARCameraView @JvmOverloads constructor(
             legacyJpegPath = null,
             // F8.6 — pixel-data path for live engines.  Batch-
             // keyframe mode ignores these (bails earlier).
-            nv21PixelData = packed.nv21,
+            //
+            // v0.10.0 audit #4A — wrap `packed.nv21` in
+            // TransferredNV21 so ownership is enforced at runtime.
+            // The AR caller passes the SAME `packed.nv21` array as
+            // both `grayData` (sync, gate-eval read) and
+            // `nv21PixelData` (async, engine ingest).  Today no race
+            // because grayData is consumed inside evaluateWithFrame
+            // before workScope.launch fires; the wrapper makes a
+            // future refactor that reorders consumption fail loudly
+            // instead of silently corrupting frames.
+            nv21PixelData = TransferredNV21(packed.nv21),
             nv21PixelWidth = packed.width,
             nv21PixelHeight = packed.height,
             onAccept = { targetPath ->
