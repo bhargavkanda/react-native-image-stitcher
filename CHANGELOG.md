@@ -16,6 +16,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-05-26
+
+### Fixed — CI binary-packaging bloat
+
+The v0.7.0 release (and likely v0.5.1 before it — both built by
+CI) shipped uncompressed binary archives that consumers downloaded
+on every `npm install`.  Sizes vs. the manual recipe used for
+v0.6.0:
+
+| Platform | v0.7.0 (CI, unstripped) | v0.7.1 (CI, stripped) | Saving |
+|---|---|---|---|
+| iOS zip   | 43 MB  | ~26 MB | -17 MB  |
+| Android zip | 165 MB | ~42 MB | -123 MB |
+
+The lib itself is unchanged; consumers on the `^0.7.0` semver range
+automatically pick up v0.7.1 and start getting the smaller download.
+No source-code changes; binary-only re-release.
+
+#### Root cause
+
+- **iOS**: `scripts/build-opencv-ios.sh` produced an xcframework
+  containing both the device slice (`ios-arm64`) and the simulator
+  slice (`ios-arm64_x86_64-simulator`).  vision-camera + ARKit
+  don't work on the simulator and the example app targets devices
+  only, so the simulator slice was dead weight in every download.
+- **Android**: `scripts/build-opencv-android.sh` ran OpenCV's
+  `build_sdk.py` for all four NDK ABIs (per the script's own
+  contract — produces a multi-arch fat SDK).  The lib's
+  `android/build.gradle` sets `ndk.abiFilters arm64-v8a` so only
+  arm64-v8a binaries reach any consumer APK, but the zip carried
+  `armeabi-v7a` / `x86` / `x86_64` libs in three sibling dirs
+  (`sdk/native/libs/`, `staticlibs/`, `3rdparty/libs/`) plus
+  `samples/` (~10 MB) and `apk/` (~5 MB) — none of it ever loaded
+  at runtime.
+
+#### Fix
+
+Both build scripts now strip the dead-weight pieces immediately
+after the OpenCV build completes, before zipping for upload.
+Sentinel checks fail loudly if a strip removes the required
+arm64-v8a artifacts (defends against a future refactor of the
+strip block).  Pattern matches the manual recipe in
+`feedback_binary_release_packaging.md` (project memory).
+
+The iOS strip auto-detects the simulator entry's index in the
+xcframework's `Info.plist::AvailableLibraries` via a
+`plutil -convert json | python3` one-liner — the index isn't fixed
+across OpenCV builds and previous manual recipes that hardcoded
+`AvailableLibraries.1` would have silently stripped the wrong
+slice if the order changed.
+
+#### Compatibility
+
+Strict additive over v0.7.0.  No code changes — the lib's runtime
+and public API surface are byte-identical.
+
 ## [0.7.0] — 2026-05-26
 
 ### Added — Tier 1: `useKeyframeStream`
@@ -1248,7 +1304,8 @@ Native module names also changed:
 - iOS pod: `RetaiLensCaptureSDK` → `RNImageStitcher`
 - iOS xcframework: shipped as `opencv2.xcframework` (linked from `RNImageStitcher.podspec`)
 
-[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.5.0...v0.5.1

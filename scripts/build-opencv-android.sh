@@ -130,6 +130,48 @@ for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
 done
 echo "[build-opencv-android] All ABIs produced libopencv_java4.so + libopencv_stitching.a."
 
+# ── 4.5. Strip non-arm64 binaries + unused subdirs (v0.7.1 fix) ──────
+#
+# The lib's android/build.gradle sets `ndk.abiFilters arm64-v8a` so
+# only arm64-v8a binaries ship in any consumer's final APK.  But the
+# OpenCV-android-sdk we just built (build_sdk.py runs --abi for ALL
+# four ABIs to produce a fat .so) carries armeabi-v7a / x86 / x86_64
+# binaries in three sibling dirs.  Those add ~120 MB of dead weight
+# to the npm-install download — every consumer pays the bandwidth +
+# disk tax even though their APK never uses these libs.
+#
+# Plus samples/ (demo apps, ~10 MB) and apk/ (Java Manager APK,
+# ~5 MB) which the lib never needs.
+#
+# Strip all of the above; keep only arm64-v8a libs / staticlibs /
+# 3rdparty/libs + sdk/native/jni/include/ (headers required for the
+# JNI build).  See `feedback_binary_release_packaging.md` for the
+# full rationale + the manual recipe this automates.
+#
+# Pre-strip size: ~165 MB.  Post-strip: ~42 MB.
+echo "[build-opencv-android] Stripping non-arm64 ABIs + samples + apk..."
+echo "[build-opencv-android] Pre-strip size: $(du -sh "${SDK_OUT}" | cut -f1)"
+for abi in armeabi-v7a x86 x86_64; do
+    rm -rf "${SDK_OUT}/sdk/native/libs/${abi}"
+    rm -rf "${SDK_OUT}/sdk/native/staticlibs/${abi}"
+    rm -rf "${SDK_OUT}/sdk/native/3rdparty/libs/${abi}"
+done
+rm -rf "${SDK_OUT}/samples"
+rm -rf "${SDK_OUT}/apk"
+echo "[build-opencv-android] Post-strip size: $(du -sh "${SDK_OUT}" | cut -f1)"
+
+# Sentinel check: the arm64-v8a binaries we just promised to keep
+# MUST still be there.  If somehow a future refactor deletes the
+# wrong dir, fail loudly here rather than ship a broken zip.
+for required in \
+    "${SDK_OUT}/sdk/native/libs/arm64-v8a/libopencv_java4.so" \
+    "${SDK_OUT}/sdk/native/staticlibs/arm64-v8a/libopencv_stitching.a"; do
+    if [ ! -f "${required}" ]; then
+        echo "[build-opencv-android] FATAL: strip removed a required arm64-v8a artifact: ${required}" >&2
+        exit 1
+    fi
+done
+
 # ── 5. Zip for release upload ────────────────────────────────────────
 cd "${OUTPUT_DIR}"
 zip -ry "RNImageStitcher-android.zip" "OpenCV-android-sdk"
