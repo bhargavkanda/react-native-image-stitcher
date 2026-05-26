@@ -514,6 +514,17 @@ class RNSARCameraView @JvmOverloads constructor(
         // (Was: eager JPEG encode for non-batch-keyframe modes,
         //  written to `tmpJpegFile`, passed as `legacyJpegPath`.
         //  See the v0.3 / F8.6 entries in CHANGELOG.md.)
+        //
+        // v0.8.0 Phase 3c — route through the worklet runtime's
+        // `runFirstParty` indirection.  The lambda body is the
+        // unchanged engine ingest call; the indirection sets up
+        // the seam where Phase 4 will fan out to host worklets
+        // without touching this first-party path.  Synchronous
+        // invocation preserves the ARCore Image ownership contract
+        // — the engine consumes the TransferredNV21 inside the
+        // lambda before ARCore recycles the Image.
+        StitcherWorkletRuntime.installIfNeeded()
+        StitcherWorkletRuntime.runFirstParty {
         module.ingestFromARCameraView(
             tx = tArr[0].toDouble(),
             ty = tArr[1].toDouble(),
@@ -565,6 +576,7 @@ class RNSARCameraView @JvmOverloads constructor(
                 ) != null
             },
         )
+        }  // closes StitcherWorkletRuntime.runFirstParty { … } (v0.8.0 Phase 3c)
     }
 
     private fun applyDisplayGeometry() {

@@ -80,6 +80,26 @@ if(NOT EXISTS "${SHARED_CPP_DIR}/keyframe_gate.hpp")
         "Expected react-native-image-stitcher/cpp/ — was the package layout broken?")
 endif()
 
+# ── React Native prefab packages for JSI ──────────────────────────
+#
+# v0.8.0 Phase 3 — activating the previously-deferred JSI integration.
+# The shared C++ host object (cpp/stitcher_frame_jsi.cpp) depends on
+# `facebook::jsi`.  ReactAndroid ships JSI as a prefab starting
+# RN 0.71+; the lib targets RN 0.84 so this is always available.
+#
+# `buildFeatures { prefab true }` in android/build.gradle enables
+# consumption + `ANDROID_STL=c++_shared` aligns the STL with what
+# the prefabs require.  The Phase-2 STL probe (`llvm-nm
+# libopencv_stitching.a | grep '__ndk1'`) confirmed OpenCV's
+# stitching archive was already built with c++_shared (768
+# __ndk1 symbols + 0 __cxx11 / NSt3) — switching the lib's flag
+# from c++_static to c++_shared just aligns + matches.  The
+# previous c++_static was working only because the JNI shim's
+# `.so` boundary used POD/C types; the new c++_shared is properly
+# matched throughout.
+find_package(ReactAndroid REQUIRED CONFIG)
+find_package(fbjni REQUIRED CONFIG)
+
 # ── Our shim ───────────────────────────────────────────────────────
 add_library(image_stitcher SHARED
     image_stitcher_jni.cpp
@@ -90,43 +110,13 @@ add_library(image_stitcher SHARED
     # retry + dimension/memory instrumentation.  Used to live in this
     # file (image_stitcher_jni.cpp).  See cpp/stitcher.hpp for design
     # rationale.
-    "${SHARED_CPP_DIR}/stitcher.cpp")
-
-# v0.8.0 NOTE — `cpp/stitcher_frame_jsi.{hpp,cpp}` is the shared JSI
-# host object for `StitcherFrame`.  iOS consumes it via the .mm shim
-# at `ios/Sources/RNImageStitcher/StitcherFrameHostObject.mm` (Apple
-# JSI is universally available in the RN pod, no extra setup needed).
-#
-# On Android, integrating it requires:
-#   1. `android { buildFeatures { prefab true } }` in build.gradle
-#   2. `find_package(ReactAndroid REQUIRED CONFIG)` here
-#   3. `target_link_libraries(image_stitcher ReactAndroid::jsi)`
-#
-# AND — the blocker — switching `ANDROID_STL` from `c++_static` to
-# `c++_shared`.  The RN prefabs require shared STL but our current
-# build uses static STL.
-#
-# **2026-05-26 STL probe finding:** `llvm-nm libopencv_stitching.a`
-# shows 768 `__ndk1`-namespaced symbols and ZERO `__cxx11` /
-# `NSt3` symbols — the OpenCV stitching archive was already built
-# with `c++_shared` (NDK libc++).  The current `c++_static` flag
-# is therefore *misaligned* with the archive; it works today only
-# because the JNI shim's `.so`-boundary uses POD/C types so no
-# std::string crosses between the two STL instances.
-#
-# Implication: Phase 3 can safely switch to `c++_shared`.  No
-# split `.so` needed.  Action items for Phase 3:
-#   1. Change `ANDROID_STL=c++_static` → `c++_shared` in
-#      android/build.gradle (defaultConfig externalNativeBuild
-#      cmake arguments).
-#   2. Add `buildFeatures { prefab true }` to android/build.gradle.
-#   3. Re-introduce `find_package(ReactAndroid REQUIRED CONFIG)`
-#      + `find_package(fbjni REQUIRED CONFIG)` here.
-#   4. Add `cpp/stitcher_frame_jsi.cpp` to image_stitcher SOURCES.
-#   5. Add `ReactAndroid::jsi fbjni::fbjni` to target_link_libraries.
-#
-# Until then, the shared C++ JSI host object exists in `cpp/` and
-# compiles on iOS; the Android-side JSI integration is deferred.
+    "${SHARED_CPP_DIR}/stitcher.cpp"
+    # v0.8.0 Phase 3 — shared JSI host object for `StitcherFrame`.
+    # Compiles to identical dispatch on both platforms; iOS consumes
+    # it via the .mm shim at
+    # `ios/Sources/RNImageStitcher/StitcherFrameHostObject.mm`.
+    # See cpp/stitcher_frame_jsi.hpp for the class API.
+    "${SHARED_CPP_DIR}/stitcher_frame_jsi.cpp")
 
 target_include_directories(image_stitcher PRIVATE
     "${OPENCV_INCLUDE_DIR}"
@@ -153,7 +143,13 @@ target_link_libraries(image_stitcher
     opencv_stitching
     -Wl,--no-whole-archive
     opencv_java
-    log)
+    log
+    # v0.8.0 Phase 3 — JSI for the shared C++ host object
+    # (cpp/stitcher_frame_jsi.cpp's `facebook::jsi::HostObject`
+    # subclass).  fbjni for the Phase 3c JNI bridge between Kotlin
+    # worklet runtime + C++ host object construction.
+    ReactAndroid::jsi
+    fbjni::fbjni)
 
 target_compile_options(image_stitcher PRIVATE
     -fvisibility=hidden
