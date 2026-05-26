@@ -23,6 +23,7 @@
 #import <Foundation/Foundation.h>
 #import <CoreVideo/CVPixelBuffer.h>
 #import <CoreMedia/CoreMedia.h>
+#import <os/log.h>
 
 #include <jsi/jsi.h>
 
@@ -63,14 +64,13 @@ using namespace facebook;
 
 namespace {
 
-/// iOS-specific `PixelBufferReader`.  Locks the `CVPixelBuffer`'s
-/// base address on each `copyTo`, copies the (Y-plane) bytes, then
-/// unlocks.  Holds a strong reference to the parent `ARFrame` so
-/// the underlying `CVPixelBuffer` (owned by ARKit's pool) doesn't
-/// get reclaimed mid-read.
-///
-/// v0.8.0: emits the Y plane only.  Full chroma (NV12 UV plane,
-/// BGRA, etc.) deferred until a host worklet needs it.
+/// iOS-specific `retailens::PixelBufferReader` impl.  See the base
+/// class docstring for the general contract (thread-affinity,
+/// invalidation semantics, Y-plane-only constraint).  This subclass
+/// adds:
+///   - `CVPixelBuffer` lock/memcpy/unlock per copyTo
+///   - `CFBridgingRetain` of the parent `ARFrame` so ARKit's
+///     pool can't reclaim the underlying buffer mid-read
 class IOSPixelBufferReader : public retailens::PixelBufferReader {
  public:
   explicit IOSPixelBufferReader(ARFrame* arFrame) {
@@ -137,13 +137,21 @@ class IOSPixelBufferReader : public retailens::PixelBufferReader {
   data.width = static_cast<int32_t>(pose.imageWidth);
   data.height = static_cast<int32_t>(pose.imageHeight);
   // ARKit's `kCVPixelFormatType_420YpCbCr8BiPlanarFullRange` (NV12)
-  // is reported as "yuv".  Other formats (rare in ARKit) → "unknown".
+  // is reported as "yuv".  Other formats (rare in ARKit; possible if
+  // ARWorldTrackingConfiguration.videoFormat is overridden to BGRA)
+  // → "unknown" + os_log warning so worklets that gate on
+  // `pixelFormat === 'yuv'` can be debugged without a screen recording.
   OSType pf = CVPixelBufferGetPixelFormatType(arFrame.capturedImage);
   if (pf == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
       pf == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
     data.pixelFormat = "yuv";
   } else {
     data.pixelFormat = "unknown";
+    os_log_error(OS_LOG_DEFAULT,
+        "[StitcherFrame] unexpected ARKit pixel format 0x%x; "
+        "worklet receives pixelFormat='unknown' and toArrayBuffer() "
+        "bytes are first-plane only (layout undefined for unknown "
+        "formats).  See StitcherFrame.ts docstring.", (unsigned int)pf);
   }
   // ARKit doesn't have a `Frame.orientation` per se; pose carries
   // the imageWidth >= imageHeight discriminator the lib uses
@@ -179,8 +187,11 @@ class IOSPixelBufferReader : public retailens::PixelBufferReader {
 
   data.pixelReader = std::make_shared<IOSPixelBufferReader>(arFrame);
 
+  // Use the static factory (private ctor enforces shared_ptr
+  // ownership — required for `shared_from_this()` inside the JSI
+  // `toArrayBuffer` lambda).
   obj->_hostObject =
-      std::make_shared<retailens::StitcherFrameJsiHostObject>(std::move(data));
+      retailens::StitcherFrameJsiHostObject::create(std::move(data));
   return obj;
 }
 

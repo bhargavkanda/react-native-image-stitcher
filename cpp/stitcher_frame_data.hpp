@@ -41,9 +41,16 @@ namespace retailens {
 ///   - Android: wraps an ARCore `ArImage*` (handles plane access via
 ///     `ArImage_getPlaneData`, calls `ArImage_release` on destruct).
 ///
-/// Thread-affinity: implementations need not be thread-safe; the
-/// JSI host object that owns the reader is itself single-threaded
-/// (lives in worklet-runtime scope).
+/// **Thread-affinity contract:** implementations need not be
+/// reentrant.  An instance MAY be constructed on thread A
+/// (typically the ARSession delegate queue) and used on thread B
+/// (the worklet-runtime thread), provided the construction-thread
+/// releases its `shared_ptr` reference before thread B uses the
+/// reader.  The `shared_ptr`'s atomic refcount serves as the
+/// happens-before barrier — fields set in the constructor are
+/// visible on the worklet thread once the construction-thread
+/// drops its ref.  Concurrent access from two threads simultaneously
+/// is NOT supported.
 class PixelBufferReader {
 public:
     virtual ~PixelBufferReader() = default;
@@ -68,7 +75,8 @@ struct StitcherFrameData {
     /// Discriminator. `"ar"` for AR-mode frames, `"vc"` for
     /// vision-camera frames.  Used by worklets to gate on AR-only
     /// field access (translation, depth, anchors, tracking state).
-    /// Mirrored to the JS `__source` field.
+    /// Mirrored to the JS `source` field (standard discriminated-
+    /// union pattern).
     std::string source;
 
     /// Width / height of the camera image in pixels.
