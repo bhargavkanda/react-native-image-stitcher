@@ -19,7 +19,7 @@
  * chip, AR toggle, settings modal) is owned by `<Camera>`.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Image,
@@ -37,6 +37,8 @@ import {
 } from 'react-native-vision-camera';
 import {
   Camera,
+  useKeyframeStream,
+  type AcceptedKeyframe,
   type CameraCaptureResult,
   type CameraError,
   type CaptureSource,
@@ -61,6 +63,29 @@ function App(): React.JSX.Element {
   // Last capture (photo or panorama).  Set in onCapture, cleared on
   // preview modal dismiss.  Drives the visibility of the modal.
   const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
+
+  // v0.7.0 — demonstrate `useKeyframeStream` end-to-end.  This
+  // example app's role is to show ALL the lib's public hooks
+  // wired into a minimal host; we log accepted keyframes (one per
+  // accepted frame, typically 4-6 per panorama) so a developer
+  // cloning the repo can see the payload shape in the logs.
+  //
+  // No visible UI for the events — that's deliberately the host's
+  // job to design.  See the hook's docstring at
+  // `src/stitching/useKeyframeStream.ts` for the AcceptedKeyframe
+  // contract + an OCR-plugin example.
+  useKeyframeStream(
+    useCallback((kf: AcceptedKeyframe) => {
+      // eslint-disable-next-line no-console
+      console.log('[example] useKeyframeStream', {
+        index: kf.index,
+        jpegPath: kf.jpegPath,
+        rotation: kf.pose.rotation,
+        translation: kf.pose.translation,
+        timestamp: kf.timestamp,
+      });
+    }, []),
+  );
 
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
