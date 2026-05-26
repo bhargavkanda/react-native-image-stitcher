@@ -92,6 +92,42 @@ add_library(image_stitcher SHARED
     # rationale.
     "${SHARED_CPP_DIR}/stitcher.cpp")
 
+# v0.8.0 NOTE — `cpp/stitcher_frame_jsi.{hpp,cpp}` is the shared JSI
+# host object for `StitcherFrame`.  iOS consumes it via the .mm shim
+# at `ios/Sources/RNImageStitcher/StitcherFrameHostObject.mm` (Apple
+# JSI is universally available in the RN pod, no extra setup needed).
+#
+# On Android, integrating it requires:
+#   1. `android { buildFeatures { prefab true } }` in build.gradle
+#   2. `find_package(ReactAndroid REQUIRED CONFIG)` here
+#   3. `target_link_libraries(image_stitcher ReactAndroid::jsi)`
+#
+# AND — the blocker — switching `ANDROID_STL` from `c++_static` to
+# `c++_shared`.  The RN prefabs require shared STL but our current
+# build uses static STL.
+#
+# **2026-05-26 STL probe finding:** `llvm-nm libopencv_stitching.a`
+# shows 768 `__ndk1`-namespaced symbols and ZERO `__cxx11` /
+# `NSt3` symbols — the OpenCV stitching archive was already built
+# with `c++_shared` (NDK libc++).  The current `c++_static` flag
+# is therefore *misaligned* with the archive; it works today only
+# because the JNI shim's `.so`-boundary uses POD/C types so no
+# std::string crosses between the two STL instances.
+#
+# Implication: Phase 3 can safely switch to `c++_shared`.  No
+# split `.so` needed.  Action items for Phase 3:
+#   1. Change `ANDROID_STL=c++_static` → `c++_shared` in
+#      android/build.gradle (defaultConfig externalNativeBuild
+#      cmake arguments).
+#   2. Add `buildFeatures { prefab true }` to android/build.gradle.
+#   3. Re-introduce `find_package(ReactAndroid REQUIRED CONFIG)`
+#      + `find_package(fbjni REQUIRED CONFIG)` here.
+#   4. Add `cpp/stitcher_frame_jsi.cpp` to image_stitcher SOURCES.
+#   5. Add `ReactAndroid::jsi fbjni::fbjni` to target_link_libraries.
+#
+# Until then, the shared C++ JSI host object exists in `cpp/` and
+# compiles on iOS; the Android-side JSI integration is deferred.
+
 target_include_directories(image_stitcher PRIVATE
     "${OPENCV_INCLUDE_DIR}"
     # cpp/ holds keyframe_gate.hpp + ar_frame_pose.h that the JNI
