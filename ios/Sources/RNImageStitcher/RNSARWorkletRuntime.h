@@ -14,8 +14,6 @@
 //   - The dispatch queue the worklet runtime pins to.
 //   - The underlying `JsiWorkletContext` (constructed lazily on
 //     `installIfNeeded`, lives for the singleton's lifetime).
-//   - A registry of host worklets (initially empty; populated by
-//     Phase 4's TS-side hook + JSI plugin).
 //
 // Exposes:
 //   - `+ shared` singleton accessor.
@@ -24,6 +22,14 @@
 //   - `- dispatchFrame:pose:` — currently a no-op stub; Phase 3c
 //     fills in the actual host-object construction + worklet
 //     invocation + first-party stitching dispatch.
+//
+// Host-worklet registry is intentionally NOT in Phase 3b — Phase 4
+// lands the JSI plugin + TS-side hook that defines the storage
+// shape (NSMutableArray of boxed shared_ptrs vs a C++ vector ivar
+// vs something else).  Pre-committing the storage type here would
+// risk rework.  See
+// `docs/plans/handoff/2026-05-26-v0.8.0-phases-2-5-implementation-guide.md`
+// Phase 4 section for the planned API.
 //
 // ## Why Obj-C facade with `.mm` implementation
 //
@@ -83,6 +89,11 @@ NS_SWIFT_NAME(RNSARWorkletRuntime)
 ///      object onto the worklet runtime's thread + invoke each
 ///      worklet via `RNWorklet::WorkletInvoker::call`.
 ///   4. Invalidate the host object after all worklets return.
+///
+/// Phase 3c gate: install/idempotence tests + this method's
+/// integration test required before merge.  See
+/// `docs/plans/handoff/2026-05-26-v0.8.0-phases-2-5-implementation-guide.md`
+/// Phase 3c gate criteria.
 ///
 /// Threading: typically called from `ARSession.delegateQueue` (main
 /// queue by default; Phase 3c will pin it explicitly to a
