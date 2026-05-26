@@ -6,7 +6,18 @@
 
 #include "stitcher_worklet_registry.hpp"
 
-#include "WKTJsiWorklet.h"
+// Cross-platform worklets-core header include.  On iOS the
+// CocoaPods setup publishes worklets-core headers via
+// `HEADER_SEARCH_PATHS` at the root of `Pods/Headers/Public/`,
+// so `<WKTJsiWorklet.h>` works.  On Android the prefab puts
+// headers under a `react-native-worklets-core/` subdirectory of
+// the include path (matches the prefab name).  The angled
+// namespace-prefixed include works on BOTH — `<x/y.h>` resolves
+// to `Pods/Headers/Public/x/y.h` on iOS (CocoaPods auto-creates
+// symlinked subdirs per pod) and to `build/headers/.../x/y.h` on
+// Android.  Pattern lifted from vc's
+// `node_modules/react-native-vision-camera/android/src/main/cpp/`.
+#include <react-native-worklets-core/WKTJsiWorklet.h>
 
 #include <algorithm>
 #include <sstream>

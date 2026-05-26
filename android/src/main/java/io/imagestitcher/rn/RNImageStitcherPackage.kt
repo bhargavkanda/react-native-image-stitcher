@@ -87,6 +87,10 @@ class RNImageStitcherPackage : ReactPackage {
             RNSARSession(reactContext),
             IncrementalStitcher(reactContext),
             FileBridge(reactContext),
+            // v0.8.0 Phase 4b.ii — Android JSI installer for the
+            // host-worklet `__stitcherProxy` global.  Mirror of
+            // iOS' `StitcherJsiInstaller`.
+            StitcherJsiInstallerModule(reactContext),
         )
     }
 
