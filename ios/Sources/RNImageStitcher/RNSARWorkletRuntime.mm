@@ -26,8 +26,10 @@
 // (process termination reclaims it).  Phase 3c will keep this shape.
 
 #import "RNSARWorkletRuntime.h"
+#import "StitcherFrameHostObject.h"
 
 #import <Foundation/Foundation.h>
+#import <os/log.h>
 
 #include <jsi/jsi.h>
 // worklets-core headers — use quotes-include since the pod
@@ -38,8 +40,12 @@
 #include "WKTJsiWorkletContext.h"
 #include "WKTJsiWorklet.h"
 
+#include "stitcher_worklet_registry.hpp"
+
+#include <exception>
 #include <memory>
 #include <utility>
+#include <vector>
 
 // Forward-declare `RNSARFramePose` — same pattern as
 // StitcherFrameHostObject.mm.  We don't read its fields here in
@@ -160,19 +166,11 @@
 }
 
 - (void)dispatchFrame:(ARFrame *)arFrame pose:(RNSARFramePose *)pose {
-    // Phase 3c minimal-viable: synchronous first-party callback
-    // dispatch.  The callback (installed by RNSARSession.start)
-    // wraps the existing `incrementalConsumer.consumeFrame(...)`
-    // call path, so net behavior is byte-identical to the v0.7.x
-    // direct call.
+    // ── Phase 3c — first-party (synchronous on caller thread) ────
     //
-    // Phase 4 will add (on top of this):
-    //   - Build `StitcherFrameHostObject` from `arFrame` + `pose`.
-    //   - If host worklets registered, dispatch the host object
-    //     onto `_ctx->invokeOnWorkletThread([...](ctx, rt) { ... })`
-    //     and invoke each via `RNWorklet::WorkletInvoker::call`.
-    //   - Invalidate the host object after the host worklets
-    //     finish (or immediately if none registered).
+    // The callback (installed by RNSARSession.start) wraps the
+    // existing `incrementalConsumer.consumeFrame(...)` call path,
+    // so net behavior is byte-identical to the v0.7.x direct call.
     //
     // **Why first-party runs on the CALLER thread (not the worklet
     // thread):** ARKit's pool reuse contract requires the pixel
@@ -182,9 +180,7 @@
     // work to its own queue).  If we posted the callback onto
     // `_dispatchQueue`, the delegate would return before
     // `consumeFrame` ran, ARKit could reclaim the buffer, and we'd
-    // get torn frames.  Phase 4's host-worklet dispatch will need
-    // to copy the buffer for off-thread access; Phase 3c keeps the
-    // sync contract intact.
+    // get torn frames.
     //
     // Pull the callback under the lock so a concurrent
     // `setFirstPartyCallback:` doesn't race with our invocation.
@@ -194,6 +190,124 @@
     if (cb != nil) {
         cb(arFrame, pose);
     }
+
+    // ── Phase 4b — host-worklet fan-out (async on worklet thread) ──
+    //
+    // Snapshot the native registry.  Fast-path early-exit when no
+    // host worklets are registered — saves the host-object alloc
+    // + dispatch_async hop on every frame (the common case in
+    // first-party-only deployments).
+    auto invokers = retailens::StitcherWorkletRegistry::shared().snapshot();
+    if (invokers.empty()) {
+        return;
+    }
+
+    // Construction must happen on the caller thread.  The
+    // `IOSPixelBufferReader` ctor takes a `CFBridgingRetain(arFrame)`
+    // so the underlying CVPixelBuffer stays alive until the host
+    // object's `invalidate` runs.  ARKit's pool will throttle the
+    // *next* frame's delegate call while we hold this retain
+    // (acceptable for Phase 4b minimum-viable; a per-frame buffer
+    // copy is a known optimization for later if throughput
+    // suffers).
+    StitcherFrameHostObject *hostObj =
+        [StitcherFrameHostObject fromARFrame:arFrame pose:pose];
+
+    // Hand the host object's jsi::HostObject shared_ptr (boxed as
+    // void*) into the lambda.  The lambda will:
+    //   1. Cast back to `std::shared_ptr<jsi::HostObject>*`
+    //   2. Construct the JS-side `jsi::Object` from the host object
+    //   3. Invoke each registered WorkletInvoker with the JS-side
+    //      object as its single argument
+    //   4. Delete the boxed shared_ptr
+    //   5. Invalidate the host object on caller-side retained ref
+    //
+    // The dispatch is via worklets-core's `JsiWorkletContext::
+    // invokeOnWorkletThread` — internally posts onto our serial
+    // `_dispatchQueue` via the `workletCallInvoker` we set up in
+    // `installIfNeeded`.
+    //
+    // `hostObj` (the Obj-C facade) is captured by the block; ARC
+    // retains it for the block's lifetime, so the host object
+    // outlives the dispatch.  We invalidate AFTER all worklets
+    // return.
+    void *hostObjPtr = [hostObj jsiHostObjectPtr];
+    if (hostObjPtr == NULL) {
+        // Host object construction failed (e.g., ARFrame was nil).
+        // Skip fan-out.
+        os_log_error(OS_LOG_DEFAULT,
+            "[RNSARWorkletRuntime] host object jsiHostObjectPtr was NULL; "
+            "skipping host-worklet fan-out for this frame.");
+        return;
+    }
+
+    if (_ctx == nullptr) {
+        // installIfNeeded wasn't called.  This shouldn't happen
+        // because RNSARSession.start calls installIfNeeded before
+        // any frames arrive, but guard defensively.
+        os_log_error(OS_LOG_DEFAULT,
+            "[RNSARWorkletRuntime] _ctx is nullptr in dispatchFrame; "
+            "did installIfNeeded run?  Skipping host-worklet fan-out.");
+        // Leaked: hostObjPtr (boxed shared_ptr).  Reclaim it here so
+        // we don't leak even on the defensive path.
+        delete static_cast<std::shared_ptr<facebook::jsi::HostObject>*>(hostObjPtr);
+        return;
+    }
+
+    _ctx->invokeOnWorkletThread(
+        [invokers, hostObjPtr, hostObj](
+            RNWorklet::JsiWorkletContext* /*ctx*/,
+            facebook::jsi::Runtime& rt) {
+            // Reclaim the boxed shared_ptr.  After this scope the
+            // unique_ptr automatically deletes the heap allocation
+            // even if the JSI call below throws.
+            std::unique_ptr<std::shared_ptr<facebook::jsi::HostObject>> spBox(
+                static_cast<std::shared_ptr<facebook::jsi::HostObject>*>(
+                    hostObjPtr));
+
+            facebook::jsi::Object frameJsi =
+                facebook::jsi::Object::createFromHostObject(rt, *spBox);
+            // Pass the host object as a single argument.  The
+            // worklet's signature is `(frame: StitcherFrame) =>
+            // void` — matches.
+            //
+            // Construct the argument value as a copy of the
+            // Object (jsi::Value(rt, obj) makes a fresh Value
+            // wrapping the same host object — refcounted by JSI).
+            facebook::jsi::Value frameVal(rt, frameJsi);
+
+            for (const auto& entry : invokers) {
+                if (!entry.invoker) continue;
+                try {
+                    entry.invoker->call(rt, facebook::jsi::Value::undefined(),
+                                         &frameVal, 1);
+                } catch (const facebook::jsi::JSError& jsErr) {
+                    // Per-worklet failure isolation: one host
+                    // worklet throwing must NOT stop the lib's own
+                    // path or other host worklets.  Log + continue.
+                    os_log_error(OS_LOG_DEFAULT,
+                        "[RNSARWorkletRuntime] host worklet '%{public}s' "
+                        "threw JS error: %{public}s",
+                        entry.id.c_str(), jsErr.what());
+                } catch (const std::exception& e) {
+                    os_log_error(OS_LOG_DEFAULT,
+                        "[RNSARWorkletRuntime] host worklet '%{public}s' "
+                        "threw native exception: %{public}s",
+                        entry.id.c_str(), e.what());
+                } catch (...) {
+                    os_log_error(OS_LOG_DEFAULT,
+                        "[RNSARWorkletRuntime] host worklet '%{public}s' "
+                        "threw unknown exception", entry.id.c_str());
+                }
+            }
+
+            // Drop the JSI references BEFORE invalidating the host
+            // object — `frameJsi` / `frameVal` go out of scope at
+            // end of lambda anyway, but be explicit.  Then
+            // invalidate the Obj-C facade which releases the
+            // CFBridgingRetain'd ARFrame so ARKit's pool can recycle.
+            [hostObj invalidate];
+        });
 }
 
 @end
