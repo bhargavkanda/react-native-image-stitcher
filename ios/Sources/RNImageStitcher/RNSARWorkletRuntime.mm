@@ -13,6 +13,17 @@
 // fills in (a) the host-object construction + worklet invocation,
 // (b) the first-party stitching callback, (c) the migration in
 // `RNSARSession.delegate`.
+//
+// ## Singleton lifetime note (for Leaks-tool readers)
+//
+// `+ shared` uses `dispatch_once`, so the singleton lives for the
+// process lifetime — same pattern as most Obj-C singletons.  This
+// means the dispatch queue (created in `init`) + the JsiWorkletContext
+// (constructed lazily in `installIfNeeded`) + the `workletCallInvoker`
+// lambda that captures the queue are ALL retained until process
+// termination.  Xcode Instruments → Leaks will flag this as "leaked
+// allocation rooted at the singleton" — that's noise, not a real leak
+// (process termination reclaims it).  Phase 3c will keep this shape.
 
 #import "RNSARWorkletRuntime.h"
 
@@ -57,11 +68,11 @@
     /// instances; serialise to ensure exactly-once init.
     NSLock *_installLock;
 
-    /// Registry of host worklets, populated by Phase 4's JSI
-    /// plugin.  Stored as boxed `std::shared_ptr<RNWorklet::JsiWorklet>`
-    /// pointers (one allocation per registration, freed on
-    /// unregister).  Empty in Phase 3b.
-    NSMutableArray<NSValue *> *_hostWorklets;
+    // Phase 4 will add the host-worklet registry here.  Storage
+    // shape (NSMutableArray of boxed shared_ptrs vs C++ vector
+    // ivar) is intentionally NOT pre-committed in Phase 3b — let
+    // the JSI plugin's actual register/unregister implementation
+    // pick the natural shape.
 }
 
 + (instancetype)shared {
@@ -77,7 +88,6 @@
             "io.imagestitcher.ar-worklet-runtime", DISPATCH_QUEUE_SERIAL);
         _installed = NO;
         _installLock = [[NSLock alloc] init];
-        _hostWorklets = [NSMutableArray array];
     }
     return self;
 }
@@ -118,7 +128,11 @@
     return result;
 }
 
-- (void)dispatchFrame:(ARFrame *)arFrame pose:(RNSARFramePose *)pose {
+// Phase 3c gate: install/idempotence tests + this method's
+// integration test required before merging Phase 3c.  See
+// CLAUDE.md's "tests with mocked deps prove nothing" mandate.
+- (void)dispatchFrame:(__unused ARFrame *)arFrame
+                 pose:(__unused RNSARFramePose *)pose {
     // Phase 3b stub.  No-op until Phase 3c lands the actual dispatch.
     //
     // Why ship the stub:
@@ -131,14 +145,13 @@
     //     only the dispatch-logic delta, not the whole class.
     //
     // Phase 3c will replace this method body with:
-    //   1. `StitcherFrameHostObject *host = [StitcherFrameHostObject
-    //         fromARFrame:arFrame pose:pose];`
+    //   1. Build `StitcherFrameHostObject` from arFrame + pose.
     //   2. First-party stitching: invoke
     //      `IncrementalStitcher.shared.ingestFromARCameraView(...)`
     //      synchronously on the caller thread (preserves the
     //      current per-frame cost envelope).
-    //   3. If `_hostWorklets.count > 0`, invoke
-    //      `_ctx->invokeOnWorkletThread([...](ctx, rt) { ... })`
+    //   3. If host worklets are registered (Phase 4 storage),
+    //      invoke `_ctx->invokeOnWorkletThread([...](ctx, rt) { ... })`
     //      and inside the lambda construct a `jsi::Object` from
     //      the host object's `jsiHostObjectPtr` + iterate the
     //      worklet list, invoking each via
@@ -146,10 +159,9 @@
     //   4. `[host invalidate]` after the worklets finish (or
     //      immediately if none registered).
     //
-    // Suppress unused-parameter warnings; the args are part of the
-    // contract even though Phase 3b doesn't read them.
-    (void)arFrame;
-    (void)pose;
+    // `__unused` parameter attribute at the param declaration:
+    // when Phase 3c reads the parameters, the attribute comes off
+    // naturally and `-Wunused-parameter` self-enforces no regress.
 }
 
 @end

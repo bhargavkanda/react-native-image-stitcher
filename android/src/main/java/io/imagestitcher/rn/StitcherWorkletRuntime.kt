@@ -32,22 +32,33 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Unlike iOS (where the lib's `.mm` directly `std::make_shared`s
  * a `RNWorklet::JsiWorkletContext`), Android can't construct the
- * context purely from native C++ without elaborate JNI plumbing.
- * Phase 3c will choose between two paths:
+ * context purely from native C++ without JNI plumbing.  Phase 3c
+ * will choose between two paths:
  *
- *   - **Option A (recommended):** JS-side code calls
+ *   - **Option A:** JS-side code calls
  *     `Worklets.createContext("stitcher.ar")` at AR-mode start;
  *     hands the resulting context pointer to this Kotlin class via
- *     a small JSI plugin.  Minimal new JNI.
+ *     a small JSI plugin.  Minimal new JNI.  **Phase 3b's
+ *     HandlerThread becomes dead code** under this option — the
+ *     JS-side `Worklets.createContext` picks its own thread.  We'd
+ *     need to remove the HandlerThread + change `installIfNeeded`
+ *     into a no-op until a `setContextHandle(Long)` setter lands.
  *   - **Option B:** Direct JNI binding to worklets-core's C++
  *     constructor.  More native code but no JS dependency at runtime.
+ *     **Phase 3b's HandlerThread is exactly the right scaffold**
+ *     under this option — its looper becomes the JsiWorkletContext's
+ *     `workletCallInvoker` target.
  *
- * Phase 3b ships the Kotlin facade either way is compatible with;
- * Phase 3c picks one.
+ * **Phase 3b assumption: Option B is the more likely path.**  The
+ * scaffolding below (HandlerThread + serial dispatch) fits Option
+ * B; if Phase 3c picks Option A instead, the HandlerThread becomes
+ * unused and Phase 3c will refactor accordingly.
  *
  * @see [RNSARWorkletRuntime] iOS equivalent
- * @see [docs/plans/handoff/2026-05-26-v0.8.0-phase-0-audit.md] for the
+ * @see docs/plans/handoff/2026-05-26-v0.8.0-phase-0-audit.md
  *      worklets-core API rationale (Audit 2: `JsiWorkletContext`).
+ * @see docs/plans/handoff/2026-05-26-v0.8.0-phases-2-5-implementation-guide.md
+ *      Phase 3c implementation plan.
  */
 object StitcherWorkletRuntime {
     private const val TAG = "StitcherWorkletRuntime"
@@ -85,8 +96,13 @@ object StitcherWorkletRuntime {
         // the looper won't be available — the Phase 3c dispatch
         // logic will need to defend against that.  For Phase 3b
         // we only care that this method returns without throwing.
-        val tid = dispatchThread.threadId
-        Log.i(TAG, "installed runtime; dispatch thread id=$tid")
+        //
+        // Log `Thread.id` (Java-side monotonic, always non-zero) —
+        // NOT `HandlerThread.threadId` (Linux tid set after first
+        // Looper-prepared message; reading from this caller thread
+        // immediately after .start() returns -1 until scheduled).
+        val javaThreadId = dispatchThread.id
+        Log.i(TAG, "installed runtime; dispatch java-thread id=$javaThreadId")
     }
 
     /// Diagnostics + tests.  Returns `true` after a successful
@@ -112,6 +128,12 @@ object StitcherWorkletRuntime {
     /// @param imageWidth   Camera image width (pixels).
     /// @param imageHeight  Camera image height (pixels).
     /// @param timestampNs  Frame timestamp in nanoseconds.
+    //
+    // Phase 3c gate: install/idempotence tests + dispatchFrame
+    // integration test required before merging Phase 3c.  See
+    // CLAUDE.md's "tests with mocked deps prove nothing" mandate
+    // + the audit's #11A Android JUnit scaffold.
+    @Suppress("UNUSED_PARAMETER")
     @JvmStatic
     fun dispatchFrame(
         arFrameJniRef: Long,
@@ -120,14 +142,12 @@ object StitcherWorkletRuntime {
         imageWidth: Int, imageHeight: Int,
         timestampNs: Double,
     ) {
-        // Phase 3b stub.  No-op until Phase 3c.  Suppress unused-
-        // parameter warnings; the args are part of the contract.
+        // Phase 3b stub.  No-op until Phase 3c.  The function-level
+        // @Suppress above silences UNUSED_PARAMETER warnings; the
+        // body stays clean.  When Phase 3c implements the dispatch,
+        // the suppression comes off naturally (every param will be
+        // read by the dispatch logic).
         if (!installed.get()) return
         // (Intentionally empty — see class docstring.)
-        @Suppress("UNUSED_PARAMETER")
-        val _suppress = arFrameJniRef + qx.toLong() + qy.toLong() +
-            qz.toLong() + qw.toLong() + tx.toLong() + ty.toLong() +
-            tz.toLong() + imageWidth.toLong() + imageHeight.toLong() +
-            timestampNs.toLong()
     }
 }
