@@ -92,6 +92,25 @@ add_library(image_stitcher SHARED
     # rationale.
     "${SHARED_CPP_DIR}/stitcher.cpp")
 
+# v0.8.0 NOTE — `cpp/stitcher_frame_jsi.{hpp,cpp}` is the shared JSI
+# host object for `StitcherFrame`.  iOS consumes it via the .mm shim
+# at `ios/Sources/RNImageStitcher/StitcherFrameHostObject.mm` (Apple
+# JSI is universally available in the RN pod, no extra setup needed).
+#
+# On Android, integrating it requires:
+#   1. `android { buildFeatures { prefab true } }` in build.gradle
+#   2. `find_package(ReactAndroid REQUIRED CONFIG)` here
+#   3. `target_link_libraries(image_stitcher ReactAndroid::jsi)`
+#
+# AND — the blocker — switching `ANDROID_STL` from `c++_static` to
+# `c++_shared`.  The RN prefabs require shared STL but our current
+# OpenCV static-archive linking assumes static STL.  Resolving that
+# (audit whether the OpenCV stitching `.a` was built with shared
+# STL, or split JSI code into a separate `.so`) is Phase 3 work.
+#
+# Until then, the shared C++ JSI host object exists in `cpp/` and
+# compiles on iOS; the Android-side JSI integration is deferred.
+
 target_include_directories(image_stitcher PRIVATE
     "${OPENCV_INCLUDE_DIR}"
     # cpp/ holds keyframe_gate.hpp + ar_frame_pose.h that the JNI
