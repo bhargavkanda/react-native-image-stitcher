@@ -60,7 +60,7 @@ NS_SWIFT_NAME(RNSARWorkletRuntime)
 /// `<Camera>` mounts share it.  Construction is cheap (just an Obj-C
 /// alloc + an `NSMutableArray`); the heavy JSI work happens in
 /// `-installIfNeeded`.
-+ (instancetype)shared NS_SWIFT_NAME(shared());
++ (instancetype)shared;
 
 /// Construct the underlying `JsiWorkletContext` if not yet
 /// installed.  Idempotent — repeated calls are no-ops.  Called from
@@ -74,6 +74,28 @@ NS_SWIFT_NAME(RNSARWorkletRuntime)
 /// Diagnostics + tests.  Returns `YES` after a successful
 /// `-installIfNeeded`.
 - (BOOL)isInstalled;
+
+/// Phase 3c — type of the first-party stitching callback.  Invoked
+/// synchronously on the caller thread (`ARSession.delegateQueue` —
+/// typically main queue today) per AR frame.  Block must consume
+/// the pixel buffer before returning (ARKit pool reuse contract).
+typedef void (^RNSARFirstPartyCallback)(ARFrame *arFrame,
+                                         RNSARFramePose *pose);
+
+/// Phase 3c — install the closure that takes ownership of the
+/// per-frame first-party stitching dispatch.  Called from
+/// `RNSARSession.start()` after the incremental consumer is set;
+/// the block then routes `dispatchFrame:pose:` calls through to
+/// the existing `incrementalConsumer.consumeFrame(...)` path.
+///
+/// Pre-Phase-3c the delegate called the consumer directly.  After
+/// Phase 3c the delegate calls `dispatchFrame:pose:` (this class)
+/// which invokes the callback.  Net behavior is byte-identical;
+/// the indirection sets up the seam where Phase 4 will fan out to
+/// host worklets without changing the first-party path.
+///
+/// Pass `nil` to clear (e.g. on `RNSARSession.stop()`).  Idempotent.
+- (void)setFirstPartyCallback:(nullable RNSARFirstPartyCallback)callback;
 
 /// Dispatch one AR frame through the registered worklets.  Called
 /// per `ARFrame` by `RNSARSession.delegate` once Phase 3c lands the

@@ -110,6 +110,43 @@ object StitcherWorkletRuntime {
     @JvmStatic
     fun isInstalled(): Boolean = installed.get()
 
+    /// v0.8.0 Phase 3c — first-party stitching dispatch.  Invokes
+    /// the supplied block synchronously on the caller thread
+    /// (`onDrawFrame`'s GL render thread today).
+    ///
+    /// Phase 3c minimum-viable: this is the closure-based equivalent
+    /// of iOS' first-party callback.  The block is the original
+    /// `module.ingestFromARCameraView(...)` call site moved
+    /// verbatim into a lambda — no behaviour change, just an
+    /// indirection so Phase 4 can interpose host-worklet fanout
+    /// without touching the engine ingest path.
+    ///
+    /// **Why synchronous + on the caller thread:** the engine's
+    /// `ingestFromARCameraView` takes ownership of the ARCore
+    /// `Image`-derived NV21 buffer (via the v0.10.0 `TransferredNV21`
+    /// wrapper).  ARCore's `Image.close()` happens after this call
+    /// returns, so the consumer must finish reading the bytes before
+    /// we return — exactly what synchronous block invocation
+    /// provides.  Phase 4 will copy the buffer for off-thread
+    /// access in host worklets; Phase 3c keeps the sync contract.
+    ///
+    /// If `installIfNeeded()` hasn't been called yet, the block
+    /// still runs (no-op on the registry side).  Defensive — the
+    /// caller may call this method before `installIfNeeded` is
+    /// wired up.
+    @JvmStatic
+    fun runFirstParty(block: () -> Unit) {
+        // Synchronous invocation — Phase 4 will extend this to also
+        // post the registered host worklets onto `dispatchThread`.
+        // Not `inline`: Phase 4 will need to read `dispatchThread`
+        // (private) from inside this function body, and Kotlin's
+        // inline functions can't access private members from call
+        // sites outside the declaring class.  Per-frame lambda
+        // alloc is ~ns and the alternative (callers passing a
+        // method reference) doesn't materially change cost.
+        block()
+    }
+
     /// Dispatch one AR frame through the registered worklets.
     /// Called per ARCore `Frame` by `RNSARCameraView.onDrawFrame`
     /// once Phase 3c lands the migration.  Phase 3b is a no-op
