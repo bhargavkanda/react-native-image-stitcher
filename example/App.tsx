@@ -64,12 +64,16 @@ function App(): React.JSX.Element {
   // preview modal dismiss.  Drives the visibility of the modal.
   const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
 
-  // v0.7.0 demo — keyframes accepted by the engine during the
-  // in-progress panorama.  Cleared whenever a capture finalises so
-  // the next hold-and-release shows its own fresh list.  See the
-  // overlay near the top of the camera UI below for the visualisation.
-  const [keyframes, setKeyframes] = useState<AcceptedKeyframe[]>([]);
-
+  // v0.7.0 — demonstrate `useKeyframeStream` end-to-end.  This
+  // example app's role is to show ALL the lib's public hooks
+  // wired into a minimal host; we log accepted keyframes (one per
+  // accepted frame, typically 4-6 per panorama) so a developer
+  // cloning the repo can see the payload shape in the logs.
+  //
+  // No visible UI for the events — that's deliberately the host's
+  // job to design.  See the hook's docstring at
+  // `src/stitching/useKeyframeStream.ts` for the AcceptedKeyframe
+  // contract + an OCR-plugin example.
   useKeyframeStream(
     useCallback((kf: AcceptedKeyframe) => {
       // eslint-disable-next-line no-console
@@ -80,7 +84,6 @@ function App(): React.JSX.Element {
         translation: kf.pose.translation,
         timestamp: kf.timestamp,
       });
-      setKeyframes((prev) => [...prev, kf]);
     }, []),
   );
 
@@ -88,9 +91,6 @@ function App(): React.JSX.Element {
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
     setPreview(result);
-    // v0.7.0 demo — clear the per-capture keyframe list so the next
-    // hold-and-release demo starts fresh.
-    setKeyframes([]);
   };
 
   const handleCaptureSourceChange = (source: CaptureSource): void => {
@@ -176,31 +176,6 @@ function App(): React.JSX.Element {
         />
 
         {/*
-          v0.7.0 demo overlay — visualises events fired by the
-          `useKeyframeStream` hook in real time as the engine
-          accepts keyframes during a hold-and-release panorama.
-          Cleared automatically when the next capture finalises
-          (see `handleCapture`).  Only fires on the `batch-keyframe`
-          engine (default for <Camera>) — see hook docstring.
-        */}
-        {keyframes.length > 0 && (
-          <View pointerEvents="none" style={styles.keyframeOverlay}>
-            <Text style={styles.keyframeCounter}>
-              useKeyframeStream: {keyframes.length} accepted
-            </Text>
-            <View style={styles.keyframeStrip}>
-              {keyframes.map((kf) => (
-                <Image
-                  key={`${kf.timestamp}-${kf.index}`}
-                  source={{ uri: `file://${kf.jpegPath}` }}
-                  style={styles.keyframeThumb}
-                />
-              ))}
-            </View>
-          </View>
-        )}
-
-        {/*
           Capture preview modal.  Renders fullscreen above the camera
           when a capture lands so the user can visually verify the
           result before resuming.  Tapping Close clears the result
@@ -256,32 +231,6 @@ const styles = StyleSheet.create({
   safe: {
     flex: 1,
     backgroundColor: '#000',
-  },
-  // v0.7.0 demo overlay styles — anchored top-right above the camera.
-  // pointerEvents="none" on the container so taps still reach the
-  // camera's controls underneath.
-  keyframeOverlay: {
-    position: 'absolute',
-    top: 8,
-    right: 8,
-    padding: 6,
-    backgroundColor: 'rgba(0, 0, 0, 0.55)',
-    borderRadius: 6,
-  },
-  keyframeCounter: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  keyframeStrip: {
-    flexDirection: 'row',
-    gap: 2,
-  },
-  keyframeThumb: {
-    width: 40,
-    height: 40,
-    backgroundColor: '#333',
   },
   permissionOverlay: {
     alignItems: 'center',
