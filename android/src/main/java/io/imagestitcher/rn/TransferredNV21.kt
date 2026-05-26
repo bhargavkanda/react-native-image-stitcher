@@ -15,7 +15,7 @@ package io.imagestitcher.rn
  * or return it to a buffer pool after calling this method."
  *
  * The v0.10.0 audit (`docs/plans/handoff/2026-05-26-autonomous-run-handoff.md`
- * finding #4) noted this is by-convention only.  The current AR
+ * finding #4A) noted this is by-convention only.  The current AR
  * caller (`RNSARCameraView`) passes the same `packed.nv21` array
  * as BOTH `grayData` (consumed synchronously inside the gate)
  * AND `nv21PixelData` (consumed asynchronously).  Today no race
@@ -30,10 +30,11 @@ package io.imagestitcher.rn
  *
  * ## Cost
  *
- * Construction: one nullable assignment (a few ns).  `takeOnce()`:
- * one synchronized read + one null-out (a few ns).  Negligible vs
- * the underlying NV21 array's KB-scale memory footprint and the
- * ms-scale frame-processing cost.
+ * Construction: tens of ns (one heap allocation for the wrapper +
+ * one volatile write of the bytes reference).  `takeOnce()`: tens
+ * of ns (one synchronized read + one null-out).  Negligible vs the
+ * underlying NV21 array's KB-scale memory footprint and the
+ * ms-scale frame-processing cost — but not a free pointer hop.
  *
  * ## Thread-safety
  *
@@ -43,6 +44,17 @@ package io.imagestitcher.rn
  * pathological case where two threads race to extract.
  */
 class TransferredNV21(bytes: ByteArray) {
+    init {
+        // Empty arrays would propagate as "0 bytes of pixel data with
+        // a non-zero width/height" downstream and crash inside the
+        // C++ ingest with a far less actionable error.  Catch at
+        // construction.  Critic-finding [MAJOR][B].
+        require(bytes.isNotEmpty()) {
+            "TransferredNV21 requires a non-empty byte array " +
+                "(received zero-length)"
+        }
+    }
+
     @Volatile
     private var bytes: ByteArray? = bytes
 
@@ -60,6 +72,12 @@ class TransferredNV21(bytes: ByteArray) {
      *     engine.addFramePixelData(nv21 = pixelBytes!!, ...)
      * }
      * ```
+     *
+     * Concurrency note: `@Volatile` on the bytes field plus the
+     * `synchronized(this)` block here together guarantee both
+     * visibility AND atomicity across threads.  The `@Volatile` is
+     * defensive for any future non-synchronized read; today every
+     * accessor goes through the synchronized block.
      */
     fun takeOnce(): ByteArray = synchronized(this) {
         val b = bytes ?: error(
@@ -71,11 +89,12 @@ class TransferredNV21(bytes: ByteArray) {
         b
     }
 
-    /**
-     * True if the bytes are still available.  Useful for defensive
-     * checks; consumers normally just call `takeOnce()` directly
-     * and let it throw on misuse.
-     */
-    val available: Boolean
-        get() = synchronized(this) { bytes != null }
+    // Note: an `available` property was considered and removed in
+    // pre-merge review (critic-finding [MAJOR][B]).  Any
+    // `if (handle.available) handle.takeOnce()` pattern is
+    // inherently TOCTOU-racy — another thread could win the
+    // takeOnce() between the check and the use.  Consumers should
+    // call `takeOnce()` directly and catch the `IllegalStateException`
+    // if they need recovery semantics.  No internal caller used
+    // `available`; YAGNI removed it.
 }
