@@ -484,10 +484,41 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
                Int32(config.videoFormat.framesPerSecond))
         isRunning = true
         currentTrackingState = .initialising
+
+        // v0.8.0 Phase 3c — install the worklet runtime + register
+        // the first-party stitching callback.  The delegate's
+        // per-frame ingest now routes through
+        // `RNSARWorkletRuntime.dispatchFrame` (see
+        // `session(_:didUpdate:)` below) which invokes this
+        // callback synchronously.  Net behavior is byte-identical
+        // to the pre-Phase-3c direct `consumer.consumeFrame(...)`
+        // call.  The indirection sets up the seam where Phase 4
+        // will fan out to host worklets without touching this
+        // first-party path.
+        RNSARWorkletRuntime.shared().installIfNeeded()
+        RNSARWorkletRuntime.shared().setFirstPartyCallback {
+            [weak self] arFrame, pose in
+            // ARKit pool reuse contract: must consume the pixel
+            // buffer before returning.  The consumer's
+            // `consumeFrame` does that synchronously inside the
+            // call (NV12 → cv::Mat sync, then heavy work on its
+            // own queue).  We're on the same thread as the
+            // delegate (ARSession.delegateQueue), so the contract
+            // holds end-to-end.
+            guard let self = self else { return }
+            guard let consumer = self.incrementalConsumer else { return }
+            consumer.consumeFrame(pixelBuffer: arFrame.capturedImage,
+                                  pose: pose)
+        }
     }
 
     @objc public func stop() {
         guard isRunning else { return }
+        // v0.8.0 Phase 3c — drop the first-party callback so the
+        // closure's `[weak self]` reference can be released
+        // immediately + no in-flight delegate frame re-enters the
+        // engine after stop.  Idempotent.
+        RNSARWorkletRuntime.shared().setFirstPartyCallback(nil)
         arSession.pause()
         isRunning = false
         currentTrackingState = .notAvailable
@@ -561,16 +592,21 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             }
         }
 
-        // Deliver this frame to the live incremental-stitching
-        // consumer if one is registered.  The consumer MUST consume
-        // the pixel buffer before returning (Apple's ARKit pool
-        // reuse contract — same constraint as the recording-append
-        // path below) — `IncrementalStitcher` does this by
-        // converting NV12 → cv::Mat synchronously inside the call,
-        // then doing the heavy work on its own queue.
-        if let consumer = self.incrementalConsumer {
-            consumer.consumeFrame(pixelBuffer: frame.capturedImage, pose: pose)
-        }
+        // v0.8.0 Phase 3c — route the per-frame ingest through the
+        // worklet runtime instead of calling the consumer directly.
+        // The first-party callback (installed in `start()` above)
+        // wraps the same `consumer.consumeFrame(pixelBuffer:pose:)`
+        // call path, so net behavior is byte-identical to v0.7.x.
+        // The indirection sets up the seam where Phase 4 will fan
+        // out to host worklets (registered via the v0.8.0
+        // `useFrameProcessor` TS hook + a JSI plugin entry point)
+        // without changing this first-party path.
+        //
+        // ARKit pool reuse contract: still satisfied — the runtime
+        // invokes the callback synchronously on the delegate
+        // thread, and the callback's `consumer.consumeFrame(...)`
+        // does the same NV12 → cv::Mat sync conversion as before.
+        RNSARWorkletRuntime.shared().dispatchFrame(frame, pose: pose)
 
         // If recording is in flight, append this frame to the
         // asset writer DIRECTLY — no queue hop.

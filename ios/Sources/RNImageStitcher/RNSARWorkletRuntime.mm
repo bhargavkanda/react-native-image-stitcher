@@ -30,8 +30,13 @@
 #import <Foundation/Foundation.h>
 
 #include <jsi/jsi.h>
-#include <WKTJsiWorkletContext.h>
-#include <WKTJsiWorklet.h>
+// worklets-core headers — use quotes-include since the pod
+// publishes them via HEADER_SEARCH_PATHS, not as a framework
+// module map.  Same pattern KeyframeGateFrameProcessor.mm uses
+// for vision-camera headers (which are reachable via <angle>
+// only because vc's podspec sets `define_module` differently).
+#include "WKTJsiWorkletContext.h"
+#include "WKTJsiWorklet.h"
 
 #include <memory>
 #include <utility>
@@ -73,6 +78,22 @@
     // ivar) is intentionally NOT pre-committed in Phase 3b — let
     // the JSI plugin's actual register/unregister implementation
     // pick the natural shape.
+
+    /// Phase 3c — first-party callback installed by RNSARSession.
+    /// Invoked synchronously on the caller thread per AR frame.
+    /// Cleared on RNSARSession.stop() to avoid retain cycles.
+    ///
+    /// Atomic property protects against the delegate firing
+    /// concurrently with a setFirstPartyCallback: call on a
+    /// different thread (rare but possible: setter on main thread
+    /// from RNSARSession.start while a delayed delegate frame
+    /// arrives).
+    RNSARFirstPartyCallback _firstPartyCallback;
+
+    /// Lock for `_firstPartyCallback` reads + writes.  The
+    /// `_installLock` above is dispatch-queue-scoped (install);
+    /// callback rotation is a separate concern.
+    NSLock *_callbackLock;
 }
 
 + (instancetype)shared {
@@ -88,8 +109,18 @@
             "io.imagestitcher.ar-worklet-runtime", DISPATCH_QUEUE_SERIAL);
         _installed = NO;
         _installLock = [[NSLock alloc] init];
+        _callbackLock = [[NSLock alloc] init];
+        _firstPartyCallback = nil;
     }
     return self;
+}
+
+- (void)setFirstPartyCallback:(RNSARFirstPartyCallback)callback {
+    [_callbackLock lock];
+    // Copy the block to move it from stack to heap (ARC handles
+    // the copy semantics for blocks assigned to strong ivars).
+    _firstPartyCallback = [callback copy];
+    [_callbackLock unlock];
 }
 
 - (void)installIfNeeded {
@@ -128,40 +159,41 @@
     return result;
 }
 
-// Phase 3c gate: install/idempotence tests + this method's
-// integration test required before merging Phase 3c.  See
-// CLAUDE.md's "tests with mocked deps prove nothing" mandate.
-- (void)dispatchFrame:(__unused ARFrame *)arFrame
-                 pose:(__unused RNSARFramePose *)pose {
-    // Phase 3b stub.  No-op until Phase 3c lands the actual dispatch.
+- (void)dispatchFrame:(ARFrame *)arFrame pose:(RNSARFramePose *)pose {
+    // Phase 3c minimal-viable: synchronous first-party callback
+    // dispatch.  The callback (installed by RNSARSession.start)
+    // wraps the existing `incrementalConsumer.consumeFrame(...)`
+    // call path, so net behavior is byte-identical to the v0.7.x
+    // direct call.
     //
-    // Why ship the stub:
-    //   - Surface fixes the API at the boundary, so RNSARSession's
-    //     migration call site (Phase 3c) compiles against this
-    //     interface today.
-    //   - `installIfNeeded` is testable + verifiable in isolation
-    //     without a running AR session.
-    //   - Phase 3c reviewer sees the API + the no-op + can audit
-    //     only the dispatch-logic delta, not the whole class.
+    // Phase 4 will add (on top of this):
+    //   - Build `StitcherFrameHostObject` from `arFrame` + `pose`.
+    //   - If host worklets registered, dispatch the host object
+    //     onto `_ctx->invokeOnWorkletThread([...](ctx, rt) { ... })`
+    //     and invoke each via `RNWorklet::WorkletInvoker::call`.
+    //   - Invalidate the host object after the host worklets
+    //     finish (or immediately if none registered).
     //
-    // Phase 3c will replace this method body with:
-    //   1. Build `StitcherFrameHostObject` from arFrame + pose.
-    //   2. First-party stitching: invoke
-    //      `IncrementalStitcher.shared.ingestFromARCameraView(...)`
-    //      synchronously on the caller thread (preserves the
-    //      current per-frame cost envelope).
-    //   3. If host worklets are registered (Phase 4 storage),
-    //      invoke `_ctx->invokeOnWorkletThread([...](ctx, rt) { ... })`
-    //      and inside the lambda construct a `jsi::Object` from
-    //      the host object's `jsiHostObjectPtr` + iterate the
-    //      worklet list, invoking each via
-    //      `RNWorklet::WorkletInvoker(w).call(rt, undef, &arg, 1)`.
-    //   4. `[host invalidate]` after the worklets finish (or
-    //      immediately if none registered).
+    // **Why first-party runs on the CALLER thread (not the worklet
+    // thread):** ARKit's pool reuse contract requires the pixel
+    // buffer to be consumed before this method returns.  The Swift
+    // consumer does that synchronously inside `consumeFrame(...)`
+    // (converts NV12 → cv::Mat synchronously, then defers heavier
+    // work to its own queue).  If we posted the callback onto
+    // `_dispatchQueue`, the delegate would return before
+    // `consumeFrame` ran, ARKit could reclaim the buffer, and we'd
+    // get torn frames.  Phase 4's host-worklet dispatch will need
+    // to copy the buffer for off-thread access; Phase 3c keeps the
+    // sync contract intact.
     //
-    // `__unused` parameter attribute at the param declaration:
-    // when Phase 3c reads the parameters, the attribute comes off
-    // naturally and `-Wunused-parameter` self-enforces no regress.
+    // Pull the callback under the lock so a concurrent
+    // `setFirstPartyCallback:` doesn't race with our invocation.
+    [_callbackLock lock];
+    RNSARFirstPartyCallback cb = _firstPartyCallback;
+    [_callbackLock unlock];
+    if (cb != nil) {
+        cb(arFrame, pose);
+    }
 }
 
 @end
