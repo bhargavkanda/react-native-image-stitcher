@@ -182,6 +182,16 @@ export { useIncrementalStitcher } from './stitching/useIncrementalStitcher';
 // caveat).  Foundation for plugin-pattern host features (OCR per
 // keyframe, packet detection, server-side analysis, etc.).
 export { useKeyframeStream } from './stitching/useKeyframeStream';
+// v0.8.0 — unified frame contract for the worklet processor.  Same
+// JS-visible shape regardless of capture mode (AR vs non-AR).  The
+// `useFrameProcessor` hook + runtime that consume this type land in
+// later v0.8.0 phases; the type itself is exported here so consumers
+// can write StitcherFrame-typed worklets ahead of the hook landing.
+export type {
+  StitcherFrame,
+  StitcherFrameProcessor,
+  ARAnchor,
+} from './stitching/StitcherFrame';
 // vision-camera Frame Processor driver for non-AR captures.  As
 // of v0.6 the only non-AR driver exported (the legacy
 // `useIncrementalJSDriver` was removed; was deprecated in v0.5).
