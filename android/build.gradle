@@ -266,6 +266,22 @@ dependencies {
         // still builds for non-camera consumers.
         android.sourceSets.main.java.exclude '**/CvFlowGateFrameProcessor.kt'
     }
+
+    // v0.8.0 Phase 4b.ii — react-native-worklets-core's Android
+    // prefab (`rnworklets`) is consumed by the native shim
+    // (`stitcher_worklet_registry.cpp` constructs
+    // `RNWorklet::WorkletInvoker`s).  `implementation` not
+    // `compileOnly` because we need the prefab's `.so` available at
+    // both link time AND runtime — without the runtime presence,
+    // `dlopen` would fail when our `libimage_stitcher.so` is loaded.
+    //
+    // Host apps that use this lib already declare worklets-core as
+    // a peer dep (see package.json's peerDependencies); RN
+    // autolinking + Gradle deduplicates, so the host doesn't get
+    // a second copy.
+    if (findProject(':react-native-worklets-core') != null) {
+        implementation project(':react-native-worklets-core')
+    }
 }
 
 // Helper from the React Native gradle convention to read host-app
