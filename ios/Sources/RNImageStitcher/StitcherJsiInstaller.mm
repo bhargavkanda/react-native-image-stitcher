@@ -25,93 +25,16 @@
 #import <os/log.h>
 
 #include <jsi/jsi.h>
-#include <memory>
-#include <string>
-#include <vector>
 
-#include "stitcher_worklet_registry.hpp"
+#include "stitcher_proxy_jsi.hpp"
 
 using namespace facebook;
 
-#pragma mark - StitcherProxy host object
-
-namespace {
-
-/// JSI host object that exposes `install` / `uninstall` to JS.
-class StitcherProxyHostObject : public jsi::HostObject {
- public:
-  jsi::Value get(jsi::Runtime& rt, const jsi::PropNameID& propName) override {
-    const std::string name = propName.utf8(rt);
-
-    if (name == "install") {
-      // install(workletFn) → string ID.  The host function captures
-      // nothing; the registry is a process-scope singleton.
-      auto fn = [](jsi::Runtime& runtime, const jsi::Value& /*thisVal*/,
-                   const jsi::Value* args, size_t count) -> jsi::Value {
-        if (count < 1) {
-          throw jsi::JSError(runtime,
-              "[StitcherProxy] install() requires 1 argument (worklet "
-              "function); got 0");
-        }
-        if (!args[0].isObject() ||
-            !args[0].getObject(runtime).isFunction(runtime)) {
-          throw jsi::JSError(runtime,
-              "[StitcherProxy] install() argument must be a function "
-              "decorated with 'worklet'");
-        }
-        // The WorkletInvoker ctor extracts the worklet metadata
-        // (`__workletHash` etc.) and throws if absent.  Propagate.
-        std::string id =
-            retailens::StitcherWorkletRegistry::shared().install(
-                runtime, args[0]);
-        return jsi::String::createFromUtf8(runtime, id);
-      };
-      return jsi::Function::createFromHostFunction(
-          rt, jsi::PropNameID::forUtf8(rt, "install"), 1, std::move(fn));
-    }
-
-    if (name == "uninstall") {
-      auto fn = [](jsi::Runtime& runtime, const jsi::Value& /*thisVal*/,
-                   const jsi::Value* args, size_t count) -> jsi::Value {
-        if (count < 1 || !args[0].isString()) {
-          // No throw — match the JS-side registry's permissive
-          // uninstall semantics; missing/bad ID is a no-op.
-          return jsi::Value::undefined();
-        }
-        std::string id = args[0].getString(runtime).utf8(runtime);
-        retailens::StitcherWorkletRegistry::shared().uninstall(id);
-        return jsi::Value::undefined();
-      };
-      return jsi::Function::createFromHostFunction(
-          rt, jsi::PropNameID::forUtf8(rt, "uninstall"), 1, std::move(fn));
-    }
-
-    if (name == "count") {
-      // Diagnostic — number of currently registered worklets.
-      // Read once on each call (no caching); registry mutations are
-      // serialised under its own mutex.
-      auto fn = [](jsi::Runtime& runtime, const jsi::Value& /*thisVal*/,
-                   const jsi::Value* /*args*/, size_t /*count*/) -> jsi::Value {
-        return jsi::Value(static_cast<double>(
-            retailens::StitcherWorkletRegistry::shared().count()));
-      };
-      return jsi::Function::createFromHostFunction(
-          rt, jsi::PropNameID::forUtf8(rt, "count"), 0, std::move(fn));
-    }
-
-    return jsi::Value::undefined();
-  }
-
-  std::vector<jsi::PropNameID> getPropertyNames(jsi::Runtime& rt) override {
-    std::vector<jsi::PropNameID> names;
-    names.push_back(jsi::PropNameID::forUtf8(rt, "install"));
-    names.push_back(jsi::PropNameID::forUtf8(rt, "uninstall"));
-    names.push_back(jsi::PropNameID::forUtf8(rt, "count"));
-    return names;
-  }
-};
-
-}  // namespace
+// The host object class + install logic moved to shared C++ in
+// `cpp/stitcher_proxy_jsi.{hpp,cpp}` (v0.8.0 Phase 4b.ii).  The
+// Android JNI installer reuses the same `install` / `uninstall` /
+// `count` host functions verbatim — the JSI dispatch is identical
+// across platforms (matches the StitcherFrame host object's design).
 
 #pragma mark - RN module
 
@@ -169,10 +92,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(install) {
   }
 
   jsi::Runtime& runtime = *(jsi::Runtime*)cxxBridge.runtime;
-  auto proxy = std::make_shared<StitcherProxyHostObject>();
-  runtime.global().setProperty(
-      runtime, "__stitcherProxy",
-      jsi::Object::createFromHostObject(runtime, proxy));
+  retailens::installStitcherProxy(runtime);
 
   os_log_info(OS_LOG_DEFAULT,
       "[StitcherJsiInstaller] installed globalThis.__stitcherProxy "

@@ -100,6 +100,15 @@ endif()
 find_package(ReactAndroid REQUIRED CONFIG)
 find_package(fbjni REQUIRED CONFIG)
 
+# v0.8.0 Phase 4b.ii — react-native-worklets-core prefab.  The
+# Gradle module name is `react-native-worklets-core`; inside it
+# publishes a library named `rnworklets` (matches vc's consumption
+# pattern in node_modules/react-native-vision-camera/android/CMakeLists.txt).
+# We consume both the headers (for `WKTJsiWorklet.h` etc.) AND
+# the .so (for `RNWorklet::WorkletInvoker` + `JsiWrapper::unwrap`
+# symbols, which are defined in worklets-core's WKTJsiWrapper.cpp).
+find_package(react-native-worklets-core REQUIRED CONFIG)
+
 # ── Our shim ───────────────────────────────────────────────────────
 add_library(image_stitcher SHARED
     image_stitcher_jni.cpp
@@ -116,7 +125,19 @@ add_library(image_stitcher SHARED
     # it via the .mm shim at
     # `ios/Sources/RNImageStitcher/StitcherFrameHostObject.mm`.
     # See cpp/stitcher_frame_jsi.hpp for the class API.
-    "${SHARED_CPP_DIR}/stitcher_frame_jsi.cpp")
+    "${SHARED_CPP_DIR}/stitcher_frame_jsi.cpp"
+    # v0.8.0 Phase 4b.ii — shared C++ registry of host-supplied
+    # worklets + the `globalThis.__stitcherProxy` host object that
+    # JS calls into.  iOS picked these up via the podspec glob in
+    # Phase 4b.i; Android adds them here.
+    "${SHARED_CPP_DIR}/stitcher_worklet_registry.cpp"
+    "${SHARED_CPP_DIR}/stitcher_proxy_jsi.cpp"
+    # v0.8.0 Phase 4b.ii — Android JNI bindings for the JSI install
+    # (`StitcherJsiInstallerModule.nativeInstall`).  Reaches into the
+    # main JS runtime via the `long` JSI handle Kotlin pulls from
+    # `ReactApplicationContext.getJavaScriptContextHolder()`.  See
+    # worklets-core's `WorkletsModule.java` for the canonical pattern.
+    stitcher_jsi_install_jni.cpp)
 
 target_include_directories(image_stitcher PRIVATE
     "${OPENCV_INCLUDE_DIR}"
@@ -149,7 +170,11 @@ target_link_libraries(image_stitcher
     # subclass).  fbjni for the Phase 3c JNI bridge between Kotlin
     # worklet runtime + C++ host object construction.
     ReactAndroid::jsi
-    fbjni::fbjni)
+    fbjni::fbjni
+    # v0.8.0 Phase 4b.ii — worklets-core's `RNWorklet::WorkletInvoker`
+    # is constructed in the C++ registry's `install` method and
+    # invoked from the Android per-frame dispatch path.
+    react-native-worklets-core::rnworklets)
 
 target_compile_options(image_stitcher PRIVATE
     -fvisibility=hidden
