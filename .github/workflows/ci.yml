@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# ci.yml — runs on every push + PR.  Lightweight check that catches
+# the cheapest class of bugs (TS type errors, broken jest tests)
+# before they merge.  Native builds (xcodebuild / gradle) are NOT
+# part of this workflow — they're slow + require platform runners,
+# and the existing manual on-device verification before merge is
+# the canonical native gate.  Adding native builds here is a v0.10.x
+# follow-up if a cheap-enough Android runner becomes available.
+#
+# v0.10.0 audit finding #12A — closes the "tests are non-negotiable
+# but CI doesn't enforce them" gap.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs when a new push lands on the same branch.
+# Saves minutes on fast iteration; doesn't affect main pushes
+# (which always run to completion).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  typecheck-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Pin to the Node version the example app builds with.
+          # See feedback_binary_release_packaging.md + recent
+          # session notes: the dev workflow uses nvm + Node 20 for
+          # Metro / RN builds (Node 17 lacks os.availableParallelism
+          # which @react-native/metro-config requires).
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        # `--ignore-scripts` skips ALL npm scripts (preinstall /
+        # install / postinstall / prepare).  Today's only relevant
+        # script is `postinstall`, which fetches the OpenCV
+        # binaries (~70 MB) — not needed for tsc / jest.  If a
+        # future preinstall or prepare script becomes load-bearing
+        # for CI, revisit this flag.
+        run: npm ci --ignore-scripts
+
+      - name: TypeScript type check — src + tests
+        # Root `tsconfig.json` includes `src/**`, which covers the
+        # test files under `src/camera/__tests__/` transitively.
+        # `tsconfig.test.json` adds `jest.config.js` + `jest.mocks/`
+        # — those are checked separately in the next step.
+        run: npx tsc --noEmit
+
+      - name: TypeScript type check — jest config + mocks
+        # `tsconfig.test.json` adds `jest.config.js` + `jest.mocks/`
+        # to the include set.  Catches drift in the test
+        # infrastructure that the root config doesn't see.
+        run: npx tsc -p tsconfig.test.json --noEmit
+
+      - name: Jest unit tests
+        # The lib's existing tests under src/camera/__tests__/
+        # cover PanoramaSettings bridge round-trips + initial-
+        # settings construction.  As v0.10.x adds more test
+        # coverage (audit findings #9A C++ tests, #11A Android
+        # JUnit), those land in this same job via different commands.
+        #
+        # `-- --ci` (passed THROUGH npm to jest, not consumed by
+        # npm) disables snapshot creation (only allows matching)
+        # + makes the runner deterministic.  Standard CI practice.
+        # `--silent` (also passed to jest) suppresses test-side
+        # console.log noise.
+        run: npm test -- --ci --silent
+
+      - name: Build dist/
+        # Confirm the published-package contents would compile
+        # cleanly.  Catches the class of bug we hit during v0.7.0
+        # where dist/ went stale relative to src/.
+        run: npm run build
