@@ -2160,7 +2160,13 @@ public final class IncrementalStitcher: NSObject {
         keyframeIndex: Int,
         keyframeCount: Int,
         keyframeMax: Int,
-        isLandscape: Bool
+        isLandscape: Bool,
+        // v0.7.0 — Tier 1 hook fields.  `pose` is the AR pose at the
+        // accept moment (gyro-synthesised in non-AR mode — translation
+        // will read as ~zeros).  `acceptedAtMs` is wall-clock ms since
+        // Unix epoch; matches `Date.now()` on the JS side.
+        pose: RNSARFramePose,
+        acceptedAtMs: Double
     ) {
         let state = IncrementalStateObject(
             panoramaPath: nil,
@@ -2184,6 +2190,16 @@ public final class IncrementalStitcher: NSObject {
         // carry — JS reads these directly from the userInfo blob.
         dict["batchKeyframeThumbnailPath"] = thumbnailPath
         dict["batchKeyframeIndex"] = keyframeIndex
+        // v0.7.0 — Tier 1 hook (useKeyframeStream) reads these.  See
+        // `AcceptedKeyframe` in src/stitching/incremental.ts.  Translation
+        // is always emitted; AR mode populates it from the camera
+        // transform, non-AR mode reads ~zeros (gyro-only, no spatial
+        // anchor).
+        dict["batchKeyframePose"] = [
+            "rotation": [pose.qx, pose.qy, pose.qz, pose.qw],
+            "translation": [pose.tx, pose.ty, pose.tz],
+        ] as [String: Any]
+        dict["batchKeyframeAcceptedAtMs"] = acceptedAtMs
         NotificationCenter.default.post(
             name: .retailensIncrementalStateUpdate,
             object: nil,
@@ -2637,7 +2653,12 @@ public final class IncrementalStitcher: NSObject {
                         keyframeIndex: Int(record.index),
                         keyframeCount: count,
                         keyframeMax: self.keyframeGate.maxCount,
-                        isLandscape: pose.imageWidth >= pose.imageHeight
+                        isLandscape: pose.imageWidth >= pose.imageHeight,
+                        // v0.7.0 — Tier 1 hook: pose snapshot + accept
+                        // timestamp threaded through to JS via the
+                        // existing state-update channel.
+                        pose: pose,
+                        acceptedAtMs: Date().timeIntervalSince1970 * 1000
                     )
                 } catch let err as NSError {
                     os_log(.fault, log: Self.diagLog,

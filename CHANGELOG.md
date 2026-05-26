@@ -16,6 +16,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-26
+
+### Added — Tier 1: `useKeyframeStream`
+
+JS-thread subscription hook for **accepted-keyframe events** — the
+small subset of camera frames the stitching engine actually chose to
+include in the panorama.  Foundation for plugin-pattern host features:
+OCR on each saved keyframe, packet detection, server-side analysis,
+analytics, etc.
+
+Fires 4-6 times per panorama (once per accepted keyframe), NOT per
+camera frame — the lowest-frequency, highest-value frame stream.
+
+```tsx
+import { useKeyframeStream, type AcceptedKeyframe } from 'react-native-image-stitcher';
+
+function OcrPlugin() {
+  useKeyframeStream(useCallback(async (kf: AcceptedKeyframe) => {
+    const text = await runOCR(kf.jpegPath);
+    console.log(`Keyframe ${kf.index} pose=${kf.pose.rotation}:`, text);
+  }, []));
+  return null;
+}
+```
+
+- **`useKeyframeStream(handler)`** exported from
+  `react-native-image-stitcher`.  Subscribes to the existing
+  `IncrementalStateUpdate` event channel; surfaces accepted-keyframe
+  events through a typed callback.  Re-subscribes on handler-identity
+  changes; async handler rejections are surfaced via `console.error`
+  rather than swallowed.
+- **`AcceptedKeyframe` type** exported.  Fields: `jpegPath` (absolute
+  path, no `file://` prefix); `pose` (rotation quaternion + optional
+  translation vector); `timestamp` (ms since epoch); `index`
+  (zero-based position in current panorama).
+- **`IncrementalState.batchKeyframePose?`** + **`batchKeyframeAcceptedAtMs?`**
+  new optional fields.  Populated by the native emit alongside the
+  existing `batchKeyframeThumbnailPath` + `batchKeyframeIndex` on
+  accept events.  Direct readers of `IncrementalState` can consume
+  these without going through the new hook.
+
+### Changed (internal — externally invisible)
+
+- **Native `emitBatchKeyframeAcceptedState` populates pose + timestamp.**
+  Both `IncrementalStitcher.swift::emitBatchKeyframeAcceptedState` and
+  `IncrementalStitcher.kt::emitBatchKeyframeAcceptedState` grew
+  parameters for the pose snapshot (quaternion + translation) and
+  accept-time wall-clock millis.  The existing call sites in the
+  batch-keyframe accept path thread the pose they already have in
+  scope.
+
+### Engine-mode caveat
+
+`useKeyframeStream` only fires under the `batch-keyframe` engine (the
+`<Camera>` component's default).  Live engines (`firstwins-rectilinear`,
+`hybrid`, `slitscan-*`) paint into a live canvas instead of saving
+per-accept JPEGs and do not surface accept events through this channel
+— the hook silently does not fire in those modes.  Live-engine accept
+emit may land as a v0.7.1 follow-up if a real consumer needs it.
+
+### Translation semantics
+
+`AcceptedKeyframe.pose.translation` is always populated by the native
+emit.  In AR mode it carries the real ARKit / ARCore camera transform
+in metres (world coords).  In non-AR (Frame Processor) mode the
+translation reads as `[0, 0, 0]` because gyroscope provides only
+rotation (no spatial anchor).  Hosts that need to distinguish can
+either check the active `frameSourceMode` or threshold the translation
+magnitude.
+
+### Compatibility
+
+Strict additive over v0.6.0.  No host changes required.  Existing
+`subscribeIncrementalState` consumers see new optional fields but
+their existing reads are unaffected.
+
+### Verification
+
+- iPhone 17 Pro (real device, iOS 26.5): hold-and-release AR-mode
+  panorama produced four accepted-keyframe events with real pose
+  data (unit quaternion + non-zero translation in metres matching
+  the physical pan).
+- Android (Galaxy A35): `compileDebugKotlin` BUILD SUCCESSFUL;
+  on-device runtime verification deferred for this release (the
+  Kotlin emit mirrors the iOS emit at the byte-for-byte payload
+  level — same field names, same types, same call-site pattern).
+
 ## [0.6.0] — 2026-05-25
 
 > [!WARNING]
@@ -1161,7 +1248,8 @@ Native module names also changed:
 - iOS pod: `RetaiLensCaptureSDK` → `RNImageStitcher`
 - iOS xcframework: shipped as `opencv2.xcframework` (linked from `RNImageStitcher.podspec`)
 
-[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.4.1...v0.5.0

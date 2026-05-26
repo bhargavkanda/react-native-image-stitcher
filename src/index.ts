@@ -175,8 +175,13 @@ export {
   getIncrementalNativeModule,
   cleanupOldKeyframes,
 } from './stitching/incremental';
-export type { IncrementalState } from './stitching/incremental';
+export type { IncrementalState, AcceptedKeyframe } from './stitching/incremental';
 export { useIncrementalStitcher } from './stitching/useIncrementalStitcher';
+// v0.7.0 — Tier 1 subscriber API.  Fires on each accepted keyframe
+// in batch-keyframe captures (see hook's docstring for engine-mode
+// caveat).  Foundation for plugin-pattern host features (OCR per
+// keyframe, packet detection, server-side analysis, etc.).
+export { useKeyframeStream } from './stitching/useKeyframeStream';
 // vision-camera Frame Processor driver for non-AR captures.  As
 // of v0.6 the only non-AR driver exported (the legacy
 // `useIncrementalJSDriver` was removed; was deprecated in v0.5).

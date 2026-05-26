@@ -1174,6 +1174,15 @@ class IncrementalStitcher(
                 keyframeMax = keyframeGate.maxCount,
                 isLandscape = imageWidth >= imageHeight,
                 newContentFraction = decision.newContentFraction,
+                // v0.7.0 — Tier 1 hook: pose snapshot + accept timestamp
+                // threaded through to JS via the existing state-update
+                // channel.  `tx,ty,tz,qx,qy,qz,qw` are parameters of
+                // `ingestFromARCameraView`; in AR mode they're real
+                // ARCore pose components, in non-AR mode they're
+                // gyro-synthesised (translation ≈ 0).
+                poseQx = qx, poseQy = qy, poseQz = qz, poseQw = qw,
+                poseTx = tx, poseTy = ty, poseTz = tz,
+                acceptedAtMs = System.currentTimeMillis(),
             )
             return
         }
@@ -2034,6 +2043,13 @@ class IncrementalStitcher(
         // "unknown" behaviour for call sites that don't have a
         // decision in hand.
         newContentFraction: Double,
+        // v0.7.0 — Tier 1 hook fields.  Pose is the AR pose at the
+        // accept moment (gyro-synthesised in non-AR mode — translation
+        // reads as ~zeros).  `acceptedAtMs` is wall-clock ms since
+        // Unix epoch; matches `Date.now()` on the JS side.
+        poseQx: Double, poseQy: Double, poseQz: Double, poseQw: Double,
+        poseTx: Double, poseTy: Double, poseTz: Double,
+        acceptedAtMs: Long,
     ) {
         val state = Arguments.createMap()
         state.putNull("panoramaPath")
@@ -2063,6 +2079,25 @@ class IncrementalStitcher(
         // emitter).
         state.putString("batchKeyframeThumbnailPath", thumbnailPath)
         state.putInt("batchKeyframeIndex", keyframeIndex)
+        // v0.7.0 — Tier 1 hook (useKeyframeStream) reads these.  See
+        // `AcceptedKeyframe` in src/stitching/incremental.ts.  Translation
+        // is always emitted; AR mode populates it from the camera
+        // transform, non-AR mode reads ~zeros (gyro-only, no spatial
+        // anchor).
+        val pose = Arguments.createMap()
+        val rotation = Arguments.createArray()
+        rotation.pushDouble(poseQx)
+        rotation.pushDouble(poseQy)
+        rotation.pushDouble(poseQz)
+        rotation.pushDouble(poseQw)
+        pose.putArray("rotation", rotation)
+        val translation = Arguments.createArray()
+        translation.pushDouble(poseTx)
+        translation.pushDouble(poseTy)
+        translation.pushDouble(poseTz)
+        pose.putArray("translation", translation)
+        state.putMap("batchKeyframePose", pose)
+        state.putDouble("batchKeyframeAcceptedAtMs", acceptedAtMs.toDouble())
         emitState(state)
     }
 

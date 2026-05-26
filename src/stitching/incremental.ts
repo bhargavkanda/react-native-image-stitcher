@@ -61,6 +61,53 @@ export enum IncrementalOutcome {
 }
 
 
+/**
+ * v0.7.0 (Tier 1) — public payload type for an accepted keyframe.
+ * Delivered to subscribers of the `useKeyframeStream` hook.
+ *
+ * Emits once per keyframe accepted by the stitching engine — typically
+ * 4-6 times per panorama, not per camera frame.  Use for low-frequency
+ * per-keyframe host work (OCR on the saved JPEG, packet detection,
+ * server-side analysis, analytics, etc.).
+ *
+ * Caveat: only the `batch-keyframe` engine emits these events as of
+ * v0.7.0.  Live engines (`firstwins-rectilinear`, `hybrid`,
+ * `slitscan-*`) paint into a live canvas instead of saving per-accept
+ * JPEGs and do not currently surface accept events through this
+ * channel; the hook silently does not fire there.  A v0.7.1 follow-up
+ * may add live-engine accept emit if a real consumer needs it.
+ *
+ * The JPEG at `jpegPath` is the engine's own copy under the active
+ * capture's session directory.  It persists for the lifetime of the
+ * panorama and is cleaned up automatically when the panorama finalises
+ * or is abandoned (or via explicit `cleanupKeyframes`).  Host code
+ * wanting to retain it long-term must copy synchronously inside the
+ * handler.
+ */
+export interface AcceptedKeyframe {
+  /** Absolute filesystem path to the keyframe JPEG.  No `file://` prefix. */
+  jpegPath: string;
+
+  /**
+   * Pose snapshot at the moment of acceptance.  Quaternion
+   * convention: `(x, y, z, w)`; lib uses
+   * `q = q_yaw * q_pitch * q_roll`.  Translation in metres (world
+   * coords) is present in AR mode and undefined in non-AR mode (no
+   * spatial anchor — only gyro-derived rotation is available).
+   */
+  pose: {
+    rotation: [number, number, number, number];
+    translation?: [number, number, number];
+  };
+
+  /** Milliseconds since the Unix epoch when the engine accepted this keyframe. */
+  timestamp: number;
+
+  /** Zero-based index of this keyframe within the in-progress panorama. */
+  index: number;
+}
+
+
 export interface IncrementalState {
   /**
    * Path to the latest panorama snapshot JPEG (file path, no
@@ -152,6 +199,33 @@ export interface IncrementalState {
    * for the thumbnail strip.
    */
   batchKeyframeIndex?: number;
+  /**
+   * v0.7.0 (Tier 1) — pose snapshot at the moment the engine
+   * accepted this keyframe.  Populated alongside
+   * `batchKeyframeThumbnailPath` + `batchKeyframeIndex` on the
+   * keyframe-accepted state emit from the `batch-keyframe` engine.
+   * Undefined for other engines and for non-accept events.
+   *
+   * Quaternion convention: `(x, y, z, w)`; lib uses
+   * `q = q_yaw * q_pitch * q_roll`.  AR mode populates `translation`
+   * from the AR camera transform (metres, world coords).  Non-AR
+   * mode omits `translation` (no spatial anchor — only gyro-derived
+   * rotation is available).
+   *
+   * Foundation for the `useKeyframeStream` Tier 1 host hook.
+   */
+  batchKeyframePose?: {
+    rotation: [number, number, number, number];
+    translation?: [number, number, number];
+  };
+  /**
+   * v0.7.0 (Tier 1) — monotonic timestamp (milliseconds since the
+   * Unix epoch) when the engine accepted this keyframe.  Populated
+   * alongside the other `batchKeyframe*` fields on the
+   * keyframe-accepted emit.  Undefined for other engines and for
+   * non-accept events.
+   */
+  batchKeyframeAcceptedAtMs?: number;
   /**
    * 2026-05-16 — realtime+batch fusion (Option A "Replace on
    * completion").  True between the moment a hybrid-engine
