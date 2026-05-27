@@ -147,44 +147,110 @@ object StitcherWorkletRuntime {
         block()
     }
 
-    /// Dispatch one AR frame through the registered worklets.
-    /// Called per ARCore `Frame` by `RNSARCameraView.onDrawFrame`
-    /// once Phase 3c lands the migration.  Phase 3b is a no-op
-    /// stub — same rationale as the iOS twin.
+    /// v0.8.0 Phase 4b.iii — fan out one AR frame to every host
+    /// worklet registered in the shared C++ `StitcherWorkletRegistry`
+    /// (populated from JS via `__stitcherProxy.install(workletFn)`).
     ///
-    /// Parameters mirror the iOS `dispatchFrame:pose:` signature.
-    /// Pose is the already-decomposed quaternion + translation; the
-    /// ARCore Frame is passed by JNI handle (a `Long` because
-    /// Kotlin can't hold a raw C++ pointer; the Phase 3c JNI layer
-    /// unboxes).
+    /// Called from `RNSARCameraView.onDrawFrame` immediately after
+    /// `runFirstParty { ... }` returns, with the already-extracted
+    /// AR frame data (pose + NV21 bytes + dimensions + tracking
+    /// state).
     ///
-    /// @param arFrameJniRef Opaque handle to the ARCore `ArFrame*`
-    ///                     (retained for the dispatch duration).
-    /// @param qx,qy,qz,qw  Pose rotation quaternion (unit length).
-    /// @param tx,ty,tz     Pose translation (metres, world coords).
-    /// @param imageWidth   Camera image width (pixels).
-    /// @param imageHeight  Camera image height (pixels).
-    /// @param timestampNs  Frame timestamp in nanoseconds.
-    //
-    // Phase 3c gate: install/idempotence tests + dispatchFrame
-    // integration test required before merging Phase 3c.  See
-    // CLAUDE.md's "tests with mocked deps prove nothing" mandate
-    // + the audit's #11A Android JUnit scaffold.
-    @Suppress("UNUSED_PARAMETER")
+    /// **Fast-path:** the native side queries the registry's count
+    /// FIRST and returns before copying any bytes when no host
+    /// worklets are registered.  In the common first-party-only
+    /// deployment, this method costs one JNI call + one C++ atomic
+    /// read per frame — negligible.
+    ///
+    /// **When host worklets ARE registered:** the JNI layer copies
+    /// the NV21 byte array into an owned C++ `std::vector` (so the
+    /// async dispatch can outlive ARCore's `Image.close()` scope),
+    /// builds a `StitcherFrameJsiHostObject`, and posts a lambda
+    /// onto worklets-core's default `JsiWorkletContext`'s worklet
+    /// thread.  The lambda iterates the registry's
+    /// `WorkletInvoker`s, calls each with the JSI host object as
+    /// its argument, and invalidates the host object after the
+    /// last invoker returns.  Per-worklet failure isolation: one
+    /// host worklet throwing does NOT stop the lib's stitching or
+    /// the other host worklets.
+    ///
+    /// **Threading:** this method returns synchronously on the
+    /// caller's thread.  The actual worklet invocations happen
+    /// asynchronously on the worklets-core thread; the caller does
+    /// NOT block on them.
+    ///
+    /// **Caller-thread contract:** the caller (`RNSARCameraView`'s
+    /// `onDrawFrame`) MUST have already invoked `runFirstParty`
+    /// before calling this method.  The first-party stitching
+    /// path holds the synchronous ARCore Image consumption
+    /// contract; the host-worklet dispatch does not.
+    ///
+    /// @param nv21Bytes      Pre-packed NV21 byte array.  COPIED
+    ///                       into a native owned buffer; caller can
+    ///                       release the reference after return.
+    /// @param width          Camera image width (pixels).
+    /// @param height         Camera image height (pixels).
+    /// @param qx,qy,qz,qw    Pose rotation quaternion (unit length).
+    /// @param tx,ty,tz       Pose translation (metres, world coords).
+    /// @param timestampNs    Frame timestamp in nanoseconds.
+    /// @param trackingState  One of "" / "notAvailable" / "limited"
+    ///                       / "normal".  Empty string ⇒ JS-side
+    ///                       `arTrackingState` is `undefined`.
     @JvmStatic
-    fun dispatchFrame(
-        arFrameJniRef: Long,
+    fun dispatchToHostWorklets(
+        nv21Bytes: ByteArray,
+        width: Int,
+        height: Int,
         qx: Double, qy: Double, qz: Double, qw: Double,
         tx: Double, ty: Double, tz: Double,
-        imageWidth: Int, imageHeight: Int,
         timestampNs: Double,
+        trackingState: String,
     ) {
-        // Phase 3b stub.  No-op until Phase 3c.  The function-level
-        // @Suppress above silences UNUSED_PARAMETER warnings; the
-        // body stays clean.  When Phase 3c implements the dispatch,
-        // the suppression comes off naturally (every param will be
-        // read by the dispatch logic).
         if (!installed.get()) return
-        // (Intentionally empty — see class docstring.)
+        nativeDispatchToHostWorklets(
+            nv21Bytes, width, height,
+            qx, qy, qz, qw,
+            tx, ty, tz,
+            timestampNs, trackingState,
+        )
+    }
+
+    /// v0.8.0 Phase 4b.iii — number of registered host worklets.
+    /// Cheap (microsecond) call into the native registry.  Used by
+    /// `RNSARCameraView.onDrawFrame` to gate the per-frame
+    /// NV21-pack + dispatch path: when no worklets are registered
+    /// AND no capture is active, the entire `forwardToIncremental`
+    /// branch can be skipped, saving the ~3-5ms NV21 pack cost per
+    /// idle preview frame.
+    @JvmStatic
+    fun hasHostWorklets(): Boolean {
+        if (!installed.get()) return false
+        return nativeRegistryCount() > 0
+    }
+
+    @JvmStatic
+    private external fun nativeRegistryCount(): Int
+
+    /// JNI binding: `android/src/main/cpp/stitcher_jsi_install_jni.cpp`'s
+    /// `nativeDispatchToHostWorklets`.  Fast-path early-exit lives
+    /// inside the native function — see its docstring.
+    @JvmStatic
+    private external fun nativeDispatchToHostWorklets(
+        nv21Bytes: ByteArray,
+        width: Int,
+        height: Int,
+        qx: Double, qy: Double, qz: Double, qw: Double,
+        tx: Double, ty: Double, tz: Double,
+        timestampNs: Double,
+        trackingState: String,
+    )
+
+    init {
+        // The JSI install module (`StitcherJsiInstallerModule`)
+        // already loads `libimage_stitcher` at class load.  We
+        // load it again here defensively in case
+        // `StitcherWorkletRuntime` is referenced before the install
+        // module — `System.loadLibrary` is idempotent.
+        System.loadLibrary("image_stitcher")
     }
 }
