@@ -19,7 +19,7 @@
  * chip, AR toggle, settings modal) is owned by `<Camera>`.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Image,
@@ -35,8 +35,10 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import {
   useCameraPermission,
 } from 'react-native-vision-camera';
+import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
+  useFrameProcessor,
   useKeyframeStream,
   type AcceptedKeyframe,
   type CameraCaptureResult,
@@ -44,6 +46,7 @@ import {
   type CaptureSource,
   type CameraLens,
   type FramesDroppedInfo,
+  type StitcherFrame,
 } from 'react-native-image-stitcher';
 
 
@@ -86,6 +89,66 @@ function App(): React.JSX.Element {
       });
     }, []),
   );
+
+  // v0.8.0 — demonstrate `useFrameProcessor` end-to-end.  The
+  // worklet fires:
+  //
+  //   - **AR mode**: on every AR frame at the camera's native rate
+  //     (30–60 fps depending on device).  Auto-registered into the
+  //     native `__stitcherProxy` registry on mount; the AR-session
+  //     dispatch path fans out to it alongside the lib's first-party
+  //     stitching.  Per-worklet failure isolation — a throw here
+  //     won't break stitching.
+  //   - **Non-AR mode**: hostile — vc's `<Camera>` accepts ONE
+  //     processor; passing this hook's return through
+  //     `<Camera frameProcessor={...}>` would displace the lib's
+  //     internal stitching driver.  THIS DEMO does NOT wire it
+  //     through (the panorama capture demo above takes priority).
+  //     Hosts that want a worklet on non-AR mode pay the tradeoff
+  //     explicitly (see CameraProps.frameProcessor docstring).
+  //
+  // The runOnJS callback is rate-limited to ~1 Hz so the example
+  // app's logs stay readable; per the worklet-throttle note
+  // (`feedback_worklet_throttle.md`), throttling is JS-side because
+  // vc v4 `frame.timestamp` semantics aren't reliably nanoseconds.
+  const lastFpLogRef = useRef(0);
+  const cumulativeFpCountsRef = useRef<{ ar: number; vc: number }>({ ar: 0, vc: 0 });
+  const fireFrameProcessorLog = useMemo(
+    () =>
+      Worklets.createRunOnJS((timestamp: number, source: string) => {
+        const counts = cumulativeFpCountsRef.current;
+        if (source === 'ar') counts.ar++;
+        else counts.vc++;
+        const now = Date.now();
+        if (now - lastFpLogRef.current >= 1000) {
+          lastFpLogRef.current = now;
+          // eslint-disable-next-line no-console
+          console.log(
+            `[example] useFrameProcessor tick — source=${source} ` +
+              `ts=${timestamp} cumulative: ar=${counts.ar} vc=${counts.vc}`,
+          );
+        }
+      }),
+    [],
+  );
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _exampleFrameProcessor = useFrameProcessor(
+    (frame: StitcherFrame) => {
+      'worklet';
+      // Non-AR mode: vc's Frame doesn't set `source`/`pose` (Phase
+      // 4a cross-boundary wrapping deferral).  Guard for undefined
+      // per the hook's docstring.
+      fireFrameProcessorLog(frame.timestamp ?? 0, frame.source ?? 'vc');
+    },
+    [fireFrameProcessorLog],
+  );
+  // Note: `_exampleFrameProcessor` is intentionally unused — we
+  // don't pass it to `<Camera frameProcessor={...}>` because
+  // doing so would disable the lib's first-party stitching in
+  // non-AR mode (see comment above).  In AR mode the hook's
+  // auto-registration via `__stitcherProxy` is what fires the
+  // worklet; the returned processor object is only relevant for
+  // non-AR mode wiring (which this demo skips).
 
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
