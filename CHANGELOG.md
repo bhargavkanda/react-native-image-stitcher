@@ -16,6 +16,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-27
+
+### Added — layered frame-access helpers
+
+Three new primitives completing the Tier 2 surface in the
+three-tier extensibility pattern.  See `docs/frame-access-tiers.md`
+for the full decision flow + use-case mapping.
+
+#### Layer 1 — `save_frame_as_jpeg` vc Frame Processor plugin (native)
+
+Worklet-callable JPEG encoder. Registers on both platforms:
+
+- **iOS** — `SaveFrameAsJpegPlugin.mm` (CIImage → CGImage → UIImage
+  → UIImageJPEGRepresentation → atomic NSData write).  Registered
+  via `+ (void)load` hook into `FrameProcessorPluginRegistry`.
+- **Android** — `SaveFrameAsJpegPlugin.kt` wrapping the lib's
+  existing `YuvImageConverter.encodeJpegFromNV21` encoder (the
+  same one used by `RNSARCameraView`'s keyframe-accept callback).
+  Registered alongside `cv_flow_gate_process_frame` in
+  `RNImageStitcherPackage.ensureFrameProcessorPluginRegistered`.
+
+Plugin contract (identical on both platforms):
+  - Args: `path` (string, REQUIRED), `quality` (number 0-100,
+    default 75, clamped `[1, 100]`)
+  - Returns: `{ ok: true, path, width, height }` OR
+             `{ ok: false, error: "..." }`
+
+Hosts can call this directly from their own `useFrameProcessor`
+worklet for custom rate-control logic; most consumers use it
+indirectly via Layer 3.
+
+#### Layer 2 — `useThrottledFrameProcessor` hook
+
+```tsx
+const fp = useThrottledFrameProcessor(
+  (frame) => {
+    'worklet';
+    // Worklet-native processing at sub-frame-rate
+  },
+  { sampleHz: 2 },
+  [],
+);
+```
+
+Pure TS throttle gate over `useFrameProcessor` (v0.8.0).  Worklet
+fires up to `sampleHz` times per second; ticks too close together
+dropped via a monotonic-time `useSharedValue` gate.
+
+**Use for**: worklet-native processing — native OCR via
+Vision.framework / ML Kit wrapped as vc Frame Processor plugins,
+TFLite ML inference, LiDAR depth (`frame.arDepth`).  Direct
+buffer/pose/depth access in the worklet; bridge small bbox-result
+payloads to JS via `runOnJS`.
+
+`sampleHz` clamped to `[0.5, 30]`.
+
+#### Layer 3 — `useFrameStream` hook
+
+```tsx
+const fp = useFrameStream(
+  { sampleHz: 2, quality: 75 },
+  (sample) => {
+    // JS-thread callback: sample.jpegPath, sample.pose, sample.timestamp
+    setThumbnail(sample.jpegPath);
+  },
+);
+```
+
+Composes Layer 2 + Layer 1 + `runOnJS` bridge to deliver
+`SampledFrame` objects to a JS-thread handler.  Slot-reuse
+strategy bounds disk usage to ~4 stale JPEGs.
+
+**Use for**: JS-thread consumers — file-path OCR libraries (RN
+modules wrapping ML Kit), cloud upload, thumbnail preview UI,
+JS-side ML (TF.js, transformers.js).
+
+`sampleHz` clamped to `[0.5, 10]`; `quality` clamped `[1, 100]`.
+
+#### Types
+
+  - `SampledFrame` — `{ jpegPath, pose, timestamp, width, height }`
+  - `FrameStreamOptions` — `{ sampleHz, quality?, outputDir? }`
+  - `ThrottledFrameProcessorOptions` — `{ sampleHz }`
+
+All exported from `react-native-image-stitcher`.
+
+### Documentation
+
+- `docs/frame-access-tiers.md` — new comprehensive reference for
+  all four host-facing hooks (`useKeyframeStream`,
+  `useThrottledFrameProcessor`, `useFrameStream`,
+  `useFrameProcessor`) with decision flow, cost envelope, use-case
+  mapping, AR vs non-AR mode tradeoff.
+
+### Example app
+
+`example/App.tsx` now mounts `useFrameStream` at 2 Hz with a
+visible thumbnail overlay (bottom-right corner) — visual proof of
+the Layer 1 + 2 + 3 pipeline working end-to-end on both iPhone
+(60 Hz AR) and Galaxy A35 (30 Hz AR).
+
+### Compatibility
+
+- Strict additive over v0.8.0.  No host changes required.
+- Works in both AR and non-AR modes via v0.8.0's unified
+  `useFrameProcessor`.
+- New hooks return `useFrameProcessor`-shape objects compatible
+  with `<Camera frameProcessor={...}>` (Phase 5 from v0.8.0).
+
+### Notes
+
+- Formal SSIM parity gate (Phase 7 of the v0.9.0 plan) was NOT
+  run for this release — the layered design doesn't touch
+  first-party stitching, so a regression is structurally unlikely.
+  Harness still in place from v0.8.0 (`scripts/ssim-compare.py`)
+  for any host that wants to run it locally.
+
+[0.9.0]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.8.0...v0.9.0
+
 ## [0.8.0] — 2026-05-27
 
 ### Added — `useFrameProcessor` hook for host worklets
