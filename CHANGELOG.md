@@ -125,6 +125,30 @@ the Layer 1 + 2 + 3 pipeline working end-to-end on both iPhone
 - New hooks return `useFrameProcessor`-shape objects compatible
   with `<Camera frameProcessor={...}>` (Phase 5 from v0.8.0).
 
+### Known limitations (v0.9.0 — addressed in v0.11.0)
+
+- **Layer 3 `useFrameStream` in AR mode**: the Layer 1
+  `save_frame_as_jpeg` vc Frame Processor plugin expects a vision-
+  camera `Frame` with `.buffer = CMSampleBufferRef`.  In AR mode
+  the worklet receives a `StitcherFrameHostObject` (v0.8.0
+  Phase 4b's JSI host object) without `.buffer` — the plugin call
+  returns `{ok: false, ...}` and `useFrameStream` silently skips
+  the sample.  Hosts needing per-frame native processing in AR
+  mode should use **Layer 2 (`useThrottledFrameProcessor`)** —
+  it works in both modes and is the right primitive for the
+  worklet-native use cases listed in `docs/frame-access-tiers.md`
+  (OCR via Vision/ML Kit, TFLite ML detection, LiDAR depth).
+  AR-mode Layer 3 support tracked in v0.11.0's plan
+  (`docs/plans/2026-05-27-v0.11.0-non-ar-composition.md`) —
+  bundled with `useStitcherWorklet` since both extend the
+  `__stitcherProxy` host-function infrastructure.
+- **Layer 3 `useFrameStream` in non-AR mode**: wiring the host's
+  frameProcessor through `<Camera>` displaces the lib's
+  first-party stitching driver (the documented Phase 5 either-or
+  constraint from v0.8.0).  Non-AR panorama capture won't produce
+  stitched output while a host frameProcessor is wired.  Tracked
+  in v0.11.0 (`useStitcherWorklet` composition).
+
 ### Notes
 
 - Formal SSIM parity gate (Phase 7 of the v0.9.0 plan) was NOT
