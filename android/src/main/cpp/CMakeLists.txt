@@ -132,6 +132,11 @@ add_library(image_stitcher SHARED
     # Phase 4b.i; Android adds them here.
     "${SHARED_CPP_DIR}/stitcher_worklet_registry.cpp"
     "${SHARED_CPP_DIR}/stitcher_proxy_jsi.cpp"
+    # v0.8.0 Phase 4b.iii — shared per-frame fan-out helper.  Posts
+    # a `StitcherFrameData` onto worklets-core's default context's
+    # worklet thread; iterates the host worklet registry; invalidates
+    # the JSI host object after dispatch completes.
+    "${SHARED_CPP_DIR}/stitcher_worklet_dispatch.cpp"
     # v0.8.0 Phase 4b.ii — Android JNI bindings for the JSI install
     # (`StitcherJsiInstallerModule.nativeInstall`).  Reaches into the
     # main JS runtime via the `long` JSI handle Kotlin pulls from
