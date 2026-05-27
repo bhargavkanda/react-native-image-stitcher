@@ -123,6 +123,16 @@ class StitcherWorkletRegistry {
   /// exposed through the JSI surface.
   void _resetForTests();
 
+  /// Test-only — install a pre-constructed entry directly, bypassing
+  /// the JSI runtime path.  Mirrors `install` but accepts an already-
+  /// constructed (or null) `WorkletInvoker` so tests can exercise
+  /// `count`/`snapshot`/`uninstall`/thread-safety without standing
+  /// up a full JSI runtime + worklets-core stack.  Tests typically
+  /// pass `nullptr` — the registry never dereferences the pointer.
+  /// Not exposed through the JSI surface.
+  std::string _installEntryForTests(
+      std::shared_ptr<RNWorklet::WorkletInvoker> invoker);
+
  private:
   StitcherWorkletRegistry() = default;
   StitcherWorkletRegistry(const StitcherWorkletRegistry&) = delete;
