@@ -88,6 +88,23 @@ return <Camera frameProcessor={fp} ... />;
 
 ### `useFrameStream` (Tier 2 — Layer 3) — sampled JPEGs to JS thread
 
+> [!IMPORTANT]
+> **v0.9.0 limitation**: Layer 3 has two known constraints addressed in v0.11.0:
+> 1. **AR mode** — the underlying `save_frame_as_jpeg` plugin doesn't yet
+>    handle `StitcherFrameHostObject` (the JSI frame from v0.8.0 Phase 4b);
+>    `useFrameStream` samples silently never fire. For per-frame native
+>    processing in AR mode, use **`useThrottledFrameProcessor`** (Layer 2)
+>    instead — it's the right primitive for OCR via Vision/ML Kit, TFLite
+>    ML, LiDAR depth.
+> 2. **Non-AR mode** — wiring `useFrameStream`'s returned processor through
+>    `<Camera frameProcessor={...}>` displaces the lib's first-party
+>    stitching driver (Phase 5 either-or). Panorama capture won't produce
+>    stitched output while the host frameProcessor is wired.
+>
+> Both addressed in v0.11.0 via `useStitcherWorklet` composition + the
+> `__stitcherProxy` host-function extension. Until then, treat Layer 3 as
+> "non-AR-only when first-party stitching isn't needed concurrently."
+
 ```tsx
 import { Camera, useFrameStream, type SampledFrame }
   from 'react-native-image-stitcher';

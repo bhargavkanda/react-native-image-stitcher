@@ -39,7 +39,6 @@ import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
   useFrameProcessor,
-  useFrameStream,
   useKeyframeStream,
   type AcceptedKeyframe,
   type CameraCaptureResult,
@@ -47,7 +46,6 @@ import {
   type CaptureSource,
   type CameraLens,
   type FramesDroppedInfo,
-  type SampledFrame,
   type StitcherFrame,
 } from 'react-native-image-stitcher';
 
@@ -152,35 +150,27 @@ function App(): React.JSX.Element {
   // worklet; the returned processor object is only relevant for
   // non-AR mode wiring (which this demo skips).
 
-  // v0.9.0 Layer 3 — demonstrate `useFrameStream` end-to-end.  Fires
-  // at 2 Hz; encodes each sample to JPEG on the producer thread via
-  // the `save_frame_as_jpeg` vc plugin (Layer 1); delivers the
-  // `SampledFrame` (file path + pose + dims) to this JS-thread
-  // handler.  The thumbnail at the bottom-right of the screen
-  // updates ~twice per second, visually confirming the entire
-  // Layer 1 + 2 + 3 pipeline works.
+  // v0.9.0 NOTE — `useFrameStream` (Tier 2 Layer 3) is exported by
+  // the lib but the example demo was removed because the current
+  // implementation has two known limitations that block a clean
+  // visual demo:
   //
-  // Use cases this demo stands in for: live thumbnail preview,
-  // sampled cloud upload, file-path OCR libraries (RN modules).
-  // For worklet-native consumers (Vision/ML Kit as vc plugins,
-  // TFLite ML, LiDAR depth) prefer `useThrottledFrameProcessor`
-  // (Layer 2) — no JPEG roundtrip cost.
-  const [latestSample, setLatestSample] = useState<SampledFrame | null>(null);
-  const [sampleCount, setSampleCount] = useState(0);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _exampleFrameStream = useFrameStream(
-    { sampleHz: 2, quality: 75 },
-    useCallback((sample: SampledFrame) => {
-      setLatestSample(sample);
-      setSampleCount((c) => c + 1);
-    }, []),
-  );
-  // Same AR-mode auto-registration pattern as `_exampleFrameProcessor`
-  // above — the returned processor isn't wired through
-  // `<Camera frameProcessor={...}>` because that would displace the
-  // lib's first-party stitching in non-AR mode.  In AR mode the
-  // worklet auto-registers via `__stitcherProxy` and fires at 2 Hz
-  // via the Layer 2 throttle gate.
+  //   1. AR mode: Layer 1's `save_frame_as_jpeg` vc plugin doesn't
+  //      yet handle `StitcherFrameHostObject` (it expects vc's
+  //      Frame with `.buffer = CMSampleBufferRef`).  Worklet body
+  //      runs but `plugin.call(frame, ...)` throws silently.
+  //      Tracked as v0.9.1 — needs AR-frame buffer-pass-via-args
+  //      bridge (vc's `SharedArray` JSI↔native path).
+  //
+  //   2. Non-AR mode: wiring the host's frameProcessor through
+  //      `<Camera>` displaces the lib's first-party stitching
+  //      driver (Phase 5 either-or constraint).  Tracked as
+  //      v0.11.0 (`useStitcherWorklet` composition).
+  //
+  // For hosts whose use case fits Layer 2 (worklet-native processing
+  // via vc plugins — Vision.framework / ML Kit / TFLite / LiDAR
+  // depth), `useThrottledFrameProcessor` works in BOTH modes today
+  // without these limitations.  See `docs/frame-access-tiers.md`.
 
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
@@ -270,28 +260,6 @@ function App(): React.JSX.Element {
           onError={handleError}
         />
 
-        {/*
-          v0.9.0 Layer 3 demo overlay — live thumbnail at 2 Hz.
-          Visible only when at least one sample has fired.  Bottom-
-          right corner; non-interactive (`pointerEvents="none"`) so
-          it doesn't intercept Camera component gestures.
-        */}
-        {latestSample != null && (
-          <View style={styles.streamOverlay} pointerEvents="none">
-            <Image
-              source={{ uri: `file://${latestSample.jpegPath}` }}
-              style={styles.streamThumb}
-              resizeMode="cover"
-              // Force RN's <Image> to re-read the file each frame —
-              // the slot path is reused across rotations, so without
-              // a cache-buster the image would stay stale.
-              key={`${latestSample.jpegPath}-${latestSample.timestamp}`}
-            />
-            <Text style={styles.streamLabel}>
-              useFrameStream • {sampleCount} samples
-            </Text>
-          </View>
-        )}
 
         {/*
           Capture preview modal.  Renders fullscreen above the camera
@@ -422,30 +390,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  // ── v0.9.0 Layer 3 demo overlay ─────────────────────────────────
-  streamOverlay: {
-    position: 'absolute',
-    bottom: 24,
-    right: 16,
-    alignItems: 'flex-end',
-    gap: 4,
-  },
-  streamThumb: {
-    width: 96,
-    height: 72,
-    borderColor: 'rgba(255,255,255,0.7)',
-    borderWidth: 1,
-    backgroundColor: '#000',
-  },
-  streamLabel: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '600',
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 3,
-  },
 });
 
 

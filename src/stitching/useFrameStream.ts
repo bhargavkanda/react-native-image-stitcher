@@ -58,8 +58,7 @@
 // passed to `<Camera frameProcessor={...}>`.  The hook returns
 // the processor object so hosts can wire it up either way.
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { Platform } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   VisionCameraProxy,
   type Frame,
@@ -73,6 +72,7 @@ import type {
   FrameStreamOptions,
   SampledFrame,
 } from '../types';
+import { getDefaultCaptureDir } from '../utils/files';
 
 /**
  * `useFrameStream` — Layer 3.  See module docstring for the full
@@ -111,37 +111,39 @@ export function useFrameStream(
   const sampleHz = Math.max(0.5, Math.min(10, options.sampleHz));
   const quality = options.quality ?? 75;
 
-  // Default output dir: a per-app cache subdirectory.  Hosts that
-  // want a known path supply their own via `options.outputDir`.
-  // `Platform.OS`-specific cache paths are read once at hook mount.
-  const outputDir = useMemo(() => {
-    if (options.outputDir != null) return options.outputDir;
-    // Both platforms expose a cache directory at a predictable path
-    // via React Native APIs; we use a small inline computation to
-    // avoid pulling `react-native-fs` as a hard dep.  The lib's
-    // existing JPEG encode targets the app's data dir via similar
-    // logic in `RNSARCameraView.kt` / `IncrementalStitcher.swift`.
-    //
-    // We just generate a relative-ish path under /tmp/ for cross-
-    // platform simplicity; the native plugin writes wherever it's
-    // told to (absolute path), so as long as the directory exists
-    // the encode succeeds.  Hosts that care about file lifecycle
-    // should supply `outputDir` explicitly.
-    return Platform.OS === 'ios'
-      ? '/tmp/rnis-frame-stream'
-      : '/data/local/tmp/rnis-frame-stream';
+  // Default output dir: the lib's canonical capture dir resolved
+  // via `FileBridge.defaultCaptureDir()`.  Same dir the lib uses
+  // for panorama JPEGs / keyframe JPEGs — guaranteed writable on
+  // both platforms (iOS NSCachesDirectory + Android Context.cacheDir),
+  // created if missing.  Resolved async on first mount; until
+  // resolution completes the worklet's `outputDir` is empty and
+  // the plugin call no-ops silently (a few frames missed at most;
+  // typical resolution time is <50ms).
+  //
+  // Hosts that want a specific path supply `options.outputDir`
+  // and skip the resolution entirely.
+  const [resolvedDefaultDir, setResolvedDefaultDir] = useState<string>('');
+  useEffect(() => {
+    if (options.outputDir != null) return;
+    let cancelled = false;
+    getDefaultCaptureDir()
+      .then((dir) => {
+        if (!cancelled) setResolvedDefaultDir(dir);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[useFrameStream] FileBridge.defaultCaptureDir() failed; ' +
+            'samples will not fire until `options.outputDir` is supplied. ' +
+            String(err),
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [options.outputDir]);
 
-  // Ensure outputDir exists on the native side.  We could use
-  // react-native-fs but to keep the dep surface minimal, we just
-  // attempt to create via a tiny native call — or, simpler, accept
-  // that the plugin's write call will fail if the dir doesn't
-  // exist + log a clear error.  For v0.9.0 baseline we defer
-  // mkdir to the host (document it in the option's JSDoc) OR fall
-  // back to the platform's tmpdir which already exists.
-  //
-  // The tmpdir defaults above always exist on iOS + Android, so
-  // the common case "host doesn't supply outputDir" Just Works.
+  const outputDir = options.outputDir ?? resolvedDefaultDir;
 
   // Stable JS-side handler reference for `runOnJS`.  The hook re-
   // captures `handler` on every render but the ref keeps the
@@ -174,19 +176,36 @@ export function useFrameStream(
   // registry hasn't initialised yet (rare race on app start).  We
   // retry every 16ms (one display frame) until success — matches
   // the pattern in `useFrameProcessorDriver`.
-  const pluginRef = useRef<FrameProcessorPlugin | null>(null);
+  //
+  // Use `useState` (not `useRef`) so the eventual non-null value
+  // triggers a re-render — the worklet closure below captures
+  // `plugin` by value at render time, so without state we'd
+  // capture `null` forever.
+  const [plugin, setPlugin] = useState<FrameProcessorPlugin | null>(null);
   useEffect(() => {
     let cancelled = false;
     let timerId: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
     const tryAcquire = () => {
       if (cancelled) return;
+      attempts += 1;
       const p = VisionCameraProxy.initFrameProcessorPlugin(
         'save_frame_as_jpeg',
         {},
       );
       if (p != null) {
-        pluginRef.current = p;
+        setPlugin(p);
         return;
+      }
+      // After ~1s of failed retries, warn once — the plugin should
+      // be registered by then; persistent failure means the host's
+      // native bundle doesn't include `save_frame_as_jpeg`.
+      if (attempts === 60) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[useFrameStream] save_frame_as_jpeg plugin not found after 1s of retries. ' +
+            'Verify react-native-image-stitcher native module is installed in your host app.',
+        );
       }
       timerId = setTimeout(tryAcquire, 16);
     };
@@ -197,16 +216,13 @@ export function useFrameStream(
     };
   }, []);
 
-  // The worklet body — fires at sampleHz, calls the JPEG plugin,
-  // bridges the result to JS.  Note we read `pluginRef.current`
-  // inside the worklet via the captured `plugin` value below;
-  // worklets-core handles the JS↔worklet reference.
-  const plugin = pluginRef.current;
-
   return useThrottledFrameProcessor(
     (frame: StitcherFrame) => {
       'worklet';
       if (plugin == null) return;
+      // Async outputDir resolution may not have completed yet on
+      // the first few frames after mount — bail until it does.
+      if (outputDir === '') return;
 
       // Slot rotation: compute slot from frame timestamp.  At
       // sampleHz=2 (500ms interval), the slot index changes every
