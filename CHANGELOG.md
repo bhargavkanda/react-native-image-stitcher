@@ -16,6 +16,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-27
+
+### Added — `useFrameProcessor` hook for host worklets
+
+Hosts can now attach a `'worklet'`-prefixed function that fires on
+every AR (and non-AR) capture frame, alongside the lib's own
+first-party stitching.  Use case: real-time OCR, packet detection,
+ML inference, custom telemetry — anything that wants per-frame
+pixel access in a worklet runtime.
+
+```tsx
+import { useFrameProcessor, type StitcherFrame }
+  from 'react-native-image-stitcher';
+
+const fp = useFrameProcessor((frame: StitcherFrame) => {
+  'worklet';
+  // frame.toArrayBuffer(), frame.pose, frame.source ('ar' | 'vc'), …
+}, []);
+```
+
+**AR mode** (iPhone via ARKit, Android via ARCore): worklets fire
+on every AR frame at the device's native rate (~30 Hz on A35,
+~60 Hz on iPhone 16 Pro).  Auto-registered into a process-scope
+native registry via `globalThis.__stitcherProxy.install(workletFn)`.
+The AR-session dispatch path fans out to both the lib's first-party
+stitching AND every registered host worklet, with **per-worklet
+failure isolation** (one host worklet throwing does NOT break
+others or the lib's stitching).
+
+**Non-AR mode** (vision-camera): pass the hook's return through
+`<Camera frameProcessor={fp}>` to enable.  Honest tradeoff: vc's
+`<Camera>` accepts ONE processor, so supplying a host processor
+displaces the lib's first-party stitching in non-AR mode.  Hosts
+that want both running concurrently should use AR mode (which
+natively composes both).  Composition for non-AR is tracked as
+v0.9+.
+
+### Added — `StitcherFrame` contract
+
+Unified frame shape across AR and non-AR modes (`src/stitching/
+StitcherFrame.ts`):
+
+  - `width` / `height` / `pixelFormat` / `orientation` / `timestamp`
+    / `toArrayBuffer()` — vc-shape parity
+  - `pose: { rotation: [x,y,z,w], translation?: [x,y,z] }` — always
+    present in AR mode; rotation-only in non-AR
+  - `source: 'ar' | 'vc'` discriminator for safe AR-field access
+  - `arDepth?`, `arAnchors?`, `arTrackingState?` — populated in AR
+    mode on supported devices
+
+### Added — JSI proxy host object
+
+`globalThis.__stitcherProxy` installed on lib bootstrap (iOS:
+`StitcherJsiInstaller` RN module via `RCTBridgeProxy.runtime` in
+bridgeless mode; Android: `StitcherJsiInstallerModule` via
+`ReactApplicationContext.getJavaScriptContextHolder()`).  Exposes
+`install` / `uninstall` / `count` host functions backed by a
+shared C++ `retailens::StitcherWorkletRegistry` (process-scope,
+mutex-serialised, snapshot-isolated).
+
+### Changed — AR-mode dispatch architecture
+
+Internal-only refactor (strict additive BC for hosts that don't
+use `useFrameProcessor`):
+
+  - **iOS**: `ARSessionDelegate.session(_:didUpdate:)` now routes
+    through `RNSARWorkletRuntime.dispatchFrame:pose:` instead of
+    directly invoking the engine.  First-party callback (Phase 3c)
+    runs synchronously on the caller thread (preserves ARKit's
+    pool-reuse contract); host worklet fan-out (Phase 4b.i)
+    dispatches asynchronously onto a dedicated worklets-core
+    context.
+
+  - **Android**: `RNSARCameraView.onDrawFrame` now wraps the
+    existing `module.ingestFromARCameraView(...)` call in
+    `StitcherWorkletRuntime.runFirstParty { ... }` (Phase 3c) and
+    follows with `StitcherWorkletRuntime.dispatchToHostWorklets(...)`
+    (Phase 4b.iii).  Per-frame fan-out runs every AR frame when host
+    worklets are registered (not just during capture).
+
+### Performance posture
+
+  - **First-party-only deployments** (no `useFrameProcessor`):
+    zero per-frame cost added.  `hasHostWorklets()` atomic-read
+    short-circuits before any dispatch path.
+  - **Host worklets registered, idle preview**: Android pays
+    ~6-10ms per AR frame (NV21 pack + JNI byte copy + worklet
+    dispatch).  iOS uses `CFBridgingRetain` (no per-frame copy,
+    but ARKit pool back-pressure on next frame).  Both acceptable
+    for v0.8.0; future optimization → zero-copy NV21 transfer via
+    direct `ByteBuffer` (Android).
+
+### Added — SSIM parity gate harness
+
+`scripts/ssim-compare.py` — pixel-wise SSIM comparison between
+panorama JPEGs (Pillow + numpy + scikit-image; threshold 0.98).
+Procedure in `docs/phase-7-parity-gate.md`.
+
+> **v0.8.0 release note:** the formal SSIM parity gate was NOT
+> run for this release.  Verification rests on manual visual
+> inspection of v0.8.0 panorama output on iPhone 16 Pro (Phase
+> 4b.i) and Galaxy A35 (Phase 4b.iii) — both produced stitched
+> panoramas matching the v0.7.x behaviour subjectively.  The
+> harness is in place for v0.8.1+ / future releases where the
+> gate is mandatory.
+
+### Migration guide
+
+No host-side changes required for the common case.  Hosts that
+want to attach worklets:
+
+1. Add `react-native-worklets-core` if not already a peer dep
+   (already in v0.7.x's peer-deps list).
+2. Replace `useFrameProcessor` imports from
+   `react-native-vision-camera` with the lib's own export:
+   ```diff
+   - import { useFrameProcessor } from 'react-native-vision-camera';
+   + import { useFrameProcessor } from 'react-native-image-stitcher';
+   ```
+3. Worklet body now receives `StitcherFrame` instead of vc's
+   `Frame` — see `src/stitching/StitcherFrame.ts` for the contract.
+
 ## [0.7.1] — 2026-05-26
 
 ### Fixed — CI binary-packaging bloat
