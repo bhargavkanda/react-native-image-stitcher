@@ -7,6 +7,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
@@ -21,7 +22,7 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * Run via:
  *
- *     gradlew :react-native-image-stitcher:test
+ *     cd example/android && ./gradlew :react-native-image-stitcher:testDebugUnitTest
  *
  * v0.10.0 PR A pins the invariants that protect against the misuse
  * pattern described in the wrapper's class docstring (a sync gate-eval
@@ -45,9 +46,10 @@ class TransferredNV21Test {
         // Message check: the wrapper should mention "zero-length" so
         // log readers can grep for it quickly.
         val message = ex.message ?: ""
-        assert(message.contains("zero-length", ignoreCase = true)) {
-            "Expected exception message to mention 'zero-length'; got: $message"
-        }
+        assertTrue(
+            "Expected exception message to mention 'zero-length'; got: $message",
+            message.contains("zero-length", ignoreCase = true),
+        )
     }
 
     @Test
@@ -73,9 +75,10 @@ class TransferredNV21Test {
         // refactor introducing the bug surfaces it diagnosable in
         // logcat.
         val message = ex.message ?: ""
-        assert(message.contains("called twice", ignoreCase = true)) {
-            "Expected exception message to mention 'called twice'; got: $message"
-        }
+        assertTrue(
+            "Expected exception message to mention 'called twice'; got: $message",
+            message.contains("called twice", ignoreCase = true),
+        )
     }
 
     @Test
@@ -113,9 +116,10 @@ class TransferredNV21Test {
             }
             // Release all threads simultaneously.
             startLatch.countDown()
-            assert(doneLatch.await(5, TimeUnit.SECONDS)) {
-                "Timeout waiting for threads to complete"
-            }
+            assertTrue(
+                "Timeout waiting for threads to complete",
+                doneLatch.await(5, TimeUnit.SECONDS),
+            )
         } finally {
             executor.shutdownNow()
         }

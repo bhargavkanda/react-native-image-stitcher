@@ -68,7 +68,8 @@ device build per change.
   the original reference, takeOnce throws on second call, thread-
   safe single-winner under 16-thread contention, distinct wrappers
   are independent.
-- Run via `./gradlew :react-native-image-stitcher:testDebugUnitTest`.
+- Run from the example Android project via
+  `cd example/android && ./gradlew :react-native-image-stitcher:testDebugUnitTest`.
 
 Neither suite changes runtime behaviour — both are additive test
 infrastructure.

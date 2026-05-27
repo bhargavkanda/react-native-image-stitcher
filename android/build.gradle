@@ -286,7 +286,8 @@ dependencies {
     // v0.10.0 audit #11A — Android JUnit test scaffold.  JVM unit
     // tests for pure-Kotlin data wrappers + algorithm helpers that
     // don't need an Android device.  Run via
-    // `gradlew :react-native-image-stitcher:test`.
+    // from `example/android` with:
+    // `./gradlew :react-native-image-stitcher:testDebugUnitTest`.
     //
     // Kept minimal — only JUnit 4 (matches AGP's default test
     // runner).  Hosts that want to add their own android-test
