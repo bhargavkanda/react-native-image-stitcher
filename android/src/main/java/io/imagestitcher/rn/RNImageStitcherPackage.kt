@@ -55,19 +55,33 @@ class RNImageStitcherPackage : ReactPackage {
                 ) { proxy, options ->
                     CvFlowGateFrameProcessor(proxy, options)
                 }
+                // v0.9.0 Layer 1 — register `save_frame_as_jpeg`
+                // alongside the cv_flow_gate plugin.  Same lifecycle,
+                // same defensive error handling (the outer try/catch
+                // covers both registrations).  Either both register
+                // or neither does — if vc isn't on the classpath,
+                // both calls are skipped together.
+                FrameProcessorPluginRegistry.addFrameProcessorPlugin(
+                    SaveFrameAsJpegPlugin.PLUGIN_NAME,
+                ) { proxy, options ->
+                    SaveFrameAsJpegPlugin(proxy, options)
+                }
                 fpPluginRegistered = true
             } catch (e: NoClassDefFoundError) {
                 android.util.Log.i(
                     "RNImageStitcherPackage",
                     "vision-camera FrameProcessorPluginRegistry not on classpath — "
-                    + "skipping cv_flow_gate_process_frame plugin registration "
-                    + "(host app doesn't appear to use Frame Processors).",
+                    + "skipping cv_flow_gate_process_frame + save_frame_as_jpeg "
+                    + "plugin registration (host app doesn't appear to use "
+                    + "Frame Processors).",
                 )
                 fpPluginRegistered = true  // don't retry every package init
             } catch (e: Throwable) {
                 android.util.Log.w(
                     "RNImageStitcherPackage",
-                    "Failed to register cv_flow_gate_process_frame plugin: ${e.message}",
+                    "Failed to register Frame Processor plugins "
+                    + "(cv_flow_gate_process_frame / save_frame_as_jpeg): "
+                    + e.message,
                 )
                 fpPluginRegistered = true
             }

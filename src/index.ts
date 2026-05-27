@@ -208,6 +208,15 @@ export { useFrameProcessor } from './stitching/useFrameProcessor';
 // prefer `useFrameStream` (Layer 3, ships in the same release).
 export { useThrottledFrameProcessor } from './stitching/useThrottledFrameProcessor';
 export type { ThrottledFrameProcessorOptions } from './types';
+// v0.9.0 Layer 3 — `useFrameStream`.  JS-thread sampled-frame
+// stream over Layer 1 (`save_frame_as_jpeg` vc plugin) + Layer 2
+// (`useThrottledFrameProcessor`).  Use for JS-thread consumers:
+// file-path OCR libs (RN modules), cloud upload, thumbnail UI.
+// For worklet-native processing (Vision/ML Kit as vc plugins,
+// TFLite ML, LiDAR depth), prefer `useThrottledFrameProcessor`
+// (Layer 2) — lower latency, no JPEG roundtrip.
+export { useFrameStream } from './stitching/useFrameStream';
+export type { FrameStreamOptions, SampledFrame } from './types';
 // vision-camera Frame Processor driver for non-AR captures.  As
 // of v0.6 the only non-AR driver exported (the legacy
 // `useIncrementalJSDriver` was removed; was deprecated in v0.5).
