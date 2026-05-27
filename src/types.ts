@@ -56,6 +56,34 @@ export interface DeviceMetadata {
 // `Camera.tsx` adapts this into the public `CameraCaptureResult` (a
 // discriminated union of photo + panorama) before emitting `onCapture`.
 
+/**
+ * v0.9.0 Layer 2 — options for `useThrottledFrameProcessor`.
+ *
+ * Wraps v0.8.0's `useFrameProcessor` with a monotonic-time throttle
+ * gate so the supplied worklet fires at most `sampleHz` times per
+ * second.  Use for sub-frame-rate worklet-native processing — native
+ * OCR (Vision.framework / ML Kit), TFLite ML detection, LiDAR depth
+ * processing — where the bbox / depth payloads are small enough to
+ * bridge to JS via `runOnJS`.
+ *
+ * For JS-thread JPEG consumers (file-path OCR libraries, cloud
+ * upload, thumbnail UI), use `useFrameStream` (Layer 3) instead.
+ */
+export interface ThrottledFrameProcessorOptions {
+  /**
+   * Target sampling rate in Hertz.  Clamped to `[0.5, 30]`.  Inside
+   * the worklet a monotonic-time gate enforces the rate; ticks too
+   * close together are silently dropped.
+   *
+   * The clamp upper bound (30 Hz) sits at typical AR rates on
+   * mid-range Android devices — beyond that, the host should just
+   * use `useFrameProcessor` directly (no throttle).  The clamp
+   * lower bound (0.5 Hz) prevents accidentally-zero-divide values
+   * + matches `useFrameStream`'s convention.
+   */
+  sampleHz: number;
+}
+
 export interface CaptureResult {
   /** Unique device-generated UUID */
   deviceUuid: string;
