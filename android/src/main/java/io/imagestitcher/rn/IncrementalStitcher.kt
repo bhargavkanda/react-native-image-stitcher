@@ -1673,12 +1673,26 @@ class IncrementalStitcher(
     @ReactMethod
     fun refinePanorama(options: ReadableMap, promise: Promise) {
         val framePathsArr = options.getArray("framePaths")
+        val requestedCount = framePathsArr?.size() ?: 0
+        // v0.10.0 #15A — emit `validating` at the very top so JS sees
+        // refine activity even when validation fails fast.  Frames may
+        // be empty here; report whatever the caller asked for.
+        emitRefineProgress(
+            stage = "validating",
+            fraction = 0.05,
+            frames = requestedCount,
+            errorMessage = null,
+        )
         if (framePathsArr == null || framePathsArr.size() < 2) {
-            promise.reject(
-                "incremental-refine-invalid-input",
-                "refinePanorama requires at least 2 framePaths (got " +
-                    "${framePathsArr?.size() ?: 0}).",
+            val msg = "refinePanorama requires at least 2 framePaths (got " +
+                "$requestedCount)."
+            emitRefineProgress(
+                stage = "error",
+                fraction = 1.0,
+                frames = requestedCount,
+                errorMessage = msg,
             )
+            promise.reject("incremental-refine-invalid-input", msg)
             return
         }
         val framePaths = Array(framePathsArr.size()) {
@@ -1686,10 +1700,14 @@ class IncrementalStitcher(
         }
         val outputPathOpt = options.getString("outputPath")
         if (outputPathOpt.isNullOrEmpty()) {
-            promise.reject(
-                "incremental-refine-invalid-input",
-                "refinePanorama requires a non-empty outputPath.",
+            val msg = "refinePanorama requires a non-empty outputPath."
+            emitRefineProgress(
+                stage = "error",
+                fraction = 1.0,
+                frames = framePaths.size,
+                errorMessage = msg,
             )
+            promise.reject("incremental-refine-invalid-input", msg)
             return
         }
         val outputPath = stripFileScheme(outputPathOpt)
@@ -1709,16 +1727,26 @@ class IncrementalStitcher(
         // Pre-flight existence check — same defensive layer iOS has.
         for (p in framePaths) {
             if (!File(p).exists()) {
-                promise.reject(
-                    "incremental-refine-missing-keyframe",
-                    "refinePanorama: keyframe missing on disk — $p",
+                val msg = "refinePanorama: keyframe missing on disk — $p"
+                emitRefineProgress(
+                    stage = "error",
+                    fraction = 1.0,
+                    frames = framePaths.size,
+                    errorMessage = msg,
                 )
+                promise.reject("incremental-refine-missing-keyframe", msg)
                 return
             }
         }
 
         refineScope.launch {
             try {
+                emitRefineProgress(
+                    stage = "stitching",
+                    fraction = 0.1,
+                    frames = framePaths.size,
+                    errorMessage = null,
+                )
                 val stitcher = BatchStitcher.bridgeInstance
                     ?: throw IllegalStateException(
                         "BatchStitcher.bridgeInstance is null — " +
@@ -1742,6 +1770,18 @@ class IncrementalStitcher(
                     useInscribedRectCrop,
                     stitchMode = effectiveMode,
                 )
+                // Stitch returned — BatchStitcher writes the JPEG
+                // synchronously, so "writing" reflects the final
+                // assembly + file I/O cost (which has already been
+                // paid by this point in practice).  Emit so JS can
+                // flip its label from "Stitching" to "Writing"
+                // before the done event fires.
+                emitRefineProgress(
+                    stage = "writing",
+                    fraction = 0.9,
+                    frames = framePaths.size,
+                    errorMessage = null,
+                )
                 val framesRequested =
                     if (dims.size > 2) dims[2] else framePaths.size
                 val framesIncluded =
@@ -1757,8 +1797,20 @@ class IncrementalStitcher(
                     putInt("framesDropped", framesRequested - framesIncluded)
                     putDouble("finalConfidenceThresh", finalConfidenceThresh)
                 }
+                emitRefineProgress(
+                    stage = "done",
+                    fraction = 1.0,
+                    frames = framePaths.size,
+                    errorMessage = null,
+                )
                 promise.resolve(map)
             } catch (t: Throwable) {
+                emitRefineProgress(
+                    stage = "error",
+                    fraction = 1.0,
+                    frames = framePaths.size,
+                    errorMessage = t.message ?: t.javaClass.simpleName,
+                )
                 promise.reject("incremental-refine-failed", t.message, t)
             }
         }
@@ -1878,6 +1930,59 @@ class IncrementalStitcher(
             putBoolean("isRefining", isRefining)
             if (refinedPanoramaPath != null) {
                 putString("refinedPanoramaPath", refinedPanoramaPath)
+            }
+        }
+        emitState(state)
+    }
+
+    /**
+     * v0.10.0 #15A — emit a refine-pipeline phase update on the same
+     * `IncrementalStateUpdate` channel that carries `isRefining` /
+     * `refinedPanoramaPath`.  Five `stage` values fire across the
+     * lifetime of one `refinePanorama` call:
+     *
+     *   - "validating" (fraction 0.05) — synchronous input checks
+     *   - "stitching"  (fraction 0.10) — start of the OpenCV stitch
+     *   - "writing"    (fraction 0.90) — stitch returned, JPEG written
+     *   - "done"       (fraction 1.00) — promise about to resolve
+     *   - "error"      (fraction 1.00) — failure path (errorMessage
+     *                                    is non-null)
+     *
+     * Coarse on purpose: OpenCV's Stitcher doesn't expose stage-by-
+     * stage callbacks, so the 0.10 → 0.90 jump is one opaque step.
+     * JS uses `stage` for the UI label and `fraction` for the spinner.
+     *
+     * iOS sibling: IncrementalStitcher.swift::emitRefineProgress.
+     * Field names + stage strings are kept identical so the JS
+     * subscriber in src/stitching/incremental.ts doesn't branch on
+     * platform.
+     */
+    private fun emitRefineProgress(
+        stage: String,
+        fraction: Double,
+        frames: Int?,
+        errorMessage: String?,
+    ) {
+        val state = Arguments.createMap().apply {
+            putNull("panoramaPath")
+            putInt("width", 0)
+            putInt("height", 0)
+            putInt("acceptedCount", 0)
+            putInt("outcome", 0)              // AcceptedHigh
+            putDouble("confidence", 1.0)
+            putDouble("overlapPercent", -1.0)
+            putInt("processingMs", 0)
+            putBoolean("isLandscape", false)
+            putInt("paintedExtent", 0)
+            putInt("panExtent", 0)
+            putInt("keyframeMax", 0)
+            putString("refineStage", stage)
+            putDouble("refineProgress", fraction)
+            if (frames != null) {
+                putInt("refineFrames", frames)
+            }
+            if (errorMessage != null) {
+                putString("refineError", errorMessage)
             }
         }
         emitState(state)
