@@ -42,3 +42,10 @@ android/.cxx/
 # Implementation plans — working documents, not part of the published source.
 # Kept locally for in-flight planning; release-time intent goes into CHANGELOG.md.
 docs/plans/
+
+# v0.8.0 Phase 7 parity baselines — locally captured panorama JPEGs
+# from v0.7.x / v0.8.0 used for SSIM comparison via
+# `scripts/ssim-compare.py`.  Per-developer + per-device captures;
+# not part of the release artifact.  See `docs/phase-7-parity-gate.md`.
+parity-baselines/
+*.parity-verification.md
