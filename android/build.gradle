@@ -282,6 +282,16 @@ dependencies {
     if (findProject(':react-native-worklets-core') != null) {
         implementation project(':react-native-worklets-core')
     }
+
+    // v0.10.0 audit #11A — Android JUnit test scaffold.  JVM unit
+    // tests for pure-Kotlin data wrappers + algorithm helpers that
+    // don't need an Android device.  Run via
+    // `gradlew :react-native-image-stitcher:test`.
+    //
+    // Kept minimal — only JUnit 4 (matches AGP's default test
+    // runner).  Hosts that want to add their own android-test
+    // dependencies can do so independently.
+    testImplementation "junit:junit:4.13.2"
 }
 
 // Helper from the React Native gradle convention to read host-app
