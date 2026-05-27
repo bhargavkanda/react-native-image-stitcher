@@ -38,6 +38,7 @@ import {
 import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
+  subscribeIncrementalState,
   useFrameProcessor,
   useKeyframeStream,
   type AcceptedKeyframe,
@@ -46,6 +47,7 @@ import {
   type CaptureSource,
   type CameraLens,
   type FramesDroppedInfo,
+  type IncrementalState,
   type StitcherFrame,
 } from 'react-native-image-stitcher';
 
@@ -149,6 +151,39 @@ function App(): React.JSX.Element {
   // auto-registration via `__stitcherProxy` is what fires the
   // worklet; the returned processor object is only relevant for
   // non-AR mode wiring (which this demo skips).
+
+  // v0.10.0 (PR B) — visible pill that surfaces refinePanorama
+  // progress events.  Subscribes to the IncrementalStateUpdate
+  // channel; renders only when `refineStage` is present.  Auto-
+  // dismisses 3 s after `done` / `error` so the next refine cycle
+  // gets a clean slate.  Useful for verifying the v0.10.0 #15A
+  // wiring end-to-end without grepping metro logs.
+  const [refine, setRefine] = useState<{
+    stage: NonNullable<IncrementalState['refineStage']>;
+    progress: number;
+    frames?: number;
+    error?: string;
+  } | null>(null);
+  useEffect(() => {
+    const sub = subscribeIncrementalState((s) => {
+      if (s.refineStage === undefined) return;
+      setRefine({
+        stage: s.refineStage,
+        progress: s.refineProgress ?? 0,
+        frames: s.refineFrames,
+        error: s.refineError,
+      });
+    });
+    return () => {
+      sub?.remove();
+    };
+  }, []);
+  useEffect(() => {
+    if (refine === null) return;
+    if (refine.stage !== 'done' && refine.stage !== 'error') return;
+    const id = setTimeout(() => setRefine(null), 3000);
+    return () => clearTimeout(id);
+  }, [refine]);
 
   // v0.9.0 NOTE — `useFrameStream` (Tier 2 Layer 3) is exported by
   // the lib but the example demo was removed because the current
@@ -259,6 +294,27 @@ function App(): React.JSX.Element {
           onFramesDropped={handleFramesDropped}
           onError={handleError}
         />
+
+        {refine !== null && (
+          <View
+            style={[
+              styles.refinePill,
+              refine.stage === 'error' && styles.refinePillError,
+              refine.stage === 'done' && styles.refinePillDone,
+            ]}
+            pointerEvents="none"
+            accessibilityRole="text"
+            accessibilityLabel={`Refine ${refine.stage} ${Math.round(refine.progress * 100)} percent`}
+          >
+            <Text style={styles.refinePillLabel}>
+              {refine.stage === 'error'
+                ? `Refine error: ${refine.error ?? 'unknown'}`
+                : `Refine: ${refine.stage}${
+                    refine.frames !== undefined ? ` (${refine.frames} frames)` : ''
+                  }  •  ${Math.round(refine.progress * 100)}%`}
+            </Text>
+          </View>
+        )}
 
 
         {/*
@@ -387,6 +443,26 @@ const styles = StyleSheet.create({
   previewCloseLabel: {
     color: '#000',
     fontSize: 17,
+    fontWeight: '600',
+  },
+  refinePill: {
+    position: 'absolute',
+    top: 56,
+    alignSelf: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0, 122, 255, 0.92)',  // iOS systemBlue
+  },
+  refinePillDone: {
+    backgroundColor: 'rgba(52, 199, 89, 0.92)',  // iOS systemGreen
+  },
+  refinePillError: {
+    backgroundColor: 'rgba(255, 59, 48, 0.92)',  // iOS systemRed
+  },
+  refinePillLabel: {
+    color: '#fff',
+    fontSize: 13,
     fontWeight: '600',
   },
 
