@@ -73,6 +73,73 @@ device build per change.
 Neither suite changes runtime behaviour — both are additive test
 infrastructure.
 
+### Added — v0.10.0 PR B: `refinePanorama` progress events + cleanup audit (`#15A` + `#16C`)
+
+#### `#15A` — phase-milestone progress emit from `refinePanorama`
+
+`refinePanorama` (both the explicit JS `module.refinePanorama(...)` API
+and the hybrid-engine auto-refine path that calls it internally) now
+emits coarse phase events on the existing `IncrementalStateUpdate`
+device-event channel.  Five stages cover one refine lifetime:
+
+| Stage         | `refineProgress` | When                                 |
+| ------------- | ---------------- | ------------------------------------ |
+| `validating`  | 0.05             | start of method, before any I/O      |
+| `stitching`   | 0.10             | OpenCV stitch in flight              |
+| `writing`     | 0.90             | stitch returned, JPEG written        |
+| `done`        | 1.00             | success — promise about to resolve   |
+| `error`       | 1.00             | failure — `refineError` is set       |
+
+`refineStage` carries the stage string; `refineProgress` carries the
+fraction; `refineFrames` reports the input keyframe count; `refineError`
+is populated on the failure path so the host can render a one-line
+failure pill.
+
+Coarse on purpose: OpenCV's `Stitcher` doesn't expose mid-pipeline
+progress, so the `0.10 → 0.90` jump is one opaque step.  JS uses
+`refineStage` for the UI label and `refineProgress` purely for the
+spinner.
+
+Reuses the existing channel (no second listener wiring required).
+Existing JS consumers that don't read the new fields are unaffected.
+
+#### `#16C` — moderate cleanup audit sweep
+
+- `src/camera/useCapture.ts` — removed a stale "`useVideoCapture` (TODO)"
+  reference; the hook has existed since v0.4.
+- `ios/Sources/RNImageStitcher/IncrementalStitcherBridge.swift` — removed
+  a self-flagged "remove this comment after" reference left over from a
+  past PiP investigation.
+- `console.*` audit: every call in `src/` was reviewed; all 13 are
+  legitimate (warn/error for surfaceable failures; `console.info`
+  one-shots that document known tradeoffs).  No removals needed.
+- TODO/FIXME triage: 4 remaining own-code TODOs all reference tracked
+  future work (lens-probe follow-up, shared-stitcher-port-part-2,
+  EXIF writer).  Left in place.
+- `ts-prune`: 3 surface-level orphans (`PanoramaConfirmModal`,
+  `IncrementalStitcherView`, `stitchFrames`) are intentional public
+  deep-import API; not re-exported from `src/index.ts` but
+  documented and consumed by hosts.  Left in place.
+
+No production behaviour changed — these are docstring + dead-comment
+removals only.
+
+### Fixed — v0.10.0 PR B (iOS): refine state events not reaching JS under RN bridgeless interop
+
+Switched `IncrementalStitcherBridge` state-event delivery from
+`RCTEventEmitter.sendEvent` to `bridge.enqueueJSCall("RCTDeviceEventEmitter", "emit", ...)`.
+Root cause: under RN bridgeless interop (RN 0.84), `sendEvent`
+silently no-ops for some event-body shapes even when the bridge is
+non-nil and the listener count is > 0 — refine events with the
+`refineStage` / `refineProgress` / `refineFrames` keys were not
+reaching any JS subscriber while live state events with a smaller
+body shape on the same channel were.  Also defensively
+`removeObserver` before `addObserver` in `init()` so the
+NotificationCenter registration is idempotent if RN re-invokes
+`init()` on the same instance (also observed on bridgeless interop).
+Android is unaffected — Android's bridge already emits via
+`DeviceEventManagerModule.RCTDeviceEventEmitter.emit(...)` directly.
+
 ## [0.9.0] — 2026-05-27
 
 ### Added — layered frame-access helpers

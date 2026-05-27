@@ -58,9 +58,6 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
         return [Self.stateUpdateEvent]
     }
 
-    // (startObserving / stopObserving moved next to handleStateUpdate
-    //  for the PiP investigation; remove this comment after.)
-
     // MARK: - Module methods
 
     /// `options` (all optional, sensible defaults documented in
