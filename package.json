@@ -53,6 +53,7 @@
   },
   "homepage": "https://github.com/bhargavkanda/react-native-image-stitcher#readme",
   "devDependencies": {
+    "@react-native-community/cli": "20.1.0",
     "@types/jest": "^29.5.0",
     "@types/react": "^19.0.0",
     "jest": "^29.7.0",
