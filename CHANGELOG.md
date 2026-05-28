@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-05-28
+
 ### Added — v0.10.0 PR A: host-side test infrastructure (`#9A` + `#11A`)
 
 Two parallel test harnesses landed so future tech-debt PRs in the
