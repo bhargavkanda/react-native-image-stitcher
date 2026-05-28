@@ -16,6 +16,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-05-28
+
+### Fixed — AR-mode composed worklets silently throw
+
+`useStitcherWorklet`'s `call(frame)` was invoking the vision-camera
+Frame Processor plugin on every frame regardless of mode.  In AR
+mode the frame is a `StitcherFrameHostObject` (no `__frame` JSI
+marker), so the vc plugin threw `getPropertyAsObject: property
+'__frame' is undefined`.  The throw was caught silently by
+`RNSARWorkletRuntime`'s per-worklet error isolation (logged to
+`os_log`, not surfaced to JS), causing any host code AFTER
+`stitcher.call(frame)` in the composed worklet body —
+`runOnJS` callbacks, `Worklets.createRunOnJS` dispatches, further
+host worklet logic — to silently never execute in AR mode.
+
+The hook's module docstring already promised AR mode would no-op
+("AR mode is unaffected — the AR-session dispatch path already
+composes natively"), but the code didn't enforce it.  v0.11.1 adds
+an early-return on `frame.source === 'ar'` in `useStitcherWorklet`'s
+worklet body.  AR stitching continues to run natively via
+`RNSARSession.swift`'s first-party callback path
+(`consumer.consumeFrame(arFrame, pose)` at line 510-511), which is
+the architectural contract for AR-mode stitching since v0.8.0.
+
+This bug was latent in v0.11.0 — surfaced by Test 2 of
+`docs/v0.11.0-manual-verification-checklist.md` on Ram's iPhone.
+
+Also added: `StitcherJsiInstaller::install` now eagerly initializes
+the worklets-core default `JsiWorkletContext` singleton during JSI
+bootstrap.  This is defense-in-depth — worklets-core's own `Worklets`
+module also initializes the default, but eager init from our
+installer makes `runOnJS` from AR-mode worklets robust to host-app
+import order (no dependency on worklets-core's `Worklets` module
+loading before our AR runtime constructs its context).
+
+### Added — Jest test for AR-source short-circuit
+
+New test file `src/stitching/__tests__/useStitcherWorklet.test.ts`
+pins the AR no-op contract.  5 new tests; full suite now 74/74 pass
+(was 69/69 in v0.11.0).
+
+## [0.11.0] — 2026-05-28
+
+### Added — `useStitcherWorklet` for non-AR composition
+
+Closes the v0.8.0 Phase 5 either-or constraint: hosts that want to
+write their OWN `useFrameProcessor` worklet body can now COMPOSE
+first-party stitching back in with a single `stitcher.call(frame)`
+call, instead of having to choose between their worklet and the
+lib's stitching.
+
+```tsx
+import {
+  Camera, useFrameProcessor, useStitcherWorklet,
+  type StitcherFrame,
+} from 'react-native-image-stitcher';
+
+function MyScreen() {
+  const stitcher = useStitcherWorklet();
+  const fp = useFrameProcessor((frame: StitcherFrame) => {
+    'worklet';
+    hostPreLogic(frame);
+    stitcher.call(frame);   // ← first-party stitching
+    hostPostLogic(frame);
+  }, [stitcher.call]);
+  return <Camera frameProcessor={fp} ... />;
+}
+```
+
+Migrating from v0.10.x is a one-line diff:
+
+```diff
++ const stitcher = useStitcherWorklet();
+  const fp = useFrameProcessor((frame: StitcherFrame) => {
+    'worklet';
++   stitcher.call(frame);   // ← first-party stitching back in
+    hostLogic(frame);
+- }, [hostLogic]);
++ }, [stitcher.call, hostLogic]);
+```
+
+### Changed
+
+- `useFrameProcessorDriver` is now a thin wrapper around
+  `useStitcherWorklet`.  Public API (`start` / `stop` /
+  `isRunning` / `frameProcessor`) is unchanged.  Pose-reset
+  semantics preserved via the new `stitcher.reset()` method which
+  the driver calls internally from `start()` and `stop()`.
+- The gyro subscription that powers pose tracking now lives in
+  `useStitcherWorklet` and runs for the lifetime of the hook
+  (mount → unmount) rather than being tied to the driver's
+  `start()` / `stop()`.  In practice this matches all observed
+  host integrations (capture screens mount `<Camera>` for the
+  duration of capture; idle screens don't).  Battery delta is
+  small (≪1% CPU at 33 ms gyro sampling).
+- `<Camera frameProcessor>` JSDoc rewritten: the "Non-AR mode
+  tradeoff (HONEST)" section is replaced by a "Non-AR mode
+  composition" section that shows the v0.11.0 composition
+  pattern.  The runtime `console.info` text is softened from
+  "your worklet REPLACES first-party stitching, panorama capture
+  will not produce stitched output" to "if you want first-party
+  stitching alongside, call `useStitcherWorklet()` from your
+  worklet body".
+- Example app (`example/App.tsx`) now demonstrates the
+  composition pattern end-to-end: one
+  `useFrameProcessor` body that calls both `stitcher.call(frame)`
+  and the existing 1 Hz host tick log.  `<Camera>` mounts with
+  `frameProcessor={exampleFrameProcessor}` (previously left
+  unwired with an "intentionally unused" comment block).
+- `docs/frame-access-tiers.md` adds a `useStitcherWorklet`
+  reference section + 1-line migration diff.  Softens the
+  "either-or" language in the Tier 3 + AR-vs-non-AR sections.
+
+### Files changed
+- NEW: `src/stitching/useStitcherWorklet.ts`
+- `src/stitching/useFrameProcessorDriver.ts` (refactored thin wrapper)
+- `src/index.ts` (export new hook + types)
+- `src/camera/Camera.tsx` (docstring + console.info softened)
+- `example/App.tsx` (composition demo)
+- `docs/frame-access-tiers.md` (new section + softened wording)
+- `docs/v0.11.0-manual-verification-checklist.md` (Phase 4 human-loop checklist)
+
+### Not touched
+- All native code (`ios/Sources/`, `android/src/main/cpp/`,
+  `android/src/main/java/io/imagestitcher/rn/`) — pure TS refactor.
+- AR-mode dispatch path — already composes natively.
+- `useFrameProcessor` (v0.8.0 public hook) — unchanged.
+
+### Verified
+- JS Jest: **69 / 69 pass**
+- C++ Gtest: **17 / 17 pass**
+- Android JUnit: **6 / 6 pass**
+- iOS build (Debug, generic iOS device): clean
+- Android `:app:assembleDebug`: clean
+- Real-device panorama capture verification deferred to the
+  human-in-the-loop checklist (`docs/v0.11.0-manual-verification-checklist.md`).
+
 ## [0.10.0] — 2026-05-28
 
 ### Added — v0.10.0 PR A: host-side test infrastructure (`#9A` + `#11A`)

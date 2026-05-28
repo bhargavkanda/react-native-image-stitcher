@@ -97,13 +97,10 @@ return <Camera frameProcessor={fp} ... />;
 >    instead — it's the right primitive for OCR via Vision/ML Kit, TFLite
 >    ML, LiDAR depth.
 > 2. **Non-AR mode** — wiring `useFrameStream`'s returned processor through
->    `<Camera frameProcessor={...}>` displaces the lib's first-party
->    stitching driver (Phase 5 either-or). Panorama capture won't produce
->    stitched output while the host frameProcessor is wired.
->
-> Both addressed in v0.11.0 via `useStitcherWorklet` composition + the
-> `__stitcherProxy` host-function extension. Until then, treat Layer 3 as
-> "non-AR-only when first-party stitching isn't needed concurrently."
+>    `<Camera frameProcessor={...}>` REPLACES the lib's first-party
+>    stitching driver unless the host's worklet body also calls
+>    `useStitcherWorklet().call(frame)` to compose first-party stitching
+>    back in (v0.11.0+). See `useStitcherWorklet` reference below.
 
 ```tsx
 import { Camera, useFrameStream, type SampledFrame }
@@ -186,7 +183,7 @@ When no host hooks are mounted, the lib's first-party stitching path is unchange
 All four hooks work in both modes:
 
 - **AR mode**: worklets auto-register via `globalThis.__stitcherProxy` (v0.8.0 Phase 4b.i / 4b.iii). The AR-session dispatch path fans out to first-party stitching + every registered host worklet on every AR frame, with per-worklet failure isolation.
-- **Non-AR mode**: the returned frame processor is passed to `<Camera frameProcessor={...}>` to wire up. **Tradeoff**: vc's `<Camera>` accepts ONE processor — supplying a host processor in non-AR mode displaces the lib's first-party stitching driver. AR mode does NOT have this constraint. The v0.11.0 plan addresses this via `useStitcherWorklet` composition (track: `docs/plans/2026-05-27-v0.11.0-non-ar-composition.md`).
+- **Non-AR mode**: the returned frame processor is passed to `<Camera frameProcessor={...}>` to wire up. vc's `<Camera>` accepts ONE processor — supplying a host processor in non-AR mode REPLACES the lib's first-party stitching driver unless the host worklet body calls `stitcher.call(frame)` (from `useStitcherWorklet`) to compose it back in. See the `useStitcherWorklet` reference below.
 
 ## Worklet hygiene
 
@@ -196,11 +193,54 @@ Three constraints all worklet bodies share:
 2. **Buffer lifetime is one worklet call.** `frame.toArrayBuffer()` returns bytes valid only inside the worklet. Copy synchronously or pass to a native plugin that takes ownership.
 3. **Don't block.** The next frame's processing is gated on the previous one returning. Long work belongs behind `runOnJS` or `Worklets.createRunOnJS`.
 
+## `useStitcherWorklet` (v0.11.0+) — composable first-party stitching
+
+Exposes the lib's first-party stitching (throttle + pose synthesis + native plugin call) as a callable worklet function.  Use this when you want to write your OWN `useFrameProcessor` worklet body that calls custom per-frame logic AND first-party stitching, without one displacing the other.
+
+```tsx
+import {
+  Camera, useFrameProcessor, useStitcherWorklet,
+  type StitcherFrame,
+} from 'react-native-image-stitcher';
+
+function MyScreen() {
+  const stitcher = useStitcherWorklet();
+  const fp = useFrameProcessor((frame: StitcherFrame) => {
+    'worklet';
+    hostPreLogic(frame);
+    stitcher.call(frame);   // ← first-party stitching
+    hostPostLogic(frame);
+  }, [stitcher.call]);
+  return <Camera frameProcessor={fp} ... />;
+}
+```
+
+- **Threading:** producer-thread (the worklet runtime vc dispatches to).  `stitcher.call` is itself a worklet — no thread hop.
+- **Pose tracking:** auto-managed.  Gyro subscribes on mount, unsubscribes on unmount.  Call `stitcher.reset()` at the start of each capture to zero accumulated pose between captures (the lib's built-in `useFrameProcessorDriver` does this internally for the default `<Camera>` integration; composed hosts should do it explicitly).
+- **Lifetime:** safe to call before the JSI plugin has resolved — internally short-circuits.  Read `stitcher.isReady` (boolean) to gate UI on plugin readiness.
+- **Pairing with `IncrementalStitcher.start`:** the plugin's per-frame call into the engine is gated by `frameProcessorIngestEnabled`, which is TRUE only when the stitcher was started with `frameSourceMode === 'frameProcessor'`.  Composed hosts must do this wiring themselves; the lib's `<Camera>` does it automatically when using the default driver.
+- **AR mode:** no effect — `<Camera frameProcessor>` is non-functional in AR mode (vc's `<Camera>` isn't mounted in that path).  Host worklets in AR mode fire via `useFrameProcessor`'s `__stitcherProxy` auto-registration (v0.8.0 Phase 4b.i / 4b.iii).
+
+### Migrating from v0.10.x
+
+Hosts that adopted the v0.8.0 Phase 5 `frameProcessor` prop on v0.10.x currently REPLACE first-party stitching in non-AR mode (one-shot `console.info` notes this).  One-line code change to compose:
+
+```diff
++ const stitcher = useStitcherWorklet();
+  const fp = useFrameProcessor((frame: StitcherFrame) => {
+    'worklet';
++   stitcher.call(frame);   // ← first-party stitching back in
+    hostLogic(frame);
+- }, [hostLogic]);
++ }, [stitcher.call, hostLogic]);
+```
+
 ## See also
 
 - `src/stitching/useFrameProcessor.ts` — the v0.8.0 base hook with full docstring
 - `src/stitching/useThrottledFrameProcessor.ts` — Layer 2 hook
 - `src/stitching/useFrameStream.ts` — Layer 3 hook
 - `src/stitching/useKeyframeStream.ts` — Tier 1 hook
+- `src/stitching/useStitcherWorklet.ts` — v0.11.0 composition hook
 - `src/stitching/StitcherFrame.ts` — the unified frame contract worklets receive
 - `docs/plans/2026-05-27-v0.9.0-layered-frame-helpers.md` — design rationale

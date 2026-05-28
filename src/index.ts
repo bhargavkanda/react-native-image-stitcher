@@ -226,6 +226,19 @@ export type {
   FrameProcessorDriverHandle,
 } from './stitching/useFrameProcessorDriver';
 
+// v0.11.0 — composable first-party stitching as a worklet function.
+// Hosts that want to COMPOSE their own per-frame logic with the
+// lib's stitching (instead of REPLACING it via the <Camera>
+// `frameProcessor` prop) call this hook + invoke `stitcher.call`
+// inside their own `useFrameProcessor` body.  See
+// `docs/host-app-integration.md` § Tier 3 for the full pattern.
+export { useStitcherWorklet } from './stitching/useStitcherWorklet';
+export type {
+  UseStitcherWorkletOptions,
+  StitcherWorkletHandle,
+  StitcherWorkletInput,
+} from './stitching/useStitcherWorklet';
+
 // ── Batch stitching ───────────────────────────────────────────────────
 // Feed a video file straight to OpenCV's cv::Stitcher, bypassing the
 // incremental pipeline.  Useful when you have content captured
