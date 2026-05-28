@@ -33,6 +33,18 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
 
     public override init() {
         super.init()
+        // Under RN bridgeless interop the bridge's init() can be
+        // invoked twice on the same instance (observed via identical
+        // instance pointers firing the observer selector twice per
+        // notification).  Defensively remove any prior registration
+        // for this notification name before adding one, so the
+        // observer can only fire once per post regardless of how
+        // many times init runs.
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .retailensIncrementalStateUpdate,
+            object: nil
+        )
         // Subscribe once at construction.  The handler self-checks
         // `hasListeners` before forwarding, so we don't have to
         // unsubscribe / resubscribe on every JS listener attach/detach.
@@ -481,31 +493,46 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
             )
         }
         guard hasListeners else {
-            if refineStage != nil {
-                // v0.10.0 PR B diag — surface dropped refine events
-                // explicitly so we can tell "no listener attached" from
-                // "no notification fired".  Remove with the rest of
-                // the refine-diag logging once the pill is confirmed.
+            if let stage = refineStage {
                 IncrementalStitcher.fileLog(
-                    "bridge handleStateUpdate DROPPED refineStage=\(refineStage!) — hasListeners=false"
+                    "bridge handleStateUpdate DROPPED refineStage=\(stage) — hasListeners=false"
                 )
             }
             return
         }
         guard let userInfo = notification.userInfo else { return }
-        // FIX: RCTEventEmitter.sendEvent is documented to be called
-        // from any thread, but in practice events from background
-        // threads can be dropped silently if the bridge is in
-        // certain states.  Dispatch to main queue to guarantee
-        // delivery.  See e.g. RN issues #19518, #28250.
+        // We deliver via `bridge.enqueueJSCall("RCTDeviceEventEmitter", "emit", ...)`
+        // rather than `RCTEventEmitter.sendEvent(...)` because under RN
+        // bridgeless interop `sendEvent` silently no-ops for some
+        // event-body shapes even when `_bridge` is non-nil and
+        // `_listenerCount > 0` (confirmed via os_log instrumentation
+        // during v0.10.0 PR B development — refine events with
+        // refineStage/refineProgress/refineFrames were not reaching
+        // any JS subscriber while live state events with a smaller
+        // body shape on the same channel were).  enqueueJSCall is
+        // the underlying mechanism sendEvent uses in Paper mode, so
+        // it is strictly at least as well-supported.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             if hasPath || refineStage != nil {
                 IncrementalStitcher.fileLog(
-                    "bridge sendEvent (main queue) body.panoramaPath=\(userInfo["panoramaPath"] ?? "MISSING") refineStage=\(refineStage ?? "nil")"
+                    "bridge enqueueJSCall (main queue) body.panoramaPath=\(userInfo["panoramaPath"] ?? "MISSING") refineStage=\(refineStage ?? "nil")"
                 )
             }
-            self.sendEvent(withName: Self.stateUpdateEvent, body: userInfo)
+            guard let bridge = self.bridge else {
+                if hasPath || refineStage != nil {
+                    IncrementalStitcher.fileLog(
+                        "bridge enqueueJSCall DROPPED — self.bridge is nil"
+                    )
+                }
+                return
+            }
+            bridge.enqueueJSCall(
+                "RCTDeviceEventEmitter",
+                method: "emit",
+                args: [Self.stateUpdateEvent, userInfo],
+                completion: nil
+            )
         }
     }
 
