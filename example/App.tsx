@@ -38,6 +38,7 @@ import {
 import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
+  getIncrementalNativeModule,
   subscribeIncrementalState,
   useFrameProcessor,
   useKeyframeStream,
@@ -79,8 +80,15 @@ function App(): React.JSX.Element {
   // job to design.  See the hook's docstring at
   // `src/stitching/useKeyframeStream.ts` for the AcceptedKeyframe
   // contract + an OCR-plugin example.
+  // v0.10.0 — also collect each keyframe path into a ref so the
+  // Re-refine button below can pass them straight to
+  // `module.refinePanorama(...)`.  Cleared whenever a new panorama
+  // capture starts (onCaptureSourceChange to panorama mode) or when
+  // the preview is dismissed (effectively a fresh session).
+  const collectedKeyframesRef = useRef<string[]>([]);
   useKeyframeStream(
     useCallback((kf: AcceptedKeyframe) => {
+      collectedKeyframesRef.current.push(kf.jpegPath);
       // eslint-disable-next-line no-console
       console.log('[example] useKeyframeStream', {
         index: kf.index,
@@ -88,6 +96,7 @@ function App(): React.JSX.Element {
         rotation: kf.pose.rotation,
         translation: kf.pose.translation,
         timestamp: kf.timestamp,
+        cumulative: collectedKeyframesRef.current.length,
       });
     }, []),
   );
@@ -212,6 +221,38 @@ function App(): React.JSX.Element {
     console.log('[example] onCapture', result);
     setPreview(result);
   };
+
+  // v0.10.0 — manually trigger `module.refinePanorama(...)` against
+  // the keyframes collected from `useKeyframeStream` during the
+  // capture.  Demonstrates the v0.10.0 #15A refineProgress events
+  // end-to-end (the auto-refine path from hybrid finalize is a no-op
+  // today because the hybrid engine doesn't persist per-frame JPEGs).
+  //
+  // Only meaningful for the batch-keyframe engine — that's the only
+  // mode `useKeyframeStream` populates.  Other engines (hybrid /
+  // slit-scan / firstwins) leave `collectedKeyframesRef` empty and
+  // the button stays hidden.
+  const handleReRefine = useCallback(async () => {
+    const native = getIncrementalNativeModule();
+    if (!native?.refinePanorama || preview?.type !== 'panorama') return;
+    const framePaths = [...collectedKeyframesRef.current];
+    if (framePaths.length < 2) return;
+    const outputPath = preview.uri.replace(/\.jpe?g$/i, '-refined.jpg')
+      .replace(/^file:\/\//, '');
+    try {
+      const r = await native.refinePanorama({
+        framePaths,
+        outputPath,
+        config: { warperType: 'spherical', blenderType: 'multiband',
+                  seamFinderType: 'graphcut', jpegQuality: 90 },
+      });
+      // eslint-disable-next-line no-console
+      console.log('[example] refinePanorama OK', r);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[example] refinePanorama FAILED', err);
+    }
+  }, [preview]);
 
   const handleCaptureSourceChange = (source: CaptureSource): void => {
     // eslint-disable-next-line no-console
@@ -349,12 +390,64 @@ function App(): React.JSX.Element {
                 resizeMode="contain"
               />
 
+              {preview.type === 'panorama'
+                && collectedKeyframesRef.current.length >= 2 && (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.previewRefineButton,
+                    pressed && styles.previewRefineButtonPressed,
+                  ]}
+                  onPress={handleReRefine}
+                  accessibilityRole="button"
+                  accessibilityLabel="Re-refine this panorama"
+                >
+                  <Text style={styles.previewRefineLabel}>
+                    Re-refine ({collectedKeyframesRef.current.length} keyframes)
+                  </Text>
+                </Pressable>
+              )}
+
+              {/*
+                Mirror the refine-progress pill INSIDE the modal so
+                the user sees the validating → stitching → writing →
+                done stages while the preview is visible.  The
+                outer-screen instance below also stays (for the
+                hybrid auto-refine path when keyframes ARE persisted
+                in a future version).
+              */}
+              {refine !== null && (
+                <View
+                  style={[
+                    styles.refinePillModal,
+                    refine.stage === 'error' && styles.refinePillError,
+                    refine.stage === 'done' && styles.refinePillDone,
+                  ]}
+                  pointerEvents="none"
+                  accessibilityRole="text"
+                >
+                  <Text style={styles.refinePillLabel}>
+                    {refine.stage === 'error'
+                      ? `Refine error: ${refine.error ?? 'unknown'}`
+                      : `Refine: ${refine.stage}${
+                          refine.frames !== undefined
+                            ? ` (${refine.frames} frames)`
+                            : ''
+                        }  •  ${Math.round(refine.progress * 100)}%`}
+                  </Text>
+                </View>
+              )}
+
               <Pressable
                 style={({ pressed }) => [
                   styles.previewCloseButton,
                   pressed && styles.previewCloseButtonPressed,
                 ]}
-                onPress={() => setPreview(null)}
+                onPress={() => {
+                  // v0.10.0 — reset keyframe collection on close so
+                  // the next capture starts clean.
+                  collectedKeyframesRef.current = [];
+                  setPreview(null);
+                }}
                 accessibilityRole="button"
                 accessibilityLabel="Close preview"
               >
@@ -445,6 +538,22 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '600',
   },
+  previewRefineButton: {
+    marginHorizontal: 16,
+    marginTop: 16,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: '#007aff',
+    alignItems: 'center',
+  },
+  previewRefineButtonPressed: {
+    backgroundColor: '#0058b3',
+  },
+  previewRefineLabel: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '600',
+  },
   refinePill: {
     position: 'absolute',
     top: 56,
@@ -453,6 +562,18 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 999,
     backgroundColor: 'rgba(0, 122, 255, 0.92)',  // iOS systemBlue
+  },
+  refinePillModal: {
+    // Same visual treatment as `refinePill` but positioned as a
+    // regular block inside the modal so it shows above the preview
+    // image without absolute-positioning math against the modal's
+    // SafeAreaView.
+    alignSelf: 'center',
+    marginTop: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0, 122, 255, 0.92)',
   },
   refinePillDone: {
     backgroundColor: 'rgba(52, 199, 89, 0.92)',  // iOS systemGreen
