@@ -1863,12 +1863,27 @@ public final class IncrementalStitcher: NSObject {
         config: [String: Any],
         completion: @escaping ([String: Any]?, NSError?) -> Void
     ) {
+        // v0.10.0 #15A — emit `validating` at the very top so JS sees
+        // refine activity even when validation fails fast.  Frames may
+        // be empty here; report whatever the caller asked for.
+        emitRefineProgress(
+            stage: "validating",
+            fraction: 0.05,
+            frames: framePaths.count,
+            errorMessage: nil
+        )
         guard framePaths.count >= 2 else {
+            let msg = "refinePanorama requires at least 2 framePaths (got \(framePaths.count))."
+            emitRefineProgress(
+                stage: "error",
+                fraction: 1.0,
+                frames: framePaths.count,
+                errorMessage: msg
+            )
             completion(nil, NSError(
                 domain: "RNImageStitcherIncremental",
                 code: 9101,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "refinePanorama requires at least 2 framePaths (got \(framePaths.count))."]
+                userInfo: [NSLocalizedDescriptionKey: msg]
             ))
             return
         }
@@ -1876,11 +1891,17 @@ public final class IncrementalStitcher: NSObject {
         for p in framePaths {
             let cleaned = p.hasPrefix("file://") ? String(p.dropFirst(7)) : p
             if !fm.fileExists(atPath: cleaned) {
+                let msg = "refinePanorama: keyframe missing on disk — \(cleaned)"
+                emitRefineProgress(
+                    stage: "error",
+                    fraction: 1.0,
+                    frames: framePaths.count,
+                    errorMessage: msg
+                )
                 completion(nil, NSError(
                     domain: "RNImageStitcherIncremental",
                     code: 9102,
-                    userInfo: [NSLocalizedDescriptionKey:
-                        "refinePanorama: keyframe missing on disk — \(cleaned)"]
+                    userInfo: [NSLocalizedDescriptionKey: msg]
                 ))
                 return
             }
@@ -1912,7 +1933,18 @@ public final class IncrementalStitcher: NSObject {
                cleanedOutput,
                warper, blender, seam)
 
-        refineQueue.async {
+        // v0.10.0 #15A — capture for the inner closure; `self` is
+        // captured weakly so the progress emitter survives only as
+        // long as the IncrementalStitcher itself does.  An emitter
+        // call on a torn instance is a no-op via `?.`.
+        let frameCount = framePaths.count
+        refineQueue.async { [weak self] in
+            self?.emitRefineProgress(
+                stage: "stitching",
+                fraction: 0.1,
+                frames: frameCount,
+                errorMessage: nil
+            )
             // C2-style: closure captures only value-typed locals
             // (paths, output path, config strings).  No `self` access
             // is needed for the cv::Stitcher call — OpenCVStitcher is
@@ -1935,24 +1967,53 @@ public final class IncrementalStitcher: NSObject {
                 // OpenCVStitcher hit one of its six guarded failure
                 // returns; surface as a clean NSError.
                 if r.width == 0 && r.height == 0 {
+                    let msg = "refinePanorama: stitcher returned sentinel — see preceding [BatchStitcher] log for cause."
+                    self?.emitRefineProgress(
+                        stage: "error",
+                        fraction: 1.0,
+                        frames: frameCount,
+                        errorMessage: msg
+                    )
                     completion(nil, NSError(
                         domain: "RNImageStitcherIncremental",
                         code: 9107,
-                        userInfo: [NSLocalizedDescriptionKey:
-                            "refinePanorama: stitcher returned sentinel — see preceding [BatchStitcher] log for cause."]
+                        userInfo: [NSLocalizedDescriptionKey: msg]
                     ))
                     return
                 }
+                // Stitch succeeded — OpenCVStitcher writes the JPEG
+                // internally before returning, so "writing" really
+                // captures the final assembly + file I/O cost.  Emit
+                // here so JS can flip its label from "Stitching" to
+                // "Writing" before the done event fires.
+                self?.emitRefineProgress(
+                    stage: "writing",
+                    fraction: 0.9,
+                    frames: frameCount,
+                    errorMessage: nil
+                )
+                self?.emitRefineProgress(
+                    stage: "done",
+                    fraction: 1.0,
+                    frames: frameCount,
+                    errorMessage: nil
+                )
                 completion([
                     "panoramaPath": r.outputPath,
                     "width": Int(r.width),
                     "height": Int(r.height),
-                    "framesRequested": framePaths.count,
-                    "framesIncluded": framePaths.count,
+                    "framesRequested": frameCount,
+                    "framesIncluded": frameCount,
                     "framesDropped": 0,
                     "finalConfidenceThresh": -1.0,
                 ], nil)
             } catch let err as NSError {
+                self?.emitRefineProgress(
+                    stage: "error",
+                    fraction: 1.0,
+                    frames: frameCount,
+                    errorMessage: err.localizedDescription
+                )
                 completion(nil, err)
             }
         }
@@ -2084,6 +2145,74 @@ public final class IncrementalStitcher: NSObject {
         dict["isRefining"] = isRefining
         if let p = refinedPanoramaPath {
             dict["refinedPanoramaPath"] = p
+        }
+        NotificationCenter.default.post(
+            name: .retailensIncrementalStateUpdate,
+            object: nil,
+            userInfo: dict
+        )
+    }
+
+    /// v0.10.0 #15A — emit a refine-pipeline phase update on the same
+    /// `IncrementalStateUpdate` channel that carries `isRefining` /
+    /// `refinedPanoramaPath`.  Five `stage` values fire across the
+    /// lifetime of one `refinePanorama` call:
+    ///
+    ///   - `validating` (fraction 0.05) — synchronous input checks
+    ///   - `stitching`  (fraction 0.10) — start of the OpenCV stitch
+    ///   - `writing`    (fraction 0.90) — stitch returned, JPEG written
+    ///   - `done`       (fraction 1.00) — completion handler invoked
+    ///   - `error`      (fraction 1.00) — failure path (`errorMessage`
+    ///                                    is non-nil)
+    ///
+    /// `fraction` is intentionally coarse: OpenCV's `Stitcher` doesn't
+    /// expose stage-by-stage callbacks, so the 0.10 → 0.90 jump is a
+    /// single opaque step.  JS uses the `stage` string for the UI
+    /// label and `fraction` purely for spinner progress.
+    ///
+    /// Reuses the existing channel (rather than introducing a new
+    /// device-event name) so the JS subscriber doesn't need to wire
+    /// a second listener.  The payload carries the same skeleton
+    /// `emitRefinementState` emits (lastState fields preserved) so
+    /// `isRefining` / `refinedPanoramaPath` sticky-merge logic on the
+    /// JS side keeps working untouched.
+    private func emitRefineProgress(
+        stage: String,
+        fraction: Double,
+        frames: Int?,
+        errorMessage: String?
+    ) {
+        // Disk-trail breadcrumb — every refine emit lands here so a
+        // future regression can be diagnosed by pulling the bridge's
+        // debug file without needing live Console.app access.
+        IncrementalStitcher.fileLog(
+            "[refine.progress] stage=\(stage) frac=\(fraction) frames=\(frames ?? -1) hasError=\(errorMessage != nil)"
+        )
+        stateLock.lock()
+        let prev = self.lastState
+        stateLock.unlock()
+        let state = IncrementalStateObject(
+            panoramaPath: prev?.panoramaPath,
+            width: prev?.width ?? 0,
+            height: prev?.height ?? 0,
+            acceptedCount: prev?.acceptedCount ?? 0,
+            outcome: prev?.outcome ?? .acceptedHigh,
+            confidence: prev?.confidence ?? 1.0,
+            overlapPercent: prev?.overlapPercent ?? -1.0,
+            processingMs: 0,
+            isLandscape: prev?.isLandscape ?? false,
+            paintedExtent: prev?.paintedExtent ?? 0,
+            panExtent: prev?.panExtent ?? 0,
+            keyframeMax: prev?.keyframeMax ?? 0
+        )
+        var dict = state.asDictionary()
+        dict["refineStage"] = stage
+        dict["refineProgress"] = fraction
+        if let f = frames {
+            dict["refineFrames"] = f
+        }
+        if let e = errorMessage {
+            dict["refineError"] = e
         }
         NotificationCenter.default.post(
             name: .retailensIncrementalStateUpdate,

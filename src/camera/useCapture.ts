@@ -18,7 +18,7 @@
  *   - This hook does NOT persist captures.  Host apps hand the
  *     returned CaptureResult to their own storage layer (WatermelonDB
  *     insert, Redux dispatch, whatever).
- *   - Video recording lives in useVideoCapture (TODO).
+ *   - Video recording lives in useVideoCapture.
  *
  * The public API is designed to be minimal and replaceable: host apps
  * that prefer the raw vision-camera API can opt out of this hook and

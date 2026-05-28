@@ -261,6 +261,48 @@ export interface IncrementalState {
    * keyframes on disk.
    */
   refinedPanoramaPath?: string;
+
+  /**
+   * v0.10.0 (#15A) — current phase of an in-flight `refinePanorama`
+   * call.  Fires from both the explicit `module.refinePanorama(...)`
+   * JS API path AND the hybrid-engine auto-refine path (which calls
+   * the same native refinePanorama internally).
+   *
+   * Lifecycle:
+   *   - `"validating"` (fraction 0.05) — synchronous input checks
+   *   - `"stitching"`  (fraction 0.10) — OpenCV stitch in flight
+   *   - `"writing"`    (fraction 0.90) — stitch done, JPEG written
+   *   - `"done"`       (fraction 1.00) — success
+   *   - `"error"`      (fraction 1.00) — failure; `refineError` is set
+   *
+   * Coarse on purpose: OpenCV's Stitcher doesn't expose mid-pipeline
+   * progress, so the 0.10 → 0.90 jump is one opaque step.  Use
+   * `refineStage` for a stage label; use `refineProgress` purely for
+   * spinner progress.
+   *
+   * Undefined when no refinement is in flight.
+   */
+  refineStage?: 'validating' | 'stitching' | 'writing' | 'done' | 'error';
+  /**
+   * v0.10.0 (#15A) — coarse progress fraction in `[0, 1]` aligned
+   * with `refineStage`.  See `refineStage` for the per-stage value
+   * mapping.  Undefined when no refinement is in flight.
+   */
+  refineProgress?: number;
+  /**
+   * v0.10.0 (#15A) — number of input frames the in-flight refine is
+   * processing.  Useful for the UI label
+   * (`Stitching 6 frames…`).  Mirrors the `framesRequested` field
+   * returned in the explicit refinePanorama resolution.  Undefined
+   * when no refinement is in flight.
+   */
+  refineFrames?: number;
+  /**
+   * v0.10.0 (#15A) — present only when `refineStage === 'error'`.
+   * Human-readable error message; the same text the rejected promise
+   * carries.  Use to render a one-line failure pill.
+   */
+  refineError?: string;
 }
 
 
