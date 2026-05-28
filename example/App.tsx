@@ -175,6 +175,20 @@ function App(): React.JSX.Element {
   } | null>(null);
   useEffect(() => {
     const sub = subscribeIncrementalState((s) => {
+      // v0.10.0 PR B diag: log EVERY state event with the refine
+      // field shape so we can see iOS vs Android delivery.  Temporary
+      // — remove once the pill is confirmed visible on both platforms.
+      // eslint-disable-next-line no-console
+      console.log('[example] state event', {
+        refineStage: s.refineStage,
+        refineProgress: s.refineProgress,
+        refineFrames: s.refineFrames,
+        refineError: s.refineError,
+        // First few base fields too, to confirm the event got through
+        // at all:
+        outcome: s.outcome,
+        isRefining: s.isRefining,
+      });
       if (s.refineStage === undefined) return;
       setRefine({
         stage: s.refineStage,
