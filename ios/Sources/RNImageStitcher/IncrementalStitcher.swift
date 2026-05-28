@@ -2182,6 +2182,21 @@ public final class IncrementalStitcher: NSObject {
         frames: Int?,
         errorMessage: String?
     ) {
+        // v0.10.0 PR B diag — log at FAULT level so it survives
+        // iOS Console.app rate-limiting.  Confirms the function is
+        // actually entered and the dict is populated.  Remove once
+        // the pill is confirmed reaching JS on both platforms.
+        os_log(.fault, log: Self.diagLog,
+               "[refine.progress] stage=%{public}@ frac=%.2f frames=%d hasError=%d",
+               stage, fraction, frames ?? -1, errorMessage != nil ? 1 : 0)
+        // Also write to the bridge's debug file so we can pull a
+        // ground-truth log of every emit even if Console.app is
+        // filtering / paused.  Pulled via `IncrementalStitcher.fileLog`
+        // path — same one the bridge writes its handleStateUpdate
+        // traces to.
+        IncrementalStitcher.fileLog(
+            "[refine.progress] stage=\(stage) frac=\(fraction) frames=\(frames ?? -1) hasError=\(errorMessage != nil)"
+        )
         stateLock.lock()
         let prev = self.lastState
         stateLock.unlock()
@@ -2208,6 +2223,10 @@ public final class IncrementalStitcher: NSObject {
         if let e = errorMessage {
             dict["refineError"] = e
         }
+        os_log(.fault, log: Self.diagLog,
+               "[refine.progress] posting notification dict.refineStage=%{public}@ dict.count=%d",
+               (dict["refineStage"] as? String) ?? "MISSING",
+               dict.count)
         NotificationCenter.default.post(
             name: .retailensIncrementalStateUpdate,
             object: nil,

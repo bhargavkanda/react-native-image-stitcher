@@ -474,12 +474,24 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
 
     @objc private func handleStateUpdate(_ notification: Notification) {
         let hasPath = (notification.userInfo?["panoramaPath"] != nil)
-        if hasPath {
+        let refineStage = notification.userInfo?["refineStage"] as? String
+        if hasPath || refineStage != nil {
             IncrementalStitcher.fileLog(
-                "bridge handleStateUpdate hasListeners=\(hasListeners) hasPath=\(hasPath) thread=\(Thread.isMainThread ? "main" : "bg")"
+                "bridge handleStateUpdate hasListeners=\(hasListeners) hasPath=\(hasPath) refineStage=\(refineStage ?? "nil") thread=\(Thread.isMainThread ? "main" : "bg")"
             )
         }
-        guard hasListeners else { return }
+        guard hasListeners else {
+            if refineStage != nil {
+                // v0.10.0 PR B diag — surface dropped refine events
+                // explicitly so we can tell "no listener attached" from
+                // "no notification fired".  Remove with the rest of
+                // the refine-diag logging once the pill is confirmed.
+                IncrementalStitcher.fileLog(
+                    "bridge handleStateUpdate DROPPED refineStage=\(refineStage!) — hasListeners=false"
+                )
+            }
+            return
+        }
         guard let userInfo = notification.userInfo else { return }
         // FIX: RCTEventEmitter.sendEvent is documented to be called
         // from any thread, but in practice events from background
@@ -488,9 +500,9 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
         // delivery.  See e.g. RN issues #19518, #28250.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            if hasPath {
+            if hasPath || refineStage != nil {
                 IncrementalStitcher.fileLog(
-                    "bridge sendEvent (main queue) body.panoramaPath=\(userInfo["panoramaPath"] ?? "MISSING")"
+                    "bridge sendEvent (main queue) body.panoramaPath=\(userInfo["panoramaPath"] ?? "MISSING") refineStage=\(refineStage ?? "nil")"
                 )
             }
             self.sendEvent(withName: Self.stateUpdateEvent, body: userInfo)
