@@ -82,7 +82,10 @@ import {
 } from './buildPanoramaInitialSettings';
 import { isLowMemDevice } from './lowMemDevice';
 import { useCapture } from './useCapture';
-import { useDeviceOrientation } from './useDeviceOrientation';
+import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
+import { useOrientationDrift } from './useOrientationDrift';
+import { OrientationDriftModal } from './OrientationDriftModal';
+import { ViewportCropOverlay } from './ViewportCropOverlay';
 import {
   getIncrementalNativeModule,
   incrementalStitcherIsAvailable,
@@ -292,6 +295,27 @@ export interface CameraProps {
   onLensChange?: (lens: CameraLens) => void;
   onFramesDropped?: (info: FramesDroppedInfo) => void;
   onError?: (err: CameraError) => void;
+
+  /**
+   * v0.12.0 — fires when the SDK auto-abandons an in-progress
+   * capture without producing output.  `reason` is a string union
+   * so future reasons (network loss, low memory, etc.) can be added
+   * without breaking the callback signature.
+   *
+   * Currently the only reason in v0.12 is `'orientation-drift'`:
+   * the user rotated the device between Mode A (landscape + vertical
+   * pan) and Mode B (portrait + horizontal pan) mid-capture.  The
+   * engine docstring at `incremental.ts:373-403` is explicit that
+   * cross-mode capture is "best-effort, not supported," so the SDK
+   * decisively cancels the capture (`incremental.cancel()`) and
+   * surfaces `OrientationDriftModal` to explain what happened.
+   *
+   * Hosts use this callback to clean up their own state (e.g., reset
+   * a wizard step, log telemetry, surface their own retry UX in
+   * addition to the SDK's built-in modal).  No `onCapture` will fire
+   * for an abandoned capture.
+   */
+  onCaptureAbandoned?: (reason: 'orientation-drift') => void;
 
   /**
    * Optional host-supplied vision-camera frame processor.
@@ -656,6 +680,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onLensChange,
     onFramesDropped,
     onError,
+    onCaptureAbandoned,
     frameProcessor: hostFrameProcessor,
     engine = 'batch-keyframe',
   } = props;
@@ -856,6 +881,64 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // Safety: stop the driver if the component unmounts mid-recording.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => () => { fpDriver.stop(); }, []);
+
+  // ── v0.12.0 — Orientation drift detection + auto-abandon ────────
+  //
+  // The incremental engine supports both portrait (Mode B, horizontal
+  // pan) and landscape (Mode A, vertical pan) capture as first-class,
+  // but the docstring at `incremental.ts:373-403` is explicit that
+  // mixing them mid-capture is "best-effort, not supported" — the
+  // output rotation becomes ambiguous and the stitched panorama is
+  // malformed.  v0.12 protects against this by snapshotting the
+  // orientation at `start()` and auto-cancelling the capture the
+  // instant the user rotates to a different orientation mid-flight.
+  //
+  // The modal is informational only — by the time it renders, the
+  // capture is already stopped.  No Continue/Resume affordance per
+  // the engine spec.
+  const drift = useOrientationDrift(statusPhase === 'recording');
+  const [driftModalDismissed, setDriftModalDismissed] = useState(false);
+  // Reset the dismissed flag when a new capture starts (or any non-
+  // recording state) so the next drift event surfaces a fresh modal.
+  useEffect(() => {
+    if (statusPhase !== 'recording') setDriftModalDismissed(false);
+  }, [statusPhase]);
+
+  useEffect(() => {
+    if (!drift.drifted || statusPhase !== 'recording') return;
+    // Auto-abandon the in-flight capture.  Order matches handleHoldEnd's
+    // "stitch" path but skips finalize:
+    //   1. Stop pumping frames so no new keyframes arrive mid-cancel.
+    //   2. Tell the native engine to drop accumulated state
+    //      (`incremental.cancel()`).
+    //   3. Reset statusPhase back to idle.
+    //   4. Notify the host via `onCaptureAbandoned`.
+    //
+    // Wrapped in an IIFE because useEffect callbacks can't be async
+    // directly.  Errors from `incremental.cancel()` are caught + sent
+    // through `onError` — abandonment must succeed even if the engine
+    // is in a weird state.
+    void (async () => {
+      fpDriver.stop();
+      try {
+        await incremental.cancel();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        onError?.(new CameraError(
+          'PANORAMA_FINALIZE_FAILED',
+          `cancel after orientation drift failed: ${message}`,
+          err,
+        ));
+      } finally {
+        setStatusPhase('idle');
+        setRecordingStartedAt(null);
+        onCaptureAbandoned?.('orientation-drift');
+      }
+    })();
+    // Deps: re-run whenever drift latches OR recording state changes.
+    // Other deps are stable refs / setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drift.drifted, statusPhase]);
 
   // v0.8.0 Phase 5 / v0.11.0 — frameProcessor prop semantics:
   //
@@ -1369,18 +1452,39 @@ export function Camera(props: CameraProps): React.JSX.Element {
         />
       )}
 
+      {/* v0.12.0 — ViewportCropOverlay default-on (PR-3): translucent
+          bars showing where the engine's pan-axis crop sits.  Mounted
+          unconditionally so the user can see the framing guides both
+          before and during recording.  Per-orientation render paths
+          live inside the component (PR-3).
+          panFraction matches the engine's default `kPanAxisFractionRect
+          = 0.70`; when settings expose this per-mode we'll wire it
+          through. */}
+      <ViewportCropOverlay panFraction={0.7} />
+
       {/*
-        Bottom area: stacks the live-frame band ABOVE the shutter row
-        so the band is tethered to the shutter on the viewport side
-        (the operator's eye is drawn from the camera preview, down
-        the band, into the shutter — a single continuous reading
-        path).  With the SDK's orientation lock holding the UI in
-        portrait, this stack works the same regardless of how the
-        device is physically held.
+        v0.12.0 — Bottom-controls area is now orientation-aware
+        (R2-lite).  Pre-v0.12 the bottom-bar + band assumed the SDK
+        held the UI in portrait via host-config Info.plist /
+        AndroidManifest orientation lock.  Now we use per-orientation
+        render paths keyed on `useDeviceOrientation()`:
+          - portrait              → bottom edge, band ABOVE shutter
+          - portrait-upside-down  → top edge,    band BELOW shutter
+          - landscape-left        → right edge,  band LEFT of shutter
+          - landscape-right       → left edge,   band RIGHT of shutter
+        Implementation: outer container picks the edge + flex
+        direction; inner band/shutter-row are stable in the JSX (the
+        flex direction does the work).  Mirrors the template pattern
+        in `CaptureStatusOverlay.tsx:268-329` but without CSS rotation
+        transforms — touch targets stay correctly oriented.
       */}
       <View
         pointerEvents="box-none"
-        style={[styles.bottomArea, { paddingBottom: insets.bottom + 12 }]}
+        style={bottomAreaStyleForOrientation(
+          deviceOrientation,
+          insets.bottom + 12,
+          insets.top + 12,
+        )}
       >
         {/* Live-frame band — only visible while recording. */}
         {statusPhase === 'recording' && (
@@ -1391,10 +1495,13 @@ export function Camera(props: CameraProps): React.JSX.Element {
           />
         )}
 
-        {/* Shutter row: lens chip (left), shutter (centre), AR toggle (right). */}
-        <View style={styles.bottomBar}>
-        <View style={styles.bottomBarLeft} />
-        <View style={styles.bottomBarCenter}>
+        {/* Shutter row: lens chip / shutter / AR toggle. Orientation-
+            aware: row in portrait modes, column in landscape modes.
+            The left/center/right slots become top/center/bottom in
+            landscape. */}
+        <View style={bottomBarStyleForOrientation(deviceOrientation)}>
+        <View style={styles.bottomBarSlot} />
+        <View style={styles.bottomBarSlotCenter}>
           <LensChip
             lens={lens}
             onChange={handleLensChange}
@@ -1410,7 +1517,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
             />
           </View>
         </View>
-        <View style={styles.bottomBarRight}>
+        <View style={styles.bottomBarSlotEnd}>
           {lens === '1x' && isARSupportedOnDevice && (
             <ARToggle arEnabled={arPreference} onToggle={handleARToggle} />
           )}
@@ -1425,6 +1532,19 @@ export function Camera(props: CameraProps): React.JSX.Element {
         onChange={setSettings}
         onClose={() => setSettingsModalVisible(false)}
       />
+
+      {/* v0.12.0 — Orientation drift modal.  Shows AFTER the SDK has
+          auto-abandoned the capture (the useEffect above stops the
+          engine + transitions to idle + fires onCaptureAbandoned).
+          Modal exists purely to explain WHY the capture was
+          cancelled.  Single OK button (no Continue) per the engine
+          spec on cross-mode capture being best-effort, not supported. */}
+      <OrientationDriftModal
+        visible={drift.drifted && !driftModalDismissed}
+        captureOrientation={drift.captureOrientation}
+        currentOrientation={drift.currentOrientation}
+        onAcknowledge={() => setDriftModalDismissed(true)}
+      />
     </View>
   );
 }
@@ -1432,6 +1552,111 @@ export function Camera(props: CameraProps): React.JSX.Element {
 
 function noop(): void {
   /* no-op handler used when panorama mode is disabled */
+}
+
+
+/**
+ * v0.12.0 — per-orientation absolute-positioning for the bottom-
+ * controls container.  Anchors the outer View to the user-perceived
+ * "bottom" edge of the device given its current physical orientation,
+ * and picks the inner flex direction so the band/shutter pair
+ * stacks in the right visual order (band on the viewport side of
+ * the shutter, regardless of orientation).
+ *
+ * Insets:
+ *   - portrait: pad bottom by safe-area + 12 (avoids the home indicator).
+ *   - portrait-upside-down: pad top by safe-area-top + 12 (avoids the
+ *     status bar / Dynamic Island in this rotation).
+ *   - landscape-*: 12 px horizontal padding only; safe-area-side is
+ *     unsupported by `useSafeAreaInsets` in landscape under R2-lite
+ *     without further host-config plumbing.  Acceptable for v0.12 —
+ *     the bottom indicator's lateral inset is < 24 px on the
+ *     supported iOS device floor and the bottomBar's flex layout
+ *     absorbs it.
+ */
+function bottomAreaStyleForOrientation(
+  orientation: DeviceOrientation,
+  bottomInsetPx: number,
+  topInsetPx: number,
+): ViewStyle {
+  switch (orientation) {
+    case 'portrait':
+      return {
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        flexDirection: 'column',
+        alignItems: 'stretch',
+        paddingBottom: bottomInsetPx,
+      };
+    case 'portrait-upside-down':
+      // Device upside-down, screen has NOT rotated (iOS apps
+      // default-disable upside-down).  JS-top == user-bottom.
+      // flexDirection 'column-reverse' so the JSX-order
+      // [band, shutter] renders as [shutter, band] in JS — i.e.
+      // shutter at JS-top (= user-bottom), band below it.
+      return {
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        top: 0,
+        flexDirection: 'column-reverse',
+        alignItems: 'stretch',
+        paddingTop: topInsetPx,
+      };
+    case 'landscape-left':
+      // Phone rotated 90° CCW from portrait, screen has NOT
+      // rotated.  JS-right == user-bottom edge.  flexDirection
+      // 'row' so [band, shutter] renders as [band-left, shutter-
+      // right] in JS, which is [band-up-screen, shutter-down-
+      // screen] in user view.  Shutter sits closest to user-
+      // bottom (= JS-right), band immediately above it.
+      return {
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        right: 0,
+        flexDirection: 'row',
+        alignItems: 'stretch',
+        paddingRight: 12,
+      };
+    case 'landscape-right':
+      // Mirror of landscape-left.  JS-left == user-bottom.
+      // flexDirection 'row-reverse' puts JSX-first child at
+      // JS-right; with [band, shutter] in JSX that means
+      // band-at-JS-right and shutter-at-JS-left — shutter at
+      // user-bottom (= JS-left), band above it.
+      return {
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        left: 0,
+        flexDirection: 'row-reverse',
+        alignItems: 'stretch',
+        paddingLeft: 12,
+      };
+  }
+}
+
+
+/**
+ * v0.12.0 — inner shutter-row flex direction: row in portrait,
+ * column in landscape.  In landscape the three slots (lens / shutter
+ * / AR toggle) stack vertically along the user-perceived vertical
+ * axis (which is JS-horizontal under no orientation lock).
+ */
+function bottomBarStyleForOrientation(
+  orientation: DeviceOrientation,
+): ViewStyle {
+  const isLandscape =
+    orientation === 'landscape-left' || orientation === 'landscape-right';
+  return {
+    flexDirection: isLandscape ? 'column' : 'row',
+    paddingHorizontal: isLandscape ? 0 : 18,
+    paddingVertical: isLandscape ? 18 : 0,
+    alignItems: 'center',
+  };
 }
 
 
@@ -1449,27 +1674,18 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.6)',
     fontSize: 13,
   },
-  bottomArea: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    flexDirection: 'column',
-    alignItems: 'stretch',
-  },
-  bottomBar: {
-    flexDirection: 'row',
-    paddingHorizontal: 18,
-    alignItems: 'flex-end',
-  },
-  bottomBarLeft: {
+  // v0.12.0 — `bottomArea` and `bottomBar` styles are now computed
+  // per-orientation by `bottomAreaStyleForOrientation` /
+  // `bottomBarStyleForOrientation` (above).  The static styles below
+  // are the orientation-invariant pieces (slot flex weights).
+  bottomBarSlot: {
     flex: 1,
   },
-  bottomBarCenter: {
+  bottomBarSlotCenter: {
     flex: 1,
     alignItems: 'center',
   },
-  bottomBarRight: {
+  bottomBarSlotEnd: {
     flex: 1,
     alignItems: 'flex-end',
     justifyContent: 'flex-end',

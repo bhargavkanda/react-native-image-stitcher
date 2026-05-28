@@ -1,42 +1,48 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * ViewportCropOverlay — V12.12.
+ * ViewportCropOverlay — V12.12 + v0.12.0 orientation-aware (R2-lite).
  *
  * Translucent dim bars on the camera preview's PAN-AXIS edges
- * showing where the panorama engine's source-crop is.  Earlier
- * versions (V12.11 Step B) put the bars on JS-top/bottom because
- * the engine clipped the long sensor axis (perpendicular to pan
- * in landscape, along pan in portrait) — that produced visible
- * bars on the user-LEFT/RIGHT in landscape, which is the WRONG
- * place: those edges aren't what the engine clips.
+ * showing where the panorama engine's source-crop is.  The engine
+ * clips ALONG the pan axis:
  *
- * V12.12: engine now clips ALONG the pan axis.  In sensor-native
- * coords:
- *   • landscape capture (vertical pan): clip = sensor Y (rows).
- *     User perceives this as TOP and BOTTOM of their landscape view.
- *   • portrait capture (horizontal pan): clip = sensor X (cols).
- *     User perceives this as LEFT and RIGHT of their portrait view.
+ *   • Portrait capture (horizontal pan / Mode B):
+ *     clip = sensor X (cols).  User perceives this as LEFT and RIGHT
+ *     of their portrait view.
  *
- * In JS coords (the host app is portrait-locked):
- *   • portrait device: user-left/right == JS-left/right.  Bars on
- *                       JS-left/right.
- *   • landscape device: user-top/bottom == JS-left/right (because
- *                       the user's vertical maps to JS-horizontal
- *                       under portrait-lock).  Bars on JS-left/right.
+ *   • Landscape capture (vertical pan / Mode A):
+ *     clip = sensor Y (rows).  User perceives this as TOP and BOTTOM
+ *     of their landscape view.
  *
- * So in BOTH device orientations the bars sit at JS-left and JS-right.
- * **No orientation detection needed in this component.**  The
- * engine has already arranged for the clip to manifest at the same
- * JS edges regardless of physical device orientation.
+ * ## v0.12.0 update (R2-lite)
  *
- * Bar width = `(1 - panFraction) / 2` of the JS-horizontal extent.
- * For the default `kPanAxisFractionRect = 0.70` engine constant,
- * each bar is 15 % wide — visibly substantial, matching what the
- * engine clips out per frame.
+ * Pre-v0.12 this component assumed the host app was orientation-
+ * locked to portrait, in which case ALL device orientations mapped
+ * to JS-left + JS-right for the bars (because the user's vertical
+ * mapped to JS-horizontal under portrait-lock).  Under R2-lite the
+ * SDK no longer holds the UI in portrait, so JS coordinates align
+ * with the physical device orientation reported by
+ * `useDeviceOrientation()`.  The bars now live at:
+ *
+ *   portrait, portrait-upside-down → JS-left + JS-right  (horizontal pan)
+ *   landscape-left, landscape-right → JS-top  + JS-bottom (vertical pan)
+ *
+ * Mounting: the flagship `<Camera>` component mounts this overlay
+ * by default in v0.12.0 (PR-3 wiring); Layer-2 hosts can mount it
+ * themselves via the public export.
+ *
+ * ## Bar dimensions
+ *
+ * Bar `(1 - panFraction) / 2` of the pan-axis extent.  For the
+ * default engine constant `kPanAxisFractionRect = 0.70`, each bar
+ * is 15 % of the pan-axis extent — visibly substantial, matching
+ * what the engine clips out per frame.
  */
 
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
+
+import { useDeviceOrientation } from './useDeviceOrientation';
 
 
 export interface ViewportCropOverlayProps {
@@ -52,15 +58,31 @@ export interface ViewportCropOverlayProps {
 export function ViewportCropOverlay({
   panFraction,
 }: ViewportCropOverlayProps): React.JSX.Element | null {
+  const orientation = useDeviceOrientation();
+
   if (panFraction >= 1) return null;
 
-  // (1 - panFraction) / 2 of the JS-horizontal extent on each side.
+  // (1 - panFraction) / 2 of the pan-axis extent on each side.
   const barPercent = `${((1 - panFraction) / 2) * 100}%` as const;
+
+  const isLandscape =
+    orientation === 'landscape-left' || orientation === 'landscape-right';
 
   return (
     <View pointerEvents="none" style={styles.root}>
-      <View style={[styles.bar, { left: 0, top: 0, bottom: 0, width: barPercent }]} />
-      <View style={[styles.bar, { right: 0, top: 0, bottom: 0, width: barPercent }]} />
+      {isLandscape ? (
+        <>
+          {/* Vertical-pan capture: bars at JS-top + JS-bottom. */}
+          <View style={[styles.bar, { left: 0, right: 0, top: 0, height: barPercent }]} />
+          <View style={[styles.bar, { left: 0, right: 0, bottom: 0, height: barPercent }]} />
+        </>
+      ) : (
+        <>
+          {/* Horizontal-pan capture: bars at JS-left + JS-right. */}
+          <View style={[styles.bar, { left: 0, top: 0, bottom: 0, width: barPercent }]} />
+          <View style={[styles.bar, { right: 0, top: 0, bottom: 0, width: barPercent }]} />
+        </>
+      )}
     </View>
   );
 }
