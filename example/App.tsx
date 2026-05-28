@@ -42,6 +42,7 @@ import {
   subscribeIncrementalState,
   useFrameProcessor,
   useKeyframeStream,
+  useStitcherWorklet,
   type AcceptedKeyframe,
   type CameraCaptureResult,
   type CameraError,
@@ -101,22 +102,22 @@ function App(): React.JSX.Element {
     }, []),
   );
 
-  // v0.8.0 — demonstrate `useFrameProcessor` end-to-end.  The
-  // worklet fires:
+  // v0.8.0 + v0.11.0 — demonstrate `useFrameProcessor` end-to-end
+  // in BOTH capture modes.  The worklet fires:
   //
   //   - **AR mode**: on every AR frame at the camera's native rate
-  //     (30–60 fps depending on device).  Auto-registered into the
-  //     native `__stitcherProxy` registry on mount; the AR-session
-  //     dispatch path fans out to it alongside the lib's first-party
-  //     stitching.  Per-worklet failure isolation — a throw here
-  //     won't break stitching.
-  //   - **Non-AR mode**: hostile — vc's `<Camera>` accepts ONE
-  //     processor; passing this hook's return through
-  //     `<Camera frameProcessor={...}>` would displace the lib's
-  //     internal stitching driver.  THIS DEMO does NOT wire it
-  //     through (the panorama capture demo above takes priority).
-  //     Hosts that want a worklet on non-AR mode pay the tradeoff
-  //     explicitly (see CameraProps.frameProcessor docstring).
+  //     (30–60 fps).  Auto-registered into the native
+  //     `__stitcherProxy` registry on mount; the AR-session
+  //     dispatch path fans out to it alongside the lib's
+  //     first-party stitching.  Per-worklet failure isolation — a
+  //     throw here won't break stitching.
+  //   - **Non-AR mode** (v0.11.0 composition): we use
+  //     `useStitcherWorklet` to get the lib's first-party
+  //     stitching as a callable worklet, then call it INSIDE the
+  //     host worklet body so both stitching AND the host tick log
+  //     fire per frame.  Before v0.11.0 this was an either-or
+  //     (vc's `<Camera>` accepts one processor; supplying ours
+  //     displaced the lib's).
   //
   // The runOnJS callback is rate-limited to ~1 Hz so the example
   // app's logs stay readable; per the worklet-throttle note
@@ -142,24 +143,30 @@ function App(): React.JSX.Element {
       }),
     [],
   );
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _exampleFrameProcessor = useFrameProcessor(
+  // v0.11.0 — compose first-party stitching with the example tick
+  // log.  `stitcher.call(frame)` runs the lib's throttle + pose
+  // synthesis + native plugin call (i.e. exactly what
+  // `useFrameProcessorDriver`'s built-in processor does); we add
+  // the host tick log alongside it.  Both fire per frame in
+  // non-AR mode; in AR mode the auto-registration via
+  // `__stitcherProxy` is what fires the worklet (the
+  // `frameProcessor` prop has no effect on AR mode because vc's
+  // `<Camera>` isn't mounted in that path).
+  const stitcher = useStitcherWorklet();
+  const exampleFrameProcessor = useFrameProcessor(
     (frame: StitcherFrame) => {
       'worklet';
-      // Non-AR mode: vc's Frame doesn't set `source`/`pose` (Phase
-      // 4a cross-boundary wrapping deferral).  Guard for undefined
-      // per the hook's docstring.
+      // First-party stitching (v0.11.0 composition).  Safe to call
+      // before the JSI plugin has resolved — internally short-
+      // circuits.  See `useStitcherWorklet` module header.
+      stitcher.call(frame);
+      // Example app's tick log.  `source`/`pose` may be undefined
+      // for vc-source frames (Phase 4a cross-boundary wrapping
+      // deferral); guard for that.
       fireFrameProcessorLog(frame.timestamp ?? 0, frame.source ?? 'vc');
     },
-    [fireFrameProcessorLog],
+    [stitcher.call, fireFrameProcessorLog],
   );
-  // Note: `_exampleFrameProcessor` is intentionally unused — we
-  // don't pass it to `<Camera frameProcessor={...}>` because
-  // doing so would disable the lib's first-party stitching in
-  // non-AR mode (see comment above).  In AR mode the hook's
-  // auto-registration via `__stitcherProxy` is what fires the
-  // worklet; the returned processor object is only relevant for
-  // non-AR mode wiring (which this demo skips).
 
   // v0.10.0 (PR B) — visible pill that surfaces refinePanorama
   // progress events.  Subscribes to the IncrementalStateUpdate
@@ -343,6 +350,12 @@ function App(): React.JSX.Element {
           // PanoramaSettingsModal.  Defaults to false for public
           // consumers; flip on for development.
           showSettingsButton={__DEV__}
+          // v0.11.0 — composed processor: lib's first-party stitching
+          // via `stitcher.call(frame)` + example tick log per frame.
+          // No-op in AR mode (vc's `<Camera>` isn't mounted in that
+          // path; AR worklets fire via `__stitcherProxy` auto-
+          // registration).
+          frameProcessor={exampleFrameProcessor}
           onCapture={handleCapture}
           onCaptureSourceChange={handleCaptureSourceChange}
           onLensChange={handleLensChange}
