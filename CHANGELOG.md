@@ -16,6 +16,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v0.10.0 PR A: host-side test infrastructure (`#9A` + `#11A`)
+
+Two parallel test harnesses landed so future tech-debt PRs in the
+v0.10.0 sweep (and beyond) can pin invariants without standing up a
+device build per change.
+
+#### Shared C++ Google Test runner (`#9A`)
+
+- `cpp/tests/CMakeLists.txt` — standalone CMake project that fetches
+  Google Test `v1.14.0` via `FetchContent` and compiles a single
+  `stitcher_cpp_tests` executable.  No system-wide gtest install
+  required.
+- `scripts/run-cpp-tests.sh` — one-shot configure / build / `ctest`
+  driver.  Output lands under gitignored `build/cpp-tests/`.
+- Initial suite (17 cases):
+  - `Pose` / `PlaneTransform` POD layout, size, field-offset
+    invariants (pinned to the cross-platform marshalling contract
+    in `cpp/ar_frame_pose.h`).
+  - `StitcherFrameData` default-construction invariants the JSI
+    host-object `get()` dispatch depends on (e.g. `qw=1.0`,
+    `hasTranslation=false`).
+  - `PixelBufferReader` `copyTo` clipping contract — validated via
+    a `FakePixelBufferReader` test helper.
+  - `StitcherWorkletRegistry` lifecycle: shared-instance, install
+    /uninstall/count/snapshot, snapshot independence from later
+    mutations, concurrent installs (16 threads × 32 each) yield
+    unique IDs without lock contention bugs.
+- New test-only registry seam `_installEntryForTests(invoker)` (in
+  `cpp/stitcher_worklet_registry.{hpp,cpp}`) — mirrors the existing
+  `_resetForTests` pattern.  Bypasses the JSI runtime path so tests
+  don't need Hermes + worklets-core; `nullptr` invokers are safe
+  because the registry never dereferences them.
+- JSI / worklets-core stubs under `cpp/tests/stubs/` let
+  `stitcher_worklet_registry.cpp` compile in the host-side test
+  target without pulling in React Native's JSI headers or the
+  worklets-core library.  Stubs are scoped exclusively to the test
+  include path; production builds never see them.
+- See `cpp/tests/README.md` for the strategy + a list of what's
+  deferred to v0.11.0+ (KeyframeGate / OpenCV-dependent code; JSI
+  host-object dispatch).
+
+#### Android JUnit scaffold (`#11A`)
+
+- `android/build.gradle` — adds `testImplementation
+  "junit:junit:4.13.2"`.  Minimal — only JUnit 4 (matches AGP's
+  default test runner).
+- `android/src/test/java/io/imagestitcher/rn/TransferredNV21Test.kt`
+  — 6 tests covering the v0.10.0 `TransferredNV21` single-use
+  ownership wrapper: constructor empty/non-empty, takeOnce returns
+  the original reference, takeOnce throws on second call, thread-
+  safe single-winner under 16-thread contention, distinct wrappers
+  are independent.
+- Run via `./gradlew :react-native-image-stitcher:testDebugUnitTest`.
+
+Neither suite changes runtime behaviour — both are additive test
+infrastructure.
+
 ## [0.9.0] — 2026-05-27
 
 ### Added — layered frame-access helpers

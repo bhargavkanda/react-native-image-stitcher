@@ -78,4 +78,14 @@ void StitcherWorkletRegistry::_resetForTests() {
   _nextId = 0;
 }
 
+std::string StitcherWorkletRegistry::_installEntryForTests(
+    std::shared_ptr<RNWorklet::WorkletInvoker> invoker) {
+  std::lock_guard<std::mutex> lock(_mutex);
+  std::ostringstream idStream;
+  idStream << "host-" << _nextId++;
+  std::string id = idStream.str();
+  _entries.push_back({id, std::move(invoker)});
+  return id;
+}
+
 }  // namespace retailens
