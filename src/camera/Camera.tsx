@@ -52,6 +52,7 @@ import {
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
@@ -85,7 +86,6 @@ import { useCapture } from './useCapture';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
 import { useOrientationDrift } from './useOrientationDrift';
 import { OrientationDriftModal } from './OrientationDriftModal';
-import { ViewportCropOverlay } from './ViewportCropOverlay';
 import {
   getIncrementalNativeModule,
   incrementalStitcherIsAvailable,
@@ -686,6 +686,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
   } = props;
 
   const insets = useSafeAreaInsets();
+  // v0.12.0 — JS-layout orientation independent of device-physical.
+  // `useWindowDimensions().width > height` tells us if the OS
+  // rotated the framebuffer (only happens for non-locked hosts in
+  // device-landscape).  Combined with `useDeviceOrientation()` to
+  // pick the JS edge corresponding to the home-indicator side of
+  // the device — see `homeIndicatorEdge` below.
+  const jsWindow = useWindowDimensions();
+  const jsLandscape = jsWindow.width > jsWindow.height;
 
   // ── State ───────────────────────────────────────────────────────
   const [arPreference, setArPreference] = useState(
@@ -1452,56 +1460,46 @@ export function Camera(props: CameraProps): React.JSX.Element {
         />
       )}
 
-      {/* v0.12.0 — ViewportCropOverlay default-on (PR-3): translucent
-          bars showing where the engine's pan-axis crop sits.  Mounted
-          unconditionally so the user can see the framing guides both
-          before and during recording.  Per-orientation render paths
-          live inside the component (PR-3).
-          panFraction matches the engine's default `kPanAxisFractionRect
-          = 0.70`; when settings expose this per-mode we'll wire it
-          through. */}
-      <ViewportCropOverlay panFraction={0.7} />
-
       {/*
-        v0.12.0 — Bottom-controls area is now orientation-aware
-        (R2-lite).  Pre-v0.12 the bottom-bar + band assumed the SDK
-        held the UI in portrait via host-config Info.plist /
-        AndroidManifest orientation lock.  Now we use per-orientation
-        render paths keyed on `useDeviceOrientation()`:
-          - portrait              → bottom edge, band ABOVE shutter
-          - portrait-upside-down  → top edge,    band BELOW shutter
-          - landscape-left        → right edge,  band LEFT of shutter
-          - landscape-right       → left edge,   band RIGHT of shutter
-        Implementation: outer container picks the edge + flex
-        direction; inner band/shutter-row are stable in the JSX (the
-        flex direction does the work).  Mirrors the template pattern
-        in `CaptureStatusOverlay.tsx:268-329` but without CSS rotation
-        transforms — touch targets stay correctly oriented.
+        v0.12.0 — Orientation-aware bottom controls anchored to the
+        physical home-indicator edge.  The shutter follows the home-
+        indicator regardless of host portrait-lock state:
+          - locked + any device              → JS-bottom (locked
+            framebuffer maps device-bottom to JS-bottom always)
+          - non-locked + device-portrait     → JS-bottom
+          - non-locked + device-landscape-L  → JS-right
+          - non-locked + device-landscape-R  → JS-left
+        Computed in `homeIndicatorEdge` which combines `jsLandscape`
+        (from window dims) with `deviceOrientation` (sensor).
       */}
       <View
         pointerEvents="box-none"
-        style={bottomAreaStyleForOrientation(
-          deviceOrientation,
+        style={bottomAreaStyleForEdge(
+          homeIndicatorEdge(jsLandscape, deviceOrientation),
           insets.bottom + 12,
           insets.top + 12,
         )}
       >
-        {/* Live-frame band — only visible while recording. */}
+        {/* Live-frame band — only visible while recording.  `vertical`
+            is true when the home-indicator anchor is on a side edge
+            (left or right), in which case the band is a vertical
+            column.  Otherwise it's a horizontal strip. */}
         {statusPhase === 'recording' && (
           <PanoramaBandOverlay
             state={incrementalState}
             frameUris={batchKeyframeThumbnails}
             captureOrientation={deviceOrientation}
+            vertical={isSideEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}
           />
         )}
 
-        {/* Shutter row: lens chip / shutter / AR toggle. Orientation-
-            aware: row in portrait modes, column in landscape modes.
-            The left/center/right slots become top/center/bottom in
-            landscape. */}
-        <View style={bottomBarStyleForOrientation(deviceOrientation)}>
-        <View style={styles.bottomBarSlot} />
-        <View style={styles.bottomBarSlotCenter}>
+        {/* Shutter row.  Horizontal row when home-indicator is on
+            top/bottom (lens left / shutter center / AR right);
+            vertical column when on left/right (slots stack along
+            the narrow strip).  Touch targets stay axis-aligned. */}
+        <View style={bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}>
+        <View style={styles.bottomBarLeft} />
+        <View style={styles.bottomBarCenter}>
           <LensChip
             lens={lens}
             onChange={handleLensChange}
@@ -1517,7 +1515,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
             />
           </View>
         </View>
-        <View style={styles.bottomBarSlotEnd}>
+        <View style={styles.bottomBarRight}>
           {lens === '1x' && isARSupportedOnDevice && (
             <ARToggle arEnabled={arPreference} onToggle={handleARToggle} />
           )}
@@ -1556,31 +1554,77 @@ function noop(): void {
 
 
 /**
- * v0.12.0 — per-orientation absolute-positioning for the bottom-
- * controls container.  Anchors the outer View to the user-perceived
- * "bottom" edge of the device given its current physical orientation,
- * and picks the inner flex direction so the band/shutter pair
- * stacks in the right visual order (band on the viewport side of
- * the shutter, regardless of orientation).
+ * v0.12.0 — JS edge corresponding to the physical home-indicator
+ * side of the device.  This is where the shutter + controls anchor
+ * to so they're always within thumb reach of the user's grip
+ * (matching iOS Camera's behaviour).
  *
- * Insets:
- *   - portrait: pad bottom by safe-area + 12 (avoids the home indicator).
- *   - portrait-upside-down: pad top by safe-area-top + 12 (avoids the
- *     status bar / Dynamic Island in this rotation).
- *   - landscape-*: 12 px horizontal padding only; safe-area-side is
- *     unsupported by `useSafeAreaInsets` in landscape under R2-lite
- *     without further host-config plumbing.  Acceptable for v0.12 —
- *     the bottom indicator's lateral inset is < 24 px on the
- *     supported iOS device floor and the bottomBar's flex layout
- *     absorbs it.
+ * Combines two signals:
+ *   - `jsLandscape`: whether the OS rotated the framebuffer.  True
+ *     only for non-locked hosts in device-landscape.
+ *   - `deviceOrient`: physical device orientation from the sensor.
+ *
+ * Truth table:
+ *   | jsLandscape | deviceOrient        | edge   |
+ *   |---           |---                  |---     |
+ *   | false        | any                 | bottom | (portrait JS coords —
+ *   |              |                     |        |  device-bottom = JS-bottom
+ *   |              |                     |        |  in both locked and
+ *   |              |                     |        |  non-locked-portrait)
+ *   | true         | landscape-left      | right  | (screen rotated, home
+ *   |              |                     |        |  indicator on user-right)
+ *   | true         | landscape-right     | left   | (mirror)
+ *
+ * Caveats:
+ *   - Non-locked + upside-down doesn't surface JS-top here because
+ *     upside-down doesn't change window dimensions; we can't
+ *     distinguish locked-portrait-with-device-flipped from
+ *     non-locked-portrait-with-screen-flipped-180°.  Defaults to
+ *     JS-bottom which matches the more common locked case.  Add
+ *     handling here when a host needs upside-down support.
+ *   - jsLandscape=true with non-landscape device shouldn't happen
+ *     in steady state — only during a transition mid-rotation.
+ *     Falls through to 'right' as a defensive default.
  */
-function bottomAreaStyleForOrientation(
-  orientation: DeviceOrientation,
+type HomeIndicatorEdge = 'bottom' | 'top' | 'left' | 'right';
+
+function homeIndicatorEdge(
+  jsLandscape: boolean,
+  deviceOrient: DeviceOrientation,
+): HomeIndicatorEdge {
+  if (!jsLandscape) return 'bottom';
+  if (deviceOrient === 'landscape-left') return 'right';
+  if (deviceOrient === 'landscape-right') return 'left';
+  return 'right';
+}
+
+
+/**
+ * v0.12.0 — true when the anchor edge is on a side (left/right), so
+ * the band + shutter row need to be vertical strips.  Top/bottom
+ * anchors yield horizontal strips.
+ */
+function isSideEdge(edge: HomeIndicatorEdge): boolean {
+  return edge === 'left' || edge === 'right';
+}
+
+
+/**
+ * v0.12.0 — bottom-controls outer container positioning.  Anchors
+ * to the home-indicator JS edge with the appropriate flex direction
+ * so the band sits on the viewport side of the shutter (toward the
+ * camera preview centre).
+ */
+function bottomAreaStyleForEdge(
+  edge: HomeIndicatorEdge,
   bottomInsetPx: number,
   topInsetPx: number,
 ): ViewStyle {
-  switch (orientation) {
-    case 'portrait':
+  switch (edge) {
+    case 'bottom':
+      // Band above shutter row, both at JS-bottom.  JSX order
+      // [band, shutter] + flexDirection 'column' = band at top of
+      // stack (closer to screen centre), shutter at JS-bottom.
       return {
         position: 'absolute',
         left: 0,
@@ -1590,12 +1634,10 @@ function bottomAreaStyleForOrientation(
         alignItems: 'stretch',
         paddingBottom: bottomInsetPx,
       };
-    case 'portrait-upside-down':
-      // Device upside-down, screen has NOT rotated (iOS apps
-      // default-disable upside-down).  JS-top == user-bottom.
-      // flexDirection 'column-reverse' so the JSX-order
-      // [band, shutter] renders as [shutter, band] in JS — i.e.
-      // shutter at JS-top (= user-bottom), band below it.
+    case 'top':
+      // Mirror of bottom.  column-reverse so JSX [band, shutter]
+      // renders [shutter, band] in JS, shutter at JS-top, band
+      // below it (toward screen centre).
       return {
         position: 'absolute',
         left: 0,
@@ -1605,13 +1647,10 @@ function bottomAreaStyleForOrientation(
         alignItems: 'stretch',
         paddingTop: topInsetPx,
       };
-    case 'landscape-left':
-      // Phone rotated 90° CCW from portrait, screen has NOT
-      // rotated.  JS-right == user-bottom edge.  flexDirection
-      // 'row' so [band, shutter] renders as [band-left, shutter-
-      // right] in JS, which is [band-up-screen, shutter-down-
-      // screen] in user view.  Shutter sits closest to user-
-      // bottom (= JS-right), band immediately above it.
+    case 'right':
+      // Band to the left of shutter column, both at JS-right.
+      // flexDirection 'row' + JSX [band, shutter] = band at JS-left
+      // of container (screen centre side), shutter at JS-right.
       return {
         position: 'absolute',
         top: 0,
@@ -1621,12 +1660,9 @@ function bottomAreaStyleForOrientation(
         alignItems: 'stretch',
         paddingRight: 12,
       };
-    case 'landscape-right':
-      // Mirror of landscape-left.  JS-left == user-bottom.
-      // flexDirection 'row-reverse' puts JSX-first child at
-      // JS-right; with [band, shutter] in JSX that means
-      // band-at-JS-right and shutter-at-JS-left — shutter at
-      // user-bottom (= JS-left), band above it.
+    case 'left':
+      // Mirror of right.  row-reverse so JSX [band, shutter] gives
+      // band at JS-right (screen centre side), shutter at JS-left.
       return {
         position: 'absolute',
         top: 0,
@@ -1641,20 +1677,19 @@ function bottomAreaStyleForOrientation(
 
 
 /**
- * v0.12.0 — inner shutter-row flex direction: row in portrait,
- * column in landscape.  In landscape the three slots (lens / shutter
- * / AR toggle) stack vertically along the user-perceived vertical
- * axis (which is JS-horizontal under no orientation lock).
+ * v0.12.0 — inner shutter-row flex direction.  Horizontal row for
+ * top/bottom anchors; vertical column for left/right anchors so
+ * the three slots (lens / shutter / AR) stack along the narrow
+ * side strip.  Buttons don't rotate — touch targets and text
+ * orient correctly via either (a) un-rotated framebuffer under
+ * portrait-lock or (b) OS-rotated framebuffer under non-locked.
  */
-function bottomBarStyleForOrientation(
-  orientation: DeviceOrientation,
-): ViewStyle {
-  const isLandscape =
-    orientation === 'landscape-left' || orientation === 'landscape-right';
+function bottomBarStyleForEdge(edge: HomeIndicatorEdge): ViewStyle {
+  const vertical = isSideEdge(edge);
   return {
-    flexDirection: isLandscape ? 'column' : 'row',
-    paddingHorizontal: isLandscape ? 0 : 18,
-    paddingVertical: isLandscape ? 18 : 0,
+    flexDirection: vertical ? 'column' : 'row',
+    paddingHorizontal: vertical ? 0 : 18,
+    paddingVertical: vertical ? 18 : 0,
     alignItems: 'center',
   };
 }
@@ -1674,18 +1709,27 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.6)',
     fontSize: 13,
   },
-  // v0.12.0 — `bottomArea` and `bottomBar` styles are now computed
-  // per-orientation by `bottomAreaStyleForOrientation` /
-  // `bottomBarStyleForOrientation` (above).  The static styles below
-  // are the orientation-invariant pieces (slot flex weights).
-  bottomBarSlot: {
+  bottomArea: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    flexDirection: 'column',
+    alignItems: 'stretch',
+  },
+  bottomBar: {
+    flexDirection: 'row',
+    paddingHorizontal: 18,
+    alignItems: 'flex-end',
+  },
+  bottomBarLeft: {
     flex: 1,
   },
-  bottomBarSlotCenter: {
+  bottomBarCenter: {
     flex: 1,
     alignItems: 'center',
   },
-  bottomBarSlotEnd: {
+  bottomBarRight: {
     flex: 1,
     alignItems: 'flex-end',
     justifyContent: 'flex-end',

@@ -88,6 +88,18 @@ export type BandCaptureOrientation =
 
 export interface PanoramaBandOverlayProps {
   /**
+   * v0.12.0 — `true` when the band should render as a vertical
+   * column in JS (anchor edge is JS-left or JS-right, i.e.
+   * non-locked host with device-landscape).  `false` (default)
+   * renders the legacy horizontal strip — covers portrait-locked
+   * hosts in any device orientation AND non-locked hosts in
+   * portrait.  The flagship `<Camera>` derives this from
+   * `useWindowDimensions()` + `useDeviceOrientation()` (see
+   * `homeIndicatorEdge` in `Camera.tsx`); Layer-2 hosts pass it
+   * directly.
+   */
+  vertical?: boolean;
+  /**
    * Latest engine state.  Pass `useIncrementalStitcher().state`.
    * Used for single-thumb fallback URI and fill-ratio when no
    * per-keyframe URIs are provided.  `state.isLandscape` is now
@@ -140,10 +152,8 @@ interface Layout {
   band: ViewStyle;
   /**
    * Direction used by both the outer band AND the scroll content.
-   * `row`/`row-reverse` for horizontal bands (portrait modes);
-   * `column`/`column-reverse` for vertical bands (landscape modes).
-   * Added in v0.12.0 — pre-v0.12 was always row/row-reverse because
-   * the SDK held the UI in portrait via host orientation lock.
+   * row/row-reverse for horizontal bands; column/column-reverse for
+   * vertical bands (non-locked host in landscape, jsLandscape=true).
    */
   flexDirection: 'row' | 'row-reverse' | 'column' | 'column-reverse';
   /** Unicode arrow pointing along the user-perceived pan axis. */
@@ -188,43 +198,38 @@ interface Layout {
  *     reads as user-right-arrow (pointing along the horizontal pan
  *     direction).
  */
-function layoutFor(orientation: BandCaptureOrientation): Layout {
+function layoutFor(
+  orientation: BandCaptureOrientation,
+  vertical: boolean,
+): Layout {
   const commonInner: ViewStyle = {
     alignItems: 'center',
     paddingHorizontal: BAND_PADDING,
     paddingVertical: BAND_PADDING,
     backgroundColor: 'rgba(0, 0, 0, 0.55)',
   };
-  // v0.12.0 — under R2-lite the SDK no longer holds the UI in
-  // portrait.  Per-orientation render paths replace the prior
-  // "always horizontal strip; relies on portrait-lock for landscape
-  // visual correctness" assumption.  Camera.tsx's bottomArea places
-  // this band on the viewport side of the shutter in each
-  // orientation; the band itself picks horizontal-vs-vertical
-  // structure here so it visually reads as a strip along the
-  // user-perceived edge.
+  // v0.12.0 — band structural orientation tracks the host's
+  // `vertical` flag (which the host derives from JS layout
+  // orientation):
   //
-  // Mapping (under no orientation lock, JS-coords == device-native
-  // portrait coords because iOS apps default to portrait-only):
-  //   portrait                : band horizontal at user-bottom (JS-bottom)
-  //   portrait-upside-down    : band horizontal at user-bottom (JS-top
-  //                             — flipped because device upside-down)
-  //   landscape-left          : band vertical   at user-bottom (JS-right
-  //                             — phone rotated CCW)
-  //   landscape-right         : band vertical   at user-bottom (JS-left
-  //                             — phone rotated CW)
+  //   vertical=false  Horizontal strip in JS coords.  Under
+  //                   portrait-lock + device-landscape this appears
+  //                   as a vertical column on user-right via the
+  //                   un-rotated framebuffer.
+  //   vertical=true   Vertical column in JS coords.  Non-locked
+  //                   + device-landscape — band lives along the
+  //                   JS-side strip where the home indicator is.
   //
-  // The flexDirection on the inner container controls thumbnail
-  // ordering: in landscape we use column (newest at end of column)
-  // or column-reverse so the LATEST keyframe sits at the
-  // user-perceived pan-leading edge regardless of rotation.
-  if (orientation === 'landscape-left') {
-    // Phone rotated 90° CCW from portrait.  User-bottom = JS-right.
-    // The band lives as a vertical strip on JS-right edge (handled
-    // by Camera.tsx's bottomAreaStyleForOrientation).  Internally,
-    // we want LATEST at user-bottom (= JS-bottom from band's local
-    // perspective) so the user's eye tracks naturally from the
-    // pan-start toward the latest captured frame.
+  // What still varies by physical orientation regardless: the
+  // thumbnail flow direction so newest sits at the user-perceived
+  // pan-leading edge (flexDirection + arrowGlyph).
+  if (vertical) {
+    // Vertical band in JS coords (non-locked landscape).  The OS
+    // rotated the framebuffer so user-top = JS-top, user-bottom =
+    // JS-bottom — same scroll direction regardless of whether the
+    // device is landscape-left or landscape-right.  Latest grows
+    // toward user-bottom (= JS-bottom).  flexDirection 'column'
+    // puts array[0]/oldest at JS-top.
     return {
       kind: 'landscape',
       band: {
@@ -238,30 +243,20 @@ function layoutFor(orientation: BandCaptureOrientation): Layout {
       arrowGlyph: '↓',
     };
   }
-  if (orientation === 'landscape-right') {
-    // Phone rotated 90° CW from portrait.  User-bottom = JS-left.
-    // Mirror of landscape-left; column-reverse so LATEST sits at
-    // band's local-top (= user-bottom in this rotation).
+  // vertical=false branch: pre-v0.12 horizontal-strip behavior
+  // keyed on device-physical orientation for thumbnail direction.
+  if (orientation === 'landscape-left') {
+    // Phone rotated 90° CCW from portrait (home indicator on the
+    // user's RIGHT).  With UI orientation-locked to portrait:
+    //   JS-left  (band horizontal start) = user-BOTTOM
+    //   JS-right (band horizontal end)   = user-TOP
+    // For the canonical "oldest at user-TOP, growth toward user-
+    // BOTTOM" reading direction the monorepo established, we want:
+    //   array[0] (oldest) at user-TOP = JS-rightmost
+    //   newest        at user-BOTTOM = JS-leftmost
+    //   → flexDirection: 'row-reverse'  (array[0] at JS-rightmost)
     return {
       kind: 'landscape',
-      band: {
-        marginHorizontal: 8,
-        marginVertical: 16,
-        width: BAND_THICKNESS,
-        flexDirection: 'column-reverse',
-        ...commonInner,
-      },
-      flexDirection: 'column-reverse',
-      arrowGlyph: '↑',
-    };
-  }
-  if (orientation === 'portrait-upside-down') {
-    // Device held upside-down, screen has not rotated (iOS apps
-    // default-disable upside-down).  JS-top == user-bottom.  Band
-    // is still a horizontal strip but reverses inner direction so
-    // latest sits at user-right (= JS-left).
-    return {
-      kind: 'portrait',
       band: {
         marginHorizontal: 16,
         marginVertical: 8,
@@ -273,8 +268,30 @@ function layoutFor(orientation: BandCaptureOrientation): Layout {
       arrowGlyph: '←',
     };
   }
-  // portrait (default).  Horizontal pan left→right.  Latest at
-  // user-right (= JS-right).
+  if (orientation === 'landscape-right') {
+    // Phone rotated 90° CW from portrait (home indicator on the
+    // user's LEFT).  Mirror of landscape-left:
+    //   JS-left  = user-TOP
+    //   JS-right = user-BOTTOM
+    // For "oldest at user-TOP, newest at user-BOTTOM":
+    //   array[0] (oldest) at user-TOP = JS-leftmost
+    //   → flexDirection: 'row'  (array[0] at JS-leftmost)
+    return {
+      kind: 'landscape',
+      band: {
+        marginHorizontal: 16,
+        marginVertical: 8,
+        height: BAND_THICKNESS,
+        flexDirection: 'row',
+        ...commonInner,
+      },
+      flexDirection: 'row',
+      arrowGlyph: '→',
+    };
+  }
+  // portrait / portrait-upside-down / default.  Held portrait, pan
+  // is horizontal left→right (or right→left for left-handed scans;
+  // the band doesn't enforce a direction).  newest at JS-rightmost.
   return {
     kind: 'portrait',
     band: {
@@ -294,6 +311,7 @@ export function PanoramaBandOverlay({
   state,
   frameUris,
   captureOrientation,
+  vertical = false,
 }: PanoramaBandOverlayProps): React.JSX.Element | null {
   // 2026-05-18 (Issue #3 fix) — orientation source priority:
   //   1. `captureOrientation` prop from the host (4-way; correct
@@ -306,8 +324,8 @@ export function PanoramaBandOverlay({
     captureOrientation
     ?? (state?.isLandscape ? 'landscape-left' : 'portrait');
   const layout = useMemo(
-    () => layoutFor(resolvedOrientation),
-    [resolvedOrientation],
+    () => layoutFor(resolvedOrientation, vertical),
+    [resolvedOrientation, vertical],
   );
 
   const scrollRef = useRef<ScrollView | null>(null);
@@ -325,12 +343,9 @@ export function PanoramaBandOverlay({
 
   const hasMultiThumb = cappedFrameUris.length > 0;
 
-  // Auto-scroll on content-size change.
-  //
-  // v0.12.0 — extended for vertical scroll in landscape modes.  In
-  // `*-reverse` (row-reverse OR column-reverse) the LATEST is at the
-  // scroll origin; scroll to {0,0}.  In normal `row`/`column` the
-  // LATEST is at the scroll end; scrollToEnd().
+  // Auto-scroll on content-size change.  `*-reverse` puts latest at
+  // scroll origin (scrollTo {0,0}); normal `row`/`column` puts
+  // latest at scroll end (scrollToEnd).
   const isReverse =
     layout.flexDirection === 'row-reverse' ||
     layout.flexDirection === 'column-reverse';
@@ -404,8 +419,8 @@ export function PanoramaBandOverlay({
         // looked detached when there were only a few thumbnails.
         <ScrollView
           ref={scrollRef}
-          // v0.12.0 — horizontal in portrait modes, vertical in
-          // landscape (where the band itself is a vertical strip).
+          // Horizontal scroll in JS-portrait bands; vertical scroll
+          // in JS-landscape (non-locked host) bands.
           horizontal={layout.kind === 'portrait'}
           showsHorizontalScrollIndicator={false}
           showsVerticalScrollIndicator={false}
