@@ -323,26 +323,42 @@ export interface CameraProps {
    * }
    * ```
    *
-   * ## Non-AR mode tradeoff (HONEST)
+   * ## Non-AR mode composition (v0.11.0+)
    *
    * vision-camera's `<Camera>` accepts ONLY ONE frame processor.
    * The lib's internal `useFrameProcessorDriver` produces the
    * processor that drives first-party panorama stitching in non-AR
-   * mode.  If you supply your own via this prop, **the lib's
-   * first-party stitching is replaced** — panorama capture in
-   * non-AR mode will not produce stitched output until you remove
-   * the prop or fork the SDK to compose both worklets manually.
+   * mode.  If you supply your own via this prop, the lib's
+   * default processor is REPLACED — but as of v0.11.0 you can
+   * COMPOSE first-party stitching back into your worklet body
+   * using `useStitcherWorklet`:
    *
-   * For the common case (host wants worklet + lib wants stitching
-   * concurrently), prefer AR mode: the AR-mode path natively fans
-   * out to both the lib's first-party stitching AND every
-   * registered host worklet on every frame, with per-worklet
-   * failure isolation.
+   * ```tsx
+   * import {
+   *   Camera, useFrameProcessor, useStitcherWorklet,
+   *   type StitcherFrame,
+   * } from 'react-native-image-stitcher';
    *
-   * Composition for non-AR mode (lib stitching + host worklet on
-   * the same vc processor) is tracked as a v0.9+ follow-up;
-   * needs the lib's first-party logic exposed as a vc Frame
-   * Processor plugin the host's worklet can call.
+   * function MyScreen() {
+   *   const stitcher = useStitcherWorklet();
+   *   const fp = useFrameProcessor((frame: StitcherFrame) => {
+   *     'worklet';
+   *     hostPreLogic(frame);
+   *     stitcher.call(frame);   // ← first-party stitching
+   *     hostPostLogic(frame);
+   *   }, [stitcher.call]);
+   *   return <Camera frameProcessor={fp} ... />;
+   * }
+   * ```
+   *
+   * Hosts that DON'T call `useStitcherWorklet` from their worklet
+   * body replace first-party stitching for non-AR captures (a
+   * one-shot console.info documents this when the prop is first
+   * supplied).  AR mode is unaffected either way — the AR-mode
+   * dispatch path (v0.8.0 Phase 4b.i / 4b.iii) natively fans out
+   * to both the lib's first-party stitching AND every registered
+   * host worklet on every frame, with per-worklet failure
+   * isolation.
    *
    * ## AR mode behaviour
    *
@@ -841,24 +857,23 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => () => { fpDriver.stop(); }, []);
 
-  // v0.8.0 Phase 5 — frameProcessor prop semantics:
+  // v0.8.0 Phase 5 / v0.11.0 — frameProcessor prop semantics:
   //
-  //   - Host supplied? → use host's processor; lib's first-party
-  //     stitching is DISABLED in non-AR mode (vc accepts only one
-  //     processor).  One-shot console.info documents the tradeoff
-  //     so the host isn't surprised by "panorama capture stopped
-  //     producing output" in non-AR mode.  AR-mode capture is
-  //     unaffected — the AR-session dispatch path fans out to BOTH
-  //     first-party and host worklets independently.
+  //   - Host supplied? → use host's processor.  The host's worklet
+  //     body controls whether first-party stitching also fires:
+  //     call `stitcher.call(frame)` (from `useStitcherWorklet`)
+  //     inside the body to compose; omit to replace.  One-shot
+  //     console.info documents the choice so the host can spot a
+  //     missing `useStitcherWorklet` call before they go hunting
+  //     for "why is non-AR panorama capture not producing output".
+  //     AR-mode capture is unaffected either way — the AR-session
+  //     dispatch path fans out to BOTH first-party stitching AND
+  //     every host worklet independently.
   //
   //   - No host processor? → use `fpDriver.frameProcessor` which is
   //     the lib's internal worklet driving first-party stitching
   //     via `useFrameProcessorDriver`.  Default behaviour for the
   //     common "I just want panorama capture" case.
-  //
-  // The pre-v0.8.0 behaviour (host's prop silently ignored with
-  // a warning) is gone — Phase 5 plumbs the prop through.  The
-  // tradeoff is honestly documented in the CameraProps docstring.
   const hostFrameProcessorAcceptedWarnedRef = useRef(false);
   if (
     hostFrameProcessor != null
@@ -868,12 +883,13 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // eslint-disable-next-line no-console
     console.info(
       '[react-native-image-stitcher] Host frameProcessor supplied — '
-      + 'non-AR mode will run YOUR worklet instead of the lib\'s '
-      + 'first-party stitching plugin (vc accepts only one frame '
-      + 'processor).  Non-AR panorama capture will not produce '
-      + 'stitched output until this prop is removed.  AR-mode '
-      + 'capture is unaffected (AR-session dispatch fans out to '
-      + 'both first-party and host worklets independently).',
+      + 'non-AR mode will run YOUR composed worklet.  If you want '
+      + 'first-party panorama stitching alongside your own logic, '
+      + 'call `useStitcherWorklet()` and invoke `stitcher.call(frame)` '
+      + 'from your worklet body (see `<Camera>` `frameProcessor` '
+      + 'JSDoc for the composition pattern).  AR-mode capture is '
+      + 'unaffected (AR-session dispatch fans out to both '
+      + 'first-party and host worklets independently).',
     );
   }
   // The Frame Processor worklet bound to vision-camera's Camera.
