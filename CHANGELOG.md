@@ -16,6 +16,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-05-28
+
+### Fixed — AR-mode composed worklets silently throw
+
+`useStitcherWorklet`'s `call(frame)` was invoking the vision-camera
+Frame Processor plugin on every frame regardless of mode.  In AR
+mode the frame is a `StitcherFrameHostObject` (no `__frame` JSI
+marker), so the vc plugin threw `getPropertyAsObject: property
+'__frame' is undefined`.  The throw was caught silently by
+`RNSARWorkletRuntime`'s per-worklet error isolation (logged to
+`os_log`, not surfaced to JS), causing any host code AFTER
+`stitcher.call(frame)` in the composed worklet body —
+`runOnJS` callbacks, `Worklets.createRunOnJS` dispatches, further
+host worklet logic — to silently never execute in AR mode.
+
+The hook's module docstring already promised AR mode would no-op
+("AR mode is unaffected — the AR-session dispatch path already
+composes natively"), but the code didn't enforce it.  v0.11.1 adds
+an early-return on `frame.source === 'ar'` in `useStitcherWorklet`'s
+worklet body.  AR stitching continues to run natively via
+`RNSARSession.swift`'s first-party callback path
+(`consumer.consumeFrame(arFrame, pose)` at line 510-511), which is
+the architectural contract for AR-mode stitching since v0.8.0.
+
+This bug was latent in v0.11.0 — surfaced by Test 2 of
+`docs/v0.11.0-manual-verification-checklist.md` on Ram's iPhone.
+
+Also added: `StitcherJsiInstaller::install` now eagerly initializes
+the worklets-core default `JsiWorkletContext` singleton during JSI
+bootstrap.  This is defense-in-depth — worklets-core's own `Worklets`
+module also initializes the default, but eager init from our
+installer makes `runOnJS` from AR-mode worklets robust to host-app
+import order (no dependency on worklets-core's `Worklets` module
+loading before our AR runtime constructs its context).
+
+### Added — Jest test for AR-source short-circuit
+
+New test file `src/stitching/__tests__/useStitcherWorklet.test.ts`
+pins the AR no-op contract.  5 new tests; full suite now 74/74 pass
+(was 69/69 in v0.11.0).
+
 ## [0.11.0] — 2026-05-28
 
 ### Added — `useStitcherWorklet` for non-AR composition
