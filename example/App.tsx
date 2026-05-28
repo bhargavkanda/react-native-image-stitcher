@@ -157,8 +157,10 @@ function App(): React.JSX.Element {
     (frame: StitcherFrame) => {
       'worklet';
       // First-party stitching (v0.11.0 composition).  Safe to call
-      // before the JSI plugin has resolved — internally short-
-      // circuits.  See `useStitcherWorklet` module header.
+      // in BOTH modes — the hook internally no-ops on AR-source
+      // frames (v0.11.1 fix) because AR stitching runs natively
+      // via the AR-side dispatcher, not via the vc plugin.  See
+      // `useStitcherWorklet` module header.
       stitcher.call(frame);
       // Example app's tick log.  `source`/`pose` may be undefined
       // for vc-source frames (Phase 4a cross-boundary wrapping

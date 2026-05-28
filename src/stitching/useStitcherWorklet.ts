@@ -336,6 +336,31 @@ export function useStitcherWorklet(
     'worklet';
     if (plugin == null) return;
 
+    // v0.11.1 — AR-source frames are stitched natively by the AR-
+    // side dispatcher (`RNSARSession.swift:510-511` → the first-
+    // party callback installed in `RNSARWorkletRuntime`).  Calling
+    // the vc Frame Processor plugin here would throw
+    // `getPropertyAsObject: property '__frame' is undefined`
+    // because AR frames are `StitcherFrameHostObject` instances
+    // and don't carry the vc `Frame` proxy's JSI marker.  The
+    // throw is caught silently by the per-worklet error handler
+    // (`RNSARWorkletRuntime.mm:284-301`) and bubbles up only to
+    // `os_log` — invisible to JS, which is why pre-v0.11.1
+    // composed hosts saw their post-`stitcher.call` lines
+    // (`fireFrameProcessorLog`, `runOnJS` callbacks) silently
+    // never execute in AR mode.  Silent no-op here matches the
+    // module-header promise that AR mode is "unaffected" by this
+    // hook (the AR-side stitching path runs natively, independent
+    // of the composed worklet body).
+    //
+    // The `(frame as StitcherFrame).source` cast is safe: vc
+    // `Frame` doesn't carry a `source` property so the check
+    // returns `undefined !== 'ar'` → `true`, and the worklet
+    // proceeds normally.  Only frames that explicitly tag
+    // themselves as AR-source (which our native AR dispatcher
+    // does — see `StitcherFrameHostObject.mm`) get short-circuited.
+    if ((frame as StitcherFrame).source === 'ar') return;
+
     // Throttle (verbatim from useFrameProcessorDriver).
     sharedFrameCounter.value += 1;
     const N = sharedEvalEveryN.value;
