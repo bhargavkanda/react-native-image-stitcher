@@ -139,9 +139,11 @@ export interface IncrementalState {
    * at the FIRST-FRAME determination thereafter.
    *
    * **This is the single source of truth for orientation across
-   * the SDK + host.**  JS-side hooks (e.g. `useDeviceOrientation`,
-   * `useWindowDimensions`) are unreliable when iOS interface-
-   * orientation lock is on; pose-derived detection is.  UI
+   * the SDK + host.**  Pose-derived detection is preferred over
+   * JS-side hooks because it works identically regardless of host
+   * configuration — `useWindowDimensions` reports JS-portrait when
+   * the host is portrait-locked (even with the device in landscape),
+   * while pose data reflects what the camera actually saw.  UI
    * components that need to know orientation (band overlay, dim
    * bars, pan guide) MUST consume `state.isLandscape` rather
    * than re-detecting.

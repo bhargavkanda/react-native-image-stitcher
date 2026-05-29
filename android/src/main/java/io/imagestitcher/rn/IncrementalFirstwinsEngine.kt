@@ -38,8 +38,9 @@ import kotlin.math.sqrt
  *   V12.4 — central 70% (pan) × 85% (perpendicular) post-warp crop
  *   V12.6 — orientation detection from R_panToCam at first frame
  *           (NOT from JS-passed frameRotationDegrees, which is wrong
- *           under iOS interface-orientation lock — Android equivalent
- *           is screen-orientation lock; same fix applies)
+ *           under portrait-locked hosts — pose-derived detection
+ *           works regardless of host orientation config, so it's
+ *           the single source of truth)
  *   V12.7 — rectilinear path: skip cylindrical warp entirely.  First
  *           frame pasted raw onto canvas; subsequent frames contribute
  *           a narrow central strip placed by pose-delta around the
