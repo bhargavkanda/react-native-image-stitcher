@@ -162,6 +162,19 @@ export { useCapture } from './camera/useCapture';
 export type { TakePhotoCallOptions } from './camera/useCapture';
 export { useVideoCapture } from './camera/useVideoCapture';
 export { useDeviceOrientation } from './camera/useDeviceOrientation';
+export type { DeviceOrientation } from './camera/useDeviceOrientation';
+
+// v0.12.0 — orientation-aware Camera (R2-lite).  `useOrientationDrift`
+// snapshots the device orientation at capture start and latches a
+// `drifted` flag if the user rotates mid-capture.  Pairs with
+// `OrientationDriftModal` for the auto-abandon UX flow.  The
+// flagship `<Camera>` component wires both internally (PR-2);
+// Layer-2 hosts using `CameraView` directly can compose the pair
+// manually (see the modal's docstring for the integration pattern).
+export { useOrientationDrift } from './camera/useOrientationDrift';
+export type { UseOrientationDriftReturn } from './camera/useOrientationDrift';
+export { OrientationDriftModal } from './camera/OrientationDriftModal';
+export type { OrientationDriftModalProps } from './camera/OrientationDriftModal';
 
 // ── Incremental stitching engine ──────────────────────────────────────
 // JS bindings around the native `IncrementalStitcher` module.  Use

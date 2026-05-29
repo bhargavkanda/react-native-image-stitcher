@@ -365,6 +365,7 @@ function App(): React.JSX.Element {
           onError={handleError}
         />
 
+
         {refine !== null && (
           <View
             style={[
@@ -398,6 +399,20 @@ function App(): React.JSX.Element {
           animationType="fade"
           transparent={false}
           onRequestClose={() => setPreview(null)}
+          // v0.12 fix: RN's iOS `Modal` defaults to portrait-only.
+          // Without this prop the modal forces iOS to rotate the
+          // window scene to portrait when shown, then the camera
+          // underneath can end up with stale orientation state on
+          // dismiss (ARSession's display transform locked to portrait,
+          // device still landscape → preview renders sideways).
+          // Declaring all orientations lets the modal stay aligned
+          // with whatever rotation the device is in.
+          supportedOrientations={[
+            'portrait',
+            'portrait-upside-down',
+            'landscape-left',
+            'landscape-right',
+          ]}
         >
           {preview && (
             <SafeAreaView style={styles.previewSafe}>

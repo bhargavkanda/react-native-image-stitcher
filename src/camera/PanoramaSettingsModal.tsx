@@ -164,6 +164,20 @@ export function PanoramaSettingsModal({
       transparent
       statusBarTranslucent
       onRequestClose={onClose}
+      // v0.12.0 — RN's iOS Modal defaults to portrait-only.  When a
+      // host removes its UIInterfaceOrientations portrait lock to
+      // support landscape capture, opening this modal while in
+      // landscape would force iOS to rotate the window scene to
+      // portrait, then the underlying <Camera>'s ARSession can end
+      // up with stale display-transform state on dismiss (preview
+      // renders sideways).  Declaring all orientations keeps the
+      // window aligned with the device throughout the modal cycle.
+      supportedOrientations={[
+        'portrait',
+        'portrait-upside-down',
+        'landscape-left',
+        'landscape-right',
+      ]}
     >
       <View style={styles.backdrop}>
         <View style={styles.sheet}>

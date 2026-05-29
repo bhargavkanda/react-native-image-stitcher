@@ -2,15 +2,24 @@
 /**
  * useDeviceOrientation — physical device orientation hook.
  *
- * The host app is portrait-locked at the iOS app level (so the
- * camera preview, header, controls, and thumbnails stay in their
- * portrait positions even when the user holds the phone sideways
- * for a vertical pan).  But text overlays — the REC banner, the
- * pan-speed pill, the live frame strip — need to follow the
- * physical device orientation so they stay readable in the user's
- * hands.  RN's `useWindowDimensions` can't help with this when
- * the app is orientation-locked: window dimensions don't change
- * when only the device rotates.
+ * Hooks into the accelerometer to report the device's physical
+ * orientation as a 4-way `DeviceOrientation` value.  Works
+ * identically regardless of host configuration:
+ *
+ *   - Portrait-locked host (Info.plist UISupportedInterfaceOrientations
+ *     restricted to Portrait):  RN's `useWindowDimensions` returns
+ *     portrait dims regardless of physical tilt.  This hook reads
+ *     the sensor directly, so text overlays (REC banner, pan-speed
+ *     pill, live frame strip) can still follow the user's hold.
+ *   - Non-locked host (Info.plist supports all 4):  the OS rotates
+ *     the framebuffer with the device; `useWindowDimensions` reflects
+ *     the rotated JS layout.  This hook still reports physical tilt
+ *     — useful in combination with window dims to detect whether
+ *     the screen rotated to match the device (`<Camera>`'s v0.12
+ *     `homeIndicatorEdge` logic uses both signals together).
+ *
+ * Either way the sensor is the single source of truth for "where
+ * the user's hands actually are."
  *
  * 2026-05-21 (v0.2 — Expo modules removal) — rewritten back onto
  * `react-native-sensors` accelerometer.  `expo-sensors`'

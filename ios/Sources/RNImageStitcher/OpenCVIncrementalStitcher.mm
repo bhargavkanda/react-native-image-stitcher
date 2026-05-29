@@ -305,13 +305,15 @@ constexpr double kRansacReprojThresh = 5.0;
         _frameRotationDegrees = frameRotationDegrees;
         // V12.6 Step C: _isLandscape is no longer derived from the
         // JS-passed frameRotationDegrees.  V12.5 telemetry proved
-        // JS was sending the wrong value when iOS orientation-lock
-        // suppressed the rotation event (always reported portrait
-        // even in landscape).  We now detect at first-frame init
-        // from R_panToCam directly — see the cylindricalWarp's
-        // first-frame branch.  Default false here is just a safe
-        // initialiser; it WILL be overwritten before any warping
-        // happens.
+        // JS was sending the wrong value under portrait-locked
+        // hosts (the lock suppresses RN's rotation event so
+        // `useWindowDimensions` always reported portrait even in
+        // landscape).  We now detect at first-frame init from
+        // R_panToCam directly — see the cylindricalWarp's
+        // first-frame branch.  Pose-derived detection works for
+        // both portrait-locked and non-locked R2-lite hosts.
+        // Default false here is just a safe initialiser; it WILL
+        // be overwritten before any warping happens.
         _isLandscape = NO;
         // Default compose dims preserve the 4:3 sensor aspect
         // (1920x1440 → 960x720 at scale 0.5).  Always landscape

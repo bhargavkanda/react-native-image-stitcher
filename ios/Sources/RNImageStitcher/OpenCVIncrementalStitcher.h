@@ -100,9 +100,10 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
 /// JS side reads this from `IncrementalState.isLandscape` to drive
 /// orientation-aware UI (band overlay, dim bars).  This is the
 /// single source of truth for orientation across the SDK + host —
-/// the V12.6 fix established that JS-side orientation hooks are
-/// unreliable under iOS interface-orientation lock; pose detection
-/// is.
+/// pose-derived detection (V12.6) is preferred because it works
+/// regardless of host orientation config (portrait-locked hosts
+/// suppress framebuffer rotation, so `useWindowDimensions` lies
+/// about the physical hold; pose data doesn't).
 @property (nonatomic, readonly) BOOL isLandscape;
 
 /// V12.14.9 — running max paint position along the pan axis, in

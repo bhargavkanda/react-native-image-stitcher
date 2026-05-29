@@ -99,9 +99,15 @@ public final class RNSARSessionBridge: NSObject {
     ) {
         let path = (options["path"] as? String) ?? ""
         let quality = (options["quality"] as? Int) ?? 90
+        // v0.12.0 — host passes the actual device orientation so
+        // the saved JPEG matches the user's view.  Defaults to
+        // "portrait" if absent, preserving pre-v0.12 behavior for
+        // any caller that hasn't been updated.
+        let orientation = (options["orientation"] as? String) ?? "portrait"
         RNSARSession.shared.takePhoto(
             toPath: path,
-            quality: quality
+            quality: quality,
+            orientation: orientation
         ) { result, error in
             if let error = error {
                 rejecter("ar-photo-failed", error.localizedDescription, error)
