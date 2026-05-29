@@ -38,8 +38,10 @@ import {
 import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
+  CaptureHeader,
   getIncrementalNativeModule,
   subscribeIncrementalState,
+  useDeviceOrientation,
   useFrameProcessor,
   useKeyframeStream,
   useStitcherWorklet,
@@ -52,9 +54,24 @@ import {
   type IncrementalState,
   type StitcherFrame,
 } from 'react-native-image-stitcher';
+import { useWindowDimensions } from 'react-native';
 
 
 function App(): React.JSX.Element {
+  // v0.12.0 orientation test (temporary; remove after v0.12 ships).
+  // - `useDeviceOrientation` is sensor-based (always reflects physical).
+  // - `useWindowDimensions` is JS-layout based (reflects framebuffer
+  //   orientation; only flips landscape when the host doesn't
+  //   portrait-lock AND the device is in landscape).
+  // The CaptureHeader below shows both values live, so when you
+  // rotate the device you can see the header rotate with the screen
+  // (because we removed UISupportedInterfaceOrientations portrait
+  // lock from Info.plist) while the camera controls stay anchored
+  // to the home-indicator-side per the v0.12 Camera.tsx logic.
+  const deviceOrient = useDeviceOrientation();
+  const jsWin = useWindowDimensions();
+  const jsLandscape = jsWin.width > jsWin.height;
+
   // Camera permission is a HOST concern — the SDK does not request
   // it.  iOS auto-prompts on first AVCaptureSession use; Android
   // REQUIRES an explicit requestPermission() call (Android treats
@@ -365,6 +382,21 @@ function App(): React.JSX.Element {
           onError={handleError}
         />
 
+        {/* v0.12 orientation test: header rendered as an absolute
+            overlay at JS-top.  When the screen rotates with the
+            device (Info.plist now supports all 4 orientations), this
+            header rotates with it — JS-top is always at user-top
+            after rotation.  Camera controls (from <Camera>) should
+            move to JS-right (= user-right = home-indicator side)
+            in JS-landscape per the v0.12 logic.  If both behave as
+            described, the orientation handling is correct. */}
+        <View style={styles.headerOverlay} pointerEvents="box-none">
+          <CaptureHeader
+            title={`device=${deviceOrient}  js=${jsWin.width}×${jsWin.height} (${jsLandscape ? 'landscape' : 'portrait'})`}
+            topInset={20}
+          />
+        </View>
+
         {refine !== null && (
           <View
             style={[
@@ -398,6 +430,20 @@ function App(): React.JSX.Element {
           animationType="fade"
           transparent={false}
           onRequestClose={() => setPreview(null)}
+          // v0.12 fix: RN's iOS `Modal` defaults to portrait-only.
+          // Without this prop the modal forces iOS to rotate the
+          // window scene to portrait when shown, then the camera
+          // underneath can end up with stale orientation state on
+          // dismiss (ARSession's display transform locked to portrait,
+          // device still landscape → preview renders sideways).
+          // Declaring all orientations lets the modal stay aligned
+          // with whatever rotation the device is in.
+          supportedOrientations={[
+            'portrait',
+            'portrait-upside-down',
+            'landscape-left',
+            'landscape-right',
+          ]}
         >
           {preview && (
             <SafeAreaView style={styles.previewSafe}>
@@ -495,6 +541,13 @@ const styles = StyleSheet.create({
   safe: {
     flex: 1,
     backgroundColor: '#000',
+  },
+  headerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 100,
   },
   permissionOverlay: {
     alignItems: 'center',
