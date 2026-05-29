@@ -22,8 +22,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
-  Image,
-  Modal,
   Pressable,
   SafeAreaView,
   StatusBar,
@@ -48,6 +46,8 @@ import {
   type CameraError,
   type CaptureSource,
   type CameraLens,
+  type CaptureThumbnailItem,
+  type CapturePreviewAction,
   type FramesDroppedInfo,
   type IncrementalState,
   type StitcherFrame,
@@ -70,6 +70,23 @@ function App(): React.JSX.Element {
   // Last capture (photo or panorama).  Set in onCapture, cleared on
   // preview modal dismiss.  Drives the visibility of the modal.
   const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
+
+  // v0.13.0 — controlled flash state demo.  The host owns the
+  // `'on' | 'off'` value; the built-in flash button drives the
+  // `onFlashChange` callback and we mirror it back via the
+  // controlled `flash` prop.  AR mode auto-disables the button
+  // (greyed + a11y "Flash unavailable in AR mode"); no host work
+  // required for that.
+  const [flash, setFlash] = useState<'on' | 'off'>('off');
+
+  // v0.13.0 — capture-history thumbnails.  Appended on every
+  // successful onCapture; rendered by `<Camera>`'s built-in
+  // `CaptureThumbnailStrip` between the preview and the bottom
+  // bar (hidden during recording so it doesn't overlap the band).
+  // Tapping a thumbnail opens the SDK's built-in CapturePreview
+  // modal (via the strip's internal handler — we don't wire
+  // `onThumbnailPress` here).
+  const [thumbnails, setThumbnails] = useState<CaptureThumbnailItem[]>([]);
 
   // v0.7.0 — demonstrate `useKeyframeStream` end-to-end.  This
   // example app's role is to show ALL the lib's public hooks
@@ -243,6 +260,22 @@ function App(): React.JSX.Element {
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
     setPreview(result);
+    // v0.13.0 — append to the host-owned thumbnails list so the
+    // built-in CaptureThumbnailStrip shows the capture history.
+    // The SDK's strip is purely presentational — it never mutates
+    // the array; the host is the canonical source.  Using
+    // `result.uri` as the id is fine here because URIs are
+    // unique per capture (timestamped filenames); a real consumer
+    // would use a DB primary key.
+    setThumbnails((prev) => [
+      ...prev,
+      {
+        id: result.uri,
+        uri: result.uri,
+        width: result.width,
+        height: result.height,
+      },
+    ]);
   };
 
   // v0.10.0 — manually trigger `module.refinePanorama(...)` against
@@ -301,6 +334,66 @@ function App(): React.JSX.Element {
     Alert.alert(`Camera error (${err.code})`, err.message);
   };
 
+  // v0.13.0 — derive the built-in CapturePreview's payload from
+  // `preview`.  Single source of truth: `preview` is set in
+  // `onCapture` and cleared via `closePreview`; the SDK's modal
+  // tracks visibility off whether `capturePreview` is defined.
+  const capturePreviewPayload = useMemo(() => {
+    if (preview === null) return undefined;
+    return {
+      imageUri: preview.uri,
+      imageWidth: preview.width,
+      imageHeight: preview.height,
+      title:
+        preview.type === 'photo'
+          ? `Photo · ${preview.width}×${preview.height}`
+          : `Panorama · ${preview.framesIncluded}/${preview.framesRequested} frames`
+            + (preview.stitchModeResolved
+              ? ` · ${preview.stitchModeResolved}`
+              : ''),
+    };
+  }, [preview]);
+
+  const closePreview = useCallback(() => {
+    // v0.10.0 — reset keyframe collection on close so the next
+    // capture starts clean.
+    collectedKeyframesRef.current = [];
+    setPreview(null);
+  }, []);
+
+  // v0.13.0 — capture-preview action buttons.  Always include
+  // Close; conditionally include Re-refine when we have a panorama
+  // with enough collected keyframes to drive `refinePanorama(...)`.
+  const capturePreviewActions = useMemo<CapturePreviewAction[] | undefined>(() => {
+    if (preview === null) return undefined;
+    const actions: CapturePreviewAction[] = [];
+    if (
+      preview.type === 'panorama'
+      && collectedKeyframesRef.current.length >= 2
+    ) {
+      actions.push({
+        label: `Re-refine (${collectedKeyframesRef.current.length} keyframes)`,
+        variant: 'neutral',
+        onPress: () => {
+          // Fire-and-forget — keep the modal open while the refine
+          // runs.  The outer floating refinePill will show progress
+          // (the in-modal pill from the pre-v0.13 hand-rolled Modal
+          // is gone; the SDK's CapturePreview doesn't accept
+          // arbitrary children).
+          void handleReRefine();
+        },
+      });
+    }
+    actions.push({
+      label: 'Close',
+      variant: 'primary',
+      onPress: closePreview,
+    });
+    return actions;
+    // Re-evaluate when preview type/uri changes; the keyframe ref
+    // is read at action-press time, so we don't need it in deps.
+  }, [preview, closePreview, handleReRefine]);
+
   // Permission gate — show grant overlay until camera access is OK.
   // This is the kind of UX the host app owns; the SDK only renders
   // <Camera> when permission is in hand.
@@ -348,10 +441,40 @@ function App(): React.JSX.Element {
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
-          // Internal-tester mode: gear icon at top-right opens
-          // PanoramaSettingsModal.  Defaults to false for public
-          // consumers; flip on for development.
+          // Internal-tester mode: gear icon opens PanoramaSettingsModal.
+          // With `headerTitle` set below, the gear is absorbed into
+          // the built-in CaptureHeader's right slot (no duplicate gear).
+          // Defaults to false for public consumers; flip on for development.
           showSettingsButton={__DEV__}
+          // v0.13.0 — built-in CaptureHeader (opt-in: only when
+          // `headerTitle` is set).  Renders a top-of-screen header
+          // with title + guidance subtitle + absorbed settings gear.
+          headerTitle="Image Stitcher Demo"
+          headerGuidance="Tap shutter for a photo. Hold + pan + release for a panorama."
+          // v0.13.0 — controlled flash demo.  Uncontrolled mode (omit
+          // `flash`) lets <Camera> own the state; we wire it up here
+          // both to exercise the controlled path and so a future
+          // host-driven flash chrome (gestures, voice, hardware key)
+          // can flip the same source of truth.  AR mode auto-disables
+          // the built-in button — no host work required.
+          flash={flash}
+          onFlashChange={setFlash}
+          // v0.13.0 — built-in capture-history strip.  Host owns the
+          // array; the strip is purely presentational and shows each
+          // capture's aspect-ratio thumbnail.  `thumbnailsMin` colours
+          // the count line green when at least one capture exists;
+          // `thumbnailsMax` is a soft hint shown as "· N max" suffix.
+          thumbnails={thumbnails}
+          thumbnailsMin={1}
+          thumbnailsMax={10}
+          // v0.13.0 — built-in CapturePreview modal (replaces the
+          // pre-v0.13 hand-rolled <Modal>).  Driven by the same
+          // `preview` state as before via `capturePreviewPayload`.
+          // Action buttons include Re-refine (when a panorama with
+          // collected keyframes) and Close.
+          capturePreview={capturePreviewPayload}
+          capturePreviewActions={capturePreviewActions}
+          onCapturePreviewClose={closePreview}
           // v0.11.0 — composed processor: lib's first-party stitching
           // via `stitcher.call(frame)` + example tick log per frame.
           // No-op in AR mode (vc's `<Camera>` isn't mounted in that
@@ -389,117 +512,24 @@ function App(): React.JSX.Element {
 
 
         {/*
-          Capture preview modal.  Renders fullscreen above the camera
-          when a capture lands so the user can visually verify the
-          result before resuming.  Tapping Close clears the result
-          and returns to the camera.
+          v0.13.0 — the pre-v0.13 hand-rolled <Modal>...</Modal> block
+          that lived here has been replaced by `<Camera>`'s built-in
+          `CapturePreview` (wired via the `capturePreview` /
+          `capturePreviewActions` / `onCapturePreviewClose` props
+          above).  Same UX: fullscreen preview, dimensions in the
+          title, Re-refine button for panorama with collected
+          keyframes, Close to dismiss.  Drives off the same `preview`
+          state so the example's existing onCapture / closePreview
+          flow continues to work.
+
+          The refinePill rendered above (outside the modal) still
+          shows progress when Re-refine fires — the modal sits on
+          top of the camera but the pill is rendered as part of the
+          outer screen, so RN's pre-v0.12 caveat about Modal stealing
+          focus from sibling elements doesn't apply to the toast-
+          shaped pill behind it (the user sees it in the gap between
+          the modal close and the next capture start).
         */}
-        <Modal
-          visible={preview !== null}
-          animationType="fade"
-          transparent={false}
-          onRequestClose={() => setPreview(null)}
-          // v0.12 fix: RN's iOS `Modal` defaults to portrait-only.
-          // Without this prop the modal forces iOS to rotate the
-          // window scene to portrait when shown, then the camera
-          // underneath can end up with stale orientation state on
-          // dismiss (ARSession's display transform locked to portrait,
-          // device still landscape → preview renders sideways).
-          // Declaring all orientations lets the modal stay aligned
-          // with whatever rotation the device is in.
-          supportedOrientations={[
-            'portrait',
-            'portrait-upside-down',
-            'landscape-left',
-            'landscape-right',
-          ]}
-        >
-          {preview && (
-            <SafeAreaView style={styles.previewSafe}>
-              <View style={styles.previewMeta}>
-                <Text style={styles.previewTitle}>
-                  {preview.type === 'photo' ? 'Photo' : 'Panorama'}
-                </Text>
-                <Text style={styles.previewSub}>
-                  {preview.width}×{preview.height}
-                  {preview.type === 'panorama'
-                    ? `  •  ${preview.framesIncluded}/${preview.framesRequested} frames  •  ${preview.durationMs} ms${preview.stitchModeResolved ? `  •  ${preview.stitchModeResolved}` : ''}`
-                    : ''}
-                </Text>
-              </View>
-
-              <Image
-                source={{ uri: preview.uri }}
-                style={styles.previewImage}
-                resizeMode="contain"
-              />
-
-              {preview.type === 'panorama'
-                && collectedKeyframesRef.current.length >= 2 && (
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.previewRefineButton,
-                    pressed && styles.previewRefineButtonPressed,
-                  ]}
-                  onPress={handleReRefine}
-                  accessibilityRole="button"
-                  accessibilityLabel="Re-refine this panorama"
-                >
-                  <Text style={styles.previewRefineLabel}>
-                    Re-refine ({collectedKeyframesRef.current.length} keyframes)
-                  </Text>
-                </Pressable>
-              )}
-
-              {/*
-                Mirror the refine-progress pill INSIDE the modal so
-                the user sees the validating → stitching → writing →
-                done stages while the preview is visible.  The
-                outer-screen instance below also stays (for the
-                hybrid auto-refine path when keyframes ARE persisted
-                in a future version).
-              */}
-              {refine !== null && (
-                <View
-                  style={[
-                    styles.refinePillModal,
-                    refine.stage === 'error' && styles.refinePillError,
-                    refine.stage === 'done' && styles.refinePillDone,
-                  ]}
-                  pointerEvents="none"
-                  accessibilityRole="text"
-                >
-                  <Text style={styles.refinePillLabel}>
-                    {refine.stage === 'error'
-                      ? `Refine error: ${refine.error ?? 'unknown'}`
-                      : `Refine: ${refine.stage}${
-                          refine.frames !== undefined
-                            ? ` (${refine.frames} frames)`
-                            : ''
-                        }  •  ${Math.round(refine.progress * 100)}%`}
-                  </Text>
-                </View>
-              )}
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.previewCloseButton,
-                  pressed && styles.previewCloseButtonPressed,
-                ]}
-                onPress={() => {
-                  // v0.10.0 — reset keyframe collection on close so
-                  // the next capture starts clean.
-                  collectedKeyframesRef.current = [];
-                  setPreview(null);
-                }}
-                accessibilityRole="button"
-                accessibilityLabel="Close preview"
-              >
-                <Text style={styles.previewCloseLabel}>Close</Text>
-              </Pressable>
-            </SafeAreaView>
-          )}
-        </Modal>
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -543,61 +573,14 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '600',
   },
-  previewSafe: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  previewMeta: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 8,
-  },
-  previewTitle: {
-    color: '#fff',
-    fontSize: 22,
-    fontWeight: '600',
-  },
-  previewSub: {
-    color: '#bbb',
-    fontSize: 13,
-    marginTop: 2,
-  },
-  previewImage: {
-    flex: 1,
-    width: '100%',
-    backgroundColor: '#000',
-  },
-  previewCloseButton: {
-    margin: 16,
-    paddingVertical: 14,
-    borderRadius: 12,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-  },
-  previewCloseButtonPressed: {
-    backgroundColor: '#ddd',
-  },
-  previewCloseLabel: {
-    color: '#000',
-    fontSize: 17,
-    fontWeight: '600',
-  },
-  previewRefineButton: {
-    marginHorizontal: 16,
-    marginTop: 16,
-    paddingVertical: 14,
-    borderRadius: 12,
-    backgroundColor: '#007aff',
-    alignItems: 'center',
-  },
-  previewRefineButtonPressed: {
-    backgroundColor: '#0058b3',
-  },
-  previewRefineLabel: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '600',
-  },
+  // v0.13.0 — removed `previewSafe`, `previewMeta`, `previewTitle`,
+  // `previewSub`, `previewImage`, `previewCloseButton(Pressed)?`,
+  // `previewCloseLabel`, `previewRefineButton(Pressed)?`,
+  // `previewRefineLabel`, and `refinePillModal` along with the
+  // hand-rolled <Modal> they styled.  The SDK's built-in
+  // `CapturePreview` modal (wired via the `capturePreview` /
+  // `capturePreviewActions` props on `<Camera>`) replaces this UI
+  // entirely.
   refinePill: {
     position: 'absolute',
     top: 56,
@@ -606,18 +589,6 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 999,
     backgroundColor: 'rgba(0, 122, 255, 0.92)',  // iOS systemBlue
-  },
-  refinePillModal: {
-    // Same visual treatment as `refinePill` but positioned as a
-    // regular block inside the modal so it shows above the preview
-    // image without absolute-positioning math against the modal's
-    // SafeAreaView.
-    alignSelf: 'center',
-    marginTop: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: 'rgba(0, 122, 255, 0.92)',
   },
   refinePillDone: {
     backgroundColor: 'rgba(52, 199, 89, 0.92)',  // iOS systemGreen
