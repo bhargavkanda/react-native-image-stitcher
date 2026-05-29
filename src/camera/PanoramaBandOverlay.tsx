@@ -380,27 +380,51 @@ export function PanoramaBandOverlay({
     return Math.max(SINGLE_THUMB_INNER, SINGLE_THUMB_MAX_PAN_LEN * fillRatio);
   }, [fillRatio]);
 
-  // V12.14.9 — rotate the panorama image 90° in landscape mode so
-  // the captured scene reads UPRIGHT to the user in landscape head-up
-  // view.  See original comment in the pre-V16 PanoramaBandOverlay for
-  // the full reasoning.  Portrait+horizontal-pan mode (the other
-  // supported mode) doesn't need rotation.
+  // Image rotation transform for thumbnails.  Captured frames are in
+  // user-perspective orientation (the capture pipeline rotates the
+  // sensor-native bytes via `outputOrientation="device"` + EXIF
+  // baking in `normaliseOrientation`).  The thumbnail BOX is in
+  // JS coords.  When JS coords are device-aligned (portrait-lock,
+  // i.e. vertical=false here) and the device is in landscape, the
+  // image content is rotated 90° from the box's axes → appears
+  // sideways without compensation.  Apply a counter-rotation to
+  // line content up with the box's perceived "top".
   //
-  // 2026-05-18 (Issue #3) — derive from `resolvedOrientation` instead
-  // of the deprecated 2-way `isLandscape`.  In landscape-RIGHT we
-  // rotate −90° so the captured scene still reads upright (the
-  // opposite sense from landscape-LEFT).
+  // When vertical=true (non-locked + device-landscape; JS coords
+  // rotated with screen), the box IS user-aligned already.  No
+  // rotation needed — the image is already correctly oriented for
+  // direct display.
+  //
+  // V12.14.9 → v0.12.0 — extended from single-thumb (cumulative
+  // panorama image fallback) to the multi-thumb path too.  Pre-
+  // v0.12 the multi-thumb keyframe thumbnails had no rotation
+  // transform, so they appeared sideways in portrait-locked
+  // landscape captures (the case the example app's batch-keyframe
+  // engine hits).
+  const thumbRotationTransform = useMemo<
+    Array<{ rotate: string }> | undefined
+  >(() => {
+    if (vertical) return undefined;
+    if (resolvedOrientation === 'landscape-left') return [{ rotate: '90deg' }];
+    if (resolvedOrientation === 'landscape-right') return [{ rotate: '-90deg' }];
+    return undefined;
+  }, [resolvedOrientation, vertical]);
+
   const singleImageStyle = useMemo(
-    () => {
-      if (resolvedOrientation === 'landscape-left') {
-        return [StyleSheet.absoluteFill, { transform: [{ rotate: '90deg' }] }];
-      }
-      if (resolvedOrientation === 'landscape-right') {
-        return [StyleSheet.absoluteFill, { transform: [{ rotate: '-90deg' }] }];
-      }
-      return StyleSheet.absoluteFill;
-    },
-    [resolvedOrientation],
+    () =>
+      thumbRotationTransform
+        ? [StyleSheet.absoluteFill, { transform: thumbRotationTransform }]
+        : StyleSheet.absoluteFill,
+    [thumbRotationTransform],
+  );
+
+  // Same rotation applied to the per-keyframe (multi-thumb) tiles.
+  const multiThumbStyle = useMemo(
+    () =>
+      thumbRotationTransform
+        ? [styles.multiThumb, { transform: thumbRotationTransform }]
+        : styles.multiThumb,
+    [thumbRotationTransform],
   );
 
   return (
@@ -438,7 +462,7 @@ export function PanoramaBandOverlay({
               // defensive).  URI segment helps RN's image cache key.
               key={`${idx}-${uri}`}
               source={{ uri }}
-              style={styles.multiThumb}
+              style={multiThumbStyle}
               resizeMode="cover"
               fadeDuration={0}
             />
