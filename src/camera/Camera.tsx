@@ -67,13 +67,21 @@ import { useARSession } from '../ar/useARSession';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
+import { CaptureHeader, type CaptureHeaderProps } from './CaptureHeader';
+import { CapturePreview, type CapturePreviewAction } from './CapturePreview';
+import {
+  CaptureThumbnailStrip,
+  type CaptureThumbnailItem,
+} from './CaptureThumbnailStrip';
 import { CaptureStatusOverlay, type CaptureStatusPhase } from './CaptureStatusOverlay';
 import { CaptureDebugOverlay } from './CaptureDebugOverlay';
 import { CaptureMemoryPill } from './CaptureMemoryPill';
 import { CaptureKeyframePill } from './CaptureKeyframePill';
 import { CaptureOrientationPill } from './CaptureOrientationPill';
 import { CaptureStitchStatsToast, useStitchStatsToast } from './CaptureStitchStatsToast';
+import { IncrementalPanGuide } from './IncrementalPanGuide';
 import { PanoramaBandOverlay } from './PanoramaBandOverlay';
+import { PanoramaGuidance } from './PanoramaGuidance';
 import { type PanoramaSettings } from './PanoramaSettings';
 import { panoramaSettingsToNativeConfig } from './PanoramaSettingsBridge';
 import { PanoramaSettingsModal } from './PanoramaSettingsModal';
@@ -316,6 +324,191 @@ export interface CameraProps {
    * for an abandoned capture.
    */
   onCaptureAbandoned?: (reason: 'orientation-drift') => void;
+
+  /**
+   * v0.13.0 — flash (torch) state.  Controlled-or-uncontrolled.
+   *
+   *   - **Uncontrolled** (omit `flash`): `<Camera>` owns the flash
+   *     state internally.  Tapping the built-in flash button toggles
+   *     it on/off.  `onFlashChange` (if supplied) fires for telemetry.
+   *   - **Controlled** (supply `flash`): the parent owns the state.
+   *     The built-in button still renders and fires `onFlashChange`
+   *     on press, but it's a no-op unless the parent updates `flash`
+   *     in response.
+   *
+   * Both shapes coexist with the v0.13 "flash button is on by default"
+   * built-in (see the bottom-left bar slot in the JSX).  Hosts that
+   * want their own flash chrome can opt out via `showFlashButton={false}`
+   * and drive the underlying torch by controlling `flash` directly.
+   *
+   * ## AR-mode behaviour
+   *
+   * In AR mode (`defaultCaptureSource="ar"` or runtime-toggled),
+   * ARKit / ARCore own the `AVCaptureDevice` and don't expose the
+   * torch through vision-camera's pipeline.  The built-in flash
+   * button renders as visibly disabled (a11y label "Flash unavailable
+   * in AR mode") and `flash` is forced to `'off'` regardless of
+   * controlled/uncontrolled state.  Hosts that need flash should
+   * toggle to non-AR before enabling.
+   */
+  flash?: 'on' | 'off';
+
+  /**
+   * v0.13.0 — fires when the user taps the built-in flash button.
+   * In uncontrolled mode, the internal state has already flipped
+   * (single render delay).  In controlled mode, the parent must
+   * update the `flash` prop in response or the visual toggle is
+   * a no-op.  Useful in either mode for telemetry.
+   */
+  onFlashChange?: (next: 'on' | 'off') => void;
+
+  /**
+   * v0.13.0 — show the built-in flash button in the bottom-left
+   * slot.  Defaults to `true`.  Hosts that render their own flash
+   * chrome (and drive the underlying torch via the controlled
+   * `flash` prop) can opt out by setting this to `false`.
+   */
+  showFlashButton?: boolean;
+
+  /**
+   * v0.13.0 — show the built-in IncrementalPanGuide ("keep the
+   * arrow on the line" drift marker) while recording.  Defaults
+   * to `true`.  The guide is gyroscope-driven and only active
+   * during the recording phase (no idle sensor cost).  Hosts that
+   * want their own pan-guide chrome can opt out via `false`.
+   */
+  panGuide?: boolean;
+
+  /**
+   * v0.13.0 — show the built-in PanoramaGuidance pan-speed pill
+   * ("Pan slowly" / "Slow down" / "Too fast") while recording.
+   * Defaults to `true`.  Gyroscope-driven, only active during
+   * recording.  Hosts that want their own speed chrome can opt
+   * out via `false`.
+   */
+  panoramaGuidance?: boolean;
+
+  /**
+   * v0.13.0 — built-in CaptureHeader title.  When set, `<Camera>`
+   * renders a top-of-screen header showing this title (centred)
+   * with an optional back affordance + guidance subtitle + the
+   * existing settings gear absorbed into the header's right side.
+   *
+   * When `headerTitle` is undefined the header is not rendered
+   * (matches pre-v0.13 behaviour: top of preview is bare except
+   * for the standalone settings gear gated on `showSettingsButton`).
+   *
+   * Combine with `onHeaderBack`, `headerBackLabel`, `headerGuidance`,
+   * and `headerColors` to customise the rest of the header.  Hosts
+   * that need richer header chrome can omit `headerTitle` and
+   * compose their own `<CaptureHeader>` above `<Camera>`.
+   */
+  headerTitle?: string;
+
+  /**
+   * v0.13.0 — header back-button callback.  When supplied (and
+   * `headerTitle` is set), the header renders a back affordance
+   * on the left.  Omitted ⇒ no back button (the title stays
+   * centred).
+   */
+  onHeaderBack?: () => void;
+
+  /**
+   * v0.13.0 — header back-button label.  Defaults to "‹ Back".
+   * No effect unless `headerTitle` and `onHeaderBack` are both set.
+   */
+  headerBackLabel?: string;
+
+  /**
+   * v0.13.0 — optional second-line subtitle shown below the
+   * header title.  E.g. "Photograph the promotional cola end cap."
+   * Renders nothing when undefined.  No effect unless `headerTitle`
+   * is set.
+   */
+  headerGuidance?: string;
+
+  /**
+   * v0.13.0 — colour overrides for the built-in header.  Defaults
+   * are white-on-black to stay legible over the camera preview.
+   * No effect unless `headerTitle` is set.
+   */
+  headerColors?: CaptureHeaderProps['colors'];
+
+  /**
+   * v0.13.0 — when provided (even as `[]`), `<Camera>` renders a
+   * built-in `CaptureThumbnailStrip` above the bottom controls
+   * showing the host's capture history.  Each item is a plain
+   * `{ id, uri, width?, height? }` object; the strip handles
+   * aspect-ratio rendering, tap-to-preview, and the count line.
+   *
+   * Omit (`undefined`) to skip the strip entirely.  Hosts using
+   * the strip independently (e.g. on a non-camera screen) can keep
+   * importing `CaptureThumbnailStrip` directly from the library —
+   * the prop here is the convenience wiring for in-`<Camera>` use.
+   *
+   * Captures emitted by `<Camera>`'s `onCapture` are NOT added to
+   * this array automatically — the host owns the canonical list
+   * (typically persisted to its own DB) and updates the prop in
+   * response.  This matches the SDK's "Camera owns runtime state,
+   * host persists" pattern.
+   */
+  thumbnails?: CaptureThumbnailItem[];
+
+  /**
+   * v0.13.0 — minimum-photos hint for the count line.  Renders
+   * "n / minPhotos min" with the success colour when reached,
+   * warning colour otherwise.
+   */
+  thumbnailsMin?: number;
+
+  /**
+   * v0.13.0 — maximum-photos hint for the count line.  Renders
+   * "· maxPhotos max" suffix.  No enforcement — the host decides
+   * what to do at the cap.
+   */
+  thumbnailsMax?: number;
+
+  /**
+   * v0.13.0 — tap handler for thumbnails.  When set, replaces the
+   * strip's built-in tap-to-preview modal; the host shows its own
+   * preview UI (e.g. with delete / recapture buttons gated on
+   * sync state).  Omit to use the built-in preview.
+   */
+  onThumbnailPress?: (item: CaptureThumbnailItem) => void;
+
+  /**
+   * v0.13.0 — when set, `<Camera>` renders a built-in `CapturePreview`
+   * modal as `visible`.  Use this for post-stitch confirmation:
+   * after `onCapture` emits, the host stores the result and sets
+   * `capturePreview` to the new image, with `capturePreviewActions`
+   * = `[Discard, Save]` (or similar).  Setting `undefined` hides
+   * the modal.
+   *
+   * Hosts using the modal for thumbnail tap-to-preview can leave
+   * this undefined and let the built-in strip's preview handle
+   * that case.
+   */
+  capturePreview?: {
+    imageUri: string;
+    imageWidth?: number;
+    imageHeight?: number;
+    title?: string;
+  };
+
+  /**
+   * v0.13.0 — action buttons rendered along the bottom of the
+   * `CapturePreview` modal.  Empty array (or undefined) renders
+   * no buttons, only the close affordance.
+   */
+  capturePreviewActions?: CapturePreviewAction[];
+
+  /**
+   * v0.13.0 — fires when the user dismisses the `capturePreview`
+   * modal (tap close, backdrop tap, hardware back on Android).
+   * The host is expected to clear the `capturePreview` prop in
+   * response.
+   */
+  onCapturePreviewClose?: () => void;
 
   /**
    * Optional host-supplied vision-camera frame processor.
@@ -681,6 +874,23 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onFramesDropped,
     onError,
     onCaptureAbandoned,
+    flash: controlledFlash,
+    onFlashChange,
+    showFlashButton = true,
+    panGuide = true,
+    panoramaGuidance = true,
+    headerTitle,
+    onHeaderBack,
+    headerBackLabel,
+    headerGuidance,
+    headerColors,
+    thumbnails,
+    thumbnailsMin,
+    thumbnailsMax,
+    onThumbnailPress,
+    capturePreview,
+    capturePreviewActions,
+    onCapturePreviewClose,
     frameProcessor: hostFrameProcessor,
     engine = 'batch-keyframe',
   } = props;
@@ -700,6 +910,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
     defaultCaptureSource === 'ar',
   );
   const [lens, setLens] = useState<CameraLens>(defaultLens);
+  // v0.13.0 — flash state.  Controlled by `controlledFlash` when the
+  // host supplies the `flash` prop; otherwise owned internally and
+  // toggled by the built-in flash button.  `effectiveFlash` below
+  // also forces 'off' in AR mode (ARKit / ARCore own the device's
+  // torch and don't surface it through vision-camera's pipeline).
+  const [internalFlash, setInternalFlash] = useState<'on' | 'off'>('off');
   const [settings, setSettings] = useState<PanoramaSettings>(() =>
     buildPanoramaInitialSettings(
       extractPanoramaOverrides(props),
@@ -1349,6 +1565,22 @@ export function Camera(props: CameraProps): React.JSX.Element {
     setArPreference((prev) => !prev);
   }, []);
 
+  // ── v0.13.0 — Flash control ─────────────────────────────────────
+  //
+  // `flashRequested` is what the host / built-in button asks for.
+  // `effectiveFlash` is what we actually drive into vision-camera —
+  // AR mode forces 'off' because ARKit / ARCore own AVCaptureDevice
+  // and the torch isn't exposed.  This way the button's visual state
+  // (a11y, styling) tracks `flashRequested` while the underlying
+  // camera always sees the correct value.
+  const flashRequested: 'on' | 'off' = controlledFlash ?? internalFlash;
+  const effectiveFlash: 'on' | 'off' = isAR ? 'off' : flashRequested;
+  const toggleFlash = useCallback(() => {
+    const next: 'on' | 'off' = flashRequested === 'on' ? 'off' : 'on';
+    if (controlledFlash == null) setInternalFlash(next);
+    onFlashChange?.(next);
+  }, [flashRequested, controlledFlash, onFlashChange]);
+
   // ── JSX ─────────────────────────────────────────────────────────
 
   return (
@@ -1380,7 +1612,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
           // works either way.  Pattern matches AuditCaptureScreen.tsx
           // which has run on `video` (true) for months without issue.
           video
-          flash="off"
+          flash={effectiveFlash}
           style={StyleSheet.absoluteFill}
           // F8 (FrameProcessor port) — host-supplied worklet runs on
           // the camera producer thread for every frame.  Only wired
@@ -1415,6 +1647,20 @@ export function Camera(props: CameraProps): React.JSX.Element {
         topInset={insets.top}
         recordingStartedAt={recordingStartedAt ?? undefined}
       />
+
+      {/* v0.13.0 — built-in pan guidance overlays.  Both sit on top
+          of the camera preview but under the controls.  Each is
+          gyroscope-driven and only subscribes while `active` is
+          true — flipping `active` false on capture-end tears the
+          subscription down so the sensor isn't running idle.  Hosts
+          can opt out per overlay via the `panGuide` / `panoramaGuidance`
+          boolean props (both default true). */}
+      {panGuide && (
+        <IncrementalPanGuide active={statusPhase === 'recording'} />
+      )}
+      {panoramaGuidance && (
+        <PanoramaGuidance active={statusPhase === 'recording'} />
+      )}
 
       {/*
         2026-05-22 (audit F9 + F3) — debug UI suite, all gated on
@@ -1459,12 +1705,52 @@ export function Camera(props: CameraProps): React.JSX.Element {
         topInset={insets.top}
       />
 
-      {/* Settings gear (top-right), gated on showSettingsButton. */}
-      {showSettingsButton && (
-        <SettingsButton
-          topInset={insets.top}
-          onPress={() => setSettingsModalVisible(true)}
-        />
+      {/* v0.13.0 — built-in CaptureHeader, gated on `headerTitle`.
+          When the header is mounted, it absorbs the settings gear
+          on its right side (avoids stacking with the standalone
+          gear).  Hosts that DON'T set `headerTitle` get the legacy
+          standalone gear, still gated on `showSettingsButton`. */}
+      {headerTitle != null ? (
+        <View style={styles.headerWrap} pointerEvents="box-none">
+          <CaptureHeader
+            title={headerTitle}
+            onBack={onHeaderBack}
+            backLabel={headerBackLabel}
+            guidance={headerGuidance}
+            colors={headerColors}
+            topInset={insets.top}
+            onSettingsPress={
+              showSettingsButton
+                ? () => setSettingsModalVisible(true)
+                : undefined
+            }
+          />
+        </View>
+      ) : (
+        showSettingsButton && (
+          <SettingsButton
+            topInset={insets.top}
+            onPress={() => setSettingsModalVisible(true)}
+          />
+        )
+      )}
+
+      {/* v0.13.0 — built-in capture-history thumbnail strip.  Renders
+          when the host supplies a `thumbnails` array (even empty),
+          hidden during recording so it doesn't overlap the band
+          overlay.  Sits above the bottom controls in JS-bottom
+          coordinates; landscape/non-locked layouts get the strip in
+          the same place (no orientation-aware repositioning for now —
+          the strip is intrinsically horizontal). */}
+      {thumbnails != null && statusPhase !== 'recording' && (
+        <View style={styles.thumbnailStripWrap} pointerEvents="box-none">
+          <CaptureThumbnailStrip
+            items={thumbnails}
+            minPhotos={thumbnailsMin}
+            maxPhotos={thumbnailsMax}
+            onItemPress={onThumbnailPress}
+          />
+        </View>
       )}
 
       {/*
@@ -1505,7 +1791,25 @@ export function Camera(props: CameraProps): React.JSX.Element {
             vertical column when on left/right (slots stack along
             the narrow strip).  Touch targets stay axis-aligned. */}
         <View style={bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}>
-        <View style={styles.bottomBarLeft} />
+        <View style={styles.bottomBarLeft}>
+          {showFlashButton && (
+            <Pressable
+              onPress={isAR ? undefined : toggleFlash}
+              accessibilityRole="button"
+              accessibilityLabel={isAR ? 'Flash unavailable in AR mode' : `Flash ${flashRequested === 'on' ? 'on' : 'off'}`}
+              accessibilityState={{ selected: flashRequested === 'on', disabled: isAR }}
+              disabled={isAR}
+              hitSlop={8}
+              style={[
+                styles.flashButton,
+                flashRequested === 'on' && !isAR && styles.flashButtonActive,
+                isAR && styles.flashButtonDisabled,
+              ]}
+            >
+              <Text style={styles.flashIcon}>⚡</Text>
+            </Pressable>
+          )}
+        </View>
         <View style={styles.bottomBarCenter}>
           <LensChip
             lens={lens}
@@ -1549,6 +1853,21 @@ export function Camera(props: CameraProps): React.JSX.Element {
         captureOrientation={drift.captureOrientation}
         currentOrientation={drift.currentOrientation}
         onAcknowledge={() => setDriftModalDismissed(true)}
+      />
+
+      {/* v0.13.0 — built-in post-stitch / tap-to-preview modal.
+          Visible when the host supplies `capturePreview`.  When
+          undefined the modal stays hidden (visible=false) so it
+          doesn't intercept touches.  Host is expected to clear
+          `capturePreview` via `onCapturePreviewClose` on dismiss. */}
+      <CapturePreview
+        visible={capturePreview != null}
+        imageUri={capturePreview?.imageUri ?? ''}
+        imageWidth={capturePreview?.imageWidth}
+        imageHeight={capturePreview?.imageHeight}
+        title={capturePreview?.title}
+        actions={capturePreviewActions}
+        onClose={onCapturePreviewClose ?? noop}
       />
     </View>
   );
@@ -1731,6 +2050,8 @@ const styles = StyleSheet.create({
   },
   bottomBarLeft: {
     flex: 1,
+    alignItems: 'flex-start',
+    justifyContent: 'flex-end',
   },
   bottomBarCenter: {
     flex: 1,
@@ -1743,5 +2064,35 @@ const styles = StyleSheet.create({
   },
   shutterWrap: {
     marginTop: 12,
+  },
+  headerWrap: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+  },
+  thumbnailStripWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 160,
+  },
+  flashButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  flashButtonActive: {
+    backgroundColor: '#ffd34d',
+  },
+  flashButtonDisabled: {
+    opacity: 0.35,
+  },
+  flashIcon: {
+    fontSize: 20,
+    color: '#ffffff',
   },
 });

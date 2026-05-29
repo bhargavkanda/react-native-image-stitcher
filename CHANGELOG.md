@@ -16,6 +16,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-05-29
+
+### Added — Layer-2 components absorbed into `<Camera>` (opt-out)
+
+The flagship `<Camera>` now ships built-in defaults for every UX
+chrome piece previously exposed only as a Layer-2 component.  Hosts
+adopting `<Camera>` directly get a complete capture surface — flash
+button, pan-speed pill, drift-marker guide, header chrome,
+capture-history strip, and post-stitch preview — without having to
+import and wire each piece by hand.
+
+All built-ins use the opt-out pattern: enabled by default, disabled
+by setting the corresponding boolean to `false` or by omitting the
+corresponding payload prop.  Hosts that want their own chrome can
+opt out per piece and layer custom UI on top of `<Camera>` (the
+Layer-2 components remain exported and are unchanged).
+
+#### Flash control
+
+- `flash?: 'on' | 'off'` — controlled torch state.  Omit to let
+  `<Camera>` own it internally.
+- `onFlashChange?` — fires on tap (controlled and uncontrolled both).
+- `showFlashButton?: boolean` (default `true`) — built-in flash button
+  in the bottom-left slot.  AR mode auto-disables (ARKit / ARCore own
+  the device's torch; surfaces "Flash unavailable in AR mode" a11y
+  label and greyed styling).
+
+#### Pan guidance
+
+- `panGuide?: boolean` (default `true`) — built-in
+  `IncrementalPanGuide` ("keep the arrow on the line" drift marker).
+- `panoramaGuidance?: boolean` (default `true`) — built-in
+  `PanoramaGuidance` pan-speed pill.
+- Both are gyroscope-driven and only subscribe to the sensor while
+  recording — no idle cost.
+
+#### Header
+
+- `headerTitle?: string` — when set, renders a built-in
+  `CaptureHeader` at the top of the screen.  The existing settings
+  gear is absorbed into the header's right side (no duplicate gear).
+- `onHeaderBack?`, `headerBackLabel?`, `headerGuidance?`,
+  `headerColors?` — pass-through to `CaptureHeader`.
+
+#### Capture history + preview
+
+- `thumbnails?: CaptureThumbnailItem[]` — when supplied (even `[]`),
+  renders the built-in `CaptureThumbnailStrip` above the bottom
+  controls.  Hidden during recording so it doesn't overlap the
+  panorama band overlay.
+- `thumbnailsMin?`, `thumbnailsMax?` — count-line hints.
+- `onThumbnailPress?` — replaces the strip's built-in
+  tap-to-preview modal with a host handler.
+- `capturePreview?` — when set, renders a built-in `CapturePreview`
+  modal showing the supplied image.  Use for post-stitch
+  confirmation; the host clears the prop on dismiss via
+  `onCapturePreviewClose`.
+- `capturePreviewActions?` — pass-through action buttons for the
+  preview modal.
+
+### Migration
+
+- Hosts that were importing Layer-2 components (`CaptureHeader`,
+  `CaptureControlsBar`, `IncrementalPanGuide`, `PanoramaGuidance`,
+  `CaptureThumbnailStrip`, `CapturePreview`) directly can now drop
+  those imports and use the corresponding `<Camera>` props.
+- The Layer-2 components remain exported and unchanged in v0.13 for
+  backward compatibility.  Deprecation of those exports is targeted
+  for v0.14.
+- No behaviour change for hosts that already use `<Camera>` and
+  don't supply any of the new props — every new built-in defaults
+  to the previous (omitted) UX, except the flash button which
+  appears in the now-occupied bottom-left slot.  Hosts that previously
+  rendered chrome in that slot above `<Camera>` can pass
+  `showFlashButton={false}`.
+
 ## [0.12.0] — 2026-05-28
 
 ### Added — Orientation-aware `<Camera>` (R2-lite)
