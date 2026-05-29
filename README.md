@@ -104,7 +104,11 @@ export function CaptureScreen() {
 
 ## `<Camera>` props (summary)
 
-See `src/camera/Camera.tsx` for the full TSDoc.  Highlights:
+> **Full reference:** [`docs/camera-component.md`](docs/camera-component.md)
+> covers every prop with purpose, default, behaviour notes, the
+> `CameraCaptureResult` / `CameraError` shapes, orientation
+> behaviour, and common compositions.  This README summary lists
+> the highlights only.
 
 ### Initial values (uncontrolled — read once at mount)
 
