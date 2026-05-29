@@ -16,6 +16,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-05-28
+
+### Added — Orientation-aware `<Camera>` (R2-lite)
+
+`<Camera>` now works correctly under both portrait-locked and
+non-locked iOS hosts.  Pre-v0.12 the component assumed the host
+had restricted `UISupportedInterfaceOrientations` to Portrait;
+removing that restriction broke control layout, camera-preview
+rotation across modal close, and panorama capture mode selection.
+
+Five coupled changes:
+
+1. **`useOrientationDrift` hook + `OrientationDriftModal`**
+   (PR-1).  Snapshots device orientation at capture start and
+   latches a `drifted: true` flag if the user rotates mid-
+   capture.  The incremental engine doesn't support cross-
+   orientation captures (per the engine spec at
+   `incremental.ts:373-403`), so `<Camera>` auto-cancels via
+   `incremental.cancel()` and shows the modal to explain.
+
+2. **New `onCaptureAbandoned` prop** on `<Camera>`.  Fires when
+   the SDK auto-cancels an in-flight capture.  Currently the only
+   reason is `'orientation-drift'`; the union signature keeps the
+   prop stable for future reasons (low memory, etc.).
+
+3. **4-way home-indicator-edge anchor** for the bottom-controls
+   row (Layer A).  Combines `useWindowDimensions()` and
+   `useDeviceOrientation()` to compute the JS edge that
+   corresponds to the device's home-indicator side, then anchors
+   shutter / lens / AR toggle there.  Matches iOS Camera's
+   behaviour: shutter stays within thumb reach regardless of tilt.
+
+4. **AR `takePhoto` orientation parameter** (Fix #2).  Pre-v0.12
+   `RNSARSession.takePhoto` hardcoded `.right` (90° CW) to
+   rotate ARKit's sensor-native landscape buffer to portrait,
+   assuming portrait hold.  Now switches on the device
+   orientation passed from `useDeviceOrientation()` so landscape
+   captures produce correctly-oriented photos.
+
+5. **Modal `supportedOrientations={[all 4]}`** on
+   `OrientationDriftModal` and `PanoramaSettingsModal`.  RN's iOS
+   `Modal` defaults to portrait-only, which force-rotates the
+   window scene when opened under a non-locked host — leaving
+   the underlying `<Camera>`'s ARSession with stale orientation
+   state on dismiss (preview rendered sideways).  Declaring all
+   four orientations keeps the window aligned through the modal
+   cycle.
+
+### Added — Comment cleanup across native + JS surfaces
+
+Stale "portrait-locked host" comments in
+`useDeviceOrientation.ts`, `incremental.ts`, `StitcherFrame.ts`,
+`OpenCVIncrementalStitcher.{h,mm}`, and
+`IncrementalFirstwinsEngine.kt` rewritten to acknowledge both
+host configurations.  Pose-derived orientation detection remains
+the single source of truth — that didn't change; the rationale
+just got more accurate.
+
+### Known follow-ups (deferred to v0.12.1 or v0.13)
+
+- Portrait + non-AR stitching can regress under fast horizontal
+  pans — likely drift detection over-firing on lateral
+  acceleration.  Needs debounce or motion-aware threshold.
+- Component-render tests (`<OrientationDriftModal>`,
+  `<PanoramaBandOverlay>` per-orientation, `<ViewportCropOverlay>`
+  per-orientation, `<Camera>` composition) need
+  `@testing-library/react-native` + a jest preset flip.  Tracked
+  for v0.12.1.
+- Portrait-upside-down landscape detection on non-locked hosts —
+  the JS dims signal is ambiguous between locked-portrait + flipped
+  device and non-locked + screen-flipped-180°.  Needs a separate
+  signal.
+- Slot/hybrid API on `<Camera>` to absorb `CaptureControlsBar`,
+  `IncrementalPanGuide`, `PanoramaGuidance`, etc. — v0.13.
+
 ## [0.11.1] — 2026-05-28
 
 ### Fixed — AR-mode composed worklets silently throw

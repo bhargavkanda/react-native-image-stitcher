@@ -140,6 +140,34 @@ See `src/camera/Camera.tsx` for the full TSDoc.  Highlights:
 | `onFramesDropped(info)` | cv::Stitcher's confidence retry loop dropped one or more input frames. |
 | `onError(err)` | Classified error.  `err.code` from a known taxonomy (`STITCH_NEED_MORE_IMGS`, `STITCH_HOMOGRAPHY_FAIL`, `STITCH_CAMERA_PARAMS_FAIL`, `STITCH_OOM`, `CAMERA_PERMISSION_DENIED`, etc.). |
 
+## Orientation support
+
+`<Camera>` works in any device orientation regardless of host
+configuration.  No host setup required — the SDK adapts at runtime.
+
+**Portrait-locked host** (Info.plist `UISupportedInterfaceOrientations`
+restricted to Portrait — recommended for kiosks / single-task apps):
+the screen stays portrait; the SDK uses sensor-derived orientation
+for capture-mode selection and overlay layout.  This is the simpler
+configuration and the historical default.
+
+**Non-locked host** (Info.plist supports all 4 orientations — recommended
+for apps with other landscape-friendly screens): the screen rotates
+with the device.  `<Camera>`'s controls (shutter, lens chip, AR toggle)
+anchor to the home-indicator edge so they stay within thumb reach
+regardless of tilt — matching iOS Camera's behaviour.  The
+orientation-aware logic combines `useWindowDimensions()` (JS-layout)
+with `useDeviceOrientation()` (sensor) to compute the correct anchor.
+
+**Mid-capture rotation safety** — the incremental engine doesn't
+support cross-orientation captures (a portrait capture's keyframes
+can't be mixed with landscape-pan frames).  If the user rotates
+mid-capture, `<Camera>` auto-abandons via `incremental.cancel()`,
+fires `onCaptureAbandoned('orientation-drift')` if the host wired
+the callback, and shows the `OrientationDriftModal` to explain why.
+Host opt-in via the `onCaptureAbandoned` prop — the default UX is
+the modal alone.
+
 ## Lens ↔ AR interaction
 
 | Action | `arPreference` | `lens` | UI |
