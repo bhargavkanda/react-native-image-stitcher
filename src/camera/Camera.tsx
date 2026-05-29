@@ -1735,24 +1735,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
         )
       )}
 
-      {/* v0.13.0 — built-in capture-history thumbnail strip.  Renders
-          when the host supplies a `thumbnails` array (even empty),
-          hidden during recording so it doesn't overlap the band
-          overlay.  Sits above the bottom controls in JS-bottom
-          coordinates; landscape/non-locked layouts get the strip in
-          the same place (no orientation-aware repositioning for now —
-          the strip is intrinsically horizontal). */}
-      {thumbnails != null && statusPhase !== 'recording' && (
-        <View style={styles.thumbnailStripWrap} pointerEvents="box-none">
-          <CaptureThumbnailStrip
-            items={thumbnails}
-            minPhotos={thumbnailsMin}
-            maxPhotos={thumbnailsMax}
-            onItemPress={onThumbnailPress}
-          />
-        </View>
-      )}
-
       {/*
         v0.12.0 — Orientation-aware bottom controls anchored to the
         physical home-indicator edge.  The shutter follows the home-
@@ -1783,6 +1765,23 @@ export function Camera(props: CameraProps): React.JSX.Element {
             frameUris={batchKeyframeThumbnails}
             captureOrientation={deviceOrientation}
             vertical={isSideEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}
+          />
+        )}
+
+        {/* v0.13.0 — built-in capture-history thumbnail strip.  Lives
+            INSIDE the orientation-aware bottomArea container so it
+            rides along to the home-indicator edge in landscape rather
+            than sitting at a hard-coded `bottom: 160` mid-screen.
+            Hidden during recording so the PanoramaBandOverlay above
+            it has room without overlap.  Strip is intrinsically
+            horizontal; v0.13.1 will add orientation-aware rotation
+            for the thumbnails + tablet "user-bottom" placement. */}
+        {thumbnails != null && statusPhase !== 'recording' && (
+          <CaptureThumbnailStrip
+            items={thumbnails}
+            minPhotos={thumbnailsMin}
+            maxPhotos={thumbnailsMax}
+            onItemPress={onThumbnailPress}
           />
         )}
 
@@ -2071,12 +2070,10 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
   },
-  thumbnailStripWrap: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 160,
-  },
+  // v0.13.1 — `thumbnailStripWrap` removed.  The strip now renders
+  // inside the orientation-aware bottomArea container (alongside
+  // PanoramaBandOverlay and the bottom bar) rather than as a
+  // position-absolute overlay at hard-coded `bottom: 160`.
   flashButton: {
     width: 44,
     height: 44,

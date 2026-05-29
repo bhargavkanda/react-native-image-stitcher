@@ -81,15 +81,21 @@ export function CaptureHeader({
   colors,
   style,
 }: CaptureHeaderProps): React.JSX.Element {
-  const bg = colors?.background ?? '#000000';
+  // v0.13.1 — defaults are now transparent over the camera preview
+  // (matches the AR toggle / settings gear pill style); hosts using
+  // the header outside a camera context can pass solid colours via
+  // `colors`.  Title + gear get a text shadow for legibility over
+  // bright preview content; guidance row keeps a translucent pill
+  // background for the same reason.
+  const bg = colors?.background ?? 'transparent';
   const titleColor = colors?.title ?? '#ffffff';
   const accent = colors?.accent ?? '#FF9F0A';
-  const guidanceBg = colors?.guidanceBackground ?? 'rgba(255,255,255,0.08)';
+  const guidanceBg = colors?.guidanceBackground ?? 'rgba(0,0,0,0.45)';
   const guidanceColor = colors?.guidanceText ?? '#ffffff';
 
   return (
     <View style={[{ backgroundColor: bg }, style]}>
-      <View style={[styles.titleRow, { paddingTop: topInset + 8 }]}>
+      <View style={[styles.titleRow, { paddingTop: topInset + 4 }]}>
         {onBack ? (
           <Pressable
             onPress={onBack}
@@ -98,7 +104,7 @@ export function CaptureHeader({
             accessibilityLabel="Go back"
             style={styles.backButton}
           >
-            <Text style={[styles.backText, { color: accent }]}>
+            <Text style={[styles.backText, styles.textShadow, { color: accent }]}>
               {backLabel}
             </Text>
           </Pressable>
@@ -107,7 +113,7 @@ export function CaptureHeader({
           <View style={styles.backButton} />
         )}
         <Text
-          style={[styles.title, { color: titleColor }]}
+          style={[styles.title, styles.textShadow, { color: titleColor }]}
           numberOfLines={1}
           accessibilityRole="header"
         >
@@ -123,7 +129,7 @@ export function CaptureHeader({
             accessibilityLabel="Open panorama settings"
             style={styles.backButton}
           >
-            <Text style={[styles.gearIcon, { color: accent }]}>⚙</Text>
+            <Text style={[styles.gearIcon, styles.textShadow, { color: accent }]}>⚙</Text>
           </Pressable>
         ) : (
           <View style={styles.backButton} />
@@ -153,32 +159,49 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingBottom: 8,
+    paddingHorizontal: 12,
+    paddingBottom: 4,
   },
   backButton: {
-    minWidth: 64,
-    paddingVertical: 4,
+    minWidth: 56,
+    paddingVertical: 2,
   },
   backText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '500',
   },
   title: {
     flex: 1,
     textAlign: 'center',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
   },
   guidance: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    // v0.13.1 — guidance row is now a centred pill inset from the
+    // edges (matches the AR-toggle / lens-chip pill style) rather
+    // than a full-width band.  The pill background gives it its
+    // own contrast over the preview without forcing a solid bar.
+    alignSelf: 'center',
+    marginTop: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    maxWidth: '90%',
   },
   guidanceText: {
-    fontSize: 13,
+    fontSize: 12,
+    textAlign: 'center',
   },
   gearIcon: {
-    fontSize: 22,
+    fontSize: 20,
     textAlign: 'right',
+  },
+  // v0.13.1 — subtle text shadow so the (now-transparent) header
+  // text stays legible over bright preview content.  Same trick
+  // iOS Camera uses for the timestamp / mode labels.
+  textShadow: {
+    textShadowColor: 'rgba(0,0,0,0.65)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
 });

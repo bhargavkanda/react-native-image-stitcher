@@ -461,12 +461,13 @@ function App(): React.JSX.Element {
           onFlashChange={setFlash}
           // v0.13.0 — built-in capture-history strip.  Host owns the
           // array; the strip is purely presentational and shows each
-          // capture's aspect-ratio thumbnail.  `thumbnailsMin` colours
-          // the count line green when at least one capture exists;
-          // `thumbnailsMax` is a soft hint shown as "· N max" suffix.
+          // capture's aspect-ratio thumbnail.  We deliberately do NOT
+          // pass `thumbnailsMin` / `thumbnailsMax` here — the count
+          // line they trigger ("N / min · max") is an audit-app UX
+          // convention, not a generic camera feature, so the example
+          // omits it.  The props remain on the SDK for hosts (like
+          // RetaiLens) that want quota-style guidance.
           thumbnails={thumbnails}
-          thumbnailsMin={1}
-          thumbnailsMax={10}
           // v0.13.0 — built-in CapturePreview modal (replaces the
           // pre-v0.13 hand-rolled <Modal>).  Driven by the same
           // `preview` state as before via `capturePreviewPayload`.
