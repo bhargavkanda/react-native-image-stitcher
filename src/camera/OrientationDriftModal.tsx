@@ -122,6 +122,17 @@ export function OrientationDriftModal(
       animationType="fade"
       onRequestClose={onAcknowledge}
       accessibilityLabel="Capture cancelled — orientation drift"
+      // v0.12.0 — see PanoramaSettingsModal for the same prop's
+      // rationale.  Declaring all orientations prevents iOS from
+      // force-rotating the window to portrait when this modal opens
+      // mid-rotation, which would otherwise leave the underlying
+      // <Camera>'s ARSession in a stale-orientation state on dismiss.
+      supportedOrientations={[
+        'portrait',
+        'portrait-upside-down',
+        'landscape-left',
+        'landscape-right',
+      ]}
     >
       <View style={styles.backdrop}>
         <View style={styles.card}>

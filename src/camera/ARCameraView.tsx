@@ -84,7 +84,23 @@ export interface ARCameraViewHandle {
    * isMirrored, isRawPhoto }`).  Native generates a temp path —
    * caller does NOT need to construct one.
    */
-  takePhoto: (options?: { quality?: number }) => Promise<{
+  takePhoto: (options?: {
+    quality?: number;
+    /**
+     * v0.12.0 — device orientation at capture time, used to bake
+     * correct rotation into the saved JPEG.  Pass the value from
+     * `useDeviceOrientation()`.  Defaults to `'portrait'` on the
+     * native side if omitted (preserves pre-v0.12 behavior).
+     * Without this, AR-mode photos taken in landscape come out
+     * sideways because the native side previously hardcoded the
+     * rotate-to-portrait assumption.
+     */
+    orientation?:
+      | 'portrait'
+      | 'portrait-upside-down'
+      | 'landscape-left'
+      | 'landscape-right';
+  }) => Promise<{
     path: string;
     width: number;
     height: number;
@@ -149,6 +165,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
         return native.takePhoto({
           path: '',
           quality: options.quality ?? 90,
+          orientation: options.orientation ?? 'portrait',
         });
       },
       startRecording: (options) => {

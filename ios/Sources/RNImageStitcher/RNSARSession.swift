@@ -813,6 +813,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     @objc public func takePhoto(
         toPath rawPath: String,
         quality: Int,
+        orientation: String,
         completion: @escaping ([String: Any]?, NSError?) -> Void
     ) {
         let resolvedPath: String
@@ -835,14 +836,52 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         }
         let pixelBuffer = frame.capturedImage
 
-        // ARKit's capturedImage is in landscape sensor orientation
-        // regardless of how the device is held.  Rotate to portrait
-        // (the way the user is holding the phone for shelf audits)
-        // by applying a 90° clockwise CIImage orientation.  Without
-        // this, photos appear sideways in any consumer that doesn't
-        // honour EXIF (RN's <Image>, the OpenCV stitcher).
+        // v0.12.0 — Pre-v0.12 this method hardcoded `.right` (90° CW)
+        // to rotate-to-portrait, assuming the user always held the
+        // phone in portrait.  Under R2-lite the device can be in
+        // any orientation, so we pick the CIImage orientation per
+        // the JS-supplied `orientation` arg (from
+        // `useDeviceOrientation()`).
+        //
+        // Empirical mapping (on-device test 2026-05-28):
+        //   portrait              → .right  (90° CW — preserved from pre-v0.12)
+        //   landscape-left        → .up     (sensor matches device tilt; no rotation)
+        //   landscape-right       → .down   (180° — sensor opposite of device tilt)
+        //   portrait-upside-down  → .left   (90° CCW)
+        //
+        // The landscape mapping (landscape-left → .up) was determined
+        // empirically and is the opposite of what Apple's ARKit
+        // pixel-buffer-orientation docs would imply.  Likely because
+        // `useDeviceOrientation()` reports `landscape-left` via the
+        // `UIDeviceOrientation` convention (home indicator on user-
+        // right) while iOS's sensor-native orientation matches that
+        // tilt direction directly.  Without this fix, AR-mode single
+        // photos in landscape come out upside-down.
+        // v0.12.0 — Pre-v0.12 this method hardcoded `.right` (90° CW)
+        // to rotate-to-portrait, assuming the user always held the
+        // phone in portrait.  Under R2-lite the device can be in
+        // any orientation, so we pick the CIImage orientation per
+        // the JS-supplied `orientation` arg (from
+        // `useDeviceOrientation()`).
+        //
+        // Empirical mapping (on-device test 2026-05-28):
+        //   portrait              → .right  (90° CW — preserved from pre-v0.12)
+        //   landscape-left        → .up     (sensor matches device tilt; no rotation)
+        //   landscape-right       → .down   (180° — sensor opposite of device tilt)
+        //   portrait-upside-down  → .left   (90° CCW)
+        //
+        // The landscape mapping (landscape-left → .up) was determined
+        // empirically; the user reported AR landscape photos came out
+        // upside-down with .down and correctly upright with .up.
+        let exifOrientation: CGImagePropertyOrientation
+        switch orientation {
+        case "landscape-left":        exifOrientation = .up
+        case "landscape-right":       exifOrientation = .down
+        case "portrait-upside-down":  exifOrientation = .left
+        default:                       exifOrientation = .right  // portrait + unknown
+        }
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            .oriented(.right)
+            .oriented(exifOrientation)
         let context = CIContext(options: nil)
         guard let cgImage = context.createCGImage(
             ciImage,

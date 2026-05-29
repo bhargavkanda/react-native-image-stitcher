@@ -1082,7 +1082,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
         // ARCameraView writes to its own tmp location; relocate to
         // photoOutputPath via the native FileBridge so both branches
         // return paths under the same dir.
-        const photo = await arViewRef.current.takePhoto({ quality: 90 });
+        // v0.12.0 — pass deviceOrientation so the AR takePhoto's
+        // native CIImage rotation matches the user's view.  Pre-
+        // v0.12 the native side hardcoded portrait, so landscape
+        // photos came out sideways.
+        const photo = await arViewRef.current.takePhoto({
+          quality: 90,
+          orientation: deviceOrientation,
+        });
         try {
           await moveFile(photo.path, photoOutputPath);
         } catch (moveErr) {

@@ -404,7 +404,26 @@ export function PanoramaBandOverlay({
   const thumbRotationTransform = useMemo<
     Array<{ rotate: string }> | undefined
   >(() => {
-    if (vertical) return undefined;
+    // Empirical observation (on-device test 2026-05-28): captured
+    // per-keyframe JPEGs ARE saved in sensor-native landscape (not
+    // user-perspective), despite the cumulative panorama getting
+    // device-orientation rotation via finalize().  So:
+    //
+    //   jsPortrait box + landscape device: box is device-aligned;
+    //     image's "up" is at file-right (sensor convention).  Rotate
+    //     90° CW (landscape-left) / 90° CCW (landscape-right) to
+    //     align image up with box up.
+    //   jsLandscape box + landscape device: box is user-aligned via
+    //     OS screen rotation; image's "up" still at file-right.  To
+    //     align image up with box up, rotate the OPPOSITE direction
+    //     from the jsPortrait case — the screen-rotation already
+    //     handles half the work; we just need to compensate for the
+    //     remaining mismatch.
+    if (vertical) {
+      if (resolvedOrientation === 'landscape-left') return [{ rotate: '-90deg' }];
+      if (resolvedOrientation === 'landscape-right') return [{ rotate: '90deg' }];
+      return undefined;
+    }
     if (resolvedOrientation === 'landscape-left') return [{ rotate: '90deg' }];
     if (resolvedOrientation === 'landscape-right') return [{ rotate: '-90deg' }];
     return undefined;
