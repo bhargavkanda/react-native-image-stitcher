@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-06-01
+
+### Docs
+
+- Refresh the npm README for the v0.14 API: full `<Camera>` prop
+  reference (incl. `captureSources`), a complete capture-screen sample,
+  the portrait recommendation, and a 0.13.x → 0.14 migration note. (The
+  0.14.0 tarball shipped before this refresh landed; no code change.)
+- Add a Docusaurus docs site (published to GitHub Pages).
+
 ## [0.14.0] — 2026-06-01
 
 ### Fixed — Android AR single-photo orientation (landscape was sideways)
