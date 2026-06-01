@@ -89,6 +89,14 @@ class RNSARCameraView @JvmOverloads constructor(
     internal data class TakePhotoRequest(
         val outputPath: String,
         val quality: Int,
+        // v0.13.2 — physical device orientation at capture time, from the
+        // JS `useDeviceOrientation()` hook (one of 'portrait' /
+        // 'portrait-upside-down' / 'landscape-left' / 'landscape-right').
+        // Used INSTEAD of the window display rotation so AR photos come
+        // out upright even under a PORTRAIT-LOCKED host (where the window
+        // rotation is always ROTATION_0 regardless of how the device is
+        // held — the cause of the "landscape AR photo is sideways" bug).
+        val orientation: String,
         val promise: com.facebook.react.bridge.Promise,
     )
     private val pendingTakePhoto =
@@ -101,9 +109,10 @@ class RNSARCameraView @JvmOverloads constructor(
     internal fun requestTakePhoto(
         outputPath: String,
         quality: Int,
+        orientation: String,
         promise: com.facebook.react.bridge.Promise,
     ) {
-        val req = TakePhotoRequest(outputPath, quality, promise)
+        val req = TakePhotoRequest(outputPath, quality, orientation, promise)
         val previous = pendingTakePhoto.getAndSet(req)
         previous?.promise?.reject(
             "ar-photo-superseded",
@@ -339,10 +348,15 @@ class RNSARCameraView @JvmOverloads constructor(
                 image,
                 req.outputPath,
                 jpegQuality = req.quality.coerceIn(1, 100),
-                displayRotation = if (lastDisplayRotation >= 0)
-                    lastDisplayRotation
-                else
-                    Surface.ROTATION_0,
+                // v0.13.2 — derive the encode rotation from the PHYSICAL
+                // device orientation (JS gyro), not the window display
+                // rotation.  Under a portrait-locked host the window stays
+                // ROTATION_0 regardless of how the device is held, so the
+                // old `lastDisplayRotation` path baked a portrait EXIF tag
+                // onto landscape captures → sideways photo.  The
+                // device-orientation → Surface.ROTATION_* mapping below
+                // feeds encodeToJpeg's existing EXIF table.
+                displayRotation = deviceOrientationToSurfaceRotation(req.orientation),
             )
             if (written == null) {
                 req.promise.reject(
@@ -631,6 +645,20 @@ class RNSARCameraView @JvmOverloads constructor(
             trackingState = trackingStateStr,
         )
     }
+
+    /// v0.13.2 — map the JS physical device orientation to the
+    /// `Surface.ROTATION_*` value `YuvImageConverter.encodeToJpeg`
+    /// expects.  Mirrors the equivalence documented in encodeToJpeg's
+    /// EXIF table (ROTATION_0=portrait, _90=landscape-left,
+    /// _180=portrait-upside-down, _270=landscape-right).  Unknown /
+    /// missing → portrait (the safe pre-v0.12 default).
+    private fun deviceOrientationToSurfaceRotation(orientation: String): Int =
+        when (orientation) {
+            "landscape-left" -> Surface.ROTATION_90
+            "portrait-upside-down" -> Surface.ROTATION_180
+            "landscape-right" -> Surface.ROTATION_270
+            else -> Surface.ROTATION_0 // "portrait" + fallback
+        }
 
     private fun applyDisplayGeometry() {
         val session = sessionRef.get() ?: return

@@ -16,6 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Android AR single-photo orientation (landscape was sideways)
+
+Android AR `takePhoto` baked the wrong rotation into landscape captures
+under a portrait-locked host: it derived the EXIF orientation from the
+window display rotation (`WindowManager.defaultDisplay.rotation`), which
+stays `ROTATION_0` when the activity is portrait-locked regardless of how
+the device is physically held — so a landscape photo got a portrait EXIF
+tag and came out 90° CW.  The JS layer already passed the gyro device
+orientation to `RNSARSession.takePhoto` (since v0.12), and iOS consumed
+it, but the Android native side dropped it.  Now Android threads the
+device orientation through `takePhoto → requestTakePhoto → encodeToJpeg`,
+mapping it to the correct `Surface.ROTATION_*` / EXIF tag.  iOS unchanged
+(already correct).  Verified on-device (Samsung A35) in both landscape
+orientations.
+
 ### Added — `captureSources` constraint prop
 
 `<Camera>` gains `captureSources?: 'ar' | 'non-ar' | 'both'` (default

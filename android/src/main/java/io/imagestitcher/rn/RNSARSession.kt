@@ -455,6 +455,13 @@ class RNSARSession(reactContext: ReactApplicationContext)
         }
         val rawPath = if (options.hasKey("path")) options.getString("path") ?: "" else ""
         val quality = if (options.hasKey("quality")) options.getInt("quality") else 90
+        // v0.13.2 — physical device orientation from JS (useDeviceOrientation).
+        // Drives the saved JPEG's rotation so landscape AR captures are
+        // upright even under a portrait-locked host.  Defaults to
+        // 'portrait' (pre-v0.12 behaviour) when the host omits it.
+        val orientation =
+            if (options.hasKey("orientation")) options.getString("orientation") ?: "portrait"
+            else "portrait"
         val resolvedPath: String = if (rawPath.isNotEmpty()) {
             rawPath
         } else {
@@ -464,7 +471,7 @@ class RNSARSession(reactContext: ReactApplicationContext)
                 "RNImageStitcher-ar-${java.util.UUID.randomUUID()}.jpg",
             ).absolutePath
         }
-        view.requestTakePhoto(resolvedPath, quality, promise)
+        view.requestTakePhoto(resolvedPath, quality, orientation, promise)
     }
 
     @ReactMethod
