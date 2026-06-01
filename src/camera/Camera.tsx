@@ -1940,6 +1940,17 @@ function isSideEdge(edge: HomeIndicatorEdge): boolean {
   return edge === 'left' || edge === 'right';
 }
 
+// v0.13.1 — test-only exports of the pure orientation-decision
+// functions.  `homeIndicatorEdge` + `isSideEdge` together produce the
+// `vertical` flag that drives PanoramaBandOverlay and
+// CaptureThumbnailStrip layout, so they carry the orientation contract.
+// Unit-tested via these handles (the lib's jest config is pure-TS and
+// can't mount <Camera>; see jest.config.js).
+/** @internal test-only — see `homeIndicatorEdge`. */
+export const _homeIndicatorEdgeForTests = homeIndicatorEdge;
+/** @internal test-only — see `isSideEdge`. */
+export const _isSideEdgeForTests = isSideEdge;
+
 
 /**
  * v0.12.0 — bottom-controls outer container positioning.  Anchors
