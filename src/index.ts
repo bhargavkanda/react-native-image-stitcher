@@ -30,6 +30,7 @@ export type {
   CameraCaptureResult,
   CameraErrorCode,
   CaptureSource,
+  CaptureSourcesMode,
   CameraLens,
   StitchMode,
   Blender,

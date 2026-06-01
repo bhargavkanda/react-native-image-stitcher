@@ -16,6 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `captureSources` constraint prop
+
+`<Camera>` gains `captureSources?: 'ar' | 'non-ar' | 'both'` (default
+`'both'`) — a constraint on which capture sources the host allows, layered
+over `defaultCaptureSource` (which picks the initial source within it):
+
+- `'both'`  — AR + non-AR; the runtime AR toggle is shown (unchanged
+  default behaviour).
+- `'ar'`    — AR only; the AR toggle is hidden (nothing to switch to) and
+  the 0.5×/1× lens chooser is hidden (ARKit/ARCore can't use the
+  ultra-wide), keeping capture on the AR-capable 1× lens.
+- `'non-ar'`— non-AR only; the AR toggle is hidden, the lens chooser stays.
+
+A single-source constraint overrides a conflicting `defaultCaptureSource`.
+Exported type: `CaptureSourcesMode`.  Verified on-device (A35) across all
+three modes.
+
 ### Fixed — capability-aware lens selection (ultra-wide + flash on 0.5×)
 
 `<Camera>` now selects the back camera device by real capability instead

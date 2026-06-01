@@ -115,6 +115,17 @@ import {
 // ─── Types ──────────────────────────────────────────────────────────
 
 export type CaptureSource = 'ar' | 'non-ar';
+/**
+ * v0.13.2 — which capture sources the host ALLOWS.  A constraint on top
+ * of `defaultCaptureSource` (which picks the initial source within this
+ * constraint):
+ *   'both'   — AR and non-AR both available; AR toggle is shown.
+ *   'ar'     — AR only; AR toggle hidden (nothing to switch to), and the
+ *              0.5× lens chooser is hidden (ARKit/ARCore don't expose the
+ *              ultra-wide).
+ *   'non-ar' — non-AR only; AR toggle hidden.
+ */
+export type CaptureSourcesMode = 'ar' | 'non-ar' | 'both';
 export type CameraLens = '1x' | '0.5x';
 export type StitchMode = 'auto' | 'panorama' | 'scans';
 export type Blender = 'multiband' | 'feather';
@@ -243,6 +254,19 @@ export interface CameraProps {
   enablePhotoMode?: boolean;
   enablePanoramaMode?: boolean;
   showSettingsButton?: boolean;
+  /**
+   * v0.13.2 — which capture sources the host allows (default `'both'`).
+   * Constrains both the runtime AR toggle and `defaultCaptureSource`:
+   *   - `'both'`  : AR + non-AR; the AR toggle is shown so the user can
+   *     switch at runtime.
+   *   - `'ar'`    : AR only.  AR toggle hidden (nothing to toggle); the
+   *     0.5× lens chooser is also hidden (ARKit/ARCore can't use the
+   *     ultra-wide), so the camera stays on the AR-capable 1× lens.
+   *   - `'non-ar'`: non-AR only.  AR toggle hidden.
+   * When set to a single source, that source wins regardless of
+   * `defaultCaptureSource`.
+   */
+  captureSources?: CaptureSourcesMode;
   style?: StyleProp<ViewStyle>;
 
   /**
@@ -862,6 +886,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const {
     defaultCaptureSource = 'ar',
     defaultLens = '1x',
+    captureSources = 'both',
     enablePhotoMode = true,
     enablePanoramaMode = true,
     showSettingsButton = false,
@@ -892,6 +917,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
     engine = 'batch-keyframe',
   } = props;
 
+  // v0.13.2 — capture-source constraint (default 'both').  Derives which
+  // sources are permitted; `captureSources` overrides any conflicting
+  // `defaultCaptureSource`.  Used to constrain the initial AR preference
+  // and to hide the AR toggle / lens chooser below.
+  const arAllowed = captureSources !== 'non-ar';
+  const nonArAllowed = captureSources !== 'ar';
+  const arOnly = captureSources === 'ar';
+
   const insets = useSafeAreaInsets();
   // v0.12.0 — JS-layout orientation independent of device-physical.
   // `useWindowDimensions().width > height` tells us if the OS
@@ -903,10 +936,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const jsLandscape = jsWindow.width > jsWindow.height;
 
   // ── State ───────────────────────────────────────────────────────
+  // v0.13.2 — initial AR preference honours `defaultCaptureSource` but
+  // is clamped to the `captureSources` constraint: 'ar' forces on,
+  // 'non-ar' forces off, 'both' uses the default.
   const [arPreference, setArPreference] = useState(
-    defaultCaptureSource === 'ar',
+    !arAllowed ? false : !nonArAllowed ? true : defaultCaptureSource === 'ar',
   );
-  const [lens, setLens] = useState<CameraLens>(defaultLens);
+  // v0.13.2 — `arOnly` forces the 1× lens (the ultra-wide isn't usable
+  // in AR), and the lens chooser is hidden in that mode.
+  const [lens, setLens] = useState<CameraLens>(arOnly ? '1x' : defaultLens);
   // v0.13.0 — flash state.  Controlled by `controlledFlash` when the
   // host supplies the `flash` prop; otherwise owned internally and
   // toggled by the built-in flash button.  `effectiveFlash` below
@@ -1864,12 +1902,16 @@ export function Camera(props: CameraProps): React.JSX.Element {
             + lens chip remain centred. */}
         <View style={styles.bottomBarLeft} />
         <View style={styles.bottomBarCenter}>
-          <LensChip
-            lens={lens}
-            onChange={handleLensChange}
-            has0_5x={has0_5x}
-            contentRotation={contentRotation}
-          />
+          {/* v0.13.2 — lens chooser hidden in AR-only mode (ARKit/ARCore
+              can't use the ultra-wide, so there's nothing to choose). */}
+          {!arOnly && (
+            <LensChip
+              lens={lens}
+              onChange={handleLensChange}
+              has0_5x={has0_5x}
+              contentRotation={contentRotation}
+            />
+          )}
           <View style={styles.shutterWrap}>
             <CameraShutter
               onTap={handleTap}
@@ -1896,7 +1938,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
         style={[styles.pillStack, { top: pillStackTop }]}
         pointerEvents="box-none"
       >
-        {lens === '1x' && isARSupportedOnDevice && (
+        {/* v0.13.2 — AR toggle only when BOTH sources are allowed
+            (captureSources='both'); a single-source constraint has
+            nothing to toggle.  Still gated on 1× + device AR support. */}
+        {arAllowed && nonArAllowed && lens === '1x' && isARSupportedOnDevice && (
           <ARToggle arEnabled={arPreference} onToggle={handleARToggle} contentRotation={contentRotation} />
         )}
         {showFlashButton && !isAR && deviceHasTorch && (
