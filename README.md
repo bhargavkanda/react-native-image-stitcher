@@ -8,10 +8,10 @@ AR-backed and IMU-fallback capture paths.
 
 | Feature | Behaviour |
 |---|---|
-| **Tap shutter** | Single photo via vision-camera's `takePhoto` (non-AR) or `ARFrame.capturedImage` (AR). |
+| **Tap shutter** | Single photo via vision-camera's `takePhoto` (non-AR) or ARCore/ARKit `capturedImage` (AR). |
 | **Hold shutter** | Panorama capture — pan and release.  Engine accumulates keyframes; stitches via `cv::Stitcher::PANORAMA` (or `SCANS` if the pose suggests a flat-translation scan). |
-| **Lens chip** | 1× / 0.5× toggle above the shutter.  Selecting 0.5× forces non-AR (AR sessions can't switch physical lenses mid-session). |
-| **AR toggle** | Bottom-right corner, conditional on the 1× lens.  Toggles between AR-pose-driven and IMU-driven capture paths. |
+| **Lens chip** | 1× / 0.5× toggle next to the shutter.  Shown only when the device actually has a usable ultra-wide (real capability detection, v0.14).  Hidden entirely in AR-only mode (`captureSources="ar"`). |
+| **Flash & AR pills** | Top-right pill stack, under the settings gear.  Flash toggles the torch (hidden on torchless lenses, e.g. a standalone ultra-wide).  AR pill toggles AR ↔ non-AR — shown only when `captureSources="both"` and the device supports AR. |
 | **Internal settings panel** | Opt-in gear icon (top-right) via `showSettingsButton` prop.  Exposes blender, seam finder, warper, flow-gate tunables — useful for internal testers; hidden from public consumers by default. |
 
 ## Installation
@@ -65,6 +65,15 @@ cd android && ./gradlew :app:assembleDebug   # Android
 
 ## Quick start
 
+> **Orientation: use portrait.** `<Camera>` is designed and tuned for
+> portrait capture. On Android it self-locks to portrait; on iOS,
+> portrait-only is the recommended host `Info.plist` configuration.
+> See [Orientation support](#orientation-support) for the full story
+> (landscape *is* supported on iOS if you need it).
+
+The minimum: resolve camera permission, then mount `<Camera>` with an
+`onCapture` handler.
+
 ```tsx
 import {
   Camera,
@@ -81,68 +90,213 @@ export function CaptureScreen() {
         'Panorama:',
         result.uri,
         `${result.framesIncluded}/${result.framesRequested} frames`,
+        `stitched as ${result.stitchModeResolved ?? 'n/a'}`,
       );
     }
   };
 
-  const handleError = (err: CameraError) => {
-    console.warn(err.code, err.message);
-  };
-
   return (
     <Camera
-      defaultCaptureSource="ar"
-      defaultLens="1x"
-      enablePhotoMode
-      enablePanoramaMode
       onCapture={handleCapture}
-      onError={handleError}
+      onError={(err: CameraError) => console.warn(err.code, err.message)}
     />
   );
 }
 ```
 
-## `<Camera>` props (summary)
+### A complete capture screen
 
-> **Full reference:** [`docs/camera-component.md`](docs/camera-component.md)
-> covers every prop with purpose, default, behaviour notes, the
-> `CameraCaptureResult` / `CameraError` shapes, orientation
-> behaviour, and common compositions.  This README summary lists
-> the highlights only.
+A realistic screen: requests permission up front, shows a capture
+history strip, opens a post-stitch preview modal, and persists the
+output to a directory you control. (The SDK does **not** request camera
+permission for you — the host owns that.)
 
-### Initial values (uncontrolled — read once at mount)
+```tsx
+import React, { useCallback, useEffect, useState } from 'react';
+import { View, StyleSheet } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { useCameraPermission } from 'react-native-vision-camera';
+import {
+  Camera,
+  type CameraCaptureResult,
+  type CameraError,
+  type CaptureThumbnailItem,
+} from 'react-native-image-stitcher';
 
-| Prop | Default | Notes |
-|---|---|---|
-| `defaultCaptureSource` | `'ar'` | `'ar'` ↔ `'non-ar'` |
-| `defaultLens` | `'1x'` | `'1x'` ↔ `'0.5x'` |
-| `defaultStitchMode` | `'auto'` | `'auto'`, `'panorama'`, `'scans'` |
-| `defaultBlender` | `'multiband'` | `'multiband'`, `'feather'` |
-| `defaultSeamFinder` | `'graphcut'` | `'graphcut'`, `'skip'` |
-| `defaultWarper` | `'plane'` | `'plane'`, `'cylindrical'`, `'spherical'` |
-| `defaultFlowNoveltyPercentile` | `0.85` | Range 0.50 – 0.99 |
-| `defaultFlowEvalEveryNFrames` | `5` | Range 1 – 10 |
-| `defaultFlowMaxTranslationCm` | `50` | 0 = disabled |
-| `defaultKeyframeMaxCount` | `6` | Range 3 – 10 |
-| `defaultKeyframeOverlapThreshold` | `0.20` | Range 0.20 – 0.60 |
+export function CaptureScreen() {
+  // 1. Camera permission is a HOST concern — resolve it BEFORE mounting
+  //    <Camera>. (Android treats unrequested permissions as denied even
+  //    when declared in the manifest, so the explicit call is required.)
+  const { hasPermission, requestPermission } = useCameraPermission();
+  useEffect(() => {
+    if (!hasPermission) requestPermission().catch(() => undefined);
+  }, [hasPermission, requestPermission]);
+
+  // 2. Capture history (drives the built-in thumbnail strip).
+  const [thumbnails, setThumbnails] = useState<CaptureThumbnailItem[]>([]);
+
+  // 3. Post-stitch preview modal — set on capture, cleared on close.
+  const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
+
+  const onCapture = useCallback((result: CameraCaptureResult) => {
+    setPreview(result);
+    setThumbnails((prev) => [
+      ...prev,
+      { id: String(Date.now()), uri: result.uri, width: result.width, height: result.height },
+    ]);
+  }, []);
+
+  if (!hasPermission) return <View style={styles.fill} />; // or your own "grant access" UI
+
+  return (
+    <SafeAreaProvider>
+      <View style={styles.fill}>
+        <Camera
+          // Capture-mode controls
+          defaultCaptureSource="ar"   // start in AR mode (pose-driven)
+          captureSources="both"       // allow AR + non-AR; show the AR toggle
+          enablePhotoMode             // tap = photo
+          enablePanoramaMode          // hold + pan = panorama
+          // Output
+          outputDir={`${/* your app dir */ ''}/captures`}
+          // Header chrome (optional)
+          headerTitle="Capture"
+          headerGuidance="Tap for a photo. Hold + pan + release for a panorama."
+          // Capture history strip
+          thumbnails={thumbnails}
+          // Post-stitch preview modal (controlled — clear it on close)
+          capturePreview={preview ? { imageUri: preview.uri } : undefined}
+          onCapturePreviewClose={() => setPreview(null)}
+          // Events
+          onCapture={onCapture}
+          onError={(err: CameraError) => console.warn(err.code, err.message)}
+          onCaptureAbandoned={(reason) => console.log('abandoned:', reason)}
+        />
+      </View>
+    </SafeAreaProvider>
+  );
+}
+
+const styles = StyleSheet.create({ fill: { flex: 1, backgroundColor: '#000' } });
+```
+
+## `<Camera>` props (full reference)
+
+Every prop is optional. `<Camera>` works with no props at all (it just
+captures and you wire `onCapture`). Props fall into seven groups.
+
+> A deeper companion reference with composition recipes lives in
+> [`docs/camera-component.md`](docs/camera-component.md). The tables
+> below are the authoritative prop list.
+
+### Capture-source & lens (uncontrolled — read once at mount)
+
+| Prop | Type | Default | Notes |
+|---|---|---|---|
+| `defaultCaptureSource` | `'ar' \| 'non-ar'` | `'ar'` | Initial capture path. Clamped to `captureSources` (below). |
+| `captureSources` | `'ar' \| 'non-ar' \| 'both'` | `'both'` | **(v0.14)** Which sources are allowed. `'both'` shows the AR toggle. `'ar'` hides the AR toggle **and** the lens chooser (ARKit/ARCore can't use the ultra-wide). `'non-ar'` hides the AR toggle, keeps the lens chooser. A single-source value overrides a conflicting `defaultCaptureSource`. |
+| `defaultLens` | `'1x' \| '0.5x'` | `'1x'` | Initial lens. The 0.5× chooser only appears if the device actually has a usable ultra-wide (real capability detection, v0.14). |
+
+### Panorama / stitcher tunables (uncontrolled — internal-tester knobs)
+
+These mirror the in-app settings panel; most apps never set them.
+
+| Prop | Type | Default | Notes |
+|---|---|---|---|
+| `defaultStitchMode` | `'auto' \| 'panorama' \| 'scans'` | `'auto'` | `'auto'` picks PANORAMA vs SCANS from the pose at finalize. |
+| `defaultBlender` | `'multiband' \| 'feather'` | `'multiband'` | cv::Stitcher blender. |
+| `defaultSeamFinder` | `'graphcut' \| 'skip'` | `'graphcut'` | Seam finder. |
+| `defaultWarper` | `'plane' \| 'cylindrical' \| 'spherical'` | `'plane'` | Projection surface. |
+| `defaultFlowNoveltyPercentile` | `number` | `0.85` | Keyframe-gate novelty threshold (0.50–0.99). |
+| `defaultFlowEvalEveryNFrames` | `number` | `5` | Flow-gate eval cadence (1–10). |
+| `defaultFlowMaxTranslationCm` | `number` | `50` | Max IMU translation between keyframes; 0 = disabled. |
+| `defaultKeyframeMaxCount` | `number` | `6` | Keyframe cap per capture (3–10). |
+| `defaultKeyframeOverlapThreshold` | `number` | `0.20` | Min overlap to accept a keyframe (0.20–0.60). |
+| `defaultCompositingResolMP` / `defaultRegistrationResolMP` / `defaultSeamEstimationResolMP` | `number` | — | Forward-looking cv::Stitcher resolution knobs (currently no-ops). |
 
 ### UI toggles
 
-| Prop | Default | Notes |
+| Prop | Type | Default | Notes |
+|---|---|---|---|
+| `enablePhotoMode` | `boolean` | `true` | Tap = photo. When false, tap is a no-op. |
+| `enablePanoramaMode` | `boolean` | `true` | Hold + pan = panorama. When false, hold is a no-op. |
+| `showSettingsButton` | `boolean` | `false` | Gear icon → internal settings panel. Internal-tester only; leave off for public consumers. |
+| `style` | `StyleProp<ViewStyle>` | — | Outer container style. |
+
+### Flash (controlled or uncontrolled)
+
+| Prop | Type | Default | Notes |
+|---|---|---|---|
+| `flash` | `'on' \| 'off'` | — | Controlled torch state. Omit to let `<Camera>` own it internally. |
+| `onFlashChange` | `(next: 'on' \| 'off') => void` | — | Fires on flash-button tap (controlled and uncontrolled). |
+| `showFlashButton` | `boolean` | `true` | Built-in flash pill (top-right). Auto-hidden when the mounted device has no torch (e.g. a standalone ultra-wide) and in AR mode. |
+
+### Header chrome (opt-in)
+
+Setting `headerTitle` renders a built-in top header; the settings gear is absorbed into it.
+
+| Prop | Type | Notes |
 |---|---|---|
-| `enablePhotoMode` | `true` | Tap-to-photo |
-| `enablePanoramaMode` | `true` | Hold-to-pan |
-| `showSettingsButton` | `false` | Internal-tester only; OFF for public consumers |
+| `headerTitle` | `string` | Shows the header when set. |
+| `headerGuidance` | `string` | Subtitle / guidance pill under the title. |
+| `onHeaderBack` | `() => void` | Renders a back affordance when provided. |
+| `headerBackLabel` | `string` | Custom back-button label. |
+| `headerColors` | `object` | Override header colours. |
 
-### Callbacks
+### Capture history + post-stitch preview
 
-| Prop | Fires when |
-|---|---|
-| `onCapture(result)` | Photo OR panorama capture completes successfully.  `result.type` discriminates. |
-| `onCaptureSourceChange(source)` | Effective capture source changes (e.g., user toggles AR, or selecting 0.5× forces non-AR). |
-| `onLensChange(lens)` | User taps the 1×/0.5× chip. |
-| `onFramesDropped(info)` | cv::Stitcher's confidence retry loop dropped one or more input frames. |
-| `onError(err)` | Classified error.  `err.code` from a known taxonomy (`STITCH_NEED_MORE_IMGS`, `STITCH_HOMOGRAPHY_FAIL`, `STITCH_CAMERA_PARAMS_FAIL`, `STITCH_OOM`, `CAMERA_PERMISSION_DENIED`, etc.). |
+| Prop | Type | Notes |
+|---|---|---|
+| `thumbnails` | `CaptureThumbnailItem[]` | When supplied (even `[]`), renders the built-in thumbnail strip. Hidden during recording. |
+| `thumbnailsMin` / `thumbnailsMax` | `number` | Optional count-line hints (e.g. quota guidance). |
+| `onThumbnailPress` | `(item) => void` | Replaces the strip's built-in tap-to-preview with your handler. |
+| `capturePreview` | `{ imageUri; imageWidth?; imageHeight?; title? }` | When set, renders the built-in preview modal. Controlled — clear it via `onCapturePreviewClose`. |
+| `capturePreviewActions` | `CapturePreviewAction[]` | Action buttons for the preview modal (e.g. Save / Retake). |
+| `onCapturePreviewClose` | `() => void` | Fires when the preview modal is dismissed. |
+
+### Callbacks & advanced
+
+| Prop | Type | Fires / purpose |
+|---|---|---|
+| `onCapture` | `(result: CameraCaptureResult) => void` | Photo OR panorama completes. `result.type` discriminates (`'photo'` / `'panorama'`). |
+| `onCaptureSourceChange` | `(source: CaptureSource) => void` | Effective source changes (AR toggle, or 0.5× forcing non-AR). |
+| `onLensChange` | `(lens: CameraLens) => void` | User taps the 1×/0.5× chip. |
+| `onFramesDropped` | `(info: FramesDroppedInfo) => void` | cv::Stitcher's confidence retry dropped input frame(s). |
+| `onCaptureAbandoned` | `(reason: 'orientation-drift') => void` | SDK auto-cancelled an in-flight capture (currently only mid-capture rotation). |
+| `onError` | `(err: CameraError) => void` | Classified error — see codes below. |
+| `outputDir` | `string` | Directory for saved JPEGs. The lib creates it if missing. |
+| `engine` | `'batch-keyframe' \| …` | Stitching engine. Default `'batch-keyframe'`; most apps leave it. |
+| `frameProcessor` | vision-camera frame processor | Host worklet composed with first-party stitching (see [`useStitcherWorklet`](docs/camera-component.md)). Advanced. |
+
+### `CameraCaptureResult`
+
+```ts
+type CameraCaptureResult =
+  | { type: 'photo'; uri: string; width: number; height: number }
+  | { type: 'panorama'; uri: string; width: number; height: number;
+      framesRequested: number; framesIncluded: number; framesDropped: number;
+      finalConfidenceThresh: number; durationMs: number;
+      stitchModeResolved?: 'panorama' | 'scans' };
+```
+
+### `CameraError` codes
+
+`err.code` is one of a fixed taxonomy so you can branch (toast vs retry vs report):
+`CAMERA_PERMISSION_DENIED`, `CAMERA_DEVICE_UNAVAILABLE`, `PHOTO_CAPTURE_FAILED`,
+`PANORAMA_START_FAILED`, `PANORAMA_FINALIZE_FAILED`, `STITCH_NEED_MORE_IMGS`,
+`STITCH_HOMOGRAPHY_FAIL`, `STITCH_CAMERA_PARAMS_FAIL`, `STITCH_OOM`,
+`OUTPUT_WRITE_FAILED`, plus `VISION_CAMERA_RUNTIME`.
+
+### Migration from 0.13.x
+
+- **Removed:** the `panGuide` and `panoramaGuidance` props (the
+  drift-marker overlay + pan-speed pill). They are no longer part of the
+  public API and `<Camera>` no longer renders them. Remove these props
+  if you were passing them — they're now a no-op type error.
+- **Added:** `captureSources` (above).
+- **Behaviour:** flash + AR controls moved to a top-right pill stack; the
+  0.5× chooser now reflects real device capability; Android self-locks to
+  portrait. No code change required for any of these.
 
 ## Orientation support
 
@@ -186,14 +340,20 @@ the modal alone.
 
 ## Lens ↔ AR interaction
 
-| Action | `arPreference` | `lens` | UI |
-|---|---|---|---|
-| Initial mount with defaults | `true` | `1x` | AR toggle ON |
-| User switches to 0.5× | unchanged (`true`) | `0.5x` | AR toggle HIDDEN, forced non-AR |
-| User switches back to 1× | unchanged (`true`) | `1x` | AR toggle visible at its previous state |
-| User taps AR toggle off (on 1×) | `false` | `1x` | AR toggle OFF |
+The lens chooser and AR toggle interact, because ARKit/ARCore sessions
+can't switch to the ultra-wide. With `captureSources="both"` (default):
 
-The component owns the runtime state; the parent persists across launches via the `on*Change` callbacks if desired.
+| Action | AR preference | Lens | UI |
+|---|---|---|---|
+| Initial mount (defaults) | on | `1×` | AR pill ON |
+| Switch to 0.5× | unchanged | `0.5×` | AR pill HIDDEN; capture forced non-AR |
+| Switch back to 1× | unchanged | `1×` | AR pill visible at its previous state |
+| Tap AR pill off (on 1×) | off | `1×` | AR pill OFF |
+
+When `captureSources` is `'ar'` or `'non-ar'`, the AR pill never shows
+(nothing to toggle), and `'ar'` additionally hides the lens chooser. The
+component owns this runtime state; persist across launches via the
+`on*Change` callbacks if desired.
 
 ## Architecture notes
 
