@@ -1603,18 +1603,41 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // ── v0.13.0 — Flash control ─────────────────────────────────────
   //
   // `flashRequested` is what the host / built-in button asks for.
-  // `effectiveFlash` is what we actually drive into vision-camera —
-  // AR mode forces 'off' because ARKit / ARCore own AVCaptureDevice
-  // and the torch isn't exposed.  This way the button's visual state
-  // (a11y, styling) tracks `flashRequested` while the underlying
-  // camera always sees the correct value.
+  // `effectiveFlash` is what we drive into vision-camera (non-AR).  AR
+  // mode forces 'off' (flash is hidden in AR; ARKit/ARCore own the
+  // device) so vision-camera — which isn't the active camera in AR —
+  // doesn't fight for it.
+  //
+  // v0.13.1 — the ACTIVE device's torch capability is the source of
+  // truth.  The ultra-wide (0.5×) lens has no flash/torch unit on most
+  // phones, so vision-camera throws `flash-not-available` if we pass
+  // flash="on" while it's selected.  `capture.device.hasTorch` (from
+  // vision-camera's device list) tells us definitively; we hide the
+  // flash control and force 'off' when the device can't flash.
+  // (Driving the wide-angle torch while on the ultra-wide is tracked
+  // separately — see the multi-lens device-selection plan.)
+  const deviceHasTorch = capture.device?.hasTorch ?? false;
   const flashRequested: 'on' | 'off' = controlledFlash ?? internalFlash;
-  const effectiveFlash: 'on' | 'off' = isAR ? 'off' : flashRequested;
+  const effectiveFlash: 'on' | 'off' =
+    isAR || !deviceHasTorch ? 'off' : flashRequested;
   const toggleFlash = useCallback(() => {
     const next: 'on' | 'off' = flashRequested === 'on' ? 'off' : 'on';
     if (controlledFlash == null) setInternalFlash(next);
     onFlashChange?.(next);
   }, [flashRequested, controlledFlash, onFlashChange]);
+
+  // v0.13.1 — top-right control pills (flash + AR) stack vertically
+  // UNDER the settings affordance.  Anchor depends on what's above:
+  //   - headerTitle set  → pills clear the CaptureHeader bar
+  //     (title row ≈ topInset + ~36; guidance pill adds ~28 when present)
+  //   - standalone gear  → pills clear the 40px gear at topInset + 8
+  //   - neither          → pills start where the gear would be
+  const pillStackTop =
+    headerTitle != null
+      ? insets.top + (headerGuidance != null ? 72 : 40)
+      : showSettingsButton
+        ? insets.top + 8 + 44
+        : insets.top + 8;
 
   // ── JSX ─────────────────────────────────────────────────────────
 
@@ -1827,25 +1850,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
             vertical column when on left/right (slots stack along
             the narrow strip).  Touch targets stay axis-aligned. */}
         <View style={bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}>
-        <View style={styles.bottomBarLeft}>
-          {showFlashButton && (
-            <Pressable
-              onPress={isAR ? undefined : toggleFlash}
-              accessibilityRole="button"
-              accessibilityLabel={isAR ? 'Flash unavailable in AR mode' : `Flash ${flashRequested === 'on' ? 'on' : 'off'}`}
-              accessibilityState={{ selected: flashRequested === 'on', disabled: isAR }}
-              disabled={isAR}
-              hitSlop={8}
-              style={[
-                styles.flashButton,
-                flashRequested === 'on' && !isAR && styles.flashButtonActive,
-                isAR && styles.flashButtonDisabled,
-              ]}
-            >
-              <Text style={[styles.flashIcon, contentRotation]}>⚡</Text>
-            </Pressable>
-          )}
-        </View>
+        {/* v0.13.1 — flash + AR moved to the top-right pill stack (see
+            below).  Left/right slots stay as flex spacers so the shutter
+            + lens chip remain centred. */}
+        <View style={styles.bottomBarLeft} />
         <View style={styles.bottomBarCenter}>
           <LensChip
             lens={lens}
@@ -1863,12 +1871,48 @@ export function Camera(props: CameraProps): React.JSX.Element {
             />
           </View>
         </View>
-        <View style={styles.bottomBarRight}>
-          {lens === '1x' && isARSupportedOnDevice && (
-            <ARToggle arEnabled={arPreference} onToggle={handleARToggle} contentRotation={contentRotation} />
-          )}
+        <View style={styles.bottomBarRight} />
         </View>
-        </View>
+      </View>
+
+      {/* v0.13.1 — top-right control pill stack, anchored UNDER the
+          settings affordance.  Vertical column; pills match the AR
+          toggle's shape.  ORDER MATTERS: AR pill is FIRST (top) so it
+          stays anchored when the flash pill below it shows/hides
+          (flash is hidden in AR mode, and when the active device has no
+          torch — e.g. the ultra-wide 0.5× lens).  AR toggle shows only
+          when the lens is 1× (ARKit/ARCore don't expose the ultra-wide)
+          and the device supports AR. */}
+      <View
+        style={[styles.pillStack, { top: pillStackTop }]}
+        pointerEvents="box-none"
+      >
+        {lens === '1x' && isARSupportedOnDevice && (
+          <ARToggle arEnabled={arPreference} onToggle={handleARToggle} contentRotation={contentRotation} />
+        )}
+        {showFlashButton && !isAR && deviceHasTorch && (
+          <Pressable
+            onPress={toggleFlash}
+            accessibilityRole="button"
+            accessibilityLabel={`Flash ${flashRequested === 'on' ? 'on' : 'off'}`}
+            accessibilityState={{ selected: flashRequested === 'on' }}
+            hitSlop={8}
+            style={[
+              pillStyles.pill,
+              flashRequested === 'on' && pillStyles.pillActive,
+            ]}
+          >
+            <Text
+              style={[
+                pillStyles.flashGlyph,
+                flashRequested === 'on' && pillStyles.glyphActive,
+                contentRotation,
+              ]}
+            >
+              ⚡
+            </Text>
+          </Pressable>
+        )}
       </View>
 
       {/* Settings modal (rendered always, visible-gated). */}
@@ -2123,22 +2167,41 @@ const styles = StyleSheet.create({
   // inside the orientation-aware bottomArea container (alongside
   // PanoramaBandOverlay and the bottom bar) rather than as a
   // position-absolute overlay at hard-coded `bottom: 160`.
-  flashButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+  //
+  // v0.13.1 — top-right control pill stack (flash + AR).  Absolute,
+  // pinned to the right edge under the settings affordance; `top` is
+  // set inline from `pillStackTop`.  Column so the pills stack
+  // vertically; gap keeps them from touching.
+  pillStack: {
+    position: 'absolute',
+    right: 14,
+    alignItems: 'flex-end',
+    gap: 10,
+  },
+});
+
+
+// v0.13.1 — shared pill style for the top-right control stack.  The
+// flash pill matches the AR toggle's shape (same padding / radius /
+// background) so the two read as a set.
+const pillStyles = StyleSheet.create({
+  pill: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    minWidth: 56,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.45)',
   },
-  flashButtonActive: {
+  pillActive: {
     backgroundColor: '#ffd34d',
   },
-  flashButtonDisabled: {
-    opacity: 0.35,
-  },
-  flashIcon: {
-    fontSize: 20,
+  flashGlyph: {
     color: '#ffffff',
+    fontSize: 18,
+  },
+  glyphActive: {
+    color: '#1a1a1a',
   },
 });
