@@ -47,6 +47,10 @@ android/.cxx/
 # Kept locally for in-flight planning; release-time intent goes into CHANGELOG.md.
 docs/plans/
 
+# Architecture decision records / internal discussions — kept locally for
+# reference; NOT part of the published source or npm package.
+docs/decisions/
+
 # v0.8.0 Phase 7 parity baselines — locally captured panorama JPEGs
 # from v0.7.x / v0.8.0 used for SSIM comparison via
 # `scripts/ssim-compare.py`.  Per-developer + per-device captures;
