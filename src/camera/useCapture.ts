@@ -36,6 +36,12 @@ import {
   type TakePhotoOptions,
 } from 'react-native-vision-camera';
 
+import {
+  selectCaptureDevice,
+  zoomForLens,
+  type CaptureDeviceMode,
+  type DeviceLike,
+} from './selectCaptureDevice';
 import { runQualityCheck } from '../quality/runQualityCheck';
 import { normaliseOrientation } from '../quality/normaliseOrientation';
 import { toBareFilePath } from '../utils/paths';
@@ -92,8 +98,22 @@ export interface UseCaptureOptions {
    * behaves as if `preferredPhysicalDevice` was undefined).  The
    * returned `availablePhysicalDevices` exposes what the device
    * actually offers so the host can render an appropriate switcher.
+   *
+   * v0.13.2 — superseded by `lens` for `<Camera>`'s own use (see
+   * `selectCaptureDevice`).  Still honoured for direct Layer-2 hosts.
    */
   preferredPhysicalDevice?: PhysicalCameraDeviceType;
+  /**
+   * v0.13.2 — the active UI lens (`1×` / `0.5×`).  When supplied, the
+   * hook uses capability-aware selection (`selectCaptureDevice`): it
+   * prefers a multi-cam device spanning both FOVs (lens switched via
+   * `zoom`, torch available on every lens), and falls back to a
+   * standalone ultra-wide device-swap only where no such multi-cam
+   * device exists.  Fixes the "0.5× shows wide-angle on some phones"
+   * and "flash unavailable on 0.5×" bugs.  When omitted, the legacy
+   * `preferredPhysicalDevice` path is used (backwards-compatible).
+   */
+  lens?: '1x' | '0.5x';
 }
 
 
@@ -166,6 +186,31 @@ export interface UseCaptureReturn {
    * load).  Always populated by the time the camera is mountable.
    */
   availablePhysicalDevices: PhysicalCameraDeviceType[];
+  /**
+   * v0.13.2 — how lenses are switched for the mounted device:
+   *   'multicam'      — one device spans both FOVs; switch via `deviceZoom`.
+   *   'standalone-uw' — separate ultra-wide device; switch by remounting.
+   *   'wide-only'     — no ultra-wide; no 0.5× chooser.
+   */
+  captureMode: CaptureDeviceMode;
+  /**
+   * v0.13.2 — whether the device can offer a 0.5× ultra-wide lens AT ALL
+   * (real capability, replacing the old hardcoded assumption).  Drives
+   * whether `<Camera>` renders the lens chooser.
+   */
+  has0_5x: boolean;
+  /**
+   * v0.13.2 — whether the currently-MOUNTED device has a torch.  Drives
+   * the flash control's availability (the standalone ultra-wide has none).
+   */
+  deviceHasTorch: boolean;
+  /**
+   * v0.13.2 — the `zoom` value to apply for the active lens in
+   * `multicam` mode (0.5× → ultra-wide end, 1× → wide baseline).
+   * `undefined` in standalone/wide-only modes (lens = device identity,
+   * no zoom needed).  Pass to `<CameraView zoom>`.
+   */
+  deviceZoom: number | undefined;
 }
 
 
@@ -208,22 +253,61 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     qualityThresholds,
     takePhotoOptions,
     preferredPhysicalDevice,
+    lens,
   } = options;
 
   const cameraRef = useRef<Camera | null>(null);
 
-  // 2026-05-14 — physical-lens-aware device picker.
+  const allDevices = useCameraDevices();
+
+  // v0.13.2 — capability-aware selection (`lens` supplied) vs legacy
+  // per-lens physical-device swap (`preferredPhysicalDevice`).
   //
-  // When `preferredPhysicalDevice` is supplied, ask vision-camera
-  // for a device that exposes that specific physical lens (e.g.,
-  // 'ultra-wide-angle-camera').  Falls back to the position-default
-  // when the device doesn't have that lens.  When undefined, behaves
-  // identically to the pre-2026-05-14 useCameraDevice(position) call.
-  const deviceWithPreferred = useCameraDevice(cameraPosition, {
+  // Capability-aware: `selectCaptureDevice` prefers a multi-cam device
+  // that spans wide + ultra-wide (so 0.5× is reached via `zoom` and the
+  // torch works on every lens), falling back to a standalone ultra-wide
+  // device-swap only where the platform has no such multi-cam grouping.
+  // This fixes (a) 0.5× silently showing the wide-angle FOV on phones
+  // where the ultra-wide is only inside a multi-cam device, and (b)
+  // flash being unavailable on the torchless standalone ultra-wide.
+  const selection = useMemo(
+    () => selectCaptureDevice(allDevices as unknown as DeviceLike[]),
+    [allDevices],
+  );
+
+
+  // Legacy path (no `lens`): preserve the pre-v0.13.2 per-physical-lens
+  // request so direct Layer-2 hosts that pass `preferredPhysicalDevice`
+  // are unaffected.
+  const legacyDevice = useCameraDevice(cameraPosition, {
     physicalDevices: preferredPhysicalDevice ? [preferredPhysicalDevice] : undefined,
   });
-  const deviceFallback = useCameraDevice(cameraPosition);
-  const device = deviceWithPreferred ?? deviceFallback;
+  const legacyFallback = useCameraDevice(cameraPosition);
+
+  // The mounted device:
+  //   - lens supplied + multicam     → the single multi-cam device
+  //     (lens switched via `zoom`, computed below).
+  //   - lens supplied + standalone-uw→ swap to the ultra-wide device on
+  //     0.5×, else the wide primary (matches the legacy swap, but with
+  //     correct device identity from `selectCaptureDevice`).
+  //   - lens supplied + wide-only    → the wide device (0.5× hidden).
+  //   - no lens                      → legacy behaviour.
+  let device: ReturnType<typeof useCameraDevice>;
+  let activeZoom: number | undefined;
+  if (lens != null) {
+    if (selection.mode === 'standalone-uw' && lens === '0.5x') {
+      device = (selection.ultraWideDevice as typeof legacyDevice) ?? selection.device as typeof legacyDevice ?? legacyFallback;
+    } else {
+      device = (selection.device as typeof legacyDevice) ?? legacyFallback;
+    }
+    activeZoom =
+      selection.mode === 'multicam' && selection.device
+        ? zoomForLens(selection.device, lens)
+        : undefined;
+  } else {
+    device = legacyDevice ?? legacyFallback;
+    activeZoom = undefined;
+  }
 
   // Enumerate ALL physical lens types available on the chosen
   // position so the host can decide whether to render a switcher.
@@ -231,8 +315,8 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
   // has `physicalDevices: PhysicalCameraDeviceType[]`.  We dedupe the
   // union across all devices at `position` so the host sees the full
   // set the platform exposes (some phones expose ultra-wide only via
-  // a separate logical camera, not the main one).
-  const allDevices = useCameraDevices();
+  // a separate logical camera, not the main one).  `allDevices` is
+  // computed once above (shared with `selectCaptureDevice`).
   const availablePhysicalDevices = useMemo<PhysicalCameraDeviceType[]>(() => {
     const seen = new Set<PhysicalCameraDeviceType>();
     for (const d of allDevices) {
@@ -334,5 +418,9 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     isCapturing,
     takePhoto,
     availablePhysicalDevices,
+    captureMode: selection.mode,
+    has0_5x: selection.has0_5x,
+    deviceHasTorch: device?.hasTorch ?? false,
+    deviceZoom: activeZoom,
   };
 }

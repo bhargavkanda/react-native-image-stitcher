@@ -16,6 +16,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — capability-aware lens selection (ultra-wide + flash on 0.5×)
+
+`<Camera>` now selects the back camera device by real capability instead
+of requesting a single physical lens per zoom level.  `selectCaptureDevice`:
+
+- **Prefers a multi-cam device** that spans wide + ultra-wide (lens
+  switched via `zoom`; torch available on every lens).  On devices that
+  expose such a device (e.g. iPhone 16 Pro — verified `multicam`), this
+  fixes the user-reported "0.5× shows the wide-angle FOV" bug AND makes
+  flash work on 0.5× (the mounted multi-cam device carries the torch).
+- **Falls back to a standalone ultra-wide** device-swap where no multi-cam
+  device exists (e.g. Samsung A35 — verified `standalone-uw`; vision-camera
+  surfaces the physical cameras separately there).  0.5× still shows the
+  ultra-wide FOV; flash hides because that standalone device is torchless.
+
+`has0_5x` is now derived from the real device inventory (was hardcoded
+`true`), so the lens chooser hides on wide-only hardware.  13 unit tests
+cover the selection matrix incl. both edge cases (ultra-wide only in a
+multi-cam group; ultra-wide only standalone).
+
+Verified on-device: iPhone 16 Pro (multicam — 0.5× FOV + flash both work)
+and Samsung A35 (standalone-uw — 0.5× FOV works, flash correctly hidden).
+
 ### Added — Android portrait lock (SDK-enforced)
 
 `<Camera>` now locks its host Activity to portrait on Android while

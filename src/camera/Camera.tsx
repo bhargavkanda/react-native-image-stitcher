@@ -1030,21 +1030,23 @@ export function Camera(props: CameraProps): React.JSX.Element {
     }
   }, [effectiveCaptureSource, onCaptureSourceChange]);
 
-  // ── Lens chip availability ──────────────────────────────────────
-  // TODO follow-up: probe the device's available physical lenses via
-  // vision-camera's `useCameraDevices` and surface in
-  // `useCapture().availablePhysicalDevices`.  For now we assume the
-  // 0.5x ultra-wide exists on modern devices.  When it doesn't, the
-  // lens chip degenerates to a static 1× indicator (see LensChip).
-  const has0_5x = true;
-
   // ── Capture hooks ───────────────────────────────────────────────
+  // v0.13.2 — pass the active `lens` so useCapture uses capability-aware
+  // selection (multi-cam zoom-switch where available, standalone-ultra-
+  // wide swap otherwise).  Replaces the old per-lens
+  // `preferredPhysicalDevice` request that mis-selected on some phones.
   const capture = useCapture({
     cameraPosition: 'back',
     enableQualityChecks: false,
-    preferredPhysicalDevice:
-      lens === '0.5x' ? 'ultra-wide-angle-camera' : 'wide-angle-camera',
+    lens,
   });
+
+  // ── Lens chip availability ──────────────────────────────────────
+  // v0.13.2 — real device capability from `useCapture` (which uses
+  // `selectCaptureDevice`).  True only when the device actually exposes
+  // an ultra-wide reachable via a multi-cam zoom OR a standalone
+  // ultra-wide device; false on wide-only hardware (chip hides).
+  const has0_5x = capture.has0_5x;
   const incremental = useIncrementalStitcher();
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);
@@ -1614,9 +1616,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // flash="on" while it's selected.  `capture.device.hasTorch` (from
   // vision-camera's device list) tells us definitively; we hide the
   // flash control and force 'off' when the device can't flash.
-  // (Driving the wide-angle torch while on the ultra-wide is tracked
-  // separately — see the multi-lens device-selection plan.)
-  const deviceHasTorch = capture.device?.hasTorch ?? false;
+  // v0.13.2 — `capture.deviceHasTorch` reflects the MOUNTED device.  In
+  // multi-cam mode this is the multi-cam device (has a torch → flash
+  // works on both 1× and 0.5× via zoom).  In standalone-uw mode on 0.5×
+  // the mounted device is the torchless ultra-wide → flash hides.
+  const deviceHasTorch = capture.deviceHasTorch;
   const flashRequested: 'on' | 'off' = controlledFlash ?? internalFlash;
   const effectiveFlash: 'on' | 'off' =
     isAR || !deviceHasTorch ? 'off' : flashRequested;
@@ -1671,6 +1675,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
           // which has run on `video` (true) for months without issue.
           video
           flash={effectiveFlash}
+          // v0.13.2 — in multi-cam mode the lens is switched via zoom
+          // on a single mounted device (0.5× → ultra-wide end, 1× →
+          // wide baseline).  undefined in standalone/wide-only modes
+          // (lens = device identity, no zoom).
+          zoom={capture.deviceZoom}
           style={StyleSheet.absoluteFill}
           // F8 (FrameProcessor port) — host-supplied worklet runs on
           // the camera producer thread for every frame.  Only wired
