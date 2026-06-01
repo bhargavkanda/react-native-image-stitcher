@@ -144,8 +144,6 @@ but no capture is in flight.
 
 | Prop | Type | Default | Purpose |
 |---|---|---|---|
-| `panGuide` | `boolean` | `true` | Show the `IncrementalPanGuide` ("keep the arrow on the line" drift-marker overlay).  A horizontal/vertical guide line with a marker that drifts perpendicular as the user tilts off-axis.  Marker colour scales green → amber → red as drift grows. |
-| `panoramaGuidance` | `boolean` | `true` | Show the `PanoramaGuidance` pan-speed pill ("Pan slowly" / "Slow down" / "Too fast").  Tuned for SCANS-mode overlap at 30 fps — prevents the post-release "Stitching failed" alert from "panned too fast" captures. |
 
 ### Header (v0.13)
 
@@ -259,20 +257,37 @@ filesystem) for inspection.
 
 ## Orientation behaviour
 
-`<Camera>` works in any device orientation regardless of host
-configuration.  No host setup required — the SDK adapts at runtime.
+> **Recommended: portrait.**  `<Camera>` is designed and tuned for
+> portrait capture — use portrait on both platforms unless you have a
+> specific reason not to.  Landscape is supported on iOS only (via the
+> host `Info.plist`); Android is always portrait.
 
-**Portrait-locked host** (`UISupportedInterfaceOrientations` =
-Portrait only):  Screen stays portrait.  The SDK reads physical
-device orientation from the accelerometer for capture-mode
-selection and overlay layout.  Bottom controls always anchor to
-JS-bottom.
+**Android — always portrait (SDK-enforced).**  While `<Camera>` is
+mounted it locks the host Activity to portrait via
+`Activity.setRequestedOrientation(SCREEN_ORIENTATION_PORTRAIT)`,
+**regardless of the host app's `AndroidManifest` `screenOrientation`**.
+A landscape or unlocked host still gets a portrait camera screen.  The
+Activity's prior `requestedOrientation` is captured on mount and
+restored on unmount, so other screens in the host app keep their own
+orientation.  This is enforced in the SDK (native `RNSARSession`
+module + a `<Camera>` mount effect) and covers both the AR (ARCore)
+and non-AR (vision-camera) capture paths.  There is no opt-out.
 
-**Non-locked host** (Info.plist supports all 4):  OS rotates the
-framebuffer with the device.  `<Camera>`'s bottom controls anchor
-to the home-indicator edge — JS-bottom in portrait, JS-right in
-landscape-left, JS-left in landscape-right — so the shutter stays
-within thumb reach.  This matches iOS Camera.
+**iOS — host-controlled (`Info.plist`).**  The SDK does not override
+iOS orientation; it follows the host's
+`UISupportedInterfaceOrientations`.
+
+- *Portrait-only* (`= Portrait` — **recommended**):  Screen stays
+  portrait.  The SDK reads physical device orientation from the
+  accelerometer for capture-mode selection and overlay layout.
+- *Non-locked* (supports all 4 — supported):  OS rotates the
+  framebuffer with the device.  `<Camera>`'s bottom controls and the
+  thumbnail strip/band anchor to the home-indicator edge — JS-bottom
+  in portrait, JS-right in landscape-left, JS-left in landscape-right
+  — so the shutter stays within thumb reach.  This matches iOS Camera.
+  Built-in modals (`CapturePreview`, `PanoramaConfirmModal`,
+  `OrientationDriftModal`, `PanoramaSettingsModal`) declare all four
+  `supportedOrientations` so they rotate with the interface.
 
 **Mid-capture rotation safety**:  The incremental engine doesn't
 support cross-orientation captures (the engine doc string at
@@ -355,8 +370,6 @@ Every v0.13 built-in is opt-out.  The matrix:
 | Built-in | How to disable |
 |---|---|
 | Flash button | `showFlashButton={false}` |
-| Pan guide line + marker | `panGuide={false}` |
-| Pan-speed pill | `panoramaGuidance={false}` |
 | Header | omit `headerTitle` (or don't pass any header props) |
 | Thumbnail strip | omit `thumbnails` (passing `undefined` skips; passing `[]` shows empty) |
 | Post-stitch preview modal | omit `capturePreview` |

@@ -16,6 +16,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Android portrait lock (SDK-enforced)
+
+`<Camera>` now locks its host Activity to portrait on Android while
+mounted, via `Activity.setRequestedOrientation`, **regardless of the
+host app's `AndroidManifest` `screenOrientation`**.  A landscape or
+unlocked host still gets a portrait camera screen.  The Activity's
+prior orientation is captured on mount and restored on unmount.
+Implemented in the native `RNSARSession` module (`lockPortrait()` /
+`unlockOrientation()`) and driven from a `<Camera>` mount effect, so
+it covers both the AR (ARCore) and non-AR (vision-camera) paths.
+There is no opt-out — Android capture is portrait-only by design.
+
+iOS is intentionally unchanged: supported orientations remain owned by
+the host `Info.plist`.  **Portrait is the recommended configuration on
+both platforms; landscape is supported on iOS** for hosts that need it.
+
+### Fixed — landscape preview + thumbnail orientation (non-locked iOS)
+
+- **Preview squish / sideways** under a non-locked host was caused by
+  an in-development `patch-package` patch to vision-camera's
+  `OrientationManager` (both `.kt` and `.swift`) that derived the
+  PREVIEW orientation from the accelerometer instead of the interface
+  orientation.  In a portrait host held landscape this forced a
+  landscape preview into a portrait surface.  The patch was removed and
+  vision-camera restored to pristine on both platforms.
+- **Band keyframe thumbnails rotated 90°**: the per-keyframe tiles in
+  `PanoramaBandOverlay` were double-rotated — the saved `keyframe-N.jpg`
+  is sensor-native landscape + EXIF Orientation 6, which `<Image>`
+  already auto-rotates, so the extra JS transform was redundant in the
+  portrait-locked (`vertical=false`) path.  The transform is now applied
+  only in the `vertical=true` (non-locked landscape) path.
+- **Stitched-preview / confirm modals stuck portrait**: `CapturePreview`
+  and `PanoramaConfirmModal` were missing `supportedOrientations`
+  (RN's iOS `<Modal>` defaults to portrait-only).  Both now declare all
+  four, matching `OrientationDriftModal` + `PanoramaSettingsModal`.
+- **Idle thumbnail strip horizontal in landscape**: `CaptureThumbnailStrip`
+  gained a `vertical` prop (wired from the same `isSideEdge` signal as
+  the band) so the idle strip stacks vertically along the home-indicator
+  edge under a non-locked host instead of running across the screen.
+
+### Removed — pan-guidance overlays no longer public
+
+`IncrementalPanGuide` (drift marker) and `PanoramaGuidance` (pan-speed
+pill) are no longer exported, and the `panGuide` / `panoramaGuidance`
+props were removed from `<Camera>`.  The components remain in the tree
+as internal-only code (not rendered).  Hosts that were passing these
+props should remove them.
+
 ## [0.13.0] — 2026-05-29
 
 ### Added — Layer-2 components absorbed into `<Camera>` (opt-out)

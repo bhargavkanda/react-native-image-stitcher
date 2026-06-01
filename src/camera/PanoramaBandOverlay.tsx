@@ -437,14 +437,42 @@ export function PanoramaBandOverlay({
     [thumbRotationTransform],
   );
 
-  // Same rotation applied to the per-keyframe (multi-thumb) tiles.
-  const multiThumbStyle = useMemo(
-    () =>
-      thumbRotationTransform
-        ? [styles.multiThumb, { transform: thumbRotationTransform }]
-        : styles.multiThumb,
-    [thumbRotationTransform],
-  );
+  // v0.13.1 — per-keyframe tile rotation is conditional on `vertical`.
+  //
+  // The keyframe JPEGs (`keyframe-N.jpg`) are saved as sensor-native
+  // landscape PIXELS *plus* an EXIF Orientation tag (= 6, "rotate 90°
+  // CW for display") — verified on-device: Android SM-A356U1 640×480
+  // + EXIF6, iOS iPhone16Pro 1920×1080 + EXIF6.  RN's <Image> (Fresco
+  // on Android, ImageIO on iOS) HONORS EXIF and auto-rotates each tile
+  // to gravity-upright on its own.  Whether a *further* JS transform is
+  // needed depends on the band box's coordinate frame:
+  //
+  //   vertical=false (portrait-locked UI): box is in portrait JS coords,
+  //     which align with the EXIF-upright tile → NO transform.  Applying
+  //     one here double-rotates (the original v0.12 bug — tiles appeared
+  //     90° off in portrait-locked landscape captures).  Verified fixed
+  //     on Android portrait-lock.
+  //   vertical=true (non-locked host, device-landscape): box is in
+  //     landscape JS coords, rotated 90° from the EXIF-upright tile →
+  //     the counter-rotation is STILL required (verified on iOS: with no
+  //     transform the tiles sit 90° off).
+  //
+  // So reuse `thumbRotationTransform` (which already encodes the correct
+  // per-orientation angle) ONLY in the vertical=true branch.
+  //
+  // The single cumulative thumb above always needs the transform: its
+  // source (`panorama-*.jpg`) is a JFIF with NO EXIF tag (verified:
+  // header ff d8 ff e0), so RN never auto-rotates it.
+  //
+  // Stitcher is unaffected — it reads `keyframe-N.jpg` with EXIF IGNORED
+  // (IMREAD_IGNORE_ORIENTATION) so it still gets the sensor-native
+  // pixels its pose intrinsics expect.  Display-only.
+  const multiThumbStyle = useMemo(() => {
+    const tileTransform = vertical ? thumbRotationTransform : undefined;
+    return tileTransform
+      ? [styles.multiThumb, { transform: tileTransform }]
+      : styles.multiThumb;
+  }, [thumbRotationTransform, vertical]);
 
   return (
     <View pointerEvents="none" style={[styles.bandBase, layout.band]}>

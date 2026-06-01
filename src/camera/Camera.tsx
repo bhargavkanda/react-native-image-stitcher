@@ -48,6 +48,7 @@ import React, {
 } from 'react';
 import {
   NativeModules,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -79,9 +80,7 @@ import { CaptureMemoryPill } from './CaptureMemoryPill';
 import { CaptureKeyframePill } from './CaptureKeyframePill';
 import { CaptureOrientationPill } from './CaptureOrientationPill';
 import { CaptureStitchStatsToast, useStitchStatsToast } from './CaptureStitchStatsToast';
-import { IncrementalPanGuide } from './IncrementalPanGuide';
 import { PanoramaBandOverlay } from './PanoramaBandOverlay';
-import { PanoramaGuidance } from './PanoramaGuidance';
 import { type PanoramaSettings } from './PanoramaSettings';
 import { panoramaSettingsToNativeConfig } from './PanoramaSettingsBridge';
 import { PanoramaSettingsModal } from './PanoramaSettingsModal';
@@ -369,24 +368,6 @@ export interface CameraProps {
    * `flash` prop) can opt out by setting this to `false`.
    */
   showFlashButton?: boolean;
-
-  /**
-   * v0.13.0 — show the built-in IncrementalPanGuide ("keep the
-   * arrow on the line" drift marker) while recording.  Defaults
-   * to `true`.  The guide is gyroscope-driven and only active
-   * during the recording phase (no idle sensor cost).  Hosts that
-   * want their own pan-guide chrome can opt out via `false`.
-   */
-  panGuide?: boolean;
-
-  /**
-   * v0.13.0 — show the built-in PanoramaGuidance pan-speed pill
-   * ("Pan slowly" / "Slow down" / "Too fast") while recording.
-   * Defaults to `true`.  Gyroscope-driven, only active during
-   * recording.  Hosts that want their own speed chrome can opt
-   * out via `false`.
-   */
-  panoramaGuidance?: boolean;
 
   /**
    * v0.13.0 — built-in CaptureHeader title.  When set, `<Camera>`
@@ -877,8 +858,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
     flash: controlledFlash,
     onFlashChange,
     showFlashButton = true,
-    panGuide = true,
-    panoramaGuidance = true,
     headerTitle,
     onHeaderBack,
     headerBackLabel,
@@ -985,6 +964,35 @@ export function Camera(props: CameraProps): React.JSX.Element {
     || settledLensRef.current !== lens
     || cameraTransitioning;
 
+
+  // ── v0.13.1 — Android portrait lock ─────────────────────────────
+  //
+  // Android lets a mounted view force its host Activity's orientation,
+  // so `<Camera>` guarantees a portrait capture surface regardless of
+  // the host app's manifest (even a landscape/unlocked host gets a
+  // portrait camera while `<Camera>` is mounted).  The lock lives on
+  // the Activity via the native `RNSARSession` module, so it covers
+  // BOTH the AR (ARCore) and non-AR (vision-camera) capture paths.
+  //
+  // iOS is intentionally NOT locked here: iOS supported orientations
+  // are a static Info.plist declaration the host owns, and we want iOS
+  // hosts to be able to support landscape/unlocked capture.  Hosts that
+  // want a portrait-only iOS app set UISupportedInterfaceOrientations
+  // themselves.
+  //
+  // Empty dep array — lock on mount, restore the host's PRIOR
+  // orientation on unmount (the native side captures it).
+  useEffect(() => {
+    if (Platform.OS !== 'android') return undefined;
+    const arModule = (NativeModules as Record<string, unknown>)
+      .RNSARSession as
+      | { lockPortrait?: () => void; unlockOrientation?: () => void }
+      | undefined;
+    arModule?.lockPortrait?.();
+    return () => {
+      arModule?.unlockOrientation?.();
+    };
+  }, []);
 
   // ── Notify parent of capture-source changes ─────────────────────
   const lastEmittedSourceRef = useRef<CaptureSource | null>(null);
@@ -1648,19 +1656,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
         recordingStartedAt={recordingStartedAt ?? undefined}
       />
 
-      {/* v0.13.0 — built-in pan guidance overlays.  Both sit on top
-          of the camera preview but under the controls.  Each is
-          gyroscope-driven and only subscribes while `active` is
-          true — flipping `active` false on capture-end tears the
-          subscription down so the sensor isn't running idle.  Hosts
-          can opt out per overlay via the `panGuide` / `panoramaGuidance`
-          boolean props (both default true). */}
-      {panGuide && (
-        <IncrementalPanGuide active={statusPhase === 'recording'} />
-      )}
-      {panoramaGuidance && (
-        <PanoramaGuidance active={statusPhase === 'recording'} />
-      )}
+      {/* v0.13.1 — the built-in pan-guidance overlays
+          (IncrementalPanGuide drift marker + PanoramaGuidance speed
+          pill) were removed from the public surface.  They remain in
+          the tree as internal-only components but <Camera> no longer
+          renders them and the `panGuide` / `panoramaGuidance` props
+          are gone.  Re-wire here if a host need resurfaces. */}
 
       {/*
         2026-05-22 (audit F9 + F3) — debug UI suite, all gated on
@@ -1782,6 +1783,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
             minPhotos={thumbnailsMin}
             maxPhotos={thumbnailsMax}
             onItemPress={onThumbnailPress}
+            // v0.13.1 — stack the idle strip vertically when the
+            // home-indicator anchor is on a side edge (non-locked host
+            // in landscape), matching PanoramaBandOverlay's `vertical`
+            // so the strip rides the home-indicator edge instead of
+            // running horizontally across the rotated screen.
+            vertical={isSideEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}
           />
         )}
 

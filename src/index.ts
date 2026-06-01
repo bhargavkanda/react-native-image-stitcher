@@ -106,9 +106,12 @@ export type {
 } from './camera/CaptureStitchStatsToast';
 export { CaptureThumbnailStrip } from './camera/CaptureThumbnailStrip';
 export type { CaptureThumbnailItem } from './camera/CaptureThumbnailStrip';
-export { IncrementalPanGuide } from './camera/IncrementalPanGuide';
+// v0.13.1 — IncrementalPanGuide (drift marker) and PanoramaGuidance
+// (pan-speed pill) are no longer part of the public API.  They remain
+// in the tree as internal-only components but are not exported and not
+// rendered by <Camera> (the `panGuide` / `panoramaGuidance` props were
+// removed).  Re-introduce here if a host need resurfaces.
 export { PanoramaBandOverlay } from './camera/PanoramaBandOverlay';
-export { PanoramaGuidance } from './camera/PanoramaGuidance';
 // Settings modal — the modal is in `PanoramaSettingsModal.tsx`, but
 // the type tree + defaults + JS↔native bridge live in dedicated
 // files since v0.4 (F10).  The modal is now a thin presentational

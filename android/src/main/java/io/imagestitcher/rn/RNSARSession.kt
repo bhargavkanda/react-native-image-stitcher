@@ -3,6 +3,7 @@ package io.imagestitcher.rn
 
 import android.app.Activity
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
@@ -57,6 +58,65 @@ class RNSARSession(reactContext: ReactApplicationContext)
     private val sessionRef = AtomicReference<Session?>(null)
     private val poseLog = mutableListOf<RNSARFramePose>()
     private val poseLogLock = ReentrantReadWriteLock()
+
+    // ── v0.13.1 — Android <Camera> portrait lock ────────────────────
+    //
+    // Unlike iOS (where supported orientations are a static Info.plist
+    // declaration the app can't override per-view at runtime), Android
+    // lets a view force its host Activity's orientation via
+    // `Activity.requestedOrientation`.  The SDK's `<Camera>` uses this
+    // to guarantee a portrait capture surface regardless of the host
+    // app's manifest — even a fully landscape/unlocked host gets a
+    // portrait camera while `<Camera>` is mounted.
+    //
+    // `lockPortrait()` is called from `Camera.tsx`'s mount effect and
+    // covers BOTH capture paths (AR ARCore view + non-AR vision-camera)
+    // because the lock lives on the Activity, not on either camera view.
+    // `unlockOrientation()` (mount-effect cleanup) restores the EXACT
+    // orientation the Activity had before we locked, so hosts with
+    // mixed-orientation screens get their prior setting back rather than
+    // a generic default.
+    //
+    // SCREEN_ORIENTATION_UNSET (-2) is our "nothing captured yet"
+    // sentinel; we never pass it to setRequestedOrientation.
+    private var priorRequestedOrientation: Int = ORIENTATION_UNSET
+
+    @ReactMethod
+    fun lockPortrait() {
+        val activity: Activity = reactApplicationContext.currentActivity ?: run {
+            Log.w(TAG, "lockPortrait: no current activity — skipping")
+            return
+        }
+        activity.runOnUiThread {
+            // Capture the prior value ONCE (first lock wins).  Guards
+            // against a remount double-capturing our own portrait value
+            // and losing the host's real prior orientation.
+            if (priorRequestedOrientation == ORIENTATION_UNSET) {
+                priorRequestedOrientation = activity.requestedOrientation
+            }
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+    }
+
+    @ReactMethod
+    fun unlockOrientation() {
+        val activity: Activity = reactApplicationContext.currentActivity ?: run {
+            Log.w(TAG, "unlockOrientation: no current activity — skipping")
+            return
+        }
+        activity.runOnUiThread {
+            if (priorRequestedOrientation != ORIENTATION_UNSET) {
+                activity.requestedOrientation = priorRequestedOrientation
+                priorRequestedOrientation = ORIENTATION_UNSET
+            } else {
+                // No capture on record (lock never ran or already
+                // restored) — fall back to UNSPECIFIED so we don't pin
+                // the host to whatever we last set.
+                activity.requestedOrientation =
+                    ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+        }
+    }
 
     @ReactMethod
     fun isSupported(promise: Promise) {
@@ -775,6 +835,11 @@ class RNSARSession(reactContext: ReactApplicationContext)
 
         private const val TAG = "RNSARSession"
         private const val MAX_POSE_LOG = 600  // ~10 s @ 60Hz
+
+        // Sentinel for "no prior Activity orientation captured yet".
+        // Distinct from any real ActivityInfo.SCREEN_ORIENTATION_*
+        // value (those are >= -1); -2 is unused by the framework.
+        private const val ORIENTATION_UNSET = -2
 
         /**
          * Convenience accessor for the AR camera view (in Phase 4.4)
