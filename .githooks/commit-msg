@@ -1,0 +1,12 @@
+#!/bin/sh
+# Strip any Co-Authored-By trailer from the commit message.
+# Backstop for the repo policy in CLAUDE.md: the owner is the sole
+# author; no co-author / agent attribution trailers in this repo.
+# Matches only true trailer LINES (start-of-line "Co-authored-by:"),
+# case-insensitive, so narrative prose mentioning the phrase is kept.
+msg_file="$1"
+# Remove matching lines.
+grep -ivE '^[[:space:]]*co-authored-by:' "$msg_file" > "$msg_file.tmp" && mv "$msg_file.tmp" "$msg_file"
+# Collapse trailing blank lines.
+awk 'BEGIN{RS="";ORS="\n\n"}{print}' "$msg_file" > "$msg_file.tmp2" 2>/dev/null && mv "$msg_file.tmp2" "$msg_file" || true
+exit 0
