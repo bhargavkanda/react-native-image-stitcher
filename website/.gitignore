@@ -1,0 +1,6 @@
+# Docusaurus
+/build
+/.docusaurus
+/node_modules
+*.log
+.DS_Store
