@@ -111,6 +111,16 @@ export interface CaptureThumbnailStripProps {
    * portrait-locked hosts.
    */
   vertical?: boolean;
+  /**
+   * v0.13.1 — counter-rotation applied to each thumbnail image so the
+   * captured scene reads upright when the device is held landscape
+   * under a PORTRAIT-LOCKED host (the JS framebuffer stays portrait, so
+   * the thumbnail would otherwise show 90° off).  `<Camera>` passes the
+   * `useContentRotation()` result; `{}` (no-op) in upright cases.
+   * Applies only to the strip's own images — orientation of the strip's
+   * scroll axis is handled separately by `vertical`.
+   */
+  contentRotation?: { transform?: ViewStyle['transform'] };
 }
 
 
@@ -147,6 +157,7 @@ export function CaptureThumbnailStrip({
   onItemPress,
   style,
   vertical = false,
+  contentRotation,
 }: CaptureThumbnailStripProps): React.JSX.Element {
   // Built-in preview state — only used when the host hasn't
   // provided its own onItemPress handler.  Letting the host pass a
@@ -234,7 +245,7 @@ export function CaptureThumbnailStrip({
           >
             <Image
               source={{ uri: item.uri }}
-              style={styles.thumbImage}
+              style={[styles.thumbImage, contentRotation]}
               resizeMode="cover"
             />
           </Pressable>

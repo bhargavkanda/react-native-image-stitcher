@@ -91,6 +91,7 @@ import {
 import { isLowMemDevice } from './lowMemDevice';
 import { useCapture } from './useCapture';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
+import { useContentRotation } from './useContentRotation';
 import { useOrientationDrift } from './useOrientationDrift';
 import { OrientationDriftModal } from './OrientationDriftModal';
 import {
@@ -596,12 +597,19 @@ interface LensChipProps {
   lens: CameraLens;
   onChange: (lens: CameraLens) => void;
   has0_5x: boolean;
+  /**
+   * v0.13.1 — counter-rotation applied to the label TEXT (not the pill
+   * container) so the "0.5×"/"1×" glyphs read upright when the device
+   * is held landscape under a portrait-locked host, while the pill
+   * itself stays fixed in the layout.  `{}` (no-op) in the upright cases.
+   */
+  contentRotation?: { transform?: ViewStyle['transform'] };
 }
-function LensChip({ lens, onChange, has0_5x }: LensChipProps): React.JSX.Element {
+function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): React.JSX.Element {
   if (!has0_5x) {
     return (
       <View style={[lensChipStyles.container, lensChipStyles.singleLens]}>
-        <Text style={lensChipStyles.label}>1×</Text>
+        <Text style={[lensChipStyles.label, contentRotation]}>1×</Text>
       </View>
     );
   }
@@ -621,6 +629,7 @@ function LensChip({ lens, onChange, has0_5x }: LensChipProps): React.JSX.Element
           style={[
             lensChipStyles.label,
             lens === '0.5x' && lensChipStyles.labelActive,
+            contentRotation,
           ]}
         >
           0.5×
@@ -640,6 +649,7 @@ function LensChip({ lens, onChange, has0_5x }: LensChipProps): React.JSX.Element
           style={[
             lensChipStyles.label,
             lens === '1x' && lensChipStyles.labelActive,
+            contentRotation,
           ]}
         >
           1×
@@ -689,8 +699,15 @@ const lensChipStyles = StyleSheet.create({
 interface ARToggleProps {
   arEnabled: boolean;
   onToggle: () => void;
+  /**
+   * v0.13.1 — counter-rotation applied to the "AR" label TEXT (not the
+   * pill container) so the glyph reads upright when the device is held
+   * landscape under a portrait-locked host, while the pill stays fixed.
+   * `{}` no-op in the upright cases.
+   */
+  contentRotation?: { transform?: ViewStyle['transform'] };
 }
-function ARToggle({ arEnabled, onToggle }: ARToggleProps): React.JSX.Element {
+function ARToggle({ arEnabled, onToggle, contentRotation }: ARToggleProps): React.JSX.Element {
   return (
     <Pressable
       onPress={onToggle}
@@ -703,6 +720,7 @@ function ARToggle({ arEnabled, onToggle }: ARToggleProps): React.JSX.Element {
         style={[
           arToggleStyles.label,
           arEnabled && arToggleStyles.labelOn,
+          contentRotation,
         ]}
       >
         AR
@@ -933,6 +951,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const isAR = effectiveCaptureSource === 'ar';
   const isNonAR = !isAR;
   const deviceOrientation = useDeviceOrientation();
+
+  // v0.13.1 — counter-rotation for control CONTENT (AR toggle, lens
+  // pill, flash icon, thumbnails) so their labels read upright relative
+  // to gravity when the device is held landscape under a PORTRAIT-LOCKED
+  // host (the recommended config — the JS framebuffer stays portrait, so
+  // without this the labels render at 90°).  Returns `{}` (no-op) in the
+  // common upright cases, including non-locked hosts where the OS already
+  // rotated the framebuffer.  See `useContentRotation` truth table.
+  const contentRotation = useContentRotation();
 
   // ── Camera handoff gate ─────────────────────────────────────────
   //
@@ -1789,6 +1816,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
             // so the strip rides the home-indicator edge instead of
             // running horizontally across the rotated screen.
             vertical={isSideEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}
+            // v0.13.1 — counter-rotate the thumbnail images so the
+            // captured scene reads upright in portrait-locked landscape.
+            contentRotation={contentRotation}
           />
         )}
 
@@ -1812,7 +1842,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
                 isAR && styles.flashButtonDisabled,
               ]}
             >
-              <Text style={styles.flashIcon}>⚡</Text>
+              <Text style={[styles.flashIcon, contentRotation]}>⚡</Text>
             </Pressable>
           )}
         </View>
@@ -1821,6 +1851,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
             lens={lens}
             onChange={handleLensChange}
             has0_5x={has0_5x}
+            contentRotation={contentRotation}
           />
           <View style={styles.shutterWrap}>
             <CameraShutter
@@ -1834,7 +1865,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         </View>
         <View style={styles.bottomBarRight}>
           {lens === '1x' && isARSupportedOnDevice && (
-            <ARToggle arEnabled={arPreference} onToggle={handleARToggle} />
+            <ARToggle arEnabled={arPreference} onToggle={handleARToggle} contentRotation={contentRotation} />
           )}
         </View>
         </View>
