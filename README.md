@@ -146,22 +146,34 @@ export function CaptureScreen() {
 
 ## Orientation support
 
-`<Camera>` works in any device orientation regardless of host
-configuration.  No host setup required — the SDK adapts at runtime.
+> **Recommended: portrait.**  `<Camera>` is designed and tuned for
+> portrait capture, and that is the recommended way to use it on both
+> platforms.  Landscape is supported on iOS for hosts that need it
+> (see below); on Android the camera is always portrait.
 
-**Portrait-locked host** (Info.plist `UISupportedInterfaceOrientations`
-restricted to Portrait — recommended for kiosks / single-task apps):
-the screen stays portrait; the SDK uses sensor-derived orientation
-for capture-mode selection and overlay layout.  This is the simpler
-configuration and the historical default.
+**Android — always portrait (SDK-enforced).**  On Android `<Camera>`
+locks its host Activity to portrait while mounted (via
+`Activity.setRequestedOrientation`), **regardless of the host app's
+manifest** — even a fully landscape or unlocked host gets a portrait
+camera screen.  The prior orientation is restored when `<Camera>`
+unmounts.  No host setup is required and there is no opt-out: Android
+capture is portrait-only by design.
 
-**Non-locked host** (Info.plist supports all 4 orientations — recommended
-for apps with other landscape-friendly screens): the screen rotates
-with the device.  `<Camera>`'s controls (shutter, lens chip, AR toggle)
-anchor to the home-indicator edge so they stay within thumb reach
-regardless of tilt — matching iOS Camera's behaviour.  The
-orientation-aware logic combines `useWindowDimensions()` (JS-layout)
-with `useDeviceOrientation()` (sensor) to compute the correct anchor.
+**iOS — portrait recommended, landscape supported.**  iOS supported
+orientations are owned by the host's `Info.plist`
+(`UISupportedInterfaceOrientations`); the SDK does not override them.
+
+- *Portrait-only host* (Info.plist = Portrait — **recommended**): the
+  screen stays portrait; the SDK uses sensor-derived orientation for
+  capture-mode selection and overlay layout.  Simplest configuration.
+- *Non-locked host* (Info.plist supports all 4 — supported for apps
+  with other landscape-friendly screens): the screen rotates with the
+  device.  `<Camera>`'s controls (shutter, lens chip, AR toggle) and
+  the live thumbnail strip/band anchor to the home-indicator edge so
+  they stay within thumb reach regardless of tilt — matching iOS
+  Camera's behaviour.  The orientation-aware logic combines
+  `useWindowDimensions()` (JS-layout) with `useDeviceOrientation()`
+  (sensor) to compute the correct anchor.
 
 **Mid-capture rotation safety** — the incremental engine doesn't
 support cross-orientation captures (a portrait capture's keyframes

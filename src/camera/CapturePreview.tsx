@@ -109,6 +109,18 @@ export function CapturePreview({
       animationType="fade"
       transparent
       statusBarTranslucent
+      // v0.13.1 — RN's iOS <Modal> defaults to portrait-only, which
+      // pins the stitched-image preview to portrait even when the host
+      // app is in landscape (the preview appeared sideways/letterboxed
+      // under a non-locked host).  Declaring all four keeps the modal
+      // aligned with the interface.  Mirrors the v0.12 fix already on
+      // OrientationDriftModal + PanoramaSettingsModal.
+      supportedOrientations={[
+        'portrait',
+        'portrait-upside-down',
+        'landscape-left',
+        'landscape-right',
+      ]}
       onRequestClose={onClose}
     >
       <View style={styles.backdrop}>

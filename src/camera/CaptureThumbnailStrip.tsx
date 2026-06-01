@@ -99,6 +99,28 @@ export interface CaptureThumbnailStripProps {
    * stay under the strip's control to keep the count line consistent.
    */
   style?: StyleProp<ViewStyle>;
+  /**
+   * v0.13.1 — when `true`, the strip stacks thumbnails VERTICALLY
+   * (column, scrolls up/down) instead of the default horizontal row.
+   * `<Camera>` sets this from the same `isSideEdge(homeIndicatorEdge)`
+   * signal that drives PanoramaBandOverlay's `vertical`, so under a
+   * non-locked host in landscape the idle capture strip stacks along
+   * the home-indicator edge like the live band does (rather than
+   * running horizontally across the middle of the rotated screen).
+   * Default `false` (legacy horizontal strip) — unchanged for
+   * portrait-locked hosts.
+   */
+  vertical?: boolean;
+  /**
+   * v0.13.1 — counter-rotation applied to each thumbnail image so the
+   * captured scene reads upright when the device is held landscape
+   * under a PORTRAIT-LOCKED host (the JS framebuffer stays portrait, so
+   * the thumbnail would otherwise show 90° off).  `<Camera>` passes the
+   * `useContentRotation()` result; `{}` (no-op) in upright cases.
+   * Applies only to the strip's own images — orientation of the strip's
+   * scroll axis is handled separately by `vertical`.
+   */
+  contentRotation?: { transform?: ViewStyle['transform'] };
 }
 
 
@@ -134,6 +156,8 @@ export function CaptureThumbnailStrip({
   disablePreview = false,
   onItemPress,
   style,
+  vertical = false,
+  contentRotation,
 }: CaptureThumbnailStripProps): React.JSX.Element {
   // Built-in preview state — only used when the host hasn't
   // provided its own onItemPress handler.  Letting the host pass a
@@ -185,10 +209,13 @@ export function CaptureThumbnailStrip({
     <View style={[styles.root, { backgroundColor }, style]}>
       <FlatList
         data={items}
-        horizontal
+        horizontal={!vertical}
         showsHorizontalScrollIndicator={false}
+        showsVerticalScrollIndicator={false}
         keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.listContent}
+        contentContainerStyle={
+          vertical ? styles.listContentVertical : styles.listContent
+        }
         ListEmptyComponent={
           <View
             style={[styles.placeholder, { borderColor: textColor }]}
@@ -210,12 +237,15 @@ export function CaptureThumbnailStrip({
             // re-created on every parent render.
             style={[
               styles.thumbWrapper,
+              // Spacing runs along the scroll axis: marginRight for the
+              // horizontal strip, marginBottom for the vertical column.
+              vertical ? styles.thumbWrapperVertical : styles.thumbWrapperHorizontal,
               { width: thumbWidth(item), height: THUMB_HEIGHT },
             ]}
           >
             <Image
               source={{ uri: item.uri }}
-              style={styles.thumbImage}
+              style={[styles.thumbImage, contentRotation]}
               resizeMode="cover"
             />
           </Pressable>
@@ -246,11 +276,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     alignItems: 'center',
   },
+  listContentVertical: {
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
   thumbWrapper: {
-    marginRight: 8,
     borderRadius: 4,
     overflow: 'hidden',
     backgroundColor: '#222',
+  },
+  // Spacing applied along the scroll axis (see render site).
+  thumbWrapperHorizontal: {
+    marginRight: 8,
+  },
+  thumbWrapperVertical: {
+    marginBottom: 8,
   },
   thumbImage: {
     width: '100%',

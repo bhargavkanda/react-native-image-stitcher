@@ -198,6 +198,60 @@ interface Layout {
  *     reads as user-right-arrow (pointing along the horizontal pan
  *     direction).
  */
+/**
+ * v0.13.1 — pure rotation-decision helpers, extracted for unit testing
+ * (the lib's jest config is pure-TS, no component mounting; see
+ * jest.config.js).  These encode the orientation contract the band
+ * relies on, so a regression in the angles/branches is caught in CI
+ * rather than only on-device.
+ *
+ * `bandThumbRotation` — the CSS rotate transform that aligns a thumb's
+ * pixels with the band box.  Returns the transform array RN expects, or
+ * `undefined` for "no rotation".  Two regimes:
+ *   - vertical=false (portrait-locked UI): the box is device-aligned, so
+ *     a landscape device needs a 90° counter-rotation (CW for
+ *     landscape-left, CCW for landscape-right).
+ *   - vertical=true (non-locked, OS-rotated framebuffer): the screen
+ *     rotation already did half the work, so the compensation is the
+ *     OPPOSITE sign.
+ * Exported as `_bandThumbRotationForTests`.
+ */
+function bandThumbRotation(
+  orientation: BandCaptureOrientation,
+  vertical: boolean,
+): Array<{ rotate: string }> | undefined {
+  if (vertical) {
+    if (orientation === 'landscape-left') return [{ rotate: '-90deg' }];
+    if (orientation === 'landscape-right') return [{ rotate: '90deg' }];
+    return undefined;
+  }
+  if (orientation === 'landscape-left') return [{ rotate: '90deg' }];
+  if (orientation === 'landscape-right') return [{ rotate: '-90deg' }];
+  return undefined;
+}
+
+/**
+ * v0.13.1 — the rotation actually applied to the per-keyframe (multi-
+ * thumb) TILES.  This is the EXIF double-rotation fix: the saved
+ * `keyframe-N.jpg` is sensor-native landscape + EXIF Orientation 6, which
+ * RN's <Image> already auto-rotates upright.  So in the portrait-locked
+ * (vertical=false) path NO further transform is applied — adding one
+ * double-rotates (the original v0.12 bug).  Only the non-locked
+ * (vertical=true) path needs the compensation.  Returns `undefined` for
+ * "no transform".  Exported as `_tileRotationForTests`.
+ */
+function tileRotation(
+  orientation: BandCaptureOrientation,
+  vertical: boolean,
+): Array<{ rotate: string }> | undefined {
+  return vertical ? bandThumbRotation(orientation, vertical) : undefined;
+}
+
+/** @internal test-only export — see `bandThumbRotation`. */
+export const _bandThumbRotationForTests = bandThumbRotation;
+/** @internal test-only export — see `tileRotation`. */
+export const _tileRotationForTests = tileRotation;
+
 function layoutFor(
   orientation: BandCaptureOrientation,
   vertical: boolean,
@@ -401,33 +455,13 @@ export function PanoramaBandOverlay({
   // transform, so they appeared sideways in portrait-locked
   // landscape captures (the case the example app's batch-keyframe
   // engine hits).
-  const thumbRotationTransform = useMemo<
-    Array<{ rotate: string }> | undefined
-  >(() => {
-    // Empirical observation (on-device test 2026-05-28): captured
-    // per-keyframe JPEGs ARE saved in sensor-native landscape (not
-    // user-perspective), despite the cumulative panorama getting
-    // device-orientation rotation via finalize().  So:
-    //
-    //   jsPortrait box + landscape device: box is device-aligned;
-    //     image's "up" is at file-right (sensor convention).  Rotate
-    //     90° CW (landscape-left) / 90° CCW (landscape-right) to
-    //     align image up with box up.
-    //   jsLandscape box + landscape device: box is user-aligned via
-    //     OS screen rotation; image's "up" still at file-right.  To
-    //     align image up with box up, rotate the OPPOSITE direction
-    //     from the jsPortrait case — the screen-rotation already
-    //     handles half the work; we just need to compensate for the
-    //     remaining mismatch.
-    if (vertical) {
-      if (resolvedOrientation === 'landscape-left') return [{ rotate: '-90deg' }];
-      if (resolvedOrientation === 'landscape-right') return [{ rotate: '90deg' }];
-      return undefined;
-    }
-    if (resolvedOrientation === 'landscape-left') return [{ rotate: '90deg' }];
-    if (resolvedOrientation === 'landscape-right') return [{ rotate: '-90deg' }];
-    return undefined;
-  }, [resolvedOrientation, vertical]);
+  // Rotation for the single cumulative thumb (panorama-*.jpg, a JFIF
+  // with NO EXIF tag → RN does not auto-rotate it, so the transform is
+  // always needed).  See `bandThumbRotation` for the angle contract.
+  const thumbRotationTransform = useMemo(
+    () => bandThumbRotation(resolvedOrientation, vertical),
+    [resolvedOrientation, vertical],
+  );
 
   const singleImageStyle = useMemo(
     () =>
@@ -437,14 +471,42 @@ export function PanoramaBandOverlay({
     [thumbRotationTransform],
   );
 
-  // Same rotation applied to the per-keyframe (multi-thumb) tiles.
-  const multiThumbStyle = useMemo(
-    () =>
-      thumbRotationTransform
-        ? [styles.multiThumb, { transform: thumbRotationTransform }]
-        : styles.multiThumb,
-    [thumbRotationTransform],
-  );
+  // v0.13.1 — per-keyframe tile rotation is conditional on `vertical`.
+  //
+  // The keyframe JPEGs (`keyframe-N.jpg`) are saved as sensor-native
+  // landscape PIXELS *plus* an EXIF Orientation tag (= 6, "rotate 90°
+  // CW for display") — verified on-device: Android SM-A356U1 640×480
+  // + EXIF6, iOS iPhone16Pro 1920×1080 + EXIF6.  RN's <Image> (Fresco
+  // on Android, ImageIO on iOS) HONORS EXIF and auto-rotates each tile
+  // to gravity-upright on its own.  Whether a *further* JS transform is
+  // needed depends on the band box's coordinate frame:
+  //
+  //   vertical=false (portrait-locked UI): box is in portrait JS coords,
+  //     which align with the EXIF-upright tile → NO transform.  Applying
+  //     one here double-rotates (the original v0.12 bug — tiles appeared
+  //     90° off in portrait-locked landscape captures).  Verified fixed
+  //     on Android portrait-lock.
+  //   vertical=true (non-locked host, device-landscape): box is in
+  //     landscape JS coords, rotated 90° from the EXIF-upright tile →
+  //     the counter-rotation is STILL required (verified on iOS: with no
+  //     transform the tiles sit 90° off).
+  //
+  // So reuse `thumbRotationTransform` (which already encodes the correct
+  // per-orientation angle) ONLY in the vertical=true branch.
+  //
+  // The single cumulative thumb above always needs the transform: its
+  // source (`panorama-*.jpg`) is a JFIF with NO EXIF tag (verified:
+  // header ff d8 ff e0), so RN never auto-rotates it.
+  //
+  // Stitcher is unaffected — it reads `keyframe-N.jpg` with EXIF IGNORED
+  // (IMREAD_IGNORE_ORIENTATION) so it still gets the sensor-native
+  // pixels its pose intrinsics expect.  Display-only.
+  const multiThumbStyle = useMemo(() => {
+    const tileTransform = tileRotation(resolvedOrientation, vertical);
+    return tileTransform
+      ? [styles.multiThumb, { transform: tileTransform }]
+      : styles.multiThumb;
+  }, [resolvedOrientation, vertical]);
 
   return (
     <View pointerEvents="none" style={[styles.bandBase, layout.band]}>

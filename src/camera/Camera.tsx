@@ -48,6 +48,7 @@ import React, {
 } from 'react';
 import {
   NativeModules,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -79,9 +80,7 @@ import { CaptureMemoryPill } from './CaptureMemoryPill';
 import { CaptureKeyframePill } from './CaptureKeyframePill';
 import { CaptureOrientationPill } from './CaptureOrientationPill';
 import { CaptureStitchStatsToast, useStitchStatsToast } from './CaptureStitchStatsToast';
-import { IncrementalPanGuide } from './IncrementalPanGuide';
 import { PanoramaBandOverlay } from './PanoramaBandOverlay';
-import { PanoramaGuidance } from './PanoramaGuidance';
 import { type PanoramaSettings } from './PanoramaSettings';
 import { panoramaSettingsToNativeConfig } from './PanoramaSettingsBridge';
 import { PanoramaSettingsModal } from './PanoramaSettingsModal';
@@ -92,6 +91,7 @@ import {
 import { isLowMemDevice } from './lowMemDevice';
 import { useCapture } from './useCapture';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
+import { useContentRotation } from './useContentRotation';
 import { useOrientationDrift } from './useOrientationDrift';
 import { OrientationDriftModal } from './OrientationDriftModal';
 import {
@@ -115,6 +115,17 @@ import {
 // ─── Types ──────────────────────────────────────────────────────────
 
 export type CaptureSource = 'ar' | 'non-ar';
+/**
+ * v0.13.2 — which capture sources the host ALLOWS.  A constraint on top
+ * of `defaultCaptureSource` (which picks the initial source within this
+ * constraint):
+ *   'both'   — AR and non-AR both available; AR toggle is shown.
+ *   'ar'     — AR only; AR toggle hidden (nothing to switch to), and the
+ *              0.5× lens chooser is hidden (ARKit/ARCore don't expose the
+ *              ultra-wide).
+ *   'non-ar' — non-AR only; AR toggle hidden.
+ */
+export type CaptureSourcesMode = 'ar' | 'non-ar' | 'both';
 export type CameraLens = '1x' | '0.5x';
 export type StitchMode = 'auto' | 'panorama' | 'scans';
 export type Blender = 'multiband' | 'feather';
@@ -243,6 +254,19 @@ export interface CameraProps {
   enablePhotoMode?: boolean;
   enablePanoramaMode?: boolean;
   showSettingsButton?: boolean;
+  /**
+   * v0.13.2 — which capture sources the host allows (default `'both'`).
+   * Constrains both the runtime AR toggle and `defaultCaptureSource`:
+   *   - `'both'`  : AR + non-AR; the AR toggle is shown so the user can
+   *     switch at runtime.
+   *   - `'ar'`    : AR only.  AR toggle hidden (nothing to toggle); the
+   *     0.5× lens chooser is also hidden (ARKit/ARCore can't use the
+   *     ultra-wide), so the camera stays on the AR-capable 1× lens.
+   *   - `'non-ar'`: non-AR only.  AR toggle hidden.
+   * When set to a single source, that source wins regardless of
+   * `defaultCaptureSource`.
+   */
+  captureSources?: CaptureSourcesMode;
   style?: StyleProp<ViewStyle>;
 
   /**
@@ -369,24 +393,6 @@ export interface CameraProps {
    * `flash` prop) can opt out by setting this to `false`.
    */
   showFlashButton?: boolean;
-
-  /**
-   * v0.13.0 — show the built-in IncrementalPanGuide ("keep the
-   * arrow on the line" drift marker) while recording.  Defaults
-   * to `true`.  The guide is gyroscope-driven and only active
-   * during the recording phase (no idle sensor cost).  Hosts that
-   * want their own pan-guide chrome can opt out via `false`.
-   */
-  panGuide?: boolean;
-
-  /**
-   * v0.13.0 — show the built-in PanoramaGuidance pan-speed pill
-   * ("Pan slowly" / "Slow down" / "Too fast") while recording.
-   * Defaults to `true`.  Gyroscope-driven, only active during
-   * recording.  Hosts that want their own speed chrome can opt
-   * out via `false`.
-   */
-  panoramaGuidance?: boolean;
 
   /**
    * v0.13.0 — built-in CaptureHeader title.  When set, `<Camera>`
@@ -615,12 +621,19 @@ interface LensChipProps {
   lens: CameraLens;
   onChange: (lens: CameraLens) => void;
   has0_5x: boolean;
+  /**
+   * v0.13.1 — counter-rotation applied to the label TEXT (not the pill
+   * container) so the "0.5×"/"1×" glyphs read upright when the device
+   * is held landscape under a portrait-locked host, while the pill
+   * itself stays fixed in the layout.  `{}` (no-op) in the upright cases.
+   */
+  contentRotation?: { transform?: ViewStyle['transform'] };
 }
-function LensChip({ lens, onChange, has0_5x }: LensChipProps): React.JSX.Element {
+function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): React.JSX.Element {
   if (!has0_5x) {
     return (
       <View style={[lensChipStyles.container, lensChipStyles.singleLens]}>
-        <Text style={lensChipStyles.label}>1×</Text>
+        <Text style={[lensChipStyles.label, contentRotation]}>1×</Text>
       </View>
     );
   }
@@ -640,6 +653,7 @@ function LensChip({ lens, onChange, has0_5x }: LensChipProps): React.JSX.Element
           style={[
             lensChipStyles.label,
             lens === '0.5x' && lensChipStyles.labelActive,
+            contentRotation,
           ]}
         >
           0.5×
@@ -659,6 +673,7 @@ function LensChip({ lens, onChange, has0_5x }: LensChipProps): React.JSX.Element
           style={[
             lensChipStyles.label,
             lens === '1x' && lensChipStyles.labelActive,
+            contentRotation,
           ]}
         >
           1×
@@ -708,8 +723,15 @@ const lensChipStyles = StyleSheet.create({
 interface ARToggleProps {
   arEnabled: boolean;
   onToggle: () => void;
+  /**
+   * v0.13.1 — counter-rotation applied to the "AR" label TEXT (not the
+   * pill container) so the glyph reads upright when the device is held
+   * landscape under a portrait-locked host, while the pill stays fixed.
+   * `{}` no-op in the upright cases.
+   */
+  contentRotation?: { transform?: ViewStyle['transform'] };
 }
-function ARToggle({ arEnabled, onToggle }: ARToggleProps): React.JSX.Element {
+function ARToggle({ arEnabled, onToggle, contentRotation }: ARToggleProps): React.JSX.Element {
   return (
     <Pressable
       onPress={onToggle}
@@ -722,6 +744,7 @@ function ARToggle({ arEnabled, onToggle }: ARToggleProps): React.JSX.Element {
         style={[
           arToggleStyles.label,
           arEnabled && arToggleStyles.labelOn,
+          contentRotation,
         ]}
       >
         AR
@@ -863,6 +886,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const {
     defaultCaptureSource = 'ar',
     defaultLens = '1x',
+    captureSources = 'both',
     enablePhotoMode = true,
     enablePanoramaMode = true,
     showSettingsButton = false,
@@ -877,8 +901,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
     flash: controlledFlash,
     onFlashChange,
     showFlashButton = true,
-    panGuide = true,
-    panoramaGuidance = true,
     headerTitle,
     onHeaderBack,
     headerBackLabel,
@@ -895,6 +917,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
     engine = 'batch-keyframe',
   } = props;
 
+  // v0.13.2 — capture-source constraint (default 'both').  Derives which
+  // sources are permitted; `captureSources` overrides any conflicting
+  // `defaultCaptureSource`.  Used to constrain the initial AR preference
+  // and to hide the AR toggle / lens chooser below.
+  const arAllowed = captureSources !== 'non-ar';
+  const nonArAllowed = captureSources !== 'ar';
+  const arOnly = captureSources === 'ar';
+
   const insets = useSafeAreaInsets();
   // v0.12.0 — JS-layout orientation independent of device-physical.
   // `useWindowDimensions().width > height` tells us if the OS
@@ -906,10 +936,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const jsLandscape = jsWindow.width > jsWindow.height;
 
   // ── State ───────────────────────────────────────────────────────
+  // v0.13.2 — initial AR preference honours `defaultCaptureSource` but
+  // is clamped to the `captureSources` constraint: 'ar' forces on,
+  // 'non-ar' forces off, 'both' uses the default.
   const [arPreference, setArPreference] = useState(
-    defaultCaptureSource === 'ar',
+    !arAllowed ? false : !nonArAllowed ? true : defaultCaptureSource === 'ar',
   );
-  const [lens, setLens] = useState<CameraLens>(defaultLens);
+  // v0.13.2 — `arOnly` forces the 1× lens (the ultra-wide isn't usable
+  // in AR), and the lens chooser is hidden in that mode.
+  const [lens, setLens] = useState<CameraLens>(arOnly ? '1x' : defaultLens);
   // v0.13.0 — flash state.  Controlled by `controlledFlash` when the
   // host supplies the `flash` prop; otherwise owned internally and
   // toggled by the built-in flash button.  `effectiveFlash` below
@@ -955,6 +990,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const isNonAR = !isAR;
   const deviceOrientation = useDeviceOrientation();
 
+  // v0.13.1 — counter-rotation for control CONTENT (AR toggle, lens
+  // pill, flash icon, thumbnails) so their labels read upright relative
+  // to gravity when the device is held landscape under a PORTRAIT-LOCKED
+  // host (the recommended config — the JS framebuffer stays portrait, so
+  // without this the labels render at 90°).  Returns `{}` (no-op) in the
+  // common upright cases, including non-locked hosts where the OS already
+  // rotated the framebuffer.  See `useContentRotation` truth table.
+  const contentRotation = useContentRotation();
+
   // ── Camera handoff gate ─────────────────────────────────────────
   //
   // The placeholder rendered while the underlying camera identity
@@ -986,6 +1030,35 @@ export function Camera(props: CameraProps): React.JSX.Element {
     || cameraTransitioning;
 
 
+  // ── v0.13.1 — Android portrait lock ─────────────────────────────
+  //
+  // Android lets a mounted view force its host Activity's orientation,
+  // so `<Camera>` guarantees a portrait capture surface regardless of
+  // the host app's manifest (even a landscape/unlocked host gets a
+  // portrait camera while `<Camera>` is mounted).  The lock lives on
+  // the Activity via the native `RNSARSession` module, so it covers
+  // BOTH the AR (ARCore) and non-AR (vision-camera) capture paths.
+  //
+  // iOS is intentionally NOT locked here: iOS supported orientations
+  // are a static Info.plist declaration the host owns, and we want iOS
+  // hosts to be able to support landscape/unlocked capture.  Hosts that
+  // want a portrait-only iOS app set UISupportedInterfaceOrientations
+  // themselves.
+  //
+  // Empty dep array — lock on mount, restore the host's PRIOR
+  // orientation on unmount (the native side captures it).
+  useEffect(() => {
+    if (Platform.OS !== 'android') return undefined;
+    const arModule = (NativeModules as Record<string, unknown>)
+      .RNSARSession as
+      | { lockPortrait?: () => void; unlockOrientation?: () => void }
+      | undefined;
+    arModule?.lockPortrait?.();
+    return () => {
+      arModule?.unlockOrientation?.();
+    };
+  }, []);
+
   // ── Notify parent of capture-source changes ─────────────────────
   const lastEmittedSourceRef = useRef<CaptureSource | null>(null);
   useEffect(() => {
@@ -995,21 +1068,23 @@ export function Camera(props: CameraProps): React.JSX.Element {
     }
   }, [effectiveCaptureSource, onCaptureSourceChange]);
 
-  // ── Lens chip availability ──────────────────────────────────────
-  // TODO follow-up: probe the device's available physical lenses via
-  // vision-camera's `useCameraDevices` and surface in
-  // `useCapture().availablePhysicalDevices`.  For now we assume the
-  // 0.5x ultra-wide exists on modern devices.  When it doesn't, the
-  // lens chip degenerates to a static 1× indicator (see LensChip).
-  const has0_5x = true;
-
   // ── Capture hooks ───────────────────────────────────────────────
+  // v0.13.2 — pass the active `lens` so useCapture uses capability-aware
+  // selection (multi-cam zoom-switch where available, standalone-ultra-
+  // wide swap otherwise).  Replaces the old per-lens
+  // `preferredPhysicalDevice` request that mis-selected on some phones.
   const capture = useCapture({
     cameraPosition: 'back',
     enableQualityChecks: false,
-    preferredPhysicalDevice:
-      lens === '0.5x' ? 'ultra-wide-angle-camera' : 'wide-angle-camera',
+    lens,
   });
+
+  // ── Lens chip availability ──────────────────────────────────────
+  // v0.13.2 — real device capability from `useCapture` (which uses
+  // `selectCaptureDevice`).  True only when the device actually exposes
+  // an ultra-wide reachable via a multi-cam zoom OR a standalone
+  // ultra-wide device; false on wide-only hardware (chip hides).
+  const has0_5x = capture.has0_5x;
   const incremental = useIncrementalStitcher();
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);
@@ -1568,18 +1643,43 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // ── v0.13.0 — Flash control ─────────────────────────────────────
   //
   // `flashRequested` is what the host / built-in button asks for.
-  // `effectiveFlash` is what we actually drive into vision-camera —
-  // AR mode forces 'off' because ARKit / ARCore own AVCaptureDevice
-  // and the torch isn't exposed.  This way the button's visual state
-  // (a11y, styling) tracks `flashRequested` while the underlying
-  // camera always sees the correct value.
+  // `effectiveFlash` is what we drive into vision-camera (non-AR).  AR
+  // mode forces 'off' (flash is hidden in AR; ARKit/ARCore own the
+  // device) so vision-camera — which isn't the active camera in AR —
+  // doesn't fight for it.
+  //
+  // v0.13.1 — the ACTIVE device's torch capability is the source of
+  // truth.  The ultra-wide (0.5×) lens has no flash/torch unit on most
+  // phones, so vision-camera throws `flash-not-available` if we pass
+  // flash="on" while it's selected.  `capture.device.hasTorch` (from
+  // vision-camera's device list) tells us definitively; we hide the
+  // flash control and force 'off' when the device can't flash.
+  // v0.13.2 — `capture.deviceHasTorch` reflects the MOUNTED device.  In
+  // multi-cam mode this is the multi-cam device (has a torch → flash
+  // works on both 1× and 0.5× via zoom).  In standalone-uw mode on 0.5×
+  // the mounted device is the torchless ultra-wide → flash hides.
+  const deviceHasTorch = capture.deviceHasTorch;
   const flashRequested: 'on' | 'off' = controlledFlash ?? internalFlash;
-  const effectiveFlash: 'on' | 'off' = isAR ? 'off' : flashRequested;
+  const effectiveFlash: 'on' | 'off' =
+    isAR || !deviceHasTorch ? 'off' : flashRequested;
   const toggleFlash = useCallback(() => {
     const next: 'on' | 'off' = flashRequested === 'on' ? 'off' : 'on';
     if (controlledFlash == null) setInternalFlash(next);
     onFlashChange?.(next);
   }, [flashRequested, controlledFlash, onFlashChange]);
+
+  // v0.13.1 — top-right control pills (flash + AR) stack vertically
+  // UNDER the settings affordance.  Anchor depends on what's above:
+  //   - headerTitle set  → pills clear the CaptureHeader bar
+  //     (title row ≈ topInset + ~36; guidance pill adds ~28 when present)
+  //   - standalone gear  → pills clear the 40px gear at topInset + 8
+  //   - neither          → pills start where the gear would be
+  const pillStackTop =
+    headerTitle != null
+      ? insets.top + (headerGuidance != null ? 72 : 40)
+      : showSettingsButton
+        ? insets.top + 8 + 44
+        : insets.top + 8;
 
   // ── JSX ─────────────────────────────────────────────────────────
 
@@ -1613,6 +1713,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
           // which has run on `video` (true) for months without issue.
           video
           flash={effectiveFlash}
+          // v0.13.2 — in multi-cam mode the lens is switched via zoom
+          // on a single mounted device (0.5× → ultra-wide end, 1× →
+          // wide baseline).  undefined in standalone/wide-only modes
+          // (lens = device identity, no zoom).
+          zoom={capture.deviceZoom}
           style={StyleSheet.absoluteFill}
           // F8 (FrameProcessor port) — host-supplied worklet runs on
           // the camera producer thread for every frame.  Only wired
@@ -1648,19 +1753,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
         recordingStartedAt={recordingStartedAt ?? undefined}
       />
 
-      {/* v0.13.0 — built-in pan guidance overlays.  Both sit on top
-          of the camera preview but under the controls.  Each is
-          gyroscope-driven and only subscribes while `active` is
-          true — flipping `active` false on capture-end tears the
-          subscription down so the sensor isn't running idle.  Hosts
-          can opt out per overlay via the `panGuide` / `panoramaGuidance`
-          boolean props (both default true). */}
-      {panGuide && (
-        <IncrementalPanGuide active={statusPhase === 'recording'} />
-      )}
-      {panoramaGuidance && (
-        <PanoramaGuidance active={statusPhase === 'recording'} />
-      )}
+      {/* v0.13.1 — the built-in pan-guidance overlays
+          (IncrementalPanGuide drift marker + PanoramaGuidance speed
+          pill) were removed from the public surface.  They remain in
+          the tree as internal-only components but <Camera> no longer
+          renders them and the `panGuide` / `panoramaGuidance` props
+          are gone.  Re-wire here if a host need resurfaces. */}
 
       {/*
         2026-05-22 (audit F9 + F3) — debug UI suite, all gated on
@@ -1735,24 +1833,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
         )
       )}
 
-      {/* v0.13.0 — built-in capture-history thumbnail strip.  Renders
-          when the host supplies a `thumbnails` array (even empty),
-          hidden during recording so it doesn't overlap the band
-          overlay.  Sits above the bottom controls in JS-bottom
-          coordinates; landscape/non-locked layouts get the strip in
-          the same place (no orientation-aware repositioning for now —
-          the strip is intrinsically horizontal). */}
-      {thumbnails != null && statusPhase !== 'recording' && (
-        <View style={styles.thumbnailStripWrap} pointerEvents="box-none">
-          <CaptureThumbnailStrip
-            items={thumbnails}
-            minPhotos={thumbnailsMin}
-            maxPhotos={thumbnailsMax}
-            onItemPress={onThumbnailPress}
-          />
-        </View>
-      )}
-
       {/*
         v0.12.0 — Orientation-aware bottom controls anchored to the
         physical home-indicator edge.  The shutter follows the home-
@@ -1786,36 +1866,52 @@ export function Camera(props: CameraProps): React.JSX.Element {
           />
         )}
 
+        {/* v0.13.0 — built-in capture-history thumbnail strip.  Lives
+            INSIDE the orientation-aware bottomArea container so it
+            rides along to the home-indicator edge in landscape rather
+            than sitting at a hard-coded `bottom: 160` mid-screen.
+            Hidden during recording so the PanoramaBandOverlay above
+            it has room without overlap.  Strip is intrinsically
+            horizontal; v0.13.1 will add orientation-aware rotation
+            for the thumbnails + tablet "user-bottom" placement. */}
+        {thumbnails != null && statusPhase !== 'recording' && (
+          <CaptureThumbnailStrip
+            items={thumbnails}
+            minPhotos={thumbnailsMin}
+            maxPhotos={thumbnailsMax}
+            onItemPress={onThumbnailPress}
+            // v0.13.1 — stack the idle strip vertically when the
+            // home-indicator anchor is on a side edge (non-locked host
+            // in landscape), matching PanoramaBandOverlay's `vertical`
+            // so the strip rides the home-indicator edge instead of
+            // running horizontally across the rotated screen.
+            vertical={isSideEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}
+            // v0.13.1 — counter-rotate the thumbnail images so the
+            // captured scene reads upright in portrait-locked landscape.
+            contentRotation={contentRotation}
+          />
+        )}
+
         {/* Shutter row.  Horizontal row when home-indicator is on
             top/bottom (lens left / shutter center / AR right);
             vertical column when on left/right (slots stack along
             the narrow strip).  Touch targets stay axis-aligned. */}
         <View style={bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}>
-        <View style={styles.bottomBarLeft}>
-          {showFlashButton && (
-            <Pressable
-              onPress={isAR ? undefined : toggleFlash}
-              accessibilityRole="button"
-              accessibilityLabel={isAR ? 'Flash unavailable in AR mode' : `Flash ${flashRequested === 'on' ? 'on' : 'off'}`}
-              accessibilityState={{ selected: flashRequested === 'on', disabled: isAR }}
-              disabled={isAR}
-              hitSlop={8}
-              style={[
-                styles.flashButton,
-                flashRequested === 'on' && !isAR && styles.flashButtonActive,
-                isAR && styles.flashButtonDisabled,
-              ]}
-            >
-              <Text style={styles.flashIcon}>⚡</Text>
-            </Pressable>
-          )}
-        </View>
+        {/* v0.13.1 — flash + AR moved to the top-right pill stack (see
+            below).  Left/right slots stay as flex spacers so the shutter
+            + lens chip remain centred. */}
+        <View style={styles.bottomBarLeft} />
         <View style={styles.bottomBarCenter}>
-          <LensChip
-            lens={lens}
-            onChange={handleLensChange}
-            has0_5x={has0_5x}
-          />
+          {/* v0.13.2 — lens chooser hidden in AR-only mode (ARKit/ARCore
+              can't use the ultra-wide, so there's nothing to choose). */}
+          {!arOnly && (
+            <LensChip
+              lens={lens}
+              onChange={handleLensChange}
+              has0_5x={has0_5x}
+              contentRotation={contentRotation}
+            />
+          )}
           <View style={styles.shutterWrap}>
             <CameraShutter
               onTap={handleTap}
@@ -1826,12 +1922,51 @@ export function Camera(props: CameraProps): React.JSX.Element {
             />
           </View>
         </View>
-        <View style={styles.bottomBarRight}>
-          {lens === '1x' && isARSupportedOnDevice && (
-            <ARToggle arEnabled={arPreference} onToggle={handleARToggle} />
-          )}
+        <View style={styles.bottomBarRight} />
         </View>
-        </View>
+      </View>
+
+      {/* v0.13.1 — top-right control pill stack, anchored UNDER the
+          settings affordance.  Vertical column; pills match the AR
+          toggle's shape.  ORDER MATTERS: AR pill is FIRST (top) so it
+          stays anchored when the flash pill below it shows/hides
+          (flash is hidden in AR mode, and when the active device has no
+          torch — e.g. the ultra-wide 0.5× lens).  AR toggle shows only
+          when the lens is 1× (ARKit/ARCore don't expose the ultra-wide)
+          and the device supports AR. */}
+      <View
+        style={[styles.pillStack, { top: pillStackTop }]}
+        pointerEvents="box-none"
+      >
+        {/* v0.13.2 — AR toggle only when BOTH sources are allowed
+            (captureSources='both'); a single-source constraint has
+            nothing to toggle.  Still gated on 1× + device AR support. */}
+        {arAllowed && nonArAllowed && lens === '1x' && isARSupportedOnDevice && (
+          <ARToggle arEnabled={arPreference} onToggle={handleARToggle} contentRotation={contentRotation} />
+        )}
+        {showFlashButton && !isAR && deviceHasTorch && (
+          <Pressable
+            onPress={toggleFlash}
+            accessibilityRole="button"
+            accessibilityLabel={`Flash ${flashRequested === 'on' ? 'on' : 'off'}`}
+            accessibilityState={{ selected: flashRequested === 'on' }}
+            hitSlop={8}
+            style={[
+              pillStyles.pill,
+              flashRequested === 'on' && pillStyles.pillActive,
+            ]}
+          >
+            <Text
+              style={[
+                pillStyles.flashGlyph,
+                flashRequested === 'on' && pillStyles.glyphActive,
+                contentRotation,
+              ]}
+            >
+              ⚡
+            </Text>
+          </Pressable>
+        )}
       </View>
 
       {/* Settings modal (rendered always, visible-gated). */}
@@ -1933,6 +2068,17 @@ function homeIndicatorEdge(
 function isSideEdge(edge: HomeIndicatorEdge): boolean {
   return edge === 'left' || edge === 'right';
 }
+
+// v0.13.1 — test-only exports of the pure orientation-decision
+// functions.  `homeIndicatorEdge` + `isSideEdge` together produce the
+// `vertical` flag that drives PanoramaBandOverlay and
+// CaptureThumbnailStrip layout, so they carry the orientation contract.
+// Unit-tested via these handles (the lib's jest config is pure-TS and
+// can't mount <Camera>; see jest.config.js).
+/** @internal test-only — see `homeIndicatorEdge`. */
+export const _homeIndicatorEdgeForTests = homeIndicatorEdge;
+/** @internal test-only — see `isSideEdge`. */
+export const _isSideEdgeForTests = isSideEdge;
 
 
 /**
@@ -2071,28 +2217,45 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
   },
-  thumbnailStripWrap: {
+  // v0.13.1 — `thumbnailStripWrap` removed.  The strip now renders
+  // inside the orientation-aware bottomArea container (alongside
+  // PanoramaBandOverlay and the bottom bar) rather than as a
+  // position-absolute overlay at hard-coded `bottom: 160`.
+  //
+  // v0.13.1 — top-right control pill stack (flash + AR).  Absolute,
+  // pinned to the right edge under the settings affordance; `top` is
+  // set inline from `pillStackTop`.  Column so the pills stack
+  // vertically; gap keeps them from touching.
+  pillStack: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 160,
+    right: 14,
+    alignItems: 'flex-end',
+    gap: 10,
   },
-  flashButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+});
+
+
+// v0.13.1 — shared pill style for the top-right control stack.  The
+// flash pill matches the AR toggle's shape (same padding / radius /
+// background) so the two read as a set.
+const pillStyles = StyleSheet.create({
+  pill: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    minWidth: 56,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.45)',
   },
-  flashButtonActive: {
+  pillActive: {
     backgroundColor: '#ffd34d',
   },
-  flashButtonDisabled: {
-    opacity: 0.35,
-  },
-  flashIcon: {
-    fontSize: 20,
+  flashGlyph: {
     color: '#ffffff',
+    fontSize: 18,
+  },
+  glyphActive: {
+    color: '#1a1a1a',
   },
 });

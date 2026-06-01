@@ -16,6 +16,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Android AR single-photo orientation (landscape was sideways)
+
+Android AR `takePhoto` baked the wrong rotation into landscape captures
+under a portrait-locked host: it derived the EXIF orientation from the
+window display rotation (`WindowManager.defaultDisplay.rotation`), which
+stays `ROTATION_0` when the activity is portrait-locked regardless of how
+the device is physically held — so a landscape photo got a portrait EXIF
+tag and came out 90° CW.  The JS layer already passed the gyro device
+orientation to `RNSARSession.takePhoto` (since v0.12), and iOS consumed
+it, but the Android native side dropped it.  Now Android threads the
+device orientation through `takePhoto → requestTakePhoto → encodeToJpeg`,
+mapping it to the correct `Surface.ROTATION_*` / EXIF tag.  iOS unchanged
+(already correct).  Verified on-device (Samsung A35) in both landscape
+orientations.
+
+### Added — `captureSources` constraint prop
+
+`<Camera>` gains `captureSources?: 'ar' | 'non-ar' | 'both'` (default
+`'both'`) — a constraint on which capture sources the host allows, layered
+over `defaultCaptureSource` (which picks the initial source within it):
+
+- `'both'`  — AR + non-AR; the runtime AR toggle is shown (unchanged
+  default behaviour).
+- `'ar'`    — AR only; the AR toggle is hidden (nothing to switch to) and
+  the 0.5×/1× lens chooser is hidden (ARKit/ARCore can't use the
+  ultra-wide), keeping capture on the AR-capable 1× lens.
+- `'non-ar'`— non-AR only; the AR toggle is hidden, the lens chooser stays.
+
+A single-source constraint overrides a conflicting `defaultCaptureSource`.
+Exported type: `CaptureSourcesMode`.  Verified on-device (A35) across all
+three modes.
+
+### Fixed — capability-aware lens selection (ultra-wide + flash on 0.5×)
+
+`<Camera>` now selects the back camera device by real capability instead
+of requesting a single physical lens per zoom level.  `selectCaptureDevice`:
+
+- **Prefers a multi-cam device** that spans wide + ultra-wide (lens
+  switched via `zoom`; torch available on every lens).  On devices that
+  expose such a device (e.g. iPhone 16 Pro — verified `multicam`), this
+  fixes the user-reported "0.5× shows the wide-angle FOV" bug AND makes
+  flash work on 0.5× (the mounted multi-cam device carries the torch).
+- **Falls back to a standalone ultra-wide** device-swap where no multi-cam
+  device exists (e.g. Samsung A35 — verified `standalone-uw`; vision-camera
+  surfaces the physical cameras separately there).  0.5× still shows the
+  ultra-wide FOV; flash hides because that standalone device is torchless.
+
+`has0_5x` is now derived from the real device inventory (was hardcoded
+`true`), so the lens chooser hides on wide-only hardware.  13 unit tests
+cover the selection matrix incl. both edge cases (ultra-wide only in a
+multi-cam group; ultra-wide only standalone).
+
+Verified on-device: iPhone 16 Pro (multicam — 0.5× FOV + flash both work)
+and Samsung A35 (standalone-uw — 0.5× FOV works, flash correctly hidden).
+
+### Added — Android portrait lock (SDK-enforced)
+
+`<Camera>` now locks its host Activity to portrait on Android while
+mounted, via `Activity.setRequestedOrientation`, **regardless of the
+host app's `AndroidManifest` `screenOrientation`**.  A landscape or
+unlocked host still gets a portrait camera screen.  The Activity's
+prior orientation is captured on mount and restored on unmount.
+Implemented in the native `RNSARSession` module (`lockPortrait()` /
+`unlockOrientation()`) and driven from a `<Camera>` mount effect, so
+it covers both the AR (ARCore) and non-AR (vision-camera) paths.
+There is no opt-out — Android capture is portrait-only by design.
+
+iOS is intentionally unchanged: supported orientations remain owned by
+the host `Info.plist`.  **Portrait is the recommended configuration on
+both platforms; landscape is supported on iOS** for hosts that need it.
+
+### Fixed — landscape preview + thumbnail orientation (non-locked iOS)
+
+- **Preview squish / sideways** under a non-locked host was caused by
+  an in-development `patch-package` patch to vision-camera's
+  `OrientationManager` (both `.kt` and `.swift`) that derived the
+  PREVIEW orientation from the accelerometer instead of the interface
+  orientation.  In a portrait host held landscape this forced a
+  landscape preview into a portrait surface.  The patch was removed and
+  vision-camera restored to pristine on both platforms.
+- **Band keyframe thumbnails rotated 90°**: the per-keyframe tiles in
+  `PanoramaBandOverlay` were double-rotated — the saved `keyframe-N.jpg`
+  is sensor-native landscape + EXIF Orientation 6, which `<Image>`
+  already auto-rotates, so the extra JS transform was redundant in the
+  portrait-locked (`vertical=false`) path.  The transform is now applied
+  only in the `vertical=true` (non-locked landscape) path.
+- **Stitched-preview / confirm modals stuck portrait**: `CapturePreview`
+  and `PanoramaConfirmModal` were missing `supportedOrientations`
+  (RN's iOS `<Modal>` defaults to portrait-only).  Both now declare all
+  four, matching `OrientationDriftModal` + `PanoramaSettingsModal`.
+- **Idle thumbnail strip horizontal in landscape**: `CaptureThumbnailStrip`
+  gained a `vertical` prop (wired from the same `isSideEdge` signal as
+  the band) so the idle strip stacks vertically along the home-indicator
+  edge under a non-locked host instead of running across the screen.
+
+### Removed — pan-guidance overlays no longer public
+
+`IncrementalPanGuide` (drift marker) and `PanoramaGuidance` (pan-speed
+pill) are no longer exported, and the `panGuide` / `panoramaGuidance`
+props were removed from `<Camera>`.  The components remain in the tree
+as internal-only code (not rendered).  Hosts that were passing these
+props should remove them.
+
 ## [0.13.0] — 2026-05-29
 
 ### Added — Layer-2 components absorbed into `<Camera>` (opt-out)

@@ -88,6 +88,16 @@ export function PanoramaConfirmModal({
       animationType="fade"
       transparent
       statusBarTranslucent
+      // v0.13.1 — RN's iOS <Modal> defaults to portrait-only.  Declare
+      // all four so the confirm modal stays aligned with the interface
+      // under a non-locked host.  Mirrors OrientationDriftModal +
+      // PanoramaSettingsModal (v0.12) and CapturePreview (v0.13.1).
+      supportedOrientations={[
+        'portrait',
+        'portrait-upside-down',
+        'landscape-left',
+        'landscape-right',
+      ]}
       onRequestClose={onDiscard}
     >
       <View style={styles.backdrop}>

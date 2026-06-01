@@ -33,6 +33,12 @@ export interface CameraViewProps {
   device: CameraDevice | null | undefined;
   /** Flash / torch state from ``useCapture().flash``. */
   flash?: 'off' | 'on';
+  /**
+   * v0.13.2 — zoom factor for the mounted device.  Used in multi-cam
+   * mode to switch lenses (0.5× ultra-wide ↔ 1× wide) on a single
+   * device.  `undefined` leaves vision-camera at its default zoom.
+   */
+  zoom?: number;
   /** Whether the preview is actively rendering.  Defaults to true. */
   isActive?: boolean;
   /**
@@ -103,6 +109,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   {
     device,
     flash = 'off',
+    zoom,
     isActive = true,
     video = false,
     guidance,
@@ -150,6 +157,8 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         isActive={isActive}
         photo
         video={video}
+        // v0.13.2 — multi-cam lens switch via zoom (undefined = default).
+        {...(zoom != null ? { zoom } : {})}
         // Bake the device orientation into the captured pixels.
         // Without this, vision-camera writes the file in the camera
         // sensor's native landscape and relies on EXIF metadata to
