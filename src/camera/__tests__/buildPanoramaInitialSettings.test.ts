@@ -61,6 +61,7 @@ describe('buildPanoramaInitialSettings', () => {
         defaultFlowMaxTranslationCm: 12,
         defaultKeyframeMaxCount: 8,
         defaultKeyframeOverlapThreshold: 0.30,
+        maxInscribedRectCrop: true,
       },
       false,
     );
@@ -75,6 +76,27 @@ describe('buildPanoramaInitialSettings', () => {
     expect(s.frameSelection.flow?.maxTranslationCm).toBe(12);
     expect(s.frameSelection.maxKeyframes).toBe(8);
     expect(s.frameSelection.overlapThreshold).toBe(0.30);
+    expect(s.stitcher.enableMaxInscribedRectCrop).toBe(true);
+  });
+
+  it('maps maxInscribedRectCrop → stitcher.enableMaxInscribedRectCrop', () => {
+    expect(
+      buildPanoramaInitialSettings({ maxInscribedRectCrop: true }, false)
+        .stitcher.enableMaxInscribedRectCrop,
+    ).toBe(true);
+    expect(
+      buildPanoramaInitialSettings({ maxInscribedRectCrop: false }, false)
+        .stitcher.enableMaxInscribedRectCrop,
+    ).toBe(false);
+    // Omitted ⇒ default (false), and the low-mem fallback must not flip it.
+    expect(
+      buildPanoramaInitialSettings({}, false)
+        .stitcher.enableMaxInscribedRectCrop,
+    ).toBe(false);
+    expect(
+      buildPanoramaInitialSettings({}, true)
+        .stitcher.enableMaxInscribedRectCrop,
+    ).toBe(false);
   });
 
   it('leaves non-overridden fields at the default (partial override)', () => {

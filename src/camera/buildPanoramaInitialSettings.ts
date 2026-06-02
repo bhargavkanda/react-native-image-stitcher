@@ -58,6 +58,13 @@ export interface PanoramaPropOverrides {
   defaultFlowMaxTranslationCm?: number;
   defaultKeyframeMaxCount?: number;
   defaultKeyframeOverlapThreshold?: number;
+  /**
+   * v0.15 — initial value for `stitcher.enableMaxInscribedRectCrop`.
+   * Maps from the standalone `maxInscribedRectCrop` <Camera> prop
+   * (kept separate from the grouped `outputImage` controls). Omitted
+   * ⇒ the stitcher default (false = bounding-rect crop).
+   */
+  maxInscribedRectCrop?: boolean;
 }
 
 
@@ -113,6 +120,9 @@ export function buildPanoramaInitialSettings(
       blenderType: overrides.defaultBlender ?? stitcherDefaults.blenderType,
       seamFinderType:
         overrides.defaultSeamFinder ?? stitcherDefaults.seamFinderType,
+      enableMaxInscribedRectCrop:
+        overrides.maxInscribedRectCrop
+        ?? stitcherDefaults.enableMaxInscribedRectCrop,
     },
 
     frameSelection: {

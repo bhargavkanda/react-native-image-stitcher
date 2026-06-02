@@ -250,6 +250,20 @@ export interface CameraProps {
   /** Forward-looking — see above. */
   defaultSeamEstimationResolMP?: number;
 
+  // ── Output controls (v0.15) ───────────────────────────────────────
+  /**
+   * Crop strategy for the stitched panorama. `false` (default) keeps
+   * the bounding-rect of non-black pixels; `true` uses the maximum
+   * inscribed rectangle (no black corners, more CPU at finalize).
+   *
+   * Implemented as a start-time stitcher config (like the other
+   * stitcher settings), so this value is read once at mount to seed the
+   * initial setting; the in-app settings modal can override it at
+   * runtime. Standalone (not part of `outputImage`) because it changes
+   * image geometry, not encoding/sizing.
+   */
+  maxInscribedRectCrop?: boolean;
+
   // ── UI knobs ──────────────────────────────────────────────────────
   enablePhotoMode?: boolean;
   enablePanoramaMode?: boolean;
@@ -865,6 +879,7 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
     defaultFlowMaxTranslationCm: props.defaultFlowMaxTranslationCm,
     defaultKeyframeMaxCount: props.defaultKeyframeMaxCount,
     defaultKeyframeOverlapThreshold: props.defaultKeyframeOverlapThreshold,
+    maxInscribedRectCrop: props.maxInscribedRectCrop,
   };
 }
 
