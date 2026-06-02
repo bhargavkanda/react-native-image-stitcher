@@ -1626,7 +1626,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
         resolveJpegQuality(outputImage),
         deviceOrientation,
         imuTotalTranslationM,
-        resolveMaxDimensions(outputImage),
       );
       if (
         typeof result.framesRequested === 'number'
@@ -1638,13 +1637,47 @@ export function Camera(props: CameraProps): React.JSX.Element {
           included: result.framesIncluded,
         });
       }
+
+      // v0.15 — panorama dimension clamp. Reuses the single-photo
+      // output-controls post-process (decode → resize-to-fit →
+      // re-encode in place) via the shared native method. Quality is
+      // already applied by the native finalize, so `qualityAppliedAt
+      // Capture: true` makes this run ONLY when a dimension cap is set
+      // (it skips quality-only requests — no needless re-encode).
+      let panoramaWidth = result.width;
+      let panoramaHeight = result.height;
+      const panoQuality = resolveJpegQuality(outputImage);
+      const panoDims = resolveMaxDimensions(outputImage);
+      if (
+        shouldApplyOutputControls({
+          quality: panoQuality,
+          maxWidth: panoDims.maxWidth,
+          maxHeight: panoDims.maxHeight,
+          qualityAppliedAtCapture: true,
+        })
+      ) {
+        const processed = await applyOutputControls(
+          toFileUri(result.panoramaPath),
+          {
+            quality: panoQuality,
+            maxWidth: panoDims.maxWidth,
+            maxHeight: panoDims.maxHeight,
+          },
+        );
+        if (processed.applied) {
+          if (processed.width != null) panoramaWidth = processed.width;
+          if (processed.height != null) panoramaHeight = processed.height;
+        }
+      }
+
       onCapture?.({
         type: 'panorama',
         // Native finalize() returns a bare `/data/.../foo.jpg` path;
-        // normalise to `file://` for Android <Image>.
+        // normalise to `file://` for Android <Image>.  (v0.15: the
+        // dimension clamp above overwrites this file in place.)
         uri: toFileUri(result.panoramaPath),
-        width: result.width,
-        height: result.height,
+        width: panoramaWidth,
+        height: panoramaHeight,
         framesRequested: result.framesRequested ?? -1,
         framesIncluded: result.framesIncluded ?? -1,
         framesDropped:
@@ -1680,6 +1713,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onCapture,
     onFramesDropped,
     onError,
+    outputImage,
     recordingStartedAt,
     fpDriver,
     // F10 Phase 2 review N1 — these four were missing pre-fix.  The
