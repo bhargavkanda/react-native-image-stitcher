@@ -90,6 +90,10 @@ import {
   type OutputImageOptions,
 } from './outputImage';
 import {
+  applyOutputControls,
+  shouldApplyOutputControls,
+} from './applyOutputControls';
+import {
   buildPanoramaInitialSettings,
   type PanoramaPropOverrides,
 } from './buildPanoramaInitialSettings';
@@ -1391,6 +1395,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
       let uri: string;
       let width: number;
       let height: number;
+      // v0.15 — the AR takePhoto path encodes at the requested quality;
+      // the non-AR (vision-camera) path does not. Drives whether a
+      // quality-only request still needs the re-encode post-process.
+      let qualityAppliedAtCapture = false;
       // Compose the destination path BEFORE the capture so both the
       // AR and non-AR branches land at the same predictable location.
       // If `outputDir` is set, the lib lands the file at a host-
@@ -1426,6 +1434,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         uri = toFileUri(photoOutputPath);
         width = photo.width;
         height = photo.height;
+        qualityAppliedAtCapture = true;
       } else {
         if (!visionCameraRef.current) {
           throw new CameraError(
@@ -1445,6 +1454,32 @@ export function Camera(props: CameraProps): React.JSX.Element {
         width = result.width;
         height = result.height;
       }
+
+      // v0.15 — single-photo output controls (resize + re-encode).
+      // Skips the native call entirely unless a dimension cap is set or
+      // a quality re-encode is actually needed for this capture path.
+      const photoQuality = resolveJpegQuality(outputImage);
+      const photoDims = resolveMaxDimensions(outputImage);
+      if (
+        shouldApplyOutputControls({
+          quality: photoQuality,
+          maxWidth: photoDims.maxWidth,
+          maxHeight: photoDims.maxHeight,
+          qualityAppliedAtCapture,
+        })
+      ) {
+        const processed = await applyOutputControls(uri, {
+          quality: photoQuality,
+          maxWidth: photoDims.maxWidth,
+          maxHeight: photoDims.maxHeight,
+        });
+        if (processed.applied) {
+          uri = processed.path;
+          if (processed.width != null) width = processed.width;
+          if (processed.height != null) height = processed.height;
+        }
+      }
+
       onCapture?.({ type: 'photo', uri, width, height });
     } catch (err) {
       const e = err instanceof CameraError
@@ -1456,7 +1491,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         );
       onError?.(e);
     }
-  }, [enablePhotoMode, isAR, capture, outputDir, onCapture, onError]);
+  }, [enablePhotoMode, isAR, capture, outputDir, onCapture, onError, outputImage]);
 
   const handleHoldStart = useCallback(async () => {
     if (!enablePanoramaMode) return;
