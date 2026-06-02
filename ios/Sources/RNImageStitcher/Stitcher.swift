@@ -217,6 +217,52 @@ public enum Stitcher {
     }
   }
 
+  /// v0.15 debug — compute the max-inscribed rectangle of the image
+  /// (no file change), for the example app's crop-visualisation harness.
+  public static func computeInscribedRect(
+    imagePath: String
+  ) throws -> (x: Int, y: Int, width: Int, height: Int, imageWidth: Int, imageHeight: Int) {
+    do {
+      let d = try OpenCVStitcher.computeInscribedRect(atPath: imagePath)
+      return (
+        x: d["x"]?.intValue ?? 0,
+        y: d["y"]?.intValue ?? 0,
+        width: d["width"]?.intValue ?? 0,
+        height: d["height"]?.intValue ?? 0,
+        imageWidth: d["imageWidth"]?.intValue ?? 0,
+        imageHeight: d["imageHeight"]?.intValue ?? 0
+      )
+    } catch let nsError as NSError {
+      throw StitcherError.fromNSError(nsError)
+    }
+  }
+
+  /// v0.15 debug — crop the image to an explicit rectangle (overwrite
+  /// in place) and re-encode at `quality`.  Pairs with the
+  /// computeInscribedRect debug harness.
+  public static func cropToRect(
+    imagePath: String,
+    x: Int,
+    y: Int,
+    width: Int,
+    height: Int,
+    quality: Int
+  ) throws -> (width: Int, height: Int) {
+    do {
+      let d = try OpenCVStitcher.cropToRect(
+        atPath: imagePath,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        quality: quality
+      )
+      return (width: d["width"]?.intValue ?? 0, height: d["height"]?.intValue ?? 0)
+    } catch let nsError as NSError {
+      throw StitcherError.fromNSError(nsError)
+    }
+  }
+
   /// Combined pipeline: extract frames from a recorded video,
   /// stitch them into a panorama, write the result to
   /// `options.outputPath`.  Used by the host app's tap-and-hold
