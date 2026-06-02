@@ -12,7 +12,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.opencv.core.Mat
 import org.opencv.core.MatOfInt
+import org.opencv.core.Size
 import org.opencv.imgcodecs.Imgcodecs
+import org.opencv.imgproc.Imgproc
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -260,6 +262,94 @@ class BatchStitcher(reactContext: ReactApplicationContext)
                 if (rotated !== img) rotated.release()
             } catch (t: Throwable) {
                 promise.reject("normalise-failed", t.message, t)
+            }
+        }
+    }
+
+    // ── Apply output controls: resize-to-fit + JPEG re-encode ────
+
+    /**
+     * v0.15 — backend for the JS `applyOutputControls`. Decodes the JPEG
+     * at `imagePath`, bakes EXIF orientation into pixels, optionally
+     * downscales it (aspect preserved, INTER_AREA) so width ≤ maxWidth
+     * AND height ≤ maxHeight, re-encodes at `quality`, and overwrites the
+     * file in place. A cap ≤ 0 (or absent) means "unbounded" on that
+     * axis. Resolves `{ width, height }` with the final pixel size.
+     *
+     * Shared by the single-photo output controls AND the panorama
+     * dimension clamp; the JS side guards the call so this only runs when
+     * a resize or a quality re-encode is actually needed.
+     */
+    @ReactMethod
+    fun applyOutputControls(options: ReadableMap, promise: Promise) {
+        val imagePath = options.getString("imagePath")
+            ?: return promise.reject("invalid-options", "imagePath required")
+        fun optInt(key: String, default: Int): Int =
+            if (options.hasKey(key) && !options.isNull(key)) options.getInt(key) else default
+        val maxWidth = optInt("maxWidth", 0)
+        val maxHeight = optInt("maxHeight", 0)
+        val quality = optInt("quality", 90).coerceIn(1, 100)
+
+        CoroutineScope(Dispatchers.Default).launch {
+            // Every distinct Mat we allocate goes here and is released in
+            // `finally` — including on the early-return error paths.
+            val toRelease = mutableListOf<Mat>()
+            try {
+                ensureOpenCv()
+                val cleaned = stripFileScheme(imagePath)
+                if (!File(cleaned).exists()) {
+                    promise.reject("read-failed", "Image not found: $imagePath")
+                    return@launch
+                }
+                val img = Imgcodecs.imread(cleaned, Imgcodecs.IMREAD_COLOR)
+                toRelease += img
+                if (img.empty()) {
+                    promise.reject("read-failed", "Could not decode $imagePath")
+                    return@launch
+                }
+                // Bake EXIF into pixels first: Android's cv::imread ignores
+                // the EXIF tag and cv::imwrite strips it, so without this a
+                // source that relied on EXIF orientation would be saved
+                // mis-rotated. No-op when the tag is already normal (the
+                // panorama + AR-photo paths), so it is safe on any input.
+                val oriented = applyExifOrientation(cleaned, img)
+                if (oriented !== img) toRelease += oriented
+
+                // Downscale to fit. scale ≥ 1 ⇒ no resize (the image is
+                // still re-encoded at `quality`, which the quality-only
+                // path relies on).
+                val w = oriented.cols()
+                val h = oriented.rows()
+                val sw = if (maxWidth > 0) maxWidth.toDouble() / w else Double.POSITIVE_INFINITY
+                val sh = if (maxHeight > 0) maxHeight.toDouble() / h else Double.POSITIVE_INFINITY
+                val scale = minOf(1.0, sw, sh)
+                val out: Mat = if (scale < 1.0) {
+                    val newW = (w * scale).toInt().coerceAtLeast(1)
+                    val newH = (h * scale).toInt().coerceAtLeast(1)
+                    val dst = Mat()
+                    Imgproc.resize(
+                        oriented, dst, Size(newW.toDouble(), newH.toDouble()),
+                        0.0, 0.0, Imgproc.INTER_AREA,
+                    )
+                    toRelease += dst
+                    dst
+                } else {
+                    oriented
+                }
+
+                val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, quality)
+                if (!Imgcodecs.imwrite(cleaned, out, params)) {
+                    promise.reject("write-failed", "Could not rewrite $imagePath")
+                    return@launch
+                }
+                promise.resolve(WritableNativeMap().apply {
+                    putInt("width", out.cols())
+                    putInt("height", out.rows())
+                })
+            } catch (t: Throwable) {
+                promise.reject("apply-output-controls-failed", t.message, t)
+            } finally {
+                toRelease.forEach { it.release() }
             }
         }
     }
