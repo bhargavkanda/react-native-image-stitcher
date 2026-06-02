@@ -181,13 +181,15 @@ export function InscribedRectDebugOverlay({
   let overlayRect:
     | { left: number; top: number; width: number; height: number }
     | null = null;
-  if (rect && box && rect.imageWidth > 0 && rect.imageHeight > 0) {
-    const scale = Math.min(
-      box.w / rect.imageWidth,
-      box.h / rect.imageHeight,
-    );
-    const dispW = rect.imageWidth * scale;
-    const dispH = rect.imageHeight * scale;
+  // After an in-place crop the file on disk is now cropped.width ×
+  // cropped.height — size the display box to THAT (not the original) so
+  // the cropped preview keeps its aspect ratio instead of stretching.
+  const dispW0 = cropped ? cropped.width : rect?.imageWidth ?? 0;
+  const dispH0 = cropped ? cropped.height : rect?.imageHeight ?? 0;
+  if (rect && box && dispW0 > 0 && dispH0 > 0) {
+    const scale = Math.min(box.w / dispW0, box.h / dispH0);
+    const dispW = dispW0 * scale;
+    const dispH = dispH0 * scale;
     const offX = (box.w - dispW) / 2;
     const offY = (box.h - dispH) / 2;
     imageBox = { left: offX, top: offY, width: dispW, height: dispH };
