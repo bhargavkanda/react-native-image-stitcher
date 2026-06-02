@@ -264,6 +264,14 @@ extern NSString *const RNImageStitcherErrorDomain;
                                                            quality:(NSInteger)quality
                                                              error:(NSError **)error;
 
+/// v0.15 debug — write a red-tinted overlay JPEG (excluded / sub-threshold
+/// pixels rendered red) next to `imagePath` (suffix ".mask.jpg") so the
+/// harness can show WHY the inscribed rect lands where it does. Returns
+/// `{ maskPath, width, height, excludedPercent }`.
++ (nullable NSDictionary *)debugMaskOverlayAtPath:(NSString *)imagePath
+                                        threshold:(NSInteger)threshold
+                                            error:(NSError **)error;
+
 @end
 
 NS_ASSUME_NONNULL_END

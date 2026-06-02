@@ -38,4 +38,8 @@ RCT_EXTERN_METHOD(cropToRect:(NSDictionary *)options
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+RCT_EXTERN_METHOD(debugMaskOverlay:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 @end
