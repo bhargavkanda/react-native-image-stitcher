@@ -52,6 +52,10 @@ import {
   type IncrementalState,
   type StitcherFrame,
 } from 'react-native-image-stitcher';
+import {
+  InscribedRectDebugOverlay,
+  inscribedRectDebugAvailable,
+} from './InscribedRectDebug';
 
 
 function App(): React.JSX.Element {
@@ -70,6 +74,13 @@ function App(): React.JSX.Element {
   // Last capture (photo or panorama).  Set in onCapture, cleared on
   // preview modal dismiss.  Drives the visibility of the modal.
   const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
+
+  // v0.15 — inscribed-rect crop debug harness (gated dev tool). When
+  // enabled, a captured panorama is sent to the overlay (which computes
+  // + draws the inscribed rectangle, then crops on confirm) instead of
+  // the normal preview.
+  const [rectDebugEnabled, setRectDebugEnabled] = useState(false);
+  const [rectDebugUri, setRectDebugUri] = useState<string | null>(null);
 
   // v0.13.0 — controlled flash state demo.  The host owns the
   // `'on' | 'off'` value; the built-in flash button drives the
@@ -259,6 +270,13 @@ function App(): React.JSX.Element {
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
+    // v0.15 — route a panorama into the inscribed-rect debug overlay
+    // when the harness is on (it expects the full, uncropped image —
+    // the library default is bounding-rect, which is exactly that).
+    if (rectDebugEnabled && result.type === 'panorama') {
+      setRectDebugUri(result.uri);
+      return;
+    }
     setPreview(result);
     // v0.13.0 — append to the host-owned thumbnails list so the
     // built-in CaptureThumbnailStrip shows the capture history.
@@ -512,6 +530,25 @@ function App(): React.JSX.Element {
         )}
 
 
+        {__DEV__ && inscribedRectDebugAvailable() && (
+          <Pressable
+            style={styles.rectDebugToggle}
+            onPress={() => setRectDebugEnabled((v) => !v)}
+            accessibilityRole="button"
+          >
+            <Text style={styles.rectDebugToggleText}>
+              🔍 Rect debug: {rectDebugEnabled ? 'ON' : 'OFF'}
+            </Text>
+          </Pressable>
+        )}
+
+        {rectDebugUri && (
+          <InscribedRectDebugOverlay
+            uri={rectDebugUri}
+            onClose={() => setRectDebugUri(null)}
+          />
+        )}
+
         {/*
           v0.13.0 — the pre-v0.13 hand-rolled <Modal>...</Modal> block
           that lived here has been replaced by `<Camera>`'s built-in
@@ -538,6 +575,20 @@ function App(): React.JSX.Element {
 
 
 const styles = StyleSheet.create({
+  rectDebugToggle: {
+    position: 'absolute',
+    top: 110,
+    left: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+  },
+  rectDebugToggleText: {
+    color: '#00E5FF',
+    fontSize: 13,
+    fontWeight: '600',
+  },
   safe: {
     flex: 1,
     backgroundColor: '#000',
