@@ -2020,14 +2020,24 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   }
 
-  // Non-black region of the image, then fill interior dark holes so the
-  // rect only avoids the never-covered border wedges (keeps dark
-  // furniture etc. — the hole-fill coverage proxy).
-  cv::Mat gray, mask;
-  cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
-  cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
-  cv::Mat filled = FillBorderConnectedHoles(mask);
-  cv::Rect r = MaxInscribedRectFromMask(filled);
+  // Prefer the TRUE coverage sidecar the stitch writes next to the
+  // panorama (<path>.coverage.png); fall back to the hole-fill brightness
+  // proxy when it's absent (e.g. a non-stitch image).
+  NSString *coveragePath = [cleaned stringByAppendingString:@".coverage.png"];
+  cv::Mat mask;
+  if ([[NSFileManager defaultManager] fileExistsAtPath:coveragePath]) {
+    cv::Mat cov = cv::imread(std::string(coveragePath.UTF8String), cv::IMREAD_GRAYSCALE);
+    if (!cov.empty() && cov.cols == img.cols && cov.rows == img.rows) {
+      cv::threshold(cov, mask, 0, 255, cv::THRESH_BINARY);
+    }
+  }
+  if (mask.empty()) {
+    cv::Mat gray, raw;
+    cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+    cv::threshold(gray, raw, 1, 255, cv::THRESH_BINARY);
+    mask = FillBorderConnectedHoles(raw);
+  }
+  cv::Rect r = MaxInscribedRectFromMask(mask);
 
   return @{
     @"x":           @((NSInteger)r.x),
@@ -2139,18 +2149,26 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   }
 
-  int t = (int)threshold;
-  if (t < 0) { t = 0; }
-  // Same mask the inscribed-rect uses: content = gray > t, everything
-  // darker is treated as "empty". This is exactly what we want to see.
-  cv::Mat gray, mask;
-  cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
-  cv::threshold(gray, mask, t, 255, cv::THRESH_BINARY);
-  // v0.15 — fill interior holes so only border-connected black (the
-  // never-covered wedges) shows as dropped; dark content is kept.
-  cv::Mat filled = FillBorderConnectedHoles(mask);
+  // Prefer the TRUE coverage sidecar (<path>.coverage.png) the stitch
+  // writes; else the hole-fill brightness proxy at threshold `t`.
+  NSString *coveragePath = [cleaned stringByAppendingString:@".coverage.png"];
+  cv::Mat mask;
+  if ([[NSFileManager defaultManager] fileExistsAtPath:coveragePath]) {
+    cv::Mat cov = cv::imread(std::string(coveragePath.UTF8String), cv::IMREAD_GRAYSCALE);
+    if (!cov.empty() && cov.cols == img.cols && cov.rows == img.rows) {
+      cv::threshold(cov, mask, 0, 255, cv::THRESH_BINARY);
+    }
+  }
+  if (mask.empty()) {
+    int t = (int)threshold;
+    if (t < 0) { t = 0; }
+    cv::Mat gray, raw;
+    cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+    cv::threshold(gray, raw, t, 255, cv::THRESH_BINARY);
+    mask = FillBorderConnectedHoles(raw);
+  }
   cv::Mat excluded;
-  cv::bitwise_not(filled, excluded);                      // 255 = dropped pixels
+  cv::bitwise_not(mask, excluded);                        // 255 = dropped pixels
 
   // Blend red (BGR 0,0,255) over the dropped pixels so they stand out.
   cv::Mat overlay = img.clone();
@@ -2174,7 +2192,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   }
 
   long total = (long)mask.rows * (long)mask.cols;
-  long content = (long)cv::countNonZero(filled);
+  long content = (long)cv::countNonZero(mask);
   int excludedPct = (total > 0)
     ? (int)((double)(total - content) * 100.0 / (double)total)
     : 0;

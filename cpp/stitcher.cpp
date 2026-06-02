@@ -146,21 +146,6 @@ cv::Mat bake_rotation(const cv::Mat& src, const std::string& orientation,
     return src;
 }
 
-// Crop the non-zero bounding rect from the stitched panorama.  cv::
-// Stitcher's compose stage leaves a black border around the warped
-// region; we trim that here.
-cv::Mat crop_bbox(const cv::Mat& panorama) {
-    cv::Mat gray;
-    cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
-    cv::Mat mask;
-    cv::threshold(gray, mask, 0, 255, cv::THRESH_BINARY);
-    cv::Rect bbox = cv::boundingRect(mask);
-    if (bbox.width <= 0 || bbox.height <= 0) {
-        return panorama;
-    }
-    return panorama(bbox).clone();
-}
-
 // Map cv::Stitcher::Status → StitchErrorCode.  cv::Stitcher's enum
 // values aren't documented as ABI-stable so we don't rely on
 // numeric equality; switch through the named constants.
@@ -239,6 +224,61 @@ cv::Rect maxInscribedRectFromMask(const cv::Mat& mask) {
         }
     }
     return bestRect;
+}
+
+// Pick the crop rectangle. Prefers the TRUE coverage mask from
+// cv::Stitcher::resultMask() (0xFF where a frame painted, 0 where
+// unfilled) so dark content is kept and only the never-covered wedges
+// drop; falls back to a brightness mask if resultMask wasn't populated
+// (older/edge OpenCV configs). `maskOut` receives the binary mask
+// actually used, so the caller can crop a coverage sidecar to match.
+cv::Rect choose_crop_rect(const cv::Mat& panorama,
+                          const cv::Mat& coverage,
+                          bool useInscribed,
+                          const LogFn& logFn,
+                          cv::Mat& maskOut) {
+    const bool haveCoverage =
+        (!coverage.empty() && coverage.size() == panorama.size());
+    cv::Mat mask;
+    if (haveCoverage) {
+        cv::Mat cov1 = coverage;
+        if (coverage.channels() != 1) {
+            cv::cvtColor(coverage, cov1, cv::COLOR_BGR2GRAY);
+        }
+        // Any painted pixel (>0) is "filled" — robust to feathered edges.
+        cv::threshold(cov1, mask, 0, 255, cv::THRESH_BINARY);
+    } else {
+        log_info(logFn, "[crop]",
+                 "resultMask unusable (empty=%d size=%dx%d vs pano %dx%d) — "
+                 "brightness-mask fallback",
+                 coverage.empty() ? 1 : 0, coverage.cols, coverage.rows,
+                 panorama.cols, panorama.rows);
+        cv::Mat gray;
+        cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+        cv::threshold(gray, mask, 0, 255, cv::THRESH_BINARY);
+    }
+    maskOut = mask;
+
+    const cv::Rect bbox = cv::boundingRect(mask);
+    if (bbox.width <= 0 || bbox.height <= 0) {
+        return cv::Rect(0, 0, panorama.cols, panorama.rows);
+    }
+    if (!useInscribed) {
+        return bbox;
+    }
+    const cv::Rect inscribed = maxInscribedRectFromMask(mask);
+    if (inscribed.width <= 0 || inscribed.height <= 0) {
+        log_info(logFn, "[crop]",
+                 "inscribed rect empty — bbox fallback (%dx%d)",
+                 bbox.width, bbox.height);
+        return bbox;
+    }
+    log_info(logFn, "[crop]",
+             "inscribed %dx%d @ (%d,%d) via %s mask (bbox was %dx%d)",
+             inscribed.width, inscribed.height, inscribed.x, inscribed.y,
+             haveCoverage ? "coverage" : "brightness",
+             bbox.width, bbox.height);
+    return inscribed;
 }
 
 }  // namespace
@@ -526,13 +566,32 @@ static StitchResult stitchFramePathsImpl_(
              framesIncluded, framePaths.size(), finalThreshold, finalAttempt);
     log_info(logFn, "[memstat]", "phase=after_stitch rss=%.1f MB", rss_mb());
 
-    // ── 4.  Crop to non-zero bounding rect ──────────────────────────
-    cv::Mat cropped = crop_bbox(panorama);
+    // ── 4.  Crop (coverage-aware inscribed rect, or bbox) ───────────
+    // Pull cv::Stitcher's coverage mask (0xFF filled / 0 unfilled). It is
+    // computed during stitch(), so this is free and exact — dark content
+    // a frame painted is kept; only never-covered wedges drop.
+    cv::Mat coverage;
+    {
+        const cv::UMat rm = stitcher->resultMask();
+        if (!rm.empty()) {
+            rm.copyTo(coverage);  // download UMat → Mat
+        }
+    }
+    cv::Mat cropMask;
+    const cv::Rect cropRect = choose_crop_rect(
+        panorama, coverage, config.useInscribedRectCrop, logFn, cropMask);
+    cv::Mat cropped = panorama(cropRect).clone();
+    // Crop the binary mask to the same rect → coverage sidecar (debug).
+    cv::Mat croppedCoverage;
+    if (cropMask.size() == panorama.size()) {
+        croppedCoverage = cropMask(cropRect).clone();
+    }
     log_info(logFn, "[dimstat]",
-             "post-crop_bbox %dx%d → %dx%d data=%.2f MB (inscribedRect=%d, currently ignored)",
+             "post-crop %dx%d → %dx%d data=%.2f MB (inscribedRect=%d, coverage=%d)",
              panorama.cols, panorama.rows, cropped.cols, cropped.rows,
              mat_mb(cropped),
-             config.useInscribedRectCrop ? 1 : 0);
+             config.useInscribedRectCrop ? 1 : 0,
+             coverage.empty() ? 0 : 1);
     log_info(logFn, "[memstat]", "phase=after_crop rss=%.1f MB", rss_mb());
 
     // ── 5.  Bake rotation per capture orientation ───────────────────
@@ -564,6 +623,18 @@ static StitchResult stitchFramePathsImpl_(
              "output written: %s (%dx%d)",
              outputPath.c_str(), final_image.cols, final_image.rows);
     log_info(logFn, "[memstat]", "phase=after_imwrite rss=%.1f MB", rss_mb());
+
+    // Best-effort coverage sidecar (<output>.coverage.png), bake-rotated
+    // to align with the JPEG, for the debug harness. Never fails stitch.
+    if (!croppedCoverage.empty()) {
+        try {
+            const cv::Mat coverageRotated =
+                bake_rotation(croppedCoverage, config.captureOrientation, logFn);
+            cv::imwrite(outputPath + ".coverage.png", coverageRotated);
+        } catch (...) {
+            // sidecar is debug-only — ignore failures
+        }
+    }
 
     // ── 7.  Fill the result ─────────────────────────────────────────
     const auto t1 = std::chrono::steady_clock::now();
