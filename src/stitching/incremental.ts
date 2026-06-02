@@ -989,6 +989,18 @@ interface NativeIncrementalModule {
      * are zero, matching legacy behaviour.
      */
     imuTranslationMetres?: number;
+    /**
+     * v0.15 — clamp the finalized panorama so its width ≤ this many px.
+     * Omitted ⇒ unbounded on this axis. Aspect ratio is preserved
+     * together with `maxHeight`; the native finalize downscales
+     * (INTER_AREA) after crop, before the JPEG encode.
+     */
+    maxWidth?: number;
+    /**
+     * v0.15 — clamp the finalized panorama so its height ≤ this many
+     * px. Omitted ⇒ unbounded on this axis. See `maxWidth`.
+     */
+    maxHeight?: number;
   }): Promise<IncrementalFinalizeResult>;
   cancel(): Promise<{ ok: true }>;
   getState(): Promise<IncrementalState | null>;
