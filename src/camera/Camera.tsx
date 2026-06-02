@@ -85,6 +85,11 @@ import { type PanoramaSettings } from './PanoramaSettings';
 import { panoramaSettingsToNativeConfig } from './PanoramaSettingsBridge';
 import { PanoramaSettingsModal } from './PanoramaSettingsModal';
 import {
+  resolveJpegQuality,
+  resolveMaxDimensions,
+  type OutputImageOptions,
+} from './outputImage';
+import {
   buildPanoramaInitialSettings,
   type PanoramaPropOverrides,
 } from './buildPanoramaInitialSettings';
@@ -263,6 +268,15 @@ export interface CameraProps {
    * image geometry, not encoding/sizing.
    */
   maxInscribedRectCrop?: boolean;
+
+  /**
+   * Output image encoding + sizing controls (JPEG quality + max
+   * dimensions). Applied to every produced image — the stitched
+   * panorama, AR single photos, and non-AR single photos. All fields
+   * optional; omitted ⇒ quality 90, no dimension cap. See
+   * {@link OutputImageOptions}.
+   */
+  outputImage?: OutputImageOptions;
 
   // ── UI knobs ──────────────────────────────────────────────────────
   enablePhotoMode?: boolean;
@@ -930,6 +944,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onCapturePreviewClose,
     frameProcessor: hostFrameProcessor,
     engine = 'batch-keyframe',
+    outputImage,
   } = props;
 
   // v0.13.2 — capture-source constraint (default 'both').  Derives which
@@ -1393,7 +1408,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         // v0.12 the native side hardcoded portrait, so landscape
         // photos came out sideways.
         const photo = await arViewRef.current.takePhoto({
-          quality: 90,
+          quality: resolveJpegQuality(outputImage),
           orientation: deviceOrientation,
         });
         try {
@@ -1573,9 +1588,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
         isNonAR ? imuGate.getTotalAbsMetres() : 0;
       const result = await incremental.finalize(
         panoOutputPath,
-        90,
+        resolveJpegQuality(outputImage),
         deviceOrientation,
         imuTotalTranslationM,
+        resolveMaxDimensions(outputImage),
       );
       if (
         typeof result.framesRequested === 'number'

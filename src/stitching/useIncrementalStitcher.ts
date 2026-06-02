@@ -85,6 +85,12 @@ export interface UseIncrementalStitcherReturn {
      * translation magnitude and prefers that).
      */
     imuTranslationMetres?: number,
+    /**
+     * v0.15 — max output dimensions for the finalized panorama. Each
+     * axis optional; omitted ⇒ unbounded. Aspect preserved by the
+     * native clamp.
+     */
+    output?: { maxWidth?: number; maxHeight?: number },
   ) => Promise<IncrementalFinalizeResult>;
   /** Abort the capture without producing output. */
   cancel: () => Promise<void>;
@@ -198,6 +204,7 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
       quality = 90,
       captureOrientation?: string,
       imuTranslationMetres?: number,
+      output?: { maxWidth?: number; maxHeight?: number },
     ): Promise<IncrementalFinalizeResult> => {
       if (!native) {
         throw new Error('useIncrementalStitcher: native module unavailable');
@@ -216,6 +223,10 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
         // doesn't carry tx/ty/tz, so pose-derived translation is 0).
         // Native side treats it as a magnitude (always ≥ 0).
         imuTranslationMetres: Math.max(0, imuTranslationMetres ?? 0),
+        // v0.15 — forwarded to the native dimension clamp (no-op when
+        // both axes are undefined).
+        maxWidth: output?.maxWidth,
+        maxHeight: output?.maxHeight,
       });
       setIsRunning(false);
       // Clear React state on finalize so the next start doesn't
