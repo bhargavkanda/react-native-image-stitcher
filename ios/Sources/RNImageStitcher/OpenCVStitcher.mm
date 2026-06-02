@@ -169,6 +169,28 @@ static cv::Rect MaxInscribedRectFromMask(const cv::Mat &mask) {
     return bestRect;
 }
 
+// v0.15 — fill interior holes of a content mask so that ONLY black
+// connected to the image BORDER (the never-covered projection wedges)
+// stays excluded.  Dark image content (unlit furniture, shadow) forms
+// INTERIOR holes surrounded by content — those are filled back in.
+// This is the pixel-based proxy for true frame coverage, which the
+// shared high-level cv::Stitcher path doesn't expose.
+static cv::Mat FillBorderConnectedHoles(const cv::Mat &mask) {
+    // Pad a 1px black border so the exterior is one connected region,
+    // then flood the border-connected black to white from the corner.
+    cv::Mat padded;
+    cv::copyMakeBorder(mask, padded, 1, 1, 1, 1, cv::BORDER_CONSTANT, cv::Scalar(0));
+    cv::floodFill(padded, cv::Point(0, 0), cv::Scalar(255));
+    cv::Mat exterior = padded(cv::Rect(1, 1, mask.cols, mask.rows));
+    // Pixels still 0 after the flood are interior holes (never reached
+    // from the border) → real content to keep.
+    cv::Mat holes;
+    cv::bitwise_not(exterior, holes);
+    cv::Mat filled;
+    cv::bitwise_or(mask, holes, filled);
+    return filled;
+}
+
 
 // V16 Phase 1b.fix3 — write a cv::Mat (BGR) as a JPEG with an EXIF
 // Orientation tag, via ImageIO.  iOS image renderers (UIImage,
@@ -1998,11 +2020,14 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   }
 
-  // Same mask the production crop uses: non-black region of the image.
+  // Non-black region of the image, then fill interior dark holes so the
+  // rect only avoids the never-covered border wedges (keeps dark
+  // furniture etc. — the hole-fill coverage proxy).
   cv::Mat gray, mask;
   cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
   cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
-  cv::Rect r = MaxInscribedRectFromMask(mask);
+  cv::Mat filled = FillBorderConnectedHoles(mask);
+  cv::Rect r = MaxInscribedRectFromMask(filled);
 
   return @{
     @"x":           @((NSInteger)r.x),
@@ -2120,9 +2145,12 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // darker is treated as "empty". This is exactly what we want to see.
   cv::Mat gray, mask;
   cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
-  cv::threshold(gray, mask, t, 255, cv::THRESH_BINARY);   // 255 = kept content
+  cv::threshold(gray, mask, t, 255, cv::THRESH_BINARY);
+  // v0.15 — fill interior holes so only border-connected black (the
+  // never-covered wedges) shows as dropped; dark content is kept.
+  cv::Mat filled = FillBorderConnectedHoles(mask);
   cv::Mat excluded;
-  cv::bitwise_not(mask, excluded);                        // 255 = dropped pixels
+  cv::bitwise_not(filled, excluded);                      // 255 = dropped pixels
 
   // Blend red (BGR 0,0,255) over the dropped pixels so they stand out.
   cv::Mat overlay = img.clone();
@@ -2146,7 +2174,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   }
 
   long total = (long)mask.rows * (long)mask.cols;
-  long content = (long)cv::countNonZero(mask);
+  long content = (long)cv::countNonZero(filled);
   int excludedPct = (total > 0)
     ? (int)((double)(total - content) * 100.0 / (double)total)
     : 0;
