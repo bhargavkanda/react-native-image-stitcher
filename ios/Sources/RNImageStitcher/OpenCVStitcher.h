@@ -245,6 +245,25 @@ extern NSString *const RNImageStitcherErrorDomain;
                                                                     quality:(NSInteger)quality
                                                                       error:(NSError **)error;
 
+/// v0.15 debug — compute the max-inscribed rectangle of the non-black
+/// region of the JPEG at `imagePath` WITHOUT modifying the file.
+/// Returns `{ x, y, width, height, imageWidth, imageHeight }` so the JS
+/// debug harness can overlay the rect on the full image.  Reuses the
+/// same `MaxInscribedRectFromMask` the production crop uses.
++ (nullable NSDictionary<NSString *, NSNumber *> *)computeInscribedRectAtPath:(NSString *)imagePath
+                                                                       error:(NSError **)error;
+
+/// v0.15 debug — crop the JPEG at `imagePath` to the given rectangle
+/// (clamped to image bounds), re-encode at `quality`, overwrite in
+/// place.  Returns the final `{ width, height }`.
++ (nullable NSDictionary<NSString *, NSNumber *> *)cropToRectAtPath:(NSString *)imagePath
+                                                                 x:(NSInteger)x
+                                                                 y:(NSInteger)y
+                                                             width:(NSInteger)width
+                                                            height:(NSInteger)height
+                                                           quality:(NSInteger)quality
+                                                             error:(NSError **)error;
+
 @end
 
 NS_ASSUME_NONNULL_END

@@ -29,4 +29,13 @@ RCT_EXTERN_METHOD(applyOutputControls:(NSDictionary *)options
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// v0.15 debug harness (inscribed-rect visualisation in the example app).
+RCT_EXTERN_METHOD(computeInscribedRect:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
+RCT_EXTERN_METHOD(cropToRect:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 @end

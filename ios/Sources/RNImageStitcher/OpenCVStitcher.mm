@@ -1969,4 +1969,119 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   };
 }
 
++ (NSDictionary<NSString *, NSNumber *> *)computeInscribedRectAtPath:(NSString *)imagePath
+                                                              error:(NSError **)error {
+  NSString *cleaned = normalizeImagePath(imagePath);
+  if (![[NSFileManager defaultManager] fileExistsAtPath:cleaned]) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1020
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Image not found: %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  std::string nativePath(cleaned.UTF8String);
+  cv::Mat img = cv::imread(nativePath, cv::IMREAD_COLOR);
+  if (img.empty()) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1021
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Could not decode image at %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  // Same mask the production crop uses: non-black region of the image.
+  cv::Mat gray, mask;
+  cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+  cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
+  cv::Rect r = MaxInscribedRectFromMask(mask);
+
+  return @{
+    @"x":           @((NSInteger)r.x),
+    @"y":           @((NSInteger)r.y),
+    @"width":       @((NSInteger)r.width),
+    @"height":      @((NSInteger)r.height),
+    @"imageWidth":  @((NSInteger)img.cols),
+    @"imageHeight": @((NSInteger)img.rows),
+  };
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)cropToRectAtPath:(NSString *)imagePath
+                                                        x:(NSInteger)x
+                                                        y:(NSInteger)y
+                                                    width:(NSInteger)width
+                                                   height:(NSInteger)height
+                                                  quality:(NSInteger)quality
+                                                    error:(NSError **)error {
+  NSString *cleaned = normalizeImagePath(imagePath);
+  if (![[NSFileManager defaultManager] fileExistsAtPath:cleaned]) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1020
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Image not found: %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  std::string nativePath(cleaned.UTF8String);
+  cv::Mat img = cv::imread(nativePath, cv::IMREAD_COLOR);
+  if (img.empty()) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1021
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Could not decode image at %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  // Clamp the requested rect to the image bounds (defensive — the JS
+  // side derives it from computeInscribedRect, but never trust input).
+  int rx = (int)x; if (rx < 0) { rx = 0; }
+  int ry = (int)y; if (ry < 0) { ry = 0; }
+  if (rx > img.cols - 1) { rx = img.cols - 1; }
+  if (ry > img.rows - 1) { ry = img.rows - 1; }
+  int rw = (int)width; if (rw < 1) { rw = 1; }
+  int rh = (int)height; if (rh < 1) { rh = 1; }
+  if (rx + rw > img.cols) { rw = img.cols - rx; }
+  if (ry + rh > img.rows) { rh = img.rows - ry; }
+
+  cv::Mat cropped = img(cv::Rect(rx, ry, rw, rh)).clone();
+
+  int q = (int)quality;
+  if (q < 1) { q = 1; }
+  if (q > 100) { q = 100; }
+  std::vector<int> writeParams = { cv::IMWRITE_JPEG_QUALITY, q };
+  bool ok = cv::imwrite(nativePath, cropped, writeParams);
+  if (!ok) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1022
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Could not rewrite image at %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  return @{
+    @"width":  @((NSInteger)cropped.cols),
+    @"height": @((NSInteger)cropped.rows),
+  };
+}
+
 @end
