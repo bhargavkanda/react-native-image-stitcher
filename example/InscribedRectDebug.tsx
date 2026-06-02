@@ -48,6 +48,12 @@ interface BatchStitcherDebug {
     height: number;
     quality: number;
   }) => Promise<{ width: number; height: number }>;
+  debugMaskOverlay?: (o: { imagePath: string; threshold?: number }) => Promise<{
+    maskPath: string;
+    width: number;
+    height: number;
+    excludedPercent: number;
+  }>;
 }
 
 const Batch = (NativeModules as { BatchStitcher?: BatchStitcherDebug })
@@ -80,12 +86,21 @@ export function InscribedRectDebugOverlay({
   // Bumped after an in-place crop to force <Image> to re-read the file
   // (RN caches by URI; overwriting the file alone won't refresh it).
   const [reloadKey, setReloadKey] = useState(0);
+  // v0.15 — "show mask": tints the dropped (sub-threshold) pixels red so
+  // it's visible WHY the inscribed rect lands where it does.
+  const [showMask, setShowMask] = useState(false);
+  const [maskUri, setMaskUri] = useState<string | null>(null);
+  const [excludedPct, setExcludedPct] = useState<number | null>(null);
+  const [maskBusy, setMaskBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
     setRect(null);
     setError(null);
     setCropped(null);
+    setShowMask(false);
+    setMaskUri(null);
+    setExcludedPct(null);
     if (!Batch?.computeInscribedRect) {
       setError('Native computeInscribedRect unavailable (rebuild the app).');
       return;
@@ -121,12 +136,44 @@ export function InscribedRectDebugOverlay({
       });
       setCropped(dims);
       setReloadKey((k) => k + 1);
+      // The image changed on disk — invalidate the cached mask overlay.
+      setShowMask(false);
+      setMaskUri(null);
+      setExcludedPct(null);
     } catch (e: unknown) {
       setError(String(e instanceof Error ? e.message : e));
     } finally {
       setBusy(false);
     }
   }, [rect, uri, cropped]);
+
+  const toggleMask = useCallback(async () => {
+    if (showMask) {
+      setShowMask(false);
+      return;
+    }
+    if (maskUri) {
+      setShowMask(true);
+      return;
+    }
+    if (!Batch?.debugMaskOverlay) {
+      setError('Native debugMaskOverlay unavailable (rebuild the app).');
+      return;
+    }
+    setMaskBusy(true);
+    try {
+      const m = await Batch.debugMaskOverlay({ imagePath: uri, threshold: 1 });
+      setMaskUri(
+        m.maskPath.startsWith('file://') ? m.maskPath : `file://${m.maskPath}`,
+      );
+      setExcludedPct(m.excludedPercent);
+      setShowMask(true);
+    } catch (e: unknown) {
+      setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setMaskBusy(false);
+    }
+  }, [showMask, maskUri, uri]);
 
   // Contain-fit transform: map image pixel space → on-screen letterbox.
   let imageBox: { left: number; top: number; width: number; height: number } | null =
@@ -160,8 +207,8 @@ export function InscribedRectDebugOverlay({
         <View style={styles.canvas} onLayout={onLayout}>
           {imageBox && (
             <Image
-              key={reloadKey}
-              source={{ uri }}
+              key={`${reloadKey}-${showMask ? 'mask' : 'orig'}`}
+              source={{ uri: showMask && maskUri ? maskUri : uri }}
               style={[styles.image, imageBox]}
               resizeMode="stretch"
             />
@@ -186,10 +233,24 @@ export function InscribedRectDebugOverlay({
             <Text style={styles.dim}>
               Image {rect.imageWidth}×{rect.imageHeight} → rect {rect.width}×
               {rect.height} @ ({rect.x}, {rect.y})
+              {showMask && excludedPct !== null
+                ? `\n${excludedPct}% dropped by the mask (red)`
+                : ''}
             </Text>
           ) : null}
 
           <View style={styles.buttons}>
+            {rect && (
+              <Pressable
+                style={[styles.btn, maskBusy && styles.btnDisabled]}
+                onPress={toggleMask}
+                disabled={maskBusy}
+              >
+                <Text style={styles.btnText}>
+                  {maskBusy ? 'Masking…' : showMask ? 'Hide mask' : 'Show mask'}
+                </Text>
+              </Pressable>
+            )}
             {rect && !cropped && (
               <Pressable
                 style={[styles.btn, styles.primary, busy && styles.btnDisabled]}

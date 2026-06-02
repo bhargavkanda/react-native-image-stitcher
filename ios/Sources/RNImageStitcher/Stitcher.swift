@@ -263,6 +263,26 @@ public enum Stitcher {
     }
   }
 
+  /// v0.15 debug — write a red-tinted mask overlay (excluded pixels =
+  /// red) next to the image and report what fraction the brightness mask
+  /// drops. Pairs with the inscribed-rect debug harness.
+  public static func debugMaskOverlay(
+    imagePath: String,
+    threshold: Int
+  ) throws -> (maskPath: String, width: Int, height: Int, excludedPercent: Int) {
+    do {
+      let d = try OpenCVStitcher.debugMaskOverlay(atPath: imagePath, threshold: threshold)
+      return (
+        maskPath: d["maskPath"] as? String ?? "",
+        width: (d["width"] as? NSNumber)?.intValue ?? 0,
+        height: (d["height"] as? NSNumber)?.intValue ?? 0,
+        excludedPercent: (d["excludedPercent"] as? NSNumber)?.intValue ?? 0
+      )
+    } catch let nsError as NSError {
+      throw StitcherError.fromNSError(nsError)
+    }
+  }
+
   /// Combined pipeline: extract frames from a recorded video,
   /// stitch them into a panorama, write the result to
   /// `options.outputPath`.  Used by the host app's tap-and-hold

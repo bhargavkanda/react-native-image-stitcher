@@ -315,6 +315,47 @@ public class StitcherBridge: NSObject {
     }
   }
 
+  /// v0.15 debug — write a red-tinted mask overlay for `imagePath`
+  /// (excluded pixels red). `threshold` optional (default 1, matching the
+  /// inscribed-rect mask). Resolves
+  /// `{ maskPath, width, height, excludedPercent }`.
+  @objc(debugMaskOverlay:resolver:rejecter:)
+  public func debugMaskOverlay(
+    options: NSDictionary,
+    resolver: @escaping RCTPromiseResolveBlock,
+    rejecter: @escaping RCTPromiseRejectBlock
+  ) {
+    guard let imagePath = options["imagePath"] as? String else {
+      rejecter("invalid-options", "imagePath must be a string", nil)
+      return
+    }
+    let threshold = (options["threshold"] as? NSNumber)?.intValue ?? 1
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let r = try Stitcher.debugMaskOverlay(imagePath: imagePath, threshold: threshold)
+        resolver([
+          "maskPath": r.maskPath,
+          "width": r.width,
+          "height": r.height,
+          "excludedPercent": r.excludedPercent,
+        ])
+      } catch let err as StitcherError {
+        switch err {
+        case .insufficientFrames(let count):
+          rejecter("insufficient-frames", "(unexpected for debugMaskOverlay) frames=\(count)", err)
+        case .readFailed(let path):
+          rejecter("read-failed", "Could not read image: \(path)", err)
+        case .writeFailed(let path):
+          rejecter("write-failed", "Could not write image: \(path)", err)
+        case .opencvFailed(let code, let message):
+          rejecter("opencv-failed-\(code)", message, err)
+        }
+      } catch {
+        rejecter("unknown", "Unexpected debugMaskOverlay failure: \(error)", error)
+      }
+    }
+  }
+
   @objc(stitch:resolver:rejecter:)
   public func stitch(
     options: NSDictionary,

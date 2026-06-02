@@ -2084,4 +2084,79 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   };
 }
 
++ (NSDictionary *)debugMaskOverlayAtPath:(NSString *)imagePath
+                               threshold:(NSInteger)threshold
+                                   error:(NSError **)error {
+  NSString *cleaned = normalizeImagePath(imagePath);
+  if (![[NSFileManager defaultManager] fileExistsAtPath:cleaned]) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1020
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Image not found: %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  std::string nativePath(cleaned.UTF8String);
+  cv::Mat img = cv::imread(nativePath, cv::IMREAD_COLOR);
+  if (img.empty()) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1021
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Could not decode image at %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  int t = (int)threshold;
+  if (t < 0) { t = 0; }
+  // Same mask the inscribed-rect uses: content = gray > t, everything
+  // darker is treated as "empty". This is exactly what we want to see.
+  cv::Mat gray, mask;
+  cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+  cv::threshold(gray, mask, t, 255, cv::THRESH_BINARY);   // 255 = kept content
+  cv::Mat excluded;
+  cv::bitwise_not(mask, excluded);                        // 255 = dropped pixels
+
+  // Blend red (BGR 0,0,255) over the dropped pixels so they stand out.
+  cv::Mat overlay = img.clone();
+  cv::Mat red(img.size(), img.type(), cv::Scalar(0, 0, 255));
+  cv::Mat blended;
+  cv::addWeighted(img, 0.35, red, 0.65, 0.0, blended);
+  blended.copyTo(overlay, excluded);
+
+  std::string outPath = std::string(cleaned.UTF8String) + ".mask.jpg";
+  std::vector<int> writeParams = { cv::IMWRITE_JPEG_QUALITY, 90 };
+  if (!cv::imwrite(outPath, overlay, writeParams)) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1022
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Could not write mask overlay for %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  long total = (long)mask.rows * (long)mask.cols;
+  long content = (long)cv::countNonZero(mask);
+  int excludedPct = (total > 0)
+    ? (int)((double)(total - content) * 100.0 / (double)total)
+    : 0;
+
+  return @{
+    @"maskPath":        [NSString stringWithUTF8String:outPath.c_str()],
+    @"width":           @((NSInteger)img.cols),
+    @"height":          @((NSInteger)img.rows),
+    @"excludedPercent": @((NSInteger)excludedPct),
+  };
+}
+
 @end
