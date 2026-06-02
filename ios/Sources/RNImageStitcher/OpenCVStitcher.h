@@ -234,6 +234,17 @@ extern NSString *const RNImageStitcherErrorDomain;
 + (nullable NSDictionary<NSString *, NSNumber *> *)normaliseImageAtPath:(NSString *)imagePath
                                                                   error:(NSError **)error;
 
+/// v0.15 — decode the JPEG at `imagePath`, downscale it (aspect
+/// preserved, INTER_AREA) so width <= maxWidth AND height <= maxHeight
+/// when those caps are > 0, re-encode at `quality`, and overwrite the
+/// file in place.  Returns the final `{ width, height }`.  iOS
+/// cv::imread honours EXIF, so orientation is preserved automatically.
++ (nullable NSDictionary<NSString *, NSNumber *> *)applyOutputControlsAtPath:(NSString *)imagePath
+                                                                   maxWidth:(NSInteger)maxWidth
+                                                                  maxHeight:(NSInteger)maxHeight
+                                                                    quality:(NSInteger)quality
+                                                                      error:(NSError **)error;
+
 @end
 
 NS_ASSUME_NONNULL_END
