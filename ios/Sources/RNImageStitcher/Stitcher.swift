@@ -193,6 +193,30 @@ public enum Stitcher {
     }
   }
 
+  /// v0.15 — resize-to-fit + JPEG re-encode for a single image, shared
+  /// by the single-photo output controls and the panorama dimension
+  /// clamp.  Caps <= 0 are unbounded; aspect ratio is preserved.
+  public static func applyOutputControls(
+    imagePath: String,
+    maxWidth: Int,
+    maxHeight: Int,
+    quality: Int
+  ) throws -> (width: Int, height: Int) {
+    do {
+      let dict = try OpenCVStitcher.applyOutputControls(
+        atPath: imagePath,
+        maxWidth: maxWidth,
+        maxHeight: maxHeight,
+        quality: quality
+      )
+      let width = dict["width"]?.intValue ?? 0
+      let height = dict["height"]?.intValue ?? 0
+      return (width: width, height: height)
+    } catch let nsError as NSError {
+      throw StitcherError.fromNSError(nsError)
+    }
+  }
+
   /// Combined pipeline: extract frames from a recorded video,
   /// stitch them into a panorama, write the result to
   /// `options.outputPath`.  Used by the host app's tap-and-hold
