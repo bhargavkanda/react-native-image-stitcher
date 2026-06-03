@@ -296,20 +296,12 @@ class RNSARCameraView @JvmOverloads constructor(
         // contract was already in place for Phase 4.
         appendPose(camera, frame.timestamp)
 
-        // Forward to the incremental stitcher if engaged, OR if any
-        // host worklets are registered (v0.8.0 Phase 4b.iii).  iOS'
-        // `RNSARWorkletRuntime.dispatchFrame:pose:` fires on every
-        // AR frame regardless of capture state; Android needs the
-        // same semantic so host worklets see the AR-mode preview
-        // stream, not just capture frames.
-        //
-        // `hasHostWorklets()` is a microsecond atomic-read on the
-        // native registry — cheap enough to hit per frame.  When
-        // no host worklets are registered AND no capture is active,
-        // the entire forwardToIncremental branch (including the
-        // ~3-5ms NV21 pack) is skipped — same cost envelope as
-        // before Phase 4b.iii.
-        if (ingestActive || StitcherWorkletRuntime.hasHostWorklets()) {
+        // Forward to the incremental stitcher only when capture is
+        // engaged.  (The v0.8.0 host-worklet dispatch — which also
+        // forwarded preview frames whenever host worklets were
+        // registered — was archived in the 2026-06 batch-keyframe
+        // cleanup.)
+        if (ingestActive) {
             forwardToIncremental(frame, camera)
         }
 
@@ -541,22 +533,14 @@ class RNSARCameraView @JvmOverloads constructor(
         //  written to `tmpJpegFile`, passed as `legacyJpegPath`.
         //  See the v0.3 / F8.6 entries in CHANGELOG.md.)
         //
-        // v0.8.0 Phase 3c — route through the worklet runtime's
-        // `runFirstParty` indirection.  The lambda body is the
-        // unchanged engine ingest call; the indirection sets up
-        // the seam where Phase 4 will fan out to host worklets
-        // without touching this first-party path.  Synchronous
-        // invocation preserves the ARCore Image ownership contract
-        // — the engine consumes the TransferredNV21 inside the
-        // lambda before ARCore recycles the Image.
-        StitcherWorkletRuntime.installIfNeeded()
-        // v0.8.0 Phase 4b.iii — only run first-party stitching when
-        // the host has actively engaged capture (`setIncrementalIngestionActive(true)`).
-        // The host-worklet dispatch below runs regardless, so AR-mode
-        // preview frames stream through registered host worklets even
-        // before/after capture.
+        // Synchronous engine ingest.  The ARCore Image ownership
+        // contract requires the engine to consume the TransferredNV21
+        // before ARCore recycles the Image, so this runs inline.  Only
+        // ingest when the host has actively engaged capture
+        // (`setIncrementalIngestionActive(true)`).  (The v0.8.0 worklet-
+        // runtime `runFirstParty` indirection + host-worklet fan-out
+        // were archived in the 2026-06 batch-keyframe cleanup.)
         if (ingestActive) {
-        StitcherWorkletRuntime.runFirstParty {
         module.ingestFromARCameraView(
             tx = tArr[0].toDouble(),
             ty = tArr[1].toDouble(),
@@ -608,42 +592,7 @@ class RNSARCameraView @JvmOverloads constructor(
                 ) != null
             },
         )
-        }  // closes StitcherWorkletRuntime.runFirstParty { … } (v0.8.0 Phase 3c)
         }  // closes `if (ingestActive)` (v0.8.0 Phase 4b.iii)
-
-        // ── v0.8.0 Phase 4b.iii — host-worklet fan-out ─────────────
-        //
-        // Dispatch the AR frame to every host worklet registered via
-        // `globalThis.__stitcherProxy.install(workletFn)` (the
-        // `useFrameProcessor` hook's AR-mode path).  The native side
-        // fast-path early-exits when the registry is empty (~ns
-        // cost), so this call is free for first-party-only deployments.
-        //
-        // Map the trackingState back to the JS-visible string set.
-        // `RNSARSession.TRACKING_*` are int codes; we re-derive the
-        // string here instead of plumbing it through.  (Could be
-        // refactored into a helper if/when other call sites need
-        // it.)
-        val trackingStateStr = when (camera.trackingState) {
-            TrackingState.TRACKING -> "normal"
-            TrackingState.PAUSED -> "limited"
-            TrackingState.STOPPED -> "notAvailable"
-            else -> ""
-        }
-        StitcherWorkletRuntime.dispatchToHostWorklets(
-            nv21Bytes = packed.nv21,
-            width = packed.width,
-            height = packed.height,
-            qx = qarr[0].toDouble(),
-            qy = qarr[1].toDouble(),
-            qz = qarr[2].toDouble(),
-            qw = qarr[3].toDouble(),
-            tx = tArr[0].toDouble(),
-            ty = tArr[1].toDouble(),
-            tz = tArr[2].toDouble(),
-            timestampNs = frame.timestamp.toDouble(),
-            trackingState = trackingStateStr,
-        )
     }
 
     /// v0.13.2 — map the JS physical device orientation to the
