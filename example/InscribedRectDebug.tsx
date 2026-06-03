@@ -210,7 +210,17 @@ export function InscribedRectDebugOverlay({
           {imageBox && (
             <Image
               key={`${reloadKey}-${showMask ? 'mask' : 'orig'}`}
-              source={{ uri: showMask && maskUri ? maskUri : uri }}
+              // Cache-bust the panorama URI with reloadKey: cropToRect
+              // overwrites the file IN PLACE, and Android's Fresco bitmap
+              // cache keys by URI — without a changing query it re-serves
+              // the stale pre-crop bitmap (the React `key` remount alone
+              // does not evict Fresco's cache).  Fresco reads the file via
+              // the URI path and ignores the query, so it still loads.  The
+              // mask uses a distinct write-once path (<img>.mask.jpg), so it
+              // needs no bust.  (iOS reloads on the key change alone.)
+              source={{
+                uri: showMask && maskUri ? maskUri : `${uri}?v=${reloadKey}`,
+              }}
               style={[styles.image, imageBox]}
               resizeMode="stretch"
             />
