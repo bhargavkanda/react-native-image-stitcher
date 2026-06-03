@@ -37,11 +37,11 @@ Pod::Spec.new do |s|
   # (cpp/) that both iOS and Android compile from a single source.
   s.source_files = ['ios/Sources/**/*.{swift,h,m,mm}',
                     'cpp/**/*.{h,hpp,cpp}']
-  # Exclude the lib's own C++ unit tests — they #include <gtest/gtest.h>,
-  # which consumer apps don't vendor.  The `cpp/**/*.cpp` glob above
-  # otherwise slurps cpp/tests/*.cpp into every host pod build, failing
-  # with `'gtest/gtest.h' file not found`.  Tests build only in the lib's
-  # CI / example app, never in a consumer.
+  # Exclude the shared C++ unit tests (cpp/tests/) — GoogleTest + JSI-stub
+  # harnesses for maintainers (pose_test.cpp etc.), NOT part of the shipped
+  # SDK.  The `cpp/**` glob above would otherwise slurp them into every host
+  # pod build and fail with `'gtest/gtest.h' file not found` (consumer apps
+  # don't vendor gtest).  Tests build only in the lib's CI / example app.
   s.exclude_files = ['cpp/tests/**/*']
   # Restrict the umbrella header to ONLY the iOS-side Obj-C `.h`
   # files.  Without this, CocoaPods defaults every header in
