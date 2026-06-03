@@ -80,34 +80,6 @@ if(NOT EXISTS "${SHARED_CPP_DIR}/keyframe_gate.hpp")
         "Expected react-native-image-stitcher/cpp/ — was the package layout broken?")
 endif()
 
-# ── React Native prefab packages for JSI ──────────────────────────
-#
-# v0.8.0 Phase 3 — activating the previously-deferred JSI integration.
-# The shared C++ host object (cpp/stitcher_frame_jsi.cpp) depends on
-# `facebook::jsi`.  ReactAndroid ships JSI as a prefab starting
-# RN 0.71+; the lib targets RN 0.84 so this is always available.
-#
-# `buildFeatures { prefab true }` in android/build.gradle enables
-# consumption + `ANDROID_STL=c++_shared` aligns the STL with what
-# the prefabs require.  The Phase-2 STL probe (`llvm-nm
-# libopencv_stitching.a | grep '__ndk1'`) confirmed OpenCV's
-# stitching archive was already built with c++_shared (768
-# __ndk1 symbols + 0 __cxx11 / NSt3) — switching the lib's flag
-# from c++_static to c++_shared just aligns + matches.  The
-# previous c++_static was working only because the JNI shim's
-# `.so` boundary used POD/C types; the new c++_shared is properly
-# matched throughout.
-find_package(ReactAndroid REQUIRED CONFIG)
-find_package(fbjni REQUIRED CONFIG)
-
-# v0.8.0 Phase 4b.ii — react-native-worklets-core prefab.  The
-# Gradle module name is `react-native-worklets-core`; inside it
-# publishes a library named `rnworklets` (matches vc's consumption
-# pattern in node_modules/react-native-vision-camera/android/CMakeLists.txt).
-# We consume both the headers (for `WKTJsiWorklet.h` etc.) AND
-# the .so (for `RNWorklet::WorkletInvoker` + `JsiWrapper::unwrap`
-# symbols, which are defined in worklets-core's WKTJsiWrapper.cpp).
-find_package(react-native-worklets-core REQUIRED CONFIG)
 
 # ── Our shim ───────────────────────────────────────────────────────
 add_library(image_stitcher SHARED
@@ -119,30 +91,7 @@ add_library(image_stitcher SHARED
     # retry + dimension/memory instrumentation.  Used to live in this
     # file (image_stitcher_jni.cpp).  See cpp/stitcher.hpp for design
     # rationale.
-    "${SHARED_CPP_DIR}/stitcher.cpp"
-    # v0.8.0 Phase 3 — shared JSI host object for `StitcherFrame`.
-    # Compiles to identical dispatch on both platforms; iOS consumes
-    # it via the .mm shim at
-    # `ios/Sources/RNImageStitcher/StitcherFrameHostObject.mm`.
-    # See cpp/stitcher_frame_jsi.hpp for the class API.
-    "${SHARED_CPP_DIR}/stitcher_frame_jsi.cpp"
-    # v0.8.0 Phase 4b.ii — shared C++ registry of host-supplied
-    # worklets + the `globalThis.__stitcherProxy` host object that
-    # JS calls into.  iOS picked these up via the podspec glob in
-    # Phase 4b.i; Android adds them here.
-    "${SHARED_CPP_DIR}/stitcher_worklet_registry.cpp"
-    "${SHARED_CPP_DIR}/stitcher_proxy_jsi.cpp"
-    # v0.8.0 Phase 4b.iii — shared per-frame fan-out helper.  Posts
-    # a `StitcherFrameData` onto worklets-core's default context's
-    # worklet thread; iterates the host worklet registry; invalidates
-    # the JSI host object after dispatch completes.
-    "${SHARED_CPP_DIR}/stitcher_worklet_dispatch.cpp"
-    # v0.8.0 Phase 4b.ii — Android JNI bindings for the JSI install
-    # (`StitcherJsiInstallerModule.nativeInstall`).  Reaches into the
-    # main JS runtime via the `long` JSI handle Kotlin pulls from
-    # `ReactApplicationContext.getJavaScriptContextHolder()`.  See
-    # worklets-core's `WorkletsModule.java` for the canonical pattern.
-    stitcher_jsi_install_jni.cpp)
+    "${SHARED_CPP_DIR}/stitcher.cpp")
 
 target_include_directories(image_stitcher PRIVATE
     "${OPENCV_INCLUDE_DIR}"
@@ -169,17 +118,7 @@ target_link_libraries(image_stitcher
     opencv_stitching
     -Wl,--no-whole-archive
     opencv_java
-    log
-    # v0.8.0 Phase 3 — JSI for the shared C++ host object
-    # (cpp/stitcher_frame_jsi.cpp's `facebook::jsi::HostObject`
-    # subclass).  fbjni for the Phase 3c JNI bridge between Kotlin
-    # worklet runtime + C++ host object construction.
-    ReactAndroid::jsi
-    fbjni::fbjni
-    # v0.8.0 Phase 4b.ii — worklets-core's `RNWorklet::WorkletInvoker`
-    # is constructed in the C++ registry's `install` method and
-    # invoked from the Android per-frame dispatch path.
-    react-native-worklets-core::rnworklets)
+    log)
 
 target_compile_options(image_stitcher PRIVATE
     -fvisibility=hidden

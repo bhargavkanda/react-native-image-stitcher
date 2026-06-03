@@ -1,0 +1,784 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// ARCHIVED -- Android live (hybrid) incremental engine  (NOT compiled, NOT shipped)
+// ====================================================================
+//
+// Extracted during the 2026-06 batch-keyframe cleanup (Phase 3) from
+// android/src/main/java/io/imagestitcher/rn/IncrementalStitcher.kt.
+// The SDK now ships only the batch-keyframe engine; the live `hybrid`
+// engine (`IncrementalEngine`) + its auto-refine driver + helpers were
+// removed.  The firstwins/slit engine lives in the sibling archived
+// file IncrementalFirstwinsEngine.kt.
+//
+// This file is REFERENCE ONLY -- it lives under archive/ (outside the
+// Gradle source set, so never compiled) and still references symbols
+// from IncrementalStitcher.kt (reactContext, emitState, BatchStitcher,
+// stripFileScheme, Arguments, ...).  Restore the declarations to
+// IncrementalStitcher.kt + re-wire the start()/finalize()/ingest()
+// branches to resurrect.
+//
+// ====================================================================
+
+package io.imagestitcher.rn
+
+// --- runHybridAutoRefine + emitRefinementState (live auto-refine driver)  (was IncrementalStitcher.kt:1819-1936) ---
+
+    /**
+     * 2026-05-16 — realtime+batch fusion auto-trigger called from
+     * the hybrid-engine branch of `finalize()`.  Fire-and-forget;
+     * the finalize() promise has ALREADY resolved with the live
+     * panorama before this is invoked.
+     *
+     *   1. Emits a state event with `isRefining = true` so the
+     *      host renders a "Refining…" pill.
+     *   2. Runs `BatchStitcher.stitchSync(...)` on the supplied
+     *      keyframe paths.
+     *   3. On success: emits a state event with `isRefining = false`
+     *      AND `refinedPanoramaPath = <path>`.
+     *   4. On failure: emits a state event with `isRefining = false`
+     *      and no refined path.  Host keeps showing the live
+     *      panorama; failure does not affect audit save.
+     *
+     * NO-OP when `framePaths.size < 2` or any path is missing on
+     * disk — matches the design doc's "if keyframes are NOT on
+     * disk, auto-trigger is a no-op" contract.  Today's hybrid
+     * engine retains no per-frame JPEGs so this is the
+     * always-no-op path; the hook is wired in advance of a future
+     * keyframe-collector enhancement.
+     */
+    internal fun runHybridAutoRefine(
+        framePaths: List<String>,
+        refinedOutputPath: String,
+        captureOrientation: String,
+        warperType: String,
+        blenderType: String,
+        seamFinderType: String,
+        useInscribedRectCrop: Boolean,
+    ) {
+        if (framePaths.size < 2) {
+            android.util.Log.i(
+                "IncrementalStitcher",
+                "[refine.auto] skipped: framePaths.size=${framePaths.size} " +
+                    "(hybrid engine retains no per-frame JPEGs)",
+            )
+            emitRefinementState(isRefining = false, refinedPanoramaPath = null)
+            return
+        }
+        for (p in framePaths) {
+            if (!File(p).exists()) {
+                android.util.Log.i(
+                    "IncrementalStitcher",
+                    "[refine.auto] skipped: missing keyframe $p",
+                )
+                emitRefinementState(isRefining = false, refinedPanoramaPath = null)
+                return
+            }
+        }
+        emitRefinementState(isRefining = true, refinedPanoramaPath = null)
+        refineScope.launch {
+            try {
+                val stitcher = BatchStitcher.bridgeInstance
+                    ?: throw IllegalStateException(
+                        "BatchStitcher.bridgeInstance is null at auto-refine time",
+                    )
+                stitcher.stitchSync(
+                    framePaths.toTypedArray(),
+                    refinedOutputPath,
+                    90,
+                    warperType,
+                    blenderType,
+                    seamFinderType,
+                    captureOrientation,
+                    useInscribedRectCrop,
+                    stitchMode = "scans",
+                )
+                android.util.Log.i(
+                    "IncrementalStitcher",
+                    "[refine.auto] success path=$refinedOutputPath",
+                )
+                emitRefinementState(
+                    isRefining = false,
+                    refinedPanoramaPath = refinedOutputPath,
+                )
+            } catch (t: Throwable) {
+                android.util.Log.w(
+                    "IncrementalStitcher",
+                    "[refine.auto] refinement failed (live output kept): ${t.message}",
+                )
+                emitRefinementState(isRefining = false, refinedPanoramaPath = null)
+            }
+        }
+    }
+
+    /**
+     * 2026-05-16 — emit a refinement-related state event.  Reuses
+     * the same IncrementalStateUpdate channel the live
+     * engines emit on; JS reads `isRefining` and `refinedPanoramaPath`
+     * directly from the event payload (no schema change required on
+     * the JS dispatch side).
+     */
+    private fun emitRefinementState(
+        isRefining: Boolean,
+        refinedPanoramaPath: String?,
+    ) {
+        val state = Arguments.createMap().apply {
+            putNull("panoramaPath")
+            putInt("width", 0)
+            putInt("height", 0)
+            putInt("acceptedCount", 0)
+            putInt("outcome", 0)              // AcceptedHigh
+            putDouble("confidence", 1.0)
+            putDouble("overlapPercent", -1.0)
+            putInt("processingMs", 0)
+            putBoolean("isLandscape", false)
+            putInt("paintedExtent", 0)
+            putInt("panExtent", 0)
+            putInt("keyframeMax", 0)
+            putBoolean("isRefining", isRefining)
+            if (refinedPanoramaPath != null) {
+                putString("refinedPanoramaPath", refinedPanoramaPath)
+            }
+        }
+        emitState(state)
+    }
+
+// --- refinedPathFromLive (live-path -> refined-path helper)  (was IncrementalStitcher.kt:1991-2008) ---
+
+    /**
+     * 2026-05-16 — given the live panorama path, derive a sibling
+     * path for the refined output.  Same algorithm iOS uses:
+     *   /…/<base>.jpg → /…/<base>-refined.jpg
+     */
+    private fun refinedPathFromLive(livePath: String): String {
+        val cleaned = stripFileScheme(livePath)
+        val file = File(cleaned)
+        val parent = file.parentFile ?: File(reactContext.cacheDir, "panoramas")
+        val name = file.name
+        val dot = name.lastIndexOf('.')
+        val refinedName = if (dot >= 0) {
+            "${name.substring(0, dot)}-refined${name.substring(dot)}"
+        } else {
+            "$name-refined"
+        }
+        return File(parent, refinedName).absolutePath
+    }
+
+// --- FrameOutcome / FrameTelemetry / StitcherSnapshot + class IncrementalEngine (hybrid live engine)  (was IncrementalStitcher.kt:2381-2934) ---
+
+// ── Frame outcome — mirrors iOS RLISFrameOutcome ────────────────────
+
+internal enum class FrameOutcome {
+    AcceptedHigh,
+    AcceptedMedium,
+    SkippedTooClose,
+    RejectedTooFar,
+    RejectedSceneUniform,
+    RejectedAlignmentLost,
+    SkippedTrackingPoor,
+    /** V12.11 Step D — operator panned BACKWARDS past the running
+     *  max along the pan axis.  Engine has SKIPPED the paste; host
+     *  should auto-finalize.  Rectilinear-only. */
+    RejectedReverseDirection,
+}
+
+
+internal data class FrameTelemetry(
+    val outcome: FrameOutcome,
+    val overlapPercent: Double,
+    val matchCount: Int,
+    val inlierRatio: Double,
+    val confidence: Double,
+    val processingMs: Double,
+    /** V12.12 — engine-detected orientation.  Mirrors iOS'
+     *  `RLISFrameTelemetry.isLandscape`.  TRUE for landscape capture
+     *  (vertical pan), FALSE for portrait (horizontal pan).  Stays
+     *  at the FIRST-FRAME determination thereafter. */
+    val isLandscape: Boolean = false,
+)
+
+
+internal data class StitcherSnapshot(
+    val panoramaPath: String,
+    val width: Int,
+    val height: Int,
+    val acceptedCount: Int,
+)
+
+
+/**
+ * Pure-OpenCV implementation of the incremental algorithm.  No RN
+ * dependency — this class can be unit-tested with synthetic Mat
+ * inputs.  Exact algorithmic mirror of iOS' OpenCVIncrementalStitcher.mm.
+ */
+internal class IncrementalEngine(
+    val composeWidth: Int,
+    val composeHeight: Int,
+    val canvasWidth: Int,
+    val canvasHeight: Int,
+    val featherPx: Int,
+    val snapshotJpegQuality: Int,
+    val snapshotEveryNAccepts: Int,
+    /// 0/90/180/270 — rotation applied to each ingested frame before
+    /// any other processing.  See iOS' equivalent for the full
+    /// rationale.  JS computes from device orientation.
+    val frameRotationDegrees: Int,
+) {
+    private val canvas: Mat = Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC3)
+    private val canvasMask: Mat = Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC1)
+
+    /// V7 pose-driven state — sensor-native compute path.  Mirrors iOS.
+    private var firstRotationArkit: Mat = Mat()
+    private var kCompose: Mat = Mat()
+    private var tCanvas: Mat = Mat.eye(3, 3, CvType.CV_64F)
+    private val mArkitToCv: Mat = Mat(3, 3, CvType.CV_64F).apply {
+        // diag(1, -1, -1) — ARKit/ARCore (Y-up, -Z forward) → OpenCV.
+        setTo(Scalar(0.0))
+        put(0, 0, 1.0); put(1, 1, -1.0); put(2, 2, -1.0)
+    }
+
+    private var lastAcceptedYaw: Double = 0.0
+    private var lastAcceptedPitch: Double = 0.0
+    private var hasFirstFrame: Boolean = false
+    private var acceptsSinceSnapshot: Int = 0
+    var acceptedCount: Int = 0
+        private set
+    private var snapshotSeq: Int = 0
+    var lastState: WritableMap? = null
+        private set
+
+    /**
+     * Read the JPEG at `path`, downscale to compose-resolution, run
+     * the same algorithm as the iOS engine.
+     */
+    fun addFrameAtPath(
+        path: String,
+        qx: Double,
+        qy: Double,
+        qz: Double,
+        qw: Double,
+        fx: Double,
+        fy: Double,
+        cx: Double,
+        cy: Double,
+        imageWidth: Int,
+        imageHeight: Int,
+        yaw: Double,
+        pitch: Double,
+        fovHorizDegrees: Double,
+        fovVertDegrees: Double,
+        trackingPoor: Boolean,
+    ): FrameTelemetry {
+        val t0 = System.nanoTime()
+        if (trackingPoor) {
+            return FrameTelemetry(
+                FrameOutcome.SkippedTrackingPoor, -1.0, 0, 0.0, 0.0,
+                msSince(t0),
+            )
+        }
+
+        val cleaned = stripFileScheme(path)
+        val srcRaw = Imgcodecs.imread(cleaned, Imgcodecs.IMREAD_COLOR)
+        if (srcRaw.empty()) {
+            return FrameTelemetry(
+                FrameOutcome.SkippedTrackingPoor, -1.0, 0, 0.0, 0.0,
+                msSince(t0),
+            )
+        }
+        // V7: NO input rotation.  ARCore (and the JS gyro fallback)
+        // deliver sensor-native landscape frames; we keep them in
+        // that frame through the entire compute pipeline.  Output
+        // rotation for display happens at snapshot/finalize time.
+        // See iOS' equivalent fix for the architectural rationale.
+        val frame = downsampleToCompose(srcRaw)
+        if (frame !== srcRaw) srcRaw.release()
+        return addFrameMat(
+            frame,
+            qx, qy, qz, qw,
+            fx, fy, cx, cy,
+            imageWidth, imageHeight,
+            yaw, pitch,
+            fovHorizDegrees, fovVertDegrees,
+            t0,
+        )
+    }
+
+    /**
+     * F8.6 — pixel-data twin of [addFrameAtPath].  Accepts the
+     * camera frame as an NV21 byte buffer instead of a JPEG file
+     * path; skips the JPEG decode round-trip.  See
+     * `IncrementalFirstwinsEngine.addFramePixelData` for the
+     * sibling implementation rationale.
+     */
+    fun addFramePixelData(
+        nv21: ByteArray,
+        nv21Width: Int,
+        nv21Height: Int,
+        qx: Double, qy: Double, qz: Double, qw: Double,
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        imageWidth: Int, imageHeight: Int,
+        yaw: Double, pitch: Double,
+        fovHorizDegrees: Double, fovVertDegrees: Double,
+        trackingPoor: Boolean,
+    ): FrameTelemetry {
+        val t0 = System.nanoTime()
+        if (trackingPoor) {
+            return FrameTelemetry(
+                FrameOutcome.SkippedTrackingPoor, -1.0, 0, 0.0, 0.0,
+                msSince(t0),
+            )
+        }
+        // F8.6 IS-1 — length guard; see
+        // `IncrementalFirstwinsEngine.addFramePixelData` for the
+        // failure-mode rationale.
+        val expectedBytes = nv21Width * nv21Height * 3 / 2
+        require(nv21.size >= expectedBytes) {
+            "addFramePixelData: nv21 buffer too small " +
+                "(${nv21.size} bytes < $expectedBytes for " +
+                "${nv21Width}x${nv21Height})"
+        }
+        val yuv = Mat(nv21Height + nv21Height / 2, nv21Width, CvType.CV_8UC1)
+        yuv.put(0, 0, nv21)
+        val srcRaw = Mat()
+        Imgproc.cvtColor(yuv, srcRaw, Imgproc.COLOR_YUV2BGR_NV21)
+        yuv.release()
+        if (srcRaw.empty()) {
+            return FrameTelemetry(
+                FrameOutcome.SkippedTrackingPoor, -1.0, 0, 0.0, 0.0,
+                msSince(t0),
+            )
+        }
+        val frame = downsampleToCompose(srcRaw)
+        if (frame !== srcRaw) srcRaw.release()
+        return addFrameMat(
+            frame,
+            qx, qy, qz, qw,
+            fx, fy, cx, cy,
+            imageWidth, imageHeight,
+            yaw, pitch,
+            fovHorizDegrees, fovVertDegrees,
+            t0,
+        )
+    }
+
+    /**
+     * F8.6 — the body extracted from [addFrameAtPath].  Takes a
+     * BGR `Mat` (already downsampled to compose dims) and runs the
+     * pose-driven homography paste pipeline.  Behaviour is
+     * identical to the pre-F8.6 `addFrameAtPath` — the body is a
+     * verbatim move.
+     */
+    private fun addFrameMat(
+        frame: Mat,
+        qx: Double, qy: Double, qz: Double, qw: Double,
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        imageWidth: Int, imageHeight: Int,
+        yaw: Double, pitch: Double,
+        fovHorizDegrees: Double, fovVertDegrees: Double,
+        t0: Long,
+    ): FrameTelemetry {
+        // Build R_new from quaternion.
+        val rNew = quaternionToRotationMat(qx, qy, qz, qw)
+
+        if (!hasFirstFrame) {
+            firstRotationArkit = rNew.clone()
+            // V7: K is in COMPOSE pixel coordinates.  Sensor intrinsics
+            // get scaled by the same uniform factor we used to downsample
+            // the frame, so K · ray → pixel produces the right pixel
+            // in compose space directly.  No rotation chain needed.
+            val sx = frame.cols().toDouble() / maxOf(1, imageWidth)
+            val sy = frame.rows().toDouble() / maxOf(1, imageHeight)
+            val s = 0.5 * (sx + sy)
+            kCompose = Mat(3, 3, CvType.CV_64F).apply {
+                setTo(Scalar(0.0))
+                put(0, 0, fx * s); put(0, 2, cx * s)
+                put(1, 1, fy * s); put(1, 2, cy * s)
+                put(2, 2, 1.0)
+            }
+
+            // Place first frame at canvas centre.
+            val ox = (canvas.cols() - frame.cols()) / 2
+            val oy = (canvas.rows() - frame.rows()) / 2
+            val roi = Rect(ox, oy, frame.cols(), frame.rows())
+            frame.copyTo(canvas.submat(roi))
+            canvasMask.submat(roi).setTo(Scalar(255.0))
+            tCanvas = Mat.eye(3, 3, CvType.CV_64F)
+            tCanvas.put(0, 2, ox.toDouble())
+            tCanvas.put(1, 2, oy.toDouble())
+
+            lastAcceptedYaw = yaw
+            lastAcceptedPitch = pitch
+            hasFirstFrame = true
+            acceptedCount = 1
+            frame.release()
+            return FrameTelemetry(
+                FrameOutcome.AcceptedHigh, 0.0, 0, 0.0, 1.0, msSince(t0),
+            )
+        }
+
+        val overlap = computeOverlapPct(
+            yaw - lastAcceptedYaw, pitch - lastAcceptedPitch,
+            fovHorizDegrees, fovVertDegrees,
+        )
+        if (overlap > MAX_OVERLAP_PCT) {
+            frame.release()
+            return FrameTelemetry(
+                FrameOutcome.SkippedTooClose, overlap, 0, 0.0, 0.0, msSince(t0),
+            )
+        }
+        if (overlap < MIN_OVERLAP_PCT) {
+            frame.release()
+            return FrameTelemetry(
+                FrameOutcome.RejectedTooFar, overlap, 0, 0.0, 0.0, msSince(t0),
+            )
+        }
+
+        // V7 pose-driven homography (sensor-native compose space):
+        //   R_rel_cv = M · R_first⁻¹ · R_new · M
+        //   H_compose = K_compose · R_rel_cv · K_compose⁻¹
+        //   H_canvas = T_canvas · H_compose
+        // No R2S/S chain — the v6 bug was applying input rotation
+        // and undoing it via the chain; v7 keeps everything in
+        // sensor-native compose space and rotates only at output.
+        val firstInv = Mat()
+        Core.transpose(firstRotationArkit, firstInv)
+        val tmp1 = Mat(); Core.gemm(mArkitToCv, firstInv, 1.0, Mat(), 0.0, tmp1)
+        val tmp2 = Mat(); Core.gemm(tmp1, rNew, 1.0, Mat(), 0.0, tmp2)
+        val rRelCv = Mat(); Core.gemm(tmp2, mArkitToCv, 1.0, Mat(), 0.0, rRelCv)
+        firstInv.release(); tmp1.release(); tmp2.release()
+
+        val kInv = kCompose.inv()
+        val hcTmp = Mat(); Core.gemm(kCompose, rRelCv, 1.0, Mat(), 0.0, hcTmp)
+        val hCompose = Mat(); Core.gemm(hcTmp, kInv, 1.0, Mat(), 0.0, hCompose)
+        kInv.release(); hcTmp.release(); rRelCv.release(); rNew.release()
+
+        val hCanvas = Mat(); Core.gemm(tCanvas, hCompose, 1.0, Mat(), 0.0, hCanvas)
+        hCompose.release()
+
+        warpAndBlend(frame, hCanvas)
+        hCanvas.release()
+        frame.release()
+
+        lastAcceptedYaw = yaw
+        lastAcceptedPitch = pitch
+        acceptedCount++
+
+        // Confidence as in iOS — function of how centred the overlap
+        // is in the [10, 75]% acceptance window.
+        val midOverlap = 0.5 * (MIN_OVERLAP_PCT + MAX_OVERLAP_PCT)
+        val overlapDistance = kotlin.math.abs(overlap - midOverlap) /
+            (MAX_OVERLAP_PCT - midOverlap)
+        val confidence = maxOf(0.0, 1.0 - overlapDistance)
+        val outcome = if (confidence >= 0.6) FrameOutcome.AcceptedHigh
+                      else FrameOutcome.AcceptedMedium
+
+        return FrameTelemetry(
+            outcome, overlap, -1, -1.0, confidence, msSince(t0),
+        )
+    }
+
+    /** Write a JPEG snapshot if accept-counter has hit the configured cadence. */
+    fun snapshotIfDue(tele: FrameTelemetry): WritableMap? {
+        val isAccept = tele.outcome == FrameOutcome.AcceptedHigh
+                    || tele.outcome == FrameOutcome.AcceptedMedium
+        var snapshotPath: String? = null
+        var snapW = 0
+        var snapH = 0
+        if (isAccept) {
+            acceptsSinceSnapshot++
+            if (acceptsSinceSnapshot >= snapshotEveryNAccepts) {
+                acceptsSinceSnapshot = 0
+                snapshotSeq++
+                val slot = snapshotSeq % 4
+                val tmpPath = "${System.getProperty("java.io.tmpdir") ?: "/data/local/tmp"}" +
+                              "/rlis-live-$slot.jpg"
+                // tightCrop = true for live snapshots: the canvas is
+                // 4800x2200, but most of it is empty until the pan
+                // covers it.  Without a tight crop, every snapshot
+                // was a ~24 MB JPEG that RN's <Image> couldn't keep
+                // up with.  Tight-cropped snapshots are 50–500 KB.
+                val snap = writeJpeg(tmpPath, snapshotJpegQuality, tightCrop = true)
+                if (snap != null) {
+                    snapshotPath = snap.panoramaPath
+                    snapW = snap.width
+                    snapH = snap.height
+                }
+            }
+        }
+
+        val map = Arguments.createMap().apply {
+            putInt("width", snapW)
+            putInt("height", snapH)
+            putInt("acceptedCount", acceptedCount)
+            putInt("outcome", tele.outcome.ordinal)
+            putDouble("confidence", tele.confidence)
+            putDouble("overlapPercent", tele.overlapPercent)
+            putDouble("processingMs", tele.processingMs)
+            if (snapshotPath != null) putString("panoramaPath", snapshotPath)
+        }
+        lastState = map
+        return map
+    }
+
+    fun finalize(outputPath: String, quality: Int): StitcherSnapshot {
+        val cleaned = stripFileScheme(outputPath)
+        val snap = writeJpeg(cleaned, quality, tightCrop = true)
+            ?: throw IllegalStateException(
+                "No frames have been accepted yet, or write failed: $cleaned",
+            )
+        release()
+        return snap
+    }
+
+    fun release() {
+        canvas.release()
+        canvasMask.release()
+        firstRotationArkit.release()
+        kCompose.release()
+        tCanvas.release()
+        mArkitToCv.release()
+    }
+
+    // ── internal helpers ────────────────────────────────────────────
+
+    private fun downsampleToCompose(src: Mat): Mat {
+        // Uniform scale that fits inside the compose-dim budget — the
+        // smaller of the two ratios wins so neither axis distorts.
+        val sw = src.cols().toDouble()
+        val sh = src.rows().toDouble()
+        var scale = minOf(composeWidth.toDouble() / sw, composeHeight.toDouble() / sh)
+        if (scale > 1.0) scale = 1.0  // never upscale
+        val outW = maxOf(1, (sw * scale).toInt())
+        val outH = maxOf(1, (sh * scale).toInt())
+        if (src.cols() == outW && src.rows() == outH) return src
+        val out = Mat()
+        Imgproc.resize(src, out, Size(outW.toDouble(), outH.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+        return out
+    }
+
+    // `placeFirstFrame` was dropped in v6 — the first-frame logic is
+    // now inlined in `addFrameAtPath` so the engine can capture the
+    // reference pose + intrinsics in the same place it positions the
+    // frame on the canvas.
+
+    private fun warpAndBlend(frame: Mat, worldH: Mat) {
+        val canvasSize = Size(canvasWidth.toDouble(), canvasHeight.toDouble())
+
+        val warped = Mat()
+        Imgproc.warpPerspective(
+            frame, warped, worldH, canvasSize,
+            Imgproc.INTER_LINEAR, Core.BORDER_CONSTANT, Scalar(0.0, 0.0, 0.0),
+        )
+
+        val frameOnesMask = Mat(frame.rows(), frame.cols(), CvType.CV_8UC1, Scalar(255.0))
+        val warpedMask = Mat()
+        Imgproc.warpPerspective(
+            frameOnesMask, warpedMask, worldH, canvasSize,
+            Imgproc.INTER_NEAREST, Core.BORDER_CONSTANT, Scalar(0.0),
+        )
+        frameOnesMask.release()
+
+        // Hard midline seam (replaces v4 ratio-feather).  Same fix
+        // as iOS v5: each output pixel comes from exactly one frame,
+        // so misalignment between frames can't produce ghosts.  The
+        // seam is placed where each pixel is equidistant from both
+        // frames' outer edges (the "middle" of the overlap), then
+        // softened with a small Gaussian to hide the pixel-perfect
+        // cut.
+        val distNew = Mat()
+        Imgproc.distanceTransform(warpedMask, distNew, Imgproc.DIST_L2, 3)
+        val distCanvas = Mat()
+        Imgproc.distanceTransform(canvasMask, distCanvas, Imgproc.DIST_L2, 3)
+
+        // alpha8: 255 where new is deeper, 0 where canvas is deeper.
+        val alpha8 = Mat()
+        Core.compare(distNew, distCanvas, alpha8, Core.CMP_GE)
+
+        // First-touch regions need new frame to write unconditionally.
+        val noPriorMask = Mat()
+        Core.compare(canvasMask, Scalar(0.0), noPriorMask, Core.CMP_EQ)
+        alpha8.setTo(Scalar(255.0), noPriorMask)
+        noPriorMask.release()
+
+        val alpha = Mat()
+        alpha8.convertTo(alpha, CvType.CV_32F, 1.0 / 255.0)
+        alpha8.release()
+        Imgproc.GaussianBlur(alpha, alpha, Size(7.0, 7.0), 0.0)
+        distNew.release(); distCanvas.release()
+
+        val alphaChannels = mutableListOf(alpha, alpha, alpha)
+        val alpha3 = Mat()
+        Core.merge(alphaChannels, alpha3)
+        val invAlpha3 = Mat()
+        Core.subtract(Mat.ones(alpha3.size(), alpha3.type()).apply {
+            setTo(Scalar(1.0, 1.0, 1.0))
+        }, alpha3, invAlpha3)
+
+        val warpedF = Mat(); warped.convertTo(warpedF, CvType.CV_32FC3)
+        val canvasF = Mat(); canvas.convertTo(canvasF, CvType.CV_32FC3)
+        val blendedF = Mat()
+        Core.multiply(warpedF, alpha3, warpedF)
+        Core.multiply(canvasF, invAlpha3, canvasF)
+        Core.add(warpedF, canvasF, blendedF)
+        warpedF.release(); canvasF.release()
+        alpha.release(); alpha3.release(); invAlpha3.release()
+
+        val blended8 = Mat()
+        blendedF.convertTo(blended8, CvType.CV_8UC3)
+        blendedF.release()
+        // Only write where warpedMask is set; rest of canvas is unchanged.
+        blended8.copyTo(canvas, warpedMask)
+        blended8.release()
+
+        Core.bitwise_or(canvasMask, warpedMask, canvasMask)
+        warpedMask.release()
+        warped.release()
+    }
+
+    private fun writeJpeg(
+        outputPath: String,
+        quality: Int,
+        tightCrop: Boolean,
+    ): StitcherSnapshot? {
+        if (acceptedCount == 0) return null
+        var crop = Rect(0, 0, canvas.cols(), canvas.rows())
+        if (tightCrop) {
+            val nonZero = MatOfPoint2f()
+            // boundingRect on the mask matrix gives us the tight crop;
+            // OpenCV Java's API takes a Mat of points, but for an
+            // image mask we use Imgproc.boundingRect on a contour.
+            // Cheaper path: walk the mask once.
+            val contoured = Imgproc.boundingRect(MaskNonZeroContour(canvasMask))
+            if (contoured.width > 0 && contoured.height > 0) {
+                crop = contoured
+            }
+            nonZero.release()
+        }
+        val cropped = Mat(canvas, crop)
+        // V7.1 GRAVITY-DERIVED OUTPUT ROTATION.  Mirrors iOS — see
+        // OpenCVIncrementalStitcher.mm for the full derivation.  The
+        // rotation comes from the AR pose (which knows gravity) so
+        // we don't need a device-orientation hook (which was the
+        // source of the v7 "sideways for landscape" bug).
+        var rotationDeg = 0
+        if (hasFirstFrame && !firstRotationArkit.empty()) {
+            val gravWorld = Mat(3, 1, CvType.CV_64F).apply {
+                put(0, 0, 0.0); put(1, 0, -1.0); put(2, 0, 0.0)
+            }
+            val firstT = Mat()
+            Core.transpose(firstRotationArkit, firstT)
+            val gravArkit = Mat(); Core.gemm(firstT, gravWorld, 1.0, Mat(), 0.0, gravArkit)
+            val gravCv = Mat(); Core.gemm(mArkitToCv, gravArkit, 1.0, Mat(), 0.0, gravCv)
+            val gx = gravCv.get(0, 0)[0]
+            val gy = gravCv.get(1, 0)[0]
+            val angle = kotlin.math.atan2(gx, gy) * 180.0 / Math.PI
+            rotationDeg = (kotlin.math.round(angle / 90.0).toInt()) * 90
+            rotationDeg = ((rotationDeg % 360) + 360) % 360
+            gravWorld.release(); firstT.release(); gravArkit.release(); gravCv.release()
+        }
+        val out = when (rotationDeg) {
+            90  -> Mat().also { Core.rotate(cropped, it, Core.ROTATE_90_CLOCKWISE) }
+            180 -> Mat().also { Core.rotate(cropped, it, Core.ROTATE_180) }
+            270 -> Mat().also { Core.rotate(cropped, it, Core.ROTATE_90_COUNTERCLOCKWISE) }
+            else -> cropped
+        }
+        val outW = out.cols()
+        val outH = out.rows()
+        val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, quality)
+        val ok = Imgcodecs.imwrite(outputPath, out, params)
+        if (out !== cropped) out.release()
+        cropped.release()
+        if (!ok) return null
+        return StitcherSnapshot(
+            panoramaPath = outputPath,
+            width = outW,
+            height = outH,
+            acceptedCount = acceptedCount,
+        )
+    }
+
+    private fun msSince(t0Nanos: Long): Double =
+        (System.nanoTime() - t0Nanos) / 1_000_000.0
+
+    companion object {
+        // v3 thresholds — relaxed match-count + inlier minimums for
+        // light-texture shelf scenes; tighter det range because the
+        // affine fit produces a much narrower legitimate scale band.
+        private const val MIN_OVERLAP_PCT = 10.0
+        private const val MAX_OVERLAP_PCT = 75.0
+        private const val MIN_MATCHES_ACCEPT = 10
+        private const val MIN_INLIER_RATIO_ACCEPT = 0.18
+        private const val HIGH_CONF_MATCHES = 60
+        private const val HIGH_CONF_INLIER_RATIO = 0.55
+        private const val ORB_MAX_FEATURES = 1000
+        private const val ORB_SCALE_FACTOR = 1.2f
+        private const val ORB_LEVELS = 8
+        private const val ORB_EDGE_THRESHOLD = 31
+        private const val LOWE_RATIO = 0.75f
+        private const val RANSAC_REPROJ_THRESH = 5.0
+        private const val HOM_DET_MIN = 0.7
+        private const val HOM_DET_MAX = 1.4
+    }
+}
+
+// --- MaskNonZeroContour helper (used only by the live engine)  (was IncrementalStitcher.kt:2937-2960) ---
+
+/// Helper for OpenCV's odd boundingRect signature on a binary mask.
+/// Wraps the mask's non-zero pixel coords as a MatOfPoint that
+/// `Imgproc.boundingRect` will accept.
+private fun MaskNonZeroContour(mask: Mat): org.opencv.core.MatOfPoint {
+    val locations = Mat()
+    Core.findNonZero(mask, locations)
+    if (locations.empty()) {
+        locations.release()
+        return org.opencv.core.MatOfPoint()
+    }
+    val pts = mutableListOf<Point>()
+    // findNonZero returns CV_32SC2 with N rows, 1 col.  Each entry is
+    // a (col, row) pair; build a point list for boundingRect.
+    val n = locations.rows()
+    val buf = IntArray(2)
+    for (i in 0 until n) {
+        locations.get(i, 0, buf)
+        pts.add(Point(buf[0].toDouble(), buf[1].toDouble()))
+    }
+    locations.release()
+    val out = org.opencv.core.MatOfPoint()
+    out.fromList(pts)
+    return out
+}
+
+// --- computeOverlapPct helper (used only by the live engine)  (was IncrementalStitcher.kt:2966-2984) ---
+
+internal fun computeOverlapPct(
+    deltaYaw: Double,
+    deltaPitch: Double,
+    fovHorizDegrees: Double,
+    fovVertDegrees: Double,
+): Double {
+    val absYaw = kotlin.math.abs(deltaYaw)
+    val absPitch = kotlin.math.abs(deltaPitch)
+    var fovH = fovHorizDegrees * Math.PI / 180.0
+    var fovV = fovVertDegrees * Math.PI / 180.0
+    if (fovH <= 1e-6) fovH = 65.0 * Math.PI / 180.0
+    if (fovV <= 1e-6) fovV = 50.0 * Math.PI / 180.0
+    val overlap = if (absYaw >= absPitch) {
+        1.0 - absYaw / fovH
+    } else {
+        1.0 - absPitch / fovV
+    }
+    return overlap.coerceIn(0.0, 1.0) * 100.0
+}
+
+// --- quaternionToRotationMat helper (used only by the live engine)  (was IncrementalStitcher.kt:2991-3001) ---
+
+/// Quaternion → 3x3 rotation matrix, mirroring iOS `quaternionToRotationMat`.
+internal fun quaternionToRotationMat(qx0: Double, qy0: Double, qz0: Double, qw0: Double): Mat {
+    var qx = qx0; var qy = qy0; var qz = qz0; var qw = qw0
+    val n = kotlin.math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
+    if (n > 1e-9) { qx /= n; qy /= n; qz /= n; qw /= n }
+    val r = Mat(3, 3, CvType.CV_64F)
+    r.put(0, 0, 1 - 2*(qy*qy + qz*qz)); r.put(0, 1, 2*(qx*qy - qw*qz));     r.put(0, 2, 2*(qx*qz + qw*qy))
+    r.put(1, 0, 2*(qx*qy + qw*qz));     r.put(1, 1, 1 - 2*(qx*qx + qz*qz)); r.put(1, 2, 2*(qy*qz - qw*qx))
+    r.put(2, 0, 2*(qx*qz - qw*qy));     r.put(2, 1, 2*(qy*qz + qw*qx));     r.put(2, 2, 1 - 2*(qx*qx + qy*qy))
+    return r
+}
