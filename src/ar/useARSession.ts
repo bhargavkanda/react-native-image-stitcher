@@ -70,6 +70,15 @@ export interface UseARSessionReturn {
    */
   isAvailable: boolean;
   /**
+   * Whether the one-shot `isSupported()` probe has resolved (success OR
+   * failure).  `false` only during the brief async window right after
+   * mount; `true` thereafter.  Lets consumers distinguish "AR not
+   * supported" (probed && !isAvailable) from "support not yet known"
+   * (!probed), so they don't prematurely mount the non-AR camera and
+   * lose a camera-handoff race when AR is the intended source.
+   */
+  supportProbed: boolean;
+  /**
    * Whether the session is currently running.  True between
    * `start()` and `stop()`.
    */
@@ -128,6 +137,7 @@ const STATE_POLL_INTERVAL_MS = 500;
 
 export function useARSession(): UseARSessionReturn {
   const [isAvailable, setIsAvailable] = useState(false);
+  const [supportProbed, setSupportProbed] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [trackingState, setTrackingState] = useState<ARTrackingState>(
     ARTrackingState.NotAvailable,
@@ -140,11 +150,30 @@ export function useARSession(): UseARSessionReturn {
   // AR support shouldn't crash anything — `isAvailable` stays
   // false and the rest of the SDK falls back to vision-camera.
   useEffect(() => {
-    if (!native) return;
-    native.isSupported().then(setIsAvailable).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.warn('[useARSession] isSupported failed', err);
-    });
+    if (!native) {
+      // No native module at all — treat the probe as resolved
+      // (unsupported) so consumers don't wait forever for AR.
+      setSupportProbed(true);
+      return;
+    }
+    let cancelled = false;
+    native
+      .isSupported()
+      .then((ok) => {
+        if (!cancelled) setIsAvailable(ok);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn('[useARSession] isSupported failed', err);
+      })
+      .finally(() => {
+        // Mark the probe resolved either way so the non-AR fallback
+        // (or AR mount) can proceed exactly once support is known.
+        if (!cancelled) setSupportProbed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [native]);
 
   const stopPolling = useCallback(() => {
@@ -200,6 +229,7 @@ export function useARSession(): UseARSessionReturn {
 
   return {
     isAvailable,
+    supportProbed,
     isRunning,
     trackingState,
     start,

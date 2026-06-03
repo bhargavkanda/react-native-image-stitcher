@@ -979,7 +979,8 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // (older iPhones, ARCore-less Androids, simulators) stay `false`
   // forever, which forces non-AR capture everywhere and hides the
   // AR toggle in the bottom bar (see JSX below).
-  const { isAvailable: isARSupportedOnDevice } = useARSession();
+  const { isAvailable: isARSupportedOnDevice, supportProbed: isARSupportProbed } =
+    useARSession();
 
   const effectiveCaptureSource = deriveEffectiveCaptureSource(
     arPreference,
@@ -988,6 +989,23 @@ export function Camera(props: CameraProps): React.JSX.Element {
   );
   const isAR = effectiveCaptureSource === 'ar';
   const isNonAR = !isAR;
+
+  // v0.14.2 — camera-handoff race guard.  While AR is the preferred
+  // source but the one-shot `isSupported()` probe hasn't resolved yet,
+  // `deriveEffectiveCaptureSource` returns 'non-ar' (because
+  // `isARSupportedOnDevice` is still false), which would mount
+  // <CameraView> and let vision-camera's AVCaptureSession grab the
+  // camera.  The switch to AR ~200-500ms later then fails with ARKit
+  // "Required sensor failed" (ARKit and AVCaptureSession can't share the
+  // camera), leaving a blank AR preview — intermittent and timing-
+  // dependent.  Defer the initial mount until the probe settles: while
+  // pending we render the "Switching camera…" placeholder instead of any
+  // camera, so vision-camera never contends for the device when AR is the
+  // intent.  Conditions mirror deriveEffectiveCaptureSource's own
+  // non-support gates (arPreference, lens) so this is true in exactly the
+  // cases that resolve to AR once support is confirmed.
+  const arSupportPending =
+    arPreference && lens !== '0.5x' && !isARSupportProbed;
   const deviceOrientation = useDeviceOrientation();
 
   // v0.13.1 — counter-rotation for control CONTENT (AR toggle, lens
@@ -1690,7 +1708,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
           only ONE camera component is alive at a time; matches the
           monorepo's working pattern and avoids the Camera2-in-use
           conflict that "always mount both" caused on Android. */}
-      {inFlightTransition ? (
+      {inFlightTransition || arSupportPending ? (
         <View style={[StyleSheet.absoluteFill, styles.transitionPlaceholder]}>
           <Text style={styles.transitionLabel}>Switching camera…</Text>
         </View>
