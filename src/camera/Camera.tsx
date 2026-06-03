@@ -302,27 +302,13 @@ export interface CameraProps {
   style?: StyleProp<ViewStyle>;
 
   /**
-   * Which incremental stitcher engine to drive.  Default
-   * `'batch-keyframe'` — collects accepted JPEGs and runs
-   * `cv::Stitcher` once at finalize time.  This is the v0.4+
-   * production default and what the v0.5 Frame Processor migration
-   * exercises.
-   *
-   * Switch to a live engine (`'firstwins-rectilinear'` or
-   * `'hybrid'`) for low-latency in-flight stitching.  Live engines
-   * exercise the F8.6 pixel-buffer ingest path (skipping the JPEG
-   * encode/decode round-trip; ~30–50 ms saved per accept) when the
-   * Frame Processor driver is active.
-   *
-   * See `docs/f8-frame-processor-plan.md` and the v0.5.0
-   * CHANGELOG for the trade-offs between batch-keyframe and live
-   * engines.
+   * Which stitcher engine to drive.  Only `'batch-keyframe'` is
+   * supported (and the default): it collects accepted keyframe JPEGs
+   * during the hold-pan-release capture and runs the stitch once at
+   * finalize.  The live engines (hybrid / slit-scan / firstwins) were
+   * archived in the batch-keyframe cleanup — see `archive/`.
    */
-  engine?: 'batch-keyframe'
-    | 'hybrid'
-    | 'slitscan-rotate' | 'slitscan-both'
-    | 'firstwins' | 'firstwins-zoomed' | 'firstwins-rectilinear'
-    | 'slitscan';
+  engine?: 'batch-keyframe';
 
   /**
    * Optional destination directory for captures.  When set, the lib
