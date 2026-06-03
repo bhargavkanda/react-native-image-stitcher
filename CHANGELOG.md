@@ -16,6 +16,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] — 2026-06-03
+
+### Fixed — AR preview blank on first entry (intermittent camera-handoff race)
+
+`<Camera>` mounted the vision-camera preview before the device AR-support
+probe (`isSupported()`) resolved: `isAvailable` starts `false`, so
+`deriveEffectiveCaptureSource` returned `'non-ar'` and vision-camera's
+AVCaptureSession grabbed the camera.  When the probe resolved ~200-500 ms
+later and the source flipped to AR, ARKit's `session.run()` raced the
+still-open AVCaptureSession for the (mutually-exclusive) camera and lost
+with `ARError "Required sensor failed."` — leaving a blank AR preview and an
+"AR session has no current frame" error on the next capture.  Being
+timing-dependent it reproduced intermittently; toggling AR off→on recovered
+(that path releases the camera cleanly first).
+
+`useARSession` now exposes `supportProbed` (true once the one-shot
+`isSupported()` probe settles — success or failure).  `<Camera>` defers the
+initial camera mount while AR is the intended source but support is still
+unknown, rendering the "Switching camera…" placeholder instead of
+vision-camera, so vision-camera never contends for the camera when AR is the
+intent.
+
+### Fixed — consumer iOS pod build pulled in the lib's C++ gtest unit tests
+
+`RNImageStitcher.podspec`'s `cpp/**/*.{h,hpp,cpp}` glob slurped the lib's own
+`cpp/tests/*.cpp` (which `#include <gtest/gtest.h>`) into every host pod
+build, failing with `'gtest/gtest.h' file not found`.  Added
+`s.exclude_files = ['cpp/tests/**/*']`.
+
 ## [0.14.1] — 2026-06-01
 
 ### Docs
