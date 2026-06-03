@@ -3,7 +3,7 @@
 // OpenCVKeyframeCollector — V16 Phase 1 helper that accumulates the
 // AR-keyframe-gate's accepted CVPixelBuffers as on-disk JPEGs while
 // the user pans, then hands the path list off to OpenCVStitcher's
-// `stitchKeyframePaths:withPoses:` on shutter release.
+// `stitchFramePaths:` on shutter release.
 //
 // Why a separate class:
 //   - CVPixelBuffer → cv::Mat → cv::imwrite has to live in ObjC++ /
@@ -25,7 +25,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Each saved keyframe ends up with a JPEG path + the index it was
 /// saved at + the on-disk size.  Returned from `saveKeyframe:…` so
-/// the host can build the path/pose list for `stitchKeyframePaths:`.
+/// the host can build the path/pose list for `stitchFramePaths:`.
 @interface OpenCVKeyframeRecord : NSObject
 @property (nonatomic, copy, readonly) NSString *path;
 @property (nonatomic, assign, readonly) NSInteger index;

@@ -35,14 +35,15 @@ Pod::Spec.new do |s|
 
   # Sources: iOS-specific Swift/Obj-C/Obj-C++ AND the shared C++ port
   # (cpp/) that both iOS and Android compile from a single source.
+  # cpp/ glob is NON-RECURSIVE on purpose: it picks up the shared C++
+  # port (all top-level cpp/*.cpp) but skips the maintainer-only
+  # GoogleTest harnesses under cpp/tests/ (which would otherwise fail
+  # the pod with `'gtest/gtest.h' file not found`). NOTE: using
+  # `cpp/**` + `s.exclude_files = ['cpp/tests/**/*']` instead broke the
+  # vendored opencv2.xcframework header integration for the remaining
+  # cpp/ files — keep this as a single non-recursive glob.
   s.source_files = ['ios/Sources/**/*.{swift,h,m,mm}',
-                    'cpp/**/*.{h,hpp,cpp}']
-  # Exclude the shared C++ unit tests (cpp/tests/) — GoogleTest + JSI-stub
-  # harnesses for maintainers (pose_test.cpp etc.), NOT part of the shipped
-  # SDK.  The `cpp/**` glob above would otherwise slurp them into every host
-  # pod build and fail with `'gtest/gtest.h' file not found` (consumer apps
-  # don't vendor gtest).  Tests build only in the lib's CI / example app.
-  s.exclude_files = ['cpp/tests/**/*']
+                    'cpp/*.{h,hpp,cpp}']
   # Restrict the umbrella header to ONLY the iOS-side Obj-C `.h`
   # files.  Without this, CocoaPods defaults every header in
   # `source_files` (including the C++ `.hpp` files under cpp/) to

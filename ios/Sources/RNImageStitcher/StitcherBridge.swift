@@ -95,10 +95,6 @@ public class StitcherBridge: NSObject {
     let warperType = (options["warperType"] as? String) ?? "plane"
     let blenderType = (options["blenderType"] as? String) ?? "multiband"
     let seamFinderType = (options["seamFinderType"] as? String) ?? "graphcut"
-    // Optional pose log from the host's RNSARSession snapshot.
-    // When present and non-empty, the native stitcher routes to the
-    // pose-driven path (skips features → matching → BA).
-    let poses = options["poses"] as? [[String: Any]]
 
     let stitchOpts = StitchVideoOptions(
       videoPath: videoPath,
@@ -112,7 +108,7 @@ public class StitcherBridge: NSObject {
 
     DispatchQueue.global(qos: .userInitiated).async {
       do {
-        let result = try Stitcher.stitchVideo(stitchOpts, poses: poses)
+        let result = try Stitcher.stitchVideo(stitchOpts)
         resolver([
           "outputPath": result.outputPath,
           "width": result.width,
