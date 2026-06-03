@@ -894,6 +894,10 @@ StitchResult stitchFramePathsManual(
     //   5. CylindricalWarper warps each frame using cameras
     //   6. GraphCutSeamFinder + MultiBandBlender produce final panorama
     cv::Mat panorama;
+    // v0.15 — the blender's dst_mask (TRUE frame coverage) hoisted to
+    // outer scope so the crop + sidecar below use it instead of a
+    // brightness threshold (which drops dark content like a mirror).
+    cv::Mat coverageMask;
     // Breadcrumbs in the device console.  If the next stitch
     // crashes, the last logged step pinpoints the failure point —
     // makes debugging without Xcode much faster.  Prefix is
@@ -1970,6 +1974,9 @@ StitchResult stitchFramePathsManual(
                  "step11b: blend complete (panoramaS=%dx%d)",
                  panoramaS.cols, panoramaS.rows);
         panoramaS.convertTo(panorama, CV_8U);
+        // Keep the blend coverage mask alive past this try scope (ref-
+        // counted, so this is cheap) for the crop + sidecar below.
+        coverageMask = panoramaMask;
         {
             auto _t = std::chrono::steady_clock::now();
             double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2101,11 +2108,23 @@ StitchResult stitchFramePathsManual(
     // < 50% of bbox area, use bbox — the mask shape is pathological
     // and shipping bbox-with-corners is better than a sliver.
     cv::Mat finalImage = panorama;
+    // v0.15 — coverage cropped to the same region(s) as finalImage, for
+    // the debug-harness sidecar written after rotation below.
+    cv::Mat coverageCropped;
+    const bool haveCoverage =
+        (!coverageMask.empty() && coverageMask.size() == panorama.size());
     try {
-        cv::Mat gray;
-        cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+        // Prefer the TRUE coverage mask (blender dst_mask): dark content a
+        // frame painted is kept; only never-covered pixels drop. Fall back
+        // to a brightness mask only if coverage is somehow unavailable.
         cv::Mat mask;
-        cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
+        if (haveCoverage) {
+            cv::threshold(coverageMask, mask, 0, 255, cv::THRESH_BINARY);
+        } else {
+            cv::Mat gray;
+            cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+            cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
+        }
 
         // V16 Phase 1b.fix5c — operator-toggleable crop strategy.
         //
@@ -2162,6 +2181,7 @@ StitchResult stitchFramePathsManual(
         if (bbox.width > 0 && bbox.height > 0
             && bbox.width <= panorama.cols && bbox.height <= panorama.rows) {
             finalImage = panorama(bbox).clone();
+            if (haveCoverage) coverageCropped = coverageMask(bbox).clone();
         }
 
         // V16 Phase 1b.fix5c — column-projection second pass ALSO gated
@@ -2211,6 +2231,8 @@ StitchResult stitchFramePathsManual(
                 cv::Rect rectCrop(cropLeft, 0,
                                   cropRight - cropLeft + 1, rows);
                 finalImage = finalImage(rectCrop).clone();
+                if (!coverageCropped.empty())
+                    coverageCropped = coverageCropped(rectCrop).clone();
                 log_info(logFn, "[BatchStitcher]",
                          "rectCrop applied: %dx%d → %dx%d",
                          cols, rows, finalImage.cols, finalImage.rows);
@@ -2234,6 +2256,8 @@ StitchResult stitchFramePathsManual(
                     cv::Rect rectCrop(cropLeft, 0,
                                       cropRight - cropLeft + 1, rows);
                     finalImage = finalImage(rectCrop).clone();
+                    if (!coverageCropped.empty())
+                        coverageCropped = coverageCropped(rectCrop).clone();
                     log_info(logFn, "[BatchStitcher]",
                              "rectCrop relaxed applied: %dx%d → %dx%d",
                              cols, rows, finalImage.cols, finalImage.rows);
@@ -2334,6 +2358,20 @@ StitchResult stitchFramePathsManual(
     cv::Mat finalImageRotated = bake_rotation(finalImage,
                                               config.captureOrientation,
                                               logFn);
+
+    // v0.15 — best-effort coverage sidecar (<output>.coverage.png),
+    // cropped + rotated to match the written JPEG, for the debug harness
+    // (computeInscribedRect / debugMaskOverlay prefer it over brightness).
+    if (!coverageCropped.empty()) {
+        try {
+            const cv::Mat covRot = bake_rotation(coverageCropped,
+                                                 config.captureOrientation,
+                                                 logFn);
+            cv::imwrite(outputPath + ".coverage.png", covRot);
+        } catch (...) {
+            // sidecar is debug-only — ignore failures
+        }
+    }
 
     // Encode + write the JPEG.  Clamp quality into [0, 100] to defend
     // against caller bugs.
