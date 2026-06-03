@@ -292,38 +292,21 @@ public enum Stitcher {
   /// All temp frame extraction lives in /tmp and is torn down by
   /// the ObjC layer regardless of success or failure.
   public static func stitchVideo(
-    _ options: StitchVideoOptions,
-    poses: [[String: Any]]? = nil
+    _ options: StitchVideoOptions
   ) throws -> StitchResult {
     do {
-      let result: RNStitchResult
-      if let poses = poses, !poses.isEmpty {
-        // Phase 5: pose-driven path.  Skips features → matching →
-        // BundleAdjuster on the native side; cv::detail::CameraParams
-        // come straight from the ARKit poses with the appropriate
-        // coordinate-system flip (Y-up → Y-down, -Z → +Z).
-        result = try OpenCVStitcher.stitchVideo(
-          atPath: options.videoPath,
-          outputPath: options.outputPath,
-          maxFrames: options.maxFrames,
-          jpegQuality: options.jpegQuality,
-          warperType: options.warperType,
-          blenderType: options.blenderType,
-          seamFinderType: options.seamFinderType,
-          poses: poses
-        )
-      } else {
-        // Existing feature-matched path.
-        result = try OpenCVStitcher.stitchVideo(
-          atPath: options.videoPath,
-          outputPath: options.outputPath,
-          maxFrames: options.maxFrames,
-          jpegQuality: options.jpegQuality,
-          warperType: options.warperType,
-          blenderType: options.blenderType,
-          seamFinderType: options.seamFinderType
-        )
-      }
+      // The pose-driven video stitch (the old native `withPoses:`
+      // path) was archived in the 2026-06 batch-keyframe cleanup;
+      // this now always runs the feature-matched compose.
+      let result = try OpenCVStitcher.stitchVideo(
+        atPath: options.videoPath,
+        outputPath: options.outputPath,
+        maxFrames: options.maxFrames,
+        jpegQuality: options.jpegQuality,
+        warperType: options.warperType,
+        blenderType: options.blenderType,
+        seamFinderType: options.seamFinderType
+      )
       return StitchResult(
         outputPath: result.outputPath,
         width: result.width,

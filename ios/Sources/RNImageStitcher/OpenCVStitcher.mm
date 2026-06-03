@@ -326,7 +326,7 @@ NSString *normalizeImagePath(NSString *path) {
 //   - error mapping: the explicit StitchErrorCode → NSError.code
 //     switch in this file at the new wrapper (lines ~528-595)
 // Removed to keep the anonymous namespace tight; sibling methods
-// (stitchKeyframePaths, stitchVideoAtPath) don't need them.
+// (stitchFramePaths, stitchVideoAtPath) don't need them.
 
 // Phase 5: build a cv::detail::CameraParams from an ARKit pose.
 //
