@@ -422,9 +422,9 @@ export interface IncrementalStartOptions {
    * 'slitscan' fall back to 'slitscan-both' with a deprecation warning
    * in the native log.
    */
-  engine?: 'hybrid' | 'slitscan-rotate' | 'slitscan-both' | 'batch-keyframe' |
-           // Deprecated — kept for type-compat during the V14 → V15 transition:
-           'firstwins' | 'firstwins-zoomed' | 'firstwins-rectilinear' | 'slitscan';
+  // Only 'batch-keyframe' remains; the live engines were archived in the
+  // batch-keyframe cleanup (see archive/).
+  engine?: 'batch-keyframe';
   /**
    * V15 — per-stage correction config overrides.  Mode-driven defaults
    * are applied first (see RLISStitcherConfig +configForMode:); fields
@@ -441,143 +441,6 @@ export interface IncrementalStartOptions {
  * fields optional (omit to accept the engine-mode default).
  */
 export interface StitcherConfig {
-  // Slit shaping (slit-scan engine only)
-  /** Fraction of pan-axis the rectilinear slit retains per frame.
-   *  Range 0.10 – 0.70, default 0.30 in V15 slit-scan modes. */
-  kPanAxisFractionRect: number;
-  /** Minimum pan-axis advance (px) before a frame is accepted.
-   *  0 = accept on every consumeFrame (Apple-dense slit-scan, V15
-   *  default).  50 = V13.0g default. */
-  kMinAcceptDeltaPx: number;
-
-  // Per-stage correction toggles
-  /** V13.0e+ ORB triangulation + median-Z parallax correction. */
-  enableTriangulation: boolean;
-  /** V13.0g per-accept incremental Δt accumulator on top of triangulation. */
-  enableTriAccumulator: boolean;
-  /** V15 1D NCC perpendicular-axis wobble correction (slitscan-rotate
-   *  default).  Independent of the other correction stages. */
-  enable1dNcc: boolean;
-  /** 1D NCC search radius in pixels (5 – 60). */
-  nccSearchRadius1d: number;
-  /** V13.0g 2D NCC fine-alignment after triangulation. */
-  enable2dNcc: boolean;
-  /** V14.0a RANSAC homography per slit + cv::warpPerspective.  When
-   *  enabled and successful, supersedes the rectangular paste path. */
-  enableRansacHomography: boolean;
-
-  // Paint mode (slit-scan engine only)
-  /** 'FirstPaintedWins' protects already-painted pixels (V13.0e+
-   *  default).  'FeatherBlend' alpha-blends new content into already-
-   *  painted overlap pixels (V13.0d-style; V15 slitscan-both default). */
-  paintMode: 'FirstPaintedWins' | 'FeatherBlend';
-
-  // Hybrid engine
-  /** 'Cylindrical' (V12.x – V14.0a behaviour) or 'Planar' (V15 default;
-   *  cv::detail::PlaneWarper).  Planar is well-behaved for pans <60°. */
-  hybridProjection: 'Cylindrical' | 'Planar';
-
-  /** V15.0c — where on the camera frame the per-accept sliver is taken.
-   *  'Center' (V13.x default), 'Bottom' (leading edge for top-to-bottom
-   *  pan), or 'Top' (leading edge for bottom-to-top pan). */
-  sliverPosition: 'Center' | 'Bottom' | 'Top';
-
-  /** V15.0c — when true, the FIRST accepted frame paints the entire
-   *  camera frame at canvas (0, 0); subsequent frames still use the
-   *  configured sliver clip.  Default false; set true when sliverPosition
-   *  is Bottom/Top so the canvas is anchored with full-frame content. */
-  firstFrameFullFrame: boolean;
-
-  /** **DEPRECATED in V15.0d** — use `planeSource` instead.
-   *
-   *  V15.0b boolean toggle for the plane-projected stitch path.
-   *  Kept for backward compat: when `planeSource` is left at its
-   *  default (Disabled), `useDetectedPlane = true` upgrades it to
-   *  ARKitDetected.  New callers should set `planeSource` directly. */
-  useDetectedPlane: boolean;
-
-  /** V15.0d — source of the plane used by the V15.0b plane-projected
-   *  stitch path.
-   *
-   *  - 'Disabled' (default): no plane projection; slit-scan path runs.
-   *  - 'ARKitDetected': use ARKit's first vertical plane that aligns
-   *    with the camera's view direction (filter threshold:
-   *    `arkitPlaneAlignmentThreshold`).  Falls back to slit-scan
-   *    silently when no aligned plane is found.
-   *  - 'Virtual': synthesize a plane at first frame: origin =
-   *    camera_pos + `virtualPlaneDepthMeters` × camera_forward;
-   *    normal = -camera_forward.  Always works; no ARKit dependency.
-   *
-   *  Field testing showed ARKit plane detection often picks the WRONG
-   *  surface (side wall, doorframe) — Virtual mode is the safer
-   *  default for arbitrary scenes.  ARKitDetected wins when ARKit
-   *  finds the correct fixture face. */
-  planeSource: 'Disabled' | 'ARKitDetected' | 'Virtual';
-
-  /** V15.0d — depth (metres) at which the synthetic plane is placed
-   *  in front of the camera when `planeSource = Virtual`.  Set to
-   *  the user's typical scan distance.  Range 0.3 – 5.0 m.  Default
-   *  1.5 m. */
-  virtualPlaneDepthMeters: number;
-
-  /** V15.0d — minimum dot product between an ARKit-detected plane's
-   *  surface normal and the camera's facing direction for the plane
-   *  to be accepted (when `planeSource = ARKitDetected`).  1.0 =
-   *  plane perfectly facing camera; 0.0 = plane edge-on; negative
-   *  = facing away.  Range 0.0 – 1.0.  Default 0.6 (≈53° max angle
-   *  off-camera). */
-  arkitPlaneAlignmentThreshold: number;
-
-  /** V15.0g — how the plane-projection helper renders each frame onto
-   *  the canvas.  Affects ARKitDetected and Virtual modes; ignored
-   *  when planeSource = Disabled.
-   *
-   *  - 'Trapezoidal' (V15.0b legacy): geometrically-correct 3D
-   *    raycast.  Each camera pixel maps to its plane intersection.
-   *    Result is a trapezoid that grows distorted with tilt
-   *    (cooler-bottom-2.3×-wider-than-top problem).
-   *  - 'Rectified' (V15.0g default): camera frame pasted as a clean
-   *    rectangle around its plane-projected anchor.  Eliminates the
-   *    tilt-induced trapezoidal distortion at the cost of strict 3D-
-   *    correctness — the camera's per-pixel perspective stays inside
-   *    the rectangle but doesn't reconcile across tilts. */
-  planeProjectionStyle: 'Trapezoidal' | 'Rectified';
-
-  /** V15.0d — 2D NCC search half-window in pixels.  Was hardcoded
-   *  ±12 in V15.0c.4.  Smaller = less wandering on repetitive
-   *  textures (peg holes, slatted panels), but easier to miss the
-   *  true overlap when pose noise is high.  Range 4 – 30.  Default
-   *  12. */
-  nccSearchMargin2d: number;
-
-  /** V15.0d — 2D NCC confidence threshold below which the correction
-   *  is rejected.  Was hardcoded 0.75 in V15.0c.4.  Higher = stricter,
-   *  fewer false matches on repetitive textures, but more frames
-   *  where NCC silently doesn't fire.  Range 0.30 – 0.99.  Default
-   *  0.75. */
-  nccConfidenceThreshold2d: number;
-
-  /** V15.0d (1B) — exponential-moving-average smoothing on 2D NCC
-   *  corrections.  When enabled, the applied correction is
-   *  `α × current + (1−α) × prev` instead of just `current`.  Damps
-   *  single-frame snaps to spurious peaks.  Default false. */
-  enableNcc2dEmaSmoothing: boolean;
-
-  /** V15.0d — EMA weight on the CURRENT-frame NCC correction
-   *  (1 − α weight on the previous correction).  Range 0.05 – 0.95.
-   *  Default 0.4 (60% prev / 40% current — heavy damping). */
-  ncc2dEmaAlpha: number;
-
-  /** V15.0d (1C) — pan-axis-aware 2D NCC.  When enabled, the cross-
-   *  axis (perpendicular to pan) NCC correction is clamped tighter
-   *  than the pan-axis (since 1D NCC + pose already handle cross-
-   *  axis wobble).  Default false. */
-  enableNcc2dPanAxisLock: boolean;
-
-  /** V15.0d — cross-axis clamp (pixels) for the pan-axis-aware mode.
-   *  Range 0 – 30.  Default 5. */
-  ncc2dCrossAxisLockPx: number;
-
   // Frame selection (V16)
 
   /** V16 — how the engine decides which ARFrames to ingest.

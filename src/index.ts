@@ -129,8 +129,6 @@ export type { PanoramaSettingsModalProps } from './camera/PanoramaSettingsModal'
 export {
   DEFAULT_PANORAMA_SETTINGS,
   DEFAULT_FLOW_GATE_SETTINGS,
-  DEFAULT_SLITSCAN_SETTINGS,
-  DEFAULT_HYBRID_SETTINGS,
 } from './camera/PanoramaSettings';
 export type {
   CaptureBaseSettings,
@@ -138,14 +136,6 @@ export type {
   BatchStitcherSettings,
   FrameSelectionSettings,
   FlowGateSettings,
-  SlitscanSettings,
-  SlitscanPaintingSettings,
-  SlitscanRegistrationSettings,
-  SlitscanAdvancedSettings,
-  Ncc1dSettings,
-  Ncc2dSettings,
-  PlaneProjectionSettings,
-  HybridSettings,
 } from './camera/PanoramaSettings';
 
 // Settings → native config adapters.  Layer 2 hosts building their
@@ -154,8 +144,6 @@ export type {
 // the single source of truth for the JS↔native wire format.
 export {
   panoramaSettingsToNativeConfig,
-  slitscanSettingsToNativeConfig,
-  hybridSettingsToNativeConfig,
 } from './camera/PanoramaSettingsBridge';
 export type { NativeConfigDict } from './camera/PanoramaSettingsBridge';
 export { ViewportCropOverlay } from './camera/ViewportCropOverlay';
@@ -207,34 +195,11 @@ export type {
   StitcherFrameProcessor,
   ARAnchor,
 } from './stitching/StitcherFrame';
-// v0.8.0 Phase 4a — public host-worklet hook.  Hosts that want a
-// per-frame callback (OCR overlay, packet detection, ML inference)
-// use this to attach a `'worklet'`-prefixed function that fires
-// on the camera producer thread.  Non-AR mode is fully wired
-// today via vision-camera passthrough; AR-mode dispatch is
-// API-stable but registration-only until Phase 4b lands the
-// cross-runtime handoff (the AR runtime iterating the registry).
-// See the hook's docstring + StitcherFrame.ts for the contract.
-export { useFrameProcessor } from './stitching/useFrameProcessor';
-// v0.9.0 Layer 2 — `useThrottledFrameProcessor`.  Throttle gate over
-// `useFrameProcessor` for sub-frame-rate worklet-native processing
-// (native OCR via Vision.framework / ML Kit, TFLite ML detection,
-// LiDAR depth).  The worklet runtime has direct access to
-// `frame.toArrayBuffer()` / `frame.arDepth`; bridge small payloads
-// (bboxes, depth-derived metrics) to JS via `runOnJS`.  For JS-thread
-// JPEG consumers (file-path OCR libs, cloud upload, thumbnail UI),
-// prefer `useFrameStream` (Layer 3, ships in the same release).
-export { useThrottledFrameProcessor } from './stitching/useThrottledFrameProcessor';
-export type { ThrottledFrameProcessorOptions } from './types';
-// v0.9.0 Layer 3 — `useFrameStream`.  JS-thread sampled-frame
-// stream over Layer 1 (`save_frame_as_jpeg` vc plugin) + Layer 2
-// (`useThrottledFrameProcessor`).  Use for JS-thread consumers:
-// file-path OCR libs (RN modules), cloud upload, thumbnail UI.
-// For worklet-native processing (Vision/ML Kit as vc plugins,
-// TFLite ML, LiDAR depth), prefer `useThrottledFrameProcessor`
-// (Layer 2) — lower latency, no JPEG roundtrip.
-export { useFrameStream } from './stitching/useFrameStream';
-export type { FrameStreamOptions, SampledFrame } from './types';
+// NOTE: the host-worklet / frame-stream hooks `useFrameProcessor`,
+// `useThrottledFrameProcessor` and `useFrameStream` (v0.8–v0.9) were
+// archived in the batch-keyframe cleanup — they drove the third-party
+// `__stitcherProxy` observer API, not batch-keyframe capture. Source is
+// preserved under archive/src/stitching/ to build on later.
 // vision-camera Frame Processor driver for non-AR captures.  As
 // of v0.6 the only non-AR driver exported (the legacy
 // `useIncrementalJSDriver` was removed; was deprecated in v0.5).
