@@ -305,7 +305,10 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     warperType: 'plane',
     blenderType: 'multiband',
     seamFinderType: 'graphcut',
-    enableMaxInscribedRectCrop: false,
+    // v0.15 — inscribed-rect crop ON by default (clean rectangle).  Set
+    // `maxInscribedRectCrop={false}` (or toggle off in settings) to keep
+    // the bbox crop, which preserves all content but may leave black corners.
+    enableMaxInscribedRectCrop: true,
   },
   frameSelection: {
     mode: 'flow-based',

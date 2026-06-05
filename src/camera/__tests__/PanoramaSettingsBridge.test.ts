@@ -63,7 +63,7 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.warperType).toBe('plane');
     expect(cfg.blenderType).toBe('multiband');
     expect(cfg.seamFinderType).toBe('graphcut');
-    expect(cfg.enableMaxInscribedRectCrop).toBe(false);
+    expect(cfg.enableMaxInscribedRectCrop).toBe(true);
 
     // FrameSelectionSettings
     expect(cfg.frameSelectionMode).toBe('flow-based');

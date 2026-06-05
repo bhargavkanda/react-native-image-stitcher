@@ -373,7 +373,7 @@ export function PanoramaSettingsModal({
                 onChange={(v) => updateStitcher({
                   enableMaxInscribedRectCrop: v === 'on',
                 })}
-                caption="off (default): crop to cv::boundingRect of non-black pixels — preserves all stitched content; may leave black corners.  on: run MaxInscribedRectFromMask + column-projection second-pass for a clean rectangle (can shrink output if mask is lopsided)."
+                caption="off: crop to cv::boundingRect of non-black pixels — preserves all stitched content; may leave black corners.  on (default): run MaxInscribedRectFromMask + column-projection second-pass for a clean rectangle (can shrink output if mask is lopsided)."
               />
             </Accordion>
 
