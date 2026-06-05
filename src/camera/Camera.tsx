@@ -1522,6 +1522,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
         config: panoramaSettingsToNativeConfig({
           ...settings,
           captureSource: effectiveCaptureSource,
+          // v0.15 — the 0.5× ultra-wide keystones badly under the `plane`
+          // warper (its very wide FOV breaks the planar projection on
+          // tilted pans).  Auto-select `cylindrical` for 0.5× — far better
+          // on wide pans — overriding the plane default for this lens only.
+          stitcher: {
+            ...settings.stitcher,
+            warperType:
+              lens === '0.5x' ? 'cylindrical' : settings.stitcher.warperType,
+          },
         }),
       });
       // F8.3 review-of-review (M3 revert): `imuGate.resetAnchor()`
@@ -1557,6 +1566,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     imuGate,
     fpDriver,
     engine,
+    lens,
     onError,
   ]);
 
