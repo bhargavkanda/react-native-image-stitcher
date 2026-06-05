@@ -213,6 +213,7 @@ These mirror the in-app settings panel; most apps never set them.
 | `defaultKeyframeMaxCount` | `number` | `6` | Keyframe cap per capture (3–10). |
 | `defaultKeyframeOverlapThreshold` | `number` | `0.20` | Min overlap to accept a keyframe (0.20–0.60). |
 | `defaultCompositingResolMP` / `defaultRegistrationResolMP` / `defaultSeamEstimationResolMP` | `number` | — | Forward-looking cv::Stitcher resolution knobs (currently no-ops). |
+| `maxInscribedRectCrop` | `boolean` | `true` | Crop the panorama to the largest inscribed rectangle (clean edges, no black corners) instead of the bounding box. Pass `false` for the bounding-box crop (keeps all stitched content but may show black corners). |
 
 ### UI toggles
 

@@ -463,6 +463,12 @@ function App(): React.JSX.Element {
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
+          // v0.15 — crop the finished panorama to the largest inscribed
+          // rectangle (clean edges, no black corners).  ON by default; pass
+          // `maxInscribedRectCrop={false}` for the bounding-box crop (keeps
+          // all stitched content but may leave black corners).  The gear →
+          // settings panel can also toggle this at runtime.
+          maxInscribedRectCrop
           // Internal-tester mode: gear icon opens PanoramaSettingsModal.
           // With `headerTitle` set below, the gear is absorbed into
           // the built-in CaptureHeader's right slot (no duplicate gear).

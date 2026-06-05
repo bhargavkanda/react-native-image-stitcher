@@ -106,6 +106,7 @@ corresponding `on*Change` callback.
 | `defaultCompositingResolMP` | `number` | — | **Forward-looking, no-op in v0.13.**  Wires through to cv::Stitcher's `compositingResol` once PanoramaSettings exposes the field. |
 | `defaultRegistrationResolMP` | `number` | — | **Forward-looking, no-op in v0.13.**  Wires through to cv::Stitcher's `registrationResol`. |
 | `defaultSeamEstimationResolMP` | `number` | — | **Forward-looking, no-op in v0.13.**  Wires through to cv::Stitcher's `seamEstimationResol`. |
+| `maxInscribedRectCrop` | `boolean` | `true` | Crop the finished panorama to the largest axis-aligned rectangle inscribed in the coverage mask (clean edges, no black corners) — morph-close + 50%-area safety floor + bounding-box fallback.  `false` = bounding-rect of non-black pixels (keeps all content, may leave black corners). |
 
 ### Mode toggles
 

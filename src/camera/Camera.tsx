@@ -250,11 +250,13 @@ export interface CameraProps {
   /** Forward-looking — see above. */
   defaultSeamEstimationResolMP?: number;
 
-  // ── Output controls (v0.15) ───────────────────────────────────────
+  // ── Inscribed-rect crop (v0.15) ───────────────────────────────────
   /**
-   * Crop strategy for the stitched panorama. `false` (default) keeps
-   * the bounding-rect of non-black pixels; `true` uses the maximum
-   * inscribed rectangle (no black corners, more CPU at finalize).
+   * Crop strategy for the stitched panorama. `true` (default) crops to
+   * the maximum axis-aligned rectangle inscribed in the coverage mask —
+   * clean edges, no black corners (slightly more CPU at finalize).
+   * `false` keeps the bounding-rect of non-black pixels, which preserves
+   * all stitched content but may leave black corners.
    *
    * Implemented as a start-time stitcher config (like the other
    * stitcher settings), so this value is read once at mount to seed the
