@@ -1,6 +1,6 @@
 {
   "name": "react-native-image-stitcher",
-  "version": "0.14.2",
+  "version": "0.15.0",
   "description": "Pose-aware panorama capture + stitching for React Native. One <Camera> component, both tap-to-photo and hold-to-pan modes, both AR-backed and IMU-fallback capture paths.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

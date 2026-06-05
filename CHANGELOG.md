@@ -16,6 +16,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-06-05
+
+### Breaking — only `batch-keyframe` remains; host-worklet / frame-stream hooks removed
+
+The live/incremental stitching engines (hybrid, slit-scan, firstwins) and the
+third-party host-worklet / frame-stream observer API were archived (kept under
+`archive/`, excluded from every build surface) so the SDK now ships only the
+`batch-keyframe` capture path.  Removed from the public API:
+
+- **Hooks** `useFrameProcessor`, `useThrottledFrameProcessor`, `useFrameStream`
+  and their option types (`ThrottledFrameProcessorOptions`, `FrameStreamOptions`,
+  `SampledFrame`).  To compose first-party stitching, use vision-camera's own
+  `useFrameProcessor` with `useStitcherWorklet().call(frame)` (see the example app).
+- The **slit-scan / hybrid** panorama-engine settings types and their
+  native-config adapters (`slitscanSettingsToNativeConfig`,
+  `hybridSettingsToNativeConfig`).
+
+A type-only break for the default batch-keyframe path; per the 0.x stability
+policy this bumps a new MINOR.
+
+### Added — inscribed-rect panorama crop (ON by default)
+
+`<Camera maxInscribedRectCrop>` (and the `enableMaxInscribedRectCrop` panorama
+setting) crops the finished panorama to the largest axis-aligned rectangle
+inscribed in the coverage mask — clean edges with no black corners from
+unfilled projection regions.  **It is now the default.**  Pass
+`maxInscribedRectCrop={false}` (or toggle it off in settings) for the previous
+bounding-box crop, which preserves all stitched content but can leave black
+corners.
+
+### Fixed — Android keyframe-gate flow reason labels
+
+`KeyframeGate.reasonFromCode` (Android) didn't map the v0.3.0 flow-strategy
+reason codes 12–15, so accepted keyframes logged as `unknown(12)`.  They now
+read `ok-flow` / `first-flow` / `overlap-too-high (flow)` / `ok-flow-translation`,
+matching the iOS labels.  Logging only — keyframe selection is unchanged.
+
 ## [0.14.2] — 2026-06-03
 
 ### Fixed — AR preview blank on first entry (intermittent camera-handoff race)

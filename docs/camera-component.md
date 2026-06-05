@@ -179,8 +179,8 @@ undefined and compose their own `<CaptureHeader>` above `<Camera>`.
 
 | Prop | Type | Default | Purpose |
 |---|---|---|---|
-| `engine` | `'batch-keyframe' \| 'hybrid' \| 'slitscan-rotate' \| 'slitscan-both' \| 'firstwins' \| 'firstwins-zoomed' \| 'firstwins-rectilinear' \| 'slitscan'` | `'batch-keyframe'` | Which incremental stitcher engine to drive.  `'batch-keyframe'` collects accepted JPEGs and runs cv::Stitcher once at finalize — the v0.4+ production default.  Switch to a live engine for low-latency in-flight stitching (sees `cpp/` for details).  Live engines exercise the F8.6 pixel-buffer ingest path. |
-| `frameProcessor` | `ReadonlyFrameProcessor \| DrawableFrameProcessor` | — | **Host-supplied vision-camera frame processor.**  Use the lib's own `useFrameProcessor` hook, NOT `react-native-vision-camera`'s.  Wiring composes through to BOTH AR mode (auto-registered via the AR-session dispatch path) and non-AR mode (replaces the lib's default processor; compose first-party stitching back in via `useStitcherWorklet`).  See the JSDoc on `CameraProps.frameProcessor` in `src/camera/Camera.tsx` for the full composition pattern. |
+| `engine` | `'batch-keyframe'` | `'batch-keyframe'` | Which stitcher engine to drive.  `'batch-keyframe'` collects accepted JPEGs and runs cv::Stitcher once at finalize.  (The live/incremental engines — hybrid, slit-scan, firstwins — were archived in v0.15.0; only batch-keyframe ships.) |
+| `frameProcessor` | `ReadonlyFrameProcessor \| DrawableFrameProcessor` | — | **Host-supplied vision-camera frame processor.**  Build it with `react-native-vision-camera`'s own `useFrameProcessor` (the lib's wrapper hook was removed in v0.15.0) and compose first-party stitching via `useStitcherWorklet().call(frame)`.  Composes through to BOTH AR mode (auto-registered via the AR-session dispatch path) and non-AR mode.  See the JSDoc on `CameraProps.frameProcessor` in `src/camera/Camera.tsx`. |
 
 ### Callbacks
 
