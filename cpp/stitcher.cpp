@@ -2128,17 +2128,17 @@ StitchResult stitchFramePathsManual(
 
         // V16 Phase 1b.fix5c — operator-toggleable crop strategy.
         //
-        //   useInscribedRectCrop = NO (opt out in settings modal):
+        //   useInscribedRectCrop = NO (v0.15 default):
         //     Final crop is just cv::boundingRect(mask) — preserves all
         //     stitched content at the cost of possible black corners
         //     where cv::Stitcher's projection didn't fill.
         //
-        //   useInscribedRectCrop = YES (v0.15 default in settings modal):
+        //   useInscribedRectCrop = YES (opt in via prop / settings modal):
         //     Run the full inscribed-rect pipeline (morph-close + 50%
         //     safety floor + column-projection second pass) for a clean
         //     -cornered rectangle.  Can over-aggressively shrink the
         //     output on lopsided masks (1146×1102 bbox → 602×1102 strip
-        //     in one field log).
+        //     in one field log) — which is why it's opt-in, not the default.
         cv::Rect bbox;
         if (config.useInscribedRectCrop) {
             cv::Mat closedMask;

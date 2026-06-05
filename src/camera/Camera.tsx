@@ -252,21 +252,23 @@ export interface CameraProps {
 
   // ── Inscribed-rect crop (v0.15) ───────────────────────────────────
   /**
-   * Crop strategy for the stitched panorama. `true` (default) crops to
-   * the maximum axis-aligned rectangle inscribed in the coverage mask —
-   * clean edges, no black corners (slightly more CPU at finalize).
-   * `false` keeps the bounding-rect of non-black pixels, which preserves
-   * all stitched content but may leave black corners.
+   * Crop strategy for the stitched panorama. `false` (default) keeps the
+   * bounding-rect of non-black pixels, which preserves all stitched
+   * content but may leave black corners. `true` crops to the maximum
+   * axis-aligned rectangle inscribed in the coverage mask — clean edges,
+   * no black corners (slightly more CPU at finalize) — but it can shrink
+   * the output substantially on lopsided / ultra-wide masks, which is why
+   * it's opt-in.
    *
    * Implemented as a start-time stitcher config (like the other
    * stitcher settings), so this value is read once at mount to seed the
    * initial setting; the in-app settings modal can override it at
    * runtime. It changes image geometry (the crop), not encoding.
    *
-   * Since the default is `true`, only pass this prop to opt out:
+   * Since the default is `false`, only pass this prop to opt in:
    * @example
-   * // Keep every stitched pixel (may leave black corners):
-   * <Camera maxInscribedRectCrop={false} />
+   * // Crop to a clean inscribed rectangle (no black corners):
+   * <Camera maxInscribedRectCrop={true} />
    */
   maxInscribedRectCrop?: boolean;
 

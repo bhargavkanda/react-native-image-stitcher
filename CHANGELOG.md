@@ -36,15 +36,15 @@ third-party host-worklet / frame-stream observer API were archived (kept under
 A type-only break for the default batch-keyframe path; per the 0.x stability
 policy this bumps a new MINOR.
 
-### Added — inscribed-rect panorama crop (ON by default)
+### Added — inscribed-rect panorama crop (opt-in)
 
-`<Camera maxInscribedRectCrop>` (and the `enableMaxInscribedRectCrop` panorama
-setting) crops the finished panorama to the largest axis-aligned rectangle
-inscribed in the coverage mask — clean edges with no black corners from
-unfilled projection regions.  **It is now the default.**  Pass
-`maxInscribedRectCrop={false}` (or toggle it off in settings) for the previous
-bounding-box crop, which preserves all stitched content but can leave black
-corners.
+`<Camera maxInscribedRectCrop={true}>` (and the `enableMaxInscribedRectCrop`
+panorama setting) crops the finished panorama to the largest axis-aligned
+rectangle inscribed in the coverage mask — clean edges with no black corners
+from unfilled projection regions.  **It is opt-in; the default is off.**  The
+default crop stays the bounding box of non-black pixels, which preserves all
+stitched content but can leave black corners.  Inscribed-rect can shrink the
+output substantially on lopsided or ultra-wide masks, so it isn't the default.
 
 ### Fixed — Android keyframe-gate flow reason labels
 

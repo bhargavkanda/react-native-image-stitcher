@@ -305,10 +305,11 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     warperType: 'plane',
     blenderType: 'multiband',
     seamFinderType: 'graphcut',
-    // v0.15 — inscribed-rect crop ON by default (clean rectangle).  Set
-    // `maxInscribedRectCrop={false}` (or toggle off in settings) to keep
-    // the bbox crop, which preserves all content but may leave black corners.
-    enableMaxInscribedRectCrop: true,
+    // v0.15 — inscribed-rect crop is OFF by default (bbox crop keeps all
+    // stitched content).  Opt in with `maxInscribedRectCrop={true}` (or toggle
+    // it on in settings) for a clean-cornered rectangle — but it can shrink the
+    // output a lot on lopsided / ultra-wide masks, which is why it's opt-in.
+    enableMaxInscribedRectCrop: false,
   },
   frameSelection: {
     mode: 'flow-based',

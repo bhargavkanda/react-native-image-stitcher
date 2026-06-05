@@ -88,15 +88,16 @@ describe('buildPanoramaInitialSettings', () => {
       buildPanoramaInitialSettings({ maxInscribedRectCrop: false }, false)
         .stitcher.enableMaxInscribedRectCrop,
     ).toBe(false);
-    // Omitted ⇒ default (true, v0.15), and the low-mem fallback must not flip it.
+    // Omitted ⇒ default (false — inscribed-rect crop is opt-in), and the
+    // low-mem fallback must not flip it.
     expect(
       buildPanoramaInitialSettings({}, false)
         .stitcher.enableMaxInscribedRectCrop,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       buildPanoramaInitialSettings({}, true)
         .stitcher.enableMaxInscribedRectCrop,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('leaves non-overridden fields at the default (partial override)', () => {
