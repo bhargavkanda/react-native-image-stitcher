@@ -151,11 +151,11 @@ public enum Stitcher {
         // IncrementalStitcher) hit the method directly with
         // the right value.
         captureOrientation: nil,
-        // V16 Phase 1b.fix5c — generic Stitcher API defaults the
-        // crop strategy to bbox-only (matches the operator-default
-        // in the panorama settings modal).  Callers that want
-        // inscribed-rect can use IncrementalStitcher with
-        // the toggle on.
+        // V16 Phase 1b.fix5c — generic Stitcher API keeps the crop
+        // strategy at bbox-only (conservative; the panorama-capture
+        // path now defaults to inscribed-rect via the settings).
+        // Callers that want inscribed-rect can use IncrementalStitcher
+        // with the toggle on.
         useInscribedRectCrop: false,
         // 2026-05-22 (audit F2) — legacy video-stitch API doesn't
         // expose stitchMode in its options dict yet.  nil falls
@@ -185,30 +185,6 @@ public enum Stitcher {
   ) throws -> (width: Int, height: Int) {
     do {
       let dict = try OpenCVStitcher.normaliseImage(atPath: imagePath)
-      let width = dict["width"]?.intValue ?? 0
-      let height = dict["height"]?.intValue ?? 0
-      return (width: width, height: height)
-    } catch let nsError as NSError {
-      throw StitcherError.fromNSError(nsError)
-    }
-  }
-
-  /// v0.15 — resize-to-fit + JPEG re-encode for a single image, shared
-  /// by the single-photo output controls and the panorama dimension
-  /// clamp.  Caps <= 0 are unbounded; aspect ratio is preserved.
-  public static func applyOutputControls(
-    imagePath: String,
-    maxWidth: Int,
-    maxHeight: Int,
-    quality: Int
-  ) throws -> (width: Int, height: Int) {
-    do {
-      let dict = try OpenCVStitcher.applyOutputControls(
-        atPath: imagePath,
-        maxWidth: maxWidth,
-        maxHeight: maxHeight,
-        quality: quality
-      )
       let width = dict["width"]?.intValue ?? 0
       let height = dict["height"]?.intValue ?? 0
       return (width: width, height: height)

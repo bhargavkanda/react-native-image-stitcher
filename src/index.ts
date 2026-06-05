@@ -38,7 +38,6 @@ export type {
   Warper,
   FramesDroppedInfo,
 } from './camera/Camera';
-export type { OutputImageOptions } from './camera/outputImage';
 
 // ─────────────────────────────────────────────────────────────────────
 // AR foundation (public since 0.1.0)

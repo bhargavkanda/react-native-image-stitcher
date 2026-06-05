@@ -60,9 +60,8 @@ export interface PanoramaPropOverrides {
   defaultKeyframeOverlapThreshold?: number;
   /**
    * v0.15 — initial value for `stitcher.enableMaxInscribedRectCrop`.
-   * Maps from the standalone `maxInscribedRectCrop` <Camera> prop
-   * (kept separate from the grouped `outputImage` controls). Omitted
-   * ⇒ the stitcher default (false = bounding-rect crop).
+   * Maps from the standalone `maxInscribedRectCrop` <Camera> prop.
+   * Omitted ⇒ the stitcher default (false = bounding-rect crop).
    */
   maxInscribedRectCrop?: boolean;
 }

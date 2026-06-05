@@ -85,15 +85,6 @@ import { type PanoramaSettings } from './PanoramaSettings';
 import { panoramaSettingsToNativeConfig } from './PanoramaSettingsBridge';
 import { PanoramaSettingsModal } from './PanoramaSettingsModal';
 import {
-  resolveJpegQuality,
-  resolveMaxDimensions,
-  type OutputImageOptions,
-} from './outputImage';
-import {
-  applyOutputControls,
-  shouldApplyOutputControls,
-} from './applyOutputControls';
-import {
   buildPanoramaInitialSettings,
   type PanoramaPropOverrides,
 } from './buildPanoramaInitialSettings';
@@ -268,19 +259,9 @@ export interface CameraProps {
    * Implemented as a start-time stitcher config (like the other
    * stitcher settings), so this value is read once at mount to seed the
    * initial setting; the in-app settings modal can override it at
-   * runtime. Standalone (not part of `outputImage`) because it changes
-   * image geometry, not encoding/sizing.
+   * runtime. It changes image geometry (the crop), not encoding.
    */
   maxInscribedRectCrop?: boolean;
-
-  /**
-   * Output image encoding + sizing controls (JPEG quality + max
-   * dimensions). Applied to every produced image — the stitched
-   * panorama, AR single photos, and non-AR single photos. All fields
-   * optional; omitted ⇒ quality 90, no dimension cap. See
-   * {@link OutputImageOptions}.
-   */
-  outputImage?: OutputImageOptions;
 
   // ── UI knobs ──────────────────────────────────────────────────────
   enablePhotoMode?: boolean;
@@ -934,7 +915,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onCapturePreviewClose,
     frameProcessor: hostFrameProcessor,
     engine = 'batch-keyframe',
-    outputImage,
   } = props;
 
   // v0.13.2 — capture-source constraint (default 'both').  Derives which
@@ -1399,10 +1379,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
       let uri: string;
       let width: number;
       let height: number;
-      // v0.15 — the AR takePhoto path encodes at the requested quality;
-      // the non-AR (vision-camera) path does not. Drives whether a
-      // quality-only request still needs the re-encode post-process.
-      let qualityAppliedAtCapture = false;
       // Compose the destination path BEFORE the capture so both the
       // AR and non-AR branches land at the same predictable location.
       // If `outputDir` is set, the lib lands the file at a host-
@@ -1420,7 +1396,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         // v0.12 the native side hardcoded portrait, so landscape
         // photos came out sideways.
         const photo = await arViewRef.current.takePhoto({
-          quality: resolveJpegQuality(outputImage),
+          quality: 90,
           orientation: deviceOrientation,
         });
         try {
@@ -1438,7 +1414,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
         uri = toFileUri(photoOutputPath);
         width = photo.width;
         height = photo.height;
-        qualityAppliedAtCapture = true;
       } else {
         if (!visionCameraRef.current) {
           throw new CameraError(
@@ -1459,31 +1434,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
         height = result.height;
       }
 
-      // v0.15 — single-photo output controls (resize + re-encode).
-      // Skips the native call entirely unless a dimension cap is set or
-      // a quality re-encode is actually needed for this capture path.
-      const photoQuality = resolveJpegQuality(outputImage);
-      const photoDims = resolveMaxDimensions(outputImage);
-      if (
-        shouldApplyOutputControls({
-          quality: photoQuality,
-          maxWidth: photoDims.maxWidth,
-          maxHeight: photoDims.maxHeight,
-          qualityAppliedAtCapture,
-        })
-      ) {
-        const processed = await applyOutputControls(uri, {
-          quality: photoQuality,
-          maxWidth: photoDims.maxWidth,
-          maxHeight: photoDims.maxHeight,
-        });
-        if (processed.applied) {
-          uri = processed.path;
-          if (processed.width != null) width = processed.width;
-          if (processed.height != null) height = processed.height;
-        }
-      }
-
       onCapture?.({ type: 'photo', uri, width, height });
     } catch (err) {
       const e = err instanceof CameraError
@@ -1495,7 +1445,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         );
       onError?.(e);
     }
-  }, [enablePhotoMode, isAR, capture, outputDir, onCapture, onError, outputImage]);
+  }, [enablePhotoMode, isAR, capture, outputDir, onCapture, onError]);
 
   const handleHoldStart = useCallback(async () => {
     if (!enablePanoramaMode) return;
@@ -1627,7 +1577,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         isNonAR ? imuGate.getTotalAbsMetres() : 0;
       const result = await incremental.finalize(
         panoOutputPath,
-        resolveJpegQuality(outputImage),
+        90, // default JPEG quality
         deviceOrientation,
         imuTotalTranslationM,
       );
@@ -1642,46 +1592,13 @@ export function Camera(props: CameraProps): React.JSX.Element {
         });
       }
 
-      // v0.15 — panorama dimension clamp. Reuses the single-photo
-      // output-controls post-process (decode → resize-to-fit →
-      // re-encode in place) via the shared native method. Quality is
-      // already applied by the native finalize, so `qualityAppliedAt
-      // Capture: true` makes this run ONLY when a dimension cap is set
-      // (it skips quality-only requests — no needless re-encode).
-      let panoramaWidth = result.width;
-      let panoramaHeight = result.height;
-      const panoQuality = resolveJpegQuality(outputImage);
-      const panoDims = resolveMaxDimensions(outputImage);
-      if (
-        shouldApplyOutputControls({
-          quality: panoQuality,
-          maxWidth: panoDims.maxWidth,
-          maxHeight: panoDims.maxHeight,
-          qualityAppliedAtCapture: true,
-        })
-      ) {
-        const processed = await applyOutputControls(
-          toFileUri(result.panoramaPath),
-          {
-            quality: panoQuality,
-            maxWidth: panoDims.maxWidth,
-            maxHeight: panoDims.maxHeight,
-          },
-        );
-        if (processed.applied) {
-          if (processed.width != null) panoramaWidth = processed.width;
-          if (processed.height != null) panoramaHeight = processed.height;
-        }
-      }
-
       onCapture?.({
         type: 'panorama',
         // Native finalize() returns a bare `/data/.../foo.jpg` path;
-        // normalise to `file://` for Android <Image>.  (v0.15: the
-        // dimension clamp above overwrites this file in place.)
+        // normalise to `file://` for Android <Image>.
         uri: toFileUri(result.panoramaPath),
-        width: panoramaWidth,
-        height: panoramaHeight,
+        width: result.width,
+        height: result.height,
         framesRequested: result.framesRequested ?? -1,
         framesIncluded: result.framesIncluded ?? -1,
         framesDropped:
@@ -1717,7 +1634,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onCapture,
     onFramesDropped,
     onError,
-    outputImage,
     recordingStartedAt,
     fpDriver,
     // F10 Phase 2 review N1 — these four were missing pre-fix.  The
