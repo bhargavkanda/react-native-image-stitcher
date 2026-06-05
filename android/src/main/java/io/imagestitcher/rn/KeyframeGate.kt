@@ -362,6 +362,12 @@ internal class KeyframeGate : AutoCloseable {
             9 -> "max-reached"
             10 -> "overlap-too-high"
             11 -> "overlap-too-high (angular)"
+            // Flow-strategy reasons (v0.3.0, cpp KeyframeGateDecisionReason
+            // 12-15) — strings must match the cpp/iOS labels exactly.
+            12 -> "ok-flow"
+            13 -> "first-flow"
+            14 -> "overlap-too-high (flow)"
+            15 -> "ok-flow-translation"
             else -> "unknown($code)"
         }
     }
