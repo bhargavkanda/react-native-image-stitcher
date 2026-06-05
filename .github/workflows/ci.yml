@@ -85,5 +85,21 @@ jobs:
       - name: Build dist/
         # Confirm the published-package contents would compile
         # cleanly.  Catches the class of bug we hit during v0.7.0
-        # where dist/ went stale relative to src/.
+        # where dist/ went stale relative to src/.  `build` now cleans
+        # dist/ first, so stale/archived artifacts can't linger.
         run: npm run build
+
+      - name: Typecheck the example app against the built SDK
+        # The src-only typecheck above never sees the example app, so an
+        # SDK change that archives/renames a PUBLIC API the example still
+        # imports (e.g. the v0.15 `useFrameProcessor` removal) slips
+        # through to a runtime `undefined is not a function`.  The example
+        # imports the SDK from the built `dist/` (file:.. link), so the
+        # previous step must run first.  `--ignore-scripts` skips the
+        # SDK's heavy OpenCV postinstall (irrelevant to tsc); patch-package
+        # is applied explicitly because the example depends on its patches.
+        working-directory: example
+        run: |
+          npm ci --ignore-scripts
+          npx patch-package
+          npx tsc --noEmit

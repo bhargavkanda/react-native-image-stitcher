@@ -32,13 +32,18 @@ import {
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import {
   useCameraPermission,
+  // v0.15 — the SDK's `useFrameProcessor` host-worklet hook was archived in
+  // the batch-keyframe cleanup.  Compose first-party stitching directly on
+  // vision-camera's own `useFrameProcessor` + `useStitcherWorklet().call`,
+  // exactly as the `useStitcherWorklet` docblock prescribes.
+  useFrameProcessor,
+  type Frame,
 } from 'react-native-vision-camera';
 import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
   getIncrementalNativeModule,
   subscribeIncrementalState,
-  useFrameProcessor,
   useKeyframeStream,
   useStitcherWorklet,
   type AcceptedKeyframe,
@@ -50,7 +55,6 @@ import {
   type CapturePreviewAction,
   type FramesDroppedInfo,
   type IncrementalState,
-  type StitcherFrame,
 } from 'react-native-image-stitcher';
 import {
   InscribedRectDebugOverlay,
@@ -182,18 +186,18 @@ function App(): React.JSX.Element {
   // `<Camera>` isn't mounted in that path).
   const stitcher = useStitcherWorklet();
   const exampleFrameProcessor = useFrameProcessor(
-    (frame: StitcherFrame) => {
+    (frame: Frame) => {
       'worklet';
-      // First-party stitching (v0.11.0 composition).  Safe to call
-      // in BOTH modes — the hook internally no-ops on AR-source
-      // frames (v0.11.1 fix) because AR stitching runs natively
-      // via the AR-side dispatcher, not via the vc plugin.  See
-      // `useStitcherWorklet` module header.
+      // First-party stitching (v0.11.0 composition).  `stitcher.call`
+      // takes a raw vision-camera `Frame` directly (its input type is
+      // `Frame | StitcherFrame`) and no-ops on AR-source frames because
+      // AR stitching runs natively via the AR-side dispatcher, not the
+      // vc plugin.  See the `useStitcherWorklet` module header.
       stitcher.call(frame);
-      // Example app's tick log.  `source`/`pose` may be undefined
-      // for vc-source frames (Phase 4a cross-boundary wrapping
-      // deferral); guard for that.
-      fireFrameProcessorLog(frame.timestamp ?? 0, frame.source ?? 'vc');
+      // Example app's tick log.  This processor only fires for vc-source
+      // frames (vc's `<Camera>` isn't mounted in AR mode), so the source
+      // is always 'vc'.
+      fireFrameProcessorLog(frame.timestamp ?? 0, 'vc');
     },
     [stitcher.call, fireFrameProcessorLog],
   );
