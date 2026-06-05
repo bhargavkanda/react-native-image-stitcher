@@ -58,6 +58,17 @@ warp. `maxInscribedRectCrop` chooses how that canvas is cropped at finalize:
   (`cv::boundingRect`): keeps every stitched pixel, but can leave black corners
   where the projection didn't fill.
 
+Because the default is `true`, you only pass the prop when you want to **opt
+out** of the inscribed-rect crop:
+
+```tsx
+// Default (true) — clean rectangular crop, no black corners. Nothing to pass:
+<Camera onCapture={handleCapture} />
+
+// Opt out — keep every stitched pixel, even if it leaves black corners:
+<Camera onCapture={handleCapture} maxInscribedRectCrop={false} />
+```
+
 The prop seeds the initial value at mount; the in-app settings modal (gear) can
 toggle it at runtime. It changes the output geometry, not the encoding.
 

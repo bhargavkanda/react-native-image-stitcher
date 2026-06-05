@@ -262,6 +262,11 @@ export interface CameraProps {
    * stitcher settings), so this value is read once at mount to seed the
    * initial setting; the in-app settings modal can override it at
    * runtime. It changes image geometry (the crop), not encoding.
+   *
+   * Since the default is `true`, only pass this prop to opt out:
+   * @example
+   * // Keep every stitched pixel (may leave black corners):
+   * <Camera maxInscribedRectCrop={false} />
    */
   maxInscribedRectCrop?: boolean;
 
