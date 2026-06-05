@@ -157,6 +157,39 @@ describe('selectCaptureDevice', () => {
     expect(sel.device).toBe(wideTorch);
     expect(sel.hasTorch).toBe(true);
   });
+
+  it('S24: multicam LISTS ultra-wide but zoom cannot reach it (minZoom~1) + standalone uw swaps', () => {
+    // Samsung/Camera2: the logical device lists the ultra-wide but its zoom
+    // range starts at 1.0, so zoom cannot reach it.  A separate ultra-wide id
+    // exists -> keep the multicam for 1x (torch) and swap to the standalone
+    // ultra-wide on 0.5x.
+    const multicamNoReach = dualWide({ minZoom: 1, hasTorch: true });
+    const uw = standaloneUltraWide();
+    const sel = selectCaptureDevice([multicamNoReach, uw]);
+    expect(sel.mode).toBe('standalone-uw');
+    expect(sel.device).toBe(multicamNoReach); // 1x primary keeps the torch
+    expect(sel.ultraWideDevice).toBe(uw); // 0.5x swaps to the real ultra-wide
+    expect(sel.has0_5x).toBe(true);
+    expect(sel.hasTorch).toBe(true);
+  });
+
+  it('multicam lists ultra-wide, zoom cannot reach (minZoom~1), NO standalone uw -> hide', () => {
+    // The ultra-wide exists ONLY inside a non-zoomable logical device with no
+    // separate id to swap to -> undeliverable -> hide the chooser.
+    const multicamNoReach = dualWide({ minZoom: 1 });
+    const sel = selectCaptureDevice([multicamNoReach]);
+    expect(sel.mode).toBe('wide-only');
+    expect(sel.has0_5x).toBe(false);
+    expect(sel.ultraWideDevice).toBeNull();
+  });
+
+  it('minZoom threshold: <=0.7 zoom-switches, >0.7 falls through to swap', () => {
+    const atThreshold = dualWide({ minZoom: 0.7 });
+    expect(selectCaptureDevice([atThreshold]).mode).toBe('multicam');
+    const aboveThreshold = dualWide({ minZoom: 0.71 });
+    const uw = standaloneUltraWide();
+    expect(selectCaptureDevice([aboveThreshold, uw]).mode).toBe('standalone-uw');
+  });
 });
 
 describe('zoomForLens (multicam lens→zoom mapping)', () => {

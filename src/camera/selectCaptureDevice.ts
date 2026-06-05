@@ -47,7 +47,11 @@ export interface DeviceLike {
 export type CaptureDeviceMode =
   /** One multi-cam device spans wide + ultra-wide; switch lenses via zoom. */
   | 'multicam'
-  /** Separate standalone wide + ultra-wide devices; switch by remounting. */
+  /**
+   * Ultra-wide reached by remounting a dedicated ultra-wide device on 0.5x
+   * (the 1x primary may be a multi-cam *or* a standalone wide).  Used when
+   * no multi-cam device can reach the ultra-wide by zoom.
+   */
   | 'standalone-uw'
   /** No ultra-wide anywhere; wide-angle only (no 0.5× chip). */
   | 'wide-only';
@@ -70,6 +74,16 @@ export interface CaptureDeviceSelection<D extends DeviceLike = DeviceLike> {
 
 const hasLens = (d: DeviceLike, lens: LensType) =>
   d.physicalDevices.includes(lens);
+
+/**
+ * Max `minZoom` a multi-cam device may report and still count as able to
+ * reach the ultra-wide *by zoom*.  Real ultra-wides sit at ~0.5-0.65x, so a
+ * logical device whose zoom range genuinely extends to the ultra-wide reports
+ * `minZoom <= ~0.65`.  A device that only *lists* the ultra-wide (a separate
+ * physical camera on Android/Camera2, not a zoom target) reports
+ * `minZoom = 1.0`.  0.7 cleanly separates the two.
+ */
+const UW_ZOOM_REACH_MAX = 0.7;
 
 /**
  * Choose the back-camera device(s) for capture.
@@ -107,7 +121,13 @@ export function selectCaptureDevice<D extends DeviceLike>(
     (d) =>
       d.isMultiCam &&
       hasLens(d, 'wide-angle-camera') &&
-      hasLens(d, 'ultra-wide-angle-camera'),
+      hasLens(d, 'ultra-wide-angle-camera') &&
+      // Must reach the ultra-wide by zoom.  On iOS the virtual device's zoom
+      // range spans it (minZoom ~0.5); on Android a logical device often
+      // *lists* the ultra-wide while its zoom range starts at 1.0 (separate
+      // physical camera, not a zoom target).  If it can't zoom there, it
+      // does NOT qualify -- we fall through to the device-swap path below.
+      d.minZoom <= UW_ZOOM_REACH_MAX,
   );
   if (multicamCandidates.length > 0) {
     const device = multicamCandidates.reduce((best, d) => {
@@ -135,9 +155,14 @@ export function selectCaptureDevice<D extends DeviceLike>(
   //
   // Prefer a torch-bearing wide-angle device as the `1×`/primary mount.
   const wideDevices = back.filter((d) => hasLens(d, 'wide-angle-camera'));
+  // A *true* standalone ultra-wide (its own id, NOT a multi-cam grouping).
+  // We deliberately do NOT fall back to a multi-cam device: mounting a
+  // logical multi-cam yields its WIDE member, not the ultra-wide, so a
+  // "swap" to it would silently show the wrong FOV.  If the only ultra-wide
+  // lives inside a non-zoomable multi-cam device, it is undeliverable and we
+  // hide the chooser (wide-only) below.
   const ultraWide =
     back.find((d) => !d.isMultiCam && hasLens(d, 'ultra-wide-angle-camera')) ??
-    back.find((d) => hasLens(d, 'ultra-wide-angle-camera')) ??
     null;
 
   if (wideDevices.length > 0 && ultraWide != null) {
