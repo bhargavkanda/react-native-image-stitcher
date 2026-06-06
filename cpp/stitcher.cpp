@@ -39,6 +39,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include "warp_guard.hpp"
+
 
 namespace retailens {
 
@@ -1617,6 +1619,44 @@ StitchResult stitchFramePathsManual(
                  composeFrames.empty() ? 0 : composeFrames[0].rows,
                  compose_scale);
 
+        // Step 7.6: cylindrical-fallback pre-pass.  The configured warper
+        // (plane by default) projects as ~tan(theta), so a wide ultra-wide
+        // (0.5x) sweep can blow a single frame's warp canvas past the
+        // 100 MP guard and hard-fail with "degenerate camera params".
+        // warpRoi() is a cheap corner projection (no pixel work), so probe
+        // every frame here; if any would diverge AND we're not already on
+        // the bounded cylindrical projection, fall back to cylindrical for
+        // the one real warp pass below.  Everything downstream (seam /
+        // blender / compose / crop) consumes the warper's OUTPUTS, so the
+        // swap is transparent.  If even cylindrical diverges, the in-loop
+        // guard (step8b) still throws — the genuine-failure safety net.
+        if (config.warperType != "cylindrical" && !composeFrames.empty()) {
+            bool wouldDiverge = false;
+            size_t divergeFrame = 0;
+            for (size_t i = 0; i < composeFrames.size(); i++) {
+                if (composeFrames[i].empty()) continue;
+                cv::Mat preK;
+                cameras[i].K().convertTo(preK, CV_32F);
+                const cv::Rect r = warper->warpRoi(
+                    composeFrames[i].size(), preK, cameras[i].R);
+                if (warpRoiExceedsGuard(r.width, r.height)) {
+                    wouldDiverge = true;
+                    divergeFrame = i;
+                    break;
+                }
+            }
+            if (wouldDiverge) {
+                log_info(logFn, "[stitch-bc]",
+                         "step7.6: '%s' warp diverges at frame %zu (>%lld MP "
+                         "guard) -- falling back to cylindrical projection",
+                         config.warperType.c_str(), divergeFrame,
+                         (long long)(kMaxWarpPixels / 1000000));
+                if (auto cyl = make_warper("cylindrical")) {
+                    warper = cyl->create(warpedScale);
+                }
+            }
+        }
+
         // Step 8: warp + (optional) seam finder + blender feed.
         //
         // Two paths based on caller's seamFinderType:
@@ -1720,12 +1760,14 @@ StitchResult stitchFramePathsManual(
                     // any panorama frame requiring more than 100 MP of
                     // intermediate storage is from a broken estimator,
                     // not a real capture worth completing.
-                    constexpr int64_t kMaxWarpPixels = 100ll * 1000ll * 1000ll;
                     const int64_t roiPixels =
                         static_cast<int64_t>(roi.width)
                         * static_cast<int64_t>(roi.height);
-                    if (roi.width <= 0 || roi.height <= 0
-                        || roiPixels > kMaxWarpPixels) {
+                    // Final safety net.  If we reach here the warper in use
+                    // is already cylindrical (either the host chose it, or
+                    // the step7.6 pre-pass fell back to it) and STILL
+                    // diverges — a genuinely broken estimate, so fail.
+                    if (warpRoiExceedsGuard(roi.width, roi.height)) {
                         log_error(logFn, "[stitch-bc]",
                                   "step8b: warpRoi degenerate for frame "
                                   "%zu (%dx%d = %lld px > %lld limit) — "

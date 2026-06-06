@@ -16,6 +16,8 @@
 #     `StitcherFrameData`, `PixelBufferReader` interface contract.
 #   - `timeBudgetCrossed` — the keyframe gate's OpenCV-free time-budget
 #     force-accept predicate (keyframe_timebudget_test.cpp).
+#   - `warpRoiExceedsGuard` — the OpenCV-free warp-canvas size guard that
+#     triggers the cylindrical-fallback pre-pass (warp_guard_test.cpp).
 #   (The StitcherWorkletRegistry test was removed when that source was
 #    archived in the Phase-3 cleanup — its CMake entries had gone stale
 #    and broke the whole suite's configure step.)
@@ -77,6 +79,7 @@ add_executable(stitcher_cpp_tests
   ${CMAKE_CURRENT_SOURCE_DIR}/pose_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/stitcher_frame_data_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/keyframe_timebudget_test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/warp_guard_test.cpp
 )
 
 target_link_libraries(stitcher_cpp_tests
