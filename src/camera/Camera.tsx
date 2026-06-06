@@ -1632,7 +1632,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const code: CameraErrorCode =
-        /need more images/i.test(message) ? 'STITCH_NEED_MORE_IMGS'
+        // Insufficient overlap surfaces two ways: cv::Stitcher's
+        // ERR_NEED_MORE_IMGS ("need more images") and the manual
+        // pipeline's "0 valid pairwise matches / frames may not overlap
+        // enough" — both are the same recoverable "pan more slowly" case.
+        /need more images|pairwise match|overlap enough/i.test(message) ? 'STITCH_NEED_MORE_IMGS'
         : /homography/i.test(message) ? 'STITCH_HOMOGRAPHY_FAIL'
         : /camera params/i.test(message) ? 'STITCH_CAMERA_PARAMS_FAIL'
         : /out of memory|oom/i.test(message) ? 'STITCH_OOM'
