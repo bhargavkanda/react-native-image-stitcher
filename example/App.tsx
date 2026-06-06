@@ -348,6 +348,18 @@ function App(): React.JSX.Element {
       '[example] onFramesDropped',
       `${info.included}/${info.requested}`,
     );
+    // Same "not enough overlap" guidance as a full stitch failure: the
+    // panorama succeeded, but some captured keyframes were dropped because
+    // they didn't overlap enough, so it's built from fewer frames than were
+    // captured (included < requested).
+    if (info.included < info.requested) {
+      Alert.alert(
+        'Panorama may be incomplete',
+        `Only ${info.included} of ${info.requested} frames could be stitched `
+          + "— the rest didn't overlap enough. For a more complete panorama, "
+          + 'pan slowly and steadily so each frame overlaps the one before it.',
+      );
+    }
   };
 
   const handleError = (err: CameraError): void => {
