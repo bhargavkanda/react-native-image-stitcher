@@ -353,6 +353,19 @@ function App(): React.JSX.Element {
   const handleError = (err: CameraError): void => {
     // eslint-disable-next-line no-console
     console.error('[example] onError', err.code, err.message);
+    // Friendly, actionable popup for the most common recoverable failure:
+    // cv::Stitcher couldn't find enough overlap between the captured frames
+    // ("need more images").  All other codes fall through to the diagnostic
+    // alert below.
+    if (err.code === 'STITCH_NEED_MORE_IMGS') {
+      Alert.alert(
+        "Couldn't create the panorama",
+        "There wasn't enough overlap between the frames to stitch them "
+          + 'together. Please try again, panning slowly and steadily so each '
+          + 'frame overlaps the one before it.',
+      );
+      return;
+    }
     Alert.alert(`Camera error (${err.code})`, err.message);
   };
 
