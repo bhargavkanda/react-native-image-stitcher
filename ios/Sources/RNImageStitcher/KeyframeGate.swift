@@ -145,6 +145,20 @@ final class KeyframeGate {
         }
     }
 
+    /// Wall-clock keyframe-interval budget, in MILLISECONDS.  When > 0,
+    /// the gate force-accepts a frame once the elapsed time since the
+    /// last accepted keyframe exceeds this value — even when novelty <
+    /// overlapThreshold.  Unlike `flowMaxTranslationCm` this applies to
+    /// BOTH the Pose and Flow strategies, and is passed STRAIGHT
+    /// THROUGH to the bridge (the unit is already what C++ expects — no
+    /// cm→m style conversion).  Default 2000 ms; 0 = disabled.  The C++
+    /// setter clamps to ≥ 0.
+    var maxKeyframeIntervalMs: Double = 2000.0 {
+        didSet {
+            bridge.setMaxKeyframeIntervalMs(maxKeyframeIntervalMs)
+        }
+    }
+
     /// V16 — percentile used to aggregate the tracked features'
     /// absolute displacements into a per-axis novelty estimate.
     /// Default 0.85.  Pre-V16 used median (0.50); the higher

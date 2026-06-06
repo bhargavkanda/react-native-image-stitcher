@@ -11,16 +11,21 @@
 #
 # Or, from the repo root: `scripts/run-cpp-tests.sh`.
 #
-# What this DOES test (v0.10.0 scope):
+# What this DOES test:
 #   - Pure-C++ types in cpp/: `Pose`, `PlaneTransform`,
 #     `StitcherFrameData`, `PixelBufferReader` interface contract.
-#   - `StitcherWorkletRegistry` lifecycle (count, snapshot, uninstall,
-#     thread-safety) — compiled against JSI/worklets-core stubs under
-#     `cpp/tests/stubs/`.  See `stubs/jsi/jsi.h` for the strategy.
+#   - `timeBudgetCrossed` — the keyframe gate's OpenCV-free time-budget
+#     force-accept predicate (keyframe_timebudget_test.cpp).
+#   (The StitcherWorkletRegistry test was removed when that source was
+#    archived in the Phase-3 cleanup — its CMake entries had gone stale
+#    and broke the whole suite's configure step.)
 #
 # What this DOES NOT test yet (deferred to v0.11.0+):
-#   - `KeyframeGate` — depends on OpenCV.  Will need an OpenCV-aware
-#     CMake config (link the same opencv_world the prod build uses).
+#   - `KeyframeGate` (the full gate) — depends on OpenCV.  Will need an
+#     OpenCV-aware CMake config (link the same opencv_world the prod
+#     build uses).  NOTE: the OpenCV-free `timeBudgetCrossed` predicate
+#     (the time-budget force-accept boundary logic) IS covered, via
+#     keyframe_timebudget_test.cpp — it's an inline header-only function.
 #   - JSI host-object dispatch — needs a real Hermes runtime.
 #   - Anything in `stitcher.cpp` (uses OpenCV stitching pipeline).
 
@@ -66,14 +71,12 @@ include_directories(
 # Test executable
 # ─────────────────────────────────────────────────────────────────────
 add_executable(stitcher_cpp_tests
-  # Production sources under test (only those whose deps we can satisfy
-  # without OpenCV / a real JSI runtime).
-  ${CMAKE_CURRENT_SOURCE_DIR}/../stitcher_worklet_registry.cpp
-
-  # Test sources.
+  # Test sources.  All subjects are header-only (Pose / PlaneTransform,
+  # StitcherFrameData, and the gate's inline `timeBudgetCrossed`
+  # predicate), so no production .cpp needs linking here.
   ${CMAKE_CURRENT_SOURCE_DIR}/pose_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/stitcher_frame_data_test.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/stitcher_worklet_registry_test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/keyframe_timebudget_test.cpp
 )
 
 target_link_libraries(stitcher_cpp_tests

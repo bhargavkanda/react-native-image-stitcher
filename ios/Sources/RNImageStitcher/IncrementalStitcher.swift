@@ -930,6 +930,21 @@ public final class IncrementalStitcher: NSObject {
         } else {
             self.keyframeGate.flowMaxTranslationCm = 0.0
         }
+        // Wall-clock keyframe-interval budget, in MILLISECONDS.  When
+        // > 0, the gate force-accepts a frame once this much time has
+        // elapsed since the last accepted keyframe (applies to BOTH
+        // Pose and Flow strategies).  Passed straight through — the JS
+        // value is already in ms (no cm→m style conversion).  Clamp to
+        // ≥ 0 (the bridge/C++ re-clamps too).  Default 2000 ms when the
+        // key is absent (NOT 0 — time-budget acceptance is on by
+        // default so a stalled scan still advances).
+        if let v = configOverrides["maxKeyframeIntervalMs"] as? Double {
+            self.keyframeGate.maxKeyframeIntervalMs = max(0.0, v)
+        } else if let v = configOverrides["maxKeyframeIntervalMs"] as? Int {
+            self.keyframeGate.maxKeyframeIntervalMs = max(0.0, Double(v))
+        } else {
+            self.keyframeGate.maxKeyframeIntervalMs = 2000.0
+        }
         // V16 — novelty aggregation percentile.  Clamp at start to
         // [0.5, 0.99]; the bridge re-clamps but matching it here
         // means our state stays in-range for logging.  Default 0.85
@@ -953,11 +968,12 @@ public final class IncrementalStitcher: NSObject {
         }
         self.keyframeGate.reset()
         os_log(.fault, log: Self.diagLog,
-               "[V16-keyframe] start gate enabled=%d strategy=%{public}@ thr=%.2f max=%d flow(maxCorners=%d quality=%.3f minDist=%.1f maxTransCm=%.1f pctile=%.2f evalEveryN=%d)",
+               "[V16-keyframe] start gate enabled=%d strategy=%{public}@ thr=%.2f max=%d maxKfIntervalMs=%.0f flow(maxCorners=%d quality=%.3f minDist=%.1f maxTransCm=%.1f pctile=%.2f evalEveryN=%d)",
                self.keyframeGate.enabled ? 1 : 0,
                self.keyframeGate.strategy == .flow ? "flow" : "pose",
                self.keyframeGate.overlapThreshold,
                self.keyframeGate.maxCount,
+               self.keyframeGate.maxKeyframeIntervalMs,
                self.keyframeGate.flowMaxCorners,
                self.keyframeGate.flowQualityLevel,
                self.keyframeGate.flowMinDistance,

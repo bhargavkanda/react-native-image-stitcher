@@ -59,6 +59,11 @@ export interface PanoramaPropOverrides {
   defaultKeyframeMaxCount?: number;
   defaultKeyframeOverlapThreshold?: number;
   /**
+   * Initial value for `frameSelection.maxKeyframeIntervalMs` — the
+   * time-budget force-accept (ms).  `0` disables it.  Default 2000.
+   */
+  defaultMaxKeyframeIntervalMs?: number;
+  /**
    * v0.15 — initial value for `stitcher.enableMaxInscribedRectCrop`.
    * Maps from the standalone `maxInscribedRectCrop` <Camera> prop.
    * Omitted ⇒ the stitcher default (false = bounding-rect crop).
@@ -131,6 +136,9 @@ export function buildPanoramaInitialSettings(
       overlapThreshold:
         overrides.defaultKeyframeOverlapThreshold
         ?? base.frameSelection.overlapThreshold,
+      maxKeyframeIntervalMs:
+        overrides.defaultMaxKeyframeIntervalMs
+        ?? base.frameSelection.maxKeyframeIntervalMs,
       flow: {
         ...flowDefaults,
         noveltyPercentile:

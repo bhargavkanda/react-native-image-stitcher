@@ -100,6 +100,24 @@ describe('buildPanoramaInitialSettings', () => {
     ).toBe(false);
   });
 
+  it('maps defaultMaxKeyframeIntervalMs → frameSelection.maxKeyframeIntervalMs', () => {
+    expect(
+      buildPanoramaInitialSettings({ defaultMaxKeyframeIntervalMs: 3500 }, false)
+        .frameSelection.maxKeyframeIntervalMs,
+    ).toBe(3500);
+    // 0 explicitly disables the time-budget force-accept — it is NOT
+    // nullish, so `??` does not replace it with the default.
+    expect(
+      buildPanoramaInitialSettings({ defaultMaxKeyframeIntervalMs: 0 }, false)
+        .frameSelection.maxKeyframeIntervalMs,
+    ).toBe(0);
+    // Omitted ⇒ the 2000 ms default.
+    expect(
+      buildPanoramaInitialSettings({}, false)
+        .frameSelection.maxKeyframeIntervalMs,
+    ).toBe(2000);
+  });
+
   it('leaves non-overridden fields at the default (partial override)', () => {
     const s = buildPanoramaInitialSettings(
       { defaultStitchMode: 'panorama' },

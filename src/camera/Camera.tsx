@@ -242,6 +242,11 @@ export interface CameraProps {
   defaultFlowMaxTranslationCm?: number;
   defaultKeyframeMaxCount?: number;
   defaultKeyframeOverlapThreshold?: number;
+  /** Time-budget force-accept (ms) for the keyframe gate — accept a
+   *  keyframe at least this often during a pan even if novelty is low,
+   *  so slow / static pans don't leave temporal gaps.  `0` disables it.
+   *  Default 2000 (2 s).  Applies to both AR and non-AR captures. */
+  defaultMaxKeyframeIntervalMs?: number;
   /** Forward-looking — wires through to cv::Stitcher's compositingResol
    *  once PanoramaSettings exposes the field (currently a no-op). */
   defaultCompositingResolMP?: number;
@@ -873,6 +878,7 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
     defaultFlowMaxTranslationCm: props.defaultFlowMaxTranslationCm,
     defaultKeyframeMaxCount: props.defaultKeyframeMaxCount,
     defaultKeyframeOverlapThreshold: props.defaultKeyframeOverlapThreshold,
+    defaultMaxKeyframeIntervalMs: props.defaultMaxKeyframeIntervalMs,
     maxInscribedRectCrop: props.maxInscribedRectCrop,
   };
 }

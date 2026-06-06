@@ -28,6 +28,7 @@
 #include "keyframe_gate.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <cstdint>
@@ -285,6 +286,10 @@ struct KeyframeGate::Impl {
     // only matters when the gate is used WITHOUT the JS bridge.
     double overlapThreshold   = 0.2;
     int32_t maxCount          = 6;
+    /// Time-budget force-accept (both strategies).  > 0 ms = force a
+    /// keyframe when this much wall-clock time has elapsed since the last
+    /// accept, even if novelty < threshold.  0.0 = disabled.  See hpp.
+    double maxKeyframeIntervalMs = 0.0;
 
     // V16 A2 — strategy + flow tunables.  Default is Pose to keep
     // pre-A2 behaviour for any caller that hasn't switched.  The
@@ -327,6 +332,13 @@ struct KeyframeGate::Impl {
     std::optional<PlaneBasis>        planeForCapture;
     bool   forceAcceptNext    = false;
     std::optional<Pose>              lastAcceptedPose;
+    /// Time-budget state.  `lastAcceptSteadyMs` = monotonic ms stamp of
+    /// the last accepted keyframe (-1 until the first accept).
+    /// `currentNowMs` = stamp for the in-flight evaluate() call, stashed
+    /// at entry so the static angular-fallback + the strategy paths can
+    /// read it without threading it through every signature.
+    int64_t lastAcceptSteadyMs = -1;
+    int64_t currentNowMs       = -1;
 
     // ── Flow-path state (V16 A2) ──────────────────────────────────
     // `prevFrameGray` is the WORKING-RESOLUTION grayscale image of the
@@ -380,6 +392,9 @@ void KeyframeGate::setFlowMinDistance(double d)         { pImpl_->flowMinDistanc
 // V16 — translation budget.  Clamp to non-negative; 0.0 disables the
 // force-accept entirely (callers can opt-out by passing 0).
 void KeyframeGate::setFlowMaxTranslationM(double m)     { pImpl_->flowMaxTranslationM = (m < 0.0 ? 0.0 : m); }
+// Time-budget force-accept (both strategies).  Clamp to non-negative;
+// 0.0 disables it (callers opt out by passing 0).
+void KeyframeGate::setMaxKeyframeIntervalMs(double ms)  { pImpl_->maxKeyframeIntervalMs = (ms < 0.0 ? 0.0 : ms); }
 // V16 — novelty percentile.  Clamp to [0.5, 0.99].  Below 0.5 the
 // estimate becomes too sensitive to the BEST-tracked-features (under-
 // reports user-perceived novelty); above 0.99 it's effectively max-
@@ -395,6 +410,8 @@ void KeyframeGate::reset() {
     pImpl_->planeForCapture.reset();
     pImpl_->forceAcceptNext = false;
     pImpl_->lastAcceptedPose.reset();
+    pImpl_->lastAcceptSteadyMs = -1;
+    pImpl_->currentNowMs       = -1;
     // V16 A2 — drop flow state.  release() returns the cv::Mat to
     // empty (refcount-managed); std::vector::clear() is the
     // canonical empty.  Mandatory: leftover state from a prior
@@ -428,6 +445,14 @@ bool    KeyframeGate::isEnabled() const         { return pImpl_->enabled; }
 // remain in the enum for back-compat but are NO LONGER EMITTED.
 // Diagnostic logging at the call sites tells us if a degenerate
 // projection triggered the fallback.
+// Monotonic wall-clock in milliseconds for the time-budget force-accept.
+// Used when the caller passes monotonicNowMs < 0 (production); tests pass
+// an explicit stamp to drive elapsed time deterministically.
+static int64_t steadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 KeyframeGateDecision KeyframeGate::evaluateAngularFallback(
     Impl& s,
     const Pose& pose)
@@ -439,6 +464,16 @@ KeyframeGateDecision KeyframeGate::evaluateAngularFallback(
     }
     if (s.acceptedCount >= s.maxCount) {
         return { false, KeyframeGateDecisionReason::RejectMaxReached,
+                 -1.0, s.acceptedCount, s.maxCount };
+    }
+    // Time-budget force-accept — overrides BOTH the disable-angular hard
+    // reject and the novelty reject below.  The angular path keeps no image
+    // baseline (only lastAcceptedPose), so this is a complete accept.
+    if (timeBudgetCrossed(s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs)) {
+        s.lastAcceptedPose   = pose;
+        s.lastAcceptSteadyMs = s.currentNowMs;
+        s.acceptedCount     += 1;
+        return { true, KeyframeGateDecisionReason::AcceptTimeInterval,
                  -1.0, s.acceptedCount, s.maxCount };
     }
     // 2026-05-14 — non-AR-mode opt-out.  When `disableAngularFallback`
@@ -469,6 +504,7 @@ KeyframeGateDecision KeyframeGate::evaluateAngularFallback(
                  newContent, s.acceptedCount, s.maxCount };
     }
     s.lastAcceptedPose = pose;
+    s.lastAcceptSteadyMs = s.currentNowMs;
     s.acceptedCount += 1;
     return { true, KeyframeGateDecisionReason::AcceptOkAngular,
              newContent, s.acceptedCount, s.maxCount };
@@ -476,9 +512,14 @@ KeyframeGateDecision KeyframeGate::evaluateAngularFallback(
 
 
 KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
-                                            const PlaneTransform* latchedPlane)
+                                            const PlaneTransform* latchedPlane,
+                                            int64_t monotonicNowMs)
 {
     Impl& s = *pImpl_;
+    // Stash the monotonic stamp for this call so the time-budget checks
+    // (here, the angular fallback, and the strategy paths) all read one
+    // consistent "now".  Caller may inject it (tests); else steady_clock.
+    s.currentNowMs = (monotonicNowMs >= 0) ? monotonicNowMs : steadyNowMs();
 
     // 1) Mode disabled → pass-through.
     if (!s.enabled) {
@@ -504,6 +545,7 @@ KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
             }
         }
         s.lastAcceptedPose = pose;
+        s.lastAcceptSteadyMs = s.currentNowMs;
         s.acceptedCount += 1;
         return { true, KeyframeGateDecisionReason::AcceptForceLast,
                  -1.0, s.acceptedCount, s.maxCount };
@@ -512,6 +554,7 @@ KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
     // 3) First-frame anchor — always accepted.
     if (s.acceptedCount == 0) {
         s.lastAcceptedPose = pose;
+        s.lastAcceptSteadyMs = s.currentNowMs;
         if (latchedPlane) {
             auto basis = planeBasisFromMatrix(latchedPlane->m);
             if (basis) {
@@ -587,16 +630,22 @@ KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
     if (overlapRatio > 1.0f) overlapRatio = 1.0f;
     double newContentFraction = 1.0 - static_cast<double>(overlapRatio);
 
-    if (newContentFraction < s.overlapThreshold) {
+    const bool poseTimeCrossed = timeBudgetCrossed(
+        s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs);
+    if (newContentFraction < s.overlapThreshold && !poseTimeCrossed) {
         return { false, KeyframeGateDecisionReason::RejectOverlapTooHigh,
                  newContentFraction, s.acceptedCount, s.maxCount };
     }
 
-    // Accept.
+    // Accept (novelty crossed, or the time-budget forced it).
     s.lastCornersOnPlane = currentCorners;
     s.lastAcceptedPose   = pose;
+    s.lastAcceptSteadyMs = s.currentNowMs;
     s.acceptedCount += 1;
-    return { true, KeyframeGateDecisionReason::AcceptOk,
+    return { true,
+             (newContentFraction >= s.overlapThreshold)
+                 ? KeyframeGateDecisionReason::AcceptOk
+                 : KeyframeGateDecisionReason::AcceptTimeInterval,
              newContentFraction, s.acceptedCount, s.maxCount };
 }
 
@@ -699,9 +748,13 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
     const uint8_t* grayData,
     int32_t width,
     int32_t height,
-    int32_t stride)
+    int32_t stride,
+    int64_t monotonicNowMs)
 {
     Impl& s = *pImpl_;
+    // Stash the monotonic stamp (see evaluate()).  The Pose-strategy
+    // dispatch below forwards it so both entry points agree on "now".
+    s.currentNowMs = (monotonicNowMs >= 0) ? monotonicNowMs : steadyNowMs();
 
     // §1 — disabled passes through unchanged for either strategy.
     if (!s.enabled) {
@@ -717,6 +770,7 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
     // mostly defensive.
     if (s.forceAcceptNext) {
         s.forceAcceptNext = false;
+        s.lastAcceptSteadyMs = s.currentNowMs;
         s.acceptedCount  += 1;
         // No newContent fraction — we accepted unconditionally.
         return { true, KeyframeGateDecisionReason::AcceptForceLast,
@@ -728,7 +782,7 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
         // Pose path is OpenCV-free and identical to the
         // backward-compat `evaluate()` entry point.  Skip the
         // grayscale wrap entirely — `grayData` is ignored.
-        return evaluate(pose, latchedPlane);
+        return evaluate(pose, latchedPlane, s.currentNowMs);
     }
 
     // Flow path — wrap incoming pixel data as a non-owning cv::Mat
@@ -738,7 +792,7 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
         // Defensive: caller forgot to supply image data despite
         // strategy=Flow.  Fall back to pose path so we degrade
         // gracefully rather than crashing on a null deref.
-        return evaluate(pose, latchedPlane);
+        return evaluate(pose, latchedPlane, s.currentNowMs);
     }
     cv::Mat currGrayFull(height, width, CV_8UC1,
                         const_cast<uint8_t*>(grayData),
@@ -760,6 +814,7 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
         s.prevFrameOrigWidth  = width;
         s.prevFrameOrigHeight = height;
         s.lastAcceptedPose    = pose;
+        s.lastAcceptSteadyMs  = s.currentNowMs;
         s.acceptedCount       = 1;
         return { true, KeyframeGateDecisionReason::AcceptFirstFlow,
                  -1.0, s.acceptedCount, s.maxCount };
@@ -878,24 +933,27 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
     const bool translationBudgetCrossed =
         (s.flowMaxTranslationM > 0.0) &&
         (translationSinceLastAccept >= s.flowMaxTranslationM);
+    // Time-budget force-accept (both strategies; see hpp).  Same shape as
+    // the translation budget, but measured on elapsed wall-clock time.
+    const bool flowTimeCrossed = timeBudgetCrossed(
+        s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs);
 
-    // §7 — accept-or-reject combined check.  Accept if EITHER the
-    // novelty crossed `overlapThreshold` (the original rule) OR the
-    // translation budget was exceeded (the V16 force-accept).  The
-    // decision reason distinguishes the two so telemetry can identify
-    // captures driven mostly by translation force-accepts vs. natural
-    // novelty accepts.
-    if (novelty < s.overlapThreshold && !translationBudgetCrossed) {
+    // §7 — accept-or-reject combined check.  Accept if the novelty crossed
+    // `overlapThreshold` (the original rule) OR the translation budget OR
+    // the time budget was exceeded (the force-accepts).  The decision
+    // reason distinguishes them so telemetry can identify what drove each.
+    if (novelty < s.overlapThreshold && !translationBudgetCrossed && !flowTimeCrossed) {
         return { false, KeyframeGateDecisionReason::RejectOverlapTooHighFlow,
                  novelty, s.acceptedCount, s.maxCount };
     }
-    // Pick the reason — novelty win takes precedence (we report what
-    // crossed the threshold first conceptually; if both crossed, the
-    // novelty path is the "natural" reason).
+    // Pick the reason — precedence: natural novelty, then translation, then
+    // time (if several crossed, report the most "natural" cause).
     const KeyframeGateDecisionReason acceptReason =
         (novelty >= s.overlapThreshold)
             ? KeyframeGateDecisionReason::AcceptOkFlow
-            : KeyframeGateDecisionReason::AcceptFlowTranslation;
+            : translationBudgetCrossed
+                ? KeyframeGateDecisionReason::AcceptFlowTranslation
+                : KeyframeGateDecisionReason::AcceptTimeInterval;
 
     // §8 — accept.  Re-detect features in the newly-accepted frame
     // (the previous set is now stale; many of them have moved out
@@ -915,11 +973,12 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
     s.prevFrameOrigWidth  = width;
     s.prevFrameOrigHeight = height;
     s.lastAcceptedPose    = pose;
+    s.lastAcceptSteadyMs  = s.currentNowMs;
     s.acceptedCount      += 1;
-    // `acceptReason` was decided in §7 — either AcceptOkFlow (novelty
-    // crossed) or AcceptFlowTranslation (translation budget forced
-    // the accept).  Reported back here so the host's telemetry can
-    // distinguish.
+    // `acceptReason` was decided in §7 — AcceptOkFlow (novelty crossed),
+    // AcceptFlowTranslation (translation budget forced it), or
+    // AcceptTimeInterval (time budget forced it).  Reported back here so
+    // the host's telemetry can distinguish.
     return { true, acceptReason,
              novelty, s.acceptedCount, s.maxCount };
 }

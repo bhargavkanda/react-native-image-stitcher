@@ -37,6 +37,7 @@ Uncontrolled internal-tester knobs; most apps never set these.
 | `defaultFlowMaxTranslationCm` | `number` | `50` | Max IMU translation between keyframes; 0 = disabled. |
 | `defaultKeyframeMaxCount` | `number` | `6` | Keyframe cap per capture (3–10). |
 | `defaultKeyframeOverlapThreshold` | `number` | `0.20` | Min overlap to accept a keyframe (0.20–0.60). |
+| `defaultMaxKeyframeIntervalMs` | `number` | `2000` | Time-budget force-accept: take a keyframe at least every N ms during a pan even if novelty is low, so slow/static pans don't leave gaps. Counts toward the keyframe cap. `0` = disabled. AR + non-AR. |
 | `defaultCompositingResolMP`<br/>`defaultRegistrationResolMP`<br/>`defaultSeamEstimationResolMP` | `number` | — | Forward-looking cv::Stitcher resolution knobs (currently no-ops). |
 | `maxInscribedRectCrop` | `boolean` | `false` | Opt in with `true` to crop the finished panorama to the largest inscribed rectangle (clean edges, no black corners) instead of the bounding box. See [Inscribed-rect crop](#inscribed-rect-crop) below. |
 

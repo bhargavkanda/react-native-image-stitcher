@@ -36,6 +36,17 @@ third-party host-worklet / frame-stream observer API were archived (kept under
 A type-only break for the default batch-keyframe path; per the 0.x stability
 policy this bumps a new MINOR.
 
+### Added — time-budget keyframe force-accept (`maxKeyframeIntervalMs`)
+
+The keyframe gate now force-accepts a keyframe when a configurable wall-clock
+interval has elapsed since the last accepted keyframe — even if the novelty /
+overlap threshold wasn't met — so a slow or static pan never leaves a temporal
+gap.  Default **2000 ms (2 s)**; `0` disables it.  Configurable via the
+`<Camera defaultMaxKeyframeIntervalMs>` prop, the `FrameSelectionSettings.maxKeyframeIntervalMs`
+field, or the in-app settings panel.  Applies to BOTH AR (plane-overlap) and
+non-AR (flow) capture paths; force-accepted keyframes count toward
+`maxKeyframes` (the cap still finalises the capture).
+
 ### Added — inscribed-rect panorama crop (opt-in)
 
 `<Camera maxInscribedRectCrop={true}>` (and the `enableMaxInscribedRectCrop`

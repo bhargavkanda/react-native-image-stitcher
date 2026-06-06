@@ -103,6 +103,7 @@ corresponding `on*Change` callback.
 | `defaultFlowMaxTranslationCm` | `number` | `50` | IMU-translation budget for force-accept (non-AR).  `0` disables the IMU gate. |
 | `defaultKeyframeMaxCount` | `number` | `6` | Hard cap on accepted keyframes.  Engine force-finalises at this count.  Range `3 – 10`. |
 | `defaultKeyframeOverlapThreshold` | `number` | `0.20` | Minimum projected overlap between consecutive keyframes (AR mode plane-overlap gate).  Range `0.20 – 0.60`. |
+| `defaultMaxKeyframeIntervalMs` | `number` | `2000` | Time-budget force-accept (both strategies).  When > 0, the gate accepts a keyframe whenever this many ms have elapsed since the last accept — even if novelty < threshold — so slow / static pans don't leave temporal gaps.  Counts toward `defaultKeyframeMaxCount`.  `0` disables it. |
 | `defaultCompositingResolMP` | `number` | — | **Forward-looking, no-op in v0.13.**  Wires through to cv::Stitcher's `compositingResol` once PanoramaSettings exposes the field. |
 | `defaultRegistrationResolMP` | `number` | — | **Forward-looking, no-op in v0.13.**  Wires through to cv::Stitcher's `registrationResol`. |
 | `defaultSeamEstimationResolMP` | `number` | — | **Forward-looking, no-op in v0.13.**  Wires through to cv::Stitcher's `seamEstimationResol`. |

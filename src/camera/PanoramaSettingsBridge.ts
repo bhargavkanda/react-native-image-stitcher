@@ -84,6 +84,9 @@ export function panoramaSettingsToNativeConfig(
     frameSelectionMode: s.frameSelection.mode,
     keyframeMaxCount: s.frameSelection.maxKeyframes,
     keyframeOverlapThreshold: s.frameSelection.overlapThreshold,
+    // Time-budget force-accept (both strategies).  Native reads
+    // configOverrides["maxKeyframeIntervalMs"] → setMaxKeyframeIntervalMs.
+    maxKeyframeIntervalMs: s.frameSelection.maxKeyframeIntervalMs,
   };
 
   // Flow strategy knobs — always serialised, regardless of

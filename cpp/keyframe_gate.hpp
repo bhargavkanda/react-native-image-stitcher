@@ -99,7 +99,22 @@ enum class KeyframeGateDecisionReason : int32_t {
     AcceptFirstFlow             = 13,  // "first-flow" — first frame under flow strategy
     RejectOverlapTooHighFlow    = 14,  // "overlap-too-high (flow)"
     AcceptFlowTranslation       = 15,  // "ok-flow-translation" — translation since last accept exceeded flowMaxTranslationM (force-accept even when novelty < threshold)
+    AcceptTimeInterval          = 16,  // "ok-time-interval" — wall-clock interval since last accept exceeded maxKeyframeIntervalMs (force-accept even when novelty < threshold; applies to BOTH Pose and Flow strategies)
 };
+
+/// Pure, OpenCV-free predicate for the time-budget force-accept — split
+/// out so it can be unit-tested on the host WITHOUT linking the gate's
+/// OpenCV-dependent .cpp.  True iff a positive budget is set, a prior
+/// accept stamp exists (lastAcceptMs >= 0), and at least that many
+/// milliseconds have elapsed (nowMs - lastAcceptMs >= intervalMs).
+inline bool timeBudgetCrossed(double intervalMs, int64_t lastAcceptMs, int64_t nowMs) {
+    // Compare elapsed-ms in `double` (not a truncating int64 cast of
+    // intervalMs) so a sub-millisecond budget doesn't collapse to
+    // "accept every frame".
+    return intervalMs > 0.0
+        && lastAcceptMs >= 0
+        && static_cast<double>(nowMs - lastAcceptMs) >= intervalMs;
+}
 
 struct KeyframeGateDecision {
     bool       accept;
@@ -128,6 +143,13 @@ public:
     void setEnabled(bool enabled);
     void setOverlapThreshold(double threshold);    // [0, 1]; default 0.4
     void setMaxCount(int32_t maxCount);            // ≥ 1; default 6
+    /// Time-budget force-accept (applies to BOTH strategies, Pose + Flow).
+    /// When > 0 and that many milliseconds of wall-clock time have elapsed
+    /// since the last accepted keyframe, the gate force-accepts the current
+    /// frame even if novelty < threshold — a "don't go longer than N ms
+    /// without a keyframe" guarantee for slow / static pans.  Counts toward
+    /// maxCount (respects the cap).  Default 0.0 = disabled; clamped to ≥ 0.
+    void setMaxKeyframeIntervalMs(double ms);
     void markNextFrameAsLast();                    // one-shot, consumed by next evaluate()
     void reset();                                  // clears acceptedCount, lastCorners, planeCached AND flow state
 
@@ -210,14 +232,21 @@ public:
     // @param stride        bytes per row (usually equal to width;
     //                       larger when the underlying buffer is
     //                       padded).
+    // @param monotonicNowMs  optional monotonic timestamp (milliseconds)
+    //                        for the time-budget force-accept.  Pass -1
+    //                        (default) to have the gate read its own
+    //                        steady_clock; tests pass an explicit value to
+    //                        drive elapsed time deterministically.
     KeyframeGateDecision evaluate(const Pose& pose,
-                                  const PlaneTransform* latchedPlane);
+                                  const PlaneTransform* latchedPlane,
+                                  int64_t monotonicNowMs = -1);
     KeyframeGateDecision evaluateWithFrame(const Pose& pose,
                                            const PlaneTransform* latchedPlane,
                                            const uint8_t* grayData,
                                            int32_t width,
                                            int32_t height,
-                                           int32_t stride);
+                                           int32_t stride,
+                                           int64_t monotonicNowMs = -1);
 
     // ── State accessors (read-only, post-evaluate) ────────────────
     int32_t getAcceptedCount() const;

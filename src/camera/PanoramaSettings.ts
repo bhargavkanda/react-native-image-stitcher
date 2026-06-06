@@ -204,6 +204,17 @@ export interface FrameSelectionSettings {
   overlapThreshold: number;
 
   /**
+   * Time-budget force-accept (BOTH strategies, AR + non-AR).  When > 0,
+   * the gate accepts a keyframe whenever this many milliseconds have
+   * elapsed since the last accepted keyframe — even if the novelty /
+   * overlap threshold wasn't met — so a slow or static pan never goes
+   * longer than this without a keyframe.  Counts toward `maxKeyframes`
+   * (the cap still finalises the capture).  `0` disables it.  Default
+   * `2000` (2 s).  Maps to the native gate's `setMaxKeyframeIntervalMs`.
+   */
+  maxKeyframeIntervalMs: number;
+
+  /**
    * Sparse-optical-flow strategy tunables.  Consulted only when
    * `mode === 'flow-based'`; safe to omit otherwise.  Defaults
    * track [DEFAULT_PANORAMA_SETTINGS.frameSelection.flow].
@@ -315,6 +326,7 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     mode: 'flow-based',
     maxKeyframes: 6,
     overlapThreshold: 0.20,
+    maxKeyframeIntervalMs: 2000,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
   },
 };

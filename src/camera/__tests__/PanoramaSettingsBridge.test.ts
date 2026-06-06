@@ -69,6 +69,7 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.frameSelectionMode).toBe('flow-based');
     expect(cfg.keyframeMaxCount).toBe(6);
     expect(cfg.keyframeOverlapThreshold).toBe(0.2);
+    expect(cfg.maxKeyframeIntervalMs).toBe(2000);
 
     // FlowGateSettings (flow is defined in the default)
     expect(cfg.flowNoveltyPercentile).toBe(0.85);
@@ -119,6 +120,7 @@ describe('panoramaSettingsToNativeConfig', () => {
         mode: 'flow-based',
         maxKeyframes: 6,
         overlapThreshold: 0.20,
+        maxKeyframeIntervalMs: 2000,
         // flow omitted — legal per the optional `?` in the type
       },
     };
@@ -151,6 +153,7 @@ describe('panoramaSettingsToNativeConfig', () => {
       'frameSelectionMode',
       'keyframeMaxCount',
       'keyframeOverlapThreshold',
+      'maxKeyframeIntervalMs',
       'seamFinderType',
       'stitchMode',
       'warperType',

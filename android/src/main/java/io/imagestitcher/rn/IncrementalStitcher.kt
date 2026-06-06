@@ -411,6 +411,17 @@ class IncrementalStitcher(
             val txBudgetCm = configOverrides
                 ?.getDoubleOrDefault("flowMaxTranslationCm", 0.0) ?: 0.0
             keyframeGate.flowMaxTranslationM = (txBudgetCm / 100.0).coerceAtLeast(0.0)
+            // Wall-clock keyframe-interval budget, in MILLISECONDS.
+            // Force-accept once this much time has elapsed since the last
+            // accepted keyframe (applies to BOTH Pose and Flow strategies).
+            // Passed straight through — the JS value is already in ms (no
+            // cm→m style conversion).  Clamp to ≥ 0.  Default 2000 ms when
+            // absent (NOT 0 — time-budget acceptance is on by default so a
+            // stalled scan still advances).  iOS parity:
+            // IncrementalStitcher.swift maxKeyframeIntervalMs block.
+            val maxKfIntervalMs = configOverrides
+                ?.getDoubleOrDefault("maxKeyframeIntervalMs", 2000.0) ?: 2000.0
+            keyframeGate.maxKeyframeIntervalMs = maxKfIntervalMs.coerceAtLeast(0.0)
             // 2026-05-22 (audit F5) — flow-strategy Shi-Tomasi
             // tunables.  Pre-audit, Android had no JNI for these
             // (iOS-only via KeyframeGateBridge); JS Settings sliders
