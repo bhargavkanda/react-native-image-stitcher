@@ -46,6 +46,7 @@ import {
   subscribeIncrementalState,
   useKeyframeStream,
   useStitcherWorklet,
+  userFacingStitchError,
   type AcceptedKeyframe,
   type CameraCaptureResult,
   type CameraError,
@@ -363,21 +364,23 @@ function App(): React.JSX.Element {
   };
 
   const handleError = (err: CameraError): void => {
-    // eslint-disable-next-line no-console
-    console.error('[example] onError', err.code, err.message);
-    // Friendly, actionable popup for the most common recoverable failure:
-    // cv::Stitcher couldn't find enough overlap between the captured frames
-    // ("need more images").  All other codes fall through to the diagnostic
-    // alert below.
-    if (err.code === 'STITCH_NEED_MORE_IMGS') {
-      Alert.alert(
-        "Couldn't create the panorama",
-        "There wasn't enough overlap between the frames to stitch them "
-          + 'together. Please try again, panning slowly and steadily so each '
-          + 'frame overlaps the one before it.',
-      );
+    // Recoverable stitch failures (not enough overlap, too much camera
+    // movement / degenerate camera params, alignment fail, OOM) get
+    // friendly, action-guiding copy from the SDK's shared map — so the
+    // user sees "pan more slowly / pivot in place" instead of a raw
+    // cv::Stitcher diagnostic.  Everything else falls through to the loud
+    // diagnostic alert.
+    const guidance = userFacingStitchError(err.code);
+    if (guidance) {
+      // warn (not error) so the dev LogBox doesn't throw a red overlay
+      // over our friendly Alert for an expected, recoverable outcome.
+      // eslint-disable-next-line no-console
+      console.warn('[example] onError (recoverable)', err.code, err.message);
+      Alert.alert(guidance.title, guidance.message);
       return;
     }
+    // eslint-disable-next-line no-console
+    console.error('[example] onError', err.code, err.message);
     Alert.alert(`Camera error (${err.code})`, err.message);
   };
 

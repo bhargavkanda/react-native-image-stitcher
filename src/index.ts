@@ -39,6 +39,12 @@ export type {
   FramesDroppedInfo,
 } from './camera/Camera';
 
+// Recoverable-stitch-failure → friendly Alert copy.  Hosts call this in
+// their onError handler to surface actionable guidance ("pan more slowly",
+// "pivot in place") instead of the raw cv::Stitcher diagnostic.
+export { userFacingStitchError } from './camera/cameraErrorMessages';
+export type { UserFacingStitchError } from './camera/cameraErrorMessages';
+
 // ─────────────────────────────────────────────────────────────────────
 // AR foundation (public since 0.1.0)
 // ─────────────────────────────────────────────────────────────────────
