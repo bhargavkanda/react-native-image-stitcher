@@ -212,7 +212,7 @@ These mirror the in-app settings panel; most apps never set them.
 | `defaultFlowMaxTranslationCm` | `number` | `50` | Max IMU translation between keyframes; 0 = disabled. |
 | `defaultKeyframeMaxCount` | `number` | `6` | Keyframe cap per capture (3–10). |
 | `defaultKeyframeOverlapThreshold` | `number` | `0.20` | Min overlap to accept a keyframe (0.20–0.60). |
-| `defaultMaxKeyframeIntervalMs` | `number` | `2000` | Time-budget force-accept: take a keyframe at least every N ms during a pan even if novelty is low, so slow/static pans don't leave gaps. Counts toward the keyframe cap. `0` = disabled. AR + non-AR. |
+| `defaultMaxKeyframeIntervalMs` | `number` | `2000` | Time-budget force-accept: take a keyframe at least every N ms during a pan even if the overlap/novelty threshold isn't met, so a slow or static pan never leaves a temporal gap. Force-accepted keyframes still count toward the keyframe cap. `0` = disabled. AR + non-AR. Also exposed as the `FrameSelectionSettings.maxKeyframeIntervalMs` settings field and in the in-app settings panel. |
 | `defaultCompositingResolMP` / `defaultRegistrationResolMP` / `defaultSeamEstimationResolMP` | `number` | — | Forward-looking cv::Stitcher resolution knobs (currently no-ops). |
 | `maxInscribedRectCrop` | `boolean` | `false` | Opt in with `true` to crop the panorama to the largest inscribed rectangle (clean edges, no black corners) instead of the bounding box. Default keeps the bounding-box crop (all stitched content; may show black corners). Inscribed-rect can shrink the output on lopsided / ultra-wide masks. |
 
@@ -288,6 +288,39 @@ type CameraCaptureResult =
 `PANORAMA_START_FAILED`, `PANORAMA_FINALIZE_FAILED`, `STITCH_NEED_MORE_IMGS`,
 `STITCH_HOMOGRAPHY_FAIL`, `STITCH_CAMERA_PARAMS_FAIL`, `STITCH_OOM`,
 `OUTPUT_WRITE_FAILED`, plus `VISION_CAMERA_RUNTIME`.
+
+#### Friendly copy for recoverable stitch failures — `userFacingStitchError`
+
+The four `STITCH_*` codes are *recoverable*: the user can usually fix them by
+re-capturing (pan more slowly, pivot in place, shorten the sweep). For those,
+the SDK exports `userFacingStitchError(code)` — it returns
+`{ title, message }` of vetted, action-guiding copy you can drop straight into a
+host `Alert`/toast (instead of surfacing the raw `cv::Stitcher` diagnostic), and
+returns `null` for every non-recoverable code so you fall back to your generic
+error UI:
+
+```tsx
+import {
+  Camera,
+  userFacingStitchError,
+  type UserFacingStitchError,
+} from 'react-native-image-stitcher';
+import { Alert } from 'react-native';
+
+<Camera
+  onError={(err) => {
+    const friendly: UserFacingStitchError | null = userFacingStitchError(err.code);
+    if (friendly) {
+      Alert.alert(friendly.title, friendly.message); // "pan more slowly", "pivot in place", …
+    } else {
+      reportGenericError(err); // permission denied, device unavailable, etc.
+    }
+  }}
+/>;
+```
+
+It lives in the SDK (not per-host) so every consumer shows the same guidance for
+the same failure. The `example/` app uses it end-to-end.
 
 ### Migration from 0.13.x
 

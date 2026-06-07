@@ -103,7 +103,7 @@ corresponding `on*Change` callback.
 | `defaultFlowMaxTranslationCm` | `number` | `50` | IMU-translation budget for force-accept (non-AR).  `0` disables the IMU gate. |
 | `defaultKeyframeMaxCount` | `number` | `6` | Hard cap on accepted keyframes.  Engine force-finalises at this count.  Range `3 – 10`. |
 | `defaultKeyframeOverlapThreshold` | `number` | `0.20` | Minimum projected overlap between consecutive keyframes (AR mode plane-overlap gate).  Range `0.20 – 0.60`. |
-| `defaultMaxKeyframeIntervalMs` | `number` | `2000` | Time-budget force-accept (both strategies).  When > 0, the gate accepts a keyframe whenever this many ms have elapsed since the last accept — even if novelty < threshold — so slow / static pans don't leave temporal gaps.  Counts toward `defaultKeyframeMaxCount`.  `0` disables it. |
+| `defaultMaxKeyframeIntervalMs` | `number` | `2000` | Time-budget force-accept (both strategies).  When > 0, the gate force-accepts a keyframe whenever this many ms have elapsed since the last accept — even if the overlap/novelty threshold isn't met — so a slow or static pan never leaves a temporal gap.  Force-accepted keyframes still count toward `defaultKeyframeMaxCount`.  `0` disables it.  AR + non-AR.  Seeds the `FrameSelectionSettings.maxKeyframeIntervalMs` settings field (also adjustable in the in-app settings panel). |
 | `defaultCompositingResolMP` | `number` | — | **Forward-looking, no-op in v0.13.**  Wires through to cv::Stitcher's `compositingResol` once PanoramaSettings exposes the field. |
 | `defaultRegistrationResolMP` | `number` | — | **Forward-looking, no-op in v0.13.**  Wires through to cv::Stitcher's `registrationResol`. |
 | `defaultSeamEstimationResolMP` | `number` | — | **Forward-looking, no-op in v0.13.**  Wires through to cv::Stitcher's `seamEstimationResol`. |
@@ -256,6 +256,55 @@ type CameraErrorCode =
 Branch on `err.code` to decide retry / toast / report behaviour.
 `err.cause` carries the original error (vision-camera, cv::Stitcher,
 filesystem) for inspection.
+
+### Friendly recoverable-stitch copy — `userFacingStitchError`
+
+The four `STITCH_*` codes (`STITCH_NEED_MORE_IMGS`, `STITCH_CAMERA_PARAMS_FAIL`,
+`STITCH_HOMOGRAPHY_FAIL`, `STITCH_OOM`) are *recoverable* — the user can fix them
+by re-capturing.  The SDK exports a mapping from those codes to friendly,
+action-guiding alert copy so you don't surface the raw `cv::Stitcher`
+diagnostic ("warpRoi too large (8171x12336) — estimator produced degenerate
+camera params") to the user:
+
+```ts
+import {
+  userFacingStitchError,
+  type UserFacingStitchError,
+} from 'react-native-image-stitcher';
+
+// UserFacingStitchError = { title: string; message: string }
+function userFacingStitchError(
+  code: CameraErrorCode,
+): UserFacingStitchError | null;
+```
+
+- For a **recoverable** stitch code it returns `{ title, message }` with copy
+  tuned to that root cause (e.g. `STITCH_CAMERA_PARAMS_FAIL` → "The view shifted
+  too much between frames… keep it in one spot and pivot slowly… the ultra-wide
+  (0.5x) lens is especially sensitive, so try 1x for wide scenes.").
+- For every **non-recoverable** code (permission denied, device unavailable,
+  generic finalize failure, unknown, …) it returns `null` — there's no single
+  corrective action to suggest, so the host shows its generic error UI.
+
+Typical use in `onError`:
+
+```tsx
+import { userFacingStitchError } from 'react-native-image-stitcher';
+import { Alert } from 'react-native';
+
+<Camera
+  onError={(err) => {
+    const friendly = userFacingStitchError(err.code);
+    if (friendly) Alert.alert(friendly.title, friendly.message);
+    else reportGenericError(err);
+  }}
+/>;
+```
+
+The mapping lives in the SDK (not per-host) so every consumer shows the same
+vetted guidance for the same failure, and it's unit-tested in isolation.  See
+`example/App.tsx` for the end-to-end wiring (it also reuses the same
+"not enough overlap" copy for the `onFramesDropped` case).
 
 ## Orientation behaviour
 

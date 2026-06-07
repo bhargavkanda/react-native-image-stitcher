@@ -120,3 +120,30 @@ const [flash, setFlash] = useState<'on' | 'off'>('off');
   }}
 />
 ```
+
+## Friendly recoverable-stitch alerts (`userFacingStitchError`)
+
+Instead of hand-writing copy for each `STITCH_*` code, let the SDK supply vetted,
+action-guiding text. `userFacingStitchError(code)` returns `{ title, message }`
+for a recoverable stitch failure (pan more slowly / pivot in place / shorten the
+sweep) and `null` for anything non-recoverable — so one branch handles the
+friendly path and falls through to your generic error UI for the rest.
+
+```tsx
+import { Camera, userFacingStitchError } from 'react-native-image-stitcher';
+import { Alert } from 'react-native';
+
+<Camera
+  onError={(err) => {
+    const friendly = userFacingStitchError(err.code);
+    if (friendly) {
+      Alert.alert(friendly.title, friendly.message);
+    } else {
+      report(err); // permission denied, device unavailable, etc.
+    }
+  }}
+/>;
+```
+
+See [Capture result & errors](./capture-result.md#friendly-copy-for-recoverable-failures--userfacingstitcherror)
+for the full code→copy table.
