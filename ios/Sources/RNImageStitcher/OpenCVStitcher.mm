@@ -443,10 +443,16 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   if (seamFinderType == nil || seamFinderType.length == 0) seamFinderType = @"graphcut";
   if (captureOrientation == nil || captureOrientation.length == 0) captureOrientation = @"portrait";
 
-  // Build the shared-C++ config.  Sentinel resolution budgets (-1.0)
-  // let the manual entry point pick its own defaults (registration
-  // 0.6 MP / seam 0.1 MP / compose 0.6 MP per Phase 1 fixes).
+  // Build the shared-C++ config.
+  //
+  // 2026-06-06 (parity — see docs/stitch-pipeline-architecture.md §3/§7):
+  // explicitly match the high-level / Android resolution budget instead of
+  // leaving the sentinel -1.0, which made the manual entry point fall back
+  // to its LOW defaults (registration 0.3 MP / compose 0.6 MP — half /
+  // 0.6x Android's 0.6 / 1.0 MP, a major reason iOS output looked softer).
   retailens::StitchConfig cfg;
+  cfg.registrationResolMP  = 0.6;   // cv::Stitcher default
+  cfg.compositingResolMP   = 1.0;   // high-level default (manual was 0.6)
   cfg.warperType           = warperType.UTF8String;
   cfg.blenderType          = blenderType.UTF8String;
   cfg.seamFinderType       = seamFinderType.UTF8String;

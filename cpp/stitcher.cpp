@@ -22,6 +22,7 @@
 #include <opencv2/stitching.hpp>
 #include <opencv2/stitching/detail/blenders.hpp>
 #include <opencv2/stitching/detail/camera.hpp>
+#include <opencv2/stitching/detail/exposure_compensate.hpp>
 #include <opencv2/stitching/detail/matchers.hpp>
 #include <opencv2/stitching/detail/motion_estimators.hpp>
 #include <opencv2/stitching/detail/seam_finders.hpp>
@@ -1948,6 +1949,30 @@ StitchResult stitchFramePathsManual(
             }
             masksWarpedU_seam.clear();
 
+            // Exposure compensation — parity with cv::Stitcher::PANORAMA,
+            // which runs a GainCompensator before blending.  Without it,
+            // per-frame auto-exposure differences surface as brightness
+            // steps at the seams.  The manual path previously skipped this
+            // entirely (the high-level path Android uses gets it for free),
+            // which is one reason iOS output looked worse.  GAIN_BLOCKS
+            // matches cv::Stitcher's default compensator.
+            //
+            // NOTE: BATCH path only — it has every warped frame in memory,
+            // which the compensator needs before it can solve gains.  The
+            // STREAM path (low-RAM, one frame at a time) can't feed the
+            // compensator globally and keeps its current no-compensation
+            // behaviour; see docs/stitch-pipeline-architecture.md.
+            auto compensator = cv::detail::ExposureCompensator::createDefault(
+                cv::detail::ExposureCompensator::GAIN_BLOCKS);
+            {
+                std::vector<cv::UMat> compImgs(N), compMasks(N);
+                for (size_t i = 0; i < N; i++) {
+                    imagesWarped[i].copyTo(compImgs[i]);
+                    masksWarped[i].copyTo(compMasks[i]);
+                }
+                compensator->feed(corners, compImgs, compMasks);
+            }
+
             // Feed the blender, releasing each frame as we go.
             log_info(logFn, "[stitch-bc]", "step10a: blender->prepare");
             blender->prepare(corners, sizes);
@@ -1955,6 +1980,10 @@ StitchResult stitchFramePathsManual(
                      "step10b: feeding blender (N=%zu)", N);
             for (size_t i = 0; i < N; i++) {
                 log_info(logFn, "[stitch-bc]", "step10c: feed frame %zu", i);
+                // Apply the per-frame exposure gain solved above, in place,
+                // before converting + feeding the blender.
+                compensator->apply(static_cast<int>(i), corners[i],
+                                   imagesWarped[i], masksWarped[i]);
                 cv::Mat imgS;
                 imagesWarped[i].convertTo(imgS, CV_16S);
                 blender->feed(imgS, masksWarped[i], corners[i]);
