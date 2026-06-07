@@ -9,11 +9,18 @@ code, update the citation.
 
 ## 0. The one fact that settles "do iOS and Android use the same stitch path?"
 
-They call the **same function** in the **same file** — but take **different
-branches inside it**:
+> **UPDATE 2026-06-07 — both platforms now use the manual `cv::detail` pipeline.**
+> Android was switched to match iOS after the manual path won the on-device A/B
+> (see §7 Outcome). `grep -rn useManualPipeline cpp/ ios/Sources android/src` now
+> shows `useManualPipeline=true` in **both** `OpenCVStitcher.mm` *and*
+> `image_stitcher_jni.cpp`. Everything below is the *pre-unification* split this
+> doc investigated — kept for the history.
+
+Historically they called the **same function** in the **same file** but took
+**different branches inside it**:
 
 - **iOS → manual `cv::detail` pipeline.**
-- **Android → high-level `cv::Stitcher` pipeline.**
+- **Android → high-level `cv::Stitcher` pipeline** *(until 2026-06-07)*.
 
 **Verify in 5 seconds:**
 
@@ -21,8 +28,9 @@ branches inside it**:
 grep -rn useManualPipeline cpp/ ios/Sources android/src
 ```
 
-You will see `useManualPipeline` set to `true` only on iOS, referenced only in
-`cpp/`, and **zero hits under `android/`**. That asymmetry is the whole answer.
+Pre-unification this showed `useManualPipeline=true` only on iOS, with **zero hits
+under `android/`** — that asymmetry was the whole answer. The flag is still how you
+tell which pipeline each platform runs.
 
 ---
 
@@ -181,8 +189,12 @@ Keep it current. It is the single source of truth for this subsystem.
   robust** — the high-level `cv::Stitcher` garbaged a wide capture (8498×3926 degenerate
   canvas) because the cylindrical fallback (§5) lives only in the manual path. The
   earlier "Android looks better" was the manual path *missing parity*, not the pipeline.
-- **Part 2 — DECIDED: keep the manual path on iOS.** (Android stays on the high-level
-  `cv::Stitcher`; the per-platform divergence is intentional and now documented.)
+- **Part 2 — DECIDED: unify BOTH platforms on the manual path.** Manual won, so per
+  the original plan (unify on the winner) Android was switched to manual too —
+  `image_stitcher_jni.cpp` now sets `useManualPipeline=true` + registration 0.6,
+  mirroring iOS. Both platforms now run the identical pipeline incl. the cylindrical
+  fallback, so Android also survives wide/0.5× captures (previously the high-level
+  path garbaged them).
 - **Step 3 (cheap partial re-run) — DEFERRED.** It only helps the rare mode-fallback
   path and would risk regressing the just-stabilized manual pipeline. Keep the current
   full re-run on the fallback (§2c); revisit only if that latency becomes a real

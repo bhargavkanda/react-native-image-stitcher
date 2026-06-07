@@ -116,6 +116,20 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         ? retailens::StitchMode::Panorama
         : retailens::StitchMode::Scans;
 
+    // 2026-06-07 — unify on the manual cv::detail pipeline.  It won the
+    // on-device A/B: equals the high-level cv::Stitcher on quality after
+    // parity AND is strictly more robust — the cylindrical fallback, warp
+    // guard, and exposure comp all live only in the manual path, so the
+    // high-level path garbages wide/0.5x captures.  Mirrors iOS'
+    // OpenCVStitcher.mm.  See docs/stitch-pipeline-architecture.md §7.
+    cfg.useManualPipeline = true;
+    // Match iOS' parity resolution: the manual entry's default registration
+    // is 0.3 MP (vs the high-level's 0.6); bump to 0.6 unless the caller set
+    // an explicit value.  (compositingResolMP already arrives as 1.0.)
+    if (cfg.registrationResolMP <= 0.0) {
+        cfg.registrationResolMP = 0.6;
+    }
+
     const std::string outPath = jstring_to_string(env, outputPath);
 
     retailens::StitchResult result = retailens::stitchFramePaths(
