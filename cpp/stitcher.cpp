@@ -297,13 +297,6 @@ static StitchResult stitchFramePathsImpl_(
     LogFn                           logFn);
 
 
-// TEMPORARY (Step 2 — docs/stitch-pipeline-architecture.md §7): when true,
-// stitchFramePaths also runs the OPPOSITE pipeline (manual vs high-level)
-// at matched resolution and writes it alongside the primary output, so the
-// two can be A/B'd from a single capture.  Flip to false / remove after the
-// manual-vs-high-level decision.
-static constexpr bool kCompareBothPipelines = true;
-
 StitchResult stitchFramePaths(
     const std::vector<std::string>& framePaths,
     const std::string&              outputPath,
@@ -331,31 +324,9 @@ StitchResult stitchFramePaths(
         cfg.stitchMode = modeOverride;
         return stitchFramePathsImpl_(framePaths, outputPath, cfg, logFn);
     };
-    // Best-effort comparison run (see kCompareBothPipelines).  Runs the
-    // OPPOSITE pipeline at the SAME (successful) mode and matched
-    // resolution, writing to outputPath + ".manual.jpg" / ".highlevel.jpg".
-    // Never affects the primary result.
-    auto runComparisonAlt = [&](StitchMode usedMode) {
-        if (!kCompareBothPipelines) return;
-        StitchConfig altCfg = config;
-        altCfg.useManualPipeline   = !config.useManualPipeline;
-        altCfg.stitchMode          = usedMode;   // the mode that succeeded
-        altCfg.registrationResolMP = 0.6;        // force parity for a fair A/B
-        altCfg.compositingResolMP  = 1.0;
-        const std::string altPath = outputPath +
-            (altCfg.useManualPipeline ? ".manual.jpg" : ".highlevel.jpg");
-        log_info(logFn, "[stitch-compare]", "ALT pipeline (%s) -> %s",
-                 altCfg.useManualPipeline ? "manual" : "high-level",
-                 altPath.c_str());
-        StitchResult altRes =
-            stitchFramePathsImpl_(framePaths, altPath, altCfg, logFn);
-        log_info(logFn, "[stitch-compare]", "ALT pipeline result code=%d",
-                 static_cast<int>(altRes.errorCode));
-    };
     StitchResult firstAttempt = runOnce(config.stitchMode);
     if (firstAttempt.errorCode == StitchErrorCode::Ok) {
         firstAttempt.stitchModeUsed = config.stitchMode;
-        runComparisonAlt(config.stitchMode);
         return firstAttempt;
     }
     // First attempt failed.  Try the opposite mode unless the error
@@ -386,7 +357,6 @@ StitchResult stitchFramePaths(
         log_info(logFn, "[stitch-fallback]",
                  "fallback mode (%s) succeeded",
                  fallbackMode == StitchMode::Scans ? "scans" : "panorama");
-        runComparisonAlt(fallbackMode);
         return secondAttempt;
     }
     // Both attempts failed.  Return the FIRST attempt's error (it's
