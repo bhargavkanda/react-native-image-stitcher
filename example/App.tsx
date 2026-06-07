@@ -47,6 +47,8 @@ import {
   useKeyframeStream,
   useStitcherWorklet,
   userFacingStitchError,
+  useStitchStatsToast,
+  CaptureStitchStatsToast,
   type AcceptedKeyframe,
   type CameraCaptureResult,
   type CameraError,
@@ -94,6 +96,12 @@ function App(): React.JSX.Element {
   // (greyed + a11y "Flash unavailable in AR mode"); no host work
   // required for that.
   const [flash, setFlash] = useState<'on' | 'off'>('off');
+
+  // Toast for the dropped-frames "pan slower" hint.  Only fires when
+  // >30% of the requested frames are missing from the final stitch
+  // (e.g. >=2 of 6); a smaller drop stays silent.  Shown as a transient
+  // toast (CaptureStitchStatsToast), not a modal.
+  const dropToast = useStitchStatsToast();
 
   // v0.13.0 — capture-history thumbnails.  Appended on every
   // successful onCapture; rendered by `<Camera>`'s built-in
@@ -344,21 +352,22 @@ function App(): React.JSX.Element {
   };
 
   const handleFramesDropped = (info: FramesDroppedInfo): void => {
+    const missing = info.requested - info.included;
     // eslint-disable-next-line no-console
     console.warn(
       '[example] onFramesDropped',
-      `${info.included}/${info.requested}`,
+      `${info.included}/${info.requested} (missing ${missing})`,
     );
-    // Same "not enough overlap" guidance as a full stitch failure: the
-    // panorama succeeded, but some captured keyframes were dropped because
-    // they didn't overlap enough, so it's built from fewer frames than were
-    // captured (included < requested).
-    if (info.included < info.requested) {
-      Alert.alert(
-        'Panorama may be incomplete',
-        `Only ${info.included} of ${info.requested} frames could be stitched `
-          + "— the rest didn't overlap enough. For a more complete panorama, "
-          + 'pan slowly and steadily so each frame overlaps the one before it.',
+    // The panorama succeeded but some keyframes were dropped for low
+    // overlap (included < requested).  Only nudge the user when the loss
+    // is significant — more than 30% of the requested frames missing
+    // (e.g. >=2 of 6); a 1-of-6 drop isn't worth interrupting for.  Shown
+    // as a transient toast, not a modal.
+    if (info.requested > 0 && missing / info.requested > 0.3) {
+      dropToast.showFor(
+        `${missing} of ${info.requested} frames were dropped — pan more `
+          + 'slowly and steadily for a complete panorama.',
+        4000,
       );
     }
   };
@@ -585,6 +594,9 @@ function App(): React.JSX.Element {
             onClose={() => setRectDebugUri(null)}
           />
         )}
+
+        {/* Dropped-frames "pan slower" toast (only when >30% missing). */}
+        <CaptureStitchStatsToast message={dropToast.message} />
 
         {/*
           v0.13.0 — the pre-v0.13 hand-rolled <Modal>...</Modal> block

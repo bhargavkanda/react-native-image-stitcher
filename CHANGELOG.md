@@ -99,9 +99,10 @@ same failure, and so the mapping is unit-testable in isolation.
   signals now map to the same recoverable "pan more slowly" outcome (and so pick
   up the `userFacingStitchError` copy above).
 - The example app now shows friendly, action-guiding guidance — via
-  `userFacingStitchError` on a stitch failure (`onError`) and a matching
-  "panorama may be incomplete" popup when frames are dropped for insufficient
-  overlap (`onFramesDropped`).
+  `userFacingStitchError` (an Alert) on a stitch failure (`onError`), and a
+  transient **toast** when frames are dropped for insufficient overlap
+  (`onFramesDropped`) — shown only when **>30%** of the requested frames are
+  missing from the final stitch (e.g. ≥2 of 6), so minor drops stay silent.
 
 ### Fixed — reach the ultra-wide by device-swap when a logical multi-cam can't (Samsung / Camera2)
 
