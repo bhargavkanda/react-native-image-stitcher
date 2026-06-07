@@ -171,6 +171,23 @@ there (it will be a full re-run — see §2c).
 ### Part 3 — this document
 Keep it current. It is the single source of truth for this subsystem.
 
+### Outcome (2026-06-07)
+- **Part 1 parity — DONE** (`cb78a70`): `GainCompensator` (GAIN_BLOCKS) added to the
+  manual BATCH path + iOS resolution raised to registration 0.6 / compose 1.0.
+- **Dual-path A/B harness — DONE then REMOVED** (`87b45cc` → reverted in `f84b4df`):
+  ran both pipelines per capture at matched resolution, saved side by side.
+- **A/B RESULT — the manual path WON.** On-device A/B (6 captures, iPhone 16 Pro): with
+  parity, the manual output matches the high-level on quality and is **strictly more
+  robust** — the high-level `cv::Stitcher` garbaged a wide capture (8498×3926 degenerate
+  canvas) because the cylindrical fallback (§5) lives only in the manual path. The
+  earlier "Android looks better" was the manual path *missing parity*, not the pipeline.
+- **Part 2 — DECIDED: keep the manual path on iOS.** (Android stays on the high-level
+  `cv::Stitcher`; the per-platform divergence is intentional and now documented.)
+- **Step 3 (cheap partial re-run) — DEFERRED.** It only helps the rare mode-fallback
+  path and would risk regressing the just-stabilized manual pipeline. Keep the current
+  full re-run on the fallback (§2c); revisit only if that latency becomes a real
+  on-device problem.
+
 ---
 
 ## 8. Flip-flop log (so this never happens again)
