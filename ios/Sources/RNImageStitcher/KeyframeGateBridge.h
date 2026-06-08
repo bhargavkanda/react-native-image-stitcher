@@ -72,6 +72,13 @@ NS_SWIFT_NAME(KeyframeGateBridge)
 /// translation overflow even when novelty < threshold; 0 disables.
 /// See KeyframeGate.swift for the operator-facing description.
 - (void)setFlowMaxTranslationM:(double)metres;
+/// Wall-clock keyframe-interval budget (milliseconds).  Set > 0 to
+/// force-accept a frame when the elapsed time since the last accepted
+/// keyframe exceeds this value (applies to BOTH Pose and Flow
+/// strategies); 0 disables.  Passed straight through (no unit
+/// conversion).  See KeyframeGate.swift for the operator-facing
+/// description.
+- (void)setMaxKeyframeIntervalMs:(double)ms;
 /// V16 — novelty aggregation percentile [0.5, 0.99].  Default 0.85.
 /// See KeyframeGate.swift for the operator-facing description.
 - (void)setFlowNoveltyPercentile:(double)percentile;

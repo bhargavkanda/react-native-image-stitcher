@@ -1,5 +1,12 @@
 # Frame-access tiers (v0.9.0+)
 
+> [!WARNING]
+> **Historical (pre-0.15.0).** The host-worklet / frame-stream hooks described
+> below — `useFrameProcessor`, `useThrottledFrameProcessor`, `useFrameStream` —
+> were **removed in v0.15.0** (see the CHANGELOG). For the current pattern,
+> compose vision-camera's own `useFrameProcessor` with the kept
+> `useStitcherWorklet().call(frame)` first-party stitching hook (see the example app).
+
 The lib exposes four host-facing hooks for accessing camera frames during AR / non-AR capture. Each hook trades latency for ergonomics differently — pick the layer that matches what you need.
 
 ## Decision flow

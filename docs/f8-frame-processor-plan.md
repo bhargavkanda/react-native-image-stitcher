@@ -1,5 +1,8 @@
 # F8 — Frame Processor port: non-AR optical flow on YUV frames
 
+> _Historical — references the host-worklet frame-processor API removed in
+> v0.15.0 (see the CHANGELOG)._
+
 **Status:** planned, not started.
 **Branch:** `feature/f8-frame-processor-yuv`
 **Estimated:** 12-15 focused hours, ~5 sub-tasks.

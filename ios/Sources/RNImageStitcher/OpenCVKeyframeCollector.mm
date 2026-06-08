@@ -174,7 +174,7 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
 
   // Rotate to caller-requested orientation.  The JPEGs are saved in
   // the orientation the stitcher expects (user-pan orientation), so
-  // OpenCVStitcher.stitchKeyframePaths can read them with no further
+  // OpenCVStitcher.stitchFramePaths can read them with no further
   // rotation work.
   cv::Mat rotated;
   if (rotationDegrees == 90) {
@@ -236,8 +236,8 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
 
 // ── CVPixelBuffer → cv::Mat (BGR) ──────────────────────────────────
 //
-// Mirrors `OpenCVIncrementalStitcher.convertPixelBuffer:toMat:` but
-// kept inline here so this file is self-contained.  Supports the two
+// Self-contained CVPixelBuffer → cv::Mat conversion (the
+// OpenCVIncrementalStitcher it once mirrored is now archived).  Supports the two
 // pixel formats ARFrame.capturedImage uses on iOS (NV12 by default;
 // BGRA when the AR session is configured for it).  Lock-once, copy
 // out, unlock — buffer lifetime ends with the caller's accept frame.

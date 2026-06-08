@@ -5,12 +5,18 @@
 // docs/site-content/design/2026-04-30-realtime-incremental-stitching.md.
 //
 // What this file does:
-//   - Owns a single `OpenCVIncrementalStitcher` instance
+//   - Orchestrates the batch-keyframe capture pipeline: a pose/flow
+//     keyframe gate selects frames, an OpenCVKeyframeCollector saves
+//     them as JPEGs, and finalize() hands the set to
+//     `OpenCVStitcher.stitchFramePaths` for one-shot stitching.
 //   - Subscribes to `RNSARSession`'s per-frame ARFrame delivery
 //   - Converts ARKit pose → yaw/pitch + horizontal FoV
-//   - Dispatches addPixelBuffer onto a serial queue
 //   - Posts state updates as Notifications so the RN bridge can fan
 //     them out to JS as device events
+//
+// History: the live incremental engines (`OpenCVIncrementalStitcher`
+// hybrid + `OpenCVFirstWinsCylindricalStitcher` slit-scan) were
+// archived; only the batch-keyframe path remains.
 //
 // What this file deliberately does NOT do:
 //   - Touch OpenCV / cv::* — that's confined to the .mm impl behind
@@ -43,12 +49,10 @@ import simd
 import UIKit
 import os.log
 
-/// Public outcome enum mirroring the ObjC `RLISFrameOutcome` so JS
-/// callers can inspect what happened to each frame without crossing
-/// the ObjC++ boundary themselves.
-///
-/// Values 7+ are emitted from the Swift gate layer (KeyframeGate),
-/// not from the native engine.  Keep numeric values in lockstep with
+/// Public outcome enum so JS callers can inspect what happened to
+/// each frame.  Values 0-6 historically mirrored the (now-archived)
+/// live-engine outcome codes; values 7+ are emitted from the Swift
+/// gate layer (KeyframeGate).  Keep numeric values in lockstep with
 /// `IncrementalOutcome` in incremental.ts.
 @objc public enum IncrementalOutcome: Int {
     case acceptedHigh = 0
@@ -84,10 +88,10 @@ public final class IncrementalStateObject: NSObject {
     @objc public let confidence: Double
     @objc public let overlapPercent: Double
     @objc public let processingMs: Double
-    /// V12.12 — engine-detected physical orientation, plumbed up
-    /// from `RLISFrameTelemetry.isLandscape`.  See incremental.ts
-    /// for the full rationale (single source of truth across SDK
-    /// + host).
+    /// V12.12 — detected physical orientation.  In the batch-keyframe
+    /// path it's derived from the saved keyframe's pixel dimensions
+    /// (imageWidth >= imageHeight).  See incremental.ts for the full
+    /// rationale (single source of truth across SDK + host).
     @objc public let isLandscape: Bool
     /// V12.14.9 — running painted extent along the pan axis, in
     /// canvas pixels.  Combined with `panExtent`, lets the JS band
@@ -196,11 +200,9 @@ struct FinalizePayload {
 
     // ── Stitcher mode selection ─────────────────────────────────
     /// True if this finalize is the V16 batch-keyframe pipeline.
+    /// Always true now that the live engines are archived; retained
+    /// so the finalize closure's branch structure stays explicit.
     let inBatchKeyframeMode: Bool
-    /// Hybrid engine ref (V14/V15 path).  nil if batch mode.
-    let hybrid: OpenCVIncrementalStitcher?
-    /// First-wins cylindrical engine ref (V13 path).  nil if batch mode.
-    let slit: OpenCVFirstWinsCylindricalStitcher?
     /// V16 keyframe collector — owns the per-session JPEG sidecar
     /// directory the post-stitch result references.
     let collector: OpenCVKeyframeCollector?
@@ -250,35 +252,6 @@ public final class IncrementalStitcher: NSObject {
 
     @objc public static let shared = IncrementalStitcher()
 
-    /// Underlying OpenCV engine.  Created on `start`, torn down on
-    /// `finalize`/`reset`.  Holding it across captures would keep the
-    /// 24 MB canvas allocated in idle.
-    ///
-    /// V10: two engine variants exist behind one Swift wrapper.
-    /// `hybridEngine` (Samsung-style, full-frame cylindrical + OF) is
-    /// the default.  `firstwinsEngine` (Apple-style, per-strip painting)
-    /// is opt-in via the JS `engine: 'slitscan'` start option.  Only
-    /// one is non-nil at a time.
-    private var hybridEngine: OpenCVIncrementalStitcher?
-    private var firstwinsEngine: OpenCVFirstWinsCylindricalStitcher?
-
-    /// V15.0b — true once we've forwarded the latched plane transform
-    /// from RNSARSession to the slit-scan engine.  Reset on
-    /// every start() so the next capture re-propagates.  We only
-    /// forward once per capture: the plane transform is latched
-    /// (RNSARSession ignores subsequent ARKit refinements),
-    /// so re-propagating each frame is wasted work.
-    private var havePropagatedPlane: Bool = false
-
-    /// Convenience: read the active engine's accepted count.  Used by
-    /// the per-frame state event.
-    private var engineAcceptedCount: Int {
-        return hybridEngine?.acceptedCount ?? firstwinsEngine?.acceptedCount ?? 0
-    }
-    private var anyEngineActive: Bool {
-        return hybridEngine != nil || firstwinsEngine != nil
-    }
-
     /// Serial queue for the heavy per-frame work.  ARSession delegate
     /// only dispatches a pre-allocated cv::Mat onto this queue — the
     /// pixel buffer itself is consumed before return.
@@ -299,13 +272,13 @@ public final class IncrementalStitcher: NSObject {
         qos: .userInitiated
     )
 
-    /// 2026-05-16 — realtime+batch fusion (Option A "Replace on
-    /// completion").  Dedicated queue for the async refinement run
-    /// that follows a hybrid-engine finalize().  Kept SEPARATE from
-    /// `workQueue` so the next capture's start/consumeFrame path
-    /// isn't gated on the prior capture's 2-5 s cv::Stitcher run —
-    /// the design doc explicitly calls out "operator can continue
-    /// browsing / starting another capture during refinement".
+    /// 2026-05-16 — dedicated queue for the async refinement run
+    /// driven by the explicit JS `refinePanorama(...)` API.  Kept
+    /// SEPARATE from `workQueue` so the next capture's start/
+    /// consumeFrame path isn't gated on a prior 2-5 s cv::Stitcher
+    /// run — the design doc explicitly calls out "operator can
+    /// continue browsing / starting another capture during
+    /// refinement".
     ///
     /// Serial: at most one refinement runs at a time (the design's
     /// "cancellation semantics if a new capture starts mid-refine"
@@ -393,16 +366,14 @@ public final class IncrementalStitcher: NSObject {
     /// capture.  See KeyframeGate.swift for the full rationale.
     private let keyframeGate = KeyframeGate()
 
-    /// V16 Phase 1 — when `engineMode == "batch-keyframe"`, no
-    /// incremental engine runs; we accumulate the gate-accepted
-    /// frames as on-disk JPEGs + their poses, then on `finalize` hand
-    /// them to `OpenCVStitcher.stitchKeyframePaths:withPoses:` (the
-    /// full BA + ExposureCompensator + GraphCutSeamFinder +
-    /// MultiBandBlender pipeline) for one-shot stitching.  Why this
-    /// is structurally different from the slit-scan / hybrid engines:
-    /// they ingest into a streaming canvas, whereas batch-keyframe
-    /// defers all stitching until shutter release so the global-
-    /// stage quality wins (BA, multi-band) become available.
+    /// V16 Phase 1 — the batch-keyframe pipeline (the only surviving
+    /// engine mode): we accumulate the gate-accepted frames as on-disk
+    /// JPEGs + their poses, then on `finalize` hand them to
+    /// `OpenCVStitcher.stitchFramePaths` (the full feature-matched
+    /// BA + ExposureCompensator + GraphCutSeamFinder + MultiBandBlender
+    /// pipeline) for one-shot stitching.  This defers all stitching
+    /// until shutter release so the global-stage quality wins (BA,
+    /// multi-band) become available.
     private var batchKeyframeMode: Bool = false
     private var keyframeCollector: OpenCVKeyframeCollector?
     /// Poses recorded 1:1 with `keyframeCollector`'s saved JPEGs.
@@ -626,29 +597,6 @@ public final class IncrementalStitcher: NSObject {
         ]
     }
 
-    /// 2026-05-16 — realtime+batch fusion (Option A) path derivation.
-    /// Given the live panorama path (which finalize() wrote inside
-    /// the app sandbox tmp or a host-supplied location), pick a path
-    /// for the refined output.  Pattern:
-    ///
-    ///   /…/RNImageStitcherIncremental-<uuid>.jpg
-    ///       → /…/RNImageStitcherIncremental-<uuid>-refined.jpg
-    ///
-    /// Same directory keeps cleanup discoverable (delete both when
-    /// the audit is discarded).  Different name avoids racing the
-    /// host UI that may still be reading the live file as the
-    /// refinement is writing.
-    fileprivate static func refinedPathFromLive(livePath: String) -> String {
-        let ns = livePath as NSString
-        let dir = ns.deletingLastPathComponent
-        let base = (ns.lastPathComponent as NSString).deletingPathExtension
-        let ext = (ns.lastPathComponent as NSString).pathExtension
-        let refinedName = ext.isEmpty
-            ? "\(base)-refined"
-            : "\(base)-refined.\(ext)"
-        return (dir as NSString).appendingPathComponent(refinedName)
-    }
-
     // ── Native orientation classifier ────────────────────────────────
     //
     // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
@@ -781,44 +729,16 @@ public final class IncrementalStitcher: NSObject {
                resolvedOrientation,
                nativeResult.hadFrame ? Int32(1) : Int32(0),
                engineMode)
-        // V15 — engine modes:
-        //   'hybrid'           → hybrid engine, planar projection by default
-        //   'slitscan-rotate'  → slit-scan, rectilinear, V13.0a + 1D NCC
-        //   'slitscan-both'    → slit-scan, rectilinear, V13.0a + no gate
-        //                        + feather blend (iterate via overrides)
-        // Backward compat in -[RLISStitcherConfig configForMode:] handles
-        // 'firstwins-rectilinear' → 'slitscan-rotate' and warns on
-        // legacy 'firstwins' / 'firstwins-zoomed' / 'slitscan' modes.
-        let normalisedMode: String
-        switch engineMode {
-        case "hybrid": normalisedMode = "hybrid"
-        case "batch-keyframe":
-            // V16 Phase 1 — new mode.  Skips the live incremental
-            // engines entirely; KeyframeGate accumulates accepted
-            // frames as JPEGs, on finalize OpenCVStitcher does the
-            // full-pipeline stitch.
-            normalisedMode = "batch-keyframe"
-        case "slitscan-rotate", "firstwins-rectilinear":
-            normalisedMode = "slitscan-rotate"
-        case "slitscan-both":
-            normalisedMode = "slitscan-both"
-        case "firstwins", "firstwins-zoomed", "slitscan":
-            NSLog("[V15-bridge] DEPRECATED engine '\(engineMode)' — using slitscan-both")
-            normalisedMode = "slitscan-both"
-        default:
-            NSLog("[V15-bridge] unknown engine '\(engineMode)' — using slitscan-both")
-            normalisedMode = "slitscan-both"
+        // Engine mode: only the batch-keyframe pipeline survives.  The
+        // live incremental engines ('hybrid', 'slitscan-*', and the
+        // legacy 'firstwins*' aliases) were archived — any non-batch
+        // `engineMode` now falls back to batch-keyframe so existing JS
+        // callers keep working.
+        if engineMode != "batch-keyframe" {
+            NSLog("[bridge] DEPRECATED engine '\(engineMode)' — live engines archived, using batch-keyframe")
         }
 
-        let useBatchKeyframe = (normalisedMode == "batch-keyframe")
-        let useFirstwinsClass = normalisedMode.hasPrefix("slitscan")
-
-        // Build the V15 config: factory default for the mode, then apply
-        // JS-side overrides.
-        let config = RLISStitcherConfig(forMode: normalisedMode)
-        Self.applyConfigOverrides(configOverrides, to: config)
-
-        if useBatchKeyframe {
+        do {
             // V16 Phase 1 — no live engine; spin up a keyframe
             // collector that saves accepted frames to disk under
             // Library/AppSupport/Captures/{uuid}/.  On finalize
@@ -838,8 +758,6 @@ public final class IncrementalStitcher: NSObject {
             // sensor orientation for the batch-keyframe path so the
             // pose's intrinsics (which describe the unrotated
             // 1920×1440 sensor) match the saved-image dimensions.
-            // The slit-scan and hybrid engines continue to receive
-            // `frameRotationDegrees` unchanged.
             self.keyframeRotationDegrees = 0
             // 2026-05-18 (Issue #1a fix) — keyframe EXIF Orientation
             // is hardcoded to 6 ("rotate 90° CW for display") regardless
@@ -912,40 +830,10 @@ public final class IncrementalStitcher: NSObject {
             // option value.
             self.batchImuTranslationMetres = 0.0
             self.batchKeyframeMode = true
-            self.hybridEngine = nil
-            self.firstwinsEngine = nil
             os_log(.fault, log: Self.diagLog,
                    "[V16-batch-keyframe] start mode=batch-keyframe rotation=0 (was %d, forced to 0 to match pose intrinsics) sessionDir=%{public}@",
                    frameRotationDegrees,
                    self.keyframeCollector?.sessionDir ?? "(nil)")
-        } else if useFirstwinsClass {
-            // Slit-scan engine always uses rectilinear in V15
-            // (firstwins-cylindrical and firstwins-zoomed modes were
-            // removed; their behaviour is unused).
-            self.firstwinsEngine = OpenCVFirstWinsCylindricalStitcher(
-                composeWidth: composeWidth,
-                composeHeight: composeHeight,
-                canvasWidth: canvasWidth,
-                canvasHeight: canvasHeight,
-                featherPx: featherPx,
-                frameRotationDegrees: frameRotationDegrees,
-                useRectilinear: true
-            )
-            self.firstwinsEngine?.setConfig(config)
-            self.hybridEngine = nil
-            self.batchKeyframeMode = false
-        } else {
-            self.hybridEngine = OpenCVIncrementalStitcher(
-                composeWidth: composeWidth,
-                composeHeight: composeHeight,
-                canvasWidth: canvasWidth,
-                canvasHeight: canvasHeight,
-                featherPx: featherPx,
-                frameRotationDegrees: frameRotationDegrees
-            )
-            self.hybridEngine?.setConfig(config)
-            self.firstwinsEngine = nil
-            self.batchKeyframeMode = false
         }
         self.isRunning = true
         // F8.3 — enable the Frame Processor plugin's producer-thread
@@ -958,8 +846,6 @@ public final class IncrementalStitcher: NSObject {
         self.acceptsSinceSnapshot = 0
         self.droppedBackpressure = 0
         self.lastState = nil
-        // V15.0b — re-arm plane propagation for the new capture.
-        self.havePropagatedPlane = false
         // V13.0c.1 — reset translation diagnostic state for the
         // new capture.  First-frame translation will be captured
         // on the next consumeFrame call.
@@ -1044,6 +930,21 @@ public final class IncrementalStitcher: NSObject {
         } else {
             self.keyframeGate.flowMaxTranslationCm = 0.0
         }
+        // Wall-clock keyframe-interval budget, in MILLISECONDS.  When
+        // > 0, the gate force-accepts a frame once this much time has
+        // elapsed since the last accepted keyframe (applies to BOTH
+        // Pose and Flow strategies).  Passed straight through — the JS
+        // value is already in ms (no cm→m style conversion).  Clamp to
+        // ≥ 0 (the bridge/C++ re-clamps too).  Default 2000 ms when the
+        // key is absent (NOT 0 — time-budget acceptance is on by
+        // default so a stalled scan still advances).
+        if let v = configOverrides["maxKeyframeIntervalMs"] as? Double {
+            self.keyframeGate.maxKeyframeIntervalMs = max(0.0, v)
+        } else if let v = configOverrides["maxKeyframeIntervalMs"] as? Int {
+            self.keyframeGate.maxKeyframeIntervalMs = max(0.0, Double(v))
+        } else {
+            self.keyframeGate.maxKeyframeIntervalMs = 2000.0
+        }
         // V16 — novelty aggregation percentile.  Clamp at start to
         // [0.5, 0.99]; the bridge re-clamps but matching it here
         // means our state stays in-range for logging.  Default 0.85
@@ -1067,11 +968,12 @@ public final class IncrementalStitcher: NSObject {
         }
         self.keyframeGate.reset()
         os_log(.fault, log: Self.diagLog,
-               "[V16-keyframe] start gate enabled=%d strategy=%{public}@ thr=%.2f max=%d flow(maxCorners=%d quality=%.3f minDist=%.1f maxTransCm=%.1f pctile=%.2f evalEveryN=%d)",
+               "[V16-keyframe] start gate enabled=%d strategy=%{public}@ thr=%.2f max=%d maxKfIntervalMs=%.0f flow(maxCorners=%d quality=%.3f minDist=%.1f maxTransCm=%.1f pctile=%.2f evalEveryN=%d)",
                self.keyframeGate.enabled ? 1 : 0,
                self.keyframeGate.strategy == .flow ? "flow" : "pose",
                self.keyframeGate.overlapThreshold,
                self.keyframeGate.maxCount,
+               self.keyframeGate.maxKeyframeIntervalMs,
                self.keyframeGate.flowMaxCorners,
                self.keyframeGate.flowQualityLevel,
                self.keyframeGate.flowMinDistance,
@@ -1119,115 +1021,10 @@ public final class IncrementalStitcher: NSObject {
     /// AR delegate could deliver several more frames — each one
     /// passed consumeFrame's `isRunning == true` check and got
     /// ingested into the canvas, producing visible "phantom" frames
-    /// V15 — apply per-stage JS overrides on top of a mode default.
-    /// Keys recognised in `overrides`: any non-readonly RLISStitcherConfig
-    /// field.  Unrecognised keys are ignored.  Values out of range are
-    /// clamped silently (e.g. kPanAxisFractionRect outside [0.05, 0.90]).
-    private static func applyConfigOverrides(_ overrides: [String: Any],
-                                             to config: RLISStitcherConfig) {
-        if let v = overrides["kPanAxisFractionRect"] as? Double {
-            config.kPanAxisFractionRect = max(0.05, min(0.90, v))
-        }
-        if let v = overrides["kMinAcceptDeltaPx"] as? Int {
-            config.kMinAcceptDeltaPx = max(0, min(500, v))
-        }
-        if let v = overrides["enableTriangulation"] as? Bool {
-            config.enableTriangulation = v
-        }
-        if let v = overrides["enableTriAccumulator"] as? Bool {
-            config.enableTriAccumulator = v
-        }
-        if let v = overrides["enable1dNcc"] as? Bool {
-            config.enable1dNcc = v
-        }
-        if let v = overrides["nccSearchRadius1d"] as? Int {
-            config.nccSearchRadius1d = max(5, min(60, v))
-        }
-        if let v = overrides["enable2dNcc"] as? Bool {
-            config.enable2dNcc = v
-        }
-        if let v = overrides["enableRansacHomography"] as? Bool {
-            config.enableRansacHomography = v
-        }
-        if let v = overrides["paintMode"] as? String {
-            switch v {
-            case "FirstPaintedWins": config.paintMode = .firstPaintedWins
-            case "FeatherBlend":     config.paintMode = .featherBlend
-            default: break
-            }
-        }
-        if let v = overrides["hybridProjection"] as? String {
-            switch v {
-            case "Cylindrical": config.hybridProjection = .cylindrical
-            case "Planar":      config.hybridProjection = .planar
-            default: break
-            }
-        }
-        if let v = overrides["useDetectedPlane"] as? Bool {
-            config.useDetectedPlane = v
-        }
-        if let v = overrides["sliverPosition"] as? String {
-            switch v {
-            case "Center": config.sliverPosition = .center
-            case "Bottom": config.sliverPosition = .bottom
-            case "Top":    config.sliverPosition = .top
-            default: break
-            }
-        }
-        if let v = overrides["firstFrameFullFrame"] as? Bool {
-            config.firstFrameFullFrame = v
-        }
-        // V15.0d new overrides.
-        if let v = overrides["planeSource"] as? String {
-            switch v {
-            case "Disabled":      config.planeSource = .disabled
-            case "ARKitDetected": config.planeSource = .arKitDetected
-            case "Virtual":       config.planeSource = .virtual
-            default: break
-            }
-        }
-        if let v = overrides["virtualPlaneDepthMeters"] as? Double {
-            config.virtualPlaneDepthMeters = max(0.3, min(5.0, v))
-        }
-        if let v = overrides["arkitPlaneAlignmentThreshold"] as? Double {
-            config.arkitPlaneAlignmentThreshold = max(0.0, min(1.0, v))
-        }
-        if let v = overrides["planeProjectionStyle"] as? String {
-            switch v {
-            case "Trapezoidal": config.planeProjectionStyle = .trapezoidal
-            case "Rectified":   config.planeProjectionStyle = .rectified
-            default: break
-            }
-        }
-        if let v = overrides["nccSearchMargin2d"] as? Int {
-            config.nccSearchMargin2d = max(4, min(60, v))
-        }
-        if let v = overrides["nccConfidenceThreshold2d"] as? Double {
-            config.nccConfidenceThreshold2d = max(0.30, min(0.99, v))
-        }
-        if let v = overrides["enableNcc2dEmaSmoothing"] as? Bool {
-            config.enableNcc2dEmaSmoothing = v
-        }
-        if let v = overrides["ncc2dEmaAlpha"] as? Double {
-            config.ncc2dEmaAlpha = max(0.05, min(0.95, v))
-        }
-        if let v = overrides["enableNcc2dPanAxisLock"] as? Bool {
-            config.enableNcc2dPanAxisLock = v
-        }
-        if let v = overrides["ncc2dCrossAxisLockPx"] as? Int {
-            config.ncc2dCrossAxisLockPx = max(0, min(30, v))
-        }
-        // Propagate the alignment threshold to the AR session so its
-        // didAdd / didUpdate filter uses the operator-chosen value.
-        // (planeAlignmentThreshold is a Float on the AR session.)
-        RNSARSession.shared.planeAlignmentThreshold =
-            Float(config.arkitPlaneAlignmentThreshold)
-    }
-
-    /// after the user thought they had released.  The engine refs
-    /// and isRunning flag are now flipped SYNCHRONOUSLY here so the
+    /// after the user thought they had released.  The batch-keyframe
+    /// state and isRunning flag are flipped SYNCHRONOUSLY here so the
     /// AR delegate's very next consumeFrame sees isRunning=false.
-    /// The work-queue body just runs the engine's own finalize.
+    /// The work-queue body just runs the one-shot stitch.
     @objc public func finalize(
         toPath outputPath: String,
         jpegQuality: Int,
@@ -1247,8 +1044,6 @@ public final class IncrementalStitcher: NSObject {
         // collapses the race: any consumeFrame entered after this
         // line sees isRunning=false at its very first guard.
         stateLock.lock()
-        let hybrid = self.hybridEngine
-        let slit = self.firstwinsEngine
         let inBatchKeyframeMode = self.batchKeyframeMode
         let collector = self.keyframeCollector
         let paths = self.keyframePaths
@@ -1306,8 +1101,6 @@ public final class IncrementalStitcher: NSObject {
         // features.  Drop the closure-capture to avoid a compile
         // warning; ARKit pose data is preserved on the ivar regardless.
         _ = self.keyframePoses
-        self.hybridEngine = nil
-        self.firstwinsEngine = nil
         self.batchKeyframeMode = false
         self.keyframeCollector = nil
         self.keyframePaths = []
@@ -1373,8 +1166,6 @@ public final class IncrementalStitcher: NSObject {
             cleaned: cleaned,
             q: q,
             inBatchKeyframeMode: inBatchKeyframeMode,
-            hybrid: hybrid,
-            slit: slit,
             collector: collector,
             paths: paths,
             batchWarperType: batchWarperType,
@@ -1617,9 +1408,9 @@ public final class IncrementalStitcher: NSObject {
                         // ARKit poses are still saved alongside each
                         // keyframe (`keyframePoses`) for future
                         // pose-driven investigation as a separate
-                        // workstream — that path stays in the codebase
-                        // (stitchKeyframePaths method) but isn't on
-                        // the hot path.
+                        // workstream, but the pose-driven stitch method
+                        // has since been archived; the feature-matched
+                        // path is the only one on the hot path.
                         // V16 Phase 1b.fix3 — pass the EXIF Orientation
                         // tag derived from `frameRotationDegrees`.
                         // V16 Phase 1b.fix8 (C2) — read knobs from
@@ -1736,81 +1527,11 @@ public final class IncrementalStitcher: NSObject {
                     } catch let stitchErr as NSError {
                         completion(nil, stitchErr)
                     }
-                } else if let hybrid = payload.hybrid {
-                    let snap = try hybrid.finalize(atPath: payload.cleaned, jpegQuality: payload.q)
-                    completion([
-                        "panoramaPath": snap.panoramaPath,
-                        "width": snap.width,
-                        "height": snap.height,
-                        "acceptedCount": snap.acceptedCount,
-                        "droppedBackpressure": payload.drops,
-                    ], nil)
-                    // 2026-05-16 — realtime+batch fusion (Option A
-                    // "Replace on completion") hook.  The live
-                    // panorama has been written and the JS finalize
-                    // promise has resolved; now fire-and-forget an
-                    // async refinement over the hybrid engine's
-                    // accepted keyframes.
-                    //
-                    // Constraints honoured here (per the design doc
-                    // and the prompt's "Constraints" list):
-                    //   1. Hybrid realtime engine is NOT modified —
-                    //      `OpenCVIncrementalStitcher.mm` stays
-                    //      untouched; we only consult the existing
-                    //      keyframe-path ivar that finalize() already
-                    //      snapshotted into `payload.paths`.
-                    //   2. NO-OP when keyframes are not on disk.
-                    //      Today's hybrid engine does NOT save per-
-                    //      frame JPEGs (only batch-keyframe mode does
-                    //      via OpenCVKeyframeCollector), so
-                    //      `payload.paths` is empty for the hybrid
-                    //      branch.  `runHybridAutoRefine` detects
-                    //      that and emits `isRefining=false` without
-                    //      running cv::Stitcher.  When a future change
-                    //      hooks the hybrid engine up to a keyframe
-                    //      collector, the same code path lights up
-                    //      automatically.
-                    //   3. Refinement is fire-and-forget — finalize's
-                    //      promise has ALREADY been resolved above.
-                    //
-                    // Capture-list discipline (C2 invariant — see the
-                    // file-top markers).  No `self.*` references allowed
-                    // here; we route the dispatch through the type
-                    // (IncrementalStitcher.shared) so the
-                    // closure captures only value-typed locals + the
-                    // class type itself.  shared is a process-wide
-                    // singleton (initialised once at module load),
-                    // so this is lifecycle-safe.
-                    let refinedOut = Self.refinedPathFromLive(
-                        livePath: snap.panoramaPath
-                    )
-                    let pathsForRefine = payload.paths   // empty for hybrid today
-                    let capOri = payload.captureOrientation
-                    let warper = payload.batchWarperType
-                    let blender = payload.batchBlenderType
-                    let seam = payload.batchSeamFinderType
-                    let inscribed = payload.batchEnableInscribedRectCrop
-                    IncrementalStitcher.shared.refineQueue.async {
-                        IncrementalStitcher.shared.runHybridAutoRefine(
-                            framePaths: pathsForRefine,
-                            refinedOutputPath: refinedOut,
-                            captureOrientation: capOri,
-                            warperType: warper,
-                            blenderType: blender,
-                            seamFinderType: seam,
-                            useInscribedRectCrop: inscribed
-                        )
-                    }
-                } else if let slit = payload.slit {
-                    let snap = try slit.finalize(atPath: payload.cleaned, jpegQuality: payload.q)
-                    completion([
-                        "panoramaPath": snap.panoramaPath,
-                        "width": snap.width,
-                        "height": snap.height,
-                        "acceptedCount": snap.acceptedCount,
-                        "droppedBackpressure": payload.drops,
-                    ], nil)
                 } else {
+                    // Defensive: batch-keyframe is the only pipeline,
+                    // so a non-batch finalize means no capture was
+                    // active (start() was never called or already torn
+                    // down).
                     completion(nil, NSError(
                         domain: "RNImageStitcherIncremental",
                         code: 9002,
@@ -1825,14 +1546,12 @@ public final class IncrementalStitcher: NSObject {
         // MARK: C2-INVARIANT-END
     }
 
-    /// 2026-05-16 — realtime+batch fusion (Option A) entry point.
-    /// Runs the shared C++ stitcher over the supplied keyframe JPEGs
-    /// and writes a refined panorama to `outputPath`.
+    /// 2026-05-16 — refine entry point.  Runs the shared C++ stitcher
+    /// over the supplied keyframe JPEGs and writes a refined panorama
+    /// to `outputPath`.
     ///
-    /// Called by:
-    ///   1. The bridge layer (explicit JS `refinePanorama(...)` API).
-    ///   2. `runHybridAutoRefine(...)` below, the fire-and-forget hook
-    ///      from `finalize()` for the hybrid-engine path.
+    /// Called by the bridge layer (explicit JS `refinePanorama(...)`
+    /// API) to re-stitch a saved keyframe set at higher quality.
     ///
     /// Threading: the work itself dispatches onto `refineQueue` (NOT
     /// `workQueue`).  That keeps the per-capture path completely
@@ -2019,140 +1738,6 @@ public final class IncrementalStitcher: NSObject {
         }
     }
 
-    /// 2026-05-16 — realtime+batch fusion (Option A) auto-trigger.
-    /// Called from `finalize()` immediately after the hybrid engine
-    /// wrote its live panorama; fire-and-forget from finalize()'s
-    /// perspective so the JS-side finalize promise resolves with the
-    /// live result first.  Then this method:
-    ///
-    ///   1. Emits a state event with `isRefining = true` so the host
-    ///      can render its "Refining…" pill.
-    ///   2. Runs `refinePanorama(framePaths, refinedOutputPath, ...)`.
-    ///   3. On success: emits a state event with `isRefining = false`
-    ///      AND `refinedPanoramaPath = <path>` so the host swaps in
-    ///      the higher-quality output.
-    ///   4. On failure: emits a state event with `isRefining = false`
-    ///      AND NO refined path.  Host keeps showing the live
-    ///      panorama; the design doc's "Couldn't refine" toast UX is
-    ///      a follow-up.
-    ///
-    /// No-op when `framePaths.count < 2` or any framePath is missing
-    /// on disk.  Hybrid-engine captures DO NOT today save per-frame
-    /// JPEGs, so this method's most common call site (from finalize's
-    /// hybrid branch) currently produces a no-op + isRefining=false
-    /// emit — which is intentional (the design doc says "if
-    /// keyframes are NOT on disk, the auto-trigger is a no-op").
-    private func runHybridAutoRefine(
-        framePaths: [String],
-        refinedOutputPath: String,
-        captureOrientation: String,
-        warperType: String,
-        blenderType: String,
-        seamFinderType: String,
-        useInscribedRectCrop: Bool
-    ) {
-        if framePaths.count < 2 {
-            os_log(.info, log: Self.diagLog,
-                   "[refine.auto] skipped: framePaths.count=%d (< 2 — hybrid engine retains no per-frame JPEGs)",
-                   framePaths.count)
-            // Emit isRefining=false so any host that pre-seeded a
-            // pill on finalize doesn't get stuck.
-            self.emitRefinementState(isRefining: false, refinedPanoramaPath: nil)
-            return
-        }
-        // Pre-flight existence check so we degrade gracefully when
-        // a JPEG was unlinked between finalize and the dispatch
-        // landing on refineQueue.
-        let fm = FileManager.default
-        for p in framePaths {
-            let cleaned = p.hasPrefix("file://") ? String(p.dropFirst(7)) : p
-            if !fm.fileExists(atPath: cleaned) {
-                os_log(.info, log: Self.diagLog,
-                       "[refine.auto] skipped: missing keyframe %{public}@",
-                       cleaned)
-                self.emitRefinementState(isRefining: false, refinedPanoramaPath: nil)
-                return
-            }
-        }
-        // Signal the pill on before the stitcher work begins.  The
-        // emit goes through the same notification channel as every
-        // other state update; JS sees it asynchronously, which is
-        // fine — operator UX wants the pill within a few hundred ms,
-        // not synchronously with finalize's promise resolution.
-        self.emitRefinementState(isRefining: true, refinedPanoramaPath: nil)
-        let config: [String: Any] = [
-            "warperType": warperType,
-            "blenderType": blenderType,
-            "seamFinderType": seamFinderType,
-            "captureOrientation": captureOrientation,
-            "useInscribedRectCrop": useInscribedRectCrop,
-            "jpegQuality": 90,
-        ]
-        self.refinePanorama(
-            framePaths: framePaths,
-            outputPath: refinedOutputPath,
-            config: config
-        ) { [weak self] result, error in
-            guard let self = self else { return }
-            if let error = error {
-                os_log(.fault, log: Self.diagLog,
-                       "[refine.auto] refinement failed: %{public}@ — leaving live output in place",
-                       error.localizedDescription)
-                self.emitRefinementState(isRefining: false, refinedPanoramaPath: nil)
-                return
-            }
-            let path = (result?["panoramaPath"] as? String) ?? refinedOutputPath
-            os_log(.fault, log: Self.diagLog,
-                   "[refine.auto] success path=%{public}@",
-                   path)
-            self.emitRefinementState(isRefining: false, refinedPanoramaPath: path)
-        }
-    }
-
-    /// 2026-05-16 — emit a minimal state event carrying only the
-    /// refinement-related fields.  Mirrors the existing
-    /// `emitBatchKeyframeAcceptedState` pattern: build a fresh
-    /// IncrementalStateObject, then add the new optional fields
-    /// directly to the userInfo dict so JS (which reads from the
-    /// raw event payload) picks them up without a schema change in
-    /// the Obj-C class.
-    private func emitRefinementState(
-        isRefining: Bool,
-        refinedPanoramaPath: String?
-    ) {
-        // Preserve the most-recent panoramaPath / dims / accepted
-        // count so the JS subscriber's sticky-snapshot merge keeps
-        // showing the live preview between the finalize and the
-        // refined swap.  All other fields default to "no-op" values.
-        stateLock.lock()
-        let prev = self.lastState
-        stateLock.unlock()
-        let state = IncrementalStateObject(
-            panoramaPath: prev?.panoramaPath,
-            width: prev?.width ?? 0,
-            height: prev?.height ?? 0,
-            acceptedCount: prev?.acceptedCount ?? 0,
-            outcome: prev?.outcome ?? .acceptedHigh,
-            confidence: prev?.confidence ?? 1.0,
-            overlapPercent: prev?.overlapPercent ?? -1.0,
-            processingMs: 0,
-            isLandscape: prev?.isLandscape ?? false,
-            paintedExtent: prev?.paintedExtent ?? 0,
-            panExtent: prev?.panExtent ?? 0,
-            keyframeMax: prev?.keyframeMax ?? 0
-        )
-        var dict = state.asDictionary()
-        dict["isRefining"] = isRefining
-        if let p = refinedPanoramaPath {
-            dict["refinedPanoramaPath"] = p
-        }
-        NotificationCenter.default.post(
-            name: .retailensIncrementalStateUpdate,
-            object: nil,
-            userInfo: dict
-        )
-    }
-
     /// v0.10.0 #15A — emit a refine-pipeline phase update on the same
     /// `IncrementalStateUpdate` channel that carries `isRefining` /
     /// `refinedPanoramaPath`.  Five `stage` values fire across the
@@ -2172,10 +1757,9 @@ public final class IncrementalStitcher: NSObject {
     ///
     /// Reuses the existing channel (rather than introducing a new
     /// device-event name) so the JS subscriber doesn't need to wire
-    /// a second listener.  The payload carries the same skeleton
-    /// `emitRefinementState` emits (lastState fields preserved) so
-    /// `isRefining` / `refinedPanoramaPath` sticky-merge logic on the
-    /// JS side keeps working untouched.
+    /// a second listener.  The payload preserves the lastState fields
+    /// so the `isRefining` / `refinedPanoramaPath` sticky-merge logic
+    /// on the JS side keeps working untouched.
     private func emitRefineProgress(
         stage: String,
         fraction: Double,
@@ -2228,11 +1812,7 @@ public final class IncrementalStitcher: NSObject {
         // FIRST so any in-flight consumeFrame bails at its first
         // guard.  Then detach the AR consumer.
         stateLock.lock()
-        let hybrid = self.hybridEngine
-        let slit = self.firstwinsEngine
         let collector = self.keyframeCollector
-        self.hybridEngine = nil
-        self.firstwinsEngine = nil
         self.keyframeCollector = nil
         self.batchKeyframeMode = false
         self.keyframePaths = []
@@ -2250,14 +1830,12 @@ public final class IncrementalStitcher: NSObject {
         self.keyframeGate.reset()
         stateLock.unlock()
         RNSARSession.shared.incrementalConsumer = nil
-        // Reset on the work queue so we don't race with an in-flight
-        // ingest that's still touching the engine's canvas.  Cancel
-        // ALSO removes the collector's session directory — the
-        // operator explicitly aborted, so the saved JPEGs aren't
-        // worth keeping for re-processing.
+        // Clean up on the work queue so we don't race with an in-flight
+        // ingest that's still saving a keyframe.  Cancel removes the
+        // collector's session directory — the operator explicitly
+        // aborted, so the saved JPEGs aren't worth keeping for
+        // re-processing.
         workQueue.async {
-            hybrid?.reset()
-            slit?.reset()
             collector?.cleanup()
         }
     }
@@ -2467,7 +2045,10 @@ public final class IncrementalStitcher: NSObject {
         let acceptedCount: Int
         stateLock.lock()
         prev = self.lastState
-        acceptedCount = self.engineAcceptedCount
+        // Batch-keyframe is the only running mode: the accepted count is
+        // the gate's running keyframe tally (the live engines that used
+        // to back `engineAcceptedCount` have been archived).
+        acceptedCount = self.keyframeGate.acceptedCount
         stateLock.unlock()
         let overlapPercent = (decision.newContentFraction >= 0)
             ? (1.0 - decision.newContentFraction) * 100.0
@@ -2516,8 +2097,6 @@ public final class IncrementalStitcher: NSObject {
             // start/stop in flight — drop this frame.
             return
         }
-        let hybrid = self.hybridEngine
-        let slit = self.firstwinsEngine
         let isRunning = self.isRunning
         // V16 Phase 1 — capture batch-keyframe state under the lock so
         // the work-queue closure (or the synchronous reject below)
@@ -2605,7 +2184,7 @@ public final class IncrementalStitcher: NSObject {
         let cadenceFires = ((self.consumeFrameCounter - 1) % evalCadence == 0)
         let gateActive =
             isRunning
-            && (hybrid != nil || slit != nil || inBatchKeyframeMode)
+            && inBatchKeyframeMode
             && self.keyframeGate.enabled
         let shouldEvaluateGate = gateActive && cadenceFires
         // True iff the gate is active for this capture but we're
@@ -2649,10 +2228,9 @@ public final class IncrementalStitcher: NSObject {
         // text; accept-path decisions emit via the keyframeAccepted
         // path and the JS state subscriber.
 
-        // V16 Phase 1 — batch-keyframe is also a valid running mode
-        // (no engine pointer, but the collector and gate are active).
-        guard isRunning,
-              (hybrid != nil || slit != nil || inBatchKeyframeMode)
+        // V16 Phase 1 — batch-keyframe is the only running mode now
+        // (no engine pointer; the collector and gate are active).
+        guard isRunning, inBatchKeyframeMode
         else { return }
 
         // Surface the gate's reject decision (if any) outside the lock.
@@ -2664,34 +2242,11 @@ public final class IncrementalStitcher: NSObject {
             return
         }
 
-        // Compute yaw + pitch from the quaternion.  Convention:
-        // yaw   = rotation about world Y (camera turning left/right)
-        // pitch = rotation about camera X (camera tilting up/down)
-        let q = simd_quatf(
-            ix: Float(pose.qx), iy: Float(pose.qy),
-            iz: Float(pose.qz), r: Float(pose.qw)
-        )
-        let (yaw, pitch) = Self.yawPitch(from: q)
-
-        // Both FoVs from physical camera intrinsics.  Passing the
-        // PHYSICAL vertical FoV (vs deriving it from compose aspect
-        // inside the engine) is what fixes the v1/v2 "only left-to-
-        // right portrait pan responds" bug — the engine's overlap
-        // gate compared world-pitch against a compose-aspect-derived
-        // vertical FoV that didn't match the actual camera, so most
-        // top-to-bottom pans fell outside the 30-70% window.
-        let fovHRad = 2.0 * atan(Double(pose.imageWidth)  / (2.0 * pose.fx))
-        let fovVRad = 2.0 * atan(Double(pose.imageHeight) / (2.0 * pose.fy))
-        let fovHDeg = fovHRad * 180.0 / .pi
-        let fovVDeg = fovVRad * 180.0 / .pi
-
-        let trackingPoor = (pose.trackingState != .tracking)
-
-        // V11 Gap #27: dispatch the heavy pipeline (engine.ingest +
-        // optional snapshot) to the work queue.  Earlier versions
-        // ran the full ~70 ms accept inside the AR delegate thread,
-        // blocking ARKit's 16 ms inter-frame budget and causing
-        // ~4-5 frames to be dropped during each accept.
+        // V11 Gap #27: dispatch the heavy keyframe-save work to the
+        // work queue.  Earlier versions ran the full ~70 ms accept
+        // inside the AR delegate thread, blocking ARKit's 16 ms
+        // inter-frame budget and causing ~4-5 frames to be dropped
+        // during each accept.
         //
         // Backpressure: if the work queue is already busy with a
         // previous frame, drop this one (don't queue up — that'd
@@ -2721,8 +2276,8 @@ public final class IncrementalStitcher: NSObject {
         // CVPixelBufferCreate + memcpy gives us a fully-owned copy
         // that ARC alone governs.  ~1-2 ms cost on iPhone 16 Pro
         // (10 MB memcpy at memory bandwidth ~10 GB/s).  Fixes the
-        // crash for ALL engine paths (slit-scan / hybrid / batch-
-        // keyframe) since they all dispatch via consumeFrame.
+        // crash for the batch-keyframe save path, which dispatches
+        // via consumeFrame.
         guard let pbCopy = Self.deepCopyPixelBuffer(pixelBuffer) else {
             // Allocation failure — drop the frame.  Extremely rare;
             // would only happen under genuine OOM.
@@ -2794,126 +2349,8 @@ public final class IncrementalStitcher: NSObject {
                            "[V16-batch-keyframe] saveKeyframe failed: %{public}@",
                            err.localizedDescription)
                 }
-                return
-            }
-
-            // V15.0b — if a vertical plane has just been detected and
-            // we haven't propagated it to the slit-scan engine yet,
-            // do so now.  Propagated only once per latched plane;
-            // RNSARSession resets on stop().
-            if !self.havePropagatedPlane,
-               let plane = RNSARSession.shared.planeTransformFlat() {
-                slit?.setPlaneTransformFlat(plane)
-                self.havePropagatedPlane = true
-                // V15.0c.4 — fault log so we can see the propagation
-                // moment without rate-limit drops.
-                os_log(.fault, log: Self.diagLog,
-                       "[V15.0b-plane] bridge propagated plane to slit-scan engine (one-shot per capture)")
-            }
-
-            let telemetry: RLISFrameTelemetry
-            if let hybrid = hybrid {
-                telemetry = hybrid.ingest(
-                    pixelBuffer: pbCopy, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw,
-                    tx: pose.tx, ty: pose.ty, tz: pose.tz,
-                    fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
-                    imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
-                    yaw: yaw, pitch: pitch,
-                    fovHorizDegrees: fovHDeg, fovVertDegrees: fovVDeg,
-                    trackingPoor: trackingPoor
-                )
-            } else if let slit = slit {
-                // V13.0e — slit-scan engine consumes tx/ty/tz for
-                // ORB-triangulation-based depth estimation and per-frame
-                // translation parallax correction.  Hybrid passes them
-                // for API symmetry; only the slit engine uses them.
-                telemetry = slit.ingest(
-                    pixelBuffer: pbCopy, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw,
-                    tx: pose.tx, ty: pose.ty, tz: pose.tz,
-                    fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
-                    imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
-                    yaw: yaw, pitch: pitch,
-                    fovHorizDegrees: fovHDeg, fovVertDegrees: fovVDeg,
-                    trackingPoor: trackingPoor
-                )
-            } else {
-                return
-            }
-
-            self.processIngestResult(
-                telemetry: telemetry, hybrid: hybrid, slit: slit)
-        }
-    }
-
-    /// Pulled out of consumeFrame so the work-queue closure stays
-    /// readable.  Same flow: build state, optionally snapshot, post
-    /// notification.
-    private func processIngestResult(
-        telemetry: RLISFrameTelemetry,
-        hybrid: OpenCVIncrementalStitcher?,
-        slit: OpenCVFirstWinsCylindricalStitcher?
-    ) {
-        var snapshotPath: String?
-        var snapW = 0, snapH = 0
-        let outcome = IncrementalOutcome(rawValue: telemetry.outcome.rawValue)
-            ?? .skippedTrackingPoor
-
-        let isAccept = (telemetry.outcome == .acceptedHigh ||
-                        telemetry.outcome == .acceptedMedium)
-
-        if isAccept {
-            self.acceptsSinceSnapshot += 1
-            if self.acceptsSinceSnapshot >= self.snapshotEveryNAccepts {
-                self.acceptsSinceSnapshot = 0
-                do {
-                    let snap: RLISSnapshot
-                    if let hybrid = hybrid {
-                        snap = try hybrid.snapshot(
-                            withJpegQuality: self.snapshotJpegQuality)
-                    } else {
-                        snap = try slit!.snapshot(
-                            withJpegQuality: self.snapshotJpegQuality)
-                    }
-                    snapshotPath = snap.panoramaPath
-                    snapW = snap.width
-                    snapH = snap.height
-                } catch {
-                    // Silently dropping a snapshot is fine — next
-                    // accept will retry.
-                }
             }
         }
-
-        // V16 — pass the gate's max keyframe count when the gate is
-        // active so JS can render "Keyframes: n/max".  Zero signals
-        // "gate disabled" to the JS pill.
-        let kfMax = self.keyframeGate.enabled ? self.keyframeGate.maxCount : 0
-        let state = IncrementalStateObject(
-            panoramaPath: snapshotPath,
-            width: snapW,
-            height: snapH,
-            acceptedCount: hybrid?.acceptedCount ?? slit?.acceptedCount ?? 0,
-            outcome: outcome,
-            confidence: telemetry.confidence,
-            overlapPercent: telemetry.overlapPercent,
-            processingMs: telemetry.processingMs,
-            isLandscape: telemetry.isLandscape,
-            paintedExtent: telemetry.paintedExtent,
-            panExtent: telemetry.panExtent,
-            keyframeMax: kfMax
-        )
-        stateLock.lock()
-        self.lastState = state
-        stateLock.unlock()
-
-        // Emit always — JS may want to drive UX on rejects too.
-        // NotificationCenter is thread-agnostic; the bridge converts
-        // it to a main-thread RN event.
-        NotificationCenter.default.post(
-            name: .retailensIncrementalStateUpdate,
-            object: nil,
-            userInfo: state.asDictionary()
-        )
     }
 
     // ── Debug log file ──────────────────────────────────────────────
@@ -2946,21 +2383,6 @@ public final class IncrementalStitcher: NSObject {
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
-
-    /// Extract yaw (rotation about world Y) and pitch (rotation about
-    /// camera X) from an ARKit camera quaternion.  Numerically stable
-    /// for camera orientations the user holds in practice — straight
-    /// up/down is gimbal-locked but a shelf-audit user is never there.
-    private static func yawPitch(from q: simd_quatf) -> (Double, Double) {
-        // Apply the quaternion to ARKit's camera-forward vector
-        // (-Z in camera frame) to get the camera-forward in world.
-        // Yaw is the angle of the projection onto the X-Z plane;
-        // pitch is the elevation angle.
-        let forward = simd_act(q, simd_float3(0, 0, -1))
-        let yaw = Double(atan2(forward.x, -forward.z))
-        let pitch = Double(asin(forward.y))
-        return (yaw, pitch)
-    }
 
     /// 2026-05-22 (audit F2) — stitchMode auto-resolver.  Port of
     /// Android's `resolveStitchModeAuto` (IncrementalStitcher.kt:1727).

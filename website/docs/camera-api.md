@@ -37,7 +37,43 @@ Uncontrolled internal-tester knobs; most apps never set these.
 | `defaultFlowMaxTranslationCm` | `number` | `50` | Max IMU translation between keyframes; 0 = disabled. |
 | `defaultKeyframeMaxCount` | `number` | `6` | Keyframe cap per capture (3–10). |
 | `defaultKeyframeOverlapThreshold` | `number` | `0.20` | Min overlap to accept a keyframe (0.20–0.60). |
+| `defaultMaxKeyframeIntervalMs` | `number` | `2000` | Time-budget force-accept: take a keyframe at least every N ms during a pan even if the overlap/novelty threshold isn't met, so a slow or static pan never leaves a temporal gap. Force-accepted keyframes still count toward the keyframe cap. `0` = disabled. AR + non-AR. Also exposed as the `FrameSelectionSettings.maxKeyframeIntervalMs` settings field and in the in-app settings panel. |
 | `defaultCompositingResolMP`<br/>`defaultRegistrationResolMP`<br/>`defaultSeamEstimationResolMP` | `number` | — | Forward-looking cv::Stitcher resolution knobs (currently no-ops). |
+| `maxInscribedRectCrop` | `boolean` | `false` | Opt in with `true` to crop the finished panorama to the largest inscribed rectangle (clean edges, no black corners) instead of the bounding box. See [Inscribed-rect crop](#inscribed-rect-crop) below. |
+
+### Inscribed-rect crop
+
+When `cv::Stitcher` warps the keyframes onto the output canvas, the filled
+region is rarely a perfect rectangle — the edges curve and the corners are
+often empty (black), especially on a wide pan or a `plane` / `cylindrical`
+warp. `maxInscribedRectCrop` chooses how that canvas is cropped at finalize:
+
+- **`false` (default)** — crop to the **bounding rectangle** of the non-black
+  pixels (`cv::boundingRect`): keeps every stitched pixel, but can leave black
+  corners where the projection didn't fill.
+- **`true`** — crop to the **largest axis-aligned rectangle that fits entirely
+  inside the stitched (coverage) region**: clean, straight edges and no black
+  corners. The rectangle is computed from the stitch's coverage mask
+  (`cv::Stitcher::resultMask`), morphologically closed to fill small holes, with
+  a 50%-area safety floor — if the inscribed rectangle would be degenerate or
+  smaller than half the bounding box (a lopsided mask), it falls back to the
+  bounding-box crop. Because it shrinks the output to fit inside the filled
+  region, it can crop away a lot on lopsided or ultra-wide pans — which is why
+  it's **opt-in**.
+
+Because the default is `false`, you only pass the prop when you want to **opt
+in** to the inscribed-rect crop:
+
+```tsx
+// Default (false) — bounding-box crop, keeps every stitched pixel:
+<Camera onCapture={handleCapture} />
+
+// Opt in — clean inscribed rectangle, no black corners (may shrink the output):
+<Camera onCapture={handleCapture} maxInscribedRectCrop={true} />
+```
+
+The prop seeds the initial value at mount; the in-app settings modal (gear) can
+toggle it at runtime. It changes the output geometry, not the encoding.
 
 ## UI toggles
 

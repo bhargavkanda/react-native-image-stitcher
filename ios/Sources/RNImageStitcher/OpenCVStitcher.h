@@ -52,7 +52,7 @@ extern NSString *const RNImageStitcherErrorDomain;
                     framesIncluded:(NSInteger)framesIncluded
              finalConfidenceThresh:(double)finalConfidenceThresh NS_DESIGNATED_INITIALIZER;
 /// Convenience initializer for paths that don't carry C+D retry
-/// telemetry (e.g. stitchVideoAtPath / stitchKeyframePaths).  Sets
+/// telemetry (e.g. stitchVideoAtPath / stitchFramePaths).  Sets
 /// the telemetry fields to sentinel values (-1) so JS callers can
 /// detect "no retry data available" cleanly.
 - (instancetype)initWithOutputPath:(NSString *)outputPath
@@ -152,65 +152,6 @@ extern NSString *const RNImageStitcherErrorDomain;
                                        seamFinderType:(nullable NSString *)seamFinderType
                                                 error:(NSError **)error;
 
-/// Phase 5: pose-driven stitch.  Same end-to-end shape as
-/// `stitchVideoAtPath` but consumes pre-computed camera poses
-/// (from ARKit/ARCore via RNSARSession) and skips the
-/// brittle features → matching → BundleAdjuster steps.  Internally:
-///
-///   1. Extract maxFrames evenly-spaced frames from the video.
-///   2. Compute each frame's timestamp (fraction × totalSeconds).
-///   3. Match each frame to the nearest pose in `poses` (within
-///      a 100 ms tolerance).
-///   4. Build cv::detail::CameraParams directly from the pose's
-///      quaternion + intrinsics — flips coordinate conventions
-///      between ARKit (Y-up, -Z forward) and OpenCV (Y-down,
-///      +Z forward).
-///   5. Hand cameras to the existing warp + seam + blend pipeline.
-///
-/// `poses` is an NSArray of NSDictionary; each entry has the keys
-/// matching `RNSARFramePose.asDictionary()`:
-///   tx, ty, tz, qx, qy, qz, qw, fx, fy, cx, cy,
-///   imageWidth, imageHeight, timestampMs, trackingState
-/// Frames whose closest pose is missing or beyond tolerance fall
-/// back to the feature-matched path frame-by-frame (degraded but
-/// functional).  When ALL poses are missing the method returns
-/// the same NSError code (1030) so the host can opt to retry via
-/// the non-pose path.
-+ (nullable RNStitchResult *)stitchVideoAtPath:(NSString *)videoPath
-                                           outputPath:(NSString *)outputPath
-                                            maxFrames:(NSInteger)maxFrames
-                                          jpegQuality:(NSInteger)quality
-                                           warperType:(nullable NSString *)warperType
-                                          blenderType:(nullable NSString *)blenderType
-                                       seamFinderType:(nullable NSString *)seamFinderType
-                                                poses:(NSArray<NSDictionary *> *)poses
-                                                error:(NSError **)error;
-
-/// V16 Phase 1: pose-driven stitch over an explicit list of frame
-/// paths.  Sibling of `stitchVideoAtPath:withPoses:` — same compose
-/// stage, but the caller supplies frames as already-on-disk JPEGs
-/// + a 1:1 pose array, so the video extraction + timestamp matching
-/// steps are skipped entirely.
-///
-/// This is the hot path for the "batch-on-AR-keyframes" flow: the
-/// Swift `KeyframeGate` accepts ≤6 frames per capture, each saved
-/// to disk with a known pose; on shutter release we feed those
-/// straight into the same `BundleAdjuster + GraphCutSeamFinder +
-/// MultiBandBlender` pipeline that the video-driven path uses.
-///
-/// `framePaths.count` MUST equal `poses.count` (1:1 mapping; any
-/// downstream filtering happens inside this method).  `framePaths`
-/// must be at least 2 entries.  Pose dictionaries follow the same
-/// shape as `RNSARFramePose.asDictionary()`.
-+ (nullable RNStitchResult *)stitchKeyframePaths:(NSArray<NSString *> *)framePaths
-                                            outputPath:(NSString *)outputPath
-                                           jpegQuality:(NSInteger)quality
-                                            warperType:(nullable NSString *)warperType
-                                           blenderType:(nullable NSString *)blenderType
-                                        seamFinderType:(nullable NSString *)seamFinderType
-                                                 poses:(NSArray<NSDictionary *> *)poses
-                                                 error:(NSError **)error;
-
 /// Normalise the EXIF orientation of `imagePath` in place.
 ///
 /// vision-camera writes photos with the camera-sensor's native
@@ -233,6 +174,33 @@ extern NSString *const RNImageStitcherErrorDomain;
 /// into a throwing API — a nullable reference type is required.
 + (nullable NSDictionary<NSString *, NSNumber *> *)normaliseImageAtPath:(NSString *)imagePath
                                                                   error:(NSError **)error;
+
+/// v0.15 debug — compute the max-inscribed rectangle of the non-black
+/// region of the JPEG at `imagePath` WITHOUT modifying the file.
+/// Returns `{ x, y, width, height, imageWidth, imageHeight }` so the JS
+/// debug harness can overlay the rect on the full image.  Reuses the
+/// same `MaxInscribedRectFromMask` the production crop uses.
++ (nullable NSDictionary<NSString *, NSNumber *> *)computeInscribedRectAtPath:(NSString *)imagePath
+                                                                       error:(NSError **)error;
+
+/// v0.15 debug — crop the JPEG at `imagePath` to the given rectangle
+/// (clamped to image bounds), re-encode at `quality`, overwrite in
+/// place.  Returns the final `{ width, height }`.
++ (nullable NSDictionary<NSString *, NSNumber *> *)cropToRectAtPath:(NSString *)imagePath
+                                                                 x:(NSInteger)x
+                                                                 y:(NSInteger)y
+                                                             width:(NSInteger)width
+                                                            height:(NSInteger)height
+                                                           quality:(NSInteger)quality
+                                                             error:(NSError **)error;
+
+/// v0.15 debug — write a red-tinted overlay JPEG (excluded / sub-threshold
+/// pixels rendered red) next to `imagePath` (suffix ".mask.jpg") so the
+/// harness can show WHY the inscribed rect lands where it does. Returns
+/// `{ maskPath, width, height, excludedPercent }`.
++ (nullable NSDictionary *)debugMaskOverlayAtPath:(NSString *)imagePath
+                                        threshold:(NSInteger)threshold
+                                            error:(NSError **)error;
 
 @end
 

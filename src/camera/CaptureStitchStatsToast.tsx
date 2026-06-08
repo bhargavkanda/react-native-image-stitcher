@@ -23,28 +23,47 @@ import type { IncrementalFinalizeResult } from '../stitching/incremental';
 export interface CaptureStitchStatsToastProps {
   /** Toast message to show.  Pass null to hide. */
   message: string | null;
+  /**
+   * Optional bold title rendered above the message (e.g. an action ask
+   * like "Pan more slowly").  Omit for a plain single-line toast.
+   */
+  title?: string | null;
   /** Top inset for safe-area placement.  Toast pinned `topInset + 12`. */
   topInset?: number;
+  /**
+   * Vertical placement.  'top' (default) pins it `topInset + 12` from the
+   * top; 'center' vertically centers it — more prominent, and dodges the
+   * notch / Dynamic Island entirely.
+   */
+  placement?: 'top' | 'center';
 }
 
 export function CaptureStitchStatsToast({
   message,
+  title = null,
   topInset = 0,
+  placement = 'top',
 }: CaptureStitchStatsToastProps): React.JSX.Element | null {
   if (message === null) return null;
   return (
     <View
       pointerEvents="none"
-      style={[
-        styles.wrap,
-        { top: topInset + 12 },
-      ]}
+      style={
+        placement === 'center'
+          ? styles.wrapCenter
+          : [styles.wrap, { top: topInset + 12 }]
+      }
     >
       <View
         style={styles.capsule}
         accessibilityRole="alert"
         accessibilityLiveRegion="polite"
       >
+        {title ? (
+          <Text style={styles.title} numberOfLines={2}>
+            {title}
+          </Text>
+        ) : null}
         <Text style={styles.text} numberOfLines={3}>
           {message}
         </Text>
@@ -61,12 +80,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     zIndex: 110,
   },
+  wrapCenter: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 24,
+    right: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 110,
+  },
   capsule: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 16,
     backgroundColor: 'rgba(15, 23, 42, 0.92)',
     maxWidth: '100%',
+  },
+  title: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: 3,
   },
   text: {
     color: '#ffffff',
@@ -93,7 +129,9 @@ const styles = StyleSheet.create({
  */
 export interface UseStitchStatsToastReturn {
   message: string | null;
-  showFor: (msg: string, ms?: number) => void;
+  /** Optional bold title shown above `message` (pass to the toast). */
+  title: string | null;
+  showFor: (msg: string, ms?: number, title?: string) => void;
   showResult: (result: IncrementalFinalizeResult, ms?: number) => void;
 }
 
@@ -101,16 +139,22 @@ const DEFAULT_DISMISS_MS = 4500;
 
 export function useStitchStatsToast(): UseStitchStatsToastReturn {
   const [message, setMessage] = useState<string | null>(null);
+  const [title, setTitle] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showFor = useCallback((msg: string, ms = DEFAULT_DISMISS_MS) => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    setMessage(msg);
-    timerRef.current = setTimeout(() => {
-      setMessage(null);
-      timerRef.current = null;
-    }, ms);
-  }, []);
+  const showFor = useCallback(
+    (msg: string, ms = DEFAULT_DISMISS_MS, titleText?: string) => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      setTitle(titleText ?? null);
+      setMessage(msg);
+      timerRef.current = setTimeout(() => {
+        setMessage(null);
+        setTitle(null);
+        timerRef.current = null;
+      }, ms);
+    },
+    [],
+  );
 
   const showResult = useCallback(
     (result: IncrementalFinalizeResult, ms = DEFAULT_DISMISS_MS) => {
@@ -151,5 +195,5 @@ export function useStitchStatsToast(): UseStitchStatsToastReturn {
     if (timerRef.current) clearTimeout(timerRef.current);
   }, []);
 
-  return { message, showFor, showResult };
+  return { message, title, showFor, showResult };
 }

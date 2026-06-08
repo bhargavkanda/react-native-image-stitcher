@@ -61,6 +61,7 @@ describe('buildPanoramaInitialSettings', () => {
         defaultFlowMaxTranslationCm: 12,
         defaultKeyframeMaxCount: 8,
         defaultKeyframeOverlapThreshold: 0.30,
+        maxInscribedRectCrop: true,
       },
       false,
     );
@@ -75,6 +76,46 @@ describe('buildPanoramaInitialSettings', () => {
     expect(s.frameSelection.flow?.maxTranslationCm).toBe(12);
     expect(s.frameSelection.maxKeyframes).toBe(8);
     expect(s.frameSelection.overlapThreshold).toBe(0.30);
+    expect(s.stitcher.enableMaxInscribedRectCrop).toBe(true);
+  });
+
+  it('maps maxInscribedRectCrop → stitcher.enableMaxInscribedRectCrop', () => {
+    expect(
+      buildPanoramaInitialSettings({ maxInscribedRectCrop: true }, false)
+        .stitcher.enableMaxInscribedRectCrop,
+    ).toBe(true);
+    expect(
+      buildPanoramaInitialSettings({ maxInscribedRectCrop: false }, false)
+        .stitcher.enableMaxInscribedRectCrop,
+    ).toBe(false);
+    // Omitted ⇒ default (false — inscribed-rect crop is opt-in), and the
+    // low-mem fallback must not flip it.
+    expect(
+      buildPanoramaInitialSettings({}, false)
+        .stitcher.enableMaxInscribedRectCrop,
+    ).toBe(false);
+    expect(
+      buildPanoramaInitialSettings({}, true)
+        .stitcher.enableMaxInscribedRectCrop,
+    ).toBe(false);
+  });
+
+  it('maps defaultMaxKeyframeIntervalMs → frameSelection.maxKeyframeIntervalMs', () => {
+    expect(
+      buildPanoramaInitialSettings({ defaultMaxKeyframeIntervalMs: 3500 }, false)
+        .frameSelection.maxKeyframeIntervalMs,
+    ).toBe(3500);
+    // 0 explicitly disables the time-budget force-accept — it is NOT
+    // nullish, so `??` does not replace it with the default.
+    expect(
+      buildPanoramaInitialSettings({ defaultMaxKeyframeIntervalMs: 0 }, false)
+        .frameSelection.maxKeyframeIntervalMs,
+    ).toBe(0);
+    // Omitted ⇒ the 2000 ms default.
+    expect(
+      buildPanoramaInitialSettings({}, false)
+        .frameSelection.maxKeyframeIntervalMs,
+    ).toBe(2000);
   });
 
   it('leaves non-overridden fields at the default (partial override)', () => {

@@ -95,10 +95,6 @@ public class StitcherBridge: NSObject {
     let warperType = (options["warperType"] as? String) ?? "plane"
     let blenderType = (options["blenderType"] as? String) ?? "multiband"
     let seamFinderType = (options["seamFinderType"] as? String) ?? "graphcut"
-    // Optional pose log from the host's RNSARSession snapshot.
-    // When present and non-empty, the native stitcher routes to the
-    // pose-driven path (skips features → matching → BA).
-    let poses = options["poses"] as? [[String: Any]]
 
     let stitchOpts = StitchVideoOptions(
       videoPath: videoPath,
@@ -112,7 +108,7 @@ public class StitcherBridge: NSObject {
 
     DispatchQueue.global(qos: .userInitiated).async {
       do {
-        let result = try Stitcher.stitchVideo(stitchOpts, poses: poses)
+        let result = try Stitcher.stitchVideo(stitchOpts)
         resolver([
           "outputPath": result.outputPath,
           "width": result.width,
@@ -175,6 +171,137 @@ public class StitcherBridge: NSObject {
         }
       } catch {
         rejecter("unknown", "Unexpected normaliseOrientation failure: \(error)", error)
+      }
+    }
+  }
+
+  /// v0.15 debug — compute the max-inscribed rectangle of `imagePath`
+  /// without modifying it.  Resolves
+  /// `{ x, y, width, height, imageWidth, imageHeight }`.
+  @objc(computeInscribedRect:resolver:rejecter:)
+  public func computeInscribedRect(
+    options: NSDictionary,
+    resolver: @escaping RCTPromiseResolveBlock,
+    rejecter: @escaping RCTPromiseRejectBlock
+  ) {
+    guard let imagePath = options["imagePath"] as? String else {
+      rejecter("invalid-options", "imagePath must be a string", nil)
+      return
+    }
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let r = try Stitcher.computeInscribedRect(imagePath: imagePath)
+        resolver([
+          "x": r.x,
+          "y": r.y,
+          "width": r.width,
+          "height": r.height,
+          "imageWidth": r.imageWidth,
+          "imageHeight": r.imageHeight,
+        ])
+      } catch let err as StitcherError {
+        switch err {
+        case .insufficientFrames(let count):
+          rejecter("insufficient-frames", "(unexpected for computeInscribedRect) frames=\(count)", err)
+        case .readFailed(let path):
+          rejecter("read-failed", "Could not read image: \(path)", err)
+        case .writeFailed(let path):
+          rejecter("write-failed", "Could not write image: \(path)", err)
+        case .opencvFailed(let code, let message):
+          rejecter("opencv-failed-\(code)", message, err)
+        }
+      } catch {
+        rejecter("unknown", "Unexpected computeInscribedRect failure: \(error)", error)
+      }
+    }
+  }
+
+  /// v0.15 debug — crop `imagePath` to the rectangle in `options`
+  /// (`x`, `y`, `width`, `height`) at `quality` (default 90), overwriting
+  /// in place.  Resolves the final `{ width, height }`.
+  @objc(cropToRect:resolver:rejecter:)
+  public func cropToRect(
+    options: NSDictionary,
+    resolver: @escaping RCTPromiseResolveBlock,
+    rejecter: @escaping RCTPromiseRejectBlock
+  ) {
+    guard let imagePath = options["imagePath"] as? String else {
+      rejecter("invalid-options", "imagePath must be a string", nil)
+      return
+    }
+    let x = (options["x"] as? NSNumber)?.intValue ?? 0
+    let y = (options["y"] as? NSNumber)?.intValue ?? 0
+    let width = (options["width"] as? NSNumber)?.intValue ?? 0
+    let height = (options["height"] as? NSNumber)?.intValue ?? 0
+    let quality = (options["quality"] as? NSNumber)?.intValue ?? 90
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let dims = try Stitcher.cropToRect(
+          imagePath: imagePath,
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          quality: quality
+        )
+        resolver([
+          "width": dims.width,
+          "height": dims.height,
+        ])
+      } catch let err as StitcherError {
+        switch err {
+        case .insufficientFrames(let count):
+          rejecter("insufficient-frames", "(unexpected for cropToRect) frames=\(count)", err)
+        case .readFailed(let path):
+          rejecter("read-failed", "Could not read image: \(path)", err)
+        case .writeFailed(let path):
+          rejecter("write-failed", "Could not write image: \(path)", err)
+        case .opencvFailed(let code, let message):
+          rejecter("opencv-failed-\(code)", message, err)
+        }
+      } catch {
+        rejecter("unknown", "Unexpected cropToRect failure: \(error)", error)
+      }
+    }
+  }
+
+  /// v0.15 debug — write a red-tinted mask overlay for `imagePath`
+  /// (excluded pixels red). `threshold` optional (default 1, matching the
+  /// inscribed-rect mask). Resolves
+  /// `{ maskPath, width, height, excludedPercent }`.
+  @objc(debugMaskOverlay:resolver:rejecter:)
+  public func debugMaskOverlay(
+    options: NSDictionary,
+    resolver: @escaping RCTPromiseResolveBlock,
+    rejecter: @escaping RCTPromiseRejectBlock
+  ) {
+    guard let imagePath = options["imagePath"] as? String else {
+      rejecter("invalid-options", "imagePath must be a string", nil)
+      return
+    }
+    let threshold = (options["threshold"] as? NSNumber)?.intValue ?? 1
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let r = try Stitcher.debugMaskOverlay(imagePath: imagePath, threshold: threshold)
+        resolver([
+          "maskPath": r.maskPath,
+          "width": r.width,
+          "height": r.height,
+          "excludedPercent": r.excludedPercent,
+        ])
+      } catch let err as StitcherError {
+        switch err {
+        case .insufficientFrames(let count):
+          rejecter("insufficient-frames", "(unexpected for debugMaskOverlay) frames=\(count)", err)
+        case .readFailed(let path):
+          rejecter("read-failed", "Could not read image: \(path)", err)
+        case .writeFailed(let path):
+          rejecter("write-failed", "Could not write image: \(path)", err)
+        case .opencvFailed(let code, let message):
+          rejecter("opencv-failed-\(code)", message, err)
+        }
+      } catch {
+        rejecter("unknown", "Unexpected debugMaskOverlay failure: \(error)", error)
       }
     }
   }

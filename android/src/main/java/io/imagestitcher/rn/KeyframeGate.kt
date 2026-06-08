@@ -140,6 +140,23 @@ internal class KeyframeGate : AutoCloseable {
             nativeSetFlowMaxTranslationM(nativeHandle, value)
         }
 
+    /// Wall-clock keyframe-interval budget, in MILLISECONDS, between
+    /// consecutive accepted keyframes before force-acceptance.  Same
+    /// knob iOS exposes via setMaxKeyframeIntervalMs (KeyframeGate.swift
+    /// `maxKeyframeIntervalMs`).  Unlike flowMaxTranslationM this applies
+    /// to BOTH the Pose and Flow strategies, and is passed STRAIGHT
+    /// THROUGH (already in the unit the C++ expects — no conversion).
+    /// Default 2000 ms (matches iOS); 0 = disabled.  The C++ setter
+    /// clamps to ≥ 0.  NOTE: like every other facade property the
+    /// initializer below does NOT fire this setter, so the caller
+    /// (IncrementalStitcher.kt) writes it explicitly at capture start
+    /// to push the value into C++ (same contract as the iOS facade).
+    var maxKeyframeIntervalMs: Double = 2000.0
+        set(value) {
+            field = value
+            nativeSetMaxKeyframeIntervalMs(nativeHandle, value)
+        }
+
     /// 2026-05-22 (audit F5) — Flow strategy: Shi-Tomasi max corners
     /// to track per frame.  Same knob iOS exposes via setFlowMaxCorners.
     /// C++ clamps to ≥ 30.  Higher = more sensitive to fine detail but
@@ -305,6 +322,9 @@ internal class KeyframeGate : AutoCloseable {
     private external fun nativeSetDisableAngularFallback(handle: Long, disabled: Boolean)
     private external fun nativeSetFlowNoveltyPercentile(handle: Long, percentile: Double)
     private external fun nativeSetFlowMaxTranslationM(handle: Long, metres: Double)
+    // Wall-clock keyframe-interval budget (ms).  iOS parity:
+    // KeyframeGateBridge.setMaxKeyframeIntervalMs.
+    private external fun nativeSetMaxKeyframeIntervalMs(handle: Long, ms: Double)
     // 2026-05-22 (audit F5) — flow-strategy tunables that were
     // previously iOS-only.  Add Android JNI parity so the Settings UI
     // sliders work on both platforms.
@@ -362,6 +382,15 @@ internal class KeyframeGate : AutoCloseable {
             9 -> "max-reached"
             10 -> "overlap-too-high"
             11 -> "overlap-too-high (angular)"
+            // Flow-strategy reasons (v0.3.0, cpp KeyframeGateDecisionReason
+            // 12-15) — strings must match the cpp/iOS labels exactly.
+            12 -> "ok-flow"
+            13 -> "first-flow"
+            14 -> "overlap-too-high (flow)"
+            15 -> "ok-flow-translation"
+            // Wall-clock keyframe-interval force-accept (Pose + Flow);
+            // cpp KeyframeGateDecisionReason::AcceptTimeInterval = 16.
+            16 -> "ok-time-interval"
             else -> "unknown($code)"
         }
     }

@@ -32,15 +32,23 @@ import {
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import {
   useCameraPermission,
+  // v0.15 — the SDK's `useFrameProcessor` host-worklet hook was archived in
+  // the batch-keyframe cleanup.  Compose first-party stitching directly on
+  // vision-camera's own `useFrameProcessor` + `useStitcherWorklet().call`,
+  // exactly as the `useStitcherWorklet` docblock prescribes.
+  useFrameProcessor,
+  type Frame,
 } from 'react-native-vision-camera';
 import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
   getIncrementalNativeModule,
   subscribeIncrementalState,
-  useFrameProcessor,
   useKeyframeStream,
   useStitcherWorklet,
+  userFacingStitchError,
+  useStitchStatsToast,
+  CaptureStitchStatsToast,
   type AcceptedKeyframe,
   type CameraCaptureResult,
   type CameraError,
@@ -50,8 +58,11 @@ import {
   type CapturePreviewAction,
   type FramesDroppedInfo,
   type IncrementalState,
-  type StitcherFrame,
 } from 'react-native-image-stitcher';
+import {
+  InscribedRectDebugOverlay,
+  inscribedRectDebugAvailable,
+} from './InscribedRectDebug';
 
 
 function App(): React.JSX.Element {
@@ -71,6 +82,13 @@ function App(): React.JSX.Element {
   // preview modal dismiss.  Drives the visibility of the modal.
   const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
 
+  // v0.15 — inscribed-rect crop debug harness (gated dev tool). When
+  // enabled, a captured panorama is sent to the overlay (which computes
+  // + draws the inscribed rectangle, then crops on confirm) instead of
+  // the normal preview.
+  const [rectDebugEnabled, setRectDebugEnabled] = useState(false);
+  const [rectDebugUri, setRectDebugUri] = useState<string | null>(null);
+
   // v0.13.0 — controlled flash state demo.  The host owns the
   // `'on' | 'off'` value; the built-in flash button drives the
   // `onFlashChange` callback and we mirror it back via the
@@ -78,6 +96,12 @@ function App(): React.JSX.Element {
   // (greyed + a11y "Flash unavailable in AR mode"); no host work
   // required for that.
   const [flash, setFlash] = useState<'on' | 'off'>('off');
+
+  // Toast for the dropped-frames "pan slower" hint.  Only fires when
+  // >30% of the requested frames are missing from the final stitch
+  // (e.g. >=2 of 6); a smaller drop stays silent.  Shown as a transient
+  // toast (CaptureStitchStatsToast), not a modal.
+  const dropToast = useStitchStatsToast();
 
   // v0.13.0 — capture-history thumbnails.  Appended on every
   // successful onCapture; rendered by `<Camera>`'s built-in
@@ -171,18 +195,18 @@ function App(): React.JSX.Element {
   // `<Camera>` isn't mounted in that path).
   const stitcher = useStitcherWorklet();
   const exampleFrameProcessor = useFrameProcessor(
-    (frame: StitcherFrame) => {
+    (frame: Frame) => {
       'worklet';
-      // First-party stitching (v0.11.0 composition).  Safe to call
-      // in BOTH modes — the hook internally no-ops on AR-source
-      // frames (v0.11.1 fix) because AR stitching runs natively
-      // via the AR-side dispatcher, not via the vc plugin.  See
-      // `useStitcherWorklet` module header.
+      // First-party stitching (v0.11.0 composition).  `stitcher.call`
+      // takes a raw vision-camera `Frame` directly (its input type is
+      // `Frame | StitcherFrame`) and no-ops on AR-source frames because
+      // AR stitching runs natively via the AR-side dispatcher, not the
+      // vc plugin.  See the `useStitcherWorklet` module header.
       stitcher.call(frame);
-      // Example app's tick log.  `source`/`pose` may be undefined
-      // for vc-source frames (Phase 4a cross-boundary wrapping
-      // deferral); guard for that.
-      fireFrameProcessorLog(frame.timestamp ?? 0, frame.source ?? 'vc');
+      // Example app's tick log.  This processor only fires for vc-source
+      // frames (vc's `<Camera>` isn't mounted in AR mode), so the source
+      // is always 'vc'.
+      fireFrameProcessorLog(frame.timestamp ?? 0, 'vc');
     },
     [stitcher.call, fireFrameProcessorLog],
   );
@@ -259,6 +283,13 @@ function App(): React.JSX.Element {
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
+    // v0.15 — route a panorama into the inscribed-rect debug overlay
+    // when the harness is on (it expects the full, uncropped image —
+    // the library default is bounding-rect, which is exactly that).
+    if (rectDebugEnabled && result.type === 'panorama') {
+      setRectDebugUri(result.uri);
+      return;
+    }
     setPreview(result);
     // v0.13.0 — append to the host-owned thumbnails list so the
     // built-in CaptureThumbnailStrip shows the capture history.
@@ -321,14 +352,43 @@ function App(): React.JSX.Element {
   };
 
   const handleFramesDropped = (info: FramesDroppedInfo): void => {
+    const missing = info.requested - info.included;
     // eslint-disable-next-line no-console
     console.warn(
       '[example] onFramesDropped',
-      `${info.included}/${info.requested}`,
+      `${info.included}/${info.requested} (missing ${missing})`,
     );
+    // The panorama succeeded but some keyframes were dropped for low
+    // overlap (included < requested).  Only nudge the user when the loss
+    // is significant — more than 30% of the requested frames missing
+    // (e.g. >=2 of 6); a 1-of-6 drop isn't worth interrupting for.  Shown
+    // as a transient toast, not a modal.
+    if (info.requested > 0 && missing / info.requested > 0.3) {
+      dropToast.showFor(
+        `${missing} of ${info.requested} frames were dropped for low `
+          + 'overlap — a slower, steadier pan captures the full scene.',
+        4000,
+        'Pan more slowly next time',
+      );
+    }
   };
 
   const handleError = (err: CameraError): void => {
+    // Recoverable stitch failures (not enough overlap, too much camera
+    // movement / degenerate camera params, alignment fail, OOM) get
+    // friendly, action-guiding copy from the SDK's shared map — so the
+    // user sees "pan more slowly / pivot in place" instead of a raw
+    // cv::Stitcher diagnostic.  Everything else falls through to the loud
+    // diagnostic alert.
+    const guidance = userFacingStitchError(err.code);
+    if (guidance) {
+      // warn (not error) so the dev LogBox doesn't throw a red overlay
+      // over our friendly Alert for an expected, recoverable outcome.
+      // eslint-disable-next-line no-console
+      console.warn('[example] onError (recoverable)', err.code, err.message);
+      Alert.alert(guidance.title, guidance.message);
+      return;
+    }
     // eslint-disable-next-line no-console
     console.error('[example] onError', err.code, err.message);
     Alert.alert(`Camera error (${err.code})`, err.message);
@@ -441,6 +501,11 @@ function App(): React.JSX.Element {
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
+          // v0.15 — inscribed-rect crop is OFF by default: the panorama is
+          // the bounding box of stitched content (may show black corners on
+          // wide / tilted pans).  Opt in with `maxInscribedRectCrop` (or the
+          // gear → settings toggle) for the clean-edged inscribed rectangle —
+          // it can shrink ultra-wide / lopsided pans, which is why it's opt-in.
           // Internal-tester mode: gear icon opens PanoramaSettingsModal.
           // With `headerTitle` set below, the gear is absorbed into
           // the built-in CaptureHeader's right slot (no duplicate gear).
@@ -512,6 +577,32 @@ function App(): React.JSX.Element {
         )}
 
 
+        {__DEV__ && inscribedRectDebugAvailable() && (
+          <Pressable
+            style={styles.rectDebugToggle}
+            onPress={() => setRectDebugEnabled((v) => !v)}
+            accessibilityRole="button"
+          >
+            <Text style={styles.rectDebugToggleText}>
+              🔍 Rect debug: {rectDebugEnabled ? 'ON' : 'OFF'}
+            </Text>
+          </Pressable>
+        )}
+
+        {rectDebugUri && (
+          <InscribedRectDebugOverlay
+            uri={rectDebugUri}
+            onClose={() => setRectDebugUri(null)}
+          />
+        )}
+
+        {/* Dropped-frames "pan slower" toast (only when >30% missing). */}
+        <CaptureStitchStatsToast
+          title={dropToast.title}
+          message={dropToast.message}
+          placement="center"
+        />
+
         {/*
           v0.13.0 — the pre-v0.13 hand-rolled <Modal>...</Modal> block
           that lived here has been replaced by `<Camera>`'s built-in
@@ -538,6 +629,20 @@ function App(): React.JSX.Element {
 
 
 const styles = StyleSheet.create({
+  rectDebugToggle: {
+    position: 'absolute',
+    top: 110,
+    left: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+  },
+  rectDebugToggleText: {
+    color: '#00E5FF',
+    fontSize: 13,
+    fontWeight: '600',
+  },
   safe: {
     flex: 1,
     backgroundColor: '#000',

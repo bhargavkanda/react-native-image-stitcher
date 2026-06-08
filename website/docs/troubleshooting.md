@@ -30,6 +30,14 @@ fuller table mapping crashes to missing config.
 | `STITCH_OOM` | Out of memory — shorter pan / fewer keyframes (`defaultKeyframeMaxCount`). |
 | `OUTPUT_WRITE_FAILED` | `outputDir` not writable / missing — the lib creates it, but check permissions. |
 
+The four `STITCH_*` codes are recoverable by re-capturing. To show the user
+friendly, action-guiding copy ("pan more slowly", "pivot in place") instead of
+the raw `cv::Stitcher` diagnostic, pass `err.code` to the SDK's
+[`userFacingStitchError`](./capture-result.md#friendly-copy-for-recoverable-failures--userfacingstitcherror)
+helper in your `onError` handler. Wide / 0.5× ultra-wide panoramas that used to
+fail with `STITCH_CAMERA_PARAMS_FAIL` now auto-retry with a cylindrical warp and
+usually complete (v0.15).
+
 ## Orientation
 
 | Symptom | Cause / fix |

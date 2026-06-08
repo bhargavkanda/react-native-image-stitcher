@@ -16,6 +16,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-06-07
+
+### Breaking — only `batch-keyframe` remains; host-worklet / frame-stream hooks removed
+
+The live/incremental stitching engines (hybrid, slit-scan, firstwins) and the
+third-party host-worklet / frame-stream observer API were archived (kept under
+`archive/`, excluded from every build surface) so the SDK now ships only the
+`batch-keyframe` capture path.  Removed from the public API:
+
+- **Hooks** `useFrameProcessor`, `useThrottledFrameProcessor`, `useFrameStream`
+  and their option types (`ThrottledFrameProcessorOptions`, `FrameStreamOptions`,
+  `SampledFrame`).  To compose first-party stitching, use vision-camera's own
+  `useFrameProcessor` with `useStitcherWorklet().call(frame)` (see the example app).
+- The **slit-scan / hybrid** panorama-engine settings types and their
+  native-config adapters (`slitscanSettingsToNativeConfig`,
+  `hybridSettingsToNativeConfig`).
+
+A type-only break for the default batch-keyframe path; per the 0.x stability
+policy this bumps a new MINOR.
+
+### Changed — iOS + Android unified on the manual `cv::detail` stitch pipeline
+
+Both platforms now run the **same** manual `cv::detail` stitch pipeline
+(`useManualPipeline=true` on both), so a given capture produces consistent,
+more robust output regardless of platform.  Previously iOS used the manual
+pipeline while Android used the high-level `cv::Stitcher` — the two diverged on
+resolution, exposure handling, and wide-capture robustness.  The unified manual
+path carries:
+
+- **Exposure compensation** (`cv::detail::GainCompensator`, GAIN_BLOCKS) — evens
+  brightness/colour across frames before blending, removing the visible seam
+  steps the manual path previously had.
+- **Matched registration / compositing resolution** (registration 0.6 MP,
+  composite 1.0 MP) on both platforms.
+- The **cylindrical warp fallback** (below), so wide / 0.5× captures survive on
+  both platforms.
+
+The decision was made after an on-device A/B (manual vs high-level at matched
+resolution): with parity the manual path matched the high-level on quality and
+was strictly more robust on wide captures.  Background + the verification trail
+are recorded in [`docs/stitch-pipeline-architecture.md`](docs/stitch-pipeline-architecture.md).
+
+### Added — cylindrical warp fallback for wide / 0.5× captures
+
+When the configured (plane) warper would diverge on a wide or 0.5× ultra-wide
+capture — a single frame's warp canvas exceeding the 100 MP guard — the stitcher
+now auto-retries with the bounded cylindrical projection instead of failing with
+`STITCH_CAMERA_PARAMS_FAIL`.  Wide and ultra-wide (0.5×) panoramas that
+previously errored out now complete.  Because the pipeline is now unified
+(above), this fallback applies on both iOS and Android.
+
+### Added — `userFacingStitchError()` for friendly recoverable-stitch copy
+
+New public SDK export that maps a recoverable stitch `CameraErrorCode`
+(`STITCH_NEED_MORE_IMGS`, `STITCH_CAMERA_PARAMS_FAIL`, `STITCH_HOMOGRAPHY_FAIL`,
+`STITCH_OOM`) to friendly, action-guiding `{ title, message }` copy for a host
+`Alert` / toast — so the user sees "pan more slowly" / "pivot in place" instead
+of the raw `cv::Stitcher` diagnostic.  Returns `null` for every non-recoverable
+code (permission denied, device unavailable, generic finalize failure, unknown,
+…), so the host falls back to its generic error UI.  Call it from `onError`:
+
+```tsx
+import { userFacingStitchError } from 'react-native-image-stitcher';
+
+onError={(err) => {
+  const friendly = userFacingStitchError(err.code);
+  if (friendly) Alert.alert(friendly.title, friendly.message);
+  else reportGenericError(err);
+}}
+```
+
+Also exports the `UserFacingStitchError` type (`{ title, message }`).  Lives in
+the SDK (not per-host) so every consumer shows the same vetted guidance for the
+same failure, and so the mapping is unit-testable in isolation.
+
+### Fixed — friendlier stitch-failure classification + example UX
+
+- `STITCH_NEED_MORE_IMGS` now also classifies the manual pipeline's "0 valid
+  pairwise matches / frames may not overlap enough" failure, which previously
+  surfaced as a generic `PANORAMA_FINALIZE_FAILED`.  Both insufficient-overlap
+  signals now map to the same recoverable "pan more slowly" outcome (and so pick
+  up the `userFacingStitchError` copy above).
+- The example app now shows friendly, action-guiding guidance — via
+  `userFacingStitchError` (an Alert) on a stitch failure (`onError`), and a
+  transient **toast** when frames are dropped for insufficient overlap
+  (`onFramesDropped`) — shown only when **>30%** of the requested frames are
+  missing from the final stitch (e.g. ≥2 of 6), so minor drops stay silent.  The toast (`CaptureStitchStatsToast`) also
+  gained optional `title` (bold, above the message) and `placement`
+  (`'top'` | `'center'`) props; the example shows a centered title+body toast.
+  Failure alerts now lead with the corrective ask as the title (e.g. "Please
+  pan more slowly" / "Try a shorter sweep") and explain the cause in the body.
+
+### Fixed — reach the ultra-wide by device-swap when a logical multi-cam can't (Samsung / Camera2)
+
+`selectCaptureDevice` now device-swaps to a standalone ultra-wide camera when a
+logical multi-cam device merely *lists* the ultra-wide but can't reach it by
+`zoom` (its zoom range starts at 1.0 — common on Android / Camera2 / Samsung,
+where the ultra-wide is a separate physical camera rather than a zoom target).
+Previously such devices stayed on the multi-cam device and 0.5× showed the
+wide-angle FOV.  A logical device whose zoom range genuinely extends to the
+ultra-wide (e.g. iOS virtual devices, `minZoom ≈ 0.5`) is still preferred and
+lens-switches via zoom as before.
+
+### Added — time-budget keyframe force-accept (`maxKeyframeIntervalMs`)
+
+The keyframe gate now force-accepts a keyframe when a configurable wall-clock
+interval has elapsed since the last accepted keyframe — even if the novelty /
+overlap threshold wasn't met — so a slow or static pan never leaves a temporal
+gap.  Default **2000 ms (2 s)**; `0` disables it.  Configurable via the
+`<Camera defaultMaxKeyframeIntervalMs>` prop, the `FrameSelectionSettings.maxKeyframeIntervalMs`
+field, or the in-app settings panel.  Applies to BOTH AR (plane-overlap) and
+non-AR (flow) capture paths; force-accepted keyframes count toward
+`maxKeyframes` (the cap still finalises the capture).
+
+### Added — inscribed-rect panorama crop (opt-in)
+
+`<Camera maxInscribedRectCrop={true}>` (and the `enableMaxInscribedRectCrop`
+panorama setting) crops the finished panorama to the largest axis-aligned
+rectangle inscribed in the coverage mask — clean edges with no black corners
+from unfilled projection regions.  **It is opt-in; the default is off.**  The
+default crop stays the bounding box of non-black pixels, which preserves all
+stitched content but can leave black corners.  Inscribed-rect can shrink the
+output substantially on lopsided or ultra-wide masks, so it isn't the default.
+
+### Fixed — Android keyframe-gate flow reason labels
+
+`KeyframeGate.reasonFromCode` (Android) didn't map the v0.3.0 flow-strategy
+reason codes 12–15, so accepted keyframes logged as `unknown(12)`.  They now
+read `ok-flow` / `first-flow` / `overlap-too-high (flow)` / `ok-flow-translation`,
+matching the iOS labels.  Logging only — keyframe selection is unchanged.
+
 ## [0.14.2] — 2026-06-03
 
 ### Fixed — AR preview blank on first entry (intermittent camera-handoff race)

@@ -145,19 +145,16 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
                captureOrientation,
                Int32(rotation),
                String(describing: options["captureOrientation"]))
-        // V15 — engine selection.  Three modes:
-        //   'hybrid'           — planar projection + feature matching
-        //   'slitscan-rotate'  — V13.0a + 1D NCC for rotation wobble
-        //   'slitscan-both'    — DEFAULT — V13.0a + no gate + feather
-        //                         blend; iterate via per-stage toggles
-        //                         in the config dict.
-        // Backward compat: 'firstwins-rectilinear' → 'slitscan-rotate'.
-        // Legacy 'firstwins' / 'firstwins-zoomed' / 'slitscan' fall
-        // back to 'slitscan-both' with a deprecation warning.
-        let engineMode = (options["engine"] as? String) ?? "slitscan-both"
+        // Engine selection.  The live incremental engines (hybrid,
+        // slitscan-*, and the legacy firstwins* aliases) were archived
+        // in the 2026-06 batch-keyframe cleanup — the SDK now ships
+        // only 'batch-keyframe'.  Any other value is still accepted for
+        // backward compatibility but falls back to batch-keyframe with
+        // a deprecation log inside IncrementalStitcher.start().
+        let engineMode = (options["engine"] as? String) ?? "batch-keyframe"
 
-        // V15 — per-stage config overrides.  All optional; missing
-        // fields use mode defaults from +[RLISStitcherConfig configForMode:].
+        // Per-stage config overrides.  All optional; keys not consumed
+        // by the batch-keyframe pipeline are ignored.
         let configOverrides = options["config"] as? [String: Any] ?? [:]
 
         IncrementalStitcher.shared.start(

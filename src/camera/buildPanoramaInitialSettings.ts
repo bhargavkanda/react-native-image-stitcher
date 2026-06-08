@@ -58,6 +58,17 @@ export interface PanoramaPropOverrides {
   defaultFlowMaxTranslationCm?: number;
   defaultKeyframeMaxCount?: number;
   defaultKeyframeOverlapThreshold?: number;
+  /**
+   * Initial value for `frameSelection.maxKeyframeIntervalMs` — the
+   * time-budget force-accept (ms).  `0` disables it.  Default 2000.
+   */
+  defaultMaxKeyframeIntervalMs?: number;
+  /**
+   * v0.15 — initial value for `stitcher.enableMaxInscribedRectCrop`.
+   * Maps from the standalone `maxInscribedRectCrop` <Camera> prop.
+   * Omitted ⇒ the stitcher default (false = bounding-rect crop).
+   */
+  maxInscribedRectCrop?: boolean;
 }
 
 
@@ -113,6 +124,9 @@ export function buildPanoramaInitialSettings(
       blenderType: overrides.defaultBlender ?? stitcherDefaults.blenderType,
       seamFinderType:
         overrides.defaultSeamFinder ?? stitcherDefaults.seamFinderType,
+      enableMaxInscribedRectCrop:
+        overrides.maxInscribedRectCrop
+        ?? stitcherDefaults.enableMaxInscribedRectCrop,
     },
 
     frameSelection: {
@@ -122,6 +136,9 @@ export function buildPanoramaInitialSettings(
       overlapThreshold:
         overrides.defaultKeyframeOverlapThreshold
         ?? base.frameSelection.overlapThreshold,
+      maxKeyframeIntervalMs:
+        overrides.defaultMaxKeyframeIntervalMs
+        ?? base.frameSelection.maxKeyframeIntervalMs,
       flow: {
         ...flowDefaults,
         noveltyPercentile:

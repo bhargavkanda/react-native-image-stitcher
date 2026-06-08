@@ -25,7 +25,7 @@
  * still use the SDK's quality + stitching modules.
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Camera,
   useCameraDevice,
@@ -308,6 +308,49 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     device = legacyDevice ?? legacyFallback;
     activeZoom = undefined;
   }
+
+  // v0.15 diagnostic (dev-only) — for the "0.5× pill shows but tapping
+  // doesn't switch the camera" report on Android (Samsung).  Logs the
+  // resolved capture mode + the mounted device's zoom range so logcat
+  // reveals whether `minZoom` actually reaches the ultra-wide.  On
+  // Camera2 the logical multi-camera's zoom range usually starts at 1.0
+  // (the ultra-wide is a separate physical id, not a zoom target), so a
+  // zoom-based 0.5× switch is a silent no-op.
+  useEffect(() => {
+    if (!__DEV__) return;
+    const summarise = (d: DeviceLike | null) =>
+      d
+        ? {
+            id: d.id,
+            physical: d.physicalDevices,
+            isMultiCam: d.isMultiCam,
+            minZoom: d.minZoom,
+            neutralZoom: d.neutralZoom,
+            maxZoom: d.maxZoom,
+            hasTorch: d.hasTorch,
+          }
+        : null;
+    const back = (allDevices as unknown as DeviceLike[]).filter(
+      (d) => d.position === 'back',
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      '[rnimagestitcher] lens-select ' +
+        JSON.stringify({
+          lens: lens ?? null,
+          mode: selection.mode,
+          has0_5x: selection.has0_5x,
+          activeZoom: activeZoom ?? null,
+          selected: summarise(selection.device),
+          ultraWide: summarise(selection.ultraWideDevice),
+          // Full back-camera enumeration — reveals whether a multicam
+          // device merely *lists* the ultra-wide while its zoom range
+          // can't reach it (minZoom ~1.0), and whether a STANDALONE
+          // ultra-wide device exists for the standalone-uw fallback.
+          allBack: back.map(summarise),
+        }),
+    );
+  }, [allDevices, selection, lens, activeZoom]);
 
   // Enumerate ALL physical lens types available on the chosen
   // position so the host can decide whether to render a switcher.

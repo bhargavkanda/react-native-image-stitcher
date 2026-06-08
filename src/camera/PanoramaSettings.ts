@@ -204,6 +204,17 @@ export interface FrameSelectionSettings {
   overlapThreshold: number;
 
   /**
+   * Time-budget force-accept (BOTH strategies, AR + non-AR).  When > 0,
+   * the gate accepts a keyframe whenever this many milliseconds have
+   * elapsed since the last accepted keyframe — even if the novelty /
+   * overlap threshold wasn't met — so a slow or static pan never goes
+   * longer than this without a keyframe.  Counts toward `maxKeyframes`
+   * (the cap still finalises the capture).  `0` disables it.  Default
+   * `2000` (2 s).  Maps to the native gate's `setMaxKeyframeIntervalMs`.
+   */
+  maxKeyframeIntervalMs: number;
+
+  /**
    * Sparse-optical-flow strategy tunables.  Consulted only when
    * `mode === 'flow-based'`; safe to omit otherwise.  Defaults
    * track [DEFAULT_PANORAMA_SETTINGS.frameSelection.flow].
@@ -305,301 +316,17 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     warperType: 'plane',
     blenderType: 'multiband',
     seamFinderType: 'graphcut',
+    // v0.15 — inscribed-rect crop is OFF by default (bbox crop keeps all
+    // stitched content).  Opt in with `maxInscribedRectCrop={true}` (or toggle
+    // it on in settings) for a clean-cornered rectangle — but it can shrink the
+    // output a lot on lopsided / ultra-wide masks, which is why it's opt-in.
     enableMaxInscribedRectCrop: false,
   },
   frameSelection: {
     mode: 'flow-based',
     maxKeyframes: 6,
     overlapThreshold: 0.20,
+    maxKeyframeIntervalMs: 2000,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
   },
-};
-
-
-// ═════════════════════════════════════════════════════════════════════
-// SlitscanSettings — Layer 2 hosts using the slit-scan engine.
-// ═════════════════════════════════════════════════════════════════════
-
-/**
- * Settings for slit-scan stitching engines (`slitscan-rotate`,
- * `slitscan-both`, `firstwins-rectilinear`).  Reached via
- * `incremental.start({ engine: '<variant>', config: { ... } })`,
- * NOT via <Camera> (which always uses batch-keyframe).  Each
- * sub-tree corresponds to a section of the native `RLISStitcherConfig`
- * the slit-scan engine reads at start.
- *
- * Field-by-field native consumer references are documented in
- * `OpenCVSlitScanStitcher.mm` / `OpenCVIncrementalStitcher.h`.
- */
-export interface SlitscanSettings extends CaptureBaseSettings {
-  /**
-   * Which slit-scan variant the engine runs.  All three share the
-   * same painting + registration + plane configuration; they differ
-   * in their internal motion model (rotation-only vs combined
-   * translation+rotation, and slit position).
-   *
-   *   • `'slitscan-rotate'`         — preferred name; rotation-only
-   *     motion model.
-   *   • `'slitscan-both'`           — combined translation + rotation
-   *     motion model.
-   *   • `'firstwins-rectilinear'`   — legacy alias of
-   *     `'slitscan-rotate'` (V13.0a naming).  Accepted natively
-   *     but new code should prefer the canonical name.
-   */
-  variant: 'slitscan-rotate' | 'slitscan-both' | 'firstwins-rectilinear';
-
-  /** Where the per-accept slit is taken from + how it's blended. */
-  painting: SlitscanPaintingSettings;
-
-  /** Frame-to-frame registration (NCC + RANSAC + triangulation). */
-  registration: SlitscanRegistrationSettings;
-
-  /** Plane projection (ARKit-detected, virtual, or disabled). */
-  plane: PlaneProjectionSettings;
-
-  /**
-   * Advanced motion-tuning knobs that the v0.3 modal never exposed.
-   * Both are read by the native side
-   * (`IncrementalStitcher.swift:1074, 1077`) and have sensible
-   * defaults; most consumers can leave this field undefined.
-   */
-  advanced?: SlitscanAdvancedSettings;
-}
-
-
-export interface SlitscanAdvancedSettings {
-  /**
-   * Fraction of the pan-axis sensor extent used to compute the
-   * per-frame slit width.  Range `[0.05, 0.90]`, default 0.70
-   * (engine internal).  Higher = wider slits = fewer accepts per
-   * pan.  Set this only if you know what the slit-scan motion
-   * model needs for your specific capture geometry.
-   * Native key: `kPanAxisFractionRect`.
-   */
-  panAxisFractionRect?: number;
-
-  /**
-   * Minimum pan-axis delta (in canvas pixels) between consecutive
-   * accepted strips.  Acts as a hard floor below which subsequent
-   * frames are rejected regardless of NCC scores.  Range
-   * `[0, 500]`, default 0 (no floor).  Native key:
-   * `kMinAcceptDeltaPx`.
-   */
-  minAcceptDeltaPx?: number;
-}
-
-
-export interface SlitscanPaintingSettings {
-  /**
-   * How new strips are blended into already-painted canvas pixels.
-   *
-   *   • `'FirstPaintedWins'` (default) — preserve the first frame's
-   *     content at any pixel; later strips don't overwrite.
-   *   • `'FeatherBlend'`               — alpha-blend new strips into
-   *     already-painted areas at slit boundaries.  Smooths visible
-   *     seams when many narrow slits stack.
-   */
-  paintMode: 'FirstPaintedWins' | 'FeatherBlend';
-
-  /**
-   * Where on the camera frame the per-accept slit is sampled from.
-   * For a typical landscape vertical pan tilting DOWN, the leading
-   * edge (new content) is at the BOTTOM of the camera frame; for
-   * upward tilt, it's at the TOP.  `'Center'` is the V13.x default.
-   */
-  sliverPosition: 'Center' | 'Bottom' | 'Top';
-
-  /**
-   * When `true`, the very first frame's FULL frame is painted onto
-   * the canvas (not just the configured slit clip).  Default
-   * `true` — gives the panorama a wider initial anchor that
-   * subsequent slits extend from.  Set false if you want strict
-   * slit-only behaviour even on the first frame.
-   */
-  firstFrameFullFrame: boolean;
-}
-
-
-export interface SlitscanRegistrationSettings {
-  /**
-   * 3D triangulation step.  Cross-references features across
-   * multiple frames to estimate scene depth.  Default `false` (off);
-   * adds latency, useful for parallax-heavy captures.
-   */
-  enableTriangulation: boolean;
-
-  /**
-   * Triangulation accumulator — when `enableTriangulation` is on,
-   * keeps a running pose graph across the whole capture.  Default
-   * `false` (off); needed for multi-shot fusion.
-   */
-  enableTriAccumulator: boolean;
-
-  /**
-   * RANSAC homography fit per pair.  Adds robustness to feature
-   * matching at the cost of a few ms per frame.  Default `false`.
-   */
-  enableRansacHomography: boolean;
-
-  /**
-   * 1D NCC strip alignment.  Present iff enabled.  Default
-   * undefined (disabled); engine uses pure feature matching.
-   */
-  ncc1d?: Ncc1dSettings;
-
-  /**
-   * 2D NCC strip alignment.  Present iff enabled.  More expensive
-   * than 1D NCC; needed for shelf-scan captures with vertical
-   * misalignment.  Default undefined (disabled).
-   */
-  ncc2d?: Ncc2dSettings;
-}
-
-
-export interface Ncc1dSettings {
-  /**
-   * Search radius in working-resolution pixels (along the pan axis).
-   * Clamped to `[5, 60]`.  Default 15 when the field is set.
-   */
-  searchRadius: number;
-}
-
-
-export interface Ncc2dSettings {
-  /**
-   * 2D search margin in pixels (rectangular region around the
-   * predicted strip position).  Clamped to `[4, 60]`.  Default 12.
-   */
-  searchMargin: number;
-
-  /**
-   * Minimum NCC score to accept a match.  Below this the engine
-   * falls back to the predicted (pose-only) position.  Clamped
-   * to `[0.30, 0.99]`.  Default 0.99 (only accept very strong
-   * matches; the canvas falls back to pose-only quickly).
-   */
-  confidenceThreshold: number;
-
-  /**
-   * EMA smoothing of the NCC-derived offset across consecutive
-   * strips.  Present iff enabled.  Default undefined.  Useful
-   * for jittery captures.
-   */
-  emaSmoothing?: { alpha: number };
-
-  /**
-   * Pan-axis-lock — when enabled, the NCC offset is constrained
-   * to the dominant pan axis (cross-axis movement bounded by
-   * `crossAxisLockPx`).  Useful when the operator's hand wobble
-   * introduces unwanted cross-axis motion.  Present iff enabled.
-   */
-  panAxisLock?: { crossAxisLockPx: number };
-}
-
-
-export interface PlaneProjectionSettings {
-  /**
-   * Where the plane the slit-scan projects onto comes from.
-   *
-   *   • `'Disabled'`       — no plane projection; engine runs
-   *                          its baseline slit-scan path.
-   *   • `'ARKitDetected'`  — use the first vertical plane that
-   *                          ARKit/ARCore finds AND whose normal
-   *                          aligns with the camera (filtered by
-   *                          `alignmentThreshold`).  Requires
-   *                          `captureSource === 'ar'`.
-   *   • `'Virtual'`        — synthesise a plane at a fixed depth
-   *                          (`virtualDepthMeters`) in front of the
-   *                          camera at first-frame pose.  No
-   *                          ARKit dependency.
-   */
-  source: 'Disabled' | 'ARKitDetected' | 'Virtual';
-
-  /**
-   * How frames are warped onto the plane.  Only consulted when
-   * `source !== 'Disabled'`.  Default `'Rectified'` for slit-scan.
-   */
-  projectionStyle?: 'Trapezoidal' | 'Rectified';
-
-  /**
-   * Depth in metres for `source === 'Virtual'`.  Range `[0.3, 5.0]`,
-   * default 1.5.  Set close to the actual shelf distance for the
-   * cleanest projection.
-   */
-  virtualDepthMeters?: number;
-
-  /**
-   * Minimum `|planeNormal · cameraForward|` for an ARKit-detected
-   * plane to be accepted (when `source === 'ARKitDetected'`).
-   * Range `[0, 1]`, default 0.6 (≈ 53° max off-axis).  Higher =
-   * stricter, only accept very-on-axis planes.
-   */
-  alignmentThreshold?: number;
-}
-
-
-export const DEFAULT_SLITSCAN_SETTINGS: SlitscanSettings = {
-  captureSource: 'ar',
-  debug: false,
-  variant: 'slitscan-rotate',
-  painting: {
-    paintMode: 'FirstPaintedWins',
-    sliverPosition: 'Bottom',
-    firstFrameFullFrame: true,
-  },
-  registration: {
-    enableTriangulation: false,
-    enableTriAccumulator: false,
-    enableRansacHomography: false,
-    // ncc1d / ncc2d omitted — both disabled by default.
-  },
-  plane: {
-    source: 'ARKitDetected',
-    projectionStyle: 'Rectified',
-    virtualDepthMeters: 1.5,
-    alignmentThreshold: 0.6,
-  },
-};
-
-
-// ═════════════════════════════════════════════════════════════════════
-// HybridSettings — RetaiLens-specific live engine.
-// ═════════════════════════════════════════════════════════════════════
-
-/**
- * Settings for the hybrid live-compositing engine
- * (`incremental.start({ engine: 'hybrid', ... })`).  Most consumers
- * won't touch this — the hybrid engine is RetaiLens-specific and
- * the public lib's batch-keyframe pipeline is a better fit for
- * general-purpose captures.  Exported here for completeness.
- *
- * Important: the hybrid engine has internal preset paths
- * (`OpenCVIncrementalStitcher.mm:139-180`) that hard-set
- * `enableTriangulation`, `enable2dNcc`, `enableRansacHomography`,
- * `planeSource = Disabled`, etc.  Code-reviewer flagged that
- * exposing those fields would be misleading — the engine clobbers
- * any overrides.  So this type is intentionally minimal: only
- * `projection` is reliably operator-tunable.  Hosts that need to
- * reach deeper-level hybrid knobs can pass a raw config dict to
- * `incremental.start()` directly (Layer 2 escape hatch).
- */
-export interface HybridSettings extends CaptureBaseSettings {
-  /**
-   * Internal projection during real-time compositing.  Independent
-   * from the panorama-stitcher's warperType (which doesn't apply
-   * to the hybrid engine — its output is the live canvas directly).
-   *
-   * Note: only effective in the rotation-only preset path (hybrid
-   * preset 1).  In the other hybrid presets the engine forces
-   * Planar internally regardless of this setting.  Native source:
-   * `OpenCVIncrementalStitcher.mm:146,161,180`.
-   */
-  projection: 'Cylindrical' | 'Planar';
-}
-
-
-export const DEFAULT_HYBRID_SETTINGS: HybridSettings = {
-  captureSource: 'ar',
-  debug: false,
-  projection: 'Planar',
 };

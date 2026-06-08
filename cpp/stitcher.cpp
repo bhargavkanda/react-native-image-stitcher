@@ -22,6 +22,7 @@
 #include <opencv2/stitching.hpp>
 #include <opencv2/stitching/detail/blenders.hpp>
 #include <opencv2/stitching/detail/camera.hpp>
+#include <opencv2/stitching/detail/exposure_compensate.hpp>
 #include <opencv2/stitching/detail/matchers.hpp>
 #include <opencv2/stitching/detail/motion_estimators.hpp>
 #include <opencv2/stitching/detail/seam_finders.hpp>
@@ -38,6 +39,8 @@
 #include <string>
 #include <unistd.h>
 #include <vector>
+
+#include "warp_guard.hpp"
 
 
 namespace retailens {
@@ -146,21 +149,6 @@ cv::Mat bake_rotation(const cv::Mat& src, const std::string& orientation,
     return src;
 }
 
-// Crop the non-zero bounding rect from the stitched panorama.  cv::
-// Stitcher's compose stage leaves a black border around the warped
-// region; we trim that here.
-cv::Mat crop_bbox(const cv::Mat& panorama) {
-    cv::Mat gray;
-    cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
-    cv::Mat mask;
-    cv::threshold(gray, mask, 0, 255, cv::THRESH_BINARY);
-    cv::Rect bbox = cv::boundingRect(mask);
-    if (bbox.width <= 0 || bbox.height <= 0) {
-        return panorama;
-    }
-    return panorama(bbox).clone();
-}
-
 // Map cv::Stitcher::Status → StitchErrorCode.  cv::Stitcher's enum
 // values aren't documented as ABI-stable so we don't rely on
 // numeric equality; switch through the named constants.
@@ -239,6 +227,61 @@ cv::Rect maxInscribedRectFromMask(const cv::Mat& mask) {
         }
     }
     return bestRect;
+}
+
+// Pick the crop rectangle. Prefers the TRUE coverage mask from
+// cv::Stitcher::resultMask() (0xFF where a frame painted, 0 where
+// unfilled) so dark content is kept and only the never-covered wedges
+// drop; falls back to a brightness mask if resultMask wasn't populated
+// (older/edge OpenCV configs). `maskOut` receives the binary mask
+// actually used, so the caller can crop a coverage sidecar to match.
+cv::Rect choose_crop_rect(const cv::Mat& panorama,
+                          const cv::Mat& coverage,
+                          bool useInscribed,
+                          const LogFn& logFn,
+                          cv::Mat& maskOut) {
+    const bool haveCoverage =
+        (!coverage.empty() && coverage.size() == panorama.size());
+    cv::Mat mask;
+    if (haveCoverage) {
+        cv::Mat cov1 = coverage;
+        if (coverage.channels() != 1) {
+            cv::cvtColor(coverage, cov1, cv::COLOR_BGR2GRAY);
+        }
+        // Any painted pixel (>0) is "filled" — robust to feathered edges.
+        cv::threshold(cov1, mask, 0, 255, cv::THRESH_BINARY);
+    } else {
+        log_info(logFn, "[crop]",
+                 "resultMask unusable (empty=%d size=%dx%d vs pano %dx%d) — "
+                 "brightness-mask fallback",
+                 coverage.empty() ? 1 : 0, coverage.cols, coverage.rows,
+                 panorama.cols, panorama.rows);
+        cv::Mat gray;
+        cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+        cv::threshold(gray, mask, 0, 255, cv::THRESH_BINARY);
+    }
+    maskOut = mask;
+
+    const cv::Rect bbox = cv::boundingRect(mask);
+    if (bbox.width <= 0 || bbox.height <= 0) {
+        return cv::Rect(0, 0, panorama.cols, panorama.rows);
+    }
+    if (!useInscribed) {
+        return bbox;
+    }
+    const cv::Rect inscribed = maxInscribedRectFromMask(mask);
+    if (inscribed.width <= 0 || inscribed.height <= 0) {
+        log_info(logFn, "[crop]",
+                 "inscribed rect empty — bbox fallback (%dx%d)",
+                 bbox.width, bbox.height);
+        return bbox;
+    }
+    log_info(logFn, "[crop]",
+             "inscribed %dx%d @ (%d,%d) via %s mask (bbox was %dx%d)",
+             inscribed.width, inscribed.height, inscribed.x, inscribed.y,
+             haveCoverage ? "coverage" : "brightness",
+             bbox.width, bbox.height);
+    return inscribed;
 }
 
 }  // namespace
@@ -526,13 +569,32 @@ static StitchResult stitchFramePathsImpl_(
              framesIncluded, framePaths.size(), finalThreshold, finalAttempt);
     log_info(logFn, "[memstat]", "phase=after_stitch rss=%.1f MB", rss_mb());
 
-    // ── 4.  Crop to non-zero bounding rect ──────────────────────────
-    cv::Mat cropped = crop_bbox(panorama);
+    // ── 4.  Crop (coverage-aware inscribed rect, or bbox) ───────────
+    // Pull cv::Stitcher's coverage mask (0xFF filled / 0 unfilled). It is
+    // computed during stitch(), so this is free and exact — dark content
+    // a frame painted is kept; only never-covered wedges drop.
+    cv::Mat coverage;
+    {
+        const cv::UMat rm = stitcher->resultMask();
+        if (!rm.empty()) {
+            rm.copyTo(coverage);  // download UMat → Mat
+        }
+    }
+    cv::Mat cropMask;
+    const cv::Rect cropRect = choose_crop_rect(
+        panorama, coverage, config.useInscribedRectCrop, logFn, cropMask);
+    cv::Mat cropped = panorama(cropRect).clone();
+    // Crop the binary mask to the same rect → coverage sidecar (debug).
+    cv::Mat croppedCoverage;
+    if (cropMask.size() == panorama.size()) {
+        croppedCoverage = cropMask(cropRect).clone();
+    }
     log_info(logFn, "[dimstat]",
-             "post-crop_bbox %dx%d → %dx%d data=%.2f MB (inscribedRect=%d, currently ignored)",
+             "post-crop %dx%d → %dx%d data=%.2f MB (inscribedRect=%d, coverage=%d)",
              panorama.cols, panorama.rows, cropped.cols, cropped.rows,
              mat_mb(cropped),
-             config.useInscribedRectCrop ? 1 : 0);
+             config.useInscribedRectCrop ? 1 : 0,
+             coverage.empty() ? 0 : 1);
     log_info(logFn, "[memstat]", "phase=after_crop rss=%.1f MB", rss_mb());
 
     // ── 5.  Bake rotation per capture orientation ───────────────────
@@ -564,6 +626,18 @@ static StitchResult stitchFramePathsImpl_(
              "output written: %s (%dx%d)",
              outputPath.c_str(), final_image.cols, final_image.rows);
     log_info(logFn, "[memstat]", "phase=after_imwrite rss=%.1f MB", rss_mb());
+
+    // Best-effort coverage sidecar (<output>.coverage.png), bake-rotated
+    // to align with the JPEG, for the debug harness. Never fails stitch.
+    if (!croppedCoverage.empty()) {
+        try {
+            const cv::Mat coverageRotated =
+                bake_rotation(croppedCoverage, config.captureOrientation, logFn);
+            cv::imwrite(outputPath + ".coverage.png", coverageRotated);
+        } catch (...) {
+            // sidecar is debug-only — ignore failures
+        }
+    }
 
     // ── 7.  Fill the result ─────────────────────────────────────────
     const auto t1 = std::chrono::steady_clock::now();
@@ -823,6 +897,10 @@ StitchResult stitchFramePathsManual(
     //   5. CylindricalWarper warps each frame using cameras
     //   6. GraphCutSeamFinder + MultiBandBlender produce final panorama
     cv::Mat panorama;
+    // v0.15 — the blender's dst_mask (TRUE frame coverage) hoisted to
+    // outer scope so the crop + sidecar below use it instead of a
+    // brightness threshold (which drops dark content like a mirror).
+    cv::Mat coverageMask;
     // Breadcrumbs in the device console.  If the next stitch
     // crashes, the last logged step pinpoints the failure point —
     // makes debugging without Xcode much faster.  Prefix is
@@ -1542,6 +1620,44 @@ StitchResult stitchFramePathsManual(
                  composeFrames.empty() ? 0 : composeFrames[0].rows,
                  compose_scale);
 
+        // Step 7.6: cylindrical-fallback pre-pass.  The configured warper
+        // (plane by default) projects as ~tan(theta), so a wide ultra-wide
+        // (0.5x) sweep can blow a single frame's warp canvas past the
+        // 100 MP guard and hard-fail with "degenerate camera params".
+        // warpRoi() is a cheap corner projection (no pixel work), so probe
+        // every frame here; if any would diverge AND we're not already on
+        // the bounded cylindrical projection, fall back to cylindrical for
+        // the one real warp pass below.  Everything downstream (seam /
+        // blender / compose / crop) consumes the warper's OUTPUTS, so the
+        // swap is transparent.  If even cylindrical diverges, the in-loop
+        // guard (step8b) still throws — the genuine-failure safety net.
+        if (config.warperType != "cylindrical" && !composeFrames.empty()) {
+            bool wouldDiverge = false;
+            size_t divergeFrame = 0;
+            for (size_t i = 0; i < composeFrames.size(); i++) {
+                if (composeFrames[i].empty()) continue;
+                cv::Mat preK;
+                cameras[i].K().convertTo(preK, CV_32F);
+                const cv::Rect r = warper->warpRoi(
+                    composeFrames[i].size(), preK, cameras[i].R);
+                if (warpRoiExceedsGuard(r.width, r.height)) {
+                    wouldDiverge = true;
+                    divergeFrame = i;
+                    break;
+                }
+            }
+            if (wouldDiverge) {
+                log_info(logFn, "[stitch-bc]",
+                         "step7.6: '%s' warp diverges at frame %zu (>%lld MP "
+                         "guard) -- falling back to cylindrical projection",
+                         config.warperType.c_str(), divergeFrame,
+                         (long long)(kMaxWarpPixels / 1000000));
+                if (auto cyl = make_warper("cylindrical")) {
+                    warper = cyl->create(warpedScale);
+                }
+            }
+        }
+
         // Step 8: warp + (optional) seam finder + blender feed.
         //
         // Two paths based on caller's seamFinderType:
@@ -1645,12 +1761,14 @@ StitchResult stitchFramePathsManual(
                     // any panorama frame requiring more than 100 MP of
                     // intermediate storage is from a broken estimator,
                     // not a real capture worth completing.
-                    constexpr int64_t kMaxWarpPixels = 100ll * 1000ll * 1000ll;
                     const int64_t roiPixels =
                         static_cast<int64_t>(roi.width)
                         * static_cast<int64_t>(roi.height);
-                    if (roi.width <= 0 || roi.height <= 0
-                        || roiPixels > kMaxWarpPixels) {
+                    // Final safety net.  If we reach here the warper in use
+                    // is already cylindrical (either the host chose it, or
+                    // the step7.6 pre-pass fell back to it) and STILL
+                    // diverges — a genuinely broken estimate, so fail.
+                    if (warpRoiExceedsGuard(roi.width, roi.height)) {
                         log_error(logFn, "[stitch-bc]",
                                   "step8b: warpRoi degenerate for frame "
                                   "%zu (%dx%d = %lld px > %lld limit) — "
@@ -1831,6 +1949,30 @@ StitchResult stitchFramePathsManual(
             }
             masksWarpedU_seam.clear();
 
+            // Exposure compensation — parity with cv::Stitcher::PANORAMA,
+            // which runs a GainCompensator before blending.  Without it,
+            // per-frame auto-exposure differences surface as brightness
+            // steps at the seams.  The manual path previously skipped this
+            // entirely (the high-level path Android uses gets it for free),
+            // which is one reason iOS output looked worse.  GAIN_BLOCKS
+            // matches cv::Stitcher's default compensator.
+            //
+            // NOTE: BATCH path only — it has every warped frame in memory,
+            // which the compensator needs before it can solve gains.  The
+            // STREAM path (low-RAM, one frame at a time) can't feed the
+            // compensator globally and keeps its current no-compensation
+            // behaviour; see docs/stitch-pipeline-architecture.md.
+            auto compensator = cv::detail::ExposureCompensator::createDefault(
+                cv::detail::ExposureCompensator::GAIN_BLOCKS);
+            {
+                std::vector<cv::UMat> compImgs(N), compMasks(N);
+                for (size_t i = 0; i < N; i++) {
+                    imagesWarped[i].copyTo(compImgs[i]);
+                    masksWarped[i].copyTo(compMasks[i]);
+                }
+                compensator->feed(corners, compImgs, compMasks);
+            }
+
             // Feed the blender, releasing each frame as we go.
             log_info(logFn, "[stitch-bc]", "step10a: blender->prepare");
             blender->prepare(corners, sizes);
@@ -1838,6 +1980,10 @@ StitchResult stitchFramePathsManual(
                      "step10b: feeding blender (N=%zu)", N);
             for (size_t i = 0; i < N; i++) {
                 log_info(logFn, "[stitch-bc]", "step10c: feed frame %zu", i);
+                // Apply the per-frame exposure gain solved above, in place,
+                // before converting + feeding the blender.
+                compensator->apply(static_cast<int>(i), corners[i],
+                                   imagesWarped[i], masksWarped[i]);
                 cv::Mat imgS;
                 imagesWarped[i].convertTo(imgS, CV_16S);
                 blender->feed(imgS, masksWarped[i], corners[i]);
@@ -1899,6 +2045,9 @@ StitchResult stitchFramePathsManual(
                  "step11b: blend complete (panoramaS=%dx%d)",
                  panoramaS.cols, panoramaS.rows);
         panoramaS.convertTo(panorama, CV_8U);
+        // Keep the blend coverage mask alive past this try scope (ref-
+        // counted, so this is cheap) for the crop + sidecar below.
+        coverageMask = panoramaMask;
         {
             auto _t = std::chrono::steady_clock::now();
             double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2030,25 +2179,37 @@ StitchResult stitchFramePathsManual(
     // < 50% of bbox area, use bbox — the mask shape is pathological
     // and shipping bbox-with-corners is better than a sliver.
     cv::Mat finalImage = panorama;
+    // v0.15 — coverage cropped to the same region(s) as finalImage, for
+    // the debug-harness sidecar written after rotation below.
+    cv::Mat coverageCropped;
+    const bool haveCoverage =
+        (!coverageMask.empty() && coverageMask.size() == panorama.size());
     try {
-        cv::Mat gray;
-        cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+        // Prefer the TRUE coverage mask (blender dst_mask): dark content a
+        // frame painted is kept; only never-covered pixels drop. Fall back
+        // to a brightness mask only if coverage is somehow unavailable.
         cv::Mat mask;
-        cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
+        if (haveCoverage) {
+            cv::threshold(coverageMask, mask, 0, 255, cv::THRESH_BINARY);
+        } else {
+            cv::Mat gray;
+            cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+            cv::threshold(gray, mask, 1, 255, cv::THRESH_BINARY);
+        }
 
         // V16 Phase 1b.fix5c — operator-toggleable crop strategy.
         //
-        //   useInscribedRectCrop = NO (default in settings modal):
+        //   useInscribedRectCrop = NO (v0.15 default):
         //     Final crop is just cv::boundingRect(mask) — preserves all
         //     stitched content at the cost of possible black corners
         //     where cv::Stitcher's projection didn't fill.
         //
-        //   useInscribedRectCrop = YES (operator opt-in):
+        //   useInscribedRectCrop = YES (opt in via prop / settings modal):
         //     Run the full inscribed-rect pipeline (morph-close + 50%
         //     safety floor + column-projection second pass) for a clean
         //     -cornered rectangle.  Can over-aggressively shrink the
         //     output on lopsided masks (1146×1102 bbox → 602×1102 strip
-        //     in one field log).
+        //     in one field log) — which is why it's opt-in, not the default.
         cv::Rect bbox;
         if (config.useInscribedRectCrop) {
             cv::Mat closedMask;
@@ -2091,6 +2252,7 @@ StitchResult stitchFramePathsManual(
         if (bbox.width > 0 && bbox.height > 0
             && bbox.width <= panorama.cols && bbox.height <= panorama.rows) {
             finalImage = panorama(bbox).clone();
+            if (haveCoverage) coverageCropped = coverageMask(bbox).clone();
         }
 
         // V16 Phase 1b.fix5c — column-projection second pass ALSO gated
@@ -2140,6 +2302,8 @@ StitchResult stitchFramePathsManual(
                 cv::Rect rectCrop(cropLeft, 0,
                                   cropRight - cropLeft + 1, rows);
                 finalImage = finalImage(rectCrop).clone();
+                if (!coverageCropped.empty())
+                    coverageCropped = coverageCropped(rectCrop).clone();
                 log_info(logFn, "[BatchStitcher]",
                          "rectCrop applied: %dx%d → %dx%d",
                          cols, rows, finalImage.cols, finalImage.rows);
@@ -2163,6 +2327,8 @@ StitchResult stitchFramePathsManual(
                     cv::Rect rectCrop(cropLeft, 0,
                                       cropRight - cropLeft + 1, rows);
                     finalImage = finalImage(rectCrop).clone();
+                    if (!coverageCropped.empty())
+                        coverageCropped = coverageCropped(rectCrop).clone();
                     log_info(logFn, "[BatchStitcher]",
                              "rectCrop relaxed applied: %dx%d → %dx%d",
                              cols, rows, finalImage.cols, finalImage.rows);
@@ -2263,6 +2429,20 @@ StitchResult stitchFramePathsManual(
     cv::Mat finalImageRotated = bake_rotation(finalImage,
                                               config.captureOrientation,
                                               logFn);
+
+    // v0.15 — best-effort coverage sidecar (<output>.coverage.png),
+    // cropped + rotated to match the written JPEG, for the debug harness
+    // (computeInscribedRect / debugMaskOverlay prefer it over brightness).
+    if (!coverageCropped.empty()) {
+        try {
+            const cv::Mat covRot = bake_rotation(coverageCropped,
+                                                 config.captureOrientation,
+                                                 logFn);
+            cv::imwrite(outputPath + ".coverage.png", covRot);
+        } catch (...) {
+            // sidecar is debug-only — ignore failures
+        }
+    }
 
     // Encode + write the JPEG.  Clamp quality into [0, 100] to defend
     // against caller bugs.

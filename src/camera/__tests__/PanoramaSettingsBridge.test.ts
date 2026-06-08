@@ -39,17 +39,11 @@
 
 import {
   DEFAULT_FLOW_GATE_SETTINGS,
-  DEFAULT_HYBRID_SETTINGS,
   DEFAULT_PANORAMA_SETTINGS,
-  DEFAULT_SLITSCAN_SETTINGS,
-  type HybridSettings,
   type PanoramaSettings,
-  type SlitscanSettings,
 } from '../PanoramaSettings';
 import {
-  hybridSettingsToNativeConfig,
   panoramaSettingsToNativeConfig,
-  slitscanSettingsToNativeConfig,
 } from '../PanoramaSettingsBridge';
 
 
@@ -75,6 +69,7 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.frameSelectionMode).toBe('flow-based');
     expect(cfg.keyframeMaxCount).toBe(6);
     expect(cfg.keyframeOverlapThreshold).toBe(0.2);
+    expect(cfg.maxKeyframeIntervalMs).toBe(2000);
 
     // FlowGateSettings (flow is defined in the default)
     expect(cfg.flowNoveltyPercentile).toBe(0.85);
@@ -125,6 +120,7 @@ describe('panoramaSettingsToNativeConfig', () => {
         mode: 'flow-based',
         maxKeyframes: 6,
         overlapThreshold: 0.20,
+        maxKeyframeIntervalMs: 2000,
         // flow omitted — legal per the optional `?` in the type
       },
     };
@@ -157,6 +153,7 @@ describe('panoramaSettingsToNativeConfig', () => {
       'frameSelectionMode',
       'keyframeMaxCount',
       'keyframeOverlapThreshold',
+      'maxKeyframeIntervalMs',
       'seamFinderType',
       'stitchMode',
       'warperType',
@@ -189,187 +186,5 @@ describe('panoramaSettingsToNativeConfig', () => {
     // omit it; if a future change starts emitting it, the modal's
     // operator-facing semantics will silently drift.
     expect(cfg).not.toHaveProperty('debug');
-  });
-});
-
-
-// ════════════════════════════════════════════════════════════════════
-// SLITSCAN — Layer 2 slit-scan engines
-// ════════════════════════════════════════════════════════════════════
-
-describe('slitscanSettingsToNativeConfig', () => {
-  it('round-trips DEFAULT_SLITSCAN_SETTINGS to the expected flat dict', () => {
-    const cfg = slitscanSettingsToNativeConfig(DEFAULT_SLITSCAN_SETTINGS);
-
-    expect(cfg.captureSource).toBe('ar');
-    expect(cfg.engineVariant).toBe('slitscan-rotate');
-
-    // Painting
-    expect(cfg.paintMode).toBe('FirstPaintedWins');
-    expect(cfg.sliverPosition).toBe('Bottom');
-    expect(cfg.firstFrameFullFrame).toBe(true);
-
-    // Registration (explicit booleans)
-    expect(cfg.enableTriangulation).toBe(false);
-    expect(cfg.enableTriAccumulator).toBe(false);
-    expect(cfg.enableRansacHomography).toBe(false);
-
-    // Plane
-    expect(cfg.planeSource).toBe('ARKitDetected');
-    expect(cfg.planeProjectionStyle).toBe('Rectified');
-    expect(cfg.arkitPlaneAlignmentThreshold).toBe(0.6);
-
-    // ncc1d / ncc2d both omitted in defaults
-    expect(cfg.enable1dNcc).toBe(false);
-    expect(cfg.enable2dNcc).toBe(false);
-    expect(cfg).not.toHaveProperty('nccSearchRadius1d');
-    expect(cfg).not.toHaveProperty('nccSearchMargin2d');
-    expect(cfg).not.toHaveProperty('nccConfidenceThreshold2d');
-    expect(cfg).not.toHaveProperty('ncc2dEmaAlpha');
-    expect(cfg).not.toHaveProperty('ncc2dCrossAxisLockPx');
-
-    // Plane: ARKitDetected — alignmentThreshold present, virtual depth absent
-    expect(cfg).not.toHaveProperty('virtualPlaneDepthMeters');
-
-    // Advanced: not set in defaults
-    expect(cfg).not.toHaveProperty('kPanAxisFractionRect');
-    expect(cfg).not.toHaveProperty('kMinAcceptDeltaPx');
-  });
-
-  it('expands `registration.ncc1d` presence-as-enable correctly', () => {
-    const withNcc1d: SlitscanSettings = {
-      ...DEFAULT_SLITSCAN_SETTINGS,
-      registration: {
-        ...DEFAULT_SLITSCAN_SETTINGS.registration,
-        ncc1d: { searchRadius: 25 },
-      },
-    };
-    const cfg = slitscanSettingsToNativeConfig(withNcc1d);
-    expect(cfg.enable1dNcc).toBe(true);
-    expect(cfg.nccSearchRadius1d).toBe(25);
-  });
-
-  it('expands `registration.ncc2d` presence-as-enable with nested optionals', () => {
-    const withNcc2dFull: SlitscanSettings = {
-      ...DEFAULT_SLITSCAN_SETTINGS,
-      registration: {
-        ...DEFAULT_SLITSCAN_SETTINGS.registration,
-        ncc2d: {
-          searchMargin: 14,
-          confidenceThreshold: 0.95,
-          emaSmoothing: { alpha: 0.5 },
-          panAxisLock: { crossAxisLockPx: 4 },
-        },
-      },
-    };
-    const cfg = slitscanSettingsToNativeConfig(withNcc2dFull);
-
-    expect(cfg.enable2dNcc).toBe(true);
-    expect(cfg.nccSearchMargin2d).toBe(14);
-    expect(cfg.nccConfidenceThreshold2d).toBe(0.95);
-    expect(cfg.enableNcc2dEmaSmoothing).toBe(true);
-    expect(cfg.ncc2dEmaAlpha).toBe(0.5);
-    expect(cfg.enableNcc2dPanAxisLock).toBe(true);
-    expect(cfg.ncc2dCrossAxisLockPx).toBe(4);
-  });
-
-  it('honours ncc2d nested-optional absence (ema + panAxisLock undefined)', () => {
-    const withNcc2dBare: SlitscanSettings = {
-      ...DEFAULT_SLITSCAN_SETTINGS,
-      registration: {
-        ...DEFAULT_SLITSCAN_SETTINGS.registration,
-        ncc2d: {
-          searchMargin: 12,
-          confidenceThreshold: 0.99,
-          // emaSmoothing + panAxisLock omitted → enable-flag false, no payload
-        },
-      },
-    };
-    const cfg = slitscanSettingsToNativeConfig(withNcc2dBare);
-
-    expect(cfg.enable2dNcc).toBe(true);
-    expect(cfg.enableNcc2dEmaSmoothing).toBe(false);
-    expect(cfg.enableNcc2dPanAxisLock).toBe(false);
-    // Critical: payload keys for the disabled sub-features must NOT
-    // ride along — Native engine would treat them as authoritative
-    // even with the enable flag off (defensive against a native bug).
-    expect(cfg).not.toHaveProperty('ncc2dEmaAlpha');
-    expect(cfg).not.toHaveProperty('ncc2dCrossAxisLockPx');
-  });
-
-  it.each([
-    ['Disabled', { virtualPlaneDepthMeters: false, arkitPlaneAlignmentThreshold: false, planeProjectionStyle: false }],
-    ['Virtual', { virtualPlaneDepthMeters: true, arkitPlaneAlignmentThreshold: false, planeProjectionStyle: true }],
-    ['ARKitDetected', { virtualPlaneDepthMeters: false, arkitPlaneAlignmentThreshold: true, planeProjectionStyle: true }],
-  ] as const)(
-    'emits plane optionals consistent with source=%s',
-    (source, expected) => {
-      const s: SlitscanSettings = {
-        ...DEFAULT_SLITSCAN_SETTINGS,
-        plane: {
-          source,
-          projectionStyle: 'Rectified',
-          virtualDepthMeters: 2.0,
-          alignmentThreshold: 0.7,
-        },
-      };
-      const cfg = slitscanSettingsToNativeConfig(s);
-      expect(cfg.planeSource).toBe(source);
-      expect('virtualPlaneDepthMeters' in cfg).toBe(expected.virtualPlaneDepthMeters);
-      expect('arkitPlaneAlignmentThreshold' in cfg).toBe(expected.arkitPlaneAlignmentThreshold);
-      expect('planeProjectionStyle' in cfg).toBe(expected.planeProjectionStyle);
-    },
-  );
-
-  it('emits `advanced` knobs only when explicitly set', () => {
-    const withAdvanced: SlitscanSettings = {
-      ...DEFAULT_SLITSCAN_SETTINGS,
-      advanced: { panAxisFractionRect: 0.6, minAcceptDeltaPx: 30 },
-    };
-    const cfg = slitscanSettingsToNativeConfig(withAdvanced);
-    expect(cfg.kPanAxisFractionRect).toBe(0.6);
-    expect(cfg.kMinAcceptDeltaPx).toBe(30);
-
-    const onlyOne: SlitscanSettings = {
-      ...DEFAULT_SLITSCAN_SETTINGS,
-      advanced: { panAxisFractionRect: 0.6 },
-      // minAcceptDeltaPx omitted within the sub-object
-    };
-    const cfgOne = slitscanSettingsToNativeConfig(onlyOne);
-    expect(cfgOne.kPanAxisFractionRect).toBe(0.6);
-    expect(cfgOne).not.toHaveProperty('kMinAcceptDeltaPx');
-  });
-});
-
-
-// ════════════════════════════════════════════════════════════════════
-// HYBRID — RetaiLens live engine
-// ════════════════════════════════════════════════════════════════════
-
-describe('hybridSettingsToNativeConfig', () => {
-  it('round-trips DEFAULT_HYBRID_SETTINGS to the expected flat dict', () => {
-    const cfg = hybridSettingsToNativeConfig(DEFAULT_HYBRID_SETTINGS);
-    expect(cfg.captureSource).toBe('ar');
-    expect(cfg.hybridProjection).toBe('Planar');
-  });
-
-  it('honours projection override', () => {
-    const cyl: HybridSettings = {
-      ...DEFAULT_HYBRID_SETTINGS,
-      projection: 'Cylindrical',
-    };
-    expect(hybridSettingsToNativeConfig(cyl).hybridProjection).toBe('Cylindrical');
-  });
-
-  it('emits only the documented hybrid surface (debug is JS-only)', () => {
-    // Hybrid presets internally clobber most fields; the bridge
-    // deliberately keeps the wire surface minimal.  This test guards
-    // against future drift where someone adds a hybrid setting to the
-    // bridge without first validating that the engine actually reads it.
-    const cfg = hybridSettingsToNativeConfig({
-      ...DEFAULT_HYBRID_SETTINGS,
-      debug: true, // JS-only, must NOT reach the wire
-    });
-    expect(Object.keys(cfg).sort()).toEqual(['captureSource', 'hybridProjection']);
   });
 });

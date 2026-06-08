@@ -10,9 +10,16 @@ import com.facebook.react.bridge.WritableNativeMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import org.opencv.core.Core
+import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.MatOfInt
+import org.opencv.core.Point
+import org.opencv.core.Rect
+import org.opencv.core.Scalar
+import org.opencv.core.Size
 import org.opencv.imgcodecs.Imgcodecs
+import org.opencv.imgproc.Imgproc
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -62,9 +69,11 @@ class BatchStitcher(reactContext: ReactApplicationContext)
      *                            | "landscape-left" | "landscape-right"
      *                            (drives output bake-rotation table,
      *                            mirrors iOS)
-     * @param useInscribedRectCrop  reserved for future parity with
-     *                              iOS' inscribed-rect crop toggle;
-     *                              currently bbox-only on Android
+     * @param useInscribedRectCrop  when true, the cv::Stitcher path
+     *                              crops to the maximum inscribed
+     *                              rectangle of the coverage mask
+     *                              (choose_crop_rect in stitcher.cpp);
+     *                              false = looser cv::boundingRect
      * @return [width, height] of the written JPEG
      * @throws RuntimeException on stitch failure
      */
@@ -262,6 +271,279 @@ class BatchStitcher(reactContext: ReactApplicationContext)
                 promise.reject("normalise-failed", t.message, t)
             }
         }
+    }
+
+    // ── v0.15 inscribed-rect debug harness (iOS parity) ──────────
+    //
+    // Pure-Kotlin / OpenCV-Java twins of iOS' OpenCVStitcher
+    // computeInscribedRect / cropToRect / debugMaskOverlay.  Exposing
+    // them as @ReactMethods is what makes the example app's
+    // `inscribedRectDebugAvailable()` return true so the __DEV__
+    // top-left rect-debug toggle shows on Android too.  The
+    // inscribed-rect ALGORITHM is a direct port of cpp/stitcher.cpp's
+    // maxInscribedRectFromMask, duplicated in Kotlin per the same
+    // "duplicate stage code, DRY when proven" convention the sibling
+    // normaliseImage follows.  Returns/params
+    // match the iOS StitcherBridge contract exactly so the shared JS
+    // (InscribedRectDebug.tsx) is platform-agnostic.
+
+    /** Resolves `{ x, y, width, height, imageWidth, imageHeight }`. */
+    @ReactMethod
+    fun computeInscribedRect(options: ReadableMap, promise: Promise) {
+        val imagePath = options.getString("imagePath")
+            ?: return promise.reject("invalid-options", "imagePath required")
+        CoroutineScope(Dispatchers.Default).launch {
+            val toRelease = mutableListOf<Mat>()
+            try {
+                ensureOpenCv()
+                val cleaned = stripFileScheme(imagePath)
+                if (!File(cleaned).exists()) {
+                    promise.reject("read-failed", "Image not found: $imagePath")
+                    return@launch
+                }
+                val img = Imgcodecs.imread(cleaned, Imgcodecs.IMREAD_COLOR)
+                toRelease += img
+                if (img.empty()) {
+                    promise.reject("read-failed", "Could not decode $imagePath")
+                    return@launch
+                }
+                val mask = coverageOrBrightnessMask(img, cleaned, 1, toRelease)
+                val r = maxInscribedRect(mask)   // [x, y, w, h]
+                promise.resolve(WritableNativeMap().apply {
+                    putInt("x", r[0])
+                    putInt("y", r[1])
+                    putInt("width", r[2])
+                    putInt("height", r[3])
+                    putInt("imageWidth", img.cols())
+                    putInt("imageHeight", img.rows())
+                })
+            } catch (t: Throwable) {
+                promise.reject("compute-inscribed-rect-failed", t.message, t)
+            } finally {
+                toRelease.forEach { it.release() }
+            }
+        }
+    }
+
+    /** Crop `imagePath` to `{ x, y, width, height }` in place; resolves `{ width, height }`. */
+    @ReactMethod
+    fun cropToRect(options: ReadableMap, promise: Promise) {
+        val imagePath = options.getString("imagePath")
+            ?: return promise.reject("invalid-options", "imagePath required")
+        fun optInt(key: String, default: Int): Int =
+            if (options.hasKey(key) && !options.isNull(key)) options.getInt(key) else default
+        val x = optInt("x", 0)
+        val y = optInt("y", 0)
+        val width = optInt("width", 0)
+        val height = optInt("height", 0)
+        val quality = optInt("quality", 90).coerceIn(1, 100)
+        CoroutineScope(Dispatchers.Default).launch {
+            val toRelease = mutableListOf<Mat>()
+            try {
+                ensureOpenCv()
+                val cleaned = stripFileScheme(imagePath)
+                if (!File(cleaned).exists()) {
+                    promise.reject("read-failed", "Image not found: $imagePath")
+                    return@launch
+                }
+                val img = Imgcodecs.imread(cleaned, Imgcodecs.IMREAD_COLOR)
+                toRelease += img
+                if (img.empty()) {
+                    promise.reject("read-failed", "Could not decode $imagePath")
+                    return@launch
+                }
+                // Clamp the rect to image bounds (never trust JS input).
+                val rx = x.coerceIn(0, img.cols() - 1)
+                val ry = y.coerceIn(0, img.rows() - 1)
+                var rw = width.coerceAtLeast(1)
+                var rh = height.coerceAtLeast(1)
+                if (rx + rw > img.cols()) rw = img.cols() - rx
+                if (ry + rh > img.rows()) rh = img.rows() - ry
+                val cropped = Mat(img, Rect(rx, ry, rw, rh)).clone()
+                toRelease += cropped
+                val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, quality)
+                if (!Imgcodecs.imwrite(cleaned, cropped, params)) {
+                    promise.reject("write-failed", "Could not rewrite $imagePath")
+                    return@launch
+                }
+                promise.resolve(WritableNativeMap().apply {
+                    putInt("width", cropped.cols())
+                    putInt("height", cropped.rows())
+                })
+            } catch (t: Throwable) {
+                promise.reject("crop-to-rect-failed", t.message, t)
+            } finally {
+                toRelease.forEach { it.release() }
+            }
+        }
+    }
+
+    /** Red-tint the dropped pixels; writes `<path>.mask.jpg`. Resolves `{ maskPath, width, height, excludedPercent }`. */
+    @ReactMethod
+    fun debugMaskOverlay(options: ReadableMap, promise: Promise) {
+        val imagePath = options.getString("imagePath")
+            ?: return promise.reject("invalid-options", "imagePath required")
+        val threshold = if (options.hasKey("threshold") && !options.isNull("threshold")) {
+            options.getInt("threshold")
+        } else {
+            1
+        }
+        CoroutineScope(Dispatchers.Default).launch {
+            val toRelease = mutableListOf<Mat>()
+            try {
+                ensureOpenCv()
+                val cleaned = stripFileScheme(imagePath)
+                if (!File(cleaned).exists()) {
+                    promise.reject("read-failed", "Image not found: $imagePath")
+                    return@launch
+                }
+                val img = Imgcodecs.imread(cleaned, Imgcodecs.IMREAD_COLOR)
+                toRelease += img
+                if (img.empty()) {
+                    promise.reject("read-failed", "Could not decode $imagePath")
+                    return@launch
+                }
+                val mask = coverageOrBrightnessMask(img, cleaned, threshold.coerceAtLeast(0), toRelease)
+                val excluded = Mat()
+                toRelease += excluded
+                Core.bitwise_not(mask, excluded)                 // 255 = dropped pixels
+                // Blend red (BGR 0,0,255) over the dropped pixels so they stand out.
+                val red = Mat(img.size(), img.type(), Scalar(0.0, 0.0, 255.0))
+                toRelease += red
+                val blended = Mat()
+                toRelease += blended
+                Core.addWeighted(img, 0.35, red, 0.65, 0.0, blended)
+                val overlay = img.clone()
+                toRelease += overlay
+                blended.copyTo(overlay, excluded)
+                val maskPath = "$cleaned.mask.jpg"
+                val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, 90)
+                if (!Imgcodecs.imwrite(maskPath, overlay, params)) {
+                    promise.reject("write-failed", "Could not write mask overlay for $imagePath")
+                    return@launch
+                }
+                val total = img.rows() * img.cols()
+                val excludedPercent = if (total > 0) Core.countNonZero(excluded) * 100 / total else 0
+                promise.resolve(WritableNativeMap().apply {
+                    putString("maskPath", maskPath)
+                    putInt("width", img.cols())
+                    putInt("height", img.rows())
+                    putInt("excludedPercent", excludedPercent)
+                })
+            } catch (t: Throwable) {
+                promise.reject("debug-mask-overlay-failed", t.message, t)
+            } finally {
+                toRelease.forEach { it.release() }
+            }
+        }
+    }
+
+    /**
+     * Coverage mask for an on-disk image: prefer the TRUE coverage
+     * sidecar (`<path>.coverage.png`) the stitch writes next to the
+     * panorama; else a brightness proxy (gray > threshold, with
+     * border-connected holes filled).  Mirrors the iOS debug methods.
+     * The returned Mat (and any intermediates) are registered in
+     * `toRelease`.
+     */
+    private fun coverageOrBrightnessMask(
+        img: Mat,
+        cleaned: String,
+        threshold: Int,
+        toRelease: MutableList<Mat>,
+    ): Mat {
+        val coveragePath = "$cleaned.coverage.png"
+        if (File(coveragePath).exists()) {
+            val cov = Imgcodecs.imread(coveragePath, Imgcodecs.IMREAD_GRAYSCALE)
+            toRelease += cov
+            if (!cov.empty() && cov.cols() == img.cols() && cov.rows() == img.rows()) {
+                val mask = Mat()
+                toRelease += mask
+                Imgproc.threshold(cov, mask, 0.0, 255.0, Imgproc.THRESH_BINARY)
+                return mask
+            }
+        }
+        val gray = Mat()
+        toRelease += gray
+        Imgproc.cvtColor(img, gray, Imgproc.COLOR_BGR2GRAY)
+        val raw = Mat()
+        toRelease += raw
+        Imgproc.threshold(gray, raw, threshold.toDouble(), 255.0, Imgproc.THRESH_BINARY)
+        val filled = fillBorderConnectedHoles(raw)
+        toRelease += filled
+        return filled
+    }
+
+    /**
+     * Fill mask holes NOT connected to the border (interior content the
+     * brightness threshold dropped).  Mirrors iOS' FillBorderConnectedHoles:
+     * pad a black border, flood the border-connected black to white, then
+     * OR the surviving interior holes back in.
+     */
+    private fun fillBorderConnectedHoles(mask: Mat): Mat {
+        val padded = Mat()
+        Core.copyMakeBorder(mask, padded, 1, 1, 1, 1, Core.BORDER_CONSTANT, Scalar(0.0))
+        // floodFill needs a mask 2px larger than the image; a zero mask
+        // makes it behave like the no-mask overload iOS uses.
+        val ffMask = Mat.zeros(padded.rows() + 2, padded.cols() + 2, CvType.CV_8UC1)
+        Imgproc.floodFill(padded, ffMask, Point(0.0, 0.0), Scalar(255.0))
+        val exterior = Mat(padded, Rect(1, 1, mask.cols(), mask.rows()))
+        val holes = Mat()
+        Core.bitwise_not(exterior, holes)
+        val filled = Mat()
+        Core.bitwise_or(mask, holes, filled)
+        padded.release()
+        ffMask.release()
+        exterior.release()
+        holes.release()
+        return filled
+    }
+
+    /**
+     * Largest axis-aligned rectangle entirely inside the non-zero region
+     * of a CV_8UC1 `mask`.  Returns `[x, y, width, height]` (all 0 if
+     * empty).  Direct port of cpp/stitcher.cpp's maxInscribedRectFromMask
+     * (max-rectangle-in-histogram, row-swept, O(W*H)); operates on a
+     * bulk-extracted ByteArray so there is no per-pixel JNI Mat access.
+     */
+    private fun maxInscribedRect(mask: Mat): IntArray {
+        if (mask.empty() || mask.type() != CvType.CV_8UC1) return intArrayOf(0, 0, 0, 0)
+        val h = mask.rows()
+        val w = mask.cols()
+        val data = ByteArray(h * w)
+        mask.get(0, 0, data)
+        val heights = IntArray(w)
+        var bestArea = 0L
+        var bx = 0
+        var by = 0
+        var bw = 0
+        var bh = 0
+        val stack = IntArray(w + 1)
+        for (row in 0 until h) {
+            val base = row * w
+            for (col in 0 until w) {
+                heights[col] = if (data[base + col].toInt() != 0) heights[col] + 1 else 0
+            }
+            var sp = 0
+            for (col in 0..w) {
+                val hh = if (col == w) 0 else heights[col]
+                while (sp > 0 && heights[stack[sp - 1]] > hh) {
+                    val topIdx = stack[--sp]
+                    val leftIdx = if (sp == 0) -1 else stack[sp - 1]
+                    val width = col - leftIdx - 1
+                    val area = heights[topIdx].toLong() * width.toLong()
+                    if (area > bestArea) {
+                        bestArea = area
+                        bx = leftIdx + 1
+                        by = row - heights[topIdx] + 1
+                        bw = width
+                        bh = heights[topIdx]
+                    }
+                }
+                stack[sp++] = col
+            }
+        }
+        return intArrayOf(bx, by, bw, bh)
     }
 
     // ── Internals ────────────────────────────────────────────────

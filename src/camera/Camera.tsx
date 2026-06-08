@@ -242,6 +242,11 @@ export interface CameraProps {
   defaultFlowMaxTranslationCm?: number;
   defaultKeyframeMaxCount?: number;
   defaultKeyframeOverlapThreshold?: number;
+  /** Time-budget force-accept (ms) for the keyframe gate — accept a
+   *  keyframe at least this often during a pan even if novelty is low,
+   *  so slow / static pans don't leave temporal gaps.  `0` disables it.
+   *  Default 2000 (2 s).  Applies to both AR and non-AR captures. */
+  defaultMaxKeyframeIntervalMs?: number;
   /** Forward-looking — wires through to cv::Stitcher's compositingResol
    *  once PanoramaSettings exposes the field (currently a no-op). */
   defaultCompositingResolMP?: number;
@@ -249,6 +254,28 @@ export interface CameraProps {
   defaultRegistrationResolMP?: number;
   /** Forward-looking — see above. */
   defaultSeamEstimationResolMP?: number;
+
+  // ── Inscribed-rect crop (v0.15) ───────────────────────────────────
+  /**
+   * Crop strategy for the stitched panorama. `false` (default) keeps the
+   * bounding-rect of non-black pixels, which preserves all stitched
+   * content but may leave black corners. `true` crops to the maximum
+   * axis-aligned rectangle inscribed in the coverage mask — clean edges,
+   * no black corners (slightly more CPU at finalize) — but it can shrink
+   * the output substantially on lopsided / ultra-wide masks, which is why
+   * it's opt-in.
+   *
+   * Implemented as a start-time stitcher config (like the other
+   * stitcher settings), so this value is read once at mount to seed the
+   * initial setting; the in-app settings modal can override it at
+   * runtime. It changes image geometry (the crop), not encoding.
+   *
+   * Since the default is `false`, only pass this prop to opt in:
+   * @example
+   * // Crop to a clean inscribed rectangle (no black corners):
+   * <Camera maxInscribedRectCrop={true} />
+   */
+  maxInscribedRectCrop?: boolean;
 
   // ── UI knobs ──────────────────────────────────────────────────────
   enablePhotoMode?: boolean;
@@ -270,27 +297,13 @@ export interface CameraProps {
   style?: StyleProp<ViewStyle>;
 
   /**
-   * Which incremental stitcher engine to drive.  Default
-   * `'batch-keyframe'` — collects accepted JPEGs and runs
-   * `cv::Stitcher` once at finalize time.  This is the v0.4+
-   * production default and what the v0.5 Frame Processor migration
-   * exercises.
-   *
-   * Switch to a live engine (`'firstwins-rectilinear'` or
-   * `'hybrid'`) for low-latency in-flight stitching.  Live engines
-   * exercise the F8.6 pixel-buffer ingest path (skipping the JPEG
-   * encode/decode round-trip; ~30–50 ms saved per accept) when the
-   * Frame Processor driver is active.
-   *
-   * See `docs/f8-frame-processor-plan.md` and the v0.5.0
-   * CHANGELOG for the trade-offs between batch-keyframe and live
-   * engines.
+   * Which stitcher engine to drive.  Only `'batch-keyframe'` is
+   * supported (and the default): it collects accepted keyframe JPEGs
+   * during the hold-pan-release capture and runs the stitch once at
+   * finalize.  The live engines (hybrid / slit-scan / firstwins) were
+   * archived in the batch-keyframe cleanup — see `archive/`.
    */
-  engine?: 'batch-keyframe'
-    | 'hybrid'
-    | 'slitscan-rotate' | 'slitscan-both'
-    | 'firstwins' | 'firstwins-zoomed' | 'firstwins-rectilinear'
-    | 'slitscan';
+  engine?: 'batch-keyframe';
 
   /**
    * Optional destination directory for captures.  When set, the lib
@@ -865,6 +878,8 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
     defaultFlowMaxTranslationCm: props.defaultFlowMaxTranslationCm,
     defaultKeyframeMaxCount: props.defaultKeyframeMaxCount,
     defaultKeyframeOverlapThreshold: props.defaultKeyframeOverlapThreshold,
+    defaultMaxKeyframeIntervalMs: props.defaultMaxKeyframeIntervalMs,
+    maxInscribedRectCrop: props.maxInscribedRectCrop,
   };
 }
 
@@ -1433,6 +1448,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         width = result.width;
         height = result.height;
       }
+
       onCapture?.({ type: 'photo', uri, width, height });
     } catch (err) {
       const e = err instanceof CameraError
@@ -1576,7 +1592,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         isNonAR ? imuGate.getTotalAbsMetres() : 0;
       const result = await incremental.finalize(
         panoOutputPath,
-        90,
+        90, // default JPEG quality
         deviceOrientation,
         imuTotalTranslationM,
       );
@@ -1590,6 +1606,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
           included: result.framesIncluded,
         });
       }
+
       onCapture?.({
         type: 'panorama',
         // Native finalize() returns a bare `/data/.../foo.jpg` path;
@@ -1615,7 +1632,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const code: CameraErrorCode =
-        /need more images/i.test(message) ? 'STITCH_NEED_MORE_IMGS'
+        // Insufficient overlap surfaces two ways: cv::Stitcher's
+        // ERR_NEED_MORE_IMGS ("need more images") and the manual
+        // pipeline's "0 valid pairwise matches / frames may not overlap
+        // enough" — both are the same recoverable "pan more slowly" case.
+        /need more images|pairwise match|overlap enough/i.test(message) ? 'STITCH_NEED_MORE_IMGS'
         : /homography/i.test(message) ? 'STITCH_HOMOGRAPHY_FAIL'
         : /camera params/i.test(message) ? 'STITCH_CAMERA_PARAMS_FAIL'
         : /out of memory|oom/i.test(message) ? 'STITCH_OOM'

@@ -41,6 +41,8 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
         case R::RejectOverlapTooHighFlow:    return @"overlap-too-high (flow)";
         // V16 — translation-budget force-accept
         case R::AcceptFlowTranslation:       return @"ok-flow-translation";
+        // Wall-clock keyframe-interval force-accept (Pose + Flow)
+        case R::AcceptTimeInterval:          return @"ok-time-interval";
     }
     return @"unknown";
 }
@@ -120,6 +122,10 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
 
 - (void)setFlowMaxTranslationM:(double)metres {
     _gate.setFlowMaxTranslationM(metres);
+}
+
+- (void)setMaxKeyframeIntervalMs:(double)ms {
+    _gate.setMaxKeyframeIntervalMs(ms);
 }
 
 - (void)setFlowNoveltyPercentile:(double)percentile {

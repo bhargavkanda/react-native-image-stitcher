@@ -151,11 +151,11 @@ public enum Stitcher {
         // IncrementalStitcher) hit the method directly with
         // the right value.
         captureOrientation: nil,
-        // V16 Phase 1b.fix5c — generic Stitcher API defaults the
-        // crop strategy to bbox-only (matches the operator-default
-        // in the panorama settings modal).  Callers that want
-        // inscribed-rect can use IncrementalStitcher with
-        // the toggle on.
+        // V16 Phase 1b.fix5c — generic Stitcher API keeps the crop
+        // strategy at bbox-only (conservative; the panorama-capture
+        // path now defaults to inscribed-rect via the settings).
+        // Callers that want inscribed-rect can use IncrementalStitcher
+        // with the toggle on.
         useInscribedRectCrop: false,
         // 2026-05-22 (audit F2) — legacy video-stitch API doesn't
         // expose stitchMode in its options dict yet.  nil falls
@@ -193,6 +193,72 @@ public enum Stitcher {
     }
   }
 
+  /// v0.15 debug — compute the max-inscribed rectangle of the image
+  /// (no file change), for the example app's crop-visualisation harness.
+  public static func computeInscribedRect(
+    imagePath: String
+  ) throws -> (x: Int, y: Int, width: Int, height: Int, imageWidth: Int, imageHeight: Int) {
+    do {
+      let d = try OpenCVStitcher.computeInscribedRect(atPath: imagePath)
+      return (
+        x: d["x"]?.intValue ?? 0,
+        y: d["y"]?.intValue ?? 0,
+        width: d["width"]?.intValue ?? 0,
+        height: d["height"]?.intValue ?? 0,
+        imageWidth: d["imageWidth"]?.intValue ?? 0,
+        imageHeight: d["imageHeight"]?.intValue ?? 0
+      )
+    } catch let nsError as NSError {
+      throw StitcherError.fromNSError(nsError)
+    }
+  }
+
+  /// v0.15 debug — crop the image to an explicit rectangle (overwrite
+  /// in place) and re-encode at `quality`.  Pairs with the
+  /// computeInscribedRect debug harness.
+  public static func cropToRect(
+    imagePath: String,
+    x: Int,
+    y: Int,
+    width: Int,
+    height: Int,
+    quality: Int
+  ) throws -> (width: Int, height: Int) {
+    do {
+      let d = try OpenCVStitcher.cropToRect(
+        atPath: imagePath,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        quality: quality
+      )
+      return (width: d["width"]?.intValue ?? 0, height: d["height"]?.intValue ?? 0)
+    } catch let nsError as NSError {
+      throw StitcherError.fromNSError(nsError)
+    }
+  }
+
+  /// v0.15 debug — write a red-tinted mask overlay (excluded pixels =
+  /// red) next to the image and report what fraction the brightness mask
+  /// drops. Pairs with the inscribed-rect debug harness.
+  public static func debugMaskOverlay(
+    imagePath: String,
+    threshold: Int
+  ) throws -> (maskPath: String, width: Int, height: Int, excludedPercent: Int) {
+    do {
+      let d = try OpenCVStitcher.debugMaskOverlay(atPath: imagePath, threshold: threshold)
+      return (
+        maskPath: d["maskPath"] as? String ?? "",
+        width: (d["width"] as? NSNumber)?.intValue ?? 0,
+        height: (d["height"] as? NSNumber)?.intValue ?? 0,
+        excludedPercent: (d["excludedPercent"] as? NSNumber)?.intValue ?? 0
+      )
+    } catch let nsError as NSError {
+      throw StitcherError.fromNSError(nsError)
+    }
+  }
+
   /// Combined pipeline: extract frames from a recorded video,
   /// stitch them into a panorama, write the result to
   /// `options.outputPath`.  Used by the host app's tap-and-hold
@@ -202,38 +268,21 @@ public enum Stitcher {
   /// All temp frame extraction lives in /tmp and is torn down by
   /// the ObjC layer regardless of success or failure.
   public static func stitchVideo(
-    _ options: StitchVideoOptions,
-    poses: [[String: Any]]? = nil
+    _ options: StitchVideoOptions
   ) throws -> StitchResult {
     do {
-      let result: RNStitchResult
-      if let poses = poses, !poses.isEmpty {
-        // Phase 5: pose-driven path.  Skips features → matching →
-        // BundleAdjuster on the native side; cv::detail::CameraParams
-        // come straight from the ARKit poses with the appropriate
-        // coordinate-system flip (Y-up → Y-down, -Z → +Z).
-        result = try OpenCVStitcher.stitchVideo(
-          atPath: options.videoPath,
-          outputPath: options.outputPath,
-          maxFrames: options.maxFrames,
-          jpegQuality: options.jpegQuality,
-          warperType: options.warperType,
-          blenderType: options.blenderType,
-          seamFinderType: options.seamFinderType,
-          poses: poses
-        )
-      } else {
-        // Existing feature-matched path.
-        result = try OpenCVStitcher.stitchVideo(
-          atPath: options.videoPath,
-          outputPath: options.outputPath,
-          maxFrames: options.maxFrames,
-          jpegQuality: options.jpegQuality,
-          warperType: options.warperType,
-          blenderType: options.blenderType,
-          seamFinderType: options.seamFinderType
-        )
-      }
+      // The pose-driven video stitch (the old native `withPoses:`
+      // path) was archived in the 2026-06 batch-keyframe cleanup;
+      // this now always runs the feature-matched compose.
+      let result = try OpenCVStitcher.stitchVideo(
+        atPath: options.videoPath,
+        outputPath: options.outputPath,
+        maxFrames: options.maxFrames,
+        jpegQuality: options.jpegQuality,
+        warperType: options.warperType,
+        blenderType: options.blenderType,
+        seamFinderType: options.seamFinderType
+      )
       return StitchResult(
         outputPath: result.outputPath,
         width: result.width,

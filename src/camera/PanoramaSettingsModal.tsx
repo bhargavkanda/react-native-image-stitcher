@@ -264,6 +264,19 @@ export function PanoramaSettingsModal({
                 })}
                 caption="Required NEW-content fraction.  20% (default): generous, ~5–6 keyframes for a 90° pan.  Native clamps to [10%, 80%]."
               />
+              <SectionHeader title="Keyframe interval (time-budget force-accept)" />
+              <SegmentedControl
+                options={['off', '1s', '2s', '3s', '5s']}
+                value={
+                  settings.frameSelection.maxKeyframeIntervalMs === 0
+                    ? 'off'
+                    : `${settings.frameSelection.maxKeyframeIntervalMs / 1000}s`
+                }
+                onChange={(v) => updateFrameSelection({
+                  maxKeyframeIntervalMs: v === 'off' ? 0 : parseInt(v, 10) * 1000,
+                })}
+                caption="Force-accept a keyframe at least this often even if novelty is low, so slow / static pans don't leave gaps.  Counts toward the keyframe cap.  off = disabled.  2s (default).  Applies to AR + non-AR."
+              />
 
               {showFlowTunables && (
                 <View style={styles.nested}>
@@ -373,7 +386,7 @@ export function PanoramaSettingsModal({
                 onChange={(v) => updateStitcher({
                   enableMaxInscribedRectCrop: v === 'on',
                 })}
-                caption="off (default): crop to cv::boundingRect of non-black pixels — preserves all stitched content; may leave black corners.  on: run MaxInscribedRectFromMask + column-projection second-pass for a clean rectangle (can shrink output if mask is lopsided)."
+                caption="off (default): crop to cv::boundingRect of non-black pixels — preserves all stitched content; may leave black corners.  on: run MaxInscribedRectFromMask + column-projection second-pass for a clean rectangle (can shrink output a lot if mask is lopsided / ultra-wide)."
               />
             </Accordion>
 

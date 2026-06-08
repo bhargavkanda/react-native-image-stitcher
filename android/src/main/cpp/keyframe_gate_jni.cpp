@@ -110,6 +110,19 @@ Java_io_imagestitcher_rn_KeyframeGate_nativeSetFlowMaxTranslationM(
     gate(handle)->setFlowMaxTranslationM(static_cast<double>(metres));
 }
 
+// Wall-clock keyframe-interval budget (milliseconds).  Force-accepts a
+// frame once the elapsed time since the last accepted keyframe exceeds
+// this value (applies to BOTH Pose and Flow strategies); 0 disables.
+// Passed straight through — no unit conversion.  See
+// setMaxKeyframeIntervalMs doc in keyframe_gate.hpp.  Android JNI
+// counterpart of the iOS bridge method in KeyframeGateBridge.
+JNIEXPORT void JNICALL
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetMaxKeyframeIntervalMs(
+    JNIEnv*, jclass, jlong handle, jdouble ms)
+{
+    gate(handle)->setMaxKeyframeIntervalMs(static_cast<double>(ms));
+}
+
 // 2026-05-14 — Android JNI for the percentile setter so JS Settings
 // can tune novelty aggregation on Android (was iOS-only until now).
 // See setFlowNoveltyPercentile doc in keyframe_gate.hpp.
