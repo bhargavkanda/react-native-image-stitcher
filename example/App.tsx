@@ -365,9 +365,10 @@ function App(): React.JSX.Element {
     // as a transient toast, not a modal.
     if (info.requested > 0 && missing / info.requested > 0.3) {
       dropToast.showFor(
-        `${missing} of ${info.requested} frames were dropped — pan more `
-          + 'slowly and steadily for a complete panorama.',
+        `${missing} of ${info.requested} frames were dropped for low `
+          + 'overlap — a slower, steadier pan captures the full scene.',
         4000,
+        'Pan more slowly next time',
       );
     }
   };
@@ -596,7 +597,11 @@ function App(): React.JSX.Element {
         )}
 
         {/* Dropped-frames "pan slower" toast (only when >30% missing). */}
-        <CaptureStitchStatsToast message={dropToast.message} />
+        <CaptureStitchStatsToast
+          title={dropToast.title}
+          message={dropToast.message}
+          placement="center"
+        />
 
         {/*
           v0.13.0 — the pre-v0.13 hand-rolled <Modal>...</Modal> block

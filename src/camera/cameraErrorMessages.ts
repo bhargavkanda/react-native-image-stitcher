@@ -37,38 +37,36 @@ const RECOVERABLE_STITCH_GUIDANCE: Partial<
   // cv::Stitcher ERR_NEED_MORE_IMGS / the manual pipeline's "0 valid
   // pairwise matches" — the frames simply don't overlap enough to chain.
   STITCH_NEED_MORE_IMGS: {
-    title: "Couldn't create the panorama",
+    title: 'Please pan more slowly',
     message:
       "There wasn't enough overlap between the frames to stitch them "
-      + 'together. Please try again, panning slowly and steadily so each '
-      + 'frame overlaps the one before it.',
+      + 'together — each frame needs to overlap the one before it.',
   },
   // Bundle adjuster produced degenerate camera params (the warp canvas
   // blew past the size guard) — almost always real camera *translation*
   // breaking PANORAMA mode's pure-rotation assumption, amplified hugely
   // on the ultra-wide lens.
   STITCH_CAMERA_PARAMS_FAIL: {
-    title: "Couldn't create the panorama",
+    title: 'Please pan more slowly',
     message:
-      'The view shifted too much between frames to line them up — usually '
+      'The view moved too much between frames to line them up — usually '
       + 'because the phone moved through space rather than just turning. '
-      + 'Keep it in one spot and pivot slowly as you pan. The ultra-wide '
-      + '(0.5x) lens is especially sensitive to this, so try 1x for wide '
-      + 'scenes.',
+      + 'The ultra-wide (0.5x) lens is especially sensitive to this, so '
+      + 'try 1x for wide scenes.',
   },
   // Pairwise homography estimation failed — frames couldn't be aligned.
   STITCH_HOMOGRAPHY_FAIL: {
-    title: "Couldn't create the panorama",
+    title: 'Please pan more slowly',
     message:
-      "The frames couldn't be aligned. Pan slowly and steadily, keeping the "
-      + 'phone level and making sure each frame overlaps the one before it.',
+      "The frames couldn't be aligned — keep the phone level and steady so "
+      + 'each frame overlaps the one before it.',
   },
   // Ran out of memory finishing the stitch — usually an over-long sweep.
   STITCH_OOM: {
-    title: 'Panorama too large',
+    title: 'Try a shorter sweep',
     message:
-      'This panorama needs more memory than the device can spare to finish. '
-      + 'Try a shorter, narrower sweep — or switch to 1x for wide scenes.',
+      'This panorama needs more memory than the device can spare to finish '
+      + '— a shorter, narrower sweep (or 1x for wide scenes) will fit.',
   },
 };
 

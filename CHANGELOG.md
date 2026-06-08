@@ -102,7 +102,11 @@ same failure, and so the mapping is unit-testable in isolation.
   `userFacingStitchError` (an Alert) on a stitch failure (`onError`), and a
   transient **toast** when frames are dropped for insufficient overlap
   (`onFramesDropped`) — shown only when **>30%** of the requested frames are
-  missing from the final stitch (e.g. ≥2 of 6), so minor drops stay silent.
+  missing from the final stitch (e.g. ≥2 of 6), so minor drops stay silent.  The toast (`CaptureStitchStatsToast`) also
+  gained optional `title` (bold, above the message) and `placement`
+  (`'top'` | `'center'`) props; the example shows a centered title+body toast.
+  Failure alerts now lead with the corrective ask as the title (e.g. "Please
+  pan more slowly" / "Try a shorter sweep") and explain the cause in the body.
 
 ### Fixed — reach the ultra-wide by device-swap when a logical multi-cam can't (Samsung / Camera2)
 

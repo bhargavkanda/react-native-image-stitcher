@@ -29,6 +29,9 @@ describe('userFacingStitchError', () => {
       // No raw stitcher diagnostics should ever reach the user.
       expect(r!.message).not.toMatch(/warpRoi|cv::|OpenCV|ERR_|StsOutOfRange|estimator/i);
       expect(r!.title).not.toMatch(/cv::|OpenCV|ERR_/i);
+      // The title is the corrective ASK (e.g. "Please pan more slowly"),
+      // not a generic failure headline.
+      expect(r!.title).not.toMatch(/couldn't|can't|error|failed|too large/i);
     },
   );
 
