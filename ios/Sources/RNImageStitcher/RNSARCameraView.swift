@@ -54,7 +54,10 @@ public final class RNSARCameraView: UIView {
 
     private func setupView() {
         arSCNView = ARSCNView(frame: bounds)
-        arSCNView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // Do NOT set autoresizingMask — we manage the ARSCNView frame
+        // manually in layoutSubviews() to achieve letterboxing.
+        // autoresizingMask would fight that and re-expand the view to
+        // fill our bounds on every Auto Layout pass.
 
         // Bind to the singleton's session.  This is the critical
         // line — without it, ARSCNView would try to create its own
@@ -71,18 +74,84 @@ public final class RNSARCameraView: UIView {
         arSCNView.showsStatistics = false
         arSCNView.automaticallyUpdatesLighting = false
 
-        // Black background while ARKit is initialising so the user
-        // sees a clean frame instead of whatever was there before.
+        // Black background: fills the letterbox bars (the areas of
+        // this view outside ARSCNView's letterboxed sub-rect).
         backgroundColor = .black
         addSubview(arSCNView)
     }
 
     public override func layoutSubviews() {
         super.layoutSubviews()
-        // RN's flexbox can re-bound this view at any time; keep the
-        // ARSCNView locked to our bounds.  autoresizingMask handles
-        // most cases but isn't always enough on rotation transitions.
-        arSCNView.frame = bounds
+        // Letterbox the ARSCNView to show the full camera FOV.
+        //
+        // ARSCNView's internal renderer always uses resizeAspectFill
+        // (fills its view, crops if aspect ratios differ).  If we give
+        // it our full bounds (portrait 9:21) and the camera image is
+        // effectively portrait 3:4 (4:3 sensor rotated for device
+        // orientation), it crops ~19% off each horizontal edge —
+        // exactly the "viewport ≠ captured frame" bug.
+        //
+        // Fix: set ARSCNView's frame to the largest rect inside our
+        // bounds that has the camera's content aspect ratio.  When
+        // ARSCNView fills a same-AR sub-rect, there is nothing to crop
+        // and the user sees the full captured scene.  The parent view's
+        // black background fills the remainder.
+        arSCNView.frame = letterboxedFrame()
+    }
+
+    /// Returns the largest `CGRect` inside `bounds` that matches the
+    /// camera's content aspect ratio (accounting for device orientation),
+    /// centred within `bounds`.
+    private func letterboxedFrame() -> CGRect {
+        let aspect = cameraContentAspect()
+        let bw = bounds.width
+        let bh = bounds.height
+        guard bw > 0, bh > 0, aspect > 0 else { return bounds }
+
+        // Try fitting by width first; if height overflows, fit by height.
+        let hByWidth = bw / aspect
+        if hByWidth <= bh {
+            // Content fits within height — horizontal bars top+bottom.
+            let y = (bh - hByWidth) / 2
+            return CGRect(x: 0, y: y, width: bw, height: hByWidth)
+        } else {
+            // Vertical bars left+right.
+            let wByHeight = bh * aspect
+            let x = (bw - wByHeight) / 2
+            return CGRect(x: x, y: 0, width: wByHeight, height: bh)
+        }
+    }
+
+    /// Camera content aspect ratio (W÷H) in the current device orientation.
+    ///
+    /// The ARKit sensor is physically landscape (e.g. 1920 × 1440, aspect 4/3).
+    /// When the device is portrait the ARSCNView displays the scene rotated,
+    /// so the effective content aspect is 3/4.  We invert accordingly so the
+    /// letterboxed frame always reflects what the user is actually looking at.
+    ///
+    /// Source priority:
+    ///   1. `currentFrame.camera.imageResolution` — live, most accurate.
+    ///   2. Active session config's `videoFormat.imageResolution` — stable
+    ///      after `arSession.run(…)` and before the first frame.
+    ///   3. 4:3 hardcoded fallback — correct for every iPhone ARKit camera.
+    private func cameraContentAspect() -> CGFloat {
+        let rawResolution: CGSize? = {
+            if let res = RNSARSession.shared.arSession.currentFrame?.camera.imageResolution {
+                return CGSize(width: res.width, height: res.height)
+            }
+            if let fmt = (RNSARSession.shared.arSession.configuration as? ARWorldTrackingConfiguration)?.videoFormat {
+                return CGSize(width: fmt.imageResolution.width, height: fmt.imageResolution.height)
+            }
+            return nil
+        }()
+
+        // Raw sensor aspect (always landscape > 1 for iPhone cameras).
+        let sensorAspect: CGFloat = rawResolution.map { $0.width / $0.height } ?? (4.0 / 3.0)
+
+        // In portrait mode (view taller than wide) the displayed scene
+        // is effectively portrait → invert the sensor aspect.
+        let deviceIsPortrait = bounds.height > bounds.width
+        return deviceIsPortrait ? (1.0 / sensorAspect) : sensorAspect
     }
 
     public override func didMoveToWindow() {
@@ -99,6 +168,12 @@ public final class RNSARCameraView: UIView {
             if !RNSARSession.shared.isRunning {
                 RNSARSession.shared.start()
             }
+            // Re-layout after session start: the configuration's
+            // videoFormat (and shortly after, currentFrame) are now
+            // available for a more accurate aspect ratio.  On iOS all
+            // ARKit cameras are 4:3 so this is a no-op in practice,
+            // but it keeps the code correct for future configs.
+            setNeedsLayout()
         } else {
             // Removed from window — stop the session.  Don't clear
             // the pose log here; the host explicitly clears between

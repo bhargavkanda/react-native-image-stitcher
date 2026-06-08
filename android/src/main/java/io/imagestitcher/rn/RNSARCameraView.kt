@@ -58,6 +58,13 @@ class RNSARCameraView @JvmOverloads constructor(
     defStyle: Int = 0,
 ) : FrameLayout(context, attrs, defStyle), GLSurfaceView.Renderer {
 
+    // Raw camera sensor aspect ratio (W÷H, always > 1 for landscape sensors).
+    // Initialised to 4:3 — a safe fallback for the first layout pass before
+    // the session is attached.  Updated from session.cameraConfig once the
+    // session is available; many Android ARCore devices use 16:9 configs
+    // (e.g. Pixel phones), so reading it dynamically is important here.
+    private var cameraAspect: Float = 4f / 3f
+
     private val glView: GLSurfaceView = GLSurfaceView(context).also { v ->
         v.preserveEGLContextOnPause = true
         v.setEGLContextClientVersion(2)
@@ -123,6 +130,10 @@ class RNSARCameraView @JvmOverloads constructor(
     }
 
     init {
+        // Black background fills the letterbox bars (the areas of this
+        // FrameLayout that the GLSurfaceView doesn't cover once it is
+        // resized to the camera's content aspect ratio in repositionGlView).
+        setBackgroundColor(android.graphics.Color.BLACK)
         addView(
             glView,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
@@ -162,6 +173,23 @@ class RNSARCameraView @JvmOverloads constructor(
                 session.resume()
             } catch (e: CameraNotAvailableException) {
                 Log.w(TAG, "session.resume on attach: $e")
+            }
+            // Read the actual camera image dimensions from the ARCore
+            // session config so repositionGlView can letterbox accurately.
+            // cameraConfig is stable after session creation; on Pixel and
+            // some other Android devices the default config is 16:9, not
+            // 4:3, so we must read dynamically rather than hard-code.
+            try {
+                val size = session.cameraConfig.imageSize
+                if (size.width > 0 && size.height > 0) {
+                    cameraAspect = size.width.toFloat() / size.height.toFloat()
+                    Log.i(TAG, "cameraConfig imageSize: ${size.width}×${size.height} → cameraAspect=$cameraAspect")
+                    // Post so the view has been laid out (width/height > 0)
+                    // before we recompute the GLSurfaceView dimensions.
+                    post { repositionGlView(width, height) }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "cameraConfig not yet available in onAttach; will use $cameraAspect fallback: ${t.message}")
             }
         } else {
             Log.w(
@@ -220,6 +248,64 @@ class RNSARCameraView @JvmOverloads constructor(
         // fires → forwardToIncremental never runs → 0 frames.
         Log.i(TAG, "setIncrementalIngestionActive: $active (prev=$ingestActive)")
         ingestActive = active
+    }
+
+    // ── Letterbox layout ──────────────────────────────────────────
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        // Recompute every time the RN-allocated view size changes (initial
+        // layout, orientation change, split-screen resize).
+        repositionGlView(w, h)
+    }
+
+    /**
+     * Resize and centre the [glView] to the letterboxed sub-rect that
+     * preserves the camera's content aspect ratio inside this FrameLayout.
+     *
+     * The camera sensor is always landscape (e.g. 640 × 480, 4:3).  When
+     * the device is portrait the user's field of view is portrait too —
+     * ARCore's UV transform rotates the feed to match.  The effective
+     * *content* aspect for the user is therefore the INVERSE of the raw
+     * sensor aspect in portrait mode.
+     *
+     * By making the [GLSurfaceView] exactly the letterboxed dimensions,
+     * ARCore's [Session.setDisplayGeometry] receives those dimensions and
+     * maps the full camera image to fill the surface without any cropping.
+     * The parent [FrameLayout]'s black background fills the bars.
+     */
+    private fun repositionGlView(viewW: Int, viewH: Int) {
+        if (viewW <= 0 || viewH <= 0) return
+        // Invert for portrait: sensor is landscape, content is portrait.
+        val contentAspect = if (viewH > viewW) 1f / cameraAspect else cameraAspect
+        val viewAspect = viewW.toFloat() / viewH.toFloat()
+
+        val glW: Int
+        val glH: Int
+        val glX: Int
+        val glY: Int
+
+        if (viewAspect > contentAspect) {
+            // View wider than content — pillarbox (vertical bars left/right).
+            glH = viewH
+            glW = (viewH * contentAspect).toInt()
+            glX = (viewW - glW) / 2
+            glY = 0
+        } else {
+            // View taller than content — letterbox (horizontal bars top/bottom).
+            glW = viewW
+            glH = (viewW / contentAspect).toInt()
+            glX = 0
+            glY = (viewH - glH) / 2
+        }
+
+        Log.d(TAG, "repositionGlView: view=${viewW}×${viewH} contentAspect=$contentAspect → gl=${glW}×${glH} @ ($glX,$glY)")
+
+        val lp = FrameLayout.LayoutParams(glW, glH).apply {
+            leftMargin = glX
+            topMargin = glY
+        }
+        glView.layoutParams = lp
     }
 
     // ── GLSurfaceView.Renderer ─────────────────────────────────────

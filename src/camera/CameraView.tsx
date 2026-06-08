@@ -169,6 +169,15 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         // how the user is holding the phone, so the saved JPEG is
         // "what you see is what was taken".
         outputOrientation="device"
+        // Show the full camera FOV — no cropping.  'contain' maps to
+        // AVLayerVideoGravity.resizeAspect on iOS and the equivalent
+        // on Android, letterboxing the preview to the sensor's exact
+        // aspect ratio.  Without this the default 'cover' crops
+        // ~19% off each horizontal edge in portrait mode (4:3 sensor
+        // in a 9:21 viewport), so the stitcher receives frames the
+        // user never saw.  Black bars fill the remainder; backgroundColor
+        // on styles.root ensures they are always black.
+        resizeMode="contain"
         torch={flash === 'on' ? 'on' : 'off'}
         onError={handleVcError}
         {...cameraProps}
@@ -189,6 +198,11 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     overflow: 'hidden',
+    // Black bars when the camera sensor's aspect ratio doesn't fill
+    // the container (e.g. 4:3 sensor in a 9:21 portrait viewport
+    // with resizeMode="contain").  Without this the bars are
+    // transparent, revealing whatever is behind the component.
+    backgroundColor: '#000',
   },
   placeholder: {
     flex: 1,
