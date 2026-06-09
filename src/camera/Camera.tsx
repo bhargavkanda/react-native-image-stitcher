@@ -899,7 +899,7 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
  */
 export function Camera(props: CameraProps): React.JSX.Element {
   const {
-    defaultCaptureSource = 'ar',
+    defaultCaptureSource = 'non-ar',
     defaultLens = '1x',
     captureSources = 'both',
     enablePhotoMode = true,

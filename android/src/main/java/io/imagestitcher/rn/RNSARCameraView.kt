@@ -130,9 +130,9 @@ class RNSARCameraView @JvmOverloads constructor(
     }
 
     init {
-        // Black background fills the letterbox bars (the areas of this
-        // FrameLayout that the GLSurfaceView doesn't cover once it is
-        // resized to the camera's content aspect ratio in repositionGlView).
+        // Black background avoids a flash before the GL surface starts
+        // clearing itself black each frame (the GL-level letterbox draws
+        // the bars; this is just belt-and-suspenders for the first frame).
         setBackgroundColor(android.graphics.Color.BLACK)
         addView(
             glView,
@@ -175,7 +175,7 @@ class RNSARCameraView @JvmOverloads constructor(
                 Log.w(TAG, "session.resume on attach: $e")
             }
             // Read the actual camera image dimensions from the ARCore
-            // session config so repositionGlView can letterbox accurately.
+            // session config so the GL-level letterbox can size its box.
             // cameraConfig is stable after session creation; on Pixel and
             // some other Android devices the default config is 16:9, not
             // 4:3, so we must read dynamically rather than hard-code.
@@ -184,9 +184,12 @@ class RNSARCameraView @JvmOverloads constructor(
                 if (size.width > 0 && size.height > 0) {
                     cameraAspect = size.width.toFloat() / size.height.toFloat()
                     Log.i(TAG, "cameraConfig imageSize: ${size.width}×${size.height} → cameraAspect=$cameraAspect")
-                    // Post so the view has been laid out (width/height > 0)
-                    // before we recompute the GLSurfaceView dimensions.
-                    post { repositionGlView(width, height) }
+                    // Invalidate the cached display geometry so the next
+                    // onDrawFrame re-pushes it with the now-known camera
+                    // aspect.  The GL-level letterbox recomputes the box
+                    // every frame — no view resize needed.
+                    lastGeomW = -1
+                    lastGeomH = -1
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "cameraConfig not yet available in onAttach; will use $cameraAspect fallback: ${t.message}")
@@ -250,62 +253,52 @@ class RNSARCameraView @JvmOverloads constructor(
         ingestActive = active
     }
 
-    // ── Letterbox layout ──────────────────────────────────────────
+    // ── GL-level letterbox ─────────────────────────────────────────
+    //
+    // The [glView] stays full-screen (MATCH_PARENT); we letterbox at the
+    // GL layer instead of resizing the SurfaceView.  Resizing the view
+    // does NOT work for ARCore: its BackgroundRenderer maps the camera
+    // texture with `Frame.transformCoordinates2d`, which uses the
+    // session's *display geometry* — not the view bounds.  A resized view
+    // therefore still rendered the full-screen (centre-cropped) camera,
+    // merely clipped to the smaller view → a cropped scene with one
+    // visible bar (the other hidden behind the capture controls).
+    //
+    // The correct fix is pure GL + ARCore geometry, applied per frame:
+    //   1. clear the WHOLE surface to black  → the letterbox bars,
+    //   2. setDisplayGeometry to the BOX size → ARCore's UV transform
+    //      fills the box aspect; when box aspect == camera aspect there
+    //      is nothing to crop, so the full FOV shows,
+    //   3. glViewport to the centred box      → camera draws only there.
 
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        // Recompute every time the RN-allocated view size changes (initial
-        // layout, orientation change, split-screen resize).
-        repositionGlView(w, h)
-    }
+    /** Last display geometry pushed to ARCore; only re-push on change. */
+    private var lastGeomW: Int = -1
+    private var lastGeomH: Int = -1
+    private var lastGeomRotation: Int = -1
 
     /**
-     * Resize and centre the [glView] to the letterboxed sub-rect that
-     * preserves the camera's content aspect ratio inside this FrameLayout.
-     *
-     * The camera sensor is always landscape (e.g. 640 × 480, 4:3).  When
-     * the device is portrait the user's field of view is portrait too —
-     * ARCore's UV transform rotates the feed to match.  The effective
-     * *content* aspect for the user is therefore the INVERSE of the raw
-     * sensor aspect in portrait mode.
-     *
-     * By making the [GLSurfaceView] exactly the letterboxed dimensions,
-     * ARCore's [Session.setDisplayGeometry] receives those dimensions and
-     * maps the full camera image to fill the surface without any cropping.
-     * The parent [FrameLayout]'s black background fills the bars.
+     * The centred letterbox rect [x, y, w, h] inside the full GL surface
+     * that preserves the camera's content aspect ratio.  The sensor is
+     * landscape (e.g. 640×480, 4:3); in portrait the on-screen content
+     * aspect is the inverse, so [cameraAspect] is inverted when the
+     * surface is taller than wide.  Falls back to the full surface until
+     * the surface has been measured.
      */
-    private fun repositionGlView(viewW: Int, viewH: Int) {
-        if (viewW <= 0 || viewH <= 0) return
-        // Invert for portrait: sensor is landscape, content is portrait.
-        val contentAspect = if (viewH > viewW) 1f / cameraAspect else cameraAspect
-        val viewAspect = viewW.toFloat() / viewH.toFloat()
-
-        val glW: Int
-        val glH: Int
-        val glX: Int
-        val glY: Int
-
-        if (viewAspect > contentAspect) {
-            // View wider than content — pillarbox (vertical bars left/right).
-            glH = viewH
-            glW = (viewH * contentAspect).toInt()
-            glX = (viewW - glW) / 2
-            glY = 0
+    private fun letterboxBox(): IntArray {
+        val sw = surfaceWidth
+        val sh = surfaceHeight
+        if (sw <= 0 || sh <= 0 || cameraAspect <= 0f) return intArrayOf(0, 0, sw, sh)
+        val contentAspect = if (sh > sw) 1f / cameraAspect else cameraAspect
+        val surfaceAspect = sw.toFloat() / sh.toFloat()
+        return if (surfaceAspect > contentAspect) {
+            // Surface wider than content — vertical bars left/right.
+            val w = (sh * contentAspect).toInt()
+            intArrayOf((sw - w) / 2, 0, w, sh)
         } else {
-            // View taller than content — letterbox (horizontal bars top/bottom).
-            glW = viewW
-            glH = (viewW / contentAspect).toInt()
-            glX = 0
-            glY = (viewH - glH) / 2
+            // Surface taller than content — horizontal bars top/bottom.
+            val h = (sw / contentAspect).toInt()
+            intArrayOf(0, (sh - h) / 2, sw, h)
         }
-
-        Log.d(TAG, "repositionGlView: view=${viewW}×${viewH} contentAspect=$contentAspect → gl=${glW}×${glH} @ ($glX,$glY)")
-
-        val lp = FrameLayout.LayoutParams(glW, glH).apply {
-            leftMargin = glX
-            topMargin = glY
-        }
-        glView.layoutParams = lp
     }
 
     // ── GLSurfaceView.Renderer ─────────────────────────────────────
@@ -324,6 +317,10 @@ class RNSARCameraView @JvmOverloads constructor(
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        // Step 1 — paint the WHOLE surface black.  This is the letterbox:
+        // anything outside the camera box below stays black.
+        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
 
         val session = sessionRef.get() ?: run {
@@ -337,9 +334,13 @@ class RNSARCameraView @JvmOverloads constructor(
         if (!sessionTextureBound) {
             backgroundRenderer.bindToSession(session)
             sessionTextureBound = true
-            // Ensure ARCore knows the surface geometry.
-            applyDisplayGeometry()
         }
+
+        // Step 2 — keep ARCore's display geometry equal to the letterbox
+        // box (not the full surface) so its UV transform fills the box
+        // aspect with the full camera FOV (no centre-crop).  Cheap: only
+        // calls setDisplayGeometry when the box actually changes.
+        applyDisplayGeometry()
 
         val frame = try {
             session.update()
@@ -349,6 +350,11 @@ class RNSARCameraView @JvmOverloads constructor(
             Log.w(TAG, "session.update failed: ${t.message}")
             return
         }
+
+        // Step 3 — confine the camera draw to the centred box; the black
+        // cleared in step 1 remains as the bars around it.
+        val box = letterboxBox()
+        GLES20.glViewport(box[0], box[1], box[2], box[3])
 
         // Draw the camera background regardless of tracking state —
         // gives the user something to look at while AR initialises.
@@ -701,11 +707,28 @@ class RNSARCameraView @JvmOverloads constructor(
             ?.defaultDisplay
             ?.rotation
             ?: Surface.ROTATION_0
-        if (rotation != lastDisplayRotation
-            || surfaceWidth > 0 || surfaceHeight > 0
-        ) {
-            session.setDisplayGeometry(rotation, surfaceWidth, surfaceHeight)
-            lastDisplayRotation = rotation
+        // Keep lastDisplayRotation current regardless — the JPEG encode
+        // path (forwardToIncremental → encodeJpegFromNV21) reads it for
+        // the EXIF orientation tag.
+        lastDisplayRotation = rotation
+
+        val box = letterboxBox()
+        val bw = box[2]
+        val bh = box[3]
+        if (bw <= 0 || bh <= 0) return
+        // Feed ARCore the BOX dimensions (not the full surface) so its UV
+        // transform fills the box aspect — the full camera FOV with no
+        // centre-crop.  Only push on change to avoid per-frame churn.
+        if (rotation != lastGeomRotation || bw != lastGeomW || bh != lastGeomH) {
+            session.setDisplayGeometry(rotation, bw, bh)
+            lastGeomRotation = rotation
+            lastGeomW = bw
+            lastGeomH = bh
+            Log.d(
+                TAG,
+                "setDisplayGeometry(box): rotation=$rotation box=${bw}×${bh} "
+                    + "surface=${surfaceWidth}×${surfaceHeight} cameraAspect=$cameraAspect",
+            )
         }
     }
 

@@ -19,10 +19,23 @@
  * UI can still use it as their building block.
  */
 
-import React, { forwardRef, useImperativeHandle, useRef } from 'react';
-import { StyleSheet, Text, View, type ViewStyle } from 'react-native';
+import React, {
+  forwardRef,
+  useCallback,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from 'react';
+import {
+  StyleSheet,
+  Text,
+  View,
+  type LayoutChangeEvent,
+  type ViewStyle,
+} from 'react-native';
 import {
   Camera,
+  useCameraFormat,
   type CameraDevice,
   type CameraProps,
 } from 'react-native-vision-camera';
@@ -140,6 +153,39 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   const innerRef = useRef<Camera>(null);
   useImperativeHandle(ref, () => innerRef.current as Camera);
 
+  // ── WYSIWYG letterboxing ────────────────────────────────────────
+  //
+  // Pin BOTH the photo and the preview (video) stream to a 4:3 aspect
+  // ratio so the viewport shows exactly what gets captured.  Without a
+  // pinned format, vision-camera picks the device default for each —
+  // commonly a 4:3 photo but a 16:9 preview — so the preview and the
+  // saved frame frame different scenes.  4:3 is the native still
+  // aspect on essentially every phone camera (incl. ultra-wide), so a
+  // matching format is virtually always available; `useCameraFormat`
+  // returns the closest match and never throws.
+  const format = useCameraFormat(device ?? undefined, [
+    { photoAspectRatio: 4 / 3 },
+    { videoAspectRatio: 4 / 3 },
+  ]);
+
+  // Measured size of our container, so we can size the <Camera> view to
+  // the largest box of the capture's aspect ratio that fits inside it
+  // (the rest becomes the black letterbox).  We deliberately size the
+  // VIEW rather than relying on vision-camera's `resizeMode` alone:
+  // resizeMode maps to PreviewView.ScaleType on Android, which several
+  // devices ignore under the default SurfaceView compositor — so the
+  // preview kept filling the screen.  When the view's own aspect ratio
+  // equals the feed's, there is nothing left to crop on any platform.
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  const onRootLayout = useCallback((e: LayoutChangeEvent) => {
+    const { width, height } = e.nativeEvent.layout;
+    setSize((prev) =>
+      prev && prev.w === width && prev.h === height
+        ? prev
+        : { w: width, h: height },
+    );
+  }, []);
+
   if (!device) {
     return (
       <View style={[styles.placeholder, style]} accessibilityLabel="Camera initialising">
@@ -148,15 +194,49 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     );
   }
 
+  // Capture aspect ratio (W÷H) in the sensor's native landscape
+  // orientation (so > 1).  Falls back to 4:3 until the format resolves.
+  const sensorAspect =
+    format && format.photoWidth > 0 && format.photoHeight > 0
+      ? format.photoWidth / format.photoHeight
+      : 4 / 3;
+
+  // With outputOrientation="device", a portrait device displays the
+  // scene rotated, so the on-screen content aspect is the inverse of
+  // the landscape sensor aspect.  Detect portrait from the measured
+  // container — robust across devices, split-screen and rotation.
+  const isPortrait = size != null ? size.h >= size.w : true;
+  const contentAspect = isPortrait ? 1 / sensorAspect : sensorAspect;
+
+  // Largest box of `contentAspect` that fits the container, centred by
+  // styles.root.  The remaining area is the black letterbox.  Before the
+  // first onLayout we fill the container so the camera session mounts
+  // immediately; the exact box snaps in ~1 frame later.
+  let cameraStyle: ViewStyle;
+  if (size == null || size.w === 0 || size.h === 0) {
+    cameraStyle = StyleSheet.absoluteFillObject;
+  } else {
+    const heightIfFullWidth = size.w / contentAspect;
+    cameraStyle =
+      heightIfFullWidth <= size.h
+        ? { width: size.w, height: heightIfFullWidth }
+        : { width: size.h * contentAspect, height: size.h };
+  }
+
   return (
-    <View style={[styles.root, style]}>
+    <View style={[styles.root, style]} onLayout={onRootLayout}>
       <Camera
         ref={innerRef}
-        style={StyleSheet.absoluteFill}
+        // Sized to the letterboxed box (capture aspect ratio) so the
+        // preview never crops; styles.root centres it and paints the
+        // surrounding bars black.  See the cameraStyle computation above.
+        style={cameraStyle}
         device={device}
         isActive={isActive}
         photo
         video={video}
+        // Pin preview + photo to the same 4:3 format (WYSIWYG capture).
+        format={format}
         // v0.13.2 — multi-cam lens switch via zoom (undefined = default).
         {...(zoom != null ? { zoom } : {})}
         // Bake the device orientation into the captured pixels.
@@ -178,6 +258,16 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         // user never saw.  Black bars fill the remainder; backgroundColor
         // on styles.root ensures they are always black.
         resizeMode="contain"
+        // Android: force TextureView rendering so that FIT_CENTER
+        // (the Android equivalent of resizeMode="contain") actually
+        // produces visible letterboxing.  The default SurfaceView mode
+        // composes at the hardware layer below the View hierarchy and
+        // on many devices ignores FIT_CENTER, filling the full surface
+        // instead.  TextureView is part of the regular View hierarchy
+        // so the matrix transform for FIT_CENTER works correctly —
+        // the bars outside the letterboxed area are transparent,
+        // revealing the parent's black backgroundColor.
+        androidPreviewViewType="texture-view"
         torch={flash === 'on' ? 'on' : 'off'}
         onError={handleVcError}
         {...cameraProps}
@@ -198,10 +288,15 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     overflow: 'hidden',
-    // Black bars when the camera sensor's aspect ratio doesn't fill
-    // the container (e.g. 4:3 sensor in a 9:21 portrait viewport
-    // with resizeMode="contain").  Without this the bars are
-    // transparent, revealing whatever is behind the component.
+    // Centre the letterboxed <Camera> box so the black bars are
+    // symmetric on both sides (top/bottom in portrait, left/right in
+    // landscape).
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Black bars when the camera's aspect ratio doesn't fill the
+    // container (e.g. 4:3 sensor in a 9:21 portrait viewport).  Without
+    // this the bars are transparent, revealing whatever is behind the
+    // component.
     backgroundColor: '#000',
   },
   placeholder: {

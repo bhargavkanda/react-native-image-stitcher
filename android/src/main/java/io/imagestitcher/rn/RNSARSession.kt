@@ -11,6 +11,8 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.google.ar.core.ArCoreApk
+import com.google.ar.core.CameraConfig
+import com.google.ar.core.CameraConfigFilter
 import com.google.ar.core.Config
 import com.google.ar.core.Plane
 import com.google.ar.core.Pose
@@ -164,6 +166,7 @@ class RNSARSession(reactContext: ReactApplicationContext)
 
             val session = sessionRef.get() ?: Session(reactApplicationContext).also {
                 sessionRef.set(it)
+                selectMatchingCameraConfig(it)
             }
             val config = Config(session).apply {
                 // Smoothed depth is the ARCore equivalent of iOS
@@ -322,6 +325,7 @@ class RNSARSession(reactContext: ReactApplicationContext)
 
             val session = Session(reactApplicationContext).also {
                 sessionRef.set(it)
+                selectMatchingCameraConfig(it)
             }
             val config = Config(session).apply {
                 if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
@@ -830,6 +834,51 @@ class RNSARSession(reactContext: ReactApplicationContext)
 
     private fun clearPoseLogInternal() {
         poseLogLock.write { poseLog.clear() }
+    }
+
+    /**
+     * Pick an ARCore camera config whose CPU image and GPU texture share
+     * the same aspect ratio, so the preview (texture) and the captured /
+     * stitched frames (acquireCameraImage) cover the SAME field of view.
+     *
+     * ARCore's default often pairs a 16:9 GPU texture with a 4:3 CPU
+     * image (e.g. 1920x1080 texture + 640x480 image on the Galaxy A35):
+     * the texture is then missing ~12 deg of vertical sensor FOV the
+     * image has, so the preview can never match the photo.  Choosing a
+     * config where the two aspects match (preferring 4:3 for max FOV,
+     * then the highest image resolution) makes preview == capture by
+     * construction -- and usually raises the stitched-frame / photo
+     * resolution above 640x480 as a bonus.
+     *
+     * Must be called on a freshly-created, un-resumed session (ARCore
+     * requires the session paused for setCameraConfig).  Best-effort: on
+     * any failure we keep ARCore's default config.
+     */
+    private fun selectMatchingCameraConfig(session: Session) {
+        try {
+            val configs = session.getSupportedCameraConfigs(CameraConfigFilter(session))
+            if (configs.isEmpty()) return
+            fun aspect(s: android.util.Size): Float = s.width.toFloat() / s.height.toFloat()
+
+            val matched = configs.filter {
+                kotlin.math.abs(aspect(it.imageSize) - aspect(it.textureSize)) < 0.02f
+            }
+            val pool = if (matched.isNotEmpty()) matched else configs
+            val chosen = pool.sortedWith(
+                compareBy<CameraConfig> { kotlin.math.abs(aspect(it.imageSize) - 4f / 3f) }
+                    .thenByDescending { it.imageSize.width * it.imageSize.height },
+            ).firstOrNull() ?: return
+            session.setCameraConfig(chosen)
+            Log.i(
+                TAG,
+                "selectMatchingCameraConfig: chose image=" +
+                    "${chosen.imageSize.width}x${chosen.imageSize.height} texture=" +
+                    "${chosen.textureSize.width}x${chosen.textureSize.height} " +
+                    "(from ${configs.size} configs, ${matched.size} aspect-matched)",
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "selectMatchingCameraConfig failed; keeping default config: ${t.message}")
+        }
     }
 
     companion object {

@@ -13,10 +13,6 @@
  *     itself does not call `requestPermission`).
  *   - All callback props are wired to console.log so the event flow
  *     is observable on-device.
- *
- * The component is the only thing exported by the library that you
- * actually need to render — everything else (preview, shutter, lens
- * chip, AR toggle, settings modal) is owned by `<Camera>`.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -225,17 +221,12 @@ function App(): React.JSX.Element {
   } | null>(null);
   useEffect(() => {
     const sub = subscribeIncrementalState((s) => {
-      // v0.10.0 PR B diag: log EVERY state event with the refine
-      // field shape so we can see iOS vs Android delivery.  Temporary
-      // — remove once the pill is confirmed visible on both platforms.
       // eslint-disable-next-line no-console
       console.log('[example] state event', {
         refineStage: s.refineStage,
         refineProgress: s.refineProgress,
         refineFrames: s.refineFrames,
         refineError: s.refineError,
-        // First few base fields too, to confirm the event got through
-        // at all:
         outcome: s.outcome,
         isRefining: s.isRefining,
       });
@@ -258,46 +249,14 @@ function App(): React.JSX.Element {
     return () => clearTimeout(id);
   }, [refine]);
 
-  // v0.9.0 NOTE — `useFrameStream` (Tier 2 Layer 3) is exported by
-  // the lib but the example demo was removed because the current
-  // implementation has two known limitations that block a clean
-  // visual demo:
-  //
-  //   1. AR mode: Layer 1's `save_frame_as_jpeg` vc plugin doesn't
-  //      yet handle `StitcherFrameHostObject` (it expects vc's
-  //      Frame with `.buffer = CMSampleBufferRef`).  Worklet body
-  //      runs but `plugin.call(frame, ...)` throws silently.
-  //      Tracked as v0.9.1 — needs AR-frame buffer-pass-via-args
-  //      bridge (vc's `SharedArray` JSI↔native path).
-  //
-  //   2. Non-AR mode: wiring the host's frameProcessor through
-  //      `<Camera>` displaces the lib's first-party stitching
-  //      driver (Phase 5 either-or constraint).  Tracked as
-  //      v0.11.0 (`useStitcherWorklet` composition).
-  //
-  // For hosts whose use case fits Layer 2 (worklet-native processing
-  // via vc plugins — Vision.framework / ML Kit / TFLite / LiDAR
-  // depth), `useThrottledFrameProcessor` works in BOTH modes today
-  // without these limitations.  See `docs/frame-access-tiers.md`.
-
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
-    // v0.15 — route a panorama into the inscribed-rect debug overlay
-    // when the harness is on (it expects the full, uncropped image —
-    // the library default is bounding-rect, which is exactly that).
     if (rectDebugEnabled && result.type === 'panorama') {
       setRectDebugUri(result.uri);
       return;
     }
     setPreview(result);
-    // v0.13.0 — append to the host-owned thumbnails list so the
-    // built-in CaptureThumbnailStrip shows the capture history.
-    // The SDK's strip is purely presentational — it never mutates
-    // the array; the host is the canonical source.  Using
-    // `result.uri` as the id is fine here because URIs are
-    // unique per capture (timestamped filenames); a real consumer
-    // would use a DB primary key.
     setThumbnails((prev) => [
       ...prev,
       {
@@ -309,16 +268,6 @@ function App(): React.JSX.Element {
     ]);
   };
 
-  // v0.10.0 — manually trigger `module.refinePanorama(...)` against
-  // the keyframes collected from `useKeyframeStream` during the
-  // capture.  Demonstrates the v0.10.0 #15A refineProgress events
-  // end-to-end (the auto-refine path from hybrid finalize is a no-op
-  // today because the hybrid engine doesn't persist per-frame JPEGs).
-  //
-  // Only meaningful for the batch-keyframe engine — that's the only
-  // mode `useKeyframeStream` populates.  Other engines (hybrid /
-  // slit-scan / firstwins) leave `collectedKeyframesRef` empty and
-  // the button stays hidden.
   const handleReRefine = useCallback(async () => {
     const native = getIncrementalNativeModule();
     if (!native?.refinePanorama || preview?.type !== 'panorama') return;
@@ -358,11 +307,6 @@ function App(): React.JSX.Element {
       '[example] onFramesDropped',
       `${info.included}/${info.requested} (missing ${missing})`,
     );
-    // The panorama succeeded but some keyframes were dropped for low
-    // overlap (included < requested).  Only nudge the user when the loss
-    // is significant — more than 30% of the requested frames missing
-    // (e.g. >=2 of 6); a 1-of-6 drop isn't worth interrupting for.  Shown
-    // as a transient toast, not a modal.
     if (info.requested > 0 && missing / info.requested > 0.3) {
       dropToast.showFor(
         `${missing} of ${info.requested} frames were dropped for low `
@@ -374,16 +318,8 @@ function App(): React.JSX.Element {
   };
 
   const handleError = (err: CameraError): void => {
-    // Recoverable stitch failures (not enough overlap, too much camera
-    // movement / degenerate camera params, alignment fail, OOM) get
-    // friendly, action-guiding copy from the SDK's shared map — so the
-    // user sees "pan more slowly / pivot in place" instead of a raw
-    // cv::Stitcher diagnostic.  Everything else falls through to the loud
-    // diagnostic alert.
     const guidance = userFacingStitchError(err.code);
     if (guidance) {
-      // warn (not error) so the dev LogBox doesn't throw a red overlay
-      // over our friendly Alert for an expected, recoverable outcome.
       // eslint-disable-next-line no-console
       console.warn('[example] onError (recoverable)', err.code, err.message);
       Alert.alert(guidance.title, guidance.message);
@@ -394,10 +330,6 @@ function App(): React.JSX.Element {
     Alert.alert(`Camera error (${err.code})`, err.message);
   };
 
-  // v0.13.0 — derive the built-in CapturePreview's payload from
-  // `preview`.  Single source of truth: `preview` is set in
-  // `onCapture` and cleared via `closePreview`; the SDK's modal
-  // tracks visibility off whether `capturePreview` is defined.
   const capturePreviewPayload = useMemo(() => {
     if (preview === null) return undefined;
     return {
@@ -415,15 +347,10 @@ function App(): React.JSX.Element {
   }, [preview]);
 
   const closePreview = useCallback(() => {
-    // v0.10.0 — reset keyframe collection on close so the next
-    // capture starts clean.
     collectedKeyframesRef.current = [];
     setPreview(null);
   }, []);
 
-  // v0.13.0 — capture-preview action buttons.  Always include
-  // Close; conditionally include Re-refine when we have a panorama
-  // with enough collected keyframes to drive `refinePanorama(...)`.
   const capturePreviewActions = useMemo<CapturePreviewAction[] | undefined>(() => {
     if (preview === null) return undefined;
     const actions: CapturePreviewAction[] = [];
@@ -435,11 +362,6 @@ function App(): React.JSX.Element {
         label: `Re-refine (${collectedKeyframesRef.current.length} keyframes)`,
         variant: 'neutral',
         onPress: () => {
-          // Fire-and-forget — keep the modal open while the refine
-          // runs.  The outer floating refinePill will show progress
-          // (the in-modal pill from the pre-v0.13 hand-rolled Modal
-          // is gone; the SDK's CapturePreview doesn't accept
-          // arbitrary children).
           void handleReRefine();
         },
       });
@@ -450,13 +372,8 @@ function App(): React.JSX.Element {
       onPress: closePreview,
     });
     return actions;
-    // Re-evaluate when preview type/uri changes; the keyframe ref
-    // is read at action-press time, so we don't need it in deps.
   }, [preview, closePreview, handleReRefine]);
 
-  // Permission gate — show grant overlay until camera access is OK.
-  // This is the kind of UX the host app owns; the SDK only renders
-  // <Camera> when permission is in hand.
   if (!hasPermission) {
     return (
       <SafeAreaProvider>
@@ -486,66 +403,23 @@ function App(): React.JSX.Element {
     );
   }
 
-  // F8.3 — the SDK's <Camera> now owns the Frame Processor worklet
-  // internally via `useFrameProcessorDriver`.  The F8.0.c/F8.1
-  // hand-rolled diagnostic worklet that lived here is gone; the
-  // SDK's driver supplies real gyro-integrated pose to the plugin
-  // and pipes frames straight into the incremental stitcher.
-
   return (
     <SafeAreaProvider>
       <StatusBar barStyle="light-content" />
       <SafeAreaView style={styles.safe}>
         <Camera
-          defaultCaptureSource="ar"
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
-          // v0.15 — inscribed-rect crop is OFF by default: the panorama is
-          // the bounding box of stitched content (may show black corners on
-          // wide / tilted pans).  Opt in with `maxInscribedRectCrop` (or the
-          // gear → settings toggle) for the clean-edged inscribed rectangle —
-          // it can shrink ultra-wide / lopsided pans, which is why it's opt-in.
-          // Internal-tester mode: gear icon opens PanoramaSettingsModal.
-          // With `headerTitle` set below, the gear is absorbed into
-          // the built-in CaptureHeader's right slot (no duplicate gear).
-          // Defaults to false for public consumers; flip on for development.
           showSettingsButton={__DEV__}
-          // v0.13.0 — built-in CaptureHeader (opt-in: only when
-          // `headerTitle` is set).  Renders a top-of-screen header
-          // with title + guidance subtitle + absorbed settings gear.
           headerTitle="Image Stitcher Demo"
           headerGuidance="Tap shutter for a photo. Hold + pan + release for a panorama."
-          // v0.13.0 — controlled flash demo.  Uncontrolled mode (omit
-          // `flash`) lets <Camera> own the state; we wire it up here
-          // both to exercise the controlled path and so a future
-          // host-driven flash chrome (gestures, voice, hardware key)
-          // can flip the same source of truth.  AR mode auto-disables
-          // the built-in button — no host work required.
           flash={flash}
           onFlashChange={setFlash}
-          // v0.13.0 — built-in capture-history strip.  Host owns the
-          // array; the strip is purely presentational and shows each
-          // capture's aspect-ratio thumbnail.  We deliberately do NOT
-          // pass `thumbnailsMin` / `thumbnailsMax` here — the count
-          // line they trigger ("N / min · max") is an audit-app UX
-          // convention, not a generic camera feature, so the example
-          // omits it.  The props remain on the SDK for hosts (like
-          // RetaiLens) that want quota-style guidance.
           thumbnails={thumbnails}
-          // v0.13.0 — built-in CapturePreview modal (replaces the
-          // pre-v0.13 hand-rolled <Modal>).  Driven by the same
-          // `preview` state as before via `capturePreviewPayload`.
-          // Action buttons include Re-refine (when a panorama with
-          // collected keyframes) and Close.
           capturePreview={capturePreviewPayload}
           capturePreviewActions={capturePreviewActions}
           onCapturePreviewClose={closePreview}
-          // v0.11.0 — composed processor: lib's first-party stitching
-          // via `stitcher.call(frame)` + example tick log per frame.
-          // No-op in AR mode (vc's `<Camera>` isn't mounted in that
-          // path; AR worklets fire via `__stitcherProxy` auto-
-          // registration).
           frameProcessor={exampleFrameProcessor}
           onCapture={handleCapture}
           onCaptureSourceChange={handleCaptureSourceChange}
@@ -553,7 +427,6 @@ function App(): React.JSX.Element {
           onFramesDropped={handleFramesDropped}
           onError={handleError}
         />
-
 
         {refine !== null && (
           <View
@@ -576,7 +449,6 @@ function App(): React.JSX.Element {
           </View>
         )}
 
-
         {__DEV__ && inscribedRectDebugAvailable() && (
           <Pressable
             style={styles.rectDebugToggle}
@@ -596,32 +468,11 @@ function App(): React.JSX.Element {
           />
         )}
 
-        {/* Dropped-frames "pan slower" toast (only when >30% missing). */}
         <CaptureStitchStatsToast
           title={dropToast.title}
           message={dropToast.message}
           placement="center"
         />
-
-        {/*
-          v0.13.0 — the pre-v0.13 hand-rolled <Modal>...</Modal> block
-          that lived here has been replaced by `<Camera>`'s built-in
-          `CapturePreview` (wired via the `capturePreview` /
-          `capturePreviewActions` / `onCapturePreviewClose` props
-          above).  Same UX: fullscreen preview, dimensions in the
-          title, Re-refine button for panorama with collected
-          keyframes, Close to dismiss.  Drives off the same `preview`
-          state so the example's existing onCapture / closePreview
-          flow continues to work.
-
-          The refinePill rendered above (outside the modal) still
-          shows progress when Re-refine fires — the modal sits on
-          top of the camera but the pill is rendered as part of the
-          outer screen, so RN's pre-v0.12 caveat about Modal stealing
-          focus from sibling elements doesn't apply to the toast-
-          shaped pill behind it (the user sees it in the gap between
-          the modal close and the next capture start).
-        */}
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -679,14 +530,6 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '600',
   },
-  // v0.13.0 — removed `previewSafe`, `previewMeta`, `previewTitle`,
-  // `previewSub`, `previewImage`, `previewCloseButton(Pressed)?`,
-  // `previewCloseLabel`, `previewRefineButton(Pressed)?`,
-  // `previewRefineLabel`, and `refinePillModal` along with the
-  // hand-rolled <Modal> they styled.  The SDK's built-in
-  // `CapturePreview` modal (wired via the `capturePreview` /
-  // `capturePreviewActions` props on `<Camera>`) replaces this UI
-  // entirely.
   refinePill: {
     position: 'absolute',
     top: 56,
@@ -694,20 +537,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 999,
-    backgroundColor: 'rgba(0, 122, 255, 0.92)',  // iOS systemBlue
+    backgroundColor: 'rgba(0, 122, 255, 0.92)',
   },
   refinePillDone: {
-    backgroundColor: 'rgba(52, 199, 89, 0.92)',  // iOS systemGreen
+    backgroundColor: 'rgba(52, 199, 89, 0.92)',
   },
   refinePillError: {
-    backgroundColor: 'rgba(255, 59, 48, 0.92)',  // iOS systemRed
+    backgroundColor: 'rgba(255, 59, 48, 0.92)',
   },
   refinePillLabel: {
     color: '#fff',
     fontSize: 13,
     fontWeight: '600',
   },
-
 });
 
 

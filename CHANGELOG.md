@@ -16,6 +16,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-06-08
+
+### Fixed
+
+- **Camera preview now matches capture FOV on all paths (letterbox WYSIWYG).**
+  The preview and captured photo now share the same field of view regardless of
+  the container size the host app uses.  Black letterbox bars fill any extra
+  space rather than cropping or stretching the camera feed.
+  - *VisionCamera path:* `CameraView` measures its rendered bounds via
+    `onLayout`, pins the format to 4:3 with `useCameraFormat`, then sizes the
+    `<Camera>` component to the largest axis-aligned box that fits the container
+    while preserving the format aspect ratio.
+  - *ARCore path (Android):* `RNSARCameraView` now selects a camera config
+    whose image aspect and texture aspect match within 2% (`selectMatchingCameraConfig`).
+    On devices (e.g. Galaxy A35) where no 4:3 matched config exists, the best
+    available 16:9 config is chosen — both preview and capture are 16:9.
+    The GL renderer letterboxes the camera texture inside the GL surface using
+    `setDisplayGeometry` + `glViewport`, centred on a black-cleared surface.
+  - *ARKit path (iOS):* `RNSARCameraView.layoutSubviews()` reads
+    `imageResolution` from the ARKit session and centres the scene view inside
+    the container bounds using the same aspect-correct letterbox calculation.
+
+- **ARCore CPU image resolution upgraded automatically.**  `selectMatchingCameraConfig`
+  prefers the highest-resolution matched config, so CPU image captures used for
+  stitching are now at full sensor resolution (1920×1080 on the Galaxy A35,
+  up from 640×480) with no API change required.
+
+### Changed
+
+- **`defaultCaptureSource` changed from `'ar'` to `'non-ar'`.**  AR mode is now
+  opt-in.  Host apps that want AR must pass `defaultCaptureSource="ar"` or
+  implement a toggle; the plain camera path is the default.
+
 ## [0.15.0] — 2026-06-07
 
 ### Breaking — only `batch-keyframe` remains; host-worklet / frame-stream hooks removed
