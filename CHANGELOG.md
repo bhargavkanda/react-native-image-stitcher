@@ -16,6 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sharp non-AR camera preview (WYSIWYG follow-up).**  The v0.15.1
+  letterbox pinned the vision-camera format by aspect ratio only, so
+  `useCameraFormat` could settle on a degenerate 4:3 format — observed as
+  a 192×144 video stream on the iPhone 16 Pro — rendering the preview as
+  upscaled mush behind a full-resolution capture.  The format filter now
+  also requests `{ videoResolution: 'max' }`, so among 4:3 formats the
+  highest-resolution one is chosen: a sharp preview plus full-res frames
+  into the non-AR stitcher, with aspect kept as the top-priority filter so
+  4:3 capture parity holds.  A bounded target (e.g. 1920×1440) is
+  deliberately avoided — the nearest such format on the iPhone 16 Pro is
+  10-bit-only (`x420`/`x422`), which the frame processor's 8-bit
+  `420v`/`420f` pipeline rejects with `device/pixel-format-not-supported`;
+  vision-camera exposes no per-format pixel formats to JS, so `'max'`
+  (empirically the device's 8-bit full-res format) is the robust choice.
+
 ## [0.15.1] — 2026-06-08
 
 ### Fixed

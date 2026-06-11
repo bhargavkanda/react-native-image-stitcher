@@ -163,9 +163,36 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // aspect on essentially every phone camera (incl. ultra-wide), so a
   // matching format is virtually always available; `useCameraFormat`
   // returns the closest match and never throws.
+  //
+  // Resolution preference matters too: filtering on aspect ALONE lets
+  // vision-camera settle on whatever 4:3 format sorts first — observed as
+  // a 192×144 VIDEO stream on the iPhone 16 Pro (the photo still uses the
+  // format's full-res photo dims, so you'd get a sharp capture behind a
+  // mush preview).  So we also request the highest video resolution.
+  //
+  // Why `'max'` and not a bounded target like 1920×1440?  We tried the
+  // bounded target and it FAILED on the iPhone 16 Pro: the nearest
+  // 1920×1440 format is a 10-bit format (pixel formats x420 / x422 only —
+  // and it is NOT flagged HDR, so the `videoHdr` filter can't dodge it).
+  // The frame processor + the stitcher's CV pipeline need 8-bit
+  // `420v`/`420f`, so vision-camera raises
+  // `device/pixel-format-not-supported` and silently falls back to a
+  // default pixel format — breaking non-AR stitching.  vision-camera does
+  // NOT expose a format's supported pixel formats to JS (no
+  // `pixelFormats` field; `FormatFilter` has no pixel-format key), so we
+  // can't select an 8-bit format by inspection.  Empirically the device's
+  // MAX 4:3 video format is 8-bit (420v/420f) on the iPhone 16 Pro, and
+  // Android formats are near-universally 8-bit YUV_420_888, so `'max'` is
+  // the robust choice: a sharp preview on a frame-processor-compatible
+  // pipeline.  Trade-off: the max format tends to run at 30 fps (fine for
+  // hold-to-pan) and feeds full-res frames to the non-AR gate — if that
+  // ever shows up as dropped frames we can downscale for the gate
+  // natively while keeping full-res keyframes.  Aspect stays the
+  // top-priority filter, so 4:3 WYSIWYG parity holds on every device.
   const format = useCameraFormat(device ?? undefined, [
     { photoAspectRatio: 4 / 3 },
     { videoAspectRatio: 4 / 3 },
+    { videoResolution: 'max' },
   ]);
 
   // Measured size of our container, so we can size the <Camera> view to
