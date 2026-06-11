@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `420v`/`420f` pipeline rejects with `device/pixel-format-not-supported`;
   vision-camera exposes no per-format pixel formats to JS, so `'max'`
   (empirically the device's 8-bit full-res format) is the robust choice.
+  Tap-to-photo stills are capped at ~12 MP (`photoResolution: 4032×3024`,
+  lowest priority) so the iPhone 16 Pro's max-video format doesn't default
+  to a 24 MP still — the panorama path uses the video stream, not
+  `takePhoto`, so the cap costs nothing there.
 
 ## [0.15.1] — 2026-06-08
 

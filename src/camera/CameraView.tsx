@@ -189,10 +189,21 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // ever shows up as dropped frames we can downscale for the gate
   // natively while keeping full-res keyframes.  Aspect stays the
   // top-priority filter, so 4:3 WYSIWYG parity holds on every device.
+  //
+  // Still resolution is capped at ~12 MP.  The max-video 4:3 format pairs
+  // with a 24 MP photo (5712×4284) on the iPhone 16 Pro by default — 2×
+  // the file size + per-capture memory for no benefit on the panorama
+  // path (which uses the VIDEO stream, not takePhoto).  `photoResolution`
+  // is the LOWEST-priority filter, so it only breaks ties between equal
+  // max-video formats (e.g. the 12 MP-photo vs 24 MP-photo variants that
+  // share the same 4032×3024 video) — it never trades preview/stitch
+  // sharpness for a smaller still.  4032×3024 = 12 MP at 4:3; nearest-
+  // match keeps stills near there on any device.
   const format = useCameraFormat(device ?? undefined, [
     { photoAspectRatio: 4 / 3 },
     { videoAspectRatio: 4 / 3 },
     { videoResolution: 'max' },
+    { photoResolution: { width: 4032, height: 3024 } },
   ]);
 
   // Measured size of our container, so we can size the <Camera> view to
