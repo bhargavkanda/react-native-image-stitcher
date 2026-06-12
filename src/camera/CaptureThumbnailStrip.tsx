@@ -247,6 +247,15 @@ export function CaptureThumbnailStrip({
               source={{ uri: item.uri }}
               style={[styles.thumbImage, contentRotation]}
               resizeMode="cover"
+              // OOM fix: the source is the FULL-RES panorama/photo file.
+              // Without resizeMethod, Android/Fresco decodes it at full
+              // resolution into a native bitmap that stays PINNED by this
+              // mounted <Image> (not LRU-evictable) — so each capture (esp.
+              // wide panoramas) accumulates tens of MB of native heap.
+              // 'resize' decodes at the ~thumbnail display size instead,
+              // making per-thumbnail memory tiny and panorama-size-
+              // independent.  No-op on iOS (harmless).
+              resizeMethod="resize"
             />
           </Pressable>
         )}

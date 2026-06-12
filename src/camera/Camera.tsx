@@ -1573,6 +1573,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // racing the final cv::Stitcher pass against late-arriving
     // keyframes.  No-op in AR mode (the driver was never started).
     fpDriver.stop();
+    // V12.14.8 restore (regressed in the SDK camera extraction): the
+    // render below unmounts <CameraView>/<ARCameraView> while
+    // statusPhase==='stitching'.  Yield a macrotask so React commits that
+    // unmount and vision-camera tears down the AVCaptureSession + preview
+    // buffers (~150-250 MB) BEFORE the memory-heavy stitch runs.  Without
+    // it the live-camera footprint and the stitch peak coexist and
+    // jetsam (iOS) / lmkd (Android) OOM-kill the app — the exact
+    // WatchdogTermination crash V12.14.8 originally fixed.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     try {
       // Compose the panorama output path: host-controlled if
       // `outputDir` is set, else the lib's canonical capture dir
@@ -1729,9 +1738,16 @@ export function Camera(props: CameraProps): React.JSX.Element {
           only ONE camera component is alive at a time; matches the
           monorepo's working pattern and avoids the Camera2-in-use
           conflict that "always mount both" caused on Android. */}
-      {inFlightTransition || arSupportPending ? (
+      {inFlightTransition || arSupportPending || statusPhase === 'stitching' ? (
+        // statusPhase==='stitching' UNMOUNTS the camera so vision-camera
+        // frees the AVCaptureSession + preview buffers during the stitch
+        // (V12.14.8 OOM fix).  The CaptureStatusOverlay renders the
+        // "Stitching…" state on top, so no placeholder label is needed
+        // in that case — only for the camera-switch transition.
         <View style={[StyleSheet.absoluteFill, styles.transitionPlaceholder]}>
-          <Text style={styles.transitionLabel}>Switching camera…</Text>
+          {statusPhase === 'stitching' ? null : (
+            <Text style={styles.transitionLabel}>Switching camera…</Text>
+          )}
         </View>
       ) : isAR ? (
         <ARCameraView
