@@ -7,6 +7,7 @@
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
+    "dist/**/*.gif",
     "src",
     "ios/Sources",
     "ios/Package.swift",
@@ -25,7 +26,8 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "build": "npm run clean && tsc -p tsconfig.build.json && npm run copy-assets",
+    "copy-assets": "cp -R src/camera/assets dist/camera/assets",
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "clean": "rm -rf dist",

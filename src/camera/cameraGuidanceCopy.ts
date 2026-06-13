@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: Apache-2.0
+/**
+ * cameraGuidanceCopy — the user-overridable copy surface for all panorama
+ * capture guidance strings (rotate prompt, pan hint, too-fast warning,
+ * lateral-stop popup, countdown).  Centralised so hosts can localise or
+ * re-word every guidance message in one place via the `guidanceCopy`
+ * `<Camera>` prop, and so the defaults live next to each other.
+ *
+ * Mirrors the override pattern of `PanoramaGuidance.messages` and
+ * `cameraErrorMessages.ts`.
+ */
+
+export interface GuidanceCopy {
+  /** Item 2 — caption pill while waiting for the user to rotate to landscape. */
+  rotateToLandscape: string;
+  /** Item 3 — short hint shown with the how-to-pan animation. */
+  panHint: string;
+  /** Item 4 — transient warning when the pan is too fast. */
+  tooFast: string;
+  /** Item 6 — popup title when the user drifts laterally (cross-axis). */
+  lateralStopTitle: string;
+  /** Item 6 — popup body / guidance for the lateral-drift stop. */
+  lateralStopBody: string;
+  /** Item 6 — popup dismiss button label. */
+  lateralStopDismiss: string;
+  /** Item 7 — confirm button on the crop editor. */
+  cropConfirm: string;
+  /** Item 7 — reset-corners button on the crop editor. */
+  cropReset: string;
+}
+
+export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
+  rotateToLandscape: 'Rotate to landscape',
+  panHint: 'Pan slowly top to bottom',
+  tooFast: 'Moving too fast — slow down',
+  lateralStopTitle: 'Keep the pan straight',
+  lateralStopBody:
+    'You moved sideways. Pan in one direction only — we stitched what you captured.',
+  lateralStopDismiss: 'Got it',
+  cropConfirm: 'Crop',
+  cropReset: 'Reset',
+};
+
+/**
+ * Merge a partial host override onto the defaults.  Undefined / missing keys
+ * fall back to the default string; an empty-object / undefined override
+ * returns the defaults unchanged.
+ */
+export function mergeGuidanceCopy(
+  override?: Partial<GuidanceCopy>,
+): GuidanceCopy {
+  if (!override) return DEFAULT_GUIDANCE_COPY;
+  return { ...DEFAULT_GUIDANCE_COPY, ...stripUndefined(override) };
+}
+
+/** Drop keys whose value is `undefined` so they don't clobber a default. */
+function stripUndefined(o: Partial<GuidanceCopy>): Partial<GuidanceCopy> {
+  const out: Partial<GuidanceCopy> = {};
+  (Object.keys(o) as (keyof GuidanceCopy)[]).forEach((k) => {
+    if (o[k] !== undefined) out[k] = o[k];
+  });
+  return out;
+}
