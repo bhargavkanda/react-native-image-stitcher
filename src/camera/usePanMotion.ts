@@ -168,7 +168,21 @@ const DEFAULT_WARN_RAD_PER_SEC = 0.6;
 
 // ── Lateral-drift constants ───────────────────────────────────────
 // v0.16: lowered 5 → 4 cm so a deliberate sideways slide trips sooner.
+// NOTE: the cm budget now only feeds the (secondary) accel readout; the
+// PRIMARY lateral trigger is the gyro cross-axis below.
 const DEFAULT_LATERAL_BUDGET_CM = 4;
+
+/**
+ * Lateral-drift trip point on the CROSS-pan gyro axis, in rad/s.
+ *
+ * v0.16 — on-device traces showed a user "moving perpendicular to the arrow"
+ * is really a ROTATION about the cross-pan axis (gyro X), not a sideways
+ * translation — so the old accel double-integration never saw it
+ * (`lateralCm` stayed ~0 while `gyro.x` spiked to 1.27).  A clean pan keeps
+ * `|gyro.x|` < ~0.1; a deliberate cross-turn blows past 0.6, so 0.5 rad/s
+ * (~29°/s) sustained for the grace window cleanly separates them.
+ */
+const DEFAULT_LATERAL_TURN_RAD_PER_SEC = 0.5;
 
 /**
  * Continuous-over-budget dwell before `lateralExceeded` latches.
@@ -474,19 +488,34 @@ export function usePanMotion({
   // callback never forces a re-render.
   const lateralRef = useRef<LateralState>(_freshLateralState());
 
+  // PRIMARY lateral-drift latch (v0.16): driven by the CROSS-pan GYRO axis
+  // in the gyro handler, not accel translation.  Reuses the same grace-window
+  // debounce (`_evalGraceLatch`) as the accel path.  Reset at capture start.
+  const lateralGyroLatchRef = useRef<GraceLatchResult>({
+    exceeded: false,
+    overBudgetSinceMs: null,
+  });
+
   // The throttled, render-visible lateral magnitude (cm) + the latched
   // exceeded flag.  These DO go through state because consumers render
   // them, but they update at most ~10 Hz / once respectively.
   const [lateralCm, setLateralCm] = useState(0);
   const [lateralExceeded, setLateralExceeded] = useState(false);
 
-  // ── Gyroscope → pan-speed bucket ───────────────────────────────
+  // ── Gyroscope → pan-speed bucket + lateral-drift latch ─────────
+  // One gyro subscription drives BOTH item-4 (too fast) and item-6
+  // (lateral drift).  Item 6 keys on the CROSS-pan axis (gyro X): a user
+  // veering perpendicular to the arrow rotates about it (on-device traces
+  // showed |gyro.x| → 1.27 on a cross-turn vs < 0.1 on a clean pan).
+  const lateralEnabled = lateralBudgetCm > 0;
   useEffect(() => {
     if (!active) {
       lastBucketRef.current = 'good';
       setPanSpeedBucket('good');
       return;
     }
+    // Capture start: clear the gyro lateral latch.
+    lateralGyroLatchRef.current = { exceeded: false, overBudgetSinceMs: null };
 
     setUpdateIntervalForType(SensorTypes.gyroscope, GYRO_SAMPLE_INTERVAL_MS);
 
@@ -495,27 +524,46 @@ export function usePanMotion({
 
     let sub: Subscription | null = gyroscope.subscribe({
       next: ({ x, y }) => {
-        // Axis-AGNOSTIC pan rate: the magnitude of rotation in the x–y
-        // (tilt) plane, ignoring roll about Z.  v0.16 — replaces the
+        const now = Date.now();
+        // Item 4 — axis-AGNOSTIC pan rate: the magnitude of rotation in the
+        // x–y (tilt) plane, ignoring roll about Z.  v0.16 — replaces the
         // single-axis pick (`gyro.x` in landscape / `gyro.y` in portrait),
         // which read ~0 and never tripped when the device's dominant pan
         // rotation landed on the OTHER axis for the user's actual hold.
         const rate = Math.hypot(x, y);
         const next = _bucketForRate(rate, goodMaxRadPerSec, warnMaxRadPerSec);
-        if (__DEV__) {
-          const now = Date.now();
-          if (now - lastGyroLogMs >= 400) {
-            lastGyroLogMs = now;
-            // eslint-disable-next-line no-console
-            console.log(
-              `[panMotion] gyro x=${x.toFixed(2)} y=${y.toFixed(2)} `
-              + `rate=${rate.toFixed(2)} bucket=${next}`,
-            );
-          }
-        }
         if (next !== lastBucketRef.current) {
           lastBucketRef.current = next;
           setPanSpeedBucket(next);
+        }
+
+        // Item 6 — lateral drift via the CROSS-pan gyro axis (device X),
+        // grace-windowed like the accel path so a brief wobble doesn't trip.
+        let crossLatched = false;
+        if (lateralEnabled) {
+          const crossRate = Math.abs(x);
+          const latch = _evalGraceLatch(
+            crossRate > DEFAULT_LATERAL_TURN_RAD_PER_SEC,
+            now,
+            lateralGyroLatchRef.current.overBudgetSinceMs,
+            lateralGyroLatchRef.current.exceeded,
+            LATERAL_GRACE_MS,
+          );
+          lateralGyroLatchRef.current = latch;
+          crossLatched = latch.exceeded;
+          if (crossLatched) {
+            setLateralExceeded((prev) => (prev ? prev : true));
+          }
+        }
+
+        if (__DEV__ && now - lastGyroLogMs >= 400) {
+          lastGyroLogMs = now;
+          // eslint-disable-next-line no-console
+          console.log(
+            `[panMotion] gyro x=${x.toFixed(2)} y=${y.toFixed(2)} `
+            + `rate=${rate.toFixed(2)} bucket=${next} `
+            + `crossRate=${Math.abs(x).toFixed(2)} lateralLatched=${crossLatched}`,
+          );
         }
       },
       error: (err) => {
@@ -531,7 +579,7 @@ export function usePanMotion({
     // resolvedAxis intentionally NOT a dep: the rate is now axis-agnostic
     // (hypot), so an orientation flip must not needlessly re-subscribe the
     // gyro mid-capture.
-  }, [active, goodMaxRadPerSec, warnMaxRadPerSec]);
+  }, [active, goodMaxRadPerSec, warnMaxRadPerSec, lateralEnabled]);
 
   // ── Accelerometer → lateral-drift integrator ───────────────────
   // NOTE: this effect intentionally does NOT depend on `resolvedAxis`.
