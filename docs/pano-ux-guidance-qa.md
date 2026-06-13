@@ -88,3 +88,17 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
   shipped via `dist/**/*.gif`). GIF was chosen over Lottie to avoid a heavy
   peer dep; the design handoff offers Lottie/APNG on request if the crisper
   look is wanted.
+
+
+## Host requirement: animated GIFs on Android (items 2 & 3)
+The two guidance animations ship as GIFs. **React Native's Android image
+loader (Fresco) decodes only the FIRST frame of a GIF unless the host app adds
+the animated-gif module** — otherwise the rotate/pan graphics appear *static*.
+Hosts must add to their `android/app/build.gradle` dependencies (version
+tracking RN's bundled Fresco, see `react-native/gradle/libs.versions.toml`):
+
+    implementation("com.facebook.fresco:animated-gif:3.6.0")
+
+iOS animates GIFs natively (no change). The example app now includes this dep.
+If a dependency-free animation is preferred, the design handoff can supply a
+Lottie/APNG export instead — that's a follow-up, not done here.

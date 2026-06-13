@@ -411,6 +411,8 @@ function App(): React.JSX.Element {
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
+          rectCropPreview
+          perspectiveCorrectCrop
           showSettingsButton={__DEV__}
           headerTitle="Image Stitcher Demo"
           headerGuidance="Tap shutter for a photo. Hold + pan + release for a panorama."
