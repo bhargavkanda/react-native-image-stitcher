@@ -1770,6 +1770,13 @@ StitchResult stitchFramePathsManual(
         // choice (wide canvases route to the low-memory STREAM+feather path).
         // Set inside step 7.7 below.
         double composeCanvasMpFinal = 0.0;
+        // Post-cap BATCH held-set = Σ of every warped frame's area.  This —
+        // not the union — is the real driver of BATCH blend memory (N warped
+        // frames + N exposure-comp UMat copies + MultiBand pyramids, all held
+        // at once).  A SMALL union with big/overlapping frames (e.g. the ~6×
+        // higher-res AR keyframes) can still blow a huge held-set, so step 8's
+        // STREAM route keys on this too, not just the union.  Set in step 7.7.
+        double composeHeldSetMpFinal = 0.0;
         // Step 7.7: RAM-aware output-canvas budget cap (wide-pan blend-OOM
         // fix).  A VALID but wide pan produces a large UNION canvas, and the
         // BATCH + MultiBand blend peak scales with it (on a 6 GB A35 a
@@ -1804,6 +1811,11 @@ StitchResult stitchFramePathsManual(
                 const double downscale =
                     canvasDownscaleForBudget(canvasMP, budgetMP);
                 composeCanvasMpFinal = canvasMP * downscale * downscale;
+                double heldSetMpRaw = 0.0;
+                for (const auto& s : capSizes) {
+                    heldSetMpRaw += (double)s.width * (double)s.height / 1e6;
+                }
+                composeHeldSetMpFinal = heldSetMpRaw * downscale * downscale;
                 // Always-on probe — confirms the RAM read (totalRamMB), the
                 // budget, the active projection, and whether the cap fired.
                 // Used to calibrate kBlendBytesPerUnionPx from real traces.
@@ -1901,14 +1913,25 @@ StitchResult stitchFramePathsManual(
         // resolution instead of OOMing.  Below it, keep BATCH + MultiBand +
         // GraphCut for the crisp seams typical small-canvas captures get.
         constexpr double kLowMemCanvasMP = 10.0;
-        const bool lowMemCanvas = composeCanvasMpFinal > kLowMemCanvasMP;
+        // Held-set guard: BATCH stayed safe at Σ-warped-area ≲13 MP but a
+        // 6-frame AR pan with a 9.6 MP union (under kLowMemCanvasMP) yet a
+        // ~32 MP held-set hit 3.6 GB and was lmkd-killed.  Route to STREAM on
+        // EITHER axis so a small-union/large-held-set capture (bigger or
+        // heavily-overlapping frames, e.g. high-res AR keyframes) can't slip
+        // into BATCH.  15 MP sits safely between the observed safe (≲13) and
+        // fatal (~32) held-sets.
+        constexpr double kMaxBatchHeldSetMP = 15.0;
+        const bool lowMemCanvas =
+            composeCanvasMpFinal > kLowMemCanvasMP
+            || composeHeldSetMpFinal > kMaxBatchHeldSetMP;
         const bool useSeam =
             (config.seamFinderType == "graphcut") && !lowMemCanvas;
         if (lowMemCanvas) {
             log_info(logFn, "[stitch-bc]",
-                     "step8: canvas %.1f MP > %.1f MP — routing to "
-                     "STREAM+feather (low-memory wide-pan path)",
-                     composeCanvasMpFinal, kLowMemCanvasMP);
+                     "step8: union=%.1f MP held-set=%.1f MP over budget "
+                     "(union>%.1f or held>%.1f) — routing to STREAM+feather",
+                     composeCanvasMpFinal, composeHeldSetMpFinal,
+                     kLowMemCanvasMP, kMaxBatchHeldSetMP);
         }
         log_info(logFn, "[BatchStitcher]",
                  "step8: %s",
