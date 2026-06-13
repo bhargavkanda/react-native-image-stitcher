@@ -103,6 +103,7 @@ import { OrientationDriftModal } from './OrientationDriftModal';
 import { shouldGateForPanMode, type PanMode } from './panModeGate';
 import { countdownSecondsFrom } from './captureCountdown';
 import { usePanMotion } from './usePanMotion';
+import type { Quad } from './cropGeometry';
 import {
   mergeGuidanceCopy,
   type GuidanceCopy,
@@ -1393,6 +1394,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // effect avoids putting these in its dep array.
   const handleHoldEndRef = useRef<(() => void) | null>(null);
   const startCaptureRef = useRef<(() => void) | null>(null);
+  // Synchronous re-entrancy latch for the finalize path: the auto-finalize
+  // timer and a manual release can both pass the async statusPhase guard in
+  // the same tick before React commits 'stitching'.
+  const finalizingRef = useRef(false);
 
   // ── v0.12.0 — Orientation drift detection + auto-abandon ────────
   //
@@ -1823,6 +1828,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // deferred start rather than starting on the next rotation.
     if (pendingPanStart) setPendingPanStart(false);
     if (statusPhase !== 'recording') return;
+    // Re-entrancy latch — close the timer-vs-release double-finalize window
+    // synchronously so incremental.finalize()/onCapture fire exactly once.
+    if (finalizingRef.current) return;
+    finalizingRef.current = true;
     setStatusPhase('stitching');
     // Stop pumping new frames before finalizing so the engine isn't
     // racing the final cv::Stitcher pass against late-arriving
@@ -1921,6 +1930,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
       const code = classifyStitchError(message);
       onError?.(new CameraError(code, message, err));
     } finally {
+      finalizingRef.current = false;
       setStatusPhase('idle');
       setRecordingStartedAt(null);
     }
@@ -2401,8 +2411,13 @@ export function Camera(props: CameraProps): React.JSX.Element {
       {/* Item 1/2 — rotate-to-landscape prompt.  Shown while a Mode-A
           hold is blocked on the user rotating to landscape.  The resume
           effect starts the deferred capture the instant they do. */}
+      {/* The rotate prompt is the ONLY feedback for the Mode-A gate, so it
+          is NOT gated on `panGuidance` — otherwise panGuidance={false} +
+          panMode='mode-a' would block a portrait hold with a dead, silent
+          shutter.  `panGuidance` governs only the cosmetic in-capture
+          overlays. */}
       <RotateToLandscapePrompt
-        visible={pendingPanStart && panGuidance}
+        visible={pendingPanStart}
         copy={guidanceCopyResolved.rotateToLandscape}
       />
 
@@ -2456,6 +2471,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
                        <Image> reloads the overwritten file.  On any
                        crop failure, fall back to the original. */}
       <RectCropPreview
+        // Remount per capture so the dragged-quad + layout state re-seed to
+        // the new image (RectCropPreview seeds its quad once via useState).
+        key={cropPending?.uri ?? 'crop'}
         visible={cropPending != null}
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
@@ -2466,15 +2484,30 @@ export function Camera(props: CameraProps): React.JSX.Element {
           if (cropPending) onCapture?.(cropPending.captureResultObj);
           setCropPending(null);
         }}
-        onConfirm={async ({ quad }) => {
+        onConfirm={async ({ quad, perspective }) => {
           if (!cropPending) return;
           const pending = cropPending;
+          // perspective=true → rectify the dragged quad to an upright
+          // rectangle (cropToQuad).  perspective=false (axis-aligned drag,
+          // OR perspectiveCorrectCrop disabled) → crop to the quad's axis-
+          // aligned bounding box — a plain crop, no warp — so the
+          // perspectiveCorrectCrop={false} contract is honoured.
+          const xs = quad.map((p) => p.x);
+          const ys = quad.map((p) => p.y);
+          const cropPoints: Quad = perspective
+            ? quad
+            : [
+                { x: Math.min(...xs), y: Math.min(...ys) },
+                { x: Math.max(...xs), y: Math.min(...ys) },
+                { x: Math.max(...xs), y: Math.max(...ys) },
+                { x: Math.min(...xs), y: Math.max(...ys) },
+              ];
           try {
             // cropQuad takes a BARE path; the stashed uri is a file://
             // URI.  Overwrites in place (pass the same path).
             const cropped = await cropQuad(
               toBareFilePath(pending.uri),
-              quad,
+              cropPoints,
               undefined,
               { quality: 90 },
             );
