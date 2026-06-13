@@ -92,6 +92,7 @@ enum class StitchErrorCode : int32_t {
     ComposeResizeFailed         = 104,
     WarpFailed                  = 105,
     EmptyPanorama               = 106,
+    LowQualityStitch            = 107,  // post-stitch validator: disjoint/fragmented output
     InvalidArgument             = 200,
     UnknownCvException          = 300,
 };

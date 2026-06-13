@@ -28,9 +28,10 @@ threaded through `PanoramaSettings`):
    "Rotate to landscape" caption; the capture starts the instant the
    user rotates to landscape (either way up).  Releasing the shutter
    before rotating cancels the pending start.
-3. **Pan how-to overlay.** A brief looping GIF + bouncing direction
-   arrow (down for landscape Mode A, right for portrait Mode B) shown
-   for ~2.5 s at the start of each recording.
+3. **Pan how-to overlay.** A brief code-drawn looping graphic (phone +
+   sweeping band) + bouncing direction arrow (down for landscape Mode A,
+   right for portrait Mode B) shown for ~2.5 s at the start of each
+   recording.
 4. **"Moving too fast" pill.** A transient amber pill while the gyro
    pan rate exceeds the warn threshold.
 5. **Blinking countdown + auto-finalize.** A blinking whole-seconds
@@ -57,8 +58,52 @@ components (`RotateToLandscapePrompt`, `PanHowToOverlay`,
 `CaptureCountdownOverlay`, `LateralMotionModal`, `RectCropPreview`) with
 their prop types, and the `cropQuad` perspective-rectify helper.
 
+### Added — capture hardening
+
+Follow-up hardening on top of the guidance set, driven by on-device
+testing:
+
+- **Guidance graphics are now code-drawn, not GIFs.** The rotate-to-
+  landscape and pan-capture animations are rendered with pure RN
+  `View` + `Animated` (`guidanceGraphics.tsx`) — resolution-independent
+  (no pixelation on high-density screens) and themeable via
+  `GUIDANCE_TOKENS`. Removes the bundled GIF assets AND the Android
+  host's previous need to add Fresco's `animated-gif` module.
+- **Crop editor seeds from the max-inscribed rectangle.** With
+  `rectCropPreview`, the draggable quad now opens on the tightest clean
+  rectangle (native `computeInscribedRect`) instead of a blind 8 %
+  inset, and the editor gains an explicit **"Use original"** button
+  (emit the stitch un-cropped) plus a warning banner. When the editor is
+  on, the native auto-crop is forced off so the full bordered panorama
+  is available to drag.
+- **`onCapture` carries `warnings`.** Both success and failure results
+  include `warnings: CaptureWarning[]` — `LOW_FRAME_UTILIZATION` (<70 %
+  of captured frames used) and `LATERAL_DRIFT_FINALIZE`. New exports:
+  `CaptureWarning`, `CaptureWarningCode`, `PanoramaCaptureResult`.
+- **Post-stitch validation.** A disjoint / fragmented stitch (frames
+  that survived confidence but didn't fuse into one panorama) is now
+  rejected with the new `STITCH_LOW_QUALITY` error code + "try again"
+  copy, instead of emitting a broken image.
+- **Quality-driven warper.** Wide pans switch from plane to the bounded
+  cylindrical projection based on the estimated sweep angle (not only on
+  an OOM-divergence fallback), reducing end-of-pan perspective stretch.
+- **Headroom-based memory gating.** The flat process-RSS pre-stitch
+  abort is replaced by a per-process headroom model: under memory
+  pressure the pipeline routes to the lighter STREAM+feather path rather
+  than hard-aborting, and the pre-stitch abort fires only when there's
+  no room for even a minimal stitch on top of the current footprint —
+  so a memory-heavy host app no longer trips it spuriously.
+
 ### Changed (BREAKING)
 
+- **`onCapture` is now a discriminated union keyed on `ok`.** It fires
+  once per capture attempt — on success (`ok:true`, discriminated
+  further by `type`) AND on failure (`ok:false`, carrying `error:
+  CameraError`); previously it fired only on success and failures went
+  solely to `onError`. `onError` STILL fires on failure as an unchanged
+  mirror. **Migration:** gate on `result.ok` before reading
+  `uri`/`width`/`height` — `if (!result.ok) { handle(result.error);
+  return; }`. Both branches also carry the new `warnings` array.
 - **`<Camera>` now defaults to `panMode='mode-a'` (landscape-only
   panorama).** Previously the component accepted both landscape (Mode A,
   top→bottom) and portrait (Mode B, left→right) holds with no gate.

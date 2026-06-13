@@ -152,4 +152,83 @@ inline double cappedSeamAspect(double inputAspect, double maxWarpedMp,
   return (capped < inputAspect) ? capped : inputAspect;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Issue 3 — post-stitch disjointness check (pure).
+//
+// The confidence filter drops frames that don't register, but nothing
+// validated the OUTPUT: a frame that survived confidence yet landed
+// geometrically disconnected shows up as a separate blob in the coverage
+// mask ("disjointed image frames in the output").  Given the largest
+// connected component's area, the total covered area, and the frame count,
+// decide whether a MEANINGFUL fraction of coverage lies OUTSIDE the main
+// blob — i.e. the frames didn't fuse into one panorama.  Pure so the
+// threshold is unit-testable; the OpenCV connected-components extraction
+// (which feeds these areas) lives in stitcher.cpp's validateStitchOutput.
+//
+// Conservative by design: a normal panorama is ONE connected blob
+// (fragmentFraction ≈ 0), so the 0.15 default never trips on it; a whole
+// disconnected frame in a few-frame pan easily exceeds 15 % of coverage.
+constexpr double kMaxStitchFragmentFraction = 0.15;
+
+inline bool stitchOutputIsDisjoint(
+    double largestComponentArea, double totalCoveredArea, int numFrames,
+    double maxFragmentFraction = kMaxStitchFragmentFraction) {
+  if (numFrames < 2) return false;
+  if (totalCoveredArea <= 0.0 || largestComponentArea <= 0.0) return false;
+  const double fragmentFraction =
+      1.0 - (largestComponentArea / totalCoveredArea);
+  return fragmentFraction > maxFragmentFraction;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Issue 6 — headroom-based memory gating (pure).
+//
+// We CANNOT measure the stitch's own allocation apart from the shared
+// process RSS (OpenCV uses malloc; there's no per-library accounting).  So
+// rather than a flat device-scaled RSS ceiling — which a memory-heavy HOST
+// app trips even when the stitch itself is small — we reason about HEADROOM:
+// estimate the per-process kill ceiling and gate on whether the stitch's
+// INCREMENTAL demand fits on top of the CURRENT process footprint.
+
+// Estimated per-process memory ceiling (MB) before the OS (iOS jetsam /
+// Android lmkd) kills the app, as a fraction of total device RAM.  Anchored
+// to the iPhone 16 Pro (8 GB) observed jetsam at ~3.38 GB ⇒ ~0.42.  Floored
+// so tiny (2 GB) devices still get a sane budget.
+constexpr double kProcessLimitFraction = 0.42;
+constexpr double kProcessBudgetFloorMB = 900.0;
+
+inline double perProcessMemoryBudgetMB(double totalRamMB) {
+  const double raw = totalRamMB * kProcessLimitFraction;
+  return (raw < kProcessBudgetFloorMB) ? kProcessBudgetFloorMB : raw;
+}
+
+// Smallest streaming-stitch peak we insist on having room for (one warped
+// frame + the CV_16SC3 accumulator + masks at compose resolution).
+// Conservative.
+constexpr double kMinStreamStitchMB = 350.0;
+
+// Early pre-stitch gate: abort BEFORE loading frames ONLY when the process
+// is already so close to its ceiling that even a minimal streaming stitch
+// won't fit on top of the current footprint.  A true last resort — scoped to
+// the stitch's MINIMAL incremental demand, not a flat device ceiling — so a
+// heavy host app with headroom remaining still proceeds.
+inline bool stitchExceedsMinimalHeadroom(double currentRssMB,
+                                         double totalRamMB) {
+  return currentRssMB + kMinStreamStitchMB
+         > perProcessMemoryBudgetMB(totalRamMB);
+}
+
+// Comfortable free headroom (MB) below which we prefer the STREAM+feather
+// path over BATCH (graphcut+multiband), whose blend peak can spike far above
+// STREAM's.  Used as an ADDITIONAL routing trigger alongside the fixed
+// canvas/held-set MP thresholds — it only ever makes routing MORE
+// conservative (more likely STREAM), never less, so it can't cause an OOM
+// that the fixed thresholds would have avoided.
+constexpr double kBatchHeadroomMB = 1000.0;
+
+inline bool lowBatchHeadroom(double currentRssMB, double totalRamMB) {
+  return (perProcessMemoryBudgetMB(totalRamMB) - currentRssMB)
+         < kBatchHeadroomMB;
+}
+
 }  // namespace retailens

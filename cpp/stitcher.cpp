@@ -246,6 +246,79 @@ cv::Rect maxInscribedRectFromMask(const cv::Mat& mask) {
     return bestRect;
 }
 
+// Issue 3 — post-stitch output validator.  The confidence filter drops
+// frames that don't REGISTER, but nothing validated the final OUTPUT: a
+// frame that survived confidence yet landed geometrically disconnected
+// shows up as a separate blob in the coverage mask (the "disjointed image
+// frames in the output" users reported).  Run connected-components on the
+// coverage mask; if a meaningful fraction of the covered area lies OUTSIDE
+// the largest blob, reject the stitch as LowQualityStitch so the host can
+// prompt a retry rather than ship a broken panorama.
+//
+// Conservative by design: a coherent panorama is ONE connected blob, so a
+// good capture never trips; the threshold lives in the pure, unit-tested
+// retailens::stitchOutputIsDisjoint.  A small morphological close first
+// bridges sub-pixel seam gaps so a single panorama isn't mis-split, while
+// being far too small to merge a genuinely-detached floating frame.
+//
+// Fails OPEN: an empty/unreadable mask returns Ok (never block a capture on
+// a mask we couldn't analyse).
+StitchErrorCode validateStitchOutput(const cv::Mat& panorama,
+                                     const cv::Mat& coverage,
+                                     int numFrames,
+                                     const LogFn& logFn,
+                                     std::string& outMessage) {
+    if (panorama.empty()) return StitchErrorCode::Ok;  // handled elsewhere
+    // Build a binary coverage mask (same posture as choose_crop_rect).
+    cv::Mat mask;
+    const bool haveCoverage =
+        (!coverage.empty() && coverage.size() == panorama.size());
+    if (haveCoverage) {
+        cv::Mat cov1 = coverage;
+        if (coverage.channels() != 1) {
+            cv::cvtColor(coverage, cov1, cv::COLOR_BGR2GRAY);
+        }
+        cv::threshold(cov1, mask, 0, 255, cv::THRESH_BINARY);
+    } else {
+        cv::Mat gray;
+        cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+        cv::threshold(gray, mask, 0, 255, cv::THRESH_BINARY);
+    }
+    if (mask.empty() || mask.type() != CV_8UC1) return StitchErrorCode::Ok;
+    // Bridge thin seam gaps so a coherent pano isn't mis-split; the 5 px
+    // kernel is far smaller than the gap a detached frame leaves, so
+    // genuinely-separate blobs are NOT merged.
+    cv::Mat closed;
+    cv::morphologyEx(
+        mask, closed, cv::MORPH_CLOSE,
+        cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5)));
+    cv::Mat labels, stats, centroids;
+    const int n = cv::connectedComponentsWithStats(
+        closed, labels, stats, centroids, 8, CV_32S);
+    double totalArea = 0.0, largestArea = 0.0;
+    for (int i = 1; i < n; i++) {  // skip background label 0
+        const double a = stats.at<int>(i, cv::CC_STAT_AREA);
+        totalArea += a;
+        if (a > largestArea) largestArea = a;
+    }
+    const double fragmentFraction =
+        (totalArea > 0.0) ? (1.0 - largestArea / totalArea) : 0.0;
+    log_info(logFn, "[stitch-bc]",
+             "step11d: validate output components=%d largest=%.0f total=%.0f "
+             "fragment=%.3f frames=%d",
+             n - 1, largestArea, totalArea, fragmentFraction, numFrames);
+    if (retailens::stitchOutputIsDisjoint(largestArea, totalArea, numFrames)) {
+        char buf[176];
+        std::snprintf(buf, sizeof(buf),
+                      "stitch validation failed: disjoint output (%d "
+                      "components, %.0f%% of coverage outside the main frame)",
+                      n - 1, fragmentFraction * 100.0);
+        outMessage = buf;
+        return StitchErrorCode::LowQualityStitch;
+    }
+    return StitchErrorCode::Ok;
+}
+
 // Pick the crop rectangle. Prefers the TRUE coverage mask from
 // cv::Stitcher::resultMask() (0xFF where a frame painted, 0 where
 // unfilled) so dark content is kept and only the never-covered wedges
@@ -884,20 +957,41 @@ StitchResult stitchFramePathsManual(
         ? config.availableRamMB
         : device_total_ram_mb();
     if (totalRamMB <= 0.0) totalRamMB = kAssumedTotalRAMGB * 1024.0;
-    const double availableRamGB = totalRamMB / 1024.0;
-    const double kPreStitchAbortMB = std::max(700.0, availableRamGB * 300.0);
-    if (kStartResidentMB > kPreStitchAbortMB) {
+
+    // Issue 6 — headroom-scoped pre-stitch gate (replaces the old flat
+    // `max(700, ram×300)` RSS ceiling).
+    //
+    // The old check compared whole-process RSS against a flat fraction of
+    // DEVICE RAM, so a memory-heavy HOST app could trip it even when the
+    // stitch itself was tiny — and on trip it HARD-ABORTED with no attempt
+    // to route to the lighter STREAM path.  We can't isolate the stitch's
+    // own allocation from the shared process RSS (OpenCV uses malloc; no
+    // per-library accounting), so instead of a device ceiling we reason
+    // about HEADROOM: estimate the per-process kill ceiling
+    // (perProcessMemoryBudgetMB) and abort here ONLY when the process is
+    // already so close to it that even a MINIMAL streaming stitch
+    // (kMinStreamStitchMB) won't fit on top of the current footprint.  That
+    // makes this a genuine last resort scoped to the stitch's minimal
+    // incremental demand — a heavy host with headroom remaining proceeds,
+    // and everything in between is handled downstream by the step-8 STREAM
+    // routing (now also headroom-aware — see lowBatchHeadroom there) and the
+    // step-7.7 canvas-budget downscale, which size to what the stitch needs
+    // rather than aborting.
+    const double perProcessBudgetMB =
+        retailens::perProcessMemoryBudgetMB(totalRamMB);
+    if (retailens::stitchExceedsMinimalHeadroom(kStartResidentMB, totalRamMB)) {
         log_error(logFn, "[stitch-bc]",
-                  "PRE-STITCH ABORT: mem=%.1fMB > %.1fMB threshold (totalRamMB=%.0f)",
-                  kStartResidentMB, kPreStitchAbortMB, totalRamMB);
-        // V16 fix-attempt 9 — sentinel return.  See validPairs<1 site
-        // below for the full root-cause analysis.  In the iOS original
-        // this returned an empty RNStitchResult; here we return
-        // a StitchResult with success=false + a stable error code so
-        // both bridges see a clean failure rather than an
-        // ambiguous "output written but zero pixels" surface.
+                  "PRE-STITCH ABORT: rss=%.1fMB + minStitch=%.0fMB > "
+                  "perProcessBudget=%.1fMB (totalRamMB=%.0f) — no headroom for "
+                  "even a minimal streaming stitch",
+                  kStartResidentMB, retailens::kMinStreamStitchMB,
+                  perProcessBudgetMB, totalRamMB);
+        // Sentinel return: success=false + stable code so both bridges see a
+        // clean failure.  Classified to STITCH_OOM in JS (classifyStitchError
+        // matches "memory abort").
         result.errorCode = StitchErrorCode::PreStitchMemoryAbort;
-        result.errorMessage = "Pre-stitch memory abort";
+        result.errorMessage =
+            "Pre-stitch memory abort: insufficient headroom for the stitch";
         // framesIncluded reflects best-known retained count at the
         // abort site — nothing has been loaded or matched yet.
         result.framesIncluded = 0;
@@ -1753,15 +1847,56 @@ StitchResult stitchFramePathsManual(
                     break;
                 }
             }
-            if (wouldDiverge) {
+            // Issue 4 — quality-driven projection.  PlaneWarper projects
+            // ~tan(theta), so on a WIDE sweep the frames at the pan extremes
+            // get visibly stretched/sheared — the "perspective at the ends"
+            // users notice — even when the warp wouldn't OOM.  Estimate the
+            // total angular sweep from the bundle-adjusted camera optical
+            // axes (first vs last frame); beyond kWidePanSweepDeg switch from
+            // plane to the bounded cylindrical projection (~theta), which
+            // keeps angular spacing uniform across the pan.
+            //
+            // On-device A/B NOTE: cylindrical bounds the HORIZONTAL angle.
+            // For a Mode-A landscape *vertical* pan the end-perspective is
+            // along the cylinder's (vertically-unbounded) axis, so if
+            // cylindrical doesn't visibly flatten the ends on-device, flip
+            // kWidePanWarper to "spherical" (bounds BOTH axes).  Left as a
+            // one-line switch + the sweep angle is logged so the trip point
+            // is tunable from real traces.
+            constexpr double kWidePanSweepDeg = 45.0;
+            const char* kWidePanWarper = "cylindrical";
+            double sweepDeg = 0.0;
+            if (cameras.size() >= 2) {
+                auto opticalAxis = [](const cv::Mat& R) -> cv::Vec3d {
+                    cv::Mat Rd;
+                    R.convertTo(Rd, CV_64F);
+                    // Camera looks along +Z; world view dir = R·e_z = col 2.
+                    return cv::Vec3d(Rd.at<double>(0, 2),
+                                     Rd.at<double>(1, 2),
+                                     Rd.at<double>(2, 2));
+                };
+                const cv::Vec3d a0 = opticalAxis(cameras.front().R);
+                const cv::Vec3d aN = opticalAxis(cameras.back().R);
+                const double n0 = cv::norm(a0);
+                const double nN = cv::norm(aN);
+                if (n0 > 1e-9 && nN > 1e-9) {
+                    double c = a0.dot(aN) / (n0 * nN);
+                    c = std::max(-1.0, std::min(1.0, c));
+                    sweepDeg = std::acos(c) * 180.0 / CV_PI;
+                }
+            }
+            const bool widePan = sweepDeg >= kWidePanSweepDeg;
+
+            if (wouldDiverge || widePan) {
                 log_info(logFn, "[stitch-bc]",
-                         "step7.6: '%s' warp diverges at frame %zu (>%lld MP "
-                         "guard) -- falling back to cylindrical projection",
-                         config.warperType.c_str(), divergeFrame,
-                         (long long)(kMaxWarpPixels / 1000000));
-                if (auto cyl = make_warper("cylindrical")) {
-                    warper = cyl->create(warpedScale);
-                    activeWarperType = "cylindrical";
+                         "step7.6: switching '%s' -> %s (diverge=%d wide=%d "
+                         "sweep=%.1fdeg, frame %zu) for a bounded projection",
+                         config.warperType.c_str(), kWidePanWarper,
+                         wouldDiverge ? 1 : 0, widePan ? 1 : 0, sweepDeg,
+                         divergeFrame);
+                if (auto bounded = make_warper(kWidePanWarper)) {
+                    warper = bounded->create(warpedScale);
+                    activeWarperType = kWidePanWarper;
                 }
             }
         }
@@ -1921,17 +2056,32 @@ StitchResult stitchFramePathsManual(
         // into BATCH.  15 MP sits safely between the observed safe (≲13) and
         // fatal (~32) held-sets.
         constexpr double kMaxBatchHeldSetMP = 15.0;
+        // Issue 6 — headroom-aware routing.  In addition to the fixed
+        // canvas/held-set MP thresholds (which bound the stitch's OWN size),
+        // route to STREAM when the process's CURRENT free headroom is thin —
+        // i.e. whatever else is resident (host app, RN, residual buffers)
+        // leaves little room for BATCH's multiband spike.  This is the
+        // "route, don't abort" half of Issue 6: under memory pressure we drop
+        // to the lighter STREAM+feather path instead of risking an OOM (or a
+        // hard pre-stitch abort).  It only ever makes routing MORE
+        // conservative, so it can't cause an OOM the fixed thresholds avoided.
+        const double rssAtRouteMB = rss_mb();
+        const bool lowHeadroom =
+            retailens::lowBatchHeadroom(rssAtRouteMB, totalRamMB);
         const bool lowMemCanvas =
             composeCanvasMpFinal > kLowMemCanvasMP
-            || composeHeldSetMpFinal > kMaxBatchHeldSetMP;
+            || composeHeldSetMpFinal > kMaxBatchHeldSetMP
+            || lowHeadroom;
         const bool useSeam =
             (config.seamFinderType == "graphcut") && !lowMemCanvas;
         if (lowMemCanvas) {
             log_info(logFn, "[stitch-bc]",
-                     "step8: union=%.1f MP held-set=%.1f MP over budget "
-                     "(union>%.1f or held>%.1f) — routing to STREAM+feather",
-                     composeCanvasMpFinal, composeHeldSetMpFinal,
-                     kLowMemCanvasMP, kMaxBatchHeldSetMP);
+                     "step8: union=%.1f MP held-set=%.1f MP rss=%.0fMB "
+                     "budget=%.0fMB (union>%.1f or held>%.1f or lowHeadroom=%d)"
+                     " — routing to STREAM+feather",
+                     composeCanvasMpFinal, composeHeldSetMpFinal, rssAtRouteMB,
+                     perProcessBudgetMB, kLowMemCanvasMP, kMaxBatchHeldSetMP,
+                     lowHeadroom ? 1 : 0);
         }
         log_info(logFn, "[BatchStitcher]",
                  "step8: %s",
@@ -2370,6 +2520,27 @@ StitchResult stitchFramePathsManual(
         log_info(logFn, "[stitch-bc]",
                  "step11c: panorama 8U conversion done (panorama=%dx%d) mem=%.1fMB",
                  panorama.cols, panorama.rows, rss_mb());
+
+        // Issue 3 — post-stitch validation.  Reject a disjoint / fragmented
+        // output (frames that survived confidence but didn't fuse into one
+        // panorama) so the host gets a clean failure (→ STITCH_LOW_QUALITY,
+        // "try again") instead of a broken image.  Fails open on an
+        // unreadable mask.  Capture the failure into the strong locals +
+        // break out of the do/while(0) like the catch paths do.
+        {
+            std::string validateMessage;
+            const StitchErrorCode validateCode = validateStitchOutput(
+                panorama, panoramaMask,
+                static_cast<int>(cameras.size()), logFn, validateMessage);
+            if (validateCode != StitchErrorCode::Ok) {
+                log_error(logFn, "[stitch-bc]",
+                          "step11d: REJECTED — %s", validateMessage.c_str());
+                capturedErrorCode = validateCode;
+                capturedErrorMessage = validateMessage;
+                failedInsidePool = true;
+                break;
+            }
+        }
 
         // Record retained-frame count for telemetry.  In the high-level
         // path this comes from stitcher->component().size() after retry;

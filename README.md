@@ -83,6 +83,15 @@ import {
 
 export function CaptureScreen() {
   const handleCapture = (result: CameraCaptureResult) => {
+    // `onCapture` fires on success AND failure — gate on `ok` first.
+    if (!result.ok) {
+      console.warn('capture failed:', result.error.code, result.error.message);
+      return;
+    }
+    // Non-fatal quality signals (e.g. <70% of frames used). Always present.
+    if (result.warnings.length > 0) {
+      console.warn('warnings:', result.warnings.map((w) => w.code));
+    }
     if (result.type === 'photo') {
       console.log('Photo:', result.uri, result.width, result.height);
     } else {
@@ -98,6 +107,8 @@ export function CaptureScreen() {
   return (
     <Camera
       onCapture={handleCapture}
+      // onError still fires on failure too (an unchanged mirror of the
+      // ok:false result above).
       onError={(err: CameraError) => console.warn(err.code, err.message)}
     />
   );
@@ -135,10 +146,13 @@ export function CaptureScreen() {
   // 2. Capture history (drives the built-in thumbnail strip).
   const [thumbnails, setThumbnails] = useState<CaptureThumbnailItem[]>([]);
 
-  // 3. Post-stitch preview modal — set on capture, cleared on close.
-  const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
+  // 3. Post-stitch preview modal — set on success, cleared on close.
+  const [preview, setPreview] = useState<
+    Extract<CameraCaptureResult, { ok: true }> | null
+  >(null);
 
   const onCapture = useCallback((result: CameraCaptureResult) => {
+    if (!result.ok) return; // failures go to onError; nothing to preview
     setPreview(result);
     setThumbnails((prev) => [
       ...prev,
@@ -260,12 +274,12 @@ Setting `headerTitle` renders a built-in top header; the settings gear is absorb
 
 | Prop | Type | Fires / purpose |
 |---|---|---|
-| `onCapture` | `(result: CameraCaptureResult) => void` | Photo OR panorama completes. `result.type` discriminates (`'photo'` / `'panorama'`). |
+| `onCapture` | `(result: CameraCaptureResult) => void` | Fires once per capture attempt. **Gate on `result.ok` first** (`true` = output present, discriminated further by `result.type`; `false` carries `result.error`). Both carry `result.warnings: CaptureWarning[]` (e.g. `LOW_FRAME_UTILIZATION`). |
 | `onCaptureSourceChange` | `(source: CaptureSource) => void` | Effective source changes (AR toggle, or 0.5× forcing non-AR). |
 | `onLensChange` | `(lens: CameraLens) => void` | User taps the 1×/0.5× chip. |
 | `onFramesDropped` | `(info: FramesDroppedInfo) => void` | cv::Stitcher's confidence retry dropped input frame(s). |
 | `onCaptureAbandoned` | `(reason: 'orientation-drift') => void` | SDK auto-cancelled an in-flight capture (currently only mid-capture rotation). |
-| `onError` | `(err: CameraError) => void` | Classified error — see codes below. |
+| `onError` | `(err: CameraError) => void` | Classified error — fires on failure as an unchanged mirror of the `ok:false` `onCapture` result. See codes below. |
 | `outputDir` | `string` | Directory for saved JPEGs. The lib creates it if missing. |
 | `engine` | `'batch-keyframe' \| …` | Stitching engine. Default `'batch-keyframe'`; most apps leave it. |
 | `frameProcessor` | vision-camera frame processor | Host worklet composed with first-party stitching (see [`useStitcherWorklet`](docs/camera-component.md)). Advanced. |

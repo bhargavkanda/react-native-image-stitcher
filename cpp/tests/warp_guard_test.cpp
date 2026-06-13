@@ -19,6 +19,12 @@ using retailens::canvasDownscaleForBudget;
 using retailens::cappedSeamAspect;
 using retailens::kBudgetFloorMP;
 using retailens::kBudgetCeilMP;
+using retailens::stitchOutputIsDisjoint;
+using retailens::perProcessMemoryBudgetMB;
+using retailens::stitchExceedsMinimalHeadroom;
+using retailens::lowBatchHeadroom;
+using retailens::kProcessBudgetFloorMB;
+using retailens::kMinStreamStitchMB;
 
 TEST(WarpGuard, AcceptsNormalRoi) {
   EXPECT_FALSE(warpRoiExceedsGuard(4000, 2000));  // 8 MP
@@ -226,4 +232,59 @@ TEST(SeamAspect, NeverRaisesAboveInput) {
 TEST(SeamAspect, DegenerateSeamMpIsNoOp) {
   EXPECT_DOUBLE_EQ(cappedSeamAspect(0.5, 19.0, 0.0), 0.5);   // seamMp <= 0
   EXPECT_DOUBLE_EQ(cappedSeamAspect(0.5, 0.0, 0.1), 0.5);    // empty warped
+}
+
+// ── Issue 3 — post-stitch disjointness (pure threshold) ──────────────
+
+TEST(StitchDisjoint, CoherentSingleBlobIsNotDisjoint) {
+  // One connected component = all coverage in the largest blob → coherent.
+  EXPECT_FALSE(stitchOutputIsDisjoint(1000.0, 1000.0, 5));
+  // A tiny seam crumb (1% outside the main blob) is well under threshold.
+  EXPECT_FALSE(stitchOutputIsDisjoint(990.0, 1000.0, 5));
+}
+
+TEST(StitchDisjoint, FloatingFrameIsDisjoint) {
+  // ≥15% of coverage outside the main blob (a detached frame) → reject.
+  EXPECT_TRUE(stitchOutputIsDisjoint(800.0, 1000.0, 4));   // 20% outside
+  EXPECT_TRUE(stitchOutputIsDisjoint(700.0, 1000.0, 3));   // 30% outside
+  // Well under threshold (10% outside) → coherent.
+  EXPECT_FALSE(stitchOutputIsDisjoint(900.0, 1000.0, 4));
+}
+
+TEST(StitchDisjoint, GuardsDegenerateInput) {
+  EXPECT_FALSE(stitchOutputIsDisjoint(800.0, 1000.0, 1));   // <2 frames
+  EXPECT_FALSE(stitchOutputIsDisjoint(0.0, 1000.0, 5));     // no main blob
+  EXPECT_FALSE(stitchOutputIsDisjoint(800.0, 0.0, 5));      // no coverage
+}
+
+// ── Issue 6 — headroom-based memory gating (pure) ────────────────────
+
+TEST(MemoryHeadroom, PerProcessBudgetScalesAndFloors) {
+  // ~42% of device RAM, floored for tiny devices.
+  EXPECT_DOUBLE_EQ(perProcessMemoryBudgetMB(8192.0), 8192.0 * 0.42);
+  EXPECT_DOUBLE_EQ(perProcessMemoryBudgetMB(6144.0), 6144.0 * 0.42);
+  // 2 GB × 0.42 = 860 MB < 900 floor → clamps to the floor.
+  EXPECT_DOUBLE_EQ(perProcessMemoryBudgetMB(2048.0), kProcessBudgetFloorMB);
+}
+
+TEST(MemoryHeadroom, EarlyAbortOnlyWhenNoRoomForMinimalStitch) {
+  // 6 GB → budget ~2580 MB.  A 400 MB baseline + 350 MB minimal stitch
+  // fits comfortably → no abort (a heavy-host scenario that the OLD flat
+  // ram×0.30 = ~1843 MB ceiling would NOT have aborted either, but a
+  // 1900 MB host WOULD have under the old check — now it proceeds).
+  EXPECT_FALSE(stitchExceedsMinimalHeadroom(400.0, 6144.0));
+  EXPECT_FALSE(stitchExceedsMinimalHeadroom(1900.0, 6144.0));
+  // Only when the process is within kMinStreamStitchMB of the ceiling.
+  const double budget = perProcessMemoryBudgetMB(6144.0);
+  EXPECT_TRUE(stitchExceedsMinimalHeadroom(budget - kMinStreamStitchMB + 1.0,
+                                           6144.0));
+  EXPECT_TRUE(stitchExceedsMinimalHeadroom(budget, 6144.0));
+}
+
+TEST(MemoryHeadroom, LowBatchHeadroomForcesStreamUnderPressure) {
+  // 6 GB → budget ~2580 MB.  At 400 MB resident there's ~2180 MB free →
+  // plenty for BATCH (not low headroom).
+  EXPECT_FALSE(lowBatchHeadroom(400.0, 6144.0));
+  // At 1800 MB resident only ~780 MB free (< 1000 MB) → prefer STREAM.
+  EXPECT_TRUE(lowBatchHeadroom(1800.0, 6144.0));
 }

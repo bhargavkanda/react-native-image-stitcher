@@ -84,6 +84,62 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
       seamMP≈0.10` and complete (`step11b`) without OOM. This was the last
       open OOM item when the UX work began.
 
+## Hardening pass (v0.16) — crop, onCapture, stitch robustness, memory
+
+**Issue 2 — crop seeded from the max-inscribed rectangle**
+- [ ] With `rectCropPreview`, the editor opens with the quad already on the
+      tightest clean rectangle (no black corners), NOT a uniform 8 % inset.
+      (When the editor is on, the native auto-crop is forced off, so the
+      panorama still shows its black borders for you to drag out into.)
+- [ ] If the native `computeInscribedRect` is unavailable it silently falls
+      back to the 8 % inset — capture still works.
+
+**Issue 5 — "Use original" + warnings + unified onCapture**
+- [ ] The crop editor shows three buttons: **Use original** (emits the
+      stitch un-cropped), **Reset** (re-seed), **Crop** (apply).
+- [ ] Pan a short/jerky capture so <70 % of frames are used → an amber
+      **warning banner** appears across the top of the crop editor, and the
+      `onCapture` result's `warnings[]` contains `LOW_FRAME_UTILIZATION`
+      (check the example's `[example] capture warnings` log).
+- [ ] Trigger a lateral-drift stop (item 6) → `warnings[]` contains
+      `LATERAL_DRIFT_FINALIZE`.
+- [ ] Force a stitch failure (e.g. cover the lens / too-fast pan) →
+      `onCapture` fires with `ok:false` AND `onError` fires (mirror). The
+      example logs `onError` and bails in `handleCapture`.
+
+**Issue 3 — post-stitch disjoint/garbage detector**
+- [ ] A clearly broken stitch (disjoint / floating-frame output) now FAILS
+      with `STITCH_LOW_QUALITY` ("That didn't come out right — try again")
+      instead of emitting a broken image. Watch logcat for
+      `step11d: validate output components=… fragment=…` and, on reject,
+      `step11d: REJECTED — stitch validation failed: disjoint output …`.
+- [ ] A NORMAL good pano logs `step11d: … components=1 fragment=0.000` and
+      passes (zero false positives — this is the key thing to confirm:
+      good captures must never be rejected).
+
+**Issue 4 — quality-driven cylindrical warper for wide pans**
+- [ ] On a WIDE pan, logcat shows `step7.6: switching 'plane' -> cylindrical
+      (diverge=0 wide=1 sweep=…deg …)` — the warper now switches on sweep
+      angle, not just on an OOM divergence. A narrow pan stays on plane
+      (`wide=0`, no switch).
+- [ ] **A/B the end-perspective:** compare a wide pan's extremes vs the old
+      plane output. ⚠️ cylindrical bounds the *horizontal* angle; for a
+      Mode-A *vertical* pan the stretched axis is the cylinder's unbounded
+      one. If the ends still look stretched, flip `kWidePanWarper` to
+      `"spherical"` in `cpp/stitcher.cpp` (one line, flagged in the step-7.6
+      comment) and rebuild. The sweep angle is logged so the 45° trip point
+      is tunable from real traces.
+
+**Issue 6 — headroom-based memory check (route, don't hard-abort)**
+- [ ] The flat 700 MB-class RSS abort is gone. logcat at the routing point
+      shows `step8: … rss=…MB budget=…MB (… or lowHeadroom=0/1) — routing to
+      STREAM+feather` — under memory pressure it routes to STREAM instead of
+      aborting.
+- [ ] The pre-stitch abort now only fires when there's no room for even a
+      minimal stitch: `PRE-STITCH ABORT: rss=… + minStitch=350MB >
+      perProcessBudget=…`. A memory-heavy host with headroom remaining
+      should NO LONGER spuriously abort a small stitch.
+
 ## Notes
 - All guidance is gated behind `panGuidance` (default true) — set false to
   opt out entirely. All copy is overridable via the `guidanceCopy` prop.
