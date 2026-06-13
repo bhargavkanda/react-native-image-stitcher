@@ -54,6 +54,7 @@ import {
   type CapturePreviewAction,
   type FramesDroppedInfo,
   type IncrementalState,
+  type PanMode,
 } from 'react-native-image-stitcher';
 import {
   InscribedRectDebugOverlay,
@@ -89,6 +90,11 @@ function App(): React.JSX.Element {
   // the normal preview.
   const [rectDebugEnabled, setRectDebugEnabled] = useState(false);
   const [rectDebugUri, setRectDebugUri] = useState<string | null>(null);
+  // panMode flag (guidance item 1).  'mode-a' (default) = landscape-only:
+  // a portrait hold shows the rotate-to-landscape prompt.  'both' = portrait
+  // hold starts immediately (Mode B, left→right) with NO prompt — the
+  // pre-guidance behaviour.  Toggle to verify both paths on-device.
+  const [panMode, setPanMode] = useState<PanMode>('mode-a');
 
   // v0.13.0 — controlled flash state demo.  The host owns the
   // `'on' | 'off'` value; the built-in flash button drives the
@@ -426,6 +432,7 @@ function App(): React.JSX.Element {
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
+          panMode={panMode}
           rectCropPreview
           perspectiveCorrectCrop
           showSettingsButton={__DEV__}
@@ -478,6 +485,20 @@ function App(): React.JSX.Element {
           </Pressable>
         )}
 
+        {__DEV__ && (
+          <Pressable
+            style={styles.panModeToggle}
+            onPress={() =>
+              setPanMode((m) => (m === 'mode-a' ? 'both' : 'mode-a'))
+            }
+            accessibilityRole="button"
+          >
+            <Text style={styles.rectDebugToggleText}>
+              🧭 panMode: {panMode === 'mode-a' ? 'mode-a (landscape only)' : 'both (portrait OK)'}
+            </Text>
+          </Pressable>
+        )}
+
         {rectDebugUri && (
           <InscribedRectDebugOverlay
             uri={rectDebugUri}
@@ -500,6 +521,15 @@ const styles = StyleSheet.create({
   rectDebugToggle: {
     position: 'absolute',
     top: 110,
+    left: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+  },
+  panModeToggle: {
+    position: 'absolute',
+    top: 150,
     left: 16,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
     paddingVertical: 6,
