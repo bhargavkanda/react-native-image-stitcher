@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include <cstdint>
+#include <cmath>
 
 // ─────────────────────────────────────────────────────────────────────
 // Warp-canvas size guard — shared by the warp pre-pass (which decides
@@ -74,6 +75,59 @@ inline bool canvasExceedsGuard(int64_t width, int64_t height,
     return true;
   }
   return width * height > maxPixels;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// RAM-aware output-canvas budget (the wide-pan blend-OOM fix).
+//
+// Distinct from the guards above: a VALID but wide pan produces a large
+// union canvas, and the BATCH + MultiBand blend peak scales with it (on a
+// 6 GB device a ~70 MP union hit ~2.97 GB RSS and was lmkd-killed mid-
+// blend).  Rather than REJECT a valid capture, we cap the canvas to a
+// memory budget by reducing compose scale — yielding a slightly-lower-res
+// but COMPLETE panorama.  The two functions below are the OpenCV-free,
+// unit-testable core of that cap (the warp/resize itself lives in
+// stitcher.cpp and is on-device-only).
+//
+// kBlendBytesPerUnionPx was back-solved from the on-device capture-14
+// failure: (2970 MB peak − ~330 MB baseline) / 70.7 MP ≈ 37.4 B per union
+// pixel.  Round up to 38 for headroom.  kBudgetCeilMP (42) keeps a 6 GB
+// device's predicted peak (~1.9 GB) under its lmkd death point while
+// staying ≤ kMaxCanvasPixels (50 MP) so the degenerate-canvas guard above
+// never fires on a cap-eligible pan.  kBudgetFloorMP (12) is > the widest
+// VALID 360° panorama (~9 MP), so a normal pano is provably never capped.
+constexpr double kBlendBytesPerUnionPx = 38.0;
+constexpr double kBlendRamFraction     = 0.30;
+constexpr double kBudgetFloorMP        = 12.0;
+constexpr double kBudgetCeilMP         = 42.0;
+
+// Output-canvas megapixel budget for a device with `totalRamMB` of RAM.
+// Monotonic-nondecreasing in RAM, clamped to [floor, ceil].  A non-
+// positive/sentinel RAM falls to the floor (the caller should resolve a
+// -1 sentinel to an assumed RAM before calling, but never get a <=0
+// budget regardless).
+inline double composeCanvasBudgetMP(double totalRamMB) {
+  const double raw = (totalRamMB * kBlendRamFraction) / kBlendBytesPerUnionPx;
+  if (raw < kBudgetFloorMP) return kBudgetFloorMP;
+  if (raw > kBudgetCeilMP)  return kBudgetCeilMP;
+  return raw;
+}
+
+// Linear downscale factor that brings a `canvasMP`-megapixel canvas down to
+// `budgetMP`.  Canvas area scales with factor², so factor = sqrt(budget /
+// canvas), clamped to [0.2, 1.0]: never UPSCALES (≤ 1.0 — a canvas already
+// within budget returns 1.0, a no-op), and never collapses below 0.2 (a
+// canvas still over budget after 0.2× is degenerate, which the separate
+// canvasExceedsGuard net catches on its own axis).  Returns 1.0 when either
+// input is non-positive (no div-by-zero; matches a "nothing to cap" no-op).
+inline double canvasDownscaleForBudget(double canvasMP, double budgetMP) {
+  if (canvasMP <= 0.0 || budgetMP <= 0.0 || canvasMP <= budgetMP) {
+    return 1.0;
+  }
+  double factor = std::sqrt(budgetMP / canvasMP);
+  if (factor < 0.2) factor = 0.2;
+  if (factor > 1.0) factor = 1.0;
+  return factor;
 }
 
 }  // namespace retailens

@@ -14,6 +14,10 @@
 
 using retailens::warpRoiExceedsGuard;
 using retailens::canvasExceedsGuard;
+using retailens::composeCanvasBudgetMP;
+using retailens::canvasDownscaleForBudget;
+using retailens::kBudgetFloorMP;
+using retailens::kBudgetCeilMP;
 
 TEST(WarpGuard, AcceptsNormalRoi) {
   EXPECT_FALSE(warpRoiExceedsGuard(4000, 2000));  // 8 MP
@@ -118,4 +122,75 @@ TEST(CanvasGuard, HonoursCustomThreshold) {
   // low-memory devices; the floor never drops below the ~9 MP valid ceiling.
   EXPECT_FALSE(canvasExceedsGuard(4000, 4000, 20'000'000));  // 16 MP < 20 MP
   EXPECT_TRUE(canvasExceedsGuard(5000, 5000, 20'000'000));   // 25 MP > 20 MP
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// RAM-aware output-canvas budget (the wide-pan blend-OOM fix).
+// composeCanvasBudgetMP(totalRamMB) + canvasDownscaleForBudget(canvasMP,
+// budgetMP) are the OpenCV-free, unit-testable core of the step-7.7 cap;
+// the warp/resize itself is on-device-only (not exercised here).
+// ─────────────────────────────────────────────────────────────────────
+
+TEST(BudgetCap, FloorClampsLowRam) {
+  // 1024 MB -> raw 1024*0.30/38 = 8.08 MP < floor -> clamped to floor.
+  EXPECT_DOUBLE_EQ(composeCanvasBudgetMP(1024.0), kBudgetFloorMP);
+}
+
+TEST(BudgetCap, CeilClampsHighRam) {
+  // A35 (6 GB): raw 48.5 MP -> ceil.  8 GB: raw 64.7 MP -> ceil.
+  EXPECT_DOUBLE_EQ(composeCanvasBudgetMP(6144.0), kBudgetCeilMP);
+  EXPECT_DOUBLE_EQ(composeCanvasBudgetMP(8192.0), kBudgetCeilMP);
+}
+
+TEST(BudgetCap, LinearInBand) {
+  // 4096 MB -> raw 4096*0.30/38 = 32.34 MP, strictly between floor and ceil.
+  EXPECT_NEAR(composeCanvasBudgetMP(4096.0), 32.337, 0.01);
+  EXPECT_GT(composeCanvasBudgetMP(4096.0), kBudgetFloorMP);
+  EXPECT_LT(composeCanvasBudgetMP(4096.0), kBudgetCeilMP);
+}
+
+TEST(BudgetCap, MonotonicNonDecreasingInRam) {
+  const double ram[] = {1024, 2048, 3072, 4096, 6144, 8192, 12288};
+  for (size_t i = 1; i < sizeof(ram) / sizeof(ram[0]); i++) {
+    EXPECT_LE(composeCanvasBudgetMP(ram[i - 1]),
+              composeCanvasBudgetMP(ram[i]));
+  }
+}
+
+TEST(BudgetCap, SentinelRamHitsFloor) {
+  // The caller resolves a -1 sentinel to an assumed RAM before calling, but
+  // the function must never yield a non-positive budget regardless.
+  EXPECT_DOUBLE_EQ(composeCanvasBudgetMP(-1.0), kBudgetFloorMP);
+  EXPECT_DOUBLE_EQ(composeCanvasBudgetMP(0.0), kBudgetFloorMP);
+}
+
+TEST(BudgetDownscale, NoCapWhenUnderBudget) {
+  // A 9 MP 360° pano is never downscaled (1.0 = no-op).
+  EXPECT_DOUBLE_EQ(canvasDownscaleForBudget(9.0, 42.0), 1.0);
+}
+
+TEST(BudgetDownscale, NoCapAtExactBudget) {
+  EXPECT_DOUBLE_EQ(canvasDownscaleForBudget(42.0, 42.0), 1.0);
+}
+
+TEST(BudgetDownscale, SqrtAreaLever) {
+  // The A35 capture-14 case: 70 MP union, 42 MP budget.
+  const double d = canvasDownscaleForBudget(70.0, 42.0);
+  EXPECT_NEAR(d, 0.77460, 1e-4);     // sqrt(42/70)
+  EXPECT_NEAR(70.0 * d * d, 42.0, 1e-6);  // area lands at budget
+}
+
+TEST(BudgetDownscale, ClampsToFloor) {
+  // A pathological union still clamps at 0.2 (the canvasExceedsGuard net on
+  // its own axis catches anything still over 50 MP afterward).
+  EXPECT_DOUBLE_EQ(canvasDownscaleForBudget(5000.0, 42.0), 0.2);
+}
+
+TEST(BudgetDownscale, NeverUpscales) {
+  EXPECT_DOUBLE_EQ(canvasDownscaleForBudget(1.3, 42.0), 1.0);  // normal field pano
+}
+
+TEST(BudgetDownscale, NonPositiveInputsAreSafe) {
+  EXPECT_DOUBLE_EQ(canvasDownscaleForBudget(0.0, 42.0), 1.0);  // no div-by-zero
+  EXPECT_DOUBLE_EQ(canvasDownscaleForBudget(70.0, 0.0), 1.0);
 }

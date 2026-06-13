@@ -85,6 +85,23 @@ double rss_mb() {
     return (double) resident_pages * (double) page_bytes / (1024.0 * 1024.0);
 }
 
+// Total physical RAM in MB, read natively.  The Android JNI bridge sets no
+// availableRamMB, so without this a 6 GB device is mis-treated as the 4 GB
+// fallback (and the step-7.7 canvas budget + pre-stitch abort under-size).
+// _SC_PHYS_PAGES is TOTAL and stable across runs (unlike _SC_AVPHYS_PAGES,
+// which is free RAM and varies).  Returns -1.0 off Linux/Android (e.g. the
+// macOS cpp-test host); the caller resolves the sentinel.
+double device_total_ram_mb() {
+#if defined(__linux__)
+    const long pages = sysconf(_SC_PHYS_PAGES);
+    const long page_bytes = sysconf(_SC_PAGESIZE);
+    if (pages <= 0 || page_bytes <= 0) return -1.0;
+    return (double) pages * (double) page_bytes / (1024.0 * 1024.0);
+#else
+    return -1.0;
+#endif
+}
+
 double mat_mb(const cv::Mat& m) {
     if (m.empty()) return 0.0;
     return (double)(m.total() * m.elemSize()) / (1024.0 * 1024.0);
@@ -859,15 +876,20 @@ StitchResult stitchFramePathsManual(
     // MB threshold (real-device headroom) rather than 1200 MB (legacy
     // protection that caps a high-RAM device at low-RAM headroom).
     const double kAssumedTotalRAMGB = 4.0;
-    const double availableRamMB = (config.availableRamMB > 0.0)
+    // Single source of truth for device RAM, shared by the pre-stitch abort
+    // AND the step-7.7 canvas budget below.  Prefer the caller's value (iOS
+    // plumbs NSProcessInfo.physicalMemory); else read it natively (Android
+    // sets none); else fall back to the conservative 4 GB assumption.
+    double totalRamMB = (config.availableRamMB > 0.0)
         ? config.availableRamMB
-        : (kAssumedTotalRAMGB * 1024.0);
-    const double availableRamGB = availableRamMB / 1024.0;
+        : device_total_ram_mb();
+    if (totalRamMB <= 0.0) totalRamMB = kAssumedTotalRAMGB * 1024.0;
+    const double availableRamGB = totalRamMB / 1024.0;
     const double kPreStitchAbortMB = std::max(700.0, availableRamGB * 300.0);
     if (kStartResidentMB > kPreStitchAbortMB) {
         log_error(logFn, "[stitch-bc]",
                   "PRE-STITCH ABORT: mem=%.1fMB > %.1fMB threshold (totalRamMB=%.0f)",
-                  kStartResidentMB, kPreStitchAbortMB, availableRamMB);
+                  kStartResidentMB, kPreStitchAbortMB, totalRamMB);
         // V16 fix-attempt 9 — sentinel return.  See validPairs<1 site
         // below for the full root-cause analysis.  In the iOS original
         // this returned an empty RNStitchResult; here we return
@@ -1710,6 +1732,12 @@ StitchResult stitchFramePathsManual(
         // blender / compose / crop) consumes the warper's OUTPUTS, so the
         // swap is transparent.  If even cylindrical diverges, the in-loop
         // guard (step8b) still throws — the genuine-failure safety net.
+        // The projection actually in use after the step7.6 fallback.  The
+        // fallback swaps `warper` but NOT warperCreator, so the step7.7 cap
+        // below (which re-creates the warper at a smaller scale) must
+        // re-create via THIS — otherwise it would silently revert
+        // cylindrical→plane on exactly the wide pan the fallback rescued.
+        std::string activeWarperType = config.warperType;
         if (config.warperType != "cylindrical" && !composeFrames.empty()) {
             bool wouldDiverge = false;
             size_t divergeFrame = 0;
@@ -1733,6 +1761,105 @@ StitchResult stitchFramePathsManual(
                          (long long)(kMaxWarpPixels / 1000000));
                 if (auto cyl = make_warper("cylindrical")) {
                     warper = cyl->create(warpedScale);
+                    activeWarperType = "cylindrical";
+                }
+            }
+        }
+
+        // Step 7.7: RAM-aware output-canvas budget cap (wide-pan blend-OOM
+        // fix).  A VALID but wide pan produces a large UNION canvas, and the
+        // BATCH + MultiBand blend peak scales with it (on a 6 GB A35 a
+        // ~70 MP union hit ~2.97 GB RSS and was lmkd-killed mid-blend, never
+        // reaching step11).  Unlike the degenerate-warp guards (per-frame
+        // 100 MP / cumulative 50 MP), this is a capture we want to COMPLETE,
+        // not reject — so cap the canvas to a memory budget by reducing
+        // compose scale, yielding a slightly-lower-res but complete pano.
+        // warpRoi() here is corner-only/cheap (no pixel warp yet) and reuses
+        // the EXACT union math blender->prepare() will allocate, so the probe
+        // predicts the real canvas.  No-op for normal panos: the budget floor
+        // (12 MP) exceeds the widest valid 360° pano (~9 MP), so the 13
+        // bounded captures see byte-identical behavior.
+        if (!composeFrames.empty()) {
+            std::vector<cv::Point> capCorners(composeFrames.size());
+            std::vector<cv::Size>  capSizes(composeFrames.size());
+            bool capOk = true;
+            for (size_t i = 0; i < composeFrames.size(); i++) {
+                if (composeFrames[i].empty()) { capOk = false; break; }
+                cv::Mat capK;
+                cameras[i].K().convertTo(capK, CV_32F);
+                const cv::Rect r = warper->warpRoi(
+                    composeFrames[i].size(), capK, cameras[i].R);
+                capCorners[i] = r.tl();
+                capSizes[i]   = r.size();
+            }
+            if (capOk) {
+                int64_t cw = 0, ch = 0;
+                blendCanvasUnion(capCorners, capSizes, cw, ch);
+                const double canvasMP = (double)cw * (double)ch / 1e6;
+                const double budgetMP = composeCanvasBudgetMP(totalRamMB);
+                const double downscale =
+                    canvasDownscaleForBudget(canvasMP, budgetMP);
+                // Always-on probe — confirms the RAM read (totalRamMB), the
+                // budget, the active projection, and whether the cap fired.
+                // Used to calibrate kBlendBytesPerUnionPx from real traces.
+                log_info(logFn, "[stitch-bc]",
+                         "step7.7: canvas probe union=%lldx%lld (%.1f MP) "
+                         "budget=%.1f MP totalRamMB=%.0f warper=%s downscale=%.3f",
+                         (long long)cw, (long long)ch, canvasMP, budgetMP,
+                         totalRamMB, activeWarperType.c_str(), downscale);
+                if (downscale < 1.0) {
+                    log_info(logFn, "[stitch-bc]",
+                             "step7.7: CAPPED downscale=%.3fx (canvasMP %.1f -> "
+                             "~%.1f, budget %.1f) — re-resizing composeFrames",
+                             downscale, canvasMP,
+                             canvasMP * downscale * downscale, budgetMP);
+                    // Co-scale EVERY quantity warpRoi depends on so the post-
+                    // cap canvas actually lands at ~budget: warpedScale,
+                    // compose_scale (read by the step9 seam aspect), and each
+                    // camera's intrinsics (focal/ppx/ppy — NOT R; mirrors the
+                    // step6 compose rescale; K() rebuilds on demand).
+                    warpedScale = (float)(warpedScale * downscale);
+                    compose_scale *= downscale;
+                    for (auto& cam : cameras) {
+                        cam.focal *= downscale;
+                        cam.ppx   *= downscale;
+                        cam.ppy   *= downscale;
+                    }
+                    // Re-resize composeFrames in place at the new scale.
+                    // INTER_LINEAR + pre-allocated dst + try/catch mirror the
+                    // step7c recycled-mmap SIGSEGV stability fix; on failure,
+                    // break out to the same failure handler step7c uses.
+                    try {
+                        for (size_t i = 0; i < composeFrames.size(); i++) {
+                            if (composeFrames[i].empty()) continue;
+                            const int nw = std::max(1,
+                                (int)std::round(composeFrames[i].cols * downscale));
+                            const int nh = std::max(1,
+                                (int)std::round(composeFrames[i].rows * downscale));
+                            cv::Mat resized(nh, nw, composeFrames[i].type());
+                            cv::resize(composeFrames[i], resized,
+                                       resized.size(), 0, 0, cv::INTER_LINEAR);
+                            composeFrames[i] = resized;
+                        }
+                    } catch (const cv::Exception& e) {
+                        log_error(logFn, "[stitch-bc]",
+                                  "step7.7: compose re-resize threw: %s", e.what());
+                        capturedErrorCode = StitchErrorCode::ComposeResizeFailed;
+                        capturedErrorMessage =
+                            std::string("Canvas-cap resize failed: ") + e.what();
+                        result.framesIncluded =
+                            static_cast<int32_t>(cameras.size());
+                        failedInsidePool = true;
+                        break;
+                    }
+                    // Re-create the warper at the new scale via the ACTIVE
+                    // projection (plane, or the step7.6 cylindrical fallback).
+                    if (auto w = make_warper(activeWarperType)) {
+                        warper = w->create(warpedScale);
+                    }
+                    log_info(logFn, "[stitch-bc]",
+                             "step7.7: cap applied new warpedScale=%.2f "
+                             "compose_scale=%.3f", warpedScale, compose_scale);
                 }
             }
         }
@@ -2041,21 +2168,28 @@ StitchResult stitchFramePathsManual(
             // step8b guard above, but a single degenerate corner OFFSET can
             // still blow this union to gigapixels — the real crash-B path
             // (51 MB → 3.7 GB on one rapid pan).  Guard BEFORE prepare().
-            {
-                int64_t canvasW = 0, canvasH = 0;
-                blendCanvasUnion(corners, sizes, canvasW, canvasH);
-                if (canvasExceedsGuard(canvasW, canvasH)) {
-                    log_error(logFn, "[stitch-bc]",
-                              "step10a: blend canvas degenerate "
-                              "(%lldx%lld px) — treating as warp failure",
-                              (long long)canvasW, (long long)canvasH);
-                    throw degenerateCanvasException(
-                        canvasW, canvasH, config.stitchMode, N);
-                }
+            int64_t canvasW = 0, canvasH = 0;
+            blendCanvasUnion(corners, sizes, canvasW, canvasH);
+            if (canvasExceedsGuard(canvasW, canvasH)) {
+                log_error(logFn, "[stitch-bc]",
+                          "step10a: blend canvas degenerate "
+                          "(%lldx%lld px) — treating as warp failure",
+                          (long long)canvasW, (long long)canvasH);
+                throw degenerateCanvasException(
+                    canvasW, canvasH, config.stitchMode, N);
             }
-            // Feed the blender, releasing each frame as we go.
-            log_info(logFn, "[stitch-bc]", "step10a: blender->prepare");
+            // Feed the blender, releasing each frame as we go.  Log the union
+            // + RSS: the union here MUST equal the step7.7 post-cap probe — a
+            // mismatch means a co-scaled quantity was missed.  step10a2
+            // isolates the persistent MultiBand accumulator (~the term the
+            // canvas budget bounds).
+            log_info(logFn, "[stitch-bc]",
+                     "step10a: blender->prepare union=%lldx%lld (%.1f MP) mem=%.1fMB",
+                     (long long)canvasW, (long long)canvasH,
+                     (double)canvasW * (double)canvasH / 1e6, rss_mb());
             blender->prepare(corners, sizes);
+            log_info(logFn, "[stitch-bc]",
+                     "step10a2: prepared mem=%.1fMB", rss_mb());
             log_info(logFn, "[stitch-bc]",
                      "step10b: feeding blender (N=%zu)", N);
             for (size_t i = 0; i < N; i++) {
