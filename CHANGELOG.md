@@ -16,6 +16,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — first-time-user panorama capture GUIDANCE
+
+A set of opt-in-by-default guidance surfaces that coach the operator
+through a non-AR hold-and-pan panorama.  All seven are wired into
+`<Camera>` automatically and read directly from new props (none are
+threaded through `PanoramaSettings`):
+
+1. **Mode gate + 2. rotate-to-landscape prompt.** Starting a panorama
+   while the phone is held portrait under Mode A is blocked behind a
+   "Rotate to landscape" caption; the capture starts the instant the
+   user rotates to landscape (either way up).  Releasing the shutter
+   before rotating cancels the pending start.
+3. **Pan how-to overlay.** A brief looping GIF + bouncing direction
+   arrow (down for landscape Mode A, right for portrait Mode B) shown
+   for ~2.5 s at the start of each recording.
+4. **"Moving too fast" pill.** A transient amber pill while the gyro
+   pan rate exceeds the warn threshold.
+5. **Blinking countdown + auto-finalize.** A blinking whole-seconds
+   countdown; at 0 the capture auto-finalizes (stitches what was
+   captured — same path as releasing the shutter).
+6. **Lateral-drift stop.** If the operator drifts sideways out of the
+   pan plane beyond the budget, the capture FINALIZES what was captured
+   and a one-button popup explains why.
+7. **Draggable-quad crop editor.** Optional post-stitch crop: drag four
+   corners over the result; confirm perspective-rectifies in place
+   (`cv::warpPerspective`) when the quad isn't axis-aligned, cancel
+   emits the un-cropped panorama.
+
+New `<Camera>` props (all optional): `panMode`, `panGuidance`
+(default `true`), `maxPanDurationMs` (default `9000`; `0` disables the
+countdown + auto-finalize), `panTooFastThreshold`, `lateralBudgetCm`
+(default `5`; `0` disables the lateral stop), `rectCropPreview`
+(default `false`), `perspectiveCorrectCrop` (default `true`), and
+`guidanceCopy` (partial override of every guidance string).
+
+New public exports: the `PanMode` type, `GuidanceCopy` +
+`DEFAULT_GUIDANCE_COPY`, the `usePanMotion` hook, the five guidance
+components (`RotateToLandscapePrompt`, `PanHowToOverlay`,
+`CaptureCountdownOverlay`, `LateralMotionModal`, `RectCropPreview`) with
+their prop types, and the `cropQuad` perspective-rectify helper.
+
+### Changed (BREAKING)
+
+- **`<Camera>` now defaults to `panMode='mode-a'` (landscape-only
+  panorama).** Previously the component accepted both landscape (Mode A,
+  top→bottom) and portrait (Mode B, left→right) holds with no gate.
+  Starting a panorama in portrait now shows the rotate-to-landscape
+  prompt instead of capturing.  **Hosts that want the previous
+  both-modes behaviour must pass `panMode='both'`.**
+
 ## [0.15.2] — 2026-06-11
 
 ### Fixed

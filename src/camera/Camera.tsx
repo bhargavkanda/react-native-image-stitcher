@@ -43,6 +43,7 @@
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -95,6 +96,24 @@ import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrienta
 import { useContentRotation } from './useContentRotation';
 import { useOrientationDrift } from './useOrientationDrift';
 import { OrientationDriftModal } from './OrientationDriftModal';
+// ── Panorama GUIDANCE building blocks (feature/pano-ux-guidance) ─────
+// Pure decision helpers + sensor hook + presentational surfaces for the
+// first-time-user pan-capture guidance (items 1–7).  All read directly
+// from the new <Camera> props below, NOT threaded through PanoramaSettings.
+import { shouldGateForPanMode, type PanMode } from './panModeGate';
+import { countdownSecondsFrom } from './captureCountdown';
+import { usePanMotion } from './usePanMotion';
+import {
+  mergeGuidanceCopy,
+  type GuidanceCopy,
+} from './cameraGuidanceCopy';
+import { GUIDANCE_PILL, GUIDANCE_TOKENS } from './guidanceTokens';
+import { RotateToLandscapePrompt } from './RotateToLandscapePrompt';
+import { PanHowToOverlay } from './PanHowToOverlay';
+import { CaptureCountdownOverlay } from './CaptureCountdownOverlay';
+import { LateralMotionModal } from './LateralMotionModal';
+import { RectCropPreview } from './RectCropPreview';
+import { cropQuad } from '../stitching/cropQuad';
 import {
   getIncrementalNativeModule,
   incrementalStitcherIsAvailable,
@@ -619,6 +638,85 @@ export interface CameraProps {
    * CHANGELOG.)
    */
   frameProcessor?: ReadonlyFrameProcessor | DrawableFrameProcessor;
+
+  // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────────
+  /**
+   * Which device holds the non-AR panorama capture accepts.
+   *
+   *   - `'mode-a'` (DEFAULT) — LANDSCAPE-only.  Holding the phone in
+   *     portrait when the user starts a panorama is BLOCKED behind the
+   *     rotate-to-landscape prompt (item 2); the capture starts the
+   *     instant they rotate to landscape (either way up).
+   *   - `'both'` — landscape OR portrait; the rotate gate never fires,
+   *     the user captures in whichever hold they're already in.
+   *
+   * **BREAKING (since the previous release defaulted to both modes):**
+   * the default is now `'mode-a'`.  Hosts that relied on portrait
+   * (Mode B, left→right) panoramas must opt back in with
+   * `panMode='both'`.  See CHANGELOG.
+   */
+  panMode?: PanMode;
+
+  /**
+   * Master switch for the in-capture pan-guidance surfaces (rotate
+   * prompt, pan how-to overlay, too-fast pill, blinking countdown).
+   * Default `true`.  Set `false` to suppress all of them (the lateral-
+   * drift FINALIZE behaviour and the crop preview are governed by their
+   * own props, not this flag).
+   */
+  panGuidance?: boolean;
+
+  /**
+   * Hard recording ceiling for a non-AR panorama, in milliseconds.  A
+   * blinking countdown (item 5) shows the whole seconds remaining and,
+   * on reaching 0, the capture auto-finalizes (stops + stitches what was
+   * captured — same code path as the user releasing the shutter).
+   * Default `9000` (9 s).  `0` disables both the countdown UI and the
+   * auto-finalize (recording is then unbounded).
+   */
+  maxPanDurationMs?: number;
+
+  /**
+   * Gyro rate (rad/s) above which the pan is flagged "moving too fast"
+   * (item 4 — the transient amber pill).  Optional; forwards to
+   * `usePanMotion`'s `warnMaxRadPerSec` (default 1.0 rad/s there).
+   */
+  panTooFastThreshold?: number;
+
+  /**
+   * Cross-pan (lateral) drift budget in CENTIMETRES (item 6).  Once the
+   * operator's integrated sideways translation exceeds this for the
+   * hook's grace window, the capture FINALIZES what was captured and a
+   * one-button popup explains why.  Default `5`.  `0` disables the
+   * lateral-drift stop entirely.
+   */
+  lateralBudgetCm?: number;
+
+  /**
+   * Show the draggable-quad crop editor (item 7) after a panorama
+   * finalizes, BEFORE emitting it via `onCapture`.  Default `false`.
+   * When `true`, the user drags 4 corners over the stitched result;
+   * confirming crops in place (native perspective rectify when the quad
+   * isn't axis-aligned), cancelling emits the un-cropped panorama.
+   */
+  rectCropPreview?: boolean;
+
+  /**
+   * Whether the crop editor (item 7) may perspective-rectify a
+   * non-rectangular quad (`cv::warpPerspective`).  Default `true`.
+   * `false` restricts the crop to the axis-aligned bounding rect even
+   * when the user drags a skewed quad.  No effect unless
+   * `rectCropPreview` is on.
+   */
+  perspectiveCorrectCrop?: boolean;
+
+  /**
+   * Copy overrides for every guidance string (rotate prompt, pan hint,
+   * too-fast warning, lateral-stop popup, crop buttons).  Partial —
+   * unspecified keys fall back to {@link DEFAULT_GUIDANCE_COPY}.  Hosts
+   * localise or re-word the whole guidance surface in one place here.
+   */
+  guidanceCopy?: Partial<GuidanceCopy>;
 }
 
 
@@ -931,7 +1029,27 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onCapturePreviewClose,
     frameProcessor: hostFrameProcessor,
     engine = 'batch-keyframe',
+    // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
+    panMode = 'mode-a',
+    panGuidance = true,
+    maxPanDurationMs = 9000,
+    panTooFastThreshold,
+    lateralBudgetCm = 5,
+    rectCropPreview = false,
+    perspectiveCorrectCrop = true,
+    guidanceCopy,
   } = props;
+
+  // Derived guidance state.  The landscape-only gate decision itself is
+  // computed inline at the call sites via `shouldGateForPanMode(panMode,
+  // deviceOrientation)` (the rotate gate + resume effect), so there's no
+  // standalone `modeAOnly` flag to keep in sync.  `guidanceCopyResolved`
+  // merges the host override onto the defaults once per `guidanceCopy`
+  // identity.
+  const guidanceCopyResolved = useMemo(
+    () => mergeGuidanceCopy(guidanceCopy),
+    [guidanceCopy],
+  );
 
   // v0.13.2 — capture-source constraint (default 'both').  Derives which
   // sources are permitted; `captureSources` overrides any conflicting
@@ -979,6 +1097,31 @@ export function Camera(props: CameraProps): React.JSX.Element {
     null,
   );
   const [incrementalState, setIncrementalState] = useState<IncrementalState | null>(null);
+  // ── Panorama GUIDANCE state (feature/pano-ux-guidance) ──────────
+  // Item 1/2 — a hold that was BLOCKED on the rotate-to-landscape gate.
+  // Latches when the user holds the shutter in portrait under Mode A;
+  // an effect below resumes the capture the instant they rotate.
+  const [pendingPanStart, setPendingPanStart] = useState(false);
+  // Item 6 — the latched lateral-drift popup (capture already finalized
+  // by the time it shows).
+  const [lateralStopVisible, setLateralStopVisible] = useState(false);
+  // Item 3 — the brief pan how-to overlay shown at the start of a
+  // recording, auto-dismissed after a timeout.
+  const [howToVisible, setHowToVisible] = useState(false);
+  // Item 5 — a ~250 ms ticking clock that drives the displayed countdown
+  // seconds while recording (the authoritative auto-stop is a setTimeout,
+  // not this tick).
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  // Item 7 — a finalized panorama awaiting the user's crop decision.
+  // Non-null mounts the RectCropPreview; `captureResultObj` is the exact
+  // CameraCaptureResult we'd otherwise have emitted, stashed so cancel /
+  // crop-confirm can emit it (possibly with cropped dims) afterwards.
+  const [cropPending, setCropPending] = useState<{
+    uri: string;
+    width: number;
+    height: number;
+    captureResultObj: CameraCaptureResult;
+  } | null>(null);
   // 2026-05-22 (audit F9 + F3) — debug stitch-stats toast.  Hook
   // exposes an imperative API; we fire `showResult(finalizeResult)`
   // on every successful finalize when settings.debug is on (gated
@@ -1023,6 +1166,18 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const arSupportPending =
     arPreference && lens !== '0.5x' && !isARSupportProbed;
   const deviceOrientation = useDeviceOrientation();
+
+  // ── Panorama GUIDANCE — shared motion signals (item 3/4/6) ──────
+  // One gyro + one accelerometer subscription, live only while a non-AR
+  // capture is recording.  Feeds the too-fast pill (`panSpeedBucket`)
+  // and the lateral-drift FINALIZE (`lateralExceeded`).  `panTooFast-
+  // Threshold` (if set) tunes the 'warn'→'bad' boundary; `lateralBudget-
+  // Cm` tunes the drift latch (0 disables the latch in the hook).
+  const panMotion = usePanMotion({
+    active: statusPhase === 'recording' && isNonAR,
+    warnMaxRadPerSec: panTooFastThreshold,
+    lateralBudgetCm,
+  });
 
   // v0.13.1 — counter-rotation for control CONTENT (AR toggle, lens
   // pill, flash icon, thumbnails) so their labels read upright relative
@@ -1211,9 +1366,33 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // The imperative pattern (start on hold-start, stop on hold-end)
   // avoids the re-render churn entirely.
   const fpDriver = useFrameProcessorDriver();
-  // Safety: stop the driver if the component unmounts mid-recording.
+  // Safety: stop the driver AND clear the pan-duration auto-finalize
+  // timer if the component unmounts mid-recording (item 5 exit path #4).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => () => { fpDriver.stop(); }, []);
+  useEffect(() => () => { fpDriver.stop(); clearPanTimer(); }, []);
+
+  // ── Panorama GUIDANCE — auto-finalize timer + ref bridges ───────
+  // The 9 s pan-duration ceiling (item 5) is an authoritative
+  // `setTimeout` (not derived from the cosmetic countdown tick).  Stored
+  // in a ref so the start logic can schedule it and ALL four capture-exit
+  // paths (manual release, drift cancel, lateral stop, unmount) clear it.
+  const panDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const clearPanTimer = useCallback(() => {
+    if (panDurationTimerRef.current) {
+      clearTimeout(panDurationTimerRef.current);
+      panDurationTimerRef.current = null;
+    }
+  }, []);
+  // `handleHoldEnd` / `startCapture` are defined further down but are
+  // referenced from effects + timers declared above them.  Refs break
+  // the declaration-order + circular-useCallback-dep cycle: each is
+  // kept current by a commit-phase effect, and callers invoke via the
+  // ref (`handleHoldEndRef.current?.()`) — mirroring how the drift
+  // effect avoids putting these in its dep array.
+  const handleHoldEndRef = useRef<(() => void) | null>(null);
+  const startCaptureRef = useRef<(() => void) | null>(null);
 
   // ── v0.12.0 — Orientation drift detection + auto-abandon ────────
   //
@@ -1233,8 +1412,13 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const [driftModalDismissed, setDriftModalDismissed] = useState(false);
   // Reset the dismissed flag when a new capture starts (or any non-
   // recording state) so the next drift event surfaces a fresh modal.
+  // Item 6 — clear the latched lateral-stop popup on the same edge so a
+  // fresh capture doesn't inherit the previous one's drift state.
   useEffect(() => {
-    if (statusPhase !== 'recording') setDriftModalDismissed(false);
+    if (statusPhase !== 'recording') {
+      setDriftModalDismissed(false);
+      setLateralStopVisible(false);
+    }
   }, [statusPhase]);
 
   useEffect(() => {
@@ -1252,6 +1436,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // through `onError` — abandonment must succeed even if the engine
     // is in a weird state.
     void (async () => {
+      // item 5 exit path #2 — kill the pan-duration auto-finalize timer
+      // so it can't fire into an already-cancelled capture.
+      clearPanTimer();
       fpDriver.stop();
       try {
         await incremental.cancel();
@@ -1463,20 +1650,17 @@ export function Camera(props: CameraProps): React.JSX.Element {
     }
   }, [enablePhotoMode, isAR, capture, outputDir, onCapture, onError]);
 
-  const handleHoldStart = useCallback(async () => {
-    if (!enablePanoramaMode) return;
-    if (!incrementalStitcherIsAvailable()) {
-      onError?.(
-        new CameraError(
-          'PANORAMA_START_FAILED',
-          'Native incremental stitcher module not available',
-        ),
-      );
-      return;
-    }
+  // ── startCapture — the "actually start recording" logic ─────────
+  // Extracted from `handleHoldStart` so the rotate-to-landscape gate
+  // (item 1/2) can DEFER it: a portrait Mode-A hold latches
+  // `pendingPanStart` and an effect calls this once the user rotates.
+  // Identical behaviour to the inline body it replaced — the only new
+  // line is the item-5 auto-finalize timer scheduled right after
+  // `setRecordingStartedAt`.
+  const startCapture = useCallback(async () => {
     try {
       // 2026-05-23 (race fix) — synchronously clear thumbnails +
-      // engine state at the top of handleHoldStart, BEFORE awaiting
+      // engine state at the top of startCapture, BEFORE awaiting
       // incremental.start().  In the previous effect-based design
       // the GL thread could ingest an AR frame during the await
       // window and add to thumbnails BEFORE React's
@@ -1488,6 +1672,17 @@ export function Camera(props: CameraProps): React.JSX.Element {
       setIncrementalState(null);
       setStatusPhase('recording');
       setRecordingStartedAt(Date.now());
+      // Item 5 — schedule the hard-ceiling auto-finalize.  Fires
+      // `handleHoldEnd` (via ref to dodge the circular useCallback dep),
+      // which finalizes what's captured — the FINALIZE-on-zero product
+      // decision.  Cleared on every other capture-exit path.  Skipped
+      // when the feature is disabled (`maxPanDurationMs <= 0`).
+      clearPanTimer();
+      if (maxPanDurationMs > 0) {
+        panDurationTimerRef.current = setTimeout(() => {
+          handleHoldEndRef.current?.();
+        }, maxPanDurationMs);
+      }
       const orientationRotation: 0 | 90 | 180 | 270 =
         deviceOrientation === 'portrait' ? 90
           : deviceOrientation === 'portrait-upside-down' ? 270
@@ -1546,6 +1741,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
       }
     } catch (err) {
       setStatusPhase('idle');
+      clearPanTimer();
       onError?.(
         new CameraError(
           'PANORAMA_START_FAILED',
@@ -1555,7 +1751,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
       );
     }
   }, [
-    enablePanoramaMode,
     incremental,
     isNonAR,
     deviceOrientation,
@@ -1565,9 +1760,68 @@ export function Camera(props: CameraProps): React.JSX.Element {
     fpDriver,
     engine,
     onError,
+    maxPanDurationMs,
+    clearPanTimer,
   ]);
 
+  // Keep the ref current so the auto-finalize timer + the rotate-resume
+  // effect can invoke the latest `startCapture` without taking it as a
+  // dep (which would re-run them on every recording-driven re-render).
+  useEffect(() => {
+    startCaptureRef.current = () => { void startCapture(); };
+  });
+
+  // ── handleHoldStart — early guards + the rotate-to-landscape gate ─
+  // The "actually start" body lives in `startCapture`; this wrapper only
+  // decides WHETHER to start now.  Under Mode A in portrait it latches
+  // `pendingPanStart` instead (item 1/2) and the resume effect below
+  // starts the capture once the user rotates to landscape.
+  const handleHoldStart = useCallback(() => {
+    if (!enablePanoramaMode) return;
+    if (!incrementalStitcherIsAvailable()) {
+      onError?.(
+        new CameraError(
+          'PANORAMA_START_FAILED',
+          'Native incremental stitcher module not available',
+        ),
+      );
+      return;
+    }
+    if (shouldGateForPanMode(panMode, deviceOrientation)) {
+      // Mode-A + portrait — block the start and show the rotate prompt.
+      // The resume effect picks this up the instant the device rotates.
+      setPendingPanStart(true);
+      return;
+    }
+    void startCapture();
+  }, [
+    enablePanoramaMode,
+    onError,
+    panMode,
+    deviceOrientation,
+    startCapture,
+  ]);
+
+  // ── Rotate-to-landscape resume (item 1/2) ───────────────────────
+  // When a hold was gated (`pendingPanStart`) and the user has since
+  // rotated so the gate no longer fires, start the deferred capture.
+  // Invoked through `startCaptureRef` (kept current above) so this
+  // effect's deps don't churn on every recording re-render.
+  useEffect(() => {
+    if (pendingPanStart && !shouldGateForPanMode(panMode, deviceOrientation)) {
+      setPendingPanStart(false);
+      startCaptureRef.current?.();
+    }
+  }, [pendingPanStart, deviceOrientation, panMode]);
+
   const handleHoldEnd = useCallback(async () => {
+    // Item 5 exit path #1 — always kill the auto-finalize timer on
+    // release, even on the early-return below (it's idempotent).
+    clearPanTimer();
+    // Item 1/2 — if the shutter is released while a rotate-gated hold is
+    // pending (user let go before rotating to landscape), abandon the
+    // deferred start rather than starting on the next rotation.
+    if (pendingPanStart) setPendingPanStart(false);
     if (statusPhase !== 'recording') return;
     setStatusPhase('stitching');
     // Stop pumping new frames before finalizing so the engine isn't
@@ -1617,7 +1871,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         });
       }
 
-      onCapture?.({
+      const captureResultObj: CameraCaptureResult = {
         type: 'panorama',
         // Native finalize() returns a bare `/data/.../foo.jpg` path;
         // normalise to `file://` for Android <Image>.
@@ -1631,7 +1885,26 @@ export function Camera(props: CameraProps): React.JSX.Element {
         finalConfidenceThresh: result.finalConfidenceThresh ?? -1,
         durationMs: Date.now() - (recordingStartedAt ?? Date.now()),
         stitchModeResolved: result.stitchModeResolved,
-      });
+      };
+      // Item 7 — when the crop editor is enabled AND the panorama has
+      // valid intrinsic dims, defer `onCapture`: stash the result and
+      // mount RectCropPreview.  The user's crop / cancel decision (the
+      // modal's onConfirm / onCancel below) emits the final result.
+      // Otherwise emit immediately, as before.
+      if (
+        rectCropPreview
+        && result.width > 0
+        && result.height > 0
+      ) {
+        setCropPending({
+          uri: captureResultObj.uri,
+          width: result.width,
+          height: result.height,
+          captureResultObj,
+        });
+      } else {
+        onCapture?.(captureResultObj);
+      }
       // 2026-05-22 (audit F9) — fire the debug stitch-stats toast on
       // every successful finalize when settings.debug is on.  Shows
       // the leaveBiggestComponent retry telemetry + resolved mode so
@@ -1672,7 +1945,74 @@ export function Camera(props: CameraProps): React.JSX.Element {
     isNonAR,
     imuGate,
     stitchToast,
+    // feature/pano-ux-guidance — the release also tears down the
+    // pan-duration timer + a pending rotate-gate, and decides whether to
+    // route the result through the crop editor.
+    clearPanTimer,
+    pendingPanStart,
+    rectCropPreview,
   ]);
+
+  // Keep `handleHoldEndRef` current so the auto-finalize timer + the
+  // lateral-drift effect invoke the latest `handleHoldEnd` without
+  // adding it as a dep (it changes identity on every recording tick).
+  useEffect(() => {
+    handleHoldEndRef.current = () => { void handleHoldEnd(); };
+  });
+
+  // ── Item 6 — lateral drift → FINALIZE + popup ───────────────────
+  // Mirrors the orientation-drift effect, but FINALIZES the capture
+  // (keeps what was stitched) rather than cancelling it: clear the
+  // pan-duration timer, latch the popup, then call handleHoldEnd via
+  // its ref.  Gated off when the budget is disabled (`<= 0`).
+  useEffect(() => {
+    if (
+      !panMotion.lateralExceeded
+      || statusPhase !== 'recording'
+      || lateralBudgetCm <= 0
+    ) {
+      return;
+    }
+    clearPanTimer();
+    setLateralStopVisible(true);
+    handleHoldEndRef.current?.();
+    // Deps mirror the drift effect: re-run when the latch trips or the
+    // recording state changes.  Other reads are stable setters / refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panMotion.lateralExceeded, statusPhase, lateralBudgetCm]);
+
+  // ── Item 3 — brief pan how-to overlay at recording start ────────
+  // Show the how-to GIF + direction arrow for a short window when a
+  // recording begins, then auto-fade.  The component never self-times;
+  // this effect owns the lifecycle.
+  useEffect(() => {
+    if (statusPhase !== 'recording') {
+      setHowToVisible(false);
+      return;
+    }
+    setHowToVisible(true);
+    const t = setTimeout(() => setHowToVisible(false), 2500);
+    return () => clearTimeout(t);
+  }, [statusPhase]);
+
+  // ── Item 5 — cosmetic countdown tick ────────────────────────────
+  // While recording, bump `nowTick` ~4×/s so `countdownSecondsFrom`
+  // recomputes the displayed whole-seconds.  The authoritative auto-stop
+  // is the `panDurationTimerRef` setTimeout, NOT this interval.  Skipped
+  // when the countdown feature is disabled (`maxPanDurationMs <= 0`).
+  useEffect(() => {
+    if (statusPhase !== 'recording' || maxPanDurationMs <= 0) return;
+    const id = setInterval(() => setNowTick(Date.now()), 250);
+    return () => clearInterval(id);
+  }, [statusPhase, maxPanDurationMs]);
+
+  // Whole seconds remaining for the countdown overlay (item 5).  Pure
+  // helper; clamps to [0, round(maxPanDurationMs/1000)].
+  const countdownSeconds = countdownSecondsFrom(
+    recordingStartedAt,
+    nowTick,
+    maxPanDurationMs,
+  );
 
   // ── Lens / AR-toggle handlers ───────────────────────────────────
   const handleLensChange = useCallback((next: CameraLens) => {
@@ -1810,6 +2150,36 @@ export function Camera(props: CameraProps): React.JSX.Element {
           the tree as internal-only components but <Camera> no longer
           renders them and the `panGuide` / `panoramaGuidance` props
           are gone.  Re-wire here if a host need resurfaces. */}
+
+      {/* feature/pano-ux-guidance — in-capture guidance overlays.
+          All gated on `panGuidance`; each renders null when not
+          visible so they can mount unconditionally. */}
+      {/* Item 5 — blinking 9 s countdown (top corner). */}
+      <CaptureCountdownOverlay
+        visible={statusPhase === 'recording' && panGuidance && maxPanDurationMs > 0}
+        secondsRemaining={countdownSeconds}
+        orientation={deviceOrientation}
+      />
+      {/* Item 3 — brief pan how-to GIF + direction arrow. */}
+      <PanHowToOverlay
+        visible={statusPhase === 'recording' && panGuidance && howToVisible}
+        orientation={deviceOrientation}
+      />
+      {/* Item 4 — transient "moving too fast" pill, centred near the
+          top (below the countdown).  Minimal inline pill in the shared
+          guidance visual language (amber text on scrim, hairline
+          border); shown only while the gyro bucket is 'bad'. */}
+      {statusPhase === 'recording'
+        && panGuidance
+        && panMotion.panSpeedBucket === 'bad' && (
+        <View style={guidanceStyles.tooFastWrap} pointerEvents="none">
+          <View style={guidanceStyles.tooFastPill}>
+            <Text style={guidanceStyles.tooFastText}>
+              {guidanceCopyResolved.tooFast}
+            </Text>
+          </View>
+        </View>
+      )}
 
       {/*
         2026-05-22 (audit F9 + F3) — debug UI suite, all gated on
@@ -2028,6 +2398,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
         onClose={() => setSettingsModalVisible(false)}
       />
 
+      {/* Item 1/2 — rotate-to-landscape prompt.  Shown while a Mode-A
+          hold is blocked on the user rotating to landscape.  The resume
+          effect starts the deferred capture the instant they do. */}
+      <RotateToLandscapePrompt
+        visible={pendingPanStart && panGuidance}
+        copy={guidanceCopyResolved.rotateToLandscape}
+      />
+
       {/* v0.12.0 — Orientation drift modal.  Shows AFTER the SDK has
           auto-abandoned the capture (the useEffect above stops the
           engine + transitions to idle + fires onCaptureAbandoned).
@@ -2039,6 +2417,18 @@ export function Camera(props: CameraProps): React.JSX.Element {
         captureOrientation={drift.captureOrientation}
         currentOrientation={drift.currentOrientation}
         onAcknowledge={() => setDriftModalDismissed(true)}
+      />
+
+      {/* Item 6 — lateral-drift popup.  Latched true by the lateral
+          effect AFTER it finalizes the capture; informational only,
+          dismiss just clears the latch so the next capture starts
+          fresh. */}
+      <LateralMotionModal
+        visible={lateralStopVisible}
+        title={guidanceCopyResolved.lateralStopTitle}
+        body={guidanceCopyResolved.lateralStopBody}
+        dismissLabel={guidanceCopyResolved.lateralStopDismiss}
+        onDismiss={() => setLateralStopVisible(false)}
       />
 
       {/* v0.13.0 — built-in post-stitch / tap-to-preview modal.
@@ -2054,6 +2444,62 @@ export function Camera(props: CameraProps): React.JSX.Element {
         title={capturePreview?.title}
         actions={capturePreviewActions}
         onClose={onCapturePreviewClose ?? noop}
+      />
+
+      {/* Item 7 — draggable-quad crop editor, shown after a panorama
+          finalizes when `rectCropPreview` is on (handleHoldEnd stashed
+          the pending result instead of emitting it).
+            - Cancel → emit the original, un-cropped panorama.
+            - Crop   → cropQuad (perspective-rectify when the quad isn't
+                       axis-aligned) overwrites the file in place; emit
+                       with the rectified dims + a cache-busting query so
+                       <Image> reloads the overwritten file.  On any
+                       crop failure, fall back to the original. */}
+      <RectCropPreview
+        visible={cropPending != null}
+        imageUri={cropPending?.uri ?? ''}
+        imageWidth={cropPending?.width ?? 0}
+        imageHeight={cropPending?.height ?? 0}
+        perspectiveCorrect={perspectiveCorrectCrop}
+        copy={guidanceCopyResolved}
+        onCancel={() => {
+          if (cropPending) onCapture?.(cropPending.captureResultObj);
+          setCropPending(null);
+        }}
+        onConfirm={async ({ quad }) => {
+          if (!cropPending) return;
+          const pending = cropPending;
+          try {
+            // cropQuad takes a BARE path; the stashed uri is a file://
+            // URI.  Overwrites in place (pass the same path).
+            const cropped = await cropQuad(
+              toBareFilePath(pending.uri),
+              quad,
+              undefined,
+              { quality: 90 },
+            );
+            onCapture?.({
+              ...pending.captureResultObj,
+              // Cache-bust so <Image> reloads the overwritten file.
+              uri: `${toFileUri(cropped.outputPath)}?t=${Date.now()}`,
+              width: cropped.width,
+              height: cropped.height,
+            });
+          } catch (err) {
+            onError?.(
+              new CameraError(
+                'OUTPUT_WRITE_FAILED',
+                err instanceof Error ? err.message : String(err),
+                err,
+              ),
+            );
+            // Fall back to the un-cropped panorama so the capture isn't
+            // lost on a crop failure.
+            onCapture?.(pending.captureResultObj);
+          } finally {
+            setCropPending(null);
+          }
+        }}
       />
     </View>
   );
@@ -2335,5 +2781,34 @@ const pillStyles = StyleSheet.create({
   },
   glyphActive: {
     color: '#1a1a1a',
+  },
+});
+
+
+// feature/pano-ux-guidance — item 4 "moving too fast" pill.  Self-
+// contained, in the shared guidance visual language (GUIDANCE_TOKENS /
+// GUIDANCE_PILL): amber text on the scrim background with a hairline
+// border, centred near the top, below the countdown.  Non-interactive
+// (the wrapper sets pointerEvents="none" so it never eats touches).
+const guidanceStyles = StyleSheet.create({
+  tooFastWrap: {
+    position: 'absolute',
+    top: 96,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  tooFastPill: {
+    paddingVertical: GUIDANCE_PILL.paddingVertical,
+    paddingHorizontal: GUIDANCE_PILL.paddingHorizontal,
+    borderRadius: GUIDANCE_PILL.borderRadius,
+    backgroundColor: GUIDANCE_TOKENS.scrim,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: GUIDANCE_TOKENS.amber,
+  },
+  tooFastText: {
+    color: GUIDANCE_TOKENS.amber,
+    fontSize: GUIDANCE_PILL.fontSize,
+    fontWeight: GUIDANCE_PILL.fontWeight,
   },
 });

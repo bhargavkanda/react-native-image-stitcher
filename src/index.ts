@@ -174,6 +174,49 @@ export type { UseOrientationDriftReturn } from './camera/useOrientationDrift';
 export { OrientationDriftModal } from './camera/OrientationDriftModal';
 export type { OrientationDriftModalProps } from './camera/OrientationDriftModal';
 
+// ── Panorama capture GUIDANCE (feature/pano-ux-guidance) ──────────────
+// The first-time-user pan-capture guidance surfaces, wired into Layer-1
+// <Camera> automatically (panMode / panGuidance / maxPanDurationMs /
+// lateralBudgetCm / rectCropPreview / guidanceCopy props).  Exported for
+// Layer-2 hosts composing their own capture UX on CameraView + the
+// incremental engine.
+//
+// `PanMode` is the landscape-only-vs-both flag; `GuidanceCopy` +
+// `DEFAULT_GUIDANCE_COPY` are the overridable copy surface.
+export type { PanMode } from './camera/panModeGate';
+export {
+  DEFAULT_GUIDANCE_COPY,
+} from './camera/cameraGuidanceCopy';
+export type { GuidanceCopy } from './camera/cameraGuidanceCopy';
+// Shared motion hook — one gyro + one accelerometer subscription feeding
+// the pan-speed bucket (item 4) and the lateral-drift latch (item 6).
+export { usePanMotion } from './camera/usePanMotion';
+export type {
+  UsePanMotionOptions,
+  UsePanMotionReturn,
+  PanSpeedBucket,
+  PanAxis,
+} from './camera/usePanMotion';
+// Presentational guidance surfaces (each renders null when not visible).
+export { RotateToLandscapePrompt } from './camera/RotateToLandscapePrompt';
+export type { RotateToLandscapePromptProps } from './camera/RotateToLandscapePrompt';
+export { PanHowToOverlay } from './camera/PanHowToOverlay';
+export type { PanHowToOverlayProps } from './camera/PanHowToOverlay';
+export { CaptureCountdownOverlay } from './camera/CaptureCountdownOverlay';
+export type { CaptureCountdownOverlayProps } from './camera/CaptureCountdownOverlay';
+export { LateralMotionModal } from './camera/LateralMotionModal';
+export type { LateralMotionModalProps } from './camera/LateralMotionModal';
+export { RectCropPreview } from './camera/RectCropPreview';
+export type {
+  RectCropPreviewProps,
+  RectCropResult,
+  ImageRect,
+} from './camera/RectCropPreview';
+// Native perspective-rectify crop used by RectCropPreview's confirm
+// path; hosts driving their own crop UI call it directly.
+export { cropQuad } from './stitching/cropQuad';
+export type { CropQuadOptions, CropQuadResult } from './stitching/cropQuad';
+
 // ── Incremental stitching engine ──────────────────────────────────────
 // JS bindings around the native `IncrementalStitcher` module.  Use
 // these when you need finer control than <Camera>'s built-in
