@@ -75,6 +75,7 @@ import {
   type CaptureThumbnailItem,
 } from './CaptureThumbnailStrip';
 import { CaptureStatusOverlay, type CaptureStatusPhase } from './CaptureStatusOverlay';
+import { classifyStitchError } from './classifyStitchError';
 import { CaptureDebugOverlay } from './CaptureDebugOverlay';
 import { CaptureMemoryPill } from './CaptureMemoryPill';
 import { CaptureKeyframePill } from './CaptureKeyframePill';
@@ -1640,16 +1641,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const code: CameraErrorCode =
-        // Insufficient overlap surfaces two ways: cv::Stitcher's
-        // ERR_NEED_MORE_IMGS ("need more images") and the manual
-        // pipeline's "0 valid pairwise matches / frames may not overlap
-        // enough" — both are the same recoverable "pan more slowly" case.
-        /need more images|pairwise match|overlap enough/i.test(message) ? 'STITCH_NEED_MORE_IMGS'
-        : /homography/i.test(message) ? 'STITCH_HOMOGRAPHY_FAIL'
-        : /camera params/i.test(message) ? 'STITCH_CAMERA_PARAMS_FAIL'
-        : /out of memory|oom/i.test(message) ? 'STITCH_OOM'
-        : 'PANORAMA_FINALIZE_FAILED';
+      // Classify the raw native failure string → typed code.  The chain
+      // lives in classifyStitchError() (the load-bearing C++↔JS contract,
+      // unit-tested against the actual native strings) so a future reword
+      // of a cpp throw can't silently drop the "pan more slowly" path.
+      const code = classifyStitchError(message);
       onError?.(new CameraError(code, message, err));
     } finally {
       setStatusPhase('idle');
@@ -1738,7 +1734,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
           only ONE camera component is alive at a time; matches the
           monorepo's working pattern and avoids the Camera2-in-use
           conflict that "always mount both" caused on Android. */}
-      {inFlightTransition || arSupportPending || statusPhase === 'stitching' ? (
+      {cameraShouldUnmount(inFlightTransition, arSupportPending, statusPhase) ? (
         // statusPhase==='stitching' UNMOUNTS the camera so vision-camera
         // frees the AVCaptureSession + preview buffers during the stitch
         // (V12.14.8 OOM fix).  The CaptureStatusOverlay renders the
@@ -2134,6 +2130,33 @@ function isSideEdge(edge: HomeIndicatorEdge): boolean {
 export const _homeIndicatorEdgeForTests = homeIndicatorEdge;
 /** @internal test-only — see `isSideEdge`. */
 export const _isSideEdgeForTests = isSideEdge;
+
+
+/**
+ * cameraShouldUnmount — whether the live camera (<CameraView> /
+ * <ARCameraView>) should be UNMOUNTED (replaced by the placeholder) this
+ * render rather than mounted.
+ *
+ * True while a camera-switch transition or AR-support probe is in flight,
+ * OR during the stitch (statusPhase==='stitching').  The stitching case is
+ * the V12.14.8 OOM fix: unmounting frees vision-camera's AVCaptureSession +
+ * preview buffers (~150-250 MB) BEFORE the memory-heavy stitch, so the
+ * live-camera footprint and the stitch peak never coexist and jetsam (iOS)
+ * / lmkd (Android) don't OOM-kill the app.
+ *
+ * Pure + exported for test — the lib's jest config can't mount <Camera>,
+ * so this boolean is the unit-testable core of the OOM render gate.
+ */
+function cameraShouldUnmount(
+  inFlightTransition: boolean,
+  arSupportPending: boolean,
+  statusPhase: CaptureStatusPhase,
+): boolean {
+  return inFlightTransition || arSupportPending || statusPhase === 'stitching';
+}
+
+/** @internal test-only — see `cameraShouldUnmount`. */
+export const _cameraShouldUnmountForTests = cameraShouldUnmount;
 
 
 /**

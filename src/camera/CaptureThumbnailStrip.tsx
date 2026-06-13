@@ -49,6 +49,7 @@ import {
 } from 'react-native';
 
 import { CapturePreview } from './CapturePreview';
+import { DISPLAY_DECODE_IMAGE_PROPS } from './displayDecodeImageProps';
 
 
 export interface CaptureThumbnailItem {
@@ -247,15 +248,9 @@ export function CaptureThumbnailStrip({
               source={{ uri: item.uri }}
               style={[styles.thumbImage, contentRotation]}
               resizeMode="cover"
-              // OOM fix: the source is the FULL-RES panorama/photo file.
-              // Without resizeMethod, Android/Fresco decodes it at full
-              // resolution into a native bitmap that stays PINNED by this
-              // mounted <Image> (not LRU-evictable) — so each capture (esp.
-              // wide panoramas) accumulates tens of MB of native heap.
-              // 'resize' decodes at the ~thumbnail display size instead,
-              // making per-thumbnail memory tiny and panorama-size-
-              // independent.  No-op on iOS (harmless).
-              resizeMethod="resize"
+              // OOM fix — decode at thumbnail size, not full capture res
+              // (see DISPLAY_DECODE_IMAGE_PROPS for the native-heap rationale).
+              {...DISPLAY_DECODE_IMAGE_PROPS}
             />
           </Pressable>
         )}

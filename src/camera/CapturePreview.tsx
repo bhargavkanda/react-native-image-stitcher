@@ -35,6 +35,8 @@ import {
   View,
 } from 'react-native';
 
+import { DISPLAY_DECODE_IMAGE_PROPS } from './displayDecodeImageProps';
+
 
 export type CapturePreviewActionVariant =
   | 'primary'
@@ -158,12 +160,9 @@ export function CapturePreview({
             source={{ uri: imageUri }}
             style={[styles.image, { aspectRatio }]}
             resizeMode="contain"
-            // OOM fix: decode the full-res panorama at the on-screen
-            // (~device-width) size rather than its full output resolution,
-            // which scales with pan width.  Without this, Android/Fresco
-            // keeps a full-size native bitmap in its URI-keyed cache after
-            // the modal closes (never cleared), compounding the leak.
-            resizeMethod="resize"
+            // OOM fix — decode at display size, not full panorama res
+            // (see DISPLAY_DECODE_IMAGE_PROPS for the native-heap rationale).
+            {...DISPLAY_DECODE_IMAGE_PROPS}
             accessibilityIgnoresInvertColors
           />
         </Pressable>
