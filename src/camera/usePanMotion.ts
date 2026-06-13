@@ -173,16 +173,28 @@ const DEFAULT_WARN_RAD_PER_SEC = 0.6;
 const DEFAULT_LATERAL_BUDGET_CM = 4;
 
 /**
- * Lateral-drift trip point on the CROSS-pan gyro axis, in rad/s.
+ * Lateral-drift trip point on the SMOOTHED cross-pan gyro rate (EMA of
+ * `|gyro.x|`), in rad/s.
  *
  * v0.16 — on-device traces showed a user "moving perpendicular to the arrow"
  * is really a ROTATION about the cross-pan axis (gyro X), not a sideways
- * translation — so the old accel double-integration never saw it
- * (`lateralCm` stayed ~0 while `gyro.x` spiked to 1.27).  A clean pan keeps
- * `|gyro.x|` < ~0.1; a deliberate cross-turn blows past 0.6, so 0.5 rad/s
- * (~29°/s) sustained for the grace window cleanly separates them.
+ * translation — so the old accel double-integration never saw it.  But the
+ * raw cross rate is NOISY (dips between samples), so a continuous-over-
+ * threshold dwell reset on every dip and never latched.  We instead smooth
+ * `|gyro.x|` with an EMA (rides the dips, gives a ~0.4 s natural dwell) and
+ * latch when the SMOOTHED rate stays above this line.  A clean pan smooths
+ * to ~0.04; the user's two cross-turns smoothed to ~0.3 and ~0.7 — so 0.15
+ * separates them with a comfortable margin.
  */
-const DEFAULT_LATERAL_TURN_RAD_PER_SEC = 0.5;
+const DEFAULT_LATERAL_TURN_RAD_PER_SEC = 0.15;
+
+/**
+ * EMA smoothing factor for the cross-pan gyro rate (per ~33 ms gyro sample).
+ * ~0.08 gives a time constant of ~12 samples (~0.4 s) — enough to ride
+ * through the inter-sample noise yet still respond within ~0.4 s of a
+ * sustained cross-turn.
+ */
+const LATERAL_CROSS_EMA_ALPHA = 0.08;
 
 /**
  * Continuous-over-budget dwell before `lateralExceeded` latches.
@@ -488,13 +500,11 @@ export function usePanMotion({
   // callback never forces a re-render.
   const lateralRef = useRef<LateralState>(_freshLateralState());
 
-  // PRIMARY lateral-drift latch (v0.16): driven by the CROSS-pan GYRO axis
-  // in the gyro handler, not accel translation.  Reuses the same grace-window
-  // debounce (`_evalGraceLatch`) as the accel path.  Reset at capture start.
-  const lateralGyroLatchRef = useRef<GraceLatchResult>({
-    exceeded: false,
-    overBudgetSinceMs: null,
-  });
+  // PRIMARY lateral-drift signal (v0.16): an EMA of the CROSS-pan GYRO rate
+  // (`|gyro.x|`), updated in the gyro handler.  Smoothing rides through the
+  // raw rate's inter-sample noise (which defeated a binary dwell latch).
+  // Reset to 0 at capture start.
+  const crossEmaRef = useRef(0);
 
   // The throttled, render-visible lateral magnitude (cm) + the latched
   // exceeded flag.  These DO go through state because consumers render
@@ -514,8 +524,8 @@ export function usePanMotion({
       setPanSpeedBucket('good');
       return;
     }
-    // Capture start: clear the gyro lateral latch.
-    lateralGyroLatchRef.current = { exceeded: false, overBudgetSinceMs: null };
+    // Capture start: clear the cross-axis EMA.
+    crossEmaRef.current = 0;
 
     setUpdateIntervalForType(SensorTypes.gyroscope, GYRO_SAMPLE_INTERVAL_MS);
 
@@ -537,21 +547,17 @@ export function usePanMotion({
           setPanSpeedBucket(next);
         }
 
-        // Item 6 — lateral drift via the CROSS-pan gyro axis (device X),
-        // grace-windowed like the accel path so a brief wobble doesn't trip.
-        let crossLatched = false;
+        // Item 6 — lateral drift via the CROSS-pan gyro axis (device X).
+        // Smooth |gyro.x| with an EMA so the noisy raw rate's dips don't
+        // reset the trigger; latch once the SMOOTHED rate stays over the
+        // threshold (the EMA's time constant IS the dwell).
+        let crossEma = crossEmaRef.current;
         if (lateralEnabled) {
-          const crossRate = Math.abs(x);
-          const latch = _evalGraceLatch(
-            crossRate > DEFAULT_LATERAL_TURN_RAD_PER_SEC,
-            now,
-            lateralGyroLatchRef.current.overBudgetSinceMs,
-            lateralGyroLatchRef.current.exceeded,
-            LATERAL_GRACE_MS,
-          );
-          lateralGyroLatchRef.current = latch;
-          crossLatched = latch.exceeded;
-          if (crossLatched) {
+          crossEma =
+            crossEma * (1 - LATERAL_CROSS_EMA_ALPHA)
+            + Math.abs(x) * LATERAL_CROSS_EMA_ALPHA;
+          crossEmaRef.current = crossEma;
+          if (crossEma > DEFAULT_LATERAL_TURN_RAD_PER_SEC) {
             setLateralExceeded((prev) => (prev ? prev : true));
           }
         }
@@ -562,7 +568,8 @@ export function usePanMotion({
           console.log(
             `[panMotion] gyro x=${x.toFixed(2)} y=${y.toFixed(2)} `
             + `rate=${rate.toFixed(2)} bucket=${next} `
-            + `crossRate=${Math.abs(x).toFixed(2)} lateralLatched=${crossLatched}`,
+            + `crossEma=${crossEma.toFixed(2)} `
+            + `latThresh=${DEFAULT_LATERAL_TURN_RAD_PER_SEC}`,
           );
         }
       },

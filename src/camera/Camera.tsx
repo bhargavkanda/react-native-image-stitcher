@@ -112,7 +112,10 @@ import { GUIDANCE_PILL, GUIDANCE_TOKENS } from './guidanceTokens';
 import { RotateToLandscapePrompt } from './RotateToLandscapePrompt';
 import { PanHowToOverlay } from './PanHowToOverlay';
 import { CaptureCountdownOverlay } from './CaptureCountdownOverlay';
-import { CaptureFrameCounterOverlay } from './CaptureFrameCounterOverlay';
+import {
+  CaptureFrameCounterOverlay,
+  topCenterForOrientation,
+} from './CaptureFrameCounterOverlay';
 import { LateralMotionModal } from './LateralMotionModal';
 import { RectCropPreview, type ImageRect } from './RectCropPreview';
 import { cropQuad } from '../stitching/cropQuad';
@@ -1101,7 +1104,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     panGuidance = true,
     maxPanDurationMs = 0,
     panTooFastThreshold,
-    lateralBudgetCm = 5,
+    lateralBudgetCm = 4,
     rectCropPreview = false,
     perspectiveCorrectCrop = true,
     guidanceCopy,
@@ -2344,10 +2347,27 @@ export function Camera(props: CameraProps): React.JSX.Element {
       {statusPhase === 'recording'
         && panGuidance
         && panMotion.panSpeedBucket !== 'good' && (
-        <View style={guidanceStyles.tooFastWrap} pointerEvents="none">
-          {/* Counter-rotate so the warning reads upright in landscape
-              (Mode A) under a portrait-locked host. */}
-          <View style={[guidanceStyles.tooFastPill, contentRotation]}>
+        // Pinned to the user-perceived top-CENTRE in every orientation (same
+        // helper as the frame counter), with a larger inset so it stacks
+        // BELOW the counter.  v0.16 — fixes the landscape bug where the pill
+        // landed at the layout-top (= user's side) and clipped off-screen.
+        <View
+          style={[
+            StyleSheet.absoluteFill,
+            topCenterForOrientation(deviceOrientation, 64).container,
+          ]}
+          pointerEvents="none"
+        >
+          <View
+            style={[
+              guidanceStyles.tooFastPill,
+              {
+                transform: [
+                  { rotate: topCenterForOrientation(deviceOrientation, 64).rotate },
+                ],
+              },
+            ]}
+          >
             <Text style={guidanceStyles.tooFastText}>
               {guidanceCopyResolved.tooFast}
             </Text>
@@ -2997,13 +3017,6 @@ const pillStyles = StyleSheet.create({
 // border, centred near the top, below the countdown.  Non-interactive
 // (the wrapper sets pointerEvents="none" so it never eats touches).
 const guidanceStyles = StyleSheet.create({
-  tooFastWrap: {
-    position: 'absolute',
-    top: 96,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-  },
   tooFastPill: {
     paddingVertical: GUIDANCE_PILL.paddingVertical,
     paddingHorizontal: GUIDANCE_PILL.paddingHorizontal,

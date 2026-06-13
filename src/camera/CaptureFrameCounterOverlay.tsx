@@ -63,7 +63,10 @@ export function CaptureFrameCounterOverlay({
   // briefly report the cap-th accept before the parent finalizes.
   const k = Math.max(0, Math.min(framesCaptured, framesMax));
 
-  const { container, rotate } = topCenterForOrientation(orientation);
+  const { container, rotate } = topCenterForOrientation(
+    orientation,
+    GUIDANCE_COUNTDOWN.inset,
+  );
 
   return (
     <View
@@ -83,18 +86,23 @@ export function CaptureFrameCounterOverlay({
 
 
 /**
- * Flex alignment that pins the pill to the user-perceived TOP-CENTRE for a
+ * Flex alignment that pins content to the user-perceived TOP-CENTRE for a
  * given device hold, plus the rotation that makes it read upright:
  *
  *   portrait              → layout top edge,    centred, 0°
  *   landscape-left        → layout left edge,   centred, +90°
  *   landscape-right       → layout right edge,  centred, -90°
  *   portrait-upside-down  → layout bottom edge, centred, 180°
+ *
+ * `inset` is the distance from the user's top edge (larger values push the
+ * content further down the screen) — exported so other top-anchored overlays
+ * (e.g. the too-fast pill) can stack BELOW the counter by passing a bigger
+ * inset, and stay correctly placed + upright in every orientation.
  */
-function topCenterForOrientation(
+export function topCenterForOrientation(
   orientation: DeviceOrientation,
+  inset: number,
 ): { container: ViewStyle; rotate: string } {
-  const { inset } = GUIDANCE_COUNTDOWN;
   switch (orientation) {
     case 'landscape-left':
       return {
