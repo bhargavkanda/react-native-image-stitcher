@@ -21,6 +21,23 @@ namespace retailens {
 // frame, and blending several would jetsam-OOM the app.  100 megapixels.
 constexpr int64_t kMaxWarpPixels = 100LL * 1000LL * 1000LL;
 
+// Max size of the CUMULATIVE blend canvas — the bounding box over every
+// positioned warp rect (corner + size) that `cv::detail::Blender::prepare`
+// allocates as its CV_16SC3 accumulator (~6 bytes/px) plus a CV_8U mask
+// and, for MultiBand, Laplacian-pyramid overhead (~1.5-2× on top).  This
+// is a DIFFERENT axis from kMaxWarpPixels: a degenerate homography can
+// shift ONE frame's corner to a huge offset so the union spans gigapixels
+// while every individual frame's extent still passes the per-frame guard.
+// Guarding the union before prepare() is what actually stops crash B (the
+// 51 MB → 3.7 GB single-pan blow-up).
+//
+// 50 MP sizing: a valid 360° cylindrical canvas is ~9 MP (2π·~1200 px
+// focal × ~1200 px tall) and real field-log panoramas are ~1.3 MP, so
+// 50 MP is ~5× headroom over the widest legitimate pano (zero false
+// positives) while 50 MP × (6 + 1) bytes + pyramid overhead ≈ 500-600 MB
+// peak — comfortably under the 6 GB-class pre-stitch headroom.
+constexpr int64_t kMaxCanvasPixels = 50LL * 1000LL * 1000LL;
+
 // True if a warp ROI of `width`×`height` px is degenerate: non-positive
 // in either dimension, or strictly larger than `maxPixels` (so a canvas
 // exactly at the limit is still allowed).
@@ -36,6 +53,27 @@ inline bool warpRoiExceedsGuard(int width, int height,
   const int64_t pixels =
       static_cast<int64_t>(width) * static_cast<int64_t>(height);
   return pixels > maxPixels;
+}
+
+// True if the cumulative blend-canvas of `width`×`height` px is degenerate:
+// non-positive in either dimension, or strictly larger than `maxPixels`
+// (so a canvas exactly at the limit is still allowed).  Same int64 area
+// math as warpRoiExceedsGuard — the union of a degenerate corner offset is
+// exactly the case where int32 area would overflow.  Takes int64 dims
+// because the union is computed in int64 (a degenerate corner can exceed
+// the int32 range on its own).
+inline bool canvasExceedsGuard(int64_t width, int64_t height,
+                               int64_t maxPixels = kMaxCanvasPixels) {
+  if (width <= 0 || height <= 0) {
+    return true;
+  }
+  // width/height are already bounded by the caller's union math, but cap
+  // the multiply defensively: if either exceeds ~3 G the product overflows
+  // int64, and such a dimension is degenerate by any measure.
+  if (width > 3'000'000'000LL || height > 3'000'000'000LL) {
+    return true;
+  }
+  return width * height > maxPixels;
 }
 
 }  // namespace retailens

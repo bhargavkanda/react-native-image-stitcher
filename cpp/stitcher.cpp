@@ -297,6 +297,85 @@ static StitchResult stitchFramePathsImpl_(
     LogFn                           logFn);
 
 
+// ─────────────────────────────────────────────────────────────────────
+// Degenerate-warp guard helpers (shared by every throw site in the manual
+// pipeline's warp/compose stage).  Centralising them keeps the error
+// MESSAGE consistent across the four sites — the JS host classifies a
+// stitch failure by substring (see src/camera/classifyStitchError.ts /
+// cameraErrorMessages.ts → STITCH_CAMERA_PARAMS_FAIL "Please pan more
+// slowly"), so every degenerate-warp throw MUST carry "degenerate camera
+// params" + the stitchMode.  Both predicates live in cpp/warp_guard.hpp
+// (OpenCV-free + unit-tested); these builders add only the message + the
+// cv::Exception envelope.
+// ─────────────────────────────────────────────────────────────────────
+
+// Per-frame divergence: ONE warped frame's ROI exceeds kMaxWarpPixels
+// (broken estimator/BA on degenerate input — low feature count, near-
+// duplicate frames, motion-blurred rapid pan).  stitchMode tells you which
+// pipeline diverged: PANORAMA usually fails on translation-heavy input
+// (homography + BA-Ray assume pure rotation); SCANS on low-texture / low-
+// overlap input (affine needs enough matches).
+static cv::Exception degenerateFrameException(
+    int width, int height, StitchMode mode, size_t frameIdx) {
+  const char* modeStr =
+      (mode == StitchMode::Scans) ? "scans" : "panorama";
+  return cv::Exception(
+      cv::Error::StsOutOfRange,
+      std::string("warpRoi too large (") + std::to_string(width) + "x"
+          + std::to_string(height)
+          + ") — estimator produced degenerate camera params on this frame "
+          + "(stitchMode=" + modeStr + ", frameIdx="
+          + std::to_string(frameIdx) + ")",
+      "stitchFramePathsManual", __FILE__, __LINE__);
+}
+
+// Cumulative-canvas divergence: every per-frame ROI passed, but the UNION
+// bounding box that blender->prepare() allocates exceeds kMaxCanvasPixels
+// (a degenerate corner OFFSET blows the union to gigapixels while each
+// frame's own extent stays small).  This is the real crash-B net.
+static cv::Exception degenerateCanvasException(
+    int64_t width, int64_t height, StitchMode mode, size_t frames) {
+  const char* modeStr =
+      (mode == StitchMode::Scans) ? "scans" : "panorama";
+  return cv::Exception(
+      cv::Error::StsOutOfRange,
+      std::string("panorama canvas too large (") + std::to_string(width)
+          + "x" + std::to_string(height)
+          + ") — estimator produced degenerate camera params across the "
+          + "frame set (stitchMode=" + modeStr + ", frames="
+          + std::to_string(frames) + ")",
+      "stitchFramePathsManual", __FILE__, __LINE__);
+}
+
+// Bounding box over every positioned warp rect (corner + size) — exactly
+// what cv::detail::Blender::prepare() allocates as its CV_16SC3 canvas.
+// Computed in int64 so a degenerate corner offset (which can exceed the
+// int32 range on its own) doesn't overflow before canvasExceedsGuard()
+// gets to inspect it.  Yields 0×0 for an empty frame set.
+static void blendCanvasUnion(const std::vector<cv::Point>& corners,
+                             const std::vector<cv::Size>&  sizes,
+                             int64_t& unionW, int64_t& unionH) {
+  if (corners.empty()) { unionW = 0; unionH = 0; return; }
+  // Seed from frame 0 (avoids any sentinel / <climits> dependency).
+  int64_t minX = corners[0].x;
+  int64_t minY = corners[0].y;
+  int64_t maxX = static_cast<int64_t>(corners[0].x) + sizes[0].width;
+  int64_t maxY = static_cast<int64_t>(corners[0].y) + sizes[0].height;
+  for (size_t i = 1; i < corners.size(); i++) {
+    const int64_t x0 = corners[i].x;
+    const int64_t y0 = corners[i].y;
+    const int64_t x1 = x0 + sizes[i].width;
+    const int64_t y1 = y0 + sizes[i].height;
+    if (x0 < minX) minX = x0;
+    if (y0 < minY) minY = y0;
+    if (x1 > maxX) maxX = x1;
+    if (y1 > maxY) maxY = y1;
+  }
+  unionW = maxX - minX;
+  unionH = maxY - minY;
+}
+
+
 StitchResult stitchFramePaths(
     const std::vector<std::string>& framePaths,
     const std::string&              outputPath,
@@ -1776,29 +1855,12 @@ StitchResult stitchFramePathsManual(
                                   i, roi.width, roi.height,
                                   (long long)roiPixels,
                                   (long long)kMaxWarpPixels);
-                        // 2026-05-22 (audit follow-up) — include
-                        // stitchMode + frame index in the error message
-                        // so the JS host can correlate the failure with
-                        // operator behaviour.  Pre-fix the error said
-                        // nothing about which pipeline diverged.  The
-                        // value tells you: PANORAMA usually fails on
-                        // translation-heavy input (homography + BA-Ray
-                        // assume pure rotation); SCANS usually fails on
-                        // low-texture or low-overlap input (affine needs
-                        // enough matches).
-                        const char* modeStr =
-                            (config.stitchMode == StitchMode::Scans) ? "scans" : "panorama";
-                        throw cv::Exception(
-                            cv::Error::StsOutOfRange,
-                            std::string("warpRoi too large (")
-                                + std::to_string(roi.width) + "x"
-                                + std::to_string(roi.height)
-                                + ") — estimator produced degenerate "
-                                + "camera params on this frame (stitchMode="
-                                + modeStr + ", frameIdx="
-                                + std::to_string(i) + ")",
-                            "stitchFramePathsManual",
-                            __FILE__, __LINE__);
+                        // Message + envelope built by the shared helper so
+                        // all four degenerate-warp throw sites stay in sync
+                        // (see degenerateFrameException above).  Lands in the
+                        // step8b catch below → WarpFailed.
+                        throw degenerateFrameException(
+                            roi.width, roi.height, config.stitchMode, i);
                     }
                     imagesWarped[i].create(roi.size(), freshInput.type());
                     masksWarped[i].create(roi.size(), CV_8U);
@@ -1973,6 +2035,24 @@ StitchResult stitchFramePathsManual(
                 compensator->feed(corners, compImgs, compMasks);
             }
 
+            // Layer-2 guard (cumulative canvas): the union of all positioned
+            // warp rects is exactly what blender->prepare() allocates as its
+            // CV_16SC3 accumulator.  Every per-frame extent passed the
+            // step8b guard above, but a single degenerate corner OFFSET can
+            // still blow this union to gigapixels — the real crash-B path
+            // (51 MB → 3.7 GB on one rapid pan).  Guard BEFORE prepare().
+            {
+                int64_t canvasW = 0, canvasH = 0;
+                blendCanvasUnion(corners, sizes, canvasW, canvasH);
+                if (canvasExceedsGuard(canvasW, canvasH)) {
+                    log_error(logFn, "[stitch-bc]",
+                              "step10a: blend canvas degenerate "
+                              "(%lldx%lld px) — treating as warp failure",
+                              (long long)canvasW, (long long)canvasH);
+                    throw degenerateCanvasException(
+                        canvasW, canvasH, config.stitchMode, N);
+                }
+            }
             // Feed the blender, releasing each frame as we go.
             log_info(logFn, "[stitch-bc]", "step10a: blender->prepare");
             blender->prepare(corners, sizes);
@@ -2005,6 +2085,20 @@ StitchResult stitchFramePathsManual(
             for (size_t i = 0; i < N; i++) {
                 cv::Mat K;
                 cameras[i].K().convertTo(K, CV_32F);
+                // Layer-1 guard (STREAM): probe the cheap warpRoi BEFORE the
+                // real mask warp below.  Unlike BATCH, the STREAM path had no
+                // per-frame net, so a degenerate ROI would OOM inside
+                // warper->warp()'s buildMaps/remap allocation right here.
+                const cv::Rect probe = warper->warpRoi(
+                    composeFrames[i].size(), K, cameras[i].R);
+                if (warpRoiExceedsGuard(probe.width, probe.height)) {
+                    log_error(logFn, "[stitch-bc]",
+                              "step8b(stream): warpRoi degenerate for frame "
+                              "%zu (%dx%d) — treating as warp failure",
+                              i, probe.width, probe.height);
+                    throw degenerateFrameException(
+                        probe.width, probe.height, config.stitchMode, i);
+                }
                 cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
                 cv::Mat tmpMaskWarped;
                 corners[i] = warper->warp(
@@ -2018,6 +2112,20 @@ StitchResult stitchFramePathsManual(
             // ~40-50 MB lower peak vs the BATCH path at 1.0 MP × 8
             // frames — the difference between staying under iOS' jetsam
             // threshold on a 2 GB device and getting WatchdogTermination.
+            // Layer-2 guard (cumulative canvas) — see the BATCH path for the
+            // rationale.  Same union check before the STREAM prepare().
+            {
+                int64_t canvasW = 0, canvasH = 0;
+                blendCanvasUnion(corners, sizes, canvasW, canvasH);
+                if (canvasExceedsGuard(canvasW, canvasH)) {
+                    log_error(logFn, "[stitch-bc]",
+                              "step10(stream): blend canvas degenerate "
+                              "(%lldx%lld px) — treating as warp failure",
+                              (long long)canvasW, (long long)canvasH);
+                    throw degenerateCanvasException(
+                        canvasW, canvasH, config.stitchMode, N);
+                }
+            }
             blender->prepare(corners, sizes);
             for (size_t i = 0; i < N; i++) {
                 cv::Mat K;
