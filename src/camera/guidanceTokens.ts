@@ -6,8 +6,9 @@
  * ("Camera Capture Guides") so every guidance surface shares exact styling
  * instead of re-declaring colors per component.
  *
- * The two looping device-motion GIFs are bundled alongside the components
- * (see ./assets); these tokens cover the code-built chrome around them.
+ * The two looping device-motion graphics are drawn programmatically (see
+ * ./guidanceGraphics — pure RN View + Animated, no image assets); these
+ * tokens cover both those graphics and the code-built chrome around them.
  */
 
 export const GUIDANCE_TOKENS = {
@@ -19,8 +20,8 @@ export const GUIDANCE_TOKENS = {
   scrim: 'rgba(0,0,0,0.42)',
   /** Pill hairline border. */
   hairline: 'rgba(255,255,255,0.16)',
-  /** Recommended on-screen size (px square) for the 280px-authored GIFs. */
-  gifSize: 240,
+  /** On-screen size (px square) of the rotate / pan guidance graphics. */
+  graphicSize: 240,
 } as const;
 
 /**

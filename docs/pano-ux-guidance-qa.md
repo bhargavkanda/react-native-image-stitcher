@@ -2,7 +2,7 @@
 
 Branch: `feature/pano-ux-guidance` (off `fix/oom-complete`). Everything below
 compiles + passes unit tests + builds (JS `tsc` 0, jest 208/208, cpp 62/62,
-Android `:app:installDebug` OK, GIFs verified in `npm pack`). What remains is
+Android `:app:installDebug` OK). What remains is
 **on-device camera / motion / gesture verification** — flows that can only be
 eyeballed on a real device, which is why they're handed to you here.
 
@@ -17,7 +17,9 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
 
 **Item 1 + 2 — Mode-A gate + rotate prompt**
 - [ ] In portrait, press-and-hold the shutter → capture does NOT start; the
-      `rotate-to-landscape.gif` + "Rotate to landscape" pill appears.
+      code-drawn rotating-phone graphic (sharp at any density) + "Rotate to
+      landscape" pill appears, and the phone graphic animates (rotates
+      portrait→landscape→portrait).
 - [ ] Rotate the phone to landscape (try BOTH landscape-left and
       landscape-right) → prompt dismisses and capture auto-starts.
 - [ ] Release the shutter while still in portrait → prompt clears, nothing
@@ -25,9 +27,10 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
 - [ ] With `panMode="both"`, a portrait hold starts immediately (no prompt).
 
 **Item 3 — Pan how-to + bouncing arrow**
-- [ ] At capture start the `pan-capture.gif` shows for ~2.5 s with a bouncing
-      amber arrow pointing DOWN (Mode A landscape). It reads upright under a
-      portrait-locked host. Auto-fades.
+- [ ] At capture start the code-drawn pan graphic (white phone + sweeping
+      amber band) shows for ~2.5 s with a bouncing amber arrow pointing DOWN
+      (Mode A landscape). The band sweeps along the pan axis. It reads
+      upright under a portrait-locked host. Auto-fades.
 
 **Item 4 — "Moving too fast"**
 - [ ] Pan fast → the "Moving too fast — slow down" pill appears; slow down →
@@ -84,21 +87,15 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
 ## Notes
 - All guidance is gated behind `panGuidance` (default true) — set false to
   opt out entirely. All copy is overridable via the `guidanceCopy` prop.
-- The two GIFs are bundled (`src/camera/assets/`, copied to `dist` on build,
-  shipped via `dist/**/*.gif`). GIF was chosen over Lottie to avoid a heavy
-  peer dep; the design handoff offers Lottie/APNG on request if the crisper
-  look is wanted.
+- The two motion graphics (rotate-to-landscape, pan-capture) are drawn
+  programmatically in `src/camera/guidanceGraphics.tsx` using pure RN core
+  `View` + `Animated` — NO image assets, NO `react-native-svg`. They are
+  resolution-independent (sharp at any screen density) and themeable via
+  `GUIDANCE_TOKENS`.
 
-
-## Host requirement: animated GIFs on Android (items 2 & 3)
-The two guidance animations ship as GIFs. **React Native's Android image
-loader (Fresco) decodes only the FIRST frame of a GIF unless the host app adds
-the animated-gif module** — otherwise the rotate/pan graphics appear *static*.
-Hosts must add to their `android/app/build.gradle` dependencies (version
-tracking RN's bundled Fresco, see `react-native/gradle/libs.versions.toml`):
-
-    implementation("com.facebook.fresco:animated-gif:3.6.0")
-
-iOS animates GIFs natively (no change). The example app now includes this dep.
-If a dependency-free animation is preferred, the design handoff can supply a
-Lottie/APNG export instead — that's a follow-up, not done here.
+## Host requirement: NONE for the guidance graphics (items 2 & 3)
+The rotate/pan graphics are now code-drawn, so there is **no host setup**:
+no Fresco `animated-gif` module, no bundled GIFs, no extra dependency. This
+replaced the earlier GIF approach, which looked pixelated on high-density
+screens and required every Android host to add Fresco's animated-gif module
+to make the GIFs move.

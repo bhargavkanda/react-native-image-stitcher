@@ -8,7 +8,7 @@
  *   │                  (faint scrim over preview)               │
  *   │                                                           │
  *   │                    ┌───────────────┐                      │
- *   │                    │   ⟳  phone    │  ← looping GIF       │
+ *   │                    │   ⟳  phone    │  ← code-drawn        │
  *   │                    │   line-art    │     (240px square)   │
  *   │                    └───────────────┘                      │
  *   │                                                           │
@@ -27,13 +27,13 @@
  * the host can mount us unconditionally without layout churn — mirrors
  * `CaptureStatusOverlay`'s `idle` → `null` contract.
  *
- * ## Why the caption counter-rotates but the GIF does not
+ * ## Why the caption counter-rotates but the graphic does not
  *
  * The host app is typically portrait-locked, so when the user tilts to
  * landscape the OS does NOT rotate the framebuffer and JS-"up" stays at
- * the device's side edge.  The GIF is gravity-agnostic line art (a
- * rotating phone) so it reads correctly at any angle and is left
- * un-rotated.  The caption is *text*, so we counter-rotate it via
+ * the device's side edge.  The graphic is gravity-agnostic line art (a
+ * rotating phone, drawn in code) so it reads correctly at any angle and
+ * is left un-rotated.  The caption is *text*, so we counter-rotate it via
  * `useContentRotation()` — the same hook the bottom controls use — so
  * the words stay upright in the user's view as they rotate.  Once the
  * device reaches landscape the host flips `visible` to false and the
@@ -50,7 +50,6 @@
 
 import React from 'react';
 import {
-  Image,
   StyleSheet,
   Text,
   View,
@@ -59,6 +58,7 @@ import {
 } from 'react-native';
 
 import { DEFAULT_GUIDANCE_COPY } from './cameraGuidanceCopy';
+import { RotatePhoneGraphic } from './guidanceGraphics';
 import { GUIDANCE_PILL, GUIDANCE_TOKENS } from './guidanceTokens';
 import { useContentRotation } from './useContentRotation';
 
@@ -101,14 +101,12 @@ export function RotateToLandscapePrompt({
       accessibilityRole="alert"
       accessibilityLiveRegion="polite"
     >
-      <Image
-        source={require('./assets/rotate-to-landscape.gif')}
-        style={styles.gif}
-        resizeMode="contain"
-        // Decorative — the caption carries the instruction for AT.
-        accessible={false}
-        accessibilityElementsHidden
-        importantForAccessibility="no"
+      {/* Code-drawn rotating-phone graphic (decorative — the caption
+          carries the instruction for assistive tech). */}
+      <RotatePhoneGraphic
+        playing={visible}
+        // Gravity-agnostic line art: read correctly at any tilt, so it is
+        // intentionally NOT counter-rotated (unlike the text caption).
       />
 
       <View style={[styles.pill, captionRotation]}>
@@ -124,16 +122,12 @@ export function RotateToLandscapePrompt({
 
 const styles = StyleSheet.create({
   root: {
-    // Faint scrim over the live preview so the white line-art GIF and
+    // Faint scrim over the live preview so the white line-art graphic and
     // caption read against bright scenes, while the preview stays
     // visible underneath (the user is framing a rotation, not a shot).
     backgroundColor: GUIDANCE_TOKENS.scrim,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  gif: {
-    width: GUIDANCE_TOKENS.gifSize,
-    height: GUIDANCE_TOKENS.gifSize,
   },
   pill: {
     // Caption pill near the bottom-center, ~96px above the bottom edge

@@ -131,10 +131,6 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
-    // Animate the panorama-guidance GIFs (rotate-to-landscape, pan-capture).
-    // RN's Fresco loader decodes only the FIRST GIF frame unless this module
-    // is present.  Version tracks RN's bundled Fresco (libs.versions.toml).
-    implementation("com.facebook.fresco:animated-gif:3.6.0")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

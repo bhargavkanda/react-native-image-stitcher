@@ -4,14 +4,15 @@
  *
  * Shown briefly at the START of a capture to teach the panning
  * gesture before the live pan-speed pill (`PanoramaGuidance`) takes
- * over.  It pairs the authored line-art GIF with a code-built
- * bouncing arrow so the direction reads instantly without any copy.
+ * over.  It pairs the code-drawn `PanPhoneGraphic` (white phone +
+ * sweeping amber band) with a code-built bouncing arrow so the
+ * direction reads instantly without any copy.
  *
  *   ┌──────────────────────────────────────────────────────────┐
  *   │                                                          │
  *   │                  ┌───────────────┐                       │
- *   │                  │  pan-capture  │   (240px GIF, the     │
- *   │                  │     .gif      │    white phone +      │
+ *   │                  │  PanPhone     │   (240px graphic, the │
+ *   │                  │  Graphic      │    white phone +      │
  *   │                  └───────────────┘    amber sweep)       │
  *   │                         ▼  ← amber triangle              │
  *   │                         ▼     bouncing ~12px along the   │
@@ -40,7 +41,7 @@
  * holds the device in landscape (Mode A) the JS framebuffer is NOT
  * rotated.  We counter-rotate the whole coach-mark with
  * `useContentRotation()` (same hook the bottom controls use) so the
- * GIF and arrow read upright relative to gravity.  The arrow's
+ * graphic and arrow read upright relative to gravity.  The arrow's
  * bounce axis and triangle point are expressed in that upright frame
  * — i.e. the user's view — so "down" / "right" mean what the user
  * sees, not the layout's raw axes.
@@ -58,13 +59,13 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import {
   Animated,
   Easing,
-  Image,
   StyleSheet,
   View,
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
 
+import { PanPhoneGraphic } from './guidanceGraphics';
 import { GUIDANCE_TOKENS } from './guidanceTokens';
 import { useContentRotation } from './useContentRotation';
 import { type DeviceOrientation } from './useDeviceOrientation';
@@ -185,17 +186,9 @@ export function PanHowToOverlay({
       style={[styles.root, style]}
     >
       <View style={[styles.content, contentRotation]}>
-        <Image
-          source={require('./assets/pan-capture.gif')}
-          style={styles.gif}
-          resizeMode="contain"
-          // Decorative — the bouncing arrow + parent copy convey the
-          // gesture; the GIF itself carries no extra information for
-          // assistive tech.
-          accessibilityRole="image"
-          accessibilityElementsHidden
-          importantForAccessibility="no-hide-descendants"
-        />
+        {/* Code-drawn phone + sweeping band (decorative — the bouncing
+            arrow + parent copy convey the gesture for assistive tech). */}
+        <PanPhoneGraphic direction={direction} playing={visible} />
         <Animated.View
           style={[
             styles.arrow,
@@ -218,10 +211,6 @@ const styles = StyleSheet.create({
   content: {
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  gif: {
-    width: GUIDANCE_TOKENS.gifSize,
-    height: GUIDANCE_TOKENS.gifSize,
   },
   // CSS-triangle base: a zero-size box whose borders are coloured on
   // one edge and transparent on the two adjacent edges, producing a
