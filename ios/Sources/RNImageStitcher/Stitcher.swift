@@ -239,6 +239,35 @@ public enum Stitcher {
     }
   }
 
+  /// item-7 — perspective-rectify the quadrilateral with corners
+  /// `(tlX,tlY) (trX,trY) (brX,brY) (blX,blY)` (IMAGE-PIXEL space, ordered
+  /// TL→TR→BR→BL) out of `imagePath` into an upright rectangle, overwrite
+  /// in place, re-encode at `quality`.  Pairs with the axis-aligned
+  /// `cropToRect`; the JS editor picks this when the dragged quad isn't
+  /// ~rectangular.  Returns the rectified `{ width, height }`.
+  public static func cropToQuad(
+    imagePath: String,
+    tlX: Double, tlY: Double,
+    trX: Double, trY: Double,
+    brX: Double, brY: Double,
+    blX: Double, blY: Double,
+    quality: Int
+  ) throws -> (width: Int, height: Int) {
+    do {
+      let d = try OpenCVStitcher.cropToQuad(
+        atPath: imagePath,
+        tlX: tlX, tlY: tlY,
+        trX: trX, trY: trY,
+        brX: brX, brY: brY,
+        blX: blX, blY: blY,
+        quality: quality
+      )
+      return (width: d["width"]?.intValue ?? 0, height: d["height"]?.intValue ?? 0)
+    } catch let nsError as NSError {
+      throw StitcherError.fromNSError(nsError)
+    }
+  }
+
   /// v0.15 debug — write a red-tinted mask overlay (excluded pixels =
   /// red) next to the image and report what fraction the brightness mask
   /// drops. Pairs with the inscribed-rect debug harness.

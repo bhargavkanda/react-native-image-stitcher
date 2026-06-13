@@ -58,6 +58,11 @@
 // The header lives in the SDK's `cpp/` dir and is on the pod's
 // HEADER_SEARCH_PATHS (see RNImageStitcher.podspec).
 #import "stitcher.hpp"
+// item-7 cropToQuad: the OpenCV-free quad geometry (quadDstRect /
+// isQuadAcceptable) + the shared canvas OOM guard.  Same `cpp/`
+// HEADER_SEARCH_PATHS as stitcher.hpp.
+#import "crop_quad.hpp"
+#import "warp_guard.hpp"
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <os/log.h>
@@ -1060,6 +1065,154 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   return @{
     @"width":  @((NSInteger)cropped.cols),
     @"height": @((NSInteger)cropped.rows),
+  };
+}
+
+// item-7 — free-quad perspective crop.  Mirrors cropToRectAtPath, but
+// instead of an axis-aligned sub-rectangle it takes 4 user-dragged
+// corners in IMAGE-PIXEL space (ordered TL, TR, BR, BL by the JS editor's
+// orderQuadCorners) and rectifies them to an upright rectangle via
+// cv::getPerspectiveTransform + cv::warpPerspective.  The destination
+// size + the convex/min-area/in-bounds gate come from the shared OpenCV-
+// free cpp/crop_quad.hpp so iOS / Android / JS agree bit-for-bit; the
+// output canvas is GUARDED with the same canvasExceedsGuard the stitch
+// pipeline uses so a near-collinear quad can't OOM a multi-MP panorama.
++ (NSDictionary<NSString *, NSNumber *> *)cropToQuadAtPath:(NSString *)imagePath
+                                                      tlX:(double)tlX
+                                                      tlY:(double)tlY
+                                                      trX:(double)trX
+                                                      trY:(double)trY
+                                                      brX:(double)brX
+                                                      brY:(double)brY
+                                                      blX:(double)blX
+                                                      blY:(double)blY
+                                                  quality:(NSInteger)quality
+                                                    error:(NSError **)error {
+  NSString *cleaned = normalizeImagePath(imagePath);
+  if (![[NSFileManager defaultManager] fileExistsAtPath:cleaned]) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1020
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Image not found: %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  std::string nativePath(cleaned.UTF8String);
+  cv::Mat img = cv::imread(nativePath, cv::IMREAD_COLOR);
+  if (img.empty()) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1021
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Could not decode image at %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  retailens::CropQuad quad;
+  quad.tl = {tlX, tlY};
+  quad.tr = {trX, trY};
+  quad.br = {brX, brY};
+  quad.bl = {blX, blY};
+
+  // Geometry gate — convex, non-degenerate, inside the decoded image.
+  if (!retailens::isQuadAcceptable(quad, (double)img.cols, (double)img.rows)) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1023
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Crop quad is degenerate (non-convex, zero-area, or out of bounds)",
+      }];
+    }
+    return nil;
+  }
+
+  const retailens::QuadDstSize dst = retailens::quadDstRect(quad);
+  // Output-canvas OOM net — the same guard the stitch pipeline uses.
+  if (dst.width <= 0 || dst.height <= 0 ||
+      retailens::canvasExceedsGuard(dst.width, dst.height)) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1024
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"Crop quad output canvas is degenerate or exceeds the size guard (%dx%d)",
+            dst.width, dst.height],
+      }];
+    }
+    return nil;
+  }
+
+  const cv::Point2f src[4] = {
+    cv::Point2f((float)tlX, (float)tlY),
+    cv::Point2f((float)trX, (float)trY),
+    cv::Point2f((float)brX, (float)brY),
+    cv::Point2f((float)blX, (float)blY),
+  };
+  const cv::Point2f dstPts[4] = {
+    cv::Point2f(0.0f, 0.0f),
+    cv::Point2f((float)dst.width, 0.0f),
+    cv::Point2f((float)dst.width, (float)dst.height),
+    cv::Point2f(0.0f, (float)dst.height),
+  };
+
+  cv::Mat warped;
+  // OpenCV throws cv::Exception (a C++ exception) — catch with a C++
+  // try/catch, NOT @try/@catch (which only traps NSException).
+  try {
+    cv::Mat transform = cv::getPerspectiveTransform(src, dstPts);
+    cv::warpPerspective(img, warped, transform,
+                        cv::Size(dst.width, dst.height), cv::INTER_LINEAR);
+  } catch (const cv::Exception &e) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1025
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Perspective warp failed: %s", e.what()],
+      }];
+    }
+    return nil;
+  }
+  if (warped.empty()) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1025
+                               userInfo:@{
+        NSLocalizedDescriptionKey: @"Perspective warp produced an empty image",
+      }];
+    }
+    return nil;
+  }
+
+  int q = (int)quality;
+  if (q < 1) { q = 1; }
+  if (q > 100) { q = 100; }
+  std::vector<int> writeParams = { cv::IMWRITE_JPEG_QUALITY, q };
+  bool ok = cv::imwrite(nativePath, warped, writeParams);
+  if (!ok) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1022
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Could not rewrite image at %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  return @{
+    @"width":  @((NSInteger)warped.cols),
+    @"height": @((NSInteger)warped.rows),
   };
 }
 

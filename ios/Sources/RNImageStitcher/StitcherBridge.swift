@@ -265,6 +265,62 @@ public class StitcherBridge: NSObject {
     }
   }
 
+  /// item-7 — perspective-rectify a user-dragged quad.  `options` carries
+  /// `imagePath` + the 4 IMAGE-PIXEL corners as a flat `quad` array of 8
+  /// numbers `[tlX, tlY, trX, trY, brX, brY, blX, blY]` (ordered
+  /// TL→TR→BR→BL by the JS editor) + optional `quality` (default 90).
+  /// Resolves the rectified `{ width, height }`.
+  @objc(cropToQuad:resolver:rejecter:)
+  public func cropToQuad(
+    options: NSDictionary,
+    resolver: @escaping RCTPromiseResolveBlock,
+    rejecter: @escaping RCTPromiseRejectBlock
+  ) {
+    guard let imagePath = options["imagePath"] as? String else {
+      rejecter("invalid-options", "imagePath must be a string", nil)
+      return
+    }
+    guard let quad = options["quad"] as? [NSNumber], quad.count == 8 else {
+      rejecter(
+        "invalid-options",
+        "quad must be an array of 8 numbers [tlX,tlY,trX,trY,brX,brY,blX,blY]",
+        nil
+      )
+      return
+    }
+    let p = quad.map { $0.doubleValue }
+    let quality = (options["quality"] as? NSNumber)?.intValue ?? 90
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let dims = try Stitcher.cropToQuad(
+          imagePath: imagePath,
+          tlX: p[0], tlY: p[1],
+          trX: p[2], trY: p[3],
+          brX: p[4], brY: p[5],
+          blX: p[6], blY: p[7],
+          quality: quality
+        )
+        resolver([
+          "width": dims.width,
+          "height": dims.height,
+        ])
+      } catch let err as StitcherError {
+        switch err {
+        case .insufficientFrames(let count):
+          rejecter("insufficient-frames", "(unexpected for cropToQuad) frames=\(count)", err)
+        case .readFailed(let path):
+          rejecter("read-failed", "Could not read image: \(path)", err)
+        case .writeFailed(let path):
+          rejecter("write-failed", "Could not write image: \(path)", err)
+        case .opencvFailed(let code, let message):
+          rejecter("opencv-failed-\(code)", message, err)
+        }
+      } catch {
+        rejecter("unknown", "Unexpected cropToQuad failure: \(error)", error)
+      }
+    }
+  }
+
   /// v0.15 debug — write a red-tinted mask overlay for `imagePath`
   /// (excluded pixels red). `threshold` optional (default 1, matching the
   /// inscribed-rect mask). Resolves

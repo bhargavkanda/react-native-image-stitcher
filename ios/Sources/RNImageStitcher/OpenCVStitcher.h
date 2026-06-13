@@ -194,6 +194,24 @@ extern NSString *const RNImageStitcherErrorDomain;
                                                            quality:(NSInteger)quality
                                                              error:(NSError **)error;
 
+/// item-7 — free-quad perspective crop.  Takes 4 IMAGE-PIXEL corners
+/// (ordered TL, TR, BR, BL) and rectifies the enclosed quadrilateral to
+/// an upright rectangle (cv::getPerspectiveTransform + warpPerspective),
+/// re-encodes at `quality`, overwrites in place.  Returns the rectified
+/// `{ width, height }`.  Rejects a degenerate / non-convex / out-of-bounds
+/// quad, and guards the output canvas with the shared canvasExceedsGuard.
++ (nullable NSDictionary<NSString *, NSNumber *> *)cropToQuadAtPath:(NSString *)imagePath
+                                                               tlX:(double)tlX
+                                                               tlY:(double)tlY
+                                                               trX:(double)trX
+                                                               trY:(double)trY
+                                                               brX:(double)brX
+                                                               brY:(double)brY
+                                                               blX:(double)blX
+                                                               blY:(double)blY
+                                                           quality:(NSInteger)quality
+                                                             error:(NSError **)error;
+
 /// v0.15 debug — write a red-tinted overlay JPEG (excluded / sub-threshold
 /// pixels rendered red) next to `imagePath` (suffix ".mask.jpg") so the
 /// harness can show WHY the inscribed rect lands where it does. Returns
