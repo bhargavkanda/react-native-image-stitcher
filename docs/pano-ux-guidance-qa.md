@@ -24,7 +24,11 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
       landscape-right) → prompt dismisses and capture auto-starts.
 - [ ] Release the shutter while still in portrait → prompt clears, nothing
       starts, and rotating afterwards does NOT spuriously start a capture.
-- [ ] With `panMode="both"`, a portrait hold starts immediately (no prompt).
+- [ ] With `panMode="both"`, a portrait hold starts immediately (no prompt)
+      and pans Mode B (left→right) as before the guidance work. The example
+      app has a `__DEV__` **🧭 panMode** toggle (top-left, under Rect debug)
+      to flip `mode-a` ↔ `both` at runtime — verify the rotate prompt appears
+      ONLY in `mode-a`.
 
 **Item 3 — Pan how-to + bouncing arrow**
 - [ ] At capture start the code-drawn pan graphic (white phone + sweeping
