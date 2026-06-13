@@ -2064,14 +2064,33 @@ StitchResult stitchFramePathsManual(
             // Aspect from compose scale → seam scale (the rescale we
             // apply to existing compose-scale data, not the original).
             double seam_compose_aspect = seam_scale / compose_scale;
+            // BUGFIX (wide-pan GraphCut OOM): the aspect above is derived from
+            // the INPUT frame size (origMp), but the resize below is applied to
+            // the WARPED images, which span the whole canvas and can be many×
+            // larger (a ~0.3 MP frame warps across a multi-MP canvas on a wide
+            // pan).  Left uncapped, GraphCut ran on multi-MP seam images and
+            // its per-pixel max-flow graph exploded to GBs (a 19 MP-canvas
+            // capture was lmkd-killed here — 3.16 GB RSS + 2.1 GB swap).  Re-cap
+            // against the LARGEST warped frame so every seam image is ≤ SEAM_MP,
+            // which is what cv::Stitcher's seam_est_resol actually targets.
+            double maxWarpedMp = 0.0;
+            for (size_t i = 0; i < N; i++) {
+                maxWarpedMp = std::max(
+                    maxWarpedMp,
+                    (double)sizes[i].width * (double)sizes[i].height / 1e6);
+            }
+            seam_compose_aspect =
+                cappedSeamAspect(seam_compose_aspect, maxWarpedMp, SEAM_MP);
             {
                 auto _t = std::chrono::steady_clock::now();
                 double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     _t - t0).count();
                 log_info(logFn, "[BatchStitcher]",
-                         "step9: graph-cut seam finder "
-                         "(compose→seam aspect = %.3f, t+%.0fms)",
-                         seam_compose_aspect, _ms);
+                         "step9: graph-cut seam finder (maxWarpedMP=%.1f "
+                         "compose→seam aspect=%.4f → seamMP≈%.2f, t+%.0fms)",
+                         maxWarpedMp, seam_compose_aspect,
+                         maxWarpedMp * seam_compose_aspect * seam_compose_aspect,
+                         _ms);
             }
             auto _seamStart = std::chrono::steady_clock::now();
             log_info(logFn, "[stitch-bc]",

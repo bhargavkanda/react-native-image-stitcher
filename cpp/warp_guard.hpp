@@ -130,4 +130,26 @@ inline double canvasDownscaleForBudget(double canvasMP, double budgetMP) {
   return factor;
 }
 
+// Seam-finder downscale aspect, re-capped against the WARPED image size.
+//
+// The GraphCut seam finder must run at ~`seamMp` megapixels per image (what
+// cv::Stitcher's seam_est_resol targets) or its per-pixel max-flow graph
+// blows up — a wide-pan capture whose warped images spanned a 19 MP canvas
+// OOM-killed the app because the seam images were multi-MP, not 0.1 MP.
+//
+// The caller's `inputAspect` is derived from the INPUT frame size, but the
+// resize it feeds is applied to the WARPED images, which can be many× larger
+// (the warp expands a ~0.3 MP frame across the whole canvas).  So re-cap the
+// aspect so the LARGEST warped frame (`maxWarpedMp`) downscales to ≤ seamMp.
+// Never RAISES the aspect (only tightens it); a no-op when the warped images
+// are already ≤ seamMp or the inputs are degenerate.
+inline double cappedSeamAspect(double inputAspect, double maxWarpedMp,
+                               double seamMp) {
+  if (seamMp <= 0.0 || maxWarpedMp <= seamMp) {
+    return inputAspect;
+  }
+  const double capped = std::sqrt(seamMp / maxWarpedMp);
+  return (capped < inputAspect) ? capped : inputAspect;
+}
+
 }  // namespace retailens

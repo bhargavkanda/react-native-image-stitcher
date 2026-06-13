@@ -16,6 +16,7 @@ using retailens::warpRoiExceedsGuard;
 using retailens::canvasExceedsGuard;
 using retailens::composeCanvasBudgetMP;
 using retailens::canvasDownscaleForBudget;
+using retailens::cappedSeamAspect;
 using retailens::kBudgetFloorMP;
 using retailens::kBudgetCeilMP;
 
@@ -193,4 +194,36 @@ TEST(BudgetDownscale, NeverUpscales) {
 TEST(BudgetDownscale, NonPositiveInputsAreSafe) {
   EXPECT_DOUBLE_EQ(canvasDownscaleForBudget(0.0, 42.0), 1.0);  // no div-by-zero
   EXPECT_DOUBLE_EQ(canvasDownscaleForBudget(70.0, 0.0), 1.0);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Seam-finder aspect re-cap (the wide-pan GraphCut-OOM fix).  Ensures
+// every seam image lands at <= seamMp regardless of how far the warp
+// expanded the canvas past the input frame size.
+// ─────────────────────────────────────────────────────────────────────
+
+TEST(SeamAspect, NoOpWhenWarpedAlreadyUnderSeam) {
+  // Warped image already <= seamMp → keep the caller's aspect untouched.
+  EXPECT_DOUBLE_EQ(cappedSeamAspect(0.5, 0.05, 0.1), 0.5);
+  EXPECT_DOUBLE_EQ(cappedSeamAspect(0.5, 0.1, 0.1), 0.5);  // boundary inclusive
+}
+
+TEST(SeamAspect, CapsLargeWarpedToSeamMp) {
+  // The capture-10 case: 19 MP warped frame, 0.1 MP seam target.  The
+  // buggy input aspect (0.568) is tightened so the seam image is ~0.1 MP.
+  const double a = cappedSeamAspect(0.568, 19.0, 0.1);
+  EXPECT_NEAR(a, 0.072548, 1e-5);           // sqrt(0.1/19)
+  EXPECT_NEAR(19.0 * a * a, 0.1, 1e-6);     // seam image lands at seamMp
+  EXPECT_LT(a, 0.568);                       // it tightened
+}
+
+TEST(SeamAspect, NeverRaisesAboveInput) {
+  // If the caller's aspect is already smaller than the cap, keep it (the
+  // function only ever TIGHTENS the seam scale, never loosens it).
+  EXPECT_DOUBLE_EQ(cappedSeamAspect(0.05, 19.0, 0.1), 0.05);
+}
+
+TEST(SeamAspect, DegenerateSeamMpIsNoOp) {
+  EXPECT_DOUBLE_EQ(cappedSeamAspect(0.5, 19.0, 0.0), 0.5);   // seamMp <= 0
+  EXPECT_DOUBLE_EQ(cappedSeamAspect(0.5, 0.0, 0.1), 0.5);    // empty warped
 }
