@@ -1766,6 +1766,10 @@ StitchResult stitchFramePathsManual(
             }
         }
 
+        // Post-cap projected canvas megapixels — drives the step-8 path
+        // choice (wide canvases route to the low-memory STREAM+feather path).
+        // Set inside step 7.7 below.
+        double composeCanvasMpFinal = 0.0;
         // Step 7.7: RAM-aware output-canvas budget cap (wide-pan blend-OOM
         // fix).  A VALID but wide pan produces a large UNION canvas, and the
         // BATCH + MultiBand blend peak scales with it (on a 6 GB A35 a
@@ -1799,6 +1803,7 @@ StitchResult stitchFramePathsManual(
                 const double budgetMP = composeCanvasBudgetMP(totalRamMB);
                 const double downscale =
                     canvasDownscaleForBudget(canvasMP, budgetMP);
+                composeCanvasMpFinal = canvasMP * downscale * downscale;
                 // Always-on probe — confirms the RAM read (totalRamMB), the
                 // budget, the active projection, and whether the cap fired.
                 // Used to calibrate kBlendBytesPerUnionPx from real traces.
@@ -1885,7 +1890,26 @@ StitchResult stitchFramePathsManual(
         // Both paths feed the SAME blender (selected per caller's
         // blenderType).  Final blend happens after either path
         // completes.
-        const bool useSeam = (config.seamFinderType == "graphcut");
+        // Wide-canvas low-memory routing.  BATCH + MultiBand holds every
+        // warped frame at once + N exposure-comp UMat copies + builds
+        // Laplacian pyramids; on a 6 GB device a ~28 MP canvas peaked ~3 GB
+        // in the blend/exposure stage and was lmkd-killed — even after the
+        // step-9 cappedSeamAspect fix bounded the seam finder.  Above
+        // kLowMemCanvasMP, force the STREAM path (one warped frame at a time,
+        // no held set, no exposure copies, no GraphCut) + the FEATHER blender
+        // (single-pass, no pyramids) so a wide pan COMPLETES at full
+        // resolution instead of OOMing.  Below it, keep BATCH + MultiBand +
+        // GraphCut for the crisp seams typical small-canvas captures get.
+        constexpr double kLowMemCanvasMP = 10.0;
+        const bool lowMemCanvas = composeCanvasMpFinal > kLowMemCanvasMP;
+        const bool useSeam =
+            (config.seamFinderType == "graphcut") && !lowMemCanvas;
+        if (lowMemCanvas) {
+            log_info(logFn, "[stitch-bc]",
+                     "step8: canvas %.1f MP > %.1f MP — routing to "
+                     "STREAM+feather (low-memory wide-pan path)",
+                     composeCanvasMpFinal, kLowMemCanvasMP);
+        }
         log_info(logFn, "[BatchStitcher]",
                  "step8: %s",
                  useSeam ? "BATCH (warp-all + seam + feed)"
@@ -1903,7 +1927,10 @@ StitchResult stitchFramePathsManual(
         // stitch, per-frame Mat releases, plus this stream path for
         // low-mem devices), both should run cleanly.
         cv::Ptr<cv::detail::Blender> blender;
-        if (config.blenderType == "feather") {
+        if (config.blenderType == "feather" || lowMemCanvas) {
+            // FEATHER for the wide-canvas low-memory path (lowMemCanvas) too —
+            // MultiBand's pyramids are the dominant blend allocation we're
+            // avoiding.
             blender = cv::detail::Blender::createDefault(
                 cv::detail::Blender::FEATHER, false);
             auto fb = blender.dynamicCast<cv::detail::FeatherBlender>();
