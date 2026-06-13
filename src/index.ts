@@ -210,6 +210,8 @@ export { PanHowToOverlay } from './camera/PanHowToOverlay';
 export type { PanHowToOverlayProps } from './camera/PanHowToOverlay';
 export { CaptureCountdownOverlay } from './camera/CaptureCountdownOverlay';
 export type { CaptureCountdownOverlayProps } from './camera/CaptureCountdownOverlay';
+export { CaptureFrameCounterOverlay } from './camera/CaptureFrameCounterOverlay';
+export type { CaptureFrameCounterOverlayProps } from './camera/CaptureFrameCounterOverlay';
 export { LateralMotionModal } from './camera/LateralMotionModal';
 export type { LateralMotionModalProps } from './camera/LateralMotionModal';
 export { RectCropPreview } from './camera/RectCropPreview';

@@ -157,12 +157,18 @@ export interface UsePanMotionReturn {
 }
 
 
-// ── Speed-bucket constants (mirror PanoramaGuidance) ──────────────
-const DEFAULT_GOOD_RAD_PER_SEC = 0.5;
-const DEFAULT_WARN_RAD_PER_SEC = 1.0;
+// ── Speed-bucket constants ────────────────────────────────────────
+// v0.16: lowered from 0.5 / 1.0.  On-device the old 1.0 rad/s (~57°/s)
+// "bad" trip point almost never fired for a hand pan that's genuinely too
+// fast for good keyframe overlap — a brisk-but-too-fast sweep sits around
+// 0.5–0.8 rad/s.  0.6 rad/s (~34°/s) is the new "too fast" line; tune via
+// the `panTooFastThreshold` prop (or the __DEV__ [panMotion] gyro logs).
+const DEFAULT_GOOD_RAD_PER_SEC = 0.4;
+const DEFAULT_WARN_RAD_PER_SEC = 0.6;
 
 // ── Lateral-drift constants ───────────────────────────────────────
-const DEFAULT_LATERAL_BUDGET_CM = 5;
+// v0.16: lowered 5 → 4 cm so a deliberate sideways slide trips sooner.
+const DEFAULT_LATERAL_BUDGET_CM = 4;
 
 /**
  * Continuous-over-budget dwell before `lateralExceeded` latches.
@@ -484,10 +490,29 @@ export function usePanMotion({
 
     setUpdateIntervalForType(SensorTypes.gyroscope, GYRO_SAMPLE_INTERVAL_MS);
 
+    // Throttle for the optional dev diagnostic log (raw axes + rate).
+    let lastGyroLogMs = 0;
+
     let sub: Subscription | null = gyroscope.subscribe({
       next: ({ x, y }) => {
-        const rate = _gyroRateForAxis(resolvedAxis, { x, y });
+        // Axis-AGNOSTIC pan rate: the magnitude of rotation in the x–y
+        // (tilt) plane, ignoring roll about Z.  v0.16 — replaces the
+        // single-axis pick (`gyro.x` in landscape / `gyro.y` in portrait),
+        // which read ~0 and never tripped when the device's dominant pan
+        // rotation landed on the OTHER axis for the user's actual hold.
+        const rate = Math.hypot(x, y);
         const next = _bucketForRate(rate, goodMaxRadPerSec, warnMaxRadPerSec);
+        if (__DEV__) {
+          const now = Date.now();
+          if (now - lastGyroLogMs >= 400) {
+            lastGyroLogMs = now;
+            // eslint-disable-next-line no-console
+            console.log(
+              `[panMotion] gyro x=${x.toFixed(2)} y=${y.toFixed(2)} `
+              + `rate=${rate.toFixed(2)} bucket=${next}`,
+            );
+          }
+        }
         if (next !== lastBucketRef.current) {
           lastBucketRef.current = next;
           setPanSpeedBucket(next);
@@ -503,7 +528,10 @@ export function usePanMotion({
       sub?.unsubscribe();
       sub = null;
     };
-  }, [active, resolvedAxis, goodMaxRadPerSec, warnMaxRadPerSec]);
+    // resolvedAxis intentionally NOT a dep: the rate is now axis-agnostic
+    // (hypot), so an orientation flip must not needlessly re-subscribe the
+    // gyro mid-capture.
+  }, [active, goodMaxRadPerSec, warnMaxRadPerSec]);
 
   // ── Accelerometer → lateral-drift integrator ───────────────────
   // NOTE: this effect intentionally does NOT depend on `resolvedAxis`.
@@ -535,10 +563,12 @@ export function usePanMotion({
     const budgetM = lateralBudgetCm / M_TO_CM;
 
     let lastEmitMs = 0;
+    let lastAccelLogMs = 0;
 
     // Integrate device-Y — the cross-pan axis (orthogonal to the
-    // gate's device-X pan axis).
-    const sub: Subscription = accelerometer.subscribe(({ y }) => {
+    // gate's device-X pan axis).  We read X too, only to log it for the
+    // on-device axis-verification (does a sideways slide spike X or Y?).
+    const sub: Subscription = accelerometer.subscribe(({ x, y }) => {
       const now = Date.now();
       const s = _integrateLateralSample(
         lateralRef.current,
@@ -549,6 +579,19 @@ export function usePanMotion({
         LATERAL_GRACE_MS,
         now,
       );
+
+      if (__DEV__ && now - lastAccelLogMs >= 400) {
+        lastAccelLogMs = now;
+        // Raw x/y let us confirm the cross-pan axis on a real device: a
+        // deliberate sideways slide should spike the integrated axis.  If
+        // lateralCm stays ~0 while X spikes, swap the integrated axis y→x.
+        // eslint-disable-next-line no-console
+        console.log(
+          `[panMotion] accel x=${x.toFixed(2)} y=${y.toFixed(2)} `
+          + `lateralCm=${(s.pos * M_TO_CM).toFixed(1)} `
+          + `budget=${lateralBudgetCm} exceeded=${s.exceeded}`,
+        );
+      }
 
       // Latch the exceeded flag once (state write only on the edge).
       if (s.exceeded) {

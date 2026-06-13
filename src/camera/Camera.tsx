@@ -112,6 +112,7 @@ import { GUIDANCE_PILL, GUIDANCE_TOKENS } from './guidanceTokens';
 import { RotateToLandscapePrompt } from './RotateToLandscapePrompt';
 import { PanHowToOverlay } from './PanHowToOverlay';
 import { CaptureCountdownOverlay } from './CaptureCountdownOverlay';
+import { CaptureFrameCounterOverlay } from './CaptureFrameCounterOverlay';
 import { LateralMotionModal } from './LateralMotionModal';
 import { RectCropPreview, type ImageRect } from './RectCropPreview';
 import { cropQuad } from '../stitching/cropQuad';
@@ -722,12 +723,16 @@ export interface CameraProps {
   panGuidance?: boolean;
 
   /**
-   * Hard recording ceiling for a non-AR panorama, in milliseconds.  A
-   * blinking countdown (item 5) shows the whole seconds remaining and,
-   * on reaching 0, the capture auto-finalizes (stops + stitches what was
-   * captured — same code path as the user releasing the shutter).
-   * Default `9000` (9 s).  `0` disables both the countdown UI and the
-   * auto-finalize (recording is then unbounded).
+   * Optional hard recording-TIME ceiling for a non-AR panorama, in
+   * milliseconds, used as a SAFETY cap alongside the primary keyframe-count
+   * auto-stop.  The default capture now finalizes when the configured
+   * keyframe count is reached (see the frame counter HUD), so this is `0`
+   * (disabled) by default.  Set it to a positive value to ALSO cap the
+   * recording by wall-clock time; when > 0 a blinking countdown (item 5)
+   * shows the seconds remaining and the capture auto-finalizes at 0.
+   *
+   * v0.16 — default changed `9000` → `0` (time cap is now opt-in; the
+   * keyframe-count stop is the default UX).
    */
   maxPanDurationMs?: number;
 
@@ -1094,7 +1099,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'mode-a',
     panGuidance = true,
-    maxPanDurationMs = 9000,
+    maxPanDurationMs = 0,
     panTooFastThreshold,
     lateralBudgetCm = 5,
     rectCropPreview = false,
@@ -2120,6 +2125,24 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panMotion.lateralExceeded, statusPhase, lateralBudgetCm]);
 
+  // ── Item 7 — auto-finalize when the configured keyframe count is hit ─
+  // The engine caps accepted keyframes at `keyframeMaxCount`; once it
+  // reports that many, no more frames will be accepted, so stop + stitch
+  // (same finalize path as releasing the shutter).  `handleHoldEnd`'s
+  // re-entrancy latch makes this idempotent vs. a manual release in the
+  // same tick.  This is the PRIMARY auto-stop (the time cap is opt-in).
+  const keyframeMaxCount = settings.frameSelection.maxKeyframes;
+  const acceptedKeyframeCount = incrementalState?.acceptedCount ?? 0;
+  useEffect(() => {
+    if (
+      statusPhase === 'recording'
+      && keyframeMaxCount > 0
+      && acceptedKeyframeCount >= keyframeMaxCount
+    ) {
+      handleHoldEndRef.current?.();
+    }
+  }, [statusPhase, keyframeMaxCount, acceptedKeyframeCount]);
+
   // ── Item 3 — brief pan how-to overlay at recording start ────────
   // Show the how-to GIF + direction arrow for a short window when a
   // recording begins, then auto-fade.  The component never self-times;
@@ -2293,26 +2316,38 @@ export function Camera(props: CameraProps): React.JSX.Element {
       {/* feature/pano-ux-guidance — in-capture guidance overlays.
           All gated on `panGuidance`; each renders null when not
           visible so they can mount unconditionally. */}
-      {/* Item 5 — blinking 9 s countdown (top corner). */}
+      {/* Item 6 — live keyframe counter "k / n" (top-centre).  The primary
+          capture HUD; the capture auto-finalizes when k reaches n. */}
+      <CaptureFrameCounterOverlay
+        visible={statusPhase === 'recording' && panGuidance}
+        framesCaptured={acceptedKeyframeCount}
+        framesMax={keyframeMaxCount}
+        orientation={deviceOrientation}
+      />
+      {/* Item 5 — optional blinking time countdown (top corner), shown only
+          when the host opts into a wall-clock cap via maxPanDurationMs. */}
       <CaptureCountdownOverlay
         visible={statusPhase === 'recording' && panGuidance && maxPanDurationMs > 0}
         secondsRemaining={countdownSeconds}
         orientation={deviceOrientation}
       />
-      {/* Item 3 — brief pan how-to GIF + direction arrow. */}
+      {/* Item 3 — brief pan how-to graphic + direction arrow. */}
       <PanHowToOverlay
         visible={statusPhase === 'recording' && panGuidance && howToVisible}
         orientation={deviceOrientation}
       />
-      {/* Item 4 — transient "moving too fast" pill, centred near the
-          top (below the countdown).  Minimal inline pill in the shared
-          guidance visual language (amber text on scrim, hairline
-          border); shown only while the gyro bucket is 'bad'. */}
+      {/* Item 4 — transient "moving too fast" pill.  Minimal inline pill in
+          the shared guidance visual language (amber text on scrim, hairline
+          border).  v0.16 — shows whenever the pan leaves the 'good' band
+          (warn OR bad), not only 'bad', so a genuinely-too-fast hand pan
+          actually surfaces it. */}
       {statusPhase === 'recording'
         && panGuidance
-        && panMotion.panSpeedBucket === 'bad' && (
+        && panMotion.panSpeedBucket !== 'good' && (
         <View style={guidanceStyles.tooFastWrap} pointerEvents="none">
-          <View style={guidanceStyles.tooFastPill}>
+          {/* Counter-rotate so the warning reads upright in landscape
+              (Mode A) under a portrait-locked host. */}
+          <View style={[guidanceStyles.tooFastPill, contentRotation]}>
             <Text style={guidanceStyles.tooFastText}>
               {guidanceCopyResolved.tooFast}
             </Text>
@@ -2615,6 +2650,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
         copy={guidanceCopyResolved}
         onUseOriginal={() => {
           if (cropPending) onCapture?.(cropPending.captureResultObj);
+          setCropPending(null);
+        }}
+        onRetake={() => {
+          // Discard this capture entirely — no onCapture — and return to
+          // the live camera (statusPhase is already 'idle' post-finalize).
           setCropPending(null);
         }}
         onConfirm={async ({ quad, perspective }) => {

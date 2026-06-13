@@ -277,7 +277,10 @@ function App(): React.JSX.Element {
       setRectDebugUri(result.uri);
       return;
     }
-    setPreview(result);
+    // Panoramas are reviewed IN the crop editor (rectCropPreview is on) —
+    // that screen IS the preview, so don't pop a second preview modal for
+    // them.  Photos (no crop step) still get the preview modal.
+    if (result.type === 'photo') setPreview(result);
     setThumbnails((prev) => [
       ...prev,
       {

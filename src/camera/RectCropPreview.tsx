@@ -121,6 +121,12 @@ export interface RectCropPreviewProps {
    */
   onUseOriginal: () => void;
   /**
+   * Tapped on "Retake" — discard this capture entirely and return to the
+   * camera.  No result is emitted (the host clears the editor + lets the
+   * user capture again).
+   */
+  onRetake: () => void;
+  /**
    * Optional non-fatal warning messages (e.g. "<70 % of frames used") shown
    * as a banner across the top of the editor so the user sees them before
    * accepting a crop.  Empty / undefined → no banner.
@@ -190,6 +196,7 @@ export function RectCropPreview(
     visible,
     onConfirm,
     onUseOriginal,
+    onRetake,
     warnings,
     perspectiveCorrect = true,
     initialRect,
@@ -222,10 +229,6 @@ export function RectCropPreview(
     boxRef.current = next;
     setBox(next);
   }, []);
-
-  const handleReset = useCallback(() => {
-    setImageQuad(seedImageQuad(imageWidth, imageHeight, initialRect));
-  }, [imageWidth, imageHeight, initialRect]);
 
   const handleConfirm = useCallback(() => {
     const ordered = orderQuadCorners(imageQuad);
@@ -410,6 +413,15 @@ export function RectCropPreview(
 
         <View style={styles.bar}>
           <View style={styles.buttons}>
+            {/* "Retake" — discard this capture, back to the camera. */}
+            <Pressable
+              style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
+              onPress={onRetake}
+              accessibilityRole="button"
+              accessibilityLabel={resolvedCopy.cropRetake}
+            >
+              <Text style={styles.btnText}>{resolvedCopy.cropRetake}</Text>
+            </Pressable>
             {/* "Use original" — emit the stitch un-cropped. */}
             <Pressable
               style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
@@ -418,14 +430,6 @@ export function RectCropPreview(
               accessibilityLabel={resolvedCopy.cropUseOriginal}
             >
               <Text style={styles.btnText}>{resolvedCopy.cropUseOriginal}</Text>
-            </Pressable>
-            <Pressable
-              style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
-              onPress={handleReset}
-              accessibilityRole="button"
-              accessibilityLabel={resolvedCopy.cropReset}
-            >
-              <Text style={styles.btnText}>{resolvedCopy.cropReset}</Text>
             </Pressable>
             <Pressable
               style={({ pressed }) => [

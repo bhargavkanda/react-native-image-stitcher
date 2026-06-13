@@ -130,11 +130,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   pill: {
-    // Caption pill near the bottom-center, ~96px above the bottom edge
-    // per the design handoff.  Absolutely positioned so it sits below
-    // the centered GIF regardless of GIF size.
-    position: 'absolute',
-    bottom: 96,
+    // Caption pill directly below the rotating-phone graphic (both are
+    // centred in the column by the root's center alignment).
+    marginTop: 16,
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: GUIDANCE_PILL.paddingVertical,

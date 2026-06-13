@@ -147,10 +147,11 @@ export function RotatePhoneGraphic({
 
   const rotate = spin.interpolate({
     inputRange: [0, 1],
-    outputRange: ['0deg', '90deg'], // clockwise to landscape
+    outputRange: ['0deg', '-90deg'], // anticlockwise to landscape
   });
 
   const ring = size * 0.78;
+  const ringInset = (size - ring) / 2;
   const phoneW = size * 0.3;
   const phoneH = size * 0.56;
 
@@ -159,7 +160,9 @@ export function RotatePhoneGraphic({
       style={[{ width: size, height: size }, styles.center, style]}
       pointerEvents="none"
     >
-      {/* Faint full guide ring — the rotation "path". */}
+      {/* Faint full guide ring — the rotation "path" (centred behind the
+          phone via explicit insets; absolute views don't honour the
+          parent's center alignment). */}
       <View
         style={[
           styles.ring,
@@ -167,16 +170,18 @@ export function RotatePhoneGraphic({
             width: ring,
             height: ring,
             borderRadius: ring / 2,
+            top: ringInset,
+            left: ringInset,
             borderColor: GUIDANCE_TOKENS.amber,
           },
         ]}
       />
-      {/* Clockwise arrowhead sitting on the ring at top-center (points
-          right = clockwise tangent). */}
+      {/* Anticlockwise arrowhead on the ring at top-centre (points LEFT =
+          anticlockwise tangent at the top of the circle). */}
       <View
         style={[
           styles.arrowHead,
-          { top: (size - ring) / 2 - 4 },
+          { top: ringInset - 5, left: size / 2 - 5 },
         ]}
       />
 
@@ -201,79 +206,68 @@ export function PanPhoneGraphic({
   playing = true,
   style,
 }: GuidanceGraphicProps & { direction: PanGraphicDirection }): React.JSX.Element {
-  const sweep = useRef(new Animated.Value(0)).current;
+  // One value loops 0→1; drives the phone's travel + perspective tilt
+  // together so the device reads as ROTATING as it sweeps along the arrow.
+  const t = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (!playing) {
-      sweep.setValue(0);
+      t.setValue(0);
       return;
     }
     const loop = Animated.loop(
-      Animated.timing(sweep, {
+      Animated.timing(t, {
         toValue: 1,
-        duration: 1600,
-        easing: Easing.linear,
+        duration: 1900,
+        easing: Easing.inOut(Easing.ease),
         useNativeDriver: true,
       }),
     );
     loop.start();
     return () => loop.stop();
-  }, [playing, sweep, direction]);
+  }, [playing, t, direction]);
 
   const down = direction === 'down';
-  const phoneW = down ? size * 0.6 : size * 0.4;
-  const phoneH = down ? size * 0.4 : size * 0.6;
+  // Mode A (down) holds the phone LANDSCAPE; Mode B (right) PORTRAIT.
+  const phoneW = down ? size * 0.5 : size * 0.34;
+  const phoneH = down ? size * 0.34 : size * 0.5;
 
-  // Travel amplitude along the pan axis, ±A from the phone centre, kept
-  // inside the screen with a small margin.
-  const amplitude = (down ? phoneH : phoneW) * 0.5 - size * 0.06;
-  const translate = sweep.interpolate({
+  // Travel ± along the pan axis (down → +Y, right → +X), kept in-canvas.
+  const amp = size * 0.2;
+  const translate = t.interpolate({
     inputRange: [0, 1],
-    outputRange: [-amplitude, amplitude],
+    outputRange: [-amp, amp],
   });
-  // Fade the band at both ends so the loop's jump-back is hidden.
-  const opacity = sweep.interpolate({
-    inputRange: [0, 0.12, 0.88, 1],
+  // The device TILTS through the sweep — rotating about the cross-pan axis
+  // as it pans — which is the 3D "the phone is turning" read the flat
+  // band lacked.  rotateX for a vertical (down) pan, rotateY for horizontal.
+  const tilt = t.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['-24deg', '24deg'],
+  });
+  // Fade at the travel ends so the loop's restart is invisible.
+  const opacity = t.interpolate({
+    inputRange: [0, 0.15, 0.85, 1],
     outputRange: [0, 1, 1, 0],
   });
 
-  const bandLong = (down ? phoneW : phoneH) * 0.8;
-  const bandTransform = down
-    ? [{ translateY: translate }]
-    : [{ translateX: translate }];
-
-  // Core bright band + a taller, fainter "glow" band behind it (RN core
-  // has no blur, so a low-opacity wider bar approximates the glow).
-  const coreBand: ViewStyle = down
-    ? { width: bandLong, height: 4 }
-    : { width: 4, height: bandLong };
-  const glowBand: ViewStyle = down
-    ? { width: bandLong, height: 14 }
-    : { width: 14, height: bandLong };
+  // `perspective` makes the rotateX/rotateY read as depth (a turning
+  // device), not a flat vertical squash.
+  const transform = down
+    ? [{ perspective: 800 }, { translateY: translate }, { rotateX: tilt }]
+    : [{ perspective: 800 }, { translateX: translate }, { rotateY: tilt }];
 
   return (
     <View
       style={[{ width: size, height: size }, styles.center, style]}
       pointerEvents="none"
     >
-      <PhoneBody width={phoneW} height={phoneH}>
-        <View style={styles.sweepCenter} pointerEvents="none">
-          <Animated.View
-            style={[
-              styles.glowBand,
-              glowBand,
-              { opacity, transform: bandTransform },
-            ]}
-          />
-          <Animated.View
-            style={[
-              styles.coreBand,
-              coreBand,
-              { opacity, transform: bandTransform },
-            ]}
-          />
-        </View>
-      </PhoneBody>
+      <Animated.View style={{ opacity, transform }}>
+        <PhoneBody width={phoneW} height={phoneH}>
+          {/* Faint amber "screen" so the turning glass catches the light. */}
+          <View style={styles.screenGlow} pointerEvents="none" />
+        </PhoneBody>
+      </Animated.View>
     </View>
   );
 }
@@ -296,34 +290,26 @@ const styles = StyleSheet.create({
     opacity: 0.28,
     backgroundColor: 'transparent',
   },
-  // Amber CSS-triangle arrowhead pointing RIGHT (clockwise tangent at the
-  // top of the ring): top+bottom borders transparent, LEFT border amber.
+  // Amber CSS-triangle arrowhead pointing LEFT (anticlockwise tangent at
+  // the top of the ring): top+bottom borders transparent, RIGHT border amber.
   arrowHead: {
     position: 'absolute',
     width: 0,
     height: 0,
     borderTopWidth: 6,
     borderBottomWidth: 6,
-    borderLeftWidth: 10,
+    borderRightWidth: 10,
     borderTopColor: 'transparent',
     borderBottomColor: 'transparent',
-    borderLeftColor: GUIDANCE_TOKENS.amber,
+    borderRightColor: GUIDANCE_TOKENS.amber,
   },
-  // Fills the phone body; the bands are centred here and translate from it.
-  sweepCenter: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  coreBand: {
-    position: 'absolute',
-    borderRadius: 2,
+  // Faint amber fill inside the phone outline — a hint of the live
+  // preview so the turning device reads as a screen, not an empty frame.
+  screenGlow: {
+    width: '78%',
+    height: '70%',
+    borderRadius: 6,
     backgroundColor: GUIDANCE_TOKENS.amber,
-  },
-  glowBand: {
-    position: 'absolute',
-    borderRadius: 7,
-    backgroundColor: GUIDANCE_TOKENS.amber,
-    opacity: 0.25,
+    opacity: 0.14,
   },
 });

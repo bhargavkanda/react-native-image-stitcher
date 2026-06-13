@@ -29,6 +29,8 @@ export interface GuidanceCopy {
   cropReset: string;
   /** Item 7 — "emit the stitch un-cropped" button on the crop editor. */
   cropUseOriginal: string;
+  /** Item 7 — discard this capture and return to the camera. */
+  cropRetake: string;
 }
 
 export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
@@ -42,6 +44,7 @@ export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
   cropConfirm: 'Crop',
   cropReset: 'Reset',
   cropUseOriginal: 'Use original',
+  cropRetake: 'Retake',
 };
 
 /**
