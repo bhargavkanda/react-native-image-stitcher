@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package io.imagestitcher.rn.ar
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
@@ -10,6 +12,14 @@ import androidx.exifinterface.media.ExifInterface
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.max
+import kotlin.math.roundToInt
+
+/** AR keyframe long-edge budget (px).  Every device's acquired AR frame is
+ *  downscaled to this before the keyframe JPEG is written, so the stitch
+ *  held-set (and thus memory) is consistent across devices regardless of
+ *  their ARCore 4:3 image resolution.  Matches the non-AR keyframe size. */
+private const val AR_KEYFRAME_MAX_LONG_EDGE = 640
 
 /**
  * Convert an ARCore `Image` (YUV_420_888) to a JPEG file on disk.
@@ -221,8 +231,36 @@ internal object YuvImageConverter {
             baos,
         )
         if (!ok) return null
+        // AR keyframe downscale guard — normalise the long edge to
+        // AR_KEYFRAME_MAX_LONG_EDGE so every device (whatever its ARCore 4:3
+        // image resolution) writes the same ~0.3 MP keyframe -> consistent
+        // stitch memory cross-device.  Only the SAVED keyframe is scaled; the
+        // C++ keyframe gate already ran on the full-res Y plane upstream.
+        var jpegBytes = baos.toByteArray()
+        if (max(packed.width, packed.height) > AR_KEYFRAME_MAX_LONG_EDGE) {
+            val src = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+            if (src != null) {
+                val scale =
+                    AR_KEYFRAME_MAX_LONG_EDGE.toFloat() / max(src.width, src.height)
+                val dst = Bitmap.createScaledBitmap(
+                    src,
+                    (src.width * scale).roundToInt().coerceAtLeast(1),
+                    (src.height * scale).roundToInt().coerceAtLeast(1),
+                    true,
+                )
+                val baos2 = ByteArrayOutputStream()
+                dst.compress(
+                    Bitmap.CompressFormat.JPEG,
+                    jpegQuality.coerceIn(1, 100),
+                    baos2,
+                )
+                jpegBytes = baos2.toByteArray()
+                if (dst !== src) dst.recycle()
+                src.recycle()
+            }
+        }
         try {
-            FileOutputStream(File(outputPath)).use { it.write(baos.toByteArray()) }
+            FileOutputStream(File(outputPath)).use { it.write(jpegBytes) }
         } catch (e: Throwable) {
             return null
         }
