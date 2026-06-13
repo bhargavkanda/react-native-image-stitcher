@@ -23,6 +23,15 @@ export interface GuidanceCopy {
   lateralStopBody: string;
   /** Item 6 — popup dismiss button label. */
   lateralStopDismiss: string;
+  /**
+   * Item 6 — popup TITLE when lateral drift stopped the capture before
+   * enough frames were captured to stitch (the user panned the wrong way
+   * almost immediately).  Nothing was produced, so the copy points them at
+   * the arrow instead of saying "we kept what you captured".
+   */
+  lateralWrongDirectionTitle: string;
+  /** Item 6 — popup BODY for the too-few-frames wrong-direction stop. */
+  lateralWrongDirectionBody: string;
   /** Item 7 — confirm button on the crop editor. */
   cropConfirm: string;
   /** Item 7 — reset-corners button on the crop editor. */
@@ -41,6 +50,10 @@ export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
   lateralStopBody:
     'You moved sideways. Pan in one direction only — we stitched what you captured.',
   lateralStopDismiss: 'Got it',
+  lateralWrongDirectionTitle: 'Follow the arrow',
+  lateralWrongDirectionBody:
+    'You moved the phone the wrong way. Pan slowly in the direction the '
+    + 'arrow shows, in one straight line.',
   cropConfirm: 'Crop',
   cropReset: 'Reset',
   cropUseOriginal: 'Use original',

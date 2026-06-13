@@ -241,9 +241,12 @@ export function PanPhoneGraphic({
   // The device TILTS through the sweep — rotating about the cross-pan axis
   // as it pans — which is the 3D "the phone is turning" read the flat
   // band lacked.  rotateX for a vertical (down) pan, rotateY for horizontal.
+  // The horizontal (right) tilt is INVERTED vs the vertical one so the edge
+  // on the side the phone is currently on reads LONGER (convex toward the
+  // viewer) — matched to on-device feedback for the portrait Mode-B pan.
   const tilt = t.interpolate({
     inputRange: [0, 1],
-    outputRange: ['-24deg', '24deg'],
+    outputRange: down ? ['-24deg', '24deg'] : ['24deg', '-24deg'],
   });
   // Fade at the travel ends so the loop's restart is invisible.
   const opacity = t.interpolate({

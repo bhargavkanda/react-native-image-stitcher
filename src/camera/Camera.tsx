@@ -108,14 +108,10 @@ import {
   mergeGuidanceCopy,
   type GuidanceCopy,
 } from './cameraGuidanceCopy';
-import { GUIDANCE_PILL, GUIDANCE_TOKENS } from './guidanceTokens';
 import { RotateToLandscapePrompt } from './RotateToLandscapePrompt';
 import { PanHowToOverlay } from './PanHowToOverlay';
 import { CaptureCountdownOverlay } from './CaptureCountdownOverlay';
-import {
-  CaptureFrameCounterOverlay,
-  topCenterForOrientation,
-} from './CaptureFrameCounterOverlay';
+import { CaptureFrameCounterOverlay } from './CaptureFrameCounterOverlay';
 import { LateralMotionModal } from './LateralMotionModal';
 import { RectCropPreview, type ImageRect } from './RectCropPreview';
 import { cropQuad } from '../stitching/cropQuad';
@@ -434,12 +430,19 @@ export interface CameraProps {
    * decisively cancels the capture (`incremental.cancel()`) and
    * surfaces `OrientationDriftModal` to explain what happened.
    *
+   * v0.16 adds `'lateral-drift'`: the user moved the phone perpendicular to
+   * the pan arrow before enough frames were captured to stitch.  Rather than
+   * finalize into a misleading "need more images" error, the SDK abandons the
+   * capture and surfaces the `LateralMotionModal` with "follow the arrow"
+   * copy.  (A lateral drift AFTER enough frames still finalizes what was
+   * captured and fires `onCapture` with a `LATERAL_DRIFT_FINALIZE` warning.)
+   *
    * Hosts use this callback to clean up their own state (e.g., reset
    * a wizard step, log telemetry, surface their own retry UX in
    * addition to the SDK's built-in modal).  No `onCapture` will fire
    * for an abandoned capture.
    */
-  onCaptureAbandoned?: (reason: 'orientation-drift') => void;
+  onCaptureAbandoned?: (reason: 'orientation-drift' | 'lateral-drift') => void;
 
   /**
    * v0.13.0 — flash (torch) state.  Controlled-or-uncontrolled.
@@ -1175,6 +1178,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // Item 6 — the latched lateral-drift popup (capture already finalized
   // by the time it shows).
   const [lateralStopVisible, setLateralStopVisible] = useState(false);
+  // Item 6 — true when the lateral stop happened with too few frames to
+  // stitch (the user veered off almost immediately): the popup then shows
+  // the "follow the arrow" copy and the capture is abandoned, not finalized.
+  const [lateralWrongDirection, setLateralWrongDirection] = useState(false);
   // Item 3 — the brief pan how-to overlay shown at the start of a
   // recording, auto-dismissed after a timeout.
   const [howToVisible, setHowToVisible] = useState(false);
@@ -1497,14 +1504,19 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // the engine spec.
   const drift = useOrientationDrift(statusPhase === 'recording');
   const [driftModalDismissed, setDriftModalDismissed] = useState(false);
-  // Reset the dismissed flag when a new capture starts (or any non-
-  // recording state) so the next drift event surfaces a fresh modal.
-  // Item 6 — clear the latched lateral-stop popup on the same edge so a
-  // fresh capture doesn't inherit the previous one's drift state.
+  // Reset the modal flags when a new capture STARTS (statusPhase →
+  // 'recording'), NOT when one stops.  v0.16 fix: the old "any non-recording
+  // state" condition cleared `lateralStopVisible` the instant a lateral stop
+  // moved statusPhase out of 'recording' — so the popup was hidden before it
+  // could ever show (the user only saw the downstream error).  Clearing on
+  // capture START instead lets the lateral / drift popups persist after the
+  // stop until the user dismisses them, while still giving the next capture
+  // a clean slate.
   useEffect(() => {
-    if (statusPhase !== 'recording') {
+    if (statusPhase === 'recording') {
       setDriftModalDismissed(false);
       setLateralStopVisible(false);
+      setLateralWrongDirection(false);
     }
   }, [statusPhase]);
 
@@ -2118,6 +2130,32 @@ export function Camera(props: CameraProps): React.JSX.Element {
       return;
     }
     clearPanTimer();
+
+    // #3 — if the user veered off before enough frames were captured to
+    // stitch, finalizing would fail with a misleading "need more images"
+    // error.  Instead ABANDON the capture (no stitch → no error) and show
+    // the "follow the arrow" popup.  Otherwise FINALIZE what was captured
+    // (a usable partial pano) and show the "keep it straight" popup.
+    const MIN_STITCHABLE_KEYFRAMES = 2;
+    if (acceptedKeyframeCount < MIN_STITCHABLE_KEYFRAMES) {
+      setLateralWrongDirection(true);
+      setLateralStopVisible(true);
+      void (async () => {
+        fpDriver.stop();
+        try {
+          await incremental.cancel();
+        } catch {
+          // best-effort — abandonment must succeed even in a weird state.
+        } finally {
+          setStatusPhase('idle');
+          setRecordingStartedAt(null);
+          onCaptureAbandoned?.('lateral-drift');
+        }
+      })();
+      return;
+    }
+
+    setLateralWrongDirection(false);
     setLateralStopVisible(true);
     // Mark this finalize as lateral-drift-triggered so handleHoldEnd attaches
     // the LATERAL_DRIFT_FINALIZE warning to the result.
@@ -2136,6 +2174,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // same tick.  This is the PRIMARY auto-stop (the time cap is opt-in).
   const keyframeMaxCount = settings.frameSelection.maxKeyframes;
   const acceptedKeyframeCount = incrementalState?.acceptedCount ?? 0;
+  // Item 4 — speed cue routed into the REC banner/border colour (green→red).
+  // Gated on panGuidance so opting out keeps the banner calm/green.
+  const recordingTooFast =
+    panGuidance && panMotion.panSpeedBucket !== 'good';
   useEffect(() => {
     if (
       statusPhase === 'recording'
@@ -2302,11 +2344,18 @@ export function Camera(props: CameraProps): React.JSX.Element {
         />
       )}
 
-      {/* REC banner + record border (during recording / stitching). */}
+      {/* REC banner + record border (during recording / stitching).  v0.16
+          — the banner + border are GREEN normally and turn RED (with the
+          too-fast copy) when the pan is too fast: the single speed cue that
+          replaced the always-red border + separate amber pill. */}
       <CaptureStatusOverlay
         phase={statusPhase}
         topInset={insets.top}
         recordingStartedAt={recordingStartedAt ?? undefined}
+        tooFast={recordingTooFast}
+        recordingMessage={
+          recordingTooFast ? guidanceCopyResolved.tooFast : undefined
+        }
       />
 
       {/* v0.13.1 — the built-in pan-guidance overlays
@@ -2339,41 +2388,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
         visible={statusPhase === 'recording' && panGuidance && howToVisible}
         orientation={deviceOrientation}
       />
-      {/* Item 4 — transient "moving too fast" pill.  Minimal inline pill in
-          the shared guidance visual language (amber text on scrim, hairline
-          border).  v0.16 — shows whenever the pan leaves the 'good' band
-          (warn OR bad), not only 'bad', so a genuinely-too-fast hand pan
-          actually surfaces it. */}
-      {statusPhase === 'recording'
-        && panGuidance
-        && panMotion.panSpeedBucket !== 'good' && (
-        // Pinned to the user-perceived top-CENTRE in every orientation (same
-        // helper as the frame counter), with a larger inset so it stacks
-        // BELOW the counter.  v0.16 — fixes the landscape bug where the pill
-        // landed at the layout-top (= user's side) and clipped off-screen.
-        <View
-          style={[
-            StyleSheet.absoluteFill,
-            topCenterForOrientation(deviceOrientation, 64).container,
-          ]}
-          pointerEvents="none"
-        >
-          <View
-            style={[
-              guidanceStyles.tooFastPill,
-              {
-                transform: [
-                  { rotate: topCenterForOrientation(deviceOrientation, 64).rotate },
-                ],
-              },
-            ]}
-          >
-            <Text style={guidanceStyles.tooFastText}>
-              {guidanceCopyResolved.tooFast}
-            </Text>
-          </View>
-        </View>
-      )}
+      {/* Item 4 — "moving too fast" feedback is no longer a separate pill.
+          v0.16 — it's consolidated into the CaptureStatusOverlay banner +
+          border above, which turn from GREEN to RED (with the too-fast copy)
+          when `recordingTooFast` — one calm cue instead of an always-red
+          border plus a second amber pill. */}
 
       {/*
         2026-05-22 (audit F9 + F3) — debug UI suite, all gated on
@@ -2624,10 +2643,21 @@ export function Camera(props: CameraProps): React.JSX.Element {
           fresh. */}
       <LateralMotionModal
         visible={lateralStopVisible}
-        title={guidanceCopyResolved.lateralStopTitle}
-        body={guidanceCopyResolved.lateralStopBody}
+        title={
+          lateralWrongDirection
+            ? guidanceCopyResolved.lateralWrongDirectionTitle
+            : guidanceCopyResolved.lateralStopTitle
+        }
+        body={
+          lateralWrongDirection
+            ? guidanceCopyResolved.lateralWrongDirectionBody
+            : guidanceCopyResolved.lateralStopBody
+        }
         dismissLabel={guidanceCopyResolved.lateralStopDismiss}
-        onDismiss={() => setLateralStopVisible(false)}
+        onDismiss={() => {
+          setLateralStopVisible(false);
+          setLateralWrongDirection(false);
+        }}
       />
 
       {/* v0.13.0 — built-in post-stitch / tap-to-preview modal.
@@ -3007,27 +3037,5 @@ const pillStyles = StyleSheet.create({
   },
   glyphActive: {
     color: '#1a1a1a',
-  },
-});
-
-
-// feature/pano-ux-guidance — item 4 "moving too fast" pill.  Self-
-// contained, in the shared guidance visual language (GUIDANCE_TOKENS /
-// GUIDANCE_PILL): amber text on the scrim background with a hairline
-// border, centred near the top, below the countdown.  Non-interactive
-// (the wrapper sets pointerEvents="none" so it never eats touches).
-const guidanceStyles = StyleSheet.create({
-  tooFastPill: {
-    paddingVertical: GUIDANCE_PILL.paddingVertical,
-    paddingHorizontal: GUIDANCE_PILL.paddingHorizontal,
-    borderRadius: GUIDANCE_PILL.borderRadius,
-    backgroundColor: GUIDANCE_TOKENS.scrim,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: GUIDANCE_TOKENS.amber,
-  },
-  tooFastText: {
-    color: GUIDANCE_TOKENS.amber,
-    fontSize: GUIDANCE_PILL.fontSize,
-    fontWeight: GUIDANCE_PILL.fontWeight,
   },
 });
