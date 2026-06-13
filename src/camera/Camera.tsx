@@ -113,8 +113,13 @@ import { RotateToLandscapePrompt } from './RotateToLandscapePrompt';
 import { PanHowToOverlay } from './PanHowToOverlay';
 import { CaptureCountdownOverlay } from './CaptureCountdownOverlay';
 import { LateralMotionModal } from './LateralMotionModal';
-import { RectCropPreview } from './RectCropPreview';
+import { RectCropPreview, type ImageRect } from './RectCropPreview';
 import { cropQuad } from '../stitching/cropQuad';
+import { computeInscribedRect } from '../stitching/computeInscribedRect';
+import {
+  buildCaptureWarnings,
+  type CaptureWarning,
+} from './captureWarnings';
 import {
   getIncrementalNativeModule,
   incrementalStitcherIsAvailable,
@@ -155,26 +160,45 @@ export type Warper = 'plane' | 'cylindrical' | 'spherical';
 
 
 /**
- * Result emitted via `onCapture`.  Discriminated union keyed on
- * `type` so consumers handle both photo and panorama outputs through
- * one callback path.
+ * Result emitted via `onCapture`.  Discriminated union keyed FIRST on
+ * `ok` (success vs. failure) and then on `type` (photo vs. panorama), so a
+ * host handles EVERY capture outcome — success, degraded success, and
+ * failure — through this one callback.
  *
- * Identifier `CameraCaptureResult` (vs. the SDK's existing
- * `CaptureResult` from `../types`) is intentional — the existing
- * CaptureResult shape has SDK-specific fields (deviceMetadata,
- * qualityReport, deviceUuid) that don't belong in the public RN
- * library's surface.  Step 3 (symbol rename) will retire the
- * historical SDK-specific names; for now we keep both types
- * side-by-side so the existing host code continues to work.
+ * ## v0.16 — unified success/failure + warnings (BREAKING)
+ *
+ * Previously `onCapture` fired only on success and carried no `ok` field;
+ * failures went *solely* to `onError`.  Hosts therefore had no single place
+ * to learn whether a capture succeeded, and no programmatic signal that a
+ * stitch was *degraded* (e.g. most frames dropped).  Now:
+ *
+ *   - `onCapture` ALWAYS fires once per capture attempt, with `ok:true`
+ *     (output present) or `ok:false` (carrying the `CameraError`).
+ *   - both success and failure carry `warnings: CaptureWarning[]` — non-fatal
+ *     quality signals (e.g. `LOW_FRAME_UTILIZATION` when <70 % of captured
+ *     frames survived, `LATERAL_DRIFT_FINALIZE` when item-6 stopped early).
+ *   - `onError` STILL fires on failure too (an unchanged mirror), so existing
+ *     error handling keeps working.
+ *
+ * Migration: gate on `ok` before reading `uri`/`width`/`height` —
+ * `if (!result.ok) { handle(result.error); return; }`.
+ *
+ * Identifier `CameraCaptureResult` (vs. the SDK's existing `CaptureResult`
+ * from `../types`) is intentional — the existing CaptureResult shape has
+ * SDK-specific fields that don't belong in the public RN library's surface.
  */
 export type CameraCaptureResult =
   | {
+      ok: true;
       type: 'photo';
       uri: string;
       width: number;
       height: number;
+      /** Non-fatal quality signals (empty when none). */
+      warnings: CaptureWarning[];
     }
   | {
+      ok: true;
       type: 'panorama';
       uri: string;
       width: number;
@@ -193,7 +217,30 @@ export type CameraCaptureResult =
        * cv::Stitcher at finalize).
        */
       stitchModeResolved?: 'panorama' | 'scans';
+      /** Non-fatal quality signals (empty when none). */
+      warnings: CaptureWarning[];
+    }
+  | {
+      ok: false;
+      /** Which capture path failed. */
+      type: 'photo' | 'panorama';
+      /** The classified failure (same object handed to `onError`). */
+      error: CameraError;
+      /** Any warnings gathered before the failure (usually empty). */
+      warnings: CaptureWarning[];
     };
+
+
+/**
+ * The success-panorama variant of {@link CameraCaptureResult} — the exact
+ * shape stashed for the crop editor and re-emitted (with adjusted dims) once
+ * the user crops.  Narrowed so the crop-confirm spread keeps `uri`/`width`/
+ * `height`/`ok` without a cast.
+ */
+export type PanoramaCaptureResult = Extract<
+  CameraCaptureResult,
+  { ok: true; type: 'panorama' }
+>;
 
 
 /**
@@ -209,6 +256,13 @@ export type CameraErrorCode =
   | 'STITCH_NEED_MORE_IMGS'
   | 'STITCH_HOMOGRAPHY_FAIL'
   | 'STITCH_CAMERA_PARAMS_FAIL'
+  /**
+   * v0.16 — the native post-stitch validator rejected the output: the
+   * panorama came out disjoint / fragmented / wildly mis-proportioned
+   * (frames didn't connect into one coherent image).  Recoverable by
+   * re-capturing, so it carries "try again" copy.
+   */
+  | 'STITCH_LOW_QUALITY'
   | 'STITCH_OOM'
   | 'OUTPUT_WRITE_FAILED'
   /**
@@ -979,7 +1033,14 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
     defaultKeyframeMaxCount: props.defaultKeyframeMaxCount,
     defaultKeyframeOverlapThreshold: props.defaultKeyframeOverlapThreshold,
     defaultMaxKeyframeIntervalMs: props.defaultMaxKeyframeIntervalMs,
-    maxInscribedRectCrop: props.maxInscribedRectCrop,
+    // Item 2 — the interactive crop editor OWNS cropping, so when it's on we
+    // force the native auto-crop OFF: the editor needs the full un-cropped
+    // panorama (black borders included) so the user can drag the inscribed-
+    // rect seed outward to keep more content.  Letting the native auto-crop
+    // pre-trim would leave nothing to adjust.
+    maxInscribedRectCrop: props.rectCropPreview
+      ? false
+      : props.maxInscribedRectCrop,
   };
 }
 
@@ -1121,7 +1182,15 @@ export function Camera(props: CameraProps): React.JSX.Element {
     uri: string;
     width: number;
     height: number;
-    captureResultObj: CameraCaptureResult;
+    captureResultObj: PanoramaCaptureResult;
+    /**
+     * Item 2 — max-inscribed-rect seed for the crop quad (image-pixel
+     * coords).  Undefined → RectCropPreview falls back to its 8 %-inset
+     * default seed (native module absent / inscribed-rect call failed).
+     */
+    initialRect?: ImageRect;
+    /** Warnings to surface as a banner on the crop editor. */
+    warnings: CaptureWarning[];
   } | null>(null);
   // 2026-05-22 (audit F9 + F3) — debug stitch-stats toast.  Hook
   // exposes an imperative API; we fire `showResult(finalizeResult)`
@@ -1398,6 +1467,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // timer and a manual release can both pass the async statusPhase guard in
   // the same tick before React commits 'stitching'.
   const finalizingRef = useRef(false);
+  // Item 6 — set by the lateral-drift effect just before it calls
+  // handleHoldEnd, so the finalize knows this stop was a sideways-drift
+  // auto-stop and can attach the LATERAL_DRIFT_FINALIZE warning.  Consumed
+  // (reset) at the start of handleHoldEnd so it never leaks to the next pan.
+  const lateralFinalizeRef = useRef(false);
 
   // ── v0.12.0 — Orientation drift detection + auto-abandon ────────
   //
@@ -1642,7 +1716,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         height = result.height;
       }
 
-      onCapture?.({ type: 'photo', uri, width, height });
+      onCapture?.({ ok: true, type: 'photo', uri, width, height, warnings: [] });
     } catch (err) {
       const e = err instanceof CameraError
         ? err
@@ -1651,7 +1725,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
           err instanceof Error ? err.message : String(err),
           err,
         );
+      // v0.16 — failures now reach `onCapture` too (ok:false), with
+      // `onError` kept as a mirror so existing handlers keep working.
       onError?.(e);
+      onCapture?.({ ok: false, type: 'photo', error: e, warnings: [] });
     }
   }, [enablePhotoMode, isAR, capture, outputDir, onCapture, onError]);
 
@@ -1832,6 +1909,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // synchronously so incremental.finalize()/onCapture fire exactly once.
     if (finalizingRef.current) return;
     finalizingRef.current = true;
+    // Consume the lateral-drift flag once, here, so it's cleared on BOTH the
+    // success and failure paths and never leaks into the next capture.
+    const wasLateralFinalize = lateralFinalizeRef.current;
+    lateralFinalizeRef.current = false;
     setStatusPhase('stitching');
     // Stop pumping new frames before finalizing so the engine isn't
     // racing the final cv::Stitcher pass against late-arriving
@@ -1880,7 +1961,18 @@ export function Camera(props: CameraProps): React.JSX.Element {
         });
       }
 
-      const captureResultObj: CameraCaptureResult = {
+      // v0.16 — non-fatal quality signals attached to the result + (when
+      // the crop editor shows) the crop banner.  LOW_FRAME_UTILIZATION when
+      // <70 % of captured frames survived; LATERAL_DRIFT_FINALIZE when item-6
+      // stopped this capture early.
+      const warnings = buildCaptureWarnings({
+        framesRequested: result.framesRequested,
+        framesIncluded: result.framesIncluded,
+        lateralFinalize: wasLateralFinalize,
+      });
+
+      const captureResultObj: PanoramaCaptureResult = {
+        ok: true,
         type: 'panorama',
         // Native finalize() returns a bare `/data/.../foo.jpg` path;
         // normalise to `file://` for Android <Image>.
@@ -1894,22 +1986,43 @@ export function Camera(props: CameraProps): React.JSX.Element {
         finalConfidenceThresh: result.finalConfidenceThresh ?? -1,
         durationMs: Date.now() - (recordingStartedAt ?? Date.now()),
         stitchModeResolved: result.stitchModeResolved,
+        warnings,
       };
       // Item 7 — when the crop editor is enabled AND the panorama has
       // valid intrinsic dims, defer `onCapture`: stash the result and
-      // mount RectCropPreview.  The user's crop / cancel decision (the
-      // modal's onConfirm / onCancel below) emits the final result.
+      // mount RectCropPreview.  The user's crop / use-original decision (the
+      // modal's onConfirm / onUseOriginal below) emits the final result.
       // Otherwise emit immediately, as before.
       if (
         rectCropPreview
         && result.width > 0
         && result.height > 0
       ) {
+        // Item 2 — seed the crop quad from the max-inscribed rectangle of
+        // the (un-cropped) panorama so the editor opens on the tightest
+        // clean rectangle, not a blind 8 % inset.  Best-effort: an absent
+        // native module / decode failure falls back to the default seed.
+        let initialRect: ImageRect | undefined;
+        try {
+          const inscribed = await computeInscribedRect(captureResultObj.uri);
+          if (inscribed && inscribed.width > 0 && inscribed.height > 0) {
+            initialRect = {
+              x: inscribed.x,
+              y: inscribed.y,
+              width: inscribed.width,
+              height: inscribed.height,
+            };
+          }
+        } catch {
+          // No seed — RectCropPreview uses its default inset.
+        }
         setCropPending({
           uri: captureResultObj.uri,
           width: result.width,
           height: result.height,
           captureResultObj,
+          initialRect,
+          warnings,
         });
       } else {
         onCapture?.(captureResultObj);
@@ -1928,7 +2041,20 @@ export function Camera(props: CameraProps): React.JSX.Element {
       // unit-tested against the actual native strings) so a future reword
       // of a cpp throw can't silently drop the "pan more slowly" path.
       const code = classifyStitchError(message);
-      onError?.(new CameraError(code, message, err));
+      const error = new CameraError(code, message, err);
+      // v0.16 — surface the failure on BOTH callbacks: `onError` (unchanged
+      // mirror) and `onCapture` (ok:false) so a host has one place to learn
+      // the outcome.  A lateral-drift stop that then failed to stitch still
+      // reports that cause via the warning.
+      onError?.(error);
+      onCapture?.({
+        ok: false,
+        type: 'panorama',
+        error,
+        warnings: wasLateralFinalize
+          ? buildCaptureWarnings({ lateralFinalize: true })
+          : [],
+      });
     } finally {
       finalizingRef.current = false;
       setStatusPhase('idle');
@@ -1985,6 +2111,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
     }
     clearPanTimer();
     setLateralStopVisible(true);
+    // Mark this finalize as lateral-drift-triggered so handleHoldEnd attaches
+    // the LATERAL_DRIFT_FINALIZE warning to the result.
+    lateralFinalizeRef.current = true;
     handleHoldEndRef.current?.();
     // Deps mirror the drift effect: re-run when the latch trips or the
     // recording state changes.  Other reads are stable setters / refs.
@@ -2463,10 +2592,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
 
       {/* Item 7 — draggable-quad crop editor, shown after a panorama
           finalizes when `rectCropPreview` is on (handleHoldEnd stashed
-          the pending result instead of emitting it).
-            - Cancel → emit the original, un-cropped panorama.
-            - Crop   → cropQuad (perspective-rectify when the quad isn't
-                       axis-aligned) overwrites the file in place; emit
+          the pending result instead of emitting it).  The quad opens
+          seeded on the max-inscribed rectangle (item 2); any capture
+          warnings show as a banner on top.
+            - Use original → emit the original, un-cropped panorama as-is.
+            - Crop         → cropQuad (perspective-rectify when the quad
+                       isn't axis-aligned) overwrites the file in place; emit
                        with the rectified dims + a cache-busting query so
                        <Image> reloads the overwritten file.  On any
                        crop failure, fall back to the original. */}
@@ -2478,9 +2609,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
+        initialRect={cropPending?.initialRect}
+        warnings={cropPending?.warnings.map((w) => w.message) ?? []}
         perspectiveCorrect={perspectiveCorrectCrop}
         copy={guidanceCopyResolved}
-        onCancel={() => {
+        onUseOriginal={() => {
           if (cropPending) onCapture?.(cropPending.captureResultObj);
           setCropPending(null);
         }}

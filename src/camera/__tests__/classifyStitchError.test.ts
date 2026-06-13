@@ -75,6 +75,31 @@ describe('classifyStitchError', () => {
     expect(classifyStitchError('cv::OutOfMemoryError / OOM')).toBe('STITCH_OOM');
   });
 
+  describe('post-stitch validator → STITCH_LOW_QUALITY (v0.16)', () => {
+    it('classifies the disjoint/fragmented output throw', () => {
+      // cpp validateStitchOutput throw shapes.
+      expect(
+        classifyStitchError('stitch validation failed: disjoint output (2 components)'),
+      ).toBe('STITCH_LOW_QUALITY');
+      expect(classifyStitchError('low-quality stitch: fragmented coverage')).toBe(
+        'STITCH_LOW_QUALITY',
+      );
+    });
+    it('is checked before OOM so its message is not swallowed', () => {
+      expect(
+        classifyStitchError('stitch validation failed: disjoint; later ran low on memory'),
+      ).toBe('STITCH_LOW_QUALITY');
+    });
+  });
+
+  it('classifies the pre-stitch memory abort → STITCH_OOM', () => {
+    // cpp pre-stitch headroom abort sentinel (Issue 6).
+    expect(classifyStitchError('Pre-stitch memory abort')).toBe('STITCH_OOM');
+    expect(classifyStitchError('stitch aborted: memory abort (projected peak)')).toBe(
+      'STITCH_OOM',
+    );
+  });
+
   it('falls back to PANORAMA_FINALIZE_FAILED for anything unclassified', () => {
     expect(classifyStitchError('ENOSPC: no space left on device')).toBe(
       'PANORAMA_FINALIZE_FAILED',

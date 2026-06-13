@@ -29,9 +29,12 @@
  *
  * ## Seeding
  *
- * The initial quad is the image's inset rectangle (default 8 % inset on
- * each edge) unless the host passes `initialRect` in image-pixel coords.
- * "Reset" returns to that seed.
+ * The initial quad comes from `initialRect` (image-pixel coords) when the
+ * host passes one — `<Camera>` passes the panorama's MAX-INSCRIBED rectangle
+ * (the tightest clean rectangle with no black corners; item 2) so the editor
+ * opens on a sensible crop the user drags to taste.  With no `initialRect`
+ * (native inscribed-rect unavailable) it falls back to an 8 %-inset
+ * rectangle.  "Reset" returns to whichever seed was used.
  */
 
 import React, {
@@ -111,8 +114,18 @@ export interface RectCropPreviewProps {
    * perspective decision; the host performs the actual native crop.
    */
   onConfirm: (result: RectCropResult) => void;
-  /** Tapped on dismiss / back — the host closes the editor unchanged. */
-  onCancel: () => void;
+  /**
+   * Tapped on "Use original" (or hardware back / dismiss) — emit the stitch
+   * un-cropped.  Also called when the user collapses the quad to something
+   * un-warpable, so a degenerate quad never reaches the native crop.
+   */
+  onUseOriginal: () => void;
+  /**
+   * Optional non-fatal warning messages (e.g. "<70 % of frames used") shown
+   * as a banner across the top of the editor so the user sees them before
+   * accepting a crop.  Empty / undefined → no banner.
+   */
+  warnings?: string[];
   /**
    * Whether to allow perspective rectify when the user picks a
    * non-rectangular quad.  When `false`, the result's `perspective` is
@@ -176,7 +189,8 @@ export function RectCropPreview(
     imageHeight,
     visible,
     onConfirm,
-    onCancel,
+    onUseOriginal,
+    warnings,
     perspectiveCorrect = true,
     initialRect,
     copy,
@@ -215,11 +229,11 @@ export function RectCropPreview(
 
   const handleConfirm = useCallback(() => {
     const ordered = orderQuadCorners(imageQuad);
-    // Guard: if the user collapsed the quad to something un-warpable, fall
-    // back to confirming nothing (the parent keeps the editor open or
-    // treats it as cancel) — never hand native a degenerate quad.
+    // Guard: if the user collapsed the quad to something un-warpable, emit
+    // the original un-cropped panorama rather than hand native a degenerate
+    // quad.
     if (!isQuadValid(ordered)) {
-      onCancel();
+      onUseOriginal();
       return;
     }
     const axisAligned = isAxisAlignedRect(ordered);
@@ -227,7 +241,7 @@ export function RectCropPreview(
       quad: ordered,
       perspective: perspectiveCorrect && !axisAligned,
     });
-  }, [imageQuad, perspectiveCorrect, onConfirm, onCancel]);
+  }, [imageQuad, perspectiveCorrect, onConfirm, onUseOriginal]);
 
   // One PanResponder per corner.  Built once (the corner index is the
   // closure key); the move handler reads live box/quad via refs + setState
@@ -329,7 +343,7 @@ export function RectCropPreview(
     <Modal
       visible={visible}
       animationType="fade"
-      onRequestClose={onCancel}
+      onRequestClose={onUseOriginal}
       accessibilityLabel="Crop the captured panorama"
       // Mirror OrientationDriftModal: declare all 4 orientations so iOS
       // doesn't force-rotate the window when this opens mid-rotation.
@@ -341,6 +355,18 @@ export function RectCropPreview(
       ]}
     >
       <View style={styles.root}>
+        {/* Non-fatal warning banner (e.g. "<70 % of frames used"), shown
+            ABOVE the image so the user sees it before accepting a crop. */}
+        {warnings && warnings.length > 0 && (
+          <View style={styles.warningBanner} accessibilityRole="alert">
+            {warnings.map((w, i) => (
+              <Text key={`warn-${i}`} style={styles.warningText}>
+                {w}
+              </Text>
+            ))}
+          </View>
+        )}
+
         <View style={styles.canvas} onLayout={onLayout}>
           {imageBox && (
             <Image
@@ -384,6 +410,15 @@ export function RectCropPreview(
 
         <View style={styles.bar}>
           <View style={styles.buttons}>
+            {/* "Use original" — emit the stitch un-cropped. */}
+            <Pressable
+              style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
+              onPress={onUseOriginal}
+              accessibilityRole="button"
+              accessibilityLabel={resolvedCopy.cropUseOriginal}
+            >
+              <Text style={styles.btnText}>{resolvedCopy.cropUseOriginal}</Text>
+            </Pressable>
             <Pressable
               style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
               onPress={handleReset}
@@ -447,6 +482,19 @@ function edgeStyle(
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#000' },
+  warningBanner: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(255,196,98,0.16)',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: GUIDANCE_TOKENS.amber,
+    gap: 4,
+  },
+  warningText: {
+    color: GUIDANCE_TOKENS.amber,
+    fontSize: 13,
+    fontWeight: '600',
+  },
   canvas: { flex: 1 },
   image: { position: 'absolute' },
   edge: {

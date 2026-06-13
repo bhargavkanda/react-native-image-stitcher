@@ -22,8 +22,9 @@
  *   2. homography estimation.
  *   3. degenerate camera params / warp-canvas guard (the divergent-warp
  *      OOM path, now converted to a clean throw by the canvas guard).
- *   4. out-of-memory.
- *   5. fallback — an unclassified finalize failure.
+ *   4. low-quality / disjoint output (the post-stitch validator, v0.16).
+ *   5. out-of-memory (incl. the pre-stitch memory abort).
+ *   6. fallback — an unclassified finalize failure.
  */
 import type { CameraErrorCode } from './Camera';
 
@@ -49,7 +50,18 @@ export function classifyStitchError(message: string): CameraErrorCode {
   if (/camera params|warpRoi|degenerate|canvas too large/i.test(message)) {
     return 'STITCH_CAMERA_PARAMS_FAIL';
   }
-  if (/out of memory|oom/i.test(message)) {
+  // v0.16 — the native post-stitch validator rejected the output as
+  // disjoint / fragmented / wildly mis-proportioned (frames didn't connect
+  // into one coherent panorama).  The cpp throw carries "stitch validation"
+  // / "disjoint" / "fragmented" (see cpp/stitcher.cpp validateStitchOutput).
+  // Kept BEFORE the OOM branch so its distinct message isn't swallowed.
+  if (/stitch validation|disjoint|fragmented|low-quality stitch/i.test(message)) {
+    return 'STITCH_LOW_QUALITY';
+  }
+  // OOM, including the pre-stitch headroom abort ("pre-stitch memory abort"
+  // / "memory abort") that fires when even the minimal streaming config
+  // won't fit — same user remedy (shorter sweep), so same code.
+  if (/out of memory|oom|memory abort/i.test(message)) {
     return 'STITCH_OOM';
   }
   return 'PANORAMA_FINALIZE_FAILED';

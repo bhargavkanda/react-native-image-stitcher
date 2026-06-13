@@ -27,6 +27,8 @@ export interface GuidanceCopy {
   cropConfirm: string;
   /** Item 7 — reset-corners button on the crop editor. */
   cropReset: string;
+  /** Item 7 — "emit the stitch un-cropped" button on the crop editor. */
+  cropUseOriginal: string;
 }
 
 export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
@@ -39,6 +41,7 @@ export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
   lateralStopDismiss: 'Got it',
   cropConfirm: 'Crop',
   cropReset: 'Reset',
+  cropUseOriginal: 'Use original',
 };
 
 /**

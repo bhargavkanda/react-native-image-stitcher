@@ -61,6 +61,15 @@ const RECOVERABLE_STITCH_GUIDANCE: Partial<
       "The frames couldn't be aligned — keep the phone level and steady so "
       + 'each frame overlaps the one before it.',
   },
+  // v0.16 — the post-stitch validator rejected the output as disjoint /
+  // fragmented: the frames stitched but didn't form one coherent panorama
+  // (usually a too-fast or jerky sweep that broke alignment partway).
+  STITCH_LOW_QUALITY: {
+    title: "That didn't come out right",
+    message:
+      "The panorama didn't stitch into one clean image — try again, panning "
+      + 'slowly and steadily in one direction so each frame overlaps the last.',
+  },
   // Ran out of memory finishing the stitch — usually an over-long sweep.
   STITCH_OOM: {
     title: 'Try a shorter sweep',

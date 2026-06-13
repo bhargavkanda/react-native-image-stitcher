@@ -76,7 +76,12 @@ function App(): React.JSX.Element {
 
   // Last capture (photo or panorama).  Set in onCapture, cleared on
   // preview modal dismiss.  Drives the visibility of the modal.
-  const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
+  // Only SUCCESSFUL captures are previewed; failures (ok:false) go to the
+  // error handler.  Narrowing the state to the ok:true variants keeps the
+  // preview reads (uri/width/height/...) type-safe.
+  const [preview, setPreview] = useState<
+    Extract<CameraCaptureResult, { ok: true }> | null
+  >(null);
 
   // v0.15 — inscribed-rect crop debug harness (gated dev tool). When
   // enabled, a captured panorama is sent to the overlay (which computes
@@ -252,6 +257,16 @@ function App(): React.JSX.Element {
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
+    // v0.16 — onCapture now fires on failure too (ok:false), mirroring
+    // onError.  The error handler already surfaces it, so just bail here.
+    if (!result.ok) return;
+    if (result.warnings.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[example] capture warnings',
+        result.warnings.map((w) => `${w.code}: ${w.message}`),
+      );
+    }
     if (rectDebugEnabled && result.type === 'panorama') {
       setRectDebugUri(result.uri);
       return;

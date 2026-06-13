@@ -28,6 +28,7 @@ export { Camera, CameraError } from './camera/Camera';
 export type {
   CameraProps,
   CameraCaptureResult,
+  PanoramaCaptureResult,
   CameraErrorCode,
   CaptureSource,
   CaptureSourcesMode,
@@ -38,6 +39,11 @@ export type {
   Warper,
   FramesDroppedInfo,
 } from './camera/Camera';
+// Non-fatal capture quality signals carried on `CameraCaptureResult.warnings`.
+export type {
+  CaptureWarning,
+  CaptureWarningCode,
+} from './camera/captureWarnings';
 
 // Recoverable-stitch-failure → friendly Alert copy.  Hosts call this in
 // their onError handler to surface actionable guidance ("pan more slowly",
