@@ -11,8 +11,12 @@
  */
 
 export interface GuidanceCopy {
-  /** Item 2 — caption pill while waiting for the user to rotate to landscape. */
+  /** Item 2 — caption pill while waiting for the user to rotate to landscape
+   *  (panMode `'vertical'`). */
   rotateToLandscape: string;
+  /** Item 2 — caption pill while waiting for the user to rotate to portrait
+   *  (panMode `'horizontal'`). */
+  rotateToPortrait: string;
   /** Item 3 — short hint shown with the how-to-pan animation. */
   panHint: string;
   /** Item 4 — transient warning when the pan is too fast. */
@@ -44,6 +48,7 @@ export interface GuidanceCopy {
 
 export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
   rotateToLandscape: 'Rotate to landscape',
+  rotateToPortrait: 'Rotate to portrait',
   panHint: 'Pan slowly top to bottom',
   tooFast: 'Moving too fast — slow down',
   lateralStopTitle: 'Keep the pan straight',

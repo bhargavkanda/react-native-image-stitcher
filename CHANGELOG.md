@@ -104,12 +104,14 @@ testing:
   mirror. **Migration:** gate on `result.ok` before reading
   `uri`/`width`/`height` — `if (!result.ok) { handle(result.error);
   return; }`. Both branches also carry the new `warnings` array.
-- **`<Camera>` now defaults to `panMode='mode-a'` (landscape-only
-  panorama).** Previously the component accepted both landscape (Mode A,
-  top→bottom) and portrait (Mode B, left→right) holds with no gate.
-  Starting a panorama in portrait now shows the rotate-to-landscape
-  prompt instead of capturing.  **Hosts that want the previous
-  both-modes behaviour must pass `panMode='both'`.**
+- **`<Camera>` now defaults to `panMode='vertical'` (landscape-only,
+  top→bottom panorama).** Previously the component accepted both
+  landscape and portrait holds with no gate.  `panMode` options are now
+  `'vertical'` (landscape-only; portrait holds gated behind the
+  rotate-to-landscape prompt), `'horizontal'` (portrait-only, left→right;
+  landscape holds gated behind the rotate-to-portrait prompt), and
+  `'both'` (either, ungated).  **Hosts that want portrait/left→right
+  panoramas pass `panMode='horizontal'` or `'both'`.**
 
 ## [0.15.2] — 2026-06-11
 

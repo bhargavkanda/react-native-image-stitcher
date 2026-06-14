@@ -115,7 +115,11 @@ export function RotatePhoneGraphic({
   size = DEFAULT_SIZE,
   playing = true,
   style,
-}: GuidanceGraphicProps): React.JSX.Element {
+  target = 'landscape',
+}: GuidanceGraphicProps & {
+  /** Orientation to rotate TO: 'landscape' (default) or 'portrait'. */
+  target?: 'landscape' | 'portrait';
+}): React.JSX.Element {
   const spin = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -145,15 +149,18 @@ export function RotatePhoneGraphic({
     return () => loop.stop();
   }, [playing, spin]);
 
+  // To-landscape: start portrait (tall), rotate anticlockwise to landscape.
+  // To-portrait: start landscape (wide), rotate clockwise to stand upright.
+  const toLandscape = target === 'landscape';
   const rotate = spin.interpolate({
     inputRange: [0, 1],
-    outputRange: ['0deg', '-90deg'], // anticlockwise to landscape
+    outputRange: toLandscape ? ['0deg', '-90deg'] : ['0deg', '90deg'],
   });
 
   const ring = size * 0.78;
   const ringInset = (size - ring) / 2;
-  const phoneW = size * 0.3;
-  const phoneH = size * 0.56;
+  const phoneW = toLandscape ? size * 0.3 : size * 0.56;
+  const phoneH = toLandscape ? size * 0.56 : size * 0.3;
 
   return (
     <View
@@ -176,11 +183,13 @@ export function RotatePhoneGraphic({
           },
         ]}
       />
-      {/* Anticlockwise arrowhead on the ring at top-centre (points LEFT =
-          anticlockwise tangent at the top of the circle). */}
+      {/* Arrowhead on the ring at top-centre, pointing along the rotation's
+          tangent: LEFT for anticlockwise (to-landscape), RIGHT for clockwise
+          (to-portrait). */}
       <View
         style={[
           styles.arrowHead,
+          toLandscape ? styles.arrowHeadLeft : styles.arrowHeadRight,
           { top: ringInset - 5, left: size / 2 - 5 },
         ]}
       />
@@ -293,18 +302,27 @@ const styles = StyleSheet.create({
     opacity: 0.28,
     backgroundColor: 'transparent',
   },
-  // Amber CSS-triangle arrowhead pointing LEFT (anticlockwise tangent at
-  // the top of the ring): top+bottom borders transparent, RIGHT border amber.
+  // Amber CSS-triangle arrowhead at the top of the ring.  The base props are
+  // shared; the direction-specific style colours the trailing border so the
+  // apex points along the rotation tangent.
   arrowHead: {
     position: 'absolute',
     width: 0,
     height: 0,
     borderTopWidth: 6,
     borderBottomWidth: 6,
-    borderRightWidth: 10,
     borderTopColor: 'transparent',
     borderBottomColor: 'transparent',
+  },
+  // Points LEFT (anticlockwise / to-landscape): RIGHT border amber.
+  arrowHeadLeft: {
+    borderRightWidth: 10,
     borderRightColor: GUIDANCE_TOKENS.amber,
+  },
+  // Points RIGHT (clockwise / to-portrait): LEFT border amber.
+  arrowHeadRight: {
+    borderLeftWidth: 10,
+    borderLeftColor: GUIDANCE_TOKENS.amber,
   },
   // Faint amber fill inside the phone outline — a hint of the live
   // preview so the turning device reads as a screen, not an empty frame.

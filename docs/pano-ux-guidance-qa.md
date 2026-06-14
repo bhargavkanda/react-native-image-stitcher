@@ -9,8 +9,9 @@ eyeballed on a real device, which is why they're handed to you here.
 Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
 `adb reverse tcp:8082 tcp:8082`), example app on the A35.
 
-> **BREAKING:** `<Camera>` now defaults to `panMode="mode-a"` (landscape-only
-> panorama). To restore both orientations pass `panMode="both"`. Verify the
+> **BREAKING:** `<Camera>` now defaults to `panMode="vertical"` (landscape-only
+> top→bottom). Options: `"vertical"` (landscape-only), `"horizontal"`
+> (portrait-only, left→right), `"both"` (either). Verify the
 > example app still behaves as intended under the new default.
 
 ## Per-item checks
@@ -24,11 +25,11 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
       landscape-right) → prompt dismisses and capture auto-starts.
 - [ ] Release the shutter while still in portrait → prompt clears, nothing
       starts, and rotating afterwards does NOT spuriously start a capture.
-- [ ] With `panMode="both"`, a portrait hold starts immediately (no prompt)
-      and pans Mode B (left→right) as before the guidance work. The example
-      app has a `__DEV__` **🧭 panMode** toggle (top-left, under Rect debug)
-      to flip `mode-a` ↔ `both` at runtime — verify the rotate prompt appears
-      ONLY in `mode-a`.
+- [ ] The example app's `__DEV__` **🧭 panMode** toggle (top-left, under Rect
+      debug) cycles `vertical → horizontal → both`. Verify:
+      `vertical` gates a PORTRAIT hold (rotate-to-landscape prompt);
+      `horizontal` gates a LANDSCAPE hold (rotate-to-portrait prompt, with the
+      phone graphic rotating the other way); `both` never prompts.
 
 **Item 3 — Pan how-to + bouncing arrow**
 - [ ] At capture start the code-drawn pan graphic (white phone + sweeping

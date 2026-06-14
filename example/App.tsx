@@ -88,11 +88,12 @@ function App(): React.JSX.Element {
   // the normal preview.
   const [rectDebugEnabled, setRectDebugEnabled] = useState(false);
   const [rectDebugUri, setRectDebugUri] = useState<string | null>(null);
-  // panMode flag (guidance item 1).  'mode-a' (default) = landscape-only:
-  // a portrait hold shows the rotate-to-landscape prompt.  'both' = portrait
-  // hold starts immediately (Mode B, left→right) with NO prompt — the
-  // pre-guidance behaviour.  Toggle to verify both paths on-device.
-  const [panMode, setPanMode] = useState<PanMode>('mode-a');
+  // panMode flag (guidance item 1).  'vertical' (default) = landscape-only
+  // (top→bottom): a portrait hold shows the rotate-to-landscape prompt.
+  // 'horizontal' = portrait-only (left→right): a landscape hold shows the
+  // rotate-to-portrait prompt.  'both' = either, no prompt.  Toggle cycles
+  // all three to verify the gates on-device.
+  const [panMode, setPanMode] = useState<PanMode>('vertical');
 
   // v0.13.0 — controlled flash state demo.  The host owns the
   // `'on' | 'off'` value; the built-in flash button drives the
@@ -479,12 +480,18 @@ function App(): React.JSX.Element {
           <Pressable
             style={styles.panModeToggle}
             onPress={() =>
-              setPanMode((m) => (m === 'mode-a' ? 'both' : 'mode-a'))
+              setPanMode((m) =>
+                m === 'vertical' ? 'horizontal' : m === 'horizontal' ? 'both' : 'vertical',
+              )
             }
             accessibilityRole="button"
           >
             <Text style={styles.rectDebugToggleText}>
-              🧭 panMode: {panMode === 'mode-a' ? 'mode-a (landscape only)' : 'both (portrait OK)'}
+              🧭 panMode: {panMode === 'vertical'
+                ? 'vertical (landscape)'
+                : panMode === 'horizontal'
+                  ? 'horizontal (portrait)'
+                  : 'both'}
             </Text>
           </Pressable>
         )}

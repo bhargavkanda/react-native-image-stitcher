@@ -100,7 +100,11 @@ import { OrientationDriftModal } from './OrientationDriftModal';
 // Pure decision helpers + sensor hook + presentational surfaces for the
 // first-time-user pan-capture guidance (items 1–7).  All read directly
 // from the new <Camera> props below, NOT threaded through PanoramaSettings.
-import { shouldGateForPanMode, type PanMode } from './panModeGate';
+import {
+  shouldGateForPanMode,
+  gateTargetOrientation,
+  type PanMode,
+} from './panModeGate';
 import { countdownSecondsFrom } from './captureCountdown';
 import { usePanMotion } from './usePanMotion';
 import type { Quad } from './cropGeometry';
@@ -705,17 +709,20 @@ export interface CameraProps {
   /**
    * Which device holds the non-AR panorama capture accepts.
    *
-   *   - `'mode-a'` (DEFAULT) — LANDSCAPE-only.  Holding the phone in
-   *     portrait when the user starts a panorama is BLOCKED behind the
-   *     rotate-to-landscape prompt (item 2); the capture starts the
-   *     instant they rotate to landscape (either way up).
-   *   - `'both'` — landscape OR portrait; the rotate gate never fires,
-   *     the user captures in whichever hold they're already in.
+   *   - `'vertical'` (DEFAULT) — LANDSCAPE-only, top→bottom pan.  Starting a
+   *     panorama in portrait is BLOCKED behind the rotate-to-landscape
+   *     prompt (item 2); the capture starts the instant they rotate to
+   *     landscape (either way up).
+   *   - `'horizontal'` — PORTRAIT-only, left→right pan.  Starting in
+   *     landscape is BLOCKED behind the rotate-to-portrait prompt; capture
+   *     starts on rotating to portrait (either way up).
+   *   - `'both'` — landscape OR portrait; the rotate gate never fires, the
+   *     user captures in whichever hold they're already in.
    *
-   * **BREAKING (since the previous release defaulted to both modes):**
-   * the default is now `'mode-a'`.  Hosts that relied on portrait
-   * (Mode B, left→right) panoramas must opt back in with
-   * `panMode='both'`.  See CHANGELOG.
+   * **BREAKING (since the previous release accepted both holds ungated):**
+   * the default is now `'vertical'`.  Hosts that want left→right (portrait)
+   * panoramas use `panMode='horizontal'` (portrait-only) or `'both'`.  See
+   * CHANGELOG.
    */
   panMode?: PanMode;
 
@@ -1103,7 +1110,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     frameProcessor: hostFrameProcessor,
     engine = 'batch-keyframe',
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
-    panMode = 'mode-a',
+    panMode = 'vertical',
     panGuidance = true,
     maxPanDurationMs = 0,
     panTooFastThreshold,
@@ -2661,17 +2668,22 @@ export function Camera(props: CameraProps): React.JSX.Element {
         onClose={() => setSettingsModalVisible(false)}
       />
 
-      {/* Item 1/2 — rotate-to-landscape prompt.  Shown while a Mode-A
-          hold is blocked on the user rotating to landscape.  The resume
-          effect starts the deferred capture the instant they do. */}
-      {/* The rotate prompt is the ONLY feedback for the Mode-A gate, so it
-          is NOT gated on `panGuidance` — otherwise panGuidance={false} +
-          panMode='mode-a' would block a portrait hold with a dead, silent
-          shutter.  `panGuidance` governs only the cosmetic in-capture
-          overlays. */}
+      {/* Item 1/2 — rotate prompt.  Shown while a gated hold is blocked on
+          the user rotating to the target orientation (landscape for
+          panMode='vertical', portrait for 'horizontal').  The resume effect
+          starts the deferred capture the instant they do. */}
+      {/* The rotate prompt is the ONLY feedback for the mode gate, so it is
+          NOT gated on `panGuidance` — otherwise panGuidance={false} +
+          a gated panMode would block the hold with a dead, silent shutter.
+          `panGuidance` governs only the cosmetic in-capture overlays. */}
       <RotateToLandscapePrompt
         visible={pendingPanStart}
-        copy={guidanceCopyResolved.rotateToLandscape}
+        target={gateTargetOrientation(panMode) ?? 'landscape'}
+        copy={
+          gateTargetOrientation(panMode) === 'portrait'
+            ? guidanceCopyResolved.rotateToPortrait
+            : guidanceCopyResolved.rotateToLandscape
+        }
       />
 
       {/* v0.12.0 — Orientation drift modal.  Shows AFTER the SDK has

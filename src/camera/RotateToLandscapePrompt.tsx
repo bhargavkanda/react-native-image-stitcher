@@ -72,9 +72,16 @@ export interface RotateToLandscapePromptProps {
   /**
    * Caption copy.  Defaults to `DEFAULT_GUIDANCE_COPY.rotateToLandscape`
    * ("Rotate to landscape").  Hosts localise via the `guidanceCopy`
-   * `<Camera>` prop and pass the resolved string here.
+   * `<Camera>` prop and pass the resolved string here.  When `target` is
+   * `'portrait'`, pass the rotate-to-portrait copy.
    */
   copy?: string;
+  /**
+   * Orientation to rotate TO: `'landscape'` (default, panMode `'vertical'`)
+   * or `'portrait'` (panMode `'horizontal'`).  Drives the rotating-phone
+   * graphic's direction.
+   */
+  target?: 'landscape' | 'portrait';
   /** Outer style passthrough (applied to the absolute-fill root). */
   style?: StyleProp<ViewStyle>;
 }
@@ -83,6 +90,7 @@ export interface RotateToLandscapePromptProps {
 export function RotateToLandscapePrompt({
   visible,
   copy = DEFAULT_GUIDANCE_COPY.rotateToLandscape,
+  target = 'landscape',
   style,
 }: RotateToLandscapePromptProps): React.JSX.Element | null {
   // Counter-rotate the caption so the text stays upright relative to
@@ -105,6 +113,7 @@ export function RotateToLandscapePrompt({
           carries the instruction for assistive tech). */}
       <RotatePhoneGraphic
         playing={visible}
+        target={target}
         // Gravity-agnostic line art: read correctly at any tilt, so it is
         // intentionally NOT counter-rotated (unlike the text caption).
       />
