@@ -484,12 +484,17 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   cfg.availableRamMB =
       (double)NSProcessInfo.processInfo.physicalMemory
       / (1024.0 * 1024.0);
-  // Route to the manual cv::detail::* pipeline; the high-level
-  // cv::Stitcher::create path (Android's default) is unsuitable for
-  // iOS's shelf-pan capture shape (compose-MP defaults, graphcut at
-  // compose-MP, BA convergence params — see stitcher.hpp comment
-  // block).
-  cfg.useManualPipeline = true;
+  // 2026-06-14 — route the batch stitch to the HIGH-LEVEL cv::Stitcher path
+  // with the SPHERICAL warper: i.e. EXACTLY what stock cv::Stitcher does by
+  // default.  Empirically isolated on real device frames — stock cv::Stitcher
+  // (high-level + spherical) stitched every failing capture cleanly, while the
+  // manual cv::detail pipeline fragmented / doubled / over-curved the same
+  // frames on plane / cylindrical / spherical alike.  The earlier "high-level
+  // unsuitable" note was made with the PLANE warper (which diverges/stretches
+  // on wide pans); spherical bounds both axes and matches the proven-clean
+  // stock result.  (Manual pipeline kept in-tree for Android / future use.)
+  cfg.warperType        = "spherical";
+  cfg.useManualPipeline = false;
 
   // Marshal NSArray<NSString*> → std::vector<std::string>.  Strip the
   // `file://` scheme that some callers attach so the shared C++ can
