@@ -1906,7 +1906,18 @@ StitchResult stitchFramePathsManual(
             }
             const bool widePan = sweepDeg >= kWidePanSweepDeg;
 
-            if (wouldDiverge || widePan) {
+            // Only switch the warper when a frame's warp ACTUALLY blows past
+            // the size guard (genuine divergence).  The `widePan` sweep-angle
+            // heuristic (>= kWidePanSweepDeg) was too aggressive — it fired on
+            // a NORMAL moderate vertical Mode-A pan and switched away from the
+            // PLANE warper that v0.6 used cleanly into the bounded-warper path,
+            // which fragmented/doubled the output (confirmed on-device
+            // 2026-06-14: stock cv::Stitcher AND v0.6 both stitch the exact
+            // same frames cleanly on the default/plane warper; only the
+            // post-v0.6 sweep-triggered switch broke it).  Keep the divergence
+            // guard (the real OOM/garbage protection) + spherical for that
+            // case; `widePan` stays only for the diagnostic log below.
+            if (wouldDiverge) {
                 log_info(logFn, "[stitch-bc]",
                          "step7.6: switching '%s' -> %s (diverge=%d wide=%d "
                          "sweep=%.1fdeg, frame %zu) for a bounded projection",
