@@ -576,6 +576,26 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
              framesRequested:framesRequested
               framesIncluded:(NSInteger)r.framesIncluded
        finalConfidenceThresh:r.finalConfidenceThresh];
+#if DEBUG
+      // A/B HARNESS (DEBUG only) — also stitch the SAME frames via the OPPOSITE
+      // pipeline (manual cv::detail + plane) and write it next to the primary
+      // (high-level + spherical) as "<base>-manual.jpg", so the crop/preview
+      // screen can TOGGLE high-level vs manual on one real capture instead of
+      // rebuilding to compare.  Doubles stitch time; DEBUG builds only.
+      {
+        std::string ap(cleanedOutputPath.UTF8String);
+        size_t dot = ap.find_last_of('.');
+        std::string altPath =
+            (dot == std::string::npos ? ap : ap.substr(0, dot)) + "-manual.jpg";
+        retailens::StitchConfig altCfg = cfg;
+        altCfg.useManualPipeline = true;
+        altCfg.warperType        = "plane";
+        retailens::StitchResult ar =
+            retailens::stitchFramePaths(paths, altPath, altCfg, logFn);
+        NSLog(@"[ab-harness] alt(manual/plane) -> %s success=%d %dx%d",
+              altPath.c_str(), ar.success ? 1 : 0, (int)ar.width, (int)ar.height);
+      }
+#endif
     } else {
       // Map StitchErrorCode → NSError.code.  Preserves the existing
       // 9001/9002/9003/1001/9007 sentinels the JS UX layer already

@@ -107,6 +107,16 @@ export interface RectCropPreviewProps {
   imageWidth: number;
   /** Intrinsic pixel height of `imageUri`. */
   imageHeight: number;
+  /**
+   * DEBUG A/B harness — file:// URI of the SAME capture stitched by the
+   * OPPOSITE pipeline (manual cv::detail + plane).  When set, a toggle appears
+   * that flips the displayed panorama between the primary (high-level +
+   * spherical) and this one, for on-device comparison on a single capture.
+   * Its dimensions are read at runtime via `Image.getSize`.  When the manual
+   * output is showing, the crop quad is hidden and the accept button emits
+   * THIS uri (so you can pick the better pipeline per capture).
+   */
+  altImageUri?: string;
   /** Show / hide the editor. */
   visible: boolean;
   /**
@@ -119,7 +129,7 @@ export interface RectCropPreviewProps {
    * un-cropped.  Also called when the user collapses the quad to something
    * un-warpable, so a degenerate quad never reaches the native crop.
    */
-  onUseOriginal: () => void;
+  onUseOriginal: (uri?: string) => void;
   /**
    * Tapped on "Retake" — discard this capture entirely and return to the
    * camera.  No result is emitted (the host clears the editor + lets the
@@ -196,6 +206,7 @@ export function RectCropPreview(
     imageUri,
     imageWidth,
     imageHeight,
+    altImageUri,
     visible,
     onConfirm,
     onUseOriginal,
@@ -207,6 +218,28 @@ export function RectCropPreview(
   } = props;
 
   const resolvedCopy = useMemo(() => mergeGuidanceCopy(copy), [copy]);
+
+  // ── DEBUG A/B harness — toggle the displayed pano between the primary
+  // (high-level + spherical) and the alt (manual + plane) stitch of the SAME
+  // frames.  `altSize` is fetched once; when the alt is showing we use its
+  // dims for the contain-fit and hide the crop quad.
+  const [showingAlt, setShowingAlt] = useState(false);
+  const [altSize, setAltSize] = useState<{ w: number; h: number } | null>(null);
+  React.useEffect(() => {
+    if (!altImageUri) {
+      setAltSize(null);
+      return;
+    }
+    Image.getSize(
+      altImageUri,
+      (w, h) => setAltSize({ w, h }),
+      () => setAltSize(null),
+    );
+  }, [altImageUri]);
+  const showAlt = showingAlt && !!altImageUri && !!altSize;
+  const activeUri = showAlt ? (altImageUri as string) : imageUri;
+  const activeW = showAlt ? (altSize as { w: number }).w : imageWidth;
+  const activeH = showAlt ? (altSize as { h: number }).h : imageHeight;
 
   // The 4 corners live in IMAGE-PIXEL space (the source of truth) so they
   // survive layout-box changes (rotation, keyboard) without drift.  We map
@@ -324,17 +357,19 @@ export function RectCropPreview(
   let screenCorners: Point[] | null = null;
 
   if (box) {
-    const fit = containFit(box, imageWidth, imageHeight);
+    const fit = containFit(box, activeW, activeH);
     if (fit) {
       imageBox = {
         left: fit.offX,
         top: fit.offY,
-        width: imageWidth * fit.scale,
-        height: imageHeight * fit.scale,
+        width: activeW * fit.scale,
+        height: activeH * fit.scale,
       };
-      screenCorners = imageQuad.map((p) =>
-        imageToScreen(p, box, imageWidth, imageHeight),
-      );
+      // Quad corners only apply to the primary (croppable) image — hidden
+      // while the alt (manual) output is shown for comparison.
+      screenCorners = showAlt
+        ? null
+        : imageQuad.map((p) => imageToScreen(p, box, imageWidth, imageHeight));
     }
   }
 
@@ -352,7 +387,7 @@ export function RectCropPreview(
     <Modal
       visible={visible}
       animationType="fade"
-      onRequestClose={onUseOriginal}
+      onRequestClose={() => onUseOriginal()}
       accessibilityLabel={
         showCropControls
           ? 'Crop the captured panorama'
@@ -380,18 +415,36 @@ export function RectCropPreview(
           </View>
         )}
 
+        {/* DEBUG A/B toggle — flip the displayed pano between the two
+            pipelines stitched from the SAME frames. */}
+        {altImageUri && altSize && (
+          <Pressable
+            style={styles.abToggle}
+            onPress={() => setShowingAlt((v) => !v)}
+            accessibilityRole="button"
+            accessibilityLabel="Toggle stitch pipeline"
+          >
+            <Text style={styles.abToggleText}>
+              {showAlt
+                ? '⟳  MANUAL (cv::detail + plane)'
+                : '⟳  HIGH-LEVEL (cv::Stitcher + spherical)'}
+              {'   ·   tap to compare'}
+            </Text>
+          </Pressable>
+        )}
+
         <View style={styles.canvas} onLayout={onLayout}>
           {imageBox && (
             <Image
-              source={{ uri: imageUri }}
+              source={{ uri: activeUri }}
               style={[styles.image, imageBox]}
               resizeMode="stretch"
             />
           )}
 
           {/* Crop affordances — quad edges + draggable handles — only in
-              crop mode.  Preview-only mode shows the bare image. */}
-          {showCropControls && (
+              crop mode on the PRIMARY image (hidden while comparing the alt). */}
+          {showCropControls && !showAlt && (
             <>
               {/* Quad edges (non-interactive). */}
               {edges.map((e, i) => (
@@ -439,38 +492,49 @@ export function RectCropPreview(
               <Text style={styles.btnText}>{resolvedCopy.cropRetake}</Text>
             </Pressable>
             {/* Crop mode only — "Use original" emits the stitch un-cropped.
-                In preview-only mode the single primary button (below) is the
-                accept action, so this would be redundant. */}
-            {showCropControls && (
+                Hidden in preview-only mode and while comparing the alt (the
+                primary button below is the accept action there). */}
+            {showCropControls && !showAlt && (
               <Pressable
                 style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
-                onPress={onUseOriginal}
+                onPress={() => onUseOriginal()}
                 accessibilityRole="button"
                 accessibilityLabel={resolvedCopy.cropUseOriginal}
               >
                 <Text style={styles.btnText}>{resolvedCopy.cropUseOriginal}</Text>
               </Pressable>
             )}
-            {/* Primary action — "Crop" applies the quad (crop mode);
-                "Confirm" accepts the image as-is (preview-only mode). */}
+            {/* Primary action — "Use this" emits the SHOWN (alt) pipeline's
+                output; otherwise "Crop" applies the quad (crop mode) or
+                "Confirm" accepts the primary as-is (preview-only mode). */}
             <Pressable
               style={({ pressed }) => [
                 styles.btn,
                 styles.primary,
                 pressed && styles.btnPressed,
               ]}
-              onPress={showCropControls ? handleConfirm : onUseOriginal}
+              onPress={
+                showAlt
+                  ? () => onUseOriginal(activeUri)
+                  : showCropControls
+                    ? handleConfirm
+                    : () => onUseOriginal()
+              }
               accessibilityRole="button"
               accessibilityLabel={
-                showCropControls
-                  ? resolvedCopy.cropConfirm
-                  : resolvedCopy.previewConfirm
+                showAlt
+                  ? 'Use this output'
+                  : showCropControls
+                    ? resolvedCopy.cropConfirm
+                    : resolvedCopy.previewConfirm
               }
             >
               <Text style={styles.btnText}>
-                {showCropControls
-                  ? resolvedCopy.cropConfirm
-                  : resolvedCopy.previewConfirm}
+                {showAlt
+                  ? 'Use this'
+                  : showCropControls
+                    ? resolvedCopy.cropConfirm
+                    : resolvedCopy.previewConfirm}
               </Text>
             </Pressable>
           </View>
@@ -528,6 +592,17 @@ const styles = StyleSheet.create({
     color: GUIDANCE_TOKENS.amber,
     fontSize: 13,
     fontWeight: '600',
+  },
+  abToggle: {
+    backgroundColor: '#0A84FF',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+  },
+  abToggleText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
   },
   canvas: { flex: 1 },
   image: { position: 'absolute' },

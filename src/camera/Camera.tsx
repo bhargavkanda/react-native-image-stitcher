@@ -2767,12 +2767,32 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
+        // DEBUG A/B harness — the native batch stitch (DEBUG build) also writes
+        // the SAME frames stitched by the OPPOSITE pipeline as `<base>-manual.jpg`
+        // next to the primary; surface it so the preview can toggle/compare.
+        // Absent in release (no file) → Image.getSize fails → toggle hidden.
+        altImageUri={
+          __DEV__ && cropPending
+            ? cropPending.uri.replace(/\.jpg$/i, '-manual.jpg')
+            : undefined
+        }
         initialRect={cropPending?.initialRect}
         warnings={cropPending?.warnings.map((w) => w.message) ?? []}
         showCropControls={rectCrop}
         copy={guidanceCopyResolved}
-        onUseOriginal={() => {
-          if (cropPending) onCapture?.(cropPending.captureResultObj);
+        onUseOriginal={(altUri) => {
+          if (cropPending) {
+            // altUri set → the user picked the alt (manual) pipeline's output
+            // in the A/B toggle; emit THAT image (cache-bust for <Image>).
+            onCapture?.(
+              altUri
+                ? {
+                    ...cropPending.captureResultObj,
+                    uri: `${altUri}?t=${Date.now()}`,
+                  }
+                : cropPending.captureResultObj,
+            );
+          }
           setCropPending(null);
         }}
         onRetake={() => {
