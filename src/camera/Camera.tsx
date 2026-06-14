@@ -1487,6 +1487,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // auto-stop and can attach the LATERAL_DRIFT_FINALIZE warning.  Consumed
   // (reset) at the start of handleHoldEnd so it never leaks to the next pan.
   const lateralFinalizeRef = useRef(false);
+  // Item 4 — latched true if the pan ever exceeded the recommended pace (the
+  // live "too fast" cue fired) during the capture, so the finalize attaches a
+  // HIGH_PAN_SPEED warning.  Reset at capture start; consumed at finalize.
+  const fastPanRef = useRef(false);
 
   // ── v0.12.0 — Orientation drift detection + auto-abandon ────────
   //
@@ -1772,6 +1776,8 @@ export function Camera(props: CameraProps): React.JSX.Element {
       // an empty array and accumulates from there.
       setBatchKeyframeThumbnails([]);
       setIncrementalState(null);
+      // Item 4 — fresh capture: clear the latched too-fast flag.
+      fastPanRef.current = false;
       setStatusPhase('recording');
       setRecordingStartedAt(Date.now());
       // Item 5 — schedule the hard-ceiling auto-finalize.  Fires
@@ -1933,6 +1939,8 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // success and failure paths and never leaks into the next capture.
     const wasLateralFinalize = lateralFinalizeRef.current;
     lateralFinalizeRef.current = false;
+    const wasFastPan = fastPanRef.current;
+    fastPanRef.current = false;
     setStatusPhase('stitching');
     // Stop pumping new frames before finalizing so the engine isn't
     // racing the final cv::Stitcher pass against late-arriving
@@ -1989,6 +1997,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         framesRequested: result.framesRequested,
         framesIncluded: result.framesIncluded,
         lateralFinalize: wasLateralFinalize,
+        highPanSpeed: wasFastPan,
       });
 
       const captureResultObj: PanoramaCaptureResult = {
@@ -2071,9 +2080,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
         ok: false,
         type: 'panorama',
         error,
-        warnings: wasLateralFinalize
-          ? buildCaptureWarnings({ lateralFinalize: true })
-          : [],
+        warnings: buildCaptureWarnings({
+          lateralFinalize: wasLateralFinalize,
+          highPanSpeed: wasFastPan,
+        }),
       });
     } finally {
       finalizingRef.current = false;
@@ -2178,6 +2188,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // Gated on panGuidance so opting out keeps the banner calm/green.
   const recordingTooFast =
     panGuidance && panMotion.panSpeedBucket !== 'good';
+  // Latch the too-fast flag whenever the live cue fires during recording, so
+  // the finalize can attach a HIGH_PAN_SPEED warning (shown on the crop
+  // editor + returned in onCapture.warnings).  Reset at capture start.
+  useEffect(() => {
+    if (statusPhase === 'recording' && recordingTooFast) {
+      fastPanRef.current = true;
+    }
+  }, [statusPhase, recordingTooFast]);
   useEffect(() => {
     if (
       statusPhase === 'recording'

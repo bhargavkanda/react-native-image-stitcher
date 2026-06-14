@@ -62,6 +62,31 @@ describe('buildCaptureWarnings', () => {
     ]);
   });
 
+  it('warns HIGH_PAN_SPEED when the pan exceeded the recommended pace', () => {
+    const warnings = buildCaptureWarnings({
+      framesRequested: 20,
+      framesIncluded: 20,
+      highPanSpeed: true,
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.code).toBe('HIGH_PAN_SPEED');
+    expect(warnings[0]?.message).toMatch(/faster than the recommended pace/i);
+  });
+
+  it('can surface lateral, high-speed AND low-utilization together', () => {
+    const warnings = buildCaptureWarnings({
+      framesRequested: 20,
+      framesIncluded: 5,
+      lateralFinalize: true,
+      highPanSpeed: true,
+    });
+    expect(warnings.map((w) => w.code).sort()).toEqual([
+      'HIGH_PAN_SPEED',
+      'LATERAL_DRIFT_FINALIZE',
+      'LOW_FRAME_UTILIZATION',
+    ]);
+  });
+
   it('honours a custom utilization threshold', () => {
     // 17/20 = 0.85; below a 0.9 threshold → warns.
     const warnings = buildCaptureWarnings({

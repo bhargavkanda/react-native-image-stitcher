@@ -11,6 +11,9 @@
  *   • LATERAL_DRIFT_FINALIZE — the capture was auto-finalized early because
  *     the phone drifted sideways (item 6); only the pre-drift portion was
  *     stitched.
+ *   • HIGH_PAN_SPEED — the pan exceeded the recommended pace at some point
+ *     during the capture (the live "too fast" cue fired), so motion blur /
+ *     thin overlap may have hurt the result.
  *
  * `<Camera>` builds these at finalize and threads them into BOTH the
  * `onCapture` result payload (so any host — not just the example app —
@@ -25,7 +28,8 @@
 /** Stable codes a host can branch on (in addition to the message). */
 export type CaptureWarningCode =
   | 'LOW_FRAME_UTILIZATION'
-  | 'LATERAL_DRIFT_FINALIZE';
+  | 'LATERAL_DRIFT_FINALIZE'
+  | 'HIGH_PAN_SPEED';
 
 export interface CaptureWarning {
   /** Stable, host-switchable code. */
@@ -53,6 +57,8 @@ export interface BuildCaptureWarningsInput {
   framesIncluded?: number;
   /** True when this finalize was triggered by lateral-drift auto-stop. */
   lateralFinalize?: boolean;
+  /** True when the pan exceeded the recommended pace during the capture. */
+  highPanSpeed?: boolean;
   /** Override the LOW_FRAME_UTILIZATION trip point (fraction in (0, 1]). */
   lowFrameUtilizationThreshold?: number;
 }
@@ -69,6 +75,7 @@ export function buildCaptureWarnings(
     framesRequested,
     framesIncluded,
     lateralFinalize = false,
+    highPanSpeed = false,
     lowFrameUtilizationThreshold = LOW_FRAME_UTILIZATION_THRESHOLD,
   } = input;
 
@@ -80,6 +87,15 @@ export function buildCaptureWarnings(
       message:
         'Capture stopped early because the phone drifted sideways — only '
         + 'the part captured before the drift was stitched.',
+    });
+  }
+
+  if (highPanSpeed) {
+    warnings.push({
+      code: 'HIGH_PAN_SPEED',
+      message:
+        'The capture was taken faster than the recommended pace — the result '
+        + 'may not be the best. Pan more slowly next time.',
     });
   }
 

@@ -43,8 +43,6 @@ import {
   useKeyframeStream,
   useStitcherWorklet,
   userFacingStitchError,
-  useStitchStatsToast,
-  CaptureStitchStatsToast,
   type AcceptedKeyframe,
   type CameraCaptureResult,
   type CameraError,
@@ -103,12 +101,6 @@ function App(): React.JSX.Element {
   // (greyed + a11y "Flash unavailable in AR mode"); no host work
   // required for that.
   const [flash, setFlash] = useState<'on' | 'off'>('off');
-
-  // Toast for the dropped-frames "pan slower" hint.  Only fires when
-  // >30% of the requested frames are missing from the final stitch
-  // (e.g. >=2 of 6); a smaller drop stays silent.  Shown as a transient
-  // toast (CaptureStitchStatsToast), not a modal.
-  const dropToast = useStitchStatsToast();
 
   // v0.13.0 — capture-history thumbnails.  Appended on every
   // successful onCapture; rendered by `<Camera>`'s built-in
@@ -326,19 +318,14 @@ function App(): React.JSX.Element {
 
   const handleFramesDropped = (info: FramesDroppedInfo): void => {
     const missing = info.requested - info.included;
+    // The low-frame-utilization warning is now surfaced on the crop editor
+    // (and in onCapture.warnings), so we no longer pop a separate toast for
+    // it — just log here.
     // eslint-disable-next-line no-console
     console.warn(
       '[example] onFramesDropped',
       `${info.included}/${info.requested} (missing ${missing})`,
     );
-    if (info.requested > 0 && missing / info.requested > 0.3) {
-      dropToast.showFor(
-        `${missing} of ${info.requested} frames were dropped for low `
-          + 'overlap — a slower, steadier pan captures the full scene.',
-        4000,
-        'Pan more slowly next time',
-      );
-    }
   };
 
   const handleError = (err: CameraError): void => {
@@ -508,12 +495,6 @@ function App(): React.JSX.Element {
             onClose={() => setRectDebugUri(null)}
           />
         )}
-
-        <CaptureStitchStatsToast
-          title={dropToast.title}
-          message={dropToast.message}
-          placement="center"
-        />
       </SafeAreaView>
     </SafeAreaProvider>
   );
