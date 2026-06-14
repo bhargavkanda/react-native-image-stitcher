@@ -27,18 +27,31 @@
  * the host can mount us unconditionally without layout churn — mirrors
  * `CaptureStatusOverlay`'s `idle` → `null` contract.
  *
- * ## Why the caption counter-rotates but the graphic does not
+ * ## Why the WHOLE prompt counter-rotates
  *
  * The host app is typically portrait-locked, so when the user tilts to
  * landscape the OS does NOT rotate the framebuffer and JS-"up" stays at
- * the device's side edge.  The graphic is gravity-agnostic line art (a
- * rotating phone, drawn in code) so it reads correctly at any angle and
- * is left un-rotated.  The caption is *text*, so we counter-rotate it via
- * `useContentRotation()` — the same hook the bottom controls use — so
- * the words stay upright in the user's view as they rotate.  Once the
- * device reaches landscape the host flips `visible` to false and the
- * prompt disappears anyway, but the counter-rotation keeps the text
- * legible during the in-between tilt.
+ * the device's side edge.  We counter-rotate the entire prompt (graphic
+ * + caption) via `useContentRotation()` — the same hook the bottom
+ * controls use — so it reads upright relative to actual gravity.
+ *
+ * This matters for BOTH children, not just the text:
+ *   - the **caption** is text and must read left-to-right;
+ *   - the **graphic is now directional** — its camera dot starts on one
+ *     edge and rotates to another to demonstrate the gesture, so an
+ *     un-rotated graphic in a landscape hold reads 90° off (the dot
+ *     appears to start "down" and travel "left" instead of "left" →
+ *     "top").  It is therefore counter-rotated with the caption.
+ *   - the column **layout** (caption below the graphic) also only reads
+ *     as a physical column once the wrapper is upright — otherwise
+ *     "below" lands at the physical side edge.
+ *
+ * (An earlier version rotated only the caption, back when the graphic
+ * was a symmetric spinner with no start/end direction.)  In a portrait
+ * hold the hook returns 0° so this is a no-op; once the device reaches
+ * the target orientation the host flips `visible` to false anyway, but
+ * the counter-rotation keeps everything legible during the in-between
+ * tilt.
  *
  * ## Accessibility
  *
@@ -93,10 +106,11 @@ export function RotateToLandscapePrompt({
   target = 'landscape',
   style,
 }: RotateToLandscapePromptProps): React.JSX.Element | null {
-  // Counter-rotate the caption so the text stays upright relative to
-  // gravity while the device is mid-tilt.  Called before the early
-  // return so the hook order stays stable across visible toggles.
-  const captionRotation = useContentRotation();
+  // Counter-rotate the WHOLE prompt so it reads upright relative to
+  // gravity while the device is mid-tilt (locked-portrait hosts) — see
+  // the file header.  Called before the early return so the hook order
+  // stays stable across visible toggles.
+  const contentRotation = useContentRotation();
 
   if (!visible) return null;
 
@@ -109,20 +123,21 @@ export function RotateToLandscapePrompt({
       accessibilityRole="alert"
       accessibilityLiveRegion="polite"
     >
-      {/* Code-drawn rotating-phone graphic (decorative — the caption
-          carries the instruction for assistive tech). */}
-      <RotatePhoneGraphic
-        playing={visible}
-        target={target}
-        // Gravity-agnostic line art: read correctly at any tilt, so it is
-        // intentionally NOT counter-rotated (unlike the text caption).
-      />
+      {/* Graphic + caption share ONE counter-rotated column so both the
+          directional graphic and the "caption below" layout stay correct
+          relative to gravity (see header).  In portrait the rotation is a
+          no-op. */}
+      <View style={[styles.content, contentRotation]}>
+        {/* Code-drawn rotating-phone graphic (decorative — the caption
+            carries the instruction for assistive tech). */}
+        <RotatePhoneGraphic playing={visible} target={target} />
 
-      <View style={[styles.pill, captionRotation]}>
-        <View style={styles.dot} />
-        <Text style={styles.caption} numberOfLines={1}>
-          {copy}
-        </Text>
+        <View style={styles.pill}>
+          <View style={styles.dot} />
+          <Text style={styles.caption} numberOfLines={1}>
+            {copy}
+          </Text>
+        </View>
       </View>
     </View>
   );
@@ -135,6 +150,13 @@ const styles = StyleSheet.create({
     // caption read against bright scenes, while the preview stays
     // visible underneath (the user is framing a rotation, not a shot).
     backgroundColor: GUIDANCE_TOKENS.scrim,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // Counter-rotated column holding the graphic + caption.  Rotating this
+  // wrapper (not the children individually) keeps the "caption below the
+  // graphic" relationship intact while orienting the pair to gravity.
+  content: {
     alignItems: 'center',
     justifyContent: 'center',
   },
