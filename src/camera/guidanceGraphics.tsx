@@ -73,6 +73,17 @@ function PhoneBody({
   style?: StyleProp<ViewStyle>;
 }): React.JSX.Element {
   const radius = Math.min(width, height) * 0.16;
+  const short = Math.min(width, height);
+  const dotSize = Math.max(4, short * 0.09);
+  const inset = Math.max(4, short * 0.06);
+  // The front-facing camera always sits on a SHORT edge: top-centre for a
+  // tall (portrait) body, side-centre for a wide (landscape) body.  (Was
+  // top-centre unconditionally, which put the dot mid-LONG-edge on a
+  // landscape body.)
+  const isWide = width > height;
+  const dotPos: ViewStyle = isWide
+    ? { left: inset, top: height / 2 - dotSize / 2 }
+    : { top: inset, left: width / 2 - dotSize / 2 };
   return (
     <View
       style={[
@@ -87,16 +98,11 @@ function PhoneBody({
         style,
       ]}
     >
-      {/* Camera dot on the top short edge → marks "up". */}
       <View
         style={[
           styles.cameraDot,
-          {
-            width: Math.max(4, width * 0.06),
-            height: Math.max(4, width * 0.06),
-            borderRadius: Math.max(2, width * 0.03),
-            top: Math.max(5, height * 0.05),
-          },
+          { width: dotSize, height: dotSize, borderRadius: dotSize / 2 },
+          dotPos,
         ]}
       />
       {children}
@@ -120,41 +126,44 @@ export function RotatePhoneGraphic({
   /** Orientation to rotate TO: 'landscape' (default) or 'portrait'. */
   target?: 'landscape' | 'portrait';
 }): React.JSX.Element {
-  const spin = useRef(new Animated.Value(0)).current;
+  // Single 0→1 loop value drives a ONE-WAY demonstration: hold the START
+  // orientation, rotate to the TARGET, hold, then fade out + reset (the
+  // reverse rotation happens while invisible).  This avoids the symmetric
+  // oscillation, which dwelt at the target and read as "starts at target,
+  // rotates away" — i.e. backwards.
+  const t = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (!playing) {
-      spin.setValue(0);
+      t.setValue(0);
       return;
     }
     const loop = Animated.loop(
-      Animated.sequence([
-        Animated.delay(350),
-        Animated.timing(spin, {
-          toValue: 1,
-          duration: 850,
-          easing: Easing.inOut(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.delay(650), // dwell at landscape so the goal state reads
-        Animated.timing(spin, {
-          toValue: 0,
-          duration: 850,
-          easing: Easing.inOut(Easing.cubic),
-          useNativeDriver: true,
-        }),
-      ]),
+      Animated.timing(t, {
+        toValue: 1,
+        duration: 2200,
+        easing: Easing.inOut(Easing.cubic),
+        useNativeDriver: true,
+      }),
     );
     loop.start();
     return () => loop.stop();
-  }, [playing, spin]);
+  }, [playing, t]);
 
   // To-landscape: start portrait (tall), rotate anticlockwise to landscape.
   // To-portrait: start landscape (wide), rotate clockwise to stand upright.
   const toLandscape = target === 'landscape';
-  const rotate = spin.interpolate({
-    inputRange: [0, 1],
-    outputRange: toLandscape ? ['0deg', '-90deg'] : ['0deg', '90deg'],
+  const targetDeg = toLandscape ? '-90deg' : '90deg';
+  // Hold START (0°) → rotate to TARGET → hold TARGET.
+  const rotate = t.interpolate({
+    inputRange: [0, 0.18, 0.62, 1],
+    outputRange: ['0deg', '0deg', targetDeg, targetDeg],
+  });
+  // Fade in at START, hold through the rotation, fade out at TARGET so the
+  // invisible reset (target→start on loop) is never seen.
+  const phoneOpacity = t.interpolate({
+    inputRange: [0, 0.12, 0.82, 1],
+    outputRange: [0, 1, 1, 0],
   });
 
   const ring = size * 0.78;
@@ -194,7 +203,9 @@ export function RotatePhoneGraphic({
         ]}
       />
 
-      <Animated.View style={{ transform: [{ rotate }] }}>
+      <Animated.View
+        style={{ opacity: phoneOpacity, transform: [{ rotate }] }}
+      >
         <PhoneBody width={phoneW} height={phoneH} />
       </Animated.View>
     </View>
