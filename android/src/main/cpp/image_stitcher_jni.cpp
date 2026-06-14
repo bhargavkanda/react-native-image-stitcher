@@ -116,16 +116,20 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         ? retailens::StitchMode::Panorama
         : retailens::StitchMode::Scans;
 
-    // 2026-06-07 — unify on the manual cv::detail pipeline.  It won the
-    // on-device A/B: equals the high-level cv::Stitcher on quality after
-    // parity AND is strictly more robust — the cylindrical fallback, warp
-    // guard, and exposure comp all live only in the manual path, so the
-    // high-level path garbages wide/0.5x captures.  Mirrors iOS'
-    // OpenCVStitcher.mm.  See docs/stitch-pipeline-architecture.md §7.
-    cfg.useManualPipeline = true;
-    // Match iOS' parity resolution: the manual entry's default registration
-    // is 0.3 MP (vs the high-level's 0.6); bump to 0.6 unless the caller set
-    // an explicit value.  (compositingResolMP already arrives as 1.0.)
+    // 2026-06-14 — route to the HIGH-LEVEL cv::Stitcher path + SPHERICAL
+    // warper, mirroring iOS (OpenCVStitcher.mm, a03f5f6).  The 2026-06-07
+    // "manual won the A/B" conclusion was made with the PLANE warper, which
+    // diverges/blows the canvas on wide & vertical Mode-A pans.  A fresh
+    // on-device A/B (2026-06-14) showed the manual cv::detail pipeline
+    // fragments / doubles / produces a near-empty gigapixel canvas (its
+    // hand-rolled BundleAdjusterRay mis-places a frame and PlaneWarper is
+    // unbounded), while stock cv::Stitcher + spherical (bounds BOTH axes)
+    // stitches the same frames cleanly and robustly.  Manual stays in-tree as
+    // the DEBUG A/B alt only.  See docs/stitch-pipeline-architecture.md §7.
+    cfg.useManualPipeline = false;
+    cfg.warperType        = "spherical";
+    // high-level cv::Stitcher already defaults registration to 0.6 MP; keep
+    // the explicit bump for any caller that left the sentinel.
     if (cfg.registrationResolMP <= 0.0) {
         cfg.registrationResolMP = 0.6;
     }
