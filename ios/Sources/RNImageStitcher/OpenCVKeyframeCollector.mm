@@ -129,17 +129,26 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
 
 - (nullable instancetype)initWithError:(NSError **)error {
   if ((self = [super init])) {
-    NSURL *appSupport = [[NSFileManager defaultManager]
-        URLForDirectory:NSApplicationSupportDirectory
+    // DEBUG builds write keyframes under Documents so they are inspectable in
+    // the Files app (gated by the example's Info.plist UIFileSharingEnabled +
+    // LSSupportsOpeningDocumentsInPlace).  RELEASE keeps them in the private,
+    // auto-cleaned ApplicationSupport dir.  See `cleanup` (retains in DEBUG).
+#if DEBUG
+    NSSearchPathDirectory baseDirType = NSDocumentDirectory;
+#else
+    NSSearchPathDirectory baseDirType = NSApplicationSupportDirectory;
+#endif
+    NSURL *baseDir = [[NSFileManager defaultManager]
+        URLForDirectory:baseDirType
                inDomain:NSUserDomainMask
       appropriateForURL:nil
                  create:YES
                   error:error];
-    if (!appSupport) return nil;
+    if (!baseDir) return nil;
     NSString *captureUUID = [[NSUUID UUID] UUIDString];
     NSString *sessionPath =
-        [[appSupport.path stringByAppendingPathComponent:@"Captures"]
-                          stringByAppendingPathComponent:captureUUID];
+        [[baseDir.path stringByAppendingPathComponent:@"Captures"]
+                       stringByAppendingPathComponent:captureUUID];
     BOOL ok = [[NSFileManager defaultManager]
                 createDirectoryAtPath:sessionPath
           withIntermediateDirectories:YES
@@ -256,8 +265,16 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
 
 - (void)cleanup {
   if (self.sessionDir.length == 0) return;
+#if DEBUG
+  // DEBUG: keep the session's keyframes on disk so they can be inspected in
+  // the Files app (Documents/Captures/<uuid>/keyframe-NNN.jpg).  Each capture
+  // is a fresh UUID folder; delete old ones via Files when done.
+  NSLog(@"[KeyframeCollector] DEBUG — retaining keyframes for inspection: %@",
+        self.sessionDir);
+#else
   [[NSFileManager defaultManager] removeItemAtPath:self.sessionDir
                                              error:nil];
+#endif
 }
 
 // ── CVPixelBuffer → cv::Mat (BGR) ──────────────────────────────────
