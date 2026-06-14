@@ -158,6 +158,14 @@ export interface RectCropPreviewProps {
   initialRect?: ImageRect;
   /** Copy overrides (cropConfirm / cropReset). Falls back to defaults. */
   copy?: Partial<GuidanceCopy>;
+  /**
+   * Safe-area insets (px).  The editor is a full-screen Modal, so the host
+   * passes `insets.top`/`insets.bottom` to keep the top toolbar (A/B toggle,
+   * warnings) clear of the notch/Dynamic Island and the bottom button bar
+   * clear of the home indicator.  Default 0.
+   */
+  topInset?: number;
+  bottomInset?: number;
 }
 
 
@@ -215,6 +223,8 @@ export function RectCropPreview(
     showCropControls = true,
     initialRect,
     copy,
+    topInset = 0,
+    bottomInset = 0,
   } = props;
 
   const resolvedCopy = useMemo(() => mergeGuidanceCopy(copy), [copy]);
@@ -402,7 +412,7 @@ export function RectCropPreview(
         'landscape-right',
       ]}
     >
-      <View style={styles.root}>
+      <View style={[styles.root, { paddingTop: topInset }]}>
         {/* Non-fatal warning banner (e.g. "<70 % of frames used"), shown
             ABOVE the image so the user sees it before accepting a crop. */}
         {warnings && warnings.length > 0 && (
@@ -415,22 +425,39 @@ export function RectCropPreview(
           </View>
         )}
 
-        {/* DEBUG A/B toggle — flip the displayed pano between the two
-            pipelines stitched from the SAME frames. */}
+        {/* DEBUG A/B comparison — a segmented control whose HIGHLIGHTED
+            segment is the pipeline currently ON SCREEN.  Tap a segment to
+            view that pipeline's stitch of the SAME frames. */}
         {altImageUri && altSize && (
-          <Pressable
-            style={styles.abToggle}
-            onPress={() => setShowingAlt((v) => !v)}
-            accessibilityRole="button"
-            accessibilityLabel="Toggle stitch pipeline"
-          >
-            <Text style={styles.abToggleText}>
-              {showAlt
-                ? '⟳  MANUAL (cv::detail + plane)'
-                : '⟳  HIGH-LEVEL (cv::Stitcher + spherical)'}
-              {'   ·   tap to compare'}
+          <View style={styles.abBar}>
+            <Text style={styles.abBarLabel}>
+              You are viewing the highlighted pipeline — tap to switch:
             </Text>
-          </Pressable>
+            <View style={styles.abSegments}>
+              <Pressable
+                style={[styles.abSeg, !showAlt && styles.abSegActive]}
+                onPress={() => setShowingAlt(false)}
+                accessibilityRole="button"
+                accessibilityState={{ selected: !showAlt }}
+                accessibilityLabel="View high-level pipeline"
+              >
+                <Text style={[styles.abSegText, !showAlt && styles.abSegTextActive]}>
+                  High-level
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.abSeg, showAlt && styles.abSegActive]}
+                onPress={() => setShowingAlt(true)}
+                accessibilityRole="button"
+                accessibilityState={{ selected: showAlt }}
+                accessibilityLabel="View manual pipeline"
+              >
+                <Text style={[styles.abSegText, showAlt && styles.abSegTextActive]}>
+                  Manual
+                </Text>
+              </Pressable>
+            </View>
+          </View>
         )}
 
         <View style={styles.canvas} onLayout={onLayout}>
@@ -480,7 +507,7 @@ export function RectCropPreview(
           )}
         </View>
 
-        <View style={styles.bar}>
+        <View style={[styles.bar, { paddingBottom: 16 + bottomInset }]}>
           <View style={styles.buttons}>
             {/* "Retake" — discard this capture, back to the camera. */}
             <Pressable
@@ -593,16 +620,42 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
-  abToggle: {
-    backgroundColor: '#0A84FF',
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    alignItems: 'center',
+  abBar: {
+    backgroundColor: '#1a1a1a',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#333',
   },
-  abToggleText: {
-    color: '#fff',
-    fontSize: 13,
+  abBarLabel: {
+    color: '#aaa',
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  abSegments: {
+    flexDirection: 'row',
+    alignSelf: 'center',
+    backgroundColor: '#000',
+    borderRadius: 9,
+    padding: 3,
+  },
+  abSeg: {
+    paddingVertical: 7,
+    paddingHorizontal: 22,
+    borderRadius: 7,
+  },
+  abSegActive: {
+    backgroundColor: '#0A84FF',
+  },
+  abSegText: {
+    color: '#9aa',
+    fontSize: 14,
     fontWeight: '700',
+  },
+  abSegTextActive: {
+    color: '#fff',
   },
   canvas: { flex: 1 },
   image: { position: 'absolute' },

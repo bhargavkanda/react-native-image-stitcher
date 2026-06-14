@@ -2779,6 +2779,8 @@ export function Camera(props: CameraProps): React.JSX.Element {
         initialRect={cropPending?.initialRect}
         warnings={cropPending?.warnings.map((w) => w.message) ?? []}
         showCropControls={rectCrop}
+        topInset={insets.top}
+        bottomInset={insets.bottom}
         copy={guidanceCopyResolved}
         onUseOriginal={(altUri) => {
           if (cropPending) {
