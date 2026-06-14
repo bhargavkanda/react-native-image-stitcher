@@ -1871,15 +1871,19 @@ StitchResult stitchFramePathsManual(
             // plane to the bounded cylindrical projection (~theta), which
             // keeps angular spacing uniform across the pan.
             //
-            // On-device A/B NOTE: cylindrical bounds the HORIZONTAL angle.
-            // For a Mode-A landscape *vertical* pan the end-perspective is
-            // along the cylinder's (vertically-unbounded) axis, so if
-            // cylindrical doesn't visibly flatten the ends on-device, flip
-            // kWidePanWarper to "spherical" (bounds BOTH axes).  Left as a
-            // one-line switch + the sweep angle is logged so the trip point
-            // is tunable from real traces.
+            // The sweep angle (sweepDeg, below) is AXIS-AGNOSTIC — the 3D
+            // angle between the first/last optical axes — so a Mode-A
+            // landscape *vertical* pan trips this gate just as a horizontal
+            // one does.  cylindrical bounds only the HORIZONTAL angle; its
+            // vertical axis is UNBOUNDED, so a vertical sweep's end frames
+            // project to runaway coordinates and shear apart (fragmented
+            // output — confirmed on-device 2026-06-14, a regression from
+            // 6b11da0 vs the v0.6 plane baseline).  Use SPHERICAL, which
+            // bounds BOTH axes, so vertical AND horizontal wide pans stay
+            // coherent.  (Divergence guard + step-7.7 canvas budget cap are
+            // unaffected — spherical is still a bounded projection.)
             constexpr double kWidePanSweepDeg = 45.0;
-            const char* kWidePanWarper = "cylindrical";
+            const char* kWidePanWarper = "spherical";
             double sweepDeg = 0.0;
             if (cameras.size() >= 2) {
                 auto opticalAxis = [](const cv::Mat& R) -> cv::Vec3d {
