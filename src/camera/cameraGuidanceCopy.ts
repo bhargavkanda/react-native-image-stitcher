@@ -1,14 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * cameraGuidanceCopy — the user-overridable copy surface for all panorama
- * capture guidance strings (rotate prompt, pan hint, too-fast warning,
- * lateral-stop popup, countdown).  Centralised so hosts can localise or
- * re-word every guidance message in one place via the `guidanceCopy`
- * `<Camera>` prop, and so the defaults live next to each other.
+ * cameraGuidanceCopy — the single user-overridable copy surface for EVERY
+ * string the panorama capture UI renders itself: the rotate prompt, pan
+ * hint, too-fast cue, lateral-stop popup, the capture-status banner
+ * (recording / stitching) AND the crop-editor warning banners.  Centralised
+ * so a host can localise or re-word the whole capture experience in one
+ * place via the `guidanceCopy` `<Camera>` prop (see the README's
+ * "Internationalization" section), and so the defaults live together.
+ *
+ * NOTE on coverage: the *recoverable stitch-error* alert copy
+ * (`userFacingStitchError`) is rendered by the HOST (it calls that helper
+ * in its `onError` handler), so it is localised there — see
+ * `cameraErrorMessages.ts`, which accepts an override map for the same
+ * reason.  Everything the SDK draws on screen flows through THIS object.
  *
  * Mirrors the override pattern of `PanoramaGuidance.messages` and
  * `cameraErrorMessages.ts`.
  */
+import {
+  DEFAULT_CAPTURE_WARNING_COPY,
+  type CaptureWarningCopy,
+} from './captureWarnings';
 
 export interface GuidanceCopy {
   /** Item 2 — caption pill while waiting for the user to rotate to landscape
@@ -44,6 +56,26 @@ export interface GuidanceCopy {
   cropUseOriginal: string;
   /** Item 7 — discard this capture and return to the camera. */
   cropRetake: string;
+
+  // ── Capture-status banner (CaptureStatusOverlay) ───────────────────────
+  /** Banner while a capture is recording (the calm, green state). */
+  statusRecording: string;
+  /** Banner while the panorama is being stitched after release. */
+  statusStitching: string;
+
+  // ── Crop-editor warning banner (buildCaptureWarnings) ──────────────────
+  // These re-use the capture-warning defaults verbatim (single source of
+  // truth in `captureWarnings.ts`); overriding them here re-words BOTH the
+  // crop-banner text AND the `message` carried on `onCapture(...).warnings`.
+  /**
+   * LOW_FRAME_UTILIZATION warning.  TEMPLATE — keep the `{included}`,
+   * `{requested}` and `{percent}` placeholders (substituted at runtime).
+   */
+  warnLowFrameUtilization: string;
+  /** LATERAL_DRIFT_FINALIZE warning. */
+  warnLateralDriftFinalize: string;
+  /** HIGH_PAN_SPEED warning. */
+  warnHighPanSpeed: string;
 }
 
 export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
@@ -63,7 +95,26 @@ export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
   cropReset: 'Reset',
   cropUseOriginal: 'Use original',
   cropRetake: 'Retake',
+  statusRecording: 'Hold steady — pan slowly',
+  statusStitching: 'Stitching panorama…',
+  // DRY: the English warning copy lives once, in captureWarnings.ts.
+  warnLowFrameUtilization: DEFAULT_CAPTURE_WARNING_COPY.lowFrameUtilization,
+  warnLateralDriftFinalize: DEFAULT_CAPTURE_WARNING_COPY.lateralDriftFinalize,
+  warnHighPanSpeed: DEFAULT_CAPTURE_WARNING_COPY.highPanSpeed,
 };
+
+/**
+ * Project the warning keys of a resolved `GuidanceCopy` back onto the
+ * {@link CaptureWarningCopy} shape `buildCaptureWarnings` consumes.  Keeps
+ * the two call sites in `<Camera>` from re-spelling the mapping (DRY).
+ */
+export function captureWarningCopyFrom(g: GuidanceCopy): CaptureWarningCopy {
+  return {
+    lowFrameUtilization: g.warnLowFrameUtilization,
+    lateralDriftFinalize: g.warnLateralDriftFinalize,
+    highPanSpeed: g.warnHighPanSpeed,
+  };
+}
 
 /**
  * Merge a partial host override onto the defaults.  Undefined / missing keys

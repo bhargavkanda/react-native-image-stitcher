@@ -9,6 +9,7 @@
 import {
   buildCaptureWarnings,
   LOW_FRAME_UTILIZATION_THRESHOLD,
+  DEFAULT_CAPTURE_WARNING_COPY,
 } from '../captureWarnings';
 
 describe('buildCaptureWarnings', () => {
@@ -107,5 +108,59 @@ describe('buildCaptureWarnings', () => {
 
   it('exposes a 0.70 default threshold', () => {
     expect(LOW_FRAME_UTILIZATION_THRESHOLD).toBe(0.7);
+  });
+
+  describe('i18n — copy override', () => {
+    it('uses an overridden (localised) message for the static warnings', () => {
+      const warnings = buildCaptureWarnings({
+        lateralFinalize: true,
+        highPanSpeed: true,
+        copy: {
+          lateralDriftFinalize: 'Capture arrêtée — dérive latérale.',
+          highPanSpeed: 'Trop rapide.',
+        },
+      });
+      expect(warnings.find((w) => w.code === 'LATERAL_DRIFT_FINALIZE')?.message)
+        .toBe('Capture arrêtée — dérive latérale.');
+      expect(warnings.find((w) => w.code === 'HIGH_PAN_SPEED')?.message).toBe(
+        'Trop rapide.',
+      );
+    });
+
+    it('interpolates {included}/{requested}/{percent} into a custom template', () => {
+      const warnings = buildCaptureWarnings({
+        framesRequested: 20,
+        framesIncluded: 5,
+        copy: {
+          lowFrameUtilization:
+            'Seulement {included}/{requested} ({percent}%) utilisées.',
+        },
+      });
+      const low = warnings.find((w) => w.code === 'LOW_FRAME_UTILIZATION');
+      expect(low?.message).toBe('Seulement 5/20 (25%) utilisées.');
+      // The structured fields are still populated for code-based hosts.
+      expect(low?.framesIncluded).toBe(5);
+      expect(low?.utilization).toBeCloseTo(0.25);
+    });
+
+    it('falls back to the default for any copy key the override omits', () => {
+      const warnings = buildCaptureWarnings({
+        lateralFinalize: true,
+        highPanSpeed: true,
+        copy: { lateralDriftFinalize: 'override only this one' },
+      });
+      expect(warnings.find((w) => w.code === 'HIGH_PAN_SPEED')?.message).toBe(
+        DEFAULT_CAPTURE_WARNING_COPY.highPanSpeed,
+      );
+    });
+
+    it('leaves an unknown placeholder verbatim rather than throwing', () => {
+      const warnings = buildCaptureWarnings({
+        framesRequested: 10,
+        framesIncluded: 1,
+        copy: { lowFrameUtilization: '{included} of {bogus} frames' },
+      });
+      expect(warnings[0]?.message).toBe('1 of {bogus} frames');
+    });
   });
 });

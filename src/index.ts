@@ -43,13 +43,25 @@ export type {
 export type {
   CaptureWarning,
   CaptureWarningCode,
+  CaptureWarningCopy,
 } from './camera/captureWarnings';
+// Default English warning templates (single source of truth; re-used by
+// `DEFAULT_GUIDANCE_COPY`).  Exposed so a host can diff / extend them.
+export { DEFAULT_CAPTURE_WARNING_COPY } from './camera/captureWarnings';
 
 // Recoverable-stitch-failure → friendly Alert copy.  Hosts call this in
 // their onError handler to surface actionable guidance ("pan more slowly",
-// "pivot in place") instead of the raw cv::Stitcher diagnostic.
-export { userFacingStitchError } from './camera/cameraErrorMessages';
-export type { UserFacingStitchError } from './camera/cameraErrorMessages';
+// "pivot in place") instead of the raw cv::Stitcher diagnostic.  Pass an
+// `overrides` map (keyed by `RECOVERABLE_STITCH_CODES`) to localise it.
+export {
+  userFacingStitchError,
+  RECOVERABLE_STITCH_GUIDANCE,
+  RECOVERABLE_STITCH_CODES,
+} from './camera/cameraErrorMessages';
+export type {
+  UserFacingStitchError,
+  UserFacingStitchErrorOverrides,
+} from './camera/cameraErrorMessages';
 
 // ─────────────────────────────────────────────────────────────────────
 // AR foundation (public since 0.1.0)

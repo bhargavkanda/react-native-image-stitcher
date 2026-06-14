@@ -110,6 +110,7 @@ import { usePanMotion } from './usePanMotion';
 import type { Quad } from './cropGeometry';
 import {
   mergeGuidanceCopy,
+  captureWarningCopyFrom,
   type GuidanceCopy,
 } from './cameraGuidanceCopy';
 import { RotateToLandscapePrompt } from './RotateToLandscapePrompt';
@@ -2012,6 +2013,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         framesIncluded: result.framesIncluded,
         lateralFinalize: wasLateralFinalize,
         highPanSpeed: wasFastPan,
+        copy: captureWarningCopyFrom(guidanceCopyResolved),
       });
 
       const captureResultObj: PanoramaCaptureResult = {
@@ -2097,6 +2099,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         warnings: buildCaptureWarnings({
           lateralFinalize: wasLateralFinalize,
           highPanSpeed: wasFastPan,
+          copy: captureWarningCopyFrom(guidanceCopyResolved),
         }),
       });
     } finally {
@@ -2411,8 +2414,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
         recordingStartedAt={recordingStartedAt ?? undefined}
         tooFast={recordingTooFast}
         recordingMessage={
-          recordingTooFast ? guidanceCopyResolved.tooFast : undefined
+          recordingTooFast
+            ? guidanceCopyResolved.tooFast
+            : guidanceCopyResolved.statusRecording
         }
+        stitchingMessage={guidanceCopyResolved.statusStitching}
       />
 
       {/* v0.13.1 — the built-in pan-guidance overlays

@@ -147,7 +147,11 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
 
 ## Notes
 - All guidance is gated behind `panGuidance` (default true) — set false to
-  opt out entirely. All copy is overridable via the `guidanceCopy` prop.
+  opt out entirely. **All SDK-rendered copy** is overridable via the
+  `guidanceCopy` prop (overlays + status banner + crop-editor warning
+  banners); the host-rendered recoverable-error alert is localised via
+  `userFacingStitchError(code, overrides)`. See the README's
+  "Internationalization (i18n)" section.
 - The two motion graphics (rotate-to-landscape, pan-capture) are drawn
   programmatically in `src/camera/guidanceGraphics.tsx` using pure RN core
   `View` + `Animated` — NO image assets, NO `react-native-svg`. They are

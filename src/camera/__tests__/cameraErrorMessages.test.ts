@@ -8,7 +8,11 @@
  * non-recoverable code returns null so the host falls back to its generic
  * error UI.
  */
-import { userFacingStitchError } from '../cameraErrorMessages';
+import {
+  userFacingStitchError,
+  RECOVERABLE_STITCH_CODES,
+  RECOVERABLE_STITCH_GUIDANCE,
+} from '../cameraErrorMessages';
 import type { CameraErrorCode } from '../Camera';
 
 describe('userFacingStitchError', () => {
@@ -73,4 +77,39 @@ describe('userFacingStitchError', () => {
       expect(userFacingStitchError(code)).toBeNull();
     },
   );
+
+  describe('i18n — overrides + exposed codes', () => {
+    it('RECOVERABLE_STITCH_CODES matches the built-in guidance keys', () => {
+      expect(RECOVERABLE_STITCH_CODES.sort()).toEqual(
+        Object.keys(RECOVERABLE_STITCH_GUIDANCE).sort(),
+      );
+      // Includes the v0.16 low-quality code so hosts know to translate it.
+      expect(RECOVERABLE_STITCH_CODES).toContain('STITCH_LOW_QUALITY');
+    });
+
+    it('a matching override wins over the built-in English', () => {
+      const r = userFacingStitchError('STITCH_OOM', {
+        STITCH_OOM: { title: 'Balayage plus court', message: 'Mémoire insuffisante.' },
+      });
+      expect(r).toEqual({
+        title: 'Balayage plus court',
+        message: 'Mémoire insuffisante.',
+      });
+    });
+
+    it('falls back to the built-in copy for codes the override omits', () => {
+      const r = userFacingStitchError('STITCH_NEED_MORE_IMGS', {
+        STITCH_OOM: { title: 'x', message: 'y' },
+      });
+      expect(r).toEqual(RECOVERABLE_STITCH_GUIDANCE.STITCH_NEED_MORE_IMGS);
+    });
+
+    it('still returns null for a non-recoverable code even with overrides', () => {
+      expect(
+        userFacingStitchError('UNKNOWN', {
+          STITCH_OOM: { title: 'x', message: 'y' },
+        }),
+      ).toBeNull();
+    });
+  });
 });
