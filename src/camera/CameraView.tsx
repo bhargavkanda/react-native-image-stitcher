@@ -22,11 +22,14 @@
 import React, {
   forwardRef,
   useCallback,
+  useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from 'react';
 import {
+  Platform,
   StyleSheet,
   Text,
   View,
@@ -35,10 +38,21 @@ import {
 } from 'react-native';
 import {
   Camera,
-  useCameraFormat,
   type CameraDevice,
   type CameraProps,
 } from 'react-native-vision-camera';
+
+import { pickCaptureFormat } from './pickCaptureFormat';
+
+
+/**
+ * Cap on the chosen capture format's PHOTO long edge (px).  4032 ≈ 12 MP at
+ * 4:3 ("4K"-ish), matching the 1× lens, so the ultra-wide stops producing a
+ * 48 MP / ~6000 px still.  Set to 2016 for "2K" (~3 MP).  `0` reverts to pure
+ * max-video.  TODO(v0.16): expose as a `<Camera photoMaxLongEdge>` prop once
+ * the 0.5× panorama 8-bit check passes on-device.
+ */
+const PHOTO_LONG_EDGE_CAP = 4032;
 
 
 export interface CameraViewProps {
@@ -190,21 +204,62 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // natively while keeping full-res keyframes.  Aspect stays the
   // top-priority filter, so 4:3 WYSIWYG parity holds on every device.
   //
-  // Still resolution is capped at ~12 MP.  The max-video 4:3 format pairs
-  // with a 24 MP photo (5712×4284) on the iPhone 16 Pro by default — 2×
-  // the file size + per-capture memory for no benefit on the panorama
-  // path (which uses the VIDEO stream, not takePhoto).  `photoResolution`
-  // is the LOWEST-priority filter, so it only breaks ties between equal
-  // max-video formats (e.g. the 12 MP-photo vs 24 MP-photo variants that
-  // share the same 4032×3024 video) — it never trades preview/stitch
-  // sharpness for a smaller still.  4032×3024 = 12 MP at 4:3; nearest-
-  // match keeps stills near there on any device.
-  const format = useCameraFormat(device ?? undefined, [
-    { photoAspectRatio: 4 / 3 },
-    { videoAspectRatio: 4 / 3 },
-    { videoResolution: 'max' },
-    { photoResolution: { width: 4032, height: 3024 } },
-  ]);
+  // Still resolution: a plain `videoResolution:'max'` filter (what we used
+  // before) maximises VIDEO and lets the PHOTO ride along — on the iPhone 16
+  // Pro ULTRA-WIDE that pairs a 48 MP still (8064×6048) with the max-video
+  // format, so a tap photo came out ~6000 px.  `pickCaptureFormat` instead
+  // picks the SHARPEST-video 4:3 format whose photo is within
+  // PHOTO_LONG_EDGE_CAP (verified on-device: the ultra-wide then chooses
+  // 3264×2448 video + 12 MP photo — still a crisp preview, no 48 MP still).
+  // The cap is on the PHOTO; video stays as high as the cap allows, so the
+  // 8-bit/sharp-preview rationale above still holds.
+  const format = useMemo(
+    () =>
+      pickCaptureFormat(device?.formats ?? [], {
+        maxPhotoLongEdge: PHOTO_LONG_EDGE_CAP,
+        aspect: 4 / 3,
+      }),
+    [device],
+  );
+
+  // TEMP DIAGNOSTIC (v0.16) — surface the device's 4:3 formats ON-SCREEN so
+  // we can design a smart photo/video format pick instead of
+  // `videoResolution:'max'` (which pairs the 48 MP photo on the iPhone 16 Pro
+  // ultra-wide).  Rendered as an overlay (RN 0.84 hides console.log from the
+  // syslog), so a screenshot captures it on iOS.  Remove once the fix is in.
+  const [fmtDebug, setFmtDebug] = useState<string | null>(null);
+  useEffect(() => {
+    if (!__DEV__ || !device) {
+      setFmtDebug(null);
+      return;
+    }
+    const fmts = device.formats ?? [];
+    const mp = (w: number, h: number) => ((w * h) / 1e6).toFixed(1);
+    const rows = fmts
+      .filter(
+        (f) =>
+          Math.abs(f.photoWidth / f.photoHeight - 4 / 3) < 0.05
+          && Math.abs(f.videoWidth / f.videoHeight - 4 / 3) < 0.05,
+      )
+      .sort((a, b) => b.videoWidth - a.videoWidth)
+      .map(
+        (f) =>
+          `p ${f.photoWidth}x${f.photoHeight} (${mp(f.photoWidth, f.photoHeight)}MP)`
+          + `  v ${f.videoWidth}x${f.videoHeight}  ${f.maxFps}fps`
+          + `${f.supportsVideoHdr ? ' hdr' : ''}`,
+      );
+    const chosen = format
+      ? `CHOSEN p ${format.photoWidth}x${format.photoHeight} `
+        + `(${mp(format.photoWidth, format.photoHeight)}MP) `
+        + `v ${format.videoWidth}x${format.videoHeight} ${format.maxFps}fps`
+      : 'CHOSEN (none yet)';
+    setFmtDebug(
+      `[fmt] ${device.position} ${device.name}\n`
+      + `formats=${fmts.length} 4:3=${rows.length}\n`
+      + `${chosen}\n--- 4:3 (video desc) ---\n`
+      + rows.join('\n'),
+    );
+  }, [device, format]);
 
   // Measured size of our container, so we can size the <Camera> view to
   // the largest box of the capture's aspect ratio that fits inside it
@@ -317,12 +372,32 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
           </Text>
         </View>
       ) : null}
+      {/* TEMP (v0.16) format-debug overlay — screenshot this on 0.5×. */}
+      {__DEV__ && fmtDebug ? (
+        <View style={styles.fmtDebug} pointerEvents="none">
+          <Text style={styles.fmtDebugText}>{fmtDebug}</Text>
+        </View>
+      ) : null}
     </View>
   );
 });
 
 
 const styles = StyleSheet.create({
+  fmtDebug: {
+    position: 'absolute',
+    top: 60,
+    left: 8,
+    right: 8,
+    backgroundColor: 'rgba(0,0,0,0.78)',
+    padding: 8,
+    borderRadius: 6,
+  },
+  fmtDebugText: {
+    color: '#0f0',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
   root: {
     flex: 1,
     overflow: 'hidden',
