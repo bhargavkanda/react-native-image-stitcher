@@ -47,56 +47,61 @@ class ReactNativeDelegate: ReactNativeBridgeDelegate {
 
   override func bundleURL() -> URL? {
 #if DEBUG
-    // Pin Metro to port 8082 (project-wide convention; 8081 is held
-    // by Tug's Expo dev server on this machine).  Mirrors the same
-    // pin in example/metro.config.js, example/package.json scripts,
-    // and example/android/gradle.properties.
+    // Pin Metro to port 8082 (project-wide convention; 8081 is held by Tug's
+    // Expo dev server on this machine).  Mirrors the pin in
+    // example/metro.config.js, example/package.json scripts, and
+    // example/android/gradle.properties.
     //
-    // Why mutate `jsLocation` instead of a hypothetical `.port`?
-    // RN 0.84's RCTBundleURLProvider bakes the port into a compile-
-    // time constant `kRCTBundleURLProviderDefaultPort = RCT_METRO_PORT`
-    // (see node_modules/react-native/React/Base/RCTBundleURLProvider.mm:19)
-    // and exposes NO Swift-bridged setter for it — we can't change
-    // the constant without recompiling React.framework.  But the
-    // internal `serverRootWithHostPort` helper checks whether the
-    // stored `jsLocation` contains a ":" and, if so, uses it as
-    // `host:port` directly, bypassing the constant.  So overriding
-    // `jsLocation` to `"<host>:8082"` is the cleanest runtime knob.
+    // Why mutate `jsLocation` instead of a hypothetical `.port`?  RN 0.84's
+    // RCTBundleURLProvider bakes the port into a compile-time constant
+    // `kRCTBundleURLProviderDefaultPort = RCT_METRO_PORT` and exposes NO
+    // Swift-bridged setter — but its `serverRootWithHostPort` helper uses any
+    // ":"-bearing `jsLocation` as `host:port` directly, bypassing the constant.
     //
-    // CRITICAL: `packagerServerHost()` triggers the proper host-
-    // discovery chain (UserDefaults from dev-menu "Configure
-    // bundler" → ip.txt that the build-phase script writes into the
-    // .app bundle → fallback "localhost").  We MUST call it BEFORE
-    // writing to `jsLocation`, otherwise on a fresh install where
-    // jsLocation is empty, our code would set "localhost:8082" and
-    // physical devices would try to reach localhost (themselves)
-    // instead of the dev mac.  Earlier version of this patch did
-    // exactly that — discovered the hard way on 2026-05-24.
+    // HOST resolution (the .120→.92 "app won't load on device" bug, 2026-06-14):
+    // the dev Mac's LAN IP changes with DHCP, which silently breaks the two
+    // sources the old code relied on — a hardcoded fallback constant, and the
+    // dev-menu "Configure Bundler" host cached in UserDefaults (which a
+    // reinstall wipes, dropping back to the stale constant).  The ONE source
+    // that is always current is `ip.txt`, which RN's "Bundle React Native code
+    // and images" build phase writes into the .app on EVERY Debug build.  Read
+    // it FIRST and treat it as authoritative; the discovery chain / constant
+    // are fallbacks only for the rare build where ip.txt is missing.
     let provider = RCTBundleURLProvider.sharedSettings()
-    let discoveredHostPort = provider.packagerServerHostPort() ?? ""
-    // packagerServerHostPort returns "<host>" or "<host>:<port>";
-    // strip any embedded port so we can force 8082.
-    let strippedHost: String
-    if let colon = discoveredHostPort.firstIndex(of: ":") {
-      strippedHost = String(discoveredHostPort[..<colon])
-    } else {
-      strippedHost = discoveredHostPort
-    }
-    // Last-resort hardcoded fallback if the build-phase script
-    // didn't write `packager-host` (observed intermittently on
-    // rebuilds — see F8.0.c notes).  192.168.68.120 is the dev
-    // mac's current local IP; update if you switch networks.
-    //
-    // TODO(F8.1+): replace with a build-setting / env-var driven
-    // default so this isn't hardcoded per-machine.  Candidates:
-    //   - RCT_DEFAULT_PACKAGER_HOST env var read by the build phase
-    //   - Info.plist key driven from Build Settings
-    //   - .xcconfig include in Pods-RNImageStitcherExample.debug
-    let host = strippedHost.isEmpty ? "192.168.68.120" : strippedHost
+    let host =
+      Self.hostFromBundledIPFile()
+      ?? Self.discoveredPackagerHost(provider)
+      ?? "192.168.68.92"  // last-resort; only hit if ip.txt isn't written
     provider.jsLocation = "\(host):8082"
     return provider.jsBundleURL(forBundleRoot: "index")
 #else
     return Bundle.main.url(forResource: "main", withExtension: "jsbundle")
 #endif
   }
+
+#if DEBUG
+  /// The dev Mac's current LAN IP, written into the .app bundle as `ip.txt` by
+  /// RN's build phase on every Debug build.  The single non-stale host source —
+  /// immune to DHCP changes and to UserDefaults being wiped on reinstall.
+  private static func hostFromBundledIPFile() -> String? {
+    guard
+      let url = Bundle.main.url(forResource: "ip", withExtension: "txt"),
+      let raw = try? String(contentsOf: url, encoding: .utf8)
+    else { return nil }
+    let host = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return host.isEmpty ? nil : host
+  }
+
+  /// RCTBundleURLProvider's discovery host (dev-menu "Configure Bundler"
+  /// UserDefaults), with any embedded port stripped so we can force :8082.
+  /// Used only when `ip.txt` is absent.
+  private static func discoveredPackagerHost(
+    _ provider: RCTBundleURLProvider
+  ) -> String? {
+    let hostPort = provider.packagerServerHostPort() ?? ""
+    let host = hostPort.split(separator: ":", maxSplits: 1)
+      .first.map(String.init) ?? hostPort
+    return host.isEmpty ? nil : host
+  }
+#endif
 }
