@@ -1941,6 +1941,13 @@ export function Camera(props: CameraProps): React.JSX.Element {
     lateralFinalizeRef.current = false;
     const wasFastPan = fastPanRef.current;
     fastPanRef.current = false;
+    if (__DEV__) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[capture] finalize: wasFastPan=${wasFastPan} `
+        + `wasLateralFinalize=${wasLateralFinalize}`,
+      );
+    }
     setStatusPhase('stitching');
     // Stop pumping new frames before finalizing so the engine isn't
     // racing the final cv::Stitcher pass against late-arriving
@@ -2188,14 +2195,39 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // Gated on panGuidance so opting out keeps the banner calm/green.
   const recordingTooFast =
     panGuidance && panMotion.panSpeedBucket !== 'good';
-  // Latch the too-fast flag whenever the live cue fires during recording, so
-  // the finalize can attach a HIGH_PAN_SPEED warning (shown on the crop
-  // editor + returned in onCapture.warnings).  Reset at capture start.
+  // Latch the too-fast flag for the HIGH_PAN_SPEED warning (shown on the crop
+  // editor + returned in onCapture.warnings).  Latches when the live cue is
+  // active OR — per the user's request — when a KEYFRAME the stitch will use
+  // is accepted while the pan is too fast (so a captured frame was actually
+  // taken at speed).  Depending on panSpeedBucket + acceptedKeyframeCount
+  // directly (not just the derived `recordingTooFast`) makes the effect run
+  // on every bucket / keyframe change, so a brief red window can't be missed.
+  // Reset at capture start.
+  const prevAcceptedForSpeedRef = useRef(0);
   useEffect(() => {
-    if (statusPhase === 'recording' && recordingTooFast) {
+    if (statusPhase !== 'recording') {
+      prevAcceptedForSpeedRef.current = acceptedKeyframeCount;
+      return;
+    }
+    const newKeyframe = acceptedKeyframeCount > prevAcceptedForSpeedRef.current;
+    prevAcceptedForSpeedRef.current = acceptedKeyframeCount;
+    if (recordingTooFast) {
+      if (__DEV__ && !fastPanRef.current) {
+        // eslint-disable-next-line no-console
+        console.log(
+          `[panMotion] HIGH_PAN_SPEED latched (bucket=`
+          + `${panMotion.panSpeedBucket} acceptedCount=${acceptedKeyframeCount}`
+          + `${newKeyframe ? ' on a keyframe' : ''})`,
+        );
+      }
       fastPanRef.current = true;
     }
-  }, [statusPhase, recordingTooFast]);
+  }, [
+    statusPhase,
+    recordingTooFast,
+    acceptedKeyframeCount,
+    panMotion.panSpeedBucket,
+  ]);
   useEffect(() => {
     if (
       statusPhase === 'recording'
