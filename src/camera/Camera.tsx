@@ -119,6 +119,7 @@ import { CaptureCountdownOverlay } from './CaptureCountdownOverlay';
 import { CaptureFrameCounterOverlay } from './CaptureFrameCounterOverlay';
 import { LateralMotionModal } from './LateralMotionModal';
 import { RectCropPreview, type ImageRect } from './RectCropPreview';
+import { buildStitchDebugInfo } from './stitchDebugInfo';
 import { cropQuad } from '../stitching/cropQuad';
 import { computeInscribedRect } from '../stitching/computeInscribedRect';
 import {
@@ -222,6 +223,12 @@ export type CameraCaptureResult =
        * cv::Stitcher at finalize).
        */
       stitchModeResolved?: 'panorama' | 'scans';
+      /**
+       * 2026-06-14 (DEV overlay) — semicolon-separated `key=value` trace of the
+       * stitcher's runtime choices (pipe/warp/route/seam/blend) for this
+       * output.  Shown on the preview in __DEV__.  iOS only for now.
+       */
+      debugSummary?: string;
       /** Non-fatal quality signals (empty when none). */
       warnings: CaptureWarning[];
     }
@@ -2031,6 +2038,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         finalConfidenceThresh: result.finalConfidenceThresh ?? -1,
         durationMs: Date.now() - (recordingStartedAt ?? Date.now()),
         stitchModeResolved: result.stitchModeResolved,
+        debugSummary: result.debugSummary,
         warnings,
       };
       // When the crop editor OR a plain preview is enabled AND the panorama
@@ -2782,6 +2790,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
         topInset={insets.top}
         bottomInset={insets.bottom}
         copy={guidanceCopyResolved}
+        // DEV overlay — show the stitcher's runtime choices (pipeline / warper /
+        // route / seam / blend) + score / frames / size for this output, so the
+        // operator can see HOW it was built.  __DEV__ only.
+        debugInfo={
+          __DEV__ && cropPending
+            ? buildStitchDebugInfo(cropPending.captureResultObj)
+            : undefined
+        }
         onUseOriginal={(altUri) => {
           if (cropPending) {
             // altUri set → the user picked the alt (manual) pipeline's output

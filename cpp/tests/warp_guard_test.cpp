@@ -20,6 +20,7 @@ using retailens::cappedSeamAspect;
 using retailens::kBudgetFloorMP;
 using retailens::kBudgetCeilMP;
 using retailens::stitchOutputIsDisjoint;
+using retailens::stitchOutputUnderutilized;
 using retailens::perProcessMemoryBudgetMB;
 using retailens::stitchExceedsMinimalHeadroom;
 using retailens::lowBatchHeadroom;
@@ -255,6 +256,41 @@ TEST(StitchDisjoint, GuardsDegenerateInput) {
   EXPECT_FALSE(stitchOutputIsDisjoint(800.0, 1000.0, 1));   // <2 frames
   EXPECT_FALSE(stitchOutputIsDisjoint(0.0, 1000.0, 5));     // no main blob
   EXPECT_FALSE(stitchOutputIsDisjoint(800.0, 0.0, 5));      // no coverage
+}
+
+// ── Utilization guard — the "black canvas" (coherent blob, empty canvas) ──
+
+TEST(StitchUnderutilized, MaroonedCornerIsRejected) {
+  // BA mis-placed a frame → content fills ~2% of a ballooned canvas.  This is
+  // ONE coherent blob, so stitchOutputIsDisjoint would PASS it; the
+  // utilization guard is what rejects it.
+  EXPECT_FALSE(stitchOutputIsDisjoint(20000.0, 20000.0, 4)); // single blob: not disjoint
+  EXPECT_TRUE(stitchOutputUnderutilized(20000.0, 1000000.0, 4)); // 2% → reject
+}
+
+TEST(StitchUnderutilized, HealthyPanoramaIsAccepted) {
+  // A real pano (even before the downstream crop) fills well over 10% of its
+  // own bounding canvas.
+  EXPECT_FALSE(stitchOutputUnderutilized(500000.0, 1000000.0, 5)); // 50%
+  EXPECT_FALSE(stitchOutputUnderutilized(120000.0, 1000000.0, 5)); // 12%
+}
+
+TEST(StitchUnderutilized, BoundaryAtTenPercent) {
+  // Exactly at the 10% default is NOT under-utilized (strict <).
+  EXPECT_FALSE(stitchOutputUnderutilized(100000.0, 1000000.0, 5)); // ==10%
+  EXPECT_TRUE(stitchOutputUnderutilized(99999.0, 1000000.0, 5));   // just under
+}
+
+TEST(StitchUnderutilized, GuardsDegenerateInput) {
+  EXPECT_FALSE(stitchOutputUnderutilized(2000.0, 1000000.0, 1)); // <2 frames
+  EXPECT_FALSE(stitchOutputUnderutilized(0.0, 1000000.0, 5));    // no coverage
+  EXPECT_FALSE(stitchOutputUnderutilized(2000.0, 0.0, 5));       // no canvas
+}
+
+TEST(StitchUnderutilized, HonoursCustomThreshold) {
+  // A caller can tighten/loosen the floor.
+  EXPECT_TRUE(stitchOutputUnderutilized(150000.0, 1000000.0, 5, 0.20));  // 15% < 20%
+  EXPECT_FALSE(stitchOutputUnderutilized(150000.0, 1000000.0, 5, 0.10)); // 15% ≥ 10%
 }
 
 // ── Issue 6 — headroom-based memory gating (pure) ────────────────────

@@ -267,6 +267,12 @@ NSString *const RNImageStitcherErrorDomain = @"RNImageStitcherErrorDomain";
 // RNStitchResult
 // ─────────────────────────────────────────────────────────────────────
 
+// Redeclare debugSummary as readwrite internally so it can be set after the
+// designated initializer (keeps the init signature unchanged).
+@interface RNStitchResult ()
+@property (nonatomic, copy, readwrite) NSString *debugSummary;
+@end
+
 @implementation RNStitchResult
 
 - (instancetype)initWithOutputPath:(NSString *)outputPath
@@ -285,6 +291,7 @@ NSString *const RNImageStitcherErrorDomain = @"RNImageStitcherErrorDomain";
     _framesRequested = framesRequested;
     _framesIncluded = framesIncluded;
     _finalConfidenceThresh = finalConfidenceThresh;
+    _debugSummary = @"";
   }
   return self;
 }
@@ -576,12 +583,25 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
              framesRequested:framesRequested
               framesIncluded:(NSInteger)r.framesIncluded
        finalConfidenceThresh:r.finalConfidenceThresh];
+      if (!r.debugSummary.empty()) {
+        result.debugSummary =
+            [NSString stringWithUTF8String:r.debugSummary.c_str()];
+      }
 #if DEBUG
-      // A/B HARNESS (DEBUG only) — also stitch the SAME frames via the OPPOSITE
-      // pipeline (manual cv::detail + plane) and write it next to the primary
-      // (high-level + spherical) as "<base>-manual.jpg", so the crop/preview
-      // screen can TOGGLE high-level vs manual on one real capture instead of
-      // rebuilding to compare.  Doubles stitch time; DEBUG builds only.
+      // A/B HARNESS (DEBUG only) — also stitch the SAME frames via the manual
+      // cv::detail pipeline and write it next to the primary (high-level) as
+      // "<base>-manual.jpg", so the crop/preview screen can TOGGLE high-level
+      // vs manual on one real capture instead of rebuilding to compare.
+      //
+      // Crucially the alt uses the SAME SPHERICAL warper as the primary — only
+      // `useManualPipeline` differs.  This isolates the variable the user is
+      // actually judging (manual cv::detail orchestration + graphcut/multiband
+      // vs stock cv::Stitcher), instead of confounding it with the warper.  The
+      // old alt forced "plane", whose UNBOUNDED projection maroons content in a
+      // corner on moderate canvases — the "black canvas" the user reported.
+      // Spherical bounds both axes, so the manual pipeline now produces a real
+      // comparison stitch (and the utilization guard in validateStitchOutput is
+      // the backstop if a degenerate placement still slips through).
       {
         std::string ap(cleanedOutputPath.UTF8String);
         size_t dot = ap.find_last_of('.');
@@ -589,10 +609,10 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
             (dot == std::string::npos ? ap : ap.substr(0, dot)) + "-manual.jpg";
         retailens::StitchConfig altCfg = cfg;
         altCfg.useManualPipeline = true;
-        altCfg.warperType        = "plane";
+        altCfg.warperType        = "spherical";
         retailens::StitchResult ar =
             retailens::stitchFramePaths(paths, altPath, altCfg, logFn);
-        NSLog(@"[ab-harness] alt(manual/plane) -> %s success=%d %dx%d",
+        NSLog(@"[ab-harness] alt(manual/spherical) -> %s success=%d %dx%d",
               altPath.c_str(), ar.success ? 1 : 0, (int)ar.width, (int)ar.height);
       }
 #endif

@@ -87,3 +87,50 @@ describe('pickCaptureFormat (iPhone 16 Pro ultra-wide fixture)', () => {
     expect(pickCaptureFormat([], { maxPhotoLongEdge: 4032 })).toBeUndefined();
   });
 });
+
+describe('pickCaptureFormat — preferHighFps (smooth-preview opt-in)', () => {
+  it('default (off) keeps the sharper 30 fps format — the jitter source', () => {
+    const chosen = pickCaptureFormat(ULTRA_WIDE, { maxPhotoLongEdge: 4032 });
+    expect(chosen!.videoWidth).toBe(3264); // 8 MP video …
+    expect(chosen!.maxFps).toBe(30); // … but only 30 fps
+  });
+
+  it('on → picks a 60 fps format over the sharper 30 fps one (same cap)', () => {
+    const chosen = pickCaptureFormat(ULTRA_WIDE, {
+      maxPhotoLongEdge: 4032,
+      preferHighFps: true,
+    });
+    expect(chosen!.maxFps).toBe(60); // smooth wins
+    expect(chosen!.photoWidth).toBe(4032); // still within the photo cap
+    expect(chosen!.videoWidth).toBe(1920); // highest-res 60 fps format
+    expect(chosen!.supportsVideoHdr).toBe(false); // non-HDR breaks the final tie
+  });
+
+  it('treats ≥target fps as equally smooth → resolution breaks the tie', () => {
+    // 120 fps low-res vs 60 fps high-res: with the default target (60) both are
+    // "smooth", so the higher-resolution 60 fps format wins (no 120 fps chase).
+    const formats: FormatLike[] = [
+      f(2016, 1512, 640, 480, 120),
+      f(2016, 1512, 1920, 1440, 60),
+    ];
+    const chosen = pickCaptureFormat(formats, {
+      maxPhotoLongEdge: 2048,
+      preferHighFps: true,
+    });
+    expect(chosen!.videoWidth).toBe(1920);
+    expect(chosen!.maxFps).toBe(60);
+  });
+
+  it('honours a raised fpsTarget (prefers 120 fps when explicitly asked)', () => {
+    const formats: FormatLike[] = [
+      f(2016, 1512, 640, 480, 120),
+      f(2016, 1512, 1920, 1440, 60),
+    ];
+    const chosen = pickCaptureFormat(formats, {
+      maxPhotoLongEdge: 2048,
+      preferHighFps: true,
+      fpsTarget: 120,
+    });
+    expect(chosen!.maxFps).toBe(120);
+  });
+});

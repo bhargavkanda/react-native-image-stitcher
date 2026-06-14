@@ -47,6 +47,7 @@ import {
   Image,
   Modal,
   PanResponder,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -166,6 +167,14 @@ export interface RectCropPreviewProps {
    */
   topInset?: number;
   bottomInset?: number;
+  /**
+   * 2026-06-14 (DEV overlay) — optional multi-line debug text describing how
+   * this output was stitched (pipeline / warper / route / seam / blend / score
+   * / frames / size).  When non-empty, rendered as a small monospace pill in
+   * the top-right corner.  The host gates this on `__DEV__`; this component
+   * just renders whatever non-empty string it's given.
+   */
+  debugInfo?: string;
 }
 
 
@@ -225,6 +234,7 @@ export function RectCropPreview(
     copy,
     topInset = 0,
     bottomInset = 0,
+    debugInfo,
   } = props;
 
   const resolvedCopy = useMemo(() => mergeGuidanceCopy(copy), [copy]);
@@ -413,6 +423,21 @@ export function RectCropPreview(
       ]}
     >
       <View style={[styles.root, { paddingTop: topInset }]}>
+        {/* DEV stitch-params overlay (host gates on __DEV__).  Top-right pill;
+            pushed below the A/B bar when that's present so they don't overlap. */}
+        {debugInfo ? (
+          <View
+            style={[
+              styles.debugPill,
+              { top: topInset + (altImageUri && altSize ? 76 : 8) },
+            ]}
+            pointerEvents="none"
+            accessibilityRole="text"
+          >
+            <Text style={styles.debugPillText}>{debugInfo}</Text>
+          </View>
+        ) : null}
+
         {/* Non-fatal warning banner (e.g. "<70 % of frames used"), shown
             ABOVE the image so the user sees it before accepting a crop. */}
         {warnings && warnings.length > 0 && (
@@ -607,6 +632,24 @@ function edgeStyle(
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#000' },
+  debugPill: {
+    position: 'absolute',
+    right: 8,
+    zIndex: 20,
+    maxWidth: '60%',
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    backgroundColor: 'rgba(0,0,0,0.66)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(120,220,160,0.5)',
+  },
+  debugPillText: {
+    color: '#7fe3a8',
+    fontSize: 10,
+    lineHeight: 14,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
+  },
   warningBanner: {
     paddingVertical: 10,
     paddingHorizontal: 16,

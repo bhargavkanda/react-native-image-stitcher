@@ -44,6 +44,10 @@ extern NSString *const RNImageStitcherErrorDomain;
 @property (nonatomic, assign, readonly) NSInteger framesRequested;
 @property (nonatomic, assign, readonly) NSInteger framesIncluded;
 @property (nonatomic, assign, readonly) double finalConfidenceThresh;
+/// 2026-06-14 (DEV overlay) — semicolon-separated `key=value` trace of the
+/// stitcher's runtime choices for this output (pipeline/warper/route/seam/
+/// blend), surfaced on the preview in __DEV__.  Empty string when unavailable.
+@property (nonatomic, copy, readonly) NSString *debugSummary;
 - (instancetype)initWithOutputPath:(NSString *)outputPath
                              width:(NSInteger)width
                             height:(NSInteger)height

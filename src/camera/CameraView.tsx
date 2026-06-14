@@ -211,13 +211,29 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // 3264×2448 video + 12 MP photo — still a crisp preview, no 48 MP still).
   // The cap is on the PHOTO; video stays as high as the cap allows, so the
   // 8-bit/sharp-preview rationale above still holds.
+  //
+  // preferHighFps: a panorama preview must stay SMOOTH while panning.  Video-
+  // resolution-first would pick the 3264×2448 **@30 fps** format over the
+  // 1920×1440 **@60 fps** one — visibly jittery.  Keyframes are clamped to
+  // 640/1280 px before stitching, so the extra video resolution buys nothing
+  // here; a 60 fps stream just looks right.  We opt the panorama camera in.
   const format = useMemo(
     () =>
       pickCaptureFormat(device?.formats ?? [], {
         maxPhotoLongEdge: PHOTO_LONG_EDGE_CAP,
         aspect: 4 / 3,
+        preferHighFps: true,
       }),
     [device],
+  );
+
+  // Pin the session frame rate to the format's max, capped at 60.  Picking a
+  // 60 fps-capable format is necessary but NOT sufficient — without an explicit
+  // `fps`, vision-camera can leave the session at a lower default, which is the
+  // jitter the user saw.  min(maxFps, 60) is always within the format's range.
+  const fps = useMemo(
+    () => (format ? Math.min(format.maxFps ?? 30, 60) : undefined),
+    [format],
   );
 
   // Measured size of our container, so we can size the <Camera> view to
@@ -289,6 +305,8 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         video={video}
         // Pin preview + photo to the same 4:3 format (WYSIWYG capture).
         format={format}
+        // Run the session at the format's fps (≤60) for a smooth pan preview.
+        {...(fps != null ? { fps } : {})}
         // v0.13.2 — multi-cam lens switch via zoom (undefined = default).
         {...(zoom != null ? { zoom } : {})}
         // Bake the device orientation into the captured pixels.

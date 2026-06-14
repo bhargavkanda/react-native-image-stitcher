@@ -180,6 +180,25 @@ inline bool stitchOutputIsDisjoint(
   return fragmentFraction > maxFragmentFraction;
 }
 
+// Coverage-to-canvas UTILIZATION guard — the "black canvas" failure.  When
+// BundleAdjusterRay mis-places a weak boundary frame, PlaneWarper throws it
+// far off-axis so the union canvas balloons and the real content clusters in
+// one corner.  That is a single coherent blob, so `stitchOutputIsDisjoint`
+// (fragmentFraction ≈ 0) PASSES it — yet it's garbage.  Guard the ratio of
+// covered pixels to total panorama pixels instead.  A valid pano (cropped to
+// its coverage downstream) fills well above this; a marooned-corner canvas is
+// only a percent or two.  The 50 MP `canvasExceedsGuard` catches gigapixel
+// blowups; this catches the moderate 12–50 MP band it leaves open.
+constexpr double kMinStitchUtilization = 0.10;
+
+inline bool stitchOutputUnderutilized(
+    double totalCoveredArea, double canvasArea, int numFrames,
+    double minUtilization = kMinStitchUtilization) {
+  if (numFrames < 2) return false;
+  if (canvasArea <= 0.0 || totalCoveredArea <= 0.0) return false;
+  return (totalCoveredArea / canvasArea) < minUtilization;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Issue 6 — headroom-based memory gating (pure).
 //

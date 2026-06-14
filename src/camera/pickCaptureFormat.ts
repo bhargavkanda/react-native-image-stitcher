@@ -49,9 +49,27 @@ export interface PickFormatOptions {
   aspect?: number;
   /** Aspect match tolerance. Default 0.05. */
   aspectTolerance?: number;
+  /**
+   * Prefer a SMOOTH (high-fps) preview over the sharpest video format.  Off by
+   * default → max-video-resolution-first (back-compat).  On (the panorama
+   * camera opts in) → rank by frame rate up to `fpsTarget` first, THEN video
+   * resolution.  The default video-first sort picks e.g. a 3264×2448 **@30 fps**
+   * format over a 1920×1440 **@60 fps** one, halving the preview frame rate —
+   * visible as jitter while panning.  The stitch clamps keyframes to 640/1280 px
+   * anyway, so the higher video resolution buys nothing for the panorama; a
+   * 60 fps stream just looks smooth.
+   */
+  preferHighFps?: boolean;
+  /**
+   * Ceiling for the fps preference when `preferHighFps` is on.  Formats at or
+   * above this are treated as equally smooth (so resolution breaks the tie
+   * instead of chasing 120 fps at a lower resolution).  Default 60.
+   */
+  fpsTarget?: number;
 }
 
 const DEFAULT_MAX_PHOTO_LONG_EDGE = 4032;
+const DEFAULT_FPS_TARGET = 60;
 
 const longEdge = (f: FormatLike): number =>
   Math.max(f.photoWidth, f.photoHeight);
@@ -69,6 +87,11 @@ export function pickCaptureFormat<F extends FormatLike>(
   const aspect = opts.aspect ?? 4 / 3;
   const tol = opts.aspectTolerance ?? 0.05;
   const cap = opts.maxPhotoLongEdge ?? DEFAULT_MAX_PHOTO_LONG_EDGE;
+  const preferHighFps = opts.preferHighFps ?? false;
+  const fpsTarget = opts.fpsTarget ?? DEFAULT_FPS_TARGET;
+  // Treat everything at/above the target as equally smooth so resolution, not
+  // a chase for 120 fps, breaks the tie.
+  const smoothness = (f: FormatLike): number => Math.min(f.maxFps, fpsTarget);
 
   const matchesAspect = (f: FormatLike): boolean =>
     f.photoHeight > 0
@@ -87,6 +110,14 @@ export function pickCaptureFormat<F extends FormatLike>(
   const candidates = withinCap.length > 0 ? withinCap : base;
 
   return candidates.slice().sort((a, b) => {
+    if (preferHighFps) {
+      // Smooth-preview priority: frame rate (up to the target) before video
+      // resolution.  Keeps the panorama preview at ~60 fps instead of dropping
+      // to a sharper-but-30fps format.
+      const sa = smoothness(a);
+      const sb = smoothness(b);
+      if (sb !== sa) return sb - sa;
+    }
     const va = videoPixels(a);
     const vb = videoPixels(b);
     if (vb !== va) return vb - va; // highest video resolution first

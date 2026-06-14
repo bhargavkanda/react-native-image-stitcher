@@ -682,6 +682,20 @@ export interface IncrementalFinalizeResult {
    * on the just-completed capture.
    */
   stitchModeResolved?: 'panorama' | 'scans';
+  /**
+   * 2026-06-14 (DEV overlay) — a semicolon-separated `key=value` trace of the
+   * stitcher's RUNTIME choices for this output, e.g.
+   * `"pipe=manual;warp=spherical;route=batch;seam=graphcut;blend=multiband"`.
+   *   pipe:  `manual` (cv::detail) | `highlevel` (cv::Stitcher)
+   *   warp:  `plane` | `cylindrical` | `spherical`
+   *   route: `batch` (warp-all + seam) | `stream` (low-memory per-frame)
+   *   seam:  `graphcut` | `none`
+   *   blend: `multiband` | `feather`
+   * Intended for a __DEV__-only overlay so the operator can see HOW the
+   * panorama was built (which warper, whether the low-memory stream/feather
+   * fallback kicked in, etc.).  iOS only for now; undefined elsewhere.
+   */
+  debugSummary?: string;
 }
 
 

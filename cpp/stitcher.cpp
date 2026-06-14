@@ -316,6 +316,27 @@ StitchErrorCode validateStitchOutput(const cv::Mat& panorama,
         outMessage = buf;
         return StitchErrorCode::LowQualityStitch;
     }
+    // Utilization guard — the "black canvas".  A coherent blob marooned in a
+    // mostly-empty canvas passes the disjoint check above (one blob), so guard
+    // the coverage-to-canvas ratio too (mask is the full panorama size).
+    {
+        const double canvasArea = (double)mask.cols * (double)mask.rows;
+        if (retailens::stitchOutputUnderutilized(totalArea, canvasArea,
+                                                 numFrames)) {
+            const double util = canvasArea > 0.0 ? totalArea / canvasArea : 0.0;
+            log_info(logFn, "[stitch-bc]",
+                     "step11d: REJECT degenerate canvas — utilization=%.3f%% "
+                     "(content %.0f / canvas %dx%d)",
+                     util * 100.0, totalArea, mask.cols, mask.rows);
+            char buf[200];
+            std::snprintf(buf, sizeof(buf),
+                          "stitch validation failed: degenerate canvas "
+                          "(content fills %.2f%% of the %dx%d panorama)",
+                          util * 100.0, mask.cols, mask.rows);
+            outMessage = buf;
+            return StitchErrorCode::LowQualityStitch;
+        }
+    }
     return StitchErrorCode::Ok;
 }
 
@@ -828,6 +849,12 @@ static StitchResult stitchFramePathsImpl_(
     result.finalConfidenceThresh  = finalThreshold;
     result.durationMs             = std::chrono::duration_cast<std::chrono::milliseconds>(
                                        t1 - t0).count();
+    // DEV overlay — cv::Stitcher owns its own compositing; for PANORAMA mode it
+    // uses GraphCut seams + MultiBand blend by default, with the configured
+    // warper.  Surfaced on the preview in __DEV__.  See StitchResult::debugSummary.
+    result.debugSummary =
+        std::string("pipe=highlevel;warp=") + config.warperType +
+        ";route=batch;seam=graphcut;blend=multiband";
     return result;
 }
 
@@ -1404,6 +1431,16 @@ StitchResult stitchFramePathsManual(
         for (int attempt = 0; attempt < kNumPruneAttempts; ++attempt) {
             const float thresh = kPruneThresholds[attempt];
             if (config.stitchMode == StitchMode::Scans && thresh > 0.31f) {
+                continue;
+            }
+            // Panorama: skip the 0.3 floor.  leaveBiggestComponent is
+            // monotonic in the threshold, so 0.3 only ever FORCES IN a weak
+            // boundary frame that survived neither 1.0 nor 0.5 — exactly the
+            // frame BundleAdjusterRay can't refine, which then mis-places under
+            // the unbounded plane warp and marooned the content in a corner
+            // ("black canvas").  Drop it and let that frame be pruned.  Scans
+            // keeps 0.3 (it floors there by design — see the >0.31 skip above).
+            if (config.stitchMode != StitchMode::Scans && thresh < 0.4f) {
                 continue;
             }
             // Restore from backups before each attempt — leaveBiggest-
@@ -2119,6 +2156,21 @@ StitchResult stitchFramePathsManual(
                          : "STREAM (warp+feed per frame)");
         log_info(logFn, "[stitch-bc]",
                  "step8 enter: %s", useSeam ? "BATCH" : "STREAM");
+
+        // DEV overlay (2026-06-14) — record the choices made for THIS output so
+        // the preview can show them in __DEV__.  `warp` is the configured warper
+        // (a divergence-only switch to spherical is rare + logged separately);
+        // route/seam/blend are the decisions just resolved above.  See
+        // StitchResult::debugSummary.
+        {
+            const bool useFeather =
+                (config.blenderType == "feather") || lowMemCanvas;
+            result.debugSummary =
+                std::string("pipe=manual;warp=") + config.warperType +
+                ";route=" + (useSeam ? "batch" : "stream") +
+                ";seam=" + (useSeam ? "graphcut" : "none") +
+                ";blend=" + (useFeather ? "feather" : "multiband");
+        }
 
         // Build the blender once — both paths feed into it.
         //

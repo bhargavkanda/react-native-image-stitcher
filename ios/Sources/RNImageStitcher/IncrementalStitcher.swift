@@ -1523,6 +1523,12 @@ public final class IncrementalStitcher: NSObject {
                         // helps the operator understand why the
                         // panorama looks the way it does.
                         batchDict["stitchModeResolved"] = payload.batchStitchModeResolved
+                        // 2026-06-14 (DEV overlay) — the stitcher's runtime
+                        // choices (pipeline/warper/route/seam/blend) for this
+                        // output, shown on the preview in __DEV__.
+                        if !r.debugSummary.isEmpty {
+                            batchDict["debugSummary"] = r.debugSummary
+                        }
                         completion(batchDict, nil)
                     } catch let stitchErr as NSError {
                         completion(nil, stitchErr)
