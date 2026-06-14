@@ -1041,10 +1041,15 @@ StitchResult stitchFramePathsManual(
                  origCount, kMaxFramesForStitch);
     }
 
-    // Load all input frames before invoking the stitcher.  Memory cost
-    // is N × frame size — for typical shelf captures (~2048×1536 RGB,
-    // ~9 MB / frame raw, but cv::imread decodes JPEG so resident
-    // footprint is bounded by the original sensor resolution).
+    // Load all input frames before invoking the stitcher.  Memory cost is
+    // N × decoded frame size.  NOTE — keyframe resolution is PLATFORM-SPLIT
+    // (verified 2026-06): on Android the keyframe JPEGs are pre-clamped to
+    // ~640px long edge at encode time (YuvImageConverter; the
+    // AR_KEYFRAME_MAX_LONG_EDGE guard fires on dimensions, so it covers the
+    // NON-AR path too), so the resident footprint here is ~0.3 MP/frame
+    // regardless of the chosen capture format.  On iOS the keyframes are
+    // written at NATIVE capture resolution (OpenCVKeyframeCollector, no
+    // clamp), so the footprint scales with the selected video format.
     //
     // V12.13 — breadcrumb each load.  If the landscape-only crash is
     // in cv::imread (e.g., decoding a JPEG produced by the new

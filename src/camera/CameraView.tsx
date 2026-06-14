@@ -22,14 +22,12 @@
 import React, {
   forwardRef,
   useCallback,
-  useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
   useState,
 } from 'react';
 import {
-  Platform,
   StyleSheet,
   Text,
   View,
@@ -222,45 +220,6 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     [device],
   );
 
-  // TEMP DIAGNOSTIC (v0.16) — surface the device's 4:3 formats ON-SCREEN so
-  // we can design a smart photo/video format pick instead of
-  // `videoResolution:'max'` (which pairs the 48 MP photo on the iPhone 16 Pro
-  // ultra-wide).  Rendered as an overlay (RN 0.84 hides console.log from the
-  // syslog), so a screenshot captures it on iOS.  Remove once the fix is in.
-  const [fmtDebug, setFmtDebug] = useState<string | null>(null);
-  useEffect(() => {
-    if (!__DEV__ || !device) {
-      setFmtDebug(null);
-      return;
-    }
-    const fmts = device.formats ?? [];
-    const mp = (w: number, h: number) => ((w * h) / 1e6).toFixed(1);
-    const rows = fmts
-      .filter(
-        (f) =>
-          Math.abs(f.photoWidth / f.photoHeight - 4 / 3) < 0.05
-          && Math.abs(f.videoWidth / f.videoHeight - 4 / 3) < 0.05,
-      )
-      .sort((a, b) => b.videoWidth - a.videoWidth)
-      .map(
-        (f) =>
-          `p ${f.photoWidth}x${f.photoHeight} (${mp(f.photoWidth, f.photoHeight)}MP)`
-          + `  v ${f.videoWidth}x${f.videoHeight}  ${f.maxFps}fps`
-          + `${f.supportsVideoHdr ? ' hdr' : ''}`,
-      );
-    const chosen = format
-      ? `CHOSEN p ${format.photoWidth}x${format.photoHeight} `
-        + `(${mp(format.photoWidth, format.photoHeight)}MP) `
-        + `v ${format.videoWidth}x${format.videoHeight} ${format.maxFps}fps`
-      : 'CHOSEN (none yet)';
-    setFmtDebug(
-      `[fmt] ${device.position} ${device.name}\n`
-      + `formats=${fmts.length} 4:3=${rows.length}\n`
-      + `${chosen}\n--- 4:3 (video desc) ---\n`
-      + rows.join('\n'),
-    );
-  }, [device, format]);
-
   // Measured size of our container, so we can size the <Camera> view to
   // the largest box of the capture's aspect ratio that fits inside it
   // (the rest becomes the black letterbox).  We deliberately size the
@@ -372,32 +331,12 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
           </Text>
         </View>
       ) : null}
-      {/* TEMP (v0.16) format-debug overlay — screenshot this on 0.5×. */}
-      {__DEV__ && fmtDebug ? (
-        <View style={styles.fmtDebug} pointerEvents="none">
-          <Text style={styles.fmtDebugText}>{fmtDebug}</Text>
-        </View>
-      ) : null}
     </View>
   );
 });
 
 
 const styles = StyleSheet.create({
-  fmtDebug: {
-    position: 'absolute',
-    top: 60,
-    left: 8,
-    right: 8,
-    backgroundColor: 'rgba(0,0,0,0.78)',
-    padding: 8,
-    borderRadius: 6,
-  },
-  fmtDebugText: {
-    color: '#0f0',
-    fontSize: 11,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
   root: {
     flex: 1,
     overflow: 'hidden',
