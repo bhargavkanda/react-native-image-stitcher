@@ -491,6 +491,16 @@ StitchResult stitchFramePaths(
     auto runOnce = [&](StitchMode modeOverride) -> StitchResult {
         StitchConfig cfg = config;
         cfg.stitchMode = modeOverride;
+        // SCANS needs the COHERENT affine pipeline (AffineBestOf2NearestMatcher
+        // → AffineBasedEstimator → BundleAdjusterAffinePartial → AffineWarper),
+        // which only the high-level cv::Stitcher provides — the manual pipeline
+        // is homography-only (an affine matcher was tried + reverted in fix-11
+        // for incoherence).  So force the high-level path for any SCANS attempt
+        // (primary or fallback); PANORAMA keeps the host's pipeline choice
+        // (manual by default — the proven-robust wide-pan path).
+        if (modeOverride == StitchMode::Scans) {
+            cfg.useManualPipeline = false;
+        }
         return stitchFramePathsImpl_(framePaths, outputPath, cfg, logFn);
     };
     StitchResult firstAttempt = runOnce(config.stitchMode);
