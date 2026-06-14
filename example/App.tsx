@@ -54,10 +54,6 @@ import {
   type IncrementalState,
   type PanMode,
 } from 'react-native-image-stitcher';
-import {
-  InscribedRectDebugOverlay,
-  inscribedRectDebugAvailable,
-} from './InscribedRectDebug';
 
 
 function App(): React.JSX.Element {
@@ -82,12 +78,12 @@ function App(): React.JSX.Element {
     Extract<CameraCaptureResult, { ok: true }> | null
   >(null);
 
-  // v0.15 — inscribed-rect crop debug harness (gated dev tool). When
-  // enabled, a captured panorama is sent to the overlay (which computes
-  // + draws the inscribed rectangle, then crops on confirm) instead of
-  // the normal preview.
-  const [rectDebugEnabled, setRectDebugEnabled] = useState(false);
-  const [rectDebugUri, setRectDebugUri] = useState<string | null>(null);
+  // v0.16 — post-capture review surface toggles (dev tools, exposed as
+  // on-screen toggles below).  `rectCrop` shows the draggable-quad crop
+  // editor; `showPreview` shows a plain image preview with Retake/Confirm;
+  // both off → onCapture fires immediately with no review screen.
+  const [rectCrop, setRectCrop] = useState(true);
+  const [showPreview, setShowPreview] = useState(false);
   // panMode flag (guidance item 1).  'vertical' (default) = landscape-only
   // (top→bottom): a portrait hold shows the rotate-to-landscape prompt.
   // 'horizontal' = portrait-only (left→right): a landscape hold shows the
@@ -266,13 +262,9 @@ function App(): React.JSX.Element {
         result.warnings.map((w) => `${w.code}: ${w.message}`),
       );
     }
-    if (rectDebugEnabled && result.type === 'panorama') {
-      setRectDebugUri(result.uri);
-      return;
-    }
-    // Panoramas are reviewed IN the crop editor (rectCropPreview is on) —
-    // that screen IS the preview, so don't pop a second preview modal for
-    // them.  Photos (no crop step) still get the preview modal.
+    // Panoramas are reviewed IN the SDK's crop/preview surface (rectCrop or
+    // showPreview) — that screen IS the preview, so don't pop a second
+    // preview modal for them.  Photos (no review step) still get the modal.
     if (result.type === 'photo') setPreview(result);
     setThumbnails((prev) => [
       ...prev,
@@ -424,8 +416,8 @@ function App(): React.JSX.Element {
           enablePhotoMode
           enablePanoramaMode
           panMode={panMode}
-          rectCropPreview
-          perspectiveCorrectCrop
+          rectCrop={rectCrop}
+          showPreview={showPreview}
           showSettingsButton={__DEV__}
           headerTitle="Image Stitcher Demo"
           headerGuidance="Tap shutter for a photo. Hold + pan + release for a panorama."
@@ -464,43 +456,49 @@ function App(): React.JSX.Element {
           </View>
         )}
 
-        {__DEV__ && inscribedRectDebugAvailable() && (
-          <Pressable
-            style={styles.rectDebugToggle}
-            onPress={() => setRectDebugEnabled((v) => !v)}
-            accessibilityRole="button"
-          >
-            <Text style={styles.rectDebugToggleText}>
-              🔍 Rect debug: {rectDebugEnabled ? 'ON' : 'OFF'}
-            </Text>
-          </Pressable>
-        )}
-
         {__DEV__ && (
-          <Pressable
-            style={styles.panModeToggle}
-            onPress={() =>
-              setPanMode((m) =>
-                m === 'vertical' ? 'horizontal' : m === 'horizontal' ? 'both' : 'vertical',
-              )
-            }
-            accessibilityRole="button"
-          >
-            <Text style={styles.rectDebugToggleText}>
-              🧭 panMode: {panMode === 'vertical'
-                ? 'vertical (landscape)'
-                : panMode === 'horizontal'
-                  ? 'horizontal (portrait)'
-                  : 'both'}
-            </Text>
-          </Pressable>
-        )}
+          <>
+            <Pressable
+              style={[styles.devToggle, { top: 110 }]}
+              onPress={() =>
+                setPanMode((m) =>
+                  m === 'vertical' ? 'horizontal' : m === 'horizontal' ? 'both' : 'vertical',
+                )
+              }
+              accessibilityRole="button"
+            >
+              <Text style={styles.devToggleText}>
+                🧭 panMode: {panMode === 'vertical'
+                  ? 'vertical (landscape)'
+                  : panMode === 'horizontal'
+                    ? 'horizontal (portrait)'
+                    : 'both'}
+              </Text>
+            </Pressable>
 
-        {rectDebugUri && (
-          <InscribedRectDebugOverlay
-            uri={rectDebugUri}
-            onClose={() => setRectDebugUri(null)}
-          />
+            {/* v0.16 — review-surface toggles. rectCrop wins over showPreview;
+                both off → onCapture fires immediately (no review screen). */}
+            <Pressable
+              style={[styles.devToggle, { top: 150 }]}
+              onPress={() => setRectCrop((v) => !v)}
+              accessibilityRole="button"
+            >
+              <Text style={styles.devToggleText}>
+                ✂️ rectCrop: {rectCrop ? 'ON' : 'OFF'}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.devToggle, { top: 190 }]}
+              onPress={() => setShowPreview((v) => !v)}
+              accessibilityRole="button"
+            >
+              <Text style={styles.devToggleText}>
+                🖼️ showPreview: {showPreview ? 'ON' : 'OFF'}
+                {rectCrop ? ' (overridden by rectCrop)' : ''}
+              </Text>
+            </Pressable>
+          </>
         )}
       </SafeAreaView>
     </SafeAreaProvider>
@@ -509,25 +507,16 @@ function App(): React.JSX.Element {
 
 
 const styles = StyleSheet.create({
-  rectDebugToggle: {
+  // Shared dev toggle chip (top-left stack); `top` set per-instance.
+  devToggle: {
     position: 'absolute',
-    top: 110,
     left: 16,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
     paddingVertical: 6,
     paddingHorizontal: 12,
     borderRadius: 16,
   },
-  panModeToggle: {
-    position: 'absolute',
-    top: 150,
-    left: 16,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-  },
-  rectDebugToggleText: {
+  devToggleText: {
     color: '#00E5FF',
     fontSize: 13,
     fontWeight: '600',

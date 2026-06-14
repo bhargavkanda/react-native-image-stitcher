@@ -767,22 +767,22 @@ export interface CameraProps {
   lateralBudgetCm?: number;
 
   /**
-   * Show the draggable-quad crop editor (item 7) after a panorama
-   * finalizes, BEFORE emitting it via `onCapture`.  Default `false`.
-   * When `true`, the user drags 4 corners over the stitched result;
-   * confirming crops in place (native perspective rectify when the quad
-   * isn't axis-aligned), cancelling emits the un-cropped panorama.
+   * Show the draggable-quad crop editor after a panorama finalizes, BEFORE
+   * emitting it via `onCapture`.  Default `false`.  When `true`, the user
+   * drags 4 corners over the stitched result; confirming crops in place
+   * (perspective-rectify when the quad isn't axis-aligned), "Use original"
+   * emits the un-cropped panorama, "Retake" discards it.  Takes precedence
+   * over {@link showPreview}.
    */
-  rectCropPreview?: boolean;
+  rectCrop?: boolean;
 
   /**
-   * Whether the crop editor (item 7) may perspective-rectify a
-   * non-rectangular quad (`cv::warpPerspective`).  Default `true`.
-   * `false` restricts the crop to the axis-aligned bounding rect even
-   * when the user drags a skewed quad.  No effect unless
-   * `rectCropPreview` is on.
+   * Show a plain review screen after a panorama finalizes — the stitched
+   * image with [Retake] / [Confirm] and NO crop box.  Default `false`.
+   * Ignored when {@link rectCrop} is on (the crop editor is itself the
+   * preview).  With both off, `onCapture` fires immediately with no UI.
    */
-  perspectiveCorrectCrop?: boolean;
+  showPreview?: boolean;
 
   /**
    * Copy overrides for every guidance string (rotate prompt, pan hint,
@@ -1057,7 +1057,7 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
     // panorama (black borders included) so the user can drag the inscribed-
     // rect seed outward to keep more content.  Letting the native auto-crop
     // pre-trim would leave nothing to adjust.
-    maxInscribedRectCrop: props.rectCropPreview
+    maxInscribedRectCrop: props.rectCrop
       ? false
       : props.maxInscribedRectCrop,
   };
@@ -1116,8 +1116,8 @@ export function Camera(props: CameraProps): React.JSX.Element {
     maxPanDurationMs = 0,
     panTooFastThreshold,
     lateralBudgetCm = 4,
-    rectCropPreview = false,
-    perspectiveCorrectCrop = true,
+    rectCrop = false,
+    showPreview = false,
     guidanceCopy,
   } = props;
 
@@ -2033,33 +2033,36 @@ export function Camera(props: CameraProps): React.JSX.Element {
         stitchModeResolved: result.stitchModeResolved,
         warnings,
       };
-      // Item 7 — when the crop editor is enabled AND the panorama has
-      // valid intrinsic dims, defer `onCapture`: stash the result and
-      // mount RectCropPreview.  The user's crop / use-original decision (the
-      // modal's onConfirm / onUseOriginal below) emits the final result.
-      // Otherwise emit immediately, as before.
+      // When the crop editor OR a plain preview is enabled AND the panorama
+      // has valid intrinsic dims, defer `onCapture`: stash the result and
+      // mount RectCropPreview (crop mode when `rectCrop`, preview-only when
+      // just `showPreview`).  The modal's confirm / use-original / retake
+      // decision emits the final result.  Otherwise emit immediately.
       if (
-        rectCropPreview
+        (rectCrop || showPreview)
         && result.width > 0
         && result.height > 0
       ) {
-        // Item 2 — seed the crop quad from the max-inscribed rectangle of
-        // the (un-cropped) panorama so the editor opens on the tightest
-        // clean rectangle, not a blind 8 % inset.  Best-effort: an absent
-        // native module / decode failure falls back to the default seed.
+        // Crop mode only — seed the quad from the max-inscribed rectangle of
+        // the (un-cropped) panorama so the editor opens on the tightest clean
+        // rectangle, not a blind 8 % inset.  Best-effort: an absent native
+        // module / decode failure falls back to the default seed.  Skipped in
+        // preview-only mode (no quad to seed).
         let initialRect: ImageRect | undefined;
-        try {
-          const inscribed = await computeInscribedRect(captureResultObj.uri);
-          if (inscribed && inscribed.width > 0 && inscribed.height > 0) {
-            initialRect = {
-              x: inscribed.x,
-              y: inscribed.y,
-              width: inscribed.width,
-              height: inscribed.height,
-            };
+        if (rectCrop) {
+          try {
+            const inscribed = await computeInscribedRect(captureResultObj.uri);
+            if (inscribed && inscribed.width > 0 && inscribed.height > 0) {
+              initialRect = {
+                x: inscribed.x,
+                y: inscribed.y,
+                width: inscribed.width,
+                height: inscribed.height,
+              };
+            }
+          } catch {
+            // No seed — RectCropPreview uses its default inset.
           }
-        } catch {
-          // No seed — RectCropPreview uses its default inset.
         }
         setCropPending({
           uri: captureResultObj.uri,
@@ -2133,7 +2136,8 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // route the result through the crop editor.
     clearPanTimer,
     pendingPanStart,
-    rectCropPreview,
+    rectCrop,
+    showPreview,
   ]);
 
   // Keep `handleHoldEndRef` current so the auto-finalize timer + the
@@ -2743,17 +2747,18 @@ export function Camera(props: CameraProps): React.JSX.Element {
         onClose={onCapturePreviewClose ?? noop}
       />
 
-      {/* Item 7 — draggable-quad crop editor, shown after a panorama
-          finalizes when `rectCropPreview` is on (handleHoldEnd stashed
-          the pending result instead of emitting it).  The quad opens
-          seeded on the max-inscribed rectangle (item 2); any capture
-          warnings show as a banner on top.
-            - Use original → emit the original, un-cropped panorama as-is.
-            - Crop         → cropQuad (perspective-rectify when the quad
-                       isn't axis-aligned) overwrites the file in place; emit
-                       with the rectified dims + a cache-busting query so
-                       <Image> reloads the overwritten file.  On any
-                       crop failure, fall back to the original. */}
+      {/* Post-capture review surface, shown after a panorama finalizes when
+          `rectCrop` OR `showPreview` is on (handleHoldEnd stashed the pending
+          result instead of emitting it).  `showCropControls={rectCrop}`:
+            - crop mode (rectCrop) → draggable quad seeded on the max-inscribed
+              rectangle; any capture warnings banner on top.
+                - Use original → emit the original, un-cropped panorama.
+                - Crop         → cropQuad (perspective-rectify when the quad
+                  isn't axis-aligned) overwrites the file in place; emit with
+                  the rectified dims + a cache-busting query so <Image> reloads
+                  it.  On any crop failure, fall back to the original.
+            - preview-only mode (showPreview, no rectCrop) → bare image with
+              [Retake]/[Confirm]; Confirm routes through onUseOriginal. */}
       <RectCropPreview
         // Remount per capture so the dragged-quad + layout state re-seed to
         // the new image (RectCropPreview seeds its quad once via useState).
@@ -2764,7 +2769,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageHeight={cropPending?.height ?? 0}
         initialRect={cropPending?.initialRect}
         warnings={cropPending?.warnings.map((w) => w.message) ?? []}
-        perspectiveCorrect={perspectiveCorrectCrop}
+        showCropControls={rectCrop}
         copy={guidanceCopyResolved}
         onUseOriginal={() => {
           if (cropPending) onCapture?.(cropPending.captureResultObj);
@@ -2779,10 +2784,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
           if (!cropPending) return;
           const pending = cropPending;
           // perspective=true → rectify the dragged quad to an upright
-          // rectangle (cropToQuad).  perspective=false (axis-aligned drag,
-          // OR perspectiveCorrectCrop disabled) → crop to the quad's axis-
-          // aligned bounding box — a plain crop, no warp — so the
-          // perspectiveCorrectCrop={false} contract is honoured.
+          // rectangle (cropToQuad).  perspective=false (the user dragged a
+          // ~rectangular quad) → crop to the quad's axis-aligned bounding box
+          // — a plain crop, no warp.
           const xs = quad.map((p) => p.x);
           const ys = quad.map((p) => p.y);
           const cropPoints: Quad = perspective

@@ -195,7 +195,7 @@ export type { OrientationDriftModalProps } from './camera/OrientationDriftModal'
 // ── Panorama capture GUIDANCE (feature/pano-ux-guidance) ──────────────
 // The first-time-user pan-capture guidance surfaces, wired into Layer-1
 // <Camera> automatically (panMode / panGuidance / maxPanDurationMs /
-// lateralBudgetCm / rectCropPreview / guidanceCopy props).  Exported for
+// lateralBudgetCm / rectCrop / showPreview / guidanceCopy props).  Exported for
 // Layer-2 hosts composing their own capture UX on CameraView + the
 // incremental engine.
 //

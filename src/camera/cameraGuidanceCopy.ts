@@ -56,6 +56,12 @@ export interface GuidanceCopy {
   cropUseOriginal: string;
   /** Item 7 — discard this capture and return to the camera. */
   cropRetake: string;
+  /**
+   * Accept button in PREVIEW-ONLY mode (`showPreview` without `rectCrop`):
+   * the editor shows the stitched image with no crop box, and this confirms
+   * it as-is.
+   */
+  previewConfirm: string;
 
   // ── Capture-status banner (CaptureStatusOverlay) ───────────────────────
   /** Banner while a capture is recording (the calm, green state). */
@@ -95,6 +101,7 @@ export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
   cropReset: 'Reset',
   cropUseOriginal: 'Use original',
   cropRetake: 'Retake',
+  previewConfirm: 'Confirm',
   statusRecording: 'Hold steady — pan slowly',
   statusStitching: 'Stitching panorama…',
   // DRY: the English warning copy lives once, in captureWarnings.ts.

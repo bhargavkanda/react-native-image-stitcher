@@ -362,6 +362,7 @@ buttons, the **capture-status banner**, and the **crop-editor warning banners**:
 | `lateralStopTitle` / `lateralStopBody` / `lateralStopDismiss` | lateral popup (stitched) | `Keep the pan straight` / … / `Got it` |
 | `lateralWrongDirectionTitle` / `lateralWrongDirectionBody` | lateral popup (too few frames) | `Follow the arrow` / … |
 | `cropConfirm` / `cropReset` / `cropUseOriginal` / `cropRetake` | crop buttons | `Crop` / `Reset` / `Use original` / `Retake` |
+| `previewConfirm` | preview-only accept button (`showPreview`) | `Confirm` |
 | `statusRecording` | status banner | `Hold steady — pan slowly` |
 | `statusStitching` | status banner | `Stitching panorama…` |
 | `warnLowFrameUtilization` | crop warning **(template)** | `Only {included} of {requested} captured frames ({percent}%) could be used — …` |

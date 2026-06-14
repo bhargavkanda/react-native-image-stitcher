@@ -40,17 +40,21 @@ threaded through `PanoramaSettings`):
 6. **Lateral-drift stop.** If the operator drifts sideways out of the
    pan plane beyond the budget, the capture FINALIZES what was captured
    and a one-button popup explains why.
-7. **Draggable-quad crop editor.** Optional post-stitch crop: drag four
-   corners over the result; confirm perspective-rectifies in place
-   (`cv::warpPerspective`) when the quad isn't axis-aligned, cancel
-   emits the un-cropped panorama.
+7. **Post-stitch review surface.** Optional. `rectCrop` shows a
+   draggable-quad crop editor (drag four corners; confirm perspective-
+   rectifies in place via `cv::warpPerspective` when the quad isn't
+   axis-aligned, "Use original" emits un-cropped, "Retake" discards).
+   `showPreview` shows the same screen with NO crop box — just the
+   stitched image with [Retake]/[Confirm]. With both off, `onCapture`
+   fires immediately.
 
 New `<Camera>` props (all optional): `panMode`, `panGuidance`
 (default `true`), `maxPanDurationMs` (default `9000`; `0` disables the
 countdown + auto-finalize), `panTooFastThreshold`, `lateralBudgetCm`
-(default `5`; `0` disables the lateral stop), `rectCropPreview`
-(default `false`), `perspectiveCorrectCrop` (default `true`), and
-`guidanceCopy` (partial override of every guidance string).
+(default `5`; `0` disables the lateral stop), `rectCrop`
+(default `false`), `showPreview` (default `false`), and
+`guidanceCopy` (partial override of every guidance string). A skewed
+crop quad is always perspective-rectified (there is no opt-out flag).
 
 New public exports: the `PanMode` type, `GuidanceCopy` +
 `DEFAULT_GUIDANCE_COPY`, the `usePanMotion` hook, the five guidance
@@ -70,7 +74,7 @@ testing:
   `GUIDANCE_TOKENS`. Removes the bundled GIF assets AND the Android
   host's previous need to add Fresco's `animated-gif` module.
 - **Crop editor seeds from the max-inscribed rectangle.** With
-  `rectCropPreview`, the draggable quad now opens on the tightest clean
+  `rectCrop`, the draggable quad now opens on the tightest clean
   rectangle (native `computeInscribedRect`) instead of a blind 8 %
   inset, and the editor gains an explicit **"Use original"** button
   (emit the stitch un-cropped) plus a warning banner. When the editor is

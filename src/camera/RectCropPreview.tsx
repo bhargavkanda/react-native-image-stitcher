@@ -133,14 +133,17 @@ export interface RectCropPreviewProps {
    */
   warnings?: string[];
   /**
-   * Whether to allow perspective rectify when the user picks a
-   * non-rectangular quad.  When `false`, the result's `perspective` is
-   * always `false` (host always uses axis-aligned crop).  Default `true`.
+   * Crop mode vs preview-only mode.  `true` (default) shows the draggable
+   * quad + corner handles + the [Retake][Use original][Crop] bar — the full
+   * crop editor.  `false` hides the quad and all crop affordances, showing
+   * just the stitched image with a [Retake][Confirm] bar — a plain preview
+   * (`<Camera showPreview>` without `rectCrop`).  Confirm emits the image
+   * un-cropped (same as "Use original").
    */
-  perspectiveCorrect?: boolean;
+  showCropControls?: boolean;
   /**
    * Optional image-pixel seed rect for the draggable quad.  Defaults to
-   * an 8 %-inset rectangle of the full image.
+   * an 8 %-inset rectangle of the full image.  Ignored in preview-only mode.
    */
   initialRect?: ImageRect;
   /** Copy overrides (cropConfirm / cropReset). Falls back to defaults. */
@@ -198,7 +201,7 @@ export function RectCropPreview(
     onUseOriginal,
     onRetake,
     warnings,
-    perspectiveCorrect = true,
+    showCropControls = true,
     initialRect,
     copy,
   } = props;
@@ -240,11 +243,14 @@ export function RectCropPreview(
       return;
     }
     const axisAligned = isAxisAlignedRect(ordered);
+    // A skewed quad is perspective-rectified; a ~rectangular drag is a plain
+    // axis-aligned crop.  (The former `perspectiveCorrect` opt-out was removed
+    // in v0.16 — the SDK always honours a skewed quad with a warp.)
     onConfirm({
       quad: ordered,
-      perspective: perspectiveCorrect && !axisAligned,
+      perspective: !axisAligned,
     });
-  }, [imageQuad, perspectiveCorrect, onConfirm, onUseOriginal]);
+  }, [imageQuad, onConfirm, onUseOriginal]);
 
   // One PanResponder per corner.  Built once (the corner index is the
   // closure key); the move handler reads live box/quad via refs + setState
@@ -347,7 +353,11 @@ export function RectCropPreview(
       visible={visible}
       animationType="fade"
       onRequestClose={onUseOriginal}
-      accessibilityLabel="Crop the captured panorama"
+      accessibilityLabel={
+        showCropControls
+          ? 'Crop the captured panorama'
+          : 'Review the captured panorama'
+      }
       // Mirror OrientationDriftModal: declare all 4 orientations so iOS
       // doesn't force-rotate the window when this opens mid-rotation.
       supportedOrientations={[
@@ -379,36 +389,42 @@ export function RectCropPreview(
             />
           )}
 
-          {/* Quad edges (non-interactive). */}
-          {edges.map((e, i) => (
-            <View key={`edge-${i}`} style={[styles.edge, e]} pointerEvents="none" />
-          ))}
+          {/* Crop affordances — quad edges + draggable handles — only in
+              crop mode.  Preview-only mode shows the bare image. */}
+          {showCropControls && (
+            <>
+              {/* Quad edges (non-interactive). */}
+              {edges.map((e, i) => (
+                <View key={`edge-${i}`} style={[styles.edge, e]} pointerEvents="none" />
+              ))}
 
-          {/* Draggable corner handles. */}
-          {screenCorners
-            && screenCorners.map((c, i) => (
-              <View
-                key={`handle-${i}`}
-                {...responders[i].panHandlers}
-                hitSlop={{
-                  top: HANDLE_HIT_RADIUS,
-                  bottom: HANDLE_HIT_RADIUS,
-                  left: HANDLE_HIT_RADIUS,
-                  right: HANDLE_HIT_RADIUS,
-                }}
-                accessibilityRole="adjustable"
-                accessibilityLabel={`Crop corner ${i + 1}`}
-                style={[
-                  styles.handle,
-                  {
-                    left: c.x - HANDLE_RADIUS,
-                    top: c.y - HANDLE_RADIUS,
-                  },
-                ]}
-              >
-                <View style={styles.handleDot} pointerEvents="none" />
-              </View>
-            ))}
+              {/* Draggable corner handles. */}
+              {screenCorners
+                && screenCorners.map((c, i) => (
+                  <View
+                    key={`handle-${i}`}
+                    {...responders[i].panHandlers}
+                    hitSlop={{
+                      top: HANDLE_HIT_RADIUS,
+                      bottom: HANDLE_HIT_RADIUS,
+                      left: HANDLE_HIT_RADIUS,
+                      right: HANDLE_HIT_RADIUS,
+                    }}
+                    accessibilityRole="adjustable"
+                    accessibilityLabel={`Crop corner ${i + 1}`}
+                    style={[
+                      styles.handle,
+                      {
+                        left: c.x - HANDLE_RADIUS,
+                        top: c.y - HANDLE_RADIUS,
+                      },
+                    ]}
+                  >
+                    <View style={styles.handleDot} pointerEvents="none" />
+                  </View>
+                ))}
+            </>
+          )}
         </View>
 
         <View style={styles.bar}>
@@ -422,26 +438,40 @@ export function RectCropPreview(
             >
               <Text style={styles.btnText}>{resolvedCopy.cropRetake}</Text>
             </Pressable>
-            {/* "Use original" — emit the stitch un-cropped. */}
-            <Pressable
-              style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
-              onPress={onUseOriginal}
-              accessibilityRole="button"
-              accessibilityLabel={resolvedCopy.cropUseOriginal}
-            >
-              <Text style={styles.btnText}>{resolvedCopy.cropUseOriginal}</Text>
-            </Pressable>
+            {/* Crop mode only — "Use original" emits the stitch un-cropped.
+                In preview-only mode the single primary button (below) is the
+                accept action, so this would be redundant. */}
+            {showCropControls && (
+              <Pressable
+                style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
+                onPress={onUseOriginal}
+                accessibilityRole="button"
+                accessibilityLabel={resolvedCopy.cropUseOriginal}
+              >
+                <Text style={styles.btnText}>{resolvedCopy.cropUseOriginal}</Text>
+              </Pressable>
+            )}
+            {/* Primary action — "Crop" applies the quad (crop mode);
+                "Confirm" accepts the image as-is (preview-only mode). */}
             <Pressable
               style={({ pressed }) => [
                 styles.btn,
                 styles.primary,
                 pressed && styles.btnPressed,
               ]}
-              onPress={handleConfirm}
+              onPress={showCropControls ? handleConfirm : onUseOriginal}
               accessibilityRole="button"
-              accessibilityLabel={resolvedCopy.cropConfirm}
+              accessibilityLabel={
+                showCropControls
+                  ? resolvedCopy.cropConfirm
+                  : resolvedCopy.previewConfirm
+              }
             >
-              <Text style={styles.btnText}>{resolvedCopy.cropConfirm}</Text>
+              <Text style={styles.btnText}>
+                {showCropControls
+                  ? resolvedCopy.cropConfirm
+                  : resolvedCopy.previewConfirm}
+              </Text>
             </Pressable>
           </View>
         </View>

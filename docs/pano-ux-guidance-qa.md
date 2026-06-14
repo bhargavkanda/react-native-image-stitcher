@@ -65,12 +65,16 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
       transient SLIDE registers; confirm that matches the intended feel.
 
 **Item 7 — Draggable-quad crop + perspective rectify**
-- [ ] With `rectCropPreview`, after a stitch the crop editor shows the result
+- [ ] With `rectCrop`, after a stitch the crop editor shows the result
       with 4 draggable corners. Corners don't jump on first touch.
 - [ ] Drag into a skewed (non-rectangular) quad → Crop → output is a
       perspective-rectified upright rectangle (native `cropToQuad`).
 - [ ] Drag to an axis-aligned rectangle → Crop → a plain crop.
-- [ ] Cancel → the original (un-cropped) panorama is emitted.
+- [ ] "Use original" → the original (un-cropped) panorama is emitted;
+      "Retake" → no `onCapture`, back to the camera.
+- [ ] **`showPreview` (without `rectCrop`)** → same screen with NO quad/corners
+      and a [Retake]/[Confirm] bar; Confirm emits the stitched image as-is.
+- [ ] **Both off** → `onCapture` fires immediately, no review screen.
 - [ ] OOM watch: crop a very large panorama — the native warp is size-guarded
       (`canvasExceedsGuard`) but verify no jetsam/lmkd on a low-RAM device.
 
@@ -92,7 +96,7 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
 ## Hardening pass (v0.16) — crop, onCapture, stitch robustness, memory
 
 **Issue 2 — crop seeded from the max-inscribed rectangle**
-- [ ] With `rectCropPreview`, the editor opens with the quad already on the
+- [ ] With `rectCrop`, the editor opens with the quad already on the
       tightest clean rectangle (no black corners), NOT a uniform 8 % inset.
       (When the editor is on, the native auto-crop is forced off, so the
       panorama still shows its black borders for you to drag out into.)
@@ -100,8 +104,8 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
       back to the 8 % inset — capture still works.
 
 **Issue 5 — "Use original" + warnings + unified onCapture**
-- [ ] The crop editor shows three buttons: **Use original** (emits the
-      stitch un-cropped), **Reset** (re-seed), **Crop** (apply).
+- [ ] The crop editor shows three buttons: **Retake** (discard), **Use
+      original** (emits the stitch un-cropped), **Crop** (apply).
 - [ ] Pan a short/jerky capture so <70 % of frames are used → an amber
       **warning banner** appears across the top of the crop editor, and the
       `onCapture` result's `warnings[]` contains `LOW_FRAME_UTILIZATION`
