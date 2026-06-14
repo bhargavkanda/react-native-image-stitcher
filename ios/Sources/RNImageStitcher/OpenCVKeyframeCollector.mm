@@ -12,6 +12,16 @@
 #include <opencv2/imgcodecs.hpp>
 #pragma pop_macro("NO")
 
+// v0.16 — keyframe long-edge clamp (px) applied before the JPEG is written.
+// The stitcher composites at ~1 MP (COMPOSE_MP) and `compose_scale` never
+// upscales, so a keyframe larger than ~1.2 MP only inflates the held-set RAM
+// (N × decoded frame) without sharpening the panorama — the 0.5× ultra-wide
+// otherwise lands ~8 MP/frame here.  1280 px sits just above the compose
+// target, so it reclaims ~6× of that RAM with zero quality loss.  (Android's
+// equivalent clamp is 640 px — a tighter low-RAM budget for A35-class
+// devices; iOS can afford the full compose resolution.)
+static const int kKeyframeMaxLongEdge = 1280;
+
 // V16 Phase 1.fix2 — write a JPEG with an EXIF Orientation tag so
 // iOS image renderers display the saved frame correctly while
 // cv::imread (with IMREAD_IGNORE_ORIENTATION) gets raw landscape
@@ -188,6 +198,22 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
     bgr.release();
   } else {
     rotated = bgr;
+  }
+
+  // Clamp the keyframe's long edge (see kKeyframeMaxLongEdge).  Uniform
+  // downscale — same factor on both axes — so it preserves aspect ratio AND
+  // orientation (no transpose/flip); the rotate above and the EXIF tag below
+  // are unaffected, only the pixel count shrinks.  INTER_AREA is the correct
+  // filter for downsampling.
+  {
+    const int longEdge =
+        rotated.cols > rotated.rows ? rotated.cols : rotated.rows;
+    if (longEdge > kKeyframeMaxLongEdge) {
+      const double s = (double)kKeyframeMaxLongEdge / (double)longEdge;
+      cv::Mat scaled;
+      cv::resize(rotated, scaled, cv::Size(), s, s, cv::INTER_AREA);
+      rotated = scaled;
+    }
   }
 
   NSInteger idx = self.acceptedCount;
