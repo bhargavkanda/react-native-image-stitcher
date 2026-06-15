@@ -49,6 +49,7 @@ import {
 } from 'react-native';
 
 import { CapturePreview } from './CapturePreview';
+import { DISPLAY_DECODE_IMAGE_PROPS } from './displayDecodeImageProps';
 
 
 export interface CaptureThumbnailItem {
@@ -247,6 +248,9 @@ export function CaptureThumbnailStrip({
               source={{ uri: item.uri }}
               style={[styles.thumbImage, contentRotation]}
               resizeMode="cover"
+              // OOM fix — decode at thumbnail size, not full capture res
+              // (see DISPLAY_DECODE_IMAGE_PROPS for the native-heap rationale).
+              {...DISPLAY_DECODE_IMAGE_PROPS}
             />
           </Pressable>
         )}

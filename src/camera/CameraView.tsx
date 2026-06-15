@@ -23,6 +23,7 @@ import React, {
   forwardRef,
   useCallback,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -35,10 +36,21 @@ import {
 } from 'react-native';
 import {
   Camera,
-  useCameraFormat,
   type CameraDevice,
   type CameraProps,
 } from 'react-native-vision-camera';
+
+import { pickCaptureFormat } from './pickCaptureFormat';
+
+
+/**
+ * Cap on the chosen capture format's PHOTO long edge (px).  4032 ≈ 12 MP at
+ * 4:3 ("4K"-ish), matching the 1× lens, so the ultra-wide stops producing a
+ * 48 MP / ~6000 px still.  Set to 2016 for "2K" (~3 MP).  `0` reverts to pure
+ * max-video.  TODO(v0.16): expose as a `<Camera photoMaxLongEdge>` prop once
+ * the 0.5× panorama 8-bit check passes on-device.
+ */
+const PHOTO_LONG_EDGE_CAP = 4032;
 
 
 export interface CameraViewProps {
@@ -190,21 +202,39 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // natively while keeping full-res keyframes.  Aspect stays the
   // top-priority filter, so 4:3 WYSIWYG parity holds on every device.
   //
-  // Still resolution is capped at ~12 MP.  The max-video 4:3 format pairs
-  // with a 24 MP photo (5712×4284) on the iPhone 16 Pro by default — 2×
-  // the file size + per-capture memory for no benefit on the panorama
-  // path (which uses the VIDEO stream, not takePhoto).  `photoResolution`
-  // is the LOWEST-priority filter, so it only breaks ties between equal
-  // max-video formats (e.g. the 12 MP-photo vs 24 MP-photo variants that
-  // share the same 4032×3024 video) — it never trades preview/stitch
-  // sharpness for a smaller still.  4032×3024 = 12 MP at 4:3; nearest-
-  // match keeps stills near there on any device.
-  const format = useCameraFormat(device ?? undefined, [
-    { photoAspectRatio: 4 / 3 },
-    { videoAspectRatio: 4 / 3 },
-    { videoResolution: 'max' },
-    { photoResolution: { width: 4032, height: 3024 } },
-  ]);
+  // Still resolution: a plain `videoResolution:'max'` filter (what we used
+  // before) maximises VIDEO and lets the PHOTO ride along — on the iPhone 16
+  // Pro ULTRA-WIDE that pairs a 48 MP still (8064×6048) with the max-video
+  // format, so a tap photo came out ~6000 px.  `pickCaptureFormat` instead
+  // picks the SHARPEST-video 4:3 format whose photo is within
+  // PHOTO_LONG_EDGE_CAP (verified on-device: the ultra-wide then chooses
+  // 3264×2448 video + 12 MP photo — still a crisp preview, no 48 MP still).
+  // The cap is on the PHOTO; video stays as high as the cap allows, so the
+  // 8-bit/sharp-preview rationale above still holds.
+  //
+  // preferHighFps: a panorama preview must stay SMOOTH while panning.  Video-
+  // resolution-first would pick the 3264×2448 **@30 fps** format over the
+  // 1920×1440 **@60 fps** one — visibly jittery.  Keyframes are clamped to
+  // 640/1280 px before stitching, so the extra video resolution buys nothing
+  // here; a 60 fps stream just looks right.  We opt the panorama camera in.
+  const format = useMemo(
+    () =>
+      pickCaptureFormat(device?.formats ?? [], {
+        maxPhotoLongEdge: PHOTO_LONG_EDGE_CAP,
+        aspect: 4 / 3,
+        preferHighFps: true,
+      }),
+    [device],
+  );
+
+  // Pin the session frame rate to the format's max, capped at 60.  Picking a
+  // 60 fps-capable format is necessary but NOT sufficient — without an explicit
+  // `fps`, vision-camera can leave the session at a lower default, which is the
+  // jitter the user saw.  min(maxFps, 60) is always within the format's range.
+  const fps = useMemo(
+    () => (format ? Math.min(format.maxFps ?? 30, 60) : undefined),
+    [format],
+  );
 
   // Measured size of our container, so we can size the <Camera> view to
   // the largest box of the capture's aspect ratio that fits inside it
@@ -275,6 +305,8 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         video={video}
         // Pin preview + photo to the same 4:3 format (WYSIWYG capture).
         format={format}
+        // Run the session at the format's fps (≤60) for a smooth pan preview.
+        {...(fps != null ? { fps } : {})}
         // v0.13.2 — multi-cam lens switch via zoom (undefined = default).
         {...(zoom != null ? { zoom } : {})}
         // Bake the device orientation into the captured pixels.

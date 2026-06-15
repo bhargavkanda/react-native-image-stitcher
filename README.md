@@ -83,6 +83,15 @@ import {
 
 export function CaptureScreen() {
   const handleCapture = (result: CameraCaptureResult) => {
+    // `onCapture` fires on success AND failure — gate on `ok` first.
+    if (!result.ok) {
+      console.warn('capture failed:', result.error.code, result.error.message);
+      return;
+    }
+    // Non-fatal quality signals (e.g. <70% of frames used). Always present.
+    if (result.warnings.length > 0) {
+      console.warn('warnings:', result.warnings.map((w) => w.code));
+    }
     if (result.type === 'photo') {
       console.log('Photo:', result.uri, result.width, result.height);
     } else {
@@ -98,6 +107,8 @@ export function CaptureScreen() {
   return (
     <Camera
       onCapture={handleCapture}
+      // onError still fires on failure too (an unchanged mirror of the
+      // ok:false result above).
       onError={(err: CameraError) => console.warn(err.code, err.message)}
     />
   );
@@ -135,10 +146,13 @@ export function CaptureScreen() {
   // 2. Capture history (drives the built-in thumbnail strip).
   const [thumbnails, setThumbnails] = useState<CaptureThumbnailItem[]>([]);
 
-  // 3. Post-stitch preview modal — set on capture, cleared on close.
-  const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
+  // 3. Post-stitch preview modal — set on success, cleared on close.
+  const [preview, setPreview] = useState<
+    Extract<CameraCaptureResult, { ok: true }> | null
+  >(null);
 
   const onCapture = useCallback((result: CameraCaptureResult) => {
+    if (!result.ok) return; // failures go to onError; nothing to preview
     setPreview(result);
     setThumbnails((prev) => [
       ...prev,
@@ -260,12 +274,12 @@ Setting `headerTitle` renders a built-in top header; the settings gear is absorb
 
 | Prop | Type | Fires / purpose |
 |---|---|---|
-| `onCapture` | `(result: CameraCaptureResult) => void` | Photo OR panorama completes. `result.type` discriminates (`'photo'` / `'panorama'`). |
+| `onCapture` | `(result: CameraCaptureResult) => void` | Fires once per capture attempt. **Gate on `result.ok` first** (`true` = output present, discriminated further by `result.type`; `false` carries `result.error`). Both carry `result.warnings: CaptureWarning[]` (e.g. `LOW_FRAME_UTILIZATION`). |
 | `onCaptureSourceChange` | `(source: CaptureSource) => void` | Effective source changes (AR toggle, or 0.5× forcing non-AR). |
 | `onLensChange` | `(lens: CameraLens) => void` | User taps the 1×/0.5× chip. |
 | `onFramesDropped` | `(info: FramesDroppedInfo) => void` | cv::Stitcher's confidence retry dropped input frame(s). |
 | `onCaptureAbandoned` | `(reason: 'orientation-drift') => void` | SDK auto-cancelled an in-flight capture (currently only mid-capture rotation). |
-| `onError` | `(err: CameraError) => void` | Classified error — see codes below. |
+| `onError` | `(err: CameraError) => void` | Classified error — fires on failure as an unchanged mirror of the `ok:false` `onCapture` result. See codes below. |
 | `outputDir` | `string` | Directory for saved JPEGs. The lib creates it if missing. |
 | `engine` | `'batch-keyframe' \| …` | Stitching engine. Default `'batch-keyframe'`; most apps leave it. |
 | `frameProcessor` | vision-camera frame processor | Host worklet composed with first-party stitching (see [`useStitcherWorklet`](docs/camera-component.md)). Advanced. |
@@ -320,7 +334,104 @@ import { Alert } from 'react-native';
 ```
 
 It lives in the SDK (not per-host) so every consumer shows the same guidance for
-the same failure. The `example/` app uses it end-to-end.
+the same failure. The `example/` app uses it end-to-end. To localise this copy,
+pass an `overrides` map as the second argument — see
+[Internationalization](#internationalization-i18n) below.
+
+## Internationalization (i18n)
+
+Every user-facing string the SDK can show is **overridable** — there is no
+bundled `locale` prop. By design you supply the translated strings from your
+own i18n catalogue (i18next, FormatJS, etc.); the SDK never ships translations
+it can't keep in sync with your wording. There are exactly **two** surfaces, and
+together they cover **100 %** of what a user reads:
+
+### 1. `guidanceCopy` — everything the SDK renders on screen
+
+A single `Partial<GuidanceCopy>` prop. Pass the keys you want to translate;
+omitted keys fall back to the English default. This covers the rotate prompt,
+the pan hint, the live "too fast" cue, the lateral-drift popups, the crop-editor
+buttons, the **capture-status banner**, and the **crop-editor warning banners**:
+
+| Key | Group | English default |
+| --- | --- | --- |
+| `rotateToLandscape` | rotate prompt | `Rotate to landscape` |
+| `rotateToPortrait` | rotate prompt | `Rotate to portrait` |
+| `panHint` | pan how-to | `Pan slowly top to bottom` |
+| `tooFast` | speed cue | `Moving too fast — slow down` |
+| `lateralStopTitle` / `lateralStopBody` / `lateralStopDismiss` | lateral popup (stitched) | `Keep the pan straight` / … / `Got it` |
+| `lateralWrongDirectionTitle` / `lateralWrongDirectionBody` | lateral popup (too few frames) | `Follow the arrow` / … |
+| `cropConfirm` / `cropReset` / `cropUseOriginal` / `cropRetake` | crop buttons | `Crop` / `Reset` / `Use original` / `Retake` |
+| `previewConfirm` | preview-only accept button (`showPreview`) | `Confirm` |
+| `statusRecording` | status banner | `Hold steady — pan slowly` |
+| `statusStitching` | status banner | `Stitching panorama…` |
+| `warnLowFrameUtilization` | crop warning **(template)** | `Only {included} of {requested} captured frames ({percent}%) could be used — …` |
+| `warnLateralDriftFinalize` | crop warning | `Capture stopped early because the phone drifted sideways — …` |
+| `warnHighPanSpeed` | crop warning | `The capture was taken faster than the recommended pace — …` |
+
+> **Templates:** `warnLowFrameUtilization` is interpolated at runtime — your
+> translation must keep the `{included}`, `{requested}` and `{percent}`
+> placeholders (an unknown placeholder is left verbatim rather than throwing).
+> Overriding a `warn*` key re-words **both** the on-screen banner **and** the
+> `message` carried on `onCapture(...).warnings[]`. The matching machine-readable
+> `code` (e.g. `HIGH_PAN_SPEED`) is always present regardless of wording, so you
+> can also branch on the code instead of the string.
+
+### 2. `userFacingStitchError(code, overrides?)` — the host-rendered error alert
+
+The recoverable-stitch-error copy is rendered by **you** (in `onError`), so it's
+localised at the call site: pass an `overrides` map (keyed by the codes in the
+exported `RECOVERABLE_STITCH_CODES`) and any match wins over the bundled English;
+omitted codes keep the default.
+
+```tsx
+import {
+  Camera,
+  userFacingStitchError,
+  RECOVERABLE_STITCH_CODES,
+  DEFAULT_GUIDANCE_COPY,
+  type GuidanceCopy,
+  type UserFacingStitchErrorOverrides,
+} from 'react-native-image-stitcher';
+import { Alert } from 'react-native';
+import { useTranslation } from 'react-i18next';
+
+function CaptureScreen() {
+  const { t } = useTranslation();
+
+  // (1) SDK-rendered copy — translate the keys you care about.
+  const guidanceCopy: Partial<GuidanceCopy> = {
+    rotateToLandscape: t('pano.rotateToLandscape'),
+    statusRecording: t('pano.statusRecording'),
+    // keep the placeholders in the template translation:
+    warnLowFrameUtilization: t('pano.warnLowFrames'), // "{included}/{requested} ({percent}%) …"
+    // …any subset; the rest stay English via DEFAULT_GUIDANCE_COPY
+  };
+
+  // (2) Host-rendered error alerts — translate by code.
+  const errorCopy: UserFacingStitchErrorOverrides = Object.fromEntries(
+    RECOVERABLE_STITCH_CODES.map((code) => [
+      code,
+      { title: t(`pano.err.${code}.title`), message: t(`pano.err.${code}.msg`) },
+    ]),
+  );
+
+  return (
+    <Camera
+      guidanceCopy={guidanceCopy}
+      onError={(err) => {
+        const friendly = userFacingStitchError(err.code, errorCopy);
+        if (friendly) Alert.alert(friendly.title, friendly.message);
+        else reportGenericError(err);
+      }}
+    />
+  );
+}
+```
+
+`DEFAULT_GUIDANCE_COPY` and `DEFAULT_CAPTURE_WARNING_COPY` are exported so you can
+seed your translation catalogue from the source strings, and
+`RECOVERABLE_STITCH_GUIDANCE` exposes the built-in error copy for the same reason.
 
 ### Migration from 0.13.x
 

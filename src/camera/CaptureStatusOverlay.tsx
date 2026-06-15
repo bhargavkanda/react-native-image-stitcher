@@ -48,9 +48,9 @@ export type CaptureStatusPhase = 'idle' | 'recording' | 'stitching';
 export interface CaptureStatusOverlayProps {
   /**
    * Current phase.  `idle` renders nothing.  `recording` shows the
-   * REC banner + red glowing border.  `stitching` swaps to a neutral
-   * "Stitching..." banner with no border (recording is over; UI
-   * cue should de-escalate).
+   * REC banner + glowing border (GREEN normally, RED when `tooFast`).
+   * `stitching` swaps to a neutral "Stitching..." banner with no border
+   * (recording is over; UI cue should de-escalate).
    */
   phase: CaptureStatusPhase;
   /**
@@ -60,6 +60,13 @@ export interface CaptureStatusOverlayProps {
    * type.
    */
   recordingMessage?: string;
+  /**
+   * v0.16 — speed feedback.  When `false` (default) the recording banner +
+   * border are GREEN ("your pace is fine"); when `true` they turn RED to
+   * signal the pan is too fast.  This consolidates the old always-red border
+   * + separate amber "slow down" pill into one calm-by-default cue.
+   */
+  tooFast?: boolean;
   /**
    * Optional override for the stitching-phase message.  Defaults to
    * "Stitching panorama…".
@@ -92,6 +99,7 @@ export interface CaptureStatusOverlayProps {
 export function CaptureStatusOverlay({
   phase,
   recordingMessage = 'Hold steady — pan slowly',
+  tooFast = false,
   stitchingMessage = 'Stitching panorama…',
   countdownMs,
   recordingStartedAt,
@@ -207,14 +215,22 @@ export function CaptureStatusOverlay({
       accessibilityLiveRegion="polite"
     >
       {showBorder ? (
-        <View pointerEvents="none" style={styles.recordBorder} />
+        <View
+          pointerEvents="none"
+          style={[
+            styles.recordBorder,
+            tooFast ? styles.recordBorderTooFast : styles.recordBorderOk,
+          ]}
+        />
       ) : null}
 
       <View
         pointerEvents="none"
         style={[
           styles.banner,
-          phase === 'recording' ? styles.bannerRecording : styles.bannerStitching,
+          phase === 'recording'
+            ? (tooFast ? styles.bannerTooFast : styles.bannerRecording)
+            : styles.bannerStitching,
           bannerOrientationStyle,
         ]}
       >
@@ -353,7 +369,12 @@ const styles = StyleSheet.create({
     minHeight: 36,
   },
   bannerRecording: {
-    backgroundColor: 'rgba(255,59,48,0.92)',
+    // Green by default — "you're recording and your pace is fine".
+    backgroundColor: 'rgba(52,199,89,0.92)',
+  },
+  bannerTooFast: {
+    // Red only when the pan is too fast (consolidates the old amber pill).
+    backgroundColor: 'rgba(255,59,48,0.94)',
   },
   bannerStitching: {
     // Neutral grey while we wait for the stitcher; communicates
@@ -386,6 +407,13 @@ const styles = StyleSheet.create({
   recordBorder: {
     ...StyleSheet.absoluteFillObject,
     borderWidth: 4,
-    borderColor: 'rgba(255,59,48,0.9)',
+  },
+  recordBorderOk: {
+    // Green by default (calm — the pan pace is fine).
+    borderColor: 'rgba(52,199,89,0.9)',
+  },
+  recordBorderTooFast: {
+    // Red only when too fast.
+    borderColor: 'rgba(255,59,48,0.95)',
   },
 });

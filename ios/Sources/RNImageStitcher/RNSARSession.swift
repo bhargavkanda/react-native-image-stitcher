@@ -154,6 +154,10 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         attributes: .concurrent
     )
     private static let MAX_POSE_LOG = 600  // ~10 s @ 60Hz
+    /// AR keyframe long-edge budget (px) — downscale every device's frame to
+    /// this before encoding so stitch memory is consistent cross-device.
+    /// Mirrors Android's AR_KEYFRAME_MAX_LONG_EDGE.
+    private static let arKeyframeMaxLongEdge: CGFloat = 640
 
     /// Latest tracking state.  Read by JS for UI feedback.
     @objc public private(set) var currentTrackingState: RNSARTrackingState = .notAvailable
@@ -472,6 +476,18 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // small text and packaging detail.
         config.isAutoFocusEnabled = true
 
+        // Option B — prefer the 4:3 videoFormat for full sensor FOV; the
+        // keyframe is downscaled to arKeyframeMaxLongEdge below so memory
+        // stays consistent across devices regardless of the format res.
+        if let fmt = ARWorldTrackingConfiguration.supportedVideoFormats.min(by: { a, b in
+            let da = abs(a.imageResolution.width / a.imageResolution.height - 4.0 / 3.0)
+            let db = abs(b.imageResolution.width / b.imageResolution.height - 4.0 / 3.0)
+            if abs(da - db) > 0.001 { return da < db }
+            return a.imageResolution.width * a.imageResolution.height
+                 < b.imageResolution.width * b.imageResolution.height
+        }) {
+            config.videoFormat = fmt
+        }
         arSession.run(config, options: [.resetTracking, .removeExistingAnchors])
         // V16-diag — log the chosen video format so we can correlate
         // batch-keyframe memory with ARFrame resolution.  iPhone Pro
@@ -855,8 +871,16 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         case "portrait-upside-down":  exifOrientation = .left
         default:                       exifOrientation = .right  // portrait + unknown
         }
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
             .oriented(exifOrientation)
+        // AR keyframe downscale guard — normalise long edge to the budget so
+        // every device produces a ~0.3 MP keyframe (cross-device-consistent
+        // stitch memory).  Mirrors Android's downscale in YuvImageConverter.
+        let kfLongEdge = max(ciImage.extent.width, ciImage.extent.height)
+        if kfLongEdge > Self.arKeyframeMaxLongEdge {
+            let kfScale = Self.arKeyframeMaxLongEdge / kfLongEdge
+            ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: kfScale, y: kfScale))
+        }
         let context = CIContext(options: nil)
         guard let cgImage = context.createCGImage(
             ciImage,

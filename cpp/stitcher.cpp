@@ -85,6 +85,23 @@ double rss_mb() {
     return (double) resident_pages * (double) page_bytes / (1024.0 * 1024.0);
 }
 
+// Total physical RAM in MB, read natively.  The Android JNI bridge sets no
+// availableRamMB, so without this a 6 GB device is mis-treated as the 4 GB
+// fallback (and the step-7.7 canvas budget + pre-stitch abort under-size).
+// _SC_PHYS_PAGES is TOTAL and stable across runs (unlike _SC_AVPHYS_PAGES,
+// which is free RAM and varies).  Returns -1.0 off Linux/Android (e.g. the
+// macOS cpp-test host); the caller resolves the sentinel.
+double device_total_ram_mb() {
+#if defined(__linux__)
+    const long pages = sysconf(_SC_PHYS_PAGES);
+    const long page_bytes = sysconf(_SC_PAGESIZE);
+    if (pages <= 0 || page_bytes <= 0) return -1.0;
+    return (double) pages * (double) page_bytes / (1024.0 * 1024.0);
+#else
+    return -1.0;
+#endif
+}
+
 double mat_mb(const cv::Mat& m) {
     if (m.empty()) return 0.0;
     return (double)(m.total() * m.elemSize()) / (1024.0 * 1024.0);
@@ -229,6 +246,100 @@ cv::Rect maxInscribedRectFromMask(const cv::Mat& mask) {
     return bestRect;
 }
 
+// Issue 3 — post-stitch output validator.  The confidence filter drops
+// frames that don't REGISTER, but nothing validated the final OUTPUT: a
+// frame that survived confidence yet landed geometrically disconnected
+// shows up as a separate blob in the coverage mask (the "disjointed image
+// frames in the output" users reported).  Run connected-components on the
+// coverage mask; if a meaningful fraction of the covered area lies OUTSIDE
+// the largest blob, reject the stitch as LowQualityStitch so the host can
+// prompt a retry rather than ship a broken panorama.
+//
+// Conservative by design: a coherent panorama is ONE connected blob, so a
+// good capture never trips; the threshold lives in the pure, unit-tested
+// retailens::stitchOutputIsDisjoint.  A small morphological close first
+// bridges sub-pixel seam gaps so a single panorama isn't mis-split, while
+// being far too small to merge a genuinely-detached floating frame.
+//
+// Fails OPEN: an empty/unreadable mask returns Ok (never block a capture on
+// a mask we couldn't analyse).
+StitchErrorCode validateStitchOutput(const cv::Mat& panorama,
+                                     const cv::Mat& coverage,
+                                     int numFrames,
+                                     const LogFn& logFn,
+                                     std::string& outMessage) {
+    if (panorama.empty()) return StitchErrorCode::Ok;  // handled elsewhere
+    // Build a binary coverage mask (same posture as choose_crop_rect).
+    cv::Mat mask;
+    const bool haveCoverage =
+        (!coverage.empty() && coverage.size() == panorama.size());
+    if (haveCoverage) {
+        cv::Mat cov1 = coverage;
+        if (coverage.channels() != 1) {
+            cv::cvtColor(coverage, cov1, cv::COLOR_BGR2GRAY);
+        }
+        cv::threshold(cov1, mask, 0, 255, cv::THRESH_BINARY);
+    } else {
+        cv::Mat gray;
+        cv::cvtColor(panorama, gray, cv::COLOR_BGR2GRAY);
+        cv::threshold(gray, mask, 0, 255, cv::THRESH_BINARY);
+    }
+    if (mask.empty() || mask.type() != CV_8UC1) return StitchErrorCode::Ok;
+    // Bridge thin seam gaps so a coherent pano isn't mis-split; the 5 px
+    // kernel is far smaller than the gap a detached frame leaves, so
+    // genuinely-separate blobs are NOT merged.
+    cv::Mat closed;
+    cv::morphologyEx(
+        mask, closed, cv::MORPH_CLOSE,
+        cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5)));
+    cv::Mat labels, stats, centroids;
+    const int n = cv::connectedComponentsWithStats(
+        closed, labels, stats, centroids, 8, CV_32S);
+    double totalArea = 0.0, largestArea = 0.0;
+    for (int i = 1; i < n; i++) {  // skip background label 0
+        const double a = stats.at<int>(i, cv::CC_STAT_AREA);
+        totalArea += a;
+        if (a > largestArea) largestArea = a;
+    }
+    const double fragmentFraction =
+        (totalArea > 0.0) ? (1.0 - largestArea / totalArea) : 0.0;
+    log_info(logFn, "[stitch-bc]",
+             "step11d: validate output components=%d largest=%.0f total=%.0f "
+             "fragment=%.3f frames=%d",
+             n - 1, largestArea, totalArea, fragmentFraction, numFrames);
+    if (retailens::stitchOutputIsDisjoint(largestArea, totalArea, numFrames)) {
+        char buf[176];
+        std::snprintf(buf, sizeof(buf),
+                      "stitch validation failed: disjoint output (%d "
+                      "components, %.0f%% of coverage outside the main frame)",
+                      n - 1, fragmentFraction * 100.0);
+        outMessage = buf;
+        return StitchErrorCode::LowQualityStitch;
+    }
+    // Utilization guard — the "black canvas".  A coherent blob marooned in a
+    // mostly-empty canvas passes the disjoint check above (one blob), so guard
+    // the coverage-to-canvas ratio too (mask is the full panorama size).
+    {
+        const double canvasArea = (double)mask.cols * (double)mask.rows;
+        if (retailens::stitchOutputUnderutilized(totalArea, canvasArea,
+                                                 numFrames)) {
+            const double util = canvasArea > 0.0 ? totalArea / canvasArea : 0.0;
+            log_info(logFn, "[stitch-bc]",
+                     "step11d: REJECT degenerate canvas — utilization=%.3f%% "
+                     "(content %.0f / canvas %dx%d)",
+                     util * 100.0, totalArea, mask.cols, mask.rows);
+            char buf[200];
+            std::snprintf(buf, sizeof(buf),
+                          "stitch validation failed: degenerate canvas "
+                          "(content fills %.2f%% of the %dx%d panorama)",
+                          util * 100.0, mask.cols, mask.rows);
+            outMessage = buf;
+            return StitchErrorCode::LowQualityStitch;
+        }
+    }
+    return StitchErrorCode::Ok;
+}
+
 // Pick the crop rectangle. Prefers the TRUE coverage mask from
 // cv::Stitcher::resultMask() (0xFF where a frame painted, 0 where
 // unfilled) so dark content is kept and only the never-covered wedges
@@ -297,6 +408,85 @@ static StitchResult stitchFramePathsImpl_(
     LogFn                           logFn);
 
 
+// ─────────────────────────────────────────────────────────────────────
+// Degenerate-warp guard helpers (shared by every throw site in the manual
+// pipeline's warp/compose stage).  Centralising them keeps the error
+// MESSAGE consistent across the four sites — the JS host classifies a
+// stitch failure by substring (see src/camera/classifyStitchError.ts /
+// cameraErrorMessages.ts → STITCH_CAMERA_PARAMS_FAIL "Please pan more
+// slowly"), so every degenerate-warp throw MUST carry "degenerate camera
+// params" + the stitchMode.  Both predicates live in cpp/warp_guard.hpp
+// (OpenCV-free + unit-tested); these builders add only the message + the
+// cv::Exception envelope.
+// ─────────────────────────────────────────────────────────────────────
+
+// Per-frame divergence: ONE warped frame's ROI exceeds kMaxWarpPixels
+// (broken estimator/BA on degenerate input — low feature count, near-
+// duplicate frames, motion-blurred rapid pan).  stitchMode tells you which
+// pipeline diverged: PANORAMA usually fails on translation-heavy input
+// (homography + BA-Ray assume pure rotation); SCANS on low-texture / low-
+// overlap input (affine needs enough matches).
+static cv::Exception degenerateFrameException(
+    int width, int height, StitchMode mode, size_t frameIdx) {
+  const char* modeStr =
+      (mode == StitchMode::Scans) ? "scans" : "panorama";
+  return cv::Exception(
+      cv::Error::StsOutOfRange,
+      std::string("warpRoi too large (") + std::to_string(width) + "x"
+          + std::to_string(height)
+          + ") — estimator produced degenerate camera params on this frame "
+          + "(stitchMode=" + modeStr + ", frameIdx="
+          + std::to_string(frameIdx) + ")",
+      "stitchFramePathsManual", __FILE__, __LINE__);
+}
+
+// Cumulative-canvas divergence: every per-frame ROI passed, but the UNION
+// bounding box that blender->prepare() allocates exceeds kMaxCanvasPixels
+// (a degenerate corner OFFSET blows the union to gigapixels while each
+// frame's own extent stays small).  This is the real crash-B net.
+static cv::Exception degenerateCanvasException(
+    int64_t width, int64_t height, StitchMode mode, size_t frames) {
+  const char* modeStr =
+      (mode == StitchMode::Scans) ? "scans" : "panorama";
+  return cv::Exception(
+      cv::Error::StsOutOfRange,
+      std::string("panorama canvas too large (") + std::to_string(width)
+          + "x" + std::to_string(height)
+          + ") — estimator produced degenerate camera params across the "
+          + "frame set (stitchMode=" + modeStr + ", frames="
+          + std::to_string(frames) + ")",
+      "stitchFramePathsManual", __FILE__, __LINE__);
+}
+
+// Bounding box over every positioned warp rect (corner + size) — exactly
+// what cv::detail::Blender::prepare() allocates as its CV_16SC3 canvas.
+// Computed in int64 so a degenerate corner offset (which can exceed the
+// int32 range on its own) doesn't overflow before canvasExceedsGuard()
+// gets to inspect it.  Yields 0×0 for an empty frame set.
+static void blendCanvasUnion(const std::vector<cv::Point>& corners,
+                             const std::vector<cv::Size>&  sizes,
+                             int64_t& unionW, int64_t& unionH) {
+  if (corners.empty()) { unionW = 0; unionH = 0; return; }
+  // Seed from frame 0 (avoids any sentinel / <climits> dependency).
+  int64_t minX = corners[0].x;
+  int64_t minY = corners[0].y;
+  int64_t maxX = static_cast<int64_t>(corners[0].x) + sizes[0].width;
+  int64_t maxY = static_cast<int64_t>(corners[0].y) + sizes[0].height;
+  for (size_t i = 1; i < corners.size(); i++) {
+    const int64_t x0 = corners[i].x;
+    const int64_t y0 = corners[i].y;
+    const int64_t x1 = x0 + sizes[i].width;
+    const int64_t y1 = y0 + sizes[i].height;
+    if (x0 < minX) minX = x0;
+    if (y0 < minY) minY = y0;
+    if (x1 > maxX) maxX = x1;
+    if (y1 > maxY) maxY = y1;
+  }
+  unionW = maxX - minX;
+  unionH = maxY - minY;
+}
+
+
 StitchResult stitchFramePaths(
     const std::vector<std::string>& framePaths,
     const std::string&              outputPath,
@@ -322,6 +512,16 @@ StitchResult stitchFramePaths(
     auto runOnce = [&](StitchMode modeOverride) -> StitchResult {
         StitchConfig cfg = config;
         cfg.stitchMode = modeOverride;
+        // SCANS needs the COHERENT affine pipeline (AffineBestOf2NearestMatcher
+        // → AffineBasedEstimator → BundleAdjusterAffinePartial → AffineWarper),
+        // which only the high-level cv::Stitcher provides — the manual pipeline
+        // is homography-only (an affine matcher was tried + reverted in fix-11
+        // for incoherence).  So force the high-level path for any SCANS attempt
+        // (primary or fallback); PANORAMA keeps the host's pipeline choice
+        // (manual by default — the proven-robust wide-pan path).
+        if (modeOverride == StitchMode::Scans) {
+            cfg.useManualPipeline = false;
+        }
         return stitchFramePathsImpl_(framePaths, outputPath, cfg, logFn);
     };
     StitchResult firstAttempt = runOnce(config.stitchMode);
@@ -385,7 +585,29 @@ static StitchResult stitchFramePathsImpl_(
     // call-site signature identical so existing bridges (iOS Obj-C++,
     // Android JNI) don't need to know which path runs internally.
     if (config.useManualPipeline) {
-        return stitchFramePathsManual(framePaths, outputPath, config, logFn);
+        StitchResult r =
+            stitchFramePathsManual(framePaths, outputPath, config, logFn);
+        // 2026-06-15 — AUTO SPHERICAL FALLBACK.  The manual pipeline defaults to
+        // the PLANE warper (flat, natural for narrow / 1x pans).  Plane is
+        // unbounded, so a wide / off-axis pan can maroon content in a corner;
+        // validateStitchOutput rejects that as LowQualityStitch (the utilization
+        // / disjoint guard) BEFORE writing any file.  Rather than fail, retry
+        // ONCE with the SPHERICAL warper, which bounds both axes — flat when
+        // plane works, bounded only when it doesn't.  Skipped when the caller
+        // already asked for spherical, or the failure wasn't a quality rejection
+        // (OOM abort / read error won't be fixed by a different warper).
+        if (!r.success
+            && r.errorCode == StitchErrorCode::LowQualityStitch
+            && config.warperType != "spherical") {
+            log_info(logFn, "[stitch-bc]",
+                     "manual '%s' marooned (LowQualityStitch) — retrying once "
+                     "with spherical (bounded both axes)",
+                     config.warperType.c_str());
+            StitchConfig sph = config;
+            sph.warperType = "spherical";
+            return stitchFramePathsManual(framePaths, outputPath, sph, logFn);
+        }
+        return r;
     }
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -649,6 +871,12 @@ static StitchResult stitchFramePathsImpl_(
     result.finalConfidenceThresh  = finalThreshold;
     result.durationMs             = std::chrono::duration_cast<std::chrono::milliseconds>(
                                        t1 - t0).count();
+    // DEV overlay — cv::Stitcher owns its own compositing; for PANORAMA mode it
+    // uses GraphCut seams + MultiBand blend by default, with the configured
+    // warper.  Surfaced on the preview in __DEV__.  See StitchResult::debugSummary.
+    result.debugSummary =
+        std::string("pipe=highlevel;warp=") + config.warperType +
+        ";route=batch;seam=graphcut;blend=multiband";
     return result;
 }
 
@@ -780,23 +1008,49 @@ StitchResult stitchFramePathsManual(
     // MB threshold (real-device headroom) rather than 1200 MB (legacy
     // protection that caps a high-RAM device at low-RAM headroom).
     const double kAssumedTotalRAMGB = 4.0;
-    const double availableRamMB = (config.availableRamMB > 0.0)
+    // Single source of truth for device RAM, shared by the pre-stitch abort
+    // AND the step-7.7 canvas budget below.  Prefer the caller's value (iOS
+    // plumbs NSProcessInfo.physicalMemory); else read it natively (Android
+    // sets none); else fall back to the conservative 4 GB assumption.
+    double totalRamMB = (config.availableRamMB > 0.0)
         ? config.availableRamMB
-        : (kAssumedTotalRAMGB * 1024.0);
-    const double availableRamGB = availableRamMB / 1024.0;
-    const double kPreStitchAbortMB = std::max(700.0, availableRamGB * 300.0);
-    if (kStartResidentMB > kPreStitchAbortMB) {
+        : device_total_ram_mb();
+    if (totalRamMB <= 0.0) totalRamMB = kAssumedTotalRAMGB * 1024.0;
+
+    // Issue 6 — headroom-scoped pre-stitch gate (replaces the old flat
+    // `max(700, ram×300)` RSS ceiling).
+    //
+    // The old check compared whole-process RSS against a flat fraction of
+    // DEVICE RAM, so a memory-heavy HOST app could trip it even when the
+    // stitch itself was tiny — and on trip it HARD-ABORTED with no attempt
+    // to route to the lighter STREAM path.  We can't isolate the stitch's
+    // own allocation from the shared process RSS (OpenCV uses malloc; no
+    // per-library accounting), so instead of a device ceiling we reason
+    // about HEADROOM: estimate the per-process kill ceiling
+    // (perProcessMemoryBudgetMB) and abort here ONLY when the process is
+    // already so close to it that even a MINIMAL streaming stitch
+    // (kMinStreamStitchMB) won't fit on top of the current footprint.  That
+    // makes this a genuine last resort scoped to the stitch's minimal
+    // incremental demand — a heavy host with headroom remaining proceeds,
+    // and everything in between is handled downstream by the step-8 STREAM
+    // routing (now also headroom-aware — see lowBatchHeadroom there) and the
+    // step-7.7 canvas-budget downscale, which size to what the stitch needs
+    // rather than aborting.
+    const double perProcessBudgetMB =
+        retailens::perProcessMemoryBudgetMB(totalRamMB);
+    if (retailens::stitchExceedsMinimalHeadroom(kStartResidentMB, totalRamMB)) {
         log_error(logFn, "[stitch-bc]",
-                  "PRE-STITCH ABORT: mem=%.1fMB > %.1fMB threshold (totalRamMB=%.0f)",
-                  kStartResidentMB, kPreStitchAbortMB, availableRamMB);
-        // V16 fix-attempt 9 — sentinel return.  See validPairs<1 site
-        // below for the full root-cause analysis.  In the iOS original
-        // this returned an empty RNStitchResult; here we return
-        // a StitchResult with success=false + a stable error code so
-        // both bridges see a clean failure rather than an
-        // ambiguous "output written but zero pixels" surface.
+                  "PRE-STITCH ABORT: rss=%.1fMB + minStitch=%.0fMB > "
+                  "perProcessBudget=%.1fMB (totalRamMB=%.0f) — no headroom for "
+                  "even a minimal streaming stitch",
+                  kStartResidentMB, retailens::kMinStreamStitchMB,
+                  perProcessBudgetMB, totalRamMB);
+        // Sentinel return: success=false + stable code so both bridges see a
+        // clean failure.  Classified to STITCH_OOM in JS (classifyStitchError
+        // matches "memory abort").
         result.errorCode = StitchErrorCode::PreStitchMemoryAbort;
-        result.errorMessage = "Pre-stitch memory abort";
+        result.errorMessage =
+            "Pre-stitch memory abort: insufficient headroom for the stitch";
         // framesIncluded reflects best-known retained count at the
         // abort site — nothing has been loaded or matched yet.
         result.framesIncluded = 0;
@@ -846,10 +1100,15 @@ StitchResult stitchFramePathsManual(
                  origCount, kMaxFramesForStitch);
     }
 
-    // Load all input frames before invoking the stitcher.  Memory cost
-    // is N × frame size — for typical shelf captures (~2048×1536 RGB,
-    // ~9 MB / frame raw, but cv::imread decodes JPEG so resident
-    // footprint is bounded by the original sensor resolution).
+    // Load all input frames before invoking the stitcher.  Memory cost is
+    // N × decoded frame size.  NOTE — keyframe resolution is PLATFORM-SPLIT
+    // (verified 2026-06): on Android the keyframe JPEGs are pre-clamped to
+    // ~640px long edge at encode time (YuvImageConverter; the
+    // AR_KEYFRAME_MAX_LONG_EDGE guard fires on dimensions, so it covers the
+    // NON-AR path too), so the resident footprint here is ~0.3 MP/frame
+    // regardless of the chosen capture format.  On iOS the keyframes are
+    // written at NATIVE capture resolution (OpenCVKeyframeCollector, no
+    // clamp), so the footprint scales with the selected video format.
     //
     // V12.13 — breadcrumb each load.  If the landscape-only crash is
     // in cv::imread (e.g., decoding a JPEG produced by the new
@@ -1194,6 +1453,16 @@ StitchResult stitchFramePathsManual(
         for (int attempt = 0; attempt < kNumPruneAttempts; ++attempt) {
             const float thresh = kPruneThresholds[attempt];
             if (config.stitchMode == StitchMode::Scans && thresh > 0.31f) {
+                continue;
+            }
+            // Panorama: skip the 0.3 floor.  leaveBiggestComponent is
+            // monotonic in the threshold, so 0.3 only ever FORCES IN a weak
+            // boundary frame that survived neither 1.0 nor 0.5 — exactly the
+            // frame BundleAdjusterRay can't refine, which then mis-places under
+            // the unbounded plane warp and marooned the content in a corner
+            // ("black canvas").  Drop it and let that frame be pruned.  Scans
+            // keeps 0.3 (it floors there by design — see the >0.31 skip above).
+            if (config.stitchMode != StitchMode::Scans && thresh < 0.4f) {
                 continue;
             }
             // Restore from backups before each attempt — leaveBiggest-
@@ -1631,6 +1900,12 @@ StitchResult stitchFramePathsManual(
         // blender / compose / crop) consumes the warper's OUTPUTS, so the
         // swap is transparent.  If even cylindrical diverges, the in-loop
         // guard (step8b) still throws — the genuine-failure safety net.
+        // The projection actually in use after the step7.6 fallback.  The
+        // fallback swaps `warper` but NOT warperCreator, so the step7.7 cap
+        // below (which re-creates the warper at a smaller scale) must
+        // re-create via THIS — otherwise it would silently revert
+        // cylindrical→plane on exactly the wide pan the fallback rescued.
+        std::string activeWarperType = config.warperType;
         if (config.warperType != "cylindrical" && !composeFrames.empty()) {
             bool wouldDiverge = false;
             size_t divergeFrame = 0;
@@ -1646,14 +1921,186 @@ StitchResult stitchFramePathsManual(
                     break;
                 }
             }
+            // Issue 4 — quality-driven projection.  PlaneWarper projects
+            // ~tan(theta), so on a WIDE sweep the frames at the pan extremes
+            // get visibly stretched/sheared — the "perspective at the ends"
+            // users notice — even when the warp wouldn't OOM.  Estimate the
+            // total angular sweep from the bundle-adjusted camera optical
+            // axes (first vs last frame); beyond kWidePanSweepDeg switch from
+            // plane to the bounded cylindrical projection (~theta), which
+            // keeps angular spacing uniform across the pan.
+            //
+            // The sweep angle (sweepDeg, below) is AXIS-AGNOSTIC — the 3D
+            // angle between the first/last optical axes — so a Mode-A
+            // landscape *vertical* pan trips this gate just as a horizontal
+            // one does.  cylindrical bounds only the HORIZONTAL angle; its
+            // vertical axis is UNBOUNDED, so a vertical sweep's end frames
+            // project to runaway coordinates and shear apart (fragmented
+            // output — confirmed on-device 2026-06-14, a regression from
+            // 6b11da0 vs the v0.6 plane baseline).  Use SPHERICAL, which
+            // bounds BOTH axes, so vertical AND horizontal wide pans stay
+            // coherent.  (Divergence guard + step-7.7 canvas budget cap are
+            // unaffected — spherical is still a bounded projection.)
+            constexpr double kWidePanSweepDeg = 45.0;
+            const char* kWidePanWarper = "spherical";
+            double sweepDeg = 0.0;
+            if (cameras.size() >= 2) {
+                auto opticalAxis = [](const cv::Mat& R) -> cv::Vec3d {
+                    cv::Mat Rd;
+                    R.convertTo(Rd, CV_64F);
+                    // Camera looks along +Z; world view dir = R·e_z = col 2.
+                    return cv::Vec3d(Rd.at<double>(0, 2),
+                                     Rd.at<double>(1, 2),
+                                     Rd.at<double>(2, 2));
+                };
+                const cv::Vec3d a0 = opticalAxis(cameras.front().R);
+                const cv::Vec3d aN = opticalAxis(cameras.back().R);
+                const double n0 = cv::norm(a0);
+                const double nN = cv::norm(aN);
+                if (n0 > 1e-9 && nN > 1e-9) {
+                    double c = a0.dot(aN) / (n0 * nN);
+                    c = std::max(-1.0, std::min(1.0, c));
+                    sweepDeg = std::acos(c) * 180.0 / CV_PI;
+                }
+            }
+            const bool widePan = sweepDeg >= kWidePanSweepDeg;
+
+            // Only switch the warper when a frame's warp ACTUALLY blows past
+            // the size guard (genuine divergence).  The `widePan` sweep-angle
+            // heuristic (>= kWidePanSweepDeg) was too aggressive — it fired on
+            // a NORMAL moderate vertical Mode-A pan and switched away from the
+            // PLANE warper that v0.6 used cleanly into the bounded-warper path,
+            // which fragmented/doubled the output (confirmed on-device
+            // 2026-06-14: stock cv::Stitcher AND v0.6 both stitch the exact
+            // same frames cleanly on the default/plane warper; only the
+            // post-v0.6 sweep-triggered switch broke it).  Keep the divergence
+            // guard (the real OOM/garbage protection) + spherical for that
+            // case; `widePan` stays only for the diagnostic log below.
             if (wouldDiverge) {
                 log_info(logFn, "[stitch-bc]",
-                         "step7.6: '%s' warp diverges at frame %zu (>%lld MP "
-                         "guard) -- falling back to cylindrical projection",
-                         config.warperType.c_str(), divergeFrame,
-                         (long long)(kMaxWarpPixels / 1000000));
-                if (auto cyl = make_warper("cylindrical")) {
-                    warper = cyl->create(warpedScale);
+                         "step7.6: switching '%s' -> %s (diverge=%d wide=%d "
+                         "sweep=%.1fdeg, frame %zu) for a bounded projection",
+                         config.warperType.c_str(), kWidePanWarper,
+                         wouldDiverge ? 1 : 0, widePan ? 1 : 0, sweepDeg,
+                         divergeFrame);
+                if (auto bounded = make_warper(kWidePanWarper)) {
+                    warper = bounded->create(warpedScale);
+                    activeWarperType = kWidePanWarper;
+                }
+            }
+        }
+
+        // Post-cap projected canvas megapixels — drives the step-8 path
+        // choice (wide canvases route to the low-memory STREAM+feather path).
+        // Set inside step 7.7 below.
+        double composeCanvasMpFinal = 0.0;
+        // Post-cap BATCH held-set = Σ of every warped frame's area.  This —
+        // not the union — is the real driver of BATCH blend memory (N warped
+        // frames + N exposure-comp UMat copies + MultiBand pyramids, all held
+        // at once).  A SMALL union with big/overlapping frames (e.g. the ~6×
+        // higher-res AR keyframes) can still blow a huge held-set, so step 8's
+        // STREAM route keys on this too, not just the union.  Set in step 7.7.
+        double composeHeldSetMpFinal = 0.0;
+        // Step 7.7: RAM-aware output-canvas budget cap (wide-pan blend-OOM
+        // fix).  A VALID but wide pan produces a large UNION canvas, and the
+        // BATCH + MultiBand blend peak scales with it (on a 6 GB A35 a
+        // ~70 MP union hit ~2.97 GB RSS and was lmkd-killed mid-blend, never
+        // reaching step11).  Unlike the degenerate-warp guards (per-frame
+        // 100 MP / cumulative 50 MP), this is a capture we want to COMPLETE,
+        // not reject — so cap the canvas to a memory budget by reducing
+        // compose scale, yielding a slightly-lower-res but complete pano.
+        // warpRoi() here is corner-only/cheap (no pixel warp yet) and reuses
+        // the EXACT union math blender->prepare() will allocate, so the probe
+        // predicts the real canvas.  No-op for normal panos: the budget floor
+        // (12 MP) exceeds the widest valid 360° pano (~9 MP), so the 13
+        // bounded captures see byte-identical behavior.
+        if (!composeFrames.empty()) {
+            std::vector<cv::Point> capCorners(composeFrames.size());
+            std::vector<cv::Size>  capSizes(composeFrames.size());
+            bool capOk = true;
+            for (size_t i = 0; i < composeFrames.size(); i++) {
+                if (composeFrames[i].empty()) { capOk = false; break; }
+                cv::Mat capK;
+                cameras[i].K().convertTo(capK, CV_32F);
+                const cv::Rect r = warper->warpRoi(
+                    composeFrames[i].size(), capK, cameras[i].R);
+                capCorners[i] = r.tl();
+                capSizes[i]   = r.size();
+            }
+            if (capOk) {
+                int64_t cw = 0, ch = 0;
+                blendCanvasUnion(capCorners, capSizes, cw, ch);
+                const double canvasMP = (double)cw * (double)ch / 1e6;
+                const double budgetMP = composeCanvasBudgetMP(totalRamMB);
+                const double downscale =
+                    canvasDownscaleForBudget(canvasMP, budgetMP);
+                composeCanvasMpFinal = canvasMP * downscale * downscale;
+                double heldSetMpRaw = 0.0;
+                for (const auto& s : capSizes) {
+                    heldSetMpRaw += (double)s.width * (double)s.height / 1e6;
+                }
+                composeHeldSetMpFinal = heldSetMpRaw * downscale * downscale;
+                // Always-on probe — confirms the RAM read (totalRamMB), the
+                // budget, the active projection, and whether the cap fired.
+                // Used to calibrate kBlendBytesPerUnionPx from real traces.
+                log_info(logFn, "[stitch-bc]",
+                         "step7.7: canvas probe union=%lldx%lld (%.1f MP) "
+                         "budget=%.1f MP totalRamMB=%.0f warper=%s downscale=%.3f",
+                         (long long)cw, (long long)ch, canvasMP, budgetMP,
+                         totalRamMB, activeWarperType.c_str(), downscale);
+                if (downscale < 1.0) {
+                    log_info(logFn, "[stitch-bc]",
+                             "step7.7: CAPPED downscale=%.3fx (canvasMP %.1f -> "
+                             "~%.1f, budget %.1f) — re-resizing composeFrames",
+                             downscale, canvasMP,
+                             canvasMP * downscale * downscale, budgetMP);
+                    // Co-scale EVERY quantity warpRoi depends on so the post-
+                    // cap canvas actually lands at ~budget: warpedScale,
+                    // compose_scale (read by the step9 seam aspect), and each
+                    // camera's intrinsics (focal/ppx/ppy — NOT R; mirrors the
+                    // step6 compose rescale; K() rebuilds on demand).
+                    warpedScale = (float)(warpedScale * downscale);
+                    compose_scale *= downscale;
+                    for (auto& cam : cameras) {
+                        cam.focal *= downscale;
+                        cam.ppx   *= downscale;
+                        cam.ppy   *= downscale;
+                    }
+                    // Re-resize composeFrames in place at the new scale.
+                    // INTER_LINEAR + pre-allocated dst + try/catch mirror the
+                    // step7c recycled-mmap SIGSEGV stability fix; on failure,
+                    // break out to the same failure handler step7c uses.
+                    try {
+                        for (size_t i = 0; i < composeFrames.size(); i++) {
+                            if (composeFrames[i].empty()) continue;
+                            const int nw = std::max(1,
+                                (int)std::round(composeFrames[i].cols * downscale));
+                            const int nh = std::max(1,
+                                (int)std::round(composeFrames[i].rows * downscale));
+                            cv::Mat resized(nh, nw, composeFrames[i].type());
+                            cv::resize(composeFrames[i], resized,
+                                       resized.size(), 0, 0, cv::INTER_LINEAR);
+                            composeFrames[i] = resized;
+                        }
+                    } catch (const cv::Exception& e) {
+                        log_error(logFn, "[stitch-bc]",
+                                  "step7.7: compose re-resize threw: %s", e.what());
+                        capturedErrorCode = StitchErrorCode::ComposeResizeFailed;
+                        capturedErrorMessage =
+                            std::string("Canvas-cap resize failed: ") + e.what();
+                        result.framesIncluded =
+                            static_cast<int32_t>(cameras.size());
+                        failedInsidePool = true;
+                        break;
+                    }
+                    // Re-create the warper at the new scale via the ACTIVE
+                    // projection (plane, or the step7.6 cylindrical fallback).
+                    if (auto w = make_warper(activeWarperType)) {
+                        warper = w->create(warpedScale);
+                    }
+                    log_info(logFn, "[stitch-bc]",
+                             "step7.7: cap applied new warpedScale=%.2f "
+                             "compose_scale=%.3f", warpedScale, compose_scale);
                 }
             }
         }
@@ -1679,13 +2126,83 @@ StitchResult stitchFramePathsManual(
         // Both paths feed the SAME blender (selected per caller's
         // blenderType).  Final blend happens after either path
         // completes.
-        const bool useSeam = (config.seamFinderType == "graphcut");
+        // Wide-canvas low-memory routing.  BATCH + MultiBand holds every
+        // warped frame at once + N exposure-comp UMat copies + builds
+        // Laplacian pyramids; on a 6 GB device a ~28 MP canvas peaked ~3 GB
+        // in the blend/exposure stage and was lmkd-killed — even after the
+        // step-9 cappedSeamAspect fix bounded the seam finder.  Above
+        // kLowMemCanvasMP, force the STREAM path (one warped frame at a time,
+        // no held set, no exposure copies, no GraphCut) + the FEATHER blender
+        // (single-pass, no pyramids) so a wide pan COMPLETES at full
+        // resolution instead of OOMing.  Below it, keep BATCH + MultiBand +
+        // GraphCut for the crisp seams typical small-canvas captures get.
+        // 2026-06-15 — RAM-gated STREAM-routing caps.  On high-RAM devices
+        // (≥5 GB physical → 6 GB+ nominal; Android sysconf reads a few hundred
+        // MB under the marketing figure, so the gate is 5000 not 6000) raise the
+        // caps so wide pans STAY on the sharp BATCH (GraphCut + MultiBand) path
+        // instead of dropping to STREAM+feather (softer).  Low-RAM devices keep
+        // the conservative 10/15 MP thresholds.  The lowHeadroom trigger below
+        // still backstops ACTUAL memory pressure regardless of these static
+        // caps, so raising them only lifts the pre-emptive ceiling, not the
+        // safety net (a memory-pressured 6 GB device still routes to STREAM).
+        const bool kHighRamDevice = totalRamMB >= 5000.0;
+        const double kLowMemCanvasMP = kHighRamDevice ? 16.0 : 10.0;
+        // Held-set guard: BATCH stayed safe at Σ-warped-area ≲13 MP but a
+        // 6-frame AR pan with a 9.6 MP union (under kLowMemCanvasMP) yet a
+        // ~32 MP held-set hit 3.6 GB and was lmkd-killed.  Route to STREAM on
+        // EITHER axis so a small-union/large-held-set capture (bigger or
+        // heavily-overlapping frames, e.g. high-res AR keyframes) can't slip
+        // into BATCH.  15 MP sits safely between the observed safe (≲13) and
+        // fatal (~32) held-sets.
+        const double kMaxBatchHeldSetMP = kHighRamDevice ? 22.0 : 15.0;
+        // Issue 6 — headroom-aware routing.  In addition to the fixed
+        // canvas/held-set MP thresholds (which bound the stitch's OWN size),
+        // route to STREAM when the process's CURRENT free headroom is thin —
+        // i.e. whatever else is resident (host app, RN, residual buffers)
+        // leaves little room for BATCH's multiband spike.  This is the
+        // "route, don't abort" half of Issue 6: under memory pressure we drop
+        // to the lighter STREAM+feather path instead of risking an OOM (or a
+        // hard pre-stitch abort).  It only ever makes routing MORE
+        // conservative, so it can't cause an OOM the fixed thresholds avoided.
+        const double rssAtRouteMB = rss_mb();
+        const bool lowHeadroom =
+            retailens::lowBatchHeadroom(rssAtRouteMB, totalRamMB);
+        const bool lowMemCanvas =
+            composeCanvasMpFinal > kLowMemCanvasMP
+            || composeHeldSetMpFinal > kMaxBatchHeldSetMP
+            || lowHeadroom;
+        const bool useSeam =
+            (config.seamFinderType == "graphcut") && !lowMemCanvas;
+        if (lowMemCanvas) {
+            log_info(logFn, "[stitch-bc]",
+                     "step8: union=%.1f MP held-set=%.1f MP rss=%.0fMB "
+                     "budget=%.0fMB (union>%.1f or held>%.1f or lowHeadroom=%d)"
+                     " — routing to STREAM+feather",
+                     composeCanvasMpFinal, composeHeldSetMpFinal, rssAtRouteMB,
+                     perProcessBudgetMB, kLowMemCanvasMP, kMaxBatchHeldSetMP,
+                     lowHeadroom ? 1 : 0);
+        }
         log_info(logFn, "[BatchStitcher]",
                  "step8: %s",
                  useSeam ? "BATCH (warp-all + seam + feed)"
                          : "STREAM (warp+feed per frame)");
         log_info(logFn, "[stitch-bc]",
                  "step8 enter: %s", useSeam ? "BATCH" : "STREAM");
+
+        // DEV overlay (2026-06-14) — record the choices made for THIS output so
+        // the preview can show them in __DEV__.  `warp` is the configured warper
+        // (a divergence-only switch to spherical is rare + logged separately);
+        // route/seam/blend are the decisions just resolved above.  See
+        // StitchResult::debugSummary.
+        {
+            const bool useFeather =
+                (config.blenderType == "feather") || lowMemCanvas;
+            result.debugSummary =
+                std::string("pipe=manual;warp=") + config.warperType +
+                ";route=" + (useSeam ? "batch" : "stream") +
+                ";seam=" + (useSeam ? "graphcut" : "none") +
+                ";blend=" + (useFeather ? "feather" : "multiband");
+        }
 
         // Build the blender once — both paths feed into it.
         //
@@ -1697,7 +2214,10 @@ StitchResult stitchFramePathsManual(
         // stitch, per-frame Mat releases, plus this stream path for
         // low-mem devices), both should run cleanly.
         cv::Ptr<cv::detail::Blender> blender;
-        if (config.blenderType == "feather") {
+        if (config.blenderType == "feather" || lowMemCanvas) {
+            // FEATHER for the wide-canvas low-memory path (lowMemCanvas) too —
+            // MultiBand's pyramids are the dominant blend allocation we're
+            // avoiding.
             blender = cv::detail::Blender::createDefault(
                 cv::detail::Blender::FEATHER, false);
             auto fb = blender.dynamicCast<cv::detail::FeatherBlender>();
@@ -1776,29 +2296,12 @@ StitchResult stitchFramePathsManual(
                                   i, roi.width, roi.height,
                                   (long long)roiPixels,
                                   (long long)kMaxWarpPixels);
-                        // 2026-05-22 (audit follow-up) — include
-                        // stitchMode + frame index in the error message
-                        // so the JS host can correlate the failure with
-                        // operator behaviour.  Pre-fix the error said
-                        // nothing about which pipeline diverged.  The
-                        // value tells you: PANORAMA usually fails on
-                        // translation-heavy input (homography + BA-Ray
-                        // assume pure rotation); SCANS usually fails on
-                        // low-texture or low-overlap input (affine needs
-                        // enough matches).
-                        const char* modeStr =
-                            (config.stitchMode == StitchMode::Scans) ? "scans" : "panorama";
-                        throw cv::Exception(
-                            cv::Error::StsOutOfRange,
-                            std::string("warpRoi too large (")
-                                + std::to_string(roi.width) + "x"
-                                + std::to_string(roi.height)
-                                + ") — estimator produced degenerate "
-                                + "camera params on this frame (stitchMode="
-                                + modeStr + ", frameIdx="
-                                + std::to_string(i) + ")",
-                            "stitchFramePathsManual",
-                            __FILE__, __LINE__);
+                        // Message + envelope built by the shared helper so
+                        // all four degenerate-warp throw sites stay in sync
+                        // (see degenerateFrameException above).  Lands in the
+                        // step8b catch below → WarpFailed.
+                        throw degenerateFrameException(
+                            roi.width, roi.height, config.stitchMode, i);
                     }
                     imagesWarped[i].create(roi.size(), freshInput.type());
                     masksWarped[i].create(roi.size(), CV_8U);
@@ -1875,14 +2378,33 @@ StitchResult stitchFramePathsManual(
             // Aspect from compose scale → seam scale (the rescale we
             // apply to existing compose-scale data, not the original).
             double seam_compose_aspect = seam_scale / compose_scale;
+            // BUGFIX (wide-pan GraphCut OOM): the aspect above is derived from
+            // the INPUT frame size (origMp), but the resize below is applied to
+            // the WARPED images, which span the whole canvas and can be many×
+            // larger (a ~0.3 MP frame warps across a multi-MP canvas on a wide
+            // pan).  Left uncapped, GraphCut ran on multi-MP seam images and
+            // its per-pixel max-flow graph exploded to GBs (a 19 MP-canvas
+            // capture was lmkd-killed here — 3.16 GB RSS + 2.1 GB swap).  Re-cap
+            // against the LARGEST warped frame so every seam image is ≤ SEAM_MP,
+            // which is what cv::Stitcher's seam_est_resol actually targets.
+            double maxWarpedMp = 0.0;
+            for (size_t i = 0; i < N; i++) {
+                maxWarpedMp = std::max(
+                    maxWarpedMp,
+                    (double)sizes[i].width * (double)sizes[i].height / 1e6);
+            }
+            seam_compose_aspect =
+                cappedSeamAspect(seam_compose_aspect, maxWarpedMp, SEAM_MP);
             {
                 auto _t = std::chrono::steady_clock::now();
                 double _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     _t - t0).count();
                 log_info(logFn, "[BatchStitcher]",
-                         "step9: graph-cut seam finder "
-                         "(compose→seam aspect = %.3f, t+%.0fms)",
-                         seam_compose_aspect, _ms);
+                         "step9: graph-cut seam finder (maxWarpedMP=%.1f "
+                         "compose→seam aspect=%.4f → seamMP≈%.2f, t+%.0fms)",
+                         maxWarpedMp, seam_compose_aspect,
+                         maxWarpedMp * seam_compose_aspect * seam_compose_aspect,
+                         _ms);
             }
             auto _seamStart = std::chrono::steady_clock::now();
             log_info(logFn, "[stitch-bc]",
@@ -1973,9 +2495,34 @@ StitchResult stitchFramePathsManual(
                 compensator->feed(corners, compImgs, compMasks);
             }
 
-            // Feed the blender, releasing each frame as we go.
-            log_info(logFn, "[stitch-bc]", "step10a: blender->prepare");
+            // Layer-2 guard (cumulative canvas): the union of all positioned
+            // warp rects is exactly what blender->prepare() allocates as its
+            // CV_16SC3 accumulator.  Every per-frame extent passed the
+            // step8b guard above, but a single degenerate corner OFFSET can
+            // still blow this union to gigapixels — the real crash-B path
+            // (51 MB → 3.7 GB on one rapid pan).  Guard BEFORE prepare().
+            int64_t canvasW = 0, canvasH = 0;
+            blendCanvasUnion(corners, sizes, canvasW, canvasH);
+            if (canvasExceedsGuard(canvasW, canvasH)) {
+                log_error(logFn, "[stitch-bc]",
+                          "step10a: blend canvas degenerate "
+                          "(%lldx%lld px) — treating as warp failure",
+                          (long long)canvasW, (long long)canvasH);
+                throw degenerateCanvasException(
+                    canvasW, canvasH, config.stitchMode, N);
+            }
+            // Feed the blender, releasing each frame as we go.  Log the union
+            // + RSS: the union here MUST equal the step7.7 post-cap probe — a
+            // mismatch means a co-scaled quantity was missed.  step10a2
+            // isolates the persistent MultiBand accumulator (~the term the
+            // canvas budget bounds).
+            log_info(logFn, "[stitch-bc]",
+                     "step10a: blender->prepare union=%lldx%lld (%.1f MP) mem=%.1fMB",
+                     (long long)canvasW, (long long)canvasH,
+                     (double)canvasW * (double)canvasH / 1e6, rss_mb());
             blender->prepare(corners, sizes);
+            log_info(logFn, "[stitch-bc]",
+                     "step10a2: prepared mem=%.1fMB", rss_mb());
             log_info(logFn, "[stitch-bc]",
                      "step10b: feeding blender (N=%zu)", N);
             for (size_t i = 0; i < N; i++) {
@@ -2005,6 +2552,20 @@ StitchResult stitchFramePathsManual(
             for (size_t i = 0; i < N; i++) {
                 cv::Mat K;
                 cameras[i].K().convertTo(K, CV_32F);
+                // Layer-1 guard (STREAM): probe the cheap warpRoi BEFORE the
+                // real mask warp below.  Unlike BATCH, the STREAM path had no
+                // per-frame net, so a degenerate ROI would OOM inside
+                // warper->warp()'s buildMaps/remap allocation right here.
+                const cv::Rect probe = warper->warpRoi(
+                    composeFrames[i].size(), K, cameras[i].R);
+                if (warpRoiExceedsGuard(probe.width, probe.height)) {
+                    log_error(logFn, "[stitch-bc]",
+                              "step8b(stream): warpRoi degenerate for frame "
+                              "%zu (%dx%d) — treating as warp failure",
+                              i, probe.width, probe.height);
+                    throw degenerateFrameException(
+                        probe.width, probe.height, config.stitchMode, i);
+                }
                 cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
                 cv::Mat tmpMaskWarped;
                 corners[i] = warper->warp(
@@ -2018,6 +2579,20 @@ StitchResult stitchFramePathsManual(
             // ~40-50 MB lower peak vs the BATCH path at 1.0 MP × 8
             // frames — the difference between staying under iOS' jetsam
             // threshold on a 2 GB device and getting WatchdogTermination.
+            // Layer-2 guard (cumulative canvas) — see the BATCH path for the
+            // rationale.  Same union check before the STREAM prepare().
+            {
+                int64_t canvasW = 0, canvasH = 0;
+                blendCanvasUnion(corners, sizes, canvasW, canvasH);
+                if (canvasExceedsGuard(canvasW, canvasH)) {
+                    log_error(logFn, "[stitch-bc]",
+                              "step10(stream): blend canvas degenerate "
+                              "(%lldx%lld px) — treating as warp failure",
+                              (long long)canvasW, (long long)canvasH);
+                    throw degenerateCanvasException(
+                        canvasW, canvasH, config.stitchMode, N);
+                }
+            }
             blender->prepare(corners, sizes);
             for (size_t i = 0; i < N; i++) {
                 cv::Mat K;
@@ -2059,6 +2634,27 @@ StitchResult stitchFramePathsManual(
         log_info(logFn, "[stitch-bc]",
                  "step11c: panorama 8U conversion done (panorama=%dx%d) mem=%.1fMB",
                  panorama.cols, panorama.rows, rss_mb());
+
+        // Issue 3 — post-stitch validation.  Reject a disjoint / fragmented
+        // output (frames that survived confidence but didn't fuse into one
+        // panorama) so the host gets a clean failure (→ STITCH_LOW_QUALITY,
+        // "try again") instead of a broken image.  Fails open on an
+        // unreadable mask.  Capture the failure into the strong locals +
+        // break out of the do/while(0) like the catch paths do.
+        {
+            std::string validateMessage;
+            const StitchErrorCode validateCode = validateStitchOutput(
+                panorama, panoramaMask,
+                static_cast<int>(cameras.size()), logFn, validateMessage);
+            if (validateCode != StitchErrorCode::Ok) {
+                log_error(logFn, "[stitch-bc]",
+                          "step11d: REJECTED — %s", validateMessage.c_str());
+                capturedErrorCode = validateCode;
+                capturedErrorMessage = validateMessage;
+                failedInsidePool = true;
+                break;
+            }
+        }
 
         // Record retained-frame count for telemetry.  In the high-level
         // path this comes from stitcher->component().size() after retry;

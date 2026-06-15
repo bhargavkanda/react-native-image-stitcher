@@ -44,6 +44,10 @@ extern NSString *const RNImageStitcherErrorDomain;
 @property (nonatomic, assign, readonly) NSInteger framesRequested;
 @property (nonatomic, assign, readonly) NSInteger framesIncluded;
 @property (nonatomic, assign, readonly) double finalConfidenceThresh;
+/// 2026-06-14 (DEV overlay) — semicolon-separated `key=value` trace of the
+/// stitcher's runtime choices for this output (pipeline/warper/route/seam/
+/// blend), surfaced on the preview in __DEV__.  Empty string when unavailable.
+@property (nonatomic, copy, readonly) NSString *debugSummary;
 - (instancetype)initWithOutputPath:(NSString *)outputPath
                              width:(NSInteger)width
                             height:(NSInteger)height
@@ -108,6 +112,10 @@ extern NSString *const RNImageStitcherErrorDomain;
 ///     them.  With `useInscribedRectCrop:YES` we find the largest
 ///     axis-aligned rectangle entirely inside the non-zero region
 ///     and crop to that — clean output with no black corners.
+/// `useManualPipeline`: YES → the manual cv::detail pipeline (graphcut +
+///   multiband, with the full memory-guard machinery); NO → stock high-level
+///   cv::Stitcher.  The batch capture passes YES (the default output); the
+///   on-demand high-level tab re-stitches the same keyframes with NO.
 + (nullable RNStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
                                           outputPath:(NSString *)outputPath
                                          jpegQuality:(NSInteger)quality
@@ -117,6 +125,7 @@ extern NSString *const RNImageStitcherErrorDomain;
                                   captureOrientation:(nullable NSString *)captureOrientation
                                 useInscribedRectCrop:(BOOL)useInscribedRectCrop
                                           stitchMode:(nullable NSString *)stitchMode
+                                   useManualPipeline:(BOOL)useManualPipeline
                                                error:(NSError **)error;
 
 /// Extract `maxFrames` evenly-spaced frames from the video at
@@ -191,6 +200,24 @@ extern NSString *const RNImageStitcherErrorDomain;
                                                                  y:(NSInteger)y
                                                              width:(NSInteger)width
                                                             height:(NSInteger)height
+                                                           quality:(NSInteger)quality
+                                                             error:(NSError **)error;
+
+/// item-7 — free-quad perspective crop.  Takes 4 IMAGE-PIXEL corners
+/// (ordered TL, TR, BR, BL) and rectifies the enclosed quadrilateral to
+/// an upright rectangle (cv::getPerspectiveTransform + warpPerspective),
+/// re-encodes at `quality`, overwrites in place.  Returns the rectified
+/// `{ width, height }`.  Rejects a degenerate / non-convex / out-of-bounds
+/// quad, and guards the output canvas with the shared canvasExceedsGuard.
++ (nullable NSDictionary<NSString *, NSNumber *> *)cropToQuadAtPath:(NSString *)imagePath
+                                                               tlX:(double)tlX
+                                                               tlY:(double)tlY
+                                                               trX:(double)trX
+                                                               trY:(double)trY
+                                                               brX:(double)brX
+                                                               brY:(double)brY
+                                                               blX:(double)blX
+                                                               blY:(double)blY
                                                            quality:(NSInteger)quality
                                                              error:(NSError **)error;
 

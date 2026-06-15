@@ -253,16 +253,16 @@ export function PanoramaSettingsModal({
                 onChange={(v) => updateFrameSelection({
                   maxKeyframes: parseInt(v, 10),
                 })}
-                caption="Hard cap on accepted keyframes; native clamps to [3, 10].  6 (default) matches Samsung Pano's behaviour and is the sweet spot for cv::Stitcher BA convergence."
+                caption="Hard cap on accepted keyframes; native clamps to [3, 10].  8 (default) is the sweet spot for cv::detail BA convergence while giving the 15%-overlap + 1 s time gate room to land frames."
               />
               <SectionHeader title="Overlap threshold (new content per keyframe)" />
               <SegmentedControl
-                options={['20%', '30%', '40%', '50%', '60%']}
+                options={['10%', '15%', '20%', '30%']}
                 value={`${Math.round(settings.frameSelection.overlapThreshold * 100)}%`}
                 onChange={(v) => updateFrameSelection({
                   overlapThreshold: parseInt(v, 10) / 100,
                 })}
-                caption="Required NEW-content fraction.  20% (default): generous, ~5–6 keyframes for a 90° pan.  Native clamps to [10%, 80%]."
+                caption="Required NEW-content fraction (lower = denser keyframes, more overlap).  15% (default): ~7–9 keyframes for a 90° pan.  10% is the native clamp floor."
               />
               <SectionHeader title="Keyframe interval (time-budget force-accept)" />
               <SegmentedControl
@@ -275,7 +275,7 @@ export function PanoramaSettingsModal({
                 onChange={(v) => updateFrameSelection({
                   maxKeyframeIntervalMs: v === 'off' ? 0 : parseInt(v, 10) * 1000,
                 })}
-                caption="Force-accept a keyframe at least this often even if novelty is low, so slow / static pans don't leave gaps.  Counts toward the keyframe cap.  off = disabled.  2s (default).  Applies to AR + non-AR."
+                caption="Force-accept a keyframe at least this often even if novelty is low, so slow / static pans don't leave gaps.  Counts toward the keyframe cap.  off = disabled.  1s (default).  Applies to AR + non-AR."
               />
 
               {showFlowTunables && (

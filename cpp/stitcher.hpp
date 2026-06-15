@@ -92,6 +92,7 @@ enum class StitchErrorCode : int32_t {
     ComposeResizeFailed         = 104,
     WarpFailed                  = 105,
     EmptyPanorama               = 106,
+    LowQualityStitch            = 107,  // post-stitch validator: disjoint/fragmented output
     InvalidArgument             = 200,
     UnknownCvException          = 300,
 };
@@ -225,6 +226,15 @@ struct StitchResult {
     // StitchConfig::stitchMode iff the fallback ran.  Defaults to
     // Panorama for back-compat in code paths that don't set it.
     StitchMode stitchModeUsed         = StitchMode::Panorama;
+
+    // 2026-06-14 (DEV overlay) — a human-readable, machine-parseable trace of
+    // the choices the stitcher actually made for THIS output, surfaced on the
+    // preview in __DEV__ so the user can see HOW a panorama was built without
+    // reading logcat/Console.  Semicolon-separated `key=value` pairs, e.g.
+    //   "pipe=manual;warp=spherical;route=batch;seam=graphcut;blend=multiband"
+    // Empty on builds that don't populate it (back-compat).  iOS marshals it up
+    // to the JS finalize dict; Android leaves it in the log for now.
+    std::string debugSummary;
 };
 
 

@@ -34,6 +34,11 @@ RCT_EXTERN_METHOD(cropToRect:(NSDictionary *)options
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// item-7 perspective crop (free-quad rectify; pairs with cropToRect).
+RCT_EXTERN_METHOD(cropToQuad:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 RCT_EXTERN_METHOD(debugMaskOverlay:(NSDictionary *)options
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)

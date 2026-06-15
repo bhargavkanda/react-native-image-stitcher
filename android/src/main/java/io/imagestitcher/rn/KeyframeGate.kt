@@ -151,7 +151,7 @@ internal class KeyframeGate : AutoCloseable {
     /// initializer below does NOT fire this setter, so the caller
     /// (IncrementalStitcher.kt) writes it explicitly at capture start
     /// to push the value into C++ (same contract as the iOS facade).
-    var maxKeyframeIntervalMs: Double = 2000.0
+    var maxKeyframeIntervalMs: Double = 1500.0
         set(value) {
             field = value
             nativeSetMaxKeyframeIntervalMs(nativeHandle, value)

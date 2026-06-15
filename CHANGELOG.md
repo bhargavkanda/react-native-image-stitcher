@@ -14,7 +14,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
-## [Unreleased]
+## [0.16.0] — 2026-06-15
+
+### Added — first-time-user panorama capture GUIDANCE
+
+A set of opt-in-by-default guidance surfaces that coach the operator
+through a non-AR hold-and-pan panorama.  All seven are wired into
+`<Camera>` automatically and read directly from new props (none are
+threaded through `PanoramaSettings`):
+
+1. **Mode gate + 2. rotate-to-landscape prompt.** Starting a panorama
+   while the phone is held portrait under Mode A is blocked behind a
+   "Rotate to landscape" caption; the capture starts the instant the
+   user rotates to landscape (either way up).  Releasing the shutter
+   before rotating cancels the pending start.
+3. **Pan how-to overlay.** A brief code-drawn looping graphic (phone +
+   sweeping band) + bouncing direction arrow (down for landscape Mode A,
+   right for portrait Mode B) shown for ~2.5 s at the start of each
+   recording.
+4. **"Moving too fast" pill.** A transient amber pill while the gyro
+   pan rate exceeds the warn threshold.
+5. **Blinking countdown + auto-finalize.** A blinking whole-seconds
+   countdown; at 0 the capture auto-finalizes (stitches what was
+   captured — same path as releasing the shutter).
+6. **Lateral-drift stop.** If the operator drifts sideways out of the
+   pan plane beyond the budget, the capture FINALIZES what was captured
+   and a one-button popup explains why.
+7. **Post-stitch review surface.** Optional. `rectCrop` shows a
+   draggable-quad crop editor (drag four corners; confirm perspective-
+   rectifies in place via `cv::warpPerspective` when the quad isn't
+   axis-aligned, "Use original" emits un-cropped, "Retake" discards).
+   `showPreview` shows the same screen with NO crop box — just the
+   stitched image with [Retake]/[Confirm]. With both off, `onCapture`
+   fires immediately.
+
+New `<Camera>` props (all optional): `panMode`, `panGuidance`
+(default `true`), `maxPanDurationMs` (default `9000`; `0` disables the
+countdown + auto-finalize), `panTooFastThreshold`, `lateralBudgetCm`
+(default `5`; `0` disables the lateral stop), `rectCrop`
+(default `false`), `showPreview` (default `false`), and
+`guidanceCopy` (partial override of every guidance string). A skewed
+crop quad is always perspective-rectified (there is no opt-out flag).
+
+New public exports: the `PanMode` type, `GuidanceCopy` +
+`DEFAULT_GUIDANCE_COPY`, the `usePanMotion` hook, the five guidance
+components (`RotateToLandscapePrompt`, `PanHowToOverlay`,
+`CaptureCountdownOverlay`, `LateralMotionModal`, `RectCropPreview`) with
+their prop types, and the `cropQuad` perspective-rectify helper.
+
+### Added — capture hardening
+
+Follow-up hardening on top of the guidance set, driven by on-device
+testing:
+
+- **Guidance graphics are now code-drawn, not GIFs.** The rotate-to-
+  landscape and pan-capture animations are rendered with pure RN
+  `View` + `Animated` (`guidanceGraphics.tsx`) — resolution-independent
+  (no pixelation on high-density screens) and themeable via
+  `GUIDANCE_TOKENS`. Removes the bundled GIF assets AND the Android
+  host's previous need to add Fresco's `animated-gif` module.
+- **Crop editor seeds from the max-inscribed rectangle.** With
+  `rectCrop`, the draggable quad now opens on the tightest clean
+  rectangle (native `computeInscribedRect`) instead of a blind 8 %
+  inset, and the editor gains an explicit **"Use original"** button
+  (emit the stitch un-cropped) plus a warning banner. When the editor is
+  on, the native auto-crop is forced off so the full bordered panorama
+  is available to drag.
+- **`onCapture` carries `warnings`.** Both success and failure results
+  include `warnings: CaptureWarning[]` — `LOW_FRAME_UTILIZATION` (<70 %
+  of captured frames used) and `LATERAL_DRIFT_FINALIZE`. New exports:
+  `CaptureWarning`, `CaptureWarningCode`, `PanoramaCaptureResult`.
+- **Post-stitch validation.** A disjoint / fragmented stitch (frames
+  that survived confidence but didn't fuse into one panorama) is now
+  rejected with the new `STITCH_LOW_QUALITY` error code + "try again"
+  copy, instead of emitting a broken image.
+- **Quality-driven warper.** Wide pans switch from plane to the bounded
+  cylindrical projection based on the estimated sweep angle (not only on
+  an OOM-divergence fallback), reducing end-of-pan perspective stretch.
+- **Headroom-based memory gating.** The flat process-RSS pre-stitch
+  abort is replaced by a per-process headroom model: under memory
+  pressure the pipeline routes to the lighter STREAM+feather path rather
+  than hard-aborting, and the pre-stitch abort fires only when there's
+  no room for even a minimal stitch on top of the current footprint —
+  so a memory-heavy host app no longer trips it spuriously.
+
+### Added — `stitcher` / `frameSelection` config as JSON-object props
+
+`<Camera>` now accepts the full stitcher and frame-gate config as JSON
+objects — `stitcher={{ warperType, blenderType, seamFinderType,
+stitchMode, enableMaxInscribedRectCrop }}` and
+`frameSelection={{ mode, maxKeyframes, overlapThreshold,
+maxKeyframeIntervalMs, flow }}` (both partial; `flow` is deep-merged).
+Object fields win over the matching flat `default*` props, which remain
+supported. This is the recommended way to configure the pipeline.
+
+### Changed (BREAKING)
+
+- **`onCapture` is now a discriminated union keyed on `ok`.** It fires
+  once per capture attempt — on success (`ok:true`, discriminated
+  further by `type`) AND on failure (`ok:false`, carrying `error:
+  CameraError`); previously it fired only on success and failures went
+  solely to `onError`. `onError` STILL fires on failure as an unchanged
+  mirror. **Migration:** gate on `result.ok` before reading
+  `uri`/`width`/`height` — `if (!result.ok) { handle(result.error);
+  return; }`. Both branches also carry the new `warnings` array.
+- **`<Camera>` now defaults to `panMode='vertical'` (landscape-only,
+  top→bottom panorama).** Previously the component accepted both
+  landscape and portrait holds with no gate.  `panMode` options are now
+  `'vertical'` (landscape-only; portrait holds gated behind the
+  rotate-to-landscape prompt), `'horizontal'` (portrait-only, left→right;
+  landscape holds gated behind the rotate-to-portrait prompt), and
+  `'both'` (either, ungated).  **Hosts that want portrait/left→right
+  panoramas pass `panMode='horizontal'` or `'both'`.**
+- **Stitch defaults moved to more robust values.** `stitchMode` now
+  defaults to `'panorama'` (was `'auto'` — the auto-resolver's SCANS
+  branch keys off double-integrated IMU translation, which is unreliable
+  during rotation); `warperType` defaults to `'spherical'` (was
+  `'plane'` — bounds both axes, fixing fragmented wide/vertical pans);
+  and the keyframe gate is denser (`maxKeyframes` → 8, a 1.5 s
+  `maxKeyframeIntervalMs` time gate re-enabled — bounding a static/slow
+  capture to ~12 s before the 8-keyframe auto-finalize, `overlapThreshold`
+  → 0.15).  **Migration:** hosts relying on the previous behaviour set the
+  values explicitly via the new `stitcher` / `frameSelection` props (or
+  the matching flat `default*` props) — e.g. `stitcher={{ stitchMode:
+  'auto', warperType: 'plane' }}`.
 
 ## [0.15.2] — 2026-06-11
 

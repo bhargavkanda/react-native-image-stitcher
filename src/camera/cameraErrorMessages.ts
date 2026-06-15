@@ -31,7 +31,17 @@ export interface UserFacingStitchError {
  * dropped code breaks the build here rather than silently going
  * unhandled.
  */
-const RECOVERABLE_STITCH_GUIDANCE: Partial<
+/**
+ * A partial map of recoverable-error code → copy, for the `overrides`
+ * argument of {@link userFacingStitchError}.  Hosts localising the SDK pass
+ * their translated strings here (typically built from their i18n catalogue,
+ * keyed by the same `CameraErrorCode`s exposed by {@link RECOVERABLE_STITCH_CODES}).
+ */
+export type UserFacingStitchErrorOverrides = Partial<
+  Record<CameraErrorCode, UserFacingStitchError>
+>;
+
+export const RECOVERABLE_STITCH_GUIDANCE: Partial<
   Record<CameraErrorCode, UserFacingStitchError>
 > = {
   // cv::Stitcher ERR_NEED_MORE_IMGS / the manual pipeline's "0 valid
@@ -61,6 +71,15 @@ const RECOVERABLE_STITCH_GUIDANCE: Partial<
       "The frames couldn't be aligned — keep the phone level and steady so "
       + 'each frame overlaps the one before it.',
   },
+  // v0.16 — the post-stitch validator rejected the output as disjoint /
+  // fragmented: the frames stitched but didn't form one coherent panorama
+  // (usually a too-fast or jerky sweep that broke alignment partway).
+  STITCH_LOW_QUALITY: {
+    title: "That didn't come out right",
+    message:
+      "The panorama didn't stitch into one clean image — try again, panning "
+      + 'slowly and steadily in one direction so each frame overlaps the last.',
+  },
   // Ran out of memory finishing the stitch — usually an over-long sweep.
   STITCH_OOM: {
     title: 'Try a shorter sweep',
@@ -71,7 +90,24 @@ const RECOVERABLE_STITCH_GUIDANCE: Partial<
 };
 
 /**
+ * The recoverable stitch-error codes this module has built-in copy for.
+ * A host wiring i18n iterates these to know exactly which codes need a
+ * translation (every other `CameraErrorCode` maps to `null` and uses the
+ * host's generic error UI).
+ */
+export const RECOVERABLE_STITCH_CODES = Object.keys(
+  RECOVERABLE_STITCH_GUIDANCE,
+) as CameraErrorCode[];
+
+/**
  * Maps a `CameraErrorCode` to friendly, action-guiding alert copy.
+ *
+ * Localisation: pass `overrides` (a partial code→copy map, typically from
+ * your i18n catalogue) and any code present there wins over the built-in
+ * English; codes you omit fall back to the bundled copy.  This is the
+ * host-side mirror of the `guidanceCopy` prop — the recoverable-error alert
+ * is rendered by the HOST (in its `onError` handler), so it is localised
+ * here rather than through `<Camera>`.
  *
  * @returns the title+message for a recoverable stitch failure, or `null`
  *   if `code` has no single user-recoverable action (the host should
@@ -79,6 +115,7 @@ const RECOVERABLE_STITCH_GUIDANCE: Partial<
  */
 export function userFacingStitchError(
   code: CameraErrorCode,
+  overrides?: UserFacingStitchErrorOverrides,
 ): UserFacingStitchError | null {
-  return RECOVERABLE_STITCH_GUIDANCE[code] ?? null;
+  return overrides?.[code] ?? RECOVERABLE_STITCH_GUIDANCE[code] ?? null;
 }

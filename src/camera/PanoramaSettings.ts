@@ -195,11 +195,11 @@ export interface FrameSelectionSettings {
 
   /**
    * Required NEW-content fraction (0..1) for a candidate frame to
-   * be accepted.  Default 0.20 = 20% novel content per accept.
-   * Lower = more frames accepted, larger panoramas.  Higher = fewer
-   * frames, faster captures but more conservative about coverage.
-   * Clamped to `[0.10, 0.80]` natively
-   * (`IncrementalStitcher.swift:962`).
+   * be accepted.  Default 0.15 = 15% novel content per accept (v0.16;
+   * was 0.20).  Lower = more frames accepted, denser overlap, more
+   * robust registration.  Higher = fewer frames, faster captures but
+   * more conservative about coverage.  Clamped to `[0.10, 0.80]`
+   * natively (`IncrementalStitcher.swift:962`) — 0.10 is the floor.
    */
   overlapThreshold: number;
 
@@ -210,7 +210,9 @@ export interface FrameSelectionSettings {
    * overlap threshold wasn't met — so a slow or static pan never goes
    * longer than this without a keyframe.  Counts toward `maxKeyframes`
    * (the cap still finalises the capture).  `0` disables it.  Default
-   * `2000` (2 s).  Maps to the native gate's `setMaxKeyframeIntervalMs`.
+   * `1500` (1.5 s) — with `maxKeyframes` 8 this bounds a static/slow
+   * capture to ~8×1.5 ≈ 12 s before the keyframe-count auto-finalize.
+   * Maps to the native gate's `setMaxKeyframeIntervalMs`.
    */
   maxKeyframeIntervalMs: number;
 
@@ -312,8 +314,21 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   captureSource: 'ar',
   debug: false,
   stitcher: {
-    stitchMode: 'auto',
-    warperType: 'plane',
+    // v0.16 — PANORAMA by default (was 'auto').  The auto-resolver's SCANS
+    // branch leans on double-integrated IMU translation, which is unreliable
+    // during rotation (gravity leakage inflates the translation estimate); in
+    // practice rotational pans are the common case and resolve to panorama
+    // anyway.  Defaulting to panorama is the robust choice — host apps that
+    // genuinely capture flat documents/walls can still opt into 'auto' or
+    // 'scans' via the ⚙️ panel or the `defaultStitchMode` / `stitcher` props.
+    stitchMode: 'panorama',
+    // v0.16 — SPHERICAL by default (bounds both axes; the proven-robust wide/
+    // vertical-pan projection).  This is now the single source of truth — the
+    // native side no longer hardcodes a warper, so the ⚙️ panel + the host's
+    // `defaultWarper` prop actually take effect.  Note: choosing `plane` here
+    // re-arms the dynamic plane→spherical fallback/divergence switch in the
+    // manual pipeline (it only fires when warperType != spherical).
+    warperType: 'spherical',
     blenderType: 'multiband',
     seamFinderType: 'graphcut',
     // v0.15 — inscribed-rect crop is OFF by default (bbox crop keeps all
@@ -324,9 +339,17 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   },
   frameSelection: {
     mode: 'flow-based',
-    maxKeyframes: 6,
-    overlapThreshold: 0.20,
-    maxKeyframeIntervalMs: 2000,
+    // v0.16 — denser keyframes by default: a 15% novelty gate, up to 8 frames,
+    // plus a 1.5 s time-budget force-accept (so a slow/static pan still lands a
+    // keyframe every 1.5 s even when novelty is low).  With 8 frames this bounds
+    // a static/slow capture to ~8×1.5 ≈ 12 s before the keyframe-count
+    // auto-finalize.  More overlap between consecutive keyframes ⇒ stronger
+    // feature matching ⇒ more robust registration.  Memory-checked: 8 frames fit
+    // the BATCH held-set cap on both platforms.  Overlap selectable in the
+    // settings panel {10,15,20,30}% (native clamp floor 10%); cap clamps [3,10].
+    maxKeyframes: 8,
+    overlapThreshold: 0.15,
+    maxKeyframeIntervalMs: 1500,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
   },
 };

@@ -420,7 +420,7 @@ class IncrementalStitcher(
             // stalled scan still advances).  iOS parity:
             // IncrementalStitcher.swift maxKeyframeIntervalMs block.
             val maxKfIntervalMs = configOverrides
-                ?.getDoubleOrDefault("maxKeyframeIntervalMs", 2000.0) ?: 2000.0
+                ?.getDoubleOrDefault("maxKeyframeIntervalMs", 1500.0) ?: 1500.0
             keyframeGate.maxKeyframeIntervalMs = maxKfIntervalMs.coerceAtLeast(0.0)
             // 2026-05-22 (audit F5) — flow-strategy Shi-Tomasi
             // tunables.  Pre-audit, Android had no JNI for these
@@ -748,6 +748,30 @@ class IncrementalStitcher(
                     // resolved cv::Stitcher mode so JS can surface it
                     // on the output preview + debug toast.
                     map.putString("stitchModeResolved", stitchModeResolved)
+                    // 2026-06-15 (iOS parity) — the exact keyframe JPEG
+                    // paths used for this stitch, so JS can re-stitch
+                    // them ON DEMAND via refinePanorama (the high-level
+                    // preview tab) without enumerating the session dir.
+                    // Camera.tsx gates that tab on this array being
+                    // present, so without it the tab never appears on
+                    // Android (the bug this fixes).  Mirrors iOS'
+                    // FinalizePayload "batchKeyframePaths": payload.paths.
+                    val keyframePathsArray = Arguments.createArray()
+                    keyframePathsSnapshot.forEach { keyframePathsArray.pushString(it) }
+                    map.putArray("batchKeyframePaths", keyframePathsArray)
+                    // The orientation THIS stitch baked into the output.
+                    // The on-demand high-level re-stitch MUST pass the
+                    // same value back through refinePanorama or the
+                    // output comes out in raw sensor landscape (sideways)
+                    // — refinePanorama otherwise defaults to "portrait"
+                    // (no bake-rotation).  Mirrors iOS' FinalizePayload
+                    // "captureOrientation": payload.captureOrientation.
+                    map.putString("captureOrientation", captureOrientationSnapshot)
+                    // 2026-06-15 — DEV overlay parity with iOS: the stitcher's
+                    // runtime recipe (pipe/warp/route/seam/blend) so the Android
+                    // pill shows the same detail, not just mode/score/frames.
+                    val dbg = stitcher.lastDebugSummary
+                    if (dbg.isNotEmpty()) map.putString("debugSummary", dbg)
                 } else {
                     // The live engines (hybrid + firstwins/slit) and their
                     // auto-refine hook were archived in the 2026-06 batch-
@@ -1493,6 +1517,15 @@ class IncrementalStitcher(
             config?.getBooleanOrDefault("useInscribedRectCrop", false) ?: false
         val stitchMode = (config?.getString("stitchMode") ?: "auto")
             .let { if (it in setOf("auto", "panorama", "scans")) it else "auto" }
+        // 2026-06-15 — pipeline is caller-selectable (mirrors iOS'
+        // refinePanorama `refineManual`).  The on-demand HIGH-LEVEL
+        // preview tab (Camera.tsx requestHighLevelAlt) calls
+        // refinePanorama with useManualPipeline:false to re-stitch the
+        // captured keyframes via stock cv::Stitcher.  Default false
+        // (high-level) preserves the refine path's historical
+        // cv::Stitcher behaviour.
+        val useManualPipeline =
+            config?.getBooleanOrDefault("useManualPipeline", false) ?: false
         val jpegQuality = max(1, min(100,
             config?.getIntOrDefault("jpegQuality", 90) ?: 90))
 
@@ -1538,9 +1571,18 @@ class IncrementalStitcher(
                     warperType,
                     blenderType,
                     seamFinderType,
+                    // captureOrientation flows through so the high-level
+                    // re-stitch bakes the SAME rotation the capture used
+                    // — without it the output is sideways (raw sensor
+                    // landscape).  The high-level tab passes back the
+                    // orientation the finalize emitted.
                     captureOrientation,
                     useInscribedRectCrop,
                     stitchMode = effectiveMode,
+                    // false = stock high-level cv::Stitcher (the on-demand
+                    // HIGH-LEVEL preview tab); true would force the manual
+                    // pipeline.  Sourced from the JS config above.
+                    useManualPipeline = useManualPipeline,
                 )
                 // Stitch returned — BatchStitcher writes the JPEG
                 // synchronously, so "writing" reflects the final
@@ -1568,6 +1610,10 @@ class IncrementalStitcher(
                     putInt("framesIncluded", framesIncluded)
                     putInt("framesDropped", framesRequested - framesIncluded)
                     putDouble("finalConfidenceThresh", finalConfidenceThresh)
+                    // DEV overlay — the high-level re-stitch's recipe so the
+                    // pill shows pipe/warp/route/seam/blend on the high-level tab.
+                    val dbg = stitcher.lastDebugSummary
+                    if (dbg.isNotEmpty()) putString("debugSummary", dbg)
                 }
                 emitRefineProgress(
                     stage = "done",
@@ -1649,39 +1695,38 @@ class IncrementalStitcher(
      * via `task_info(TASK_VM_INFO)` — see
      * `IncrementalStitcherBridge.swift:231-259`).
      *
-     * Returns the **total PSS** (proportional set size) of this
-     * process in MB.  PSS is the metric Android's Low-Memory-Killer
-     * (`lmkd`) ranks against, so it's the right one-true-number for
-     * the on-screen memory pill: it's "how close are we to being
-     * killed by the system?".
+     * Returns the process **RSS** (resident set size) in MB, read from
+     * `/proc/self/statm` (resident-pages × page-size).  RSS is what the shared
+     * C++ `[memstat]` lines report (`rss_mb()` reads the same `/proc`), so the
+     * pill and the stitch logs show the SAME number — handy when correlating a
+     * spike with a logcat trace.
      *
-     * Total PSS = USS (private) + sum(shared / refcount).  Read via
-     * `ActivityManager.getProcessMemoryInfo()`, which is the same API
-     * Android Studio's profiler uses.  Granularity is 1 KB; we
-     * divide by 1024 to MB so the JS side displays a number directly
-     * comparable to the iOS phys_footprint value.
+     * Why not `ActivityManager.getProcessMemoryInfo().totalPss`?  It's
+     * RATE-LIMITED on Android 8+ (returns a cached value when polled often), so
+     * at the pill's 500 ms cadence it froze at the launch-time reading and never
+     * moved.  `/proc/self/statm` is a single unthrottled read.
      *
-     * Returns -1.0 on failure (very rare — `getProcessMemoryInfo()`
-     * is generally infallible since Android 5.0 because PSS is read
-     * from `/proc/self/smaps` synchronously on the calling thread).
+     * Returns -1.0 on failure (very rare — `/proc/self/statm` is always present
+     * and cheap to read on the calling thread).
      */
     @ReactMethod
     fun getMemoryFootprintMB(promise: Promise) {
         try {
-            val am = reactContext.getSystemService(ActivityManager::class.java)
-            if (am == null) {
-                promise.resolve(-1.0)
-                return
-            }
-            val pid = android.os.Process.myPid()
-            val infos = am.getProcessMemoryInfo(intArrayOf(pid))
-            if (infos == null || infos.isEmpty()) {
-                promise.resolve(-1.0)
-                return
-            }
-            // totalPss is in KB.  Divide by 1024 → MB.  Use Double so
-            // the JS overlay can render fractional MB if it wants.
-            val mb = infos[0].totalPss.toDouble() / 1024.0
+            // Read RSS from /proc/self/statm (field[1] = resident pages).  This
+            // is UNTHROTTLED and matches the C++ [memstat] rss_mb() in logcat, so
+            // the pill tracks the same number I read from the stitch logs.
+            //
+            // 2026-06-15 — was ActivityManager.getProcessMemoryInfo().totalPss,
+            // which is RATE-LIMITED on Android 8+: polled frequently (the pill
+            // ticks every 500 ms) it returns a CACHED value, so the pill froze at
+            // its launch-time reading (~310 MB) and never showed the stitch spike.
+            val fields = java.io.File("/proc/self/statm")
+                .readText().trim().split(' ')
+            val residentPages = fields[1].toLong()
+            val pageSize =
+                android.system.Os.sysconf(android.system.OsConstants._SC_PAGESIZE)
+            val mb = residentPages.toDouble() * pageSize.toDouble() /
+                (1024.0 * 1024.0)
             promise.resolve(mb)
         } catch (t: Throwable) {
             android.util.Log.w(
@@ -1935,15 +1980,27 @@ class IncrementalStitcher(
         if (denom <= 1e-9) return "panorama"  // no motion either way
         val ratio = tScore / denom
 
+        // 2026-06-15 — LOW-ROTATION GUARD.  The gyro rotation (rRadians) is
+        // trustworthy; the IMU translation (tMeters, in non-AR) is NOT — a
+        // continuous rotation leaks gravity into the double-integrated accel and
+        // inflates it, which can falsely push `ratio` over 0.55 → SCANS, whose
+        // affine warper can't represent the rotation.  So when the gyro shows a
+        // clear pan (> ~20°) with only modest translation, force PANORAMA
+        // regardless of the (possibly-inflated) translation.  Genuine shelf
+        // scans (low rotation, large real translation) skip this and still
+        // reach SCANS via the ratio.  (Conservative: keeps the tMeters cap so a
+        // genuine large-translation capture isn't forced to PANORAMA.)
+        val lowRotationGuard = rRadians > 0.35 && tMeters < 0.25
+        val mode = if (!lowRotationGuard && ratio >= 0.55) "scans" else "panorama"
         android.util.Log.i(
             "IncrementalStitcher",
             "stitch-mode auto: tPose=${"%.3f".format(tPose)}m " +
                 "tImu=${"%.3f".format(imuTranslationMetres)}m " +
                 "r=${"%.3f".format(rRadians)}rad " +
                 "ratio=${"%.3f".format(ratio)} " +
-                "→ ${if (ratio >= 0.55) "scans" else "panorama"}",
+                "rotGuard=$lowRotationGuard → $mode",
         )
-        return if (ratio >= 0.55) "scans" else "panorama"
+        return mode
     }
 
     /**

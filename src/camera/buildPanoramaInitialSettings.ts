@@ -32,6 +32,9 @@
 import {
   DEFAULT_FLOW_GATE_SETTINGS,
   DEFAULT_PANORAMA_SETTINGS,
+  type BatchStitcherSettings,
+  type FlowGateSettings,
+  type FrameSelectionSettings,
   type PanoramaSettings,
 } from './PanoramaSettings';
 
@@ -60,7 +63,7 @@ export interface PanoramaPropOverrides {
   defaultKeyframeOverlapThreshold?: number;
   /**
    * Initial value for `frameSelection.maxKeyframeIntervalMs` — the
-   * time-budget force-accept (ms).  `0` disables it.  Default 2000.
+   * time-budget force-accept (ms).  `0` disables it.  Default 1500.
    */
   defaultMaxKeyframeIntervalMs?: number;
   /**
@@ -69,6 +72,23 @@ export interface PanoramaPropOverrides {
    * Omitted ⇒ the stitcher default (false = bounding-rect crop).
    */
   maxInscribedRectCrop?: boolean;
+  /**
+   * v0.16 — pass the stitcher config as a JSON OBJECT (canonical field names:
+   * `warperType` / `blenderType` / `seamFinderType` / `stitchMode` /
+   * `enableMaxInscribedRectCrop`).  Any field set here OVERRIDES the matching
+   * flat `default*` prop; unset fields fall back to the flat prop, then the SDK
+   * default.  Partial — set only what you want.
+   */
+  stitcher?: Partial<BatchStitcherSettings>;
+  /**
+   * v0.16 — pass the frame-gate config as a JSON OBJECT (canonical field names:
+   * `mode` / `maxKeyframes` / `overlapThreshold` / `maxKeyframeIntervalMs` /
+   * `flow`).  Overrides the matching flat `default*` props; `flow` is
+   * DEEP-merged so you can set a single flow knob without restating the rest.
+   */
+  frameSelection?: Partial<Omit<FrameSelectionSettings, 'flow'>> & {
+    flow?: Partial<FlowGateSettings>;
+  };
 }
 
 
@@ -127,6 +147,8 @@ export function buildPanoramaInitialSettings(
       enableMaxInscribedRectCrop:
         overrides.maxInscribedRectCrop
         ?? stitcherDefaults.enableMaxInscribedRectCrop,
+      // The JSON-object prop wins over the flat default* props above.
+      ...(overrides.stitcher ?? {}),
     },
 
     frameSelection: {
@@ -139,6 +161,11 @@ export function buildPanoramaInitialSettings(
       maxKeyframeIntervalMs:
         overrides.defaultMaxKeyframeIntervalMs
         ?? base.frameSelection.maxKeyframeIntervalMs,
+      // The JSON-object prop wins over the flat default* props above for the
+      // scalar fields (mode / maxKeyframes / overlapThreshold / intervalMs).
+      // Its `flow` (if any) is dropped here and DEEP-merged in the explicit
+      // `flow:` key below, so a partial flow object doesn't wipe the rest.
+      ...(overrides.frameSelection ?? {}),
       flow: {
         ...flowDefaults,
         noveltyPercentile:
@@ -150,6 +177,8 @@ export function buildPanoramaInitialSettings(
         maxTranslationCm:
           overrides.defaultFlowMaxTranslationCm
           ?? flowDefaults.maxTranslationCm,
+        // The object prop's flow wins over the flat default*Flow* props.
+        ...(overrides.frameSelection?.flow ?? {}),
       },
     },
   };

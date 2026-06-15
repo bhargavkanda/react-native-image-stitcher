@@ -14,6 +14,7 @@ import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.MatOfInt
+import org.opencv.core.MatOfPoint2f
 import org.opencv.core.Point
 import org.opencv.core.Rect
 import org.opencv.core.Scalar
@@ -108,7 +109,26 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         // SCANS canvas size is bounded by sum-of-frames; PANORAMA
         // can diverge to multi-GB on translation-heavy input).
         stitchMode: String,
+        // 2026-06-15 — pipeline picker (mirrors iOS' OpenCVStitcher
+        // `useManualPipeline:` param).  true → the MANUAL cv::detail
+        // pipeline (graphcut + multiband + the full memory-guard set;
+        // the default for batch capture).  false → stock high-level
+        // cv::Stitcher (the on-demand HIGH-LEVEL preview tab driven by
+        // refinePanorama).  Appended LAST to match the JNI C signature
+        // in image_stitcher_jni.cpp — order/count/type must line up
+        // exactly or it's an UnsatisfiedLinkError at runtime.
+        useManualPipeline: Boolean,
     ): IntArray
+
+    // 2026-06-15 — getter for the last successful stitch's debugSummary
+    // (pipe/warp/route/seam/blend).  The jintArray return of
+    // nativeStitchFramePaths can't carry a string; this fetches the value the
+    // JNI stashed.  Called by stitchSync right after a successful stitch.
+    private external fun nativeLastDebugSummary(): String
+
+    /** debugSummary of the most recent stitchSync() (empty if none/failed). */
+    internal var lastDebugSummary: String = ""
+        private set
 
     // ── Stitch frames → panorama ─────────────────────────────────
 
@@ -180,6 +200,9 @@ class BatchStitcher(reactContext: ReactApplicationContext)
                     seamEstimationResolMP,
                     compositingResolMP,
                     stitchMode,
+                    // Direct @ReactMethod batch stitch → MANUAL pipeline
+                    // (the memory-safe default; mirrors iOS).
+                    true,
                 )
                 val duration = System.currentTimeMillis() - start
                 // 2026-05-15 (D) — dims layout from native JNI:
@@ -378,6 +401,121 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         }
     }
 
+    /**
+     * item-7 — free-quad perspective crop (iOS `cropToQuadAtPath` parity).
+     *
+     * `options` carries `imagePath` + the 4 IMAGE-PIXEL corners as a flat
+     * `quad` array of 8 numbers `[tlX,tlY,trX,trY,brX,brY,blX,blY]`
+     * (ordered TL→TR→BR→BL by the JS editor's `orderQuadCorners`) +
+     * optional `quality` (default 90).  Rectifies the quadrilateral to an
+     * upright rectangle (Imgproc.getPerspectiveTransform +
+     * Imgproc.warpPerspective), overwrites in place, resolves
+     * `{ width, height }`.  Mirrors `cropToRect`; the JS editor chooses
+     * this when the dragged quad isn't ~axis-aligned.
+     *
+     * The destination size (averaged opposite edges) + the convex /
+     * min-area / in-bounds gate + the output-canvas OOM guard are
+     * Kotlin ports of cpp/crop_quad.hpp (quadDstRect / isQuadAcceptable)
+     * and cpp/warp_guard.hpp (canvasExceedsGuard), kept in sync with iOS
+     * per the same "duplicate stage code" convention `cropToRect` follows.
+     */
+    @ReactMethod
+    fun cropToQuad(options: ReadableMap, promise: Promise) {
+        val imagePath = options.getString("imagePath")
+            ?: return promise.reject("invalid-options", "imagePath required")
+        val quadArr = options.getArray("quad")
+        if (quadArr == null || quadArr.size() != 8) {
+            return promise.reject(
+                "invalid-options",
+                "quad must be an array of 8 numbers [tlX,tlY,trX,trY,brX,brY,blX,blY]",
+            )
+        }
+        val p = DoubleArray(8) { quadArr.getDouble(it) }
+        val quality =
+            (if (options.hasKey("quality") && !options.isNull("quality")) {
+                options.getInt("quality")
+            } else {
+                90
+            }).coerceIn(1, 100)
+        CoroutineScope(Dispatchers.Default).launch {
+            val toRelease = mutableListOf<Mat>()
+            try {
+                ensureOpenCv()
+                val cleaned = stripFileScheme(imagePath)
+                if (!File(cleaned).exists()) {
+                    promise.reject("read-failed", "Image not found: $imagePath")
+                    return@launch
+                }
+                val img = Imgcodecs.imread(cleaned, Imgcodecs.IMREAD_COLOR)
+                toRelease += img
+                if (img.empty()) {
+                    promise.reject("read-failed", "Could not decode $imagePath")
+                    return@launch
+                }
+
+                // Geometry gate — convex, non-degenerate, inside the image.
+                if (!isQuadAcceptableForCrop(p, img.cols().toDouble(), img.rows().toDouble())) {
+                    promise.reject(
+                        "crop-to-quad-failed",
+                        "Crop quad is degenerate (non-convex, zero-area, or out of bounds)",
+                    )
+                    return@launch
+                }
+                // Destination size = avg of opposite edge lengths (rounded).
+                val dstW = Math.round((quadEdge(p, 0, 1) + quadEdge(p, 3, 2)) / 2.0).toInt()
+                val dstH = Math.round((quadEdge(p, 0, 3) + quadEdge(p, 1, 2)) / 2.0).toInt()
+                // Output-canvas OOM net — same 50 MP guard the stitch uses.
+                if (dstW <= 0 || dstH <= 0 || canvasExceedsGuard(dstW.toLong(), dstH.toLong())) {
+                    promise.reject(
+                        "crop-to-quad-failed",
+                        "Crop quad output canvas is degenerate or exceeds the size guard (${dstW}x${dstH})",
+                    )
+                    return@launch
+                }
+
+                val src = MatOfPoint2f(
+                    Point(p[0], p[1]),  // TL
+                    Point(p[2], p[3]),  // TR
+                    Point(p[4], p[5]),  // BR
+                    Point(p[6], p[7]),  // BL
+                )
+                toRelease += src
+                val dst = MatOfPoint2f(
+                    Point(0.0, 0.0),
+                    Point(dstW.toDouble(), 0.0),
+                    Point(dstW.toDouble(), dstH.toDouble()),
+                    Point(0.0, dstH.toDouble()),
+                )
+                toRelease += dst
+                val transform = Imgproc.getPerspectiveTransform(src, dst)
+                toRelease += transform
+                val warped = Mat()
+                toRelease += warped
+                Imgproc.warpPerspective(
+                    img, warped, transform, Size(dstW.toDouble(), dstH.toDouble()),
+                    Imgproc.INTER_LINEAR,
+                )
+                if (warped.empty()) {
+                    promise.reject("crop-to-quad-failed", "Perspective warp produced an empty image")
+                    return@launch
+                }
+                val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, quality)
+                if (!Imgcodecs.imwrite(cleaned, warped, params)) {
+                    promise.reject("write-failed", "Could not rewrite $imagePath")
+                    return@launch
+                }
+                promise.resolve(WritableNativeMap().apply {
+                    putInt("width", warped.cols())
+                    putInt("height", warped.rows())
+                })
+            } catch (t: Throwable) {
+                promise.reject("crop-to-quad-failed", t.message, t)
+            } finally {
+                toRelease.forEach { it.release() }
+            }
+        }
+    }
+
     /** Red-tint the dropped pixels; writes `<path>.mask.jpg`. Resolves `{ maskPath, width, height, excludedPercent }`. */
     @ReactMethod
     fun debugMaskOverlay(options: ReadableMap, promise: Promise) {
@@ -546,6 +684,79 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         return intArrayOf(bx, by, bw, bh)
     }
 
+    // ── item-7 free-quad crop geometry (ports of cpp/crop_quad.hpp +
+    //    cpp/warp_guard.hpp; kept in sync with iOS cropToQuad) ───────
+
+    /**
+     * Euclidean length of the edge between corners `i` and `j` in the flat
+     * `[x0,y0,x1,y1,...]` quad array `p` (corner k = (p[2k], p[2k+1])).
+     */
+    private fun quadEdge(p: DoubleArray, i: Int, j: Int): Double {
+        val dx = p[2 * i] - p[2 * j]
+        val dy = p[2 * i + 1] - p[2 * j + 1]
+        return Math.hypot(dx, dy)
+    }
+
+    /**
+     * Port of cpp/crop_quad.hpp:isQuadAcceptable for the flat 8-number
+     * quad `p` ([tlX,tlY,trX,trY,brX,brY,blX,blY]).  True when the quad is
+     * convex, has |area| ≥ `minArea` px², and every corner lies inside
+     * `[0..imageW]×[0..imageH]` (½-px epsilon).  Mirrors the iOS gate so
+     * both platforms reject the same degenerate quads.
+     */
+    private fun isQuadAcceptableForCrop(
+        p: DoubleArray,
+        imageW: Double,
+        imageH: Double,
+        minArea: Double = 1.0,
+    ): Boolean {
+        // Convexity — all consecutive edge cross-products share one sign.
+        var sign = 0
+        for (i in 0 until 4) {
+            val ax = p[2 * i]; val ay = p[2 * i + 1]
+            val bx = p[2 * ((i + 1) % 4)]; val by = p[2 * ((i + 1) % 4) + 1]
+            val cx = p[2 * ((i + 2) % 4)]; val cy = p[2 * ((i + 2) % 4) + 1]
+            val cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx)
+            if (cross != 0.0) {
+                val s = if (cross > 0.0) 1 else -1
+                if (sign == 0) sign = s else if (s != sign) return false
+            }
+        }
+        // Min-area via the shoelace formula (|2A| ≥ 2·minArea).
+        var area2 = 0.0
+        for (i in 0 until 4) {
+            val ax = p[2 * i]; val ay = p[2 * i + 1]
+            val bx = p[2 * ((i + 1) % 4)]; val by = p[2 * ((i + 1) % 4) + 1]
+            area2 += ax * by - bx * ay
+        }
+        if (Math.abs(area2) < minArea * 2.0) return false
+        // In-bounds — every corner inside the decoded image (½-px slop).
+        if (imageW > 0.0 && imageH > 0.0) {
+            val eps = 0.5
+            for (i in 0 until 4) {
+                val x = p[2 * i]; val y = p[2 * i + 1]
+                if (x < -eps || x > imageW + eps || y < -eps || y > imageH + eps) return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * Port of cpp/warp_guard.hpp:canvasExceedsGuard — true when a
+     * `width`×`height` output canvas is degenerate (non-positive) or
+     * strictly larger than `maxPixels` (default 50 MP, boundary inclusive).
+     * int64 area math matches the C++ so the same quads are rejected.
+     */
+    private fun canvasExceedsGuard(
+        width: Long,
+        height: Long,
+        maxPixels: Long = 50L * 1000L * 1000L,
+    ): Boolean {
+        if (width <= 0 || height <= 0) return true
+        if (width > 3_000_000_000L || height > 3_000_000_000L) return true
+        return width * height > maxPixels
+    }
+
     // ── Internals ────────────────────────────────────────────────
 
     /**
@@ -623,9 +834,15 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         // translation captures safely (PANORAMA on translation can
         // diverge → multi-GB canvas → lmkd kill).
         stitchMode: String = "scans",
+        // 2026-06-15 — pipeline picker (mirrors iOS' OpenCVStitcher
+        // `useManualPipeline:`).  Defaults to true (MANUAL) so the
+        // batch-keyframe finalize orchestrator gets the memory-safe
+        // manual path without re-stating it.  The refine/high-level
+        // path passes false to drive the stock cv::Stitcher pipeline.
+        useManualPipeline: Boolean = true,
     ): IntArray {
         ensureNativeStitcher()
-        return nativeStitchFramePaths(
+        val dims = nativeStitchFramePaths(
             framePaths,
             outputPath,
             jpegQuality,
@@ -638,7 +855,12 @@ class BatchStitcher(reactContext: ReactApplicationContext)
             seamEstimationResolMP,
             compositingResolMP,
             stitchMode,
+            useManualPipeline,
         )
+        // Capture the run's debugSummary (pipe/warp/route/seam/blend) for the
+        // DEV overlay; best-effort so a getter hiccup never fails the stitch.
+        lastDebugSummary = try { nativeLastDebugSummary() } catch (_: Throwable) { "" }
+        return dims
     }
 
     /**

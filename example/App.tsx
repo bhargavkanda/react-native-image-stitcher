@@ -43,8 +43,6 @@ import {
   useKeyframeStream,
   useStitcherWorklet,
   userFacingStitchError,
-  useStitchStatsToast,
-  CaptureStitchStatsToast,
   type AcceptedKeyframe,
   type CameraCaptureResult,
   type CameraError,
@@ -54,11 +52,8 @@ import {
   type CapturePreviewAction,
   type FramesDroppedInfo,
   type IncrementalState,
+  type PanMode,
 } from 'react-native-image-stitcher';
-import {
-  InscribedRectDebugOverlay,
-  inscribedRectDebugAvailable,
-} from './InscribedRectDebug';
 
 
 function App(): React.JSX.Element {
@@ -76,14 +71,28 @@ function App(): React.JSX.Element {
 
   // Last capture (photo or panorama).  Set in onCapture, cleared on
   // preview modal dismiss.  Drives the visibility of the modal.
-  const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
+  // Only SUCCESSFUL captures are previewed; failures (ok:false) go to the
+  // error handler.  Narrowing the state to the ok:true variants keeps the
+  // preview reads (uri/width/height/...) type-safe.
+  const [preview, setPreview] = useState<
+    Extract<CameraCaptureResult, { ok: true }> | null
+  >(null);
 
-  // v0.15 — inscribed-rect crop debug harness (gated dev tool). When
-  // enabled, a captured panorama is sent to the overlay (which computes
-  // + draws the inscribed rectangle, then crops on confirm) instead of
-  // the normal preview.
-  const [rectDebugEnabled, setRectDebugEnabled] = useState(false);
-  const [rectDebugUri, setRectDebugUri] = useState<string | null>(null);
+  // v0.16 — post-capture review surface toggles (dev tools, exposed as
+  // on-screen toggles below).  `rectCrop` shows the draggable-quad crop
+  // editor; `showPreview` shows a plain image preview with Retake/Confirm;
+  // both off → onCapture fires immediately with no review screen.
+  // Defaults match the SDK prop defaults: rectCrop OFF, showPreview OFF,
+  // panMode 'vertical' — i.e. capture fires onCapture immediately with no
+  // review surface unless a toggle is flipped on.
+  const [rectCrop, setRectCrop] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  // panMode flag (guidance item 1).  'vertical' (default) = landscape-only
+  // (top→bottom): a portrait hold shows the rotate-to-landscape prompt.
+  // 'horizontal' = portrait-only (left→right): a landscape hold shows the
+  // rotate-to-portrait prompt.  'both' = either, no prompt.  Toggle cycles
+  // all three to verify the gates on-device.
+  const [panMode, setPanMode] = useState<PanMode>('vertical');
 
   // v0.13.0 — controlled flash state demo.  The host owns the
   // `'on' | 'off'` value; the built-in flash button drives the
@@ -92,12 +101,6 @@ function App(): React.JSX.Element {
   // (greyed + a11y "Flash unavailable in AR mode"); no host work
   // required for that.
   const [flash, setFlash] = useState<'on' | 'off'>('off');
-
-  // Toast for the dropped-frames "pan slower" hint.  Only fires when
-  // >30% of the requested frames are missing from the final stitch
-  // (e.g. >=2 of 6); a smaller drop stays silent.  Shown as a transient
-  // toast (CaptureStitchStatsToast), not a modal.
-  const dropToast = useStitchStatsToast();
 
   // v0.13.0 — capture-history thumbnails.  Appended on every
   // successful onCapture; rendered by `<Camera>`'s built-in
@@ -252,11 +255,20 @@ function App(): React.JSX.Element {
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
-    if (rectDebugEnabled && result.type === 'panorama') {
-      setRectDebugUri(result.uri);
-      return;
+    // v0.16 — onCapture now fires on failure too (ok:false), mirroring
+    // onError.  The error handler already surfaces it, so just bail here.
+    if (!result.ok) return;
+    if (result.warnings.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[example] capture warnings',
+        result.warnings.map((w) => `${w.code}: ${w.message}`),
+      );
     }
-    setPreview(result);
+    // Panoramas are reviewed IN the SDK's crop/preview surface (rectCrop or
+    // showPreview) — that screen IS the preview, so don't pop a second
+    // preview modal for them.  Photos (no review step) still get the modal.
+    if (result.type === 'photo') setPreview(result);
     setThumbnails((prev) => [
       ...prev,
       {
@@ -302,19 +314,14 @@ function App(): React.JSX.Element {
 
   const handleFramesDropped = (info: FramesDroppedInfo): void => {
     const missing = info.requested - info.included;
+    // The low-frame-utilization warning is now surfaced on the crop editor
+    // (and in onCapture.warnings), so we no longer pop a separate toast for
+    // it — just log here.
     // eslint-disable-next-line no-console
     console.warn(
       '[example] onFramesDropped',
       `${info.included}/${info.requested} (missing ${missing})`,
     );
-    if (info.requested > 0 && missing / info.requested > 0.3) {
-      dropToast.showFor(
-        `${missing} of ${info.requested} frames were dropped for low `
-          + 'overlap — a slower, steadier pan captures the full scene.',
-        4000,
-        'Pan more slowly next time',
-      );
-    }
   };
 
   const handleError = (err: CameraError): void => {
@@ -411,6 +418,14 @@ function App(): React.JSX.Element {
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
+          panMode={panMode}
+          rectCrop={rectCrop}
+          showPreview={showPreview}
+          // Time-budget force-accept ON at 1 s (the SDK default) — a keyframe is
+          // accepted every second even if the 15 % novelty gate hasn't tripped,
+          // so slow/static pans don't leave gaps.  (Was previously disabled to
+          // test novelty in isolation.)  Adjust via the ⚙️ Keyframe interval.
+          defaultMaxKeyframeIntervalMs={1500}
           showSettingsButton={__DEV__}
           headerTitle="Image Stitcher Demo"
           headerGuidance="Tap shutter for a photo. Hold + pan + release for a panorama."
@@ -449,30 +464,50 @@ function App(): React.JSX.Element {
           </View>
         )}
 
-        {__DEV__ && inscribedRectDebugAvailable() && (
-          <Pressable
-            style={styles.rectDebugToggle}
-            onPress={() => setRectDebugEnabled((v) => !v)}
-            accessibilityRole="button"
-          >
-            <Text style={styles.rectDebugToggleText}>
-              🔍 Rect debug: {rectDebugEnabled ? 'ON' : 'OFF'}
-            </Text>
-          </Pressable>
-        )}
+        {__DEV__ && (
+          <>
+            <Pressable
+              style={[styles.devToggle, { top: 110 }]}
+              onPress={() =>
+                setPanMode((m) =>
+                  m === 'vertical' ? 'horizontal' : m === 'horizontal' ? 'both' : 'vertical',
+                )
+              }
+              accessibilityRole="button"
+            >
+              <Text style={styles.devToggleText}>
+                🧭 panMode: {panMode === 'vertical'
+                  ? 'vertical (landscape)'
+                  : panMode === 'horizontal'
+                    ? 'horizontal (portrait)'
+                    : 'both'}
+              </Text>
+            </Pressable>
 
-        {rectDebugUri && (
-          <InscribedRectDebugOverlay
-            uri={rectDebugUri}
-            onClose={() => setRectDebugUri(null)}
-          />
-        )}
+            {/* v0.16 — review-surface toggles. rectCrop wins over showPreview;
+                both off → onCapture fires immediately (no review screen). */}
+            <Pressable
+              style={[styles.devToggle, { top: 150 }]}
+              onPress={() => setRectCrop((v) => !v)}
+              accessibilityRole="button"
+            >
+              <Text style={styles.devToggleText}>
+                ✂️ rectCrop: {rectCrop ? 'ON' : 'OFF'}
+              </Text>
+            </Pressable>
 
-        <CaptureStitchStatsToast
-          title={dropToast.title}
-          message={dropToast.message}
-          placement="center"
-        />
+            <Pressable
+              style={[styles.devToggle, { top: 190 }]}
+              onPress={() => setShowPreview((v) => !v)}
+              accessibilityRole="button"
+            >
+              <Text style={styles.devToggleText}>
+                🖼️ showPreview: {showPreview ? 'ON' : 'OFF'}
+                {rectCrop ? ' (overridden by rectCrop)' : ''}
+              </Text>
+            </Pressable>
+          </>
+        )}
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -480,16 +515,16 @@ function App(): React.JSX.Element {
 
 
 const styles = StyleSheet.create({
-  rectDebugToggle: {
+  // Shared dev toggle chip (top-left stack); `top` set per-instance.
+  devToggle: {
     position: 'absolute',
-    top: 110,
     left: 16,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
     paddingVertical: 6,
     paddingHorizontal: 12,
     borderRadius: 16,
   },
-  rectDebugToggleText: {
+  devToggleText: {
     color: '#00E5FF',
     fontSize: 13,
     fontWeight: '600',

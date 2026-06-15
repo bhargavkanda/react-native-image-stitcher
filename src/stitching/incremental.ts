@@ -682,6 +682,33 @@ export interface IncrementalFinalizeResult {
    * on the just-completed capture.
    */
   stitchModeResolved?: 'panorama' | 'scans';
+  /**
+   * 2026-06-14 (DEV overlay) — a semicolon-separated `key=value` trace of the
+   * stitcher's RUNTIME choices for this output, e.g.
+   * `"pipe=manual;warp=spherical;route=batch;seam=graphcut;blend=multiband"`.
+   *   pipe:  `manual` (cv::detail) | `highlevel` (cv::Stitcher)
+   *   warp:  `plane` | `cylindrical` | `spherical`
+   *   route: `batch` (warp-all + seam) | `stream` (low-memory per-frame)
+   *   seam:  `graphcut` | `none`
+   *   blend: `multiband` | `feather`
+   * Intended for a __DEV__-only overlay so the operator can see HOW the
+   * panorama was built (which warper, whether the low-memory stream/feather
+   * fallback kicked in, etc.).  iOS only for now; undefined elsewhere.
+   */
+  debugSummary?: string;
+  /**
+   * 2026-06-15 (iOS) — the exact keyframe JPEG paths used for this stitch.
+   * Lets the host re-stitch the SAME frames on demand via `refinePanorama`
+   * (e.g. the high-level preview tab) without re-running the capture or
+   * enumerating the session directory.  iOS only; undefined elsewhere.
+   */
+  batchKeyframePaths?: string[];
+  /**
+   * 2026-06-15 (iOS) — the capture orientation this stitch baked into the
+   * output.  An on-demand re-stitch (refinePanorama) MUST pass this back or the
+   * result comes out in the raw sensor landscape (sideways).  iOS only.
+   */
+  captureOrientation?: string;
 }
 
 
@@ -750,6 +777,15 @@ export interface IncrementalRefineOptions {
   stitchMode?: 'auto' | 'panorama' | 'scans';
   /** JPEG quality 1..100, default 90. */
   jpegQuality?: number;
+  /**
+   * 2026-06-15 (iOS) — which stitch pipeline to run.  `true` = the manual
+   * `cv::detail` pipeline (the default batch-capture output); `false` = stock
+   * high-level `cv::Stitcher`.  Default `false` on the refine path.  This is
+   * how the on-demand "high-level" preview tab re-stitches the captured
+   * keyframes via cv::Stitcher without re-running the whole capture.  iOS only
+   * (Android refine is always cv::Stitcher).
+   */
+  useManualPipeline?: boolean;
 }
 
 
@@ -771,6 +807,15 @@ export interface IncrementalRefineResult {
   framesDropped: number;
   /** The confidence threshold that succeeded.  -1 when not applicable. */
   finalConfidenceThresh: number;
+  /**
+   * 2026-06-15 (DEV overlay A/B-aware) — the stitcher's own semicolon-separated
+   * `key=value` runtime recipe for THIS refined output, e.g.
+   * `"pipe=highlevel;warp=spherical;route=batch;seam=graphcut;blend=multiband"`.
+   * Mirrors `IncrementalFinalizeResult.debugSummary`.  Lets the on-demand
+   * high-level preview tab show its OWN recipe in the __DEV__ overlay pill
+   * instead of the manual primary's recipe.  iOS only; undefined elsewhere.
+   */
+  debugSummary?: string;
 }
 
 

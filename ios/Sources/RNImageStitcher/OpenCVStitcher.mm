@@ -58,6 +58,11 @@
 // The header lives in the SDK's `cpp/` dir and is on the pod's
 // HEADER_SEARCH_PATHS (see RNImageStitcher.podspec).
 #import "stitcher.hpp"
+// item-7 cropToQuad: the OpenCV-free quad geometry (quadDstRect /
+// isQuadAcceptable) + the shared canvas OOM guard.  Same `cpp/`
+// HEADER_SEARCH_PATHS as stitcher.hpp.
+#import "crop_quad.hpp"
+#import "warp_guard.hpp"
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <os/log.h>
@@ -262,6 +267,12 @@ NSString *const RNImageStitcherErrorDomain = @"RNImageStitcherErrorDomain";
 // RNStitchResult
 // ─────────────────────────────────────────────────────────────────────
 
+// Redeclare debugSummary as readwrite internally so it can be set after the
+// designated initializer (keeps the init signature unchanged).
+@interface RNStitchResult ()
+@property (nonatomic, copy, readwrite) NSString *debugSummary;
+@end
+
 @implementation RNStitchResult
 
 - (instancetype)initWithOutputPath:(NSString *)outputPath
@@ -280,6 +291,7 @@ NSString *const RNImageStitcherErrorDomain = @"RNImageStitcherErrorDomain";
     _framesRequested = framesRequested;
     _framesIncluded = framesIncluded;
     _finalConfidenceThresh = finalConfidenceThresh;
+    _debugSummary = @"";
   }
   return self;
 }
@@ -411,6 +423,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                   captureOrientation:(NSString *)captureOrientation
                                 useInscribedRectCrop:(BOOL)useInscribedRectCrop
                                           stitchMode:(NSString *)stitchMode
+                                   useManualPipeline:(BOOL)useManualPipeline
                                                error:(NSError **)error {
   // ── Phase 2 (2026-05-16): delegated to shared C++ ───────────────────
   //
@@ -438,7 +451,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // working until they are updated.  The shared C++ has its own
   // defaults but we want the wrapper to be tolerant of nil inputs
   // from Swift / Obj-C callers that grew up against the legacy API.
-  if (warperType == nil || warperType.length == 0) warperType = @"plane";
+  if (warperType == nil || warperType.length == 0) warperType = @"spherical";
   if (blenderType == nil || blenderType.length == 0) blenderType = @"multiband";
   if (seamFinderType == nil || seamFinderType.length == 0) seamFinderType = @"graphcut";
   if (captureOrientation == nil || captureOrientation.length == 0) captureOrientation = @"portrait";
@@ -479,12 +492,22 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   cfg.availableRamMB =
       (double)NSProcessInfo.processInfo.physicalMemory
       / (1024.0 * 1024.0);
-  // Route to the manual cv::detail::* pipeline; the high-level
-  // cv::Stitcher::create path (Android's default) is unsuitable for
-  // iOS's shelf-pan capture shape (compose-MP defaults, graphcut at
-  // compose-MP, BA convergence params — see stitcher.hpp comment
-  // block).
-  cfg.useManualPipeline = true;
+  // 2026-06-15 — DEFAULT to the MANUAL cv::detail pipeline.  ALL the memory/OOM
+  // hardening lives on the manual path (PreStitchMemoryAbort, RAM-aware
+  // canvas-budget downscale, STREAM/BATCH held-set routing, the black-canvas
+  // utilization guard); the high-level cv::Stitcher path calls NONE of it.  So
+  // manual is both the user's preferred output AND the memory-safe one.
+  //
+  // WARPER: NOT hardcoded — cfg.warperType carries the caller's choice (set from
+  // the JS `warperType`, which defaults to "spherical" and is settable via the
+  // ⚙️ panel / the host's `defaultWarper` prop).  The JS default is the single
+  // source of truth now.  Choosing "plane" re-arms the dynamic plane→spherical
+  // fallback + divergence switch in the manual pipeline (they only fire when
+  // warperType != "spherical").
+  //
+  // The pipeline is caller-driven: batch capture passes YES (manual, default
+  // output); the on-demand high-level tab re-stitches with NO.
+  cfg.useManualPipeline = useManualPipeline;
 
   // Marshal NSArray<NSString*> → std::vector<std::string>.  Strip the
   // `file://` scheme that some callers attach so the shared C++ can
@@ -566,6 +589,18 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
              framesRequested:framesRequested
               framesIncluded:(NSInteger)r.framesIncluded
        finalConfidenceThresh:r.finalConfidenceThresh];
+      if (!r.debugSummary.empty()) {
+        result.debugSummary =
+            [NSString stringWithUTF8String:r.debugSummary.c_str()];
+      }
+      // 2026-06-15 — the eager A/B harness that ALSO stitched the high-level
+      // alt on EVERY capture has been REMOVED.  Manual is now the default (this
+      // method), so computing high-level eagerly was pure wasted work —
+      // especially while profiling memory/perf — when the user isn't viewing
+      // it.  The keyframe JPEGs are retained on disk so high-level can be
+      // produced ON DEMAND (follow-up: a `useManualPipeline` param on this
+      // method lets `refinePanorama` re-stitch them via the high-level path
+      // when the user switches to the high-level tab).
     } else {
       // Map StitchErrorCode → NSError.code.  Preserves the existing
       // 9001/9002/9003/1001/9007 sentinels the JS UX layer already
@@ -863,6 +898,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
           captureOrientation:nil
         useInscribedRectCrop:NO
                   stitchMode:nil
+           useManualPipeline:NO  // legacy video path keeps high-level cv::Stitcher
                        error:&stitchErr];
 
   // Always tear down the tmp dir, success or fail — leaving
@@ -1060,6 +1096,154 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   return @{
     @"width":  @((NSInteger)cropped.cols),
     @"height": @((NSInteger)cropped.rows),
+  };
+}
+
+// item-7 — free-quad perspective crop.  Mirrors cropToRectAtPath, but
+// instead of an axis-aligned sub-rectangle it takes 4 user-dragged
+// corners in IMAGE-PIXEL space (ordered TL, TR, BR, BL by the JS editor's
+// orderQuadCorners) and rectifies them to an upright rectangle via
+// cv::getPerspectiveTransform + cv::warpPerspective.  The destination
+// size + the convex/min-area/in-bounds gate come from the shared OpenCV-
+// free cpp/crop_quad.hpp so iOS / Android / JS agree bit-for-bit; the
+// output canvas is GUARDED with the same canvasExceedsGuard the stitch
+// pipeline uses so a near-collinear quad can't OOM a multi-MP panorama.
++ (NSDictionary<NSString *, NSNumber *> *)cropToQuadAtPath:(NSString *)imagePath
+                                                      tlX:(double)tlX
+                                                      tlY:(double)tlY
+                                                      trX:(double)trX
+                                                      trY:(double)trY
+                                                      brX:(double)brX
+                                                      brY:(double)brY
+                                                      blX:(double)blX
+                                                      blY:(double)blY
+                                                  quality:(NSInteger)quality
+                                                    error:(NSError **)error {
+  NSString *cleaned = normalizeImagePath(imagePath);
+  if (![[NSFileManager defaultManager] fileExistsAtPath:cleaned]) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1020
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Image not found: %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  std::string nativePath(cleaned.UTF8String);
+  cv::Mat img = cv::imread(nativePath, cv::IMREAD_COLOR);
+  if (img.empty()) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1021
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Could not decode image at %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  retailens::CropQuad quad;
+  quad.tl = {tlX, tlY};
+  quad.tr = {trX, trY};
+  quad.br = {brX, brY};
+  quad.bl = {blX, blY};
+
+  // Geometry gate — convex, non-degenerate, inside the decoded image.
+  if (!retailens::isQuadAcceptable(quad, (double)img.cols, (double)img.rows)) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1023
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          @"Crop quad is degenerate (non-convex, zero-area, or out of bounds)",
+      }];
+    }
+    return nil;
+  }
+
+  const retailens::QuadDstSize dst = retailens::quadDstRect(quad);
+  // Output-canvas OOM net — the same guard the stitch pipeline uses.
+  if (dst.width <= 0 || dst.height <= 0 ||
+      retailens::canvasExceedsGuard(dst.width, dst.height)) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1024
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:
+            @"Crop quad output canvas is degenerate or exceeds the size guard (%dx%d)",
+            dst.width, dst.height],
+      }];
+    }
+    return nil;
+  }
+
+  const cv::Point2f src[4] = {
+    cv::Point2f((float)tlX, (float)tlY),
+    cv::Point2f((float)trX, (float)trY),
+    cv::Point2f((float)brX, (float)brY),
+    cv::Point2f((float)blX, (float)blY),
+  };
+  const cv::Point2f dstPts[4] = {
+    cv::Point2f(0.0f, 0.0f),
+    cv::Point2f((float)dst.width, 0.0f),
+    cv::Point2f((float)dst.width, (float)dst.height),
+    cv::Point2f(0.0f, (float)dst.height),
+  };
+
+  cv::Mat warped;
+  // OpenCV throws cv::Exception (a C++ exception) — catch with a C++
+  // try/catch, NOT @try/@catch (which only traps NSException).
+  try {
+    cv::Mat transform = cv::getPerspectiveTransform(src, dstPts);
+    cv::warpPerspective(img, warped, transform,
+                        cv::Size(dst.width, dst.height), cv::INTER_LINEAR);
+  } catch (const cv::Exception &e) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1025
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Perspective warp failed: %s", e.what()],
+      }];
+    }
+    return nil;
+  }
+  if (warped.empty()) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1025
+                               userInfo:@{
+        NSLocalizedDescriptionKey: @"Perspective warp produced an empty image",
+      }];
+    }
+    return nil;
+  }
+
+  int q = (int)quality;
+  if (q < 1) { q = 1; }
+  if (q > 100) { q = 100; }
+  std::vector<int> writeParams = { cv::IMWRITE_JPEG_QUALITY, q };
+  bool ok = cv::imwrite(nativePath, warped, writeParams);
+  if (!ok) {
+    if (error) {
+      *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
+                                   code:1022
+                               userInfo:@{
+        NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"Could not rewrite image at %@", imagePath],
+      }];
+    }
+    return nil;
+  }
+
+  return @{
+    @"width":  @((NSInteger)warped.cols),
+    @"height": @((NSInteger)warped.rows),
   };
 }
 

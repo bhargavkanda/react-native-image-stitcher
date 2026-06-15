@@ -860,21 +860,27 @@ class RNSARSession(reactContext: ReactApplicationContext)
             if (configs.isEmpty()) return
             fun aspect(s: android.util.Size): Float = s.width.toFloat() / s.height.toFloat()
 
-            val matched = configs.filter {
-                kotlin.math.abs(aspect(it.imageSize) - aspect(it.textureSize)) < 0.02f
-            }
-            val pool = if (matched.isNotEmpty()) matched else configs
-            val chosen = pool.sortedWith(
+            // Option B (max FOV + bounded memory): prefer the 4:3-aspect
+            // IMAGE for full vertical sensor FOV, regardless of texture aspect
+            // (the A35 only pairs its 4:3 image with a 16:9 texture, so an
+            // aspect-MATCH filter would force 16:9 and lose that FOV).  Among
+            // 4:3 images prefer the SMALLEST resolution — the keyframe is
+            // downscaled to AR_KEYFRAME_MAX_LONG_EDGE anyway, so smallest is
+            // closest to that budget + cheapest.  Device-agnostic: any
+            // device's 4:3 image is chosen, then normalised by the downscale
+            // guard in YuvImageConverter.  Trade-off: the 16:9 preview texture
+            // shows less than the 4:3 capture (accepted for max FOV).
+            val chosen = configs.sortedWith(
                 compareBy<CameraConfig> { kotlin.math.abs(aspect(it.imageSize) - 4f / 3f) }
-                    .thenByDescending { it.imageSize.width * it.imageSize.height },
+                    .thenBy { it.imageSize.width * it.imageSize.height },
             ).firstOrNull() ?: return
             session.setCameraConfig(chosen)
             Log.i(
                 TAG,
-                "selectMatchingCameraConfig: chose image=" +
+                "selectMatchingCameraConfig: chose 4:3-pref image=" +
                     "${chosen.imageSize.width}x${chosen.imageSize.height} texture=" +
                     "${chosen.textureSize.width}x${chosen.textureSize.height} " +
-                    "(from ${configs.size} configs, ${matched.size} aspect-matched)",
+                    "(from ${configs.size} configs)",
             )
         } catch (t: Throwable) {
             Log.w(TAG, "selectMatchingCameraConfig failed; keeping default config: ${t.message}")

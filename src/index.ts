@@ -28,6 +28,7 @@ export { Camera, CameraError } from './camera/Camera';
 export type {
   CameraProps,
   CameraCaptureResult,
+  PanoramaCaptureResult,
   CameraErrorCode,
   CaptureSource,
   CaptureSourcesMode,
@@ -38,12 +39,29 @@ export type {
   Warper,
   FramesDroppedInfo,
 } from './camera/Camera';
+// Non-fatal capture quality signals carried on `CameraCaptureResult.warnings`.
+export type {
+  CaptureWarning,
+  CaptureWarningCode,
+  CaptureWarningCopy,
+} from './camera/captureWarnings';
+// Default English warning templates (single source of truth; re-used by
+// `DEFAULT_GUIDANCE_COPY`).  Exposed so a host can diff / extend them.
+export { DEFAULT_CAPTURE_WARNING_COPY } from './camera/captureWarnings';
 
 // Recoverable-stitch-failure → friendly Alert copy.  Hosts call this in
 // their onError handler to surface actionable guidance ("pan more slowly",
-// "pivot in place") instead of the raw cv::Stitcher diagnostic.
-export { userFacingStitchError } from './camera/cameraErrorMessages';
-export type { UserFacingStitchError } from './camera/cameraErrorMessages';
+// "pivot in place") instead of the raw cv::Stitcher diagnostic.  Pass an
+// `overrides` map (keyed by `RECOVERABLE_STITCH_CODES`) to localise it.
+export {
+  userFacingStitchError,
+  RECOVERABLE_STITCH_GUIDANCE,
+  RECOVERABLE_STITCH_CODES,
+} from './camera/cameraErrorMessages';
+export type {
+  UserFacingStitchError,
+  UserFacingStitchErrorOverrides,
+} from './camera/cameraErrorMessages';
 
 // ─────────────────────────────────────────────────────────────────────
 // AR foundation (public since 0.1.0)
@@ -173,6 +191,51 @@ export { useOrientationDrift } from './camera/useOrientationDrift';
 export type { UseOrientationDriftReturn } from './camera/useOrientationDrift';
 export { OrientationDriftModal } from './camera/OrientationDriftModal';
 export type { OrientationDriftModalProps } from './camera/OrientationDriftModal';
+
+// ── Panorama capture GUIDANCE (feature/pano-ux-guidance) ──────────────
+// The first-time-user pan-capture guidance surfaces, wired into Layer-1
+// <Camera> automatically (panMode / panGuidance / maxPanDurationMs /
+// lateralBudgetCm / rectCrop / showPreview / guidanceCopy props).  Exported for
+// Layer-2 hosts composing their own capture UX on CameraView + the
+// incremental engine.
+//
+// `PanMode` is the landscape-only-vs-both flag; `GuidanceCopy` +
+// `DEFAULT_GUIDANCE_COPY` are the overridable copy surface.
+export type { PanMode } from './camera/panModeGate';
+export {
+  DEFAULT_GUIDANCE_COPY,
+} from './camera/cameraGuidanceCopy';
+export type { GuidanceCopy } from './camera/cameraGuidanceCopy';
+// Shared motion hook — one gyro + one accelerometer subscription feeding
+// the pan-speed bucket (item 4) and the lateral-drift latch (item 6).
+export { usePanMotion } from './camera/usePanMotion';
+export type {
+  UsePanMotionOptions,
+  UsePanMotionReturn,
+  PanSpeedBucket,
+  PanAxis,
+} from './camera/usePanMotion';
+// Presentational guidance surfaces (each renders null when not visible).
+export { RotateToLandscapePrompt } from './camera/RotateToLandscapePrompt';
+export type { RotateToLandscapePromptProps } from './camera/RotateToLandscapePrompt';
+export { PanHowToOverlay } from './camera/PanHowToOverlay';
+export type { PanHowToOverlayProps } from './camera/PanHowToOverlay';
+export { CaptureCountdownOverlay } from './camera/CaptureCountdownOverlay';
+export type { CaptureCountdownOverlayProps } from './camera/CaptureCountdownOverlay';
+export { CaptureFrameCounterOverlay } from './camera/CaptureFrameCounterOverlay';
+export type { CaptureFrameCounterOverlayProps } from './camera/CaptureFrameCounterOverlay';
+export { LateralMotionModal } from './camera/LateralMotionModal';
+export type { LateralMotionModalProps } from './camera/LateralMotionModal';
+export { RectCropPreview } from './camera/RectCropPreview';
+export type {
+  RectCropPreviewProps,
+  RectCropResult,
+  ImageRect,
+} from './camera/RectCropPreview';
+// Native perspective-rectify crop used by RectCropPreview's confirm
+// path; hosts driving their own crop UI call it directly.
+export { cropQuad } from './stitching/cropQuad';
+export type { CropQuadOptions, CropQuadResult } from './stitching/cropQuad';
 
 // ── Incremental stitching engine ──────────────────────────────────────
 // JS bindings around the native `IncrementalStitcher` module.  Use

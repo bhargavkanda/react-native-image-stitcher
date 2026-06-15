@@ -943,7 +943,7 @@ public final class IncrementalStitcher: NSObject {
         } else if let v = configOverrides["maxKeyframeIntervalMs"] as? Int {
             self.keyframeGate.maxKeyframeIntervalMs = max(0.0, Double(v))
         } else {
-            self.keyframeGate.maxKeyframeIntervalMs = 2000.0
+            self.keyframeGate.maxKeyframeIntervalMs = 1500.0
         }
         // V16 — novelty aggregation percentile.  Clamp at start to
         // [0.5, 0.99]; the bridge re-clamps but matching it here
@@ -1438,7 +1438,10 @@ public final class IncrementalStitcher: NSObject {
                             seamFinderType: payload.batchSeamFinderType,
                             captureOrientation: payload.captureOrientation,
                             useInscribedRectCrop: payload.batchEnableInscribedRectCrop,
-                            stitchMode: payload.batchStitchModeResolved
+                            stitchMode: payload.batchStitchModeResolved,
+                            // Batch capture = the default output = MANUAL pipeline
+                            // (graphcut + multiband + the full memory-guard set).
+                            useManualPipeline: true
                         )
                         // V16 fix-attempt 9 (verified on device,
                         // 2026-05-13) — sentinel-result detection.
@@ -1501,6 +1504,17 @@ public final class IncrementalStitcher: NSObject {
                             "batchKeyframeSessionDir":
                                 payload.collector?.sessionDir ?? "",
                             "batchKeyframeCount": payload.paths.count,
+                            // 2026-06-15 — the exact keyframe JPEG paths used for
+                            // this stitch, so JS can re-stitch them ON DEMAND via
+                            // refinePanorama (the high-level tab) without listing
+                            // the session dir itself.
+                            "batchKeyframePaths": payload.paths,
+                            // The orientation this stitch baked into the output.
+                            // The on-demand high-level re-stitch MUST pass the
+                            // same value or it comes out in the raw sensor
+                            // landscape (sideways) — refinePanorama otherwise
+                            // defaults to "portrait" (no bake-rotation).
+                            "captureOrientation": payload.captureOrientation,
                         ]
                         if r.framesRequested >= 0 {
                             batchDict["framesRequested"] = Int(r.framesRequested)
@@ -1523,6 +1537,12 @@ public final class IncrementalStitcher: NSObject {
                         // helps the operator understand why the
                         // panorama looks the way it does.
                         batchDict["stitchModeResolved"] = payload.batchStitchModeResolved
+                        // 2026-06-14 (DEV overlay) — the stitcher's runtime
+                        // choices (pipeline/warper/route/seam/blend) for this
+                        // output, shown on the preview in __DEV__.
+                        if !r.debugSummary.isEmpty {
+                            batchDict["debugSummary"] = r.debugSummary
+                        }
                         completion(batchDict, nil)
                     } catch let stitchErr as NSError {
                         completion(nil, stitchErr)
@@ -1641,6 +1661,11 @@ public final class IncrementalStitcher: NSObject {
         // at line 738 of src/stitching/incremental.ts).  JS callers
         // can override by passing config["stitchMode"].
         let refineStitchMode = (config["stitchMode"] as? String) ?? "scans"
+        // 2026-06-15 — pipeline is caller-selectable.  The on-demand high-level
+        // tab calls refinePanorama with useManualPipeline:false to re-stitch the
+        // captured keyframes via stock cv::Stitcher.  Default false (high-level)
+        // preserves the refine path's historical cv::Stitcher behaviour.
+        let refineManual = (config["useManualPipeline"] as? Bool) ?? false
         let quality     = max(1, min(100, (config["jpegQuality"] as? Int) ?? 90))
         let cleanedOutput = outputPath.hasPrefix("file://")
             ? String(outputPath.dropFirst(7))
@@ -1679,7 +1704,8 @@ public final class IncrementalStitcher: NSObject {
                     seamFinderType: seam,
                     captureOrientation: orientation,
                     useInscribedRectCrop: useInscribed,
-                    stitchMode: refineStitchMode
+                    stitchMode: refineStitchMode,
+                    useManualPipeline: refineManual
                 )
                 // fix-9 sentinel detection — see the finalize() path
                 // for the full rationale.  A 0×0 result means
@@ -1717,7 +1743,13 @@ public final class IncrementalStitcher: NSObject {
                     frames: frameCount,
                     errorMessage: nil
                 )
-                completion([
+                // 2026-06-15 (DEV overlay A/B-aware) — carry the stitcher's
+                // own runtime recipe up to JS so the preview's DEV pill shows
+                // the HIGH-LEVEL recipe (pipe=highlevel;warp=spherical;…) while
+                // the user views the high-level tab, instead of the manual
+                // primary's recipe.  Mirrors the batch finalize's batchDict
+                // (guard empty — empty string means unavailable).
+                var refineDict: [String: Any] = [
                     "panoramaPath": r.outputPath,
                     "width": Int(r.width),
                     "height": Int(r.height),
@@ -1725,7 +1757,11 @@ public final class IncrementalStitcher: NSObject {
                     "framesIncluded": frameCount,
                     "framesDropped": 0,
                     "finalConfidenceThresh": -1.0,
-                ], nil)
+                ]
+                if !r.debugSummary.isEmpty {
+                    refineDict["debugSummary"] = r.debugSummary
+                }
+                completion(refineDict, nil)
             } catch let err as NSError {
                 self?.emitRefineProgress(
                     stage: "error",
@@ -2450,11 +2486,23 @@ public final class IncrementalStitcher: NSObject {
         let denom = tScore + rScore
         if denom <= 1e-9 { return "panorama" }  // no motion either way
         let ratio = tScore / denom
+
+        // 2026-06-15 — LOW-ROTATION GUARD.  The gyro rotation (rRadians) is
+        // trustworthy; the IMU translation (tMeters, in non-AR) is NOT — a
+        // continuous rotation leaks gravity into the double-integrated accel and
+        // inflates it, which can falsely push `ratio` over 0.55 → SCANS, whose
+        // affine warper can't represent the rotation.  When the gyro shows a
+        // clear pan (> ~20°) with only modest translation, force PANORAMA
+        // regardless of the (possibly-inflated) translation.  Genuine shelf
+        // scans (low rotation, large real translation) skip this and still
+        // reach SCANS via the ratio.
+        let lowRotationGuard = rRadians > 0.35 && tMeters < 0.25
+        let mode = (!lowRotationGuard && ratio >= 0.55) ? "scans" : "panorama"
         os_log(.fault, log: Self.diagLog,
-               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f → %{public}@",
+               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f rotGuard=%d → %{public}@",
                tPose, imuTranslationMetres, rRadians, ratio,
-               ratio >= 0.55 ? "scans" : "panorama")
-        return ratio >= 0.55 ? "scans" : "panorama"
+               lowRotationGuard ? 1 : 0, mode)
+        return mode
     }
 
     /// Closed-form q · (0,0,-1) · q⁻¹ — rotates the camera-forward

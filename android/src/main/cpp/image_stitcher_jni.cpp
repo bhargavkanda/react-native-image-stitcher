@@ -28,6 +28,15 @@
 
 #include <string>
 #include <vector>
+#include <cstdio>    // /proc/self/statm read for the purge diagnostic
+#include <unistd.h>  // sysconf — device RAM for the manual-pipeline budget
+#include <dlfcn.h>   // dlsym — resolve mallopt() at runtime (API-gated; see below)
+
+// M_PURGE (release free pages back to the OS) was added to bionic at API 28;
+// define it for our minSdk-24 build (a harmless no-op on the older allocator).
+#ifndef M_PURGE
+#define M_PURGE (-101)
+#endif
 
 
 #define LOG_TAG "BatchStitcher.JNI"
@@ -63,6 +72,53 @@ void androidLogBridge(int level, const char* tag, const char* msg) {
     __android_log_print(prio, LOG_TAG, "%s %s", tag ? tag : "", msg ? msg : "");
 }
 
+// 2026-06-15 — last successful stitch's debugSummary (pipe/warp/route/seam/blend).
+// The nativeStitchFramePaths return is a jintArray which can't carry a string,
+// so we stash it here and expose it via the lightweight nativeLastDebugSummary()
+// getter that Kotlin calls right after a successful stitch (same thread → no
+// concurrency).  Mirrors the iOS RNStitchResult.debugSummary surface so the DEV
+// overlay shows warp/route/seam/blend on Android too, not just mode/score.
+std::string g_lastDebugSummary;
+
+// Return the just-finished stitch's freed native memory to the OS.  cv::Mat /
+// the OpenCV allocator keep freed blocks in a process-wide pool, so without this
+// the native-heap RSS baseline ratchets up ~10-15 MB per capture (dumpsys showed
+// the creep in Native Heap, not Graphics).  mallopt() was exported by bionic at
+// API 26 but our minSdk is 24, so resolve it at runtime via dlsym and call only
+// when present (it is on every API-26+ device, including the test A35).
+double procRssMB() {
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (f == nullptr) return -1.0;
+    long sizePages = 0, residentPages = 0;
+    const int n = fscanf(f, "%ld %ld", &sizePages, &residentPages);
+    fclose(f);
+    if (n != 2) return -1.0;
+    return static_cast<double>(residentPages)
+        * static_cast<double>(sysconf(_SC_PAGE_SIZE)) / (1024.0 * 1024.0);
+}
+
+void purgeNativeAllocator() {
+    using MalloptFn = int (*)(int, int);
+    // Resolve mallopt at runtime (API-26 symbol; minSdk 24).  Prefer an explicit
+    // libc.so handle — RTLD_DEFAULT from a dlopen'd .so doesn't always reach
+    // libc on Android — then fall back to RTLD_DEFAULT.
+    static MalloptFn fn = []() -> MalloptFn {
+        void* h = dlopen("libc.so", RTLD_NOLOAD | RTLD_NOW);
+        void* s = (h != nullptr) ? dlsym(h, "mallopt") : nullptr;
+        if (s == nullptr) s = dlsym(RTLD_DEFAULT, "mallopt");
+        return reinterpret_cast<MalloptFn>(s);
+    }();
+    const double before = procRssMB();
+    if (fn != nullptr) fn(M_PURGE, 0);
+    const double after = procRssMB();
+    // Diagnostic: shows whether mallopt resolved and how much RSS the purge
+    // actually returned to the OS.  If mallopt=MISSING → dlsym failed; if
+    // resolved but before≈after → the residual isn't allocator-retained (real
+    // leak) and M_PURGE can't help.
+    LOGI("[memstat] purge: mallopt=%s rss %.1f -> %.1f MB",
+         (fn != nullptr) ? "ok" : "MISSING", before, after);
+}
+
 }  // namespace
 
 
@@ -81,7 +137,8 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         jdouble registrationResolMP,
         jdouble seamEstimationResolMP,
         jdouble compositingResolMP,
-        jstring stitchModeStr) {
+        jstring stitchModeStr,
+        jboolean useManualPipeline) {
 
     if (framePaths == nullptr) {
         throw_runtime(env, "framePaths is null");
@@ -116,18 +173,39 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         ? retailens::StitchMode::Panorama
         : retailens::StitchMode::Scans;
 
-    // 2026-06-07 — unify on the manual cv::detail pipeline.  It won the
-    // on-device A/B: equals the high-level cv::Stitcher on quality after
-    // parity AND is strictly more robust — the cylindrical fallback, warp
-    // guard, and exposure comp all live only in the manual path, so the
-    // high-level path garbages wide/0.5x captures.  Mirrors iOS'
-    // OpenCVStitcher.mm.  See docs/stitch-pipeline-architecture.md §7.
-    cfg.useManualPipeline = true;
-    // Match iOS' parity resolution: the manual entry's default registration
-    // is 0.3 MP (vs the high-level's 0.6); bump to 0.6 unless the caller set
-    // an explicit value.  (compositingResolMP already arrives as 1.0.)
+    // 2026-06-15 — pipeline is caller-selectable (mirrors iOS).  The batch
+    // finalize passes useManualPipeline=true: ALL the memory/OOM hardening
+    // lives on the manual path (PreStitchMemoryAbort, RAM-aware canvas-budget
+    // downscale, STREAM/BATCH held-set routing, the black-canvas utilization
+    // guard); the high-level cv::Stitcher path calls NONE of it — so manual is
+    // both the preferred output AND the memory-safe one.  The on-demand
+    // HIGH-LEVEL preview tab calls refinePanorama with useManualPipeline=false
+    // to re-stitch the captured keyframes via stock cv::Stitcher.
+    //
+    // WARPER: NOT hardcoded — cfg.warperType carries the caller's choice (set
+    // above from the JS `warperType`, which defaults to "spherical" and is
+    // settable via the ⚙️ panel / the host's `defaultWarper` prop).  The JS
+    // default is the single source of truth now (mirrors iOS).  Choosing "plane"
+    // re-arms the manual pipeline's dynamic plane→spherical fallback/divergence
+    // switch (they only fire when warperType != "spherical").
+    cfg.useManualPipeline = (useManualPipeline == JNI_TRUE);
+    if (cfg.warperType.empty()) cfg.warperType = "spherical";
     if (cfg.registrationResolMP <= 0.0) {
         cfg.registrationResolMP = 0.6;
+    }
+    // Plumb the device's physical RAM so the manual pipeline's memory budget
+    // (perProcessMemoryBudgetMB = RAM × 0.42, floored at 900 MB) scales to the
+    // ACTUAL device instead of the assumed-4GB fallback (which over-throttles a
+    // 6–8 GB phone into STREAM+feather → blurrier).  iOS passes physicalMemory;
+    // on Android we read it from sysconf here (no JNI signature change needed).
+    if (cfg.availableRamMB <= 0.0) {
+        const long pages    = sysconf(_SC_PHYS_PAGES);
+        const long pageSize = sysconf(_SC_PAGE_SIZE);
+        if (pages > 0 && pageSize > 0) {
+            cfg.availableRamMB =
+                static_cast<double>(pages) * static_cast<double>(pageSize)
+                / (1024.0 * 1024.0);
+        }
     }
 
     const std::string outPath = jstring_to_string(env, outputPath);
@@ -135,12 +213,21 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
     retailens::StitchResult result = retailens::stitchFramePaths(
         paths, outPath, cfg, &androidLogBridge);
 
+    // Return the stitch's freed native memory to the OS so the native-heap RSS
+    // baseline doesn't ratchet up ~10-15 MB per capture (see purgeNativeAllocator).
+    // Applies to BOTH pipelines (they share the OpenCV/bionic allocator).
+    purgeNativeAllocator();
+
     if (!result.success) {
         const std::string msg = "Stitch failed: " + result.errorMessage +
             " (code=" + std::to_string(static_cast<int>(result.errorCode)) + ")";
         throw_runtime(env, msg);
         return nullptr;
     }
+
+    // Stash the run's debugSummary for nativeLastDebugSummary() (jintArray
+    // can't carry a string).  Read by Kotlin right after this returns.
+    g_lastDebugSummary = result.debugSummary;
 
     // Return [width, height, framesRequested, framesIncluded, finalThresholdMilli]
     // — same JNI return layout as the previous file (Kotlin already
@@ -156,4 +243,13 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
     };
     env->SetIntArrayRegion(dims, 0, 5, values);
     return dims;
+}
+
+// Returns the debugSummary of the most recent successful stitch (pipe/warp/
+// route/seam/blend).  Kotlin calls this right after nativeStitchFramePaths so
+// the value is fresh (stitches are serialized on one background thread).
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_imagestitcher_rn_BatchStitcher_nativeLastDebugSummary(
+        JNIEnv* env, jobject /*thiz*/) {
+    return env->NewStringUTF(g_lastDebugSummary.c_str());
 }

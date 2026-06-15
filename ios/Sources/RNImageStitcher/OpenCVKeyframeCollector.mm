@@ -12,6 +12,16 @@
 #include <opencv2/imgcodecs.hpp>
 #pragma pop_macro("NO")
 
+// v0.16 — keyframe long-edge clamp (px) applied before the JPEG is written.
+// The stitcher composites at ~1 MP (COMPOSE_MP) and `compose_scale` never
+// upscales, so a keyframe larger than ~1.2 MP only inflates the held-set RAM
+// (N × decoded frame) without sharpening the panorama — the 0.5× ultra-wide
+// otherwise lands ~8 MP/frame here.  1280 px sits just above the compose
+// target, so it reclaims ~6× of that RAM with zero quality loss.  (Android's
+// equivalent clamp is 640 px — a tighter low-RAM budget for A35-class
+// devices; iOS can afford the full compose resolution.)
+static const int kKeyframeMaxLongEdge = 1280;
+
 // V16 Phase 1.fix2 — write a JPEG with an EXIF Orientation tag so
 // iOS image renderers display the saved frame correctly while
 // cv::imread (with IMREAD_IGNORE_ORIENTATION) gets raw landscape
@@ -119,17 +129,26 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
 
 - (nullable instancetype)initWithError:(NSError **)error {
   if ((self = [super init])) {
-    NSURL *appSupport = [[NSFileManager defaultManager]
-        URLForDirectory:NSApplicationSupportDirectory
+    // DEBUG builds write keyframes under Documents so they are inspectable in
+    // the Files app (gated by the example's Info.plist UIFileSharingEnabled +
+    // LSSupportsOpeningDocumentsInPlace).  RELEASE keeps them in the private,
+    // auto-cleaned ApplicationSupport dir.  See `cleanup` (retains in DEBUG).
+#if DEBUG
+    NSSearchPathDirectory baseDirType = NSDocumentDirectory;
+#else
+    NSSearchPathDirectory baseDirType = NSApplicationSupportDirectory;
+#endif
+    NSURL *baseDir = [[NSFileManager defaultManager]
+        URLForDirectory:baseDirType
                inDomain:NSUserDomainMask
       appropriateForURL:nil
                  create:YES
                   error:error];
-    if (!appSupport) return nil;
+    if (!baseDir) return nil;
     NSString *captureUUID = [[NSUUID UUID] UUIDString];
     NSString *sessionPath =
-        [[appSupport.path stringByAppendingPathComponent:@"Captures"]
-                          stringByAppendingPathComponent:captureUUID];
+        [[baseDir.path stringByAppendingPathComponent:@"Captures"]
+                       stringByAppendingPathComponent:captureUUID];
     BOOL ok = [[NSFileManager defaultManager]
                 createDirectoryAtPath:sessionPath
           withIntermediateDirectories:YES
@@ -190,6 +209,22 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
     rotated = bgr;
   }
 
+  // Clamp the keyframe's long edge (see kKeyframeMaxLongEdge).  Uniform
+  // downscale — same factor on both axes — so it preserves aspect ratio AND
+  // orientation (no transpose/flip); the rotate above and the EXIF tag below
+  // are unaffected, only the pixel count shrinks.  INTER_AREA is the correct
+  // filter for downsampling.
+  {
+    const int longEdge =
+        rotated.cols > rotated.rows ? rotated.cols : rotated.rows;
+    if (longEdge > kKeyframeMaxLongEdge) {
+      const double s = (double)kKeyframeMaxLongEdge / (double)longEdge;
+      cv::Mat scaled;
+      cv::resize(rotated, scaled, cv::Size(), s, s, cv::INTER_AREA);
+      rotated = scaled;
+    }
+  }
+
   NSInteger idx = self.acceptedCount;
   NSString *filename =
       [NSString stringWithFormat:@"keyframe-%03ld.jpg", (long)idx];
@@ -230,8 +265,16 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
 
 - (void)cleanup {
   if (self.sessionDir.length == 0) return;
+#if DEBUG
+  // DEBUG: keep the session's keyframes on disk so they can be inspected in
+  // the Files app (Documents/Captures/<uuid>/keyframe-NNN.jpg).  Each capture
+  // is a fresh UUID folder; delete old ones via Files when done.
+  NSLog(@"[KeyframeCollector] DEBUG — retaining keyframes for inspection: %@",
+        self.sessionDir);
+#else
   [[NSFileManager defaultManager] removeItemAtPath:self.sessionDir
                                              error:nil];
+#endif
 }
 
 // ── CVPixelBuffer → cv::Mat (BGR) ──────────────────────────────────

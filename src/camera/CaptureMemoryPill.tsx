@@ -18,7 +18,13 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import {
+  StyleSheet,
+  Text,
+  View,
+  type StyleProp,
+  type ViewStyle,
+} from 'react-native';
 
 import { getIncrementalNativeModule } from '../stitching/incremental';
 
@@ -29,11 +35,19 @@ export interface CaptureMemoryPillProps {
    *  for no visible benefit; higher loses correlation with capture
    *  activity. */
   pollIntervalMs?: number;
+  /**
+   * Optional position override.  When supplied it REPLACES the default
+   * top-right anchor (`top: topInset + 56, right: 12`), so the pill can be
+   * reused on other screens (e.g. the crop/preview surface) without colliding
+   * with their own corner UI.  Pass the full absolute position you want.
+   */
+  style?: StyleProp<ViewStyle>;
 }
 
 export function CaptureMemoryPill({
   topInset = 0,
   pollIntervalMs = 500,
+  style,
 }: CaptureMemoryPillProps): React.JSX.Element | null {
   const [memMB, setMemMB] = useState<number | null>(null);
 
@@ -69,7 +83,8 @@ export function CaptureMemoryPill({
       pointerEvents="none"
       style={[
         styles.container,
-        { top: topInset + 56, backgroundColor: bg },
+        { backgroundColor: bg },
+        style ?? { top: topInset + 56, right: 12 },
       ]}
       accessibilityRole="alert"
     >
@@ -81,7 +96,6 @@ export function CaptureMemoryPill({
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    right: 12,
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 999,

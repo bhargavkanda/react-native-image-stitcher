@@ -35,6 +35,8 @@ import {
   View,
 } from 'react-native';
 
+import { DISPLAY_DECODE_IMAGE_PROPS } from './displayDecodeImageProps';
+
 
 export type CapturePreviewActionVariant =
   | 'primary'
@@ -158,6 +160,9 @@ export function CapturePreview({
             source={{ uri: imageUri }}
             style={[styles.image, { aspectRatio }]}
             resizeMode="contain"
+            // OOM fix — decode at display size, not full panorama res
+            // (see DISPLAY_DECODE_IMAGE_PROPS for the native-heap rationale).
+            {...DISPLAY_DECODE_IMAGE_PROPS}
             accessibilityIgnoresInvertColors
           />
         </Pressable>
