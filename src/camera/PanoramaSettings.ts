@@ -312,7 +312,14 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   captureSource: 'ar',
   debug: false,
   stitcher: {
-    stitchMode: 'auto',
+    // v0.16 — PANORAMA by default (was 'auto').  The auto-resolver's SCANS
+    // branch leans on double-integrated IMU translation, which is unreliable
+    // during rotation (gravity leakage inflates the translation estimate); in
+    // practice rotational pans are the common case and resolve to panorama
+    // anyway.  Defaulting to panorama is the robust choice — host apps that
+    // genuinely capture flat documents/walls can still opt into 'auto' or
+    // 'scans' via the ⚙️ panel or the `defaultStitchMode` / `stitcher` props.
+    stitchMode: 'panorama',
     // v0.16 — SPHERICAL by default (bounds both axes; the proven-robust wide/
     // vertical-pan projection).  This is now the single source of truth — the
     // native side no longer hardcodes a warper, so the ⚙️ panel + the host's

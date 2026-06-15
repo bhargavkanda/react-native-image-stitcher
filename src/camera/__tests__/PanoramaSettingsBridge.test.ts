@@ -59,7 +59,7 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.captureSource).toBe('ar');
 
     // BatchStitcherSettings
-    expect(cfg.stitchMode).toBe('auto');
+    expect(cfg.stitchMode).toBe('panorama'); // v0.16 — default flipped auto→panorama
     expect(cfg.warperType).toBe('spherical');
     expect(cfg.blenderType).toBe('multiband');
     expect(cfg.seamFinderType).toBe('graphcut');
