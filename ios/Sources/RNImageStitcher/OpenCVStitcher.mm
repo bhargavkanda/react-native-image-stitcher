@@ -491,17 +491,19 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   cfg.availableRamMB =
       (double)NSProcessInfo.processInfo.physicalMemory
       / (1024.0 * 1024.0);
-  // 2026-06-14 — route the batch stitch to the HIGH-LEVEL cv::Stitcher path
-  // with the SPHERICAL warper: i.e. EXACTLY what stock cv::Stitcher does by
-  // default.  Empirically isolated on real device frames — stock cv::Stitcher
-  // (high-level + spherical) stitched every failing capture cleanly, while the
-  // manual cv::detail pipeline fragmented / doubled / over-curved the same
-  // frames on plane / cylindrical / spherical alike.  The earlier "high-level
-  // unsuitable" note was made with the PLANE warper (which diverges/stretches
-  // on wide pans); spherical bounds both axes and matches the proven-clean
-  // stock result.  (Manual pipeline kept in-tree for Android / future use.)
+  // 2026-06-15 — DEFAULT to the MANUAL cv::detail pipeline + SPHERICAL warper.
+  // Two reasons: (1) the user prefers the manual output (sharper graphcut +
+  // multiband, finer control); (2) ALL of the memory/OOM hardening lives on
+  // the manual path (PreStitchMemoryAbort, RAM-aware canvas-budget downscale,
+  // STREAM/BATCH held-set routing, the black-canvas utilization guard) — the
+  // high-level cv::Stitcher path calls NONE of it.  Manual + spherical gives
+  // the user's preferred result AND re-arms the full memory safety net (which
+  // the earlier high-level flip had bypassed).  Spherical bounds BOTH axes, so
+  // the marooned-corner "black canvas" that motivated the high-level flip no
+  // longer applies (that was the unbounded PLANE warper).  High-level is now
+  // computed ON DEMAND only (JS `refinePanorama`), never eagerly — see below.
   cfg.warperType        = "spherical";
-  cfg.useManualPipeline = false;
+  cfg.useManualPipeline = true;
 
   // Marshal NSArray<NSString*> → std::vector<std::string>.  Strip the
   // `file://` scheme that some callers attach so the shared C++ can
@@ -587,35 +589,14 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
         result.debugSummary =
             [NSString stringWithUTF8String:r.debugSummary.c_str()];
       }
-#if DEBUG
-      // A/B HARNESS (DEBUG only) — also stitch the SAME frames via the manual
-      // cv::detail pipeline and write it next to the primary (high-level) as
-      // "<base>-manual.jpg", so the crop/preview screen can TOGGLE high-level
-      // vs manual on one real capture instead of rebuilding to compare.
-      //
-      // Crucially the alt uses the SAME SPHERICAL warper as the primary — only
-      // `useManualPipeline` differs.  This isolates the variable the user is
-      // actually judging (manual cv::detail orchestration + graphcut/multiband
-      // vs stock cv::Stitcher), instead of confounding it with the warper.  The
-      // old alt forced "plane", whose UNBOUNDED projection maroons content in a
-      // corner on moderate canvases — the "black canvas" the user reported.
-      // Spherical bounds both axes, so the manual pipeline now produces a real
-      // comparison stitch (and the utilization guard in validateStitchOutput is
-      // the backstop if a degenerate placement still slips through).
-      {
-        std::string ap(cleanedOutputPath.UTF8String);
-        size_t dot = ap.find_last_of('.');
-        std::string altPath =
-            (dot == std::string::npos ? ap : ap.substr(0, dot)) + "-manual.jpg";
-        retailens::StitchConfig altCfg = cfg;
-        altCfg.useManualPipeline = true;
-        altCfg.warperType        = "spherical";
-        retailens::StitchResult ar =
-            retailens::stitchFramePaths(paths, altPath, altCfg, logFn);
-        NSLog(@"[ab-harness] alt(manual/spherical) -> %s success=%d %dx%d",
-              altPath.c_str(), ar.success ? 1 : 0, (int)ar.width, (int)ar.height);
-      }
-#endif
+      // 2026-06-15 — the eager A/B harness that ALSO stitched the high-level
+      // alt on EVERY capture has been REMOVED.  Manual is now the default (this
+      // method), so computing high-level eagerly was pure wasted work —
+      // especially while profiling memory/perf — when the user isn't viewing
+      // it.  The keyframe JPEGs are retained on disk so high-level can be
+      // produced ON DEMAND (follow-up: a `useManualPipeline` param on this
+      // method lets `refinePanorama` re-stitch them via the high-level path
+      // when the user switches to the high-level tab).
     } else {
       // Map StitchErrorCode → NSError.code.  Preserves the existing
       // 9001/9002/9003/1001/9007 sentinels the JS UX layer already

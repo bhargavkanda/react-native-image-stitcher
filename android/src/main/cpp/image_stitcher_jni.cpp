@@ -28,6 +28,7 @@
 
 #include <string>
 #include <vector>
+#include <unistd.h>  // sysconf — device RAM for the manual-pipeline budget
 
 
 #define LOG_TAG "BatchStitcher.JNI"
@@ -116,22 +117,33 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         ? retailens::StitchMode::Panorama
         : retailens::StitchMode::Scans;
 
-    // 2026-06-14 — route to the HIGH-LEVEL cv::Stitcher path + SPHERICAL
-    // warper, mirroring iOS (OpenCVStitcher.mm, a03f5f6).  The 2026-06-07
-    // "manual won the A/B" conclusion was made with the PLANE warper, which
-    // diverges/blows the canvas on wide & vertical Mode-A pans.  A fresh
-    // on-device A/B (2026-06-14) showed the manual cv::detail pipeline
-    // fragments / doubles / produces a near-empty gigapixel canvas (its
-    // hand-rolled BundleAdjusterRay mis-places a frame and PlaneWarper is
-    // unbounded), while stock cv::Stitcher + spherical (bounds BOTH axes)
-    // stitches the same frames cleanly and robustly.  Manual stays in-tree as
-    // the DEBUG A/B alt only.  See docs/stitch-pipeline-architecture.md §7.
-    cfg.useManualPipeline = false;
+    // 2026-06-15 — DEFAULT to the MANUAL cv::detail pipeline + SPHERICAL warper,
+    // mirroring iOS (OpenCVStitcher.mm).  The manual path is where ALL the
+    // memory/OOM hardening lives (PreStitchMemoryAbort, RAM-aware canvas-budget
+    // downscale, STREAM/BATCH held-set routing, black-canvas utilization guard);
+    // the high-level cv::Stitcher path calls NONE of it.  Manual + spherical
+    // re-arms that safety net and matches the user's preferred output.
+    // Spherical bounds BOTH axes, so the marooned-corner "black canvas" that
+    // motivated the earlier high-level flip (unbounded PLANE warper) no longer
+    // applies.  See docs/stitch-pipeline-architecture.md §7.
+    cfg.useManualPipeline = true;
     cfg.warperType        = "spherical";
-    // high-level cv::Stitcher already defaults registration to 0.6 MP; keep
-    // the explicit bump for any caller that left the sentinel.
     if (cfg.registrationResolMP <= 0.0) {
         cfg.registrationResolMP = 0.6;
+    }
+    // Plumb the device's physical RAM so the manual pipeline's memory budget
+    // (perProcessMemoryBudgetMB = RAM × 0.42, floored at 900 MB) scales to the
+    // ACTUAL device instead of the assumed-4GB fallback (which over-throttles a
+    // 6–8 GB phone into STREAM+feather → blurrier).  iOS passes physicalMemory;
+    // on Android we read it from sysconf here (no JNI signature change needed).
+    if (cfg.availableRamMB <= 0.0) {
+        const long pages    = sysconf(_SC_PHYS_PAGES);
+        const long pageSize = sysconf(_SC_PAGE_SIZE);
+        if (pages > 0 && pageSize > 0) {
+            cfg.availableRamMB =
+                static_cast<double>(pages) * static_cast<double>(pageSize)
+                / (1024.0 * 1024.0);
+        }
     }
 
     const std::string outPath = jstring_to_string(env, outputPath);

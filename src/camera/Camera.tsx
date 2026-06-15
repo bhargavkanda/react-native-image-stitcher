@@ -2775,15 +2775,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
-        // DEBUG A/B harness — the native batch stitch (DEBUG build) also writes
-        // the SAME frames stitched by the OPPOSITE pipeline as `<base>-manual.jpg`
-        // next to the primary; surface it so the preview can toggle/compare.
-        // Absent in release (no file) → Image.getSize fails → toggle hidden.
-        altImageUri={
-          __DEV__ && cropPending
-            ? cropPending.uri.replace(/\.jpg$/i, '-manual.jpg')
-            : undefined
-        }
+        // 2026-06-15 — manual is now the default/only eager stitch; the eager
+        // high-level A/B alt was removed (it was wasted compute while profiling).
+        // The on-demand high-level tab (re-stitch via refinePanorama) is the
+        // next step; until then there's no alt image, so the A/B toggle stays
+        // hidden.
+        altImageUri={undefined}
         initialRect={cropPending?.initialRect}
         warnings={cropPending?.warnings.map((w) => w.message) ?? []}
         showCropControls={rectCrop}
