@@ -493,6 +493,25 @@ StitchResult stitchFramePaths(
     const StitchConfig&             config,
     LogFn                           logFn)
 {
+    // ── v0.16.1 — native-heap leak fix (one-time, process-wide) ─────────
+    // The ~7-9 MB/stitch LIVE native-heap creep is OpenCV core's OWN pooled
+    // scratch — TBB per-worker TLS + IPP per-thread arenas — re-primed as the
+    // calling thread migrates across the Kotlin Dispatchers.Default pool.  It
+    // is NOT app memory (every cv::Mat below is RAII / explicitly .release()'d)
+    // and NOT reclaimable by the mallopt(M_PURGE) we added, because those pools
+    // are not serviced by bionic malloc.  setNumThreads(1) removes the TBB
+    // worker pool (and its per-worker scratch); setUseIPP(false) removes the
+    // IPP TLS arenas — so no per-thread scratch can accumulate regardless of
+    // which thread a stitch lands on.  Stitches are serialized and the keyframes
+    // are small, so the single-threaded cost is minor.  C++11 static-init is
+    // thread-safe; runs exactly once on the first stitch.
+    static const bool s_cvTuned = []() {
+        cv::setNumThreads(1);
+        cv::ipp::setUseIPP(false);
+        return true;
+    }();
+    (void)s_cvTuned;
+
     // 2026-05-22 (audit follow-up) — mode-fallback retry.  When the
     // configured stitchMode produces degenerate camera params (the
     // "warpRoi too large" crash users hit on translation-heavy
