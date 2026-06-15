@@ -418,11 +418,11 @@ function App(): React.JSX.Element {
           panMode={panMode}
           rectCrop={rectCrop}
           showPreview={showPreview}
-          // Disable the 2 s keyframe time-budget force-accept so ONLY the
-          // flow-based novelty gate (20 % overlap) decides — lets us verify
-          // novelty selection in isolation. Re-enable via the ⚙️ settings
-          // panel (Keyframe interval) to compare. SDK default is 2000 ms.
-          defaultMaxKeyframeIntervalMs={0}
+          // Time-budget force-accept ON at 1 s (the SDK default) — a keyframe is
+          // accepted every second even if the 15 % novelty gate hasn't tripped,
+          // so slow/static pans don't leave gaps.  (Was previously disabled to
+          // test novelty in isolation.)  Adjust via the ⚙️ Keyframe interval.
+          defaultMaxKeyframeIntervalMs={1000}
           showSettingsButton={__DEV__}
           headerTitle="Image Stitcher Demo"
           headerGuidance="Tap shutter for a photo. Hold + pan + release for a panorama."

@@ -67,9 +67,9 @@ describe('panoramaSettingsToNativeConfig', () => {
 
     // FrameSelectionSettings
     expect(cfg.frameSelectionMode).toBe('flow-based');
-    expect(cfg.keyframeMaxCount).toBe(10);
+    expect(cfg.keyframeMaxCount).toBe(8);
     expect(cfg.keyframeOverlapThreshold).toBe(0.15);
-    expect(cfg.maxKeyframeIntervalMs).toBe(2000);
+    expect(cfg.maxKeyframeIntervalMs).toBe(1000);
 
     // FlowGateSettings (flow is defined in the default)
     expect(cfg.flowNoveltyPercentile).toBe(0.85);
@@ -96,7 +96,7 @@ describe('panoramaSettingsToNativeConfig', () => {
     const cfg = panoramaSettingsToNativeConfig(noFlow);
 
     expect(cfg.frameSelectionMode).toBe('flow-based');
-    expect(cfg.keyframeMaxCount).toBe(10);
+    expect(cfg.keyframeMaxCount).toBe(8);
     expect(cfg.keyframeOverlapThreshold).toBe(0.15);
 
     // Every flow.* native key present, matching DEFAULT_FLOW_GATE_SETTINGS.
@@ -118,9 +118,9 @@ describe('panoramaSettingsToNativeConfig', () => {
       ...DEFAULT_PANORAMA_SETTINGS,
       frameSelection: {
         mode: 'flow-based',
-        maxKeyframes: 10,
+        maxKeyframes: 8,
         overlapThreshold: 0.15,
-        maxKeyframeIntervalMs: 2000,
+        maxKeyframeIntervalMs: 1000,
         // flow omitted — legal per the optional `?` in the type
       },
     };

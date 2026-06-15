@@ -210,7 +210,7 @@ export interface FrameSelectionSettings {
    * overlap threshold wasn't met — so a slow or static pan never goes
    * longer than this without a keyframe.  Counts toward `maxKeyframes`
    * (the cap still finalises the capture).  `0` disables it.  Default
-   * `2000` (2 s).  Maps to the native gate's `setMaxKeyframeIntervalMs`.
+   * `1000` (1 s).  Maps to the native gate's `setMaxKeyframeIntervalMs`.
    */
   maxKeyframeIntervalMs: number;
 
@@ -324,15 +324,16 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   },
   frameSelection: {
     mode: 'flow-based',
-    // v0.16 — denser keyframes by default: a 15% novelty gate + up to 10
-    // frames.  More overlap between consecutive keyframes ⇒ stronger feature
-    // matching ⇒ more robust registration (fewer dropped boundary frames /
-    // black-canvas placements).  Memory-checked: 10 frames ≈ 12 MP held-set on
-    // iOS, under the 15 MP BATCH cap; ~3 MP on Android.  Selectable in the
-    // settings panel from {10, 15, 20, 30}%; native clamp floor is 10%.
-    maxKeyframes: 10,
+    // v0.16 — denser keyframes by default: a 15% novelty gate, up to 8 frames,
+    // plus a 1 s time-budget force-accept (so a slow/static pan still lands a
+    // keyframe every second even when novelty is low).  More overlap between
+    // consecutive keyframes ⇒ stronger feature matching ⇒ more robust
+    // registration.  Memory-checked: 8 frames fit the BATCH held-set cap on both
+    // platforms.  Overlap selectable in the settings panel {10,15,20,30}% (native
+    // clamp floor 10%); frame cap clamps to [3,10].
+    maxKeyframes: 8,
     overlapThreshold: 0.15,
-    maxKeyframeIntervalMs: 2000,
+    maxKeyframeIntervalMs: 1000,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
   },
 };

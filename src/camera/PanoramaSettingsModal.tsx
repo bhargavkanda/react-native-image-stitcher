@@ -253,7 +253,7 @@ export function PanoramaSettingsModal({
                 onChange={(v) => updateFrameSelection({
                   maxKeyframes: parseInt(v, 10),
                 })}
-                caption="Hard cap on accepted keyframes; native clamps to [3, 10].  10 (default in v0.16) gives the denser 15%-overlap gate room to retain more frames for robust registration."
+                caption="Hard cap on accepted keyframes; native clamps to [3, 10].  8 (default) is the sweet spot for cv::detail BA convergence while giving the 15%-overlap + 1 s time gate room to land frames."
               />
               <SectionHeader title="Overlap threshold (new content per keyframe)" />
               <SegmentedControl
@@ -275,7 +275,7 @@ export function PanoramaSettingsModal({
                 onChange={(v) => updateFrameSelection({
                   maxKeyframeIntervalMs: v === 'off' ? 0 : parseInt(v, 10) * 1000,
                 })}
-                caption="Force-accept a keyframe at least this often even if novelty is low, so slow / static pans don't leave gaps.  Counts toward the keyframe cap.  off = disabled.  2s (default).  Applies to AR + non-AR."
+                caption="Force-accept a keyframe at least this often even if novelty is low, so slow / static pans don't leave gaps.  Counts toward the keyframe cap.  off = disabled.  1s (default).  Applies to AR + non-AR."
               />
 
               {showFlowTunables && (
