@@ -2136,7 +2136,17 @@ StitchResult stitchFramePathsManual(
         // (single-pass, no pyramids) so a wide pan COMPLETES at full
         // resolution instead of OOMing.  Below it, keep BATCH + MultiBand +
         // GraphCut for the crisp seams typical small-canvas captures get.
-        constexpr double kLowMemCanvasMP = 10.0;
+        // 2026-06-15 — RAM-gated STREAM-routing caps.  On high-RAM devices
+        // (≥5 GB physical → 6 GB+ nominal; Android sysconf reads a few hundred
+        // MB under the marketing figure, so the gate is 5000 not 6000) raise the
+        // caps so wide pans STAY on the sharp BATCH (GraphCut + MultiBand) path
+        // instead of dropping to STREAM+feather (softer).  Low-RAM devices keep
+        // the conservative 10/15 MP thresholds.  The lowHeadroom trigger below
+        // still backstops ACTUAL memory pressure regardless of these static
+        // caps, so raising them only lifts the pre-emptive ceiling, not the
+        // safety net (a memory-pressured 6 GB device still routes to STREAM).
+        const bool kHighRamDevice = totalRamMB >= 5000.0;
+        const double kLowMemCanvasMP = kHighRamDevice ? 16.0 : 10.0;
         // Held-set guard: BATCH stayed safe at Σ-warped-area ≲13 MP but a
         // 6-frame AR pan with a 9.6 MP union (under kLowMemCanvasMP) yet a
         // ~32 MP held-set hit 3.6 GB and was lmkd-killed.  Route to STREAM on
@@ -2144,7 +2154,7 @@ StitchResult stitchFramePathsManual(
         // heavily-overlapping frames, e.g. high-res AR keyframes) can't slip
         // into BATCH.  15 MP sits safely between the observed safe (≲13) and
         // fatal (~32) held-sets.
-        constexpr double kMaxBatchHeldSetMP = 15.0;
+        const double kMaxBatchHeldSetMP = kHighRamDevice ? 22.0 : 15.0;
         // Issue 6 — headroom-aware routing.  In addition to the fixed
         // canvas/held-set MP thresholds (which bound the stitch's OWN size),
         // route to STREAM when the process's CURRENT free headroom is thin —
