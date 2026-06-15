@@ -2867,10 +2867,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
         // 2026-06-15 — manual is the default/eager output.  The high-level tab
         // is ON DEMAND: RectCropPreview calls onRequestAlt() (which re-stitches
         // the captured keyframes via cv::Stitcher) only when the user switches
-        // to it.  Gate on keyframePaths so the tab only appears where it can run
-        // (iOS); Android returns no paths → no tab.
+        // to it.  DEBUG-ONLY: it's a pipeline-comparison tool (dev-jargon
+        // "Manual"/"High-level" labels), gated behind `settings.debug` like the
+        // rest of the diagnostic UI.  Also requires keyframePaths, so it only
+        // appears where it can run (iOS); Android returns no paths → no tab.
         onRequestAlt={
-          cropPending?.captureResultObj.keyframePaths?.length
+          settings.debug && cropPending?.captureResultObj.keyframePaths?.length
             ? requestHighLevelAlt
             : undefined
         }
