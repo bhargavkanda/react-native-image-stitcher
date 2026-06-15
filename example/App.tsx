@@ -82,7 +82,10 @@ function App(): React.JSX.Element {
   // on-screen toggles below).  `rectCrop` shows the draggable-quad crop
   // editor; `showPreview` shows a plain image preview with Retake/Confirm;
   // both off → onCapture fires immediately with no review screen.
-  const [rectCrop, setRectCrop] = useState(true);
+  // Defaults match the SDK prop defaults: rectCrop OFF, showPreview OFF,
+  // panMode 'vertical' — i.e. capture fires onCapture immediately with no
+  // review surface unless a toggle is flipped on.
+  const [rectCrop, setRectCrop] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   // panMode flag (guidance item 1).  'vertical' (default) = landscape-only
   // (top→bottom): a portrait hold shows the rotate-to-landscape prompt.
