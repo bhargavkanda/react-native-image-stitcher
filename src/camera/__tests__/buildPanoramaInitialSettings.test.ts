@@ -154,7 +154,7 @@ describe('buildPanoramaInitialSettings', () => {
     expect(wire.stitchMode).toBe('scans');
     expect(wire.flowMaxTranslationCm).toBe(25);
     // Defaulted fields still on the wire with their default value.
-    expect(wire.warperType).toBe('spherical');
+    expect(wire.warperType).toBe('plane');
     expect(wire.frameSelectionMode).toBe('flow-based');
     expect(wire.flowNoveltyPercentile).toBe(0.85);
   });

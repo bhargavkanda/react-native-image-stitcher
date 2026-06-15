@@ -314,21 +314,19 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   captureSource: 'ar',
   debug: false,
   stitcher: {
-    // v0.16 — PANORAMA by default (was 'auto').  The auto-resolver's SCANS
-    // branch leans on double-integrated IMU translation, which is unreliable
-    // during rotation (gravity leakage inflates the translation estimate); in
-    // practice rotational pans are the common case and resolve to panorama
-    // anyway.  Defaulting to panorama is the robust choice — host apps that
-    // genuinely capture flat documents/walls can still opt into 'auto' or
-    // 'scans' via the ⚙️ panel or the `defaultStitchMode` / `stitcher` props.
-    stitchMode: 'panorama',
-    // v0.16 — SPHERICAL by default (bounds both axes; the proven-robust wide/
-    // vertical-pan projection).  This is now the single source of truth — the
-    // native side no longer hardcodes a warper, so the ⚙️ panel + the host's
-    // `defaultWarper` prop actually take effect.  Note: choosing `plane` here
-    // re-arms the dynamic plane→spherical fallback/divergence switch in the
-    // manual pipeline (it only fires when warperType != spherical).
-    warperType: 'spherical',
+    // v0.16 — AUTO by default.  Reverted from the brief 'panorama' default after
+    // on-device comparison (matches the v0.15.2 behaviour, which produced better
+    // results for these captures).  The auto-resolver now carries the
+    // low-rotation guard (rRadians>0.35 && t<0.25 → force PANORAMA), so the old
+    // IMU-gravity-leak SCANS misclassification on rotational pans is fixed; auto
+    // can again safely pick SCANS (high-level affine) for genuine flat scans.
+    stitchMode: 'auto',
+    // v0.16 — PLANE by default.  Reverted from 'spherical' after on-device
+    // comparison (matches v0.15.2 — flatter, more natural for the common 1x
+    // pan).  Plane is unbounded, so this re-arms the manual pipeline's dynamic
+    // plane→SPHERICAL divergence/quality fallback (it fires only when
+    // warperType != 'spherical'), keeping wide/off-axis pans safe.
+    warperType: 'plane',
     blenderType: 'multiband',
     seamFinderType: 'graphcut',
     // v0.15 — inscribed-rect crop is OFF by default (bbox crop keeps all
