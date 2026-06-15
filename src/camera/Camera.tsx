@@ -1273,7 +1273,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
       config: {
         useManualPipeline: boolean;
         warperType: 'spherical' | 'plane';
-        stitchMode: 'panorama';
+        stitchMode: 'panorama' | 'scans';
       },
     ): Promise<{ uri: string; debugInfo: string } | null> => {
       const pending = cropPending;
@@ -1335,6 +1335,20 @@ export function Camera(props: CameraProps): React.JSX.Element {
         useManualPipeline: true,
         warperType: 'plane',
         stitchMode: 'panorama',
+      }),
+    [stitchWithConfig],
+  );
+
+  // Tab 4 "SCANS" — stock cv::Stitcher in SCANS/AFFINE mode, ON-DEMAND.  The
+  // affine model fits low-rotation / translation captures (vs the homography of
+  // the other 3 tabs); compare it per-capture to tune the panorama-vs-SCANS
+  // threshold.  warperType is irrelevant here — SCANS hard-wires PlaneWarper.
+  const requestScansProjection = useCallback(
+    () =>
+      stitchWithConfig('scans', {
+        useManualPipeline: false,
+        warperType: 'spherical',
+        stitchMode: 'scans',
       }),
     [stitchWithConfig],
   );
@@ -2912,6 +2926,11 @@ export function Camera(props: CameraProps): React.JSX.Element {
         onRequestPlaneProjection={
           __DEV__ && cropPending?.captureResultObj.keyframePaths?.length
             ? requestPlaneProjection
+            : undefined
+        }
+        onRequestScansProjection={
+          __DEV__ && cropPending?.captureResultObj.keyframePaths?.length
+            ? requestScansProjection
             : undefined
         }
         // Live gyro rotation magnitude for this capture — shown as a pill so the

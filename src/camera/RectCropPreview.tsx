@@ -126,6 +126,12 @@ export interface RectCropPreviewProps {
   onRequestAlt?: () => Promise<{ uri: string; debugInfo: string } | null>;
   onRequestPlaneProjection?: () => Promise<{ uri: string; debugInfo: string } | null>;
   /**
+   * Tab 4 "SCANS" — re-stitch via stock cv::Stitcher in SCANS/AFFINE mode,
+   * ON-DEMAND (computed on first tap, like High-level).  The only affine tab;
+   * compare it against the homography tabs to tune the panorama-vs-SCANS choice.
+   */
+  onRequestScansProjection?: () => Promise<{ uri: string; debugInfo: string } | null>;
+  /**
    * 2026-06-15 (DEV) — gyro rotation magnitude of the capture, in radians.
    * When set, a small pill shows it (rad + degrees) so the dev can read the
    * rotation per capture and tune the panorama-vs-SCANS threshold.
@@ -197,9 +203,10 @@ export interface RectCropPreviewProps {
 }
 
 
-/** The three projection-comparison tabs.  'spherical' is the finalize primary
- *  (croppable); 'plane' + 'highlevel' are re-stitched alternates (compare-only). */
-type TabMode = 'spherical' | 'plane' | 'highlevel';
+/** The projection-comparison tabs.  'spherical' is the finalize primary
+ *  (croppable); 'plane' / 'highlevel' / 'scans' are re-stitched alternates
+ *  (compare-only).  'scans' is the only AFFINE one; the rest are homography. */
+type TabMode = 'spherical' | 'plane' | 'highlevel' | 'scans';
 
 /** Per-alt-tab state: the re-stitched output uri + its DEV recipe + image size
  *  (for contain-fit) + loading/failed flags. */
@@ -276,6 +283,7 @@ export function RectCropPreview(
     debugInfo,
     onRequestAlt,
     onRequestPlaneProjection,
+    onRequestScansProjection,
     rRadians,
     showMemoryPill,
   } = props;
@@ -290,7 +298,9 @@ export function RectCropPreview(
   const [activeTab, setActiveTab] = useState<TabMode>('spherical');
   const [planeTab, setPlaneTab] = useState<AltTab>(EMPTY_ALT_TAB);
   const [highTab, setHighTab] = useState<AltTab>(EMPTY_ALT_TAB);
-  const tabsOffered = !!onRequestPlaneProjection || !!onRequestAlt;
+  const [scansTab, setScansTab] = useState<AltTab>(EMPTY_ALT_TAB);
+  const tabsOffered =
+    !!onRequestPlaneProjection || !!onRequestAlt || !!onRequestScansProjection;
 
   // EAGER: kick off the Plane re-stitch once on mount (sequential after the
   // finalize primary — peak stays ~1 stitch).  Cancel-guarded against unmount.
@@ -325,6 +335,21 @@ export function RectCropPreview(
       .finally(() => setHighTab((s) => ({ ...s, loading: false })));
   }, [onRequestAlt]);
 
+  // ON-DEMAND: compute the SCANS (affine) tab on first tap (same pattern).
+  const scansStartedRef = useRef(false);
+  const showScans = React.useCallback(() => {
+    setActiveTab('scans');
+    if (scansStartedRef.current || !onRequestScansProjection) return;
+    scansStartedRef.current = true;
+    setScansTab((s) => ({ ...s, loading: true, failed: false }));
+    onRequestScansProjection()
+      .then((r) =>
+        setScansTab((s) =>
+          r ? { ...s, uri: r.uri, debugInfo: r.debugInfo } : { ...s, failed: true }))
+      .catch(() => setScansTab((s) => ({ ...s, failed: true })))
+      .finally(() => setScansTab((s) => ({ ...s, loading: false })));
+  }, [onRequestScansProjection]);
+
   // Fetch each alt tab's image size once its uri arrives (for the contain-fit).
   React.useEffect(() => {
     if (!planeTab.uri) return;
@@ -334,9 +359,16 @@ export function RectCropPreview(
     if (!highTab.uri) return;
     Image.getSize(highTab.uri, (w, h) => setHighTab((s) => ({ ...s, size: { w, h } })), () => {});
   }, [highTab.uri]);
+  React.useEffect(() => {
+    if (!scansTab.uri) return;
+    Image.getSize(scansTab.uri, (w, h) => setScansTab((s) => ({ ...s, size: { w, h } })), () => {});
+  }, [scansTab.uri]);
 
   const activeAlt: AltTab | null =
-    activeTab === 'plane' ? planeTab : activeTab === 'highlevel' ? highTab : null;
+    activeTab === 'plane' ? planeTab
+    : activeTab === 'highlevel' ? highTab
+    : activeTab === 'scans' ? scansTab
+    : null;
   // Only the Spherical primary is croppable; the alt tabs are compare-only.
   const isCroppable = activeTab === 'spherical';
   // showAlt: an alt tab is selected AND its image is loaded (uri + size).  Until
@@ -547,6 +579,7 @@ export function RectCropPreview(
           const pillText =
             activeTab === 'plane' ? planeTab.debugInfo
             : activeTab === 'highlevel' ? highTab.debugInfo
+            : activeTab === 'scans' ? scansTab.debugInfo
             : debugInfo;
           return pillText ? (
             <View
@@ -574,21 +607,20 @@ export function RectCropPreview(
           </View>
         )}
 
-        {/* 3-tab projection comparison.  Spherical = manual+spherical finalize
-            primary (croppable); Plane = manual+plane (eager); High-level = stock
-            cv::Stitcher (on-demand).  The active tab spins while it stitches. */}
+        {/* 4-tab projection comparison.  Spherical = manual+spherical finalize
+            primary (croppable, homography); Plane = manual+plane (eager,
+            homography); High-level = cv::Stitcher PANORAMA (on-demand,
+            homography); SCANS = cv::Stitcher SCANS (on-demand, AFFINE).  The
+            active tab spins while it stitches; on failure it falls back to the
+            spherical primary. */}
         {tabsOffered && (
           <View style={styles.abBar}>
             <Text style={styles.abBarLabel}>
-              {activeTab === 'plane' && planeTab.loading
-                ? 'Computing plane projection…'
-                : activeTab === 'highlevel' && highTab.loading
-                  ? 'Stitching high-level…'
-                  : activeTab === 'plane' && planeTab.failed
-                    ? 'Plane stitch failed — showing spherical'
-                    : activeTab === 'highlevel' && highTab.failed
-                      ? 'High-level stitch failed — showing spherical'
-                      : 'Tap a projection to compare:'}
+              {activeAlt?.loading
+                ? 'Computing projection…'
+                : activeAlt?.failed
+                  ? 'Stitch failed — showing spherical'
+                  : 'Tap a projection to compare:'}
             </Text>
             <View style={styles.abSegments}>
               <Pressable
@@ -638,6 +670,25 @@ export function RectCropPreview(
                       style={[styles.abSegText, activeTab === 'highlevel' && styles.abSegTextActive]}
                     >
                       High-level
+                    </Text>
+                  )}
+                </Pressable>
+              ) : null}
+              {onRequestScansProjection ? (
+                <Pressable
+                  style={[styles.abSeg, activeTab === 'scans' && styles.abSegActive]}
+                  onPress={showScans}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: activeTab === 'scans', busy: scansTab.loading }}
+                  accessibilityLabel="View SCANS affine pipeline (computed on demand)"
+                >
+                  {scansTab.loading ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text
+                      style={[styles.abSegText, activeTab === 'scans' && styles.abSegTextActive]}
+                    >
+                      SCANS
                     </Text>
                   )}
                 </Pressable>
@@ -847,7 +898,11 @@ const styles = StyleSheet.create({
   },
   abSeg: {
     paddingVertical: 7,
-    paddingHorizontal: 22,
+    // 4 segments (Spherical/Plane/High-level/SCANS) — tighter horizontal
+    // padding + min-width so they fit a ~360px phone without clipping.
+    paddingHorizontal: 11,
+    minWidth: 44,
+    alignItems: 'center',
     borderRadius: 7,
   },
   abSegActive: {
@@ -855,7 +910,7 @@ const styles = StyleSheet.create({
   },
   abSegText: {
     color: '#9aa',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
   },
   abSegTextActive: {
