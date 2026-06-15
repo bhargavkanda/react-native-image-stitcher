@@ -1743,7 +1743,13 @@ public final class IncrementalStitcher: NSObject {
                     frames: frameCount,
                     errorMessage: nil
                 )
-                completion([
+                // 2026-06-15 (DEV overlay A/B-aware) — carry the stitcher's
+                // own runtime recipe up to JS so the preview's DEV pill shows
+                // the HIGH-LEVEL recipe (pipe=highlevel;warp=spherical;…) while
+                // the user views the high-level tab, instead of the manual
+                // primary's recipe.  Mirrors the batch finalize's batchDict
+                // (guard empty — empty string means unavailable).
+                var refineDict: [String: Any] = [
                     "panoramaPath": r.outputPath,
                     "width": Int(r.width),
                     "height": Int(r.height),
@@ -1751,7 +1757,11 @@ public final class IncrementalStitcher: NSObject {
                     "framesIncluded": frameCount,
                     "framesDropped": 0,
                     "finalConfidenceThresh": -1.0,
-                ], nil)
+                ]
+                if !r.debugSummary.isEmpty {
+                    refineDict["debugSummary"] = r.debugSummary
+                }
+                completion(refineDict, nil)
             } catch let err as NSError {
                 self?.emitRefineProgress(
                     stage: "error",

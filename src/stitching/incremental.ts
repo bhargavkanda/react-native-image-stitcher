@@ -807,6 +807,15 @@ export interface IncrementalRefineResult {
   framesDropped: number;
   /** The confidence threshold that succeeded.  -1 when not applicable. */
   finalConfidenceThresh: number;
+  /**
+   * 2026-06-15 (DEV overlay A/B-aware) — the stitcher's own semicolon-separated
+   * `key=value` runtime recipe for THIS refined output, e.g.
+   * `"pipe=highlevel;warp=spherical;route=batch;seam=graphcut;blend=multiband"`.
+   * Mirrors `IncrementalFinalizeResult.debugSummary`.  Lets the on-demand
+   * high-level preview tab show its OWN recipe in the __DEV__ overlay pill
+   * instead of the manual primary's recipe.  iOS only; undefined elsewhere.
+   */
+  debugSummary?: string;
 }
 
 

@@ -126,8 +126,12 @@ export interface RectCropPreviewProps {
    * null on failure).  It runs only the FIRST time the user taps the
    * "High-level" tab — nothing is computed unless asked for.  When provided (or
    * `altImageUri` is), the A/B toggle appears.
+   *
+   * Resolves with the high-level output's file:// `uri` AND its OWN
+   * DEV-overlay `debugInfo` recipe (so the params pill can switch to the
+   * high-level recipe while that tab is viewed), or `null` on failure.
    */
-  onRequestAlt?: () => Promise<string | null>;
+  onRequestAlt?: () => Promise<{ uri: string; debugInfo: string } | null>;
   /** Show / hide the editor. */
   visible: boolean;
   /**
@@ -258,6 +262,10 @@ export function RectCropPreview(
   // contain-fit and hide the crop quad.
   const [showingAlt, setShowingAlt] = useState(false);
   const [lazyAltUri, setLazyAltUri] = useState<string | null>(null);
+  // The high-level (alt) stitch's OWN DEV-overlay recipe, resolved alongside
+  // its uri from `onRequestAlt`.  Shown in the params pill in place of the
+  // manual primary's `debugInfo` while the high-level tab is being viewed.
+  const [lazyAltDebugInfo, setLazyAltDebugInfo] = useState<string | null>(null);
   const [altLoading, setAltLoading] = useState(false);
   const [altFailed, setAltFailed] = useState(false);
   const altUri = altImageUri ?? lazyAltUri ?? null;
@@ -281,9 +289,13 @@ export function RectCropPreview(
     setAltFailed(false);
     setAltLoading(true);
     onRequestAlt()
-      .then((uri) => {
-        if (uri) setLazyAltUri(uri);
-        else setAltFailed(true);
+      .then((result) => {
+        if (result) {
+          setLazyAltUri(result.uri);
+          setLazyAltDebugInfo(result.debugInfo);
+        } else {
+          setAltFailed(true);
+        }
       })
       .catch(() => setAltFailed(true))
       .finally(() => setAltLoading(false));
@@ -456,19 +468,27 @@ export function RectCropPreview(
     >
       <View style={[styles.root, { paddingTop: topInset }]}>
         {/* DEV stitch-params overlay (host gates on __DEV__).  Top-right pill;
-            pushed below the A/B bar when that's present so they don't overlap. */}
-        {debugInfo ? (
-          <View
-            style={[
-              styles.debugPill,
-              { top: topInset + (altImageUri && altSize ? 76 : 8) },
-            ]}
-            pointerEvents="none"
-            accessibilityRole="text"
-          >
-            <Text style={styles.debugPillText}>{debugInfo}</Text>
-          </View>
-        ) : null}
+            pushed below the A/B bar when that's present so they don't overlap.
+            A/B-AWARE: while the user is viewing the on-demand high-level tab and
+            its recipe is known, show the HIGH-LEVEL recipe (pipe=highlevel;…)
+            instead of the manual primary's `debugInfo` — otherwise the pill
+            would misleadingly claim the manual recipe for a high-level output. */}
+        {(() => {
+          const pillText =
+            showAlt && lazyAltDebugInfo ? lazyAltDebugInfo : debugInfo;
+          return pillText ? (
+            <View
+              style={[
+                styles.debugPill,
+                { top: topInset + (altImageUri && altSize ? 76 : 8) },
+              ]}
+              pointerEvents="none"
+              accessibilityRole="text"
+            >
+              <Text style={styles.debugPillText}>{pillText}</Text>
+            </View>
+          ) : null;
+        })()}
 
         {/* Non-fatal warning banner (e.g. "<70 % of frames used"), shown
             ABOVE the image so the user sees it before accepting a crop. */}

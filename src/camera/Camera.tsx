@@ -1238,11 +1238,16 @@ export function Camera(props: CameraProps): React.JSX.Element {
   // 2026-06-15 — ON-DEMAND high-level preview.  Manual is the default/eager
   // output; when the user switches to the "high-level" tab in the preview we
   // re-stitch the SAME captured keyframes through stock cv::Stitcher via
-  // `refinePanorama` (useManualPipeline:false).  Returns a cache-busted file://
-  // uri for the high-level JPEG, or null when unavailable (no keyframe paths —
+  // `refinePanorama` (useManualPipeline:false).  Resolves with the high-level
+  // JPEG's file:// uri AND its OWN DEV-overlay recipe (so the preview pill shows
+  // the high-level recipe — pipe=highlevel;… — while that tab is viewed, not the
+  // manual primary's recipe), or null when unavailable (no keyframe paths —
   // e.g. Android — or the stitch failed).  Computed lazily so it costs nothing
   // unless the user actually asks for it.
-  const requestHighLevelAlt = useCallback(async (): Promise<string | null> => {
+  const requestHighLevelAlt = useCallback(async (): Promise<{
+    uri: string;
+    debugInfo: string;
+  } | null> => {
     const pending = cropPending;
     const kf = pending?.captureResultObj.keyframePaths;
     if (!pending || !kf || kf.length < 2) return null;
@@ -1268,8 +1273,21 @@ export function Camera(props: CameraProps): React.JSX.Element {
         },
       });
       // Plain file:// uri — the path is unique per capture and computed once, so
-      // no cache-bust here (the accept handler adds one when emitting).
-      return toFileUri(r.panoramaPath);
+      // no cache-bust here (the accept handler adds one when emitting).  The
+      // DEV pill text is the HIGH-LEVEL stitch's own recipe (only the fields
+      // IncrementalRefineResult carries; buildStitchDebugInfo tolerates the rest
+      // being absent).
+      return {
+        uri: toFileUri(r.panoramaPath),
+        debugInfo: buildStitchDebugInfo({
+          debugSummary: r.debugSummary,
+          finalConfidenceThresh: r.finalConfidenceThresh,
+          framesIncluded: r.framesIncluded,
+          framesRequested: r.framesRequested,
+          width: r.width,
+          height: r.height,
+        }),
+      };
     } catch {
       return null;
     }
