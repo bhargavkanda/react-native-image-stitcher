@@ -2486,11 +2486,23 @@ public final class IncrementalStitcher: NSObject {
         let denom = tScore + rScore
         if denom <= 1e-9 { return "panorama" }  // no motion either way
         let ratio = tScore / denom
+
+        // 2026-06-15 — LOW-ROTATION GUARD.  The gyro rotation (rRadians) is
+        // trustworthy; the IMU translation (tMeters, in non-AR) is NOT — a
+        // continuous rotation leaks gravity into the double-integrated accel and
+        // inflates it, which can falsely push `ratio` over 0.55 → SCANS, whose
+        // affine warper can't represent the rotation.  When the gyro shows a
+        // clear pan (> ~20°) with only modest translation, force PANORAMA
+        // regardless of the (possibly-inflated) translation.  Genuine shelf
+        // scans (low rotation, large real translation) skip this and still
+        // reach SCANS via the ratio.
+        let lowRotationGuard = rRadians > 0.35 && tMeters < 0.25
+        let mode = (!lowRotationGuard && ratio >= 0.55) ? "scans" : "panorama"
         os_log(.fault, log: Self.diagLog,
-               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f → %{public}@",
+               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f rotGuard=%d → %{public}@",
                tPose, imuTranslationMetres, rRadians, ratio,
-               ratio >= 0.55 ? "scans" : "panorama")
-        return ratio >= 0.55 ? "scans" : "panorama"
+               lowRotationGuard ? 1 : 0, mode)
+        return mode
     }
 
     /// Closed-form q · (0,0,-1) · q⁻¹ — rotates the camera-forward

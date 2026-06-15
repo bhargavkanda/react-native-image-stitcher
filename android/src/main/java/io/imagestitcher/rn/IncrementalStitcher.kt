@@ -1980,15 +1980,27 @@ class IncrementalStitcher(
         if (denom <= 1e-9) return "panorama"  // no motion either way
         val ratio = tScore / denom
 
+        // 2026-06-15 — LOW-ROTATION GUARD.  The gyro rotation (rRadians) is
+        // trustworthy; the IMU translation (tMeters, in non-AR) is NOT — a
+        // continuous rotation leaks gravity into the double-integrated accel and
+        // inflates it, which can falsely push `ratio` over 0.55 → SCANS, whose
+        // affine warper can't represent the rotation.  So when the gyro shows a
+        // clear pan (> ~20°) with only modest translation, force PANORAMA
+        // regardless of the (possibly-inflated) translation.  Genuine shelf
+        // scans (low rotation, large real translation) skip this and still
+        // reach SCANS via the ratio.  (Conservative: keeps the tMeters cap so a
+        // genuine large-translation capture isn't forced to PANORAMA.)
+        val lowRotationGuard = rRadians > 0.35 && tMeters < 0.25
+        val mode = if (!lowRotationGuard && ratio >= 0.55) "scans" else "panorama"
         android.util.Log.i(
             "IncrementalStitcher",
             "stitch-mode auto: tPose=${"%.3f".format(tPose)}m " +
                 "tImu=${"%.3f".format(imuTranslationMetres)}m " +
                 "r=${"%.3f".format(rRadians)}rad " +
                 "ratio=${"%.3f".format(ratio)} " +
-                "→ ${if (ratio >= 0.55) "scans" else "panorama"}",
+                "rotGuard=$lowRotationGuard → $mode",
         )
-        return if (ratio >= 0.55) "scans" else "panorama"
+        return mode
     }
 
     /**
