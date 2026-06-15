@@ -748,6 +748,25 @@ class IncrementalStitcher(
                     // resolved cv::Stitcher mode so JS can surface it
                     // on the output preview + debug toast.
                     map.putString("stitchModeResolved", stitchModeResolved)
+                    // 2026-06-15 (iOS parity) — the exact keyframe JPEG
+                    // paths used for this stitch, so JS can re-stitch
+                    // them ON DEMAND via refinePanorama (the high-level
+                    // preview tab) without enumerating the session dir.
+                    // Camera.tsx gates that tab on this array being
+                    // present, so without it the tab never appears on
+                    // Android (the bug this fixes).  Mirrors iOS'
+                    // FinalizePayload "batchKeyframePaths": payload.paths.
+                    val keyframePathsArray = Arguments.createArray()
+                    keyframePathsSnapshot.forEach { keyframePathsArray.pushString(it) }
+                    map.putArray("batchKeyframePaths", keyframePathsArray)
+                    // The orientation THIS stitch baked into the output.
+                    // The on-demand high-level re-stitch MUST pass the
+                    // same value back through refinePanorama or the
+                    // output comes out in raw sensor landscape (sideways)
+                    // — refinePanorama otherwise defaults to "portrait"
+                    // (no bake-rotation).  Mirrors iOS' FinalizePayload
+                    // "captureOrientation": payload.captureOrientation.
+                    map.putString("captureOrientation", captureOrientationSnapshot)
                 } else {
                     // The live engines (hybrid + firstwins/slit) and their
                     // auto-refine hook were archived in the 2026-06 batch-
@@ -1493,6 +1512,15 @@ class IncrementalStitcher(
             config?.getBooleanOrDefault("useInscribedRectCrop", false) ?: false
         val stitchMode = (config?.getString("stitchMode") ?: "auto")
             .let { if (it in setOf("auto", "panorama", "scans")) it else "auto" }
+        // 2026-06-15 — pipeline is caller-selectable (mirrors iOS'
+        // refinePanorama `refineManual`).  The on-demand HIGH-LEVEL
+        // preview tab (Camera.tsx requestHighLevelAlt) calls
+        // refinePanorama with useManualPipeline:false to re-stitch the
+        // captured keyframes via stock cv::Stitcher.  Default false
+        // (high-level) preserves the refine path's historical
+        // cv::Stitcher behaviour.
+        val useManualPipeline =
+            config?.getBooleanOrDefault("useManualPipeline", false) ?: false
         val jpegQuality = max(1, min(100,
             config?.getIntOrDefault("jpegQuality", 90) ?: 90))
 
@@ -1538,9 +1566,18 @@ class IncrementalStitcher(
                     warperType,
                     blenderType,
                     seamFinderType,
+                    // captureOrientation flows through so the high-level
+                    // re-stitch bakes the SAME rotation the capture used
+                    // — without it the output is sideways (raw sensor
+                    // landscape).  The high-level tab passes back the
+                    // orientation the finalize emitted.
                     captureOrientation,
                     useInscribedRectCrop,
                     stitchMode = effectiveMode,
+                    // false = stock high-level cv::Stitcher (the on-demand
+                    // HIGH-LEVEL preview tab); true would force the manual
+                    // pipeline.  Sourced from the JS config above.
+                    useManualPipeline = useManualPipeline,
                 )
                 // Stitch returned — BatchStitcher writes the JPEG
                 // synchronously, so "writing" reflects the final

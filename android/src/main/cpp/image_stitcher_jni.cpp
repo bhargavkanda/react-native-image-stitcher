@@ -82,7 +82,8 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         jdouble registrationResolMP,
         jdouble seamEstimationResolMP,
         jdouble compositingResolMP,
-        jstring stitchModeStr) {
+        jstring stitchModeStr,
+        jboolean useManualPipeline) {
 
     if (framePaths == nullptr) {
         throw_runtime(env, "framePaths is null");
@@ -117,17 +118,20 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         ? retailens::StitchMode::Panorama
         : retailens::StitchMode::Scans;
 
-    // 2026-06-15 — DEFAULT to the MANUAL cv::detail pipeline (mirrors iOS).  ALL
-    // the memory/OOM hardening lives on the manual path (PreStitchMemoryAbort,
-    // RAM-aware canvas-budget downscale, STREAM/BATCH held-set routing, the
-    // black-canvas utilization guard); the high-level cv::Stitcher path calls
-    // NONE of it — so manual is both the preferred output AND the memory-safe one.
+    // 2026-06-15 — pipeline is caller-selectable (mirrors iOS).  The batch
+    // finalize passes useManualPipeline=true: ALL the memory/OOM hardening
+    // lives on the manual path (PreStitchMemoryAbort, RAM-aware canvas-budget
+    // downscale, STREAM/BATCH held-set routing, the black-canvas utilization
+    // guard); the high-level cv::Stitcher path calls NONE of it — so manual is
+    // both the preferred output AND the memory-safe one.  The on-demand
+    // HIGH-LEVEL preview tab calls refinePanorama with useManualPipeline=false
+    // to re-stitch the captured keyframes via stock cv::Stitcher.
     //
     // WARPER no longer forced: cfg.warperType carries the caller's choice
     // (default "plane" — flat for narrow/1x pans).  The shared dispatcher
     // (stitchFramePathsImpl_) auto-retries with SPHERICAL if a plane stitch
     // maroons (LowQualityStitch).  Flat when plane works; bounded only when not.
-    cfg.useManualPipeline = true;
+    cfg.useManualPipeline = (useManualPipeline == JNI_TRUE);
     if (cfg.registrationResolMP <= 0.0) {
         cfg.registrationResolMP = 0.6;
     }

@@ -109,6 +109,15 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         // SCANS canvas size is bounded by sum-of-frames; PANORAMA
         // can diverge to multi-GB on translation-heavy input).
         stitchMode: String,
+        // 2026-06-15 — pipeline picker (mirrors iOS' OpenCVStitcher
+        // `useManualPipeline:` param).  true → the MANUAL cv::detail
+        // pipeline (graphcut + multiband + the full memory-guard set;
+        // the default for batch capture).  false → stock high-level
+        // cv::Stitcher (the on-demand HIGH-LEVEL preview tab driven by
+        // refinePanorama).  Appended LAST to match the JNI C signature
+        // in image_stitcher_jni.cpp — order/count/type must line up
+        // exactly or it's an UnsatisfiedLinkError at runtime.
+        useManualPipeline: Boolean,
     ): IntArray
 
     // ── Stitch frames → panorama ─────────────────────────────────
@@ -181,6 +190,9 @@ class BatchStitcher(reactContext: ReactApplicationContext)
                     seamEstimationResolMP,
                     compositingResolMP,
                     stitchMode,
+                    // Direct @ReactMethod batch stitch → MANUAL pipeline
+                    // (the memory-safe default; mirrors iOS).
+                    true,
                 )
                 val duration = System.currentTimeMillis() - start
                 // 2026-05-15 (D) — dims layout from native JNI:
@@ -812,6 +824,12 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         // translation captures safely (PANORAMA on translation can
         // diverge → multi-GB canvas → lmkd kill).
         stitchMode: String = "scans",
+        // 2026-06-15 — pipeline picker (mirrors iOS' OpenCVStitcher
+        // `useManualPipeline:`).  Defaults to true (MANUAL) so the
+        // batch-keyframe finalize orchestrator gets the memory-safe
+        // manual path without re-stating it.  The refine/high-level
+        // path passes false to drive the stock cv::Stitcher pipeline.
+        useManualPipeline: Boolean = true,
     ): IntArray {
         ensureNativeStitcher()
         return nativeStitchFramePaths(
@@ -827,6 +845,7 @@ class BatchStitcher(reactContext: ReactApplicationContext)
             seamEstimationResolMP,
             compositingResolMP,
             stitchMode,
+            useManualPipeline,
         )
     }
 
