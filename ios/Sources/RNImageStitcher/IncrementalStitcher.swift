@@ -943,7 +943,7 @@ public final class IncrementalStitcher: NSObject {
         } else if let v = configOverrides["maxKeyframeIntervalMs"] as? Int {
             self.keyframeGate.maxKeyframeIntervalMs = max(0.0, Double(v))
         } else {
-            self.keyframeGate.maxKeyframeIntervalMs = 2000.0
+            self.keyframeGate.maxKeyframeIntervalMs = 1500.0
         }
         // V16 — novelty aggregation percentile.  Clamp at start to
         // [0.5, 0.99]; the bridge re-clamps but matching it here

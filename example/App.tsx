@@ -425,7 +425,7 @@ function App(): React.JSX.Element {
           // accepted every second even if the 15 % novelty gate hasn't tripped,
           // so slow/static pans don't leave gaps.  (Was previously disabled to
           // test novelty in isolation.)  Adjust via the ⚙️ Keyframe interval.
-          defaultMaxKeyframeIntervalMs={1000}
+          defaultMaxKeyframeIntervalMs={1500}
           showSettingsButton={__DEV__}
           headerTitle="Image Stitcher Demo"
           headerGuidance="Tap shutter for a photo. Hold + pan + release for a panorama."

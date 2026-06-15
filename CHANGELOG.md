@@ -131,9 +131,10 @@ supported. This is the recommended way to configure the pipeline.
   branch keys off double-integrated IMU translation, which is unreliable
   during rotation); `warperType` defaults to `'spherical'` (was
   `'plane'` — bounds both axes, fixing fragmented wide/vertical pans);
-  and the keyframe gate is denser (`maxKeyframes` → 8, a 1 s
-  `maxKeyframeIntervalMs` time gate re-enabled, `overlapThreshold` →
-  0.15).  **Migration:** hosts relying on the previous behaviour set the
+  and the keyframe gate is denser (`maxKeyframes` → 8, a 1.5 s
+  `maxKeyframeIntervalMs` time gate re-enabled — bounding a static/slow
+  capture to ~12 s before the 8-keyframe auto-finalize, `overlapThreshold`
+  → 0.15).  **Migration:** hosts relying on the previous behaviour set the
   values explicitly via the new `stitcher` / `frameSelection` props (or
   the matching flat `default*` props) — e.g. `stitcher={{ stitchMode:
   'auto', warperType: 'plane' }}`.

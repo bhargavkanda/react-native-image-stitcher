@@ -151,9 +151,9 @@ final class KeyframeGate {
     /// overlapThreshold.  Unlike `flowMaxTranslationCm` this applies to
     /// BOTH the Pose and Flow strategies, and is passed STRAIGHT
     /// THROUGH to the bridge (the unit is already what C++ expects — no
-    /// cm→m style conversion).  Default 2000 ms; 0 = disabled.  The C++
+    /// cm→m style conversion).  Default 1500 ms; 0 = disabled.  The C++
     /// setter clamps to ≥ 0.
-    var maxKeyframeIntervalMs: Double = 2000.0 {
+    var maxKeyframeIntervalMs: Double = 1500.0 {
         didSet {
             bridge.setMaxKeyframeIntervalMs(maxKeyframeIntervalMs)
         }

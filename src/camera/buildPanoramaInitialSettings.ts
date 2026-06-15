@@ -63,7 +63,7 @@ export interface PanoramaPropOverrides {
   defaultKeyframeOverlapThreshold?: number;
   /**
    * Initial value for `frameSelection.maxKeyframeIntervalMs` — the
-   * time-budget force-accept (ms).  `0` disables it.  Default 2000.
+   * time-budget force-accept (ms).  `0` disables it.  Default 1500.
    */
   defaultMaxKeyframeIntervalMs?: number;
   /**

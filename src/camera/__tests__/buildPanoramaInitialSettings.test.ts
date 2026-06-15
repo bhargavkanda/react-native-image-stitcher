@@ -112,11 +112,11 @@ describe('buildPanoramaInitialSettings', () => {
       buildPanoramaInitialSettings({ defaultMaxKeyframeIntervalMs: 0 }, false)
         .frameSelection.maxKeyframeIntervalMs,
     ).toBe(0);
-    // Omitted ⇒ the 1000 ms (1 s) default.
+    // Omitted ⇒ the 1500 ms (1.5 s) default.
     expect(
       buildPanoramaInitialSettings({}, false)
         .frameSelection.maxKeyframeIntervalMs,
-    ).toBe(1000);
+    ).toBe(1500);
   });
 
   it('leaves non-overridden fields at the default (partial override)', () => {

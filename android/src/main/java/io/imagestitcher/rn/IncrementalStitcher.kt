@@ -420,7 +420,7 @@ class IncrementalStitcher(
             // stalled scan still advances).  iOS parity:
             // IncrementalStitcher.swift maxKeyframeIntervalMs block.
             val maxKfIntervalMs = configOverrides
-                ?.getDoubleOrDefault("maxKeyframeIntervalMs", 2000.0) ?: 2000.0
+                ?.getDoubleOrDefault("maxKeyframeIntervalMs", 1500.0) ?: 1500.0
             keyframeGate.maxKeyframeIntervalMs = maxKfIntervalMs.coerceAtLeast(0.0)
             // 2026-05-22 (audit F5) — flow-strategy Shi-Tomasi
             // tunables.  Pre-audit, Android had no JNI for these
