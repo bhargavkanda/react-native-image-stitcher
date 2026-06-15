@@ -28,6 +28,7 @@
 
 #include <string>
 #include <vector>
+#include <cstdio>    // /proc/self/statm read for the purge diagnostic
 #include <unistd.h>  // sysconf — device RAM for the manual-pipeline budget
 #include <dlfcn.h>   // dlsym — resolve mallopt() at runtime (API-gated; see below)
 
@@ -85,11 +86,37 @@ std::string g_lastDebugSummary;
 // the creep in Native Heap, not Graphics).  mallopt() was exported by bionic at
 // API 26 but our minSdk is 24, so resolve it at runtime via dlsym and call only
 // when present (it is on every API-26+ device, including the test A35).
+double procRssMB() {
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (f == nullptr) return -1.0;
+    long sizePages = 0, residentPages = 0;
+    const int n = fscanf(f, "%ld %ld", &sizePages, &residentPages);
+    fclose(f);
+    if (n != 2) return -1.0;
+    return static_cast<double>(residentPages)
+        * static_cast<double>(sysconf(_SC_PAGE_SIZE)) / (1024.0 * 1024.0);
+}
+
 void purgeNativeAllocator() {
     using MalloptFn = int (*)(int, int);
-    static MalloptFn fn =
-        reinterpret_cast<MalloptFn>(dlsym(RTLD_DEFAULT, "mallopt"));
+    // Resolve mallopt at runtime (API-26 symbol; minSdk 24).  Prefer an explicit
+    // libc.so handle — RTLD_DEFAULT from a dlopen'd .so doesn't always reach
+    // libc on Android — then fall back to RTLD_DEFAULT.
+    static MalloptFn fn = []() -> MalloptFn {
+        void* h = dlopen("libc.so", RTLD_NOLOAD | RTLD_NOW);
+        void* s = (h != nullptr) ? dlsym(h, "mallopt") : nullptr;
+        if (s == nullptr) s = dlsym(RTLD_DEFAULT, "mallopt");
+        return reinterpret_cast<MalloptFn>(s);
+    }();
+    const double before = procRssMB();
     if (fn != nullptr) fn(M_PURGE, 0);
+    const double after = procRssMB();
+    // Diagnostic: shows whether mallopt resolved and how much RSS the purge
+    // actually returned to the OS.  If mallopt=MISSING → dlsym failed; if
+    // resolved but before≈after → the residual isn't allocator-retained (real
+    // leak) and M_PURGE can't help.
+    LOGI("[memstat] purge: mallopt=%s rss %.1f -> %.1f MB",
+         (fn != nullptr) ? "ok" : "MISSING", before, after);
 }
 
 }  // namespace
