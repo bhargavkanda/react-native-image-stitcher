@@ -444,6 +444,10 @@ function CaptureScreen() {
 seed your translation catalogue from the source strings, and
 `RECOVERABLE_STITCH_GUIDANCE` exposes the built-in error copy for the same reason.
 
+> **Full worked example** — a Spanish `es.json` catalogue (both surfaces) plus a
+> host language-setting that switches the copy at runtime: see the
+> [Internationalization guide](https://bhargavkanda.github.io/react-native-image-stitcher/docs/i18n#worked-example-spanish-with-a-dynamic-language-setting).
+
 ### Migration from 0.13.x
 
 - **Removed:** the `panGuide` and `panoramaGuidance` props (the
