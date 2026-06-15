@@ -492,20 +492,20 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   cfg.availableRamMB =
       (double)NSProcessInfo.processInfo.physicalMemory
       / (1024.0 * 1024.0);
-  // 2026-06-15 — DEFAULT to the MANUAL cv::detail pipeline + SPHERICAL warper.
-  // Two reasons: (1) the user prefers the manual output (sharper graphcut +
-  // multiband, finer control); (2) ALL of the memory/OOM hardening lives on
-  // the manual path (PreStitchMemoryAbort, RAM-aware canvas-budget downscale,
-  // STREAM/BATCH held-set routing, the black-canvas utilization guard) — the
-  // high-level cv::Stitcher path calls NONE of it.  Manual + spherical gives
-  // the user's preferred result AND re-arms the full memory safety net (which
-  // the earlier high-level flip had bypassed).  Spherical bounds BOTH axes, so
-  // the marooned-corner "black canvas" that motivated the high-level flip no
-  // longer applies (that was the unbounded PLANE warper).  High-level is now
-  // computed ON DEMAND only (JS `refinePanorama`), never eagerly — see below.
-  // The pipeline is now caller-driven: the batch capture passes YES (manual,
-  // the default output); the on-demand high-level tab re-stitches with NO.
-  cfg.warperType        = "spherical";
+  // 2026-06-15 — DEFAULT to the MANUAL cv::detail pipeline.  ALL the memory/OOM
+  // hardening lives on the manual path (PreStitchMemoryAbort, RAM-aware
+  // canvas-budget downscale, STREAM/BATCH held-set routing, the black-canvas
+  // utilization guard); the high-level cv::Stitcher path calls NONE of it.  So
+  // manual is both the user's preferred output AND the memory-safe one.
+  //
+  // WARPER: no longer forced.  cfg.warperType carries the caller's choice
+  // (default "plane" — flat / natural for narrow & 1x pans).  Plane is
+  // unbounded, so the shared dispatcher (stitchFramePathsImpl_) auto-retries
+  // with SPHERICAL if a plane stitch maroons (LowQualityStitch).  Flat when
+  // plane works; bounded only when it doesn't — no more always-curved output.
+  //
+  // The pipeline is caller-driven: batch capture passes YES (manual, default
+  // output); the on-demand high-level tab re-stitches with NO.
   cfg.useManualPipeline = useManualPipeline;
 
   // Marshal NSArray<NSString*> → std::vector<std::string>.  Strip the

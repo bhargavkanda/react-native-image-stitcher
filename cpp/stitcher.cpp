@@ -585,7 +585,29 @@ static StitchResult stitchFramePathsImpl_(
     // call-site signature identical so existing bridges (iOS Obj-C++,
     // Android JNI) don't need to know which path runs internally.
     if (config.useManualPipeline) {
-        return stitchFramePathsManual(framePaths, outputPath, config, logFn);
+        StitchResult r =
+            stitchFramePathsManual(framePaths, outputPath, config, logFn);
+        // 2026-06-15 — AUTO SPHERICAL FALLBACK.  The manual pipeline defaults to
+        // the PLANE warper (flat, natural for narrow / 1x pans).  Plane is
+        // unbounded, so a wide / off-axis pan can maroon content in a corner;
+        // validateStitchOutput rejects that as LowQualityStitch (the utilization
+        // / disjoint guard) BEFORE writing any file.  Rather than fail, retry
+        // ONCE with the SPHERICAL warper, which bounds both axes — flat when
+        // plane works, bounded only when it doesn't.  Skipped when the caller
+        // already asked for spherical, or the failure wasn't a quality rejection
+        // (OOM abort / read error won't be fixed by a different warper).
+        if (!r.success
+            && r.errorCode == StitchErrorCode::LowQualityStitch
+            && config.warperType != "spherical") {
+            log_info(logFn, "[stitch-bc]",
+                     "manual '%s' marooned (LowQualityStitch) — retrying once "
+                     "with spherical (bounded both axes)",
+                     config.warperType.c_str());
+            StitchConfig sph = config;
+            sph.warperType = "spherical";
+            return stitchFramePathsManual(framePaths, outputPath, sph, logFn);
+        }
+        return r;
     }
 
     const auto t0 = std::chrono::steady_clock::now();
