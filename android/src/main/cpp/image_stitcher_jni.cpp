@@ -64,6 +64,14 @@ void androidLogBridge(int level, const char* tag, const char* msg) {
     __android_log_print(prio, LOG_TAG, "%s %s", tag ? tag : "", msg ? msg : "");
 }
 
+// 2026-06-15 — last successful stitch's debugSummary (pipe/warp/route/seam/blend).
+// The nativeStitchFramePaths return is a jintArray which can't carry a string,
+// so we stash it here and expose it via the lightweight nativeLastDebugSummary()
+// getter that Kotlin calls right after a successful stitch (same thread → no
+// concurrency).  Mirrors the iOS RNStitchResult.debugSummary surface so the DEV
+// overlay shows warp/route/seam/blend on Android too, not just mode/score.
+std::string g_lastDebugSummary;
+
 }  // namespace
 
 
@@ -127,11 +135,13 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
     // HIGH-LEVEL preview tab calls refinePanorama with useManualPipeline=false
     // to re-stitch the captured keyframes via stock cv::Stitcher.
     //
-    // WARPER no longer forced: cfg.warperType carries the caller's choice
-    // (default "plane" — flat for narrow/1x pans).  The shared dispatcher
-    // (stitchFramePathsImpl_) auto-retries with SPHERICAL if a plane stitch
-    // maroons (LowQualityStitch).  Flat when plane works; bounded only when not.
+    // WARPER forced to SPHERICAL again (2026-06-15, user request — testing),
+    // mirroring iOS.  Overrides cfg.warperType (JS default "plane") + the panel
+    // knob; the manual pipeline always uses spherical (bounds both axes,
+    // deterministic).  The plane-default + auto-fallback experiment regressed
+    // vertical Mode-A pans, so we're back on spherical for now.
     cfg.useManualPipeline = (useManualPipeline == JNI_TRUE);
+    cfg.warperType        = "spherical";
     if (cfg.registrationResolMP <= 0.0) {
         cfg.registrationResolMP = 0.6;
     }
@@ -162,6 +172,10 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         return nullptr;
     }
 
+    // Stash the run's debugSummary for nativeLastDebugSummary() (jintArray
+    // can't carry a string).  Read by Kotlin right after this returns.
+    g_lastDebugSummary = result.debugSummary;
+
     // Return [width, height, framesRequested, framesIncluded, finalThresholdMilli]
     // — same JNI return layout as the previous file (Kotlin already
     // parses indices 0-4).  The threshold is multiplied by 1000 +
@@ -176,4 +190,13 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
     };
     env->SetIntArrayRegion(dims, 0, 5, values);
     return dims;
+}
+
+// Returns the debugSummary of the most recent successful stitch (pipe/warp/
+// route/seam/blend).  Kotlin calls this right after nativeStitchFramePaths so
+// the value is fresh (stitches are serialized on one background thread).
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_imagestitcher_rn_BatchStitcher_nativeLastDebugSummary(
+        JNIEnv* env, jobject /*thiz*/) {
+    return env->NewStringUTF(g_lastDebugSummary.c_str());
 }

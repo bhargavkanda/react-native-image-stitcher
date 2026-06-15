@@ -767,6 +767,11 @@ class IncrementalStitcher(
                     // (no bake-rotation).  Mirrors iOS' FinalizePayload
                     // "captureOrientation": payload.captureOrientation.
                     map.putString("captureOrientation", captureOrientationSnapshot)
+                    // 2026-06-15 — DEV overlay parity with iOS: the stitcher's
+                    // runtime recipe (pipe/warp/route/seam/blend) so the Android
+                    // pill shows the same detail, not just mode/score/frames.
+                    val dbg = stitcher.lastDebugSummary
+                    if (dbg.isNotEmpty()) map.putString("debugSummary", dbg)
                 } else {
                     // The live engines (hybrid + firstwins/slit) and their
                     // auto-refine hook were archived in the 2026-06 batch-
@@ -1605,6 +1610,10 @@ class IncrementalStitcher(
                     putInt("framesIncluded", framesIncluded)
                     putInt("framesDropped", framesRequested - framesIncluded)
                     putDouble("finalConfidenceThresh", finalConfidenceThresh)
+                    // DEV overlay — the high-level re-stitch's recipe so the
+                    // pill shows pipe/warp/route/seam/blend on the high-level tab.
+                    val dbg = stitcher.lastDebugSummary
+                    if (dbg.isNotEmpty()) putString("debugSummary", dbg)
                 }
                 emitRefineProgress(
                     stage = "done",

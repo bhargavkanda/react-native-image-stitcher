@@ -498,14 +498,18 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // utilization guard); the high-level cv::Stitcher path calls NONE of it.  So
   // manual is both the user's preferred output AND the memory-safe one.
   //
-  // WARPER: no longer forced.  cfg.warperType carries the caller's choice
-  // (default "plane" — flat / natural for narrow & 1x pans).  Plane is
-  // unbounded, so the shared dispatcher (stitchFramePathsImpl_) auto-retries
-  // with SPHERICAL if a plane stitch maroons (LowQualityStitch).  Flat when
-  // plane works; bounded only when it doesn't — no more always-curved output.
+  // WARPER: forced to SPHERICAL again (2026-06-15, user request — testing).
+  // This OVERRIDES the JS warperType (which defaults to "plane") + the settings
+  // panel Warper knob, so the manual pipeline always uses spherical (bounds both
+  // axes; deterministic — no plane↔spherical switching).  The plane-default +
+  // auto spherical-fallback experiment regressed vertical Mode-A pans (a thin
+  // distorted strip that didn't trip the maroon guard), so we're back on
+  // spherical for now.  The dispatcher auto-fallback stays in the tree but is
+  // dormant (it only fires when warperType != "spherical").
   //
   // The pipeline is caller-driven: batch capture passes YES (manual, default
   // output); the on-demand high-level tab re-stitches with NO.
+  cfg.warperType        = "spherical";
   cfg.useManualPipeline = useManualPipeline;
 
   // Marshal NSArray<NSString*> → std::vector<std::string>.  Strip the

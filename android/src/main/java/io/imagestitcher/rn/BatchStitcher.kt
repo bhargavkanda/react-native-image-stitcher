@@ -120,6 +120,16 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         useManualPipeline: Boolean,
     ): IntArray
 
+    // 2026-06-15 — getter for the last successful stitch's debugSummary
+    // (pipe/warp/route/seam/blend).  The jintArray return of
+    // nativeStitchFramePaths can't carry a string; this fetches the value the
+    // JNI stashed.  Called by stitchSync right after a successful stitch.
+    private external fun nativeLastDebugSummary(): String
+
+    /** debugSummary of the most recent stitchSync() (empty if none/failed). */
+    internal var lastDebugSummary: String = ""
+        private set
+
     // ── Stitch frames → panorama ─────────────────────────────────
 
     @ReactMethod
@@ -832,7 +842,7 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         useManualPipeline: Boolean = true,
     ): IntArray {
         ensureNativeStitcher()
-        return nativeStitchFramePaths(
+        val dims = nativeStitchFramePaths(
             framePaths,
             outputPath,
             jpegQuality,
@@ -847,6 +857,10 @@ class BatchStitcher(reactContext: ReactApplicationContext)
             stitchMode,
             useManualPipeline,
         )
+        // Capture the run's debugSummary (pipe/warp/route/seam/blend) for the
+        // DEV overlay; best-effort so a getter hiccup never fails the stitch.
+        lastDebugSummary = try { nativeLastDebugSummary() } catch (_: Throwable) { "" }
+        return dims
     }
 
     /**
