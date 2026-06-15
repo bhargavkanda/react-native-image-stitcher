@@ -195,7 +195,7 @@ export interface FrameSelectionSettings {
 
   /**
    * Required NEW-content fraction (0..1) for a candidate frame to
-   * be accepted.  Default 0.10 = 10% novel content per accept (v0.16;
+   * be accepted.  Default 0.15 = 15% novel content per accept (v0.16;
    * was 0.20).  Lower = more frames accepted, denser overlap, more
    * robust registration.  Higher = fewer frames, faster captures but
    * more conservative about coverage.  Clamped to `[0.10, 0.80]`
@@ -324,14 +324,14 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   },
   frameSelection: {
     mode: 'flow-based',
-    // v0.16 — denser keyframes by default: a 10% novelty gate + up to 10
+    // v0.16 — denser keyframes by default: a 15% novelty gate + up to 10
     // frames.  More overlap between consecutive keyframes ⇒ stronger feature
     // matching ⇒ more robust registration (fewer dropped boundary frames /
     // black-canvas placements).  Memory-checked: 10 frames ≈ 12 MP held-set on
-    // iOS, under the 15 MP BATCH cap; ~3 MP on Android.  10% is the native
-    // clamp floor (see overlapThreshold doc).
+    // iOS, under the 15 MP BATCH cap; ~3 MP on Android.  Selectable in the
+    // settings panel from {10, 15, 20, 30}%; native clamp floor is 10%.
     maxKeyframes: 10,
-    overlapThreshold: 0.10,
+    overlapThreshold: 0.15,
     maxKeyframeIntervalMs: 2000,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
   },

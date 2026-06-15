@@ -253,16 +253,16 @@ export function PanoramaSettingsModal({
                 onChange={(v) => updateFrameSelection({
                   maxKeyframes: parseInt(v, 10),
                 })}
-                caption="Hard cap on accepted keyframes; native clamps to [3, 10].  6 (default) matches Samsung Pano's behaviour and is the sweet spot for cv::Stitcher BA convergence."
+                caption="Hard cap on accepted keyframes; native clamps to [3, 10].  10 (default in v0.16) gives the denser 15%-overlap gate room to retain more frames for robust registration."
               />
               <SectionHeader title="Overlap threshold (new content per keyframe)" />
               <SegmentedControl
-                options={['20%', '30%', '40%', '50%', '60%']}
+                options={['10%', '15%', '20%', '30%']}
                 value={`${Math.round(settings.frameSelection.overlapThreshold * 100)}%`}
                 onChange={(v) => updateFrameSelection({
                   overlapThreshold: parseInt(v, 10) / 100,
                 })}
-                caption="Required NEW-content fraction.  20% (default): generous, ~5–6 keyframes for a 90° pan.  Native clamps to [10%, 80%]."
+                caption="Required NEW-content fraction (lower = denser keyframes, more overlap).  15% (default): ~7–9 keyframes for a 90° pan.  10% is the native clamp floor."
               />
               <SectionHeader title="Keyframe interval (time-budget force-accept)" />
               <SegmentedControl
