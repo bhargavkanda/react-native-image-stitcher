@@ -353,21 +353,32 @@ omitted keys fall back to the English default. This covers the rotate prompt,
 the pan hint, the live "too fast" cue, the lateral-drift popups, the crop-editor
 buttons, the **capture-status banner**, and the **crop-editor warning banners**:
 
-| Key | Group | English default |
+Each default is the **exact, complete** source string — translate it verbatim
+(keep the `{included}` / `{requested}` / `{percent}` placeholders in
+`warnLowFrameUtilization`), or `import { DEFAULT_GUIDANCE_COPY }` to seed your
+catalogue programmatically.
+
+| Key | Where it appears | English default (translate verbatim) |
 | --- | --- | --- |
 | `rotateToLandscape` | rotate prompt | `Rotate to landscape` |
 | `rotateToPortrait` | rotate prompt | `Rotate to portrait` |
-| `panHint` | pan how-to | `Pan slowly top to bottom` |
-| `tooFast` | speed cue | `Moving too fast — slow down` |
-| `lateralStopTitle` / `lateralStopBody` / `lateralStopDismiss` | lateral popup (stitched) | `Keep the pan straight` / … / `Got it` |
-| `lateralWrongDirectionTitle` / `lateralWrongDirectionBody` | lateral popup (too few frames) | `Follow the arrow` / … |
-| `cropConfirm` / `cropReset` / `cropUseOriginal` / `cropRetake` | crop buttons | `Crop` / `Reset` / `Use original` / `Retake` |
-| `previewConfirm` | preview-only accept button (`showPreview`) | `Confirm` |
+| `panHint` | pan how-to overlay | `Pan slowly top to bottom` |
+| `tooFast` | speed-cue pill | `Moving too fast — slow down` |
+| `lateralStopTitle` | lateral-drift popup (stitched) | `Keep the pan straight` |
+| `lateralStopBody` | lateral-drift popup (stitched) | `You moved sideways. Pan in one direction only — we stitched what you captured.` |
+| `lateralStopDismiss` | lateral-drift popup button | `Got it` |
+| `lateralWrongDirectionTitle` | lateral-drift popup (too few frames) | `Follow the arrow` |
+| `lateralWrongDirectionBody` | lateral-drift popup (too few frames) | `You moved the phone the wrong way. Pan slowly in the direction the arrow shows, in one straight line.` |
+| `cropConfirm` | crop-editor button | `Crop` |
+| `cropReset` | crop-editor button | `Reset` |
+| `cropUseOriginal` | crop-editor button | `Use original` |
+| `cropRetake` | crop-editor button | `Retake` |
+| `previewConfirm` | preview accept button (`showPreview`) | `Confirm` |
 | `statusRecording` | status banner | `Hold steady — pan slowly` |
 | `statusStitching` | status banner | `Stitching panorama…` |
-| `warnLowFrameUtilization` | crop warning **(template)** | `Only {included} of {requested} captured frames ({percent}%) could be used — …` |
-| `warnLateralDriftFinalize` | crop warning | `Capture stopped early because the phone drifted sideways — …` |
-| `warnHighPanSpeed` | crop warning | `The capture was taken faster than the recommended pace — …` |
+| `warnLowFrameUtilization` | crop warning **(template)** | `Only {included} of {requested} captured frames ({percent}%) could be used — the panorama may be incomplete. Pan more slowly and steadily next time.` |
+| `warnLateralDriftFinalize` | crop warning | `Capture stopped early because the phone drifted sideways — only the part captured before the drift was stitched.` |
+| `warnHighPanSpeed` | crop warning | `The capture was taken faster than the recommended pace — the result may not be the best. Pan more slowly next time.` |
 
 > **Templates:** `warnLowFrameUtilization` is interpolated at runtime — your
 > translation must keep the `{included}`, `{requested}` and `{percent}`
