@@ -270,15 +270,22 @@ function App(): React.JSX.Element {
     // showPreview) — that screen IS the preview, so don't pop a second
     // preview modal for them.  Photos (no review step) still get the modal.
     if (result.type === 'photo') setPreview(result);
-    setThumbnails((prev) => [
-      ...prev,
-      {
-        id: result.uri,
-        uri: result.uri,
-        width: result.width,
-        height: result.height,
-      },
-    ]);
+    // Dedup by uri — a capture-history strip should never show the same
+    // capture twice, and a duplicate `id` (uri) throws React's "two children
+    // with the same key".  Robust against any double onCapture delivery.
+    setThumbnails((prev) =>
+      prev.some((t) => t.id === result.uri)
+        ? prev
+        : [
+            ...prev,
+            {
+              id: result.uri,
+              uri: result.uri,
+              width: result.width,
+              height: result.height,
+            },
+          ],
+    );
   };
 
   const handleReRefine = useCallback(async () => {
