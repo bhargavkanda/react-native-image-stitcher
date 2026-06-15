@@ -423,6 +423,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                   captureOrientation:(NSString *)captureOrientation
                                 useInscribedRectCrop:(BOOL)useInscribedRectCrop
                                           stitchMode:(NSString *)stitchMode
+                                   useManualPipeline:(BOOL)useManualPipeline
                                                error:(NSError **)error {
   // ── Phase 2 (2026-05-16): delegated to shared C++ ───────────────────
   //
@@ -502,8 +503,10 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // the marooned-corner "black canvas" that motivated the high-level flip no
   // longer applies (that was the unbounded PLANE warper).  High-level is now
   // computed ON DEMAND only (JS `refinePanorama`), never eagerly — see below.
+  // The pipeline is now caller-driven: the batch capture passes YES (manual,
+  // the default output); the on-demand high-level tab re-stitches with NO.
   cfg.warperType        = "spherical";
-  cfg.useManualPipeline = true;
+  cfg.useManualPipeline = useManualPipeline;
 
   // Marshal NSArray<NSString*> → std::vector<std::string>.  Strip the
   // `file://` scheme that some callers attach so the shared C++ can
@@ -894,6 +897,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
           captureOrientation:nil
         useInscribedRectCrop:NO
                   stitchMode:nil
+           useManualPipeline:NO  // legacy video path keeps high-level cv::Stitcher
                        error:&stitchErr];
 
   // Always tear down the tmp dir, success or fail — leaving

@@ -112,6 +112,10 @@ extern NSString *const RNImageStitcherErrorDomain;
 ///     them.  With `useInscribedRectCrop:YES` we find the largest
 ///     axis-aligned rectangle entirely inside the non-zero region
 ///     and crop to that — clean output with no black corners.
+/// `useManualPipeline`: YES → the manual cv::detail pipeline (graphcut +
+///   multiband, with the full memory-guard machinery); NO → stock high-level
+///   cv::Stitcher.  The batch capture passes YES (the default output); the
+///   on-demand high-level tab re-stitches the same keyframes with NO.
 + (nullable RNStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
                                           outputPath:(NSString *)outputPath
                                          jpegQuality:(NSInteger)quality
@@ -121,6 +125,7 @@ extern NSString *const RNImageStitcherErrorDomain;
                                   captureOrientation:(nullable NSString *)captureOrientation
                                 useInscribedRectCrop:(BOOL)useInscribedRectCrop
                                           stitchMode:(nullable NSString *)stitchMode
+                                   useManualPipeline:(BOOL)useManualPipeline
                                                error:(NSError **)error;
 
 /// Extract `maxFrames` evenly-spaced frames from the video at

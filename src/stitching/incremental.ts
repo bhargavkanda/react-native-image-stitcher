@@ -696,6 +696,13 @@ export interface IncrementalFinalizeResult {
    * fallback kicked in, etc.).  iOS only for now; undefined elsewhere.
    */
   debugSummary?: string;
+  /**
+   * 2026-06-15 (iOS) — the exact keyframe JPEG paths used for this stitch.
+   * Lets the host re-stitch the SAME frames on demand via `refinePanorama`
+   * (e.g. the high-level preview tab) without re-running the capture or
+   * enumerating the session directory.  iOS only; undefined elsewhere.
+   */
+  batchKeyframePaths?: string[];
 }
 
 
@@ -764,6 +771,15 @@ export interface IncrementalRefineOptions {
   stitchMode?: 'auto' | 'panorama' | 'scans';
   /** JPEG quality 1..100, default 90. */
   jpegQuality?: number;
+  /**
+   * 2026-06-15 (iOS) — which stitch pipeline to run.  `true` = the manual
+   * `cv::detail` pipeline (the default batch-capture output); `false` = stock
+   * high-level `cv::Stitcher`.  Default `false` on the refine path.  This is
+   * how the on-demand "high-level" preview tab re-stitches the captured
+   * keyframes via cv::Stitcher without re-running the whole capture.  iOS only
+   * (Android refine is always cv::Stitcher).
+   */
+  useManualPipeline?: boolean;
 }
 
 

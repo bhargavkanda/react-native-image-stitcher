@@ -1438,7 +1438,10 @@ public final class IncrementalStitcher: NSObject {
                             seamFinderType: payload.batchSeamFinderType,
                             captureOrientation: payload.captureOrientation,
                             useInscribedRectCrop: payload.batchEnableInscribedRectCrop,
-                            stitchMode: payload.batchStitchModeResolved
+                            stitchMode: payload.batchStitchModeResolved,
+                            // Batch capture = the default output = MANUAL pipeline
+                            // (graphcut + multiband + the full memory-guard set).
+                            useManualPipeline: true
                         )
                         // V16 fix-attempt 9 (verified on device,
                         // 2026-05-13) — sentinel-result detection.
@@ -1501,6 +1504,11 @@ public final class IncrementalStitcher: NSObject {
                             "batchKeyframeSessionDir":
                                 payload.collector?.sessionDir ?? "",
                             "batchKeyframeCount": payload.paths.count,
+                            // 2026-06-15 — the exact keyframe JPEG paths used for
+                            // this stitch, so JS can re-stitch them ON DEMAND via
+                            // refinePanorama (the high-level tab) without listing
+                            // the session dir itself.
+                            "batchKeyframePaths": payload.paths,
                         ]
                         if r.framesRequested >= 0 {
                             batchDict["framesRequested"] = Int(r.framesRequested)
@@ -1647,6 +1655,11 @@ public final class IncrementalStitcher: NSObject {
         // at line 738 of src/stitching/incremental.ts).  JS callers
         // can override by passing config["stitchMode"].
         let refineStitchMode = (config["stitchMode"] as? String) ?? "scans"
+        // 2026-06-15 — pipeline is caller-selectable.  The on-demand high-level
+        // tab calls refinePanorama with useManualPipeline:false to re-stitch the
+        // captured keyframes via stock cv::Stitcher.  Default false (high-level)
+        // preserves the refine path's historical cv::Stitcher behaviour.
+        let refineManual = (config["useManualPipeline"] as? Bool) ?? false
         let quality     = max(1, min(100, (config["jpegQuality"] as? Int) ?? 90))
         let cleanedOutput = outputPath.hasPrefix("file://")
             ? String(outputPath.dropFirst(7))
@@ -1685,7 +1698,8 @@ public final class IncrementalStitcher: NSObject {
                     seamFinderType: seam,
                     captureOrientation: orientation,
                     useInscribedRectCrop: useInscribed,
-                    stitchMode: refineStitchMode
+                    stitchMode: refineStitchMode,
+                    useManualPipeline: refineManual
                 )
                 // fix-9 sentinel detection — see the finalize() path
                 // for the full rationale.  A 0×0 result means

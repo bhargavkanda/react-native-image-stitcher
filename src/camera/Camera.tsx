@@ -229,6 +229,12 @@ export type CameraCaptureResult =
        * output.  Shown on the preview in __DEV__.  iOS only for now.
        */
       debugSummary?: string;
+      /**
+       * 2026-06-15 (iOS) — keyframe JPEG paths used for this stitch, so the
+       * preview can re-stitch them on demand via `refinePanorama` (the
+       * high-level tab).  iOS only; undefined elsewhere.
+       */
+      keyframePaths?: string[];
       /** Non-fatal quality signals (empty when none). */
       warnings: CaptureWarning[];
     }
@@ -1222,6 +1228,39 @@ export function Camera(props: CameraProps): React.JSX.Element {
     /** Warnings to surface as a banner on the crop editor. */
     warnings: CaptureWarning[];
   } | null>(null);
+
+  // 2026-06-15 — ON-DEMAND high-level preview.  Manual is the default/eager
+  // output; when the user switches to the "high-level" tab in the preview we
+  // re-stitch the SAME captured keyframes through stock cv::Stitcher via
+  // `refinePanorama` (useManualPipeline:false).  Returns a cache-busted file://
+  // uri for the high-level JPEG, or null when unavailable (no keyframe paths —
+  // e.g. Android — or the stitch failed).  Computed lazily so it costs nothing
+  // unless the user actually asks for it.
+  const requestHighLevelAlt = useCallback(async (): Promise<string | null> => {
+    const pending = cropPending;
+    const kf = pending?.captureResultObj.keyframePaths;
+    if (!pending || !kf || kf.length < 2) return null;
+    const native = getIncrementalNativeModule();
+    if (!native) return null;
+    const outputPath = `${toBareFilePath(pending.uri).replace(/\.jpg$/i, '')}-highlevel.jpg`;
+    try {
+      const r = await native.refinePanorama({
+        framePaths: kf,
+        outputPath,
+        config: {
+          useManualPipeline: false,
+          warperType: 'spherical',
+          stitchMode: 'panorama',
+        },
+      });
+      // Plain file:// uri — the path is unique per capture and computed once, so
+      // no cache-bust here (the accept handler adds one when emitting).
+      return toFileUri(r.panoramaPath);
+    } catch {
+      return null;
+    }
+  }, [cropPending]);
+
   // 2026-05-22 (audit F9 + F3) — debug stitch-stats toast.  Hook
   // exposes an imperative API; we fire `showResult(finalizeResult)`
   // on every successful finalize when settings.debug is on (gated
@@ -2039,6 +2078,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         durationMs: Date.now() - (recordingStartedAt ?? Date.now()),
         stitchModeResolved: result.stitchModeResolved,
         debugSummary: result.debugSummary,
+        keyframePaths: result.batchKeyframePaths,
         warnings,
       };
       // When the crop editor OR a plain preview is enabled AND the panorama
@@ -2775,12 +2815,16 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
-        // 2026-06-15 — manual is now the default/only eager stitch; the eager
-        // high-level A/B alt was removed (it was wasted compute while profiling).
-        // The on-demand high-level tab (re-stitch via refinePanorama) is the
-        // next step; until then there's no alt image, so the A/B toggle stays
-        // hidden.
-        altImageUri={undefined}
+        // 2026-06-15 — manual is the default/eager output.  The high-level tab
+        // is ON DEMAND: RectCropPreview calls onRequestAlt() (which re-stitches
+        // the captured keyframes via cv::Stitcher) only when the user switches
+        // to it.  Gate on keyframePaths so the tab only appears where it can run
+        // (iOS); Android returns no paths → no tab.
+        onRequestAlt={
+          cropPending?.captureResultObj.keyframePaths?.length
+            ? requestHighLevelAlt
+            : undefined
+        }
         initialRect={cropPending?.initialRect}
         warnings={cropPending?.warnings.map((w) => w.message) ?? []}
         showCropControls={rectCrop}

@@ -161,7 +161,11 @@ public enum Stitcher {
         // expose stitchMode in its options dict yet.  nil falls
         // through to Panorama in OpenCVStitcher.mm (preserves
         // historical behaviour).
-        stitchMode: nil
+        stitchMode: nil,
+        // Generic one-shot API keeps the high-level cv::Stitcher pipeline
+        // (its historical behaviour); the batch capture is what defaults to
+        // manual.  warperType "plane" above only matters on the manual path.
+        useManualPipeline: false
       )
       return StitchResult(
         outputPath: result.outputPath,

@@ -44,6 +44,7 @@ import React, {
   useState,
 } from 'react';
 import {
+  ActivityIndicator,
   Image,
   Modal,
   PanResponder,
@@ -118,6 +119,15 @@ export interface RectCropPreviewProps {
    * THIS uri (so you can pick the better pipeline per capture).
    */
   altImageUri?: string;
+  /**
+   * 2026-06-15 — ON-DEMAND alt (high-level) stitch.  The PRIMARY image is the
+   * MANUAL pipeline (the default output); this callback re-stitches the SAME
+   * captured keyframes via cv::Stitcher and resolves with a file:// uri (or
+   * null on failure).  It runs only the FIRST time the user taps the
+   * "High-level" tab — nothing is computed unless asked for.  When provided (or
+   * `altImageUri` is), the A/B toggle appears.
+   */
+  onRequestAlt?: () => Promise<string | null>;
   /** Show / hide the editor. */
   visible: boolean;
   /**
@@ -235,29 +245,51 @@ export function RectCropPreview(
     topInset = 0,
     bottomInset = 0,
     debugInfo,
+    onRequestAlt,
   } = props;
 
   const resolvedCopy = useMemo(() => mergeGuidanceCopy(copy), [copy]);
 
-  // ── DEBUG A/B harness — toggle the displayed pano between the primary
-  // (high-level + spherical) and the alt (manual + plane) stitch of the SAME
-  // frames.  `altSize` is fetched once; when the alt is showing we use its
-  // dims for the contain-fit and hide the crop quad.
+  // ── A/B comparison — the PRIMARY (imageUri) is the MANUAL pipeline (the
+  // default output).  The alt is HIGH-LEVEL cv::Stitcher, produced either
+  // EAGERLY (`altImageUri`, legacy) or ON DEMAND (`onRequestAlt`, re-stitched
+  // the first time the user opens the high-level tab).  `altSize` is fetched
+  // once the alt uri exists; when the alt is showing we use its dims for the
+  // contain-fit and hide the crop quad.
   const [showingAlt, setShowingAlt] = useState(false);
+  const [lazyAltUri, setLazyAltUri] = useState<string | null>(null);
+  const [altLoading, setAltLoading] = useState(false);
+  const [altFailed, setAltFailed] = useState(false);
+  const altUri = altImageUri ?? lazyAltUri ?? null;
+  const altOffered = !!altImageUri || !!onRequestAlt;
   const [altSize, setAltSize] = useState<{ w: number; h: number } | null>(null);
   React.useEffect(() => {
-    if (!altImageUri) {
+    if (!altUri) {
       setAltSize(null);
       return;
     }
     Image.getSize(
-      altImageUri,
+      altUri,
       (w, h) => setAltSize({ w, h }),
       () => setAltSize(null),
     );
-  }, [altImageUri]);
-  const showAlt = showingAlt && !!altImageUri && !!altSize;
-  const activeUri = showAlt ? (altImageUri as string) : imageUri;
+  }, [altUri]);
+  // Switch to the high-level (alt) view; compute it lazily on first request.
+  const showHighLevel = React.useCallback(() => {
+    setShowingAlt(true);
+    if (altUri || altLoading || !onRequestAlt) return;
+    setAltFailed(false);
+    setAltLoading(true);
+    onRequestAlt()
+      .then((uri) => {
+        if (uri) setLazyAltUri(uri);
+        else setAltFailed(true);
+      })
+      .catch(() => setAltFailed(true))
+      .finally(() => setAltLoading(false));
+  }, [altUri, altLoading, onRequestAlt]);
+  const showAlt = showingAlt && !!altUri && !!altSize;
+  const activeUri = showAlt ? (altUri as string) : imageUri;
   const activeW = showAlt ? (altSize as { w: number }).w : imageWidth;
   const activeH = showAlt ? (altSize as { h: number }).h : imageHeight;
 
@@ -450,13 +482,17 @@ export function RectCropPreview(
           </View>
         )}
 
-        {/* DEBUG A/B comparison — a segmented control whose HIGHLIGHTED
-            segment is the pipeline currently ON SCREEN.  Tap a segment to
-            view that pipeline's stitch of the SAME frames. */}
-        {altImageUri && altSize && (
+        {/* A/B comparison.  Primary = MANUAL (the default output); the
+            HIGH-LEVEL segment re-stitches the same keyframes ON DEMAND the
+            first time it's tapped (spinner while it runs, then it caches). */}
+        {altOffered && (
           <View style={styles.abBar}>
             <Text style={styles.abBarLabel}>
-              You are viewing the highlighted pipeline — tap to switch:
+              {altLoading
+                ? 'Stitching high-level… (manual shown meanwhile)'
+                : altFailed
+                  ? 'High-level stitch failed — showing manual'
+                  : 'Viewing the highlighted pipeline — tap to switch:'}
             </Text>
             <View style={styles.abSegments}>
               <Pressable
@@ -464,22 +500,26 @@ export function RectCropPreview(
                 onPress={() => setShowingAlt(false)}
                 accessibilityRole="button"
                 accessibilityState={{ selected: !showAlt }}
-                accessibilityLabel="View high-level pipeline"
+                accessibilityLabel="View manual pipeline (default)"
               >
                 <Text style={[styles.abSegText, !showAlt && styles.abSegTextActive]}>
-                  High-level
+                  Manual
                 </Text>
               </Pressable>
               <Pressable
                 style={[styles.abSeg, showAlt && styles.abSegActive]}
-                onPress={() => setShowingAlt(true)}
+                onPress={showHighLevel}
                 accessibilityRole="button"
-                accessibilityState={{ selected: showAlt }}
-                accessibilityLabel="View manual pipeline"
+                accessibilityState={{ selected: showAlt, busy: altLoading }}
+                accessibilityLabel="View high-level pipeline (computed on demand)"
               >
-                <Text style={[styles.abSegText, showAlt && styles.abSegTextActive]}>
-                  Manual
-                </Text>
+                {altLoading ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text style={[styles.abSegText, showAlt && styles.abSegTextActive]}>
+                    High-level
+                  </Text>
+                )}
               </Pressable>
             </View>
           </View>
