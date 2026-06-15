@@ -1509,6 +1509,12 @@ public final class IncrementalStitcher: NSObject {
                             // refinePanorama (the high-level tab) without listing
                             // the session dir itself.
                             "batchKeyframePaths": payload.paths,
+                            // The orientation this stitch baked into the output.
+                            // The on-demand high-level re-stitch MUST pass the
+                            // same value or it comes out in the raw sensor
+                            // landscape (sideways) — refinePanorama otherwise
+                            // defaults to "portrait" (no bake-rotation).
+                            "captureOrientation": payload.captureOrientation,
                         ]
                         if r.framesRequested >= 0 {
                             batchDict["framesRequested"] = Int(r.framesRequested)

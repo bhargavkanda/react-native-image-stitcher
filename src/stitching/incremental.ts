@@ -703,6 +703,12 @@ export interface IncrementalFinalizeResult {
    * enumerating the session directory.  iOS only; undefined elsewhere.
    */
   batchKeyframePaths?: string[];
+  /**
+   * 2026-06-15 (iOS) — the capture orientation this stitch baked into the
+   * output.  An on-demand re-stitch (refinePanorama) MUST pass this back or the
+   * result comes out in the raw sensor landscape (sideways).  iOS only.
+   */
+  captureOrientation?: string;
 }
 
 

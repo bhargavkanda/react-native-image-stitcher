@@ -235,6 +235,12 @@ export type CameraCaptureResult =
        * high-level tab).  iOS only; undefined elsewhere.
        */
       keyframePaths?: string[];
+      /**
+       * 2026-06-15 (iOS) — orientation this stitch baked in.  The on-demand
+       * high-level re-stitch passes it back so it matches the manual output's
+       * rotation (not the raw sensor landscape).  iOS only.
+       */
+      captureOrientation?: string;
       /** Non-fatal quality signals (empty when none). */
       warnings: CaptureWarning[];
     }
@@ -1251,6 +1257,14 @@ export function Camera(props: CameraProps): React.JSX.Element {
           useManualPipeline: false,
           warperType: 'spherical',
           stitchMode: 'panorama',
+          // Match the manual output's rotation — without this the high-level
+          // re-stitch bakes "portrait" (no rotation) and comes out sideways.
+          captureOrientation: pending.captureResultObj.captureOrientation as
+            | 'portrait'
+            | 'portrait-upside-down'
+            | 'landscape-left'
+            | 'landscape-right'
+            | undefined,
         },
       });
       // Plain file:// uri — the path is unique per capture and computed once, so
@@ -2079,6 +2093,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         stitchModeResolved: result.stitchModeResolved,
         debugSummary: result.debugSummary,
         keyframePaths: result.batchKeyframePaths,
+        captureOrientation: result.captureOrientation,
         warnings,
       };
       // When the crop editor OR a plain preview is enabled AND the panorama
