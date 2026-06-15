@@ -2864,6 +2864,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
         topInset={insets.top}
         bottomInset={insets.bottom}
         copy={guidanceCopyResolved}
+        // Carry the live memory pill onto the preview too (same settings.debug
+        // gate as the camera), so the operator can watch the RSS spike when the
+        // on-demand high-level re-stitch fires.
+        showMemoryPill={settings.debug}
         // DEV overlay — show the stitcher's runtime choices (pipeline / warper /
         // route / seam / blend) + score / frames / size for this output, so the
         // operator can see HOW it was built.  __DEV__ only.

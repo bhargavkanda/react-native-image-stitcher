@@ -75,6 +75,7 @@ import {
   type Quad,
 } from './cropGeometry';
 import { GUIDANCE_TOKENS } from './guidanceTokens';
+import { CaptureMemoryPill } from './CaptureMemoryPill';
 
 
 /** Image-pixel rectangle, used for the optional `initialRect` seed. */
@@ -189,6 +190,12 @@ export interface RectCropPreviewProps {
    * just renders whatever non-empty string it's given.
    */
   debugInfo?: string;
+  /**
+   * 2026-06-15 — show the live memory-footprint pill (polled native RSS,
+   * green/amber/red) on the preview too, so the operator can watch the spike
+   * when the on-demand high-level re-stitch fires.  Host gates on settings.debug.
+   */
+  showMemoryPill?: boolean;
 }
 
 
@@ -250,6 +257,7 @@ export function RectCropPreview(
     bottomInset = 0,
     debugInfo,
     onRequestAlt,
+    showMemoryPill,
   } = props;
 
   const resolvedCopy = useMemo(() => mergeGuidanceCopy(copy), [copy]);
@@ -467,6 +475,20 @@ export function RectCropPreview(
       ]}
     >
       <View style={[styles.root, { paddingTop: topInset }]}>
+        {/* Live memory-footprint pill (host gates on settings.debug).  Top-LEFT
+            so it clears the top-right stitch-params pill; watch it spike when
+            the high-level re-stitch fires. */}
+        {showMemoryPill ? (
+          <CaptureMemoryPill
+            style={{
+              position: 'absolute',
+              top: topInset + (altOffered ? 76 : 8),
+              left: 12,
+              zIndex: 21,
+            }}
+          />
+        ) : null}
+
         {/* DEV stitch-params overlay (host gates on __DEV__).  Top-right pill;
             pushed below the A/B bar when that's present so they don't overlap.
             A/B-AWARE: while the user is viewing the on-demand high-level tab and
