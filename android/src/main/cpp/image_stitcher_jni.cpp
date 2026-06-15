@@ -29,6 +29,13 @@
 #include <string>
 #include <vector>
 #include <unistd.h>  // sysconf — device RAM for the manual-pipeline budget
+#include <dlfcn.h>   // dlsym — resolve mallopt() at runtime (API-gated; see below)
+
+// M_PURGE (release free pages back to the OS) was added to bionic at API 28;
+// define it for our minSdk-24 build (a harmless no-op on the older allocator).
+#ifndef M_PURGE
+#define M_PURGE (-101)
+#endif
 
 
 #define LOG_TAG "BatchStitcher.JNI"
@@ -71,6 +78,19 @@ void androidLogBridge(int level, const char* tag, const char* msg) {
 // concurrency).  Mirrors the iOS RNStitchResult.debugSummary surface so the DEV
 // overlay shows warp/route/seam/blend on Android too, not just mode/score.
 std::string g_lastDebugSummary;
+
+// Return the just-finished stitch's freed native memory to the OS.  cv::Mat /
+// the OpenCV allocator keep freed blocks in a process-wide pool, so without this
+// the native-heap RSS baseline ratchets up ~10-15 MB per capture (dumpsys showed
+// the creep in Native Heap, not Graphics).  mallopt() was exported by bionic at
+// API 26 but our minSdk is 24, so resolve it at runtime via dlsym and call only
+// when present (it is on every API-26+ device, including the test A35).
+void purgeNativeAllocator() {
+    using MalloptFn = int (*)(int, int);
+    static MalloptFn fn =
+        reinterpret_cast<MalloptFn>(dlsym(RTLD_DEFAULT, "mallopt"));
+    if (fn != nullptr) fn(M_PURGE, 0);
+}
 
 }  // namespace
 
@@ -165,6 +185,11 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
 
     retailens::StitchResult result = retailens::stitchFramePaths(
         paths, outPath, cfg, &androidLogBridge);
+
+    // Return the stitch's freed native memory to the OS so the native-heap RSS
+    // baseline doesn't ratchet up ~10-15 MB per capture (see purgeNativeAllocator).
+    // Applies to BOTH pipelines (they share the OpenCV/bionic allocator).
+    purgeNativeAllocator();
 
     if (!result.success) {
         const std::string msg = "Stitch failed: " + result.errorMessage +
