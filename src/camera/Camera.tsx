@@ -2901,16 +2901,16 @@ export function Camera(props: CameraProps): React.JSX.Element {
         // projections + tune the panorama-vs-SCANS threshold:
         //   • onRequestPlaneProjection → Tab 2 "Plane" (manual + plane), EAGER
         //   • onRequestAlt             → Tab 3 "High-level" (cv::Stitcher), ON-DEMAND
-        // DEBUG-ONLY (dev-jargon labels + extra stitch cost), gated behind
-        // `settings.debug`.  Works on BOTH platforms now — Android finalize()
-        // returns batchKeyframePaths too (the old "iOS-only" note is stale).
+        // Gated on `__DEV__` (like the rRadians pill) — so it shows in any dev
+        // build without needing the ⚙️ Debug toggle, and never ships to prod.
+        // Works on BOTH platforms (Android finalize returns batchKeyframePaths).
         onRequestAlt={
-          settings.debug && cropPending?.captureResultObj.keyframePaths?.length
+          __DEV__ && cropPending?.captureResultObj.keyframePaths?.length
             ? requestHighLevelAlt
             : undefined
         }
         onRequestPlaneProjection={
-          settings.debug && cropPending?.captureResultObj.keyframePaths?.length
+          __DEV__ && cropPending?.captureResultObj.keyframePaths?.length
             ? requestPlaneProjection
             : undefined
         }
