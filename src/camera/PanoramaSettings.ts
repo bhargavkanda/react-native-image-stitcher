@@ -313,7 +313,13 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   debug: false,
   stitcher: {
     stitchMode: 'auto',
-    warperType: 'plane',
+    // v0.16 — SPHERICAL by default (bounds both axes; the proven-robust wide/
+    // vertical-pan projection).  This is now the single source of truth — the
+    // native side no longer hardcodes a warper, so the ⚙️ panel + the host's
+    // `defaultWarper` prop actually take effect.  Note: choosing `plane` here
+    // re-arms the dynamic plane→spherical fallback/divergence switch in the
+    // manual pipeline (it only fires when warperType != spherical).
+    warperType: 'spherical',
     blenderType: 'multiband',
     seamFinderType: 'graphcut',
     // v0.15 — inscribed-rect crop is OFF by default (bbox crop keeps all

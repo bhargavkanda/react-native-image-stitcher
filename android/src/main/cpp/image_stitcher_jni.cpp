@@ -135,13 +135,14 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
     // HIGH-LEVEL preview tab calls refinePanorama with useManualPipeline=false
     // to re-stitch the captured keyframes via stock cv::Stitcher.
     //
-    // WARPER forced to SPHERICAL again (2026-06-15, user request — testing),
-    // mirroring iOS.  Overrides cfg.warperType (JS default "plane") + the panel
-    // knob; the manual pipeline always uses spherical (bounds both axes,
-    // deterministic).  The plane-default + auto-fallback experiment regressed
-    // vertical Mode-A pans, so we're back on spherical for now.
+    // WARPER: NOT hardcoded — cfg.warperType carries the caller's choice (set
+    // above from the JS `warperType`, which defaults to "spherical" and is
+    // settable via the ⚙️ panel / the host's `defaultWarper` prop).  The JS
+    // default is the single source of truth now (mirrors iOS).  Choosing "plane"
+    // re-arms the manual pipeline's dynamic plane→spherical fallback/divergence
+    // switch (they only fire when warperType != "spherical").
     cfg.useManualPipeline = (useManualPipeline == JNI_TRUE);
-    cfg.warperType        = "spherical";
+    if (cfg.warperType.empty()) cfg.warperType = "spherical";
     if (cfg.registrationResolMP <= 0.0) {
         cfg.registrationResolMP = 0.6;
     }

@@ -60,7 +60,7 @@ describe('panoramaSettingsToNativeConfig', () => {
 
     // BatchStitcherSettings
     expect(cfg.stitchMode).toBe('auto');
-    expect(cfg.warperType).toBe('plane');
+    expect(cfg.warperType).toBe('spherical');
     expect(cfg.blenderType).toBe('multiband');
     expect(cfg.seamFinderType).toBe('graphcut');
     expect(cfg.enableMaxInscribedRectCrop).toBe(false);
