@@ -1695,39 +1695,38 @@ class IncrementalStitcher(
      * via `task_info(TASK_VM_INFO)` — see
      * `IncrementalStitcherBridge.swift:231-259`).
      *
-     * Returns the **total PSS** (proportional set size) of this
-     * process in MB.  PSS is the metric Android's Low-Memory-Killer
-     * (`lmkd`) ranks against, so it's the right one-true-number for
-     * the on-screen memory pill: it's "how close are we to being
-     * killed by the system?".
+     * Returns the process **RSS** (resident set size) in MB, read from
+     * `/proc/self/statm` (resident-pages × page-size).  RSS is what the shared
+     * C++ `[memstat]` lines report (`rss_mb()` reads the same `/proc`), so the
+     * pill and the stitch logs show the SAME number — handy when correlating a
+     * spike with a logcat trace.
      *
-     * Total PSS = USS (private) + sum(shared / refcount).  Read via
-     * `ActivityManager.getProcessMemoryInfo()`, which is the same API
-     * Android Studio's profiler uses.  Granularity is 1 KB; we
-     * divide by 1024 to MB so the JS side displays a number directly
-     * comparable to the iOS phys_footprint value.
+     * Why not `ActivityManager.getProcessMemoryInfo().totalPss`?  It's
+     * RATE-LIMITED on Android 8+ (returns a cached value when polled often), so
+     * at the pill's 500 ms cadence it froze at the launch-time reading and never
+     * moved.  `/proc/self/statm` is a single unthrottled read.
      *
-     * Returns -1.0 on failure (very rare — `getProcessMemoryInfo()`
-     * is generally infallible since Android 5.0 because PSS is read
-     * from `/proc/self/smaps` synchronously on the calling thread).
+     * Returns -1.0 on failure (very rare — `/proc/self/statm` is always present
+     * and cheap to read on the calling thread).
      */
     @ReactMethod
     fun getMemoryFootprintMB(promise: Promise) {
         try {
-            val am = reactContext.getSystemService(ActivityManager::class.java)
-            if (am == null) {
-                promise.resolve(-1.0)
-                return
-            }
-            val pid = android.os.Process.myPid()
-            val infos = am.getProcessMemoryInfo(intArrayOf(pid))
-            if (infos == null || infos.isEmpty()) {
-                promise.resolve(-1.0)
-                return
-            }
-            // totalPss is in KB.  Divide by 1024 → MB.  Use Double so
-            // the JS overlay can render fractional MB if it wants.
-            val mb = infos[0].totalPss.toDouble() / 1024.0
+            // Read RSS from /proc/self/statm (field[1] = resident pages).  This
+            // is UNTHROTTLED and matches the C++ [memstat] rss_mb() in logcat, so
+            // the pill tracks the same number I read from the stitch logs.
+            //
+            // 2026-06-15 — was ActivityManager.getProcessMemoryInfo().totalPss,
+            // which is RATE-LIMITED on Android 8+: polled frequently (the pill
+            // ticks every 500 ms) it returns a CACHED value, so the pill froze at
+            // its launch-time reading (~310 MB) and never showed the stitch spike.
+            val fields = java.io.File("/proc/self/statm")
+                .readText().trim().split(' ')
+            val residentPages = fields[1].toLong()
+            val pageSize =
+                android.system.Os.sysconf(android.system.OsConstants._SC_PAGESIZE)
+            val mb = residentPages.toDouble() * pageSize.toDouble() /
+                (1024.0 * 1024.0)
             promise.resolve(mb)
         } catch (t: Throwable) {
             android.util.Log.w(
