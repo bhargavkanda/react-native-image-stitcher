@@ -339,16 +339,15 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
   },
   frameSelection: {
     mode: 'flow-based',
-    // v0.16 — denser keyframes by default: a 15% novelty gate, up to 8 frames,
-    // plus a 1.5 s time-budget force-accept (so a slow/static pan still lands a
-    // keyframe every 1.5 s even when novelty is low).  With 8 frames this bounds
-    // a static/slow capture to ~8×1.5 ≈ 12 s before the keyframe-count
-    // auto-finalize.  More overlap between consecutive keyframes ⇒ stronger
-    // feature matching ⇒ more robust registration.  Memory-checked: 8 frames fit
-    // the BATCH held-set cap on both platforms.  Overlap selectable in the
-    // settings panel {10,15,20,30}% (native clamp floor 10%); cap clamps [3,10].
-    maxKeyframes: 8,
-    overlapThreshold: 0.15,
+    // v0.16 — keyframe gate: a 20% novelty gate, up to 6 frames, plus a 1.5 s
+    // time-budget force-accept (so a slow/static pan still lands a keyframe every
+    // 1.5 s even when novelty is low).  These match the leaner v0.15.2 cadence (6
+    // frames / 20% overlap) — fewer, more-novel keyframes = lighter memory + less
+    // redundant overlap.  With 6 frames this bounds a static/slow capture to
+    // ~6×1.5 ≈ 9 s before the keyframe-count auto-finalize.  Overlap selectable in
+    // the settings panel {10,15,20,30}% (native clamp floor 10%); cap clamps [3,10].
+    maxKeyframes: 6,
+    overlapThreshold: 0.20,
     maxKeyframeIntervalMs: 1500,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
   },
