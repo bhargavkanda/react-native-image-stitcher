@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
-## [Unreleased]
+## [0.16.0] — 2026-06-15
 
 ### Added — first-time-user panorama capture GUIDANCE
 
@@ -98,6 +98,16 @@ testing:
   no room for even a minimal stitch on top of the current footprint —
   so a memory-heavy host app no longer trips it spuriously.
 
+### Added — `stitcher` / `frameSelection` config as JSON-object props
+
+`<Camera>` now accepts the full stitcher and frame-gate config as JSON
+objects — `stitcher={{ warperType, blenderType, seamFinderType,
+stitchMode, enableMaxInscribedRectCrop }}` and
+`frameSelection={{ mode, maxKeyframes, overlapThreshold,
+maxKeyframeIntervalMs, flow }}` (both partial; `flow` is deep-merged).
+Object fields win over the matching flat `default*` props, which remain
+supported. This is the recommended way to configure the pipeline.
+
 ### Changed (BREAKING)
 
 - **`onCapture` is now a discriminated union keyed on `ok`.** It fires
@@ -116,6 +126,17 @@ testing:
   landscape holds gated behind the rotate-to-portrait prompt), and
   `'both'` (either, ungated).  **Hosts that want portrait/left→right
   panoramas pass `panMode='horizontal'` or `'both'`.**
+- **Stitch defaults moved to more robust values.** `stitchMode` now
+  defaults to `'panorama'` (was `'auto'` — the auto-resolver's SCANS
+  branch keys off double-integrated IMU translation, which is unreliable
+  during rotation); `warperType` defaults to `'spherical'` (was
+  `'plane'` — bounds both axes, fixing fragmented wide/vertical pans);
+  and the keyframe gate is denser (`maxKeyframes` → 8, a 1 s
+  `maxKeyframeIntervalMs` time gate re-enabled, `overlapThreshold` →
+  0.15).  **Migration:** hosts relying on the previous behaviour set the
+  values explicitly via the new `stitcher` / `frameSelection` props (or
+  the matching flat `default*` props) — e.g. `stitcher={{ stitchMode:
+  'auto', warperType: 'plane' }}`.
 
 ## [0.15.2] — 2026-06-11
 
