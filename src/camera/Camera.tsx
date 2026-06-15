@@ -224,6 +224,12 @@ export type CameraCaptureResult =
        */
       stitchModeResolved?: 'panorama' | 'scans';
       /**
+       * 2026-06-15 (DEV) — gyro rotation magnitude of the capture, in radians.
+       * Shown on the dev preview so the panorama-vs-SCANS rotation threshold can
+       * be tuned. `0` = no pose-derived rotation signal (non-AR with no poses).
+       */
+      rRadians?: number;
+      /**
        * 2026-06-14 (DEV overlay) — semicolon-separated `key=value` trace of the
        * stitcher's runtime choices (pipe/warp/route/seam/blend) for this
        * output.  Shown on the preview in __DEV__.  iOS only for now.
@@ -1251,63 +1257,87 @@ export function Camera(props: CameraProps): React.JSX.Element {
     warnings: CaptureWarning[];
   } | null>(null);
 
-  // 2026-06-15 — ON-DEMAND high-level preview.  Manual is the default/eager
-  // output; when the user switches to the "high-level" tab in the preview we
-  // re-stitch the SAME captured keyframes through stock cv::Stitcher via
-  // `refinePanorama` (useManualPipeline:false).  Resolves with the high-level
-  // JPEG's file:// uri AND its OWN DEV-overlay recipe (so the preview pill shows
-  // the high-level recipe — pipe=highlevel;… — while that tab is viewed, not the
-  // manual primary's recipe), or null when unavailable (no keyframe paths —
-  // e.g. Android — or the stitch failed).  Computed lazily so it costs nothing
-  // unless the user actually asks for it.
-  const requestHighLevelAlt = useCallback(async (): Promise<{
-    uri: string;
-    debugInfo: string;
-  } | null> => {
-    const pending = cropPending;
-    const kf = pending?.captureResultObj.keyframePaths;
-    if (!pending || !kf || kf.length < 2) return null;
-    const native = getIncrementalNativeModule();
-    if (!native) return null;
-    const outputPath = `${toBareFilePath(pending.uri).replace(/\.jpg$/i, '')}-highlevel.jpg`;
-    try {
-      const r = await native.refinePanorama({
-        framePaths: kf,
-        outputPath,
-        config: {
-          useManualPipeline: false,
-          warperType: 'spherical',
-          stitchMode: 'panorama',
-          // Match the manual output's rotation — without this the high-level
-          // re-stitch bakes "portrait" (no rotation) and comes out sideways.
-          captureOrientation: pending.captureResultObj.captureOrientation as
-            | 'portrait'
-            | 'portrait-upside-down'
-            | 'landscape-left'
-            | 'landscape-right'
-            | undefined,
-        },
-      });
-      // Plain file:// uri — the path is unique per capture and computed once, so
-      // no cache-bust here (the accept handler adds one when emitting).  The
-      // DEV pill text is the HIGH-LEVEL stitch's own recipe (only the fields
-      // IncrementalRefineResult carries; buildStitchDebugInfo tolerates the rest
-      // being absent).
-      return {
-        uri: toFileUri(r.panoramaPath),
-        debugInfo: buildStitchDebugInfo({
-          debugSummary: r.debugSummary,
-          finalConfidenceThresh: r.finalConfidenceThresh,
-          framesIncluded: r.framesIncluded,
-          framesRequested: r.framesRequested,
-          width: r.width,
-          height: r.height,
-        }),
-      };
-    } catch {
-      return null;
-    }
-  }, [cropPending]);
+  // 2026-06-15 — DEV 3-tab preview re-stitch.  The SAME captured keyframes can
+  // be re-stitched through any (warper, pipeline) config via `refinePanorama`.
+  // One shared helper drives the alternate tabs:
+  //   • Plane      — manual pipeline + plane warper   (eager, vs the spherical
+  //                  primary which is the manual finalize output itself)
+  //   • High-level — stock cv::Stitcher (homography)  (on-demand)
+  // Returns the result JPEG's file:// uri + its OWN DEV recipe (so the pill
+  // matches the shown tab), or null when unavailable (no keyframe paths or the
+  // stitch failed).  `suffix` keeps each tab's JPEG distinct from the finalize
+  // primary and from each other.
+  const stitchWithConfig = useCallback(
+    async (
+      suffix: string,
+      config: {
+        useManualPipeline: boolean;
+        warperType: 'spherical' | 'plane';
+        stitchMode: 'panorama';
+      },
+    ): Promise<{ uri: string; debugInfo: string } | null> => {
+      const pending = cropPending;
+      const kf = pending?.captureResultObj.keyframePaths;
+      if (!pending || !kf || kf.length < 2) return null;
+      const native = getIncrementalNativeModule();
+      if (!native) return null;
+      const outputPath = `${toBareFilePath(pending.uri).replace(/\.jpg$/i, '')}-${suffix}.jpg`;
+      try {
+        const r = await native.refinePanorama({
+          framePaths: kf,
+          outputPath,
+          config: {
+            ...config,
+            // Match the manual output's rotation — without this the re-stitch
+            // bakes "portrait" (no rotation) and comes out sideways.
+            captureOrientation: pending.captureResultObj.captureOrientation as
+              | 'portrait'
+              | 'portrait-upside-down'
+              | 'landscape-left'
+              | 'landscape-right'
+              | undefined,
+          },
+        });
+        return {
+          uri: toFileUri(r.panoramaPath),
+          debugInfo: buildStitchDebugInfo({
+            debugSummary: r.debugSummary,
+            finalConfidenceThresh: r.finalConfidenceThresh,
+            framesIncluded: r.framesIncluded,
+            framesRequested: r.framesRequested,
+            width: r.width,
+            height: r.height,
+          }),
+        };
+      } catch {
+        return null;
+      }
+    },
+    [cropPending],
+  );
+
+  // Tab 3 "High-level" — stock cv::Stitcher (homography), ON-DEMAND.
+  const requestHighLevelAlt = useCallback(
+    () =>
+      stitchWithConfig('highlevel', {
+        useManualPipeline: false,
+        warperType: 'spherical',
+        stitchMode: 'panorama',
+      }),
+    [stitchWithConfig],
+  );
+
+  // Tab 2 "Plane" — manual pipeline + plane warper, EAGER (computed on preview
+  // mount so it's ready to compare against the spherical primary).
+  const requestPlaneProjection = useCallback(
+    () =>
+      stitchWithConfig('plane', {
+        useManualPipeline: true,
+        warperType: 'plane',
+        stitchMode: 'panorama',
+      }),
+    [stitchWithConfig],
+  );
 
   // 2026-05-22 (audit F9 + F3) — debug stitch-stats toast.  Hook
   // exposes an imperative API; we fire `showResult(finalizeResult)`
@@ -2125,6 +2155,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         finalConfidenceThresh: result.finalConfidenceThresh ?? -1,
         durationMs: Date.now() - (recordingStartedAt ?? Date.now()),
         stitchModeResolved: result.stitchModeResolved,
+        rRadians: result.rRadians,
         debugSummary: result.debugSummary,
         keyframePaths: result.batchKeyframePaths,
         captureOrientation: result.captureOrientation,
@@ -2864,17 +2895,29 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
-        // 2026-06-15 — manual is the default/eager output.  The high-level tab
-        // is ON DEMAND: RectCropPreview calls onRequestAlt() (which re-stitches
-        // the captured keyframes via cv::Stitcher) only when the user switches
-        // to it.  DEBUG-ONLY: it's a pipeline-comparison tool (dev-jargon
-        // "Manual"/"High-level" labels), gated behind `settings.debug` like the
-        // rest of the diagnostic UI.  Also requires keyframePaths, so it only
-        // appears where it can run (iOS); Android returns no paths → no tab.
+        // 2026-06-15 — DEV 3-tab projection comparison.  The primary finalize
+        // output is Tab 1 "Spherical" (manual + spherical, the default).  When
+        // keyframes are available the preview shows two more tabs to compare
+        // projections + tune the panorama-vs-SCANS threshold:
+        //   • onRequestPlaneProjection → Tab 2 "Plane" (manual + plane), EAGER
+        //   • onRequestAlt             → Tab 3 "High-level" (cv::Stitcher), ON-DEMAND
+        // DEBUG-ONLY (dev-jargon labels + extra stitch cost), gated behind
+        // `settings.debug`.  Works on BOTH platforms now — Android finalize()
+        // returns batchKeyframePaths too (the old "iOS-only" note is stale).
         onRequestAlt={
           settings.debug && cropPending?.captureResultObj.keyframePaths?.length
             ? requestHighLevelAlt
             : undefined
+        }
+        onRequestPlaneProjection={
+          settings.debug && cropPending?.captureResultObj.keyframePaths?.length
+            ? requestPlaneProjection
+            : undefined
+        }
+        // Live gyro rotation magnitude for this capture — shown as a pill so the
+        // dev can read the rRadians per capture and pick the threshold. __DEV__.
+        rRadians={
+          __DEV__ ? cropPending?.captureResultObj.rRadians : undefined
         }
         initialRect={cropPending?.initialRect}
         warnings={cropPending?.warnings.map((w) => w.message) ?? []}

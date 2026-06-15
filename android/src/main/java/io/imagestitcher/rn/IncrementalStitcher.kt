@@ -667,8 +667,12 @@ class IncrementalStitcher(
         val stitchModeResolved: String = when (batchStitchMode) {
             "panorama" -> "panorama"
             "scans"    -> "scans"
-            else -> resolveStitchModeAuto(firstPose, lastPose, imuTranslationMetres)
+            else -> resolveStitchModeAuto(firstPose, lastPose, imuTranslationMetres).mode
         }
+        // Surface the gyro rotation magnitude for EVERY capture (the 'panorama'
+        // default skips resolveStitchModeAuto, but the dev 3-tab preview still
+        // needs rRadians to tune the panorama-vs-SCANS threshold).
+        val rRadiansResolved: Double = rotationRadians(firstPose, lastPose)
         android.util.Log.i(
             "IncrementalStitcher",
             "finalize stitch-mode: configured=$batchStitchMode resolved=$stitchModeResolved " +
@@ -748,6 +752,7 @@ class IncrementalStitcher(
                     // resolved cv::Stitcher mode so JS can surface it
                     // on the output preview + debug toast.
                     map.putString("stitchModeResolved", stitchModeResolved)
+                    map.putDouble("rRadians", rRadiansResolved)
                     // 2026-06-15 (iOS parity) — the exact keyframe JPEG
                     // paths used for this stitch, so JS can re-stitch
                     // them ON DEMAND via refinePanorama (the high-level
@@ -1928,6 +1933,15 @@ class IncrementalStitcher(
      *
      * Returns "panorama" or "scans" — never "auto".
      */
+    /**
+     * Result of [resolveStitchModeAuto]: the chosen mode PLUS the gyro rotation
+     * magnitude that drove the decision.  rRadians is surfaced to JS (the dev
+     * 3-tab preview shows it) so the panorama-vs-SCANS rotation threshold can be
+     * tuned from real captures.  rRadians is 0.0 only on the no-pose fallbacks
+     * (non-AR with no pose data) — there is no gyro-derived rotation to report.
+     */
+    private data class StitchModeResolution(val mode: String, val rRadians: Double)
+
     private fun resolveStitchModeAuto(
         firstPose: DoubleArray?,
         lastPose: DoubleArray?,
@@ -1935,14 +1949,16 @@ class IncrementalStitcher(
         // translation in METRES.  Used as a fallback when pose-derived
         // translation is 0 (non-AR mode).
         imuTranslationMetres: Double = 0.0,
-    ): String {
+    ): StitchModeResolution {
         if (firstPose == null || lastPose == null) {
             // No pose data at all — fall back on the IMU signal.  IMU
             // > 5 cm hints SCANS; everything else hints PANORAMA.
-            return if (imuTranslationMetres > 0.05) "scans" else "panorama"
+            return StitchModeResolution(
+                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0)
         }
         if (firstPose.size != 7 || lastPose.size != 7) {
-            return if (imuTranslationMetres > 0.05) "scans" else "panorama"
+            return StitchModeResolution(
+                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0)
         }
 
         // Translation magnitude (Euclidean, in metres) — pose-derived.
@@ -1962,11 +1978,7 @@ class IncrementalStitcher(
         // conventions; rotated by the pose quaternion gives the world-
         // frame forward direction.  Angle between the first and last
         // camera-forward vectors is the total rotation around any axis.
-        val fwdFirst = qrotForward(firstPose[3], firstPose[4], firstPose[5], firstPose[6])
-        val fwdLast = qrotForward(lastPose[3], lastPose[4], lastPose[5], lastPose[6])
-        val dot = (fwdFirst[0] * fwdLast[0] + fwdFirst[1] * fwdLast[1] + fwdFirst[2] * fwdLast[2])
-            .coerceIn(-1.0, 1.0)
-        val rRadians = kotlin.math.acos(dot)
+        val rRadians = rotationRadians(firstPose, lastPose)
 
         // Normalisation: 10 cm of translation ≈ 1 rad of rotation as
         // "equivalent magnitude" for the ratio.  Empirically: shelf
@@ -1977,7 +1989,7 @@ class IncrementalStitcher(
         val tScore = tMeters / 0.10
         val rScore = rRadians / 1.00
         val denom = tScore + rScore
-        if (denom <= 1e-9) return "panorama"  // no motion either way
+        if (denom <= 1e-9) return StitchModeResolution("panorama", rRadians)  // no motion
         val ratio = tScore / denom
 
         // 2026-06-15 — LOW-ROTATION GUARD.  The gyro rotation (rRadians) is
@@ -2000,7 +2012,22 @@ class IncrementalStitcher(
                 "ratio=${"%.3f".format(ratio)} " +
                 "rotGuard=$lowRotationGuard → $mode",
         )
-        return mode
+        return StitchModeResolution(mode, rRadians)
+    }
+
+    /**
+     * Gyro rotation magnitude (radians) between two 7-element poses
+     * `[tx,ty,tz,qx,qy,qz,qw]` — the angle between the camera-forward vectors.
+     * Returns 0.0 if either pose is missing/malformed (non-AR with no pose).
+     * Shared by [resolveStitchModeAuto] and the finalize `rRadians` readout (DRY).
+     */
+    private fun rotationRadians(firstPose: DoubleArray?, lastPose: DoubleArray?): Double {
+        if (firstPose == null || lastPose == null) return 0.0
+        if (firstPose.size != 7 || lastPose.size != 7) return 0.0
+        val f = qrotForward(firstPose[3], firstPose[4], firstPose[5], firstPose[6])
+        val l = qrotForward(lastPose[3], lastPose[4], lastPose[5], lastPose[6])
+        val dot = (f[0] * l[0] + f[1] * l[1] + f[2] * l[2]).coerceIn(-1.0, 1.0)
+        return kotlin.math.acos(dot)
     }
 
     /**

@@ -76,6 +76,7 @@ import {
 } from './cropGeometry';
 import { GUIDANCE_TOKENS } from './guidanceTokens';
 import { CaptureMemoryPill } from './CaptureMemoryPill';
+import { CaptureRotationPill } from './CaptureRotationPill';
 
 
 /** Image-pixel rectangle, used for the optional `initialRect` seed. */
@@ -111,28 +112,25 @@ export interface RectCropPreviewProps {
   /** Intrinsic pixel height of `imageUri`. */
   imageHeight: number;
   /**
-   * DEBUG A/B harness — file:// URI of the SAME capture stitched by the
-   * OPPOSITE pipeline (manual cv::detail + plane).  When set, a toggle appears
-   * that flips the displayed panorama between the primary (high-level +
-   * spherical) and this one, for on-device comparison on a single capture.
-   * Its dimensions are read at runtime via `Image.getSize`.  When the manual
-   * output is showing, the crop quad is hidden and the accept button emits
-   * THIS uri (so you can pick the better pipeline per capture).
-   */
-  altImageUri?: string;
-  /**
-   * 2026-06-15 — ON-DEMAND alt (high-level) stitch.  The PRIMARY image is the
-   * MANUAL pipeline (the default output); this callback re-stitches the SAME
-   * captured keyframes via cv::Stitcher and resolves with a file:// uri (or
-   * null on failure).  It runs only the FIRST time the user taps the
-   * "High-level" tab — nothing is computed unless asked for.  When provided (or
-   * `altImageUri` is), the A/B toggle appears.
+   * 2026-06-15 — DEV 3-tab projection comparison.  The PRIMARY image
+   * (`imageUri`) is Tab 1 "Spherical" (manual + spherical, the finalize output).
    *
-   * Resolves with the high-level output's file:// `uri` AND its OWN
-   * DEV-overlay `debugInfo` recipe (so the params pill can switch to the
-   * high-level recipe while that tab is viewed), or `null` on failure.
+   * `onRequestAlt` → Tab 3 "High-level": re-stitches the SAME captured keyframes
+   * via stock cv::Stitcher, ON-DEMAND (only the first time the tab is tapped).
+   * `onRequestPlaneProjection` → Tab 2 "Plane": re-stitches via the manual
+   * pipeline + plane warper, EAGERLY (kicked off on mount so it's ready to
+   * compare).  Each resolves with the output's file:// `uri` AND its OWN
+   * DEV-overlay `debugInfo` recipe (so the params pill matches the shown tab),
+   * or `null` on failure.  The tab bar appears when either is provided.
    */
   onRequestAlt?: () => Promise<{ uri: string; debugInfo: string } | null>;
+  onRequestPlaneProjection?: () => Promise<{ uri: string; debugInfo: string } | null>;
+  /**
+   * 2026-06-15 (DEV) — gyro rotation magnitude of the capture, in radians.
+   * When set, a small pill shows it (rad + degrees) so the dev can read the
+   * rotation per capture and tune the panorama-vs-SCANS threshold.
+   */
+  rRadians?: number;
   /** Show / hide the editor. */
   visible: boolean;
   /**
@@ -199,6 +197,27 @@ export interface RectCropPreviewProps {
 }
 
 
+/** The three projection-comparison tabs.  'spherical' is the finalize primary
+ *  (croppable); 'plane' + 'highlevel' are re-stitched alternates (compare-only). */
+type TabMode = 'spherical' | 'plane' | 'highlevel';
+
+/** Per-alt-tab state: the re-stitched output uri + its DEV recipe + image size
+ *  (for contain-fit) + loading/failed flags. */
+interface AltTab {
+  uri: string | null;
+  debugInfo: string | null;
+  size: { w: number; h: number } | null;
+  loading: boolean;
+  failed: boolean;
+}
+const EMPTY_ALT_TAB: AltTab = {
+  uri: null,
+  debugInfo: null,
+  size: null,
+  loading: false,
+  failed: false,
+};
+
 /** Default inset (fraction of each dimension) for the seed quad. */
 const DEFAULT_INSET_FRACTION = 0.08;
 /** On-screen radius of each draggable corner handle. */
@@ -244,7 +263,6 @@ export function RectCropPreview(
     imageUri,
     imageWidth,
     imageHeight,
-    altImageUri,
     visible,
     onConfirm,
     onUseOriginal,
@@ -257,61 +275,76 @@ export function RectCropPreview(
     bottomInset = 0,
     debugInfo,
     onRequestAlt,
+    onRequestPlaneProjection,
+    rRadians,
     showMemoryPill,
   } = props;
 
   const resolvedCopy = useMemo(() => mergeGuidanceCopy(copy), [copy]);
 
-  // ── A/B comparison — the PRIMARY (imageUri) is the MANUAL pipeline (the
-  // default output).  The alt is HIGH-LEVEL cv::Stitcher, produced either
-  // EAGERLY (`altImageUri`, legacy) or ON DEMAND (`onRequestAlt`, re-stitched
-  // the first time the user opens the high-level tab).  `altSize` is fetched
-  // once the alt uri exists; when the alt is showing we use its dims for the
-  // contain-fit and hide the crop quad.
-  const [showingAlt, setShowingAlt] = useState(false);
-  const [lazyAltUri, setLazyAltUri] = useState<string | null>(null);
-  // The high-level (alt) stitch's OWN DEV-overlay recipe, resolved alongside
-  // its uri from `onRequestAlt`.  Shown in the params pill in place of the
-  // manual primary's `debugInfo` while the high-level tab is being viewed.
-  const [lazyAltDebugInfo, setLazyAltDebugInfo] = useState<string | null>(null);
-  const [altLoading, setAltLoading] = useState(false);
-  const [altFailed, setAltFailed] = useState(false);
-  const altUri = altImageUri ?? lazyAltUri ?? null;
-  const altOffered = !!altImageUri || !!onRequestAlt;
-  const [altSize, setAltSize] = useState<{ w: number; h: number } | null>(null);
+  // ── 3-tab projection comparison ─────────────────────────────────────
+  // Tab 1 "Spherical" = the PRIMARY (imageUri), the manual+spherical finalize
+  // output (croppable). Tab 2 "Plane" = manual+plane, computed EAGERLY on mount.
+  // Tab 3 "High-level" = stock cv::Stitcher, computed ON-DEMAND on first tap.
+  // Each alt tab tracks its uri + DEV recipe + image size + loading/failed.
+  const [activeTab, setActiveTab] = useState<TabMode>('spherical');
+  const [planeTab, setPlaneTab] = useState<AltTab>(EMPTY_ALT_TAB);
+  const [highTab, setHighTab] = useState<AltTab>(EMPTY_ALT_TAB);
+  const tabsOffered = !!onRequestPlaneProjection || !!onRequestAlt;
+
+  // EAGER: kick off the Plane re-stitch once on mount (sequential after the
+  // finalize primary — peak stays ~1 stitch).  Cancel-guarded against unmount.
   React.useEffect(() => {
-    if (!altUri) {
-      setAltSize(null);
-      return;
-    }
-    Image.getSize(
-      altUri,
-      (w, h) => setAltSize({ w, h }),
-      () => setAltSize(null),
-    );
-  }, [altUri]);
-  // Switch to the high-level (alt) view; compute it lazily on first request.
-  const showHighLevel = React.useCallback(() => {
-    setShowingAlt(true);
-    if (altUri || altLoading || !onRequestAlt) return;
-    setAltFailed(false);
-    setAltLoading(true);
-    onRequestAlt()
-      .then((result) => {
-        if (result) {
-          setLazyAltUri(result.uri);
-          setLazyAltDebugInfo(result.debugInfo);
-        } else {
-          setAltFailed(true);
-        }
+    if (!onRequestPlaneProjection) return undefined;
+    let cancelled = false;
+    setPlaneTab((s) => ({ ...s, loading: true, failed: false }));
+    onRequestPlaneProjection()
+      .then((r) => {
+        if (cancelled) return;
+        setPlaneTab((s) =>
+          r ? { ...s, uri: r.uri, debugInfo: r.debugInfo } : { ...s, failed: true });
       })
-      .catch(() => setAltFailed(true))
-      .finally(() => setAltLoading(false));
-  }, [altUri, altLoading, onRequestAlt]);
-  const showAlt = showingAlt && !!altUri && !!altSize;
-  const activeUri = showAlt ? (altUri as string) : imageUri;
-  const activeW = showAlt ? (altSize as { w: number }).w : imageWidth;
-  const activeH = showAlt ? (altSize as { h: number }).h : imageHeight;
+      .catch(() => { if (!cancelled) setPlaneTab((s) => ({ ...s, failed: true })); })
+      .finally(() => { if (!cancelled) setPlaneTab((s) => ({ ...s, loading: false })); });
+    return () => { cancelled = true; };
+  }, [onRequestPlaneProjection]);
+
+  // ON-DEMAND: compute the High-level tab on first tap (ref-guard prevents
+  // double-stitch); switch to it immediately (it shows a spinner while running).
+  const highStartedRef = useRef(false);
+  const showHighLevel = React.useCallback(() => {
+    setActiveTab('highlevel');
+    if (highStartedRef.current || !onRequestAlt) return;
+    highStartedRef.current = true;
+    setHighTab((s) => ({ ...s, loading: true, failed: false }));
+    onRequestAlt()
+      .then((r) =>
+        setHighTab((s) =>
+          r ? { ...s, uri: r.uri, debugInfo: r.debugInfo } : { ...s, failed: true }))
+      .catch(() => setHighTab((s) => ({ ...s, failed: true })))
+      .finally(() => setHighTab((s) => ({ ...s, loading: false })));
+  }, [onRequestAlt]);
+
+  // Fetch each alt tab's image size once its uri arrives (for the contain-fit).
+  React.useEffect(() => {
+    if (!planeTab.uri) return;
+    Image.getSize(planeTab.uri, (w, h) => setPlaneTab((s) => ({ ...s, size: { w, h } })), () => {});
+  }, [planeTab.uri]);
+  React.useEffect(() => {
+    if (!highTab.uri) return;
+    Image.getSize(highTab.uri, (w, h) => setHighTab((s) => ({ ...s, size: { w, h } })), () => {});
+  }, [highTab.uri]);
+
+  const activeAlt: AltTab | null =
+    activeTab === 'plane' ? planeTab : activeTab === 'highlevel' ? highTab : null;
+  // Only the Spherical primary is croppable; the alt tabs are compare-only.
+  const isCroppable = activeTab === 'spherical';
+  // showAlt: an alt tab is selected AND its image is loaded (uri + size).  Until
+  // then we keep showing the spherical primary (so a tab tap never blanks).
+  const showAlt = activeAlt != null && !!activeAlt.uri && !!activeAlt.size;
+  const activeUri = showAlt ? (activeAlt!.uri as string) : imageUri;
+  const activeW = showAlt ? (activeAlt!.size as { w: number }).w : imageWidth;
+  const activeH = showAlt ? (activeAlt!.size as { h: number }).h : imageHeight;
 
   // The 4 corners live in IMAGE-PIXEL space (the source of truth) so they
   // survive layout-box changes (rotation, keyboard) without drift.  We map
@@ -437,11 +470,11 @@ export function RectCropPreview(
         width: activeW * fit.scale,
         height: activeH * fit.scale,
       };
-      // Quad corners only apply to the primary (croppable) image — hidden
-      // while the alt (manual) output is shown for comparison.
-      screenCorners = showAlt
-        ? null
-        : imageQuad.map((p) => imageToScreen(p, box, imageWidth, imageHeight));
+      // Quad corners only apply to the Spherical primary (the croppable tab) —
+      // hidden on the Plane / High-level compare-only tabs.
+      screenCorners = isCroppable
+        ? imageQuad.map((p) => imageToScreen(p, box, imageWidth, imageHeight))
+        : null;
     }
   }
 
@@ -482,7 +515,22 @@ export function RectCropPreview(
           <CaptureMemoryPill
             style={{
               position: 'absolute',
-              top: topInset + (altOffered ? 76 : 8),
+              top: topInset + (tabsOffered ? 76 : 8),
+              left: 12,
+              zIndex: 21,
+            }}
+          />
+        ) : null}
+
+        {/* Gyro rotation readout (host gates on __DEV__) — read it per capture
+            to tune the panorama-vs-SCANS threshold.  Top-LEFT, stacked below the
+            memory pill when both show. */}
+        {rRadians != null ? (
+          <CaptureRotationPill
+            rRadians={rRadians}
+            style={{
+              position: 'absolute',
+              top: topInset + (tabsOffered ? 76 : 8) + (showMemoryPill ? 34 : 0),
               left: 12,
               zIndex: 21,
             }}
@@ -497,12 +545,14 @@ export function RectCropPreview(
             would misleadingly claim the manual recipe for a high-level output. */}
         {(() => {
           const pillText =
-            showAlt && lazyAltDebugInfo ? lazyAltDebugInfo : debugInfo;
+            activeTab === 'plane' ? planeTab.debugInfo
+            : activeTab === 'highlevel' ? highTab.debugInfo
+            : debugInfo;
           return pillText ? (
             <View
               style={[
                 styles.debugPill,
-                { top: topInset + (altImageUri && altSize ? 76 : 8) },
+                { top: topInset + (tabsOffered ? 76 : 8) },
               ]}
               pointerEvents="none"
               accessibilityRole="text"
@@ -524,45 +574,74 @@ export function RectCropPreview(
           </View>
         )}
 
-        {/* A/B comparison.  Primary = MANUAL (the default output); the
-            HIGH-LEVEL segment re-stitches the same keyframes ON DEMAND the
-            first time it's tapped (spinner while it runs, then it caches). */}
-        {altOffered && (
+        {/* 3-tab projection comparison.  Spherical = manual+spherical finalize
+            primary (croppable); Plane = manual+plane (eager); High-level = stock
+            cv::Stitcher (on-demand).  The active tab spins while it stitches. */}
+        {tabsOffered && (
           <View style={styles.abBar}>
             <Text style={styles.abBarLabel}>
-              {altLoading
-                ? 'Stitching high-level… (manual shown meanwhile)'
-                : altFailed
-                  ? 'High-level stitch failed — showing manual'
-                  : 'Viewing the highlighted pipeline — tap to switch:'}
+              {activeTab === 'plane' && planeTab.loading
+                ? 'Computing plane projection…'
+                : activeTab === 'highlevel' && highTab.loading
+                  ? 'Stitching high-level…'
+                  : activeTab === 'plane' && planeTab.failed
+                    ? 'Plane stitch failed — showing spherical'
+                    : activeTab === 'highlevel' && highTab.failed
+                      ? 'High-level stitch failed — showing spherical'
+                      : 'Tap a projection to compare:'}
             </Text>
             <View style={styles.abSegments}>
               <Pressable
-                style={[styles.abSeg, !showAlt && styles.abSegActive]}
-                onPress={() => setShowingAlt(false)}
+                style={[styles.abSeg, activeTab === 'spherical' && styles.abSegActive]}
+                onPress={() => setActiveTab('spherical')}
                 accessibilityRole="button"
-                accessibilityState={{ selected: !showAlt }}
-                accessibilityLabel="View manual pipeline (default)"
+                accessibilityState={{ selected: activeTab === 'spherical' }}
+                accessibilityLabel="View spherical projection (manual, croppable)"
               >
-                <Text style={[styles.abSegText, !showAlt && styles.abSegTextActive]}>
-                  Manual
+                <Text
+                  style={[styles.abSegText, activeTab === 'spherical' && styles.abSegTextActive]}
+                >
+                  Spherical
                 </Text>
               </Pressable>
-              <Pressable
-                style={[styles.abSeg, showAlt && styles.abSegActive]}
-                onPress={showHighLevel}
-                accessibilityRole="button"
-                accessibilityState={{ selected: showAlt, busy: altLoading }}
-                accessibilityLabel="View high-level pipeline (computed on demand)"
-              >
-                {altLoading ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <Text style={[styles.abSegText, showAlt && styles.abSegTextActive]}>
-                    High-level
-                  </Text>
-                )}
-              </Pressable>
+              {onRequestPlaneProjection ? (
+                <Pressable
+                  style={[styles.abSeg, activeTab === 'plane' && styles.abSegActive]}
+                  onPress={() => setActiveTab('plane')}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: activeTab === 'plane', busy: planeTab.loading }}
+                  accessibilityLabel="View plane projection (manual)"
+                >
+                  {planeTab.loading ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text
+                      style={[styles.abSegText, activeTab === 'plane' && styles.abSegTextActive]}
+                    >
+                      Plane
+                    </Text>
+                  )}
+                </Pressable>
+              ) : null}
+              {onRequestAlt ? (
+                <Pressable
+                  style={[styles.abSeg, activeTab === 'highlevel' && styles.abSegActive]}
+                  onPress={showHighLevel}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: activeTab === 'highlevel', busy: highTab.loading }}
+                  accessibilityLabel="View high-level pipeline (computed on demand)"
+                >
+                  {highTab.loading ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text
+                      style={[styles.abSegText, activeTab === 'highlevel' && styles.abSegTextActive]}
+                    >
+                      High-level
+                    </Text>
+                  )}
+                </Pressable>
+              ) : null}
             </View>
           </View>
         )}
@@ -576,9 +655,9 @@ export function RectCropPreview(
             />
           )}
 
-          {/* Crop affordances — quad edges + draggable handles — only in
-              crop mode on the PRIMARY image (hidden while comparing the alt). */}
-          {showCropControls && !showAlt && (
+          {/* Crop affordances — quad edges + draggable handles — only in crop
+              mode on the Spherical primary (hidden on the compare-only tabs). */}
+          {showCropControls && isCroppable && (
             <>
               {/* Quad edges (non-interactive). */}
               {edges.map((e, i) => (
@@ -626,9 +705,9 @@ export function RectCropPreview(
               <Text style={styles.btnText}>{resolvedCopy.cropRetake}</Text>
             </Pressable>
             {/* Crop mode only — "Use original" emits the stitch un-cropped.
-                Hidden in preview-only mode and while comparing the alt (the
+                Hidden in preview-only mode and on the compare-only tabs (the
                 primary button below is the accept action there). */}
-            {showCropControls && !showAlt && (
+            {showCropControls && isCroppable && (
               <Pressable
                 style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
                 onPress={() => onUseOriginal()}
@@ -638,9 +717,9 @@ export function RectCropPreview(
                 <Text style={styles.btnText}>{resolvedCopy.cropUseOriginal}</Text>
               </Pressable>
             )}
-            {/* Primary action — "Use this" emits the SHOWN (alt) pipeline's
-                output; otherwise "Crop" applies the quad (crop mode) or
-                "Confirm" accepts the primary as-is (preview-only mode). */}
+            {/* Primary action — on a compare-only tab "Use this" emits the SHOWN
+                projection's output; on the Spherical primary "Crop" applies the
+                quad (crop mode) or "Confirm" accepts as-is (preview-only mode). */}
             <Pressable
               style={({ pressed }) => [
                 styles.btn,
@@ -648,7 +727,7 @@ export function RectCropPreview(
                 pressed && styles.btnPressed,
               ]}
               onPress={
-                showAlt
+                !isCroppable
                   ? () => onUseOriginal(activeUri)
                   : showCropControls
                     ? handleConfirm
@@ -656,7 +735,7 @@ export function RectCropPreview(
               }
               accessibilityRole="button"
               accessibilityLabel={
-                showAlt
+                !isCroppable
                   ? 'Use this output'
                   : showCropControls
                     ? resolvedCopy.cropConfirm
@@ -664,7 +743,7 @@ export function RectCropPreview(
               }
             >
               <Text style={styles.btnText}>
-                {showAlt
+                {!isCroppable
                   ? 'Use this'
                   : showCropControls
                     ? resolvedCopy.cropConfirm

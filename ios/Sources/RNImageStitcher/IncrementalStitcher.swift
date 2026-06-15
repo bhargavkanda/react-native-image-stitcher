@@ -223,6 +223,10 @@ struct FinalizePayload {
     /// resolved upstream by `resolveStitchModeAuto` before this snapshot
     /// is captured; this field never carries 'auto'.
     let batchStitchModeResolved: String
+    /// Gyro rotation magnitude (radians) of the capture — surfaced to JS for the
+    /// dev 3-tab preview's rRadians readout (threshold tuning).  0.0 when there
+    /// is no pose-derived rotation signal (non-AR with no poses).
+    let rRadians: Double
     let keyframeExifOrientation: Int
     /// AR-STITCHING-TWO-MODES (memory/ar-stitching-two-modes.md):
     /// capture-time hold orientation for the bake-rotation pass.
@@ -1155,8 +1159,15 @@ public final class IncrementalStitcher: NSObject {
                             first: batchFirstAcceptedPose,
                             last:  batchLastAcceptedPose,
                             imuTranslationMetres: batchImuTranslationMetres
-                         )
+                         ).mode
         }
+        // Surface gyro rotation magnitude for EVERY capture (the 'panorama'
+        // default skips resolveStitchModeAuto, but the dev 3-tab preview still
+        // needs rRadians to tune the panorama-vs-SCANS threshold).  Captured
+        // into the payload here so the C2-invariant finalize closure can read
+        // it via payload (no self/ivar access inside the closure).
+        let rRadiansResolved = rotationRadians(
+            first: batchFirstAcceptedPose, last: batchLastAcceptedPose)
         os_log(.fault, log: Self.diagLog,
                "[V16-batch-keyframe.stitchMode] configured=%{public}@ resolved=%{public}@ paths=%d imuT=%.3fm",
                batchStitchMode, stitchModeResolved, Int32(paths.count),
@@ -1173,6 +1184,7 @@ public final class IncrementalStitcher: NSObject {
             batchSeamFinderType: batchSeamFinderType,
             batchEnableInscribedRectCrop: batchEnableInscribedRectCrop,
             batchStitchModeResolved: stitchModeResolved,
+            rRadians: rRadiansResolved,
             keyframeExifOrientation: keyframeExifOrientation,
             captureOrientation: captureOrientation,
             drops: drops,
@@ -1537,6 +1549,7 @@ public final class IncrementalStitcher: NSObject {
                         // helps the operator understand why the
                         // panorama looks the way it does.
                         batchDict["stitchModeResolved"] = payload.batchStitchModeResolved
+                        batchDict["rRadians"] = payload.rRadians
                         // 2026-06-14 (DEV overlay) — the stitcher's runtime
                         // choices (pipeline/warper/route/seam/blend) for this
                         // output, shown on the preview in __DEV__.
@@ -2449,13 +2462,13 @@ public final class IncrementalStitcher: NSObject {
         first: [Double]?,
         last:  [Double]?,
         imuTranslationMetres: Double
-    ) -> String {
+    ) -> (mode: String, rRadians: Double) {
         guard let firstPose = first, firstPose.count == 7,
               let lastPose  = last,  lastPose.count == 7  else {
             // No pose data at all — fall back on whichever signal we
             // do have.  imuTranslationMetres > 0 hints "scans"; 0
-            // hints "panorama".
-            return imuTranslationMetres > 0.05 ? "scans" : "panorama"
+            // hints "panorama".  rRadians 0.0 — no gyro signal.
+            return (imuTranslationMetres > 0.05 ? "scans" : "panorama", 0.0)
         }
         // Translation magnitude (Euclidean, in metres).
         let dtx = lastPose[0] - firstPose[0]
@@ -2467,14 +2480,7 @@ public final class IncrementalStitcher: NSObject {
         // the only signal we have.
         let tMeters = max(tPose, imuTranslationMetres)
         // Rotation magnitude — angle between camera-forward vectors.
-        // Camera-forward in body frame is (0, 0, -1) for ARKit/ARCore.
-        let fwdFirst = qrotForwardZneg(
-            firstPose[3], firstPose[4], firstPose[5], firstPose[6])
-        let fwdLast = qrotForwardZneg(
-            lastPose[3], lastPose[4], lastPose[5], lastPose[6])
-        let dot = max(-1.0, min(1.0,
-            fwdFirst.0 * fwdLast.0 + fwdFirst.1 * fwdLast.1 + fwdFirst.2 * fwdLast.2))
-        let rRadians = acos(dot)
+        let rRadians = rotationRadians(first: firstPose, last: lastPose)
         // Normalisation: 10 cm of translation ≈ 1 rad of rotation as
         // "equivalent magnitude" for the ratio.  Shelf scans cover
         // ~30 cm translation with ~10° (0.17 rad) rotation:
@@ -2484,7 +2490,7 @@ public final class IncrementalStitcher: NSObject {
         let tScore = tMeters / 0.10
         let rScore = rRadians / 1.00
         let denom = tScore + rScore
-        if denom <= 1e-9 { return "panorama" }  // no motion either way
+        if denom <= 1e-9 { return ("panorama", rRadians) }  // no motion either way
         let ratio = tScore / denom
 
         // 2026-06-15 — LOW-ROTATION GUARD.  The gyro rotation (rRadians) is
@@ -2502,7 +2508,20 @@ public final class IncrementalStitcher: NSObject {
                "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f rotGuard=%d → %{public}@",
                tPose, imuTranslationMetres, rRadians, ratio,
                lowRotationGuard ? 1 : 0, mode)
-        return mode
+        return (mode, rRadians)
+    }
+
+    /// Gyro rotation magnitude (radians) between two 7-element poses
+    /// `[tx,ty,tz,qx,qy,qz,qw]` — angle between camera-forward vectors.
+    /// Returns 0.0 if either pose is missing/malformed (non-AR, no pose).
+    /// Shared by `resolveStitchModeAuto` + the finalize `rRadians` readout (DRY).
+    private func rotationRadians(first: [Double]?, last: [Double]?) -> Double {
+        guard let f = first, f.count == 7, let l = last, l.count == 7 else { return 0.0 }
+        let fwdFirst = qrotForwardZneg(f[3], f[4], f[5], f[6])
+        let fwdLast  = qrotForwardZneg(l[3], l[4], l[5], l[6])
+        let dot = max(-1.0, min(1.0,
+            fwdFirst.0 * fwdLast.0 + fwdFirst.1 * fwdLast.1 + fwdFirst.2 * fwdLast.2))
+        return acos(dot)
     }
 
     /// Closed-form q · (0,0,-1) · q⁻¹ — rotates the camera-forward

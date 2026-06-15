@@ -683,6 +683,14 @@ export interface IncrementalFinalizeResult {
    */
   stitchModeResolved?: 'panorama' | 'scans';
   /**
+   * 2026-06-15 (DEV) — gyro rotation magnitude of the capture, in RADIANS
+   * (angle between the first and last accepted keyframe camera-forward vectors).
+   * Surfaced so a dev tool can display it and tune the panorama-vs-SCANS
+   * rotation threshold from real captures. `0` when there is no pose-derived
+   * rotation signal (non-AR with no poses) — not necessarily "no rotation".
+   */
+  rRadians?: number;
+  /**
    * 2026-06-14 (DEV overlay) — a semicolon-separated `key=value` trace of the
    * stitcher's RUNTIME choices for this output, e.g.
    * `"pipe=manual;warp=spherical;route=batch;seam=graphcut;blend=multiband"`.
