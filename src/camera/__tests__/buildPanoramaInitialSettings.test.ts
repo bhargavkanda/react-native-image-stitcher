@@ -24,6 +24,7 @@
  */
 
 import {
+  DEFAULT_FLOW_GATE_SETTINGS,
   DEFAULT_PANORAMA_SETTINGS,
   type PanoramaSettings,
 } from '../PanoramaSettings';
@@ -156,5 +157,64 @@ describe('buildPanoramaInitialSettings', () => {
     expect(wire.warperType).toBe('spherical');
     expect(wire.frameSelectionMode).toBe('flow-based');
     expect(wire.flowNoveltyPercentile).toBe(0.85);
+  });
+
+  // ── v0.16 — JSON-object props (stitcher / frameSelection) ────────────
+
+  it('accepts a `stitcher` JSON object (partial; unset fields keep defaults)', () => {
+    const s = buildPanoramaInitialSettings(
+      { stitcher: { warperType: 'plane', blenderType: 'feather' } },
+      false,
+    );
+    expect(s.stitcher.warperType).toBe('plane');
+    expect(s.stitcher.blenderType).toBe('feather');
+    // Unset object fields fall back to the SDK defaults.
+    expect(s.stitcher.seamFinderType).toBe(
+      DEFAULT_PANORAMA_SETTINGS.stitcher.seamFinderType,
+    );
+    expect(s.stitcher.stitchMode).toBe(
+      DEFAULT_PANORAMA_SETTINGS.stitcher.stitchMode,
+    );
+  });
+
+  it('accepts a `frameSelection` JSON object and DEEP-merges `flow`', () => {
+    const s = buildPanoramaInitialSettings(
+      {
+        frameSelection: {
+          maxKeyframes: 5,
+          overlapThreshold: 0.25,
+          flow: { maxCorners: 99 },
+        },
+      },
+      false,
+    );
+    expect(s.frameSelection.maxKeyframes).toBe(5);
+    expect(s.frameSelection.overlapThreshold).toBe(0.25);
+    // flow.maxCorners overridden; the rest of flow stays at defaults.
+    expect(s.frameSelection.flow?.maxCorners).toBe(99);
+    expect(s.frameSelection.flow?.noveltyPercentile).toBe(
+      DEFAULT_FLOW_GATE_SETTINGS.noveltyPercentile,
+    );
+    expect(s.frameSelection.flow?.minDistance).toBe(
+      DEFAULT_FLOW_GATE_SETTINGS.minDistance,
+    );
+    // Untouched scalar stays default.
+    expect(s.frameSelection.maxKeyframeIntervalMs).toBe(
+      DEFAULT_PANORAMA_SETTINGS.frameSelection.maxKeyframeIntervalMs,
+    );
+  });
+
+  it('object props WIN over the matching flat default* props', () => {
+    const s = buildPanoramaInitialSettings(
+      {
+        defaultWarper: 'cylindrical',
+        defaultKeyframeMaxCount: 3,
+        stitcher: { warperType: 'plane' },
+        frameSelection: { maxKeyframes: 9 },
+      },
+      false,
+    );
+    expect(s.stitcher.warperType).toBe('plane'); // object beats defaultWarper
+    expect(s.frameSelection.maxKeyframes).toBe(9); // object beats flat
   });
 });

@@ -353,6 +353,19 @@ export interface CameraProps {
   defaultRegistrationResolMP?: number;
   /** Forward-looking — see above. */
   defaultSeamEstimationResolMP?: number;
+  /**
+   * v0.16 — pass the whole stitcher config as a JSON object instead of the
+   * individual `default*` props above (canonical field names: `warperType` /
+   * `blenderType` / `seamFinderType` / `stitchMode` /
+   * `enableMaxInscribedRectCrop`).  Partial; any field set here wins over the
+   * matching flat prop.  Runtime ⚙️-panel edits still override at capture time. */
+  stitcher?: PanoramaPropOverrides['stitcher'];
+  /**
+   * v0.16 — pass the whole frame-gate config as a JSON object (canonical field
+   * names: `mode` / `maxKeyframes` / `overlapThreshold` / `maxKeyframeIntervalMs`
+   * / `flow`).  Partial; `flow` is deep-merged.  Wins over the flat `default*`
+   * props. */
+  frameSelection?: PanoramaPropOverrides['frameSelection'];
 
   // ── Inscribed-rect crop (v0.15) ───────────────────────────────────
   /**
@@ -1071,6 +1084,9 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
     defaultKeyframeMaxCount: props.defaultKeyframeMaxCount,
     defaultKeyframeOverlapThreshold: props.defaultKeyframeOverlapThreshold,
     defaultMaxKeyframeIntervalMs: props.defaultMaxKeyframeIntervalMs,
+    // v0.16 — JSON-object form (wins over the flat default* props above).
+    stitcher: props.stitcher,
+    frameSelection: props.frameSelection,
     // Item 2 — the interactive crop editor OWNS cropping, so when it's on we
     // force the native auto-crop OFF: the editor needs the full un-cropped
     // panorama (black borders included) so the user can drag the inscribed-
