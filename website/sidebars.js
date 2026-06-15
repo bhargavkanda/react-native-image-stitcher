@@ -14,6 +14,7 @@ const sidebars = {
       items: ['camera-api', 'orientation', 'flash-and-lenses', 'recipes'],
     },
     'capture-result',
+    'i18n',
     'troubleshooting',
   ],
 };
