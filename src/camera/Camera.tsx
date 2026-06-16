@@ -1323,50 +1323,38 @@ export function Camera(props: CameraProps): React.JSX.Element {
     [cropPending],
   );
 
-  // 2026-06-15 — ALTERNATE-PATH validation (ON-DEMAND only).  Tab 1 is our
-  // approach's actual output (auto-resolved).  The single Alternate tab
-  // re-stitches the SAME keyframes with the OPPOSITE stitch mode, so you can
-  // judge per capture whether the panorama↔SCANS gating picked right:
-  //   • our approach picked PANORAMA → alternate = SCANS (high-level affine)
-  //   • our approach picked SCANS    → alternate = PANORAMA (manual + plane,
-  //                                     matching our panorama config)
-  // Nothing is computed until the Alternate tab is tapped — no eager work.
-  const requestAlternate = useCallback(() => {
-    const mode = cropPending?.captureResultObj.stitchModeResolved;
-    return mode === 'scans'
-      ? stitchWithConfig('alt-pano', {
-          useManualPipeline: true,
-          warperType: 'plane',
-          stitchMode: 'panorama',
-        })
-      : stitchWithConfig('alt-scans', {
-          useManualPipeline: false,
-          warperType: 'spherical',
-          stitchMode: 'scans',
-        });
-  }, [stitchWithConfig, cropPending]);
-
-  // 2026-06-16 (DEV) — two MORE on-demand comparison tabs (also lazy — nothing
-  // is stitched until the tab is tapped).  Same captured keyframes re-stitched
-  // with a SPHERICAL warper through each pipeline, so the operator can A/B which
-  // spherical output looks best per capture:
-  //   • Sph·Manual  — manual pipeline (cv::detail)  + spherical warper
-  //   • Sph·HighLvl — stock cv::Stitcher (PANORAMA) + spherical warper
-  const requestSphericalManual = useCallback(
+  // 2026-06-16 (DEV) — fixed on-demand comparison tabs (all LAZY — nothing is
+  // stitched until the tab is tapped).  Tab 1 (the primary, "As captured") is
+  // our actual output: manual pipeline, plane projection, auto-resolved.  These
+  // three re-stitch the SAME captured keyframes through the HIGH-LEVEL
+  // cv::Stitcher so the operator can A/B projection + mode per capture:
+  //   • High-level PLANE      — cv::Stitcher PANORAMA + plane warper
+  //   • High-level SPHERICAL  — cv::Stitcher PANORAMA + spherical warper
+  //   • SCANS (high-level)    — cv::Stitcher SCANS (affine; warper is moot)
+  const requestHighPlane = useCallback(
     () =>
-      stitchWithConfig('sph-manual', {
-        useManualPipeline: true,
+      stitchWithConfig('hl-plane', {
+        useManualPipeline: false,
+        warperType: 'plane',
+        stitchMode: 'panorama',
+      }),
+    [stitchWithConfig],
+  );
+  const requestHighSpherical = useCallback(
+    () =>
+      stitchWithConfig('hl-sph', {
+        useManualPipeline: false,
         warperType: 'spherical',
         stitchMode: 'panorama',
       }),
     [stitchWithConfig],
   );
-  const requestSphericalHighLevel = useCallback(
+  const requestScansHighLevel = useCallback(
     () =>
-      stitchWithConfig('sph-high', {
+      stitchWithConfig('hl-scans', {
         useManualPipeline: false,
         warperType: 'spherical',
-        stitchMode: 'panorama',
+        stitchMode: 'scans',
       }),
     [stitchWithConfig],
   );
@@ -2929,37 +2917,33 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
-        // 2026-06-16 — DEV alternate-path validation.  Tab 1 = our approach's
-        // actual output (auto-resolved, croppable).  Up to THREE on-demand
-        // comparison tabs, each re-stitching the SAME captured keyframes — all
-        // lazy (nothing computes until the tab is tapped, no eager work):
-        //   • Alternate — the OPPOSITE stitch mode (panorama↔SCANS), to validate
-        //                 the auto gating per capture.
-        //   • Sph·Man   — manual pipeline + spherical warper.
-        //   • Sph·HL    — stock cv::Stitcher + spherical warper.
+        // 2026-06-16 — DEV comparison tabs.  Tab 1 ("As captured") = our actual
+        // output: manual pipeline, plane projection, auto-resolved (croppable).
+        // Three FIXED on-demand high-level comparators re-stitch the SAME
+        // captured keyframes — all lazy (nothing computes until the tab is
+        // tapped, no eager work):
+        //   • HL·Plane — high-level cv::Stitcher PANORAMA + plane warper.
+        //   • HL·Sph   — high-level cv::Stitcher PANORAMA + spherical warper.
+        //   • SCANS    — high-level cv::Stitcher SCANS (affine).
         // Gated on __DEV__ (never ships to prod); requires keyframePaths (both
         // platforms return them).
         alternates={
           __DEV__ && cropPending?.captureResultObj.keyframePaths?.length
             ? [
                 {
-                  key: 'alt',
-                  // The opposite of what our approach picked for this capture.
-                  label:
-                    cropPending.captureResultObj.stitchModeResolved === 'scans'
-                      ? 'Panorama'
-                      : 'SCANS',
-                  request: requestAlternate,
+                  key: 'hl-plane',
+                  label: 'HL·Plane',
+                  request: requestHighPlane,
                 },
                 {
-                  key: 'sph-manual',
-                  label: 'Sph·Man',
-                  request: requestSphericalManual,
+                  key: 'hl-sph',
+                  label: 'HL·Sph',
+                  request: requestHighSpherical,
                 },
                 {
-                  key: 'sph-high',
-                  label: 'Sph·HL',
-                  request: requestSphericalHighLevel,
+                  key: 'hl-scans',
+                  label: 'SCANS',
+                  request: requestScansHighLevel,
                 },
               ]
             : undefined
