@@ -582,24 +582,30 @@ StitchResult stitchFramePaths(
     const StitchConfig&             config,
     LogFn                           logFn)
 {
-    // ── v0.16.1 — native-heap leak fix (one-time, process-wide) ─────────
+    // ── v0.16.1 — native-heap leak fix (one-time) — ANDROID ONLY ────────
     // The ~7-9 MB/stitch LIVE native-heap creep is OpenCV core's OWN pooled
-    // scratch — TBB per-worker TLS + IPP per-thread arenas — re-primed as the
-    // calling thread migrates across the Kotlin Dispatchers.Default pool.  It
-    // is NOT app memory (every cv::Mat below is RAII / explicitly .release()'d)
-    // and NOT reclaimable by the mallopt(M_PURGE) we added, because those pools
-    // are not serviced by bionic malloc.  setNumThreads(1) removes the TBB
-    // worker pool (and its per-worker scratch); setUseIPP(false) removes the
-    // IPP TLS arenas — so no per-thread scratch can accumulate regardless of
-    // which thread a stitch lands on.  Stitches are serialized and the keyframes
-    // are small, so the single-threaded cost is minor.  C++11 static-init is
-    // thread-safe; runs exactly once on the first stitch.
+    // scratch — TBB per-worker TLS — re-primed as the calling thread migrates
+    // across the Kotlin Dispatchers.Default pool.  It is NOT app memory (every
+    // cv::Mat below is RAII / explicitly .release()'d) and NOT reclaimable by
+    // mallopt(M_PURGE) (those pools aren't serviced by bionic malloc).
+    // setNumThreads(1) removes the TBB worker pool so no per-worker scratch can
+    // accumulate.  Stitches are serialized and the keyframes are small, so the
+    // single-threaded cost is minor.  C++11 static-init is thread-safe; runs once.
+    //
+    // 2026-06-16 (audit) — ANDROID-GATED.  The prebuilt iOS opencv2.xcframework
+    // uses the GCD parallel backend (NOT TBB — getBuildInformation reads
+    // "Parallel framework: GCD"), so there is no TBB pool to remove; pinning to
+    // 1 thread there is pure cost (serialized ORB/matcher/warp/blend + a
+    // single-core per-frame KeyframeGate) for ZERO memory benefit.  Recovering
+    // iOS's multi-core path.  setUseIPP(false) was dropped entirely — IPP is
+    // x86-only, a no-op on arm64 (both Android NDK and iOS).
+#if defined(__ANDROID__)
     static const bool s_cvTuned = []() {
         cv::setNumThreads(1);
-        cv::ipp::setUseIPP(false);
         return true;
     }();
     (void)s_cvTuned;
+#endif
 
     // ── 2026-06-16 — per-stitch memory profiling (DEV; gated) ───────────
     // Install the resident-memory probe (iOS phys_footprint; null on Android →
@@ -646,9 +652,17 @@ StitchResult stitchFramePaths(
     // Why this is safe to enable unconditionally:
     //   - The retry only fires on a failed attempt (no perf hit on
     //     happy paths).
-    //   - Both modes share the load-images and write-output stages,
-    //     so the per-frame I/O cost isn't duplicated — only the
-    //     estimator/BA/warp middle is re-run.
+    //   - 2026-06-16 (audit) CORRECTION: each attempt is a FULL independent
+    //     run of stitchFramePathsImpl_ — it re-imreads every frame and re-runs
+    //     ORB/matcher/BA from scratch (the per-frame I/O + feature cost IS
+    //     duplicated; the earlier claim that "only the estimator/BA/warp middle
+    //     is re-run" was false).  Same is true of the manual plane→spherical
+    //     retry below.  Acceptable because (a) it only fires on a failure/quality
+    //     rejection, not the happy path, and (b) memory does NOT stack — each
+    //     attempt's buffers RAII-free before the next begins.  A caching
+    //     refactor (reuse decoded images + features/cameras across the retry) is
+    //     deferred: it threads mutable state through both impls and carries
+    //     correctness risk for an occasional fallback path.
     //   - Result reflects whichever mode succeeded (returned via
     //     StitchResult.stitchModeUsed, populated below).
     auto runOnce = [&](StitchMode modeOverride) -> StitchResult {
@@ -2403,16 +2417,20 @@ StitchResult stitchFramePathsManual(
                     cv::Mat K;
                     cameras[i].K().convertTo(K, CV_32F);
 
-                    // V12.14.6 — clone input to break any recycled-mmap
-                    // link to prior captures' allocations.  cv::Mat::clone
-                    // forces a fresh memcpy into a freshly-allocated buffer.
-                    cv::Mat freshInput = composeFrames[i].clone();
+                    // 2026-06-16 (audit #5/L4) — warp composeFrames[i] DIRECTLY.
+                    // The old V12.14.6 `freshInput = composeFrames[i].clone()` (a
+                    // full-res malloc+memcpy+free per frame, as a recycled-mmap
+                    // defense) is disproven by the STREAM warp path below, which
+                    // passes the frame raw with no clone.  warp READS the input +
+                    // writes a SEPARATE output Mat, and composeFrames[i] is
+                    // released just after — so the copy bought nothing.  Removes N
+                    // full-res copies per BATCH stitch.
 
                     // V12.14.6 — pre-allocate output Mats via warpRoi() so
                     // cv::remap doesn't need to call create() internally
                     // (the suspect path that crashed in cv::resize too).
                     cv::Rect roi = warper->warpRoi(
-                        freshInput.size(), K, cameras[i].R);
+                        composeFrames[i].size(), K, cameras[i].R);
                     // 2026-05-18 (Issue #1 guard): cv::Stitcher's estimator
                     // + BA can produce wildly wrong camera parameters on
                     // degenerate input (low feature count, near-duplicate
@@ -2447,12 +2465,12 @@ StitchResult stitchFramePathsManual(
                         throw degenerateFrameException(
                             roi.width, roi.height, config.stitchMode, i);
                     }
-                    imagesWarped[i].create(roi.size(), freshInput.type());
+                    imagesWarped[i].create(roi.size(), composeFrames[i].type());
                     masksWarped[i].create(roi.size(), CV_8U);
 
-                    cv::Mat mask(freshInput.size(), CV_8U, cv::Scalar(255));
+                    cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
                     corners[i] = warper->warp(
-                        freshInput, K, cameras[i].R, cv::INTER_LINEAR,
+                        composeFrames[i], K, cameras[i].R, cv::INTER_LINEAR,
                         cv::BORDER_CONSTANT, imagesWarped[i]);
                     warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
                                  cv::BORDER_CONSTANT, masksWarped[i]);
@@ -2631,10 +2649,19 @@ StitchResult stitchFramePathsManual(
             auto compensator = cv::detail::ExposureCompensator::createDefault(
                 cv::detail::ExposureCompensator::GAIN_BLOCKS);
             {
+                // 2026-06-16 (audit #1) — feed the compensator ZERO-COPY views,
+                // not deep copies.  With HAVE_OPENCL undefined (both platforms)
+                // getUMat(ACCESS_READ) shares the backing Mat buffer (no memcpy,
+                // no GPU transfer); feed() takes const& and only READS pixels to
+                // solve gains, so the output is byte-identical.  The old copyTo
+                // loop DOUBLED the full-res warped held-set (~60-90 MB transient)
+                // at the exact BATCH peak the canvas budget is tuned around —
+                // imagesWarped[]/masksWarped[] are still live here (released in
+                // the feed loop below).
                 std::vector<cv::UMat> compImgs(N), compMasks(N);
                 for (size_t i = 0; i < N; i++) {
-                    imagesWarped[i].copyTo(compImgs[i]);
-                    masksWarped[i].copyTo(compMasks[i]);
+                    compImgs[i]  = imagesWarped[i].getUMat(cv::ACCESS_READ);
+                    compMasks[i] = masksWarped[i].getUMat(cv::ACCESS_READ);
                 }
                 compensator->feed(corners, compImgs, compMasks);
             }
