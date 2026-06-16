@@ -217,6 +217,10 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
         // and to PANORAMA when both are 0).
         let imuT = (options["imuTranslationMetres"] as? Double) ?? 0.0
         IncrementalStitcher.shared.updateImuTranslationMetres(imuT)
+        // 2026-06-16 — the EXPLICIT lens the user selected ('1x'|'0.5x'): the
+        // reliable zoom signal for the high-level warper tree (0.5x → spherical).
+        let lens = (options["lens"] as? String) ?? "1x"
+        IncrementalStitcher.shared.updateLens(lens)
         IncrementalStitcher.shared.finalize(
             toPath: outputPath,
             jpegQuality: quality
@@ -323,6 +327,17 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
         }
         let mb = Double(info.phys_footprint) / (1024.0 * 1024.0)
         resolver(mb)
+    }
+
+    /// Total physical RAM in MB.  Lets the DEV memory pill derive RAM-aware
+    /// pressure bands (iOS jetsam scales with device RAM) instead of fixed
+    /// thresholds.  NSProcessInfo.physicalMemory is exact + cheap.
+    @objc(getDeviceTotalRamMB:rejecter:)
+    public func getDeviceTotalRamMB(
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        resolver(Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0))
     }
 
     /// 2026-05-16 — realtime+batch fusion (Option A) bridge.  Marshal

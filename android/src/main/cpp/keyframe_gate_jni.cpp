@@ -311,23 +311,30 @@ Java_io_imagestitcher_rn_KeyframeGate_nativeEvaluateWithFrame(
         }
     }
 
-    // Pin the byte[] for the duration of the gate evaluate.  Use
-    // GetPrimitiveArrayCritical (zero-copy, JVM pins the GC) over
-    // GetByteArrayElements (may copy on some VMs) because at 30-60
-    // Hz of 2 MB Y-planes, the copy cost adds up.  Evaluate is
-    // ~1-5 ms so the pin window is short.  Always paired with
-    // ReleasePrimitiveArrayCritical even on the error paths below.
+    // 2026-06-16 (audit #4) — pin the byte[] ONLY to INGEST it.
+    // GetPrimitiveArrayCritical is zero-copy (the JVM pins the GC) — preferred
+    // over GetByteArrayElements (which may copy a 2 MB Y-plane at 30-60 Hz) —
+    // but it blocks the GC for the pin's whole life.  So we keep that life to a
+    // single downscale: ingestWorkingFrame() reads the pinned bytes into an
+    // OWNED working frame, we Release IMMEDIATELY, then evaluateWithWorkingMat()
+    // runs the heavy OpenCV (goodFeaturesToTrack / optical flow) with the pin
+    // already gone — no longer stalling the GC or the frame-rate producer
+    // thread.  Always paired with ReleasePrimitiveArrayCritical, even on errors.
     retailens::KeyframeGateDecision d;
     if (grayBytes && grayWidth > 0 && grayHeight > 0 && grayStride >= grayWidth) {
         void* raw = env->GetPrimitiveArrayCritical(grayBytes, nullptr);
         if (raw) {
-            d = gate(handle)->evaluateWithFrame(
-                pose, planePtr,
+            gate(handle)->ingestWorkingFrame(
                 static_cast<const uint8_t*>(raw),
                 static_cast<int32_t>(grayWidth),
                 static_cast<int32_t>(grayHeight),
                 static_cast<int32_t>(grayStride));
             env->ReleasePrimitiveArrayCritical(grayBytes, raw, JNI_ABORT);
+            // Pin released — heavy OpenCV now runs outside the critical section.
+            d = gate(handle)->evaluateWithWorkingMat(
+                pose, planePtr,
+                static_cast<int32_t>(grayWidth),
+                static_cast<int32_t>(grayHeight));
         } else {
             // GetPrimitiveArrayCritical failed (rare, but defensive).
             // Fall back to pose-only path so we degrade gracefully

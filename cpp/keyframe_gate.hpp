@@ -248,6 +248,39 @@ public:
                                            int32_t stride,
                                            int64_t monotonicNowMs = -1);
 
+    // ── Split entry point (2026-06-16, audit #4) ──────────────────
+    //
+    // Android JNI pins the gray byte[] with GetPrimitiveArrayCritical, which
+    // blocks the GC for the pin's whole duration.  Running the heavy OpenCV
+    // (goodFeaturesToTrack / optical flow, multi-ms) inside that window stalls
+    // the frame-rate producer thread and violates the JNI no-blocking-between-
+    // critical rule.  This pair splits the work so ONLY the pinned-buffer read
+    // happens under the pin:
+    //
+    //   ingestWorkingFrame(grayData, w, h, stride)   // <- under the pin
+    //       Builds the downscaled working frame (the only step that reads the
+    //       pinned pixels) and stashes it INSIDE the gate.  Does nothing (no
+    //       pixel read) for Pose/disabled/force-accept/invalid input — those
+    //       don't need the frame.  cv::Mat is kept out of this header so the
+    //       JNI needn't link OpenCV; the frame lives on the gate's Impl.
+    //
+    //   evaluateWithWorkingMat(pose, plane, origW, origH)   // <- pin released
+    //       Runs the rest of the gate (the heavy OpenCV) on the stashed working
+    //       frame, OUTSIDE the critical section.  origW/origH are the ORIGINAL
+    //       full-res dims (the working frame is downscaled).
+    //
+    // evaluateWithFrame() above is exactly ingest+evaluate in sequence — kept
+    // for iOS and any non-pinned caller (DRY: it delegates to these two).
+    void ingestWorkingFrame(const uint8_t* grayData,
+                            int32_t width,
+                            int32_t height,
+                            int32_t stride);
+    KeyframeGateDecision evaluateWithWorkingMat(const Pose& pose,
+                                                const PlaneTransform* latchedPlane,
+                                                int32_t origWidth,
+                                                int32_t origHeight,
+                                                int64_t monotonicNowMs = -1);
+
     // ── State accessors (read-only, post-evaluate) ────────────────
     int32_t getAcceptedCount() const;
     int32_t getMaxCount() const;

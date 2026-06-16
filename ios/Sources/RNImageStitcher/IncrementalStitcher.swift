@@ -223,6 +223,15 @@ struct FinalizePayload {
     /// resolved upstream by `resolveStitchModeAuto` before this snapshot
     /// is captured; this field never carries 'auto'.
     let batchStitchModeResolved: String
+    /// Gyro rotation magnitude (radians) of the capture — surfaced to JS for the
+    /// dev 3-tab preview's rRadians readout (threshold tuning).  0.0 when there
+    /// is no pose-derived rotation signal (non-AR with no poses).
+    let rRadians: Double
+    /// Translation magnitude (metres) + the auto decision ratio
+    /// (tScore/(tScore+rScore), >=0.55 → SCANS) that drove the panorama-vs-SCANS
+    /// choice — surfaced to JS for the dev tuning readout alongside rRadians.
+    let tMeters: Double
+    let decisionRatio: Double
     let keyframeExifOrientation: Int
     /// AR-STITCHING-TWO-MODES (memory/ar-stitching-two-modes.md):
     /// capture-time hold orientation for the bake-rotation pass.
@@ -430,6 +439,10 @@ public final class IncrementalStitcher: NSObject {
     /// AR mode (where pose-derived tx/ty/tz is always 0).  Set to 0
     /// at start() and overwritten at finalize() entry.
     private var batchImuTranslationMetres: Double = 0.0
+    /// 2026-06-16 — the explicit lens the user selected ('1x' | '0.5x'), set at
+    /// finalize() entry from JS.  The zoom signal for the high-level warper tree
+    /// (0.5x ultra-wide → spherical).  Defaults to '1x'.
+    private var batchLens: String = "1x"
     /// AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
     ///
     /// Physical phone orientation at start() time, sourced from the
@@ -489,6 +502,14 @@ public final class IncrementalStitcher: NSObject {
     @objc public func updateImuTranslationMetres(_ metres: Double) {
         stateLock.lock()
         self.batchImuTranslationMetres = max(0.0, metres)
+        stateLock.unlock()
+    }
+
+    /// 2026-06-16 — store the explicit lens ('1x' | '0.5x') JS supplies at
+    /// finalize() entry; the high-level warper tree reads it (0.5x → spherical).
+    @objc public func updateLens(_ lens: String) {
+        stateLock.lock()
+        self.batchLens = lens
         stateLock.unlock()
     }
 
@@ -829,6 +850,7 @@ public final class IncrementalStitcher: NSObject {
             // too.  Updated at finalize() entry from JS-supplied
             // option value.
             self.batchImuTranslationMetres = 0.0
+            self.batchLens = "1x"  // overwritten at finalize() from JS (updateLens)
             self.batchKeyframeMode = true
             os_log(.fault, log: Self.diagLog,
                    "[V16-batch-keyframe] start mode=batch-keyframe rotation=0 (was %d, forced to 0 to match pose intrinsics) sessionDir=%{public}@",
@@ -1147,20 +1169,33 @@ public final class IncrementalStitcher: NSObject {
         // translation/rotation magnitude ratio between first + last
         // accepted keyframe poses → SCANS (translation-heavy) or
         // PANORAMA (rotation-heavy).  Non-auto values pass through.
+        // Resolve once so the dev readout gets the SAME tMeters / ratio / rRadians
+        // that drove the decision — and gets them even when the mode is forced
+        // (informative: shows what auto WOULD have picked).  Captured into the
+        // payload here so the C2-invariant finalize closure can read them via
+        // payload (no self/ivar access inside the closure).
+        let autoResolution = resolveStitchModeAuto(
+            first: batchFirstAcceptedPose,
+            last:  batchLastAcceptedPose,
+            imuTranslationMetres: batchImuTranslationMetres)
         let stitchModeResolved: String
         switch batchStitchMode {
         case "panorama": stitchModeResolved = "panorama"
         case "scans":    stitchModeResolved = "scans"
-        default:         stitchModeResolved = resolveStitchModeAuto(
-                            first: batchFirstAcceptedPose,
-                            last:  batchLastAcceptedPose,
-                            imuTranslationMetres: batchImuTranslationMetres
-                         )
+        default:         stitchModeResolved = autoResolution.mode
         }
+        let rRadiansResolved = autoResolution.rRadians
+        // 2026-06-16 — HIGH-LEVEL ACROSS THE BOARD (mirrors Android).  Pick the
+        // warper from the (motion, Mode A/B, lens) tree; the dispatch below now
+        // forces useManualPipeline=false + stitchMode="panorama".  batchWarperType
+        // (settings) is superseded by the tree.
+        let highLevelWarper = pickHighLevelWarper(
+            orientation: captureOrientation,
+            lens: batchLens)
         os_log(.fault, log: Self.diagLog,
-               "[V16-batch-keyframe.stitchMode] configured=%{public}@ resolved=%{public}@ paths=%d imuT=%.3fm",
-               batchStitchMode, stitchModeResolved, Int32(paths.count),
-               batchImuTranslationMetres)
+               "[V16-batch-keyframe.stitchMode] configured=%{public}@ resolved=%{public}@ warper=%{public}@ lens=%{public}@ paths=%d imuT=%.3fm",
+               batchStitchMode, stitchModeResolved, highLevelWarper, batchLens,
+               Int32(paths.count), batchImuTranslationMetres)
 
         let payload = FinalizePayload(
             cleaned: cleaned,
@@ -1168,11 +1203,14 @@ public final class IncrementalStitcher: NSObject {
             inBatchKeyframeMode: inBatchKeyframeMode,
             collector: collector,
             paths: paths,
-            batchWarperType: batchWarperType,
+            batchWarperType: highLevelWarper,
             batchBlenderType: batchBlenderType,
             batchSeamFinderType: batchSeamFinderType,
             batchEnableInscribedRectCrop: batchEnableInscribedRectCrop,
             batchStitchModeResolved: stitchModeResolved,
+            rRadians: rRadiansResolved,
+            tMeters: autoResolution.tMeters,
+            decisionRatio: autoResolution.ratio,
             keyframeExifOrientation: keyframeExifOrientation,
             captureOrientation: captureOrientation,
             drops: drops,
@@ -1438,10 +1476,15 @@ public final class IncrementalStitcher: NSObject {
                             seamFinderType: payload.batchSeamFinderType,
                             captureOrientation: payload.captureOrientation,
                             useInscribedRectCrop: payload.batchEnableInscribedRectCrop,
-                            stitchMode: payload.batchStitchModeResolved,
-                            // Batch capture = the default output = MANUAL pipeline
-                            // (graphcut + multiband + the full memory-guard set).
-                            useManualPipeline: true
+                            // 2026-06-16 — HIGH-LEVEL ACROSS THE BOARD (mirrors
+                            // Android): always cv::Stitcher PANORAMA with the
+                            // tree-chosen warper (payload.batchWarperType is now
+                            // highLevelWarper).  The manual path's OOM hardening
+                            // was ported to high-level (catch ladder + two-phase
+                            // canvas guard + RAM-aware compositingResol + spherical
+                            // rescue), so this is now memory-safe.
+                            stitchMode: "panorama",
+                            useManualPipeline: false
                         )
                         // V16 fix-attempt 9 (verified on device,
                         // 2026-05-13) — sentinel-result detection.
@@ -1537,6 +1580,11 @@ public final class IncrementalStitcher: NSObject {
                         // helps the operator understand why the
                         // panorama looks the way it does.
                         batchDict["stitchModeResolved"] = payload.batchStitchModeResolved
+                        batchDict["rRadians"] = payload.rRadians
+                        // Dev tuning readout — translation magnitude + the auto
+                        // decision ratio that drove panorama-vs-SCANS.
+                        batchDict["tMeters"] = payload.tMeters
+                        batchDict["decisionRatio"] = payload.decisionRatio
                         // 2026-06-14 (DEV overlay) — the stitcher's runtime
                         // choices (pipeline/warper/route/seam/blend) for this
                         // output, shown on the preview in __DEV__.
@@ -2449,13 +2497,13 @@ public final class IncrementalStitcher: NSObject {
         first: [Double]?,
         last:  [Double]?,
         imuTranslationMetres: Double
-    ) -> String {
+    ) -> (mode: String, rRadians: Double, tMeters: Double, ratio: Double) {
         guard let firstPose = first, firstPose.count == 7,
               let lastPose  = last,  lastPose.count == 7  else {
             // No pose data at all — fall back on whichever signal we
             // do have.  imuTranslationMetres > 0 hints "scans"; 0
-            // hints "panorama".
-            return imuTranslationMetres > 0.05 ? "scans" : "panorama"
+            // hints "panorama".  rRadians 0.0 — no gyro signal.
+            return (imuTranslationMetres > 0.05 ? "scans" : "panorama", 0.0, 0.0, 0.0)
         }
         // Translation magnitude (Euclidean, in metres).
         let dtx = lastPose[0] - firstPose[0]
@@ -2467,14 +2515,7 @@ public final class IncrementalStitcher: NSObject {
         // the only signal we have.
         let tMeters = max(tPose, imuTranslationMetres)
         // Rotation magnitude — angle between camera-forward vectors.
-        // Camera-forward in body frame is (0, 0, -1) for ARKit/ARCore.
-        let fwdFirst = qrotForwardZneg(
-            firstPose[3], firstPose[4], firstPose[5], firstPose[6])
-        let fwdLast = qrotForwardZneg(
-            lastPose[3], lastPose[4], lastPose[5], lastPose[6])
-        let dot = max(-1.0, min(1.0,
-            fwdFirst.0 * fwdLast.0 + fwdFirst.1 * fwdLast.1 + fwdFirst.2 * fwdLast.2))
-        let rRadians = acos(dot)
+        let rRadians = rotationRadians(first: firstPose, last: lastPose)
         // Normalisation: 10 cm of translation ≈ 1 rad of rotation as
         // "equivalent magnitude" for the ratio.  Shelf scans cover
         // ~30 cm translation with ~10° (0.17 rad) rotation:
@@ -2484,7 +2525,7 @@ public final class IncrementalStitcher: NSObject {
         let tScore = tMeters / 0.10
         let rScore = rRadians / 1.00
         let denom = tScore + rScore
-        if denom <= 1e-9 { return "panorama" }  // no motion either way
+        if denom <= 1e-9 { return ("panorama", rRadians, tMeters, 0.0) }  // no motion either way
         let ratio = tScore / denom
 
         // 2026-06-15 — LOW-ROTATION GUARD.  The gyro rotation (rRadians) is
@@ -2502,7 +2543,43 @@ public final class IncrementalStitcher: NSObject {
                "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f rotGuard=%d → %{public}@",
                tPose, imuTranslationMetres, rRadians, ratio,
                lowRotationGuard ? 1 : 0, mode)
-        return mode
+        return (mode, rRadians, tMeters, ratio)
+    }
+
+    /// 2026-06-16 — high-level warper decision tree (mirrors Android's
+    /// pickHighLevelWarper).  The pipeline is now ALWAYS high-level cv::Stitcher
+    /// PANORAMA.  Warper is a pure function of (lens, pan direction); the
+    /// rotation-vs-translation (ex-SCANS) distinction was DROPPED as redundant —
+    /// at 1x the same direction-based warpers serve both, and 0.5x is always
+    /// spherical.  orientation = capture hold ("landscape*" = Mode A vertical
+    /// pan; else Mode B horizontal); lens = the EXPLICIT lens ("0.5x" | "1x").
+    ///
+    ///     0.5x ultra-wide          → spherical   (bounded both axes; any pan)
+    ///     1x + Mode A (vertical)   → plane
+    ///     1x + Mode B (horizontal) → cylindrical
+    ///
+    /// Quality-preferred warper; the C++ memory ladder force-falls to spherical
+    /// (and downscales compositingResol) under pressure.
+    private func pickHighLevelWarper(
+        orientation: String,
+        lens: String
+    ) -> String {
+        if lens == "0.5x" { return "spherical" }           // ultra-wide → always spherical
+        let verticalPanModeA = orientation.hasPrefix("landscape")
+        return verticalPanModeA ? "plane" : "cylindrical"  // 1x: A→plane, B→cylindrical
+    }
+
+    /// Gyro rotation magnitude (radians) between two 7-element poses
+    /// `[tx,ty,tz,qx,qy,qz,qw]` — angle between camera-forward vectors.
+    /// Returns 0.0 if either pose is missing/malformed (non-AR, no pose).
+    /// Shared by `resolveStitchModeAuto` + the finalize `rRadians` readout (DRY).
+    private func rotationRadians(first: [Double]?, last: [Double]?) -> Double {
+        guard let f = first, f.count == 7, let l = last, l.count == 7 else { return 0.0 }
+        let fwdFirst = qrotForwardZneg(f[3], f[4], f[5], f[6])
+        let fwdLast  = qrotForwardZneg(l[3], l[4], l[5], l[6])
+        let dot = max(-1.0, min(1.0,
+            fwdFirst.0 * fwdLast.0 + fwdFirst.1 * fwdLast.1 + fwdFirst.2 * fwdLast.2))
+        return acos(dot)
     }
 
     /// Closed-form q · (0,0,-1) · q⁻¹ — rotates the camera-forward

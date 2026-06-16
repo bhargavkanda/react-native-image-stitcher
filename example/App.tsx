@@ -82,11 +82,12 @@ function App(): React.JSX.Element {
   // on-screen toggles below).  `rectCrop` shows the draggable-quad crop
   // editor; `showPreview` shows a plain image preview with Retake/Confirm;
   // both off → onCapture fires immediately with no review screen.
-  // Defaults match the SDK prop defaults: rectCrop OFF, showPreview OFF,
-  // panMode 'vertical' — i.e. capture fires onCapture immediately with no
-  // review surface unless a toggle is flipped on.
+  // NOTE: showPreview defaults ON here (the SDK prop default is still OFF) so
+  // the post-capture preview mounts — that's where the rRadians readout and the
+  // 3-tab Spherical/Plane/High-level projection comparison live.  Flip it off
+  // via the on-screen toggle for the immediate-onCapture flow.
   const [rectCrop, setRectCrop] = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
+  const [showPreview, setShowPreview] = useState(true);
   // panMode flag (guidance item 1).  'vertical' (default) = landscape-only
   // (top→bottom): a portrait hold shows the rotate-to-landscape prompt.
   // 'horizontal' = portrait-only (left→right): a landscape hold shows the
@@ -269,15 +270,22 @@ function App(): React.JSX.Element {
     // showPreview) — that screen IS the preview, so don't pop a second
     // preview modal for them.  Photos (no review step) still get the modal.
     if (result.type === 'photo') setPreview(result);
-    setThumbnails((prev) => [
-      ...prev,
-      {
-        id: result.uri,
-        uri: result.uri,
-        width: result.width,
-        height: result.height,
-      },
-    ]);
+    // Dedup by uri — a capture-history strip should never show the same
+    // capture twice, and a duplicate `id` (uri) throws React's "two children
+    // with the same key".  Robust against any double onCapture delivery.
+    setThumbnails((prev) =>
+      prev.some((t) => t.id === result.uri)
+        ? prev
+        : [
+            ...prev,
+            {
+              id: result.uri,
+              uri: result.uri,
+              width: result.width,
+              height: result.height,
+            },
+          ],
+    );
   };
 
   const handleReRefine = useCallback(async () => {

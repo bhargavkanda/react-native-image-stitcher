@@ -633,7 +633,8 @@ class IncrementalStitcher(
         val wasBatchKeyframe = batchKeyframeMode
         val keyframePathsSnapshot = batchKeyframePaths.toList()
         val captureOrientationSnapshot = batchCaptureOrientation
-        val warperTypeSnapshot = batchWarperType
+        // batchWarperType (settings) is superseded by the high-level warper tree
+        // (pickHighLevelWarper) below — kept as a field for back-compat, unused here.
         val blenderTypeSnapshot = batchBlenderType
         val seamFinderTypeSnapshot = batchSeamFinderType
         val useInscribedRectCropSnapshot = batchUseInscribedRectCrop
@@ -664,11 +665,31 @@ class IncrementalStitcher(
         // falls back to pose data only.  Always non-negative.
         val imuTranslationMetres = (options.getDoubleOrDefault("imuTranslationMetres", 0.0) ?: 0.0)
             .coerceAtLeast(0.0)
+        // Resolve once so the dev readout gets the SAME tMeters / ratio / rRadians
+        // that drove the decision — and gets them even when the mode was forced
+        // (informative: shows what auto WOULD have picked).
+        val autoResolution = resolveStitchModeAuto(firstPose, lastPose, imuTranslationMetres)
         val stitchModeResolved: String = when (batchStitchMode) {
             "panorama" -> "panorama"
             "scans"    -> "scans"
-            else -> resolveStitchModeAuto(firstPose, lastPose, imuTranslationMetres)
+            else -> autoResolution.mode
         }
+        // Surface the gyro rotation + translation + decision ratio for EVERY
+        // capture (the forced modes skip the auto decision, but the dev preview
+        // still reads these to tune the panorama-vs-SCANS threshold).
+        val rRadiansResolved: Double = autoResolution.rRadians
+        val tMetersResolved: Double = autoResolution.tMeters
+        val decisionRatioResolved: Double = autoResolution.ratio
+        // 2026-06-16 — HIGH-LEVEL ACROSS THE BOARD.  Pick the warper from the
+        // (motion, Mode A/B, zoom) tree and always run cv::Stitcher PANORAMA
+        // (useManualPipeline=false at the stitchSync call below).  stitchModeResolved
+        // is now only the MOTION classifier feeding the tree + the dev readout;
+        // the actual stitch mode is always panorama.  Zoom comes from the EXPLICIT
+        // lens label the user selected ('1x'|'0.5x') — the reliable signal (FOV
+        // from intrinsics was unreliable: multi-cam 0.5x doesn't change fx, and
+        // the non-AR path may supply fx=0 → FOV defaulted to 65° → never 0.5x).
+        val lensOpt = options.getString("lens") ?: "1x"
+        val highLevelWarper = pickHighLevelWarper(captureOrientationSnapshot, lensOpt)
         android.util.Log.i(
             "IncrementalStitcher",
             "finalize stitch-mode: configured=$batchStitchMode resolved=$stitchModeResolved " +
@@ -714,12 +735,13 @@ class IncrementalStitcher(
                         keyframePathsSnapshot.toTypedArray(),
                         outputPath,
                         quality,
-                        warperTypeSnapshot,
+                        highLevelWarper,                 // tree-chosen (was batchWarperType)
                         blenderTypeSnapshot,
                         seamFinderTypeSnapshot,
                         captureOrientationSnapshot,
                         useInscribedRectCropSnapshot,
-                        stitchMode = stitchModeResolved,
+                        stitchMode = "panorama",         // always high-level PANORAMA
+                        useManualPipeline = false,       // high level across the board
                     )
                     // 2026-05-15 (D) — dims layout from native JNI:
                     //   [0] width, [1] height, [2] framesRequested,
@@ -748,6 +770,11 @@ class IncrementalStitcher(
                     // resolved cv::Stitcher mode so JS can surface it
                     // on the output preview + debug toast.
                     map.putString("stitchModeResolved", stitchModeResolved)
+                    map.putDouble("rRadians", rRadiansResolved)
+                    // Dev tuning readout — translation magnitude + the auto
+                    // decision ratio that drove panorama-vs-SCANS.
+                    map.putDouble("tMeters", tMetersResolved)
+                    map.putDouble("decisionRatio", decisionRatioResolved)
                     // 2026-06-15 (iOS parity) — the exact keyframe JPEG
                     // paths used for this stitch, so JS can re-stitch
                     // them ON DEMAND via refinePanorama (the high-level
@@ -875,36 +902,13 @@ class IncrementalStitcher(
         grayHeight: Int,
         grayStride: Int,
         onAccept: (targetPath: String) -> Boolean,
-        // 2026-05-21 (v0.3) — only required when batchKeyframeMode
-        // is false (the legacy hybrid/firstwins live-engine path,
-        // which feeds JPEG paths into addFrameAtPath for each ARCore
-        // frame).  Pass null when batchKeyframeMode is true; the
-        // batch path uses `grayData` + `onAccept` instead.  Modern
-        // callers prefer `nv21PixelData` below — `legacyJpegPath` is
-        // kept only as a defensive fallback for older call sites
-        // that have not yet been migrated.
-        legacyJpegPath: String? = null,
-        // F8.6 — pixel-data path for live engines.  When supplied
-        // (and `batchKeyframeMode == false`), takes precedence over
-        // `legacyJpegPath`: the live engine ingests via
-        // `addFramePixelData` (NV21 → BGR Mat in-process) instead of
-        // `addFrameAtPath` (JPEG decode round-trip).  Saves ~30-50 ms
-        // per accepted frame on a mid-tier device.  Pass null to use
-        // the legacy JPEG path.
-        //
-        // OWNERSHIP: wrapped in `TransferredNV21` (audit #4A,
-        // v0.10.0).  The wrapper enforces single-use: the engine
-        // calls `.takeOnce()` on the producer thread before
-        // dispatching to `workScope`; subsequent attempts to extract
-        // the bytes throw.  Callers MUST construct a fresh
-        // `TransferredNV21` per frame and MUST NOT hand the same
-        // instance to two consumers (e.g., a sync gate-eval + an
-        // async workScope.launch).  The Frame Processor plugin and
-        // the AR camera view both allocate fresh NV21 arrays per
-        // frame; the wrapper is a defensive-programming guard.
-        nv21PixelData: TransferredNV21? = null,
-        nv21PixelWidth: Int = 0,
-        nv21PixelHeight: Int = 0,
+        // 2026-06-16 (audit #8/L3) — the live-engine ingest params
+        // (legacyJpegPath / nv21PixelData / nv21PixelWidth/Height) were
+        // removed here.  The live engines were archived in 2026-06, so the
+        // only remaining path is batch-keyframe (always on), which ingests via
+        // `grayData` + `onAccept`.  The TransferredNV21 ownership wrapper had no
+        // live consumer (takeOnce() called nowhere — verified by grep) and is
+        // deleted along with these params.
     ) {
         // ── V16 batch-keyframe: AR-driven path ─────────────────────
         //
@@ -1213,21 +1217,6 @@ class IncrementalStitcher(
             grayWidth = width,
             grayHeight = height,
             grayStride = yRowStride,
-            // F8.6 — pass the already-packed NV21 so the live
-            // engine branch (hybrid / firstwins) can ingest via
-            // `addFramePixelData` instead of JPEG-decoding a
-            // separately-written path.  Batch-keyframe mode
-            // ignores these (it uses `grayData` + `onAccept`).
-            //
-            // v0.10.0 audit #4A — wrap in TransferredNV21 so the
-            // engine takes ownership exactly once on the producer
-            // thread (engine calls `.takeOnce()` before workScope).
-            // Misuse (handing this same instance to two consumers)
-            // throws at the second `.takeOnce()` site, not silently
-            // corrupting frames.
-            nv21PixelData = TransferredNV21(nv21Bytes),
-            nv21PixelWidth = width,
-            nv21PixelHeight = height,
             onAccept = { targetPath ->
                 // Synchronous JPEG encode via the existing
                 // YuvImageConverter (also used by RNSARCameraView's
@@ -1738,6 +1727,33 @@ class IncrementalStitcher(
     }
 
     /**
+     * Total physical RAM in MB.  Lets the DEV memory pill derive RAM-aware
+     * pressure bands instead of the iPhone-fixed 1500/2200 MB thresholds (which
+     * never trip on a 4 GB Android phone that jetsams ~1.3 GB — false comfort).
+     * Reads `_SC_PHYS_PAGES × _SC_PAGE_SIZE` (TOTAL + stable across runs, unlike
+     * the rate-limited ActivityManager path).  -1.0 on failure.
+     */
+    @ReactMethod
+    fun getDeviceTotalRamMB(promise: Promise) {
+        try {
+            val pages = android.system.Os.sysconf(android.system.OsConstants._SC_PHYS_PAGES)
+            val pageSize =
+                android.system.Os.sysconf(android.system.OsConstants._SC_PAGESIZE)
+            if (pages <= 0 || pageSize <= 0) {
+                promise.resolve(-1.0)
+                return
+            }
+            promise.resolve(pages.toDouble() * pageSize.toDouble() / (1024.0 * 1024.0))
+        } catch (t: Throwable) {
+            android.util.Log.w(
+                "IncrementalStitcher",
+                "getDeviceTotalRamMB: failed: ${t.message}",
+            )
+            promise.resolve(-1.0)
+        }
+    }
+
+    /**
      * Release the C++ KeyframeGate heap allocation when RN tears
      * down the bridge module (e.g. on a JS reload).  Without this,
      * each reload leaks ~100 bytes of native heap — small but
@@ -1928,6 +1944,24 @@ class IncrementalStitcher(
      *
      * Returns "panorama" or "scans" — never "auto".
      */
+    /**
+     * Result of [resolveStitchModeAuto]: the chosen mode PLUS the gyro rotation
+     * magnitude that drove the decision.  rRadians is surfaced to JS (the dev
+     * 3-tab preview shows it) so the panorama-vs-SCANS rotation threshold can be
+     * tuned from real captures.  rRadians is 0.0 only on the no-pose fallbacks
+     * (non-AR with no pose data) — there is no gyro-derived rotation to report.
+     */
+    private data class StitchModeResolution(
+        val mode: String,
+        val rRadians: Double,
+        // tMeters = translation magnitude (m) that fed the ratio; ratio = the
+        // tScore/(tScore+rScore) decision value (>=0.55 → SCANS). Surfaced to the
+        // dev readout so the panorama-vs-SCANS threshold can be tuned from real
+        // captures, alongside rRadians.
+        val tMeters: Double,
+        val ratio: Double,
+    )
+
     private fun resolveStitchModeAuto(
         firstPose: DoubleArray?,
         lastPose: DoubleArray?,
@@ -1935,14 +1969,16 @@ class IncrementalStitcher(
         // translation in METRES.  Used as a fallback when pose-derived
         // translation is 0 (non-AR mode).
         imuTranslationMetres: Double = 0.0,
-    ): String {
+    ): StitchModeResolution {
         if (firstPose == null || lastPose == null) {
             // No pose data at all — fall back on the IMU signal.  IMU
             // > 5 cm hints SCANS; everything else hints PANORAMA.
-            return if (imuTranslationMetres > 0.05) "scans" else "panorama"
+            return StitchModeResolution(
+                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0, 0.0, 0.0)
         }
         if (firstPose.size != 7 || lastPose.size != 7) {
-            return if (imuTranslationMetres > 0.05) "scans" else "panorama"
+            return StitchModeResolution(
+                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0, 0.0, 0.0)
         }
 
         // Translation magnitude (Euclidean, in metres) — pose-derived.
@@ -1962,11 +1998,7 @@ class IncrementalStitcher(
         // conventions; rotated by the pose quaternion gives the world-
         // frame forward direction.  Angle between the first and last
         // camera-forward vectors is the total rotation around any axis.
-        val fwdFirst = qrotForward(firstPose[3], firstPose[4], firstPose[5], firstPose[6])
-        val fwdLast = qrotForward(lastPose[3], lastPose[4], lastPose[5], lastPose[6])
-        val dot = (fwdFirst[0] * fwdLast[0] + fwdFirst[1] * fwdLast[1] + fwdFirst[2] * fwdLast[2])
-            .coerceIn(-1.0, 1.0)
-        val rRadians = kotlin.math.acos(dot)
+        val rRadians = rotationRadians(firstPose, lastPose)
 
         // Normalisation: 10 cm of translation ≈ 1 rad of rotation as
         // "equivalent magnitude" for the ratio.  Empirically: shelf
@@ -1977,7 +2009,7 @@ class IncrementalStitcher(
         val tScore = tMeters / 0.10
         val rScore = rRadians / 1.00
         val denom = tScore + rScore
-        if (denom <= 1e-9) return "panorama"  // no motion either way
+        if (denom <= 1e-9) return StitchModeResolution("panorama", rRadians, tMeters, 0.0)  // no motion
         val ratio = tScore / denom
 
         // 2026-06-15 — LOW-ROTATION GUARD.  The gyro rotation (rRadians) is
@@ -2000,7 +2032,51 @@ class IncrementalStitcher(
                 "ratio=${"%.3f".format(ratio)} " +
                 "rotGuard=$lowRotationGuard → $mode",
         )
-        return mode
+        return StitchModeResolution(mode, rRadians, tMeters, ratio)
+    }
+
+    /**
+     * 2026-06-16 — high-level warper decision tree (the pipeline is now ALWAYS
+     * high-level cv::Stitcher PANORAMA — useManualPipeline=false).  Warper is a
+     * pure function of (lens, pan direction); the rotation-vs-translation
+     * (ex-SCANS) distinction was DROPPED as redundant — at 1x the same
+     * direction-based warpers serve both, and 0.5x is always spherical.  Inputs:
+     *   orientation = capture hold ("landscape*" = Mode A vertical pan;
+     *                 "portrait*" = Mode B horizontal pan)
+     *   lens        = the EXPLICIT lens the user selected ("0.5x" ultra-wide |
+     *                 "1x" wide).  Reliable zoom signal (FOV-from-intrinsics was
+     *                 unreliable — multi-cam 0.5x reaches the ultra-wide by zoom
+     *                 without changing fx, and the non-AR path may supply fx=0).
+     *
+     *     0.5x ultra-wide          → spherical   (bounded both axes; any pan)
+     *     1x + Mode A (vertical)   → plane
+     *     1x + Mode B (horizontal) → cylindrical
+     *
+     * Quality-preferred warper; the C++ memory ladder force-falls to spherical
+     * (and downscales compositingResol) under pressure.
+     */
+    private fun pickHighLevelWarper(
+        orientation: String,
+        lens: String,
+    ): String {
+        if (lens == "0.5x") return "spherical"                // ultra-wide → always spherical
+        val verticalPanModeA = orientation.startsWith("landscape")
+        return if (verticalPanModeA) "plane" else "cylindrical"  // 1x: A→plane, B→cylindrical
+    }
+
+    /**
+     * Gyro rotation magnitude (radians) between two 7-element poses
+     * `[tx,ty,tz,qx,qy,qz,qw]` — the angle between the camera-forward vectors.
+     * Returns 0.0 if either pose is missing/malformed (non-AR with no pose).
+     * Shared by [resolveStitchModeAuto] and the finalize `rRadians` readout (DRY).
+     */
+    private fun rotationRadians(firstPose: DoubleArray?, lastPose: DoubleArray?): Double {
+        if (firstPose == null || lastPose == null) return 0.0
+        if (firstPose.size != 7 || lastPose.size != 7) return 0.0
+        val f = qrotForward(firstPose[3], firstPose[4], firstPose[5], firstPose[6])
+        val l = qrotForward(lastPose[3], lastPose[4], lastPose[5], lastPose[6])
+        val dot = (f[0] * l[0] + f[1] * l[1] + f[2] * l[2]).coerceIn(-1.0, 1.0)
+        return kotlin.math.acos(dot)
     }
 
     /**

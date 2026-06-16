@@ -97,7 +97,11 @@ double procRssMB() {
         * static_cast<double>(sysconf(_SC_PAGE_SIZE)) / (1024.0 * 1024.0);
 }
 
-void purgeNativeAllocator() {
+// Returns the POST-purge RSS in MB (the leak-plateau "floor"), or -1 when the
+// diagnostic reads are gated off.  The mallopt(M_PURGE) CALL is UNCONDITIONAL —
+// it's the leak fix; only its before/after READS + the log are gated (3A), so a
+// release build pays nothing while debug builds surface memFloor.
+double purgeNativeAllocator(bool profiling) {
     using MalloptFn = int (*)(int, int);
     // Resolve mallopt at runtime (API-26 symbol; minSdk 24).  Prefer an explicit
     // libc.so handle — RTLD_DEFAULT from a dlopen'd .so doesn't always reach
@@ -108,8 +112,9 @@ void purgeNativeAllocator() {
         if (s == nullptr) s = dlsym(RTLD_DEFAULT, "mallopt");
         return reinterpret_cast<MalloptFn>(s);
     }();
-    const double before = procRssMB();
-    if (fn != nullptr) fn(M_PURGE, 0);
+    const double before = profiling ? procRssMB() : -1.0;
+    if (fn != nullptr) fn(M_PURGE, 0);          // the fix — always runs
+    if (!profiling) return -1.0;
     const double after = procRssMB();
     // Diagnostic: shows whether mallopt resolved and how much RSS the purge
     // actually returned to the OS.  If mallopt=MISSING → dlsym failed; if
@@ -117,6 +122,7 @@ void purgeNativeAllocator() {
     // leak) and M_PURGE can't help.
     LOGI("[memstat] purge: mallopt=%s rss %.1f -> %.1f MB",
          (fn != nullptr) ? "ok" : "MISSING", before, after);
+    return after;  // memFloor — the post-purge plateau metric
 }
 
 }  // namespace
@@ -189,6 +195,9 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
     // re-arms the manual pipeline's dynamic plane→spherical fallback/divergence
     // switch (they only fire when warperType != "spherical").
     cfg.useManualPipeline = (useManualPipeline == JNI_TRUE);
+    // 2026-06-16 — memory profiling (DEV).  Gated by the compile flag (debug-on,
+    // release-off); Android leaves memProbeFn null so rss_mb() uses /proc.
+    cfg.enableMemoryProfiling = (RNIS_MEMORY_PROFILING != 0);
     if (cfg.warperType.empty()) cfg.warperType = "spherical";
     if (cfg.registrationResolMP <= 0.0) {
         cfg.registrationResolMP = 0.6;
@@ -210,13 +219,49 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
 
     const std::string outPath = jstring_to_string(env, outputPath);
 
-    retailens::StitchResult result = retailens::stitchFramePaths(
-        paths, outPath, cfg, &androidLogBridge);
+    // 2026-06-16 (review #1) — backstop try/catch at the JNI C-ABI boundary.
+    // stitchFramePaths now has its own catch ladders (high-level + manual), so
+    // this should never fire — but a C++ exception crossing into JNI is UB
+    // (std::terminate/SIGABRT), so we NEVER let one through: convert any escape
+    // into a Java exception the Kotlin layer can catch.
+    retailens::StitchResult result;
+    try {
+        result = retailens::stitchFramePaths(
+            paths, outPath, cfg, &androidLogBridge);
+    } catch (const std::exception& e) {
+        throw_runtime(env, std::string("native stitch crashed: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        throw_runtime(env, "native stitch crashed (unknown exception)");
+        return nullptr;
+    }
 
     // Return the stitch's freed native memory to the OS so the native-heap RSS
     // baseline doesn't ratchet up ~10-15 MB per capture (see purgeNativeAllocator).
-    // Applies to BOTH pipelines (they share the OpenCV/bionic allocator).
-    purgeNativeAllocator();
+    // Applies to BOTH pipelines (they share the OpenCV/bionic allocator).  The
+    // post-purge RSS is the leak-plateau "floor" — append it to debugSummary so
+    // it rides the existing nativeLastDebugSummary() path to JS (no new bridge).
+    const double memFloor = purgeNativeAllocator(RNIS_MEMORY_PROFILING != 0);
+    if ((RNIS_MEMORY_PROFILING != 0) && memFloor >= 0.0) {
+        char fbuf[40];
+        std::snprintf(fbuf, sizeof(fbuf), ";memFloor=%.1f", memFloor);
+        if (!result.debugSummary.empty()) result.debugSummary += fbuf;
+        // 2026-06-16 — one authoritative per-stitch memory line to logcat (the
+        // sampler peak otherwise only rides debugSummary to the on-screen
+        // overlay).  pipe/warp/mode lets each line be attributed to a preview
+        // tab: pipe=manual warp=plane mode=panorama = "As captured" primary;
+        // pipe=highlevel warp=plane = HL·Plane; warp=spherical = HL·Sph;
+        // mode=scans = SCANS.  Grep `[memstat] record:` to harvest all of them.
+        LOGI("[memstat] record: pipe=%s warp=%s mode=%s before=%.1f peak=%.1f "
+             "after=%.1f floor=%.1f src=%s frames=%d/%d",
+             cfg.useManualPipeline ? "manual" : "highlevel",
+             cfg.warperType.c_str(),
+             (result.stitchModeUsed == retailens::StitchMode::Scans)
+                 ? "scans" : "panorama",
+             result.memBeforeMB, result.memPeakMB, result.memAfterMB, memFloor,
+             result.memSource.c_str(),
+             result.framesIncluded, result.framesRequested);
+    }
 
     if (!result.success) {
         const std::string msg = "Stitch failed: " + result.errorMessage +

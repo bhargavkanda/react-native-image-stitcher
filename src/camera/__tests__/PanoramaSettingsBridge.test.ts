@@ -59,16 +59,16 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.captureSource).toBe('ar');
 
     // BatchStitcherSettings
-    expect(cfg.stitchMode).toBe('panorama'); // v0.16 — default flipped auto→panorama
-    expect(cfg.warperType).toBe('spherical');
+    expect(cfg.stitchMode).toBe('auto'); // v0.16 — default reverted to auto (matches v0.15.2)
+    expect(cfg.warperType).toBe('plane'); // v0.16 — default reverted to plane (matches v0.15.2)
     expect(cfg.blenderType).toBe('multiband');
     expect(cfg.seamFinderType).toBe('graphcut');
     expect(cfg.enableMaxInscribedRectCrop).toBe(false);
 
     // FrameSelectionSettings
     expect(cfg.frameSelectionMode).toBe('flow-based');
-    expect(cfg.keyframeMaxCount).toBe(8);
-    expect(cfg.keyframeOverlapThreshold).toBe(0.15);
+    expect(cfg.keyframeMaxCount).toBe(6);
+    expect(cfg.keyframeOverlapThreshold).toBe(0.20);
     expect(cfg.maxKeyframeIntervalMs).toBe(1500);
 
     // FlowGateSettings (flow is defined in the default)
@@ -96,8 +96,8 @@ describe('panoramaSettingsToNativeConfig', () => {
     const cfg = panoramaSettingsToNativeConfig(noFlow);
 
     expect(cfg.frameSelectionMode).toBe('flow-based');
-    expect(cfg.keyframeMaxCount).toBe(8);
-    expect(cfg.keyframeOverlapThreshold).toBe(0.15);
+    expect(cfg.keyframeMaxCount).toBe(6);
+    expect(cfg.keyframeOverlapThreshold).toBe(0.20);
 
     // Every flow.* native key present, matching DEFAULT_FLOW_GATE_SETTINGS.
     expect(cfg.flowNoveltyPercentile).toBe(DEFAULT_FLOW_GATE_SETTINGS.noveltyPercentile);

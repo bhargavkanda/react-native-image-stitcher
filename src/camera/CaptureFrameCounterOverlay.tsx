@@ -36,6 +36,14 @@ import { GUIDANCE_COUNTDOWN, GUIDANCE_PILL, GUIDANCE_TOKENS } from './guidanceTo
 import { type DeviceOrientation } from './useDeviceOrientation';
 
 
+/**
+ * Extra distance (px) to drop the counter from the user-top in landscape so it
+ * clears the pan how-to coach-mark's bouncing arrow.  Landscape only; portrait
+ * is unaffected.  72 px (the symmetric lift) over-cleared, so this is smaller.
+ */
+const COUNTER_LANDSCAPE_EXTRA_INSET = 40;
+
+
 export interface CaptureFrameCounterOverlayProps {
   /** Show / hide.  Driven by the host while a capture is recording. */
   visible: boolean;
@@ -63,9 +71,15 @@ export function CaptureFrameCounterOverlay({
   // briefly report the cap-th accept before the parent finalizes.
   const k = Math.max(0, Math.min(framesCaptured, framesMax));
 
+  // 2026-06-16 — in LANDSCAPE, push the counter further from the user-top so it
+  // clears the pan how-to coach-mark's bouncing amber arrow, which sits near the
+  // top there and otherwise overlaps it.  Portrait keeps the standard inset.
+  // Tune COUNTER_LANDSCAPE_EXTRA_INSET if the gap is too small / too large.
+  const isLandscape =
+    orientation === 'landscape-left' || orientation === 'landscape-right';
   const { container, rotate } = topCenterForOrientation(
     orientation,
-    GUIDANCE_COUNTDOWN.inset,
+    GUIDANCE_COUNTDOWN.inset + (isLandscape ? COUNTER_LANDSCAPE_EXTRA_INSET : 0),
   );
 
   return (

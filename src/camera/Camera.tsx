@@ -224,6 +224,19 @@ export type CameraCaptureResult =
        */
       stitchModeResolved?: 'panorama' | 'scans';
       /**
+       * 2026-06-15 (DEV) — gyro rotation magnitude of the capture, in radians.
+       * Shown on the dev preview so the panorama-vs-SCANS rotation threshold can
+       * be tuned. `0` = no pose-derived rotation signal (non-AR with no poses).
+       */
+      rRadians?: number;
+      /**
+       * 2026-06-16 (DEV) — translation magnitude (m) + auto decision ratio
+       * (`>=0.55` → SCANS) that drove panorama-vs-SCANS. Shown on the dev
+       * readout alongside `rRadians` to tune the threshold from real captures.
+       */
+      tMeters?: number;
+      decisionRatio?: number;
+      /**
        * 2026-06-14 (DEV overlay) — semicolon-separated `key=value` trace of the
        * stitcher's runtime choices (pipe/warp/route/seam/blend) for this
        * output.  Shown on the preview in __DEV__.  iOS only for now.
@@ -1251,64 +1264,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
     warnings: CaptureWarning[];
   } | null>(null);
 
-  // 2026-06-15 — ON-DEMAND high-level preview.  Manual is the default/eager
-  // output; when the user switches to the "high-level" tab in the preview we
-  // re-stitch the SAME captured keyframes through stock cv::Stitcher via
-  // `refinePanorama` (useManualPipeline:false).  Resolves with the high-level
-  // JPEG's file:// uri AND its OWN DEV-overlay recipe (so the preview pill shows
-  // the high-level recipe — pipe=highlevel;… — while that tab is viewed, not the
-  // manual primary's recipe), or null when unavailable (no keyframe paths —
-  // e.g. Android — or the stitch failed).  Computed lazily so it costs nothing
-  // unless the user actually asks for it.
-  const requestHighLevelAlt = useCallback(async (): Promise<{
-    uri: string;
-    debugInfo: string;
-  } | null> => {
-    const pending = cropPending;
-    const kf = pending?.captureResultObj.keyframePaths;
-    if (!pending || !kf || kf.length < 2) return null;
-    const native = getIncrementalNativeModule();
-    if (!native) return null;
-    const outputPath = `${toBareFilePath(pending.uri).replace(/\.jpg$/i, '')}-highlevel.jpg`;
-    try {
-      const r = await native.refinePanorama({
-        framePaths: kf,
-        outputPath,
-        config: {
-          useManualPipeline: false,
-          warperType: 'spherical',
-          stitchMode: 'panorama',
-          // Match the manual output's rotation — without this the high-level
-          // re-stitch bakes "portrait" (no rotation) and comes out sideways.
-          captureOrientation: pending.captureResultObj.captureOrientation as
-            | 'portrait'
-            | 'portrait-upside-down'
-            | 'landscape-left'
-            | 'landscape-right'
-            | undefined,
-        },
-      });
-      // Plain file:// uri — the path is unique per capture and computed once, so
-      // no cache-bust here (the accept handler adds one when emitting).  The
-      // DEV pill text is the HIGH-LEVEL stitch's own recipe (only the fields
-      // IncrementalRefineResult carries; buildStitchDebugInfo tolerates the rest
-      // being absent).
-      return {
-        uri: toFileUri(r.panoramaPath),
-        debugInfo: buildStitchDebugInfo({
-          debugSummary: r.debugSummary,
-          finalConfidenceThresh: r.finalConfidenceThresh,
-          framesIncluded: r.framesIncluded,
-          framesRequested: r.framesRequested,
-          width: r.width,
-          height: r.height,
-        }),
-      };
-    } catch {
-      return null;
-    }
-  }, [cropPending]);
-
   // 2026-05-22 (audit F9 + F3) — debug stitch-stats toast.  Hook
   // exposes an imperative API; we fire `showResult(finalizeResult)`
   // on every successful finalize when settings.debug is on (gated
@@ -2086,6 +2041,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         90, // default JPEG quality
         deviceOrientation,
         imuTotalTranslationM,
+        lens, // 2026-06-16 — explicit '1x'|'0.5x' for the high-level warper tree
       );
       if (
         typeof result.framesRequested === 'number'
@@ -2125,6 +2081,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
         finalConfidenceThresh: result.finalConfidenceThresh ?? -1,
         durationMs: Date.now() - (recordingStartedAt ?? Date.now()),
         stitchModeResolved: result.stitchModeResolved,
+        rRadians: result.rRadians,
+        tMeters: result.tMeters,
+        decisionRatio: result.decisionRatio,
         debugSummary: result.debugSummary,
         keyframePaths: result.batchKeyframePaths,
         captureOrientation: result.captureOrientation,
@@ -2228,6 +2187,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
     isNonAR,
     imuGate,
     stitchToast,
+    // 2026-06-16 — the finalize passes `lens` (the high-level warper tree's zoom
+    // signal); without it here the closure would send a STALE lens if the user
+    // switched 1x↔0.5x after this callback was last memoized.
+    lens,
     // feature/pano-ux-guidance — the release also tears down the
     // pan-duration timer + a pending rotate-gate, and decides whether to
     // route the result through the crop editor.
@@ -2864,18 +2827,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
-        // 2026-06-15 — manual is the default/eager output.  The high-level tab
-        // is ON DEMAND: RectCropPreview calls onRequestAlt() (which re-stitches
-        // the captured keyframes via cv::Stitcher) only when the user switches
-        // to it.  DEBUG-ONLY: it's a pipeline-comparison tool (dev-jargon
-        // "Manual"/"High-level" labels), gated behind `settings.debug` like the
-        // rest of the diagnostic UI.  Also requires keyframePaths, so it only
-        // appears where it can run (iOS); Android returns no paths → no tab.
-        onRequestAlt={
-          settings.debug && cropPending?.captureResultObj.keyframePaths?.length
-            ? requestHighLevelAlt
-            : undefined
-        }
         initialRect={cropPending?.initialRect}
         warnings={cropPending?.warnings.map((w) => w.message) ?? []}
         showCropControls={rectCrop}

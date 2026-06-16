@@ -683,6 +683,23 @@ export interface IncrementalFinalizeResult {
    */
   stitchModeResolved?: 'panorama' | 'scans';
   /**
+   * 2026-06-15 (DEV) — gyro rotation magnitude of the capture, in RADIANS
+   * (angle between the first and last accepted keyframe camera-forward vectors).
+   * Surfaced so a dev tool can display it and tune the panorama-vs-SCANS
+   * rotation threshold from real captures. `0` when there is no pose-derived
+   * rotation signal (non-AR with no poses) — not necessarily "no rotation".
+   */
+  rRadians?: number;
+  /**
+   * 2026-06-16 (DEV) — translation magnitude (metres) and the auto decision
+   * ratio (`tScore/(tScore+rScore)`, `>=0.55` → SCANS) that drove the
+   * panorama-vs-SCANS choice. Surfaced alongside `rRadians` so a dev tool can
+   * display the full decision inputs and tune the threshold from real captures.
+   * `0` when there is no motion signal (non-AR with no poses / no movement).
+   */
+  tMeters?: number;
+  decisionRatio?: number;
+  /**
    * 2026-06-14 (DEV overlay) — a semicolon-separated `key=value` trace of the
    * stitcher's RUNTIME choices for this output, e.g.
    * `"pipe=manual;warp=spherical;route=batch;seam=graphcut;blend=multiband"`.
@@ -897,6 +914,14 @@ interface NativeIncrementalModule {
      * are zero, matching legacy behaviour.
      */
     imuTranslationMetres?: number;
+    /**
+     * 2026-06-16 — the explicit lens the user selected (`'1x'` | `'0.5x'`).
+     * The reliable zoom signal for the high-level warper tree: `'0.5x'`
+     * (ultra-wide) → spherical warper.  Replaces deriving zoom from the
+     * intrinsics FOV (unreliable on multi-cam 0.5x / non-AR fx=0).  Omitted →
+     * treated as `'1x'`.
+     */
+    lens?: string;
   }): Promise<IncrementalFinalizeResult>;
   cancel(): Promise<{ ok: true }>;
   getState(): Promise<IncrementalState | null>;
@@ -922,6 +947,10 @@ interface NativeIncrementalModule {
    *  one-true-number for "how close are we to OOM?".  Returns -1
    *  on task_info failure (very rare).  Resolves immediately. */
   getMemoryFootprintMB(): Promise<number>;
+  /** 2026-06-16 — total physical RAM in MB.  Lets the DEV memory pill derive
+   *  RAM-aware pressure bands instead of iPhone-fixed thresholds.  -1 on
+   *  failure.  Resolves immediately. */
+  getDeviceTotalRamMB?(): Promise<number>;
   /**
    * 2026-05-16 — realtime+batch fusion API foundation.  Run the
    * shared C++ `cv::Stitcher` pipeline over a caller-supplied list

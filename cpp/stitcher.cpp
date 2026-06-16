@@ -30,17 +30,23 @@
 #include <opencv2/stitching/warpers.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cfloat>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
 #include "warp_guard.hpp"
+
+// RNIS_MEMORY_PROFILING is defined in stitcher.hpp (shared across the 3 native
+// translation units).  kMemProfilingCompiled exposes it as a constexpr below.
 
 
 namespace retailens {
@@ -69,12 +75,21 @@ void log_error(const LogFn& logFn, const char* tag, const char* fmt, ...) {
     logFn(2, tag, buf);
 }
 
-// Read /proc/self/statm to get RSS in MB.  Cheap (~20 µs).  Used at
-// pipeline phase boundaries to correlate logged peak memory with the
-// staging-resolution + retry decisions.  Returns -1 on read failure
-// (e.g., procfs not mounted — never happens on iOS/Android but we
-// guard for portability).
-double rss_mb() {
+// Compile-time gate as a constexpr (so dead branches fold away in release).
+constexpr bool kMemProfilingCompiled = (RNIS_MEMORY_PROFILING != 0);
+
+// Per-stitch resident-memory probe, installed for the duration of a stitch by
+// MemProbeScope below.  Lets rss_mb() (and therefore every OOM guard, phase log,
+// the peak sampler and the per-stitch record) read the platform's real source
+// without threading `config` through dozens of call sites.  Calls are serialized
+// (stitchFramePaths contract), and the sampler thread only reads it within the
+// scope's lifetime, so a plain file-static is safe.
+std::function<double()> g_memProbe;
+
+// Read /proc/self/statm to get RSS in MB.  Cheap (~20 µs).  Returns -1 when
+// procfs is absent — which is the case on iOS (no /proc), so this is the Android
+// path; iOS supplies g_memProbe instead.
+double rss_mb_proc() {
     FILE* f = std::fopen("/proc/self/statm", "r");
     if (f == nullptr) return -1.0;
     long size_pages = 0, resident_pages = 0;
@@ -84,6 +99,80 @@ double rss_mb() {
     long page_bytes = sysconf(_SC_PAGESIZE);
     return (double) resident_pages * (double) page_bytes / (1024.0 * 1024.0);
 }
+
+// Effective resident-memory reader (MB).  Prefers the installed probe (iOS
+// phys_footprint), else /proc (Android).  -1 when neither is available.  Used at
+// pipeline phase boundaries + by the OOM guards — making the guards work on iOS,
+// where they previously got -1 (the runtime-pressure router was dead).
+double rss_mb() {
+    if (g_memProbe) {
+        const double v = g_memProbe();
+        if (v >= 0.0) return v;
+    }
+    return rss_mb_proc();
+}
+
+// Which source rss_mb() is currently resolving to — for the per-stitch record.
+const char* mem_source_label() {
+    if (g_memProbe && g_memProbe() >= 0.0) return "phys_footprint";
+    if (rss_mb_proc() >= 0.0) return "rss";
+    return "";
+}
+
+// RAII: install/uninstall the resident-memory probe for one stitch.
+struct MemProbeScope {
+    explicit MemProbeScope(std::function<double()> probe) { g_memProbe = std::move(probe); }
+    ~MemProbeScope() { g_memProbe = nullptr; }
+    MemProbeScope(const MemProbeScope&) = delete;
+    MemProbeScope& operator=(const MemProbeScope&) = delete;
+};
+
+// DRY [memstat] phase log — gated, and (unlike the old inline form) skips the
+// rss_mb() read entirely when profiling is off, so release pays nothing.
+void log_memstat(const LogFn& logFn, bool enabled, const char* phase) {
+    if (!enabled || !logFn) return;
+    char buf[80];
+    std::snprintf(buf, sizeof(buf), "phase=%s rss=%.1f MB", phase, rss_mb());
+    logFn(0, "[memstat]", buf);
+}
+
+// Background peak-memory sampler.  Wakes every ~50 ms during a stitch and tracks
+// the max resident memory into `peak` — the ONLY way to catch the transient
+// warp-all + GraphCut + MultiBand spike, which the phase-boundary reads (taken
+// after the blender frees its pyramids) systematically miss.  RAII: the thread
+// starts in the ctor (when active) and is joined in stop()/dtor.  It is a pure
+// memory reader, not OpenCV work, so cv::setNumThreads(1) does not constrain it.
+class PeakSampler {
+public:
+    PeakSampler(bool active, std::atomic<double>& peak) : peak_(peak), active_(active) {
+        if (!active_) return;
+        thread_ = std::thread([this]() {
+            while (!stop_.load(std::memory_order_relaxed)) {
+                const double v = rss_mb();
+                double cur = peak_.load(std::memory_order_relaxed);
+                while (v > cur &&
+                       !peak_.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {}
+                // Sleep in 10 ms slices so stop() is responsive (~50 ms cadence).
+                for (int i = 0; i < 5 && !stop_.load(std::memory_order_relaxed); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        });
+    }
+    void stop() {
+        if (!active_) return;
+        stop_.store(true, std::memory_order_relaxed);
+        if (thread_.joinable()) thread_.join();
+        active_ = false;
+    }
+    ~PeakSampler() { stop(); }
+    PeakSampler(const PeakSampler&) = delete;
+    PeakSampler& operator=(const PeakSampler&) = delete;
+private:
+    std::atomic<double>& peak_;
+    std::atomic<bool>    stop_{false};
+    std::thread          thread_;
+    bool                 active_;
+};
 
 // Total physical RAM in MB, read natively.  The Android JNI bridge sets no
 // availableRamMB, so without this a 6 GB device is mis-treated as the 4 GB
@@ -493,81 +582,139 @@ StitchResult stitchFramePaths(
     const StitchConfig&             config,
     LogFn                           logFn)
 {
-    // 2026-05-22 (audit follow-up) — mode-fallback retry.  When the
-    // configured stitchMode produces degenerate camera params (the
-    // "warpRoi too large" crash users hit on translation-heavy
-    // captures stitched as PANORAMA, or low-texture inputs stitched
-    // as SCANS), automatically retry once with the OPPOSITE mode
-    // before giving up.  Symmetric: PANORAMA-then-SCANS or
-    // SCANS-then-PANORAMA depending on configured mode.
+    // ── v0.16.1 — native-heap leak fix (one-time) — ANDROID ONLY ────────
+    // The ~7-9 MB/stitch LIVE native-heap creep is OpenCV core's OWN pooled
+    // scratch — TBB per-worker TLS — re-primed as the calling thread migrates
+    // across the Kotlin Dispatchers.Default pool.  It is NOT app memory (every
+    // cv::Mat below is RAII / explicitly .release()'d) and NOT reclaimable by
+    // mallopt(M_PURGE) (those pools aren't serviced by bionic malloc).
+    // setNumThreads(1) removes the TBB worker pool so no per-worker scratch can
+    // accumulate.  Stitches are serialized and the keyframes are small, so the
+    // single-threaded cost is minor.  C++11 static-init is thread-safe; runs once.
     //
-    // Why this is safe to enable unconditionally:
-    //   - The retry only fires on a failed attempt (no perf hit on
-    //     happy paths).
-    //   - Both modes share the load-images and write-output stages,
-    //     so the per-frame I/O cost isn't duplicated — only the
-    //     estimator/BA/warp middle is re-run.
-    //   - Result reflects whichever mode succeeded (returned via
-    //     StitchResult.stitchModeUsed, populated below).
-    auto runOnce = [&](StitchMode modeOverride) -> StitchResult {
+    // 2026-06-16 (audit) — ANDROID-GATED.  The prebuilt iOS opencv2.xcframework
+    // uses the GCD parallel backend (NOT TBB — getBuildInformation reads
+    // "Parallel framework: GCD"), so there is no TBB pool to remove; pinning to
+    // 1 thread there is pure cost (serialized ORB/matcher/warp/blend + a
+    // single-core per-frame KeyframeGate) for ZERO memory benefit.  Recovering
+    // iOS's multi-core path.  setUseIPP(false) was dropped entirely — IPP is
+    // x86-only, a no-op on arm64 (both Android NDK and iOS).
+#if defined(__ANDROID__)
+    static const bool s_cvTuned = []() {
+        cv::setNumThreads(1);
+        return true;
+    }();
+    (void)s_cvTuned;
+#endif
+
+    // ── 2026-06-16 — per-stitch memory profiling (DEV; gated) ───────────
+    // Install the resident-memory probe (iOS phys_footprint; null on Android →
+    // /proc) for the whole stitch — including the retry + the high-level/manual
+    // impls below — so the OOM guards, phase logs, peak sampler + record all read
+    // the right source.  The sampler runs across both attempts (peak = the worse
+    // of the two, which is the conservative OOM number).  `finish()` stops the
+    // sampler + stamps the record onto whichever result we return.
+    const bool memProfiling = kMemProfilingCompiled && config.enableMemoryProfiling;
+    MemProbeScope memProbe(config.memProbeFn);
+    const std::string memSource =
+        memProfiling ? std::string(mem_source_label()) : std::string();
+    const double memBefore = memProfiling ? rss_mb() : -1.0;
+    std::atomic<double> peakMB{ memBefore };
+    PeakSampler sampler(memProfiling, peakMB);
+    auto finish = [&](StitchResult r) -> StitchResult {
+        sampler.stop();
+        if (memProfiling) {
+            const double memAfter = rss_mb();
+            r.memBeforeMB = memBefore;
+            r.memAfterMB  = memAfter;
+            r.memPeakMB   = std::max(peakMB.load(), std::max(memBefore, memAfter));
+            r.memSource   = memSource;
+            // memFloorMB stays -1; the platform bridge fills it after its
+            // post-stitch reclaim (Android mallopt(M_PURGE) / iOS settle read).
+            char mbuf[96];
+            std::snprintf(mbuf, sizeof(mbuf),
+                          "memBefore=%.1f;memPeak=%.1f;memAfter=%.1f;memSrc=%s",
+                          r.memBeforeMB, r.memPeakMB, r.memAfterMB, memSource.c_str());
+            if (!r.debugSummary.empty()) r.debugSummary += ";";
+            r.debugSummary += mbuf;
+        }
+        return r;
+    };
+
+    // 2026-06-16 — TWO-BRANCH fallback retry (only fires on a retryable failure;
+    // no happy-path cost; each attempt is a full independent run — memory does
+    // NOT stack, RAII frees between attempts):
+    //
+    //   HIGH-LEVEL caller (Android default, useManualPipeline=false): retry once
+    //     with the SPHERICAL warper — bounds the canvas on both axes (lower peak
+    //     ~16% measured + rescues a marooned plane/cylindrical warp).
+    //   MANUAL caller (iOS pre-Phase-2, useManualPipeline=true): the OLD
+    //     PANORAMA↔SCANS mode-fallback is PRESERVED so iOS does not regress until
+    //     its bridge is flipped to high-level (review #3/#4).  The dispatcher
+    //     guard routes SCANS→high-level affine; PANORAMA→manual (+ its own
+    //     plane→spherical self-rescue).
+    //
+    // PreStitchMemoryAbort is excluded from worthRetrying (a headroom abort is
+    // independent of warper/mode — retrying won't help).
+    auto runOnce = [&](StitchMode modeOverride,
+                       const std::string& warperOverride) -> StitchResult {
         StitchConfig cfg = config;
         cfg.stitchMode = modeOverride;
-        // SCANS needs the COHERENT affine pipeline (AffineBestOf2NearestMatcher
-        // → AffineBasedEstimator → BundleAdjusterAffinePartial → AffineWarper),
-        // which only the high-level cv::Stitcher provides — the manual pipeline
-        // is homography-only (an affine matcher was tried + reverted in fix-11
-        // for incoherence).  So force the high-level path for any SCANS attempt
-        // (primary or fallback); PANORAMA keeps the host's pipeline choice
-        // (manual by default — the proven-robust wide-pan path).
-        if (modeOverride == StitchMode::Scans) {
-            cfg.useManualPipeline = false;
-        }
+        if (!warperOverride.empty()) cfg.warperType = warperOverride;
         return stitchFramePathsImpl_(framePaths, outputPath, cfg, logFn);
     };
-    StitchResult firstAttempt = runOnce(config.stitchMode);
+    StitchResult firstAttempt = runOnce(config.stitchMode, std::string());
+    firstAttempt.stitchModeUsed = config.stitchMode;
     if (firstAttempt.errorCode == StitchErrorCode::Ok) {
-        firstAttempt.stitchModeUsed = config.stitchMode;
-        return firstAttempt;
+        return finish(firstAttempt);
     }
-    // First attempt failed.  Try the opposite mode unless the error
-    // is something the opposite mode wouldn't fix (e.g. invalid
-    // argument count, file-read failure, OOM).
-    bool worthRetrying =
+    const bool worthRetrying =
         firstAttempt.errorCode == StitchErrorCode::UnknownCvException
         || firstAttempt.errorCode == StitchErrorCode::HomographyEstimationFailed
         || firstAttempt.errorCode == StitchErrorCode::CameraParamsAdjustFailed
         || firstAttempt.errorCode == StitchErrorCode::WarpFailed
-        || firstAttempt.errorCode == StitchErrorCode::EmptyPanorama;
+        || firstAttempt.errorCode == StitchErrorCode::EmptyPanorama
+        || firstAttempt.errorCode == StitchErrorCode::LowQualityStitch;
     if (!worthRetrying) {
-        firstAttempt.stitchModeUsed = config.stitchMode;
-        return firstAttempt;
+        return finish(firstAttempt);
     }
-    StitchMode fallbackMode =
-        (config.stitchMode == StitchMode::Panorama) ? StitchMode::Scans
-                                                    : StitchMode::Panorama;
-    log_info(logFn, "[stitch-fallback]",
-             "primary mode (%s) failed with code=%d msg=%s — retrying with %s",
-             config.stitchMode == StitchMode::Scans ? "scans" : "panorama",
-             static_cast<int>(firstAttempt.errorCode),
-             firstAttempt.errorMessage.c_str(),
-             fallbackMode == StitchMode::Scans ? "scans" : "panorama");
-    StitchResult secondAttempt = runOnce(fallbackMode);
-    if (secondAttempt.errorCode == StitchErrorCode::Ok) {
-        secondAttempt.stitchModeUsed = fallbackMode;
+    // HIGH-LEVEL: spherical warper rescue.
+    if (!config.useManualPipeline
+        && config.stitchMode == StitchMode::Panorama
+        && config.warperType != "spherical") {
         log_info(logFn, "[stitch-fallback]",
-                 "fallback mode (%s) succeeded",
-                 fallbackMode == StitchMode::Scans ? "scans" : "panorama");
-        return secondAttempt;
+                 "high-level warper (%s) failed code=%d (%s) — retrying spherical",
+                 config.warperType.c_str(),
+                 static_cast<int>(firstAttempt.errorCode),
+                 firstAttempt.errorMessage.c_str());
+        StitchResult sph = runOnce(config.stitchMode, "spherical");
+        sph.stitchModeUsed = config.stitchMode;
+        if (sph.errorCode == StitchErrorCode::Ok) {
+            log_info(logFn, "[stitch-fallback]", "spherical rescue succeeded");
+            return finish(sph);
+        }
+        log_info(logFn, "[stitch-fallback]",
+                 "spherical rescue also failed code=%d — returning primary error",
+                 static_cast<int>(sph.errorCode));
+        return finish(firstAttempt);
     }
-    // Both attempts failed.  Return the FIRST attempt's error (it's
-    // what the operator's chosen mode produced — more useful for
-    // diagnosis than the fallback's failure).
-    log_info(logFn, "[stitch-fallback]",
-             "fallback mode (%s) also failed with code=%d — returning primary error",
-             fallbackMode == StitchMode::Scans ? "scans" : "panorama",
-             static_cast<int>(secondAttempt.errorCode));
-    firstAttempt.stitchModeUsed = config.stitchMode;
-    return firstAttempt;
+    // MANUAL: preserved opposite-mode fallback (iOS no-regression).
+    if (config.useManualPipeline) {
+        const StitchMode fallbackMode =
+            (config.stitchMode == StitchMode::Panorama) ? StitchMode::Scans
+                                                        : StitchMode::Panorama;
+        log_info(logFn, "[stitch-fallback]",
+                 "manual primary mode (%s) failed code=%d — retrying %s",
+                 config.stitchMode == StitchMode::Scans ? "scans" : "panorama",
+                 static_cast<int>(firstAttempt.errorCode),
+                 fallbackMode == StitchMode::Scans ? "scans" : "panorama");
+        StitchResult secondAttempt = runOnce(fallbackMode, std::string());
+        if (secondAttempt.errorCode == StitchErrorCode::Ok) {
+            secondAttempt.stitchModeUsed = fallbackMode;
+            return finish(secondAttempt);
+        }
+    }
+    return finish(firstAttempt);
 }
 
 // 2026-05-22 (audit follow-up) — renamed inner entry point so the
@@ -584,7 +731,14 @@ static StitchResult stitchFramePathsImpl_(
     // useManualPipeline for the tradeoffs.  Routing here keeps the
     // call-site signature identical so existing bridges (iOS Obj-C++,
     // Android JNI) don't need to know which path runs internally.
-    if (config.useManualPipeline) {
+    //
+    // 2026-06-16 — SCANS always uses the high-level pipeline: the manual path is
+    // homography-only (no affine matcher/estimator/warper), so SCANS+manual
+    // would silently run a homography stitch.  The old mode-fallback enforced
+    // this in runOnce; now that runOnce is warper-only, enforce it here so a
+    // not-yet-migrated caller passing stitchMode=scans + useManualPipeline=true
+    // (e.g. iOS pre-Phase-2) still gets the correct affine SCANS path.
+    if (config.useManualPipeline && config.stitchMode != StitchMode::Scans) {
         StitchResult r =
             stitchFramePathsManual(framePaths, outputPath, config, logFn);
         // 2026-06-15 — AUTO SPHERICAL FALLBACK.  The manual pipeline defaults to
@@ -614,6 +768,16 @@ static StitchResult stitchFramePathsImpl_(
     StitchResult result;
     result.framesRequested = static_cast<int32_t>(framePaths.size());
 
+    // 2026-06-16 (review #1) — outer crash-catch ladder over the WHOLE high-level
+    // body.  Now that high-level is the default pipeline, an OOM-class throw must
+    // NOT escape: cv::Stitcher PANORAMA internals (MultiBand pyramids, GraphCut,
+    // STL vectors) can throw std::bad_alloc (NOT a cv::Exception, so the narrow
+    // inner catch(cv::Exception&) misses it), and the post-stitch clone/crop/bake
+    // ops can throw cv::Exception(StsNoMem) OUTSIDE the inner catches — either
+    // would cross the JNI C-ABI → std::terminate/SIGABRT.  Mirror the manual
+    // path's ladder so any throw becomes a clean StitchResult error (which also
+    // makes the spherical rescue eligible).  The JNI adds a backstop too.
+    try {
     if (framePaths.size() < 2) {
         result.errorCode = StitchErrorCode::InvalidArgument;
         result.errorMessage = "Need at least 2 frames to stitch (got " +
@@ -639,7 +803,9 @@ static StitchResult stitchFramePathsImpl_(
              config.captureOrientation.c_str(),
              config.jpegQuality,
              config.useInscribedRectCrop ? 1 : 0);
-    log_info(logFn, "[memstat]", "phase=entry rss=%.1f MB", rss_mb());
+    // Gate the [memstat] phase logs (compile flag + runtime settings.debug).
+    const bool memstat = kMemProfilingCompiled && config.enableMemoryProfiling;
+    log_memstat(logFn, memstat, "entry");
 
     // ── 1.  Load input frames ───────────────────────────────────────
     std::vector<cv::Mat> images;
@@ -662,7 +828,7 @@ static StitchResult stitchFramePathsImpl_(
     }
     log_info(logFn, "[dimstat]", "loaded %zu frames total_input_data=%.2f MB",
              images.size(), totalInputMB);
-    log_info(logFn, "[memstat]", "phase=after_imread rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "after_imread");
 
     // ── 2.  Configure cv::Stitcher ──────────────────────────────────
     const cv::Stitcher::Mode cvMode = (config.stitchMode == StitchMode::Scans)
@@ -704,7 +870,17 @@ static StitchResult stitchFramePathsImpl_(
     if (config.seamEstimationResolMP > 0.0) {
         stitcher->setSeamEstimationResol(config.seamEstimationResolMP);
     }
-    const double kHighLevelComposeFallbackMP = 1.0;
+    // 2026-06-16 (high-level safety) — RAM-aware compositing resolution.
+    // cv::Stitcher composes the whole canvas at once (no STREAM mode), so the
+    // per-frame compose MP directly sizes the peak.  1.0 MP is fine on 6 GB+
+    // (measured peak ~0.7-0.9 GB on the A35); on lower-RAM devices clamp to
+    // 0.6 MP so the unguarded high-level path can't out-grow the per-process
+    // budget.  An explicit caller override (compositingResolMP > 0) still wins.
+    double totalRamMB = (config.availableRamMB > 0.0)
+        ? config.availableRamMB : device_total_ram_mb();
+    if (totalRamMB <= 0.0) totalRamMB = 4.0 * 1024.0;  // conservative fallback
+    const double kHighLevelComposeFallbackMP =
+        (totalRamMB >= 5.0 * 1024.0) ? 1.0 : 0.6;
     const double composeMP = (config.compositingResolMP > 0.0)
         ? config.compositingResolMP : kHighLevelComposeFallbackMP;
     stitcher->setCompositingResol(composeMP);
@@ -725,7 +901,28 @@ static StitchResult stitchFramePathsImpl_(
     // with progressively lower thresholds [1.0 → 0.5 → 0.3] until
     // every frame is retained or we hit the floor.  SCANS skips the
     // higher thresholds (its default is already 0.3).
-    log_info(logFn, "[memstat]", "phase=before_stitch rss=%.1f MB", rss_mb());
+    // 2026-06-16 (high-level safety) — pre-stitch headroom abort.  The
+    // high-level path has no STREAM fallback or canvas downscale, so if the
+    // process is ALREADY so close to its per-process kill ceiling that even a
+    // minimal stitch won't fit on top, abort cleanly (surfaced via onError)
+    // rather than letting cv::Stitcher march into an lmkd/jetsam kill.  Reuses
+    // the manual path's headroom guard; rss_mb() is memProbeFn-backed so this
+    // works on iOS too (where /proc is absent).  Skipped when rss is unknown.
+    {
+        const double startRssMB = rss_mb();
+        if (startRssMB >= 0.0
+            && retailens::stitchExceedsMinimalHeadroom(startRssMB, totalRamMB)) {
+            result.errorCode = StitchErrorCode::PreStitchMemoryAbort;
+            result.errorMessage =
+                "Pre-stitch abort: insufficient memory headroom for high-level "
+                "stitch (rss=" + std::to_string(static_cast<int>(startRssMB)) +
+                "MB, budget=" + std::to_string(static_cast<int>(
+                    retailens::perProcessMemoryBudgetMB(totalRamMB))) + "MB)";
+            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+            return result;
+        }
+    }
+    log_memstat(logFn, memstat, "before_stitch");
     const double kRetryThresholds[] = {1.0, 0.5, 0.3};
     const int kNumAttempts = sizeof(kRetryThresholds) / sizeof(double);
     cv::Mat panorama;
@@ -743,10 +940,14 @@ static StitchResult stitchFramePathsImpl_(
                  "attempt %d/%d panoConfidenceThresh=%.2f",
                  finalAttempt, kNumAttempts, thresh);
         try {
-            status = stitcher->stitch(images, panorama);
+            // 2026-06-16 (review #2) — TWO-PHASE: estimateTransform (registration
+            // + BA + leaveBiggestComponent at this threshold) here; composePanorama
+            // runs ONCE after the canvas-union guard below.  This is the ONLY way
+            // to inspect the estimated canvas BEFORE the warp/blend allocates it.
+            status = stitcher->estimateTransform(images);
         } catch (const cv::Exception& e) {
             result.errorCode = StitchErrorCode::UnknownCvException;
-            result.errorMessage = std::string("Stitcher::stitch threw on attempt ") +
+            result.errorMessage = std::string("Stitcher::estimateTransform threw on attempt ") +
                 std::to_string(finalAttempt) + ": " + e.what();
             log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
             return result;
@@ -777,19 +978,156 @@ static StitchResult stitchFramePathsImpl_(
     }
     if (status != cv::Stitcher::OK) {
         result.errorCode = statusToErrorCode(status);
-        result.errorMessage = "Stitcher::stitch failed at all " +
+        result.errorMessage = "Stitcher::estimateTransform failed at all " +
             std::to_string(finalAttempt) + " thresholds, last status code " +
             std::to_string(static_cast<int>(status));
         log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
         return result;
     }
+
+    // 2026-06-16 (review #2) — degenerate-canvas guard BEFORE composePanorama.
+    // estimateTransform succeeded; composePanorama will now warp+blend a canvas
+    // whose size is set by the estimated focals/rotations.  A divergent BA
+    // produces absurd focals → a gigapixel canvas → an lmkd/jetsam kill MID
+    // allocation that NO try/catch can intercept.  Project the warp-canvas union
+    // from cameras() + the configured warper at the registration/WORK scale
+    // (conservative: a valid pano is well under 1 MP here, so a union over
+    // kMaxCanvasPixels (50 MP) is unambiguously degenerate) and abort cleanly
+    // before the allocation.  Valid wide pans are bounded separately by the
+    // RAM-aware compositingResol above, so this only fires on a divergent
+    // estimate — and the abort routes to the outer wrapper's spherical rescue.
+    try {
+        const std::vector<cv::detail::CameraParams> cams = stitcher->cameras();
+        if (!cams.empty()) {
+            std::vector<double> focals;
+            focals.reserve(cams.size());
+            for (const auto& c : cams) focals.push_back(c.focal);
+            std::sort(focals.begin(), focals.end());
+            const double warpScale = focals[focals.size() / 2];  // median focal
+            cv::Ptr<cv::WarperCreator> wc = make_warper(config.warperType);
+            if (wc) {
+                cv::Ptr<cv::detail::RotationWarper> w =
+                    wc->create(static_cast<float>(warpScale));
+                const double workScale = stitcher->workScale();
+                int64_t minX = 0, minY = 0, maxX = 0, maxY = 0;
+                bool seeded = false;
+                for (size_t i = 0; i < cams.size() && i < images.size(); ++i) {
+                    cv::Mat K;
+                    cams[i].K().convertTo(K, CV_32F);
+                    const cv::Size workSz(
+                        std::max(1, (int)std::lround(images[i].cols * workScale)),
+                        std::max(1, (int)std::lround(images[i].rows * workScale)));
+                    const cv::Rect roi = w->warpRoi(workSz, K, cams[i].R);
+                    if (!seeded) {
+                        minX = roi.x; minY = roi.y;
+                        maxX = (int64_t)roi.x + roi.width;
+                        maxY = (int64_t)roi.y + roi.height;
+                        seeded = true;
+                    } else {
+                        minX = std::min<int64_t>(minX, roi.x);
+                        minY = std::min<int64_t>(minY, roi.y);
+                        maxX = std::max<int64_t>(maxX, (int64_t)roi.x + roi.width);
+                        maxY = std::max<int64_t>(maxY, (int64_t)roi.y + roi.height);
+                    }
+                }
+                if (seeded && canvasExceedsGuard(maxX - minX, maxY - minY)) {
+                    result.errorCode = StitchErrorCode::WarpFailed;
+                    result.errorMessage =
+                        "Degenerate high-level estimate: warp-canvas union " +
+                        std::to_string(maxX - minX) + "x" +
+                        std::to_string(maxY - minY) +
+                        " px (work scale) exceeds guard — aborting before "
+                        "composePanorama to avoid an OOM kill";
+                    log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+                    return result;  // → outer wrapper's spherical rescue (bounded)
+                }
+
+                // 2026-06-16 (review #2 + on-device data) — VALID-but-large canvas
+                // budget.  A wide PLANE pan peaked ~2520 MB on the 6 GB A35 (above
+                // its red line; OOM on 4 GB) — not degenerate (passed the guard
+                // above), just unbounded-plane-large.  Project the COMPOSE-scale
+                // canvas from the work-scale union (same geometry; resolution
+                // ratio composeScale/workScale) and, if it exceeds the RAM canvas
+                // budget, bound it BEFORE composePanorama: downscale
+                // compositingResol when a modest (≤2×) shrink suffices, else route
+                // to spherical (its geometry bounds the canvas at FULL resolution
+                // — data: ~5× lower peak).  This is the manual path's
+                // composeCanvasBudgetMP downscale, ported to high-level.
+                if (seeded && workScale > 0.0 && !images.empty()
+                    && images[0].total() > 0) {
+                    const double fullArea =
+                        static_cast<double>(images[0].cols) * images[0].rows;
+                    const double composeScale =
+                        std::min(1.0, std::sqrt(composeMP * 1e6 / fullArea));
+                    const double ratioCS = composeScale / workScale;
+                    const double workCanvasMP =
+                        static_cast<double>(maxX - minX) * (maxY - minY) / 1e6;
+                    const double composeCanvasMP = workCanvasMP * ratioCS * ratioCS;
+                    const double canvasBudgetMP =
+                        retailens::composeCanvasBudgetMP(totalRamMB);
+                    if (composeCanvasMP > canvasBudgetMP) {
+                        const double over = composeCanvasMP / canvasBudgetMP;
+                        if (over <= 2.0 || config.warperType == "spherical") {
+                            const double targetMP = composeMP / over;
+                            stitcher->setCompositingResol(targetMP);
+                            log_info(logFn, "[stitch]",
+                                     "canvas %.1f MP > budget %.1f MP (warp=%s) — "
+                                     "downscaled compositingResol %.2f→%.2f MP",
+                                     composeCanvasMP, canvasBudgetMP,
+                                     config.warperType.c_str(), composeMP, targetMP);
+                        } else {
+                            // >2× over on plane/cylindrical → spherical bounds it
+                            // geometrically (full res) far better than a big shrink.
+                            result.errorCode = StitchErrorCode::WarpFailed;
+                            result.errorMessage =
+                                "high-level canvas " +
+                                std::to_string(static_cast<int>(composeCanvasMP)) +
+                                " MP >> budget " +
+                                std::to_string(static_cast<int>(canvasBudgetMP)) +
+                                " MP for warper '" + config.warperType +
+                                "' — routing to spherical (bounded geometry)";
+                            log_info(logFn, "[stitch]", "%s",
+                                     result.errorMessage.c_str());
+                            return result;  // → outer wrapper's spherical rescue
+                        }
+                    }
+                }
+            }
+        }
+    } catch (const cv::Exception& e) {
+        // warpRoi can itself throw on a degenerate camera — treat as degenerate.
+        result.errorCode = StitchErrorCode::WarpFailed;
+        result.errorMessage =
+            std::string("Degenerate high-level estimate (warpRoi threw): ") + e.what();
+        log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+        return result;
+    }
+
+    // Canvas bounded → compose.
+    try {
+        status = stitcher->composePanorama(panorama);
+    } catch (const cv::Exception& e) {
+        result.errorCode = StitchErrorCode::UnknownCvException;
+        result.errorMessage =
+            std::string("Stitcher::composePanorama threw: ") + e.what();
+        log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+        return result;
+    }
+    if (status != cv::Stitcher::OK) {
+        result.errorCode = statusToErrorCode(status);
+        result.errorMessage = "Stitcher::composePanorama failed, status " +
+            std::to_string(static_cast<int>(status));
+        log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+        return result;
+    }
+
     log_info(logFn, "[dimstat]",
              "post-stitch panorama %dx%d %dch data=%.2f MB"
              " (framesIncluded=%d/%zu, finalThresh=%.2f, attempts=%d)",
              panorama.cols, panorama.rows, panorama.channels(),
              mat_mb(panorama),
              framesIncluded, framePaths.size(), finalThreshold, finalAttempt);
-    log_info(logFn, "[memstat]", "phase=after_stitch rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "after_stitch");
 
     // ── 4.  Crop (coverage-aware inscribed rect, or bbox) ───────────
     // Pull cv::Stitcher's coverage mask (0xFF filled / 0 unfilled). It is
@@ -802,6 +1140,26 @@ static StitchResult stitchFramePathsImpl_(
             rm.copyTo(coverage);  // download UMat → Mat
         }
     }
+
+    // 2026-06-16 (high-level safety) — validate the output BEFORE cropping/
+    // writing.  The manual path has had this since v0.16; the high-level path
+    // shipped whatever cv::Stitcher produced.  Rejects the black-canvas /
+    // fragmented-output failures (utilization + disjoint guards) as
+    // LowQualityStitch so the host can surface a "retry" instead of a broken
+    // image.  Fails open on an empty coverage mask.
+    {
+        std::string validateMessage;
+        const StitchErrorCode validateCode = validateStitchOutput(
+            panorama, coverage, framesIncluded, logFn, validateMessage);
+        if (validateCode != StitchErrorCode::Ok) {
+            result.errorCode = validateCode;
+            result.errorMessage = validateMessage;
+            log_error(logFn, "[stitch]", "high-level REJECTED — %s",
+                      validateMessage.c_str());
+            return result;
+        }
+    }
+
     cv::Mat cropMask;
     const cv::Rect cropRect = choose_crop_rect(
         panorama, coverage, config.useInscribedRectCrop, logFn, cropMask);
@@ -817,14 +1175,14 @@ static StitchResult stitchFramePathsImpl_(
              mat_mb(cropped),
              config.useInscribedRectCrop ? 1 : 0,
              coverage.empty() ? 0 : 1);
-    log_info(logFn, "[memstat]", "phase=after_crop rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "after_crop");
 
     // ── 5.  Bake rotation per capture orientation ───────────────────
     cv::Mat final_image = bake_rotation(cropped, config.captureOrientation, logFn);
     log_info(logFn, "[dimstat]",
              "post-bake_rotation %dx%d data=%.2f MB",
              final_image.cols, final_image.rows, mat_mb(final_image));
-    log_info(logFn, "[memstat]", "phase=after_bake_rotation rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "after_bake_rotation");
 
     // ── 6.  Write JPEG ──────────────────────────────────────────────
     const int q = std::max(0, std::min(100, config.jpegQuality));
@@ -847,7 +1205,7 @@ static StitchResult stitchFramePathsImpl_(
     log_info(logFn, "[stitch]",
              "output written: %s (%dx%d)",
              outputPath.c_str(), final_image.cols, final_image.rows);
-    log_info(logFn, "[memstat]", "phase=after_imwrite rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "after_imwrite");
 
     // Best-effort coverage sidecar (<output>.coverage.png), bake-rotated
     // to align with the JPEG, for the debug harness. Never fails stitch.
@@ -878,6 +1236,29 @@ static StitchResult stitchFramePathsImpl_(
         std::string("pipe=highlevel;warp=") + config.warperType +
         ";route=batch;seam=graphcut;blend=multiband";
     return result;
+    } catch (const cv::Exception& e) {
+        result.success = false;
+        result.errorCode = StitchErrorCode::UnknownCvException;
+        result.errorMessage =
+            std::string("high-level cv::Exception (uncaught): ") + e.what();
+        log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+        return result;
+    } catch (const std::exception& e) {
+        // std::bad_alloc from cv::Stitcher's STL internals lands here (it is NOT
+        // a cv::Exception).  Clean error instead of std::terminate.
+        result.success = false;
+        result.errorCode = StitchErrorCode::UnknownCvException;
+        result.errorMessage =
+            std::string("high-level std::exception (likely OOM): ") + e.what();
+        log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+        return result;
+    } catch (...) {
+        result.success = false;
+        result.errorCode = StitchErrorCode::UnknownCvException;
+        result.errorMessage = "high-level unknown exception (uncaught)";
+        log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+        return result;
+    }
 }
 
 
@@ -2259,16 +2640,20 @@ StitchResult stitchFramePathsManual(
                     cv::Mat K;
                     cameras[i].K().convertTo(K, CV_32F);
 
-                    // V12.14.6 — clone input to break any recycled-mmap
-                    // link to prior captures' allocations.  cv::Mat::clone
-                    // forces a fresh memcpy into a freshly-allocated buffer.
-                    cv::Mat freshInput = composeFrames[i].clone();
+                    // 2026-06-16 (audit #5/L4) — warp composeFrames[i] DIRECTLY.
+                    // The old V12.14.6 `freshInput = composeFrames[i].clone()` (a
+                    // full-res malloc+memcpy+free per frame, as a recycled-mmap
+                    // defense) is disproven by the STREAM warp path below, which
+                    // passes the frame raw with no clone.  warp READS the input +
+                    // writes a SEPARATE output Mat, and composeFrames[i] is
+                    // released just after — so the copy bought nothing.  Removes N
+                    // full-res copies per BATCH stitch.
 
                     // V12.14.6 — pre-allocate output Mats via warpRoi() so
                     // cv::remap doesn't need to call create() internally
                     // (the suspect path that crashed in cv::resize too).
                     cv::Rect roi = warper->warpRoi(
-                        freshInput.size(), K, cameras[i].R);
+                        composeFrames[i].size(), K, cameras[i].R);
                     // 2026-05-18 (Issue #1 guard): cv::Stitcher's estimator
                     // + BA can produce wildly wrong camera parameters on
                     // degenerate input (low feature count, near-duplicate
@@ -2303,12 +2688,12 @@ StitchResult stitchFramePathsManual(
                         throw degenerateFrameException(
                             roi.width, roi.height, config.stitchMode, i);
                     }
-                    imagesWarped[i].create(roi.size(), freshInput.type());
+                    imagesWarped[i].create(roi.size(), composeFrames[i].type());
                     masksWarped[i].create(roi.size(), CV_8U);
 
-                    cv::Mat mask(freshInput.size(), CV_8U, cv::Scalar(255));
+                    cv::Mat mask(composeFrames[i].size(), CV_8U, cv::Scalar(255));
                     corners[i] = warper->warp(
-                        freshInput, K, cameras[i].R, cv::INTER_LINEAR,
+                        composeFrames[i], K, cameras[i].R, cv::INTER_LINEAR,
                         cv::BORDER_CONSTANT, imagesWarped[i]);
                     warper->warp(mask, K, cameras[i].R, cv::INTER_NEAREST,
                                  cv::BORDER_CONSTANT, masksWarped[i]);
@@ -2487,10 +2872,19 @@ StitchResult stitchFramePathsManual(
             auto compensator = cv::detail::ExposureCompensator::createDefault(
                 cv::detail::ExposureCompensator::GAIN_BLOCKS);
             {
+                // 2026-06-16 (audit #1) — feed the compensator ZERO-COPY views,
+                // not deep copies.  With HAVE_OPENCL undefined (both platforms)
+                // getUMat(ACCESS_READ) shares the backing Mat buffer (no memcpy,
+                // no GPU transfer); feed() takes const& and only READS pixels to
+                // solve gains, so the output is byte-identical.  The old copyTo
+                // loop DOUBLED the full-res warped held-set (~60-90 MB transient)
+                // at the exact BATCH peak the canvas budget is tuned around —
+                // imagesWarped[]/masksWarped[] are still live here (released in
+                // the feed loop below).
                 std::vector<cv::UMat> compImgs(N), compMasks(N);
                 for (size_t i = 0; i < N; i++) {
-                    imagesWarped[i].copyTo(compImgs[i]);
-                    masksWarped[i].copyTo(compMasks[i]);
+                    compImgs[i]  = imagesWarped[i].getUMat(cv::ACCESS_READ);
+                    compMasks[i] = masksWarped[i].getUMat(cv::ACCESS_READ);
                 }
                 compensator->feed(corners, compImgs, compMasks);
             }

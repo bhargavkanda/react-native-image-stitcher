@@ -56,6 +56,10 @@ RCT_EXTERN_METHOD(markNextFrameAsLastKeyframe:(RCTPromiseResolveBlock)resolver
 RCT_EXTERN_METHOD(getMemoryFootprintMB:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// 2026-06-16 — total physical RAM (MB) for the pill's RAM-aware pressure bands.
+RCT_EXTERN_METHOD(getDeviceTotalRamMB:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 // 2026-05-16 — realtime+batch fusion (Option A "Replace on completion").
 // Run the shared C++ stitcher over a caller-supplied list of keyframe
 // JPEG paths and write a refined panorama to `outputPath`.  See JS

@@ -612,26 +612,13 @@ class RNSARCameraView @JvmOverloads constructor(
         val rotationForEncode = if (lastDisplayRotation >= 0)
             lastDisplayRotation else android.view.Surface.ROTATION_0
 
-        // F8.6 (v0.6) — the eager JPEG encode for live-engine mode
-        // is gone.  Pass the already-packed NV21 directly via
-        // `nv21PixelData`; the engine's new `addFramePixelData`
-        // path builds the BGR cv::Mat in-process via cvtColor,
-        // skipping the JPEG decode round-trip downstream.  In
-        // batch-keyframe mode the engine ignores `nv21PixelData`
-        // (it uses `grayData` + `onAccept` lazily); no behaviour
-        // change there.
-        //
-        // (Was: eager JPEG encode for non-batch-keyframe modes,
-        //  written to `tmpJpegFile`, passed as `legacyJpegPath`.
-        //  See the v0.3 / F8.6 entries in CHANGELOG.md.)
-        //
-        // Synchronous engine ingest.  The ARCore Image ownership
-        // contract requires the engine to consume the TransferredNV21
-        // before ARCore recycles the Image, so this runs inline.  Only
-        // ingest when the host has actively engaged capture
-        // (`setIncrementalIngestionActive(true)`).  (The v0.8.0 worklet-
-        // runtime `runFirstParty` indirection + host-worklet fan-out
-        // were archived in the 2026-06 batch-keyframe cleanup.)
+        // Batch-keyframe ingest.  The gate reads the Y plane of the packed
+        // NV21 synchronously (grayData) and the lazy onAccept JPEG-encodes only
+        // accepted frames — no eager encode, no live-engine pixel-data path
+        // (the live engines + the TransferredNV21 ownership wrapper were removed
+        // in the 2026-06 cleanup; see audit #8).  Runs inline so the gate read
+        // completes before ARCore recycles the Image.  Only ingest when the host
+        // has actively engaged capture (`setIncrementalIngestionActive(true)`).
         if (ingestActive) {
         module.ingestFromARCameraView(
             tx = tArr[0].toDouble(),
@@ -654,22 +641,6 @@ class RNSARCameraView @JvmOverloads constructor(
             grayWidth = packed.width,
             grayHeight = packed.height,
             grayStride = packed.width,
-            legacyJpegPath = null,
-            // F8.6 — pixel-data path for live engines.  Batch-
-            // keyframe mode ignores these (bails earlier).
-            //
-            // v0.10.0 audit #4A — wrap `packed.nv21` in
-            // TransferredNV21 so ownership is enforced at runtime.
-            // The AR caller passes the SAME `packed.nv21` array as
-            // both `grayData` (sync, gate-eval read) and
-            // `nv21PixelData` (async, engine ingest).  Today no race
-            // because grayData is consumed inside evaluateWithFrame
-            // before workScope.launch fires; the wrapper makes a
-            // future refactor that reorders consumption fail loudly
-            // instead of silently corrupting frames.
-            nv21PixelData = TransferredNV21(packed.nv21),
-            nv21PixelWidth = packed.width,
-            nv21PixelHeight = packed.height,
             onAccept = { targetPath ->
                 // Lazy JPEG encode.  Runs ONLY if the C++ KeyframeGate
                 // accepted the frame.  Encodes from the pre-packed

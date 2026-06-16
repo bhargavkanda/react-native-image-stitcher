@@ -44,7 +44,6 @@ import React, {
   useState,
 } from 'react';
 import {
-  ActivityIndicator,
   Image,
   Modal,
   PanResponder,
@@ -110,29 +109,6 @@ export interface RectCropPreviewProps {
   imageWidth: number;
   /** Intrinsic pixel height of `imageUri`. */
   imageHeight: number;
-  /**
-   * DEBUG A/B harness — file:// URI of the SAME capture stitched by the
-   * OPPOSITE pipeline (manual cv::detail + plane).  When set, a toggle appears
-   * that flips the displayed panorama between the primary (high-level +
-   * spherical) and this one, for on-device comparison on a single capture.
-   * Its dimensions are read at runtime via `Image.getSize`.  When the manual
-   * output is showing, the crop quad is hidden and the accept button emits
-   * THIS uri (so you can pick the better pipeline per capture).
-   */
-  altImageUri?: string;
-  /**
-   * 2026-06-15 — ON-DEMAND alt (high-level) stitch.  The PRIMARY image is the
-   * MANUAL pipeline (the default output); this callback re-stitches the SAME
-   * captured keyframes via cv::Stitcher and resolves with a file:// uri (or
-   * null on failure).  It runs only the FIRST time the user taps the
-   * "High-level" tab — nothing is computed unless asked for.  When provided (or
-   * `altImageUri` is), the A/B toggle appears.
-   *
-   * Resolves with the high-level output's file:// `uri` AND its OWN
-   * DEV-overlay `debugInfo` recipe (so the params pill can switch to the
-   * high-level recipe while that tab is viewed), or `null` on failure.
-   */
-  onRequestAlt?: () => Promise<{ uri: string; debugInfo: string } | null>;
   /** Show / hide the editor. */
   visible: boolean;
   /**
@@ -176,9 +152,9 @@ export interface RectCropPreviewProps {
   copy?: Partial<GuidanceCopy>;
   /**
    * Safe-area insets (px).  The editor is a full-screen Modal, so the host
-   * passes `insets.top`/`insets.bottom` to keep the top toolbar (A/B toggle,
-   * warnings) clear of the notch/Dynamic Island and the bottom button bar
-   * clear of the home indicator.  Default 0.
+   * passes `insets.top`/`insets.bottom` to keep the top toolbar (warnings)
+   * clear of the notch/Dynamic Island and the bottom button bar clear of the
+   * home indicator.  Default 0.
    */
   topInset?: number;
   bottomInset?: number;
@@ -244,7 +220,6 @@ export function RectCropPreview(
     imageUri,
     imageWidth,
     imageHeight,
-    altImageUri,
     visible,
     onConfirm,
     onUseOriginal,
@@ -256,62 +231,10 @@ export function RectCropPreview(
     topInset = 0,
     bottomInset = 0,
     debugInfo,
-    onRequestAlt,
     showMemoryPill,
   } = props;
 
   const resolvedCopy = useMemo(() => mergeGuidanceCopy(copy), [copy]);
-
-  // ── A/B comparison — the PRIMARY (imageUri) is the MANUAL pipeline (the
-  // default output).  The alt is HIGH-LEVEL cv::Stitcher, produced either
-  // EAGERLY (`altImageUri`, legacy) or ON DEMAND (`onRequestAlt`, re-stitched
-  // the first time the user opens the high-level tab).  `altSize` is fetched
-  // once the alt uri exists; when the alt is showing we use its dims for the
-  // contain-fit and hide the crop quad.
-  const [showingAlt, setShowingAlt] = useState(false);
-  const [lazyAltUri, setLazyAltUri] = useState<string | null>(null);
-  // The high-level (alt) stitch's OWN DEV-overlay recipe, resolved alongside
-  // its uri from `onRequestAlt`.  Shown in the params pill in place of the
-  // manual primary's `debugInfo` while the high-level tab is being viewed.
-  const [lazyAltDebugInfo, setLazyAltDebugInfo] = useState<string | null>(null);
-  const [altLoading, setAltLoading] = useState(false);
-  const [altFailed, setAltFailed] = useState(false);
-  const altUri = altImageUri ?? lazyAltUri ?? null;
-  const altOffered = !!altImageUri || !!onRequestAlt;
-  const [altSize, setAltSize] = useState<{ w: number; h: number } | null>(null);
-  React.useEffect(() => {
-    if (!altUri) {
-      setAltSize(null);
-      return;
-    }
-    Image.getSize(
-      altUri,
-      (w, h) => setAltSize({ w, h }),
-      () => setAltSize(null),
-    );
-  }, [altUri]);
-  // Switch to the high-level (alt) view; compute it lazily on first request.
-  const showHighLevel = React.useCallback(() => {
-    setShowingAlt(true);
-    if (altUri || altLoading || !onRequestAlt) return;
-    setAltFailed(false);
-    setAltLoading(true);
-    onRequestAlt()
-      .then((result) => {
-        if (result) {
-          setLazyAltUri(result.uri);
-          setLazyAltDebugInfo(result.debugInfo);
-        } else {
-          setAltFailed(true);
-        }
-      })
-      .catch(() => setAltFailed(true))
-      .finally(() => setAltLoading(false));
-  }, [altUri, altLoading, onRequestAlt]);
-  const showAlt = showingAlt && !!altUri && !!altSize;
-  const activeUri = showAlt ? (altUri as string) : imageUri;
-  const activeW = showAlt ? (altSize as { w: number }).w : imageWidth;
-  const activeH = showAlt ? (altSize as { h: number }).h : imageHeight;
 
   // The 4 corners live in IMAGE-PIXEL space (the source of truth) so they
   // survive layout-box changes (rotation, keyboard) without drift.  We map
@@ -429,19 +352,18 @@ export function RectCropPreview(
   let screenCorners: Point[] | null = null;
 
   if (box) {
-    const fit = containFit(box, activeW, activeH);
+    const fit = containFit(box, imageWidth, imageHeight);
     if (fit) {
       imageBox = {
         left: fit.offX,
         top: fit.offY,
-        width: activeW * fit.scale,
-        height: activeH * fit.scale,
+        width: imageWidth * fit.scale,
+        height: imageHeight * fit.scale,
       };
-      // Quad corners only apply to the primary (croppable) image — hidden
-      // while the alt (manual) output is shown for comparison.
-      screenCorners = showAlt
-        ? null
-        : imageQuad.map((p) => imageToScreen(p, box, imageWidth, imageHeight));
+      // Quad corners only apply in crop mode.
+      screenCorners = showCropControls
+        ? imageQuad.map((p) => imageToScreen(p, box, imageWidth, imageHeight))
+        : null;
     }
   }
 
@@ -476,41 +398,28 @@ export function RectCropPreview(
     >
       <View style={[styles.root, { paddingTop: topInset }]}>
         {/* Live memory-footprint pill (host gates on settings.debug).  Top-LEFT
-            so it clears the top-right stitch-params pill; watch it spike when
-            the high-level re-stitch fires. */}
+            so it clears the top-right stitch-params pill. */}
         {showMemoryPill ? (
           <CaptureMemoryPill
             style={{
               position: 'absolute',
-              top: topInset + (altOffered ? 76 : 8),
+              top: topInset + 8,
               left: 12,
               zIndex: 21,
             }}
           />
         ) : null}
 
-        {/* DEV stitch-params overlay (host gates on __DEV__).  Top-right pill;
-            pushed below the A/B bar when that's present so they don't overlap.
-            A/B-AWARE: while the user is viewing the on-demand high-level tab and
-            its recipe is known, show the HIGH-LEVEL recipe (pipe=highlevel;…)
-            instead of the manual primary's `debugInfo` — otherwise the pill
-            would misleadingly claim the manual recipe for a high-level output. */}
-        {(() => {
-          const pillText =
-            showAlt && lazyAltDebugInfo ? lazyAltDebugInfo : debugInfo;
-          return pillText ? (
-            <View
-              style={[
-                styles.debugPill,
-                { top: topInset + (altImageUri && altSize ? 76 : 8) },
-              ]}
-              pointerEvents="none"
-              accessibilityRole="text"
-            >
-              <Text style={styles.debugPillText}>{pillText}</Text>
-            </View>
-          ) : null;
-        })()}
+        {/* DEV stitch-params overlay (host gates on __DEV__).  Top-right pill. */}
+        {debugInfo ? (
+          <View
+            style={[styles.debugPill, { top: topInset + 8 }]}
+            pointerEvents="none"
+            accessibilityRole="text"
+          >
+            <Text style={styles.debugPillText}>{debugInfo}</Text>
+          </View>
+        ) : null}
 
         {/* Non-fatal warning banner (e.g. "<70 % of frames used"), shown
             ABOVE the image so the user sees it before accepting a crop. */}
@@ -524,61 +433,18 @@ export function RectCropPreview(
           </View>
         )}
 
-        {/* A/B comparison.  Primary = MANUAL (the default output); the
-            HIGH-LEVEL segment re-stitches the same keyframes ON DEMAND the
-            first time it's tapped (spinner while it runs, then it caches). */}
-        {altOffered && (
-          <View style={styles.abBar}>
-            <Text style={styles.abBarLabel}>
-              {altLoading
-                ? 'Stitching high-level… (manual shown meanwhile)'
-                : altFailed
-                  ? 'High-level stitch failed — showing manual'
-                  : 'Viewing the highlighted pipeline — tap to switch:'}
-            </Text>
-            <View style={styles.abSegments}>
-              <Pressable
-                style={[styles.abSeg, !showAlt && styles.abSegActive]}
-                onPress={() => setShowingAlt(false)}
-                accessibilityRole="button"
-                accessibilityState={{ selected: !showAlt }}
-                accessibilityLabel="View manual pipeline (default)"
-              >
-                <Text style={[styles.abSegText, !showAlt && styles.abSegTextActive]}>
-                  Manual
-                </Text>
-              </Pressable>
-              <Pressable
-                style={[styles.abSeg, showAlt && styles.abSegActive]}
-                onPress={showHighLevel}
-                accessibilityRole="button"
-                accessibilityState={{ selected: showAlt, busy: altLoading }}
-                accessibilityLabel="View high-level pipeline (computed on demand)"
-              >
-                {altLoading ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <Text style={[styles.abSegText, showAlt && styles.abSegTextActive]}>
-                    High-level
-                  </Text>
-                )}
-              </Pressable>
-            </View>
-          </View>
-        )}
-
         <View style={styles.canvas} onLayout={onLayout}>
           {imageBox && (
             <Image
-              source={{ uri: activeUri }}
+              source={{ uri: imageUri }}
               style={[styles.image, imageBox]}
               resizeMode="stretch"
             />
           )}
 
-          {/* Crop affordances — quad edges + draggable handles — only in
-              crop mode on the PRIMARY image (hidden while comparing the alt). */}
-          {showCropControls && !showAlt && (
+          {/* Crop affordances — quad edges + draggable handles — only in crop
+              mode (hidden in preview-only mode). */}
+          {showCropControls && (
             <>
               {/* Quad edges (non-interactive). */}
               {edges.map((e, i) => (
@@ -626,9 +492,9 @@ export function RectCropPreview(
               <Text style={styles.btnText}>{resolvedCopy.cropRetake}</Text>
             </Pressable>
             {/* Crop mode only — "Use original" emits the stitch un-cropped.
-                Hidden in preview-only mode and while comparing the alt (the
-                primary button below is the accept action there). */}
-            {showCropControls && !showAlt && (
+                Hidden in preview-only mode (Confirm below is the accept action
+                there). */}
+            {showCropControls && (
               <Pressable
                 style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
                 onPress={() => onUseOriginal()}
@@ -638,37 +504,26 @@ export function RectCropPreview(
                 <Text style={styles.btnText}>{resolvedCopy.cropUseOriginal}</Text>
               </Pressable>
             )}
-            {/* Primary action — "Use this" emits the SHOWN (alt) pipeline's
-                output; otherwise "Crop" applies the quad (crop mode) or
-                "Confirm" accepts the primary as-is (preview-only mode). */}
+            {/* Primary action — "Crop" applies the quad (crop mode) or "Confirm"
+                accepts the image as-is (preview-only mode). */}
             <Pressable
               style={({ pressed }) => [
                 styles.btn,
                 styles.primary,
                 pressed && styles.btnPressed,
               ]}
-              onPress={
-                showAlt
-                  ? () => onUseOriginal(activeUri)
-                  : showCropControls
-                    ? handleConfirm
-                    : () => onUseOriginal()
-              }
+              onPress={showCropControls ? handleConfirm : () => onUseOriginal()}
               accessibilityRole="button"
               accessibilityLabel={
-                showAlt
-                  ? 'Use this output'
-                  : showCropControls
-                    ? resolvedCopy.cropConfirm
-                    : resolvedCopy.previewConfirm
+                showCropControls
+                  ? resolvedCopy.cropConfirm
+                  : resolvedCopy.previewConfirm
               }
             >
               <Text style={styles.btnText}>
-                {showAlt
-                  ? 'Use this'
-                  : showCropControls
-                    ? resolvedCopy.cropConfirm
-                    : resolvedCopy.previewConfirm}
+                {showCropControls
+                  ? resolvedCopy.cropConfirm
+                  : resolvedCopy.previewConfirm}
               </Text>
             </Pressable>
           </View>
@@ -744,43 +599,6 @@ const styles = StyleSheet.create({
     color: GUIDANCE_TOKENS.amber,
     fontSize: 13,
     fontWeight: '600',
-  },
-  abBar: {
-    backgroundColor: '#1a1a1a',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#333',
-  },
-  abBarLabel: {
-    color: '#aaa',
-    fontSize: 11,
-    fontWeight: '600',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  abSegments: {
-    flexDirection: 'row',
-    alignSelf: 'center',
-    backgroundColor: '#000',
-    borderRadius: 9,
-    padding: 3,
-  },
-  abSeg: {
-    paddingVertical: 7,
-    paddingHorizontal: 22,
-    borderRadius: 7,
-  },
-  abSegActive: {
-    backgroundColor: '#0A84FF',
-  },
-  abSegText: {
-    color: '#9aa',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  abSegTextActive: {
-    color: '#fff',
   },
   canvas: { flex: 1 },
   image: { position: 'absolute' },
