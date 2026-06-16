@@ -14,6 +14,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.16.1] — 2026-06-16
+
+### Changed — high-level `cv::Stitcher` is now the default pipeline
+
+The batch finalize now drives OpenCV's high-level `cv::Stitcher`
+(PANORAMA) on both platforms instead of the hand-rolled `cv::detail`
+("manual") path.  In testing it produced consistently better seams and
+lower, more stable peak memory.  This is a **behaviour change, not an
+API change** — the public surface (`<Camera>`, the hooks, the finalize
+options) is unchanged; only the stitched output and memory profile
+differ.
+
+The warper is chosen per-capture (pure function of the selected lens +
+pan direction), always `PANORAMA`:
+
+| Lens  | Mode A (vertical pan) | Mode B (horizontal pan) |
+| ----- | --------------------- | ----------------------- |
+| 1×    | plane                 | cylindrical             |
+| 0.5×  | spherical             | spherical               |
+
+The lens comes from the explicit `1x` / `0.5x` the user selected
+(plumbed through the finalize options); the previous FOV-from-intrinsics
+heuristic was unreliable on multi-camera devices and is gone, along with
+the now-redundant rotation-vs-translation (ex-SCANS) branch.
+
+### Added — production memory hardening on the high-level path
+
+The OOM guards that previously only covered the manual path were ported
+across, so the new default is memory-safe under pressure:
+
+- pre-stitch RSS headroom abort (also works on iOS now via the
+  `phys_footprint` probe, which revives the runtime-pressure router);
+- RAM-aware compositing resolution;
+- two-phase `estimateTransform` → project the warp canvas → abort if
+  degenerate, downscale or route to the bounded spherical warper if
+  over budget;
+- a full C++ catch ladder + a JNI backstop so an allocation failure can
+  no longer cross the C-ABI and abort the process;
+- a warper→spherical rescue (high-level) with the manual `PANORAMA` ↔
+  `SCANS` mode-fallback preserved for the iOS manual callers.
+
+### Fixed
+
+- The native allocator is purged after each stitch, and on Android the
+  OpenCV worker pool is pinned to one thread, eliminating the per-stitch
+  RSS creep observed on the manual path.
+
 ## [0.16.0] — 2026-06-15
 
 ### Added — first-time-user panorama capture GUIDANCE
