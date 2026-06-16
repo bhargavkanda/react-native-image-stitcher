@@ -112,24 +112,25 @@ export interface RectCropPreviewProps {
   /** Intrinsic pixel height of `imageUri`. */
   imageHeight: number;
   /**
-   * 2026-06-15 — DEV alternate-path validation.  The PRIMARY image (`imageUri`)
-   * is Tab 1 — our approach's actual (auto-resolved) output.  `onRequestAlternate`
-   * → the single "Alternate" tab: re-stitches the SAME captured keyframes with
-   * the OPPOSITE stitch mode (panorama↔SCANS), ON-DEMAND (only when the tab is
-   * tapped — no eager work).  Resolves with the output's file:// `uri` + its OWN
-   * DEV-overlay `debugInfo` recipe (so the params pill matches the shown tab), or
-   * `null` on failure.  The tab bar appears when it's provided.
+   * 2026-06-16 — DEV alternate-path validation.  The PRIMARY image (`imageUri`)
+   * is Tab 1 — our approach's actual (auto-resolved) output, and the only
+   * croppable tab.  `alternates` adds N on-demand compare-only tabs, each
+   * re-stitching the SAME captured keyframes a different way.  Every alternate
+   * is LAZY: its `request` runs only on the FIRST tap of its tab (no eager
+   * work), resolving with the output's file:// `uri` + its OWN DEV-overlay
+   * `debugInfo` recipe (so the params pill matches the shown tab), or `null` on
+   * failure.  The tab bar appears when `alternates` is non-empty.
    */
-  onRequestAlternate?: () => Promise<{ uri: string; debugInfo: string } | null>;
-  /** Label for the Alternate tab — what it will compute (the opposite of what
-   *  our approach picked), e.g. "SCANS" or "Panorama".  Default "Alternate". */
-  alternateLabel?: string;
+  alternates?: AlternateTabSpec[];
   /**
-   * 2026-06-15 (DEV) — gyro rotation magnitude of the capture, in radians.
-   * When set, a small pill shows it (rad + degrees) so the dev can read the
-   * rotation per capture and tune the panorama-vs-SCANS threshold.
+   * 2026-06-15 (DEV) — gyro rotation magnitude (radians) plus (2026-06-16) the
+   * translation magnitude (metres) and auto decision ratio (`>=0.55` → SCANS)
+   * of the capture.  When set, a small pill shows them so the dev can read the
+   * decision inputs per capture and tune the panorama-vs-SCANS threshold.
    */
   rRadians?: number;
+  tMeters?: number;
+  decisionRatio?: number;
   /** Show / hide the editor. */
   visible: boolean;
   /**
@@ -196,10 +197,19 @@ export interface RectCropPreviewProps {
 }
 
 
-/** Two tabs: 'primary' is our approach's actual (auto-resolved) output, and is
- *  croppable; 'alternate' is the OPPOSITE-mode re-stitch (panorama↔SCANS),
- *  computed on demand to validate the gating — compare-only. */
-type TabMode = 'primary' | 'alternate';
+/** One on-demand comparison tab: a stable `key`, a short `label` for the
+ *  segment, and a lazy `request` that re-stitches the captured keyframes some
+ *  way (runs once, on first tap).  Resolves the output uri + DEV recipe, or
+ *  `null` on failure. */
+export interface AlternateTabSpec {
+  key: string;
+  label: string;
+  request: () => Promise<{ uri: string; debugInfo: string } | null>;
+}
+
+/** Active tab: `'primary'` (our auto-resolved output, the only croppable tab) or
+ *  an alternate's `key` (compare-only). */
+type TabMode = string;
 
 /** Per-alt-tab state: the re-stitched output uri + its DEV recipe + image size
  *  (for contain-fit) + loading/failed flags. */
@@ -274,45 +284,73 @@ export function RectCropPreview(
     topInset = 0,
     bottomInset = 0,
     debugInfo,
-    onRequestAlternate,
-    alternateLabel = 'Alternate',
+    alternates,
     rRadians,
+    tMeters,
+    decisionRatio,
     showMemoryPill,
   } = props;
 
   const resolvedCopy = useMemo(() => mergeGuidanceCopy(copy), [copy]);
 
-  // ── 2-tab: primary + on-demand alternate ────────────────────────────
+  // ── N-tab: primary + up to N on-demand alternates ───────────────────
   // Tab 1 = the PRIMARY (imageUri), our approach's actual (auto-resolved) output
-  // (croppable). Tab 2 "Alternate" = the OPPOSITE-mode re-stitch (panorama↔SCANS),
-  // computed ON-DEMAND on first tap (ref-guard prevents double-stitch).  No eager
-  // work — nothing is stitched unless the Alternate tab is tapped.
+  // (the only croppable tab).  Each `alternates[i]` is a compare-only tab whose
+  // stitch runs ON-DEMAND on the first tap of that tab (a per-key ref-guard
+  // prevents a double-stitch).  No eager work — nothing is stitched unless its
+  // tab is tapped.  State is keyed by the alternate's `key`.
   const [activeTab, setActiveTab] = useState<TabMode>('primary');
-  const [altTab, setAltTab] = useState<AltTab>(EMPTY_ALT_TAB);
-  const tabsOffered = !!onRequestAlternate;
+  const [altTabs, setAltTabs] = useState<Record<string, AltTab>>({});
+  const tabsOffered = !!(alternates && alternates.length > 0);
 
-  const altStartedRef = useRef(false);
-  const showAlternate = React.useCallback(() => {
-    setActiveTab('alternate');
-    if (altStartedRef.current || !onRequestAlternate) return;
-    altStartedRef.current = true;
-    setAltTab((s) => ({ ...s, loading: true, failed: false }));
-    onRequestAlternate()
-      .then((r) =>
-        setAltTab((s) =>
-          r ? { ...s, uri: r.uri, debugInfo: r.debugInfo } : { ...s, failed: true }))
-      .catch(() => setAltTab((s) => ({ ...s, failed: true })))
-      .finally(() => setAltTab((s) => ({ ...s, loading: false })));
-  }, [onRequestAlternate]);
+  // Keys whose stitch has already been kicked off (so a re-tap doesn't restart).
+  const altStartedRef = useRef<Set<string>>(new Set());
+  const showAlternate = React.useCallback(
+    (key: string) => {
+      setActiveTab(key);
+      if (altStartedRef.current.has(key)) return;
+      const spec = alternates?.find((a) => a.key === key);
+      if (!spec) return;
+      altStartedRef.current.add(key);
+      const patch = (k: string, p: Partial<AltTab>) =>
+        setAltTabs((s) => ({ ...s, [k]: { ...(s[k] ?? EMPTY_ALT_TAB), ...p } }));
+      patch(key, { loading: true, failed: false });
+      spec
+        .request()
+        .then((r) =>
+          patch(key, r ? { uri: r.uri, debugInfo: r.debugInfo } : { failed: true }))
+        .catch(() => patch(key, { failed: true }))
+        .finally(() => patch(key, { loading: false }));
+    },
+    [alternates],
+  );
 
-  // Fetch the alternate's image size once its uri arrives (for the contain-fit).
+  // Fetch each alternate's image size once its uri arrives (for the contain-fit).
+  // Guarded by `!t.size` so writing the size back doesn't re-trigger the fetch.
   React.useEffect(() => {
-    if (!altTab.uri) return;
-    Image.getSize(altTab.uri, (w, h) => setAltTab((s) => ({ ...s, size: { w, h } })), () => {});
-  }, [altTab.uri]);
+    Object.entries(altTabs).forEach(([key, t]) => {
+      if (t.uri && !t.size) {
+        Image.getSize(
+          t.uri,
+          (w, h) =>
+            setAltTabs((s) => ({
+              ...s,
+              [key]: { ...(s[key] ?? EMPTY_ALT_TAB), size: { w, h } },
+            })),
+          () => {},
+        );
+      }
+    });
+  }, [altTabs]);
 
-  const activeAlt: AltTab | null = activeTab === 'alternate' ? altTab : null;
-  // Only the primary is croppable; the alternate is compare-only.
+  const activeAlt: AltTab | null =
+    activeTab === 'primary' ? null : altTabs[activeTab] ?? null;
+  // Label of the currently-selected alternate (for the bar's status line).
+  const activeAltLabel: string | null =
+    activeTab === 'primary'
+      ? null
+      : alternates?.find((a) => a.key === activeTab)?.label ?? 'Alternate';
+  // Only the primary is croppable; every alternate is compare-only.
   const isCroppable = activeTab === 'primary';
   // showAlt: an alt tab is selected AND its image is loaded (uri + size).  Until
   // then we keep showing the spherical primary (so a tab tap never blanks).
@@ -503,6 +541,8 @@ export function RectCropPreview(
         {rRadians != null ? (
           <CaptureRotationPill
             rRadians={rRadians}
+            tMeters={tMeters}
+            decisionRatio={decisionRatio}
             style={{
               position: 'absolute',
               top: topInset + (tabsOffered ? 76 : 8) + (showMemoryPill ? 34 : 0),
@@ -520,7 +560,7 @@ export function RectCropPreview(
             would misleadingly claim the manual recipe for a high-level output. */}
         {(() => {
           const pillText =
-            activeTab === 'alternate' ? altTab.debugInfo : debugInfo;
+            activeAlt != null ? activeAlt.debugInfo : debugInfo;
           return pillText ? (
             <View
               style={[
@@ -547,18 +587,18 @@ export function RectCropPreview(
           </View>
         )}
 
-        {/* 2 tabs.  "As captured" = our approach's actual (auto-resolved) output
-            (croppable).  The Alternate tab re-stitches the SAME keyframes with
-            the OPPOSITE mode (panorama↔SCANS) ON DEMAND — spins while it
-            stitches, falls back to the primary on failure. */}
+        {/* Tabs.  "As captured" = our approach's actual (auto-resolved) output
+            (croppable).  Each alternate re-stitches the SAME keyframes a
+            different way ON DEMAND — spins while it stitches, falls back to the
+            primary on failure. */}
         {tabsOffered && (
           <View style={styles.abBar}>
             <Text style={styles.abBarLabel}>
               {activeAlt?.loading
-                ? `Computing ${alternateLabel}…`
+                ? `Computing ${activeAltLabel}…`
                 : activeAlt?.failed
-                  ? `${alternateLabel} stitch failed — showing primary`
-                  : 'Tap to compare the alternate path:'}
+                  ? `${activeAltLabel} stitch failed — showing primary`
+                  : 'Tap to compare alternate stitches:'}
             </Text>
             <View style={styles.abSegments}>
               <Pressable
@@ -574,25 +614,32 @@ export function RectCropPreview(
                   As captured
                 </Text>
               </Pressable>
-              {/* The bar only renders when tabsOffered (= onRequestAlternate is
-                  provided), so the Alternate segment always shows here. */}
-              <Pressable
-                style={[styles.abSeg, activeTab === 'alternate' && styles.abSegActive]}
-                onPress={showAlternate}
-                accessibilityRole="button"
-                accessibilityState={{ selected: activeTab === 'alternate', busy: altTab.loading }}
-                accessibilityLabel={`View the ${alternateLabel} alternate (computed on demand)`}
-              >
-                {altTab.loading ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <Text
-                    style={[styles.abSegText, activeTab === 'alternate' && styles.abSegTextActive]}
+              {/* One compare-only segment per alternate; each stitches lazily on
+                  first tap.  The bar only renders when tabsOffered. */}
+              {alternates!.map((a) => {
+                const t = altTabs[a.key];
+                const selected = activeTab === a.key;
+                return (
+                  <Pressable
+                    key={a.key}
+                    style={[styles.abSeg, selected && styles.abSegActive]}
+                    onPress={() => showAlternate(a.key)}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected, busy: !!t?.loading }}
+                    accessibilityLabel={`View the ${a.label} alternate (computed on demand)`}
                   >
-                    {alternateLabel}
-                  </Text>
-                )}
-              </Pressable>
+                    {t?.loading ? (
+                      <ActivityIndicator size="small" color="#fff" />
+                    ) : (
+                      <Text
+                        style={[styles.abSegText, selected && styles.abSegTextActive]}
+                      >
+                        {a.label}
+                      </Text>
+                    )}
+                  </Pressable>
+                );
+              })}
             </View>
           </View>
         )}

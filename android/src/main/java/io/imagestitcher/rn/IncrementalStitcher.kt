@@ -664,15 +664,21 @@ class IncrementalStitcher(
         // falls back to pose data only.  Always non-negative.
         val imuTranslationMetres = (options.getDoubleOrDefault("imuTranslationMetres", 0.0) ?: 0.0)
             .coerceAtLeast(0.0)
+        // Resolve once so the dev readout gets the SAME tMeters / ratio / rRadians
+        // that drove the decision — and gets them even when the mode was forced
+        // (informative: shows what auto WOULD have picked).
+        val autoResolution = resolveStitchModeAuto(firstPose, lastPose, imuTranslationMetres)
         val stitchModeResolved: String = when (batchStitchMode) {
             "panorama" -> "panorama"
             "scans"    -> "scans"
-            else -> resolveStitchModeAuto(firstPose, lastPose, imuTranslationMetres).mode
+            else -> autoResolution.mode
         }
-        // Surface the gyro rotation magnitude for EVERY capture (the 'panorama'
-        // default skips resolveStitchModeAuto, but the dev 3-tab preview still
-        // needs rRadians to tune the panorama-vs-SCANS threshold).
-        val rRadiansResolved: Double = rotationRadians(firstPose, lastPose)
+        // Surface the gyro rotation + translation + decision ratio for EVERY
+        // capture (the forced modes skip the auto decision, but the dev preview
+        // still reads these to tune the panorama-vs-SCANS threshold).
+        val rRadiansResolved: Double = autoResolution.rRadians
+        val tMetersResolved: Double = autoResolution.tMeters
+        val decisionRatioResolved: Double = autoResolution.ratio
         android.util.Log.i(
             "IncrementalStitcher",
             "finalize stitch-mode: configured=$batchStitchMode resolved=$stitchModeResolved " +
@@ -753,6 +759,10 @@ class IncrementalStitcher(
                     // on the output preview + debug toast.
                     map.putString("stitchModeResolved", stitchModeResolved)
                     map.putDouble("rRadians", rRadiansResolved)
+                    // Dev tuning readout — translation magnitude + the auto
+                    // decision ratio that drove panorama-vs-SCANS.
+                    map.putDouble("tMeters", tMetersResolved)
+                    map.putDouble("decisionRatio", decisionRatioResolved)
                     // 2026-06-15 (iOS parity) — the exact keyframe JPEG
                     // paths used for this stitch, so JS can re-stitch
                     // them ON DEMAND via refinePanorama (the high-level
@@ -1743,6 +1753,33 @@ class IncrementalStitcher(
     }
 
     /**
+     * Total physical RAM in MB.  Lets the DEV memory pill derive RAM-aware
+     * pressure bands instead of the iPhone-fixed 1500/2200 MB thresholds (which
+     * never trip on a 4 GB Android phone that jetsams ~1.3 GB — false comfort).
+     * Reads `_SC_PHYS_PAGES × _SC_PAGE_SIZE` (TOTAL + stable across runs, unlike
+     * the rate-limited ActivityManager path).  -1.0 on failure.
+     */
+    @ReactMethod
+    fun getDeviceTotalRamMB(promise: Promise) {
+        try {
+            val pages = android.system.Os.sysconf(android.system.OsConstants._SC_PHYS_PAGES)
+            val pageSize =
+                android.system.Os.sysconf(android.system.OsConstants._SC_PAGESIZE)
+            if (pages <= 0 || pageSize <= 0) {
+                promise.resolve(-1.0)
+                return
+            }
+            promise.resolve(pages.toDouble() * pageSize.toDouble() / (1024.0 * 1024.0))
+        } catch (t: Throwable) {
+            android.util.Log.w(
+                "IncrementalStitcher",
+                "getDeviceTotalRamMB: failed: ${t.message}",
+            )
+            promise.resolve(-1.0)
+        }
+    }
+
+    /**
      * Release the C++ KeyframeGate heap allocation when RN tears
      * down the bridge module (e.g. on a JS reload).  Without this,
      * each reload leaks ~100 bytes of native heap — small but
@@ -1940,7 +1977,16 @@ class IncrementalStitcher(
      * tuned from real captures.  rRadians is 0.0 only on the no-pose fallbacks
      * (non-AR with no pose data) — there is no gyro-derived rotation to report.
      */
-    private data class StitchModeResolution(val mode: String, val rRadians: Double)
+    private data class StitchModeResolution(
+        val mode: String,
+        val rRadians: Double,
+        // tMeters = translation magnitude (m) that fed the ratio; ratio = the
+        // tScore/(tScore+rScore) decision value (>=0.55 → SCANS). Surfaced to the
+        // dev readout so the panorama-vs-SCANS threshold can be tuned from real
+        // captures, alongside rRadians.
+        val tMeters: Double,
+        val ratio: Double,
+    )
 
     private fun resolveStitchModeAuto(
         firstPose: DoubleArray?,
@@ -1954,11 +2000,11 @@ class IncrementalStitcher(
             // No pose data at all — fall back on the IMU signal.  IMU
             // > 5 cm hints SCANS; everything else hints PANORAMA.
             return StitchModeResolution(
-                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0)
+                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0, 0.0, 0.0)
         }
         if (firstPose.size != 7 || lastPose.size != 7) {
             return StitchModeResolution(
-                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0)
+                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0, 0.0, 0.0)
         }
 
         // Translation magnitude (Euclidean, in metres) — pose-derived.
@@ -1989,7 +2035,7 @@ class IncrementalStitcher(
         val tScore = tMeters / 0.10
         val rScore = rRadians / 1.00
         val denom = tScore + rScore
-        if (denom <= 1e-9) return StitchModeResolution("panorama", rRadians)  // no motion
+        if (denom <= 1e-9) return StitchModeResolution("panorama", rRadians, tMeters, 0.0)  // no motion
         val ratio = tScore / denom
 
         // 2026-06-15 — LOW-ROTATION GUARD.  The gyro rotation (rRadians) is
@@ -2012,7 +2058,7 @@ class IncrementalStitcher(
                 "ratio=${"%.3f".format(ratio)} " +
                 "rotGuard=$lowRotationGuard → $mode",
         )
-        return StitchModeResolution(mode, rRadians)
+        return StitchModeResolution(mode, rRadians, tMeters, ratio)
     }
 
     /**

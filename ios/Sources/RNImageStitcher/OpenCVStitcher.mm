@@ -509,6 +509,17 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // output); the on-demand high-level tab re-stitches with NO.
   cfg.useManualPipeline = useManualPipeline;
 
+  // 2026-06-16 — iOS resident-memory probe.  iOS has no /proc/self/statm, so the
+  // shared rss_mb() returned -1 — which (a) blinded the per-stitch profiling and
+  // (b) silently DISABLED the runtime-pressure half of the manual pipeline's OOM
+  // router (the lowBatchHeadroom STREAM trigger), on the very platform (jetsam)
+  // it protects.  Plug task_info(TASK_VM_INFO).phys_footprint (the metric jetsam
+  // evaluates) as the probe.  Set UNCONDITIONALLY — the OOM guards must work in
+  // release too; only the sampler + per-stitch record are gated by the compile
+  // flag (debug-on, release-off).
+  cfg.memProbeFn = []() -> double { return StitcherResidentMB(); };
+  cfg.enableMemoryProfiling = (RNIS_MEMORY_PROFILING != 0);
+
   // Marshal NSArray<NSString*> → std::vector<std::string>.  Strip the
   // `file://` scheme that some callers attach so the shared C++ can
   // cv::imread the raw filesystem path.
@@ -590,8 +601,17 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
               framesIncluded:(NSInteger)r.framesIncluded
        finalConfidenceThresh:r.finalConfidenceThresh];
       if (!r.debugSummary.empty()) {
+        std::string dbg = r.debugSummary;
+        // iOS has no mallopt purge; the post-stitch settle read IS the leak
+        // floor (memFloor).  Append it so it rides debugSummary to JS like
+        // Android's post-purge value (gated; debug-only).
+        if (RNIS_MEMORY_PROFILING != 0) {
+          char fbuf[40];
+          snprintf(fbuf, sizeof(fbuf), ";memFloor=%.1f", StitcherResidentMB());
+          dbg += fbuf;
+        }
         result.debugSummary =
-            [NSString stringWithUTF8String:r.debugSummary.c_str()];
+            [NSString stringWithUTF8String:dbg.c_str()];
       }
       // 2026-06-15 — the eager A/B harness that ALSO stitched the high-level
       // alt on EVERY capture has been REMOVED.  Manual is now the default (this

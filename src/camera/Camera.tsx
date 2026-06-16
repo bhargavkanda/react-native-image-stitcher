@@ -230,6 +230,13 @@ export type CameraCaptureResult =
        */
       rRadians?: number;
       /**
+       * 2026-06-16 (DEV) — translation magnitude (m) + auto decision ratio
+       * (`>=0.55` → SCANS) that drove panorama-vs-SCANS. Shown on the dev
+       * readout alongside `rRadians` to tune the threshold from real captures.
+       */
+      tMeters?: number;
+      decisionRatio?: number;
+      /**
        * 2026-06-14 (DEV overlay) — semicolon-separated `key=value` trace of the
        * stitcher's runtime choices (pipe/warp/route/seam/blend) for this
        * output.  Shown on the preview in __DEV__.  iOS only for now.
@@ -1339,6 +1346,31 @@ export function Camera(props: CameraProps): React.JSX.Element {
         });
   }, [stitchWithConfig, cropPending]);
 
+  // 2026-06-16 (DEV) — two MORE on-demand comparison tabs (also lazy — nothing
+  // is stitched until the tab is tapped).  Same captured keyframes re-stitched
+  // with a SPHERICAL warper through each pipeline, so the operator can A/B which
+  // spherical output looks best per capture:
+  //   • Sph·Manual  — manual pipeline (cv::detail)  + spherical warper
+  //   • Sph·HighLvl — stock cv::Stitcher (PANORAMA) + spherical warper
+  const requestSphericalManual = useCallback(
+    () =>
+      stitchWithConfig('sph-manual', {
+        useManualPipeline: true,
+        warperType: 'spherical',
+        stitchMode: 'panorama',
+      }),
+    [stitchWithConfig],
+  );
+  const requestSphericalHighLevel = useCallback(
+    () =>
+      stitchWithConfig('sph-high', {
+        useManualPipeline: false,
+        warperType: 'spherical',
+        stitchMode: 'panorama',
+      }),
+    [stitchWithConfig],
+  );
+
   // 2026-05-22 (audit F9 + F3) — debug stitch-stats toast.  Hook
   // exposes an imperative API; we fire `showResult(finalizeResult)`
   // on every successful finalize when settings.debug is on (gated
@@ -2156,6 +2188,8 @@ export function Camera(props: CameraProps): React.JSX.Element {
         durationMs: Date.now() - (recordingStartedAt ?? Date.now()),
         stitchModeResolved: result.stitchModeResolved,
         rRadians: result.rRadians,
+        tMeters: result.tMeters,
+        decisionRatio: result.decisionRatio,
         debugSummary: result.debugSummary,
         keyframePaths: result.batchKeyframePaths,
         captureOrientation: result.captureOrientation,
@@ -2895,28 +2929,48 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
-        // 2026-06-15 — DEV alternate-path validation.  Tab 1 = our approach's
-        // actual output (auto-resolved).  ONE on-demand "Alternate" tab
-        // re-stitches the SAME keyframes with the OPPOSITE mode (panorama↔SCANS)
-        // so you can validate the gating per capture.  Nothing computes until
-        // tapped — no eager work.  Gated on __DEV__ (never ships to prod);
-        // requires keyframePaths (both platforms return them).
-        onRequestAlternate={
+        // 2026-06-16 — DEV alternate-path validation.  Tab 1 = our approach's
+        // actual output (auto-resolved, croppable).  Up to THREE on-demand
+        // comparison tabs, each re-stitching the SAME captured keyframes — all
+        // lazy (nothing computes until the tab is tapped, no eager work):
+        //   • Alternate — the OPPOSITE stitch mode (panorama↔SCANS), to validate
+        //                 the auto gating per capture.
+        //   • Sph·Man   — manual pipeline + spherical warper.
+        //   • Sph·HL    — stock cv::Stitcher + spherical warper.
+        // Gated on __DEV__ (never ships to prod); requires keyframePaths (both
+        // platforms return them).
+        alternates={
           __DEV__ && cropPending?.captureResultObj.keyframePaths?.length
-            ? requestAlternate
+            ? [
+                {
+                  key: 'alt',
+                  // The opposite of what our approach picked for this capture.
+                  label:
+                    cropPending.captureResultObj.stitchModeResolved === 'scans'
+                      ? 'Panorama'
+                      : 'SCANS',
+                  request: requestAlternate,
+                },
+                {
+                  key: 'sph-manual',
+                  label: 'Sph·Man',
+                  request: requestSphericalManual,
+                },
+                {
+                  key: 'sph-high',
+                  label: 'Sph·HL',
+                  request: requestSphericalHighLevel,
+                },
+              ]
             : undefined
         }
-        // Label the Alternate tab with what it will compute (the opposite of
-        // what our approach picked for this capture).
-        alternateLabel={
-          cropPending?.captureResultObj.stitchModeResolved === 'scans'
-            ? 'Panorama'
-            : 'SCANS'
-        }
-        // Live gyro rotation magnitude for this capture — shown as a pill so the
-        // dev can read the rRadians per capture and pick the threshold. __DEV__.
-        rRadians={
-          __DEV__ ? cropPending?.captureResultObj.rRadians : undefined
+        // Live decision inputs for this capture — shown as a pill so the dev can
+        // read the rotation / translation / ratio per capture and tune the
+        // panorama-vs-SCANS threshold. __DEV__.
+        rRadians={__DEV__ ? cropPending?.captureResultObj.rRadians : undefined}
+        tMeters={__DEV__ ? cropPending?.captureResultObj.tMeters : undefined}
+        decisionRatio={
+          __DEV__ ? cropPending?.captureResultObj.decisionRatio : undefined
         }
         initialRect={cropPending?.initialRect}
         warnings={cropPending?.warnings.map((w) => w.message) ?? []}

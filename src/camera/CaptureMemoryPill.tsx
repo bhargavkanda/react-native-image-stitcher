@@ -3,15 +3,23 @@
  * CaptureMemoryPill — top-right diagnostic pill showing native
  * process memory footprint in MB, polled at 500 ms.
  *
- * Color-coded against the iPhone 16 Pro per-process jetsam limit:
+ * Color-coded against the device's per-process memory budget, which is read
+ * once at mount via `getDeviceTotalRamMB()` (RAM-aware):
  *
- *   - green  <1500 MB   (comfortable)
- *   - amber  1500–2200  (approaching pressure)
- *   - red    >2200      (close to limit — capture may be killed)
+ *   budget = max(RAM × 0.42, 900 MB)   (mirrors warp_guard.hpp
+ *                                        perProcessMemoryBudgetMB)
+ *   - green  < 55 % of budget   (comfortable)
+ *   - amber  55–70 % of budget   (approaching pressure)
+ *   - red    > 70 % of budget    (close to limit — capture may be killed)
  *
- * Backed by the existing `getMemoryFootprintMB()` native module
- * (iOS: `task_info phys_footprint`, Android: `Debug.MemoryInfo
- * getTotalPss * 1024`).  Returns -1 if the native call fails.
+ * Why RAM-aware: the old fixed 1500/2200 MB thresholds were tuned for the
+ * iPhone 16 Pro and NEVER tripped on a 4 GB Android phone that jetsams ~1.3 GB
+ * (false comfort exactly where OOM happens).  Falls back to 1500/2200 if the
+ * RAM read is unavailable.
+ *
+ * Backed by the `getMemoryFootprintMB()` native module (iOS: `task_info`
+ * `phys_footprint`; Android: `/proc/self/statm` RSS — the SAME number the C++
+ * `[memstat]` logs report).  Returns -1 if the native call fails.
  *
  * Mount this pill inside a `settings.debug`-gated branch — it
  * polls native every 500 ms and is unwanted in production builds.
@@ -50,11 +58,21 @@ export function CaptureMemoryPill({
   style,
 }: CaptureMemoryPillProps): React.JSX.Element | null {
   const [memMB, setMemMB] = useState<number | null>(null);
+  // Device total RAM (MB), read once — drives the RAM-aware pressure bands.
+  const [ramMB, setRamMB] = useState<number | null>(null);
 
   useEffect(() => {
     const native = getIncrementalNativeModule();
     if (!native?.getMemoryFootprintMB) return undefined;
     let cancelled = false;
+    // One-time RAM read for the bands (optional native method — older bridges
+    // without it just keep the fixed-threshold fallback).
+    native
+      .getDeviceTotalRamMB?.()
+      .then((r) => {
+        if (!cancelled && r > 0) setRamMB(r);
+      })
+      .catch(() => {});
     const tick = async () => {
       try {
         const mb = await native.getMemoryFootprintMB();
@@ -73,9 +91,15 @@ export function CaptureMemoryPill({
 
   if (memMB === null || memMB < 0) return null;
 
+  // RAM-aware bands: budget = max(RAM × 0.42, 900) (mirrors warp_guard.hpp
+  // perProcessMemoryBudgetMB); amber at 55 %, red at 70 %.  Fall back to the
+  // iPhone-tuned fixed thresholds when RAM is unknown.
+  const budget = ramMB != null ? Math.max(ramMB * 0.42, 900) : null;
+  const redAt = budget != null ? budget * 0.7 : 2200;
+  const amberAt = budget != null ? budget * 0.55 : 1500;
   const bg =
-    memMB > 2200 ? 'rgba(239, 68, 68, 0.92)'    // red
-    : memMB > 1500 ? 'rgba(245, 158, 11, 0.92)' // amber
+    memMB > redAt ? 'rgba(239, 68, 68, 0.92)'    // red
+    : memMB > amberAt ? 'rgba(245, 158, 11, 0.92)' // amber
     : 'rgba(34, 197, 94, 0.92)';                // green
 
   return (

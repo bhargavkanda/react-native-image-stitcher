@@ -47,6 +47,23 @@
 #include <vector>
 
 
+// ── 2026-06-16 — memory-profiling compile gate (shared) ─────────────────
+// Hard gate for the peak sampler + per-stitch record + [memstat] phase logs
+// (stitcher.cpp) and the mallopt purge diagnostic READS (image_stitcher_jni.cpp).
+// Default: ON in debug, OFF in release, so production pays nothing.  Override
+// with -DRNIS_MEMORY_PROFILING=1 to profile a release build.  NDEBUG is the
+// portable signal both Gradle (Debug CMake config) and Xcode use, so this is
+// uniform across Android + iOS with no per-build-system flag.  Defined in the
+// shared header so all three native translation units agree.
+#ifndef RNIS_MEMORY_PROFILING
+#  ifdef NDEBUG
+#    define RNIS_MEMORY_PROFILING 0
+#  else
+#    define RNIS_MEMORY_PROFILING 1
+#  endif
+#endif
+
+
 namespace retailens {
 
 // Stable error codes.  Mirror the JS-side `StitchErrorCode` enum so
@@ -197,6 +214,23 @@ struct StitchConfig {
     // flip it to true once the manual port is verified — separate
     // commit from this V2 introduction.
     bool        useManualPipeline    = false;
+
+    // ── 2026-06-16 — memory profiling hooks (DEV deploy gate) ───────────
+    // memProbeFn: resident-memory source in MB, or < 0 if unavailable.  When
+    // set it is the canonical reader used by rss_mb() (so the OOM guards, the
+    // phase logs, the peak sampler and the per-stitch record all use it).  Its
+    // reason for existing is iOS, which has no /proc/self/statm — the Obj-C++
+    // bridge plugs task_info(TASK_VM_INFO).phys_footprint here.  Android leaves
+    // it null and rss_mb() falls back to /proc.  Must be callable from a
+    // background thread (the peak sampler), so the closure must not touch
+    // thread-affine state.
+    std::function<double()> memProbeFn = nullptr;
+    // enableMemoryProfiling: runtime gate (plumbed from settings.debug) for the
+    // peak sampler + the per-stitch record + the [memstat] phase logs.  The
+    // COMPILE-time RNIS_MEMORY_PROFILING flag (off in release) is the hard gate;
+    // this is the per-call switch on top.  The mallopt(M_PURGE) CALL is NOT
+    // gated by this — only its diagnostic READS are.
+    bool        enableMemoryProfiling = false;
 };
 
 
@@ -235,6 +269,24 @@ struct StitchResult {
     // Empty on builds that don't populate it (back-compat).  iOS marshals it up
     // to the JS finalize dict; Android leaves it in the log for now.
     std::string debugSummary;
+
+    // ── 2026-06-16 — per-stitch memory record (DEV profiling) ───────────
+    // All in MB; -1.0 when profiling is off or no memory source is available.
+    //   memBeforeMB: resident at entry (after the leak-fix once-guard).
+    //   memPeakMB:   max resident sampled DURING the stitch by the 50 ms peak
+    //                sampler — the transient warp-all + GraphCut + MultiBand
+    //                spike that the phase-boundary reads miss (it decides OOM).
+    //   memAfterMB:  resident after the pipeline returns (blender pyramids freed).
+    //   memFloorMB:  resident after the platform's post-stitch reclaim — Android
+    //                fills it after mallopt(M_PURGE); iOS after a settle read.
+    //                This is the leak-PLATEAU metric (the bridge sets it; the
+    //                core leaves it at -1).
+    //   memSource:   "phys_footprint" (iOS task_info) | "rss" (/proc) | "".
+    double      memBeforeMB = -1.0;
+    double      memPeakMB   = -1.0;
+    double      memAfterMB  = -1.0;
+    double      memFloorMB  = -1.0;
+    std::string memSource;
 };
 
 

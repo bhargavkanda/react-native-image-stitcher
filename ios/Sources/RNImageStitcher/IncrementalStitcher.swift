@@ -227,6 +227,11 @@ struct FinalizePayload {
     /// dev 3-tab preview's rRadians readout (threshold tuning).  0.0 when there
     /// is no pose-derived rotation signal (non-AR with no poses).
     let rRadians: Double
+    /// Translation magnitude (metres) + the auto decision ratio
+    /// (tScore/(tScore+rScore), >=0.55 → SCANS) that drove the panorama-vs-SCANS
+    /// choice — surfaced to JS for the dev tuning readout alongside rRadians.
+    let tMeters: Double
+    let decisionRatio: Double
     let keyframeExifOrientation: Int
     /// AR-STITCHING-TWO-MODES (memory/ar-stitching-two-modes.md):
     /// capture-time hold orientation for the bake-rotation pass.
@@ -1151,23 +1156,22 @@ public final class IncrementalStitcher: NSObject {
         // translation/rotation magnitude ratio between first + last
         // accepted keyframe poses → SCANS (translation-heavy) or
         // PANORAMA (rotation-heavy).  Non-auto values pass through.
+        // Resolve once so the dev readout gets the SAME tMeters / ratio / rRadians
+        // that drove the decision — and gets them even when the mode is forced
+        // (informative: shows what auto WOULD have picked).  Captured into the
+        // payload here so the C2-invariant finalize closure can read them via
+        // payload (no self/ivar access inside the closure).
+        let autoResolution = resolveStitchModeAuto(
+            first: batchFirstAcceptedPose,
+            last:  batchLastAcceptedPose,
+            imuTranslationMetres: batchImuTranslationMetres)
         let stitchModeResolved: String
         switch batchStitchMode {
         case "panorama": stitchModeResolved = "panorama"
         case "scans":    stitchModeResolved = "scans"
-        default:         stitchModeResolved = resolveStitchModeAuto(
-                            first: batchFirstAcceptedPose,
-                            last:  batchLastAcceptedPose,
-                            imuTranslationMetres: batchImuTranslationMetres
-                         ).mode
+        default:         stitchModeResolved = autoResolution.mode
         }
-        // Surface gyro rotation magnitude for EVERY capture (the 'panorama'
-        // default skips resolveStitchModeAuto, but the dev 3-tab preview still
-        // needs rRadians to tune the panorama-vs-SCANS threshold).  Captured
-        // into the payload here so the C2-invariant finalize closure can read
-        // it via payload (no self/ivar access inside the closure).
-        let rRadiansResolved = rotationRadians(
-            first: batchFirstAcceptedPose, last: batchLastAcceptedPose)
+        let rRadiansResolved = autoResolution.rRadians
         os_log(.fault, log: Self.diagLog,
                "[V16-batch-keyframe.stitchMode] configured=%{public}@ resolved=%{public}@ paths=%d imuT=%.3fm",
                batchStitchMode, stitchModeResolved, Int32(paths.count),
@@ -1185,6 +1189,8 @@ public final class IncrementalStitcher: NSObject {
             batchEnableInscribedRectCrop: batchEnableInscribedRectCrop,
             batchStitchModeResolved: stitchModeResolved,
             rRadians: rRadiansResolved,
+            tMeters: autoResolution.tMeters,
+            decisionRatio: autoResolution.ratio,
             keyframeExifOrientation: keyframeExifOrientation,
             captureOrientation: captureOrientation,
             drops: drops,
@@ -1550,6 +1556,10 @@ public final class IncrementalStitcher: NSObject {
                         // panorama looks the way it does.
                         batchDict["stitchModeResolved"] = payload.batchStitchModeResolved
                         batchDict["rRadians"] = payload.rRadians
+                        // Dev tuning readout — translation magnitude + the auto
+                        // decision ratio that drove panorama-vs-SCANS.
+                        batchDict["tMeters"] = payload.tMeters
+                        batchDict["decisionRatio"] = payload.decisionRatio
                         // 2026-06-14 (DEV overlay) — the stitcher's runtime
                         // choices (pipeline/warper/route/seam/blend) for this
                         // output, shown on the preview in __DEV__.
@@ -2462,13 +2472,13 @@ public final class IncrementalStitcher: NSObject {
         first: [Double]?,
         last:  [Double]?,
         imuTranslationMetres: Double
-    ) -> (mode: String, rRadians: Double) {
+    ) -> (mode: String, rRadians: Double, tMeters: Double, ratio: Double) {
         guard let firstPose = first, firstPose.count == 7,
               let lastPose  = last,  lastPose.count == 7  else {
             // No pose data at all — fall back on whichever signal we
             // do have.  imuTranslationMetres > 0 hints "scans"; 0
             // hints "panorama".  rRadians 0.0 — no gyro signal.
-            return (imuTranslationMetres > 0.05 ? "scans" : "panorama", 0.0)
+            return (imuTranslationMetres > 0.05 ? "scans" : "panorama", 0.0, 0.0, 0.0)
         }
         // Translation magnitude (Euclidean, in metres).
         let dtx = lastPose[0] - firstPose[0]
@@ -2490,7 +2500,7 @@ public final class IncrementalStitcher: NSObject {
         let tScore = tMeters / 0.10
         let rScore = rRadians / 1.00
         let denom = tScore + rScore
-        if denom <= 1e-9 { return ("panorama", rRadians) }  // no motion either way
+        if denom <= 1e-9 { return ("panorama", rRadians, tMeters, 0.0) }  // no motion either way
         let ratio = tScore / denom
 
         // 2026-06-15 — LOW-ROTATION GUARD.  The gyro rotation (rRadians) is
@@ -2508,7 +2518,7 @@ public final class IncrementalStitcher: NSObject {
                "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f rotGuard=%d → %{public}@",
                tPose, imuTranslationMetres, rRadians, ratio,
                lowRotationGuard ? 1 : 0, mode)
-        return (mode, rRadians)
+        return (mode, rRadians, tMeters, ratio)
     }
 
     /// Gyro rotation magnitude (radians) between two 7-element poses

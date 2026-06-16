@@ -325,6 +325,17 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
         resolver(mb)
     }
 
+    /// Total physical RAM in MB.  Lets the DEV memory pill derive RAM-aware
+    /// pressure bands (iOS jetsam scales with device RAM) instead of fixed
+    /// thresholds.  NSProcessInfo.physicalMemory is exact + cheap.
+    @objc(getDeviceTotalRamMB:rejecter:)
+    public func getDeviceTotalRamMB(
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        resolver(Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0))
+    }
+
     /// 2026-05-16 — realtime+batch fusion (Option A) bridge.  Marshal
     /// the options dictionary into the engine layer, dispatch the
     /// refinement off the bridge thread so the JS Promise doesn't block

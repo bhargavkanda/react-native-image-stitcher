@@ -30,17 +30,23 @@
 #include <opencv2/stitching/warpers.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cfloat>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
 #include "warp_guard.hpp"
+
+// RNIS_MEMORY_PROFILING is defined in stitcher.hpp (shared across the 3 native
+// translation units).  kMemProfilingCompiled exposes it as a constexpr below.
 
 
 namespace retailens {
@@ -69,12 +75,21 @@ void log_error(const LogFn& logFn, const char* tag, const char* fmt, ...) {
     logFn(2, tag, buf);
 }
 
-// Read /proc/self/statm to get RSS in MB.  Cheap (~20 µs).  Used at
-// pipeline phase boundaries to correlate logged peak memory with the
-// staging-resolution + retry decisions.  Returns -1 on read failure
-// (e.g., procfs not mounted — never happens on iOS/Android but we
-// guard for portability).
-double rss_mb() {
+// Compile-time gate as a constexpr (so dead branches fold away in release).
+constexpr bool kMemProfilingCompiled = (RNIS_MEMORY_PROFILING != 0);
+
+// Per-stitch resident-memory probe, installed for the duration of a stitch by
+// MemProbeScope below.  Lets rss_mb() (and therefore every OOM guard, phase log,
+// the peak sampler and the per-stitch record) read the platform's real source
+// without threading `config` through dozens of call sites.  Calls are serialized
+// (stitchFramePaths contract), and the sampler thread only reads it within the
+// scope's lifetime, so a plain file-static is safe.
+std::function<double()> g_memProbe;
+
+// Read /proc/self/statm to get RSS in MB.  Cheap (~20 µs).  Returns -1 when
+// procfs is absent — which is the case on iOS (no /proc), so this is the Android
+// path; iOS supplies g_memProbe instead.
+double rss_mb_proc() {
     FILE* f = std::fopen("/proc/self/statm", "r");
     if (f == nullptr) return -1.0;
     long size_pages = 0, resident_pages = 0;
@@ -84,6 +99,80 @@ double rss_mb() {
     long page_bytes = sysconf(_SC_PAGESIZE);
     return (double) resident_pages * (double) page_bytes / (1024.0 * 1024.0);
 }
+
+// Effective resident-memory reader (MB).  Prefers the installed probe (iOS
+// phys_footprint), else /proc (Android).  -1 when neither is available.  Used at
+// pipeline phase boundaries + by the OOM guards — making the guards work on iOS,
+// where they previously got -1 (the runtime-pressure router was dead).
+double rss_mb() {
+    if (g_memProbe) {
+        const double v = g_memProbe();
+        if (v >= 0.0) return v;
+    }
+    return rss_mb_proc();
+}
+
+// Which source rss_mb() is currently resolving to — for the per-stitch record.
+const char* mem_source_label() {
+    if (g_memProbe && g_memProbe() >= 0.0) return "phys_footprint";
+    if (rss_mb_proc() >= 0.0) return "rss";
+    return "";
+}
+
+// RAII: install/uninstall the resident-memory probe for one stitch.
+struct MemProbeScope {
+    explicit MemProbeScope(std::function<double()> probe) { g_memProbe = std::move(probe); }
+    ~MemProbeScope() { g_memProbe = nullptr; }
+    MemProbeScope(const MemProbeScope&) = delete;
+    MemProbeScope& operator=(const MemProbeScope&) = delete;
+};
+
+// DRY [memstat] phase log — gated, and (unlike the old inline form) skips the
+// rss_mb() read entirely when profiling is off, so release pays nothing.
+void log_memstat(const LogFn& logFn, bool enabled, const char* phase) {
+    if (!enabled || !logFn) return;
+    char buf[80];
+    std::snprintf(buf, sizeof(buf), "phase=%s rss=%.1f MB", phase, rss_mb());
+    logFn(0, "[memstat]", buf);
+}
+
+// Background peak-memory sampler.  Wakes every ~50 ms during a stitch and tracks
+// the max resident memory into `peak` — the ONLY way to catch the transient
+// warp-all + GraphCut + MultiBand spike, which the phase-boundary reads (taken
+// after the blender frees its pyramids) systematically miss.  RAII: the thread
+// starts in the ctor (when active) and is joined in stop()/dtor.  It is a pure
+// memory reader, not OpenCV work, so cv::setNumThreads(1) does not constrain it.
+class PeakSampler {
+public:
+    PeakSampler(bool active, std::atomic<double>& peak) : peak_(peak), active_(active) {
+        if (!active_) return;
+        thread_ = std::thread([this]() {
+            while (!stop_.load(std::memory_order_relaxed)) {
+                const double v = rss_mb();
+                double cur = peak_.load(std::memory_order_relaxed);
+                while (v > cur &&
+                       !peak_.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {}
+                // Sleep in 10 ms slices so stop() is responsive (~50 ms cadence).
+                for (int i = 0; i < 5 && !stop_.load(std::memory_order_relaxed); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        });
+    }
+    void stop() {
+        if (!active_) return;
+        stop_.store(true, std::memory_order_relaxed);
+        if (thread_.joinable()) thread_.join();
+        active_ = false;
+    }
+    ~PeakSampler() { stop(); }
+    PeakSampler(const PeakSampler&) = delete;
+    PeakSampler& operator=(const PeakSampler&) = delete;
+private:
+    std::atomic<double>& peak_;
+    std::atomic<bool>    stop_{false};
+    std::thread          thread_;
+    bool                 active_;
+};
 
 // Total physical RAM in MB, read natively.  The Android JNI bridge sets no
 // availableRamMB, so without this a 6 GB device is mis-treated as the 4 GB
@@ -512,6 +601,40 @@ StitchResult stitchFramePaths(
     }();
     (void)s_cvTuned;
 
+    // ── 2026-06-16 — per-stitch memory profiling (DEV; gated) ───────────
+    // Install the resident-memory probe (iOS phys_footprint; null on Android →
+    // /proc) for the whole stitch — including the retry + the high-level/manual
+    // impls below — so the OOM guards, phase logs, peak sampler + record all read
+    // the right source.  The sampler runs across both attempts (peak = the worse
+    // of the two, which is the conservative OOM number).  `finish()` stops the
+    // sampler + stamps the record onto whichever result we return.
+    const bool memProfiling = kMemProfilingCompiled && config.enableMemoryProfiling;
+    MemProbeScope memProbe(config.memProbeFn);
+    const std::string memSource =
+        memProfiling ? std::string(mem_source_label()) : std::string();
+    const double memBefore = memProfiling ? rss_mb() : -1.0;
+    std::atomic<double> peakMB{ memBefore };
+    PeakSampler sampler(memProfiling, peakMB);
+    auto finish = [&](StitchResult r) -> StitchResult {
+        sampler.stop();
+        if (memProfiling) {
+            const double memAfter = rss_mb();
+            r.memBeforeMB = memBefore;
+            r.memAfterMB  = memAfter;
+            r.memPeakMB   = std::max(peakMB.load(), std::max(memBefore, memAfter));
+            r.memSource   = memSource;
+            // memFloorMB stays -1; the platform bridge fills it after its
+            // post-stitch reclaim (Android mallopt(M_PURGE) / iOS settle read).
+            char mbuf[96];
+            std::snprintf(mbuf, sizeof(mbuf),
+                          "memBefore=%.1f;memPeak=%.1f;memAfter=%.1f;memSrc=%s",
+                          r.memBeforeMB, r.memPeakMB, r.memAfterMB, memSource.c_str());
+            if (!r.debugSummary.empty()) r.debugSummary += ";";
+            r.debugSummary += mbuf;
+        }
+        return r;
+    };
+
     // 2026-05-22 (audit follow-up) — mode-fallback retry.  When the
     // configured stitchMode produces degenerate camera params (the
     // "warpRoi too large" crash users hit on translation-heavy
@@ -546,7 +669,7 @@ StitchResult stitchFramePaths(
     StitchResult firstAttempt = runOnce(config.stitchMode);
     if (firstAttempt.errorCode == StitchErrorCode::Ok) {
         firstAttempt.stitchModeUsed = config.stitchMode;
-        return firstAttempt;
+        return finish(firstAttempt);
     }
     // First attempt failed.  Try the opposite mode unless the error
     // is something the opposite mode wouldn't fix (e.g. invalid
@@ -559,7 +682,7 @@ StitchResult stitchFramePaths(
         || firstAttempt.errorCode == StitchErrorCode::EmptyPanorama;
     if (!worthRetrying) {
         firstAttempt.stitchModeUsed = config.stitchMode;
-        return firstAttempt;
+        return finish(firstAttempt);
     }
     StitchMode fallbackMode =
         (config.stitchMode == StitchMode::Panorama) ? StitchMode::Scans
@@ -576,7 +699,7 @@ StitchResult stitchFramePaths(
         log_info(logFn, "[stitch-fallback]",
                  "fallback mode (%s) succeeded",
                  fallbackMode == StitchMode::Scans ? "scans" : "panorama");
-        return secondAttempt;
+        return finish(secondAttempt);
     }
     // Both attempts failed.  Return the FIRST attempt's error (it's
     // what the operator's chosen mode produced — more useful for
@@ -586,7 +709,7 @@ StitchResult stitchFramePaths(
              fallbackMode == StitchMode::Scans ? "scans" : "panorama",
              static_cast<int>(secondAttempt.errorCode));
     firstAttempt.stitchModeUsed = config.stitchMode;
-    return firstAttempt;
+    return finish(firstAttempt);
 }
 
 // 2026-05-22 (audit follow-up) — renamed inner entry point so the
@@ -658,7 +781,9 @@ static StitchResult stitchFramePathsImpl_(
              config.captureOrientation.c_str(),
              config.jpegQuality,
              config.useInscribedRectCrop ? 1 : 0);
-    log_info(logFn, "[memstat]", "phase=entry rss=%.1f MB", rss_mb());
+    // Gate the [memstat] phase logs (compile flag + runtime settings.debug).
+    const bool memstat = kMemProfilingCompiled && config.enableMemoryProfiling;
+    log_memstat(logFn, memstat, "entry");
 
     // ── 1.  Load input frames ───────────────────────────────────────
     std::vector<cv::Mat> images;
@@ -681,7 +806,7 @@ static StitchResult stitchFramePathsImpl_(
     }
     log_info(logFn, "[dimstat]", "loaded %zu frames total_input_data=%.2f MB",
              images.size(), totalInputMB);
-    log_info(logFn, "[memstat]", "phase=after_imread rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "after_imread");
 
     // ── 2.  Configure cv::Stitcher ──────────────────────────────────
     const cv::Stitcher::Mode cvMode = (config.stitchMode == StitchMode::Scans)
@@ -744,7 +869,7 @@ static StitchResult stitchFramePathsImpl_(
     // with progressively lower thresholds [1.0 → 0.5 → 0.3] until
     // every frame is retained or we hit the floor.  SCANS skips the
     // higher thresholds (its default is already 0.3).
-    log_info(logFn, "[memstat]", "phase=before_stitch rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "before_stitch");
     const double kRetryThresholds[] = {1.0, 0.5, 0.3};
     const int kNumAttempts = sizeof(kRetryThresholds) / sizeof(double);
     cv::Mat panorama;
@@ -808,7 +933,7 @@ static StitchResult stitchFramePathsImpl_(
              panorama.cols, panorama.rows, panorama.channels(),
              mat_mb(panorama),
              framesIncluded, framePaths.size(), finalThreshold, finalAttempt);
-    log_info(logFn, "[memstat]", "phase=after_stitch rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "after_stitch");
 
     // ── 4.  Crop (coverage-aware inscribed rect, or bbox) ───────────
     // Pull cv::Stitcher's coverage mask (0xFF filled / 0 unfilled). It is
@@ -836,14 +961,14 @@ static StitchResult stitchFramePathsImpl_(
              mat_mb(cropped),
              config.useInscribedRectCrop ? 1 : 0,
              coverage.empty() ? 0 : 1);
-    log_info(logFn, "[memstat]", "phase=after_crop rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "after_crop");
 
     // ── 5.  Bake rotation per capture orientation ───────────────────
     cv::Mat final_image = bake_rotation(cropped, config.captureOrientation, logFn);
     log_info(logFn, "[dimstat]",
              "post-bake_rotation %dx%d data=%.2f MB",
              final_image.cols, final_image.rows, mat_mb(final_image));
-    log_info(logFn, "[memstat]", "phase=after_bake_rotation rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "after_bake_rotation");
 
     // ── 6.  Write JPEG ──────────────────────────────────────────────
     const int q = std::max(0, std::min(100, config.jpegQuality));
@@ -866,7 +991,7 @@ static StitchResult stitchFramePathsImpl_(
     log_info(logFn, "[stitch]",
              "output written: %s (%dx%d)",
              outputPath.c_str(), final_image.cols, final_image.rows);
-    log_info(logFn, "[memstat]", "phase=after_imwrite rss=%.1f MB", rss_mb());
+    log_memstat(logFn, memstat, "after_imwrite");
 
     // Best-effort coverage sidecar (<output>.coverage.png), bake-rotated
     // to align with the JPEG, for the debug harness. Never fails stitch.

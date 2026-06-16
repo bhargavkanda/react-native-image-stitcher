@@ -26,6 +26,14 @@ import {
 export interface CaptureRotationPillProps {
   /** Gyro rotation magnitude in radians. Renders nothing when null/undefined. */
   rRadians?: number | null;
+  /**
+   * 2026-06-16 — translation magnitude (metres) and the auto decision ratio
+   * (`>=0.55` → SCANS) that drove panorama-vs-SCANS for this capture. When
+   * either is set, a second line shows `tr <m> · ratio <r> → SCANS|PANO`, so the
+   * dev reads the FULL decision inputs (not just rotation) per capture.
+   */
+  tMeters?: number | null;
+  decisionRatio?: number | null;
   /** Top inset (status bar / notch). Pill pinned `topInset + 12` (top-left). */
   topInset?: number;
   /** Optional absolute-position override (replaces the default top-left anchor). */
@@ -34,6 +42,8 @@ export interface CaptureRotationPillProps {
 
 export function CaptureRotationPill({
   rRadians,
+  tMeters,
+  decisionRatio,
   topInset = 0,
   style,
 }: CaptureRotationPillProps): React.JSX.Element | null {
@@ -41,9 +51,19 @@ export function CaptureRotationPill({
 
   const degrees = (rRadians * 180) / Math.PI;
   const noPose = rRadians === 0;
-  const label = noPose
+  const rotLine = noPose
     ? 'rot 0.000 rad (no pose)'
     : `rot ${rRadians.toFixed(3)} rad (${degrees.toFixed(1)}°)`;
+
+  // Second line: translation + the decision ratio + the mode it implies.
+  // 0.55 is the SCANS threshold (mirrors resolveStitchModeAuto on both natives).
+  const hasDecision = tMeters != null || decisionRatio != null;
+  const ratio = decisionRatio ?? 0;
+  const decisionLine = hasDecision
+    ? `tr ${(tMeters ?? 0).toFixed(3)} m · ratio ${ratio.toFixed(2)} → ${
+        ratio >= 0.55 ? 'SCANS' : 'PANO'
+      }`
+    : null;
 
   return (
     <View
@@ -51,7 +71,10 @@ export function CaptureRotationPill({
       style={[styles.container, style ?? { top: topInset + 12, left: 12 }]}
       accessibilityRole="alert"
     >
-      <Text style={styles.text}>{label}</Text>
+      <Text style={styles.text}>{rotLine}</Text>
+      {decisionLine != null ? (
+        <Text style={styles.text}>{decisionLine}</Text>
+      ) : null}
     </View>
   );
 }
