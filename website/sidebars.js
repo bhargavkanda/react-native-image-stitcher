@@ -11,10 +11,22 @@ const sidebars = {
       type: 'category',
       label: 'The <Camera> component',
       collapsed: false,
-      items: ['camera-api', 'orientation', 'flash-and-lenses', 'recipes'],
+      items: [
+        'camera-api',
+        'full-example',
+        'orientation',
+        'flash-and-lenses',
+        'recipes',
+      ],
     },
     'capture-result',
     'i18n',
+    {
+      type: 'category',
+      label: 'OpenCV',
+      collapsed: false,
+      items: ['sharing-opencv', 'bring-your-own-opencv'],
+    },
     'troubleshooting',
   ],
 };
