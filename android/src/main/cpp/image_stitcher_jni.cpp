@@ -232,6 +232,21 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         char fbuf[40];
         std::snprintf(fbuf, sizeof(fbuf), ";memFloor=%.1f", memFloor);
         if (!result.debugSummary.empty()) result.debugSummary += fbuf;
+        // 2026-06-16 — one authoritative per-stitch memory line to logcat (the
+        // sampler peak otherwise only rides debugSummary to the on-screen
+        // overlay).  pipe/warp/mode lets each line be attributed to a preview
+        // tab: pipe=manual warp=plane mode=panorama = "As captured" primary;
+        // pipe=highlevel warp=plane = HL·Plane; warp=spherical = HL·Sph;
+        // mode=scans = SCANS.  Grep `[memstat] record:` to harvest all of them.
+        LOGI("[memstat] record: pipe=%s warp=%s mode=%s before=%.1f peak=%.1f "
+             "after=%.1f floor=%.1f src=%s frames=%d/%d",
+             cfg.useManualPipeline ? "manual" : "highlevel",
+             cfg.warperType.c_str(),
+             (result.stitchModeUsed == retailens::StitchMode::Scans)
+                 ? "scans" : "panorama",
+             result.memBeforeMB, result.memPeakMB, result.memAfterMB, memFloor,
+             result.memSource.c_str(),
+             result.framesIncluded, result.framesRequested);
     }
 
     if (!result.success) {

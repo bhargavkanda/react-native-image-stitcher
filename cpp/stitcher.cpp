@@ -862,7 +862,17 @@ static StitchResult stitchFramePathsImpl_(
     if (config.seamEstimationResolMP > 0.0) {
         stitcher->setSeamEstimationResol(config.seamEstimationResolMP);
     }
-    const double kHighLevelComposeFallbackMP = 1.0;
+    // 2026-06-16 (high-level safety) — RAM-aware compositing resolution.
+    // cv::Stitcher composes the whole canvas at once (no STREAM mode), so the
+    // per-frame compose MP directly sizes the peak.  1.0 MP is fine on 6 GB+
+    // (measured peak ~0.7-0.9 GB on the A35); on lower-RAM devices clamp to
+    // 0.6 MP so the unguarded high-level path can't out-grow the per-process
+    // budget.  An explicit caller override (compositingResolMP > 0) still wins.
+    double totalRamMB = (config.availableRamMB > 0.0)
+        ? config.availableRamMB : device_total_ram_mb();
+    if (totalRamMB <= 0.0) totalRamMB = 4.0 * 1024.0;  // conservative fallback
+    const double kHighLevelComposeFallbackMP =
+        (totalRamMB >= 5.0 * 1024.0) ? 1.0 : 0.6;
     const double composeMP = (config.compositingResolMP > 0.0)
         ? config.compositingResolMP : kHighLevelComposeFallbackMP;
     stitcher->setCompositingResol(composeMP);
@@ -883,6 +893,27 @@ static StitchResult stitchFramePathsImpl_(
     // with progressively lower thresholds [1.0 → 0.5 → 0.3] until
     // every frame is retained or we hit the floor.  SCANS skips the
     // higher thresholds (its default is already 0.3).
+    // 2026-06-16 (high-level safety) — pre-stitch headroom abort.  The
+    // high-level path has no STREAM fallback or canvas downscale, so if the
+    // process is ALREADY so close to its per-process kill ceiling that even a
+    // minimal stitch won't fit on top, abort cleanly (surfaced via onError)
+    // rather than letting cv::Stitcher march into an lmkd/jetsam kill.  Reuses
+    // the manual path's headroom guard; rss_mb() is memProbeFn-backed so this
+    // works on iOS too (where /proc is absent).  Skipped when rss is unknown.
+    {
+        const double startRssMB = rss_mb();
+        if (startRssMB >= 0.0
+            && retailens::stitchExceedsMinimalHeadroom(startRssMB, totalRamMB)) {
+            result.errorCode = StitchErrorCode::PreStitchMemoryAbort;
+            result.errorMessage =
+                "Pre-stitch abort: insufficient memory headroom for high-level "
+                "stitch (rss=" + std::to_string(static_cast<int>(startRssMB)) +
+                "MB, budget=" + std::to_string(static_cast<int>(
+                    retailens::perProcessMemoryBudgetMB(totalRamMB))) + "MB)";
+            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+            return result;
+        }
+    }
     log_memstat(logFn, memstat, "before_stitch");
     const double kRetryThresholds[] = {1.0, 0.5, 0.3};
     const int kNumAttempts = sizeof(kRetryThresholds) / sizeof(double);
@@ -960,6 +991,26 @@ static StitchResult stitchFramePathsImpl_(
             rm.copyTo(coverage);  // download UMat → Mat
         }
     }
+
+    // 2026-06-16 (high-level safety) — validate the output BEFORE cropping/
+    // writing.  The manual path has had this since v0.16; the high-level path
+    // shipped whatever cv::Stitcher produced.  Rejects the black-canvas /
+    // fragmented-output failures (utilization + disjoint guards) as
+    // LowQualityStitch so the host can surface a "retry" instead of a broken
+    // image.  Fails open on an empty coverage mask.
+    {
+        std::string validateMessage;
+        const StitchErrorCode validateCode = validateStitchOutput(
+            panorama, coverage, framesIncluded, logFn, validateMessage);
+        if (validateCode != StitchErrorCode::Ok) {
+            result.errorCode = validateCode;
+            result.errorMessage = validateMessage;
+            log_error(logFn, "[stitch]", "high-level REJECTED — %s",
+                      validateMessage.c_str());
+            return result;
+        }
+    }
+
     cv::Mat cropMask;
     const cv::Rect cropRect = choose_crop_rect(
         panorama, coverage, config.useInscribedRectCrop, logFn, cropMask);
