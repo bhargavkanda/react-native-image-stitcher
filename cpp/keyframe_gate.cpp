@@ -356,6 +356,11 @@ struct KeyframeGate::Impl {
     // the downscale factor.  Re-set whenever prevFrameGrayWork is.
     int32_t                     prevFrameOrigWidth  = 0;
     int32_t                     prevFrameOrigHeight = 0;
+    // 2026-06-16 (audit #4) — the CURRENT frame's downscaled working image,
+    // produced by ingestWorkingFrame() (under the JNI pin) and consumed by
+    // evaluateWithWorkingMat() (after the pin is released).  Empty unless an
+    // ingest is pending.  Owned (downscaleToWorking clones / resizes).
+    cv::Mat                     pendingWorkMat;
 };
 
 // Compile-time layout check on the shared POD struct — ensures iOS
@@ -751,6 +756,45 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
     int32_t stride,
     int64_t monotonicNowMs)
 {
+    // 2026-06-16 (audit #4) — thin wrapper = ingest (reads pixels) + evaluate.
+    // Kept for iOS / non-pinned callers; the Android JNI calls the two halves
+    // separately so the heavy OpenCV runs OUTSIDE the GC-pinned critical region.
+    ingestWorkingFrame(grayData, width, height, stride);
+    return evaluateWithWorkingMat(pose, latchedPlane, width, height, monotonicNowMs);
+}
+
+void KeyframeGate::ingestWorkingFrame(
+    const uint8_t* grayData,
+    int32_t width,
+    int32_t height,
+    int32_t stride)
+{
+    Impl& s = *pImpl_;
+    s.pendingWorkMat.release();
+    // Only the Flow strategy reads pixels; disabled / force-accept / Pose ignore
+    // them (the Pose path is deliberately OpenCV-free).  For those — and for
+    // invalid input — stash nothing; evaluateWithWorkingMat short-circuits
+    // without a frame.  This is the ONLY step that touches `grayData`, so the
+    // JNI can ReleasePrimitiveArrayCritical immediately after it returns.
+    if (!s.enabled || s.forceAcceptNext || s.strategy != GateStrategy::Flow
+        || grayData == nullptr || width <= 0 || height <= 0 || stride < width) {
+        return;
+    }
+    // Non-owning view over the (pinned) bytes; downscaleToWorking returns an
+    // OWNED Mat (clone or resize output), so it stays valid after the pin drops.
+    cv::Mat currGrayFull(height, width, CV_8UC1,
+                        const_cast<uint8_t*>(grayData),
+                        static_cast<size_t>(stride));
+    s.pendingWorkMat = downscaleToWorking(currGrayFull);
+}
+
+KeyframeGateDecision KeyframeGate::evaluateWithWorkingMat(
+    const Pose& pose,
+    const PlaneTransform* latchedPlane,
+    int32_t origWidth,
+    int32_t origHeight,
+    int64_t monotonicNowMs)
+{
     Impl& s = *pImpl_;
     // Stash the monotonic stamp (see evaluate()).  The Pose-strategy
     // dispatch below forwards it so both entry points agree on "now".
@@ -785,19 +829,14 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
         return evaluate(pose, latchedPlane, s.currentNowMs);
     }
 
-    // Flow path — wrap incoming pixel data as a non-owning cv::Mat
-    // and downscale to working resolution.  The non-owning view is
-    // SAFE because we deep-copy (via clone) before storing on Impl.
-    if (grayData == nullptr || width <= 0 || height <= 0 || stride < width) {
-        // Defensive: caller forgot to supply image data despite
-        // strategy=Flow.  Fall back to pose path so we degrade
-        // gracefully rather than crashing on a null deref.
+    // Flow path — operate on the working frame ingestWorkingFrame() stashed.
+    // Empty ⇒ ingest declined (null/invalid grayData under Flow); fall back to
+    // the pose path so we degrade gracefully rather than deref a null frame.
+    cv::Mat currGrayWork = std::move(s.pendingWorkMat);
+    s.pendingWorkMat.release();
+    if (currGrayWork.empty()) {
         return evaluate(pose, latchedPlane, s.currentNowMs);
     }
-    cv::Mat currGrayFull(height, width, CV_8UC1,
-                        const_cast<uint8_t*>(grayData),
-                        static_cast<size_t>(stride));
-    cv::Mat currGrayWork = downscaleToWorking(currGrayFull);
 
     // §4 — first-frame accept under Flow.  No prev to track against;
     // we anchor here and detect features so subsequent frames have
@@ -811,8 +850,8 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
             s.flowMinDistance);
         s.prevFrameGrayWork = currGrayWork;  // clone-owned via downscale path
         s.prevFeatures      = std::move(features);
-        s.prevFrameOrigWidth  = width;
-        s.prevFrameOrigHeight = height;
+        s.prevFrameOrigWidth  = origWidth;
+        s.prevFrameOrigHeight = origHeight;
         s.lastAcceptedPose    = pose;
         s.lastAcceptSteadyMs  = s.currentNowMs;
         s.acceptedCount       = 1;
@@ -970,8 +1009,8 @@ KeyframeGateDecision KeyframeGate::evaluateWithFrame(
         s.flowMinDistance);
     s.prevFrameGrayWork = currGrayWork;   // owned via downscale's clone
     s.prevFeatures      = std::move(nextFeatures);
-    s.prevFrameOrigWidth  = width;
-    s.prevFrameOrigHeight = height;
+    s.prevFrameOrigWidth  = origWidth;
+    s.prevFrameOrigHeight = origHeight;
     s.lastAcceptedPose    = pose;
     s.lastAcceptSteadyMs  = s.currentNowMs;
     s.acceptedCount      += 1;

@@ -361,7 +361,7 @@ function layoutFor(
 }
 
 
-export function PanoramaBandOverlay({
+function PanoramaBandOverlayImpl({
   state,
   frameUris,
   captureOrientation,
@@ -584,6 +584,14 @@ export function PanoramaBandOverlay({
     </View>
   );
 }
+
+// 2026-06-16 (audit #7) — memoized.  This is the lone ~6 Hz consumer that mounts
+// in PRODUCTION (the debug pills are settings.debug-gated), and most engine ticks
+// are REJECTED frames that don't change its visible inputs (frameUris /
+// acceptedCount / orientation).  React.memo skips the re-render on those, so the
+// ~6×/sec engine emits no longer re-render this overlay's subtree on the hot
+// capture path (battery/heat on long captures).
+export const PanoramaBandOverlay = React.memo(PanoramaBandOverlayImpl);
 
 
 const styles = StyleSheet.create({

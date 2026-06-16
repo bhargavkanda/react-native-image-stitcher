@@ -890,36 +890,13 @@ class IncrementalStitcher(
         grayHeight: Int,
         grayStride: Int,
         onAccept: (targetPath: String) -> Boolean,
-        // 2026-05-21 (v0.3) — only required when batchKeyframeMode
-        // is false (the legacy hybrid/firstwins live-engine path,
-        // which feeds JPEG paths into addFrameAtPath for each ARCore
-        // frame).  Pass null when batchKeyframeMode is true; the
-        // batch path uses `grayData` + `onAccept` instead.  Modern
-        // callers prefer `nv21PixelData` below — `legacyJpegPath` is
-        // kept only as a defensive fallback for older call sites
-        // that have not yet been migrated.
-        legacyJpegPath: String? = null,
-        // F8.6 — pixel-data path for live engines.  When supplied
-        // (and `batchKeyframeMode == false`), takes precedence over
-        // `legacyJpegPath`: the live engine ingests via
-        // `addFramePixelData` (NV21 → BGR Mat in-process) instead of
-        // `addFrameAtPath` (JPEG decode round-trip).  Saves ~30-50 ms
-        // per accepted frame on a mid-tier device.  Pass null to use
-        // the legacy JPEG path.
-        //
-        // OWNERSHIP: wrapped in `TransferredNV21` (audit #4A,
-        // v0.10.0).  The wrapper enforces single-use: the engine
-        // calls `.takeOnce()` on the producer thread before
-        // dispatching to `workScope`; subsequent attempts to extract
-        // the bytes throw.  Callers MUST construct a fresh
-        // `TransferredNV21` per frame and MUST NOT hand the same
-        // instance to two consumers (e.g., a sync gate-eval + an
-        // async workScope.launch).  The Frame Processor plugin and
-        // the AR camera view both allocate fresh NV21 arrays per
-        // frame; the wrapper is a defensive-programming guard.
-        nv21PixelData: TransferredNV21? = null,
-        nv21PixelWidth: Int = 0,
-        nv21PixelHeight: Int = 0,
+        // 2026-06-16 (audit #8/L3) — the live-engine ingest params
+        // (legacyJpegPath / nv21PixelData / nv21PixelWidth/Height) were
+        // removed here.  The live engines were archived in 2026-06, so the
+        // only remaining path is batch-keyframe (always on), which ingests via
+        // `grayData` + `onAccept`.  The TransferredNV21 ownership wrapper had no
+        // live consumer (takeOnce() called nowhere — verified by grep) and is
+        // deleted along with these params.
     ) {
         // ── V16 batch-keyframe: AR-driven path ─────────────────────
         //
@@ -1228,21 +1205,6 @@ class IncrementalStitcher(
             grayWidth = width,
             grayHeight = height,
             grayStride = yRowStride,
-            // F8.6 — pass the already-packed NV21 so the live
-            // engine branch (hybrid / firstwins) can ingest via
-            // `addFramePixelData` instead of JPEG-decoding a
-            // separately-written path.  Batch-keyframe mode
-            // ignores these (it uses `grayData` + `onAccept`).
-            //
-            // v0.10.0 audit #4A — wrap in TransferredNV21 so the
-            // engine takes ownership exactly once on the producer
-            // thread (engine calls `.takeOnce()` before workScope).
-            // Misuse (handing this same instance to two consumers)
-            // throws at the second `.takeOnce()` site, not silently
-            // corrupting frames.
-            nv21PixelData = TransferredNV21(nv21Bytes),
-            nv21PixelWidth = width,
-            nv21PixelHeight = height,
             onAccept = { targetPath ->
                 // Synchronous JPEG encode via the existing
                 // YuvImageConverter (also used by RNSARCameraView's
