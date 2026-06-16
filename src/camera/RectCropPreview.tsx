@@ -112,25 +112,18 @@ export interface RectCropPreviewProps {
   /** Intrinsic pixel height of `imageUri`. */
   imageHeight: number;
   /**
-   * 2026-06-15 — DEV 3-tab projection comparison.  The PRIMARY image
-   * (`imageUri`) is Tab 1 "Spherical" (manual + spherical, the finalize output).
-   *
-   * `onRequestAlt` → Tab 3 "High-level": re-stitches the SAME captured keyframes
-   * via stock cv::Stitcher, ON-DEMAND (only the first time the tab is tapped).
-   * `onRequestPlaneProjection` → Tab 2 "Plane": re-stitches via the manual
-   * pipeline + plane warper, EAGERLY (kicked off on mount so it's ready to
-   * compare).  Each resolves with the output's file:// `uri` AND its OWN
-   * DEV-overlay `debugInfo` recipe (so the params pill matches the shown tab),
-   * or `null` on failure.  The tab bar appears when either is provided.
+   * 2026-06-15 — DEV alternate-path validation.  The PRIMARY image (`imageUri`)
+   * is Tab 1 — our approach's actual (auto-resolved) output.  `onRequestAlternate`
+   * → the single "Alternate" tab: re-stitches the SAME captured keyframes with
+   * the OPPOSITE stitch mode (panorama↔SCANS), ON-DEMAND (only when the tab is
+   * tapped — no eager work).  Resolves with the output's file:// `uri` + its OWN
+   * DEV-overlay `debugInfo` recipe (so the params pill matches the shown tab), or
+   * `null` on failure.  The tab bar appears when it's provided.
    */
-  onRequestAlt?: () => Promise<{ uri: string; debugInfo: string } | null>;
-  onRequestPlaneProjection?: () => Promise<{ uri: string; debugInfo: string } | null>;
-  /**
-   * Tab 4 "SCANS" — re-stitch via stock cv::Stitcher in SCANS/AFFINE mode,
-   * ON-DEMAND (computed on first tap, like High-level).  The only affine tab;
-   * compare it against the homography tabs to tune the panorama-vs-SCANS choice.
-   */
-  onRequestScansProjection?: () => Promise<{ uri: string; debugInfo: string } | null>;
+  onRequestAlternate?: () => Promise<{ uri: string; debugInfo: string } | null>;
+  /** Label for the Alternate tab — what it will compute (the opposite of what
+   *  our approach picked), e.g. "SCANS" or "Panorama".  Default "Alternate". */
+  alternateLabel?: string;
   /**
    * 2026-06-15 (DEV) — gyro rotation magnitude of the capture, in radians.
    * When set, a small pill shows it (rad + degrees) so the dev can read the
@@ -203,10 +196,10 @@ export interface RectCropPreviewProps {
 }
 
 
-/** The projection-comparison tabs.  'spherical' is the finalize primary
- *  (croppable); 'plane' / 'highlevel' / 'scans' are re-stitched alternates
- *  (compare-only).  'scans' is the only AFFINE one; the rest are homography. */
-type TabMode = 'spherical' | 'plane' | 'highlevel' | 'scans';
+/** Two tabs: 'primary' is our approach's actual (auto-resolved) output, and is
+ *  croppable; 'alternate' is the OPPOSITE-mode re-stitch (panorama↔SCANS),
+ *  computed on demand to validate the gating — compare-only. */
+type TabMode = 'primary' | 'alternate';
 
 /** Per-alt-tab state: the re-stitched output uri + its DEV recipe + image size
  *  (for contain-fit) + loading/failed flags. */
@@ -281,96 +274,46 @@ export function RectCropPreview(
     topInset = 0,
     bottomInset = 0,
     debugInfo,
-    onRequestAlt,
-    onRequestPlaneProjection,
-    onRequestScansProjection,
+    onRequestAlternate,
+    alternateLabel = 'Alternate',
     rRadians,
     showMemoryPill,
   } = props;
 
   const resolvedCopy = useMemo(() => mergeGuidanceCopy(copy), [copy]);
 
-  // ── 3-tab projection comparison ─────────────────────────────────────
-  // Tab 1 "Spherical" = the PRIMARY (imageUri), the manual+spherical finalize
-  // output (croppable). Tab 2 "Plane" = manual+plane, computed EAGERLY on mount.
-  // Tab 3 "High-level" = stock cv::Stitcher, computed ON-DEMAND on first tap.
-  // Each alt tab tracks its uri + DEV recipe + image size + loading/failed.
-  const [activeTab, setActiveTab] = useState<TabMode>('spherical');
-  const [planeTab, setPlaneTab] = useState<AltTab>(EMPTY_ALT_TAB);
-  const [highTab, setHighTab] = useState<AltTab>(EMPTY_ALT_TAB);
-  const [scansTab, setScansTab] = useState<AltTab>(EMPTY_ALT_TAB);
-  const tabsOffered =
-    !!onRequestPlaneProjection || !!onRequestAlt || !!onRequestScansProjection;
+  // ── 2-tab: primary + on-demand alternate ────────────────────────────
+  // Tab 1 = the PRIMARY (imageUri), our approach's actual (auto-resolved) output
+  // (croppable). Tab 2 "Alternate" = the OPPOSITE-mode re-stitch (panorama↔SCANS),
+  // computed ON-DEMAND on first tap (ref-guard prevents double-stitch).  No eager
+  // work — nothing is stitched unless the Alternate tab is tapped.
+  const [activeTab, setActiveTab] = useState<TabMode>('primary');
+  const [altTab, setAltTab] = useState<AltTab>(EMPTY_ALT_TAB);
+  const tabsOffered = !!onRequestAlternate;
 
-  // EAGER: kick off the Plane re-stitch once on mount (sequential after the
-  // finalize primary — peak stays ~1 stitch).  Cancel-guarded against unmount.
-  React.useEffect(() => {
-    if (!onRequestPlaneProjection) return undefined;
-    let cancelled = false;
-    setPlaneTab((s) => ({ ...s, loading: true, failed: false }));
-    onRequestPlaneProjection()
-      .then((r) => {
-        if (cancelled) return;
-        setPlaneTab((s) =>
-          r ? { ...s, uri: r.uri, debugInfo: r.debugInfo } : { ...s, failed: true });
-      })
-      .catch(() => { if (!cancelled) setPlaneTab((s) => ({ ...s, failed: true })); })
-      .finally(() => { if (!cancelled) setPlaneTab((s) => ({ ...s, loading: false })); });
-    return () => { cancelled = true; };
-  }, [onRequestPlaneProjection]);
-
-  // ON-DEMAND: compute the High-level tab on first tap (ref-guard prevents
-  // double-stitch); switch to it immediately (it shows a spinner while running).
-  const highStartedRef = useRef(false);
-  const showHighLevel = React.useCallback(() => {
-    setActiveTab('highlevel');
-    if (highStartedRef.current || !onRequestAlt) return;
-    highStartedRef.current = true;
-    setHighTab((s) => ({ ...s, loading: true, failed: false }));
-    onRequestAlt()
+  const altStartedRef = useRef(false);
+  const showAlternate = React.useCallback(() => {
+    setActiveTab('alternate');
+    if (altStartedRef.current || !onRequestAlternate) return;
+    altStartedRef.current = true;
+    setAltTab((s) => ({ ...s, loading: true, failed: false }));
+    onRequestAlternate()
       .then((r) =>
-        setHighTab((s) =>
+        setAltTab((s) =>
           r ? { ...s, uri: r.uri, debugInfo: r.debugInfo } : { ...s, failed: true }))
-      .catch(() => setHighTab((s) => ({ ...s, failed: true })))
-      .finally(() => setHighTab((s) => ({ ...s, loading: false })));
-  }, [onRequestAlt]);
+      .catch(() => setAltTab((s) => ({ ...s, failed: true })))
+      .finally(() => setAltTab((s) => ({ ...s, loading: false })));
+  }, [onRequestAlternate]);
 
-  // ON-DEMAND: compute the SCANS (affine) tab on first tap (same pattern).
-  const scansStartedRef = useRef(false);
-  const showScans = React.useCallback(() => {
-    setActiveTab('scans');
-    if (scansStartedRef.current || !onRequestScansProjection) return;
-    scansStartedRef.current = true;
-    setScansTab((s) => ({ ...s, loading: true, failed: false }));
-    onRequestScansProjection()
-      .then((r) =>
-        setScansTab((s) =>
-          r ? { ...s, uri: r.uri, debugInfo: r.debugInfo } : { ...s, failed: true }))
-      .catch(() => setScansTab((s) => ({ ...s, failed: true })))
-      .finally(() => setScansTab((s) => ({ ...s, loading: false })));
-  }, [onRequestScansProjection]);
+  // Fetch the alternate's image size once its uri arrives (for the contain-fit).
+  React.useEffect(() => {
+    if (!altTab.uri) return;
+    Image.getSize(altTab.uri, (w, h) => setAltTab((s) => ({ ...s, size: { w, h } })), () => {});
+  }, [altTab.uri]);
 
-  // Fetch each alt tab's image size once its uri arrives (for the contain-fit).
-  React.useEffect(() => {
-    if (!planeTab.uri) return;
-    Image.getSize(planeTab.uri, (w, h) => setPlaneTab((s) => ({ ...s, size: { w, h } })), () => {});
-  }, [planeTab.uri]);
-  React.useEffect(() => {
-    if (!highTab.uri) return;
-    Image.getSize(highTab.uri, (w, h) => setHighTab((s) => ({ ...s, size: { w, h } })), () => {});
-  }, [highTab.uri]);
-  React.useEffect(() => {
-    if (!scansTab.uri) return;
-    Image.getSize(scansTab.uri, (w, h) => setScansTab((s) => ({ ...s, size: { w, h } })), () => {});
-  }, [scansTab.uri]);
-
-  const activeAlt: AltTab | null =
-    activeTab === 'plane' ? planeTab
-    : activeTab === 'highlevel' ? highTab
-    : activeTab === 'scans' ? scansTab
-    : null;
-  // Only the Spherical primary is croppable; the alt tabs are compare-only.
-  const isCroppable = activeTab === 'spherical';
+  const activeAlt: AltTab | null = activeTab === 'alternate' ? altTab : null;
+  // Only the primary is croppable; the alternate is compare-only.
+  const isCroppable = activeTab === 'primary';
   // showAlt: an alt tab is selected AND its image is loaded (uri + size).  Until
   // then we keep showing the spherical primary (so a tab tap never blanks).
   const showAlt = activeAlt != null && !!activeAlt.uri && !!activeAlt.size;
@@ -577,10 +520,7 @@ export function RectCropPreview(
             would misleadingly claim the manual recipe for a high-level output. */}
         {(() => {
           const pillText =
-            activeTab === 'plane' ? planeTab.debugInfo
-            : activeTab === 'highlevel' ? highTab.debugInfo
-            : activeTab === 'scans' ? scansTab.debugInfo
-            : debugInfo;
+            activeTab === 'alternate' ? altTab.debugInfo : debugInfo;
           return pillText ? (
             <View
               style={[
@@ -607,92 +547,52 @@ export function RectCropPreview(
           </View>
         )}
 
-        {/* 4-tab projection comparison.  Spherical = manual+spherical finalize
-            primary (croppable, homography); Plane = manual+plane (eager,
-            homography); High-level = cv::Stitcher PANORAMA (on-demand,
-            homography); SCANS = cv::Stitcher SCANS (on-demand, AFFINE).  The
-            active tab spins while it stitches; on failure it falls back to the
-            spherical primary. */}
+        {/* 2 tabs.  "As captured" = our approach's actual (auto-resolved) output
+            (croppable).  The Alternate tab re-stitches the SAME keyframes with
+            the OPPOSITE mode (panorama↔SCANS) ON DEMAND — spins while it
+            stitches, falls back to the primary on failure. */}
         {tabsOffered && (
           <View style={styles.abBar}>
             <Text style={styles.abBarLabel}>
               {activeAlt?.loading
-                ? 'Computing projection…'
+                ? `Computing ${alternateLabel}…`
                 : activeAlt?.failed
-                  ? 'Stitch failed — showing spherical'
-                  : 'Tap a projection to compare:'}
+                  ? `${alternateLabel} stitch failed — showing primary`
+                  : 'Tap to compare the alternate path:'}
             </Text>
             <View style={styles.abSegments}>
               <Pressable
-                style={[styles.abSeg, activeTab === 'spherical' && styles.abSegActive]}
-                onPress={() => setActiveTab('spherical')}
+                style={[styles.abSeg, activeTab === 'primary' && styles.abSegActive]}
+                onPress={() => setActiveTab('primary')}
                 accessibilityRole="button"
-                accessibilityState={{ selected: activeTab === 'spherical' }}
-                accessibilityLabel="View spherical projection (manual, croppable)"
+                accessibilityState={{ selected: activeTab === 'primary' }}
+                accessibilityLabel="View our approach's output (croppable)"
               >
                 <Text
-                  style={[styles.abSegText, activeTab === 'spherical' && styles.abSegTextActive]}
+                  style={[styles.abSegText, activeTab === 'primary' && styles.abSegTextActive]}
                 >
-                  Spherical
+                  As captured
                 </Text>
               </Pressable>
-              {onRequestPlaneProjection ? (
-                <Pressable
-                  style={[styles.abSeg, activeTab === 'plane' && styles.abSegActive]}
-                  onPress={() => setActiveTab('plane')}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: activeTab === 'plane', busy: planeTab.loading }}
-                  accessibilityLabel="View plane projection (manual)"
-                >
-                  {planeTab.loading ? (
-                    <ActivityIndicator size="small" color="#fff" />
-                  ) : (
-                    <Text
-                      style={[styles.abSegText, activeTab === 'plane' && styles.abSegTextActive]}
-                    >
-                      Plane
-                    </Text>
-                  )}
-                </Pressable>
-              ) : null}
-              {onRequestAlt ? (
-                <Pressable
-                  style={[styles.abSeg, activeTab === 'highlevel' && styles.abSegActive]}
-                  onPress={showHighLevel}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: activeTab === 'highlevel', busy: highTab.loading }}
-                  accessibilityLabel="View high-level pipeline (computed on demand)"
-                >
-                  {highTab.loading ? (
-                    <ActivityIndicator size="small" color="#fff" />
-                  ) : (
-                    <Text
-                      style={[styles.abSegText, activeTab === 'highlevel' && styles.abSegTextActive]}
-                    >
-                      High-level
-                    </Text>
-                  )}
-                </Pressable>
-              ) : null}
-              {onRequestScansProjection ? (
-                <Pressable
-                  style={[styles.abSeg, activeTab === 'scans' && styles.abSegActive]}
-                  onPress={showScans}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: activeTab === 'scans', busy: scansTab.loading }}
-                  accessibilityLabel="View SCANS affine pipeline (computed on demand)"
-                >
-                  {scansTab.loading ? (
-                    <ActivityIndicator size="small" color="#fff" />
-                  ) : (
-                    <Text
-                      style={[styles.abSegText, activeTab === 'scans' && styles.abSegTextActive]}
-                    >
-                      SCANS
-                    </Text>
-                  )}
-                </Pressable>
-              ) : null}
+              {/* The bar only renders when tabsOffered (= onRequestAlternate is
+                  provided), so the Alternate segment always shows here. */}
+              <Pressable
+                style={[styles.abSeg, activeTab === 'alternate' && styles.abSegActive]}
+                onPress={showAlternate}
+                accessibilityRole="button"
+                accessibilityState={{ selected: activeTab === 'alternate', busy: altTab.loading }}
+                accessibilityLabel={`View the ${alternateLabel} alternate (computed on demand)`}
+              >
+                {altTab.loading ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text
+                    style={[styles.abSegText, activeTab === 'alternate' && styles.abSegTextActive]}
+                  >
+                    {alternateLabel}
+                  </Text>
+                )}
+              </Pressable>
             </View>
           </View>
         )}

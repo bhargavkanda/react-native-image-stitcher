@@ -1316,42 +1316,28 @@ export function Camera(props: CameraProps): React.JSX.Element {
     [cropPending],
   );
 
-  // Tab 3 "High-level" — stock cv::Stitcher (homography), ON-DEMAND.
-  const requestHighLevelAlt = useCallback(
-    () =>
-      stitchWithConfig('highlevel', {
-        useManualPipeline: false,
-        warperType: 'spherical',
-        stitchMode: 'panorama',
-      }),
-    [stitchWithConfig],
-  );
-
-  // Tab 2 "Plane" — manual pipeline + plane warper, EAGER (computed on preview
-  // mount so it's ready to compare against the spherical primary).
-  const requestPlaneProjection = useCallback(
-    () =>
-      stitchWithConfig('plane', {
-        useManualPipeline: true,
-        warperType: 'plane',
-        stitchMode: 'panorama',
-      }),
-    [stitchWithConfig],
-  );
-
-  // Tab 4 "SCANS" — stock cv::Stitcher in SCANS/AFFINE mode, ON-DEMAND.  The
-  // affine model fits low-rotation / translation captures (vs the homography of
-  // the other 3 tabs); compare it per-capture to tune the panorama-vs-SCANS
-  // threshold.  warperType is irrelevant here — SCANS hard-wires PlaneWarper.
-  const requestScansProjection = useCallback(
-    () =>
-      stitchWithConfig('scans', {
-        useManualPipeline: false,
-        warperType: 'spherical',
-        stitchMode: 'scans',
-      }),
-    [stitchWithConfig],
-  );
+  // 2026-06-15 — ALTERNATE-PATH validation (ON-DEMAND only).  Tab 1 is our
+  // approach's actual output (auto-resolved).  The single Alternate tab
+  // re-stitches the SAME keyframes with the OPPOSITE stitch mode, so you can
+  // judge per capture whether the panorama↔SCANS gating picked right:
+  //   • our approach picked PANORAMA → alternate = SCANS (high-level affine)
+  //   • our approach picked SCANS    → alternate = PANORAMA (manual + plane,
+  //                                     matching our panorama config)
+  // Nothing is computed until the Alternate tab is tapped — no eager work.
+  const requestAlternate = useCallback(() => {
+    const mode = cropPending?.captureResultObj.stitchModeResolved;
+    return mode === 'scans'
+      ? stitchWithConfig('alt-pano', {
+          useManualPipeline: true,
+          warperType: 'plane',
+          stitchMode: 'panorama',
+        })
+      : stitchWithConfig('alt-scans', {
+          useManualPipeline: false,
+          warperType: 'spherical',
+          stitchMode: 'scans',
+        });
+  }, [stitchWithConfig, cropPending]);
 
   // 2026-05-22 (audit F9 + F3) — debug stitch-stats toast.  Hook
   // exposes an imperative API; we fire `showResult(finalizeResult)`
@@ -2909,29 +2895,23 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
-        // 2026-06-15 — DEV 3-tab projection comparison.  The primary finalize
-        // output is Tab 1 "Spherical" (manual + spherical, the default).  When
-        // keyframes are available the preview shows two more tabs to compare
-        // projections + tune the panorama-vs-SCANS threshold:
-        //   • onRequestPlaneProjection → Tab 2 "Plane" (manual + plane), EAGER
-        //   • onRequestAlt             → Tab 3 "High-level" (cv::Stitcher), ON-DEMAND
-        // Gated on `__DEV__` (like the rRadians pill) — so it shows in any dev
-        // build without needing the ⚙️ Debug toggle, and never ships to prod.
-        // Works on BOTH platforms (Android finalize returns batchKeyframePaths).
-        onRequestAlt={
+        // 2026-06-15 — DEV alternate-path validation.  Tab 1 = our approach's
+        // actual output (auto-resolved).  ONE on-demand "Alternate" tab
+        // re-stitches the SAME keyframes with the OPPOSITE mode (panorama↔SCANS)
+        // so you can validate the gating per capture.  Nothing computes until
+        // tapped — no eager work.  Gated on __DEV__ (never ships to prod);
+        // requires keyframePaths (both platforms return them).
+        onRequestAlternate={
           __DEV__ && cropPending?.captureResultObj.keyframePaths?.length
-            ? requestHighLevelAlt
+            ? requestAlternate
             : undefined
         }
-        onRequestPlaneProjection={
-          __DEV__ && cropPending?.captureResultObj.keyframePaths?.length
-            ? requestPlaneProjection
-            : undefined
-        }
-        onRequestScansProjection={
-          __DEV__ && cropPending?.captureResultObj.keyframePaths?.length
-            ? requestScansProjection
-            : undefined
+        // Label the Alternate tab with what it will compute (the opposite of
+        // what our approach picked for this capture).
+        alternateLabel={
+          cropPending?.captureResultObj.stitchModeResolved === 'scans'
+            ? 'Panorama'
+            : 'SCANS'
         }
         // Live gyro rotation magnitude for this capture — shown as a pill so the
         // dev can read the rRadians per capture and pick the threshold. __DEV__.
