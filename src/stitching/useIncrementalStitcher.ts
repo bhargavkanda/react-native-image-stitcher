@@ -85,6 +85,12 @@ export interface UseIncrementalStitcherReturn {
      * translation magnitude and prefers that).
      */
     imuTranslationMetres?: number,
+    /**
+     * 2026-06-16 — the EXPLICIT lens the user selected (`'1x'` | `'0.5x'`).
+     * The reliable zoom signal for the high-level warper tree (`'0.5x'`
+     * ultra-wide → spherical).  Omit ⇒ treated as `'1x'`.
+     */
+    lens?: string,
   ) => Promise<IncrementalFinalizeResult>;
   /** Abort the capture without producing output. */
   cancel: () => Promise<void>;
@@ -198,6 +204,7 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
       quality = 90,
       captureOrientation?: string,
       imuTranslationMetres?: number,
+      lens?: string,
     ): Promise<IncrementalFinalizeResult> => {
       if (!native) {
         throw new Error('useIncrementalStitcher: native module unavailable');
@@ -216,6 +223,12 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
         // doesn't carry tx/ty/tz, so pose-derived translation is 0).
         // Native side treats it as a magnitude (always ≥ 0).
         imuTranslationMetres: Math.max(0, imuTranslationMetres ?? 0),
+        // 2026-06-16 — the EXPLICIT lens the user selected ('1x' | '0.5x').
+        // This is the reliable zoom signal for the high-level warper tree
+        // (0.5x ultra-wide → spherical); deriving zoom from intrinsics FOV was
+        // unreliable (multi-cam 0.5x reaches the ultra-wide by zoom without
+        // changing the reported fx, and the non-AR path may supply fx=0).
+        lens,
       });
       setIsRunning(false);
       // Clear React state on finalize so the next start doesn't

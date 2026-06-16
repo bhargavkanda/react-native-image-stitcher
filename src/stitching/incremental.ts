@@ -914,6 +914,14 @@ interface NativeIncrementalModule {
      * are zero, matching legacy behaviour.
      */
     imuTranslationMetres?: number;
+    /**
+     * 2026-06-16 — the explicit lens the user selected (`'1x'` | `'0.5x'`).
+     * The reliable zoom signal for the high-level warper tree: `'0.5x'`
+     * (ultra-wide) → spherical warper.  Replaces deriving zoom from the
+     * intrinsics FOV (unreliable on multi-cam 0.5x / non-AR fx=0).  Omitted →
+     * treated as `'1x'`.
+     */
+    lens?: string;
   }): Promise<IncrementalFinalizeResult>;
   cancel(): Promise<{ ok: true }>;
   getState(): Promise<IncrementalState | null>;

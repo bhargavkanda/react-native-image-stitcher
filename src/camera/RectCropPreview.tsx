@@ -44,7 +44,6 @@ import React, {
   useState,
 } from 'react';
 import {
-  ActivityIndicator,
   Image,
   Modal,
   PanResponder,
@@ -76,7 +75,6 @@ import {
 } from './cropGeometry';
 import { GUIDANCE_TOKENS } from './guidanceTokens';
 import { CaptureMemoryPill } from './CaptureMemoryPill';
-import { CaptureRotationPill } from './CaptureRotationPill';
 
 
 /** Image-pixel rectangle, used for the optional `initialRect` seed. */
@@ -111,26 +109,6 @@ export interface RectCropPreviewProps {
   imageWidth: number;
   /** Intrinsic pixel height of `imageUri`. */
   imageHeight: number;
-  /**
-   * 2026-06-16 — DEV alternate-path validation.  The PRIMARY image (`imageUri`)
-   * is Tab 1 — our approach's actual (auto-resolved) output, and the only
-   * croppable tab.  `alternates` adds N on-demand compare-only tabs, each
-   * re-stitching the SAME captured keyframes a different way.  Every alternate
-   * is LAZY: its `request` runs only on the FIRST tap of its tab (no eager
-   * work), resolving with the output's file:// `uri` + its OWN DEV-overlay
-   * `debugInfo` recipe (so the params pill matches the shown tab), or `null` on
-   * failure.  The tab bar appears when `alternates` is non-empty.
-   */
-  alternates?: AlternateTabSpec[];
-  /**
-   * 2026-06-15 (DEV) — gyro rotation magnitude (radians) plus (2026-06-16) the
-   * translation magnitude (metres) and auto decision ratio (`>=0.55` → SCANS)
-   * of the capture.  When set, a small pill shows them so the dev can read the
-   * decision inputs per capture and tune the panorama-vs-SCANS threshold.
-   */
-  rRadians?: number;
-  tMeters?: number;
-  decisionRatio?: number;
   /** Show / hide the editor. */
   visible: boolean;
   /**
@@ -174,9 +152,9 @@ export interface RectCropPreviewProps {
   copy?: Partial<GuidanceCopy>;
   /**
    * Safe-area insets (px).  The editor is a full-screen Modal, so the host
-   * passes `insets.top`/`insets.bottom` to keep the top toolbar (A/B toggle,
-   * warnings) clear of the notch/Dynamic Island and the bottom button bar
-   * clear of the home indicator.  Default 0.
+   * passes `insets.top`/`insets.bottom` to keep the top toolbar (warnings)
+   * clear of the notch/Dynamic Island and the bottom button bar clear of the
+   * home indicator.  Default 0.
    */
   topInset?: number;
   bottomInset?: number;
@@ -196,37 +174,6 @@ export interface RectCropPreviewProps {
   showMemoryPill?: boolean;
 }
 
-
-/** One on-demand comparison tab: a stable `key`, a short `label` for the
- *  segment, and a lazy `request` that re-stitches the captured keyframes some
- *  way (runs once, on first tap).  Resolves the output uri + DEV recipe, or
- *  `null` on failure. */
-export interface AlternateTabSpec {
-  key: string;
-  label: string;
-  request: () => Promise<{ uri: string; debugInfo: string } | null>;
-}
-
-/** Active tab: `'primary'` (our auto-resolved output, the only croppable tab) or
- *  an alternate's `key` (compare-only). */
-type TabMode = string;
-
-/** Per-alt-tab state: the re-stitched output uri + its DEV recipe + image size
- *  (for contain-fit) + loading/failed flags. */
-interface AltTab {
-  uri: string | null;
-  debugInfo: string | null;
-  size: { w: number; h: number } | null;
-  loading: boolean;
-  failed: boolean;
-}
-const EMPTY_ALT_TAB: AltTab = {
-  uri: null,
-  debugInfo: null,
-  size: null,
-  loading: false,
-  failed: false,
-};
 
 /** Default inset (fraction of each dimension) for the seed quad. */
 const DEFAULT_INSET_FRACTION = 0.08;
@@ -284,80 +231,10 @@ export function RectCropPreview(
     topInset = 0,
     bottomInset = 0,
     debugInfo,
-    alternates,
-    rRadians,
-    tMeters,
-    decisionRatio,
     showMemoryPill,
   } = props;
 
   const resolvedCopy = useMemo(() => mergeGuidanceCopy(copy), [copy]);
-
-  // ── N-tab: primary + up to N on-demand alternates ───────────────────
-  // Tab 1 = the PRIMARY (imageUri), our approach's actual (auto-resolved) output
-  // (the only croppable tab).  Each `alternates[i]` is a compare-only tab whose
-  // stitch runs ON-DEMAND on the first tap of that tab (a per-key ref-guard
-  // prevents a double-stitch).  No eager work — nothing is stitched unless its
-  // tab is tapped.  State is keyed by the alternate's `key`.
-  const [activeTab, setActiveTab] = useState<TabMode>('primary');
-  const [altTabs, setAltTabs] = useState<Record<string, AltTab>>({});
-  const tabsOffered = !!(alternates && alternates.length > 0);
-
-  // Keys whose stitch has already been kicked off (so a re-tap doesn't restart).
-  const altStartedRef = useRef<Set<string>>(new Set());
-  const showAlternate = React.useCallback(
-    (key: string) => {
-      setActiveTab(key);
-      if (altStartedRef.current.has(key)) return;
-      const spec = alternates?.find((a) => a.key === key);
-      if (!spec) return;
-      altStartedRef.current.add(key);
-      const patch = (k: string, p: Partial<AltTab>) =>
-        setAltTabs((s) => ({ ...s, [k]: { ...(s[k] ?? EMPTY_ALT_TAB), ...p } }));
-      patch(key, { loading: true, failed: false });
-      spec
-        .request()
-        .then((r) =>
-          patch(key, r ? { uri: r.uri, debugInfo: r.debugInfo } : { failed: true }))
-        .catch(() => patch(key, { failed: true }))
-        .finally(() => patch(key, { loading: false }));
-    },
-    [alternates],
-  );
-
-  // Fetch each alternate's image size once its uri arrives (for the contain-fit).
-  // Guarded by `!t.size` so writing the size back doesn't re-trigger the fetch.
-  React.useEffect(() => {
-    Object.entries(altTabs).forEach(([key, t]) => {
-      if (t.uri && !t.size) {
-        Image.getSize(
-          t.uri,
-          (w, h) =>
-            setAltTabs((s) => ({
-              ...s,
-              [key]: { ...(s[key] ?? EMPTY_ALT_TAB), size: { w, h } },
-            })),
-          () => {},
-        );
-      }
-    });
-  }, [altTabs]);
-
-  const activeAlt: AltTab | null =
-    activeTab === 'primary' ? null : altTabs[activeTab] ?? null;
-  // Label of the currently-selected alternate (for the bar's status line).
-  const activeAltLabel: string | null =
-    activeTab === 'primary'
-      ? null
-      : alternates?.find((a) => a.key === activeTab)?.label ?? 'Alternate';
-  // Only the primary is croppable; every alternate is compare-only.
-  const isCroppable = activeTab === 'primary';
-  // showAlt: an alt tab is selected AND its image is loaded (uri + size).  Until
-  // then we keep showing the spherical primary (so a tab tap never blanks).
-  const showAlt = activeAlt != null && !!activeAlt.uri && !!activeAlt.size;
-  const activeUri = showAlt ? (activeAlt!.uri as string) : imageUri;
-  const activeW = showAlt ? (activeAlt!.size as { w: number }).w : imageWidth;
-  const activeH = showAlt ? (activeAlt!.size as { h: number }).h : imageHeight;
 
   // The 4 corners live in IMAGE-PIXEL space (the source of truth) so they
   // survive layout-box changes (rotation, keyboard) without drift.  We map
@@ -475,17 +352,16 @@ export function RectCropPreview(
   let screenCorners: Point[] | null = null;
 
   if (box) {
-    const fit = containFit(box, activeW, activeH);
+    const fit = containFit(box, imageWidth, imageHeight);
     if (fit) {
       imageBox = {
         left: fit.offX,
         top: fit.offY,
-        width: activeW * fit.scale,
-        height: activeH * fit.scale,
+        width: imageWidth * fit.scale,
+        height: imageHeight * fit.scale,
       };
-      // Quad corners only apply to the Spherical primary (the croppable tab) —
-      // hidden on the Plane / High-level compare-only tabs.
-      screenCorners = isCroppable
+      // Quad corners only apply in crop mode.
+      screenCorners = showCropControls
         ? imageQuad.map((p) => imageToScreen(p, box, imageWidth, imageHeight))
         : null;
     }
@@ -522,58 +398,28 @@ export function RectCropPreview(
     >
       <View style={[styles.root, { paddingTop: topInset }]}>
         {/* Live memory-footprint pill (host gates on settings.debug).  Top-LEFT
-            so it clears the top-right stitch-params pill; watch it spike when
-            the high-level re-stitch fires. */}
+            so it clears the top-right stitch-params pill. */}
         {showMemoryPill ? (
           <CaptureMemoryPill
             style={{
               position: 'absolute',
-              top: topInset + (tabsOffered ? 76 : 8),
+              top: topInset + 8,
               left: 12,
               zIndex: 21,
             }}
           />
         ) : null}
 
-        {/* Gyro rotation readout (host gates on __DEV__) — read it per capture
-            to tune the panorama-vs-SCANS threshold.  Top-LEFT, stacked below the
-            memory pill when both show. */}
-        {rRadians != null ? (
-          <CaptureRotationPill
-            rRadians={rRadians}
-            tMeters={tMeters}
-            decisionRatio={decisionRatio}
-            style={{
-              position: 'absolute',
-              top: topInset + (tabsOffered ? 76 : 8) + (showMemoryPill ? 34 : 0),
-              left: 12,
-              zIndex: 21,
-            }}
-          />
+        {/* DEV stitch-params overlay (host gates on __DEV__).  Top-right pill. */}
+        {debugInfo ? (
+          <View
+            style={[styles.debugPill, { top: topInset + 8 }]}
+            pointerEvents="none"
+            accessibilityRole="text"
+          >
+            <Text style={styles.debugPillText}>{debugInfo}</Text>
+          </View>
         ) : null}
-
-        {/* DEV stitch-params overlay (host gates on __DEV__).  Top-right pill;
-            pushed below the A/B bar when that's present so they don't overlap.
-            A/B-AWARE: while the user is viewing the on-demand high-level tab and
-            its recipe is known, show the HIGH-LEVEL recipe (pipe=highlevel;…)
-            instead of the manual primary's `debugInfo` — otherwise the pill
-            would misleadingly claim the manual recipe for a high-level output. */}
-        {(() => {
-          const pillText =
-            activeAlt != null ? activeAlt.debugInfo : debugInfo;
-          return pillText ? (
-            <View
-              style={[
-                styles.debugPill,
-                { top: topInset + (tabsOffered ? 76 : 8) },
-              ]}
-              pointerEvents="none"
-              accessibilityRole="text"
-            >
-              <Text style={styles.debugPillText}>{pillText}</Text>
-            </View>
-          ) : null;
-        })()}
 
         {/* Non-fatal warning banner (e.g. "<70 % of frames used"), shown
             ABOVE the image so the user sees it before accepting a crop. */}
@@ -587,75 +433,18 @@ export function RectCropPreview(
           </View>
         )}
 
-        {/* Tabs.  "As captured" = our approach's actual (auto-resolved) output
-            (croppable).  Each alternate re-stitches the SAME keyframes a
-            different way ON DEMAND — spins while it stitches, falls back to the
-            primary on failure. */}
-        {tabsOffered && (
-          <View style={styles.abBar}>
-            <Text style={styles.abBarLabel}>
-              {activeAlt?.loading
-                ? `Computing ${activeAltLabel}…`
-                : activeAlt?.failed
-                  ? `${activeAltLabel} stitch failed — showing primary`
-                  : 'Tap to compare alternate stitches:'}
-            </Text>
-            <View style={styles.abSegments}>
-              <Pressable
-                style={[styles.abSeg, activeTab === 'primary' && styles.abSegActive]}
-                onPress={() => setActiveTab('primary')}
-                accessibilityRole="button"
-                accessibilityState={{ selected: activeTab === 'primary' }}
-                accessibilityLabel="View our approach's output (croppable)"
-              >
-                <Text
-                  style={[styles.abSegText, activeTab === 'primary' && styles.abSegTextActive]}
-                >
-                  As captured
-                </Text>
-              </Pressable>
-              {/* One compare-only segment per alternate; each stitches lazily on
-                  first tap.  The bar only renders when tabsOffered. */}
-              {alternates!.map((a) => {
-                const t = altTabs[a.key];
-                const selected = activeTab === a.key;
-                return (
-                  <Pressable
-                    key={a.key}
-                    style={[styles.abSeg, selected && styles.abSegActive]}
-                    onPress={() => showAlternate(a.key)}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected, busy: !!t?.loading }}
-                    accessibilityLabel={`View the ${a.label} alternate (computed on demand)`}
-                  >
-                    {t?.loading ? (
-                      <ActivityIndicator size="small" color="#fff" />
-                    ) : (
-                      <Text
-                        style={[styles.abSegText, selected && styles.abSegTextActive]}
-                      >
-                        {a.label}
-                      </Text>
-                    )}
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
-        )}
-
         <View style={styles.canvas} onLayout={onLayout}>
           {imageBox && (
             <Image
-              source={{ uri: activeUri }}
+              source={{ uri: imageUri }}
               style={[styles.image, imageBox]}
               resizeMode="stretch"
             />
           )}
 
           {/* Crop affordances — quad edges + draggable handles — only in crop
-              mode on the Spherical primary (hidden on the compare-only tabs). */}
-          {showCropControls && isCroppable && (
+              mode (hidden in preview-only mode). */}
+          {showCropControls && (
             <>
               {/* Quad edges (non-interactive). */}
               {edges.map((e, i) => (
@@ -703,9 +492,9 @@ export function RectCropPreview(
               <Text style={styles.btnText}>{resolvedCopy.cropRetake}</Text>
             </Pressable>
             {/* Crop mode only — "Use original" emits the stitch un-cropped.
-                Hidden in preview-only mode and on the compare-only tabs (the
-                primary button below is the accept action there). */}
-            {showCropControls && isCroppable && (
+                Hidden in preview-only mode (Confirm below is the accept action
+                there). */}
+            {showCropControls && (
               <Pressable
                 style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
                 onPress={() => onUseOriginal()}
@@ -715,37 +504,26 @@ export function RectCropPreview(
                 <Text style={styles.btnText}>{resolvedCopy.cropUseOriginal}</Text>
               </Pressable>
             )}
-            {/* Primary action — on a compare-only tab "Use this" emits the SHOWN
-                projection's output; on the Spherical primary "Crop" applies the
-                quad (crop mode) or "Confirm" accepts as-is (preview-only mode). */}
+            {/* Primary action — "Crop" applies the quad (crop mode) or "Confirm"
+                accepts the image as-is (preview-only mode). */}
             <Pressable
               style={({ pressed }) => [
                 styles.btn,
                 styles.primary,
                 pressed && styles.btnPressed,
               ]}
-              onPress={
-                !isCroppable
-                  ? () => onUseOriginal(activeUri)
-                  : showCropControls
-                    ? handleConfirm
-                    : () => onUseOriginal()
-              }
+              onPress={showCropControls ? handleConfirm : () => onUseOriginal()}
               accessibilityRole="button"
               accessibilityLabel={
-                !isCroppable
-                  ? 'Use this output'
-                  : showCropControls
-                    ? resolvedCopy.cropConfirm
-                    : resolvedCopy.previewConfirm
+                showCropControls
+                  ? resolvedCopy.cropConfirm
+                  : resolvedCopy.previewConfirm
               }
             >
               <Text style={styles.btnText}>
-                {!isCroppable
-                  ? 'Use this'
-                  : showCropControls
-                    ? resolvedCopy.cropConfirm
-                    : resolvedCopy.previewConfirm}
+                {showCropControls
+                  ? resolvedCopy.cropConfirm
+                  : resolvedCopy.previewConfirm}
               </Text>
             </Pressable>
           </View>
@@ -821,47 +599,6 @@ const styles = StyleSheet.create({
     color: GUIDANCE_TOKENS.amber,
     fontSize: 13,
     fontWeight: '600',
-  },
-  abBar: {
-    backgroundColor: '#1a1a1a',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#333',
-  },
-  abBarLabel: {
-    color: '#aaa',
-    fontSize: 11,
-    fontWeight: '600',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  abSegments: {
-    flexDirection: 'row',
-    alignSelf: 'center',
-    backgroundColor: '#000',
-    borderRadius: 9,
-    padding: 3,
-  },
-  abSeg: {
-    paddingVertical: 7,
-    // 4 segments (Spherical/Plane/High-level/SCANS) — tighter horizontal
-    // padding + min-width so they fit a ~360px phone without clipping.
-    paddingHorizontal: 11,
-    minWidth: 44,
-    alignItems: 'center',
-    borderRadius: 7,
-  },
-  abSegActive: {
-    backgroundColor: '#0A84FF',
-  },
-  abSegText: {
-    color: '#9aa',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  abSegTextActive: {
-    color: '#fff',
   },
   canvas: { flex: 1 },
   image: { position: 'absolute' },

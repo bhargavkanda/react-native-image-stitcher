@@ -217,6 +217,10 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
         // and to PANORAMA when both are 0).
         let imuT = (options["imuTranslationMetres"] as? Double) ?? 0.0
         IncrementalStitcher.shared.updateImuTranslationMetres(imuT)
+        // 2026-06-16 — the EXPLICIT lens the user selected ('1x'|'0.5x'): the
+        // reliable zoom signal for the high-level warper tree (0.5x → spherical).
+        let lens = (options["lens"] as? String) ?? "1x"
+        IncrementalStitcher.shared.updateLens(lens)
         IncrementalStitcher.shared.finalize(
             toPath: outputPath,
             jpegQuality: quality

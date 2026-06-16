@@ -633,7 +633,8 @@ class IncrementalStitcher(
         val wasBatchKeyframe = batchKeyframeMode
         val keyframePathsSnapshot = batchKeyframePaths.toList()
         val captureOrientationSnapshot = batchCaptureOrientation
-        val warperTypeSnapshot = batchWarperType
+        // batchWarperType (settings) is superseded by the high-level warper tree
+        // (pickHighLevelWarper) below — kept as a field for back-compat, unused here.
         val blenderTypeSnapshot = batchBlenderType
         val seamFinderTypeSnapshot = batchSeamFinderType
         val useInscribedRectCropSnapshot = batchUseInscribedRectCrop
@@ -679,6 +680,16 @@ class IncrementalStitcher(
         val rRadiansResolved: Double = autoResolution.rRadians
         val tMetersResolved: Double = autoResolution.tMeters
         val decisionRatioResolved: Double = autoResolution.ratio
+        // 2026-06-16 — HIGH-LEVEL ACROSS THE BOARD.  Pick the warper from the
+        // (motion, Mode A/B, zoom) tree and always run cv::Stitcher PANORAMA
+        // (useManualPipeline=false at the stitchSync call below).  stitchModeResolved
+        // is now only the MOTION classifier feeding the tree + the dev readout;
+        // the actual stitch mode is always panorama.  Zoom comes from the EXPLICIT
+        // lens label the user selected ('1x'|'0.5x') — the reliable signal (FOV
+        // from intrinsics was unreliable: multi-cam 0.5x doesn't change fx, and
+        // the non-AR path may supply fx=0 → FOV defaulted to 65° → never 0.5x).
+        val lensOpt = options.getString("lens") ?: "1x"
+        val highLevelWarper = pickHighLevelWarper(captureOrientationSnapshot, lensOpt)
         android.util.Log.i(
             "IncrementalStitcher",
             "finalize stitch-mode: configured=$batchStitchMode resolved=$stitchModeResolved " +
@@ -724,12 +735,13 @@ class IncrementalStitcher(
                         keyframePathsSnapshot.toTypedArray(),
                         outputPath,
                         quality,
-                        warperTypeSnapshot,
+                        highLevelWarper,                 // tree-chosen (was batchWarperType)
                         blenderTypeSnapshot,
                         seamFinderTypeSnapshot,
                         captureOrientationSnapshot,
                         useInscribedRectCropSnapshot,
-                        stitchMode = stitchModeResolved,
+                        stitchMode = "panorama",         // always high-level PANORAMA
+                        useManualPipeline = false,       // high level across the board
                     )
                     // 2026-05-15 (D) — dims layout from native JNI:
                     //   [0] width, [1] height, [2] framesRequested,
@@ -2021,6 +2033,35 @@ class IncrementalStitcher(
                 "rotGuard=$lowRotationGuard → $mode",
         )
         return StitchModeResolution(mode, rRadians, tMeters, ratio)
+    }
+
+    /**
+     * 2026-06-16 — high-level warper decision tree (the pipeline is now ALWAYS
+     * high-level cv::Stitcher PANORAMA — useManualPipeline=false).  Warper is a
+     * pure function of (lens, pan direction); the rotation-vs-translation
+     * (ex-SCANS) distinction was DROPPED as redundant — at 1x the same
+     * direction-based warpers serve both, and 0.5x is always spherical.  Inputs:
+     *   orientation = capture hold ("landscape*" = Mode A vertical pan;
+     *                 "portrait*" = Mode B horizontal pan)
+     *   lens        = the EXPLICIT lens the user selected ("0.5x" ultra-wide |
+     *                 "1x" wide).  Reliable zoom signal (FOV-from-intrinsics was
+     *                 unreliable — multi-cam 0.5x reaches the ultra-wide by zoom
+     *                 without changing fx, and the non-AR path may supply fx=0).
+     *
+     *     0.5x ultra-wide          → spherical   (bounded both axes; any pan)
+     *     1x + Mode A (vertical)   → plane
+     *     1x + Mode B (horizontal) → cylindrical
+     *
+     * Quality-preferred warper; the C++ memory ladder force-falls to spherical
+     * (and downscales compositingResol) under pressure.
+     */
+    private fun pickHighLevelWarper(
+        orientation: String,
+        lens: String,
+    ): String {
+        if (lens == "0.5x") return "spherical"                // ultra-wide → always spherical
+        val verticalPanModeA = orientation.startsWith("landscape")
+        return if (verticalPanModeA) "plane" else "cylindrical"  // 1x: A→plane, B→cylindrical
     }
 
     /**

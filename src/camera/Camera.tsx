@@ -1264,101 +1264,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
     warnings: CaptureWarning[];
   } | null>(null);
 
-  // 2026-06-15 — DEV 3-tab preview re-stitch.  The SAME captured keyframes can
-  // be re-stitched through any (warper, pipeline) config via `refinePanorama`.
-  // One shared helper drives the alternate tabs:
-  //   • Plane      — manual pipeline + plane warper   (eager, vs the spherical
-  //                  primary which is the manual finalize output itself)
-  //   • High-level — stock cv::Stitcher (homography)  (on-demand)
-  // Returns the result JPEG's file:// uri + its OWN DEV recipe (so the pill
-  // matches the shown tab), or null when unavailable (no keyframe paths or the
-  // stitch failed).  `suffix` keeps each tab's JPEG distinct from the finalize
-  // primary and from each other.
-  const stitchWithConfig = useCallback(
-    async (
-      suffix: string,
-      config: {
-        useManualPipeline: boolean;
-        warperType: 'spherical' | 'plane';
-        stitchMode: 'panorama' | 'scans';
-      },
-    ): Promise<{ uri: string; debugInfo: string } | null> => {
-      const pending = cropPending;
-      const kf = pending?.captureResultObj.keyframePaths;
-      if (!pending || !kf || kf.length < 2) return null;
-      const native = getIncrementalNativeModule();
-      if (!native) return null;
-      const outputPath = `${toBareFilePath(pending.uri).replace(/\.jpg$/i, '')}-${suffix}.jpg`;
-      try {
-        const r = await native.refinePanorama({
-          framePaths: kf,
-          outputPath,
-          config: {
-            ...config,
-            // Match the manual output's rotation — without this the re-stitch
-            // bakes "portrait" (no rotation) and comes out sideways.
-            captureOrientation: pending.captureResultObj.captureOrientation as
-              | 'portrait'
-              | 'portrait-upside-down'
-              | 'landscape-left'
-              | 'landscape-right'
-              | undefined,
-          },
-        });
-        return {
-          uri: toFileUri(r.panoramaPath),
-          debugInfo: buildStitchDebugInfo({
-            debugSummary: r.debugSummary,
-            finalConfidenceThresh: r.finalConfidenceThresh,
-            framesIncluded: r.framesIncluded,
-            framesRequested: r.framesRequested,
-            width: r.width,
-            height: r.height,
-          }),
-        };
-      } catch {
-        return null;
-      }
-    },
-    [cropPending],
-  );
-
-  // 2026-06-16 (DEV) — fixed on-demand comparison tabs (all LAZY — nothing is
-  // stitched until the tab is tapped).  Tab 1 (the primary, "As captured") is
-  // our actual output: manual pipeline, plane projection, auto-resolved.  These
-  // three re-stitch the SAME captured keyframes through the HIGH-LEVEL
-  // cv::Stitcher so the operator can A/B projection + mode per capture:
-  //   • High-level PLANE      — cv::Stitcher PANORAMA + plane warper
-  //   • High-level SPHERICAL  — cv::Stitcher PANORAMA + spherical warper
-  //   • SCANS (high-level)    — cv::Stitcher SCANS (affine; warper is moot)
-  const requestHighPlane = useCallback(
-    () =>
-      stitchWithConfig('hl-plane', {
-        useManualPipeline: false,
-        warperType: 'plane',
-        stitchMode: 'panorama',
-      }),
-    [stitchWithConfig],
-  );
-  const requestHighSpherical = useCallback(
-    () =>
-      stitchWithConfig('hl-sph', {
-        useManualPipeline: false,
-        warperType: 'spherical',
-        stitchMode: 'panorama',
-      }),
-    [stitchWithConfig],
-  );
-  const requestScansHighLevel = useCallback(
-    () =>
-      stitchWithConfig('hl-scans', {
-        useManualPipeline: false,
-        warperType: 'spherical',
-        stitchMode: 'scans',
-      }),
-    [stitchWithConfig],
-  );
-
   // 2026-05-22 (audit F9 + F3) — debug stitch-stats toast.  Hook
   // exposes an imperative API; we fire `showResult(finalizeResult)`
   // on every successful finalize when settings.debug is on (gated
@@ -2136,6 +2041,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         90, // default JPEG quality
         deviceOrientation,
         imuTotalTranslationM,
+        lens, // 2026-06-16 — explicit '1x'|'0.5x' for the high-level warper tree
       );
       if (
         typeof result.framesRequested === 'number'
@@ -2281,6 +2187,10 @@ export function Camera(props: CameraProps): React.JSX.Element {
     isNonAR,
     imuGate,
     stitchToast,
+    // 2026-06-16 — the finalize passes `lens` (the high-level warper tree's zoom
+    // signal); without it here the closure would send a STALE lens if the user
+    // switched 1x↔0.5x after this callback was last memoized.
+    lens,
     // feature/pano-ux-guidance — the release also tears down the
     // pan-duration timer + a pending rotate-gate, and decides whether to
     // route the result through the crop editor.
@@ -2917,45 +2827,6 @@ export function Camera(props: CameraProps): React.JSX.Element {
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
-        // 2026-06-16 — DEV comparison tabs.  Tab 1 ("As captured") = our actual
-        // output: manual pipeline, plane projection, auto-resolved (croppable).
-        // Three FIXED on-demand high-level comparators re-stitch the SAME
-        // captured keyframes — all lazy (nothing computes until the tab is
-        // tapped, no eager work):
-        //   • HL·Plane — high-level cv::Stitcher PANORAMA + plane warper.
-        //   • HL·Sph   — high-level cv::Stitcher PANORAMA + spherical warper.
-        //   • SCANS    — high-level cv::Stitcher SCANS (affine).
-        // Gated on __DEV__ (never ships to prod); requires keyframePaths (both
-        // platforms return them).
-        alternates={
-          __DEV__ && cropPending?.captureResultObj.keyframePaths?.length
-            ? [
-                {
-                  key: 'hl-plane',
-                  label: 'HL·Plane',
-                  request: requestHighPlane,
-                },
-                {
-                  key: 'hl-sph',
-                  label: 'HL·Sph',
-                  request: requestHighSpherical,
-                },
-                {
-                  key: 'hl-scans',
-                  label: 'SCANS',
-                  request: requestScansHighLevel,
-                },
-              ]
-            : undefined
-        }
-        // Live decision inputs for this capture — shown as a pill so the dev can
-        // read the rotation / translation / ratio per capture and tune the
-        // panorama-vs-SCANS threshold. __DEV__.
-        rRadians={__DEV__ ? cropPending?.captureResultObj.rRadians : undefined}
-        tMeters={__DEV__ ? cropPending?.captureResultObj.tMeters : undefined}
-        decisionRatio={
-          __DEV__ ? cropPending?.captureResultObj.decisionRatio : undefined
-        }
         initialRect={cropPending?.initialRect}
         warnings={cropPending?.warnings.map((w) => w.message) ?? []}
         showCropControls={rectCrop}

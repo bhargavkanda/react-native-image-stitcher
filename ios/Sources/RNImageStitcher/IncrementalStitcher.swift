@@ -439,6 +439,10 @@ public final class IncrementalStitcher: NSObject {
     /// AR mode (where pose-derived tx/ty/tz is always 0).  Set to 0
     /// at start() and overwritten at finalize() entry.
     private var batchImuTranslationMetres: Double = 0.0
+    /// 2026-06-16 — the explicit lens the user selected ('1x' | '0.5x'), set at
+    /// finalize() entry from JS.  The zoom signal for the high-level warper tree
+    /// (0.5x ultra-wide → spherical).  Defaults to '1x'.
+    private var batchLens: String = "1x"
     /// AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
     ///
     /// Physical phone orientation at start() time, sourced from the
@@ -498,6 +502,14 @@ public final class IncrementalStitcher: NSObject {
     @objc public func updateImuTranslationMetres(_ metres: Double) {
         stateLock.lock()
         self.batchImuTranslationMetres = max(0.0, metres)
+        stateLock.unlock()
+    }
+
+    /// 2026-06-16 — store the explicit lens ('1x' | '0.5x') JS supplies at
+    /// finalize() entry; the high-level warper tree reads it (0.5x → spherical).
+    @objc public func updateLens(_ lens: String) {
+        stateLock.lock()
+        self.batchLens = lens
         stateLock.unlock()
     }
 
@@ -838,6 +850,7 @@ public final class IncrementalStitcher: NSObject {
             // too.  Updated at finalize() entry from JS-supplied
             // option value.
             self.batchImuTranslationMetres = 0.0
+            self.batchLens = "1x"  // overwritten at finalize() from JS (updateLens)
             self.batchKeyframeMode = true
             os_log(.fault, log: Self.diagLog,
                    "[V16-batch-keyframe] start mode=batch-keyframe rotation=0 (was %d, forced to 0 to match pose intrinsics) sessionDir=%{public}@",
@@ -1172,10 +1185,17 @@ public final class IncrementalStitcher: NSObject {
         default:         stitchModeResolved = autoResolution.mode
         }
         let rRadiansResolved = autoResolution.rRadians
+        // 2026-06-16 — HIGH-LEVEL ACROSS THE BOARD (mirrors Android).  Pick the
+        // warper from the (motion, Mode A/B, lens) tree; the dispatch below now
+        // forces useManualPipeline=false + stitchMode="panorama".  batchWarperType
+        // (settings) is superseded by the tree.
+        let highLevelWarper = pickHighLevelWarper(
+            orientation: captureOrientation,
+            lens: batchLens)
         os_log(.fault, log: Self.diagLog,
-               "[V16-batch-keyframe.stitchMode] configured=%{public}@ resolved=%{public}@ paths=%d imuT=%.3fm",
-               batchStitchMode, stitchModeResolved, Int32(paths.count),
-               batchImuTranslationMetres)
+               "[V16-batch-keyframe.stitchMode] configured=%{public}@ resolved=%{public}@ warper=%{public}@ lens=%{public}@ paths=%d imuT=%.3fm",
+               batchStitchMode, stitchModeResolved, highLevelWarper, batchLens,
+               Int32(paths.count), batchImuTranslationMetres)
 
         let payload = FinalizePayload(
             cleaned: cleaned,
@@ -1183,7 +1203,7 @@ public final class IncrementalStitcher: NSObject {
             inBatchKeyframeMode: inBatchKeyframeMode,
             collector: collector,
             paths: paths,
-            batchWarperType: batchWarperType,
+            batchWarperType: highLevelWarper,
             batchBlenderType: batchBlenderType,
             batchSeamFinderType: batchSeamFinderType,
             batchEnableInscribedRectCrop: batchEnableInscribedRectCrop,
@@ -1456,10 +1476,15 @@ public final class IncrementalStitcher: NSObject {
                             seamFinderType: payload.batchSeamFinderType,
                             captureOrientation: payload.captureOrientation,
                             useInscribedRectCrop: payload.batchEnableInscribedRectCrop,
-                            stitchMode: payload.batchStitchModeResolved,
-                            // Batch capture = the default output = MANUAL pipeline
-                            // (graphcut + multiband + the full memory-guard set).
-                            useManualPipeline: true
+                            // 2026-06-16 — HIGH-LEVEL ACROSS THE BOARD (mirrors
+                            // Android): always cv::Stitcher PANORAMA with the
+                            // tree-chosen warper (payload.batchWarperType is now
+                            // highLevelWarper).  The manual path's OOM hardening
+                            // was ported to high-level (catch ladder + two-phase
+                            // canvas guard + RAM-aware compositingResol + spherical
+                            // rescue), so this is now memory-safe.
+                            stitchMode: "panorama",
+                            useManualPipeline: false
                         )
                         // V16 fix-attempt 9 (verified on device,
                         // 2026-05-13) — sentinel-result detection.
@@ -2519,6 +2544,29 @@ public final class IncrementalStitcher: NSObject {
                tPose, imuTranslationMetres, rRadians, ratio,
                lowRotationGuard ? 1 : 0, mode)
         return (mode, rRadians, tMeters, ratio)
+    }
+
+    /// 2026-06-16 — high-level warper decision tree (mirrors Android's
+    /// pickHighLevelWarper).  The pipeline is now ALWAYS high-level cv::Stitcher
+    /// PANORAMA.  Warper is a pure function of (lens, pan direction); the
+    /// rotation-vs-translation (ex-SCANS) distinction was DROPPED as redundant —
+    /// at 1x the same direction-based warpers serve both, and 0.5x is always
+    /// spherical.  orientation = capture hold ("landscape*" = Mode A vertical
+    /// pan; else Mode B horizontal); lens = the EXPLICIT lens ("0.5x" | "1x").
+    ///
+    ///     0.5x ultra-wide          → spherical   (bounded both axes; any pan)
+    ///     1x + Mode A (vertical)   → plane
+    ///     1x + Mode B (horizontal) → cylindrical
+    ///
+    /// Quality-preferred warper; the C++ memory ladder force-falls to spherical
+    /// (and downscales compositingResol) under pressure.
+    private func pickHighLevelWarper(
+        orientation: String,
+        lens: String
+    ) -> String {
+        if lens == "0.5x" { return "spherical" }           // ultra-wide → always spherical
+        let verticalPanModeA = orientation.hasPrefix("landscape")
+        return verticalPanModeA ? "plane" : "cylindrical"  // 1x: A→plane, B→cylindrical
     }
 
     /// Gyro rotation magnitude (radians) between two 7-element poses

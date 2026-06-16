@@ -219,8 +219,22 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
 
     const std::string outPath = jstring_to_string(env, outputPath);
 
-    retailens::StitchResult result = retailens::stitchFramePaths(
-        paths, outPath, cfg, &androidLogBridge);
+    // 2026-06-16 (review #1) — backstop try/catch at the JNI C-ABI boundary.
+    // stitchFramePaths now has its own catch ladders (high-level + manual), so
+    // this should never fire — but a C++ exception crossing into JNI is UB
+    // (std::terminate/SIGABRT), so we NEVER let one through: convert any escape
+    // into a Java exception the Kotlin layer can catch.
+    retailens::StitchResult result;
+    try {
+        result = retailens::stitchFramePaths(
+            paths, outPath, cfg, &androidLogBridge);
+    } catch (const std::exception& e) {
+        throw_runtime(env, std::string("native stitch crashed: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        throw_runtime(env, "native stitch crashed (unknown exception)");
+        return nullptr;
+    }
 
     // Return the stitch's freed native memory to the OS so the native-heap RSS
     // baseline doesn't ratchet up ~10-15 MB per capture (see purgeNativeAllocator).
