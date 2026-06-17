@@ -112,6 +112,40 @@ android {
         prefab true
     }
 
+    // ── Host OpenCV reuse: why NOT prefab publishing ─────────────────
+    //
+    // Goal: let a HOST app's own native (C++/NDK) code reuse the SAME
+    // custom OpenCV (4.10.0, arm64-v8a) this AAR already bundles — both
+    // libopencv_java4.so (cv::Mat, imgproc, features2d, calib3d, flann,
+    // photo, video …) AND cv::Stitcher (which lives in the static
+    // archive libopencv_stitching.a, NOT in the fat .so).
+    //
+    // We evaluated AGP `prefabPublishing` first (the idiomatic AAR way)
+    // and it CANNOT carry this OpenCV.  Empirically verified: AGP's
+    // prefab modules only export libraries the module's own
+    // externalNativeBuild PRODUCES (here: just `image_stitcher`).  A
+    // prebuilt jniLib (.so) or a prebuilt static archive (.a) is not an
+    // accepted prefab `libraryName` — the configure fails with
+    // `[CXX1404] did not find implicitly required targets`.  So neither
+    // libopencv_java4.so nor libopencv_stitching.a can ride a prefab.
+    //
+    // Instead we expose the bundled OpenCV's OWN first-class CMake
+    // package — which already defines every module (incl. opencv_stitching
+    // as a STATIC IMPORTED target and opencv_java as a SHARED IMPORTED
+    // target) — to consumers via a rootProject ext property.  A host
+    // points its externalNativeBuild at `-DOpenCV_DIR=<that dir>`, does
+    // `find_package(OpenCV REQUIRED)`, then links the SHARED `opencv_java`
+    // (cv::Mat & friends resolved at runtime from the AAR's already-shipped
+    // libopencv_java4.so — NO second copy) plus the whole-archived STATIC
+    // `opencv_stitching` (cv::Stitcher, a small private copy since it isn't
+    // in the fat .so).  This is the idiomatic Android OpenCV-consumption
+    // path.  See example/android/app for the working consumer.
+    //
+    // Set unconditionally at configure time so it's readable from the
+    // host app module regardless of project evaluation order.
+    rootProject.ext.rnisOpenCVAndroidSdkDir = "$opencvSdkDir/native"
+    rootProject.ext.rnisOpenCVDir = "$opencvSdkDir/native/jni"
+
     // ── JNI shim build path ─────────────────────────────────────────
     // Gradle compiles cpp/image_stitcher_jni.cpp into
     // libimage_stitcher.so for the ABIs filtered above.  The shim
