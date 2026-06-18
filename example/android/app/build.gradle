@@ -84,29 +84,6 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
-
-        // ── Host OpenCV-reuse demo (consumer) ────────────────────────
-        // Builds app/src/main/cpp/opencv_self_test.cpp, which reuses the
-        // SAME custom OpenCV bundled by react-native-image-stitcher —
-        // including cv::Stitcher — via OpenCV's own find_package.
-        //
-        // The library exposes the path to its vendored OpenCV Android SDK
-        // through `rootProject.ext.rnisOpenCVDir`.  We resolve it robustly:
-        // prefer the ext property; if the library configures AFTER this
-        // module we fall back to deriving it from the autolinked library
-        // project's dir (evaluation-order independent).
-        ndk {
-            abiFilters 'arm64-v8a'
-        }
-        externalNativeBuild {
-            cmake {
-                arguments "-DOpenCV_DIR=${resolveRnisOpenCVDir()}",
-                          // Match the library's STL so the cv::* C++ ABI
-                          // (libc++ __ndk1) lines up at link/runtime.
-                          "-DANDROID_STL=c++_shared"
-                cppFlags "-std=c++17"
-            }
-        }
         // Force the Metro port to 8082 (project-wide convention; 8081
         // is held by Tug's Expo dev server).  The React Native Gradle
         // plugin's `configureDevServerLocation` is supposed to bake
@@ -149,24 +126,6 @@ android {
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
     }
-
-    // Compile + link the host OpenCV-reuse consumer (opencv_self_test.cpp).
-    externalNativeBuild {
-        cmake {
-            path file("src/main/cpp/CMakeLists.txt")
-            version "3.22.1"
-        }
-    }
-
-    // The library AAR already packages libopencv_java4.so into the APK.
-    // We link against it (IMPORTED SHARED via find_package) but must NOT
-    // re-package a second copy from the vendored SDK.  pickFirsts keeps the
-    // single AAR-provided .so if any duplicate is ever seen at merge time.
-    packagingOptions {
-        jniLibs {
-            pickFirsts += ['**/libopencv_java4.so', '**/libc++_shared.so']
-        }
-    }
 }
 
 dependencies {
@@ -178,30 +137,4 @@ dependencies {
     } else {
         implementation jscFlavor
     }
-}
-
-/**
- * Resolve the bundled OpenCV Android SDK CMake-config dir
- * (…/sdk/native/jni, holding OpenCVConfig.cmake) that the consumer's
- * find_package(OpenCV) needs.
- *
- * Primary source: rootProject.ext.rnisOpenCVDir, published by the
- * react-native-image-stitcher library's android/build.gradle.  If this
- * module happens to be configured before the library, that ext isn't set
- * yet — so we fall back to deriving the path from the autolinked library
- * Gradle project's projectDir (evaluation-order independent).
- */
-def resolveRnisOpenCVDir() {
-    if (rootProject.ext.has('rnisOpenCVDir')) {
-        return rootProject.ext.rnisOpenCVDir
-    }
-    def libProject = rootProject.findProject(':react-native-image-stitcher')
-    if (libProject != null) {
-        // libProject.projectDir == <pkg>/android ; SDK lives under vendor/.
-        return file("${libProject.projectDir}/vendor/OpenCV-android-sdk/sdk/native/jni").absolutePath
-    }
-    throw new GradleException(
-        "Could not locate the react-native-image-stitcher OpenCV SDK: neither " +
-        "rootProject.ext.rnisOpenCVDir nor the ':react-native-image-stitcher' " +
-        "project is available.  Is the library installed + autolinked?")
 }
