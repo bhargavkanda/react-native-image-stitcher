@@ -53,6 +53,7 @@ import {
   type FramesDroppedInfo,
   type IncrementalState,
   type PanMode,
+  type StitcherFrame,
 } from 'react-native-image-stitcher';
 
 
@@ -210,6 +211,22 @@ function App(): React.JSX.Element {
     },
     [stitcher.call, fireFrameProcessorLog],
   );
+
+  // AR-mode host worklet (the `arFrameProcessor` prop).  Unlike
+  // `frameProcessor` above (vision-camera, non-AR only), this fires once
+  // per ARKit / ARCore frame while in AR capture, dispatched natively via
+  // `__stitcherProxy` ALONGSIDE first-party stitching.  Here it just feeds
+  // the SAME tick log with source `'ar'`, so the per-second log line's
+  // `cumulative: ar=N` climbing is direct proof the AR fan-out is live.
+  // Must be a `'worklet'`; kept stable via useMemo so it isn't
+  // re-registered on every render.
+  const demoArFrameProcessor = useMemo(() => {
+    const fp = (frame: StitcherFrame) => {
+      'worklet';
+      fireFrameProcessorLog(frame.timestamp ?? 0, frame.source ?? 'ar');
+    };
+    return fp;
+  }, [fireFrameProcessorLog]);
 
   // v0.10.0 (PR B) — visible pill that surfaces refinePanorama
   // progress events.  Subscribes to the IncrementalStateUpdate
@@ -444,6 +461,7 @@ function App(): React.JSX.Element {
           capturePreviewActions={capturePreviewActions}
           onCapturePreviewClose={closePreview}
           frameProcessor={exampleFrameProcessor}
+          arFrameProcessor={demoArFrameProcessor}
           onCapture={handleCapture}
           onCaptureSourceChange={handleCaptureSourceChange}
           onLensChange={handleLensChange}
