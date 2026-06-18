@@ -30,7 +30,7 @@
  * developer verification.
  */
 
-import React, { forwardRef, useImperativeHandle, useRef } from 'react';
+import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import {
   NativeModules,
   Platform,
@@ -40,6 +40,9 @@ import {
   requireNativeComponent,
   type ViewStyle,
 } from 'react-native';
+
+import { ensureStitcherProxyInstalled } from '../stitching/ensureStitcherProxyInstalled';
+import type { StitcherFrameProcessor } from '../stitching/StitcherFrame';
 
 
 // React Native looks up the component by its NATIVE name.
@@ -63,6 +66,25 @@ export interface ARCameraViewProps {
    * components without rewriting their guidance text plumbing.
    */
   guidance?: string;
+  /**
+   * Optional host worklet invoked once per AR frame, ALONGSIDE the
+   * lib's first-party stitching (composition, not replacement).  The
+   * worklet receives a `StitcherFrame` enriched with AR metadata —
+   * `source: 'ar'`, world-space `pose` (rotation + translation),
+   * `arTrackingState`, and (when supported) `arDepth` / `arAnchors`.
+   *
+   * Must be a `'worklet'`-prefixed function.  Registration installs the
+   * native `__stitcherProxy` JSI host object on first use and fans the
+   * worklet out from the AR session's per-frame dispatch.  If the
+   * native install is unavailable (e.g. remote debugging), the worklet
+   * silently never fires — no crash.
+   *
+   * The non-AR equivalent is vision-camera's own `useFrameProcessor`
+   * passed via `<Camera frameProcessor={...}>`; the two modes run on
+   * different runtimes with different frame shapes, hence the separate
+   * prop.
+   */
+  arFrameProcessor?: StitcherFrameProcessor;
 }
 
 
@@ -145,13 +167,40 @@ type RecordingCallbacks = {
 
 export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
   function ARCameraView(
-    { style, guidance },
+    { style, guidance, arFrameProcessor },
     ref,
   ): React.JSX.Element {
     // Held across the start→stop lifecycle so stopRecording's
     // resolved VideoFile can be delivered via the same callback
     // pair vision-camera uses.
     const recordingCallbacksRef = useRef<RecordingCallbacks | null>(null);
+
+    // AR frame-processor registration.  Installs the native
+    // `__stitcherProxy` (idempotent) and registers the host worklet so
+    // the AR session's per-frame fan-out invokes it; unregisters on
+    // unmount or when the worklet identity changes.  No-op when no
+    // worklet is supplied or the native install is unavailable.
+    useEffect(() => {
+      if (arFrameProcessor == null) {
+        return undefined;
+      }
+      if (!ensureStitcherProxyInstalled()) {
+        return undefined;
+      }
+      const proxy = (globalThis as {
+        __stitcherProxy?: {
+          install(fn: StitcherFrameProcessor): string;
+          uninstall(id: string): void;
+        };
+      }).__stitcherProxy;
+      if (proxy == null) {
+        return undefined;
+      }
+      const id = proxy.install(arFrameProcessor);
+      return () => {
+        proxy.uninstall(id);
+      };
+    }, [arFrameProcessor]);
 
     useImperativeHandle(ref, () => ({
       takePhoto: async (options = {}) => {
