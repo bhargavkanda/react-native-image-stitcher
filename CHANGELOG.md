@@ -14,6 +14,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.16.2] — 2026-06-17
+
+### Added — reuse the bundled OpenCV from your host app's native code (Android)
+
+A host app's own native (C++/NDK) code can now reuse the **same** custom
+OpenCV this library bundles (4.10.0, arm64-v8a) — **including `cv::Stitcher`**
+— with no second copy of `libopencv_java4.so` in the APK.
+
+The Android build now publishes the location of its vendored OpenCV SDK via
+`rootProject.ext.rnisOpenCVDir` (and `rnisOpenCVAndroidSdkDir`). A consumer
+points its `externalNativeBuild` at `-DOpenCV_DIR=${rootProject.ext.rnisOpenCVDir}`,
+calls `find_package(OpenCV)`, and links the shared `opencv_java` (core /
+imgproc / calib3d / … resolved at runtime from the already-shipped `.so`)
+plus the whole-archived static `opencv_stitching` (`cv::Stitcher`). A
+build-verified consumer ships in the example app
+(`example/android/app/src/main/cpp/`).
+
+This is additive — no public API or runtime-behaviour change. AGP
+`prefabPublishing` was evaluated and is unworkable for prebuilt OpenCV
+(prefab only exports libraries the module itself builds), so OpenCV's own
+first-class CMake package is used instead. iOS reuse (the vendored
+`opencv2.xcframework`) is unchanged.
+
+### Docs
+
+Documentation site refreshed: an easier **Getting started**, a complete
+**`<Camera>` API** reference (every prop, the v0.16 guidance params —
+`rectCrop` / `showPreview` / `panMode` / `panGuidance` / `maxPanDurationMs` /
+`panTooFastThreshold` / `lateralBudgetCm` / `guidanceCopy` — and the
+`stitcher` / `frameSelection` settings-JSON tables), a fully-loaded
+**Complete example**, the v0.16 **Capture result & errors** union, and new
+**Sharing OpenCV** / **Bring your own OpenCV** guides.
+
 ## [0.16.1] — 2026-06-16
 
 ### Changed — high-level `cv::Stitcher` is now the default pipeline

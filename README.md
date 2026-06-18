@@ -29,8 +29,8 @@ Peer dependencies (the host app provides these):
   "react": ">=18.0.0",
   "react-native": ">=0.72.0",
   "react-native-vision-camera": ">=4.7.0",
+  "react-native-worklets-core": ">=1.3.0",
   "react-native-sensors": ">=7.0.0",
-  "expo-sensors": ">=14.0.0",
   "react-native-safe-area-context": ">=4.0.0"
 }
 ```
@@ -71,49 +71,31 @@ cd android && ./gradlew :app:assembleDebug   # Android
 > See [Orientation support](#orientation-support) for the full story
 > (landscape *is* supported on iOS if you need it).
 
-The minimum: resolve camera permission, then mount `<Camera>` with an
-`onCapture` handler.
+The minimum: mount `<Camera>` with an `onCapture` handler. It fires once
+per capture attempt — gate on `result.ok` before reading the output.
 
 ```tsx
-import {
-  Camera,
-  type CameraCaptureResult,
-  type CameraError,
-} from 'react-native-image-stitcher';
+import { Camera, type CameraCaptureResult } from 'react-native-image-stitcher';
 
 export function CaptureScreen() {
-  const handleCapture = (result: CameraCaptureResult) => {
-    // `onCapture` fires on success AND failure — gate on `ok` first.
-    if (!result.ok) {
-      console.warn('capture failed:', result.error.code, result.error.message);
-      return;
-    }
-    // Non-fatal quality signals (e.g. <70% of frames used). Always present.
-    if (result.warnings.length > 0) {
-      console.warn('warnings:', result.warnings.map((w) => w.code));
-    }
-    if (result.type === 'photo') {
-      console.log('Photo:', result.uri, result.width, result.height);
-    } else {
-      console.log(
-        'Panorama:',
-        result.uri,
-        `${result.framesIncluded}/${result.framesRequested} frames`,
-        `stitched as ${result.stitchModeResolved ?? 'n/a'}`,
-      );
-    }
-  };
-
   return (
     <Camera
-      onCapture={handleCapture}
-      // onError still fires on failure too (an unchanged mirror of the
-      // ok:false result above).
-      onError={(err: CameraError) => console.warn(err.code, err.message)}
+      onCapture={(result: CameraCaptureResult) => {
+        if (!result.ok) {
+          console.warn('capture failed:', result.error.code);
+          return;
+        }
+        // result.type is 'photo' or 'panorama'; both carry uri/width/height.
+        console.log(result.type, result.uri, result.width, result.height);
+      }}
     />
   );
 }
 ```
+
+> **Camera permission is the host's job.** The SDK never requests it for
+> you — resolve it (e.g. with vision-camera's `useCameraPermission`)
+> before mounting `<Camera>`.
 
 ### A complete capture screen
 

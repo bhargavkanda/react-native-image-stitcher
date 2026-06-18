@@ -6,6 +6,10 @@ sidebar_position: 2
 
 # Getting started
 
+Capture and stitch a panorama in three steps: install, drop in
+`<Camera>`, and branch on the result. This page is the fastest path to a
+working screen — the deeper guides are linked at the bottom.
+
 ## Install
 
 ```bash
@@ -13,6 +17,10 @@ npm install react-native-image-stitcher
 # or
 yarn add react-native-image-stitcher
 ```
+
+A `postinstall` script fetches the matching custom OpenCV binaries
+(`opencv2.xcframework` for iOS + per-ABI `.so` files for Android) from
+the package's GitHub Releases — about 100 MB, downloaded once and cached.
 
 ### Peer dependencies
 
@@ -29,30 +37,17 @@ The host app provides these:
 }
 ```
 
-### OpenCV binaries (fetched on install)
-
-A `postinstall` script downloads the matching custom OpenCV build
-(`opencv2.xcframework` for iOS + per-ABI `.so` files for Android) from
-the package's GitHub Releases — ~100 MB, fetched once and cached. Set
-`SKIP_OPENCV_FETCH=1` to bypass (e.g. in CI where binaries are
-pre-staged).
-
-Then the standard native build:
-
-```bash
-cd ios && pod install
-cd android && ./gradlew :app:assembleDebug
-```
-
-:::warning Read host integration first
-The host needs extra native configuration beyond `pod install` /
-`gradlew` — Expo factory classes in `AppDelegate`/`MainApplication`,
-several `Info.plist` permission strings (iOS SIGABRTs without them), and
-two `patch-package` patches for RN 0.84. See
+:::caution Native setup is required
+The host needs native configuration beyond `npm install` — Expo factory
+classes, iOS `Info.plist` permission strings, and a couple of
+`patch-package` patches. Walk through
 **[Host app integration](./host-integration.md)** before your first run.
 :::
 
-## Minimal usage
+## The shortest working example
+
+Mount `<Camera>` and handle `onCapture`. It fires once per capture
+attempt — gate on `result.ok` before reading the output.
 
 ```tsx
 import { Camera, type CameraCaptureResult } from 'react-native-image-stitcher';
@@ -60,91 +55,41 @@ import { Camera, type CameraCaptureResult } from 'react-native-image-stitcher';
 export function CaptureScreen() {
   return (
     <Camera
-      onCapture={(r: CameraCaptureResult) =>
-        console.log(r.type, r.uri, r.width, r.height)
-      }
+      onCapture={(result: CameraCaptureResult) => {
+        if (!result.ok) {
+          console.warn('capture failed:', result.error.code);
+          return;
+        }
+        // result.type is 'photo' or 'panorama'; both carry uri/width/height.
+        console.log(result.type, result.uri, result.width, result.height);
+      }}
     />
   );
 }
 ```
 
+That's the whole API surface you need to get a capture on screen. Tap the
+shutter for a photo; hold, pan, and release for a panorama.
+
+:::note Camera permission is the host's job
+The SDK never requests camera permission for you. Resolve it (e.g. with
+vision-camera's `useCameraPermission`) before mounting `<Camera>`.
+:::
+
 :::tip Use portrait
 `<Camera>` is designed for portrait capture. Android self-locks to
-portrait; on iOS, a portrait-only host is recommended. See
+portrait; on iOS a portrait-only host is recommended. See
 [Orientation](./orientation.md).
 :::
 
-## A complete capture screen
+## What next
 
-Requests permission up front, shows a capture-history strip, and opens a
-post-stitch preview modal. The SDK does **not** request camera permission
-for you — the host owns that.
-
-```tsx
-import React, { useCallback, useEffect, useState } from 'react';
-import { View, StyleSheet } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { useCameraPermission } from 'react-native-vision-camera';
-import {
-  Camera,
-  type CameraCaptureResult,
-  type CameraError,
-  type CaptureThumbnailItem,
-} from 'react-native-image-stitcher';
-
-export function CaptureScreen() {
-  // 1. Resolve camera permission BEFORE mounting <Camera>.
-  const { hasPermission, requestPermission } = useCameraPermission();
-  useEffect(() => {
-    if (!hasPermission) requestPermission().catch(() => undefined);
-  }, [hasPermission, requestPermission]);
-
-  // 2. Capture history → drives the built-in thumbnail strip.
-  const [thumbnails, setThumbnails] = useState<CaptureThumbnailItem[]>([]);
-
-  // 3. Post-stitch preview modal (controlled).
-  const [preview, setPreview] = useState<CameraCaptureResult | null>(null);
-
-  const onCapture = useCallback((result: CameraCaptureResult) => {
-    setPreview(result);
-    setThumbnails((prev) => [
-      ...prev,
-      {
-        id: String(Date.now()),
-        uri: result.uri,
-        width: result.width,
-        height: result.height,
-      },
-    ]);
-  }, []);
-
-  if (!hasPermission) return <View style={styles.fill} />;
-
-  return (
-    <SafeAreaProvider>
-      <View style={styles.fill}>
-        <Camera
-          defaultCaptureSource="ar"
-          captureSources="both"
-          enablePhotoMode
-          enablePanoramaMode
-          outputDir={`${/* your app dir */ ''}/captures`}
-          headerTitle="Capture"
-          headerGuidance="Tap for a photo. Hold + pan + release for a panorama."
-          thumbnails={thumbnails}
-          capturePreview={preview ? { imageUri: preview.uri } : undefined}
-          onCapturePreviewClose={() => setPreview(null)}
-          onCapture={onCapture}
-          onError={(err: CameraError) => console.warn(err.code, err.message)}
-          onCaptureAbandoned={(reason) => console.log('abandoned:', reason)}
-        />
-      </View>
-    </SafeAreaProvider>
-  );
-}
-
-const styles = StyleSheet.create({ fill: { flex: 1, backgroundColor: '#000' } });
-```
-
-The [`example/`](https://github.com/bhargavkanda/react-native-image-stitcher/tree/main/example)
-directory is the canonical reference host.
+- **[`<Camera>` API reference](./camera-api.md)** — every prop, typed,
+  grouped, with defaults.
+- **[Full example](./full-example.md)** — a complete, fully-loaded
+  capture screen: permission, thumbnail history, preview modal, and
+  output directory.
+- **[Capture result & errors](./capture-result.md)** — the
+  `CameraCaptureResult` union, warnings, and the `CameraError` taxonomy.
+- **[Sharing OpenCV](./sharing-opencv.md)** — reuse the fetched OpenCV
+  binaries with other native modules instead of bundling a second copy.
