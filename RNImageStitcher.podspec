@@ -60,6 +60,18 @@ Pod::Spec.new do |s|
 
   s.dependency 'React-Core'
 
+  # react-native-worklets-core — provides the `RNWorklet::WorkletInvoker`
+  # + `JsiWorkletContext` primitives the AR-mode JSI fan-out is built on
+  # (StitcherJsiInstaller.mm / RNSARWorkletRuntime.mm + the shared
+  # cpp/stitcher_worklet_{registry,dispatch}.cpp).  In practice this pod
+  # is already in every host's graph (vision-camera depends on it), but
+  # declaring it here makes the dependency explicit and guarantees its
+  # headers are present even for a host that uses AR mode without
+  # vision-camera.  The bare `WKTJsiWorklet.h` includes in the .mm files
+  # resolve via the HEADER_SEARCH_PATHS entry below (the package's own
+  # node_modules copy of the worklets-core cpp/ dir).
+  s.dependency 'react-native-worklets-core'
+
   # ─────────────────────────────────────────────────────────────────────
   # OpenCV — pre-built custom xcframework fetched by postinstall
   # ─────────────────────────────────────────────────────────────────────
@@ -84,6 +96,19 @@ Pod::Spec.new do |s|
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
     'CLANG_CXX_LIBRARY' => 'libc++',
     'OTHER_CPLUSPLUSFLAGS' => '$(inherited) -std=c++17',
-    'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_TARGET_SRCROOT}/cpp"',
+    # HEADER_SEARCH_PATHS:
+    #   - "${PODS_TARGET_SRCROOT}/cpp" — the shared C++ port's own
+    #     headers (keyframe_gate.hpp, stitcher_frame_jsi.hpp, …).
+    #   - the worklets-core cpp/ dir — so the bare `#include
+    #     "WKTJsiWorklet.h"` / "WKTJsiWorkletContext.h" lines in
+    #     StitcherJsiInstaller.mm + RNSARWorkletRuntime.mm resolve.
+    #     PODS_ROOT is `<host>/ios/Pods`; the package's worklets-core
+    #     copy lives at `<host>/node_modules/react-native-worklets-core/
+    #     cpp`, i.e. `${PODS_ROOT}/../node_modules/...`.  (The shared
+    #     cpp/*.cpp files instead use the namespace-prefixed
+    #     `<react-native-worklets-core/WKTJsiWorklet.h>` form, which
+    #     resolves against `${PODS_ROOT}/Headers/Public` — already on
+    #     the inherited path — and works on Android's prefab too.)
+    'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_TARGET_SRCROOT}/cpp" "${PODS_ROOT}/../node_modules/react-native-worklets-core/cpp"',
   }
 end

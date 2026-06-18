@@ -383,17 +383,30 @@ class RNSARCameraView @JvmOverloads constructor(
             cameraPosWorld,
         )
 
+        // v0.8.0 Phase 4b.iii — ensure the host-worklet runtime is
+        // installed before any per-frame fan-out can run.  Idempotent
+        // (AtomicBoolean CAS): the first frame starts the dispatch
+        // thread; every later frame is a single atomic read.  Kept on
+        // the GL thread because that's the only thread guaranteed to
+        // run once the AR session is live.
+        StitcherWorkletRuntime.installIfNeeded()
+
         // Push pose into the AR session log.  Mirrors iOS' delegate
         // path; the existing RNSARFramePose / appendPose
         // contract was already in place for Phase 4.
         appendPose(camera, frame.timestamp)
 
-        // Forward to the incremental stitcher only when capture is
-        // engaged.  (The v0.8.0 host-worklet dispatch — which also
-        // forwarded preview frames whenever host worklets were
-        // registered — was archived in the 2026-06 batch-keyframe
-        // cleanup.)
-        if (ingestActive) {
+        // Forward to the incremental stitcher when capture is engaged,
+        // OR when an AR frame-processor host worklet is registered (the
+        // v0.8.0 Phase 4b.iii fan-out forwards preview frames whenever
+        // host worklets exist, even with capture off — the host worklet
+        // observes the live AR stream).  `forwardToIncremental` does the
+        // NV21 pack once and gates the first-party ingest internally on
+        // `ingestActive`; the host-worklet dispatch is gated on the
+        // native registry count.  `hasHostWorklets()` is a cheap atomic
+        // read (microseconds) so the common capture-off / no-worklet
+        // preview path stays near-free.
+        if (ingestActive || StitcherWorkletRuntime.hasHostWorklets()) {
             forwardToIncremental(frame, camera)
         }
 
@@ -656,6 +669,42 @@ class RNSARCameraView @JvmOverloads constructor(
             },
         )
         }  // closes `if (ingestActive)` (v0.8.0 Phase 4b.iii)
+
+        // ── v0.8.0 Phase 4b.iii — AR frame-processor host-worklet fan-out ──
+        //
+        // After the first-party stitching ingest (above), fan the SAME
+        // already-packed NV21 frame + pose out to every host worklet the
+        // JS `arFrameProcessor` registered via `__stitcherProxy.install`.
+        // This is independent of `ingestActive`: a host worklet observes
+        // the live AR stream whether or not the user has engaged capture
+        // (the onDrawFrame gate already let us in when host worklets
+        // exist).  `dispatchToHostWorklets` does a cheap native
+        // registry-count fast-path early-exit + (only when worklets are
+        // registered) copies the bytes into an owned native buffer and
+        // dispatches asynchronously on worklets-core's default context,
+        // so the GL render thread is NOT blocked on worklet execution.
+        //
+        // We reuse `packed.nv21` (full NV21: Y plane then interleaved
+        // VU) + `qarr` / `tArr` (already read above) — no extra Image
+        // hold, no second pack.  ARCore camera pose is full 6DoF, so
+        // translation is always valid.
+        val arTracking = when (camera.trackingState) {
+            TrackingState.TRACKING -> "normal"
+            TrackingState.PAUSED -> "limited"
+            TrackingState.STOPPED -> "notAvailable"
+            else -> "notAvailable"
+        }
+        StitcherWorkletRuntime.dispatchToHostWorklets(
+            nv21Bytes = packed.nv21,
+            width = packed.width,
+            height = packed.height,
+            qx = qarr[0].toDouble(), qy = qarr[1].toDouble(),
+            qz = qarr[2].toDouble(), qw = qarr[3].toDouble(),
+            tx = tArr[0].toDouble(), ty = tArr[1].toDouble(),
+            tz = tArr[2].toDouble(),
+            timestampNs = frame.timestamp.toDouble(),
+            trackingState = arTracking,
+        )
     }
 
     /// v0.13.2 — map the JS physical device orientation to the

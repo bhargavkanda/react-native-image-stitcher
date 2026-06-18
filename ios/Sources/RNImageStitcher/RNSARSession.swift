@@ -501,10 +501,34 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         isRunning = true
         currentTrackingState = .initialising
 
-        // Per-frame ingest calls `incrementalConsumer.consumeFrame`
-        // directly from `session(_:didUpdate:)` below. (The v0.8
-        // worklet-runtime indirection that used to live here was archived
-        // in the batch-keyframe cleanup — see archive/.)
+        // v0.8.0 Phase 3c/4b — wire the AR worklet runtime.  The
+        // per-frame ingest is routed through `RNSARWorkletRuntime`
+        // (see `session(_:didUpdate:)` below) instead of calling the
+        // incremental consumer directly.  Two steps here:
+        //
+        //   1. `installIfNeeded()` lazily constructs the worklet
+        //      runtime's `JsiWorkletContext` + its serial dispatch
+        //      queue (idempotent; safe across redundant start() calls
+        //      and multiple <Camera> mounts).
+        //   2. `setFirstPartyCallback:` installs the EXISTING first-
+        //      party stitching behaviour as a closure.  The runtime
+        //      invokes this synchronously on the delegate (caller)
+        //      thread per frame — byte-identical to the old direct
+        //      `consumeFrame(...)` call — and then fans the frame out
+        //      to any host-registered worklets asynchronously on its
+        //      own queue.
+        //
+        // The callback captures `self` weakly so the runtime singleton
+        // (process-lifetime) never keeps this session alive.  It reads
+        // `incrementalConsumer` (itself weak) at call time, so a torn-
+        // down consumer simply no-ops — same semantics as the prior
+        // `incrementalConsumer?.consumeFrame(...)` optional-chain.
+        let workletRuntime = RNSARWorkletRuntime.shared()
+        workletRuntime.installIfNeeded()
+        workletRuntime.setFirstPartyCallback { [weak self] arFrame, pose in
+            self?.incrementalConsumer?.consumeFrame(
+                pixelBuffer: arFrame.capturedImage, pose: pose)
+        }
     }
 
     @objc public func stop() {
@@ -513,6 +537,12 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         isRunning = false
         currentTrackingState = .notAvailable
         clearPoseLog()
+        // v0.8.0 Phase 3c — clear the worklet runtime's first-party
+        // callback so the (process-lifetime) runtime singleton doesn't
+        // hold the closure (and transitively the consumer reference)
+        // between captures.  `start()` reinstalls it on the next run.
+        // Idempotent; safe even if start() never ran the install path.
+        RNSARWorkletRuntime.shared().setFirstPartyCallback(nil)
         // V15.0b — clear latched plane so the next capture detects
         // afresh.  Plane geometry is per-capture: a different
         // fixture in a different orientation needs a new lock.
@@ -596,8 +626,16 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // cv::Mat sync conversion synchronously on the delegate thread
         // before returning, so the captured pixel buffer is safe for
         // ARKit to recycle after this call.
-        incrementalConsumer?.consumeFrame(pixelBuffer: frame.capturedImage,
-                                          pose: pose)
+        //
+        // `dispatchFrame(_:pose:)` runs the first-party callback
+        // (installed in `start()`, which wraps the same
+        // `incrementalConsumer.consumeFrame(...)` path) SYNCHRONOUSLY on
+        // this delegate thread — preserving the pool-reuse contract —
+        // and THEN fans the frame out to any host-registered worklets
+        // ASYNCHRONOUSLY on the runtime's own queue.  Do NOT also call
+        // `consumeFrame` here: dispatchFrame already drives it, and
+        // double-consuming would ingest each frame twice.
+        RNSARWorkletRuntime.shared().dispatchFrame(frame, pose: pose)
 
         // If recording is in flight, append this frame to the
         // asset writer DIRECTLY — no queue hop.

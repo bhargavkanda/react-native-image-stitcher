@@ -66,6 +66,20 @@ add_library(opencv_stitching STATIC IMPORTED)
 set_target_properties(opencv_stitching PROPERTIES
     IMPORTED_LOCATION "${OPENCV_STITCHING_A}")
 
+# ── React Native + worklets-core prefabs (v0.8.0 Phase 4b.ii/iii) ──
+#
+# The AR frame-processor's JSI fan-out (stitcher_jsi_install_jni.cpp +
+# the shared cpp/stitcher_*_jsi.cpp) needs RN's JSI runtime, fbjni, and
+# react-native-worklets-core's `RNWorklet::JsiWorkletContext` /
+# `WorkletInvoker`.  RN 0.71+ ships jsi + the native-modules umbrella as
+# prefab packages; worklets-core ships a `rnworklets` prefab module.
+# `buildFeatures.prefab true` (android/build.gradle) makes these
+# discoverable.  We mirror react-native-vision-camera's consumption of
+# the SAME prefabs in this example app (verified working on RN 0.84.1).
+find_package(ReactAndroid REQUIRED CONFIG)
+find_package(fbjni REQUIRED CONFIG)
+find_package(react-native-worklets-core REQUIRED CONFIG)
+
 # ── Shared C++ port (KeyframeGate) ────────────────────────────────
 #
 # `cpp/` at the SDK root holds C++ that's compiled into BOTH the iOS
@@ -91,12 +105,26 @@ add_library(image_stitcher SHARED
     # retry + dimension/memory instrumentation.  Used to live in this
     # file (image_stitcher_jni.cpp).  See cpp/stitcher.hpp for design
     # rationale.
-    "${SHARED_CPP_DIR}/stitcher.cpp")
+    "${SHARED_CPP_DIR}/stitcher.cpp"
+    # v0.8.0 Phase 4b.ii/iii — AR frame-processor JSI fan-out.  The JNI
+    # binding (stitcher_jsi_install_jni.cpp) installs
+    # `globalThis.__stitcherProxy` and fans each AR frame out to the
+    # registered host worklets.  The 4 shared cpp/ JSI files below are
+    # the SAME source the iOS pod compiles — one cross-platform JSI
+    # surface (proxy host object + native worklet registry + per-frame
+    # dispatch helper + StitcherFrame JSI host object).
+    stitcher_jsi_install_jni.cpp
+    "${SHARED_CPP_DIR}/stitcher_proxy_jsi.cpp"
+    "${SHARED_CPP_DIR}/stitcher_worklet_registry.cpp"
+    "${SHARED_CPP_DIR}/stitcher_worklet_dispatch.cpp"
+    "${SHARED_CPP_DIR}/stitcher_frame_jsi.cpp")
 
 target_include_directories(image_stitcher PRIVATE
     "${OPENCV_INCLUDE_DIR}"
     # cpp/ holds keyframe_gate.hpp + ar_frame_pose.h that the JNI
-    # bindings include without relative-path spelunking.
+    # bindings include without relative-path spelunking.  Also the
+    # shared JSI sources (stitcher_proxy_jsi.hpp, stitcher_frame_data.hpp,
+    # stitcher_worklet_*.hpp, stitcher_frame_jsi.hpp).
     "${SHARED_CPP_DIR}")
 
 # Link order matters:
@@ -118,7 +146,22 @@ target_link_libraries(image_stitcher
     opencv_stitching
     -Wl,--no-whole-archive
     opencv_java
-    log)
+    log
+    # v0.8.0 Phase 4b.ii/iii — JSI fan-out deps.  Mirrors
+    # react-native-vision-camera's link set on RN 0.84.1:
+    #   ReactAndroid::jsi         — facebook::jsi::Runtime / Value / Object
+    #   ReactAndroid::reactnative — RN's native-modules umbrella prefab
+    #                               (RN >= 0.76; CallInvoker + friends that
+    #                               worklets-core's context depends on)
+    #   fbjni::fbjni              — JNI helpers worklets-core links against
+    #   react-native-worklets-core::rnworklets — JsiWorkletContext +
+    #                               WorkletInvoker.  Carries its own
+    #                               include dir so <react-native-worklets-core/
+    #                               WKTJsiWorkletContext.h> resolves.
+    ReactAndroid::jsi
+    ReactAndroid::reactnative
+    fbjni::fbjni
+    react-native-worklets-core::rnworklets)
 
 target_compile_options(image_stitcher PRIVATE
     -fvisibility=hidden
