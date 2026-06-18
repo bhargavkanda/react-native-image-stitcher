@@ -14,6 +14,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.17.0] — 2026-06-19
+
+### Added — `arFrameProcessor`: observe AR frames with a host worklet
+
+`<Camera>` gains an **`arFrameProcessor`** prop — a `'worklet'` invoked once per
+**ARKit / ARCore frame** while in AR capture, dispatched natively and running
+*alongside* first-party stitching (composition, not replacement). The worklet
+receives a `StitcherFrame` tagged `source: 'ar'` with the world-space `pose` and
+`arTrackingState`. It fires during preview too (continuous observation), at zero
+per-frame cost when no worklet is registered.
+
+This restores the previously-archived AR host-worklet capability and re-exposes
+it as an explicit prop (rather than the old auto-registering hook). Under the
+hood it installs `globalThis.__stitcherProxy` (JSI) on first use and fans frames
+out through a shared C++ proxy / registry / dispatch layer on both platforms
+(verified against `react-native-worklets-core` 1.6.3).
+
+The non-AR equivalent remains `frameProcessor` (vision-camera); the two modes use
+different runtimes and frame shapes, hence the separate prop. The
+`StitcherFrame` / `StitcherFrameProcessor` type names are unchanged.
+
+Verified on device: the worklet fires per frame on **iOS (ARKit, iPhone 16 Pro)**
+and **Android (ARCore, Galaxy A35)**.
+
+### Fixed
+
+- **Example app crashed at launch on Android** (`PlatformConstants could not be
+  found`). The v0.16.2 OpenCV-reuse demo added an app-level `externalNativeBuild`
+  to `example/android/app/build.gradle` that displaced React Native's own
+  New-Architecture app native build (so core TurboModules weren't compiled in).
+  Removed it; React Native owns the app native build again. **Example-app only —
+  the published SDK was never affected.**
+
 ## [0.16.2] — 2026-06-17
 
 ### Added — reuse the bundled OpenCV from your host app's native code (Android)
