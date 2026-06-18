@@ -66,6 +66,7 @@ import type {
 } from 'react-native-vision-camera';
 
 import { useARSession } from '../ar/useARSession';
+import type { StitcherFrameProcessor } from '../stitching/StitcherFrame';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
@@ -751,6 +752,18 @@ export interface CameraProps {
    */
   frameProcessor?: ReadonlyFrameProcessor | DrawableFrameProcessor;
 
+  /**
+   * AR-mode host worklet, invoked once per ARKit / ARCore frame
+   * ALONGSIDE the lib's first-party stitching (composition, not
+   * replacement).  Receives a `StitcherFrame` tagged `source: 'ar'`
+   * with world-space `pose` + `arTrackingState`.  Only fires in AR
+   * capture (`captureSource === 'ar'`); the non-AR equivalent is
+   * `frameProcessor` above (the two modes use different runtimes and
+   * frame shapes).  Must be a `'worklet'`-prefixed function; if the
+   * native install is unavailable it silently never fires.
+   */
+  arFrameProcessor?: StitcherFrameProcessor;
+
   // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────────
   /**
    * Which device holds the non-AR panorama capture accepts.
@@ -1157,6 +1170,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     capturePreviewActions,
     onCapturePreviewClose,
     frameProcessor: hostFrameProcessor,
+    arFrameProcessor,
     engine = 'batch-keyframe',
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'vertical',
@@ -2420,6 +2434,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         <ARCameraView
           ref={arViewRef}
           style={StyleSheet.absoluteFill}
+          arFrameProcessor={arFrameProcessor}
         />
       ) : (
         <CameraView

@@ -101,6 +101,12 @@ class RNImageStitcherPackage : ReactPackage {
             RNSARSession(reactContext),
             IncrementalStitcher(reactContext),
             FileBridge(reactContext),
+            // v0.8.0 Phase 4b.ii — surfaces `NativeModules.StitcherJsiInstaller`
+            // so JS' `ensureStitcherProxyInstalled()` can call its
+            // blocking-sync `install()` to install `globalThis.__stitcherProxy`
+            // on the main JS runtime (AR frame-processor host-worklet
+            // registration).  Mirror of iOS' StitcherJsiInstaller.
+            StitcherJsiInstallerModule(reactContext),
         )
     }
 

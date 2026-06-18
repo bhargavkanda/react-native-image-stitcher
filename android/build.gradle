@@ -301,6 +301,26 @@ dependencies {
         android.sourceSets.main.java.exclude '**/CvFlowGateFrameProcessor.kt'
     }
 
+    // v0.8.0 Phase 4b.ii/iii — react-native-worklets-core, consumed
+    // for its `rnworklets` PREFAB module (RNWorklet::JsiWorkletContext /
+    // WorkletInvoker) by the AR frame-processor JSI fan-out
+    // (src/main/cpp/stitcher_jsi_install_jni.cpp + the shared cpp/
+    // stitcher_*_jsi.cpp).  `find_package(react-native-worklets-core ...)`
+    // in CMakeLists.txt needs this gradle project on the path so AGP
+    // wires the prefab into the native build.  Same consumption pattern
+    // react-native-vision-camera uses for Frame Processors.
+    //
+    // `findProject(...)` guard mirrors the vision-camera block above:
+    // the SDK still compiles in hosts that don't install worklets-core
+    // (those hosts simply don't use the AR frame processor — the JSI
+    // sources still compile, but the prefab link only happens when the
+    // host provides worklets-core).  Autolinking adds the project for
+    // any host that depends on vision-camera (which transitively pulls
+    // in worklets-core).
+    if (findProject(':react-native-worklets-core') != null) {
+        implementation project(':react-native-worklets-core')
+    }
+
     // v0.10.0 audit #11A — Android JUnit test scaffold.  JVM unit
     // tests for pure-Kotlin data wrappers + algorithm helpers that
     // don't need an Android device.  Run via
