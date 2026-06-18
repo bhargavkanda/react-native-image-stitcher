@@ -17,9 +17,10 @@
  * (false comfort exactly where OOM happens).  Falls back to 1500/2200 if the
  * RAM read is unavailable.
  *
- * Backed by the `getMemoryFootprintMB()` native module (iOS: `task_info`
- * `phys_footprint`; Android: `/proc/self/statm` RSS — the SAME number the C++
- * `[memstat]` logs report).  Returns -1 if the native call fails.
+ * Backed by the `getMemoryFootprintMB()` native module (iOS:
+ * `task_info(TASK_VM_INFO)` `phys_footprint`; Android: `/proc/self/statm` RSS
+ * — resident pages, unthrottled — the SAME number the C++ `[memstat]` logs
+ * report).  Returns -1 if the native call fails.
  *
  * Mount this pill inside a `settings.debug`-gated branch — it
  * polls native every 500 ms and is unwanted in production builds.
