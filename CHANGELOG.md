@@ -14,6 +14,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.18.0] — 2026-06-18
+
+### ⚠️ Breaking — `StitcherFrame` → `CameraFrame`
+
+The frame type a worklet receives is renamed **`StitcherFrame` →
+`CameraFrame`** (and `StitcherFrameProcessor` → `CameraFrameProcessor`).
+The shape is unchanged; only the names changed, to match the
+`arFrameProcessor` prop's role (it's the camera frame, not a "stitcher"
+frame). Update your imports:
+
+```diff
+- import { type StitcherFrame } from 'react-native-image-stitcher';
++ import { type CameraFrame } from 'react-native-image-stitcher';
+```
+
+### Added — AR depth, anchors, scene mesh, and intrinsics on `CameraFrame`
+
+The AR frame a worklet receives can now carry rich per-frame metadata,
+each behind an **opt-in `<Camera>` prop** (all off by default — you pay
+only for what you request):
+
+- **`enableDepth`** → `frame.arDepth` — a depth map normalised to **one
+  cross-platform shape**: `Float32` **metres** in `depthMap`, optional
+  `Uint8` `confidenceMap` (`0`/`1`/`2`). Sourced from ARKit
+  `sceneDepth`/`smoothedSceneDepth` (LiDAR) and the ARCore Depth API.
+- **`enableAnchors`** → `frame.arAnchors` — detected planes / images,
+  now with plane **`alignment`** (`'horizontal'` | `'vertical'`),
+  **`extent`** (`[x, z]` metres), and (iOS only) semantic
+  **`classification`** (`'wall'`/`'floor'`/…).
+- **`enableMesh`** → `type: 'mesh'` entries in `arAnchors` carrying
+  `meshGeometry` (`vertices`/`faces`/optional `classifications`
+  ArrayBuffers). iOS uses ARKit `ARMeshAnchor` scene reconstruction
+  (LiDAR); **Android reconstructs a rough mesh from the depth map**
+  (camera-local vertices, identity transform, no per-face
+  classifications) — so Android mesh requires a Depth-API device and is
+  geometry-only.
+- **`planeDetection`** (`'vertical'` (default) | `'horizontal'` |
+  `'both'`) — which plane orientations reach `arAnchors`. iOS changes
+  ARKit `planeDetection`; Android keeps detecting both (ARCore needs
+  horizontal planes to bootstrap tracking) and filters the emitted set,
+  so the JS-observable result is identical on both platforms. The
+  `'vertical'` default preserves the plane-projected stitch path's
+  long-standing behaviour.
+- **`frame.intrinsics`** — per-frame `fx`/`fy`/`cx`/`cy` (px) plus the
+  capture resolution, for lifting 2D image coordinates to 3D. Always
+  present on AR frames; `undefined` on non-AR (vision-camera) frames,
+  which have no intrinsics surface.
+
+Depth/anchor/mesh bytes are **eager-copied** out of the native frame at
+extraction time, so they're safe to read anywhere in the worklet (no
+buffer-lifetime footgun). See the new **[Testing the AR frame
+processor](https://bhargavkanda.github.io/react-native-image-stitcher/docs/dev-testing)**
+guide for a copy-paste verification recipe and the expected on-device
+output per platform.
+
+### Notes
+
+- Compile-verified on both platforms (iOS `xcodebuild` + Android
+  `assembleDebug`); all unit tests + typecheck pass. On-device
+  observation of depth/planes/mesh/intrinsics against real surfaces is
+  the recommended pre-adoption check (see the dev-testing guide).
+
 ## [0.17.0] — 2026-06-19
 
 ### Added — `arFrameProcessor`: observe AR frames with a host worklet
