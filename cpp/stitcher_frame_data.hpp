@@ -77,12 +77,26 @@ public:
 struct ArAnchor {
     /// Stable per-session identifier (ARKit UUID / ARCore anchor id).
     std::string id;
-    /// Coarse class: `"plane"`, `"image"`, or `"point"`.
+    /// Coarse class: `"plane"`, `"image"`, `"point"`, or `"mesh"`.
     std::string type;
     /// 4x4 anchor->world transform, ROW-MAJOR (16 elements). Platform
     /// code is responsible for emitting row-major regardless of the
     /// native matrix's storage order.
     std::array<double, 16> transform{};
+
+    // ── Scene-reconstruction geometry (only when type == "mesh") ──
+    /// True when this anchor carries a mesh (gates JSI emission of
+    /// `meshGeometry`).  Raw bytes, emitted as ArrayBuffers verbatim
+    /// (no conversion) by the JSI layer:
+    ///   - meshVertices: Float32 xyz triplets, anchor-local.
+    ///   - meshFaces: Uint32 triangle indices into the vertices.
+    ///   - meshClassifications: optional Uint8 per-face class (iOS
+    ///     ARMeshAnchor; empty on Android — depth-derived meshes have
+    ///     no semantics).
+    bool hasMesh = false;
+    std::vector<uint8_t> meshVertices;
+    std::vector<uint8_t> meshFaces;
+    std::vector<uint8_t> meshClassifications;
 };
 
 /// AR depth map for one frame. The platforms encode depth differently,

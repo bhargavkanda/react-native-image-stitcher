@@ -8,6 +8,7 @@
 
 #include "stitcher_worklet_registry.hpp"
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -15,6 +16,13 @@
 namespace retailens {
 
 namespace {
+
+// AR-metadata extraction toggles (see header).  Atomic: written on the
+// JS thread via __stitcherProxy.setExtractionConfig, read on the AR
+// delegate / GL thread by the platform extraction.  Default all false.
+std::atomic<bool> g_extractDepth{false};
+std::atomic<bool> g_extractAnchors{false};
+std::atomic<bool> g_extractMesh{false};
 
 class StitcherProxyHostObject : public facebook::jsi::HostObject {
  public:
@@ -84,6 +92,21 @@ class StitcherProxyHostObject : public facebook::jsi::HostObject {
           rt, PropNameID::forUtf8(rt, "count"), 0, std::move(fn));
     }
 
+    if (name == "setExtractionConfig") {
+      // setExtractionConfig(depth, anchors, mesh) — three booleans gating
+      // the platform AR extraction.  Missing/non-bool args default false.
+      auto fn = [](facebook::jsi::Runtime& runtime, const Value& /*thisVal*/,
+                   const Value* args, size_t count) -> Value {
+        g_extractDepth.store(count > 0 && args[0].isBool() && args[0].getBool());
+        g_extractAnchors.store(count > 1 && args[1].isBool() &&
+                               args[1].getBool());
+        g_extractMesh.store(count > 2 && args[2].isBool() && args[2].getBool());
+        return Value::undefined();
+      };
+      return Function::createFromHostFunction(
+          rt, PropNameID::forUtf8(rt, "setExtractionConfig"), 3, std::move(fn));
+    }
+
     return Value::undefined();
   }
 
@@ -93,6 +116,8 @@ class StitcherProxyHostObject : public facebook::jsi::HostObject {
     names.push_back(facebook::jsi::PropNameID::forUtf8(rt, "install"));
     names.push_back(facebook::jsi::PropNameID::forUtf8(rt, "uninstall"));
     names.push_back(facebook::jsi::PropNameID::forUtf8(rt, "count"));
+    names.push_back(
+        facebook::jsi::PropNameID::forUtf8(rt, "setExtractionConfig"));
     return names;
   }
 };
@@ -104,6 +129,12 @@ void installStitcherProxy(facebook::jsi::Runtime& runtime) {
   runtime.global().setProperty(
       runtime, "__stitcherProxy",
       facebook::jsi::Object::createFromHostObject(runtime, proxy));
+}
+
+ExtractionConfig getExtractionConfig() {
+  return ExtractionConfig{g_extractDepth.load(std::memory_order_relaxed),
+                          g_extractAnchors.load(std::memory_order_relaxed),
+                          g_extractMesh.load(std::memory_order_relaxed)};
 }
 
 }  // namespace retailens

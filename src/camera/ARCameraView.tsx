@@ -85,6 +85,25 @@ export interface ARCameraViewProps {
    * prop.
    */
   arFrameProcessor?: CameraFrameProcessor;
+  /**
+   * Opt in to per-frame AR depth extraction (`CameraFrame.arDepth`).
+   * Default `false` — depth is the costliest field (a per-frame buffer
+   * copy), so it stays off until a worklet needs it.
+   */
+  enableDepth?: boolean;
+  /**
+   * Opt in to per-frame AR anchor extraction (`CameraFrame.arAnchors` —
+   * detected planes / augmented images).  Default `false`.
+   */
+  enableAnchors?: boolean;
+  /**
+   * Opt in to scene-reconstruction mesh anchors (`type: 'mesh'` entries
+   * in `arAnchors`, carrying `meshGeometry`).  Default `false`.  iOS
+   * enables ARKit `sceneReconstruction` (LiDAR devices); Android
+   * reconstructs a rough mesh from the depth map.  Expensive — only on
+   * when needed.  Implies depth on Android.
+   */
+  enableMesh?: boolean;
 }
 
 
@@ -167,7 +186,7 @@ type RecordingCallbacks = {
 
 export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
   function ARCameraView(
-    { style, guidance, arFrameProcessor },
+    { style, guidance, arFrameProcessor, enableDepth, enableAnchors, enableMesh },
     ref,
   ): React.JSX.Element {
     // Held across the start→stop lifecycle so stopRecording's
@@ -201,6 +220,33 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
         proxy.uninstall(id);
       };
     }, [arFrameProcessor]);
+
+    // Push the AR-metadata extraction config to native — gates the
+    // costly per-frame depth / anchor / mesh work (all off by default).
+    // Routed through `__stitcherProxy.setExtractionConfig`, read by the
+    // platform AR extraction.  iOS ADDITIONALLY toggles ARKit
+    // `sceneReconstruction` for mesh (a session-config change, not a
+    // per-frame gate); Android reconstructs mesh from the depth map and
+    // needs no session change.
+    useEffect(() => {
+      const depth = enableDepth === true;
+      const anchors = enableAnchors === true;
+      const mesh = enableMesh === true;
+      if (ensureStitcherProxyInstalled()) {
+        (globalThis as {
+          __stitcherProxy?: {
+            setExtractionConfig?(d: boolean, a: boolean, m: boolean): void;
+          };
+        }).__stitcherProxy?.setExtractionConfig?.(depth, anchors, mesh);
+      }
+      if (Platform.OS === 'ios') {
+        const session = (NativeModules as Record<string, unknown>)
+          .RNSARSession as
+          | { setSceneReconstructionEnabled?(on: boolean): void }
+          | undefined;
+        session?.setSceneReconstructionEnabled?.(mesh);
+      }
+    }, [enableDepth, enableAnchors, enableMesh]);
 
     useImperativeHandle(ref, () => ({
       takePhoto: async (options = {}) => {

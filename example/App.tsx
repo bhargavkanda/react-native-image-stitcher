@@ -201,11 +201,19 @@ function App(): React.JSX.Element {
   const fireArMetaLog = useMemo(
     () =>
       Worklets.createRunOnJS(
-        (depthW: number, depthH: number, hasConf: number, anchors: number) => {
+        (
+          depthW: number,
+          depthH: number,
+          hasConf: number,
+          anchors: number,
+          meshAnchors: number,
+          meshVertBytes: number,
+        ) => {
           // eslint-disable-next-line no-console
           console.log(
             `[example] arFrame meta — arDepth=${depthW}x${depthH} ` +
-              `confidenceMap=${hasConf ? 'yes' : 'no'} arAnchors=${anchors}`,
+              `confidenceMap=${hasConf ? 'yes' : 'no'} arAnchors=${anchors} ` +
+              `mesh=${meshAnchors} (${meshVertBytes}B verts)`,
           );
         },
       ),
@@ -250,11 +258,24 @@ function App(): React.JSX.Element {
       if (g.__exArMetaTick === 0 && frame.source === 'ar') {
         const d = frame.arDepth;
         const anchors = frame.arAnchors;
+        let meshAnchors = 0;
+        let meshVertBytes = 0;
+        if (anchors) {
+          for (let i = 0; i < anchors.length; i++) {
+            const mg = anchors[i].meshGeometry;
+            if (anchors[i].type === 'mesh' && mg) {
+              meshAnchors += 1;
+              meshVertBytes += mg.vertices.byteLength;
+            }
+          }
+        }
         fireArMetaLog(
           d ? d.width : 0,
           d ? d.height : 0,
           d && d.confidenceMap ? 1 : 0,
           anchors ? anchors.length : 0,
+          meshAnchors,
+          meshVertBytes,
         );
       }
     };
@@ -495,6 +516,9 @@ function App(): React.JSX.Element {
           onCapturePreviewClose={closePreview}
           frameProcessor={exampleFrameProcessor}
           arFrameProcessor={demoArFrameProcessor}
+          enableDepth
+          enableAnchors
+          enableMesh
           onCapture={handleCapture}
           onCaptureSourceChange={handleCaptureSourceChange}
           onLensChange={handleLensChange}

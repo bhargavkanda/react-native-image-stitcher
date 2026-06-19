@@ -177,13 +177,33 @@ export interface CameraFrame {
 export interface ARAnchor {
   /** Stable per-session anchor identifier. */
   id: string;
-  /** Anchor kind.  `'point'` is Android (ARCore) only. */
-  type: 'plane' | 'image' | 'point';
   /**
-   * 4×4 row-major transform from anchor space to world space.
-   * 16 numbers.
+   * Anchor kind.  `'point'` is Android (ARCore) only; `'mesh'` is a
+   * scene-reconstruction mesh anchor, present only when the `enableMesh`
+   * `<Camera>` prop is on (and the device supports reconstruction).
+   */
+  type: 'plane' | 'image' | 'point' | 'mesh';
+  /**
+   * 4×4 row-major transform from anchor space to world space (16
+   * numbers).  For `'mesh'` anchors, the `meshGeometry.vertices` are in
+   * this anchor's LOCAL space — multiply by `transform` for world coords.
    */
   transform: number[];
+  /**
+   * Scene-reconstruction geometry — present only on `type: 'mesh'`
+   * anchors.  Buffers (wrap in the noted typed-array view):
+   *   - `vertices`  → `Float32Array`, xyz triplets in anchor-local space.
+   *   - `faces`     → `Uint32Array`, triangle indices into `vertices`.
+   *   - `classifications` → optional `Uint8Array`, one ARKit mesh class
+   *     per face (0=none, 1=wall, 2=floor, 3=ceiling, …).  **iOS only**
+   *     (from `ARMeshAnchor`); absent on Android, where the mesh is
+   *     reconstructed from the depth map and carries no semantics.
+   */
+  meshGeometry?: {
+    vertices: ArrayBuffer;
+    faces: ArrayBuffer;
+    classifications?: ArrayBuffer;
+  };
 }
 
 /**

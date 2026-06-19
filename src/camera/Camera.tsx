@@ -764,6 +764,25 @@ export interface CameraProps {
    */
   arFrameProcessor?: CameraFrameProcessor;
 
+  /**
+   * Opt in to per-frame AR depth on the `arFrameProcessor` frame
+   * (`CameraFrame.arDepth`).  Default `false` — depth is the costliest
+   * field (a per-frame buffer copy), so it's off until you need it.
+   */
+  enableDepth?: boolean;
+  /**
+   * Opt in to per-frame AR anchors (`CameraFrame.arAnchors` — detected
+   * planes / images).  Default `false`.
+   */
+  enableAnchors?: boolean;
+  /**
+   * Opt in to scene-reconstruction mesh anchors (`type: 'mesh'` in
+   * `arAnchors`, with `meshGeometry`).  Default `false`.  iOS enables
+   * ARKit `sceneReconstruction` (LiDAR); Android reconstructs a rough
+   * mesh from the depth map.  Expensive — only on when needed.
+   */
+  enableMesh?: boolean;
+
   // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────────
   /**
    * Which device holds the non-AR panorama capture accepts.
@@ -1171,6 +1190,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onCapturePreviewClose,
     frameProcessor: hostFrameProcessor,
     arFrameProcessor,
+    enableDepth,
+    enableAnchors,
+    enableMesh,
     engine = 'batch-keyframe',
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'vertical',
@@ -2435,6 +2457,9 @@ export function Camera(props: CameraProps): React.JSX.Element {
           ref={arViewRef}
           style={StyleSheet.absoluteFill}
           arFrameProcessor={arFrameProcessor}
+          enableDepth={enableDepth}
+          enableAnchors={enableAnchors}
+          enableMesh={enableMesh}
         />
       ) : (
         <CameraView

@@ -284,6 +284,30 @@ Value StitcherFrameJsiHostObject::get(Runtime& rt,
         transform.setValueAtIndex(rt, j, Value(a.transform[j]));
       }
       obj.setProperty(rt, "transform", transform);
+      if (a.hasMesh) {
+        // Scene-reconstruction geometry — bytes emitted verbatim as
+        // ArrayBuffers (vertices=Float32, faces=Uint32, classifications=Uint8).
+        Object mesh(rt);
+        auto vbuf = std::make_shared<OwningPixelBuffer>(a.meshVertices.size());
+        if (!a.meshVertices.empty()) {
+          std::memcpy(vbuf->bytes(), a.meshVertices.data(), a.meshVertices.size());
+        }
+        mesh.setProperty(rt, "vertices", facebook::jsi::ArrayBuffer(rt, vbuf));
+        auto fbuf = std::make_shared<OwningPixelBuffer>(a.meshFaces.size());
+        if (!a.meshFaces.empty()) {
+          std::memcpy(fbuf->bytes(), a.meshFaces.data(), a.meshFaces.size());
+        }
+        mesh.setProperty(rt, "faces", facebook::jsi::ArrayBuffer(rt, fbuf));
+        if (!a.meshClassifications.empty()) {
+          auto cbuf =
+              std::make_shared<OwningPixelBuffer>(a.meshClassifications.size());
+          std::memcpy(cbuf->bytes(), a.meshClassifications.data(),
+                      a.meshClassifications.size());
+          mesh.setProperty(rt, "classifications",
+                           facebook::jsi::ArrayBuffer(rt, cbuf));
+        }
+        obj.setProperty(rt, "meshGeometry", mesh);
+      }
       anchors.setValueAtIndex(rt, i, obj);
     }
     return anchors;
