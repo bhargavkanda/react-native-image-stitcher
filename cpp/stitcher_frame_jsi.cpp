@@ -5,8 +5,10 @@
 
 #include "stitcher_frame_jsi.hpp"
 
+#include <cstring>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace retailens {
 
@@ -49,6 +51,14 @@ std::vector<PropNameID> StitcherFrameJsiHostObject::getPropertyNames(
   names.push_back(PropNameID::forUtf8(rt, "toArrayBuffer"));
   if (!_data.arTrackingState.empty()) {
     names.push_back(PropNameID::forUtf8(rt, "arTrackingState"));
+  }
+  if (_data.arDepth.has_value()) {
+    names.push_back(PropNameID::forUtf8(rt, "arDepth"));
+  }
+  // AR frames expose `arAnchors` (possibly an empty array); non-AR
+  // frames omit it (JS sees `undefined`).
+  if (_data.source == "ar") {
+    names.push_back(PropNameID::forUtf8(rt, "arAnchors"));
   }
   return names;
 }
@@ -205,9 +215,81 @@ Value StitcherFrameJsiHostObject::get(Runtime& rt,
         PropNameID::forUtf8(rt, "toArrayBuffer"), 0, fn);
   }
 
-  // Unknown property — return undefined (matches JS object
-  // semantics).  Worklets accessing arDepth / arAnchors hit this
-  // path in v0.8.0 (stubbed to undefined; populated in v0.8.1+).
+  if (name == "arDepth") {
+    // Normalise both platforms to ONE JS shape:
+    //   { width, height, depthMap: Float32 metres, confidenceMap?: Uint8 0..2 }
+    if (!_data.arDepth.has_value()) return Value::undefined();
+    const ArDepth& d = *_data.arDepth;
+    const std::size_t px =
+        static_cast<std::size_t>(d.width) * static_cast<std::size_t>(d.height);
+    if (px == 0) return Value::undefined();
+
+    Object depth(rt);
+    depth.setProperty(rt, "width", Value(static_cast<double>(d.width)));
+    depth.setProperty(rt, "height", Value(static_cast<double>(d.height)));
+
+    // depthMap — always emitted as Float32 metres (px * 4 bytes).
+    auto depthBuf = std::make_shared<OwningPixelBuffer>(px * sizeof(float));
+    auto* out = reinterpret_cast<float*>(depthBuf->bytes());
+    std::vector<uint8_t> conf;  // Uint8 0..2 (empty => no confidenceMap)
+
+    if (d.format == "f32m") {
+      // iOS ARKit: depthBytes already Float32 metres; confidence is a
+      // separate Uint8 (ARConfidenceLevel 0..2) — pass both through.
+      if (d.depthBytes.size() >= px * sizeof(float)) {
+        std::memcpy(out, d.depthBytes.data(), px * sizeof(float));
+      }
+      if (d.confidenceBytes.size() >= px) {
+        conf.assign(d.confidenceBytes.begin(), d.confidenceBytes.begin() + px);
+      }
+    } else if (d.format == "u16packed") {
+      // Android ARCore DEPTH16: low 13 bits = millimetres, high 3 bits
+      // = confidence 0..7.  Convert mm->metres and map confidence 0..7
+      // -> 0..2 so JS sees the same scale as iOS.
+      const auto* src = reinterpret_cast<const uint16_t*>(d.depthBytes.data());
+      const std::size_t srcCount = d.depthBytes.size() / sizeof(uint16_t);
+      conf.resize(px, 0);
+      for (std::size_t i = 0; i < px; ++i) {
+        const uint16_t raw = (i < srcCount) ? src[i] : 0;
+        out[i] = static_cast<float>(raw & 0x1FFF) / 1000.0f;
+        const uint8_t c7 = static_cast<uint8_t>((raw >> 13) & 0x7);
+        conf[i] = (c7 <= 2) ? 0 : (c7 <= 5 ? 1 : 2);
+      }
+    } else {
+      return Value::undefined();
+    }
+
+    depth.setProperty(rt, "depthMap", facebook::jsi::ArrayBuffer(rt, depthBuf));
+    if (!conf.empty()) {
+      auto confBuf = std::make_shared<OwningPixelBuffer>(px);
+      std::memcpy(confBuf->bytes(), conf.data(), px);
+      depth.setProperty(rt, "confidenceMap",
+                        facebook::jsi::ArrayBuffer(rt, confBuf));
+    }
+    return depth;
+  }
+
+  if (name == "arAnchors") {
+    // AR frames return an array (possibly empty); non-AR returns
+    // undefined (matches the JS `arAnchors?: ARAnchor[]` contract).
+    if (_data.source != "ar") return Value::undefined();
+    Array anchors(rt, _data.arAnchors.size());
+    for (std::size_t i = 0; i < _data.arAnchors.size(); ++i) {
+      const ArAnchor& a = _data.arAnchors[i];
+      Object obj(rt);
+      obj.setProperty(rt, "id", String::createFromUtf8(rt, a.id));
+      obj.setProperty(rt, "type", String::createFromUtf8(rt, a.type));
+      Array transform(rt, 16);
+      for (std::size_t j = 0; j < 16; ++j) {
+        transform.setValueAtIndex(rt, j, Value(a.transform[j]));
+      }
+      obj.setProperty(rt, "transform", transform);
+      anchors.setValueAtIndex(rt, i, obj);
+    }
+    return anchors;
+  }
+
+  // Unknown property — return undefined (matches JS object semantics).
   return Value::undefined();
 }
 

@@ -196,6 +196,18 @@ object StitcherWorkletRuntime {
     /// @param trackingState  One of "" / "notAvailable" / "limited"
     ///                       / "normal".  Empty string ⇒ JS-side
     ///                       `arTrackingState` is `undefined`.
+    /// @param depthBytes     Raw ARCore DEPTH16 bytes, dense row-packed
+    ///                       (`depthWidth*depthHeight*2` bytes, uint16/px,
+    ///                       low 13 bits = mm, high 3 bits = confidence).
+    ///                       `null` when depth is unavailable this frame —
+    ///                       the JNI then leaves `data.arDepth == nullopt`.
+    /// @param depthWidth     Depth-map width (px); 0 when no depth.
+    /// @param depthHeight    Depth-map height (px); 0 when no depth.
+    /// @param anchorIds      Parallel arrays describing every TRACKING
+    /// @param anchorTypes    anchor: stable id, coarse type
+    /// @param anchorTransforms ("plane"/"image"/"point"), and a 16-element
+    ///                       ROW-MAJOR (anchor->world) transform.  Empty
+    ///                       when no anchors are tracked.
     @JvmStatic
     fun dispatchToHostWorklets(
         nv21Bytes: ByteArray,
@@ -205,6 +217,12 @@ object StitcherWorkletRuntime {
         tx: Double, ty: Double, tz: Double,
         timestampNs: Double,
         trackingState: String,
+        depthBytes: ByteArray?,
+        depthWidth: Int,
+        depthHeight: Int,
+        anchorIds: Array<String>,
+        anchorTypes: Array<String>,
+        anchorTransforms: Array<DoubleArray>,
     ) {
         if (!installed.get()) return
         nativeDispatchToHostWorklets(
@@ -212,6 +230,8 @@ object StitcherWorkletRuntime {
             qx, qy, qz, qw,
             tx, ty, tz,
             timestampNs, trackingState,
+            depthBytes, depthWidth, depthHeight,
+            anchorIds, anchorTypes, anchorTransforms,
         )
     }
 
@@ -243,6 +263,12 @@ object StitcherWorkletRuntime {
         tx: Double, ty: Double, tz: Double,
         timestampNs: Double,
         trackingState: String,
+        depthBytes: ByteArray?,
+        depthWidth: Int,
+        depthHeight: Int,
+        anchorIds: Array<String>,
+        anchorTypes: Array<String>,
+        anchorTransforms: Array<DoubleArray>,
     )
 
     init {

@@ -694,6 +694,38 @@ class RNSARCameraView @JvmOverloads constructor(
             TrackingState.STOPPED -> "notAvailable"
             else -> "notAvailable"
         }
+
+        // ── AR depth (ARCore Depth API, DEPTH16) ────────────────────────
+        //
+        // Acquire the 16-bit depth image for this frame and ROW-PACK it
+        // into a contiguous w*h*2 byte array (uint16/pixel, low 13 bits =
+        // millimetres, high 3 bits = confidence 0..7).  The shared JSI
+        // layer (`cpp/stitcher_frame_jsi.cpp`) unpacks mm->metres and
+        // confidence 0..7 -> 0..2, so we emit the RAW packed bytes with
+        // format "u16packed" and leave the confidence array empty.
+        //
+        // ARCore's plane[0].rowStride may EXCEED w*2 (alignment padding);
+        // we copy exactly w*2 bytes per row so the JS-side reader sees a
+        // dense, no-padding buffer.  Older devices / un-supported sessions
+        // throw NotYetAvailableException (or depth disabled) — caught and
+        // treated as "no depth this frame" (null).  `use {}` closes the
+        // ARCore Image deterministically in all paths.
+        val depth: ArDepthData? = acquireDepth16Packed(frame)
+
+        // ── AR anchors ──────────────────────────────────────────────────
+        //
+        // Emit every TRACKING anchor as { id, type, transform(row-major) }.
+        // The app does NOT call session.createAnchor() anywhere today, so
+        // getAllAnchors() is empty in practice — an empty list is the
+        // CORRECT contract for "AR frame, no anchors" (the JSI layer still
+        // returns a [] for source=="ar").  The extraction below is fully
+        // wired so it lights up automatically if anchor creation lands.
+        val anchors: List<ArAnchorData> =
+            sessionRef.get()?.let { collectTrackingAnchors(it) } ?: emptyList()
+        val anchorIds = Array(anchors.size) { anchors[it].id }
+        val anchorTypes = Array(anchors.size) { anchors[it].type }
+        val anchorTransforms = Array(anchors.size) { anchors[it].transform }
+
         StitcherWorkletRuntime.dispatchToHostWorklets(
             nv21Bytes = packed.nv21,
             width = packed.width,
@@ -704,7 +736,127 @@ class RNSARCameraView @JvmOverloads constructor(
             tz = tArr[2].toDouble(),
             timestampNs = frame.timestamp.toDouble(),
             trackingState = arTracking,
+            depthBytes = depth?.bytes,
+            depthWidth = depth?.width ?: 0,
+            depthHeight = depth?.height ?: 0,
+            anchorIds = anchorIds,
+            anchorTypes = anchorTypes,
+            anchorTransforms = anchorTransforms,
         )
+    }
+
+    /// Packed DEPTH16 result: dense (no row padding) uint16-per-pixel
+    /// bytes plus the depth-map dimensions.  `bytes.size == width*height*2`.
+    private data class ArDepthData(
+        val bytes: ByteArray,
+        val width: Int,
+        val height: Int,
+    )
+
+    /// One TRACKING anchor flattened for the JNI parallel-array marshal.
+    /// `transform` is a 16-element ROW-MAJOR (anchor->world) matrix.
+    private data class ArAnchorData(
+        val id: String,
+        val type: String,
+        val transform: DoubleArray,
+    )
+
+    /**
+     * Acquire this frame's ARCore depth image (DEPTH16) and copy it into a
+     * dense, row-packed `ByteArray` of `w*h*2` bytes (no stride padding).
+     *
+     * Returns null when depth is unavailable for this frame — older
+     * devices that don't support the Depth API, the first frames before
+     * ARCore produces a depth estimate (`NotYetAvailableException`), or a
+     * session configured without `DepthMode.AUTOMATIC`.  The ARCore Image
+     * is always closed via `use {}`.
+     *
+     * Byte order is preserved verbatim from ARCore's little-endian
+     * DEPTH16 buffer — the shared C++ JSI layer reinterprets the bytes as
+     * `uint16_t` on the same (little-endian ARM) device, so no swap is
+     * needed.
+     */
+    private fun acquireDepth16Packed(
+        frame: com.google.ar.core.Frame,
+    ): ArDepthData? {
+        return try {
+            frame.acquireDepthImage16Bits()?.use { img ->
+                val w = img.width
+                val h = img.height
+                if (w <= 0 || h <= 0) return null
+                val plane = img.planes[0]
+                val rowStride = plane.rowStride          // may exceed w*2
+                val src = plane.buffer                   // direct ByteBuffer
+                val rowBytes = w * 2                      // DEPTH16: 2 bytes/px
+                val out = ByteArray(rowBytes * h)
+                // Copy ROW BY ROW — only the first `rowBytes` of each
+                // `rowStride`-byte source row are real pixels; the tail
+                // (rowStride - rowBytes) is alignment padding to skip.
+                val row = ByteArray(rowBytes)
+                for (y in 0 until h) {
+                    src.position(y * rowStride)
+                    src.get(row, 0, rowBytes)
+                    System.arraycopy(row, 0, out, y * rowBytes, rowBytes)
+                }
+                ArDepthData(bytes = out, width = w, height = h)
+            }
+        } catch (t: Throwable) {
+            // NotYetAvailableException (early frames), depth unsupported,
+            // or any plane-access failure — treat as "no depth this frame".
+            if (forwardLogTick % 30 == 1) {
+                Log.d(TAG, "acquireDepth16Packed: no depth this frame: ${t.message}")
+            }
+            null
+        }
+    }
+
+    /**
+     * Collect every currently-TRACKING anchor from the session as
+     * `ArAnchorData` (id, coarse type, row-major 4x4 transform).
+     *
+     * `Pose.toMatrix(float[16], 0)` yields a COLUMN-MAJOR (OpenGL) matrix;
+     * we TRANSPOSE it to the row-major layout the shared C++ contract
+     * expects (`ArAnchor.transform`, anchor->world, row-major).
+     *
+     * Cross-platform parity: ARKit's `frame.anchors` auto-includes detected
+     * `ARPlaneAnchor`s (planeDetection is on), so iOS surfaces planes as
+     * anchors for free.  ARCore exposes detected planes / augmented images
+     * as TRACKABLES (not `Anchor`s) until you call `createAnchor`, and this
+     * app creates none — so to give the worklet the same useful per-frame
+     * spatial data, we surface detected plane + augmented-image trackables
+     * (in TRACKING state) directly as anchors.  `centerPose` is the anchor
+     * pose; `Pose.toMatrix` is COLUMN-MAJOR (OpenGL) so we transpose to the
+     * row-major layout the shared C++ contract (`ArAnchor.transform`,
+     * anchor->world) expects.  ids are per-session-stable (identity hash).
+     */
+    private fun collectTrackingAnchors(
+        session: Session,
+    ): List<ArAnchorData> {
+        val out = ArrayList<ArAnchorData>()
+        val colMajor = FloatArray(16)
+
+        fun emit(id: String, type: String, pose: com.google.ar.core.Pose) {
+            pose.toMatrix(colMajor, 0)  // COLUMN-MAJOR (OpenGL)
+            val rowMajor = DoubleArray(16)
+            for (r in 0 until 4) {
+                for (c in 0 until 4) {
+                    rowMajor[r * 4 + c] = colMajor[c * 4 + r].toDouble()
+                }
+            }
+            out.add(ArAnchorData(id = id, type = type, transform = rowMajor))
+        }
+
+        for (plane in session.getAllTrackables(com.google.ar.core.Plane::class.java)) {
+            if (plane.trackingState != TrackingState.TRACKING) continue
+            // Skip planes merged into a larger one (avoids duplicate poses).
+            if (plane.subsumedBy != null) continue
+            emit("plane-${System.identityHashCode(plane)}", "plane", plane.centerPose)
+        }
+        for (img in session.getAllTrackables(com.google.ar.core.AugmentedImage::class.java)) {
+            if (img.trackingState != TrackingState.TRACKING) continue
+            emit("image-${System.identityHashCode(img)}", "image", img.centerPose)
+        }
+        return out
     }
 
     /// v0.13.2 — map the JS physical device orientation to the

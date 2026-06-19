@@ -21,8 +21,10 @@
 #import "StitcherFrameHostObject.h"
 
 #import <Foundation/Foundation.h>
+#import <ARKit/ARKit.h>
 #import <CoreVideo/CVPixelBuffer.h>
 #import <CoreMedia/CoreMedia.h>
+#import <simd/simd.h>
 #import <os/log.h>
 
 #include <jsi/jsi.h>
@@ -121,6 +123,125 @@ class IOSPixelBufferReader : public retailens::PixelBufferReader {
   std::size_t _height = 0;
 };
 
+#pragma mark - AR depth + anchor extraction
+
+/// Copy a single-channel CVPixelBuffer into a TIGHTLY-PACKED byte
+/// vector, stripping any per-row padding.  ARKit's depth/confidence
+/// maps frequently have `bytesPerRow > width * elementSize` (rows are
+/// padded for alignment), so a bulk `memcpy(base, w*h*elemSize)` would
+/// copy garbage padding bytes into the wrong positions and shear the
+/// map.  We copy `width * elementSize` bytes per row from `base +
+/// row * bytesPerRow` so the result is row-packed exactly as the
+/// shared JSI layer (`stitcher_frame_jsi.cpp`) expects.
+///
+/// Returns `true` on success (out is filled with `w*h*elementSize`
+/// bytes); `false` if the buffer couldn't be locked or has no base
+/// address (out is left untouched).
+bool PackSingleChannelPixelBuffer(CVPixelBufferRef buffer,
+                                  std::size_t elementSize,
+                                  std::vector<uint8_t>& out) {
+  if (buffer == NULL) return false;
+  if (CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly) !=
+      kCVReturnSuccess) {
+    return false;
+  }
+  const std::size_t width = CVPixelBufferGetWidth(buffer);
+  const std::size_t height = CVPixelBufferGetHeight(buffer);
+  const std::size_t bytesPerRow = CVPixelBufferGetBytesPerRow(buffer);
+  const uint8_t* base =
+      reinterpret_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(buffer));
+  const std::size_t rowBytes = width * elementSize;
+
+  bool ok = false;
+  if (base != nullptr && width > 0 && height > 0 && bytesPerRow >= rowBytes) {
+    out.resize(rowBytes * height);
+    for (std::size_t row = 0; row < height; ++row) {
+      std::memcpy(out.data() + row * rowBytes,
+                  base + row * bytesPerRow,
+                  rowBytes);
+    }
+    ok = true;
+  }
+  CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
+  return ok;
+}
+
+/// Extract ARKit `sceneDepth` (preferred) / `smoothedSceneDepth` into
+/// the shared `ArDepth` struct as `format="f32m"`:
+///   - depthBytes    = Float32 metres, row-packed (w*h*4 bytes)
+///   - confidenceBytes = Uint8 ARConfidenceLevel 0..2, row-packed (w*h)
+/// `width`/`height` are the DEPTH MAP's own dimensions (≈256x192),
+/// NOT the camera image's — the JSI layer derives `px = w*h` from
+/// these to validate the byte counts.  Leaves `data.arDepth` as
+/// `nullopt` when the device/session provides no depth (non-LiDAR
+/// devices, or before the first depth frame arrives).
+void ExtractARDepth(ARFrame* arFrame, retailens::StitcherFrameData& data) {
+  ARDepthData* dd = arFrame.sceneDepth;
+  if (dd == nil) dd = arFrame.smoothedSceneDepth;
+  if (dd == nil) return;
+
+  CVPixelBufferRef depthMap = dd.depthMap;   // kCVPixelFormatType_DepthFloat32
+  if (depthMap == NULL) return;
+  const int32_t w = static_cast<int32_t>(CVPixelBufferGetWidth(depthMap));
+  const int32_t h = static_cast<int32_t>(CVPixelBufferGetHeight(depthMap));
+  if (w <= 0 || h <= 0) return;
+
+  std::vector<uint8_t> depthBytes;
+  if (!PackSingleChannelPixelBuffer(depthMap, sizeof(float), depthBytes)) {
+    return;
+  }
+
+  // Confidence is optional (some configs/devices omit it).  When
+  // present it's a Uint8 ARConfidenceLevel (0=low,1=medium,2=high),
+  // same w*h dimensions as the depth map.  Leave empty on failure —
+  // the JSI layer treats an empty confidence buffer as "no
+  // confidenceMap" (matching the JS `confidenceMap?` optional).
+  std::vector<uint8_t> confidenceBytes;
+  CVPixelBufferRef conf = dd.confidenceMap;  // kCVPixelFormatType_ConfidenceUint8
+  if (conf != NULL) {
+    if (!PackSingleChannelPixelBuffer(conf, sizeof(uint8_t), confidenceBytes)) {
+      confidenceBytes.clear();
+    }
+  }
+
+  retailens::ArDepth out;
+  out.width = w;
+  out.height = h;
+  out.format = "f32m";
+  out.depthBytes = std::move(depthBytes);
+  out.confidenceBytes = std::move(confidenceBytes);
+  data.arDepth = std::move(out);
+}
+
+/// Extract the frame's tracked anchors into the shared `ArAnchor`
+/// vector.  Each anchor carries a stable id, a coarse type
+/// (`"plane"` / `"image"` / `"point"`), and a 4x4 anchor->world
+/// transform emitted ROW-MAJOR.  ARKit's `simd_float4x4` is
+/// COLUMN-MAJOR (`columns[c][r]`), so we transpose:
+/// `transform[r*4+c] = a.transform.columns[c][r]`.
+void ExtractARAnchors(ARFrame* arFrame, retailens::StitcherFrameData& data) {
+  NSArray<ARAnchor*>* anchors = arFrame.anchors;
+  data.arAnchors.reserve(anchors.count);
+  for (ARAnchor* a in anchors) {
+    retailens::ArAnchor out;
+    out.id = std::string(a.identifier.UUIDString.UTF8String);
+    if ([a isKindOfClass:[ARPlaneAnchor class]]) {
+      out.type = "plane";
+    } else if ([a isKindOfClass:[ARImageAnchor class]]) {
+      out.type = "image";
+    } else {
+      out.type = "point";
+    }
+    const simd_float4x4 m = a.transform;
+    for (int r = 0; r < 4; ++r) {
+      for (int c = 0; c < 4; ++c) {
+        out.transform[r * 4 + c] = static_cast<double>(m.columns[c][r]);
+      }
+    }
+    data.arAnchors.push_back(std::move(out));
+  }
+}
+
 }  // anonymous namespace
 
 #pragma mark - Obj-C facade
@@ -186,6 +307,15 @@ class IOSPixelBufferReader : public retailens::PixelBufferReader {
   }
 
   data.pixelReader = std::make_shared<IOSPixelBufferReader>(arFrame);
+
+  // AR depth + anchors.  Both EAGER-COPY out of the ARFrame here (the
+  // depth/confidence bytes are packed into owned vectors; anchor
+  // transforms are read into std::array), so neither depends on the
+  // ARFrame's lifetime the way the pixel reader does.  Depth is
+  // nullopt on non-LiDAR devices / before the first depth frame;
+  // anchors is an empty vector when none are tracked.
+  ExtractARDepth(arFrame, data);
+  ExtractARAnchors(arFrame, data);
 
   // Use the static factory (private ctor enforces shared_ptr
   // ownership — required for `shared_from_this()` inside the JSI

@@ -457,10 +457,26 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         let config = ARWorldTrackingConfiguration()
         // sceneDepth gives us per-pixel depth on LiDAR-equipped
         // devices; gracefully no-ops on non-LiDAR devices.  Used by
-        // Phase 6 measurement.
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-            config.frameSemantics = .smoothedSceneDepth
+        // Phase 6 measurement AND the StitcherFrame `arDepth` field
+        // (StitcherFrameHostObject.mm reads `arFrame.sceneDepth ??
+        // arFrame.smoothedSceneDepth`).
+        //
+        // Enable BOTH `.sceneDepth` (raw per-frame depth) and
+        // `.smoothedSceneDepth` (temporally-averaged, less noisy)
+        // when the device supports them.  Without at least one of
+        // these in `frameSemantics`, `ARFrame.sceneDepth` /
+        // `.smoothedSceneDepth` are ALWAYS nil and the `arDepth`
+        // field would never populate.  Each semantic is gated by its
+        // own `supportsFrameSemantics` check so this no-ops on
+        // non-LiDAR devices instead of throwing at `run()`.
+        var depthSemantics: ARConfiguration.FrameSemantics = []
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            depthSemantics.insert(.sceneDepth)
         }
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            depthSemantics.insert(.smoothedSceneDepth)
+        }
+        config.frameSemantics = depthSemantics
         // V15.0b — enable VERTICAL plane detection for the
         // plane-projected stitch mode.  ARKit incrementally builds a
         // model of any vertical surface in view (typical retail

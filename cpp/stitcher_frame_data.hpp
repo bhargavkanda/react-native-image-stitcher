@@ -27,10 +27,13 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace retailens {
 
@@ -66,6 +69,45 @@ public:
     /// (clip silently).  This matches JS `ArrayBuffer.slice` semantics
     /// even though the host object always allocates exactly `byteSize()`.
     virtual std::size_t copyTo(uint8_t* dst, std::size_t maxBytes) = 0;
+};
+
+/// One detected AR anchor (ARKit `ARAnchor` / ARCore `Anchor`).
+/// Mirrors the JS `ARAnchor`: a stable id, a coarse type, and a
+/// 4x4 transform.
+struct ArAnchor {
+    /// Stable per-session identifier (ARKit UUID / ARCore anchor id).
+    std::string id;
+    /// Coarse class: `"plane"`, `"image"`, or `"point"`.
+    std::string type;
+    /// 4x4 anchor->world transform, ROW-MAJOR (16 elements). Platform
+    /// code is responsible for emitting row-major regardless of the
+    /// native matrix's storage order.
+    std::array<double, 16> transform{};
+};
+
+/// AR depth map for one frame. The platforms encode depth differently,
+/// so we carry the raw bytes plus a `format` tag and NORMALISE to a
+/// single JS shape (Float32 metres + Uint8 confidence 0..2) in the JSI
+/// layer (`stitcher_frame_jsi.cpp`):
+///   - iOS (ARKit `ARDepthData`): `depthBytes` = Float32 metres
+///     (row-packed); `confidenceBytes` = Uint8 `ARConfidenceLevel`
+///     (0=low,1=medium,2=high). `format = "f32m"`.
+///   - Android (ARCore DEPTH16): `depthBytes` = uint16 packed (low 13
+///     bits = millimetres, high 3 bits = confidence 0..7);
+///     `confidenceBytes` empty. `format = "u16packed"`.
+/// Depth maps are small (~256x192 iOS, ~160x120 Android) so the bytes
+/// are eager-copied at extraction time (the ARCore Image is closed
+/// in-scope; iOS copies for the same uniform contract).
+struct ArDepth {
+    int32_t width = 0;
+    int32_t height = 0;
+    /// Encoding of `depthBytes`: `"f32m"` or `"u16packed"`.
+    std::string format;
+    /// Raw depth bytes, interpreted per `format`.
+    std::vector<uint8_t> depthBytes;
+    /// Per-pixel confidence (Uint8 0..2). Populated on iOS; empty on
+    /// Android (confidence is packed into `depthBytes`).
+    std::vector<uint8_t> confidenceBytes;
 };
 
 /// Plain-old-data payload for one `StitcherFrame`.  Fully extracted
@@ -127,15 +169,19 @@ struct StitcherFrameData {
     /// docstring for lifetime contract.
     std::shared_ptr<PixelBufferReader> pixelReader;
 
-    // ── AR-only optional fields (not populated in v0.8.0; stubs) ──
-    // These are deferred to v0.8.1+ because the host worklets that
-    // would consume them aren't shipping in v0.8.0 either.  Adding
-    // them here as plain data fields keeps the JSI host object code
-    // simple when they DO arrive.
+    // ── AR-only optional fields ──────────────────────────────────────
 
-    /// arDepth, arAnchors stubs intentionally omitted — they're
-    /// fields the JSI dispatch will return `undefined` for in v0.8.0.
-    /// v0.8.1+ adds them here as `std::optional<ArDepth>` etc.
+    /// AR depth map (ARKit sceneDepth / ARCore Depth API).  `nullopt`
+    /// when the device/session can't provide depth; the JSI host object
+    /// then exposes `arDepth === undefined`.  Normalised to a single JS
+    /// shape in the JSI layer regardless of the native `format`.
+    std::optional<ArDepth> arDepth;
+
+    /// Tracked AR anchors visible this frame.  Empty when none (or in
+    /// non-AR mode); the JSI host object exposes `arAnchors === undefined`
+    /// only when empty AND source != "ar" (an AR frame with no anchors
+    /// returns an empty array, per the JS contract).
+    std::vector<ArAnchor> arAnchors;
 };
 
 }  // namespace retailens

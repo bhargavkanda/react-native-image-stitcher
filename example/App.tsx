@@ -194,6 +194,24 @@ function App(): React.JSX.Element {
   // `__stitcherProxy` is what fires the worklet (the
   // `frameProcessor` prop has no effect on AR mode because vc's
   // `<Camera>` isn't mounted in that path).
+  // AR depth/anchors readout — proves `arDepth` / `arAnchors` are actually
+  // populated (not undefined).  Called ~1/sec from the AR worklet (the read
+  // is throttled there because reading `arDepth` allocates a depth buffer;
+  // real consumers should likewise read it only when needed).
+  const fireArMetaLog = useMemo(
+    () =>
+      Worklets.createRunOnJS(
+        (depthW: number, depthH: number, hasConf: number, anchors: number) => {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[example] arFrame meta — arDepth=${depthW}x${depthH} ` +
+              `confidenceMap=${hasConf ? 'yes' : 'no'} arAnchors=${anchors}`,
+          );
+        },
+      ),
+    [],
+  );
+
   const stitcher = useStitcherWorklet();
   const exampleFrameProcessor = useFrameProcessor(
     (frame: Frame) => {
@@ -224,9 +242,24 @@ function App(): React.JSX.Element {
     const fp = (frame: CameraFrame) => {
       'worklet';
       fireFrameProcessorLog(frame.timestamp ?? 0, frame.source ?? 'ar');
+      // Read arDepth/arAnchors ~once/sec (a worklet-runtime-global tick
+      // counter), since accessing `arDepth` allocates a depth buffer —
+      // don't do it every frame.
+      const g = globalThis as { __exArMetaTick?: number };
+      g.__exArMetaTick = ((g.__exArMetaTick ?? 0) + 1) % 60;
+      if (g.__exArMetaTick === 0 && frame.source === 'ar') {
+        const d = frame.arDepth;
+        const anchors = frame.arAnchors;
+        fireArMetaLog(
+          d ? d.width : 0,
+          d ? d.height : 0,
+          d && d.confidenceMap ? 1 : 0,
+          anchors ? anchors.length : 0,
+        );
+      }
     };
     return fp;
-  }, [fireFrameProcessorLog]);
+  }, [fireFrameProcessorLog, fireArMetaLog]);
 
   // v0.10.0 (PR B) — visible pill that surfaces refinePanorama
   // progress events.  Subscribes to the IncrementalStateUpdate

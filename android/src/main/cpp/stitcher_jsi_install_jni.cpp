@@ -143,7 +143,12 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
     jdouble qx, jdouble qy, jdouble qz, jdouble qw,
     jdouble tx, jdouble ty, jdouble tz,
     jdouble timestampNs,
-    jstring trackingState) {
+    jstring trackingState,
+    jbyteArray depthBytes,
+    jint depthWidth, jint depthHeight,
+    jobjectArray anchorIds,
+    jobjectArray anchorTypes,
+    jobjectArray anchorTransforms) {
   // Fast-path early-exit BEFORE the JNI byte-array copy.  Saves the
   // ~3MB memcpy + JSI host object alloc on every frame in the
   // common first-party-only case.
@@ -213,6 +218,90 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
   data.arTrackingState = trackingStateStr;
   data.pixelReader =
       std::make_shared<AndroidNV21BufferReader>(std::move(bytes));
+
+  // ── AR depth (ARCore DEPTH16, "u16packed") ────────────────────────
+  //
+  // Kotlin hands us a dense, row-packed uint16-per-pixel byte array
+  // (depthWidth*depthHeight*2 bytes; low 13 bits = mm, high 3 bits =
+  // confidence 0..7) or null when depth is unavailable this frame.  We
+  // copy the bytes verbatim into `data.arDepth.depthBytes` with
+  // `format = "u16packed"` and leave `confidenceBytes` EMPTY — the
+  // shared JSI layer (`cpp/stitcher_frame_jsi.cpp`) unpacks mm->metres
+  // and confidence 0..7 -> 0..2 from the high bits.
+  if (depthBytes != nullptr && depthWidth > 0 && depthHeight > 0) {
+    const jsize depthLen = env->GetArrayLength(depthBytes);
+    if (depthLen > 0) {
+      retailens::ArDepth depth;
+      depth.width = static_cast<int32_t>(depthWidth);
+      depth.height = static_cast<int32_t>(depthHeight);
+      depth.format = "u16packed";
+      depth.depthBytes.resize(static_cast<std::size_t>(depthLen));
+      env->GetByteArrayRegion(
+          depthBytes, 0, depthLen,
+          reinterpret_cast<jbyte*>(depth.depthBytes.data()));
+      // confidenceBytes intentionally left empty (packed into the high
+      // 3 bits of each uint16 — unpacked JSI-side).
+      data.arDepth = std::move(depth);
+    }
+  }
+
+  // ── AR anchors ────────────────────────────────────────────────────
+  //
+  // Three parallel arrays from Kotlin: ids (String[]), types (String[]),
+  // transforms (double[16][]).  Build one `retailens::ArAnchor` per
+  // entry; the transform is already ROW-MAJOR (anchor->world) — Kotlin
+  // transposed ARCore's column-major OpenGL matrix before marshaling.
+  // Empty arrays (the common case — the app creates no anchors today)
+  // leave `data.arAnchors` empty, which the JSI layer surfaces as `[]`
+  // for source=="ar".
+  if (anchorIds != nullptr && anchorTypes != nullptr &&
+      anchorTransforms != nullptr) {
+    const jsize anchorCount = env->GetArrayLength(anchorIds);
+    data.arAnchors.reserve(static_cast<std::size_t>(anchorCount));
+    for (jsize i = 0; i < anchorCount; ++i) {
+      retailens::ArAnchor anchor;
+
+      auto idObj = reinterpret_cast<jstring>(
+          env->GetObjectArrayElement(anchorIds, i));
+      if (idObj != nullptr) {
+        const char* cs = env->GetStringUTFChars(idObj, nullptr);
+        if (cs != nullptr) {
+          anchor.id = cs;
+          env->ReleaseStringUTFChars(idObj, cs);
+        }
+        env->DeleteLocalRef(idObj);
+      }
+
+      auto typeObj = reinterpret_cast<jstring>(
+          env->GetObjectArrayElement(anchorTypes, i));
+      if (typeObj != nullptr) {
+        const char* cs = env->GetStringUTFChars(typeObj, nullptr);
+        if (cs != nullptr) {
+          anchor.type = cs;
+          env->ReleaseStringUTFChars(typeObj, cs);
+        }
+        env->DeleteLocalRef(typeObj);
+      }
+
+      auto transformObj = reinterpret_cast<jdoubleArray>(
+          env->GetObjectArrayElement(anchorTransforms, i));
+      if (transformObj != nullptr) {
+        const jsize n = env->GetArrayLength(transformObj);
+        jdouble* elems = env->GetDoubleArrayElements(transformObj, nullptr);
+        if (elems != nullptr) {
+          const jsize copyN = (n < 16) ? n : 16;
+          for (jsize j = 0; j < copyN; ++j) {
+            anchor.transform[static_cast<std::size_t>(j)] =
+                static_cast<double>(elems[j]);
+          }
+          env->ReleaseDoubleArrayElements(transformObj, elems, JNI_ABORT);
+        }
+        env->DeleteLocalRef(transformObj);
+      }
+
+      data.arAnchors.push_back(std::move(anchor));
+    }
+  }
 
   // Dispatch on worklets-core's default context.  That context is
   // initialised by JS' `Worklets.install()` (which runs at lib
