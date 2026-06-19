@@ -238,6 +238,42 @@ public final class RNSARSessionBridge: RCTEventEmitter {
         }
     }
 
+    // MARK: - v0.20.0 — AR overlay renderer
+
+    /// Replace the ENTIRE JS-set overlay collection.  The JS layer (the
+    /// shared `arOverlayController`) does the per-id diff and always sends
+    /// the FULL current array here on every mutation (declarative prop +
+    /// imperative ref methods both funnel through this one method).
+    ///
+    /// Native replaces its JS-overlay namespace in `RNISAROverlayStore`
+    /// wholesale; the per-frame draw view in the mounted `RNSARCameraView`
+    /// reprojects + strokes them every ARFrame.  Plugin-placed overlays
+    /// (a SEPARATE namespace, via `RNISARPluginRegistry.setOverlays`) are
+    /// untouched — the draw view renders the UNION.
+    ///
+    /// `overlays` is an array of dictionaries matching the JS `AROverlay`
+    /// shape (`id`, `worldPosition?`, `sizeMeters?`, `worldQuad?`, `shape?`,
+    /// `label?`, `color?`, `mode?`).  Entries missing an `id` or any
+    /// geometry are dropped.  Synchronous (no main-queue hop needed — it
+    /// only mutates the thread-safe store; the draw view reads it on the
+    /// next render pass).
+    @objc(setOverlays:resolver:rejecter:)
+    public func setOverlays(
+        overlays: NSArray,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        var parsed: [RNISAROverlay] = []
+        parsed.reserveCapacity(overlays.count)
+        for item in overlays {
+            guard let dict = item as? [String: Any],
+                  let o = RNISAROverlay.from(dictionary: dict) else { continue }
+            parsed.append(o)
+        }
+        RNISAROverlayStore.shared.setJSOverlays(parsed)
+        resolver(nil)
+    }
+
     @objc(snapshotPoseLog:rejecter:)
     public func snapshotPoseLog(
         resolver: @escaping RCTPromiseResolveBlock,

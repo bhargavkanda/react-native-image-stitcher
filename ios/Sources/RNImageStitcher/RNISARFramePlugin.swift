@@ -244,4 +244,41 @@ public final class RNISARPluginRegistry: NSObject {
             ]
         )
     }
+
+    // MARK: - v0.20.0 — native-plugin overlay placement
+
+    // A native plugin can place AR overlays DIRECTLY (native→native, zero
+    // JS latency) via the methods below.  Plugin overlays live in their
+    // OWN namespace in `RNISAROverlayStore`, separate from JS-set overlays
+    // — the draw view renders the UNION, so a plugin placing overlays
+    // never clobbers `<Camera overlays={...}>` / the imperative ref, and
+    // vice-versa.  Safe to call from any thread (the store is internally
+    // locked); the per-frame draw view picks the change up on its next
+    // redraw.
+
+    /// Replace the ENTIRE plugin overlay set.  Pass the same dictionary
+    /// shape the JS `AROverlay` interface uses (`id`, `worldPosition`,
+    /// `sizeMeters`, `worldQuad`, `shape`, `label`, `color`, `mode`).
+    /// Entries missing an `id` or any geometry are dropped.
+    @objc public func setOverlays(_ overlays: [[String: Any]]) {
+        let parsed = overlays.compactMap { RNISAROverlay.from(dictionary: $0) }
+        RNISAROverlayStore.shared.setPluginOverlays(parsed)
+    }
+
+    /// Add or replace a single plugin overlay (same dictionary shape as
+    /// `setOverlays`).  No-op if the dict has no `id` / no geometry.
+    @objc public func addOverlay(_ overlay: [String: Any]) {
+        guard let parsed = RNISAROverlay.from(dictionary: overlay) else { return }
+        RNISAROverlayStore.shared.addPluginOverlay(parsed)
+    }
+
+    /// Remove a single plugin overlay by id.  No-op if absent.
+    @objc public func removeOverlay(_ id: String) {
+        RNISAROverlayStore.shared.removePluginOverlay(id)
+    }
+
+    /// Clear ALL plugin overlays.  JS-set overlays are untouched.
+    @objc public func clearOverlays() {
+        RNISAROverlayStore.shared.clearPluginOverlays()
+    }
 }

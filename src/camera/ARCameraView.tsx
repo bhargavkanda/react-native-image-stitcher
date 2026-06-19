@@ -45,6 +45,11 @@ import {
 import { ensureStitcherProxyInstalled } from '../stitching/ensureStitcherProxyInstalled';
 import type { CameraFrameProcessor } from '../stitching/CameraFrame';
 import type { ARFrameMeta, ARPluginResult } from '../stitching/ARFrameMeta';
+import type { AROverlay } from '../stitching/AROverlay';
+import {
+  createAROverlayController,
+  type AROverlayMethods,
+} from './arOverlayController';
 
 
 // React Native looks up the component by its NATIVE name.
@@ -167,6 +172,32 @@ export interface ARCameraViewProps {
    * present; cleanup on unmount / when the handler is removed).
    */
   onArPluginResult?: (e: ARPluginResult) => void;
+
+  /**
+   * v0.20.0 — AR OVERLAY / ANNOTATION renderer.  A declarative array of 2D
+   * shapes the native overlay layer draws ON TOP of the AR camera preview,
+   * each anchored to WORLD positions and REPROJECTED to screen on every AR
+   * frame from the current camera pose + intrinsics (smooth, display-rate
+   * tracking; no 3D engine).
+   *
+   * State-driven: pass a React-state array and update it as your world points
+   * change.  The set is diffed against the current overlays BY `id` (add /
+   * update / remove), so re-passing the same ids is cheap.  Each render pushes
+   * the resolved array to native via `RNSARSession.setOverlays`.
+   *
+   * For zero-render-latency / fire-and-forget mutations use the imperative ref
+   * methods instead ({@link ARCameraViewHandle.setOverlays} etc.) — both paths
+   * funnel through the same native channel and stay consistent.  JS-set
+   * overlays are merged on the native side with any overlays a registered AR
+   * plugin placed directly (`RNISARPluginRegistry.setOverlays` /
+   * `RNSARPluginRegistry.setOverlays`); the two sets are namespaced so neither
+   * clobbers the other.
+   *
+   * See {@link AROverlay} for the shape (single world point + size, or explicit
+   * world quad; `outline` / `box`; optional label + colour; `mode:'3d'` is a
+   * documented scaffold this release and renders as `'2d'`).
+   */
+  overlays?: AROverlay[];
 }
 
 
@@ -180,8 +211,13 @@ export interface ARCameraViewProps {
  * Note we do NOT exhaustively mirror vision-camera's API surface —
  * only the methods the panorama capture flow uses today.  As the
  * SDK grows AR-aware features, methods are added here.
+ *
+ * v0.20.0 — also exposes the imperative AR-overlay methods
+ * ({@link AROverlayMethods}: `setOverlays` / `addOverlay` / `updateOverlay` /
+ * `removeOverlay` / `clearOverlays`) so a host can drive overlays without a
+ * render (the declarative `overlays` prop is the React-state alternative).
  */
-export interface ARCameraViewHandle {
+export interface ARCameraViewHandle extends AROverlayMethods {
   /**
    * Capture the latest ARFrame as a JPEG.  Resolves with a
    * vision-camera-compatible PhotoFile (`{ path, width, height,
@@ -260,6 +296,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       onArFrame,
       arFrameMetaInterval,
       onArPluginResult,
+      overlays,
     },
     ref,
   ): React.JSX.Element {
@@ -267,6 +304,19 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
     // resolved VideoFile can be delivered via the same callback
     // pair vision-camera uses.
     const recordingCallbacksRef = useRef<RecordingCallbacks | null>(null);
+
+    // v0.20.0 — AR overlay controller (shared logic with <Camera>).  One
+    // instance per mount holds the JS-set overlay collection (keyed by id) and
+    // pushes the full array to native on every mutation.  Both the declarative
+    // `overlays` prop (effect below) and the imperative ref methods drive it,
+    // so the two APIs can never diverge.
+    const overlayControllerRef = useRef<
+      ReturnType<typeof createAROverlayController> | null
+    >(null);
+    if (overlayControllerRef.current == null) {
+      overlayControllerRef.current = createAROverlayController();
+    }
+    const overlayController = overlayControllerRef.current;
 
     // AR frame-processor registration.  Installs the native
     // `__stitcherProxy` (idempotent) and registers the host worklet so
@@ -427,7 +477,27 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       };
     }, [arPluginResultEnabled]);
 
+    // v0.20.0 — declarative `overlays` prop → native.  Each render pushes the
+    // resolved array through the controller (which replaces the JS-set
+    // collection wholesale and dispatches to `RNSARSession.setOverlays`).  The
+    // controller dedups identical native dispatches at the wire level is NOT
+    // attempted here — React only re-runs this when `overlays` identity
+    // changes, and native overlay set is cheap (a handful of shapes).  When the
+    // prop is omitted we DON'T touch the controller, so a host driving overlays
+    // purely imperatively (via the ref) isn't clobbered by an undefined prop.
+    useEffect(() => {
+      if (overlays == null) {
+        return;
+      }
+      overlayController.setOverlays(overlays);
+    }, [overlays, overlayController]);
+
     useImperativeHandle(ref, () => ({
+      setOverlays: overlayController.setOverlays,
+      addOverlay: overlayController.addOverlay,
+      updateOverlay: overlayController.updateOverlay,
+      removeOverlay: overlayController.removeOverlay,
+      clearOverlays: overlayController.clearOverlays,
       takePhoto: async (options = {}) => {
         const native: any =
           (NativeModules as Record<string, unknown>).RNSARSession;
@@ -479,7 +549,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
           callbacks.onRecordingError?.(err as Error);
         }
       },
-    }), []);
+    }), [overlayController]);
 
     if (!NativeARCameraView
         || (Platform.OS !== 'ios' && Platform.OS !== 'android')) {

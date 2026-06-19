@@ -45,8 +45,10 @@ import {
   useStitcherWorklet,
   userFacingStitchError,
   type AcceptedKeyframe,
+  type AROverlay,
   type CameraCaptureResult,
   type CameraError,
+  type CameraHandle,
   type CaptureSource,
   type CameraLens,
   type CaptureThumbnailItem,
@@ -221,6 +223,18 @@ function App(): React.JSX.Element {
   // private to RetaiLens, written against this same framework).
   const [pluginText, setPluginText] = useState('plugins: (none)');
 
+  // v0.20.0 — AR OVERLAY renderer demo.  We drive a single overlay imperatively
+  // through the `<Camera>` ref so it tracks a detected plane WITHOUT a React
+  // re-render per frame.  When `onArFrame` reports a plane anchor we derive its
+  // world position from the anchor→world transform (translation = elements
+  // [12],[13],[14] of the row-major 4×4) and pin an outline marker there; the
+  // native overlay layer reprojects it to screen every AR frame so it stays
+  // glued to the plane as the camera moves.  A small text readout mirrors the
+  // overlay state so it's verifiable even before pointing at a plane.
+  const cameraRef = useRef<CameraHandle | null>(null);
+  const overlayPinnedRef = useRef(false);
+  const [overlayText, setOverlayText] = useState('overlay: (no plane yet)');
+
   const stitcher = useStitcherWorklet();
   const exampleFrameProcessor = useFrameProcessor(
     (frame: Frame) => {
@@ -277,6 +291,45 @@ function App(): React.JSX.Element {
         `planes[v:${vPlanes} h:${hPlanes}] mesh=${meshStr} ` +
         `intr=${intrStr}`,
     );
+
+    // v0.20.0 — pin a demo overlay to the FIRST detected plane anchor.  The
+    // anchor's `transform` is a row-major 4×4 anchor→world matrix; its
+    // translation (the anchor's world origin) lives at indices [12],[13],[14].
+    // We update the overlay's world position every frame the anchor is visible
+    // so it tracks if the plane re-centres; the native layer handles the
+    // per-frame screen reprojection.  Imperative (via the ref) so there's no
+    // React re-render on the AR frame cadence.
+    const plane = m.anchors.find((a) => a.type === 'plane');
+    if (plane && plane.transform.length >= 16) {
+      const worldPosition: [number, number, number] = [
+        plane.transform[12],
+        plane.transform[13],
+        plane.transform[14],
+      ];
+      const overlay: AROverlay = {
+        id: 'demo',
+        worldPosition,
+        sizeMeters: [0.2, 0.2],
+        shape: 'outline',
+        label: 'AR',
+        color: '#00E5FF',
+      };
+      // setOverlays replaces the whole JS-set; with one overlay that's the same
+      // as add/update but keeps the demo trivially simple.
+      cameraRef.current?.setOverlays([overlay]);
+      overlayPinnedRef.current = true;
+      setOverlayText(
+        `overlay: demo @ [${worldPosition
+          .map((v) => v.toFixed(2))
+          .join(', ')}]`,
+      );
+    } else if (overlayPinnedRef.current && m.anchors.length === 0) {
+      // No anchors tracked anymore — clear so the overlay doesn't linger at a
+      // stale world point.
+      cameraRef.current?.clearOverlays();
+      overlayPinnedRef.current = false;
+      setOverlayText('overlay: (cleared — no plane)');
+    }
 
     // v0.19.0 — surface the sample plugin's SYNC result.  The native
     // FrameBrightnessPlugin (name() === 'frameBrightness') returns
@@ -527,6 +580,7 @@ function App(): React.JSX.Element {
       <StatusBar barStyle="light-content" />
       <SafeAreaView style={styles.safe}>
         <Camera
+          ref={cameraRef}
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
@@ -570,6 +624,10 @@ function App(): React.JSX.Element {
           {/* v0.19.0 — AR plugin framework readout (sample FrameBrightnessPlugin). */}
           <Text style={styles.arPluginText} numberOfLines={1}>
             {pluginText}
+          </Text>
+          {/* v0.20.0 — AR overlay renderer readout (demo plane-pinned marker). */}
+          <Text style={styles.arOverlayText} numberOfLines={1}>
+            {overlayText}
           </Text>
         </View>
 
@@ -667,6 +725,14 @@ const styles = StyleSheet.create({
   // result is visually separable from the green AR-metadata line above.
   arPluginText: {
     color: '#FFD34D',
+    fontSize: 11,
+    marginTop: 3,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  // v0.20.0 — AR overlay renderer readout, cyan to match the demo overlay's
+  // colour (#00E5FF) so the on-screen text and the drawn marker read as a set.
+  arOverlayText: {
+    color: '#00E5FF',
     fontSize: 11,
     marginTop: 3,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',

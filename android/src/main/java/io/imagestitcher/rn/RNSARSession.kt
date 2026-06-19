@@ -186,6 +186,76 @@ class RNSARSession(reactContext: ReactApplicationContext)
         arFrameMetaLastEmitNs = 0L
     }
 
+    // ── 0.20.0 — AR overlay/annotation imperative API ────────────────────
+    //
+    // JS-facing methods backing the `<Camera>` / `<ARCameraView>` ref's
+    // overlay API (setOverlays / addOverlay / updateOverlay / removeOverlay /
+    // clearOverlays) AND the declarative `overlays` prop (which TS funnels
+    // through `setOverlays`).  Each forwards to the bound AR camera view's
+    // [AROverlayStore] JS namespace; the renderer draws the UNION of these
+    // and any native-plugin overlays.  Fire-and-forget (no Promise) — mirrors
+    // the other config-prop setters (setPlaneDetection, lockPortrait).
+    //
+    // No-op (logged) when no AR camera view is bound — the host called an
+    // overlay method before mounting <ARCameraView>; the next mount will NOT
+    // auto-replay JS overlays (unlike plugin overlays), so the host should
+    // set overlays after mount (the declarative `overlays` prop does this
+    // naturally via its mount effect).
+
+    @ReactMethod
+    fun setOverlays(overlays: com.facebook.react.bridge.ReadableArray?) {
+        val view = attachedView ?: run {
+            Log.d(TAG, "setOverlays: no AR camera view bound — ignoring")
+            return
+        }
+        view.setOverlaysFromJs(AROverlayData.fromReadableArray(overlays))
+    }
+
+    @ReactMethod
+    fun addOverlay(overlay: com.facebook.react.bridge.ReadableMap?) {
+        val view = attachedView ?: run {
+            Log.d(TAG, "addOverlay: no AR camera view bound — ignoring")
+            return
+        }
+        val parsed = AROverlayData.fromReadableMap(overlay) ?: run {
+            Log.w(TAG, "addOverlay: malformed overlay (no id / no anchor) — ignoring")
+            return
+        }
+        view.addOverlayFromJs(parsed)
+    }
+
+    @ReactMethod
+    fun updateOverlay(id: String?, patch: com.facebook.react.bridge.ReadableMap?) {
+        if (id.isNullOrEmpty() || patch == null) {
+            Log.w(TAG, "updateOverlay: missing id or patch — ignoring")
+            return
+        }
+        val view = attachedView ?: run {
+            Log.d(TAG, "updateOverlay: no AR camera view bound — ignoring")
+            return
+        }
+        view.updateOverlayFromJs(id, patch)
+    }
+
+    @ReactMethod
+    fun removeOverlay(id: String?) {
+        if (id.isNullOrEmpty()) return
+        val view = attachedView ?: run {
+            Log.d(TAG, "removeOverlay: no AR camera view bound — ignoring")
+            return
+        }
+        view.removeOverlayFromJs(id)
+    }
+
+    @ReactMethod
+    fun clearOverlays() {
+        val view = attachedView ?: run {
+            Log.d(TAG, "clearOverlays: no AR camera view bound — ignoring")
+            return
+        }
+        view.clearOverlaysFromJs()
+    }
+
     @ReactMethod
     fun isSupported(promise: Promise) {
         // `checkAvailability` can return UNKNOWN_CHECKING if the
@@ -892,11 +962,25 @@ class RNSARSession(reactContext: ReactApplicationContext)
 
     internal fun bindCameraView(view: RNSARCameraView) {
         attachedView = view
+        // 0.20.0 — replay any plugin overlays placed BEFORE this view
+        // mounted (e.g. from MainApplication.onCreate) so they render
+        // immediately.  Plugin overlays live in the plugin namespace; JS
+        // overlays (set via the imperative API) survive across remounts on
+        // the view's own store, so we don't touch them here.
+        val cached = RNSARPluginRegistry.currentPluginOverlays()
+        if (cached.isNotEmpty()) {
+            view.overlayStore.setPluginOverlays(cached)
+        }
     }
 
     internal fun unbindCameraView(view: RNSARCameraView) {
         if (attachedView === view) attachedView = null
     }
+
+    /// 0.20.0 — the bound AR camera view's overlay store, or null when no
+    /// view is mounted.  Used by [RNSARPluginRegistry] to push native-plugin
+    /// overlays into the live renderer.
+    internal fun boundOverlayStore(): AROverlayStore? = attachedView?.overlayStore
 
     /**
      * Emit a pre-built [ARFrameMeta] WritableMap to JS over the shared

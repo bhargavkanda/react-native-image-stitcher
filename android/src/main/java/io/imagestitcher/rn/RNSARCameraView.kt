@@ -78,6 +78,29 @@ class RNSARCameraView @JvmOverloads constructor(
     private val backgroundRenderer = BackgroundRenderer()
     private val sessionRef = AtomicReference<Session?>(null)
     private var sessionTextureBound = false
+
+    // ── 0.20.0 — AR overlay/annotation renderer ─────────────────────────
+    //
+    // [overlayStore] is the single source of truth for the overlays to
+    // draw (UNION of JS-set + native-plugin-set; see [AROverlayStore]);
+    // [overlayRenderer] is the transparent Canvas View stacked ABOVE the
+    // GLSurfaceView in this FrameLayout.  Per frame, [onDrawFrame] snapshots
+    // the camera view/projection matrices + the letterbox box and pushes
+    // them into the renderer (which reprojects + redraws on the UI thread).
+    //
+    // The store is exposed (via [overlayStore] internal) so the native
+    // plugin path ([RNSARPluginRegistry.setOverlays] etc.) and the JS
+    // imperative path ([RNSARSession] @ReactMethods → bound view) both write
+    // to it; the JS imperative path uses the JS namespace, plugins the
+    // plugin namespace.
+    val overlayStore = AROverlayStore()
+    private val overlayRenderer = AROverlayRenderer(context, overlayStore)
+
+    // Scratch matrices for the per-frame overlay camera snapshot — reused
+    // each frame so the GL thread does no per-frame allocation when overlays
+    // are active.  ARCore returns COLUMN-MAJOR (OpenGL) matrices.
+    private val overlayViewMatrix = FloatArray(16)
+    private val overlayProjMatrix = FloatArray(16)
     /// Last known display rotation; consulted on each setDisplayGeometry
     /// call so we can recompute when the user rotates the device.
     private var lastDisplayRotation: Int = -1
@@ -138,6 +161,14 @@ class RNSARCameraView @JvmOverloads constructor(
         setBackgroundColor(android.graphics.Color.BLACK)
         addView(
             glView,
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
+        )
+        // 0.20.0 — overlay renderer stacked ABOVE the GLSurfaceView (added
+        // after glView so it draws on top).  Full-screen + transparent; it
+        // reprojects world overlays into the same letterbox box the camera
+        // feed fills, so its coordinate space matches the preview.
+        addView(
+            overlayRenderer,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
         )
     }
@@ -215,6 +246,11 @@ class RNSARCameraView @JvmOverloads constructor(
         // Pause the GL thread so we stop drawing frames.
         glView.onPause()
         sessionTextureBound = false
+        // 0.20.0 — stop drawing overlays; we drop the camera snapshot so a
+        // stale pose isn't reused if the view re-attaches.  The overlay SET
+        // itself is left intact (the host may keep the same overlays across
+        // a remount); only the per-frame camera state is cleared.
+        overlayRenderer.clear()
         IncrementalStitcher.bridgeInstance?.unbindArCameraView(this)
         RNSARSession.instance?.unbindCameraView(this)
         // iOS parity (didMoveToWindow else-branch): stop the session
@@ -398,6 +434,14 @@ class RNSARCameraView @JvmOverloads constructor(
         // contract was already in place for Phase 4.
         appendPose(camera, frame.timestamp)
 
+        // ── 0.20.0 — feed the overlay renderer this frame's camera ───────
+        //
+        // Only when overlays exist (cheap AtomicReference emptiness check),
+        // snapshot the view + projection matrices and the letterbox box so
+        // the overlay View can reproject world points → screen and redraw.
+        // Runs every render frame so overlays track at display rate.
+        maybeUpdateOverlayCamera(camera, box)
+
         // Forward to the incremental stitcher when capture is engaged,
         // OR when an AR frame-processor host worklet is registered (the
         // v0.8.0 Phase 4b.iii fan-out forwards preview frames whenever
@@ -545,6 +589,94 @@ class RNSARCameraView @JvmOverloads constructor(
         )
         RNSARSession.instance?.appendPose(framePose)
         RNSARSession.instance?.updateTrackingState(camera.trackingState)
+    }
+
+    // ── 0.20.0 — per-frame overlay camera snapshot + JS imperative API ──
+
+    /**
+     * Snapshot this frame's camera view + projection matrices and the
+     * letterbox box into the [overlayRenderer], then trigger a redraw.
+     *
+     * Cheap no-op when no overlays are set (single AtomicReference
+     * emptiness check) so the common no-overlay preview path pays almost
+     * nothing.  ARCore's `getViewMatrix` / `getProjectionMatrix` are
+     * COLUMN-MAJOR (OpenGL) — exactly what `android.opengl.Matrix` and the
+     * renderer expect.  The near/far planes (0.05 m / 100 m) bound depth
+     * precision; they don't affect XY projection.
+     *
+     * @param camera the ARCore camera for this frame (pose + intrinsics).
+     * @param glBox  the letterbox box [x, y, w, h] in GL pixel space
+     *               (origin BOTTOM-left, as used by `glViewport`).  We flip
+     *               Y to the overlay View's TOP-left origin here.
+     */
+    private fun maybeUpdateOverlayCamera(camera: Camera, glBox: IntArray) {
+        if (overlayStore.isEmpty()) return
+
+        // ARCore projection matrix: near=0.05 m, far=100 m (matches the
+        // BackgroundRenderer's typical range; depth bounds only).
+        try {
+            camera.getViewMatrix(overlayViewMatrix, 0)
+            camera.getProjectionMatrix(overlayProjMatrix, 0, 0.05f, 100f)
+        } catch (t: Throwable) {
+            // Camera not ready (early frames) — skip this frame's overlay
+            // update; the feed keeps drawing and we retry next frame.
+            return
+        }
+
+        // GL viewport box → overlay View box.  GL origin is bottom-left;
+        // the View is top-left.  Both share surfaceWidth × surfaceHeight.
+        val boxX = glBox[0].toFloat()
+        val boxW = glBox[2].toFloat()
+        val boxH = glBox[3].toFloat()
+        val boxYTop = (surfaceHeight - (glBox[1] + glBox[3])).toFloat()
+
+        val tracking = camera.trackingState == TrackingState.TRACKING
+
+        overlayRenderer.updateCamera(
+            viewMatrix = overlayViewMatrix,
+            projectionMatrix = overlayProjMatrix,
+            boxX = boxX,
+            boxY = boxYTop,
+            boxW = boxW,
+            boxH = boxH,
+            tracking = tracking,
+        )
+    }
+
+    // ── JS imperative overlay API (forwarded from RNSARSession) ──────────
+    //
+    // The JS `ARCameraViewHandle` / `<Camera>` ref methods (setOverlays /
+    // addOverlay / updateOverlay / removeOverlay / clearOverlays) route
+    // through the singleton `RNSARSession` native module — the SAME idiom
+    // takePhoto uses — which forwards to the bound view's [overlayStore]
+    // (JS namespace).  These run on the bridge thread; the store's
+    // AtomicReferences make that safe against the GL thread's per-frame
+    // read.  An overlay set change triggers an immediate redraw so the
+    // overlay appears without waiting for the next AR frame's snapshot.
+
+    internal fun setOverlaysFromJs(overlays: List<AROverlayData>) {
+        overlayStore.setJsOverlays(overlays)
+        overlayRenderer.postInvalidateOnAnimation()
+    }
+
+    internal fun addOverlayFromJs(overlay: AROverlayData) {
+        overlayStore.addJsOverlay(overlay)
+        overlayRenderer.postInvalidateOnAnimation()
+    }
+
+    internal fun updateOverlayFromJs(id: String, patch: com.facebook.react.bridge.ReadableMap) {
+        overlayStore.updateJsOverlay(id, patch)
+        overlayRenderer.postInvalidateOnAnimation()
+    }
+
+    internal fun removeOverlayFromJs(id: String) {
+        overlayStore.removeJsOverlay(id)
+        overlayRenderer.postInvalidateOnAnimation()
+    }
+
+    internal fun clearOverlaysFromJs() {
+        overlayStore.clearJsOverlays()
+        overlayRenderer.postInvalidateOnAnimation()
     }
 
     /// P3-G diagnostic — rate-limit the per-frame log so we can see

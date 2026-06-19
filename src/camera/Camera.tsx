@@ -41,8 +41,10 @@
  */
 
 import React, {
+  forwardRef,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -68,6 +70,8 @@ import type {
 import { useARSession } from '../ar/useARSession';
 import type { CameraFrameProcessor } from '../stitching/CameraFrame';
 import type { ARFrameMeta, ARPluginResult } from '../stitching/ARFrameMeta';
+import type { AROverlay } from '../stitching/AROverlay';
+import type { AROverlayMethods } from './arOverlayController';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
@@ -834,6 +838,26 @@ export interface CameraProps {
    */
   onArPluginResult?: (e: ARPluginResult) => void;
 
+  /**
+   * v0.20.0 — AR OVERLAY / ANNOTATION renderer.  A declarative array of 2D
+   * shapes drawn ON TOP of the AR camera preview, each anchored to WORLD
+   * positions and REPROJECTED to screen on every AR frame from the current
+   * camera pose + intrinsics (smooth display-rate tracking, no 3D engine).
+   * Only meaningful in AR capture (`captureSource === 'ar'`); `<Camera>`
+   * threads this straight through to the underlying `<ARCameraView>`.
+   *
+   * State-driven: pass a React-state array and update it as your world points
+   * change (e.g. from {@link CameraProps.onArFrame} plane anchors).  The set is
+   * diffed against the current overlays BY `id`.  For zero-render-latency
+   * mutations use the imperative ref methods on the `<Camera>` handle instead
+   * ({@link CameraHandle}: `setOverlays` / `addOverlay` / `updateOverlay` /
+   * `removeOverlay` / `clearOverlays`) — both paths funnel through the same
+   * native channel.  JS-set overlays merge on the native side with overlays a
+   * registered AR plugin placed directly (namespaced so neither clobbers the
+   * other).  See {@link AROverlay} for the shape.
+   */
+  overlays?: AROverlay[];
+
   // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────────
   /**
    * Which device holds the non-AR panorama capture accepts.
@@ -920,6 +944,26 @@ export interface CameraProps {
    */
   guidanceCopy?: Partial<GuidanceCopy>;
 }
+
+
+/**
+ * v0.20.0 — imperative handle exposed via the `<Camera>` ref.
+ *
+ * Currently scoped to the AR-overlay methods ({@link AROverlayMethods}:
+ * `setOverlays` / `addOverlay` / `updateOverlay` / `removeOverlay` /
+ * `clearOverlays`), which forward to the underlying `<ARCameraView>`'s overlay
+ * channel when AR mode is mounted.  They are no-ops while the camera is in
+ * non-AR mode (no `<ARCameraView>` is mounted, and overlays only render over
+ * the AR preview) — use the declarative {@link CameraProps.overlays} prop for
+ * a set that survives AR↔non-AR transitions, since it re-applies automatically
+ * whenever `<ARCameraView>` (re)mounts.
+ *
+ * The shape is identical to {@link ARCameraViewHandle}'s overlay subset so a
+ * host can use either component with the same overlay code.  Photo / panorama
+ * capture remain driven by the built-in shutter (no imperative capture methods
+ * on this handle — see the component docstring's scope note).
+ */
+export interface CameraHandle extends AROverlayMethods {}
 
 
 // ─── Sub-components ─────────────────────────────────────────────────
@@ -1207,8 +1251,15 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
 
 /**
  * The public `<Camera>` component.
+ *
+ * v0.20.0 — now a `forwardRef`.  The ref exposes {@link CameraHandle} (the AR
+ * overlay methods); existing callers that don't pass a ref are unaffected
+ * (`forwardRef` makes the ref optional).
  */
-export function Camera(props: CameraProps): React.JSX.Element {
+export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
+  props: CameraProps,
+  ref,
+): React.JSX.Element {
   const {
     defaultCaptureSource = 'non-ar',
     defaultLens = '1x',
@@ -1248,6 +1299,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onArFrame,
     arFrameMetaInterval,
     onArPluginResult,
+    overlays,
     engine = 'batch-keyframe',
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'vertical',
@@ -1510,6 +1562,21 @@ export function Camera(props: CameraProps): React.JSX.Element {
   const incremental = useIncrementalStitcher();
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);
+
+  // v0.20.0 — AR overlay imperative handle.  `<Camera>` itself renders no
+  // overlay layer; the overlay methods forward to the mounted
+  // `<ARCameraView>`'s handle (which owns the controller + native dispatch).
+  // No-op when AR mode isn't mounted (`arViewRef.current === null`), matching
+  // the CameraHandle docstring — the declarative `overlays` prop is the path
+  // that survives AR↔non-AR transitions.  The `overlays` prop is also threaded
+  // straight to `<ARCameraView>` below, so a host can use either API.
+  useImperativeHandle(ref, (): CameraHandle => ({
+    setOverlays: (o) => arViewRef.current?.setOverlays(o),
+    addOverlay: (o) => arViewRef.current?.addOverlay(o),
+    updateOverlay: (id, patch) => arViewRef.current?.updateOverlay(id, patch),
+    removeOverlay: (id) => arViewRef.current?.removeOverlay(id),
+    clearOverlays: () => arViewRef.current?.clearOverlays(),
+  }), []);
 
   // Effect that does the async transition work whenever the settled
   // refs disagree with the current isAR/lens.  Order matters:
@@ -2519,6 +2586,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
           onArFrame={onArFrame}
           arFrameMetaInterval={arFrameMetaInterval}
           onArPluginResult={onArPluginResult}
+          overlays={overlays}
         />
       ) : (
         <CameraView
@@ -3015,7 +3083,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
       />
     </View>
   );
-}
+});
 
 
 function noop(): void {
