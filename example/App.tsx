@@ -56,6 +56,7 @@ import {
   type PanMode,
   type CameraFrame,
   type ARFrameMeta,
+  type ARPluginResult,
 } from 'react-native-image-stitcher';
 
 
@@ -210,6 +211,16 @@ function App(): React.JSX.Element {
   // should use — no worklet, no shared value, no polling.
   const [arMetaText, setArMetaText] = useState('AR: (idle)');
 
+  // v0.19.0 — AR PLUGIN FRAMEWORK readout.  The example registers a tiny
+  // native `FrameBrightnessPlugin` (iOS RNISARPluginRegistry / Android
+  // RNSARPluginRegistry, wired in AppDelegate / MainApplication) that
+  // computes the mean luma of each AR frame and returns `{ brightness: 0..1 }`
+  // SYNCHRONOUSLY — so its result rides the throttled `onArFrame` event on
+  // `meta.plugins.brightness` (read in `handleArFrame`).  This proves the
+  // generic plugin framework end-to-end without shipping any OCR (OCR is
+  // private to RetaiLens, written against this same framework).
+  const [pluginText, setPluginText] = useState('plugins: (none)');
+
   const stitcher = useStitcherWorklet();
   const exampleFrameProcessor = useFrameProcessor(
     (frame: Frame) => {
@@ -266,6 +277,42 @@ function App(): React.JSX.Element {
         `planes[v:${vPlanes} h:${hPlanes}] mesh=${meshStr} ` +
         `intr=${intrStr}`,
     );
+
+    // v0.19.0 — surface the sample plugin's SYNC result.  The native
+    // FrameBrightnessPlugin (name() === 'frameBrightness') returns
+    // `{ brightness: 0..1 }` each frame; the SDK folds it into `meta.plugins`
+    // KEYED BY PLUGIN NAME, so the result lives at
+    // `meta.plugins.frameBrightness.brightness`.  Values are typed `unknown`
+    // (each plugin defines its own shape), so narrow per-key.
+    const frameBrightness = m.plugins?.frameBrightness as
+      | { brightness?: number }
+      | undefined;
+    const brightness =
+      typeof frameBrightness?.brightness === 'number'
+        ? frameBrightness.brightness
+        : undefined;
+    if (brightness !== undefined) {
+      // 12-cell bar so the live luma is readable at a glance on-device.
+      const cells = Math.max(0, Math.min(12, Math.round(brightness * 12)));
+      const bar = '█'.repeat(cells) + '░'.repeat(12 - cells);
+      setPluginText(
+        `plugins: brightness=${brightness.toFixed(2)} ${bar}`,
+      );
+    } else if (m.plugins == null) {
+      // Registry empty (no native plugin registered on this build) — keep the
+      // idle copy so the overlay still proves the field is plumbed.
+      setPluginText('plugins: (none)');
+    }
+  }, []);
+
+  // v0.19.0 — the ASYNC plugin-result channel.  Fires when a registered
+  // plugin offloads heavy work and later calls `registry.emit(name, result)`
+  // (worklet-free, JS MAIN thread).  The sample FrameBrightnessPlugin reports
+  // SYNCHRONOUSLY (via `meta.plugins` above), so this handler is wired purely
+  // to verify the out-of-band channel — and so a host with an async plugin
+  // (e.g. RetaiLens's OCR) has a worked example to copy.
+  const handleArPluginResult = useCallback((e: ARPluginResult) => {
+    setPluginText(`plugin[${e.plugin}]: ${JSON.stringify(e.result)}`);
   }, []);
 
   // v0.10.0 (PR B) — visible pill that surfaces refinePanorama
@@ -502,6 +549,7 @@ function App(): React.JSX.Element {
           onCapturePreviewClose={closePreview}
           frameProcessor={exampleFrameProcessor}
           onArFrame={handleArFrame}
+          onArPluginResult={handleArPluginResult}
           enableDepth
           enableAnchors
           planeDetection="both"
@@ -518,6 +566,10 @@ function App(): React.JSX.Element {
         <View style={styles.arMetaOverlay} pointerEvents="none">
           <Text style={styles.arMetaText} numberOfLines={3}>
             {arMetaText}
+          </Text>
+          {/* v0.19.0 — AR plugin framework readout (sample FrameBrightnessPlugin). */}
+          <Text style={styles.arPluginText} numberOfLines={1}>
+            {pluginText}
           </Text>
         </View>
 
@@ -609,6 +661,14 @@ const styles = StyleSheet.create({
   arMetaText: {
     color: '#7CFC9A',
     fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  // v0.19.0 — AR plugin framework readout, distinct amber tint so the plugin
+  // result is visually separable from the green AR-metadata line above.
+  arPluginText: {
+    color: '#FFD34D',
+    fontSize: 11,
+    marginTop: 3,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   // Shared dev toggle chip (top-left stack); `top` set per-instance.

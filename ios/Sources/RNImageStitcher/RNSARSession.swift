@@ -492,6 +492,24 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     private var lastArFrameMetaEmit: TimeInterval = 0
     private let arFrameMetaLock = NSLock()
 
+    // ──────────────────────────────────────────────────────────────
+    // v0.19.0 — native AR plugin framework (RNISARPluginRegistry)
+    // ──────────────────────────────────────────────────────────────
+    //
+    // While the plugin registry is NON-EMPTY, the per-frame path builds a
+    // `RNISARFrameContext` once and calls each registered plugin's
+    // `process(_:)` on the AR (delegate) thread (see `invokeArPlugins`).
+    // Non-nil SYNC results are cached here so the throttled `onArFrame`
+    // meta build can fold them in under `plugins: { [name]: result }`
+    // without re-running plugins.  Zero-plugin apps skip the whole path
+    // (the registry's `isEmpty` gate), so they pay nothing.
+    //
+    // Written on the AR thread (per-frame) and read on the same thread
+    // (the meta build runs inline in `session(_:didUpdate:)`), but guarded
+    // anyway for defensiveness against any future off-thread reader.
+    private var latestPluginSyncResults: [String: Any] = [:]
+    private let pluginSyncResultsLock = NSLock()
+
     private override init() {
         super.init()
         arSession.delegate = self
@@ -594,6 +612,12 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         detectedPlaneTransformInternal = nil
         bestRejectedAlignment = -1.0
         planeLatchLock.unlock()
+        // v0.19.0 — drop any cached SYNC plugin results so the next
+        // capture's `onArFrame` meta doesn't surface stale plugin output
+        // before the first frame of the new session runs the plugins.
+        pluginSyncResultsLock.lock()
+        latestPluginSyncResults = [:]
+        pluginSyncResultsLock.unlock()
     }
 
     /// Build the `ARWorldTrackingConfiguration` shared by `start()` and
@@ -845,6 +869,16 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // `consumeFrame` here: dispatchFrame already drives it, and
         // double-consuming would ingest each frame twice.
         RNSARWorkletRuntime.shared().dispatchFrame(frame, pose: pose)
+
+        // v0.19.0 — native AR plugin framework.  When the registry is
+        // non-empty, build the per-frame `RNISARFrameContext` once and run
+        // every registered plugin's `process(_:)` SYNCHRONOUSLY on this AR
+        // thread (so the live pixel/depth buffers are valid for the call).
+        // Caches non-nil SYNC results for the meta build below.  Cheap
+        // no-op when no plugins are registered (the common case).  Runs
+        // BEFORE `maybeEmitArFrameMeta` so the throttled `onArFrame` meta
+        // can fold in this frame's freshest plugin results.
+        invokeArPlugins(frame, pose: pose)
 
         // v0.18.0 — `onArFrame` LIGHT-metadata channel.  Gated +
         // throttled; builds the ARFrameMeta dictionary and posts it for
@@ -1433,11 +1467,103 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // Obj-C++ extraction helpers + the shared C++ extraction-config
         // gating (depth/anchors/mesh ⇐ enableDepth/enableAnchors/enableMesh).
         let meta = CameraFrameHostObject.lightArFrameMeta(from: frame, pose: pose)
+
+        // v0.19.0 — fold in any SYNC plugin results captured by
+        // `invokeArPlugins` for the freshest frames.  Only attach the
+        // `plugins` key when there's at least one result, so the common
+        // (no-plugin) meta shape is unchanged.  Snapshot under the lock,
+        // then bridge into a fresh dictionary copy.
+        pluginSyncResultsLock.lock()
+        let pluginResults = latestPluginSyncResults
+        pluginSyncResultsLock.unlock()
+        let userInfo: [AnyHashable: Any]
+        if pluginResults.isEmpty {
+            userInfo = meta
+        } else {
+            var withPlugins = meta
+            withPlugins["plugins"] = pluginResults
+            userInfo = withPlugins
+        }
+
         NotificationCenter.default.post(
             name: .retailensARFrameMeta,
             object: nil,
-            userInfo: meta
+            userInfo: userInfo
         )
+    }
+
+    /// v0.19.0 — run all registered native AR plugins for this frame.
+    /// Gated on the registry being NON-EMPTY (the cheap `isEmpty` check) so
+    /// zero-plugin apps skip the context build entirely.  When plugins are
+    /// present, builds ONE `RNISARFrameContext` (zero-copy view of the
+    /// frame's live buffers + the already-built anchor dicts) and calls
+    /// each plugin's `process(_:)` SYNCHRONOUSLY on this AR (delegate)
+    /// thread — so the live `pixelBuffer` / `depthBuffer` are valid for the
+    /// call (the plugin must copy before offloading; see the protocol
+    /// docstring).  Non-nil SYNC results are cached in
+    /// `latestPluginSyncResults` for the throttled `onArFrame` meta to fold
+    /// in; ASYNC results arrive later via `RNISARPluginRegistry.emit`.
+    private func invokeArPlugins(_ frame: ARFrame, pose: RNSARFramePose) {
+        let registry = RNISARPluginRegistry.shared
+        guard !registry.isEmpty else { return }
+        let plugins = registry.plugins()
+        guard !plugins.isEmpty else { return }
+
+        // depthBuffer: expose the live sceneDepth map ONLY when the
+        // `<Camera enableDepth>` prop is on (gating read in Obj-C++ so the
+        // C++ extraction-config header stays out of Swift).  Prefer
+        // `sceneDepth`, fall back to `smoothedSceneDepth` — same precedence
+        // as the full extraction path.
+        var depthBuffer: CVPixelBuffer? = nil
+        if CameraFrameHostObject.arExtractionDepthEnabled() {
+            if let dd = frame.sceneDepth ?? frame.smoothedSceneDepth {
+                depthBuffer = dd.depthMap
+            }
+        }
+
+        // anchors: reuse the EXACT light dicts the `onArFrame` meta builds
+        // (gated on `enableAnchors`; empty otherwise) — DRY single source.
+        let anchorDicts = CameraFrameHostObject.arAnchorDicts(from: frame)
+        let anchors = anchorDicts as? [[String: Any]] ?? []
+
+        let context = RNISARFrameContext(
+            pixelBuffer: frame.capturedImage,
+            timestampNs: frame.timestamp * 1e9,
+            fx: pose.fx, fy: pose.fy, cx: pose.cx, cy: pose.cy,
+            imageWidth: pose.imageWidth, imageHeight: pose.imageHeight,
+            poseRotation: [pose.qx, pose.qy, pose.qz, pose.qw],
+            poseTranslation: [pose.tx, pose.ty, pose.tz],
+            trackingState: Self.trackingStateString(pose.trackingState),
+            depthBuffer: depthBuffer,
+            anchors: anchors
+        )
+
+        var syncResults: [String: Any] = [:]
+        for plugin in plugins {
+            // Defensive: a plugin throwing/crashing in `process` would take
+            // down the AR thread, but Swift has no try/catch for non-Error
+            // crashes — the contract is that plugins are well-behaved.  We
+            // simply collect non-nil results keyed by the plugin's name.
+            if let result = plugin.process(context) {
+                syncResults[plugin.name()] = result
+            }
+        }
+
+        pluginSyncResultsLock.lock()
+        latestPluginSyncResults = syncResults
+        pluginSyncResultsLock.unlock()
+    }
+
+    /// Map the SDK's `RNSARTrackingState` to the same string the
+    /// `onArFrame` meta + `CameraFrame.trackingState` use, so plugins see a
+    /// consistent vocabulary.
+    private static func trackingStateString(_ s: RNSARTrackingState) -> String {
+        switch s {
+        case .tracking:     return "normal"
+        case .limited:      return "limited"
+        case .initialising: return "limited"
+        case .notAvailable: return "notAvailable"
+        }
     }
 
     private func makePose(from frame: ARFrame) -> RNSARFramePose {

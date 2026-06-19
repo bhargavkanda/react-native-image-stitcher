@@ -78,6 +78,31 @@ NS_SWIFT_NAME(CameraFrameHostObject)
                                          pose:(RNSARFramePose *)pose
     NS_SWIFT_NAME(lightArFrameMeta(from:pose:));
 
+/// Build the gated anchor-dictionary array for an ARFrame — the SAME
+/// `[{ id, type, alignment?, extent?, classification?, transform }]`
+/// shape the `onArFrame` LIGHT meta surfaces (mesh anchors excluded;
+/// they're summarised under `mesh`).  Returns an EMPTY array when the
+/// JS `enableAnchors` flag is off (read from the shared C++ extraction
+/// config) — matching the TS contract's `Array<...>` (never null).
+///
+/// Extracted so BOTH the `onArFrame` light-meta path AND the v0.19.0 AR
+/// plugin context (`RNISARFrameContext.anchors`) build anchors from one
+/// source of truth (DRY).
+///
+/// Thread: safe to call from the ARSession delegate queue (reads the
+/// frame synchronously; copies nothing that outlives the call).
++ (NSArray<NSDictionary *> *)arAnchorDictsFromFrame:(ARFrame *)arFrame
+    NS_SWIFT_NAME(arAnchorDicts(from:));
+
+/// Whether the shared C++ extraction config currently has `enableDepth`
+/// on (the `<Camera enableDepth>` prop, set via JS
+/// `__stitcherProxy.setExtractionConfig`).  The v0.19.0 AR plugin
+/// context uses this to decide whether to expose the raw
+/// `ARFrame.sceneDepth` depthBuffer to plugins — gating the config read
+/// (C++) in the .mm so Swift doesn't need the C++ header.
++ (BOOL)arExtractionDepthEnabled
+    NS_SWIFT_NAME(arExtractionDepthEnabled());
+
 @end
 
 NS_ASSUME_NONNULL_END

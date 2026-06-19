@@ -38,6 +38,8 @@ public final class RNSARSessionBridge: RCTEventEmitter {
     private var hasListeners: Bool = false
 
     private static let arFrameEvent = "RNImageStitcherARFrame"
+    // v0.19.0 — async AR-plugin result channel (RNISARPluginRegistry.emit).
+    private static let arPluginResultEvent = "RNImageStitcherARPluginResult"
 
     public override init() {
         super.init()
@@ -56,6 +58,20 @@ public final class RNSARSessionBridge: RCTEventEmitter {
             name: .retailensARFrameMeta,
             object: nil
         )
+        // v0.19.0 — observe the async AR-plugin result channel (posted by
+        // `RNISARPluginRegistry.emit`) and re-emit as a JS device event.
+        // Same de-dupe rationale as the onArFrame observer above.
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .retailensARPluginResult,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleArPluginResult(_:)),
+            name: .retailensARPluginResult,
+            object: nil
+        )
     }
 
     deinit {
@@ -71,7 +87,7 @@ public final class RNSARSessionBridge: RCTEventEmitter {
     }
 
     public override func supportedEvents() -> [String]! {
-        return [Self.arFrameEvent]
+        return [Self.arFrameEvent, Self.arPluginResultEvent]
     }
 
     public override func startObserving() {
@@ -95,6 +111,25 @@ public final class RNSARSessionBridge: RCTEventEmitter {
                 "RCTDeviceEventEmitter",
                 method: "emit",
                 args: [Self.arFrameEvent, userInfo],
+                completion: nil
+            )
+        }
+    }
+
+    /// v0.19.0 — forward a posted async AR-plugin result
+    /// (`{ plugin, result }`, from `RNISARPluginRegistry.emit`) to JS as
+    /// the `RNImageStitcherARPluginResult` device event.  Dropped when no
+    /// JS listener is attached.  Emits via `enqueueJSCall` on the main
+    /// queue (same `sendEvent`-avoidance rationale as `handleArFrameMeta`).
+    @objc private func handleArPluginResult(_ notification: Notification) {
+        guard hasListeners else { return }
+        guard let userInfo = notification.userInfo else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let bridge = self.bridge else { return }
+            bridge.enqueueJSCall(
+                "RCTDeviceEventEmitter",
+                method: "emit",
+                args: [Self.arPluginResultEvent, userInfo],
                 completion: nil
             )
         }

@@ -44,7 +44,7 @@ import {
 
 import { ensureStitcherProxyInstalled } from '../stitching/ensureStitcherProxyInstalled';
 import type { CameraFrameProcessor } from '../stitching/CameraFrame';
-import type { ARFrameMeta } from '../stitching/ARFrameMeta';
+import type { ARFrameMeta, ARPluginResult } from '../stitching/ARFrameMeta';
 
 
 // React Native looks up the component by its NATIVE name.
@@ -145,6 +145,28 @@ export interface ARCameraViewProps {
    * (≈ 10 Hz).  No effect unless `onArFrame` is provided.
    */
   arFrameMetaInterval?: number;
+
+  /**
+   * v0.19.0 — ASYNCHRONOUS AR-plugin result callback, invoked on the JS MAIN
+   * thread (NOT a worklet).  Part of the AR plugin framework: host-registered
+   * native plugins (see `RNISARPluginRegistry` / `RNSARPluginRegistry`) can
+   * offload heavy per-frame work to their own queue and later push a result
+   * via `registry.emit(name, result)`.  The SDK routes that to JS as a
+   * `RNImageStitcherARPluginResult` device event; when this prop is provided,
+   * this component subscribes and invokes the handler with
+   * `{ plugin, result }`.
+   *
+   * SYNCHRONOUS plugin results (computed inline on the AR thread) instead ride
+   * the throttled {@link onArFrame} event on {@link ARFrameMeta.plugins} —
+   * read them there.  This callback is ONLY for the out-of-band async channel.
+   *
+   * The subscription is independent of {@link onArFrame}: a host can read
+   * sync results via `onArFrame` and async results via `onArPluginResult`,
+   * either, or both.  Wiring mirrors `onArFrame` exactly (latest handler held
+   * in a ref so the subscription effect depends only on whether a handler is
+   * present; cleanup on unmount / when the handler is removed).
+   */
+  onArPluginResult?: (e: ARPluginResult) => void;
 }
 
 
@@ -237,6 +259,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       planeDetection,
       onArFrame,
       arFrameMetaInterval,
+      onArPluginResult,
     },
     ref,
   ): React.JSX.Element {
@@ -361,6 +384,48 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
         session.setArFrameMetaEnabled?.(false, intervalMs);
       };
     }, [arFrameEnabled, arFrameMetaInterval]);
+
+    // v0.19.0 — onArPluginResult device-event wiring (worklet-free, main
+    // thread).  Mirrors the onArFrame subscription above: the latest handler
+    // is held in a ref so the subscription effect depends only on WHETHER a
+    // handler is present, not its (per-render-changing) identity — so the
+    // native event subscription isn't torn down + re-established every render.
+    //
+    // This is a PURELY-JS subscription: unlike onArFrame there's no native
+    // "enable" toggle to flip.  Native emits `RNImageStitcherARPluginResult`
+    // whenever a registered plugin calls `registry.emit(...)`; the registry is
+    // empty unless the host registered plugins, so an app with no plugins
+    // never sees an event even if this prop is wired.
+    const onArPluginResultRef = useRef<
+      ((e: ARPluginResult) => void) | undefined
+    >(onArPluginResult);
+    useEffect(() => {
+      onArPluginResultRef.current = onArPluginResult;
+    }, [onArPluginResult]);
+
+    const arPluginResultEnabled = onArPluginResult != null;
+    useEffect(() => {
+      if (!arPluginResultEnabled) {
+        return undefined;
+      }
+      const native = (NativeModules as Record<string, unknown>)
+        .RNSARSession;
+      if (native == null) {
+        // Native module unavailable (e.g. web, or a native build predating
+        // the plugin event channel): no-op, no crash.
+        return undefined;
+      }
+      const emitter = new NativeEventEmitter(native as never);
+      const sub = emitter.addListener(
+        'RNImageStitcherARPluginResult',
+        (e: ARPluginResult) => {
+          onArPluginResultRef.current?.(e);
+        },
+      );
+      return () => {
+        sub.remove();
+      };
+    }, [arPluginResultEnabled]);
 
     useImperativeHandle(ref, () => ({
       takePhoto: async (options = {}) => {

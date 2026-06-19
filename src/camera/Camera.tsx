@@ -67,7 +67,7 @@ import type {
 
 import { useARSession } from '../ar/useARSession';
 import type { CameraFrameProcessor } from '../stitching/CameraFrame';
-import type { ARFrameMeta } from '../stitching/ARFrameMeta';
+import type { ARFrameMeta, ARPluginResult } from '../stitching/ARFrameMeta';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
@@ -814,6 +814,26 @@ export interface CameraProps {
    */
   arFrameMetaInterval?: number;
 
+  /**
+   * v0.19.0 — ASYNCHRONOUS AR-plugin result callback (the AR plugin
+   * framework), invoked on the JS MAIN thread (NOT a worklet).  Only fires in
+   * AR capture (`captureSource === 'ar'`).  Host-registered native plugins
+   * (see `RNISARPluginRegistry` / `RNSARPluginRegistry`) that offload heavy
+   * per-frame work to their own queue push results via
+   * `registry.emit(name, result)`; `<Camera>` threads this handler to
+   * `<ARCameraView>`, which subscribes to the `RNImageStitcherARPluginResult`
+   * device event and invokes it with `{ plugin, result }`.
+   *
+   * SYNCHRONOUS plugin results (computed inline on the AR thread) instead ride
+   * the throttled {@link onArFrame} event on {@link ARFrameMeta.plugins}.
+   * Use `onArFrame` for the in-band sync channel and `onArPluginResult` for
+   * the out-of-band async channel — a host can wire either or both.
+   *
+   * The SDK ships ONLY the generic plugin framework; there are no built-in
+   * plugins, so this never fires unless the host registers native plugins.
+   */
+  onArPluginResult?: (e: ARPluginResult) => void;
+
   // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────────
   /**
    * Which device holds the non-AR panorama capture accepts.
@@ -1227,6 +1247,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     planeDetection,
     onArFrame,
     arFrameMetaInterval,
+    onArPluginResult,
     engine = 'batch-keyframe',
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'vertical',
@@ -2497,6 +2518,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
           planeDetection={planeDetection}
           onArFrame={onArFrame}
           arFrameMetaInterval={arFrameMetaInterval}
+          onArPluginResult={onArPluginResult}
         />
       ) : (
         <CameraView

@@ -398,27 +398,45 @@ class RNSARCameraView @JvmOverloads constructor(
         // contract was already in place for Phase 4.
         appendPose(camera, frame.timestamp)
 
-        // onArFrame (v0.18.0) — LIGHT AR-metadata event channel.  Built
-        // + emitted INDEPENDENTLY of the stitcher ingest / host-worklet
-        // fan-out below: a host that only wants per-frame AR metadata
-        // (no capture, no worklet) still gets it.  Gated + throttled
-        // internally; near-free (one volatile read + one nanoTime
-        // compare) when disabled or inside the throttle window.
-        maybeEmitArFrameMeta(frame, camera)
-
         // Forward to the incremental stitcher when capture is engaged,
         // OR when an AR frame-processor host worklet is registered (the
         // v0.8.0 Phase 4b.iii fan-out forwards preview frames whenever
         // host worklets exist, even with capture off — the host worklet
-        // observes the live AR stream).  `forwardToIncremental` does the
+        // observes the live AR stream), OR when a native AR plugin is
+        // registered (0.19.0 — `forwardToIncremental` builds the
+        // ARFrameContext + runs the plugins; their SYNC results are stashed
+        // for the onArFrame meta below).  `forwardToIncremental` does the
         // NV21 pack once and gates the first-party ingest internally on
-        // `ingestActive`; the host-worklet dispatch is gated on the
-        // native registry count.  `hasHostWorklets()` is a cheap atomic
-        // read (microseconds) so the common capture-off / no-worklet
-        // preview path stays near-free.
-        if (ingestActive || StitcherWorkletRuntime.hasHostWorklets()) {
+        // `ingestActive`; the host-worklet dispatch is gated on the native
+        // worklet registry count; the plugin invocation on the plugin
+        // registry.  All three checks are cheap atomic reads so the common
+        // idle preview path (no capture, no worklet, no plugin) stays
+        // near-free.
+        //
+        // ORDER (0.19.0): run forwardToIncremental BEFORE maybeEmitArFrameMeta
+        // so the native-plugin SYNC results computed in the former are
+        // available to fold into the onArFrame `plugins` field built in the
+        // latter (same render frame).
+        if (ingestActive ||
+            StitcherWorkletRuntime.hasHostWorklets() ||
+            !RNSARPluginRegistry.isEmpty()
+        ) {
             forwardToIncremental(frame, camera)
+        } else {
+            // No consumer this frame — make sure last frame's stashed plugin
+            // sync results don't leak into a later onArFrame meta.
+            lastPluginSyncResults = null
         }
+
+        // onArFrame (v0.18.0) — LIGHT AR-metadata event channel.  Built
+        // + emitted INDEPENDENTLY of the stitcher ingest / host-worklet
+        // fan-out above: a host that only wants per-frame AR metadata
+        // (no capture, no worklet) still gets it.  Gated + throttled
+        // internally; near-free (one volatile read + one nanoTime
+        // compare) when disabled or inside the throttle window.  Native-
+        // plugin SYNC results (0.19.0) stashed by forwardToIncremental
+        // above ride along under the meta's `plugins` field.
+        maybeEmitArFrameMeta(frame, camera)
 
         // takePhoto consumer — runs on EVERY render tick (not just
         // when ingest is active), since the host calls takePhoto in
@@ -813,6 +831,132 @@ class RNSARCameraView @JvmOverloads constructor(
             anchorAlignments = anchorAlignments,
             anchorExtents = anchorExtents,
         )
+
+        // ── 0.19.0 — native AR-plugin per-frame invocation ───────────────
+        //
+        // Mirror of iOS' RNSARSession.session(_:didUpdate:) plugin loop.
+        // Only build the ARFrameContext + call plugins when the registry is
+        // NON-EMPTY (the onDrawFrame gate already let us in via that check,
+        // but a worklet-only frame can reach here with an empty plugin
+        // registry — re-check so those frames pay nothing).  Runs on the AR
+        // (GL render) thread, synchronously.  Reuses the already-packed
+        // `packed.nv21`, the depth/anchors collected above, and the pose +
+        // intrinsics already read — no extra Image acquire, no second pack.
+        // Depth is passed ONLY when the host opted into enableDepth (a
+        // mesh-only host acquired depth for its mesh, but the contract says
+        // the context's depth is null unless enableDepth).
+        runArPlugins(
+            packed, qarr, tArr, arTracking, frame, intrinsics, anchors,
+            depth = if (flags.depth) depth else null,
+        )
+    }
+
+    /// 0.19.0 — last frame's native-plugin SYNC results, keyed by plugin
+    /// name.  Written by [runArPlugins] on the GL render thread, read by
+    /// [maybeEmitArFrameMeta] on the same thread one step later in the same
+    /// onDrawFrame tick.  Null = no plugins ran / no sync results this
+    /// frame.  Single-threaded handoff (both on the GL thread) so no
+    /// synchronisation is needed, but @Volatile is cheap insurance against
+    /// any future cross-thread read.
+    @Volatile
+    private var lastPluginSyncResults: Map<String, Any?>? = null
+
+    /**
+     * 0.19.0 — build one [ARFrameContext] from the current frame and invoke
+     * every registered [ARFramePlugin].
+     *
+     *  - Non-null SYNC results are collected into a `{ name -> result }` map
+     *    and stashed in [lastPluginSyncResults] for [maybeEmitArFrameMeta]
+     *    to fold into the onArFrame `plugins` field this same tick.
+     *  - A plugin returning `null` defers to the ASYNC channel
+     *    ([RNSARPluginRegistry.emit] → `RNImageStitcherARPluginResult`).
+     *
+     * A throwing plugin is isolated (logged, skipped) so one bad plugin
+     * can't take down the AR render loop.
+     *
+     * Reuses caller-collected data (no extra Image work):
+     * @param packed     the already-packed NV21 camera image.
+     * @param qarr       pose rotation quaternion [x,y,z,w].
+     * @param tArr       pose translation [x,y,z] (world metres).
+     * @param tracking   contract tracking string ("normal"|"limited"|"notAvailable").
+     * @param frame      the ARCore frame (for the timestamp).
+     * @param intrinsics camera intrinsics (fx,fy,cx,cy + image dims).
+     * @param anchors    anchor descriptors already collected for onArFrame
+     *                   (enableAnchors-gated; empty otherwise).
+     * @param depth      row-packed DEPTH16 or null (enableDepth-gated).
+     */
+    private fun runArPlugins(
+        packed: YuvImageConverter.PackedYuv,
+        qarr: FloatArray,
+        tArr: FloatArray,
+        tracking: String,
+        frame: com.google.ar.core.Frame,
+        intrinsics: com.google.ar.core.CameraIntrinsics,
+        anchors: List<ArAnchorData>,
+        depth: ArDepthData?,
+    ) {
+        val plugins = RNSARPluginRegistry.plugins()
+        if (plugins.isEmpty()) {
+            lastPluginSyncResults = null
+            return
+        }
+
+        // Flatten the already-collected anchor descriptors into plain maps
+        // (id/type/transform + optional alignment/extent) so plugins get the
+        // same shape as the JS `ARAnchor` contract without a JSI dependency.
+        val anchorMaps: List<Map<String, Any?>> =
+            if (anchors.isEmpty()) emptyList()
+            else anchors.map { a ->
+                val m = HashMap<String, Any?>(5)
+                m["id"] = a.id
+                m["type"] = a.type
+                m["transform"] = a.transform
+                if (a.alignment.isNotEmpty()) m["alignment"] = a.alignment
+                a.extent?.let { m["extent"] = it }
+                m
+            }
+
+        val ctx = ARFrameContext(
+            nv21 = packed.nv21,
+            width = packed.width,
+            height = packed.height,
+            timestampNs = frame.timestamp.toDouble(),
+            fx = intrinsics.focalLength[0].toDouble(),
+            fy = intrinsics.focalLength[1].toDouble(),
+            cx = intrinsics.principalPoint[0].toDouble(),
+            cy = intrinsics.principalPoint[1].toDouble(),
+            imageWidth = intrinsics.imageDimensions[0],
+            imageHeight = intrinsics.imageDimensions[1],
+            poseRotation = doubleArrayOf(
+                qarr[0].toDouble(), qarr[1].toDouble(),
+                qarr[2].toDouble(), qarr[3].toDouble(),
+            ),
+            poseTranslation = doubleArrayOf(
+                tArr[0].toDouble(), tArr[1].toDouble(), tArr[2].toDouble(),
+            ),
+            trackingState = tracking,
+            depthBytes = depth?.bytes,
+            depthWidth = depth?.width ?: 0,
+            depthHeight = depth?.height ?: 0,
+            anchors = anchorMaps,
+        )
+
+        var sync: HashMap<String, Any?>? = null
+        for (plugin in plugins) {
+            val result = try {
+                plugin.process(ctx)
+            } catch (t: Throwable) {
+                if (forwardLogTick % 30 == 1) {
+                    Log.w(TAG, "AR plugin '${plugin.name()}' threw in process(): ${t.message}")
+                }
+                null
+            }
+            if (result != null) {
+                if (sync == null) sync = HashMap()
+                sync[plugin.name()] = result
+            }
+        }
+        lastPluginSyncResults = sync
     }
 
     /// Packed DEPTH16 result: dense (no row padding) uint16-per-pixel
@@ -1184,6 +1328,31 @@ class RNSARCameraView @JvmOverloads constructor(
             }
         } else {
             meta.putNull("mesh")
+        }
+
+        // ── plugins (0.19.0) — native-plugin SYNC results, if any ────────
+        //    `lastPluginSyncResults` was stashed by `runArPlugins` earlier
+        //    in THIS same onDrawFrame tick (forwardToIncremental runs before
+        //    maybeEmitArFrameMeta).  Each value is the WritableMap a plugin
+        //    returned from `process()`; we re-key it under `plugins[name]`.
+        //    Omitted entirely when no plugin produced a sync result (JS sees
+        //    `meta.plugins === undefined`), matching the optional `plugins?`
+        //    field in the ARFrameMeta contract.
+        val pluginResults = lastPluginSyncResults
+        if (!pluginResults.isNullOrEmpty()) {
+            val pluginsMap = com.facebook.react.bridge.Arguments.createMap()
+            for ((name, value) in pluginResults) {
+                when (value) {
+                    is com.facebook.react.bridge.WritableMap ->
+                        pluginsMap.putMap(name, value)
+                    null -> pluginsMap.putNull(name)
+                    // Defensive: a plugin should only ever return a
+                    // WritableMap, but never let an unexpected type crash the
+                    // emit — drop it.
+                    else -> { /* skip unsupported result type */ }
+                }
+            }
+            meta.putMap("plugins", pluginsMap)
         }
 
         session.emitArFrameMeta(meta)

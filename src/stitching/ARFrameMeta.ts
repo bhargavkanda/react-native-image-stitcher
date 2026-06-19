@@ -104,4 +104,54 @@ export interface ARFrameMeta {
     vertexCount: number;
     faceCount: number;
   } | null;
+
+  /**
+   * v0.19.0 — SYNCHRONOUS results from host-registered AR frame plugins
+   * (the AR plugin framework).  Keyed by each plugin's `name()`; the value
+   * is the light JSON result the plugin's `process(ctx)` returned on the AR
+   * thread (`nil`/`null`-returning plugins are omitted).  Only present when
+   * the native plugin registry is non-empty AND at least one plugin returned
+   * a sync result for this frame; otherwise omitted entirely (zero-plugin
+   * apps pay nothing — native skips building the context).
+   *
+   * The SDK ships ONLY the generic framework — there are no built-in
+   * plugins.  Hosts register native plugins via `RNISARPluginRegistry`
+   * (iOS) / `RNSARPluginRegistry` (Android) at startup; each plugin is
+   * called once per AR frame while the registry is non-empty.  Result
+   * values are `unknown` because each plugin defines its own shape — cast
+   * after reading the entry you care about (e.g.
+   * `meta.plugins?.brightness as number`).
+   *
+   * ## Sync vs async results
+   *
+   * This field carries only the LIGHT, in-band SYNC results (computed fast
+   * enough to ride the throttled `onArFrame` event).  Plugins that offload
+   * heavy work to their own queue deliver results out-of-band via
+   * `registry.emit(name, result)`, which surfaces through the separate
+   * `onArPluginResult` callback (the `RNImageStitcherARPluginResult`
+   * event) — NOT here.
+   */
+  plugins?: { [name: string]: unknown };
+}
+
+
+/**
+ * v0.19.0 — an ASYNCHRONOUS result from a host-registered AR frame plugin,
+ * delivered via the `onArPluginResult` callback.
+ *
+ * Unlike the in-band SYNC results carried on {@link ARFrameMeta.plugins}
+ * (which ride the throttled `onArFrame` event), a plugin produces an async
+ * result by offloading heavy work to its own queue and later calling
+ * `registry.emit(name, result)` on the native side.  The SDK routes that to
+ * JS as a `RNImageStitcherARPluginResult` device event; `<ARCameraView>`
+ * subscribes and invokes `onArPluginResult` on the JS MAIN thread.
+ *
+ * `result` is `unknown` because each plugin defines its own result shape —
+ * branch on `plugin` (the emitting plugin's `name()`) and cast accordingly.
+ */
+export interface ARPluginResult {
+  /** The `name()` of the plugin that emitted this result. */
+  plugin: string;
+  /** The plugin-defined result payload (cast after branching on `plugin`). */
+  result: unknown;
 }
