@@ -14,6 +14,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.19.0] — 2026-06-19
+
+### Added — Native AR frame-processor plugins
+
+AR-mode `<Camera>` can now run **native per-frame plugins** with zero-copy
+access to the AR frame — the foundation for on-device CV (OCR, object
+detection, reconstruction feeds) **without** baking that domain code into the
+SDK. The SDK ships only the generic framework; plugins live in your app.
+
+- **Plugin interface:** implement `RNISARFramePlugin` (iOS) / `ARFramePlugin`
+  (Android) — `name()` + `process(context)`.
+- **`ARFrameContext`** hands the plugin the frame **zero-copy**: the camera
+  buffer, `pose`, `intrinsics`, tracking state, timestamp, and — when the
+  matching `enable*` prop is on — `depth` + `anchors`. The buffer is valid
+  **only during `process()`**; copy it before offloading to another thread.
+- **Register at startup:** `RNISARPluginRegistry.shared.register(…)` (iOS) /
+  `RNSARPluginRegistry.register(…)` (Android). The SDK invokes registered
+  plugins per AR frame, gated on a **non-empty registry** — zero-plugin apps
+  pay nothing.
+- **Two result channels:** light **synchronous** `process()` returns fold into
+  `onArFrame`'s `ARFrameMeta.plugins` (keyed by plugin name); heavy / **async**
+  results are pushed via `registry.emit(name, result)` → the new
+  **`onArPluginResult`** callback prop (delivered off the AR thread — for slow
+  work like OCR that must not block frame capture).
+- The example ships a sample `FrameBrightnessPlugin` (both platforms),
+  surfaced live in the AR overlay.
+
+Device-verified on iPhone 16 Pro. The SDK stays dependency-light — no OCR / ML
+runtimes are added to core.
+
 ## [0.18.0] — 2026-06-18
 
 ### ⚠️ Breaking — `StitcherFrame` → `CameraFrame`
