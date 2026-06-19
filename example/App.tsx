@@ -228,20 +228,13 @@ function App(): React.JSX.Element {
     [stitcher.call, fireFrameProcessorLog],
   );
 
-  // AR-mode host worklet (the `arFrameProcessor` prop).  Kept present so
-  // the AR fan-out path stays exercised end-to-end, but deliberately a
-  // MINIMAL capture-free NO-OP: AR worklets must currently capture nothing
-  // (worklets-core's closure-wrap recurses without termination → SIGBUS
-  // when an AR worklet captures a host object).  Use `onArFrame` (the
-  // worklet-free main-thread callback, wired below) to get AR data into JS
-  // — that's what drives the on-screen readout now.
-  const demoArFrameProcessor = useMemo(() => {
-    const fp = (_frame: CameraFrame) => {
-      'worklet';
-      // Intentionally empty — no capture, no host-object access.
-    };
-    return fp;
-  }, []);
+  // NOTE: this example intentionally does NOT pass an `arFrameProcessor`.
+  // All AR data reaches JS through the worklet-free `onArFrame` callback
+  // (see `handleArFrame` below), which is the recommended path.  Mounting
+  // an `arFrameProcessor` (even a no-op) turns on the heavy worklet
+  // extraction path; with `enableMesh` that path marshals the LiDAR
+  // ARMeshAnchor each frame and currently faults on mesh warmup — onArFrame
+  // avoids it entirely (it reports mesh as light counts, no buffer copy).
 
   // v0.18.0 — the worklet-free AR metadata handler.  Runs on the JS MAIN
   // thread (NOT a worklet), so capturing `setArMetaText` is perfectly safe.
@@ -508,11 +501,9 @@ function App(): React.JSX.Element {
           capturePreviewActions={capturePreviewActions}
           onCapturePreviewClose={closePreview}
           frameProcessor={exampleFrameProcessor}
-          arFrameProcessor={demoArFrameProcessor}
           onArFrame={handleArFrame}
           enableDepth
           enableAnchors
-          enableMesh
           planeDetection="both"
           onCapture={handleCapture}
           onCaptureSourceChange={handleCaptureSourceChange}

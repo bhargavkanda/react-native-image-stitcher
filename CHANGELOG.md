@@ -107,6 +107,19 @@ and Release). A worklet that captures **nothing** installs and runs fine.
 Until this is resolved upstream, **use `onArFrame`** (above) to get AR
 data into JS; reserve the worklet for capture-free per-frame work.
 
+### Known limitation — `enableMesh` is memory-heavy on sustained sessions
+
+`enableMesh` turns on ARKit **continuous scene reconstruction**, the most
+memory-intensive AR mode — the mesh model grows as you scan, and a long
+session with depth + mesh both on can be **jetsam-killed by iOS** after a
+few seconds on memory-constrained devices. `onArFrame` reports mesh as
+light *counts* (`anchorCount`/`vertexCount`/`faceCount`) without copying
+geometry, so reading mesh stats is cheap; it's the **underlying ARKit
+meshing** that's heavy. For now, enable `mesh` only for short captures (the
+example demos depth + planes + intrinsics with mesh off). Proper memory
+management for sustained meshing — bounded reconstruction, single depth
+semantic, on-demand geometry — lands with the 0.20 reconstruction work.
+
 ### Internal — `StitcherFrameData` → `CameraFrameData`
 
 The shared C++ frame struct and its JSI/Obj-C++ host objects were renamed
