@@ -18,6 +18,8 @@ import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.SessionPausedException
 import io.imagestitcher.rn.ar.BackgroundRenderer
 import io.imagestitcher.rn.ar.YuvImageConverter
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicReference
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
@@ -695,6 +697,17 @@ class RNSARCameraView @JvmOverloads constructor(
             else -> "notAvailable"
         }
 
+        // ── Opt-in AR-metadata extraction gate ──────────────────────────
+        //
+        // depth/anchors/mesh are all OFF by default (the JS-driven
+        // enableDepth/enableAnchors/enableMesh `<Camera>` props, read via
+        // the shared `retailens::getExtractionConfig()` snapshot).  Skip
+        // the costly ARCore depth-acquire / anchor-collect / mesh-build
+        // work for every toggle a host hasn't opted into.  A mesh anchor
+        // is reconstructed FROM the depth map, so mesh implies acquiring
+        // depth even when `depth` (the raw arDepth emission) is off.
+        val flags = StitcherWorkletRuntime.extractionFlags()
+
         // ── AR depth (ARCore Depth API, DEPTH16) ────────────────────────
         //
         // Acquire the 16-bit depth image for this frame and ROW-PACK it
@@ -710,7 +723,11 @@ class RNSARCameraView @JvmOverloads constructor(
         // throw NotYetAvailableException (or depth disabled) — caught and
         // treated as "no depth this frame" (null).  `use {}` closes the
         // ARCore Image deterministically in all paths.
-        val depth: ArDepthData? = acquireDepth16Packed(frame)
+        //
+        // Acquired when EITHER depth (raw emission) OR mesh
+        // (reconstruction) is requested.
+        val depth: ArDepthData? =
+            if (flags.depth || flags.mesh) acquireDepth16Packed(frame) else null
 
         // ── AR anchors ──────────────────────────────────────────────────
         //
@@ -720,11 +737,41 @@ class RNSARCameraView @JvmOverloads constructor(
         // CORRECT contract for "AR frame, no anchors" (the JSI layer still
         // returns a [] for source=="ar").  The extraction below is fully
         // wired so it lights up automatically if anchor creation lands.
+        // Gated on the anchors toggle.
         val anchors: List<ArAnchorData> =
-            sessionRef.get()?.let { collectTrackingAnchors(it) } ?: emptyList()
-        val anchorIds = Array(anchors.size) { anchors[it].id }
-        val anchorTypes = Array(anchors.size) { anchors[it].type }
-        val anchorTransforms = Array(anchors.size) { anchors[it].transform }
+            if (flags.anchors)
+                sessionRef.get()?.let { collectTrackingAnchors(it) } ?: emptyList()
+            else emptyList()
+
+        // ── AR scene mesh (reconstructed from the depth map) ─────────────
+        //
+        // ARCore has no native scene mesh (unlike ARKit's ARMeshAnchor), so
+        // when `mesh` is requested we unproject the DEPTH16 map into a
+        // camera-local point grid and triangulate it.  Emitted as ONE extra
+        // anchor (type="mesh", id="mesh-depth", identity transform — the
+        // vertices are camera-local, NOT world).  Built only when mesh is
+        // on AND a depth map was available this frame.
+        val meshAnchor: ArAnchorData? =
+            if (flags.mesh && depth != null) buildDepthMesh(depth, intrinsics)
+            else null
+
+        // Combine real anchors + the optional depth mesh into the parallel
+        // marshal arrays.  meshVertices/meshFaces are null for every
+        // non-mesh anchor; the mesh anchor carries its Float32/Uint32 byte
+        // buffers (the JNI sets ArAnchor.hasMesh from them).
+        val allAnchors: List<ArAnchorData> =
+            if (meshAnchor != null) anchors + meshAnchor else anchors
+        val anchorIds = Array(allAnchors.size) { allAnchors[it].id }
+        val anchorTypes = Array(allAnchors.size) { allAnchors[it].type }
+        val anchorTransforms = Array(allAnchors.size) { allAnchors[it].transform }
+        val anchorMeshVertices =
+            Array<ByteArray?>(allAnchors.size) { allAnchors[it].meshVertices }
+        val anchorMeshFaces =
+            Array<ByteArray?>(allAnchors.size) { allAnchors[it].meshFaces }
+        // Per-anchor plane alignment ("" for image/mesh) + extent
+        // ([extentX, extentZ] metres, null for non-plane anchors).
+        val anchorAlignments = Array(allAnchors.size) { allAnchors[it].alignment }
+        val anchorExtents = Array<DoubleArray?>(allAnchors.size) { allAnchors[it].extent }
 
         StitcherWorkletRuntime.dispatchToHostWorklets(
             nv21Bytes = packed.nv21,
@@ -736,12 +783,27 @@ class RNSARCameraView @JvmOverloads constructor(
             tz = tArr[2].toDouble(),
             timestampNs = frame.timestamp.toDouble(),
             trackingState = arTracking,
-            depthBytes = depth?.bytes,
-            depthWidth = depth?.width ?: 0,
-            depthHeight = depth?.height ?: 0,
+            // Emit raw arDepth ONLY when depth was explicitly requested —
+            // a mesh-only host gets the mesh anchor but no arDepth buffer.
+            depthBytes = if (flags.depth) depth?.bytes else null,
+            depthWidth = if (flags.depth) depth?.width ?: 0 else 0,
+            depthHeight = if (flags.depth) depth?.height ?: 0 else 0,
             anchorIds = anchorIds,
             anchorTypes = anchorTypes,
             anchorTransforms = anchorTransforms,
+            anchorMeshVertices = anchorMeshVertices,
+            anchorMeshFaces = anchorMeshFaces,
+            // Per-frame camera intrinsics (fx,fy,cx,cy in pixels at the
+            // capture resolution).  `intrinsics` = camera.imageIntrinsics,
+            // already in scope above (declared at the top of this fn).
+            fx = intrinsics.focalLength[0].toDouble(),
+            fy = intrinsics.focalLength[1].toDouble(),
+            cx = intrinsics.principalPoint[0].toDouble(),
+            cy = intrinsics.principalPoint[1].toDouble(),
+            intrinsicsImageWidth = intrinsics.imageDimensions[0],
+            intrinsicsImageHeight = intrinsics.imageDimensions[1],
+            anchorAlignments = anchorAlignments,
+            anchorExtents = anchorExtents,
         )
     }
 
@@ -753,12 +815,27 @@ class RNSARCameraView @JvmOverloads constructor(
         val height: Int,
     )
 
-    /// One TRACKING anchor flattened for the JNI parallel-array marshal.
+    /// One anchor flattened for the JNI parallel-array marshal.
     /// `transform` is a 16-element ROW-MAJOR (anchor->world) matrix.
+    ///
+    /// For a depth-derived scene mesh (type="mesh") the geometry rides
+    /// along in `meshVertices` (Float32 xyz triplets, LITTLE-ENDIAN) and
+    /// `meshFaces` (Uint32 triangle indices, LITTLE-ENDIAN); both are
+    /// `null` for plane/image/point anchors.  Mesh vertices are
+    /// CAMERA-LOCAL, so the mesh anchor's `transform` is identity.
     private data class ArAnchorData(
         val id: String,
         val type: String,
         val transform: DoubleArray,
+        val meshVertices: ByteArray? = null,
+        val meshFaces: ByteArray? = null,
+        /// Plane alignment: "" (n/a — image/mesh anchors) | "horizontal"
+        /// | "vertical".  Set only on plane anchors; the JNI maps it to
+        /// `ArAnchor.alignment` (empty → JS `alignment === undefined`).
+        val alignment: String = "",
+        /// Plane extent [extentX, extentZ] in metres, or null (image/mesh
+        /// anchors).  Non-null → the JNI sets `ArAnchor.hasExtent`.
+        val extent: DoubleArray? = null,
     )
 
     /**
@@ -811,6 +888,132 @@ class RNSARCameraView @JvmOverloads constructor(
     }
 
     /**
+     * Reconstruct a triangle mesh from this frame's DEPTH16 map.
+     *
+     * ARCore (unlike ARKit's `ARMeshAnchor`) exposes no scene mesh, so we
+     * unproject every valid depth pixel into a camera-local 3D point and
+     * triangulate the resulting grid.  The output is ONE `ArAnchorData`
+     * with type="mesh", id="mesh-depth", an IDENTITY transform (vertices
+     * are camera-local, not world), a Float32 vertex buffer (xyz triplets,
+     * little-endian) and a Uint32 triangle-index buffer (little-endian).
+     *
+     * ## Intrinsics
+     *
+     * `camera.imageIntrinsics` gives focal length + principal point at the
+     * CAMERA-IMAGE resolution.  The depth map is much smaller (~160x120 on
+     * ARCore), so we SCALE the intrinsics to the depth resolution:
+     *   fx_d = fx * depthW / imgW,  cx_d = cx * depthW / imgW   (and y).
+     *
+     * ## Unprojection
+     *
+     * Depth z (metres) = (raw uint16 & 0x1FFF) / 1000.0  (low 13 bits = mm;
+     * high 3 bits = confidence, masked off).  z==0 ⇒ invalid (skipped).
+     *   X = (u - cx_d) * z / fx_d
+     *   Y = (v - cy_d) * z / fy_d
+     *   Z = z
+     *
+     * ## Triangulation
+     *
+     * For each grid cell whose 4 corners are ALL valid, emit 2 triangles
+     * (6 Uint32 indices into the vertex array).  No decimation (non-goal).
+     *
+     * Returns null if the depth map has no valid pixels / no full cells.
+     */
+    private fun buildDepthMesh(
+        depth: ArDepthData,
+        intrinsics: com.google.ar.core.CameraIntrinsics,
+    ): ArAnchorData? {
+        val w = depth.width
+        val h = depth.height
+        if (w <= 1 || h <= 1) return null
+
+        // Scale camera-image intrinsics to the depth-map resolution.
+        val imgW = intrinsics.imageDimensions[0].toDouble()
+        val imgH = intrinsics.imageDimensions[1].toDouble()
+        if (imgW <= 0.0 || imgH <= 0.0) return null
+        val sx = w.toDouble() / imgW
+        val sy = h.toDouble() / imgH
+        val fxD = intrinsics.focalLength[0].toDouble() * sx
+        val fyD = intrinsics.focalLength[1].toDouble() * sy
+        val cxD = intrinsics.principalPoint[0].toDouble() * sx
+        val cyD = intrinsics.principalPoint[1].toDouble() * sy
+        if (fxD <= 0.0 || fyD <= 0.0) return null
+
+        // Read DEPTH16 as little-endian uint16 (raw mm in low 13 bits).
+        val depthBuf = ByteBuffer.wrap(depth.bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val px = w * h
+
+        // Unproject every valid pixel; build a pixel->vertex index map
+        // (-1 for invalid) so triangulation can reference the compacted
+        // vertex array.
+        val vertXyz = FloatArray(px * 3)   // upper-bound; trimmed on write
+        val indexMap = IntArray(px) { -1 }
+        var vertCount = 0
+        for (v in 0 until h) {
+            val rowBase = v * w
+            for (u in 0 until w) {
+                val raw = depthBuf.getShort((rowBase + u) * 2).toInt() and 0xFFFF
+                val mm = raw and 0x1FFF
+                if (mm == 0) continue            // invalid depth — skip
+                val z = mm / 1000.0
+                val x = (u - cxD) * z / fxD
+                val y = (v - cyD) * z / fyD
+                val o = vertCount * 3
+                vertXyz[o] = x.toFloat()
+                vertXyz[o + 1] = y.toFloat()
+                vertXyz[o + 2] = z.toFloat()
+                indexMap[rowBase + u] = vertCount
+                vertCount++
+            }
+        }
+        if (vertCount == 0) return null
+
+        // Triangulate the grid: each cell with all 4 corners valid → 2
+        // triangles.  Index buffer is grown dynamically (count of full
+        // cells isn't known ahead without a second pass).
+        //   tl tr
+        //   bl br   →  (tl, bl, br) + (tl, br, tr)
+        val faces = ArrayList<Int>(px * 2)
+        for (v in 0 until h - 1) {
+            val r0 = v * w
+            val r1 = r0 + w
+            for (u in 0 until w - 1) {
+                val tl = indexMap[r0 + u]
+                val tr = indexMap[r0 + u + 1]
+                val bl = indexMap[r1 + u]
+                val br = indexMap[r1 + u + 1]
+                if (tl < 0 || tr < 0 || bl < 0 || br < 0) continue
+                faces.add(tl); faces.add(bl); faces.add(br)
+                faces.add(tl); faces.add(br); faces.add(tr)
+            }
+        }
+        if (faces.isEmpty()) return null
+
+        // Pack vertices (Float32 xyz) + faces (Uint32) into little-endian
+        // byte arrays — the JSI layer reinterprets these as ArrayBuffers
+        // verbatim (Float32Array / Uint32Array on the same LE ARM device).
+        val vertBytes = ByteArray(vertCount * 3 * 4)
+        val vbuf = ByteBuffer.wrap(vertBytes).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until vertCount * 3) vbuf.putFloat(vertXyz[i])
+
+        val faceBytes = ByteArray(faces.size * 4)
+        val fbuf = ByteBuffer.wrap(faceBytes).order(ByteOrder.LITTLE_ENDIAN)
+        for (idx in faces) fbuf.putInt(idx)
+
+        // Identity 4x4 (row-major == column-major for identity).
+        val identity = DoubleArray(16)
+        identity[0] = 1.0; identity[5] = 1.0; identity[10] = 1.0; identity[15] = 1.0
+
+        return ArAnchorData(
+            id = "mesh-depth",
+            type = "mesh",
+            transform = identity,
+            meshVertices = vertBytes,
+            meshFaces = faceBytes,
+        )
+    }
+
+    /**
      * Collect every currently-TRACKING anchor from the session as
      * `ArAnchorData` (id, coarse type, row-major 4x4 transform).
      *
@@ -835,7 +1038,9 @@ class RNSARCameraView @JvmOverloads constructor(
         val out = ArrayList<ArAnchorData>()
         val colMajor = FloatArray(16)
 
-        fun emit(id: String, type: String, pose: com.google.ar.core.Pose) {
+        // Transpose ARCore's COLUMN-MAJOR (OpenGL) pose matrix to the
+        // ROW-MAJOR (anchor->world) layout the shared C++ contract wants.
+        fun rowMajorTransform(pose: com.google.ar.core.Pose): DoubleArray {
             pose.toMatrix(colMajor, 0)  // COLUMN-MAJOR (OpenGL)
             val rowMajor = DoubleArray(16)
             for (r in 0 until 4) {
@@ -843,14 +1048,54 @@ class RNSARCameraView @JvmOverloads constructor(
                     rowMajor[r * 4 + c] = colMajor[c * 4 + r].toDouble()
                 }
             }
-            out.add(ArAnchorData(id = id, type = type, transform = rowMajor))
+            return rowMajor
         }
+
+        // Image/mesh anchors carry no alignment/extent (alignment=""/
+        // extent=null) — same shape as before this change.
+        fun emit(id: String, type: String, pose: com.google.ar.core.Pose) {
+            out.add(ArAnchorData(id = id, type = type, transform = rowMajorTransform(pose)))
+        }
+
+        // Read the JS `<Camera planeDetection=...>` filter once per frame
+        // ("vertical" | "horizontal" | "both").  We FILTER which plane
+        // orientations are surfaced here — ARCore's planeFindingMode stays
+        // HORIZONTAL_AND_VERTICAL (see RNSARSession.setPlaneDetection).
+        val planeMode = RNSARSession.planeDetectionMode
 
         for (plane in session.getAllTrackables(com.google.ar.core.Plane::class.java)) {
             if (plane.trackingState != TrackingState.TRACKING) continue
             // Skip planes merged into a larger one (avoids duplicate poses).
             if (plane.subsumedBy != null) continue
-            emit("plane-${System.identityHashCode(plane)}", "plane", plane.centerPose)
+
+            val alignment = when (plane.type) {
+                com.google.ar.core.Plane.Type.HORIZONTAL_UPWARD_FACING,
+                com.google.ar.core.Plane.Type.HORIZONTAL_DOWNWARD_FACING -> "horizontal"
+                com.google.ar.core.Plane.Type.VERTICAL -> "vertical"
+                else -> ""
+            }
+            // Filter by the JS plane-detection prop (applied AFTER the
+            // subsumedBy / trackingState skips above).  "both" keeps all.
+            when (planeMode) {
+                "vertical" -> if (alignment != "vertical") continue
+                "horizontal" -> if (alignment != "horizontal") continue
+                else -> { /* "both" — keep all orientations */ }
+            }
+
+            out.add(
+                ArAnchorData(
+                    id = "plane-${System.identityHashCode(plane)}",
+                    type = "plane",
+                    transform = rowMajorTransform(plane.centerPose),
+                    alignment = alignment,
+                    // extentX/extentZ: plane size (metres) along its local
+                    // X/Z axes (Y is the normal).
+                    extent = doubleArrayOf(
+                        plane.extentX.toDouble(),
+                        plane.extentZ.toDouble(),
+                    ),
+                ),
+            )
         }
         for (img in session.getAllTrackables(com.google.ar.core.AugmentedImage::class.java)) {
             if (img.trackingState != TrackingState.TRACKING) continue

@@ -84,6 +84,18 @@ struct ArAnchor {
     /// native matrix's storage order.
     std::array<double, 16> transform{};
 
+    /// Plane alignment: "" (n/a), "horizontal", or "vertical".  Set on
+    /// plane anchors; empty -> JS `alignment === undefined`.
+    std::string alignment;
+    /// Plane extent in metres along local x/z ([extentX, extentZ]); valid
+    /// only when hasExtent (plane anchors).
+    bool hasExtent = false;
+    double extentX = 0.0;
+    double extentZ = 0.0;
+    /// ARKit semantic class ("wall","floor","table",… or "none"); empty
+    /// string -> JS `classification === undefined` (iOS only).
+    std::string classification;
+
     // ── Scene-reconstruction geometry (only when type == "mesh") ──
     /// True when this anchor carries a mesh (gates JSI emission of
     /// `meshGeometry`).  Raw bytes, emitted as ArrayBuffers verbatim
@@ -196,6 +208,17 @@ struct StitcherFrameData {
     /// only when empty AND source != "ar" (an AR frame with no anchors
     /// returns an empty array, per the JS contract).
     std::vector<ArAnchor> arAnchors;
+
+    /// Per-frame camera intrinsics (fx,fy,cx,cy in pixels) + the capture
+    /// resolution they're expressed at.  Valid only when hasIntrinsics
+    /// (AR frames); the JSI exposes `intrinsics === undefined` otherwise.
+    bool hasIntrinsics = false;
+    double fx = 0.0;
+    double fy = 0.0;
+    double cx = 0.0;
+    double cy = 0.0;
+    int32_t intrinsicsImageWidth = 0;
+    int32_t intrinsicsImageHeight = 0;
 };
 
 }  // namespace retailens

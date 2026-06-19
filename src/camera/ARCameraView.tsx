@@ -104,6 +104,23 @@ export interface ARCameraViewProps {
    * when needed.  Implies depth on Android.
    */
   enableMesh?: boolean;
+  /**
+   * Which plane orientations to surface in `arAnchors` (requires
+   * `enableAnchors`).  Default `'vertical'` — the orientation the
+   * plane-projected stitch path has always used, so existing callers
+   * see no change.
+   *
+   *   - `'vertical'`   — walls / doors / fixtures (the default)
+   *   - `'horizontal'` — floors / tables / seats
+   *   - `'both'`       — surface every detected plane
+   *
+   * Platform notes: iOS changes ARKit `planeDetection` to match (a
+   * live session reconfigure).  Android always detects both planes
+   * (ARCore needs horizontal planes to bootstrap tracking) and simply
+   * FILTERS which orientations reach `arAnchors`, so the JS-observable
+   * set is identical on both platforms.
+   */
+  planeDetection?: 'vertical' | 'horizontal' | 'both';
 }
 
 
@@ -186,7 +203,15 @@ type RecordingCallbacks = {
 
 export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
   function ARCameraView(
-    { style, guidance, arFrameProcessor, enableDepth, enableAnchors, enableMesh },
+    {
+      style,
+      guidance,
+      arFrameProcessor,
+      enableDepth,
+      enableAnchors,
+      enableMesh,
+      planeDetection,
+    },
     ref,
   ): React.JSX.Element {
     // Held across the start→stop lifecycle so stopRecording's
@@ -247,6 +272,21 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
         session?.setSceneReconstructionEnabled?.(mesh);
       }
     }, [enableDepth, enableAnchors, enableMesh]);
+
+    // Push the plane-detection mode to native.  Unlike the extraction
+    // config above this is a SESSION setting, so it routes through the
+    // RNSARSession native module on BOTH platforms (iOS reconfigures
+    // ARKit `planeDetection`; Android stores an emission filter — see
+    // the prop docs).  Defaults to `'vertical'` to preserve the
+    // plane-projected stitch path's long-standing behaviour.
+    useEffect(() => {
+      const mode = planeDetection ?? 'vertical';
+      const session = (NativeModules as Record<string, unknown>)
+        .RNSARSession as
+        | { setPlaneDetection?(mode: string): void }
+        | undefined;
+      session?.setPlaneDetection?.(mode);
+    }, [planeDetection]);
 
     useImperativeHandle(ref, () => ({
       takePhoto: async (options = {}) => {

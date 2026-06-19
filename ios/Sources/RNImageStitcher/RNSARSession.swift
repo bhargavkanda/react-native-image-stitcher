@@ -166,6 +166,39 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     @objc public private(set) var isRunning: Bool = false
 
     // ──────────────────────────────────────────────────────────────
+    // Scene reconstruction (ARKit mesh) — opt-in
+    // ──────────────────────────────────────────────────────────────
+    /// Whether ARKit scene reconstruction (the LiDAR mesh,
+    /// `ARMeshAnchor`s) should be enabled.  Off by default — meshing
+    /// is costly (extra LiDAR processing + per-frame ARMeshAnchor
+    /// churn) and only the StitcherFrame `meshGeometry` consumer wants
+    /// it.  Driven from JS via
+    /// `NativeModules.RNSARSession.setSceneReconstructionEnabled(bool)`
+    /// (the <Camera> `enableMesh` prop).  When toggled while a session
+    /// is live, the session is reconfigured + re-run in place.
+    ///
+    /// Honored both at session creation (`start()`) and on live toggle
+    /// (`setSceneReconstructionEnabled`).  Independent of the depth
+    /// `frameSemantics`/planeDetection config — those are left
+    /// untouched.  No-ops on devices without
+    /// `supportsSceneReconstruction` (the flag is stored but produces
+    /// no mesh).
+    @objc public private(set) var isSceneReconstructionEnabled: Bool = false
+
+    // ──────────────────────────────────────────────────────────────
+    // v0.18.0 — configurable plane detection (planeDetection prop)
+    // ──────────────────────────────────────────────────────────────
+    /// Which plane orientations ARKit should detect, driven from JS via
+    /// `NativeModules.RNSARSession.setPlaneDetection(mode)` (the
+    /// `<Camera>` `planeDetection` prop).  Default `[.vertical]` preserves
+    /// the plane-projected stitch path's long-standing behaviour.  Stored
+    /// as the raw ARKit OptionSet so `start()` and the live-reconfigure
+    /// paths (`setSceneReconstructionEnabled` / `setPlaneDetection`) read
+    /// one source of truth.
+    private var planeDetectionOptions:
+        ARWorldTrackingConfiguration.PlaneDetection = [.vertical]
+
+    // ──────────────────────────────────────────────────────────────
     // V15.0b — vertical plane detection
     // ──────────────────────────────────────────────────────────────
     /// First detected vertical plane anchor's transform (4x4, column-
@@ -454,56 +487,12 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
                    "[V15.0f-ar-start] start() called while already running — ignored to preserve plane detection state")
             return
         }
-        let config = ARWorldTrackingConfiguration()
-        // sceneDepth gives us per-pixel depth on LiDAR-equipped
-        // devices; gracefully no-ops on non-LiDAR devices.  Used by
-        // Phase 6 measurement AND the StitcherFrame `arDepth` field
-        // (StitcherFrameHostObject.mm reads `arFrame.sceneDepth ??
-        // arFrame.smoothedSceneDepth`).
-        //
-        // Enable BOTH `.sceneDepth` (raw per-frame depth) and
-        // `.smoothedSceneDepth` (temporally-averaged, less noisy)
-        // when the device supports them.  Without at least one of
-        // these in `frameSemantics`, `ARFrame.sceneDepth` /
-        // `.smoothedSceneDepth` are ALWAYS nil and the `arDepth`
-        // field would never populate.  Each semantic is gated by its
-        // own `supportsFrameSemantics` check so this no-ops on
-        // non-LiDAR devices instead of throwing at `run()`.
-        var depthSemantics: ARConfiguration.FrameSemantics = []
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            depthSemantics.insert(.sceneDepth)
-        }
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-            depthSemantics.insert(.smoothedSceneDepth)
-        }
-        config.frameSemantics = depthSemantics
-        // V15.0b — enable VERTICAL plane detection for the
-        // plane-projected stitch mode.  ARKit incrementally builds a
-        // model of any vertical surface in view (typical retail
-        // fixture wall).  The first-detected vertical plane's
-        // transform is latched at capture-start and used as the
-        // canvas reference frame: each accepted camera frame is
-        // warped onto the plane via a 3×3 homography rather than
-        // onto a virtual cylinder/plane at first-frame anchor.
-        // CPU cost is negligible (<2 ms/frame).  Detection time:
-        // 2–5 s on non-LiDAR devices, sub-second on LiDAR.
-        config.planeDetection = [.vertical]
-        // Auto-focus on for better feature tracking on shelves with
-        // small text and packaging detail.
-        config.isAutoFocusEnabled = true
-
-        // Option B — prefer the 4:3 videoFormat for full sensor FOV; the
-        // keyframe is downscaled to arKeyframeMaxLongEdge below so memory
-        // stays consistent across devices regardless of the format res.
-        if let fmt = ARWorldTrackingConfiguration.supportedVideoFormats.min(by: { a, b in
-            let da = abs(a.imageResolution.width / a.imageResolution.height - 4.0 / 3.0)
-            let db = abs(b.imageResolution.width / b.imageResolution.height - 4.0 / 3.0)
-            if abs(da - db) > 0.001 { return da < db }
-            return a.imageResolution.width * a.imageResolution.height
-                 < b.imageResolution.width * b.imageResolution.height
-        }) {
-            config.videoFormat = fmt
-        }
+        // Build the shared base config (depth semantics + plane detection
+        // + autofocus + scene reconstruction + 4:3 video format).  See
+        // `makeBaseConfiguration()` — centralised so `start()` and the
+        // live-reconfigure paths can't drift.  `start()` is the only path
+        // that resets tracking + removes existing anchors.
+        let config = makeBaseConfiguration()
         arSession.run(config, options: [.resetTracking, .removeExistingAnchors])
         // V16-diag — log the chosen video format so we can correlate
         // batch-keyframe memory with ARFrame resolution.  iPhone Pro
@@ -569,6 +558,149 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         detectedPlaneTransformInternal = nil
         bestRejectedAlignment = -1.0
         planeLatchLock.unlock()
+    }
+
+    /// Build the `ARWorldTrackingConfiguration` shared by `start()` and
+    /// the live-reconfigure paths (`setSceneReconstructionEnabled`,
+    /// `setPlaneDetection`).  Single source of truth so the call sites
+    /// can't drift — every reconfigure preserves the SAME depth
+    /// frameSemantics, current plane-detection mode, autofocus, scene
+    /// reconstruction, and 4:3 video-format preference.  Only the `run`
+    /// OPTIONS differ at the call site (`start()` resets tracking; the
+    /// live toggles do not).
+    ///
+    /// - sceneDepth + smoothedSceneDepth: enable both when supported so
+    ///   `ARFrame.sceneDepth` populates the StitcherFrame `arDepth` field;
+    ///   each is gated by `supportsFrameSemantics` so this no-ops on
+    ///   non-LiDAR devices instead of throwing at `run()`.
+    /// - planeDetection: from `planeDetectionOptions` (default `[.vertical]`
+    ///   for the plane-projected stitch path; set via `setPlaneDetection`).
+    /// - autofocus: on, for feature tracking on shelves with small text.
+    /// - sceneReconstruction: from the stored `isSceneReconstructionEnabled`
+    ///   flag (no-ops on non-LiDAR devices).
+    /// - videoFormat: prefer 4:3 for full sensor FOV (keyframe is
+    ///   downscaled to `arKeyframeMaxLongEdge` later for memory parity).
+    private func makeBaseConfiguration() -> ARWorldTrackingConfiguration {
+        let config = ARWorldTrackingConfiguration()
+        var depthSemantics: ARConfiguration.FrameSemantics = []
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            depthSemantics.insert(.sceneDepth)
+        }
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            depthSemantics.insert(.smoothedSceneDepth)
+        }
+        config.frameSemantics = depthSemantics
+        config.planeDetection = planeDetectionOptions
+        config.isAutoFocusEnabled = true
+        Self.applySceneReconstruction(to: config,
+                                      enabled: isSceneReconstructionEnabled)
+        if let fmt = ARWorldTrackingConfiguration.supportedVideoFormats.min(by: { a, b in
+            let da = abs(a.imageResolution.width / a.imageResolution.height - 4.0 / 3.0)
+            let db = abs(b.imageResolution.width / b.imageResolution.height - 4.0 / 3.0)
+            if abs(da - db) > 0.001 { return da < db }
+            return a.imageResolution.width * a.imageResolution.height
+                 < b.imageResolution.width * b.imageResolution.height
+        }) {
+            config.videoFormat = fmt
+        }
+        return config
+    }
+
+    /// Set the ARWorldTrackingConfiguration's `sceneReconstruction`
+    /// from a desired-enabled flag, gated on device support.  Prefers
+    /// `.meshWithClassification` (per-face semantic labels — what the
+    /// StitcherFrame `meshGeometry.classifications` consumer wants),
+    /// falling back to plain `.mesh`, and `.none` when disabled or
+    /// unsupported.  Centralised so `start()` and the live-toggle path
+    /// stay consistent.
+    private static func applySceneReconstruction(
+        to config: ARWorldTrackingConfiguration,
+        enabled: Bool
+    ) {
+        guard enabled else {
+            // `ARWorldTrackingConfiguration.SceneReconstruction` is an
+            // OptionSet — the empty set `[]` means "no meshing"
+            // (`.none` is unavailable on OptionSets).
+            config.sceneReconstruction = []
+            return
+        }
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(
+            .meshWithClassification) {
+            config.sceneReconstruction = .meshWithClassification
+        } else if ARWorldTrackingConfiguration.supportsSceneReconstruction(
+            .mesh) {
+            config.sceneReconstruction = .mesh
+        } else {
+            // No LiDAR / unsupported — leave meshing off (empty set).
+            config.sceneReconstruction = []
+        }
+    }
+
+    /// Toggle ARKit scene reconstruction (LiDAR mesh / `ARMeshAnchor`s).
+    /// Stores the flag so it's honored by the next `start()`, and — if a
+    /// session is ALREADY running — reconfigures + re-runs the live
+    /// session in place so the toggle takes effect immediately.
+    ///
+    /// Reconfiguration rebuilds the SAME config `start()` builds (depth
+    /// frameSemantics + vertical planeDetection + autofocus + 4:3 video
+    /// format) so we don't accidentally drop those when flipping the
+    /// mesh flag.  We re-run WITHOUT `[.resetTracking,
+    /// .removeExistingAnchors]` so the existing world map, pose log, and
+    /// any latched plane survive the toggle (only the mesh option
+    /// changes).
+    ///
+    /// No-op on devices without scene-reconstruction support: the flag
+    /// is still stored (cheap, harmless) but `applySceneReconstruction`
+    /// leaves the config `.none`.
+    @objc public func setSceneReconstructionEnabled(_ enabled: Bool) {
+        isSceneReconstructionEnabled = enabled
+        os_log(.fault, log: arSessionDiagLog,
+               "[scene-mesh] setSceneReconstructionEnabled(%{public}@) running=%{public}@ supported=%{public}@",
+               enabled ? "true" : "false",
+               isRunning ? "true" : "false",
+               ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
+                   ? "true" : "false")
+
+        guard isRunning else { return }
+
+        // Rebuild the live config from the shared builder — picks up the
+        // new mesh flag (just stored) along with the current depth
+        // semantics + plane-detection mode, so a mesh toggle never
+        // silently drops those.  Re-run in place — NO reset/removeAnchors
+        // so existing tracking, pose log, and latched plane survive.
+        let config = makeBaseConfiguration()
+        arSession.run(config)
+    }
+
+    /// Set which plane orientations ARKit detects — the JS `<Camera>`
+    /// `planeDetection` prop, routed via
+    /// `NativeModules.RNSARSession.setPlaneDetection(mode)`.  Stores the
+    /// mode (honored by the next `start()`) and, if a session is live,
+    /// reconfigures + re-runs in place (no reset — tracking / pose log /
+    /// latched plane survive).
+    ///
+    /// `mode`: `"vertical"` (default), `"horizontal"`, or `"both"`.
+    /// Anything else falls back to `"vertical"`.
+    ///
+    /// NOTE on the legacy vertical-plane latch: the V15 plane-projected
+    /// stitch latches the first camera-facing VERTICAL plane.  Choosing
+    /// `"horizontal"` drops vertical detection, so that latch won't fire
+    /// — an explicit opt-out (the caller asked for horizontal-only).
+    /// `"vertical"` and `"both"` keep it working.
+    @objc public func setPlaneDetection(_ mode: String) {
+        switch mode {
+        case "horizontal": planeDetectionOptions = [.horizontal]
+        case "both":       planeDetectionOptions = [.horizontal, .vertical]
+        default:           planeDetectionOptions = [.vertical]  // "vertical" + fallback
+        }
+        os_log(.fault, log: arSessionDiagLog,
+               "[plane-detect] setPlaneDetection(%{public}@) running=%{public}@",
+               mode, isRunning ? "true" : "false")
+        guard isRunning else { return }
+        // Reconfigure in place — NO reset/removeAnchors so existing
+        // tracking + pose log survive the plane-mode change.
+        let config = makeBaseConfiguration()
+        arSession.run(config)
     }
 
     /// Empty the pose log — call between captures so the next

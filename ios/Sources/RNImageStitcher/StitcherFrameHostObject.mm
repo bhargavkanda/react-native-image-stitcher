@@ -24,6 +24,7 @@
 #import <ARKit/ARKit.h>
 #import <CoreVideo/CVPixelBuffer.h>
 #import <CoreMedia/CoreMedia.h>
+#import <Metal/Metal.h>
 #import <simd/simd.h>
 #import <os/log.h>
 
@@ -37,6 +38,7 @@
 
 #include "stitcher_frame_data.hpp"
 #include "stitcher_frame_jsi.hpp"
+#include "stitcher_proxy_jsi.hpp"   // retailens::getExtractionConfig()
 
 using namespace facebook;
 
@@ -57,6 +59,10 @@ using namespace facebook;
 @property (nonatomic, readonly) double qy;
 @property (nonatomic, readonly) double qz;
 @property (nonatomic, readonly) double qw;
+@property (nonatomic, readonly) double fx;
+@property (nonatomic, readonly) double fy;
+@property (nonatomic, readonly) double cx;
+@property (nonatomic, readonly) double cy;
 @property (nonatomic, readonly) NSInteger imageWidth;
 @property (nonatomic, readonly) NSInteger imageHeight;
 @property (nonatomic, readonly) double timestampMs;
@@ -213,12 +219,35 @@ void ExtractARDepth(ARFrame* arFrame, retailens::StitcherFrameData& data) {
   data.arDepth = std::move(out);
 }
 
+/// Map an `ARPlaneClassification` to the JS `ARAnchor.classification`
+/// string union.  Returns `""` for anything unmapped (the JSI then
+/// exposes `classification === undefined`).  Caller gates this on
+/// `classificationStatus == .known` so an undetermined `.none` doesn't
+/// masquerade as a real "none" classification.
+static std::string PlaneClassificationString(ARPlaneClassification c) {
+  switch (c) {
+    case ARPlaneClassificationWall:    return "wall";
+    case ARPlaneClassificationFloor:   return "floor";
+    case ARPlaneClassificationCeiling: return "ceiling";
+    case ARPlaneClassificationTable:   return "table";
+    case ARPlaneClassificationSeat:    return "seat";
+    case ARPlaneClassificationDoor:    return "door";
+    case ARPlaneClassificationWindow:  return "window";
+    case ARPlaneClassificationNone:    return "none";
+    default:                           return "";
+  }
+}
+
 /// Extract the frame's tracked anchors into the shared `ArAnchor`
 /// vector.  Each anchor carries a stable id, a coarse type
 /// (`"plane"` / `"image"` / `"point"`), and a 4x4 anchor->world
 /// transform emitted ROW-MAJOR.  ARKit's `simd_float4x4` is
 /// COLUMN-MAJOR (`columns[c][r]`), so we transpose:
 /// `transform[r*4+c] = a.transform.columns[c][r]`.
+///
+/// Plane anchors additionally carry `alignment` (horizontal/vertical),
+/// `extent` ([x, z] metres), and — on classification-capable devices —
+/// a semantic `classification` (wall/floor/…).
 void ExtractARAnchors(ARFrame* arFrame, retailens::StitcherFrameData& data) {
   NSArray<ARAnchor*>* anchors = arFrame.anchors;
   data.arAnchors.reserve(anchors.count);
@@ -227,6 +256,25 @@ void ExtractARAnchors(ARFrame* arFrame, retailens::StitcherFrameData& data) {
     out.id = std::string(a.identifier.UUIDString.UTF8String);
     if ([a isKindOfClass:[ARPlaneAnchor class]]) {
       out.type = "plane";
+      ARPlaneAnchor* plane = (ARPlaneAnchor*)a;
+      out.alignment =
+          (plane.alignment == ARPlaneAnchorAlignmentVertical) ? "vertical"
+                                                              : "horizontal";
+      // Deprecated `extent` (simd_float3 x,y,z; y≈0) rather than iOS-16
+      // `planeExtent` — the pod's deployment target still includes
+      // iOS 15, and the Swift plane math (RNSARSession) uses `.extent`
+      // too.  [extentX, extentZ] in plane-local metres.
+      out.hasExtent = true;
+      out.extentX = static_cast<double>(plane.extent.x);
+      out.extentZ = static_cast<double>(plane.extent.z);
+      // Semantic classification only on capable devices AND once ARKit
+      // has actually determined it (`.known`).  Otherwise `classification`
+      // is `.none` merely because it's undetermined — leave empty so JS
+      // sees `undefined`, not a misleading "none".
+      if (ARPlaneAnchor.isClassificationSupported &&
+          plane.classificationStatus == ARPlaneClassificationStatusKnown) {
+        out.classification = PlaneClassificationString(plane.classification);
+      }
     } else if ([a isKindOfClass:[ARImageAnchor class]]) {
       out.type = "image";
     } else {
@@ -238,6 +286,180 @@ void ExtractARAnchors(ARFrame* arFrame, retailens::StitcherFrameData& data) {
         out.transform[r * 4 + c] = static_cast<double>(m.columns[c][r]);
       }
     }
+    data.arAnchors.push_back(std::move(out));
+  }
+}
+
+/// Copy the `geometry.vertices` ARGeometrySource (format=float3,
+/// MTLBuffer-backed) into a TIGHTLY-PACKED Float32 xyz byte vector
+/// (count*3 floats).  ARKit reports `offset` (byte offset to the first
+/// element within the buffer) and `stride` (bytes between consecutive
+/// elements).  A simd_float3 is 16 bytes in MSL alignment (xyz + 4
+/// pad) but ARKit may also hand back a 12-byte tight stride — we never
+/// assume, we read `stride` per element and copy exactly 12 bytes
+/// (3×Float32) from `base + offset + i*stride`, dropping any pad.
+/// Returns false (and leaves `out` untouched) if the buffer is
+/// unreadable or the source isn't the expected float3 layout.
+bool PackMeshVertices(ARGeometrySource* src, std::vector<uint8_t>& out) {
+  if (src == nil) return false;
+  id<MTLBuffer> buffer = src.buffer;
+  if (buffer == nil) return false;
+  const NSInteger count = src.count;
+  if (count <= 0) return false;
+  // Vertices must be 3-component Float32 (ARKit's documented layout).
+  if (src.format != MTLVertexFormatFloat3 ||
+      src.componentsPerVector != 3) {
+    return false;
+  }
+  const NSUInteger offset = src.offset;
+  const NSUInteger stride = src.stride;
+  const uint8_t* contents =
+      reinterpret_cast<const uint8_t*>([buffer contents]);
+  if (contents == nullptr) return false;
+  const NSUInteger bufLen = [buffer length];
+  const std::size_t triple = 3 * sizeof(float);  // 12 bytes, tight
+
+  out.resize(static_cast<std::size_t>(count) * triple);
+  for (NSInteger i = 0; i < count; ++i) {
+    const NSUInteger elemOffset = offset + static_cast<NSUInteger>(i) * stride;
+    // Bounds guard — never read past the MTLBuffer.
+    if (elemOffset + triple > bufLen) {
+      out.clear();
+      return false;
+    }
+    std::memcpy(out.data() + static_cast<std::size_t>(i) * triple,
+                contents + elemOffset,
+                triple);
+  }
+  return true;
+}
+
+/// Convert an ARGeometryElement (triangle faces) into a tightly-packed
+/// Uint32 index vector (faces.count * 3 indices).  ARKit's
+/// `bytesPerIndex` is 2 or 4 — we widen 16-bit indices to Uint32 so the
+/// JS side always sees a Uint32Array (matches the cpp/ JSI contract
+/// which emits `meshFaces` verbatim as an ArrayBuffer of Uint32).
+/// Returns false (out untouched) on an unexpected primitive type /
+/// index width, or unreadable buffer.
+bool PackMeshFaces(ARGeometryElement* faces, std::vector<uint8_t>& out) {
+  if (faces == nil) return false;
+  if (faces.primitiveType != ARGeometryPrimitiveTypeTriangle) return false;
+  if (faces.indexCountPerPrimitive != 3) return false;
+  id<MTLBuffer> buffer = faces.buffer;
+  if (buffer == nil) return false;
+  const NSInteger primCount = faces.count;
+  if (primCount <= 0) return false;
+  const NSInteger bytesPerIndex = faces.bytesPerIndex;
+  if (bytesPerIndex != 2 && bytesPerIndex != 4) return false;
+
+  const uint8_t* contents =
+      reinterpret_cast<const uint8_t*>([buffer contents]);
+  if (contents == nullptr) return false;
+  const NSUInteger bufLen = [buffer length];
+
+  const std::size_t totalIndices =
+      static_cast<std::size_t>(primCount) * 3;
+  // Index buffer is tightly packed: count*3 indices of bytesPerIndex.
+  const NSUInteger neededBytes =
+      static_cast<NSUInteger>(totalIndices) *
+      static_cast<NSUInteger>(bytesPerIndex);
+  if (neededBytes > bufLen) return false;
+
+  out.resize(totalIndices * sizeof(uint32_t));
+  uint32_t* dst = reinterpret_cast<uint32_t*>(out.data());
+  if (bytesPerIndex == 4) {
+    // Already Uint32 — bulk copy.
+    std::memcpy(dst, contents, totalIndices * sizeof(uint32_t));
+  } else {
+    // 16-bit → widen each index to 32-bit.
+    const uint16_t* src = reinterpret_cast<const uint16_t*>(contents);
+    for (std::size_t i = 0; i < totalIndices; ++i) {
+      dst[i] = static_cast<uint32_t>(src[i]);
+    }
+  }
+  return true;
+}
+
+/// Copy the optional per-face classification ARGeometrySource (UInt8,
+/// one value per triangle) into a Uint8 byte vector.  ARKit's
+/// classification source is one element per face with format
+/// MTLVertexFormatUChar.  Leaves `out` empty (returns false) when nil
+/// or unreadable — the cpp/ JSI layer treats an empty
+/// `meshClassifications` as "no classifications" (optional in JS).
+bool PackMeshClassifications(ARGeometrySource* src, std::vector<uint8_t>& out) {
+  if (src == nil) return false;
+  id<MTLBuffer> buffer = src.buffer;
+  if (buffer == nil) return false;
+  const NSInteger count = src.count;
+  if (count <= 0) return false;
+  const NSUInteger offset = src.offset;
+  const NSUInteger stride = src.stride;
+  const uint8_t* contents =
+      reinterpret_cast<const uint8_t*>([buffer contents]);
+  if (contents == nullptr) return false;
+  const NSUInteger bufLen = [buffer length];
+
+  out.resize(static_cast<std::size_t>(count));
+  for (NSInteger i = 0; i < count; ++i) {
+    const NSUInteger elemOffset = offset + static_cast<NSUInteger>(i) * stride;
+    if (elemOffset + 1 > bufLen) {
+      out.clear();
+      return false;
+    }
+    out[static_cast<std::size_t>(i)] = contents[elemOffset];
+  }
+  return true;
+}
+
+/// Extract scene-reconstruction mesh anchors (`ARMeshAnchor`) into the
+/// shared `ArAnchor` vector as `type="mesh"` entries.  Each mesh anchor
+/// carries an anchor->world transform (ROW-MAJOR — same transpose as
+/// `ExtractARAnchors`) plus the marshalled `ARMeshGeometry`:
+///   - meshVertices: Float32 xyz triplets (anchor-local), tightly packed.
+///   - meshFaces: Uint32 triangle indices.
+///   - meshClassifications: optional Uint8 per-face class.
+///
+/// ARMeshGeometry's buffers are MTLBuffer-backed but CPU-accessible
+/// (ARKit allocates them with shared storage), so we read `.contents()`
+/// directly on the delegate thread (EAGER copy into owned vectors, like
+/// the depth bytes) — the marshalled `ArAnchor` then has no dependency
+/// on the ARFrame's lifetime.  A mesh anchor whose vertices/faces fail
+/// to marshal is SKIPPED (we never emit a `hasMesh=true` anchor with
+/// empty geometry).
+void ExtractARMesh(ARFrame* arFrame, retailens::StitcherFrameData& data) {
+  NSArray<ARAnchor*>* anchors = arFrame.anchors;
+  for (ARAnchor* a in anchors) {
+    if (![a isKindOfClass:[ARMeshAnchor class]]) continue;
+    ARMeshAnchor* meshAnchor = (ARMeshAnchor*)a;
+    ARMeshGeometry* geometry = meshAnchor.geometry;
+    if (geometry == nil) continue;
+
+    std::vector<uint8_t> vertices;
+    if (!PackMeshVertices(geometry.vertices, vertices)) continue;
+    std::vector<uint8_t> faces;
+    if (!PackMeshFaces(geometry.faces, faces)) continue;
+
+    std::vector<uint8_t> classifications;
+    // Optional — leave empty if absent / unreadable.
+    if (geometry.classification != nil) {
+      if (!PackMeshClassifications(geometry.classification, classifications)) {
+        classifications.clear();
+      }
+    }
+
+    retailens::ArAnchor out;
+    out.id = std::string(a.identifier.UUIDString.UTF8String);
+    out.type = "mesh";
+    const simd_float4x4 m = a.transform;
+    for (int r = 0; r < 4; ++r) {
+      for (int c = 0; c < 4; ++c) {
+        out.transform[r * 4 + c] = static_cast<double>(m.columns[c][r]);
+      }
+    }
+    out.hasMesh = true;
+    out.meshVertices = std::move(vertices);
+    out.meshFaces = std::move(faces);
+    out.meshClassifications = std::move(classifications);
     data.arAnchors.push_back(std::move(out));
   }
 }
@@ -294,6 +516,21 @@ void ExtractARAnchors(ARFrame* arFrame, retailens::StitcherFrameData& data) {
   data.tz = pose.tz;
   data.hasTranslation = true;   // AR mode always has translation
 
+  // Per-frame camera intrinsics.  `pose` already carries them
+  // (`ARCamera.intrinsics` + `imageResolution`, marshalled in
+  // `RNSARSession.makePose`), so this is six scalars — effectively free.
+  // Always populated for AR frames; the JSI exposes
+  // `intrinsics === undefined` only for non-AR (vc) frames, which have
+  // no intrinsics surface.  NOT gated on the extraction config — it's
+  // too cheap to be worth a toggle, and pose-lift consumers expect it.
+  data.hasIntrinsics = true;
+  data.fx = pose.fx;
+  data.fy = pose.fy;
+  data.cx = pose.cx;
+  data.cy = pose.cy;
+  data.intrinsicsImageWidth = static_cast<int32_t>(pose.imageWidth);
+  data.intrinsicsImageHeight = static_cast<int32_t>(pose.imageHeight);
+
   switch (arFrame.camera.trackingState) {
     case ARTrackingStateNotAvailable:
       data.arTrackingState = "notAvailable";
@@ -308,14 +545,31 @@ void ExtractARAnchors(ARFrame* arFrame, retailens::StitcherFrameData& data) {
 
   data.pixelReader = std::make_shared<IOSPixelBufferReader>(arFrame);
 
-  // AR depth + anchors.  Both EAGER-COPY out of the ARFrame here (the
-  // depth/confidence bytes are packed into owned vectors; anchor
-  // transforms are read into std::array), so neither depends on the
-  // ARFrame's lifetime the way the pixel reader does.  Depth is
-  // nullopt on non-LiDAR devices / before the first depth frame;
-  // anchors is an empty vector when none are tracked.
-  ExtractARDepth(arFrame, data);
-  ExtractARAnchors(arFrame, data);
+  // AR depth + anchors + mesh.  All EAGER-COPY out of the ARFrame here
+  // (depth/confidence bytes and mesh vertex/face/classification bytes
+  // are packed into owned vectors; anchor transforms read into
+  // std::array), so none depend on the ARFrame's lifetime the way the
+  // pixel reader does.  Depth is nullopt on non-LiDAR devices / before
+  // the first depth frame; anchors/mesh are empty when none are tracked.
+  //
+  // GATED on the per-frame extraction config (set from JS via
+  // `__stitcherProxy.setExtractionConfig(depth, anchors, mesh)`,
+  // driven by the <Camera> enableDepth/enableAnchors/enableMesh
+  // props).  Defaults are all-false, so a host that doesn't opt in
+  // pays ZERO arDepth/arAnchors/mesh extraction cost — only the
+  // always-cheap pose/tracking/pixels are populated.  Read the snapshot
+  // once so all three extractors see a consistent config for this frame.
+  const retailens::ExtractionConfig extractionConfig =
+      retailens::getExtractionConfig();
+  if (extractionConfig.depth) {
+    ExtractARDepth(arFrame, data);
+  }
+  if (extractionConfig.anchors) {
+    ExtractARAnchors(arFrame, data);
+  }
+  if (extractionConfig.mesh) {
+    ExtractARMesh(arFrame, data);
+  }
 
   // Use the static factory (private ctor enforces shared_ptr
   // ownership — required for `shared_from_this()` inside the JSI

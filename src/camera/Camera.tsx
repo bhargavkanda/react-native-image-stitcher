@@ -782,6 +782,14 @@ export interface CameraProps {
    * mesh from the depth map.  Expensive — only on when needed.
    */
   enableMesh?: boolean;
+  /**
+   * Which plane orientations to surface in `CameraFrame.arAnchors`
+   * (requires `enableAnchors`; AR capture only).  Default `'vertical'`
+   * — the orientation the plane-projected stitch path has always used.
+   * `'horizontal'` surfaces floors / tables; `'both'` surfaces every
+   * detected plane.  See `ARCameraView` for the per-platform details.
+   */
+  planeDetection?: 'vertical' | 'horizontal' | 'both';
 
   // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────────
   /**
@@ -1193,6 +1201,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     enableDepth,
     enableAnchors,
     enableMesh,
+    planeDetection,
     engine = 'batch-keyframe',
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'vertical',
@@ -2460,6 +2469,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
           enableDepth={enableDepth}
           enableAnchors={enableAnchors}
           enableMesh={enableMesh}
+          planeDetection={planeDetection}
         />
       ) : (
         <CameraView

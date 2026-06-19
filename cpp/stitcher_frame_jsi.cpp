@@ -60,6 +60,9 @@ std::vector<PropNameID> StitcherFrameJsiHostObject::getPropertyNames(
   if (_data.source == "ar") {
     names.push_back(PropNameID::forUtf8(rt, "arAnchors"));
   }
+  if (_data.hasIntrinsics) {
+    names.push_back(PropNameID::forUtf8(rt, "intrinsics"));
+  }
   return names;
 }
 
@@ -284,6 +287,20 @@ Value StitcherFrameJsiHostObject::get(Runtime& rt,
         transform.setValueAtIndex(rt, j, Value(a.transform[j]));
       }
       obj.setProperty(rt, "transform", transform);
+      if (!a.alignment.empty()) {
+        obj.setProperty(rt, "alignment",
+                        String::createFromUtf8(rt, a.alignment));
+      }
+      if (a.hasExtent) {
+        Array extent(rt, 2);
+        extent.setValueAtIndex(rt, 0, Value(a.extentX));
+        extent.setValueAtIndex(rt, 1, Value(a.extentZ));
+        obj.setProperty(rt, "extent", extent);
+      }
+      if (!a.classification.empty()) {
+        obj.setProperty(rt, "classification",
+                        String::createFromUtf8(rt, a.classification));
+      }
       if (a.hasMesh) {
         // Scene-reconstruction geometry — bytes emitted verbatim as
         // ArrayBuffers (vertices=Float32, faces=Uint32, classifications=Uint8).
@@ -311,6 +328,26 @@ Value StitcherFrameJsiHostObject::get(Runtime& rt,
       anchors.setValueAtIndex(rt, i, obj);
     }
     return anchors;
+  }
+
+  // Per-frame camera intrinsics (AR frames only).  `intrinsics ===
+  // undefined` when not populated (non-AR frames).  Shape mirrors the
+  // JS `CameraFrame.intrinsics`: fx/fy/cx/cy in pixels + the capture
+  // resolution they're expressed at.
+  if (name == "intrinsics") {
+    if (!_data.hasIntrinsics) return Value::undefined();
+    Object intrinsics(rt);
+    intrinsics.setProperty(rt, "fx", Value(_data.fx));
+    intrinsics.setProperty(rt, "fy", Value(_data.fy));
+    intrinsics.setProperty(rt, "cx", Value(_data.cx));
+    intrinsics.setProperty(rt, "cy", Value(_data.cy));
+    intrinsics.setProperty(
+        rt, "imageWidth",
+        Value(static_cast<double>(_data.intrinsicsImageWidth)));
+    intrinsics.setProperty(
+        rt, "imageHeight",
+        Value(static_cast<double>(_data.intrinsicsImageHeight)));
+    return intrinsics;
   }
 
   // Unknown property — return undefined (matches JS object semantics).

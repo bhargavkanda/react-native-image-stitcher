@@ -208,12 +208,19 @@ function App(): React.JSX.Element {
           anchors: number,
           meshAnchors: number,
           meshVertBytes: number,
+          vPlanes: number,
+          hPlanes: number,
+          fx: number,
+          imgW: number,
+          imgH: number,
         ) => {
           // eslint-disable-next-line no-console
           console.log(
             `[example] arFrame meta — arDepth=${depthW}x${depthH} ` +
               `confidenceMap=${hasConf ? 'yes' : 'no'} arAnchors=${anchors} ` +
-              `mesh=${meshAnchors} (${meshVertBytes}B verts)`,
+              `planes=[v:${vPlanes} h:${hPlanes}] ` +
+              `mesh=${meshAnchors} (${meshVertBytes}B verts) ` +
+              `intrinsics=${fx ? `fx=${fx.toFixed(0)} ${imgW}x${imgH}` : 'none'}`,
           );
         },
       ),
@@ -260,15 +267,22 @@ function App(): React.JSX.Element {
         const anchors = frame.arAnchors;
         let meshAnchors = 0;
         let meshVertBytes = 0;
+        let vPlanes = 0;
+        let hPlanes = 0;
         if (anchors) {
           for (let i = 0; i < anchors.length; i++) {
-            const mg = anchors[i].meshGeometry;
-            if (anchors[i].type === 'mesh' && mg) {
+            const a = anchors[i];
+            const mg = a.meshGeometry;
+            if (a.type === 'mesh' && mg) {
               meshAnchors += 1;
               meshVertBytes += mg.vertices.byteLength;
+            } else if (a.type === 'plane') {
+              if (a.alignment === 'vertical') vPlanes += 1;
+              else if (a.alignment === 'horizontal') hPlanes += 1;
             }
           }
         }
+        const k = frame.intrinsics;
         fireArMetaLog(
           d ? d.width : 0,
           d ? d.height : 0,
@@ -276,6 +290,11 @@ function App(): React.JSX.Element {
           anchors ? anchors.length : 0,
           meshAnchors,
           meshVertBytes,
+          vPlanes,
+          hPlanes,
+          k ? k.fx : 0,
+          k ? k.imageWidth : 0,
+          k ? k.imageHeight : 0,
         );
       }
     };
@@ -519,6 +538,7 @@ function App(): React.JSX.Element {
           enableDepth
           enableAnchors
           enableMesh
+          planeDetection="both"
           onCapture={handleCapture}
           onCaptureSourceChange={handleCaptureSourceChange}
           onLensChange={handleLensChange}

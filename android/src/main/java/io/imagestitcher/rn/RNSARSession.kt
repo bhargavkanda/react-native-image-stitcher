@@ -120,6 +120,32 @@ class RNSARSession(reactContext: ReactApplicationContext)
         }
     }
 
+    /**
+     * Android side of the JS `<Camera planeDetection=...>` prop.  Sets
+     * which plane orientations are EMITTED into `arAnchors`
+     * (`"vertical"` | `"horizontal"` | `"both"`); an unrecognised value
+     * falls back to `"vertical"`.
+     *
+     * Unlike iOS — where the prop narrows ARKit's `planeDetection`
+     * option set — we deliberately do NOT narrow ARCore's
+     * `planeFindingMode`: it stays `HORIZONTAL_AND_VERTICAL` so ARCore
+     * keeps bootstrapping tracking from horizontal planes (a plain
+     * vertical wall alone leaves ARCore unable to establish a
+     * gravity-aligned world; see the start()/startForView() config
+     * comments).  We only FILTER which plane orientations are surfaced
+     * into `arAnchors` (in [RNSARCameraView.collectTrackingAnchors]).
+     *
+     * Void (no Promise): a fire-and-forget setter mirroring the other
+     * config-prop bridge calls.
+     */
+    @ReactMethod
+    fun setPlaneDetection(mode: String) {
+        planeDetectionMode = when (mode) {
+            "vertical", "horizontal", "both" -> mode
+            else -> "vertical"
+        }
+    }
+
     @ReactMethod
     fun isSupported(promise: Promise) {
         // `checkAvailability` can return UNKNOWN_CHECKING if the
@@ -915,6 +941,24 @@ class RNSARSession(reactContext: ReactApplicationContext)
         @Volatile
         var instance: RNSARSession? = null
             private set
+
+        /**
+         * Which plane orientations reach `arAnchors`:
+         * `"vertical"` | `"horizontal"` | `"both"`.
+         *
+         * Default `"vertical"` preserves the legacy plane-projected
+         * stitch path (the shutter-gate / evaluatePlanesForFrame logic
+         * only ever cared about vertical planes), so existing hosts see
+         * no change unless they opt into a wider filter via the JS
+         * `<Camera planeDetection=...>` prop (→ [setPlaneDetection]).
+         *
+         * Read on the GL render thread in
+         * [RNSARCameraView.collectTrackingAnchors]; written from the JS
+         * thread via [setPlaneDetection] — hence `@Volatile`.
+         */
+        @JvmStatic
+        @Volatile
+        var planeDetectionMode: String = "vertical"
     }
 
     init {

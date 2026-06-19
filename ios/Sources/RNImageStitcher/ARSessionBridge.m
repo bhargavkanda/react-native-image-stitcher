@@ -34,6 +34,14 @@ RCT_EXTERN_METHOD(stop:(RCTPromiseResolveBlock)resolver
 RCT_EXTERN_METHOD(getState:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+RCT_EXTERN_METHOD(setSceneReconstructionEnabled:(nonnull NSNumber *)enabled
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
+RCT_EXTERN_METHOD(setPlaneDetection:(nonnull NSString *)mode
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 RCT_EXTERN_METHOD(snapshotPoseLog:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 

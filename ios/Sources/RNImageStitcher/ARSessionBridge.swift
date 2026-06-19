@@ -68,6 +68,47 @@ public final class RNSARSessionBridge: NSObject {
         ])
     }
 
+    /// Toggle ARKit scene reconstruction (LiDAR mesh / `ARMeshAnchor`s).
+    /// Driven by the <Camera> `enableMesh` prop; gates the
+    /// StitcherFrame `meshGeometry` extraction at the SESSION level
+    /// (the per-frame `__stitcherProxy.setExtractionConfig(...mesh)`
+    /// gates the marshaling — both must be on for a host to receive
+    /// mesh).  Resolves with no value.
+    ///
+    /// Hops to the main queue: `setSceneReconstructionEnabled` may call
+    /// `arSession.run(config)` to reconfigure a live session, and
+    /// ARKit session lifecycle must run on the main thread (same
+    /// constraint as `start`).
+    @objc(setSceneReconstructionEnabled:resolver:rejecter:)
+    public func setSceneReconstructionEnabled(
+        enabled: NSNumber,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        let on = enabled.boolValue
+        DispatchQueue.main.async {
+            RNSARSession.shared.setSceneReconstructionEnabled(on)
+            resolver(nil)
+        }
+    }
+
+    /// Hops to the main queue: `setPlaneDetection` may call
+    /// `arSession.run(config)` to reconfigure a live session, and ARKit
+    /// session lifecycle must run on the main thread (same constraint as
+    /// `start` / `setSceneReconstructionEnabled`).
+    @objc(setPlaneDetection:resolver:rejecter:)
+    public func setPlaneDetection(
+        mode: NSString,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        let m = mode as String
+        DispatchQueue.main.async {
+            RNSARSession.shared.setPlaneDetection(m)
+            resolver(nil)
+        }
+    }
+
     @objc(snapshotPoseLog:rejecter:)
     public func snapshotPoseLog(
         resolver: @escaping RCTPromiseResolveBlock,

@@ -117,6 +117,29 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeRegistryCount(
       retailens::StitcherWorkletRegistry::shared().count());
 }
 
+// ─── per-frame extraction-config gate ──────────────────────────────
+//
+// Returns the current `retailens::getExtractionConfig()` packed into a
+// `jint` bitmask so Kotlin can cheaply read the JS-driven
+// enableDepth/enableAnchors/enableMesh toggles once per frame and skip
+// the costly ARCore depth-acquire / anchor-collect / mesh-build work
+// when a host hasn't opted in.  Same atomic-snapshot read the JSI
+// `setExtractionConfig` host function writes.
+//
+//   bit0 (0x1) = depth
+//   bit1 (0x2) = anchors
+//   bit2 (0x4) = mesh
+extern "C" JNIEXPORT jint JNICALL
+Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeExtractionFlags(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+  const retailens::ExtractionConfig cfg = retailens::getExtractionConfig();
+  jint flags = 0;
+  if (cfg.depth) flags |= 0x1;
+  if (cfg.anchors) flags |= 0x2;
+  if (cfg.mesh) flags |= 0x4;
+  return flags;
+}
+
 // ─── v0.8.0 Phase 4b.iii — per-frame dispatch JNI binding ──────────
 //
 // Called from Kotlin's `StitcherWorkletRuntime.dispatchToHostWorklets`
@@ -148,7 +171,13 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
     jint depthWidth, jint depthHeight,
     jobjectArray anchorIds,
     jobjectArray anchorTypes,
-    jobjectArray anchorTransforms) {
+    jobjectArray anchorTransforms,
+    jobjectArray anchorMeshVertices,
+    jobjectArray anchorMeshFaces,
+    jdouble fx, jdouble fy, jdouble cx, jdouble cy,
+    jint intrinsicsImageWidth, jint intrinsicsImageHeight,
+    jobjectArray anchorAlignments,
+    jobjectArray anchorExtents) {
   // Fast-path early-exit BEFORE the JNI byte-array copy.  Saves the
   // ~3MB memcpy + JSI host object alloc on every frame in the
   // common first-party-only case.
@@ -245,15 +274,35 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
     }
   }
 
+  // ── Per-frame camera intrinsics ───────────────────────────────────
+  //
+  // Kotlin passes camera.imageIntrinsics (fx,fy,cx,cy in pixels) + the
+  // capture resolution they're expressed at.  fx <= 0.0 is the "no
+  // intrinsics" sentinel (defensive — AR frames always carry valid
+  // intrinsics, but a degenerate session could yield 0).  The shared
+  // JSI layer exposes `intrinsics === undefined` when !hasIntrinsics.
+  if (fx > 0.0) {
+    data.hasIntrinsics = true;
+    data.fx = fx;
+    data.fy = fy;
+    data.cx = cx;
+    data.cy = cy;
+    data.intrinsicsImageWidth = static_cast<int32_t>(intrinsicsImageWidth);
+    data.intrinsicsImageHeight = static_cast<int32_t>(intrinsicsImageHeight);
+  }
+
   // ── AR anchors ────────────────────────────────────────────────────
   //
-  // Three parallel arrays from Kotlin: ids (String[]), types (String[]),
-  // transforms (double[16][]).  Build one `retailens::ArAnchor` per
-  // entry; the transform is already ROW-MAJOR (anchor->world) — Kotlin
-  // transposed ARCore's column-major OpenGL matrix before marshaling.
-  // Empty arrays (the common case — the app creates no anchors today)
-  // leave `data.arAnchors` empty, which the JSI layer surfaces as `[]`
-  // for source=="ar".
+  // Five parallel arrays from Kotlin: ids (String[]), types (String[]),
+  // transforms (double[16][]), and the per-anchor mesh byte arrays
+  // meshVertices (byte[][], Float32 xyz triplets) + meshFaces (byte[][],
+  // Uint32 triangle indices) — both NULL for non-mesh anchors.  Build one
+  // `retailens::ArAnchor` per entry; the transform is already ROW-MAJOR
+  // (anchor->world) — Kotlin transposed ARCore's column-major OpenGL
+  // matrix before marshaling (mesh anchors emit identity: the vertices
+  // are camera-local).  Empty arrays (the common case — no host opted
+  // into anchors/mesh) leave `data.arAnchors` empty, which the JSI layer
+  // surfaces as `[]` for source=="ar".
   if (anchorIds != nullptr && anchorTypes != nullptr &&
       anchorTransforms != nullptr) {
     const jsize anchorCount = env->GetArrayLength(anchorIds);
@@ -297,6 +346,77 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
           env->ReleaseDoubleArrayElements(transformObj, elems, JNI_ABORT);
         }
         env->DeleteLocalRef(transformObj);
+      }
+
+      // ── per-anchor plane alignment + extent ─────────────────────────
+      //
+      // anchorAlignments[i] is "" for image/mesh anchors (→ JS
+      // `alignment === undefined`) or "horizontal"/"vertical" for plane
+      // anchors.  anchorExtents[i] is null for non-plane anchors or a
+      // double[2] = {extentX, extentZ} (metres) for planes.  Both arrays
+      // are parallel to anchorIds; guard for null (a caller passing the
+      // older arg shape) the same way the mesh arrays are guarded.  We do
+      // NOT set classification — Android has no plane semantics (iOS-only).
+      if (anchorAlignments != nullptr) {
+        auto alignObj = reinterpret_cast<jstring>(
+            env->GetObjectArrayElement(anchorAlignments, i));
+        if (alignObj != nullptr) {
+          const char* cs = env->GetStringUTFChars(alignObj, nullptr);
+          if (cs != nullptr) {
+            if (cs[0] != '\0') {
+              anchor.alignment = cs;
+            }
+            env->ReleaseStringUTFChars(alignObj, cs);
+          }
+          env->DeleteLocalRef(alignObj);
+        }
+      }
+      if (anchorExtents != nullptr) {
+        auto extObj = reinterpret_cast<jdoubleArray>(
+            env->GetObjectArrayElement(anchorExtents, i));
+        if (extObj != nullptr) {
+          if (env->GetArrayLength(extObj) >= 2) {
+            jdouble vals[2] = {0.0, 0.0};
+            env->GetDoubleArrayRegion(extObj, 0, 2, vals);
+            anchor.hasExtent = true;
+            anchor.extentX = static_cast<double>(vals[0]);
+            anchor.extentZ = static_cast<double>(vals[1]);
+          }
+          env->DeleteLocalRef(extObj);
+        }
+      }
+
+      // ── per-anchor mesh geometry (depth-derived; type=="mesh") ──────
+      //
+      // anchorMeshVertices[i] / anchorMeshFaces[i] are null for non-mesh
+      // anchors and a byte[] for a mesh anchor.  When BOTH are present we
+      // copy them verbatim into the ArAnchor's vectors and flag hasMesh —
+      // the JSI layer (`cpp/stitcher_frame_jsi.cpp`) emits them as
+      // ArrayBuffers (Float32 vertices / Uint32 faces) unchanged.
+      // meshClassifications stays empty (Android depth meshes carry no
+      // per-face semantics).
+      if (anchorMeshVertices != nullptr && anchorMeshFaces != nullptr) {
+        auto vertObj = reinterpret_cast<jbyteArray>(
+            env->GetObjectArrayElement(anchorMeshVertices, i));
+        auto faceObj = reinterpret_cast<jbyteArray>(
+            env->GetObjectArrayElement(anchorMeshFaces, i));
+        if (vertObj != nullptr && faceObj != nullptr) {
+          const jsize vLen = env->GetArrayLength(vertObj);
+          const jsize fLen = env->GetArrayLength(faceObj);
+          if (vLen > 0 && fLen > 0) {
+            anchor.meshVertices.resize(static_cast<std::size_t>(vLen));
+            env->GetByteArrayRegion(
+                vertObj, 0, vLen,
+                reinterpret_cast<jbyte*>(anchor.meshVertices.data()));
+            anchor.meshFaces.resize(static_cast<std::size_t>(fLen));
+            env->GetByteArrayRegion(
+                faceObj, 0, fLen,
+                reinterpret_cast<jbyte*>(anchor.meshFaces.data()));
+            anchor.hasMesh = true;
+          }
+        }
+        if (vertObj != nullptr) env->DeleteLocalRef(vertObj);
+        if (faceObj != nullptr) env->DeleteLocalRef(faceObj);
       }
 
       data.arAnchors.push_back(std::move(anchor));

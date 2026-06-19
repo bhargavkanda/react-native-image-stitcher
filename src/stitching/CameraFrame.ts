@@ -167,6 +167,28 @@ export interface CameraFrame {
    * tracking is degraded check this.  Undefined in non-AR mode.
    */
   arTrackingState?: 'notAvailable' | 'limited' | 'normal';
+
+  /**
+   * Camera intrinsics for THIS frame — focal lengths (`fx`,`fy`) and
+   * principal point (`cx`,`cy`) in PIXELS at the `imageWidth × imageHeight`
+   * capture resolution.  Needed to lift 2D image-space coordinates to 3D
+   * via pose + intrinsics (e.g. object-level reconstruction).
+   *
+   * Populated on **AR frames** (`source: 'ar'`) from ARKit
+   * `ARCamera.intrinsics` / ARCore `Camera` intrinsics.  **Undefined for
+   * non-AR (vision-camera) frames** — they are raw vc `Frame`s without an
+   * intrinsics surface; read vc's own APIs there if needed.  (The spec
+   * called this required; it's optional here because the non-AR frame
+   * shape genuinely can't carry it.)
+   */
+  intrinsics?: {
+    fx: number;
+    fy: number;
+    cx: number;
+    cy: number;
+    imageWidth: number;
+    imageHeight: number;
+  };
 }
 
 /**
@@ -189,6 +211,32 @@ export interface ARAnchor {
    * this anchor's LOCAL space — multiply by `transform` for world coords.
    */
   transform: number[];
+  /**
+   * Plane orientation — `'horizontal'` (floor / table / seat) vs
+   * `'vertical'` (wall / door / window).  Present on `'plane'` anchors;
+   * undefined for other anchor kinds.  Lets a host distinguish a shelf
+   * surface from the wall behind it.
+   */
+  alignment?: 'horizontal' | 'vertical';
+  /**
+   * Plane size in metres along its local x / z axes (`[x, z]`).  Present
+   * on `'plane'` anchors only.
+   */
+  extent?: [number, number];
+  /**
+   * ARKit semantic classification of the plane's surface, when the
+   * framework provides it (iOS; mostly horizontal planes).  Undefined
+   * when unknown / unsupported (incl. Android, which has no equivalent).
+   */
+  classification?:
+    | 'wall'
+    | 'floor'
+    | 'ceiling'
+    | 'table'
+    | 'seat'
+    | 'door'
+    | 'window'
+    | 'none';
   /**
    * Scene-reconstruction geometry — present only on `type: 'mesh'`
    * anchors.  Buffers (wrap in the noted typed-array view):

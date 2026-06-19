@@ -205,9 +205,17 @@ object StitcherWorkletRuntime {
     /// @param depthHeight    Depth-map height (px); 0 when no depth.
     /// @param anchorIds      Parallel arrays describing every TRACKING
     /// @param anchorTypes    anchor: stable id, coarse type
-    /// @param anchorTransforms ("plane"/"image"/"point"), and a 16-element
-    ///                       ROW-MAJOR (anchor->world) transform.  Empty
-    ///                       when no anchors are tracked.
+    /// @param anchorTransforms ("plane"/"image"/"point"/"mesh"), and a
+    ///                       16-element ROW-MAJOR (anchor->world) transform
+    ///                       (identity for the depth-derived "mesh" anchor —
+    ///                       its vertices are camera-local).  Empty when no
+    ///                       anchors/mesh were collected.
+    /// @param anchorMeshVertices Parallel per-anchor mesh byte arrays: a
+    /// @param anchorMeshFaces    Float32-xyz vertex buffer + a Uint32 index
+    ///                       buffer for the depth-derived mesh anchor, `null`
+    ///                       for every non-mesh anchor.  Carried verbatim to
+    ///                       the JNI which sets `ArAnchor.hasMesh` + the
+    ///                       mesh vectors when both are non-null.
     @JvmStatic
     fun dispatchToHostWorklets(
         nv21Bytes: ByteArray,
@@ -223,6 +231,12 @@ object StitcherWorkletRuntime {
         anchorIds: Array<String>,
         anchorTypes: Array<String>,
         anchorTransforms: Array<DoubleArray>,
+        anchorMeshVertices: Array<ByteArray?>,
+        anchorMeshFaces: Array<ByteArray?>,
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        intrinsicsImageWidth: Int, intrinsicsImageHeight: Int,
+        anchorAlignments: Array<String>,
+        anchorExtents: Array<DoubleArray?>,
     ) {
         if (!installed.get()) return
         nativeDispatchToHostWorklets(
@@ -232,6 +246,10 @@ object StitcherWorkletRuntime {
             timestampNs, trackingState,
             depthBytes, depthWidth, depthHeight,
             anchorIds, anchorTypes, anchorTransforms,
+            anchorMeshVertices, anchorMeshFaces,
+            fx, fy, cx, cy,
+            intrinsicsImageWidth, intrinsicsImageHeight,
+            anchorAlignments, anchorExtents,
         )
     }
 
@@ -248,8 +266,40 @@ object StitcherWorkletRuntime {
         return nativeRegistryCount() > 0
     }
 
+    /// Per-frame AR-metadata extraction toggles (the JS-driven
+    /// enableDepth/enableAnchors/enableMesh `<Camera>` props, written via
+    /// `__stitcherProxy.setExtractionConfig`).  Read once per frame in
+    /// `RNSARCameraView.forwardToIncremental` to GATE the costly ARCore
+    /// depth-acquire / anchor-collect / mesh-build work — all default OFF,
+    /// so a host pays zero AR-metadata cost until it opts in.
+    ///
+    /// Returns all-false (no extraction) before `installIfNeeded()` runs.
+    data class ExtractionFlags(
+        val depth: Boolean,
+        val anchors: Boolean,
+        val mesh: Boolean,
+    )
+
+    @JvmStatic
+    fun extractionFlags(): ExtractionFlags {
+        if (!installed.get()) return ExtractionFlags(false, false, false)
+        val bits = nativeExtractionFlags()
+        return ExtractionFlags(
+            depth = (bits and 0x1) != 0,
+            anchors = (bits and 0x2) != 0,
+            mesh = (bits and 0x4) != 0,
+        )
+    }
+
     @JvmStatic
     private external fun nativeRegistryCount(): Int
+
+    /// JNI binding: `nativeExtractionFlags` in
+    /// `android/src/main/cpp/stitcher_jsi_install_jni.cpp`.  Packs
+    /// `retailens::getExtractionConfig()` into a bitmask
+    /// (bit0=depth, bit1=anchors, bit2=mesh).
+    @JvmStatic
+    private external fun nativeExtractionFlags(): Int
 
     /// JNI binding: `android/src/main/cpp/stitcher_jsi_install_jni.cpp`'s
     /// `nativeDispatchToHostWorklets`.  Fast-path early-exit lives
@@ -269,6 +319,12 @@ object StitcherWorkletRuntime {
         anchorIds: Array<String>,
         anchorTypes: Array<String>,
         anchorTransforms: Array<DoubleArray>,
+        anchorMeshVertices: Array<ByteArray?>,
+        anchorMeshFaces: Array<ByteArray?>,
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        intrinsicsImageWidth: Int, intrinsicsImageHeight: Int,
+        anchorAlignments: Array<String>,
+        anchorExtents: Array<DoubleArray?>,
     )
 
     init {
