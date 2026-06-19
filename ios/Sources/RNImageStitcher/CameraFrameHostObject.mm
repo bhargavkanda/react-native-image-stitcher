@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// StitcherFrameHostObject.mm — iOS-specific wrapper for the shared
-// `retailens::StitcherFrameJsiHostObject` (defined in
-// `cpp/stitcher_frame_jsi.{hpp,cpp}`).
+// CameraFrameHostObject.mm — iOS-specific wrapper for the shared
+// `retailens::CameraFrameJsiHostObject` (defined in
+// `cpp/camera_frame_jsi.{hpp,cpp}`).
 //
 // Owns:
 //   - The Obj-C facade callable from Swift / other Obj-C / .mm files.
@@ -10,15 +10,15 @@
 //     `CVPixelBufferRef` from `ARFrame.capturedImage`; lock / memcpy
 //     / unlock pattern).
 //   - The Obj-C → C++ extraction logic that builds a
-//     `retailens::StitcherFrameData` from an `ARFrame` + the lib's
+//     `retailens::CameraFrameData` from an `ARFrame` + the lib's
 //     `RNSARFramePose`.
 //
 // Does NOT own:
 //   - The JSI `get` / `getPropertyNames` dispatch.  That lives in
-//     `cpp/stitcher_frame_jsi.cpp` and is identical to the Android
+//     `cpp/camera_frame_jsi.cpp` and is identical to the Android
 //     implementation (DRY across platforms).
 
-#import "StitcherFrameHostObject.h"
+#import "CameraFrameHostObject.h"
 
 #import <Foundation/Foundation.h>
 #import <ARKit/ARKit.h>
@@ -36,8 +36,8 @@
 #include <string>
 #include <utility>
 
-#include "stitcher_frame_data.hpp"
-#include "stitcher_frame_jsi.hpp"
+#include "camera_frame_data.hpp"
+#include "camera_frame_jsi.hpp"
 #include "stitcher_proxy_jsi.hpp"   // retailens::getExtractionConfig()
 
 using namespace facebook;
@@ -138,7 +138,7 @@ class IOSPixelBufferReader : public retailens::PixelBufferReader {
 /// copy garbage padding bytes into the wrong positions and shear the
 /// map.  We copy `width * elementSize` bytes per row from `base +
 /// row * bytesPerRow` so the result is row-packed exactly as the
-/// shared JSI layer (`stitcher_frame_jsi.cpp`) expects.
+/// shared JSI layer (`camera_frame_jsi.cpp`) expects.
 ///
 /// Returns `true` on success (out is filled with `w*h*elementSize`
 /// bytes); `false` if the buffer couldn't be locked or has no base
@@ -181,7 +181,7 @@ bool PackSingleChannelPixelBuffer(CVPixelBufferRef buffer,
 /// these to validate the byte counts.  Leaves `data.arDepth` as
 /// `nullopt` when the device/session provides no depth (non-LiDAR
 /// devices, or before the first depth frame arrives).
-void ExtractARDepth(ARFrame* arFrame, retailens::StitcherFrameData& data) {
+void ExtractARDepth(ARFrame* arFrame, retailens::CameraFrameData& data) {
   ARDepthData* dd = arFrame.sceneDepth;
   if (dd == nil) dd = arFrame.smoothedSceneDepth;
   if (dd == nil) return;
@@ -248,7 +248,7 @@ static std::string PlaneClassificationString(ARPlaneClassification c) {
 /// Plane anchors additionally carry `alignment` (horizontal/vertical),
 /// `extent` ([x, z] metres), and — on classification-capable devices —
 /// a semantic `classification` (wall/floor/…).
-void ExtractARAnchors(ARFrame* arFrame, retailens::StitcherFrameData& data) {
+void ExtractARAnchors(ARFrame* arFrame, retailens::CameraFrameData& data) {
   NSArray<ARAnchor*>* anchors = arFrame.anchors;
   data.arAnchors.reserve(anchors.count);
   for (ARAnchor* a in anchors) {
@@ -426,7 +426,7 @@ bool PackMeshClassifications(ARGeometrySource* src, std::vector<uint8_t>& out) {
 /// on the ARFrame's lifetime.  A mesh anchor whose vertices/faces fail
 /// to marshal is SKIPPED (we never emit a `hasMesh=true` anchor with
 /// empty geometry).
-void ExtractARMesh(ARFrame* arFrame, retailens::StitcherFrameData& data) {
+void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
   NSArray<ARAnchor*>* anchors = arFrame.anchors;
   for (ARAnchor* a in anchors) {
     if (![a isKindOfClass:[ARMeshAnchor class]]) continue;
@@ -468,14 +468,14 @@ void ExtractARMesh(ARFrame* arFrame, retailens::StitcherFrameData& data) {
 
 #pragma mark - Obj-C facade
 
-@implementation StitcherFrameHostObject {
-  std::shared_ptr<retailens::StitcherFrameJsiHostObject> _hostObject;
+@implementation CameraFrameHostObject {
+  std::shared_ptr<retailens::CameraFrameJsiHostObject> _hostObject;
 }
 
 + (instancetype)fromARFrame:(ARFrame*)arFrame pose:(RNSARFramePose*)pose {
-  StitcherFrameHostObject* obj = [[self alloc] init];
+  CameraFrameHostObject* obj = [[self alloc] init];
 
-  retailens::StitcherFrameData data;
+  retailens::CameraFrameData data;
   data.source = "ar";
   data.width = static_cast<int32_t>(pose.imageWidth);
   data.height = static_cast<int32_t>(pose.imageHeight);
@@ -575,8 +575,170 @@ void ExtractARMesh(ARFrame* arFrame, retailens::StitcherFrameData& data) {
   // ownership — required for `shared_from_this()` inside the JSI
   // `toArrayBuffer` lambda).
   obj->_hostObject =
-      retailens::StitcherFrameJsiHostObject::create(std::move(data));
+      retailens::CameraFrameJsiHostObject::create(std::move(data));
   return obj;
+}
+
++ (NSDictionary *)lightArFrameMetaFromARFrame:(ARFrame *)arFrame
+                                         pose:(RNSARFramePose *)pose {
+  // ── Always-present scalars: timestamp / trackingState / pose ──────────
+  //
+  // timestamp is NANOSECONDS (AR-framework monotonic clock) to match the
+  // ARFrameMeta TS contract + CameraFrame.timestampNs.  ARFrame.timestamp
+  // is CFAbsoluteTime (seconds) → ×1e9.
+  NSMutableDictionary *meta = [NSMutableDictionary dictionary];
+  meta[@"timestamp"] = @(arFrame.timestamp * 1e9);
+
+  NSString *trackingState;
+  switch (arFrame.camera.trackingState) {
+    case ARTrackingStateNotAvailable: trackingState = @"notAvailable"; break;
+    case ARTrackingStateLimited:      trackingState = @"limited";      break;
+    case ARTrackingStateNormal:       trackingState = @"normal";       break;
+    default:                          trackingState = @"notAvailable"; break;
+  }
+  meta[@"trackingState"] = trackingState;
+
+  // pose: quaternion (x,y,z,w) + translation [x,y,z] — straight off the
+  // already-marshalled RNSARFramePose (no re-derivation from the matrix).
+  meta[@"pose"] = @{
+    @"rotation": @[ @(pose.qx), @(pose.qy), @(pose.qz), @(pose.qw) ],
+    @"translation": @[ @(pose.tx), @(pose.ty), @(pose.tz) ],
+  };
+
+  // intrinsics: always attempted; NSNull only when the frame reported a
+  // degenerate (zero) capture resolution (the TS contract's `null`).
+  if (pose.imageWidth > 0 && pose.imageHeight > 0) {
+    meta[@"intrinsics"] = @{
+      @"fx": @(pose.fx),
+      @"fy": @(pose.fy),
+      @"cx": @(pose.cx),
+      @"cy": @(pose.cy),
+      @"imageWidth": @(pose.imageWidth),
+      @"imageHeight": @(pose.imageHeight),
+    };
+  } else {
+    meta[@"intrinsics"] = [NSNull null];
+  }
+
+  // ── Gated, LIGHT fields: depth dims / anchors / mesh counts ───────────
+  //
+  // Same per-frame extraction config the full host-object path reads
+  // (set from JS via __stitcherProxy.setExtractionConfig, driven by the
+  // <Camera> enableDepth/enableAnchors/enableMesh props).  Snapshot once
+  // so all three see a consistent config for this frame.
+  const retailens::ExtractionConfig cfg = retailens::getExtractionConfig();
+
+  // depth: dimensions + whether a confidence channel exists.  NO pixel
+  // copy — just the depth map's own w/h and a confidenceMap != NULL probe.
+  // null when the prop is off OR the device produced no depth this frame.
+  id depthValue = [NSNull null];
+  if (cfg.depth) {
+    ARDepthData *dd = arFrame.sceneDepth;
+    if (dd == nil) dd = arFrame.smoothedSceneDepth;
+    if (dd != nil) {
+      CVPixelBufferRef depthMap = dd.depthMap;
+      if (depthMap != NULL) {
+        const int w = (int)CVPixelBufferGetWidth(depthMap);
+        const int h = (int)CVPixelBufferGetHeight(depthMap);
+        if (w > 0 && h > 0) {
+          depthValue = @{
+            @"width": @(w),
+            @"height": @(h),
+            @"hasConfidence": @(dd.confidenceMap != NULL),
+          };
+        }
+      }
+    }
+  }
+  meta[@"depth"] = depthValue;
+
+  // anchors: id / coarse type / row-major 4x4 transform, plus plane
+  // alignment + extent + (capable-device) classification.  Mirrors
+  // ExtractARAnchors above but into an NSDictionary array (no byte
+  // marshaling — that path is for the full host object).  Empty array
+  // when the prop is off (cheap + JSON-stable, matching the TS contract's
+  // `Array<...>` rather than null).  Mesh anchors are summarised under
+  // `mesh` (counts) below, NOT listed individually here unless enableMesh
+  // is off — to match Android's collectTrackingAnchors which surfaces
+  // plane/image anchors and emits mesh as a separate summary.
+  NSMutableArray *anchorsOut = [NSMutableArray array];
+  if (cfg.anchors) {
+    for (ARAnchor *a in arFrame.anchors) {
+      // ARMeshAnchors are summarised under `mesh`; skip here.
+      if ([a isKindOfClass:[ARMeshAnchor class]]) continue;
+
+      NSMutableDictionary *anchor = [NSMutableDictionary dictionary];
+      anchor[@"id"] = a.identifier.UUIDString;
+
+      if ([a isKindOfClass:[ARPlaneAnchor class]]) {
+        anchor[@"type"] = @"plane";
+        ARPlaneAnchor *plane = (ARPlaneAnchor *)a;
+        anchor[@"alignment"] =
+            (plane.alignment == ARPlaneAnchorAlignmentVertical) ? @"vertical"
+                                                                : @"horizontal";
+        // [extentX, extentZ] in plane-local metres (deprecated `extent`
+        // for iOS-15 parity, same as ExtractARAnchors).
+        anchor[@"extent"] = @[ @(plane.extent.x), @(plane.extent.z) ];
+        if (ARPlaneAnchor.isClassificationSupported &&
+            plane.classificationStatus == ARPlaneClassificationStatusKnown) {
+          std::string cls = PlaneClassificationString(plane.classification);
+          if (!cls.empty()) {
+            anchor[@"classification"] =
+                [NSString stringWithUTF8String:cls.c_str()];
+          }
+        }
+      } else if ([a isKindOfClass:[ARImageAnchor class]]) {
+        anchor[@"type"] = @"image";
+      } else {
+        anchor[@"type"] = @"point";
+      }
+
+      // Row-major anchor->world (transpose ARKit's column-major matrix),
+      // 16 NSNumbers — same transpose as ExtractARAnchors.
+      const simd_float4x4 m = a.transform;
+      NSMutableArray *transform = [NSMutableArray arrayWithCapacity:16];
+      for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+          [transform addObject:@((double)m.columns[c][r])];
+        }
+      }
+      anchor[@"transform"] = transform;
+      [anchorsOut addObject:anchor];
+    }
+  }
+  meta[@"anchors"] = anchorsOut;
+
+  // mesh: anchor / vertex / face COUNTS only (no vertex/face byte
+  // marshaling).  null when the prop is off.  Counts are read from each
+  // ARMeshAnchor's geometry sources without touching the MTLBuffer
+  // contents (just `.count` on the vertices source + faces element).
+  id meshValue = [NSNull null];
+  if (cfg.mesh) {
+    int anchorCount = 0;
+    long vertexCount = 0;
+    long faceCount = 0;
+    for (ARAnchor *a in arFrame.anchors) {
+      if (![a isKindOfClass:[ARMeshAnchor class]]) continue;
+      ARMeshAnchor *meshAnchor = (ARMeshAnchor *)a;
+      ARMeshGeometry *geometry = meshAnchor.geometry;
+      if (geometry == nil) continue;
+      anchorCount += 1;
+      if (geometry.vertices != nil) {
+        vertexCount += (long)geometry.vertices.count;
+      }
+      if (geometry.faces != nil) {
+        faceCount += (long)geometry.faces.count;  // triangle (primitive) count
+      }
+    }
+    meshValue = @{
+      @"anchorCount": @(anchorCount),
+      @"vertexCount": @(vertexCount),
+      @"faceCount": @(faceCount),
+    };
+  }
+  meta[@"mesh"] = meshValue;
+
+  return meta;
 }
 
 - (void)invalidate {

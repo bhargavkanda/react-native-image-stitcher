@@ -5,6 +5,7 @@
 // imports as `NativeModules.RNSARSession`.
 
 #import <React/RCTBridgeModule.h>
+#import <React/RCTEventEmitter.h>
 
 // REMAP form, NOT EXTERN_MODULE.  The Swift singleton in
 // RNSARSession.swift takes the @objc name "RNSARSession"
@@ -20,7 +21,14 @@
 // `RNSARSessionBridge` and dispatch methods against THAT
 // class — where takePhoto / startRecording / stopRecording etc.
 // actually live.
-@interface RCT_EXTERN_REMAP_MODULE(RNSARSession, RNSARSessionBridge, NSObject)
+//
+// v0.18.0 — base class is now `RCTEventEmitter` (was `NSObject`) so the
+// "RNSARSession" module can emit the `RNImageStitcherARFrame` device
+// event for the `onArFrame` channel.  RN auto-provides the
+// `addListener:` / `removeListeners:` emitter selectors for a module
+// whose remap base is RCTEventEmitter; the Swift class supplies
+// `supportedEvents` / `startObserving` / `stopObserving`.
+@interface RCT_EXTERN_REMAP_MODULE(RNSARSession, RNSARSessionBridge, RCTEventEmitter)
 
 RCT_EXTERN_METHOD(isSupported:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
@@ -39,6 +47,12 @@ RCT_EXTERN_METHOD(setSceneReconstructionEnabled:(nonnull NSNumber *)enabled
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
 RCT_EXTERN_METHOD(setPlaneDetection:(nonnull NSString *)mode
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
+// v0.18.0 — toggle the onArFrame LIGHT-metadata channel + its throttle.
+RCT_EXTERN_METHOD(setArFrameMetaEnabled:(nonnull NSNumber *)enabled
+                  intervalMs:(nonnull NSNumber *)intervalMs
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// stitcher_frame_jsi.hpp — shared C++ JSI host object for the v0.8.0
+// camera_frame_jsi.hpp — shared C++ JSI host object for the v0.8.0
 // `StitcherFrame` contract.  Compiles on both iOS and Android; each
 // platform provides only the PixelBufferReader implementation and
 // the construction call site (Obj-C++ on iOS; JNI on Android).
@@ -18,7 +18,7 @@
 #include <memory>
 #include <vector>
 
-#include "stitcher_frame_data.hpp"
+#include "camera_frame_data.hpp"
 
 namespace retailens {
 
@@ -59,26 +59,26 @@ class OwningPixelBuffer : public facebook::jsi::MutableBuffer {
 /// worklet, then invalidate (typically immediately after dispatch
 /// returns — the underlying pixel buffer's lifetime is bound to
 /// the calling AR-session callback scope).
-class StitcherFrameJsiHostObject
+class CameraFrameJsiHostObject
     : public facebook::jsi::HostObject,
-      public std::enable_shared_from_this<StitcherFrameJsiHostObject> {
+      public std::enable_shared_from_this<CameraFrameJsiHostObject> {
  public:
   /// Factory.  ALWAYS use this — `shared_from_this()` (called inside
   /// `get` for `toArrayBuffer`) requires the instance to be owned
   /// by a `shared_ptr` from the moment of construction.  A raw
-  /// `new StitcherFrameJsiHostObject(...)` would throw
+  /// `new CameraFrameJsiHostObject(...)` would throw
   /// `std::bad_weak_ptr` on the first `toArrayBuffer()` JSI call.
   ///
   /// Private constructor + public factory enforces this at the
   /// language level; callers can't accidentally construct without
   /// `std::make_shared`.
-  static std::shared_ptr<StitcherFrameJsiHostObject> create(
-      StitcherFrameData data) {
+  static std::shared_ptr<CameraFrameJsiHostObject> create(
+      CameraFrameData data) {
     // `std::make_shared` would require a public ctor; route through
     // a tagged-dispatch private constructor instead.
-    struct EnableMakeShared : StitcherFrameJsiHostObject {
-      explicit EnableMakeShared(StitcherFrameData d)
-          : StitcherFrameJsiHostObject(std::move(d)) {}
+    struct EnableMakeShared : CameraFrameJsiHostObject {
+      explicit EnableMakeShared(CameraFrameData d)
+          : CameraFrameJsiHostObject(std::move(d)) {}
     };
     return std::make_shared<EnableMakeShared>(std::move(data));
   }
@@ -99,9 +99,9 @@ class StitcherFrameJsiHostObject
   bool isValid() const { return _isValid; }
 
  private:
-  explicit StitcherFrameJsiHostObject(StitcherFrameData data);
+  explicit CameraFrameJsiHostObject(CameraFrameData data);
 
-  StitcherFrameData _data;
+  CameraFrameData _data;
   bool _isValid;
 };
 

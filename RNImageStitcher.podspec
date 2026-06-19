@@ -98,7 +98,7 @@ Pod::Spec.new do |s|
     'OTHER_CPLUSPLUSFLAGS' => '$(inherited) -std=c++17',
     # HEADER_SEARCH_PATHS:
     #   - "${PODS_TARGET_SRCROOT}/cpp" — the shared C++ port's own
-    #     headers (keyframe_gate.hpp, stitcher_frame_jsi.hpp, …).
+    #     headers (keyframe_gate.hpp, camera_frame_jsi.hpp, …).
     #   - the worklets-core cpp/ dir — so the bare `#include
     #     "WKTJsiWorklet.h"` / "WKTJsiWorkletContext.h" lines in
     #     StitcherJsiInstaller.mm + RNSARWorkletRuntime.mm resolve.

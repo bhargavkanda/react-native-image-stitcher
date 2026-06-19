@@ -29,6 +29,7 @@ import AVFoundation
 import simd
 import UIKit
 import os.log
+import QuartzCore  // CACurrentMediaTime (monotonic clock for onArFrame throttle)
 
 // V15.0c.4 — FAULT-level os_log on the same subsystem/category the
 // slit-scan engine uses, so Console.app's filter for `category =
@@ -39,6 +40,19 @@ fileprivate let arSessionDiagLog = OSLog(
     subsystem: "com.tiger.retailens.sdk",
     category: "slitscan"
 )
+
+
+// v0.18.0 — `onArFrame` LIGHT-metadata channel.  The AR session posts
+// this notification (carrying the `ARFrameMeta`-shaped dictionary) per
+// throttled frame; `RNSARSessionBridge` (an RCTEventEmitter) observes it
+// and re-emits as the JS `RNImageStitcherARFrame` device event.  We go
+// via NotificationCenter — rather than the bridge holding a reference to
+// the session singleton — so the framework-free engine pattern (used by
+// IncrementalStitcher) is preserved.
+public extension Notification.Name {
+    static let retailensARFrameMeta =
+        Notification.Name("RNImageStitcherARFrame")
+}
 
 
 /// Track state mirrors `ARCamera.TrackingState`.  We mirror it
@@ -456,6 +470,28 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     /// been torn down.
     @objc public weak var incrementalConsumer: ARFrameConsumer?
 
+    // ──────────────────────────────────────────────────────────────
+    // v0.18.0 — `onArFrame` LIGHT-metadata channel
+    // ──────────────────────────────────────────────────────────────
+    //
+    // When a host supplies the `<Camera onArFrame={...}>` prop, the TS
+    // layer calls `setArFrameMetaEnabled(true, intervalMs)`; on
+    // unmount / prop-removal it calls `(false, _)`.  While enabled, each
+    // ARFrame's per-frame path builds the LIGHT `ARFrameMeta` dictionary
+    // (no pixel / vertex / face bytes — see
+    // `CameraFrameHostObject.lightArFrameMetaFromARFrame:pose:`) and
+    // posts it on `.retailensARFrameMeta` for the bridge to re-emit.
+    //
+    // Throttle: emit at most one meta per `arFrameMetaIntervalSec`
+    // (default 0.1s ≈ 10Hz) using `CACurrentMediaTime()` (monotonic,
+    // unaffected by wall-clock changes).  Both flags are touched only on
+    // the ARSession delegate thread (the per-frame path) + the bridge
+    // thread (the setter); guarded by `arFrameMetaLock`.
+    private var arFrameMetaEnabled: Bool = false
+    private var arFrameMetaIntervalSec: TimeInterval = 0.1
+    private var lastArFrameMetaEmit: TimeInterval = 0
+    private let arFrameMetaLock = NSLock()
+
     private override init() {
         super.init()
         arSession.delegate = self
@@ -703,6 +739,31 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         arSession.run(config)
     }
 
+    /// v0.18.0 — toggle the `onArFrame` LIGHT-metadata channel.  Called
+    /// from JS (via the bridge) with `true` + the throttle interval when a
+    /// host supplies `<Camera onArFrame={...}>`, and `false` on
+    /// unmount / prop-removal.  Idempotent.
+    ///
+    /// `intervalMs` clamps to a 16ms floor (≈60Hz, ARKit's max delivery
+    /// rate) — a smaller value can't produce more frames, and 0 would
+    /// disable throttling entirely (one emit per ARFrame).  Resetting the
+    /// `lastArFrameMetaEmit` clock on enable means the first frame after
+    /// `onArFrame` mounts emits immediately rather than waiting out a
+    /// stale interval from a previous session.
+    @objc public func setArFrameMetaEnabled(_ enabled: Bool, intervalMs: Double) {
+        arFrameMetaLock.lock()
+        arFrameMetaEnabled = enabled
+        arFrameMetaIntervalSec = max(0.016, intervalMs / 1000.0)
+        if enabled {
+            // Emit the next frame immediately (don't carry a stale clock).
+            lastArFrameMetaEmit = 0
+        }
+        arFrameMetaLock.unlock()
+        os_log(.fault, log: arSessionDiagLog,
+               "[onArFrame] setArFrameMetaEnabled(%{public}@) interval=%.0fms",
+               enabled ? "true" : "false", intervalMs)
+    }
+
     /// Empty the pose log — call between captures so the next
     /// panorama starts fresh.
     @objc public func clearPoseLog() {
@@ -784,6 +845,12 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // `consumeFrame` here: dispatchFrame already drives it, and
         // double-consuming would ingest each frame twice.
         RNSARWorkletRuntime.shared().dispatchFrame(frame, pose: pose)
+
+        // v0.18.0 — `onArFrame` LIGHT-metadata channel.  Gated +
+        // throttled; builds the ARFrameMeta dictionary and posts it for
+        // the bridge to re-emit.  Cheap no-op when disabled (the common
+        // case — most hosts don't supply `onArFrame`).
+        maybeEmitArFrameMeta(frame, pose: pose)
 
         // If recording is in flight, append this frame to the
         // asset writer DIRECTLY — no queue hop.
@@ -1328,6 +1395,49 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             return String(path.dropFirst("file://".count))
         }
         return path
+    }
+
+    /// v0.18.0 — build + post the LIGHT `onArFrame` metadata for this
+    /// frame, gated on `arFrameMetaEnabled` and throttled to
+    /// `arFrameMetaIntervalSec`.  Runs on the ARSession delegate thread
+    /// (the per-frame `didUpdate` path).
+    ///
+    /// The gate + throttle check is taken under `arFrameMetaLock` (a
+    /// microsecond hold); the actual meta build (the slightly more
+    /// expensive part — anchor transpose, depth/mesh probes) happens
+    /// OUTSIDE the lock so the bridge's `setArFrameMetaEnabled` never
+    /// blocks behind a frame build.  Posting on NotificationCenter is
+    /// synchronous but the observer (`RNSARSessionBridge.handle…`) just
+    /// hops to the main queue for the actual JS emit, so this returns
+    /// quickly and never blocks ARKit's delegate.
+    ///
+    /// `CACurrentMediaTime()` is the monotonic media clock (same unit as
+    /// the throttle interval); immune to wall-clock adjustments.
+    private func maybeEmitArFrameMeta(_ frame: ARFrame, pose: RNSARFramePose) {
+        arFrameMetaLock.lock()
+        let enabled = arFrameMetaEnabled
+        let interval = arFrameMetaIntervalSec
+        let last = lastArFrameMetaEmit
+        let now = CACurrentMediaTime()
+        let due = enabled && (last == 0 || (now - last) >= interval)
+        if due {
+            // Reserve this slot before releasing the lock so a burst of
+            // delegate callbacks can't all pass the throttle gate.
+            lastArFrameMetaEmit = now
+        }
+        arFrameMetaLock.unlock()
+
+        guard due else { return }
+
+        // Build the LIGHT meta (no pixel/vertex/face bytes).  Reuses the
+        // Obj-C++ extraction helpers + the shared C++ extraction-config
+        // gating (depth/anchors/mesh ⇐ enableDepth/enableAnchors/enableMesh).
+        let meta = CameraFrameHostObject.lightArFrameMeta(from: frame, pose: pose)
+        NotificationCenter.default.post(
+            name: .retailensARFrameMeta,
+            object: nil,
+            userInfo: meta
+        )
     }
 
     private func makePose(from frame: ARFrame) -> RNSARFramePose {

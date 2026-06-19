@@ -69,6 +69,52 @@ processor](https://bhargavkanda.github.io/react-native-image-stitcher/docs/dev-t
 guide for a copy-paste verification recipe and the expected on-device
 output per platform.
 
+### Added — `onArFrame`: worklet-free AR metadata on the main thread
+
+`<Camera onArFrame={(meta) => …}>` is a new callback (also on
+`<ARCameraView>`) that delivers **light per-frame AR metadata on the JS
+main thread** — no worklet involved:
+
+```ts
+onArFrame={(m: ARFrameMeta) => {
+  // m.trackingState, m.pose, m.intrinsics,
+  // m.depth?.{width,height,hasConfidence},
+  // m.anchors[] (id/type/alignment/extent/classification/transform),
+  // m.mesh?.{anchorCount,vertexCount,faceCount}
+}}
+```
+
+Native builds the metadata each frame (reusing the same extraction as
+above) and emits it as a throttled event (default ≈10 Hz; tune with
+`arFrameMetaInterval` ms). Costly fields are gated by the same opt-ins
+(`depth` needs `enableDepth`, `mesh` needs `enableMesh`, `anchors` needs
+`enableAnchors`); `pose`/`trackingState`/`intrinsics` are always present.
+
+**This is the recommended way to read AR data in JS** for observe/measure
+use cases — it carries *light* data (dims, counts, intrinsics, plane
+geometry), never heavy buffers. For zero-copy access to raw per-frame
+buffers (depth pixels, mesh vertices) you'd use the `arFrameProcessor`
+worklet — see the limitation below.
+
+### Known limitation — `arFrameProcessor` worklets must capture nothing
+
+In this release an `arFrameProcessor` worklet must **not capture host
+objects** (a `runOnJS` callback or a shared value) in its closure:
+`react-native-worklets-core` deep-copies the worklet's closure when it's
+installed into the AR worklet runtime, and a captured host object makes
+that copy recurse until the stack overflows (a hard crash, on both Debug
+and Release). A worklet that captures **nothing** installs and runs fine.
+Until this is resolved upstream, **use `onArFrame`** (above) to get AR
+data into JS; reserve the worklet for capture-free per-frame work.
+
+### Internal — `StitcherFrameData` → `CameraFrameData`
+
+The shared C++ frame struct and its JSI/Obj-C++ host objects were renamed
+(`StitcherFrameData` → `CameraFrameData`, `StitcherFrameJsiHostObject` →
+`CameraFrameJsiHostObject`, `StitcherFrameHostObject` →
+`CameraFrameHostObject`) to match the public `CameraFrame` type. No public
+API change.
+
 ### Notes
 
 - Compile-verified on both platforms (iOS `xcodebuild` + Android

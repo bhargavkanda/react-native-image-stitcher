@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   the GLSurfaceView GL render thread (audit caveat #4 from the
  *   Phase-0 audit).
  * - `dispatchFrame()` stub — Phase 3c will fill in:
- *     1. Build `StitcherFrameHostObject` from ARCore Frame + pose
+ *     1. Build `CameraFrameHostObject` from ARCore Frame + pose
  *        (via the shared C++ JSI host object now linked into
  *        `libimage_stitcher.so` post-Phase-3a).
  *     2. Run first-party stitching synchronously on the caller
@@ -165,7 +165,7 @@ object StitcherWorkletRuntime {
     /// **When host worklets ARE registered:** the JNI layer copies
     /// the NV21 byte array into an owned C++ `std::vector` (so the
     /// async dispatch can outlive ARCore's `Image.close()` scope),
-    /// builds a `StitcherFrameJsiHostObject`, and posts a lambda
+    /// builds a `CameraFrameJsiHostObject`, and posts a lambda
     /// onto worklets-core's default `JsiWorkletContext`'s worklet
     /// thread.  The lambda iterates the registry's
     /// `WorkletInvoker`s, calls each with the JSI host object as

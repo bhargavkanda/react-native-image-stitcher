@@ -67,6 +67,7 @@ import type {
 
 import { useARSession } from '../ar/useARSession';
 import type { CameraFrameProcessor } from '../stitching/CameraFrame';
+import type { ARFrameMeta } from '../stitching/ARFrameMeta';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
@@ -791,6 +792,28 @@ export interface CameraProps {
    */
   planeDetection?: 'vertical' | 'horizontal' | 'both';
 
+  /**
+   * v0.18.0 — LIGHT per-frame AR metadata callback, invoked on the JS
+   * MAIN thread (NOT a worklet).  Only fires in AR capture
+   * (`captureSource === 'ar'`).  Receives an {@link ARFrameMeta} carrying
+   * pose, tracking state, intrinsics, and (when the matching `enable*`
+   * prop is on) depth dimensions, anchors, and mesh counts.
+   *
+   * This is the recommended way to read AR metadata: it sidesteps the
+   * worklet path entirely (the `arFrameProcessor` worklet can only safely
+   * surface a worklets-core shared value, because capturing a host
+   * callback crashes the worklet closure-wrap).  Native builds the meta
+   * and emits a device event; `<Camera>` threads the handler through to
+   * `<ARCameraView>`, which subscribes and invokes it on the main thread.
+   */
+  onArFrame?: (meta: ARFrameMeta) => void;
+
+  /**
+   * v0.18.0 — throttle interval (ms) for {@link onArFrame}.  Default `100`
+   * (≈ 10 Hz).  No effect unless `onArFrame` is provided.
+   */
+  arFrameMetaInterval?: number;
+
   // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────────
   /**
    * Which device holds the non-AR panorama capture accepts.
@@ -1202,6 +1225,8 @@ export function Camera(props: CameraProps): React.JSX.Element {
     enableAnchors,
     enableMesh,
     planeDetection,
+    onArFrame,
+    arFrameMetaInterval,
     engine = 'batch-keyframe',
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'vertical',
@@ -2470,6 +2495,8 @@ export function Camera(props: CameraProps): React.JSX.Element {
           enableAnchors={enableAnchors}
           enableMesh={enableMesh}
           planeDetection={planeDetection}
+          onArFrame={onArFrame}
+          arFrameMetaInterval={arFrameMetaInterval}
         />
       ) : (
         <CameraView

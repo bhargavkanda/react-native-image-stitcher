@@ -33,8 +33,8 @@
 // v0.8.0 Phase 4b.iii — per-frame fan-out support.  The shared
 // `dispatchToHostWorklets` posts to worklets-core's default context;
 // this JNI file's `nativeDispatchToHostWorklets` constructs the
-// `StitcherFrameData` from raw bytes + pose + dims and forwards it.
-#include "stitcher_frame_data.hpp"
+// `CameraFrameData` from raw bytes + pose + dims and forwards it.
+#include "camera_frame_data.hpp"
 #include "stitcher_worklet_dispatch.hpp"
 #include "stitcher_worklet_registry.hpp"
 
@@ -76,7 +76,7 @@ Java_io_imagestitcher_rn_StitcherJsiInstallerModule_nativeInstall(
 // Owns a heap-allocated `std::vector<uint8_t>` of pre-copied NV21
 // bytes.  Constructed by `nativeDispatchToHostWorklets` after one
 // JNI byte-array copy from Kotlin; outlives the AR render thread
-// scope via `StitcherFrameData::pixelReader`'s `shared_ptr` —
+// scope via `CameraFrameData::pixelReader`'s `shared_ptr` —
 // dropped when the host object is invalidated.
 
 namespace {
@@ -217,10 +217,10 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
     }
   }
 
-  // Build StitcherFrameData.  Field semantics match the iOS
-  // `StitcherFrameHostObject::fromARFrame:pose:` factory; this is
+  // Build CameraFrameData.  Field semantics match the iOS
+  // `CameraFrameHostObject::fromARFrame:pose:` factory; this is
   // the Android equivalent path.
-  retailens::StitcherFrameData data;
+  retailens::CameraFrameData data;
   data.source = "ar";
   data.width = static_cast<int32_t>(width);
   data.height = static_cast<int32_t>(height);
@@ -255,7 +255,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
   // confidence 0..7) or null when depth is unavailable this frame.  We
   // copy the bytes verbatim into `data.arDepth.depthBytes` with
   // `format = "u16packed"` and leave `confidenceBytes` EMPTY — the
-  // shared JSI layer (`cpp/stitcher_frame_jsi.cpp`) unpacks mm->metres
+  // shared JSI layer (`cpp/camera_frame_jsi.cpp`) unpacks mm->metres
   // and confidence 0..7 -> 0..2 from the high bits.
   if (depthBytes != nullptr && depthWidth > 0 && depthHeight > 0) {
     const jsize depthLen = env->GetArrayLength(depthBytes);
@@ -391,7 +391,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
       // anchorMeshVertices[i] / anchorMeshFaces[i] are null for non-mesh
       // anchors and a byte[] for a mesh anchor.  When BOTH are present we
       // copy them verbatim into the ArAnchor's vectors and flag hasMesh —
-      // the JSI layer (`cpp/stitcher_frame_jsi.cpp`) emits them as
+      // the JSI layer (`cpp/camera_frame_jsi.cpp`) emits them as
       // ArrayBuffers (Float32 vertices / Uint32 faces) unchanged.
       // meshClassifications stays empty (Android depth meshes carry no
       // per-face semantics).

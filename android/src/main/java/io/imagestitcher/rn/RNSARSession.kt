@@ -146,6 +146,46 @@ class RNSARSession(reactContext: ReactApplicationContext)
         }
     }
 
+    // ── onArFrame — LIGHT AR metadata channel (v0.18.0) ───────────────
+    //
+    // Android side of the shared `onArFrame` contract.  Delivers light
+    // AR metadata (tracking state, pose, intrinsics, depth dims, anchor
+    // descriptors, mesh counts) to JS on the main thread as a normal
+    // RCTDeviceEventEmitter event — NO worklets, NO zero-copy buffers.
+    //
+    // This is the deliberate counterpart to the `arFrameProcessor`
+    // host-worklet path: worklets-core's closure-wrap crashes when an
+    // AR worklet captures host objects, so `onArFrame` bypasses worklets
+    // entirely and uses the bridge event channel the rest of this module
+    // already uses (see `IncrementalStitcher.emitState`).
+    //
+    // TS sets the gate via `setArFrameMetaEnabled(true, intervalMs)` when
+    // a host passes the `onArFrame` prop, and `setArFrameMetaEnabled(false, _)`
+    // on unmount / prop removal.  The per-frame build + emit happens in
+    // `RNSARCameraView.onDrawFrame` (the only thread guaranteed to run
+    // once the AR session is live), gated + throttled by the companion
+    // state set here.
+
+    /**
+     * JS-facing gate for the `onArFrame` metadata channel.
+     *
+     *  - `enabled`    — true while a host supplies the `onArFrame` prop.
+     *  - `intervalMs` — throttle floor in milliseconds (default contract
+     *                   value 100 ≈ 10 Hz).  Clamped to ≥ 0; a 0 interval
+     *                   means "emit every render frame" (no throttle).
+     *
+     * Fire-and-forget (no Promise) — mirrors the other config-prop bridge
+     * setters (`setPlaneDetection`, `lockPortrait`).
+     */
+    @ReactMethod
+    fun setArFrameMetaEnabled(enabled: Boolean, intervalMs: Double) {
+        arFrameMetaEnabled = enabled
+        arFrameMetaIntervalMs = if (intervalMs.isNaN()) 100L else intervalMs.toLong().coerceAtLeast(0L)
+        // Reset the throttle clock so the first frame after enabling emits
+        // immediately rather than waiting out a stale interval window.
+        arFrameMetaLastEmitNs = 0L
+    }
+
     @ReactMethod
     fun isSupported(promise: Promise) {
         // `checkAvailability` can return UNKNOWN_CHECKING if the
@@ -858,6 +898,48 @@ class RNSARSession(reactContext: ReactApplicationContext)
         if (attachedView === view) attachedView = null
     }
 
+    /**
+     * Emit a pre-built [ARFrameMeta] WritableMap to JS over the shared
+     * `RNImageStitcherARFrame` device event.  Called from
+     * [RNSARCameraView.maybeEmitArFrameMeta] on the GL render thread.
+     *
+     * Uses the same `DeviceEventManagerModule.RCTDeviceEventEmitter`
+     * channel as [IncrementalStitcher.emitState] — RN drops the event
+     * when no JS listener is attached, so no extra gating is needed
+     * beyond the enabled flag the caller already checked.  The
+     * TS-required `addListener`/`removeListeners` no-op pair already
+     * exists on the `IncrementalStitcher` module; the `NativeEventEmitter`
+     * the TS layer constructs over `RNSARSession` needs the same pair, so
+     * they're declared below.
+     */
+    internal fun emitArFrameMeta(meta: com.facebook.react.bridge.WritableMap) {
+        try {
+            reactApplicationContext
+                .getJSModule(
+                    com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java,
+                )
+                .emit(AR_FRAME_META_EVENT, meta)
+        } catch (t: Throwable) {
+            // Catalyst instance torn down mid-emit (reload / unmount race),
+            // or no JS context yet — drop the frame silently.  AR metadata
+            // is best-effort and re-emitted every interval, so a dropped
+            // frame is harmless.
+            Log.d(TAG, "emitArFrameMeta: emit failed (ignoring): ${t.message}")
+        }
+    }
+
+    /// Required by RN's `NativeEventEmitter` contract — the TS
+    /// `onArFrame` wiring constructs a `NativeEventEmitter` over this
+    /// module, which calls `addListener`/`removeListeners` on subscribe /
+    /// unsubscribe.  No-op on Android: `DeviceEventManagerModule` does its
+    /// own listener tracking and drops events when none are attached
+    /// (same rationale as `IncrementalStitcher.addListener`).
+    @ReactMethod
+    fun addListener(eventName: String) { /* no-op — see KDoc */ }
+
+    @ReactMethod
+    fun removeListeners(count: Int) { /* no-op — see KDoc */ }
+
     private fun clearPoseLogInternal() {
         poseLogLock.write { poseLog.clear() }
     }
@@ -959,6 +1041,36 @@ class RNSARSession(reactContext: ReactApplicationContext)
         @JvmStatic
         @Volatile
         var planeDetectionMode: String = "vertical"
+
+        // ── onArFrame gate + throttle (v0.18.0) ──────────────────────
+        //
+        // Written from the JS thread via [setArFrameMetaEnabled];
+        // read on the GL render thread in
+        // [RNSARCameraView.maybeEmitArFrameMeta] — hence `@Volatile`.
+        //
+        //  - `arFrameMetaEnabled`     — gate: only build+emit when true.
+        //  - `arFrameMetaIntervalMs`  — throttle floor (ms); contract
+        //                               default 100 (≈10 Hz).
+        //  - `arFrameMetaLastEmitNs`  — monotonic clock of the last emit
+        //                               (System.nanoTime()); 0 = "never",
+        //                               reset on every enable so the first
+        //                               post-enable frame emits at once.
+        @JvmStatic
+        @Volatile
+        var arFrameMetaEnabled: Boolean = false
+
+        @JvmStatic
+        @Volatile
+        var arFrameMetaIntervalMs: Long = 100L
+
+        @JvmStatic
+        @Volatile
+        var arFrameMetaLastEmitNs: Long = 0L
+
+        /// Event name carrying the [ARFrameMeta] payload to JS.  MUST
+        /// match the shared contract + the iOS `supportedEvents` entry +
+        /// the TS `NativeEventEmitter` subscription string exactly.
+        const val AR_FRAME_META_EVENT = "RNImageStitcherARFrame"
     }
 
     init {

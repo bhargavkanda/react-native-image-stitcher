@@ -27,7 +27,7 @@ Covered:
 - `Pose`, `PlaneTransform` (POD layout / size / field offsets — pinned
   to the cross-platform marshalling contract documented in
   `cpp/ar_frame_pose.h`).
-- `StitcherFrameData` (default-construction invariants the JSI host
+- `CameraFrameData` (default-construction invariants the JSI host
   object's `get()` dispatch relies on).
 - `PixelBufferReader` interface contract (clipping behaviour of
   `copyTo` — validated via the `FakePixelBufferReader` test helper).
@@ -46,7 +46,7 @@ Not yet covered (intentional deferrals):
   parity suite (`#2C`).
 - `stitcher.cpp` — uses the full OpenCV stitching pipeline; same
   reason as above.
-- JSI host-object dispatch (`stitcher_frame_jsi.cpp`,
+- JSI host-object dispatch (`camera_frame_jsi.cpp`,
   `stitcher_proxy_jsi.cpp`, `stitcher_worklet_dispatch.cpp`) — needs
   a real Hermes runtime.  The `StitcherWorkletRegistry` tests sidestep
   this via the `_installEntryForTests` seam + JSI stubs under

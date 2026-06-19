@@ -26,7 +26,7 @@
 // (process termination reclaims it).  Phase 3c will keep this shape.
 
 #import "RNSARWorkletRuntime.h"
-#import "StitcherFrameHostObject.h"
+#import "CameraFrameHostObject.h"
 
 #import <Foundation/Foundation.h>
 #import <os/log.h>
@@ -48,7 +48,7 @@
 #include <vector>
 
 // Forward-declare `RNSARFramePose` — same pattern as
-// StitcherFrameHostObject.mm.  We don't read its fields here in
+// CameraFrameHostObject.mm.  We don't read its fields here in
 // Phase 3b (the stub doesn't unpack the pose), but Phase 3c will.
 @class RNSARFramePose;
 
@@ -210,8 +210,8 @@
     // (acceptable for Phase 4b minimum-viable; a per-frame buffer
     // copy is a known optimization for later if throughput
     // suffers).
-    StitcherFrameHostObject *hostObj =
-        [StitcherFrameHostObject fromARFrame:arFrame pose:pose];
+    CameraFrameHostObject *hostObj =
+        [CameraFrameHostObject fromARFrame:arFrame pose:pose];
 
     // Hand the host object's jsi::HostObject shared_ptr (boxed as
     // void*) into the lambda.  The lambda will:

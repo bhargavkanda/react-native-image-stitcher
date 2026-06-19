@@ -5,7 +5,7 @@
 
 #include "stitcher_worklet_dispatch.hpp"
 
-#include "stitcher_frame_jsi.hpp"
+#include "camera_frame_jsi.hpp"
 #include "stitcher_worklet_registry.hpp"
 
 #include <react-native-worklets-core/WKTJsiWorklet.h>
@@ -31,7 +31,7 @@
 namespace retailens {
 
 void dispatchToHostWorklets(RNWorklet::JsiWorkletContext* context,
-                             StitcherFrameData data) {
+                             CameraFrameData data) {
   // Fast-path early-exit when no host worklets are registered.
   // The Android caller (`StitcherWorkletRuntime.dispatchToHostWorklets`)
   // already runs in a hot per-frame loop; saving the host-object
@@ -51,18 +51,18 @@ void dispatchToHostWorklets(RNWorklet::JsiWorkletContext* context,
 
   // Build the JSI host object on the worklet thread (inside the
   // lambda) so JSI access happens on the target runtime.
-  // `StitcherFrameJsiHostObject::create` uses the `make_shared`-via-
+  // `CameraFrameJsiHostObject::create` uses the `make_shared`-via-
   // factory pattern (required by `shared_from_this()` inside the
   // `toArrayBuffer` lambda); see its header.
   //
-  // Capture `data` by-move so the StitcherFrameData (including the
+  // Capture `data` by-move so the CameraFrameData (including the
   // pixel reader's shared_ptr) lives until the lambda runs.
   // Capture `invokers` by-move as well.
   context->invokeOnWorkletThread(
       [invokers = std::move(invokers), data = std::move(data)](
           RNWorklet::JsiWorkletContext* /*ctx*/,
           facebook::jsi::Runtime& rt) mutable {
-        auto hostObj = StitcherFrameJsiHostObject::create(std::move(data));
+        auto hostObj = CameraFrameJsiHostObject::create(std::move(data));
         facebook::jsi::Object frameJsi =
             facebook::jsi::Object::createFromHostObject(rt, hostObj);
         facebook::jsi::Value frameVal(rt, frameJsi);

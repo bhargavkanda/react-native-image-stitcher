@@ -341,7 +341,7 @@ export function useStitcherWorklet(
     // party callback installed in `RNSARWorkletRuntime`).  Calling
     // the vc Frame Processor plugin here would throw
     // `getPropertyAsObject: property '__frame' is undefined`
-    // because AR frames are `StitcherFrameHostObject` instances
+    // because AR frames are `CameraFrameHostObject` instances
     // and don't carry the vc `Frame` proxy's JSI marker.  The
     // throw is caught silently by the per-worklet error handler
     // (`RNSARWorkletRuntime.mm:284-301`) and bubbles up only to
@@ -358,7 +358,7 @@ export function useStitcherWorklet(
     // returns `undefined !== 'ar'` → `true`, and the worklet
     // proceeds normally.  Only frames that explicitly tag
     // themselves as AR-source (which our native AR dispatcher
-    // does — see `StitcherFrameHostObject.mm`) get short-circuited.
+    // does — see `CameraFrameHostObject.mm`) get short-circuited.
     if ((frame as CameraFrame).source === 'ar') return;
 
     // Throttle (verbatim from useFrameProcessorDriver).

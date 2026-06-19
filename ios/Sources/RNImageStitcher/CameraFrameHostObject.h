@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// StitcherFrameHostObject.h — Obj-C facade for the v0.8.0
+// CameraFrameHostObject.h — Obj-C facade for the v0.8.0
 // `StitcherFrame` JSI host object.  Header is intentionally
 // Obj-C-only (no `<jsi/jsi.h>` import) so this can land in the
 // public CocoaPods umbrella without breaking `use_frameworks!` hosts
@@ -30,8 +30,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-NS_SWIFT_NAME(StitcherFrameHostObject)
-@interface StitcherFrameHostObject : NSObject
+NS_SWIFT_NAME(CameraFrameHostObject)
+@interface CameraFrameHostObject : NSObject
 
 /// Construct a host object backed by the supplied ARFrame + pose.
 /// Retains the ARFrame for the host object's lifetime — caller can
@@ -54,6 +54,29 @@ NS_SWIFT_NAME(StitcherFrameHostObject)
 ///
 /// Returns `NULL` if the host object has been invalidated.
 - (nullable void *)jsiHostObjectPtr;
+
+/// Build the LIGHT per-frame AR metadata dictionary for the `onArFrame`
+/// callback (the `ARFrameMeta` TS shape).  Distinct from the full
+/// host-object factory above: this copies NO pixel / vertex / face bytes
+/// — only scalars, dimensions, anchor transforms, and mesh COUNTS — so
+/// it's cheap enough to run at the throttled `onArFrame` cadence.
+///
+/// Gating mirrors the full extraction path: `depth` only when the JS
+/// `enableDepth` flag is on (read from the shared C++ extraction config),
+/// `anchors` only when `enableAnchors`, `mesh` (counts) only when
+/// `enableMesh`.  `intrinsics` / `pose` / `trackingState` / `timestamp`
+/// are always populated.  `intrinsics` is `NSNull` only when the frame
+/// reported a degenerate (zero) resolution.
+///
+/// Returns a JSON-safe `NSDictionary` (NSNumber / NSString / NSArray /
+/// NSDictionary / NSNull leaves) ready to hand to
+/// `bridge.enqueueJSCall("RCTDeviceEventEmitter", "emit", ...)`.
+///
+/// Thread: safe to call from the ARSession delegate queue (reads the
+/// frame synchronously; copies nothing that outlives the call).
++ (NSDictionary *)lightArFrameMetaFromARFrame:(ARFrame *)arFrame
+                                         pose:(RNSARFramePose *)pose
+    NS_SWIFT_NAME(lightArFrameMeta(from:pose:));
 
 @end
 

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// stitcher_frame_jsi.cpp — implementation of the shared C++ JSI
-// host object.  See stitcher_frame_jsi.hpp for class docs.
+// camera_frame_jsi.cpp — implementation of the shared C++ JSI
+// host object.  See camera_frame_jsi.hpp for class docs.
 
-#include "stitcher_frame_jsi.hpp"
+#include "camera_frame_jsi.hpp"
 
 #include <cstring>
 #include <string>
@@ -22,10 +22,10 @@ using facebook::jsi::Runtime;
 using facebook::jsi::String;
 using facebook::jsi::Value;
 
-StitcherFrameJsiHostObject::StitcherFrameJsiHostObject(StitcherFrameData data)
+CameraFrameJsiHostObject::CameraFrameJsiHostObject(CameraFrameData data)
     : _data(std::move(data)), _isValid(true) {}
 
-void StitcherFrameJsiHostObject::invalidate() {
+void CameraFrameJsiHostObject::invalidate() {
   _isValid = false;
   // Release the pixel reader immediately so the underlying camera
   // buffer can be reclaimed.  ARKit's ARFrame uses a pooled
@@ -35,7 +35,7 @@ void StitcherFrameJsiHostObject::invalidate() {
   _data.pixelReader.reset();
 }
 
-std::vector<PropNameID> StitcherFrameJsiHostObject::getPropertyNames(
+std::vector<PropNameID> CameraFrameJsiHostObject::getPropertyNames(
     Runtime& rt) {
   std::vector<PropNameID> names;
   names.push_back(PropNameID::forUtf8(rt, "isValid"));
@@ -66,7 +66,7 @@ std::vector<PropNameID> StitcherFrameJsiHostObject::getPropertyNames(
   return names;
 }
 
-Value StitcherFrameJsiHostObject::get(Runtime& rt,
+Value CameraFrameJsiHostObject::get(Runtime& rt,
                                        const PropNameID& propName) {
   const std::string name = propName.utf8(rt);
 
@@ -119,7 +119,7 @@ Value StitcherFrameJsiHostObject::get(Runtime& rt,
     // object's lifetime beyond what the runtime intended.  When the
     // runtime releases its shared_ptr (after dispatch), the weak
     // ref expires and toArrayBuffer() throws on next call.
-    auto weakSelf = std::weak_ptr<StitcherFrameJsiHostObject>(shared_from_this());
+    auto weakSelf = std::weak_ptr<CameraFrameJsiHostObject>(shared_from_this());
     HostFunctionType fn = [weakSelf](Runtime& runtime,
                                        const Value& thisVal,
                                        const Value* args,

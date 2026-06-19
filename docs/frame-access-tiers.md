@@ -98,7 +98,7 @@ return <Camera frameProcessor={fp} ... />;
 > [!IMPORTANT]
 > **v0.9.0 limitation**: Layer 3 has two known constraints addressed in v0.11.0:
 > 1. **AR mode** — the underlying `save_frame_as_jpeg` plugin doesn't yet
->    handle `StitcherFrameHostObject` (the JSI frame from v0.8.0 Phase 4b);
+>    handle `CameraFrameHostObject` (the JSI frame from v0.8.0 Phase 4b);
 >    `useFrameStream` samples silently never fire. For per-frame native
 >    processing in AR mode, use **`useThrottledFrameProcessor`** (Layer 2)
 >    instead — it's the right primitive for OCR via Vision/ML Kit, TFLite

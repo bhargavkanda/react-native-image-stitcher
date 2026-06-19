@@ -40,7 +40,7 @@ import com.facebook.react.bridge.ReactMethod
  * `retailens::StitcherWorkletRegistry`.  Per-frame fan-out from
  * Android's `StitcherWorkletRuntime` is a separate piece of work
  * (Phase 4b.ii follow-up) — needs the Kotlin↔JNI bridge that
- * constructs a `StitcherFrameJsiHostObject` from an `ArImage` +
+ * constructs a `CameraFrameJsiHostObject` from an `ArImage` +
  * pose and posts it through a worklet runtime.  Until that lands,
  * Android-registered worklets behave exactly like iOS-registered
  * worklets BEFORE Phase 4b.i: they exist in the registry but

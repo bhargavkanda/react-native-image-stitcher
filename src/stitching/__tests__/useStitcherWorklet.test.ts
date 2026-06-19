@@ -11,7 +11,7 @@
  *     v0.11.1 the code didn't enforce that — `stitcher.call` would
  *     invoke the vc Frame Processor plugin even on AR-source
  *     frames, which throws `getPropertyAsObject: property '__frame'
- *     is undefined` because AR frames are `StitcherFrameHostObject`
+ *     is undefined` because AR frames are `CameraFrameHostObject`
  *     instances and don't carry vc's JSI `Frame` proxy marker.  The
  *     throw was caught silently by the per-worklet error handler in
  *     `RNSARWorkletRuntime.mm`, surfacing only as an `os_log` entry

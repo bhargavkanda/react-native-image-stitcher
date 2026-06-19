@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// stitcher_frame_data_test.cpp — v0.10.0 audit #9A
+// camera_frame_data_test.cpp — v0.10.0 audit #9A
 //
-// Sanity coverage for the `StitcherFrameData` POD payload + the
+// Sanity coverage for the `CameraFrameData` POD payload + the
 // `PixelBufferReader` interface contract.  The shared C++
-// `StitcherFrameData` is constructed by both the iOS Obj-C++ side
-// (`StitcherFrameHostObject.mm`) and the Android JNI side
+// `CameraFrameData` is constructed by both the iOS Obj-C++ side
+// (`CameraFrameHostObject.mm`) and the Android JNI side
 // (`stitcher_frame_jni.cpp`); these tests pin the default-construction
 // invariants both sides depend on (e.g. `hasTranslation=false`,
 // `qw=1.0`).
@@ -14,7 +14,7 @@
 // (`FakePixelBufferReader`) to validate the `copyTo` clipping
 // behaviour the docstring promises.
 
-#include "stitcher_frame_data.hpp"
+#include "camera_frame_data.hpp"
 
 #include <gtest/gtest.h>
 
@@ -24,7 +24,7 @@
 #include <vector>
 
 using retailens::PixelBufferReader;
-using retailens::StitcherFrameData;
+using retailens::CameraFrameData;
 
 namespace {
 
@@ -51,16 +51,16 @@ class FakePixelBufferReader : public PixelBufferReader {
 
 }  // namespace
 
-// ─── StitcherFrameData default-construction invariants ─────────────
+// ─── CameraFrameData default-construction invariants ─────────────
 
-TEST(StitcherFrameDataTest, DefaultsAreSafeForJSIDispatch) {
+TEST(CameraFrameDataTest, DefaultsAreSafeForJSIDispatch) {
   // The JSI host object's `get()` dispatch keys off these defaults to
   // expose `undefined` for unset fields.  In particular:
   //   - `hasTranslation == false`  →  pose.translation === undefined
   //   - `arTrackingState.empty()`  →  arTrackingState === undefined
   //   - `qw == 1.0` with rest zero →  identity rotation (safe default
   //     for non-AR mode where rotation is unknown)
-  StitcherFrameData d;
+  CameraFrameData d;
   EXPECT_EQ(d.width, 0);
   EXPECT_EQ(d.height, 0);
   EXPECT_TRUE(d.source.empty());
@@ -79,18 +79,18 @@ TEST(StitcherFrameDataTest, DefaultsAreSafeForJSIDispatch) {
   EXPECT_EQ(d.pixelReader, nullptr);
 }
 
-TEST(StitcherFrameDataTest, IsCopyable) {
-  // `StitcherFrameData` is documented as "value-typed (cheap to copy;
+TEST(CameraFrameDataTest, IsCopyable) {
+  // `CameraFrameData` is documented as "value-typed (cheap to copy;
   // ~100 bytes)".  Copy needs to deep-copy the strings + bump the
   // pixelReader shared_ptr refcount.
-  StitcherFrameData a;
+  CameraFrameData a;
   a.source = "ar";
   a.width = 1920;
   a.height = 1080;
   a.pixelReader = std::make_shared<FakePixelBufferReader>(
       std::vector<uint8_t>{1, 2, 3});
 
-  StitcherFrameData b = a;
+  CameraFrameData b = a;
   EXPECT_EQ(b.source, "ar");
   EXPECT_EQ(b.width, 1920);
   EXPECT_EQ(b.height, 1080);
@@ -113,7 +113,7 @@ TEST(PixelBufferReaderTest, CopyToReturnsAllBytesWhenMaxBytesExceedsSize) {
 }
 
 TEST(PixelBufferReaderTest, CopyToClipsWhenMaxBytesIsSmaller) {
-  // Contract per stitcher_frame_data.hpp: "Implementations MUST handle
+  // Contract per camera_frame_data.hpp: "Implementations MUST handle
   // the case where maxBytes < byteSize() (clip silently)."
   FakePixelBufferReader reader({0xAA, 0xBB, 0xCC, 0xDD});
   uint8_t buf[2] = {0};

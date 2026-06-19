@@ -17,13 +17,107 @@
 import Foundation
 import React
 
+// v0.18.0 — `RNSARSessionBridge` is now an `RCTEventEmitter` (was a
+// plain `NSObject`) so it can deliver the `onArFrame` LIGHT-metadata
+// channel as the JS `RNImageStitcherARFrame` device event.  The JS side
+// subscribes via `new NativeEventEmitter(NativeModules.RNSARSession)` —
+// the same module name this bridge is remapped to (see ARSessionBridge.m).
+//
+// Pattern mirrors `IncrementalStitcherBridge`: observe a NotificationCenter
+// post from the framework-free `RNSARSession` engine, then re-emit on the
+// main queue via `bridge.enqueueJSCall("RCTDeviceEventEmitter", "emit", …)`
+// rather than `RCTEventEmitter.sendEvent(…)`, because under RN bridgeless
+// interop `sendEvent` silently no-ops for some event-body shapes (see the
+// IncrementalStitcherBridge.handleStateUpdate docstring).
 @objc(RNSARSessionBridge)
-public final class RNSARSessionBridge: NSObject {
+public final class RNSARSessionBridge: RCTEventEmitter {
 
-    @objc public static func requiresMainQueueSetup() -> Bool {
+    /// Whether at least one JS listener is attached to the AR-frame event.
+    /// RN's EventEmitter contract: don't emit when no listeners are
+    /// registered.  Toggled by `startObserving` / `stopObserving`.
+    private var hasListeners: Bool = false
+
+    private static let arFrameEvent = "RNImageStitcherARFrame"
+
+    public override init() {
+        super.init()
+        // Defensively de-dupe the observer: under RN bridgeless interop a
+        // bridge's init() can run twice on the same instance.  Remove any
+        // prior registration for this notification before adding, so the
+        // observer fires at most once per post regardless.
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .retailensARFrameMeta,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleArFrameMeta(_:)),
+            name: .retailensARFrameMeta,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: - RCTEventEmitter protocol
+
+    public override static func requiresMainQueueSetup() -> Bool {
         // ARSession.start() must be called on the main thread —
         // ARKit needs to attach to the active CVDisplayLink.
         return true
+    }
+
+    public override func supportedEvents() -> [String]! {
+        return [Self.arFrameEvent]
+    }
+
+    public override func startObserving() {
+        hasListeners = true
+    }
+
+    public override func stopObserving() {
+        hasListeners = false
+    }
+
+    /// Forward a posted `ARFrameMeta` dictionary to JS as the
+    /// `RNImageStitcherARFrame` device event.  Dropped when no JS listener
+    /// is attached.  Emits via `enqueueJSCall` on the main queue (see the
+    /// class docstring for why not `sendEvent`).
+    @objc private func handleArFrameMeta(_ notification: Notification) {
+        guard hasListeners else { return }
+        guard let userInfo = notification.userInfo else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let bridge = self.bridge else { return }
+            bridge.enqueueJSCall(
+                "RCTDeviceEventEmitter",
+                method: "emit",
+                args: [Self.arFrameEvent, userInfo],
+                completion: nil
+            )
+        }
+    }
+
+    // MARK: - Module methods
+
+    /// v0.18.0 — toggle the `onArFrame` LIGHT-metadata channel.  Called
+    /// from JS with `true` + the throttle interval (ms) when a host
+    /// supplies `<Camera onArFrame={...}>`, and `false` on
+    /// unmount / prop-removal.  Resolves with no value.
+    @objc(setArFrameMetaEnabled:intervalMs:resolver:rejecter:)
+    public func setArFrameMetaEnabled(
+        enabled: NSNumber,
+        intervalMs: NSNumber,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        RNSARSession.shared.setArFrameMetaEnabled(
+            enabled.boolValue,
+            intervalMs: intervalMs.doubleValue
+        )
+        resolver(nil)
     }
 
     @objc(isSupported:rejecter:)

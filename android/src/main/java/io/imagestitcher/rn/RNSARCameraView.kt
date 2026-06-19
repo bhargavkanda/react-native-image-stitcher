@@ -398,6 +398,14 @@ class RNSARCameraView @JvmOverloads constructor(
         // contract was already in place for Phase 4.
         appendPose(camera, frame.timestamp)
 
+        // onArFrame (v0.18.0) — LIGHT AR-metadata event channel.  Built
+        // + emitted INDEPENDENTLY of the stitcher ingest / host-worklet
+        // fan-out below: a host that only wants per-frame AR metadata
+        // (no capture, no worklet) still gets it.  Gated + throttled
+        // internally; near-free (one volatile read + one nanoTime
+        // compare) when disabled or inside the throttle window.
+        maybeEmitArFrameMeta(frame, camera)
+
         // Forward to the incremental stitcher when capture is engaged,
         // OR when an AR frame-processor host worklet is registered (the
         // v0.8.0 Phase 4b.iii fan-out forwards preview frames whenever
@@ -713,7 +721,7 @@ class RNSARCameraView @JvmOverloads constructor(
         // Acquire the 16-bit depth image for this frame and ROW-PACK it
         // into a contiguous w*h*2 byte array (uint16/pixel, low 13 bits =
         // millimetres, high 3 bits = confidence 0..7).  The shared JSI
-        // layer (`cpp/stitcher_frame_jsi.cpp`) unpacks mm->metres and
+        // layer (`cpp/camera_frame_jsi.cpp`) unpacks mm->metres and
         // confidence 0..7 -> 0..2, so we emit the RAW packed bytes with
         // format "u16packed" and leave the confidence array empty.
         //
@@ -1011,6 +1019,257 @@ class RNSARCameraView @JvmOverloads constructor(
             meshVertices = vertBytes,
             meshFaces = faceBytes,
         )
+    }
+
+    // ── onArFrame (v0.18.0) — LIGHT AR-metadata event channel ────────
+    //
+    // Build + throttle + emit the shared `ARFrameMeta` payload over the
+    // `RNImageStitcherARFrame` device event.  Runs every render frame
+    // from `onDrawFrame`, but is near-free unless a host has opted in
+    // via `RNSARSession.setArFrameMetaEnabled(true, intervalMs)`:
+    //   - one volatile read of `arFrameMetaEnabled` short-circuits the
+    //     disabled case,
+    //   - a monotonic `nanoTime()` compare throttles to `intervalMs`.
+    //
+    // The payload mirrors the shared contract EXACTLY (timestamp ns,
+    // trackingState string, pose {rotation[4], translation[3]},
+    // intrinsics|null, depth|null, anchors[], mesh|null).  depth/anchors/
+    // mesh honour the SAME `enableDepth`/`enableAnchors`/`enableMesh`
+    // extraction flags the worklet fan-out uses, so a host pays no
+    // depth-acquire / anchor-collect cost for a field it didn't request.
+    //
+    // CRITICAL: this is LIGHT.  No pixel copies — depth is read for
+    // dimensions + confidence-presence only (no `acquireDepth16Packed`
+    // row-pack), and mesh is reported as anchor/vertex/face COUNTS only
+    // (no vertex/face byte marshaling).  The heavy buffers stay on the
+    // `arFrameProcessor` worklet path.
+
+    private fun maybeEmitArFrameMeta(
+        frame: com.google.ar.core.Frame,
+        camera: Camera,
+    ) {
+        // Gate: disabled is the overwhelmingly common case — bail on a
+        // single volatile read before touching the clock or the frame.
+        if (!RNSARSession.arFrameMetaEnabled) return
+
+        // Throttle: emit at most once per `arFrameMetaIntervalMs`.  Uses
+        // System.nanoTime() (monotonic; immune to wall-clock jumps).  A
+        // 0 interval disables throttling (emit every render frame).
+        val nowNs = System.nanoTime()
+        val intervalMs = RNSARSession.arFrameMetaIntervalMs
+        if (intervalMs > 0L) {
+            val last = RNSARSession.arFrameMetaLastEmitNs
+            if (last != 0L && (nowNs - last) < intervalMs * 1_000_000L) return
+        }
+        RNSARSession.arFrameMetaLastEmitNs = nowNs
+
+        val session = RNSARSession.instance ?: return
+
+        // ── trackingState (always) — contract string enum ───────────
+        val trackingStr = when (camera.trackingState) {
+            TrackingState.TRACKING -> "normal"
+            TrackingState.PAUSED -> "limited"
+            TrackingState.STOPPED -> "notAvailable"
+            else -> "notAvailable"
+        }
+
+        // ── pose (always) — rotation quaternion [x,y,z,w] + translation
+        val pose = camera.pose
+        val q = pose.rotationQuaternion  // x, y, z, w
+        val t = pose.translation         // x, y, z
+
+        val meta = com.facebook.react.bridge.Arguments.createMap()
+        meta.putDouble("timestamp", frame.timestamp.toDouble())  // ns
+        meta.putString("trackingState", trackingStr)
+
+        val poseMap = com.facebook.react.bridge.Arguments.createMap()
+        val rotArr = com.facebook.react.bridge.Arguments.createArray()
+        rotArr.pushDouble(q[0].toDouble()); rotArr.pushDouble(q[1].toDouble())
+        rotArr.pushDouble(q[2].toDouble()); rotArr.pushDouble(q[3].toDouble())
+        poseMap.putArray("rotation", rotArr)
+        val transArr = com.facebook.react.bridge.Arguments.createArray()
+        transArr.pushDouble(t[0].toDouble()); transArr.pushDouble(t[1].toDouble())
+        transArr.pushDouble(t[2].toDouble())
+        poseMap.putArray("translation", transArr)
+        meta.putMap("pose", poseMap)
+
+        // ── intrinsics (always) — fx,fy,cx,cy + image dims, or null ──
+        // camera.imageIntrinsics is always present once tracking has a
+        // frame; guarded defensively (older devices can throw before the
+        // first valid frame).
+        val intrinsicsMap: com.facebook.react.bridge.WritableMap? = try {
+            val intr = camera.imageIntrinsics
+            com.facebook.react.bridge.Arguments.createMap().apply {
+                putDouble("fx", intr.focalLength[0].toDouble())
+                putDouble("fy", intr.focalLength[1].toDouble())
+                putDouble("cx", intr.principalPoint[0].toDouble())
+                putDouble("cy", intr.principalPoint[1].toDouble())
+                putInt("imageWidth", intr.imageDimensions[0])
+                putInt("imageHeight", intr.imageDimensions[1])
+            }
+        } catch (t2: Throwable) {
+            null
+        }
+        if (intrinsicsMap != null) meta.putMap("intrinsics", intrinsicsMap)
+        else meta.putNull("intrinsics")
+
+        // Honour the SAME extraction flags as the worklet fan-out so
+        // depth/anchors/mesh only cost work when the host opted in.
+        val flags = StitcherWorkletRuntime.extractionFlags()
+
+        // ── depth (only when enableDepth) — DIMS + confidence presence,
+        //    NO pixel copy.  DEPTH16 packs an 8-bit (high 3 bits)
+        //    confidence with each sample, so when a depth image exists
+        //    confidence is always present.
+        if (flags.depth) {
+            val depthDims = acquireDepthDimsLight(frame)
+            if (depthDims != null) {
+                val depthMap = com.facebook.react.bridge.Arguments.createMap()
+                depthMap.putInt("width", depthDims[0])
+                depthMap.putInt("height", depthDims[1])
+                depthMap.putBoolean("hasConfidence", true)
+                meta.putMap("depth", depthMap)
+            } else {
+                meta.putNull("depth")
+            }
+        } else {
+            meta.putNull("depth")
+        }
+
+        // ── anchors (only when enableAnchors) — descriptors, no pixels.
+        //    Reuses the existing collectTrackingAnchors (id/type/alignment/
+        //    extent/transform); the depth-mesh anchor is NOT included here
+        //    (mesh is reported as counts in the `mesh` field below).
+        val anchorsArr = com.facebook.react.bridge.Arguments.createArray()
+        if (flags.anchors) {
+            val anchors = sessionRef.get()?.let { collectTrackingAnchors(it) } ?: emptyList()
+            for (a in anchors) {
+                val am = com.facebook.react.bridge.Arguments.createMap()
+                am.putString("id", a.id)
+                am.putString("type", a.type)
+                if (a.alignment.isNotEmpty()) am.putString("alignment", a.alignment)
+                a.extent?.let { ext ->
+                    val extArr = com.facebook.react.bridge.Arguments.createArray()
+                    extArr.pushDouble(ext[0]); extArr.pushDouble(ext[1])
+                    am.putArray("extent", extArr)
+                }
+                // classification: ARCore exposes none for plane/image
+                // trackables (ARKit-only field) — omit it (JS sees
+                // `classification === undefined`), matching the
+                // `classification?` optionality in the contract.
+                val tArr = com.facebook.react.bridge.Arguments.createArray()
+                for (v in a.transform) tArr.pushDouble(v)
+                am.putArray("transform", tArr)
+                anchorsArr.pushMap(am)
+            }
+        }
+        meta.putArray("anchors", anchorsArr)
+
+        // ── mesh (only when enableMesh) — COUNTS only, no byte marshal.
+        //    ARCore has no native scene mesh; the depth-reconstructed
+        //    mesh is what the worklet path emits.  For the LIGHT channel
+        //    we report a single anchor (anchorCount=1) whose vertex/face
+        //    counts come from a count-only depth scan (no buffer build).
+        //    Reported only when mesh is on AND a depth image is available.
+        if (flags.mesh) {
+            val meshCounts = computeDepthMeshCountsLight(frame)
+            if (meshCounts != null) {
+                val meshMap = com.facebook.react.bridge.Arguments.createMap()
+                meshMap.putInt("anchorCount", 1)
+                meshMap.putInt("vertexCount", meshCounts[0])
+                meshMap.putInt("faceCount", meshCounts[1])
+                meta.putMap("mesh", meshMap)
+            } else {
+                meta.putNull("mesh")
+            }
+        } else {
+            meta.putNull("mesh")
+        }
+
+        session.emitArFrameMeta(meta)
+    }
+
+    /**
+     * LIGHT depth probe — return `[width, height]` of this frame's
+     * DEPTH16 image WITHOUT copying any pixels (the contract's depth
+     * field carries dims + confidence-presence only).  `use {}` closes
+     * the ARCore Image deterministically in all paths.  Returns null when
+     * depth is unavailable (unsupported device, early frames, or depth
+     * not configured).
+     */
+    private fun acquireDepthDimsLight(
+        frame: com.google.ar.core.Frame,
+    ): IntArray? {
+        return try {
+            frame.acquireDepthImage16Bits()?.use { img ->
+                val w = img.width
+                val h = img.height
+                if (w <= 0 || h <= 0) null else intArrayOf(w, h)
+            }
+        } catch (t: Throwable) {
+            // NotYetAvailableException / depth unsupported — no depth.
+            null
+        }
+    }
+
+    /**
+     * LIGHT mesh count probe — return `[vertexCount, faceCount]` for the
+     * depth-reconstructed mesh WITHOUT building any vertex/face byte
+     * buffers (the contract's mesh field carries counts only).
+     *
+     * Mirrors [buildDepthMesh]'s validity rules exactly (z==0 ⇒ invalid
+     * vertex; a grid cell contributes 2 faces iff all 4 corners are
+     * valid) so the reported counts match what the worklet path would
+     * actually marshal — but we never allocate the vertex/index/byte
+     * arrays.  Reuses [acquireDepth16Packed] for the row-packed DEPTH16
+     * read (the only depth read available), then scans it numerically.
+     *
+     * Returns null when no depth image is available or the mesh would be
+     * empty (no valid pixels / no full cells).
+     *
+     * Note: camera intrinsics are NOT needed here — vertex/face VALIDITY
+     * is purely a function of the depth value (mm != 0), and counts are
+     * invariant to the unprojection the worklet path performs.
+     */
+    private fun computeDepthMeshCountsLight(
+        frame: com.google.ar.core.Frame,
+    ): IntArray? {
+        val depth = acquireDepth16Packed(frame) ?: return null
+        val w = depth.width
+        val h = depth.height
+        if (w <= 1 || h <= 1) return null
+
+        val depthBuf = ByteBuffer.wrap(depth.bytes).order(ByteOrder.LITTLE_ENDIAN)
+
+        // Per-pixel validity (matches buildDepthMesh: low 13 bits = mm;
+        // mm==0 ⇒ invalid).  Track which pixels are valid so face cells
+        // can test their 4 corners without re-reading the buffer.
+        val valid = BooleanArray(w * h)
+        var vertexCount = 0
+        for (i in 0 until w * h) {
+            val raw = depthBuf.getShort(i * 2).toInt() and 0xFFFF
+            if ((raw and 0x1FFF) != 0) {
+                valid[i] = true
+                vertexCount++
+            }
+        }
+        if (vertexCount == 0) return null
+
+        // Faces: each cell with all 4 corners valid → 2 triangles.
+        var faceCount = 0
+        for (v in 0 until h - 1) {
+            val r0 = v * w
+            val r1 = r0 + w
+            for (u in 0 until w - 1) {
+                if (valid[r0 + u] && valid[r0 + u + 1] &&
+                    valid[r1 + u] && valid[r1 + u + 1]
+                ) {
+                    faceCount += 2
+                }
+            }
+        }
+        if (faceCount == 0) return null
+        return intArrayOf(vertexCount, faceCount)
     }
 
     /**

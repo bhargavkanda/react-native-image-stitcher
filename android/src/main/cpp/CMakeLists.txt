@@ -112,19 +112,19 @@ add_library(image_stitcher SHARED
     # registered host worklets.  The 4 shared cpp/ JSI files below are
     # the SAME source the iOS pod compiles — one cross-platform JSI
     # surface (proxy host object + native worklet registry + per-frame
-    # dispatch helper + StitcherFrame JSI host object).
+    # dispatch helper + CameraFrame JSI host object).
     stitcher_jsi_install_jni.cpp
     "${SHARED_CPP_DIR}/stitcher_proxy_jsi.cpp"
     "${SHARED_CPP_DIR}/stitcher_worklet_registry.cpp"
     "${SHARED_CPP_DIR}/stitcher_worklet_dispatch.cpp"
-    "${SHARED_CPP_DIR}/stitcher_frame_jsi.cpp")
+    "${SHARED_CPP_DIR}/camera_frame_jsi.cpp")
 
 target_include_directories(image_stitcher PRIVATE
     "${OPENCV_INCLUDE_DIR}"
     # cpp/ holds keyframe_gate.hpp + ar_frame_pose.h that the JNI
     # bindings include without relative-path spelunking.  Also the
-    # shared JSI sources (stitcher_proxy_jsi.hpp, stitcher_frame_data.hpp,
-    # stitcher_worklet_*.hpp, stitcher_frame_jsi.hpp).
+    # shared JSI sources (stitcher_proxy_jsi.hpp, camera_frame_data.hpp,
+    # stitcher_worklet_*.hpp, camera_frame_jsi.hpp).
     "${SHARED_CPP_DIR}")
 
 # Link order matters:

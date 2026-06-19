@@ -18,6 +18,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Platform,
   Pressable,
   SafeAreaView,
   StatusBar,
@@ -54,6 +55,7 @@ import {
   type IncrementalState,
   type PanMode,
   type CameraFrame,
+  type ARFrameMeta,
 } from 'react-native-image-stitcher';
 
 
@@ -194,38 +196,19 @@ function App(): React.JSX.Element {
   // `__stitcherProxy` is what fires the worklet (the
   // `frameProcessor` prop has no effect on AR mode because vc's
   // `<Camera>` isn't mounted in that path).
-  // AR depth/anchors readout — proves `arDepth` / `arAnchors` are actually
-  // populated (not undefined).  Called ~1/sec from the AR worklet (the read
-  // is throttled there because reading `arDepth` allocates a depth buffer;
-  // real consumers should likewise read it only when needed).
-  const fireArMetaLog = useMemo(
-    () =>
-      Worklets.createRunOnJS(
-        (
-          depthW: number,
-          depthH: number,
-          hasConf: number,
-          anchors: number,
-          meshAnchors: number,
-          meshVertBytes: number,
-          vPlanes: number,
-          hPlanes: number,
-          fx: number,
-          imgW: number,
-          imgH: number,
-        ) => {
-          // eslint-disable-next-line no-console
-          console.log(
-            `[example] arFrame meta — arDepth=${depthW}x${depthH} ` +
-              `confidenceMap=${hasConf ? 'yes' : 'no'} arAnchors=${anchors} ` +
-              `planes=[v:${vPlanes} h:${hPlanes}] ` +
-              `mesh=${meshAnchors} (${meshVertBytes}B verts) ` +
-              `intrinsics=${fx ? `fx=${fx.toFixed(0)} ${imgW}x${imgH}` : 'none'}`,
-          );
-        },
-      ),
-    [],
-  );
+  // v0.18.0 — AR depth/anchor/mesh/intrinsics readout, driven by the
+  // worklet-FREE `onArFrame` callback (see `handleArFrame` below).
+  //
+  // Previously this rode a worklets-core SHARED VALUE written from inside
+  // the AR worklet: capturing a `createRunOnJS` callback in an AR worklet
+  // makes worklets-core's closure-wrap recurse without termination →
+  // SIGBUS the instant AR mode mounts, so a shared value (a host object the
+  // wrapper references rather than deep-copies) was the only safe channel.
+  // `onArFrame` removes that hazard entirely: native builds the metadata
+  // and emits a device event, and the handler runs on the JS MAIN thread
+  // with a plain `setState`.  THIS is the pattern AR-metadata consumers
+  // should use — no worklet, no shared value, no polling.
+  const [arMetaText, setArMetaText] = useState('AR: (idle)');
 
   const stitcher = useStitcherWorklet();
   const exampleFrameProcessor = useFrameProcessor(
@@ -245,61 +228,52 @@ function App(): React.JSX.Element {
     [stitcher.call, fireFrameProcessorLog],
   );
 
-  // AR-mode host worklet (the `arFrameProcessor` prop).  Unlike
-  // `frameProcessor` above (vision-camera, non-AR only), this fires once
-  // per ARKit / ARCore frame while in AR capture, dispatched natively via
-  // `__stitcherProxy` ALONGSIDE first-party stitching.  Here it just feeds
-  // the SAME tick log with source `'ar'`, so the per-second log line's
-  // `cumulative: ar=N` climbing is direct proof the AR fan-out is live.
-  // Must be a `'worklet'`; kept stable via useMemo so it isn't
-  // re-registered on every render.
+  // AR-mode host worklet (the `arFrameProcessor` prop).  Kept present so
+  // the AR fan-out path stays exercised end-to-end, but deliberately a
+  // MINIMAL capture-free NO-OP: AR worklets must currently capture nothing
+  // (worklets-core's closure-wrap recurses without termination → SIGBUS
+  // when an AR worklet captures a host object).  Use `onArFrame` (the
+  // worklet-free main-thread callback, wired below) to get AR data into JS
+  // — that's what drives the on-screen readout now.
   const demoArFrameProcessor = useMemo(() => {
-    const fp = (frame: CameraFrame) => {
+    const fp = (_frame: CameraFrame) => {
       'worklet';
-      fireFrameProcessorLog(frame.timestamp ?? 0, frame.source ?? 'ar');
-      // Read arDepth/arAnchors ~once/sec (a worklet-runtime-global tick
-      // counter), since accessing `arDepth` allocates a depth buffer —
-      // don't do it every frame.
-      const g = globalThis as { __exArMetaTick?: number };
-      g.__exArMetaTick = ((g.__exArMetaTick ?? 0) + 1) % 60;
-      if (g.__exArMetaTick === 0 && frame.source === 'ar') {
-        const d = frame.arDepth;
-        const anchors = frame.arAnchors;
-        let meshAnchors = 0;
-        let meshVertBytes = 0;
-        let vPlanes = 0;
-        let hPlanes = 0;
-        if (anchors) {
-          for (let i = 0; i < anchors.length; i++) {
-            const a = anchors[i];
-            const mg = a.meshGeometry;
-            if (a.type === 'mesh' && mg) {
-              meshAnchors += 1;
-              meshVertBytes += mg.vertices.byteLength;
-            } else if (a.type === 'plane') {
-              if (a.alignment === 'vertical') vPlanes += 1;
-              else if (a.alignment === 'horizontal') hPlanes += 1;
-            }
-          }
-        }
-        const k = frame.intrinsics;
-        fireArMetaLog(
-          d ? d.width : 0,
-          d ? d.height : 0,
-          d && d.confidenceMap ? 1 : 0,
-          anchors ? anchors.length : 0,
-          meshAnchors,
-          meshVertBytes,
-          vPlanes,
-          hPlanes,
-          k ? k.fx : 0,
-          k ? k.imageWidth : 0,
-          k ? k.imageHeight : 0,
-        );
-      }
+      // Intentionally empty — no capture, no host-object access.
     };
     return fp;
-  }, [fireFrameProcessorLog, fireArMetaLog]);
+  }, []);
+
+  // v0.18.0 — the worklet-free AR metadata handler.  Runs on the JS MAIN
+  // thread (NOT a worklet), so capturing `setArMetaText` is perfectly safe.
+  // Formats the light `ARFrameMeta` (pose / tracking / intrinsics / depth
+  // dims / anchor + mesh counts) into the green on-screen readout.
+  const arFrameCountRef = useRef(0);
+  const handleArFrame = useCallback((m: ARFrameMeta) => {
+    arFrameCountRef.current += 1;
+    let vPlanes = 0;
+    let hPlanes = 0;
+    for (const a of m.anchors) {
+      if (a.type === 'plane') {
+        if (a.alignment === 'vertical') vPlanes += 1;
+        else if (a.alignment === 'horizontal') hPlanes += 1;
+      }
+    }
+    const depthStr = m.depth
+      ? `${m.depth.width}x${m.depth.height}${m.depth.hasConfidence ? '+conf' : ''}`
+      : 'none';
+    const intrStr = m.intrinsics
+      ? `fx${Math.round(m.intrinsics.fx)} ${m.intrinsics.imageWidth}x${m.intrinsics.imageHeight}`
+      : 'none';
+    const meshStr = m.mesh
+      ? `${m.mesh.anchorCount}/${m.mesh.vertexCount}v/${m.mesh.faceCount}f`
+      : 'none';
+    setArMetaText(
+      `AR#${arFrameCountRef.current} track=${m.trackingState} ` +
+        `depth=${depthStr} anchors=${m.anchors.length} ` +
+        `planes[v:${vPlanes} h:${hPlanes}] mesh=${meshStr} ` +
+        `intr=${intrStr}`,
+    );
+  }, []);
 
   // v0.10.0 (PR B) — visible pill that surfaces refinePanorama
   // progress events.  Subscribes to the IncrementalStateUpdate
@@ -535,6 +509,7 @@ function App(): React.JSX.Element {
           onCapturePreviewClose={closePreview}
           frameProcessor={exampleFrameProcessor}
           arFrameProcessor={demoArFrameProcessor}
+          onArFrame={handleArFrame}
           enableDepth
           enableAnchors
           enableMesh
@@ -545,6 +520,15 @@ function App(): React.JSX.Element {
           onFramesDropped={handleFramesDropped}
           onError={handleError}
         />
+
+        {/* Always rendered (not __DEV__-gated) so it's visible in the
+            Release build used to verify AR metadata without the Debug
+            inspector's Hermes allocation tracker. */}
+        <View style={styles.arMetaOverlay} pointerEvents="none">
+          <Text style={styles.arMetaText} numberOfLines={3}>
+            {arMetaText}
+          </Text>
+        </View>
 
         {refine !== null && (
           <View
@@ -618,6 +602,24 @@ function App(): React.JSX.Element {
 
 
 const styles = StyleSheet.create({
+  // AR metadata readout — fed from the worklet-free `onArFrame` callback
+  // (see `handleArFrame`).  Bottom strip so it doesn't collide with the
+  // top-left dev toggles or the guidance banner.
+  arMetaOverlay: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    bottom: 96,
+    backgroundColor: 'rgba(0, 0, 0, 0.62)',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+  },
+  arMetaText: {
+    color: '#7CFC9A',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
   // Shared dev toggle chip (top-left stack); `top` set per-instance.
   devToggle: {
     position: 'absolute',

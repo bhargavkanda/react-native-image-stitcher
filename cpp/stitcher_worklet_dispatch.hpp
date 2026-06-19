@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // stitcher_worklet_dispatch.hpp — shared C++ helper that fans out a
-// `StitcherFrameData` to every host worklet registered in the
+// `CameraFrameData` to every host worklet registered in the
 // process-scope `retailens::StitcherWorkletRegistry`.
 //
 // v0.8.0 Phase 4b.iii — used by Android's per-frame fan-out path
@@ -26,7 +26,7 @@
 
 #pragma once
 
-#include "stitcher_frame_data.hpp"
+#include "camera_frame_data.hpp"
 
 #include <jsi/jsi.h>
 
@@ -36,7 +36,7 @@ class JsiWorkletContext;
 
 namespace retailens {
 
-/// Fan out a `StitcherFrameData` to every registered host worklet.
+/// Fan out a `CameraFrameData` to every registered host worklet.
 ///
 /// Behaviour:
 ///
@@ -44,7 +44,7 @@ namespace retailens {
 ///      is empty.  No host object is constructed; the caller's
 ///      thread returns immediately.
 ///   2. Otherwise, the function snapshots the registry, constructs
-///      a `StitcherFrameJsiHostObject` (deferred until inside the
+///      a `CameraFrameJsiHostObject` (deferred until inside the
 ///      worklet-thread lambda so JSI access happens on the
 ///      target runtime), and dispatches via
 ///      `context->invokeOnWorkletThread(...)`.
@@ -66,6 +66,6 @@ namespace retailens {
 /// @param data     Frame data + pixel reader.  Moved into the
 ///                 worklet-thread lambda.
 void dispatchToHostWorklets(RNWorklet::JsiWorkletContext* context,
-                             StitcherFrameData data);
+                             CameraFrameData data);
 
 }  // namespace retailens

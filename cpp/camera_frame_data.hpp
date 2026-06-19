@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// stitcher_frame_data.hpp — platform-agnostic backing data for the
+// camera_frame_data.hpp — platform-agnostic backing data for the
 // v0.8.0 `StitcherFrame` JSI host object.
 //
 // ## Why this lives here
@@ -16,13 +16,13 @@
 // ## Memory model
 //
 // `PixelBufferReader` is an opaque interface; platform code (iOS
-// `StitcherFrameHostObject.mm`; Android `stitcher_frame_jni.cpp`)
+// `CameraFrameHostObject.mm`; Android `stitcher_frame_jni.cpp`)
 // implements it by wrapping the underlying `CVPixelBufferRef` /
 // `ArImage*`.  Lifetime: the reader holds a strong ref to its
 // source for the entire host-object lifetime; releases on
 // destruction (deterministic, RAII).
 //
-// `StitcherFrameData` is value-typed (cheap to copy; ~100 bytes).
+// `CameraFrameData` is value-typed (cheap to copy; ~100 bytes).
 // Construct on the worklet runtime's thread before each dispatch.
 
 #pragma once
@@ -114,7 +114,7 @@ struct ArAnchor {
 /// AR depth map for one frame. The platforms encode depth differently,
 /// so we carry the raw bytes plus a `format` tag and NORMALISE to a
 /// single JS shape (Float32 metres + Uint8 confidence 0..2) in the JSI
-/// layer (`stitcher_frame_jsi.cpp`):
+/// layer (`camera_frame_jsi.cpp`):
 ///   - iOS (ARKit `ARDepthData`): `depthBytes` = Float32 metres
 ///     (row-packed); `confidenceBytes` = Uint8 `ARConfidenceLevel`
 ///     (0=low,1=medium,2=high). `format = "f32m"`.
@@ -139,7 +139,7 @@ struct ArDepth {
 /// Plain-old-data payload for one `StitcherFrame`.  Fully extracted
 /// at construction time (cheap fields) plus an opaque reader for
 /// the lazy pixel access.
-struct StitcherFrameData {
+struct CameraFrameData {
     /// Discriminator. `"ar"` for AR-mode frames, `"vc"` for
     /// vision-camera frames.  Used by worklets to gate on AR-only
     /// field access (translation, depth, anchors, tracking state).
