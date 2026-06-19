@@ -53,7 +53,7 @@ import {
   type FramesDroppedInfo,
   type IncrementalState,
   type PanMode,
-  type StitcherFrame,
+  type CameraFrame,
 } from 'react-native-image-stitcher';
 
 
@@ -200,7 +200,7 @@ function App(): React.JSX.Element {
       'worklet';
       // First-party stitching (v0.11.0 composition).  `stitcher.call`
       // takes a raw vision-camera `Frame` directly (its input type is
-      // `Frame | StitcherFrame`) and no-ops on AR-source frames because
+      // `Frame | CameraFrame`) and no-ops on AR-source frames because
       // AR stitching runs natively via the AR-side dispatcher, not the
       // vc plugin.  See the `useStitcherWorklet` module header.
       stitcher.call(frame);
@@ -221,7 +221,7 @@ function App(): React.JSX.Element {
   // Must be a `'worklet'`; kept stable via useMemo so it isn't
   // re-registered on every render.
   const demoArFrameProcessor = useMemo(() => {
-    const fp = (frame: StitcherFrame) => {
+    const fp = (frame: CameraFrame) => {
       'worklet';
       fireFrameProcessorLog(frame.timestamp ?? 0, frame.source ?? 'ar');
     };

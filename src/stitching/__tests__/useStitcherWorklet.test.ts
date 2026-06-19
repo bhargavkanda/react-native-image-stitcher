@@ -39,7 +39,7 @@
  * the plugin-acquisition retry or gyro for the call-routing test).
  */
 
-import type { StitcherFrame } from '../StitcherFrame';
+import type { CameraFrame } from '../CameraFrame';
 
 // ─── Mock vision-camera ──────────────────────────────────────────
 const pluginCallSpy = jest.fn();
@@ -99,7 +99,7 @@ describe('useStitcherWorklet', () => {
   describe('AR-source short-circuit (v0.11.1 fix)', () => {
     it('does NOT invoke the vc plugin for AR-source frames', () => {
       const { call } = useStitcherWorklet();
-      const arFrame: StitcherFrame = {
+      const arFrame: CameraFrame = {
         width: 1920,
         height: 1080,
         pixelFormat: 'yuv',
@@ -115,7 +115,7 @@ describe('useStitcherWorklet', () => {
 
     it('does NOT invoke the vc plugin for AR-source frames even when called repeatedly', () => {
       const { call } = useStitcherWorklet();
-      const arFrame: StitcherFrame = {
+      const arFrame: CameraFrame = {
         width: 1920,
         height: 1080,
         pixelFormat: 'yuv',
@@ -133,7 +133,7 @@ describe('useStitcherWorklet', () => {
   describe('vc-source happy path', () => {
     it('invokes the vc plugin for vc-source frames', () => {
       const { call } = useStitcherWorklet();
-      const vcFrame: StitcherFrame = {
+      const vcFrame: CameraFrame = {
         width: 1920,
         height: 1080,
         pixelFormat: 'yuv',
@@ -150,7 +150,7 @@ describe('useStitcherWorklet', () => {
     it('invokes the vc plugin for frames with undefined source (raw vc Frame)', () => {
       // vc's raw `Frame` doesn't carry the `source` field — the lib's
       // Phase 4a deferral means we don't wrap vc frames into
-      // `StitcherFrame`.  The AR-source check must treat undefined
+      // `CameraFrame`.  The AR-source check must treat undefined
       // as "not AR" to preserve the non-AR worklet path.
       const { call } = useStitcherWorklet();
       const rawVcFrame = {
@@ -161,7 +161,7 @@ describe('useStitcherWorklet', () => {
         timestamp: 0,
         toArrayBuffer: () => new ArrayBuffer(0),
         // `source` intentionally absent
-      } as unknown as StitcherFrame;
+      } as unknown as CameraFrame;
       call(rawVcFrame);
       expect(pluginCallSpy).toHaveBeenCalledTimes(1);
     });
@@ -170,7 +170,7 @@ describe('useStitcherWorklet', () => {
   describe('plugin.call payload shape', () => {
     it('passes the frame + a numeric-intrinsics params object', () => {
       const { call } = useStitcherWorklet();
-      const vcFrame: StitcherFrame = {
+      const vcFrame: CameraFrame = {
         width: 1920,
         height: 1080,
         pixelFormat: 'yuv',

@@ -4,7 +4,7 @@
  * v0.8.0 — unified frame contract for the lib's worklet processor.
  *
  * Worklets registered via the v0.8.0 `useFrameProcessor` hook (also in
- * this directory) receive a `StitcherFrame` regardless of capture mode.
+ * this directory) receive a `CameraFrame` regardless of capture mode.
  * The lib-owned worklet runtime guarantees the same JS-visible shape
  * whether the underlying source is a vision-camera `Frame` (non-AR
  * mode, sourced from the FP plugin) or an ARKit `ARFrame` / ARCore
@@ -18,10 +18,10 @@
  * (Phase-0 audit confirmed the iOS path).  But vision-camera's
  * **Android** `Frame` is `androidx.camera.core.ImageProxy`-coupled —
  * ARCore does NOT produce `ImageProxy` instances.  Forcing
- * `StitcherFrame extends Frame` would either (a) require reverse-
+ * `CameraFrame extends Frame` would either (a) require reverse-
  * engineering ImageProxy on Android (intractable + fragile), or
  * (b) make the type asymmetric per platform.  Both are worse than
- * making `StitcherFrame` a structural sibling type that vc Frames
+ * making `CameraFrame` a structural sibling type that vc Frames
  * happen to satisfy (because vc Frames carry the same width / height /
  * orientation / pixelFormat / timestamp / toArrayBuffer surface).
  *
@@ -38,10 +38,10 @@
  * a JPEG-encode frame-processor plugin).  Returning a reference and
  * reading it later will read into freed memory.
  */
-export interface StitcherFrame {
+export interface CameraFrame {
   // ── vision-camera-shaped fields (structural compat) ─────────────
   // Worklets written against a vc `Frame` work unchanged against a
-  // `StitcherFrame` (the fields below are a strict subset of vc
+  // `CameraFrame` (the fields below are a strict subset of vc
   // Frame's JS-visible surface).
 
   /** Pixel width of the camera image. */
@@ -190,8 +190,8 @@ export interface ARAnchor {
  * v0.8.0 — worklet function signature for the unified frame processor.
  *
  * Must be a `'worklet'`-prefixed function (so it can run on the
- * worklet runtime).  Receives a `StitcherFrame` per camera frame; the
+ * worklet runtime).  Receives a `CameraFrame` per camera frame; the
  * return value is ignored (use `runOnJS` / shared values to surface
  * results back to the JS thread).
  */
-export type StitcherFrameProcessor = (frame: StitcherFrame) => void;
+export type CameraFrameProcessor = (frame: CameraFrame) => void;

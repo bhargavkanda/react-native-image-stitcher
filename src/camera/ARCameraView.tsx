@@ -42,7 +42,7 @@ import {
 } from 'react-native';
 
 import { ensureStitcherProxyInstalled } from '../stitching/ensureStitcherProxyInstalled';
-import type { StitcherFrameProcessor } from '../stitching/StitcherFrame';
+import type { CameraFrameProcessor } from '../stitching/CameraFrame';
 
 
 // React Native looks up the component by its NATIVE name.
@@ -69,7 +69,7 @@ export interface ARCameraViewProps {
   /**
    * Optional host worklet invoked once per AR frame, ALONGSIDE the
    * lib's first-party stitching (composition, not replacement).  The
-   * worklet receives a `StitcherFrame` enriched with AR metadata —
+   * worklet receives a `CameraFrame` enriched with AR metadata —
    * `source: 'ar'`, world-space `pose` (rotation + translation),
    * `arTrackingState`, and (when supported) `arDepth` / `arAnchors`.
    *
@@ -84,7 +84,7 @@ export interface ARCameraViewProps {
    * different runtimes with different frame shapes, hence the separate
    * prop.
    */
-  arFrameProcessor?: StitcherFrameProcessor;
+  arFrameProcessor?: CameraFrameProcessor;
 }
 
 
@@ -189,7 +189,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       }
       const proxy = (globalThis as {
         __stitcherProxy?: {
-          install(fn: StitcherFrameProcessor): string;
+          install(fn: CameraFrameProcessor): string;
           uninstall(id: string): void;
         };
       }).__stitcherProxy;

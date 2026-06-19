@@ -66,7 +66,7 @@ import type {
 } from 'react-native-vision-camera';
 
 import { useARSession } from '../ar/useARSession';
-import type { StitcherFrameProcessor } from '../stitching/StitcherFrame';
+import type { CameraFrameProcessor } from '../stitching/CameraFrame';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
@@ -680,11 +680,11 @@ export interface CameraProps {
    *     worklet to fire on vc's Frame Processor runtime.
    *
    * ```tsx
-   * import { Camera, useFrameProcessor, type StitcherFrame }
+   * import { Camera, useFrameProcessor, type CameraFrame }
    *   from 'react-native-image-stitcher';
    *
    * function MyScreen() {
-   *   const fp = useFrameProcessor((frame: StitcherFrame) => {
+   *   const fp = useFrameProcessor((frame: CameraFrame) => {
    *     'worklet';
    *     // ...
    *   }, []);
@@ -705,12 +705,12 @@ export interface CameraProps {
    * ```tsx
    * import {
    *   Camera, useFrameProcessor, useStitcherWorklet,
-   *   type StitcherFrame,
+   *   type CameraFrame,
    * } from 'react-native-image-stitcher';
    *
    * function MyScreen() {
    *   const stitcher = useStitcherWorklet();
-   *   const fp = useFrameProcessor((frame: StitcherFrame) => {
+   *   const fp = useFrameProcessor((frame: CameraFrame) => {
    *     'worklet';
    *     hostPreLogic(frame);
    *     stitcher.call(frame);   // ← first-party stitching
@@ -755,14 +755,14 @@ export interface CameraProps {
   /**
    * AR-mode host worklet, invoked once per ARKit / ARCore frame
    * ALONGSIDE the lib's first-party stitching (composition, not
-   * replacement).  Receives a `StitcherFrame` tagged `source: 'ar'`
+   * replacement).  Receives a `CameraFrame` tagged `source: 'ar'`
    * with world-space `pose` + `arTrackingState`.  Only fires in AR
    * capture (`captureSource === 'ar'`); the non-AR equivalent is
    * `frameProcessor` above (the two modes use different runtimes and
    * frame shapes).  Must be a `'worklet'`-prefixed function; if the
    * native install is unavailable it silently never fires.
    */
-  arFrameProcessor?: StitcherFrameProcessor;
+  arFrameProcessor?: CameraFrameProcessor;
 
   // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────────
   /**
