@@ -126,18 +126,18 @@ import type {
   FrameProcessorPlugin,
 } from 'react-native-vision-camera';
 
-import type { StitcherFrame } from './StitcherFrame';
+import type { CameraFrame } from './CameraFrame';
 
 /**
  * Frames the lib's stitching worklet accepts.  Accepting either a
  * vc `Frame` (what the host's `useFrameProcessor` body sees) or the
- * lib's `StitcherFrame` (what the lib's `useFrameProcessor` body
+ * lib's `CameraFrame` (what the lib's `useFrameProcessor` body
  * sees) keeps the same `useStitcherWorklet` usable from both kinds
  * of host worklet bodies without a cast on the call site.  The
  * worklet only reads `width` / `height`; the rest of the frame
  * object is forwarded verbatim to the native plugin.
  */
-export type StitcherWorkletInput = Frame | StitcherFrame;
+export type StitcherWorkletInput = Frame | CameraFrame;
 
 
 export interface UseStitcherWorkletOptions {
@@ -173,7 +173,7 @@ export interface UseStitcherWorkletOptions {
 
 export interface StitcherWorkletHandle {
   /**
-   * Worklet function: pass a `StitcherFrame` to perform one frame of
+   * Worklet function: pass a `CameraFrame` to perform one frame of
    * the lib's first-party stitching (throttle + pose synthesis +
    * native plugin call).  Safe to call from inside another
    * `'worklet'`-prefixed function (this is the canonical
@@ -341,7 +341,7 @@ export function useStitcherWorklet(
     // party callback installed in `RNSARWorkletRuntime`).  Calling
     // the vc Frame Processor plugin here would throw
     // `getPropertyAsObject: property '__frame' is undefined`
-    // because AR frames are `StitcherFrameHostObject` instances
+    // because AR frames are `CameraFrameHostObject` instances
     // and don't carry the vc `Frame` proxy's JSI marker.  The
     // throw is caught silently by the per-worklet error handler
     // (`RNSARWorkletRuntime.mm:284-301`) and bubbles up only to
@@ -353,13 +353,13 @@ export function useStitcherWorklet(
     // hook (the AR-side stitching path runs natively, independent
     // of the composed worklet body).
     //
-    // The `(frame as StitcherFrame).source` cast is safe: vc
+    // The `(frame as CameraFrame).source` cast is safe: vc
     // `Frame` doesn't carry a `source` property so the check
     // returns `undefined !== 'ar'` → `true`, and the worklet
     // proceeds normally.  Only frames that explicitly tag
     // themselves as AR-source (which our native AR dispatcher
-    // does — see `StitcherFrameHostObject.mm`) get short-circuited.
-    if ((frame as StitcherFrame).source === 'ar') return;
+    // does — see `CameraFrameHostObject.mm`) get short-circuited.
+    if ((frame as CameraFrame).source === 'ar') return;
 
     // Throttle (verbatim from useFrameProcessorDriver).
     sharedFrameCounter.value += 1;
@@ -388,7 +388,7 @@ export function useStitcherWorklet(
     const fy = h * sharedFyNumerator.value;
 
     // vc's `plugin.call` is typed against vc's `Frame`.  The worklet
-    // accepts the union (`Frame | StitcherFrame`); cast through
+    // accepts the union (`Frame | CameraFrame`); cast through
     // `unknown` because the union doesn't satisfy vc's interface
     // even though structurally both members do.
     plugin.call(frame as unknown as Frame, {

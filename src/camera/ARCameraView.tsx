@@ -32,6 +32,7 @@
 
 import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import {
+  NativeEventEmitter,
   NativeModules,
   Platform,
   StyleSheet,
@@ -42,7 +43,8 @@ import {
 } from 'react-native';
 
 import { ensureStitcherProxyInstalled } from '../stitching/ensureStitcherProxyInstalled';
-import type { StitcherFrameProcessor } from '../stitching/StitcherFrame';
+import type { CameraFrameProcessor } from '../stitching/CameraFrame';
+import type { ARFrameMeta } from '../stitching/ARFrameMeta';
 
 
 // React Native looks up the component by its NATIVE name.
@@ -69,7 +71,7 @@ export interface ARCameraViewProps {
   /**
    * Optional host worklet invoked once per AR frame, ALONGSIDE the
    * lib's first-party stitching (composition, not replacement).  The
-   * worklet receives a `StitcherFrame` enriched with AR metadata —
+   * worklet receives a `CameraFrame` enriched with AR metadata —
    * `source: 'ar'`, world-space `pose` (rotation + translation),
    * `arTrackingState`, and (when supported) `arDepth` / `arAnchors`.
    *
@@ -84,7 +86,65 @@ export interface ARCameraViewProps {
    * different runtimes with different frame shapes, hence the separate
    * prop.
    */
-  arFrameProcessor?: StitcherFrameProcessor;
+  arFrameProcessor?: CameraFrameProcessor;
+  /**
+   * Opt in to per-frame AR depth extraction (`CameraFrame.arDepth`).
+   * Default `false` — depth is the costliest field (a per-frame buffer
+   * copy), so it stays off until a worklet needs it.
+   */
+  enableDepth?: boolean;
+  /**
+   * Opt in to per-frame AR anchor extraction (`CameraFrame.arAnchors` —
+   * detected planes / augmented images).  Default `false`.
+   */
+  enableAnchors?: boolean;
+  /**
+   * Opt in to scene-reconstruction mesh anchors (`type: 'mesh'` entries
+   * in `arAnchors`, carrying `meshGeometry`).  Default `false`.  iOS
+   * enables ARKit `sceneReconstruction` (LiDAR devices); Android
+   * reconstructs a rough mesh from the depth map.  Expensive — only on
+   * when needed.  Implies depth on Android.
+   */
+  enableMesh?: boolean;
+  /**
+   * Which plane orientations to surface in `arAnchors` (requires
+   * `enableAnchors`).  Default `'vertical'` — the orientation the
+   * plane-projected stitch path has always used, so existing callers
+   * see no change.
+   *
+   *   - `'vertical'`   — walls / doors / fixtures (the default)
+   *   - `'horizontal'` — floors / tables / seats
+   *   - `'both'`       — surface every detected plane
+   *
+   * Platform notes: iOS changes ARKit `planeDetection` to match (a
+   * live session reconfigure).  Android always detects both planes
+   * (ARCore needs horizontal planes to bootstrap tracking) and simply
+   * FILTERS which orientations reach `arAnchors`, so the JS-observable
+   * set is identical on both platforms.
+   */
+  planeDetection?: 'vertical' | 'horizontal' | 'both';
+
+  /**
+   * v0.18.0 — LIGHT per-frame AR metadata callback, invoked on the JS
+   * MAIN thread (NOT a worklet).  When provided, the native AR session
+   * builds an {@link ARFrameMeta} per frame and emits it as a device
+   * event; this component subscribes and calls the handler.  Worklet-free
+   * — this is the recommended way to read AR pose / tracking / anchor /
+   * intrinsics / depth-dims / mesh-counts data (the `arFrameProcessor`
+   * worklet can only safely surface a shared value; see `ARFrameMeta`).
+   *
+   * Costly fields are gated: `depth` only when `enableDepth`, `mesh` only
+   * when `enableMesh`, `anchors` only when `enableAnchors`;
+   * `intrinsics` / `pose` / `trackingState` are always present.  Emission
+   * is throttled to {@link arFrameMetaInterval} ms.
+   */
+  onArFrame?: (meta: ARFrameMeta) => void;
+
+  /**
+   * v0.18.0 — throttle interval (ms) for {@link onArFrame}.  Default `100`
+   * (≈ 10 Hz).  No effect unless `onArFrame` is provided.
+   */
+  arFrameMetaInterval?: number;
 }
 
 
@@ -167,7 +227,17 @@ type RecordingCallbacks = {
 
 export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
   function ARCameraView(
-    { style, guidance, arFrameProcessor },
+    {
+      style,
+      guidance,
+      arFrameProcessor,
+      enableDepth,
+      enableAnchors,
+      enableMesh,
+      planeDetection,
+      onArFrame,
+      arFrameMetaInterval,
+    },
     ref,
   ): React.JSX.Element {
     // Held across the start→stop lifecycle so stopRecording's
@@ -189,7 +259,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       }
       const proxy = (globalThis as {
         __stitcherProxy?: {
-          install(fn: StitcherFrameProcessor): string;
+          install(fn: CameraFrameProcessor): string;
           uninstall(id: string): void;
         };
       }).__stitcherProxy;
@@ -201,6 +271,96 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
         proxy.uninstall(id);
       };
     }, [arFrameProcessor]);
+
+    // Push the AR-metadata extraction config to native — gates the
+    // costly per-frame depth / anchor / mesh work (all off by default).
+    // Routed through `__stitcherProxy.setExtractionConfig`, read by the
+    // platform AR extraction.  iOS ADDITIONALLY toggles ARKit
+    // `sceneReconstruction` for mesh (a session-config change, not a
+    // per-frame gate); Android reconstructs mesh from the depth map and
+    // needs no session change.
+    useEffect(() => {
+      const depth = enableDepth === true;
+      const anchors = enableAnchors === true;
+      const mesh = enableMesh === true;
+      if (ensureStitcherProxyInstalled()) {
+        (globalThis as {
+          __stitcherProxy?: {
+            setExtractionConfig?(d: boolean, a: boolean, m: boolean): void;
+          };
+        }).__stitcherProxy?.setExtractionConfig?.(depth, anchors, mesh);
+      }
+      if (Platform.OS === 'ios') {
+        const session = (NativeModules as Record<string, unknown>)
+          .RNSARSession as
+          | { setSceneReconstructionEnabled?(on: boolean): void }
+          | undefined;
+        session?.setSceneReconstructionEnabled?.(mesh);
+      }
+    }, [enableDepth, enableAnchors, enableMesh]);
+
+    // Push the plane-detection mode to native.  Unlike the extraction
+    // config above this is a SESSION setting, so it routes through the
+    // RNSARSession native module on BOTH platforms (iOS reconfigures
+    // ARKit `planeDetection`; Android stores an emission filter — see
+    // the prop docs).  Defaults to `'vertical'` to preserve the
+    // plane-projected stitch path's long-standing behaviour.
+    useEffect(() => {
+      const mode = planeDetection ?? 'vertical';
+      const session = (NativeModules as Record<string, unknown>)
+        .RNSARSession as
+        | { setPlaneDetection?(mode: string): void }
+        | undefined;
+      session?.setPlaneDetection?.(mode);
+    }, [planeDetection]);
+
+    // v0.18.0 — onArFrame device-event wiring (worklet-free, main thread).
+    //
+    // The latest `onArFrame` is held in a ref so the subscription effect
+    // depends only on whether a handler is present + the interval — NOT on
+    // the handler's identity (which typically changes every render).  This
+    // avoids tearing down + re-establishing the native event subscription
+    // (and the costly `setArFrameMetaEnabled(true)` extraction toggle) on
+    // every parent re-render.
+    const onArFrameRef = useRef<((meta: ARFrameMeta) => void) | undefined>(
+      onArFrame,
+    );
+    useEffect(() => {
+      onArFrameRef.current = onArFrame;
+    }, [onArFrame]);
+
+    const arFrameEnabled = onArFrame != null;
+    useEffect(() => {
+      if (!arFrameEnabled) {
+        return undefined;
+      }
+      const session = (NativeModules as Record<string, unknown>)
+        .RNSARSession as
+        | {
+            setArFrameMetaEnabled?(enabled: boolean, intervalMs: number): void;
+          }
+        | undefined;
+      if (session?.setArFrameMetaEnabled == null) {
+        // Native module / method unavailable (e.g. web, or a native build
+        // predating the event channel): no-op, no crash.
+        return undefined;
+      }
+      const intervalMs = arFrameMetaInterval ?? 100;
+      session.setArFrameMetaEnabled(true, intervalMs);
+      const emitter = new NativeEventEmitter(
+        NativeModules.RNSARSession as never,
+      );
+      const sub = emitter.addListener(
+        'RNImageStitcherARFrame',
+        (meta: ARFrameMeta) => {
+          onArFrameRef.current?.(meta);
+        },
+      );
+      return () => {
+        sub.remove();
+        session.setArFrameMetaEnabled?.(false, intervalMs);
+      };
+    }, [arFrameEnabled, arFrameMetaInterval]);
 
     useImperativeHandle(ref, () => ({
       takePhoto: async (options = {}) => {

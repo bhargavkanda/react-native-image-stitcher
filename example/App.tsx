@@ -18,6 +18,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Platform,
   Pressable,
   SafeAreaView,
   StatusBar,
@@ -53,7 +54,8 @@ import {
   type FramesDroppedInfo,
   type IncrementalState,
   type PanMode,
-  type StitcherFrame,
+  type CameraFrame,
+  type ARFrameMeta,
 } from 'react-native-image-stitcher';
 
 
@@ -194,13 +196,27 @@ function App(): React.JSX.Element {
   // `__stitcherProxy` is what fires the worklet (the
   // `frameProcessor` prop has no effect on AR mode because vc's
   // `<Camera>` isn't mounted in that path).
+  // v0.18.0 — AR depth/anchor/mesh/intrinsics readout, driven by the
+  // worklet-FREE `onArFrame` callback (see `handleArFrame` below).
+  //
+  // Previously this rode a worklets-core SHARED VALUE written from inside
+  // the AR worklet: capturing a `createRunOnJS` callback in an AR worklet
+  // makes worklets-core's closure-wrap recurse without termination →
+  // SIGBUS the instant AR mode mounts, so a shared value (a host object the
+  // wrapper references rather than deep-copies) was the only safe channel.
+  // `onArFrame` removes that hazard entirely: native builds the metadata
+  // and emits a device event, and the handler runs on the JS MAIN thread
+  // with a plain `setState`.  THIS is the pattern AR-metadata consumers
+  // should use — no worklet, no shared value, no polling.
+  const [arMetaText, setArMetaText] = useState('AR: (idle)');
+
   const stitcher = useStitcherWorklet();
   const exampleFrameProcessor = useFrameProcessor(
     (frame: Frame) => {
       'worklet';
       // First-party stitching (v0.11.0 composition).  `stitcher.call`
       // takes a raw vision-camera `Frame` directly (its input type is
-      // `Frame | StitcherFrame`) and no-ops on AR-source frames because
+      // `Frame | CameraFrame`) and no-ops on AR-source frames because
       // AR stitching runs natively via the AR-side dispatcher, not the
       // vc plugin.  See the `useStitcherWorklet` module header.
       stitcher.call(frame);
@@ -212,21 +228,45 @@ function App(): React.JSX.Element {
     [stitcher.call, fireFrameProcessorLog],
   );
 
-  // AR-mode host worklet (the `arFrameProcessor` prop).  Unlike
-  // `frameProcessor` above (vision-camera, non-AR only), this fires once
-  // per ARKit / ARCore frame while in AR capture, dispatched natively via
-  // `__stitcherProxy` ALONGSIDE first-party stitching.  Here it just feeds
-  // the SAME tick log with source `'ar'`, so the per-second log line's
-  // `cumulative: ar=N` climbing is direct proof the AR fan-out is live.
-  // Must be a `'worklet'`; kept stable via useMemo so it isn't
-  // re-registered on every render.
-  const demoArFrameProcessor = useMemo(() => {
-    const fp = (frame: StitcherFrame) => {
-      'worklet';
-      fireFrameProcessorLog(frame.timestamp ?? 0, frame.source ?? 'ar');
-    };
-    return fp;
-  }, [fireFrameProcessorLog]);
+  // NOTE: this example intentionally does NOT pass an `arFrameProcessor`.
+  // All AR data reaches JS through the worklet-free `onArFrame` callback
+  // (see `handleArFrame` below), which is the recommended path.  Mounting
+  // an `arFrameProcessor` (even a no-op) turns on the heavy worklet
+  // extraction path; with `enableMesh` that path marshals the LiDAR
+  // ARMeshAnchor each frame and currently faults on mesh warmup — onArFrame
+  // avoids it entirely (it reports mesh as light counts, no buffer copy).
+
+  // v0.18.0 — the worklet-free AR metadata handler.  Runs on the JS MAIN
+  // thread (NOT a worklet), so capturing `setArMetaText` is perfectly safe.
+  // Formats the light `ARFrameMeta` (pose / tracking / intrinsics / depth
+  // dims / anchor + mesh counts) into the green on-screen readout.
+  const arFrameCountRef = useRef(0);
+  const handleArFrame = useCallback((m: ARFrameMeta) => {
+    arFrameCountRef.current += 1;
+    let vPlanes = 0;
+    let hPlanes = 0;
+    for (const a of m.anchors) {
+      if (a.type === 'plane') {
+        if (a.alignment === 'vertical') vPlanes += 1;
+        else if (a.alignment === 'horizontal') hPlanes += 1;
+      }
+    }
+    const depthStr = m.depth
+      ? `${m.depth.width}x${m.depth.height}${m.depth.hasConfidence ? '+conf' : ''}`
+      : 'none';
+    const intrStr = m.intrinsics
+      ? `fx${Math.round(m.intrinsics.fx)} ${m.intrinsics.imageWidth}x${m.intrinsics.imageHeight}`
+      : 'none';
+    const meshStr = m.mesh
+      ? `${m.mesh.anchorCount}/${m.mesh.vertexCount}v/${m.mesh.faceCount}f`
+      : 'none';
+    setArMetaText(
+      `AR#${arFrameCountRef.current} track=${m.trackingState} ` +
+        `depth=${depthStr} anchors=${m.anchors.length} ` +
+        `planes[v:${vPlanes} h:${hPlanes}] mesh=${meshStr} ` +
+        `intr=${intrStr}`,
+    );
+  }, []);
 
   // v0.10.0 (PR B) — visible pill that surfaces refinePanorama
   // progress events.  Subscribes to the IncrementalStateUpdate
@@ -461,13 +501,25 @@ function App(): React.JSX.Element {
           capturePreviewActions={capturePreviewActions}
           onCapturePreviewClose={closePreview}
           frameProcessor={exampleFrameProcessor}
-          arFrameProcessor={demoArFrameProcessor}
+          onArFrame={handleArFrame}
+          enableDepth
+          enableAnchors
+          planeDetection="both"
           onCapture={handleCapture}
           onCaptureSourceChange={handleCaptureSourceChange}
           onLensChange={handleLensChange}
           onFramesDropped={handleFramesDropped}
           onError={handleError}
         />
+
+        {/* Always rendered (not __DEV__-gated) so it's visible in the
+            Release build used to verify AR metadata without the Debug
+            inspector's Hermes allocation tracker. */}
+        <View style={styles.arMetaOverlay} pointerEvents="none">
+          <Text style={styles.arMetaText} numberOfLines={3}>
+            {arMetaText}
+          </Text>
+        </View>
 
         {refine !== null && (
           <View
@@ -541,6 +593,24 @@ function App(): React.JSX.Element {
 
 
 const styles = StyleSheet.create({
+  // AR metadata readout — fed from the worklet-free `onArFrame` callback
+  // (see `handleArFrame`).  Bottom strip so it doesn't collide with the
+  // top-left dev toggles or the guidance banner.
+  arMetaOverlay: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    bottom: 96,
+    backgroundColor: 'rgba(0, 0, 0, 0.62)',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+  },
+  arMetaText: {
+    color: '#7CFC9A',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
   // Shared dev toggle chip (top-left stack); `top` set per-instance.
   devToggle: {
     position: 'absolute',

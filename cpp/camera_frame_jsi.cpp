@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// stitcher_frame_jsi.cpp — implementation of the shared C++ JSI
-// host object.  See stitcher_frame_jsi.hpp for class docs.
+// camera_frame_jsi.cpp — implementation of the shared C++ JSI
+// host object.  See camera_frame_jsi.hpp for class docs.
 
-#include "stitcher_frame_jsi.hpp"
+#include "camera_frame_jsi.hpp"
 
+#include <cstring>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace retailens {
 
@@ -20,10 +22,10 @@ using facebook::jsi::Runtime;
 using facebook::jsi::String;
 using facebook::jsi::Value;
 
-StitcherFrameJsiHostObject::StitcherFrameJsiHostObject(StitcherFrameData data)
+CameraFrameJsiHostObject::CameraFrameJsiHostObject(CameraFrameData data)
     : _data(std::move(data)), _isValid(true) {}
 
-void StitcherFrameJsiHostObject::invalidate() {
+void CameraFrameJsiHostObject::invalidate() {
   _isValid = false;
   // Release the pixel reader immediately so the underlying camera
   // buffer can be reclaimed.  ARKit's ARFrame uses a pooled
@@ -33,7 +35,7 @@ void StitcherFrameJsiHostObject::invalidate() {
   _data.pixelReader.reset();
 }
 
-std::vector<PropNameID> StitcherFrameJsiHostObject::getPropertyNames(
+std::vector<PropNameID> CameraFrameJsiHostObject::getPropertyNames(
     Runtime& rt) {
   std::vector<PropNameID> names;
   names.push_back(PropNameID::forUtf8(rt, "isValid"));
@@ -50,10 +52,21 @@ std::vector<PropNameID> StitcherFrameJsiHostObject::getPropertyNames(
   if (!_data.arTrackingState.empty()) {
     names.push_back(PropNameID::forUtf8(rt, "arTrackingState"));
   }
+  if (_data.arDepth.has_value()) {
+    names.push_back(PropNameID::forUtf8(rt, "arDepth"));
+  }
+  // AR frames expose `arAnchors` (possibly an empty array); non-AR
+  // frames omit it (JS sees `undefined`).
+  if (_data.source == "ar") {
+    names.push_back(PropNameID::forUtf8(rt, "arAnchors"));
+  }
+  if (_data.hasIntrinsics) {
+    names.push_back(PropNameID::forUtf8(rt, "intrinsics"));
+  }
   return names;
 }
 
-Value StitcherFrameJsiHostObject::get(Runtime& rt,
+Value CameraFrameJsiHostObject::get(Runtime& rt,
                                        const PropNameID& propName) {
   const std::string name = propName.utf8(rt);
 
@@ -106,7 +119,7 @@ Value StitcherFrameJsiHostObject::get(Runtime& rt,
     // object's lifetime beyond what the runtime intended.  When the
     // runtime releases its shared_ptr (after dispatch), the weak
     // ref expires and toArrayBuffer() throws on next call.
-    auto weakSelf = std::weak_ptr<StitcherFrameJsiHostObject>(shared_from_this());
+    auto weakSelf = std::weak_ptr<CameraFrameJsiHostObject>(shared_from_this());
     HostFunctionType fn = [weakSelf](Runtime& runtime,
                                        const Value& thisVal,
                                        const Value* args,
@@ -205,9 +218,139 @@ Value StitcherFrameJsiHostObject::get(Runtime& rt,
         PropNameID::forUtf8(rt, "toArrayBuffer"), 0, fn);
   }
 
-  // Unknown property — return undefined (matches JS object
-  // semantics).  Worklets accessing arDepth / arAnchors hit this
-  // path in v0.8.0 (stubbed to undefined; populated in v0.8.1+).
+  if (name == "arDepth") {
+    // Normalise both platforms to ONE JS shape:
+    //   { width, height, depthMap: Float32 metres, confidenceMap?: Uint8 0..2 }
+    if (!_data.arDepth.has_value()) return Value::undefined();
+    const ArDepth& d = *_data.arDepth;
+    const std::size_t px =
+        static_cast<std::size_t>(d.width) * static_cast<std::size_t>(d.height);
+    if (px == 0) return Value::undefined();
+
+    Object depth(rt);
+    depth.setProperty(rt, "width", Value(static_cast<double>(d.width)));
+    depth.setProperty(rt, "height", Value(static_cast<double>(d.height)));
+
+    // depthMap — always emitted as Float32 metres (px * 4 bytes).
+    auto depthBuf = std::make_shared<OwningPixelBuffer>(px * sizeof(float));
+    auto* out = reinterpret_cast<float*>(depthBuf->bytes());
+    std::vector<uint8_t> conf;  // Uint8 0..2 (empty => no confidenceMap)
+
+    if (d.format == "f32m") {
+      // iOS ARKit: depthBytes already Float32 metres; confidence is a
+      // separate Uint8 (ARConfidenceLevel 0..2) — pass both through.
+      if (d.depthBytes.size() >= px * sizeof(float)) {
+        std::memcpy(out, d.depthBytes.data(), px * sizeof(float));
+      }
+      if (d.confidenceBytes.size() >= px) {
+        conf.assign(d.confidenceBytes.begin(), d.confidenceBytes.begin() + px);
+      }
+    } else if (d.format == "u16packed") {
+      // Android ARCore DEPTH16: low 13 bits = millimetres, high 3 bits
+      // = confidence 0..7.  Convert mm->metres and map confidence 0..7
+      // -> 0..2 so JS sees the same scale as iOS.
+      const auto* src = reinterpret_cast<const uint16_t*>(d.depthBytes.data());
+      const std::size_t srcCount = d.depthBytes.size() / sizeof(uint16_t);
+      conf.resize(px, 0);
+      for (std::size_t i = 0; i < px; ++i) {
+        const uint16_t raw = (i < srcCount) ? src[i] : 0;
+        out[i] = static_cast<float>(raw & 0x1FFF) / 1000.0f;
+        const uint8_t c7 = static_cast<uint8_t>((raw >> 13) & 0x7);
+        conf[i] = (c7 <= 2) ? 0 : (c7 <= 5 ? 1 : 2);
+      }
+    } else {
+      return Value::undefined();
+    }
+
+    depth.setProperty(rt, "depthMap", facebook::jsi::ArrayBuffer(rt, depthBuf));
+    if (!conf.empty()) {
+      auto confBuf = std::make_shared<OwningPixelBuffer>(px);
+      std::memcpy(confBuf->bytes(), conf.data(), px);
+      depth.setProperty(rt, "confidenceMap",
+                        facebook::jsi::ArrayBuffer(rt, confBuf));
+    }
+    return depth;
+  }
+
+  if (name == "arAnchors") {
+    // AR frames return an array (possibly empty); non-AR returns
+    // undefined (matches the JS `arAnchors?: ARAnchor[]` contract).
+    if (_data.source != "ar") return Value::undefined();
+    Array anchors(rt, _data.arAnchors.size());
+    for (std::size_t i = 0; i < _data.arAnchors.size(); ++i) {
+      const ArAnchor& a = _data.arAnchors[i];
+      Object obj(rt);
+      obj.setProperty(rt, "id", String::createFromUtf8(rt, a.id));
+      obj.setProperty(rt, "type", String::createFromUtf8(rt, a.type));
+      Array transform(rt, 16);
+      for (std::size_t j = 0; j < 16; ++j) {
+        transform.setValueAtIndex(rt, j, Value(a.transform[j]));
+      }
+      obj.setProperty(rt, "transform", transform);
+      if (!a.alignment.empty()) {
+        obj.setProperty(rt, "alignment",
+                        String::createFromUtf8(rt, a.alignment));
+      }
+      if (a.hasExtent) {
+        Array extent(rt, 2);
+        extent.setValueAtIndex(rt, 0, Value(a.extentX));
+        extent.setValueAtIndex(rt, 1, Value(a.extentZ));
+        obj.setProperty(rt, "extent", extent);
+      }
+      if (!a.classification.empty()) {
+        obj.setProperty(rt, "classification",
+                        String::createFromUtf8(rt, a.classification));
+      }
+      if (a.hasMesh) {
+        // Scene-reconstruction geometry — bytes emitted verbatim as
+        // ArrayBuffers (vertices=Float32, faces=Uint32, classifications=Uint8).
+        Object mesh(rt);
+        auto vbuf = std::make_shared<OwningPixelBuffer>(a.meshVertices.size());
+        if (!a.meshVertices.empty()) {
+          std::memcpy(vbuf->bytes(), a.meshVertices.data(), a.meshVertices.size());
+        }
+        mesh.setProperty(rt, "vertices", facebook::jsi::ArrayBuffer(rt, vbuf));
+        auto fbuf = std::make_shared<OwningPixelBuffer>(a.meshFaces.size());
+        if (!a.meshFaces.empty()) {
+          std::memcpy(fbuf->bytes(), a.meshFaces.data(), a.meshFaces.size());
+        }
+        mesh.setProperty(rt, "faces", facebook::jsi::ArrayBuffer(rt, fbuf));
+        if (!a.meshClassifications.empty()) {
+          auto cbuf =
+              std::make_shared<OwningPixelBuffer>(a.meshClassifications.size());
+          std::memcpy(cbuf->bytes(), a.meshClassifications.data(),
+                      a.meshClassifications.size());
+          mesh.setProperty(rt, "classifications",
+                           facebook::jsi::ArrayBuffer(rt, cbuf));
+        }
+        obj.setProperty(rt, "meshGeometry", mesh);
+      }
+      anchors.setValueAtIndex(rt, i, obj);
+    }
+    return anchors;
+  }
+
+  // Per-frame camera intrinsics (AR frames only).  `intrinsics ===
+  // undefined` when not populated (non-AR frames).  Shape mirrors the
+  // JS `CameraFrame.intrinsics`: fx/fy/cx/cy in pixels + the capture
+  // resolution they're expressed at.
+  if (name == "intrinsics") {
+    if (!_data.hasIntrinsics) return Value::undefined();
+    Object intrinsics(rt);
+    intrinsics.setProperty(rt, "fx", Value(_data.fx));
+    intrinsics.setProperty(rt, "fy", Value(_data.fy));
+    intrinsics.setProperty(rt, "cx", Value(_data.cx));
+    intrinsics.setProperty(rt, "cy", Value(_data.cy));
+    intrinsics.setProperty(
+        rt, "imageWidth",
+        Value(static_cast<double>(_data.intrinsicsImageWidth)));
+    intrinsics.setProperty(
+        rt, "imageHeight",
+        Value(static_cast<double>(_data.intrinsicsImageHeight)));
+    return intrinsics;
+  }
+
+  // Unknown property — return undefined (matches JS object semantics).
   return Value::undefined();
 }
 

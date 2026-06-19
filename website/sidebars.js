@@ -17,6 +17,7 @@ const sidebars = {
         'orientation',
         'flash-and-lenses',
         'recipes',
+        'dev-testing',
       ],
     },
     'capture-result',

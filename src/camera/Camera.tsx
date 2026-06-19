@@ -66,7 +66,8 @@ import type {
 } from 'react-native-vision-camera';
 
 import { useARSession } from '../ar/useARSession';
-import type { StitcherFrameProcessor } from '../stitching/StitcherFrame';
+import type { CameraFrameProcessor } from '../stitching/CameraFrame';
+import type { ARFrameMeta } from '../stitching/ARFrameMeta';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
@@ -680,11 +681,11 @@ export interface CameraProps {
    *     worklet to fire on vc's Frame Processor runtime.
    *
    * ```tsx
-   * import { Camera, useFrameProcessor, type StitcherFrame }
+   * import { Camera, useFrameProcessor, type CameraFrame }
    *   from 'react-native-image-stitcher';
    *
    * function MyScreen() {
-   *   const fp = useFrameProcessor((frame: StitcherFrame) => {
+   *   const fp = useFrameProcessor((frame: CameraFrame) => {
    *     'worklet';
    *     // ...
    *   }, []);
@@ -705,12 +706,12 @@ export interface CameraProps {
    * ```tsx
    * import {
    *   Camera, useFrameProcessor, useStitcherWorklet,
-   *   type StitcherFrame,
+   *   type CameraFrame,
    * } from 'react-native-image-stitcher';
    *
    * function MyScreen() {
    *   const stitcher = useStitcherWorklet();
-   *   const fp = useFrameProcessor((frame: StitcherFrame) => {
+   *   const fp = useFrameProcessor((frame: CameraFrame) => {
    *     'worklet';
    *     hostPreLogic(frame);
    *     stitcher.call(frame);   // ← first-party stitching
@@ -755,14 +756,63 @@ export interface CameraProps {
   /**
    * AR-mode host worklet, invoked once per ARKit / ARCore frame
    * ALONGSIDE the lib's first-party stitching (composition, not
-   * replacement).  Receives a `StitcherFrame` tagged `source: 'ar'`
+   * replacement).  Receives a `CameraFrame` tagged `source: 'ar'`
    * with world-space `pose` + `arTrackingState`.  Only fires in AR
    * capture (`captureSource === 'ar'`); the non-AR equivalent is
    * `frameProcessor` above (the two modes use different runtimes and
    * frame shapes).  Must be a `'worklet'`-prefixed function; if the
    * native install is unavailable it silently never fires.
    */
-  arFrameProcessor?: StitcherFrameProcessor;
+  arFrameProcessor?: CameraFrameProcessor;
+
+  /**
+   * Opt in to per-frame AR depth on the `arFrameProcessor` frame
+   * (`CameraFrame.arDepth`).  Default `false` — depth is the costliest
+   * field (a per-frame buffer copy), so it's off until you need it.
+   */
+  enableDepth?: boolean;
+  /**
+   * Opt in to per-frame AR anchors (`CameraFrame.arAnchors` — detected
+   * planes / images).  Default `false`.
+   */
+  enableAnchors?: boolean;
+  /**
+   * Opt in to scene-reconstruction mesh anchors (`type: 'mesh'` in
+   * `arAnchors`, with `meshGeometry`).  Default `false`.  iOS enables
+   * ARKit `sceneReconstruction` (LiDAR); Android reconstructs a rough
+   * mesh from the depth map.  Expensive — only on when needed.
+   */
+  enableMesh?: boolean;
+  /**
+   * Which plane orientations to surface in `CameraFrame.arAnchors`
+   * (requires `enableAnchors`; AR capture only).  Default `'vertical'`
+   * — the orientation the plane-projected stitch path has always used.
+   * `'horizontal'` surfaces floors / tables; `'both'` surfaces every
+   * detected plane.  See `ARCameraView` for the per-platform details.
+   */
+  planeDetection?: 'vertical' | 'horizontal' | 'both';
+
+  /**
+   * v0.18.0 — LIGHT per-frame AR metadata callback, invoked on the JS
+   * MAIN thread (NOT a worklet).  Only fires in AR capture
+   * (`captureSource === 'ar'`).  Receives an {@link ARFrameMeta} carrying
+   * pose, tracking state, intrinsics, and (when the matching `enable*`
+   * prop is on) depth dimensions, anchors, and mesh counts.
+   *
+   * This is the recommended way to read AR metadata: it sidesteps the
+   * worklet path entirely (the `arFrameProcessor` worklet can only safely
+   * surface a worklets-core shared value, because capturing a host
+   * callback crashes the worklet closure-wrap).  Native builds the meta
+   * and emits a device event; `<Camera>` threads the handler through to
+   * `<ARCameraView>`, which subscribes and invokes it on the main thread.
+   */
+  onArFrame?: (meta: ARFrameMeta) => void;
+
+  /**
+   * v0.18.0 — throttle interval (ms) for {@link onArFrame}.  Default `100`
+   * (≈ 10 Hz).  No effect unless `onArFrame` is provided.
+   */
+  arFrameMetaInterval?: number;
 
   // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────────
   /**
@@ -1171,6 +1221,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
     onCapturePreviewClose,
     frameProcessor: hostFrameProcessor,
     arFrameProcessor,
+    enableDepth,
+    enableAnchors,
+    enableMesh,
+    planeDetection,
+    onArFrame,
+    arFrameMetaInterval,
     engine = 'batch-keyframe',
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'vertical',
@@ -2435,6 +2491,12 @@ export function Camera(props: CameraProps): React.JSX.Element {
           ref={arViewRef}
           style={StyleSheet.absoluteFill}
           arFrameProcessor={arFrameProcessor}
+          enableDepth={enableDepth}
+          enableAnchors={enableAnchors}
+          enableMesh={enableMesh}
+          planeDetection={planeDetection}
+          onArFrame={onArFrame}
+          arFrameMetaInterval={arFrameMetaInterval}
         />
       ) : (
         <CameraView

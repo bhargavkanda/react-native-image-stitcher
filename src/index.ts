@@ -259,10 +259,14 @@ export { useKeyframeStream } from './stitching/useKeyframeStream';
 // v0.8.0 — unified frame contract for the worklet processor.  Same
 // JS-visible shape regardless of capture mode (AR vs non-AR).
 export type {
-  StitcherFrame,
-  StitcherFrameProcessor,
+  CameraFrame,
+  CameraFrameProcessor,
   ARAnchor,
-} from './stitching/StitcherFrame';
+} from './stitching/CameraFrame';
+// v0.18.0 — LIGHT per-frame AR metadata delivered via the `onArFrame`
+// callback (main-thread, worklet-free).  See the type's docstring for why
+// it bypasses the worklet path.
+export type { ARFrameMeta } from './stitching/ARFrameMeta';
 // NOTE: the host-worklet / frame-stream hooks `useFrameProcessor`,
 // `useThrottledFrameProcessor` and `useFrameStream` (v0.8–v0.9) were
 // archived in the batch-keyframe cleanup — they drove the third-party

@@ -14,6 +14,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.18.0] — 2026-06-18
+
+### ⚠️ Breaking — `StitcherFrame` → `CameraFrame`
+
+The frame type a worklet receives is renamed **`StitcherFrame` →
+`CameraFrame`** (and `StitcherFrameProcessor` → `CameraFrameProcessor`).
+The shape is unchanged; only the names changed, to match the
+`arFrameProcessor` prop's role (it's the camera frame, not a "stitcher"
+frame). Update your imports:
+
+```diff
+- import { type StitcherFrame } from 'react-native-image-stitcher';
++ import { type CameraFrame } from 'react-native-image-stitcher';
+```
+
+### Added — AR depth, anchors, scene mesh, and intrinsics on `CameraFrame`
+
+The AR frame a worklet receives can now carry rich per-frame metadata,
+each behind an **opt-in `<Camera>` prop** (all off by default — you pay
+only for what you request):
+
+- **`enableDepth`** → `frame.arDepth` — a depth map normalised to **one
+  cross-platform shape**: `Float32` **metres** in `depthMap`, optional
+  `Uint8` `confidenceMap` (`0`/`1`/`2`). Sourced from ARKit
+  `sceneDepth`/`smoothedSceneDepth` (LiDAR) and the ARCore Depth API.
+- **`enableAnchors`** → `frame.arAnchors` — detected planes / images,
+  now with plane **`alignment`** (`'horizontal'` | `'vertical'`),
+  **`extent`** (`[x, z]` metres), and (iOS only) semantic
+  **`classification`** (`'wall'`/`'floor'`/…).
+- **`enableMesh`** → `type: 'mesh'` entries in `arAnchors` carrying
+  `meshGeometry` (`vertices`/`faces`/optional `classifications`
+  ArrayBuffers). iOS uses ARKit `ARMeshAnchor` scene reconstruction
+  (LiDAR); **Android reconstructs a rough mesh from the depth map**
+  (camera-local vertices, identity transform, no per-face
+  classifications) — so Android mesh requires a Depth-API device and is
+  geometry-only.
+- **`planeDetection`** (`'vertical'` (default) | `'horizontal'` |
+  `'both'`) — which plane orientations reach `arAnchors`. iOS changes
+  ARKit `planeDetection`; Android keeps detecting both (ARCore needs
+  horizontal planes to bootstrap tracking) and filters the emitted set,
+  so the JS-observable result is identical on both platforms. The
+  `'vertical'` default preserves the plane-projected stitch path's
+  long-standing behaviour.
+- **`frame.intrinsics`** — per-frame `fx`/`fy`/`cx`/`cy` (px) plus the
+  capture resolution, for lifting 2D image coordinates to 3D. Always
+  present on AR frames; `undefined` on non-AR (vision-camera) frames,
+  which have no intrinsics surface.
+
+Depth/anchor/mesh bytes are **eager-copied** out of the native frame at
+extraction time, so they're safe to read anywhere in the worklet (no
+buffer-lifetime footgun). See the new **[Testing the AR frame
+processor](https://bhargavkanda.github.io/react-native-image-stitcher/docs/dev-testing)**
+guide for a copy-paste verification recipe and the expected on-device
+output per platform.
+
+### Added — `onArFrame`: worklet-free AR metadata on the main thread
+
+`<Camera onArFrame={(meta) => …}>` is a new callback (also on
+`<ARCameraView>`) that delivers **light per-frame AR metadata on the JS
+main thread** — no worklet involved:
+
+```ts
+onArFrame={(m: ARFrameMeta) => {
+  // m.trackingState, m.pose, m.intrinsics,
+  // m.depth?.{width,height,hasConfidence},
+  // m.anchors[] (id/type/alignment/extent/classification/transform),
+  // m.mesh?.{anchorCount,vertexCount,faceCount}
+}}
+```
+
+Native builds the metadata each frame (reusing the same extraction as
+above) and emits it as a throttled event (default ≈10 Hz; tune with
+`arFrameMetaInterval` ms). Costly fields are gated by the same opt-ins
+(`depth` needs `enableDepth`, `mesh` needs `enableMesh`, `anchors` needs
+`enableAnchors`); `pose`/`trackingState`/`intrinsics` are always present.
+
+**This is the recommended way to read AR data in JS** for observe/measure
+use cases — it carries *light* data (dims, counts, intrinsics, plane
+geometry), never heavy buffers. For zero-copy access to raw per-frame
+buffers (depth pixels, mesh vertices) you'd use the `arFrameProcessor`
+worklet — see the limitation below.
+
+### Known limitation — `arFrameProcessor` worklets must capture nothing
+
+In this release an `arFrameProcessor` worklet must **not capture host
+objects** (a `runOnJS` callback or a shared value) in its closure:
+`react-native-worklets-core` deep-copies the worklet's closure when it's
+installed into the AR worklet runtime, and a captured host object makes
+that copy recurse until the stack overflows (a hard crash, on both Debug
+and Release). A worklet that captures **nothing** installs and runs fine.
+Until this is resolved upstream, **use `onArFrame`** (above) to get AR
+data into JS; reserve the worklet for capture-free per-frame work.
+
+### Known limitation — `enableMesh` is memory-heavy on sustained sessions
+
+`enableMesh` turns on ARKit **continuous scene reconstruction**, the most
+memory-intensive AR mode — the mesh model grows as you scan, and a long
+session with depth + mesh both on can be **jetsam-killed by iOS** after a
+few seconds on memory-constrained devices. `onArFrame` reports mesh as
+light *counts* (`anchorCount`/`vertexCount`/`faceCount`) without copying
+geometry, so reading mesh stats is cheap; it's the **underlying ARKit
+meshing** that's heavy. For now, enable `mesh` only for short captures (the
+example demos depth + planes + intrinsics with mesh off). Proper memory
+management for sustained meshing — bounded reconstruction, single depth
+semantic, on-demand geometry — lands with the 0.20 reconstruction work.
+
+### Internal — `StitcherFrameData` → `CameraFrameData`
+
+The shared C++ frame struct and its JSI/Obj-C++ host objects were renamed
+(`StitcherFrameData` → `CameraFrameData`, `StitcherFrameJsiHostObject` →
+`CameraFrameJsiHostObject`, `StitcherFrameHostObject` →
+`CameraFrameHostObject`) to match the public `CameraFrame` type. No public
+API change.
+
+### Notes
+
+- Compile-verified on both platforms (iOS `xcodebuild` + Android
+  `assembleDebug`); all unit tests + typecheck pass. On-device
+  observation of depth/planes/mesh/intrinsics against real surfaces is
+  the recommended pre-adoption check (see the dev-testing guide).
+
 ## [0.17.0] — 2026-06-19
 
 ### Added — `arFrameProcessor`: observe AR frames with a host worklet

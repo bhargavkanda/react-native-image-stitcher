@@ -4,7 +4,7 @@
  * v0.8.0 — unified frame contract for the lib's worklet processor.
  *
  * Worklets registered via the v0.8.0 `useFrameProcessor` hook (also in
- * this directory) receive a `StitcherFrame` regardless of capture mode.
+ * this directory) receive a `CameraFrame` regardless of capture mode.
  * The lib-owned worklet runtime guarantees the same JS-visible shape
  * whether the underlying source is a vision-camera `Frame` (non-AR
  * mode, sourced from the FP plugin) or an ARKit `ARFrame` / ARCore
@@ -18,10 +18,10 @@
  * (Phase-0 audit confirmed the iOS path).  But vision-camera's
  * **Android** `Frame` is `androidx.camera.core.ImageProxy`-coupled —
  * ARCore does NOT produce `ImageProxy` instances.  Forcing
- * `StitcherFrame extends Frame` would either (a) require reverse-
+ * `CameraFrame extends Frame` would either (a) require reverse-
  * engineering ImageProxy on Android (intractable + fragile), or
  * (b) make the type asymmetric per platform.  Both are worse than
- * making `StitcherFrame` a structural sibling type that vc Frames
+ * making `CameraFrame` a structural sibling type that vc Frames
  * happen to satisfy (because vc Frames carry the same width / height /
  * orientation / pixelFormat / timestamp / toArrayBuffer surface).
  *
@@ -38,10 +38,10 @@
  * a JPEG-encode frame-processor plugin).  Returning a reference and
  * reading it later will read into freed memory.
  */
-export interface StitcherFrame {
+export interface CameraFrame {
   // ── vision-camera-shaped fields (structural compat) ─────────────
   // Worklets written against a vc `Frame` work unchanged against a
-  // `StitcherFrame` (the fields below are a strict subset of vc
+  // `CameraFrame` (the fields below are a strict subset of vc
   // Frame's JS-visible surface).
 
   /** Pixel width of the camera image. */
@@ -167,6 +167,28 @@ export interface StitcherFrame {
    * tracking is degraded check this.  Undefined in non-AR mode.
    */
   arTrackingState?: 'notAvailable' | 'limited' | 'normal';
+
+  /**
+   * Camera intrinsics for THIS frame — focal lengths (`fx`,`fy`) and
+   * principal point (`cx`,`cy`) in PIXELS at the `imageWidth × imageHeight`
+   * capture resolution.  Needed to lift 2D image-space coordinates to 3D
+   * via pose + intrinsics (e.g. object-level reconstruction).
+   *
+   * Populated on **AR frames** (`source: 'ar'`) from ARKit
+   * `ARCamera.intrinsics` / ARCore `Camera` intrinsics.  **Undefined for
+   * non-AR (vision-camera) frames** — they are raw vc `Frame`s without an
+   * intrinsics surface; read vc's own APIs there if needed.  (The spec
+   * called this required; it's optional here because the non-AR frame
+   * shape genuinely can't carry it.)
+   */
+  intrinsics?: {
+    fx: number;
+    fy: number;
+    cx: number;
+    cy: number;
+    imageWidth: number;
+    imageHeight: number;
+  };
 }
 
 /**
@@ -177,21 +199,67 @@ export interface StitcherFrame {
 export interface ARAnchor {
   /** Stable per-session anchor identifier. */
   id: string;
-  /** Anchor kind.  `'point'` is Android (ARCore) only. */
-  type: 'plane' | 'image' | 'point';
   /**
-   * 4×4 row-major transform from anchor space to world space.
-   * 16 numbers.
+   * Anchor kind.  `'point'` is Android (ARCore) only; `'mesh'` is a
+   * scene-reconstruction mesh anchor, present only when the `enableMesh`
+   * `<Camera>` prop is on (and the device supports reconstruction).
+   */
+  type: 'plane' | 'image' | 'point' | 'mesh';
+  /**
+   * 4×4 row-major transform from anchor space to world space (16
+   * numbers).  For `'mesh'` anchors, the `meshGeometry.vertices` are in
+   * this anchor's LOCAL space — multiply by `transform` for world coords.
    */
   transform: number[];
+  /**
+   * Plane orientation — `'horizontal'` (floor / table / seat) vs
+   * `'vertical'` (wall / door / window).  Present on `'plane'` anchors;
+   * undefined for other anchor kinds.  Lets a host distinguish a shelf
+   * surface from the wall behind it.
+   */
+  alignment?: 'horizontal' | 'vertical';
+  /**
+   * Plane size in metres along its local x / z axes (`[x, z]`).  Present
+   * on `'plane'` anchors only.
+   */
+  extent?: [number, number];
+  /**
+   * ARKit semantic classification of the plane's surface, when the
+   * framework provides it (iOS; mostly horizontal planes).  Undefined
+   * when unknown / unsupported (incl. Android, which has no equivalent).
+   */
+  classification?:
+    | 'wall'
+    | 'floor'
+    | 'ceiling'
+    | 'table'
+    | 'seat'
+    | 'door'
+    | 'window'
+    | 'none';
+  /**
+   * Scene-reconstruction geometry — present only on `type: 'mesh'`
+   * anchors.  Buffers (wrap in the noted typed-array view):
+   *   - `vertices`  → `Float32Array`, xyz triplets in anchor-local space.
+   *   - `faces`     → `Uint32Array`, triangle indices into `vertices`.
+   *   - `classifications` → optional `Uint8Array`, one ARKit mesh class
+   *     per face (0=none, 1=wall, 2=floor, 3=ceiling, …).  **iOS only**
+   *     (from `ARMeshAnchor`); absent on Android, where the mesh is
+   *     reconstructed from the depth map and carries no semantics.
+   */
+  meshGeometry?: {
+    vertices: ArrayBuffer;
+    faces: ArrayBuffer;
+    classifications?: ArrayBuffer;
+  };
 }
 
 /**
  * v0.8.0 — worklet function signature for the unified frame processor.
  *
  * Must be a `'worklet'`-prefixed function (so it can run on the
- * worklet runtime).  Receives a `StitcherFrame` per camera frame; the
+ * worklet runtime).  Receives a `CameraFrame` per camera frame; the
  * return value is ignored (use `runOnJS` / shared values to surface
  * results back to the JS thread).
  */
-export type StitcherFrameProcessor = (frame: StitcherFrame) => void;
+export type CameraFrameProcessor = (frame: CameraFrame) => void;

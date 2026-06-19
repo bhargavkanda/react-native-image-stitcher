@@ -35,7 +35,7 @@
 //
 // The implementation needs to hold `std::shared_ptr<JsiWorkletContext>`
 // + run JSI value construction, which can't live in pure Swift.  Same
-// pattern as `KeyframeGateBridge.{h,mm}` + `StitcherFrameHostObject.{h,mm}`:
+// pattern as `KeyframeGateBridge.{h,mm}` + `CameraFrameHostObject.{h,mm}`:
 // keep the header umbrella-safe (no JSI imports), put the C++ glue in
 // the .mm.
 //
@@ -103,7 +103,7 @@ typedef void (^RNSARFirstPartyCallback)(ARFrame *arFrame,
 /// runtime can be built + linked + the API surface fixed).
 ///
 /// The Phase 3c implementation will:
-///   1. Build a `StitcherFrameHostObject` from `arFrame` + `pose`.
+///   1. Build a `CameraFrameHostObject` from `arFrame` + `pose`.
 ///   2. Run the first-party stitching synchronously on the caller
 ///      thread (preserves today's `ingestFromARCameraView` cost
 ///      envelope at the producer site).

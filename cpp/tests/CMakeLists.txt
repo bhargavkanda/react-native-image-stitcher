@@ -13,7 +13,7 @@
 #
 # What this DOES test:
 #   - Pure-C++ types in cpp/: `Pose`, `PlaneTransform`,
-#     `StitcherFrameData`, `PixelBufferReader` interface contract.
+#     `CameraFrameData`, `PixelBufferReader` interface contract.
 #   - `timeBudgetCrossed` — the keyframe gate's OpenCV-free time-budget
 #     force-accept predicate (keyframe_timebudget_test.cpp).
 #   - `warpRoiExceedsGuard` — the OpenCV-free warp-canvas size guard that
@@ -65,7 +65,7 @@ FetchContent_MakeAvailable(googletest)
 # `#include <react-native-worklets-core/WKTJsiWorklet.h>` resolve to
 # the test-only stubs before any system header.  The production cpp/
 # directory comes after so retailens:: headers (e.g. ar_frame_pose.h,
-# stitcher_frame_data.hpp) are found as the production code expects.
+# camera_frame_data.hpp) are found as the production code expects.
 include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs
   ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -76,10 +76,10 @@ include_directories(
 # ─────────────────────────────────────────────────────────────────────
 add_executable(stitcher_cpp_tests
   # Test sources.  All subjects are header-only (Pose / PlaneTransform,
-  # StitcherFrameData, and the gate's inline `timeBudgetCrossed`
+  # CameraFrameData, and the gate's inline `timeBudgetCrossed`
   # predicate), so no production .cpp needs linking here.
   ${CMAKE_CURRENT_SOURCE_DIR}/pose_test.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/stitcher_frame_data_test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/camera_frame_data_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/keyframe_timebudget_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/warp_guard_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/crop_quad_test.cpp

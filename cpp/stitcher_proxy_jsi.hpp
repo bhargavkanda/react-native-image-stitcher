@@ -43,4 +43,20 @@ namespace retailens {
 /// Android: `@ReactMethod(isBlockingSynchronousMethod = true)`).
 void installStitcherProxy(facebook::jsi::Runtime& runtime);
 
+/// Per-frame AR-metadata extraction toggles.  Set from JS via
+/// `__stitcherProxy.setExtractionConfig(depth, anchors, mesh)` (driven by
+/// the `<Camera>` enableDepth/enableAnchors/enableMesh props); read by the
+/// platform AR extraction to skip costly work when off.  Defaults: all
+/// false — zero arDepth/arAnchors/mesh cost until a host opts in (the
+/// always-cheap pose/tracking/pixels are unaffected).
+struct ExtractionConfig {
+  bool depth = false;
+  bool anchors = false;
+  bool mesh = false;
+};
+
+/// Thread-safe snapshot of the current extraction config.  Written on the
+/// JS thread (via the proxy), read on the AR delegate / GL thread.
+ExtractionConfig getExtractionConfig();
+
 }  // namespace retailens
