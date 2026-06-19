@@ -653,60 +653,15 @@ void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
   meta[@"depth"] = depthValue;
 
   // anchors: id / coarse type / row-major 4x4 transform, plus plane
-  // alignment + extent + (capable-device) classification.  Mirrors
-  // ExtractARAnchors above but into an NSDictionary array (no byte
-  // marshaling — that path is for the full host object).  Empty array
-  // when the prop is off (cheap + JSON-stable, matching the TS contract's
-  // `Array<...>` rather than null).  Mesh anchors are summarised under
-  // `mesh` (counts) below, NOT listed individually here unless enableMesh
-  // is off — to match Android's collectTrackingAnchors which surfaces
-  // plane/image anchors and emits mesh as a separate summary.
-  NSMutableArray *anchorsOut = [NSMutableArray array];
-  if (cfg.anchors) {
-    for (ARAnchor *a in arFrame.anchors) {
-      // ARMeshAnchors are summarised under `mesh`; skip here.
-      if ([a isKindOfClass:[ARMeshAnchor class]]) continue;
-
-      NSMutableDictionary *anchor = [NSMutableDictionary dictionary];
-      anchor[@"id"] = a.identifier.UUIDString;
-
-      if ([a isKindOfClass:[ARPlaneAnchor class]]) {
-        anchor[@"type"] = @"plane";
-        ARPlaneAnchor *plane = (ARPlaneAnchor *)a;
-        anchor[@"alignment"] =
-            (plane.alignment == ARPlaneAnchorAlignmentVertical) ? @"vertical"
-                                                                : @"horizontal";
-        // [extentX, extentZ] in plane-local metres (deprecated `extent`
-        // for iOS-15 parity, same as ExtractARAnchors).
-        anchor[@"extent"] = @[ @(plane.extent.x), @(plane.extent.z) ];
-        if (ARPlaneAnchor.isClassificationSupported &&
-            plane.classificationStatus == ARPlaneClassificationStatusKnown) {
-          std::string cls = PlaneClassificationString(plane.classification);
-          if (!cls.empty()) {
-            anchor[@"classification"] =
-                [NSString stringWithUTF8String:cls.c_str()];
-          }
-        }
-      } else if ([a isKindOfClass:[ARImageAnchor class]]) {
-        anchor[@"type"] = @"image";
-      } else {
-        anchor[@"type"] = @"point";
-      }
-
-      // Row-major anchor->world (transpose ARKit's column-major matrix),
-      // 16 NSNumbers — same transpose as ExtractARAnchors.
-      const simd_float4x4 m = a.transform;
-      NSMutableArray *transform = [NSMutableArray arrayWithCapacity:16];
-      for (int r = 0; r < 4; ++r) {
-        for (int c = 0; c < 4; ++c) {
-          [transform addObject:@((double)m.columns[c][r])];
-        }
-      }
-      anchor[@"transform"] = transform;
-      [anchorsOut addObject:anchor];
-    }
-  }
-  meta[@"anchors"] = anchorsOut;
+  // alignment + extent + (capable-device) classification.  Built by the
+  // shared `arAnchorDictsFromFrame:` helper (DRY — same source the
+  // v0.19.0 AR plugin context reuses).  Empty array when the prop is off
+  // (cheap + JSON-stable, matching the TS contract's `Array<...>` rather
+  // than null).  Mesh anchors are summarised under `mesh` (counts) below,
+  // NOT listed individually — to match Android's collectTrackingAnchors
+  // which surfaces plane/image anchors and emits mesh as a separate
+  // summary.
+  meta[@"anchors"] = [self arAnchorDictsFromFrame:arFrame];
 
   // mesh: anchor / vertex / face COUNTS only (no vertex/face byte
   // marshaling).  null when the prop is off.  Counts are read from each
@@ -739,6 +694,63 @@ void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
   meta[@"mesh"] = meshValue;
 
   return meta;
+}
+
++ (NSArray<NSDictionary *> *)arAnchorDictsFromFrame:(ARFrame *)arFrame {
+  // Gate on the shared C++ extraction config's `anchors` flag — when the
+  // <Camera enableAnchors> prop is off, return an empty array (JSON-
+  // stable, matches the TS `Array<...>` contract; never null).
+  NSMutableArray<NSDictionary *> *anchorsOut = [NSMutableArray array];
+  const retailens::ExtractionConfig cfg = retailens::getExtractionConfig();
+  if (!cfg.anchors || arFrame == nil) return anchorsOut;
+
+  for (ARAnchor *a in arFrame.anchors) {
+    // ARMeshAnchors are summarised under `mesh` (counts), not listed here.
+    if ([a isKindOfClass:[ARMeshAnchor class]]) continue;
+
+    NSMutableDictionary *anchor = [NSMutableDictionary dictionary];
+    anchor[@"id"] = a.identifier.UUIDString;
+
+    if ([a isKindOfClass:[ARPlaneAnchor class]]) {
+      anchor[@"type"] = @"plane";
+      ARPlaneAnchor *plane = (ARPlaneAnchor *)a;
+      anchor[@"alignment"] =
+          (plane.alignment == ARPlaneAnchorAlignmentVertical) ? @"vertical"
+                                                              : @"horizontal";
+      // [extentX, extentZ] in plane-local metres (deprecated `extent` for
+      // iOS-15 parity, same as ExtractARAnchors).
+      anchor[@"extent"] = @[ @(plane.extent.x), @(plane.extent.z) ];
+      if (ARPlaneAnchor.isClassificationSupported &&
+          plane.classificationStatus == ARPlaneClassificationStatusKnown) {
+        std::string cls = PlaneClassificationString(plane.classification);
+        if (!cls.empty()) {
+          anchor[@"classification"] =
+              [NSString stringWithUTF8String:cls.c_str()];
+        }
+      }
+    } else if ([a isKindOfClass:[ARImageAnchor class]]) {
+      anchor[@"type"] = @"image";
+    } else {
+      anchor[@"type"] = @"point";
+    }
+
+    // Row-major anchor->world (transpose ARKit's column-major matrix),
+    // 16 NSNumbers — same transpose as ExtractARAnchors.
+    const simd_float4x4 m = a.transform;
+    NSMutableArray *transform = [NSMutableArray arrayWithCapacity:16];
+    for (int r = 0; r < 4; ++r) {
+      for (int c = 0; c < 4; ++c) {
+        [transform addObject:@((double)m.columns[c][r])];
+      }
+    }
+    anchor[@"transform"] = transform;
+    [anchorsOut addObject:anchor];
+  }
+  return anchorsOut;
+}
+
++ (BOOL)arExtractionDepthEnabled {
+  return retailens::getExtractionConfig().depth ? YES : NO;
 }
 
 - (void)invalidate {

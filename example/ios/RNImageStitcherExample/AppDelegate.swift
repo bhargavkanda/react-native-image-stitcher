@@ -2,6 +2,7 @@ import UIKit
 import React
 import React_RCTAppDelegate
 import ReactAppDependencyProvider
+import RNImageStitcher  // v0.19.0 — RNISARPluginRegistry (AR plugin framework)
 
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -20,6 +21,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     reactNativeDelegate = delegate
     reactNativeFactory = factory
+
+    // v0.19.0 — register the sample native AR plugin to exercise the
+    // `RNISARFramePlugin` framework end-to-end.  Its per-frame mean-luma
+    // result rides the `onArFrame` meta as
+    // `meta.plugins.frameBrightness.brightness` (see FrameBrightnessPlugin
+    // + the on-screen AR overlay in App.tsx).  A real host registers its
+    // own plugin (e.g. OCR) the same way.
+    RNISARPluginRegistry.shared.register(FrameBrightnessPlugin())
 
     window = UIWindow(frame: UIScreen.main.bounds)
 

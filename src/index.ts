@@ -265,8 +265,13 @@ export type {
 } from './stitching/CameraFrame';
 // v0.18.0 — LIGHT per-frame AR metadata delivered via the `onArFrame`
 // callback (main-thread, worklet-free).  See the type's docstring for why
-// it bypasses the worklet path.
+// it bypasses the worklet path.  v0.19.0 adds `plugins` (sync results from
+// host-registered AR plugins ride this same throttled event).
 export type { ARFrameMeta } from './stitching/ARFrameMeta';
+// v0.19.0 — the AR plugin framework's ASYNC result type, delivered via the
+// `onArPluginResult` callback (a plugin's out-of-band `registry.emit(...)`
+// result).  The SDK ships only the generic framework — no built-in plugins.
+export type { ARPluginResult } from './stitching/ARFrameMeta';
 // NOTE: the host-worklet / frame-stream hooks `useFrameProcessor`,
 // `useThrottledFrameProcessor` and `useFrameStream` (v0.8–v0.9) were
 // archived in the batch-keyframe cleanup — they drove the third-party

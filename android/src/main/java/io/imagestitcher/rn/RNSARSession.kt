@@ -928,6 +928,28 @@ class RNSARSession(reactContext: ReactApplicationContext)
         }
     }
 
+    /**
+     * Emit a pre-built ASYNC plugin-result body to JS over the
+     * `RNImageStitcherARPluginResult` device event (0.19.0).  Called from
+     * [RNSARPluginRegistry.emit] — the body is `{ plugin, result }`.
+     *
+     * Reuses the SAME `DeviceEventManagerModule.RCTDeviceEventEmitter`
+     * channel as [emitArFrameMeta]; RN drops the event when no JS listener
+     * is attached, and a torn-down Catalyst instance is swallowed silently
+     * (plugin results are best-effort).
+     */
+    internal fun emitArPluginResult(body: com.facebook.react.bridge.WritableMap) {
+        try {
+            reactApplicationContext
+                .getJSModule(
+                    com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java,
+                )
+                .emit(AR_PLUGIN_RESULT_EVENT, body)
+        } catch (t: Throwable) {
+            Log.d(TAG, "emitArPluginResult: emit failed (ignoring): ${t.message}")
+        }
+    }
+
     /// Required by RN's `NativeEventEmitter` contract — the TS
     /// `onArFrame` wiring constructs a `NativeEventEmitter` over this
     /// module, which calls `addListener`/`removeListeners` on subscribe /
@@ -1071,6 +1093,12 @@ class RNSARSession(reactContext: ReactApplicationContext)
         /// match the shared contract + the iOS `supportedEvents` entry +
         /// the TS `NativeEventEmitter` subscription string exactly.
         const val AR_FRAME_META_EVENT = "RNImageStitcherARFrame"
+
+        /// Event name carrying an ASYNC plugin result to JS (0.19.0).
+        /// MUST match [RNSARPluginRegistry.AR_PLUGIN_RESULT_EVENT], the
+        /// iOS `supportedEvents` entry, and the TS subscription string.
+        const val AR_PLUGIN_RESULT_EVENT =
+            RNSARPluginRegistry.AR_PLUGIN_RESULT_EVENT
     }
 
     init {
