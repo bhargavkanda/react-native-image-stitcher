@@ -31,6 +31,7 @@
 
 import Foundation
 import ARKit
+import SceneKit
 import UIKit
 import simd
 
@@ -43,13 +44,23 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     /// session (and the same pose log that the stitcher consumes).
     private var arSCNView: ARSCNView!
 
-    /// v0.20.0 — transparent overlay layer drawn ABOVE the camera
-    /// preview.  Reprojects each overlay's world point(s) to screen
-    /// every AR frame and strokes the outline/box + label.  Letterboxed
-    /// to the SAME sub-rect as `arSCNView` so projected screen points
-    /// (which are in the camera-image viewport) line up with the pixels
-    /// the user sees.
-    private var overlayView: AROverlayDrawView!
+    /// v0.20.0 — world-anchored overlays backed by REAL `ARAnchor`s.  Each
+    /// overlay becomes an `ARAnchor` added to the session; ARSCNView creates a
+    /// node per anchor (via `renderer(_:nodeFor:)`) and keeps its transform
+    /// synced to the anchor every frame — and crucially ARKit *refines* the
+    /// anchor as its world understanding improves (drift / re-localization),
+    /// so the marker stays glued to the real-world spot across a long session,
+    /// not just a short one (which a fixed world coordinate would not survive).
+    /// Diffed against the overlay store each render pass (`RNISAROverlay` is
+    /// `Equatable`): add new ids, rebuild changed ones, remove gone ones.
+    ///
+    /// Two maps, guarded by `anchorLock` because `nodeFor` may run on a
+    /// different (render) thread than the `updateAtTime` diff:
+    ///   - `overlayAnchors`: overlay id → (its anchor, the overlay it came from)
+    ///   - `anchorOverlays`: anchor UUID → overlay (so `nodeFor` can build it)
+    private var overlayAnchors: [String: (anchor: ARAnchor, overlay: RNISAROverlay)] = [:]
+    private var anchorOverlays: [UUID: RNISAROverlay] = [:]
+    private let anchorLock = NSLock()
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
@@ -96,13 +107,9 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         backgroundColor = .black
         addSubview(arSCNView)
 
-        // v0.20.0 — overlay layer ABOVE the preview.  Transparent +
-        // non-interactive (touches pass through to RN's gesture layer).
-        overlayView = AROverlayDrawView(frame: bounds)
-        overlayView.backgroundColor = .clear
-        overlayView.isOpaque = false
-        overlayView.isUserInteractionEnabled = false
-        addSubview(overlayView)
+        // v0.20.0 — overlays render as world-anchored SceneKit nodes inside
+        // `arSCNView.scene` (see `syncOverlayNodes`), so there is no separate
+        // 2D overlay UIView to add here.
     }
 
     // MARK: - v0.20.0 — declarative `overlays` prop (KVC from RN)
@@ -152,10 +159,10 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         // black background fills the remainder.
         let lb = letterboxedFrame()
         arSCNView.frame = lb
-        // Overlay must cover the SAME letterboxed sub-rect: projectPoint
-        // returns viewport-relative pixels for the camera-image area, so
-        // the overlay's coordinate origin has to match `arSCNView`'s.
-        overlayView.frame = lb
+        // Overlay nodes live in `arSCNView.scene` and are rendered by the
+        // same (letterboxed) ARSCNView against the live AR camera, so they
+        // need no separate framing — they align with the camera feed
+        // automatically.
     }
 
     /// Returns the largest `CGRect` inside `bounds` that matches the
@@ -246,307 +253,215 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
 
     // MARK: - ARSCNViewDelegate (v0.20.0 overlay redraw hook)
 
-    /// Called once per ARSCNView render pass (≈ display rate) on the MAIN
-    /// thread.  We use it ONLY to drive the overlay redraw: refresh the
-    /// projected screen points from the current ARFrame's camera
-    /// pose+intrinsics and mark the overlay layer dirty.  Cheap — bails
-    /// immediately when there are no overlays (the common case), so a
-    /// preview with no annotations pays essentially nothing here.
+    /// Called once per ARSCNView render pass.  Keeps the set of overlay
+    /// ARAnchors in sync with the overlay store (add / rebuild / remove).
+    /// ARKit then tracks each anchor and ARSCNView positions its node — we do
+    /// NOT project or position anything by hand.  Cheap: an `==` diff over a
+    /// handful of overlays.
     ///
     /// We deliberately do NOT touch `RNSARSession`'s pose log / plugin /
-    /// onArFrame paths — those ride the ARSession delegate which the
-    /// singleton owns.  This delegate is purely the renderer's hook.
+    /// onArFrame paths — those ride the ARSession delegate which the singleton
+    /// owns.  This delegate is purely the overlay-sync hook.
     public func renderer(
         _ renderer: SCNSceneRenderer,
         updateAtTime time: TimeInterval
     ) {
-        guard overlayView != nil else { return }
-        if RNISAROverlayStore.shared.isEmpty {
-            // Clear any stale geometry once after the last overlay is
-            // removed, then stop doing work.
-            if overlayView.hasProjectedShapes {
-                overlayView.update(projected: [])
-            }
-            return
-        }
-        guard let frame = arSCNView.session.currentFrame else { return }
-        let viewportSize = overlayView.bounds.size
-        guard viewportSize.width > 0, viewportSize.height > 0 else { return }
-
-        // Interface orientation drives ARKit's projectPoint mapping.  Read
-        // it from the window scene (main thread — we are on it).
-        let orientation = currentInterfaceOrientation()
-
-        let overlays = RNISAROverlayStore.shared.snapshot()
-        var projected: [AROverlayDrawView.ProjectedShape] = []
-        projected.reserveCapacity(overlays.count)
-        for overlay in overlays {
-            if let shape = Self.project(
-                overlay: overlay,
-                camera: frame.camera,
-                orientation: orientation,
-                viewportSize: viewportSize
-            ) {
-                projected.append(shape)
-            }
-        }
-        overlayView.update(projected: projected)
+        syncOverlayAnchors()
     }
 
-    /// Reproject one overlay's world point(s) to screen via ARKit's
-    /// BUILT-IN `ARCamera.projectPoint(_:orientation:viewportSize:)`.
-    /// Returns `nil` (overlay hidden this frame) when ANY required corner
-    /// is behind the camera — `projectPoint` clamps off-screen but does
-    /// not signal "behind", so we additionally test each point against the
-    /// camera's view matrix and drop the whole shape if any corner has a
-    /// non-negative camera-space Z (i.e. behind the lens).
-    private static func project(
-        overlay: RNISAROverlay,
-        camera: ARCamera,
-        orientation: UIInterfaceOrientation,
-        viewportSize: CGSize
-    ) -> AROverlayDrawView.ProjectedShape? {
+    /// ARSCNViewDelegate: vend the node for one of our overlay anchors.  May
+    /// run on the render thread; ARSCNView keeps the returned node's transform
+    /// synced to the (ARKit-refined) anchor.  We build the visual RELATIVE to
+    /// the anchor origin — the anchor carries the world position.
+    public func renderer(
+        _ renderer: SCNSceneRenderer,
+        nodeFor anchor: ARAnchor
+    ) -> SCNNode? {
+        anchorLock.lock()
+        let overlay = anchorOverlays[anchor.identifier]
+        anchorLock.unlock()
+        guard let overlay = overlay else { return nil }
 
-        // v0.20.0 3D SCAFFOLD HOOK ───────────────────────────────────
-        // `mode:'3d'` is a scaffold this release — no 3D engine
-        // (SceneKit / Filament) is wired.  We render it as 2D (below)
-        // and warn ONCE.  A future release plugs a SceneKit node-based
-        // renderer in HERE (e.g. add/update an SCNNode on
-        // `arSCNView.scene.rootNode` keyed by overlay.id) instead of
-        // falling through to the 2D projection.
-        if overlay.mode == .threeD {
-            warnOnce3DScaffold()
-            // fall through → treat as 2D
+        if let quad = overlay.worldQuad, quad.count >= 3 {
+            // Anchor sits at the centroid; draw the loop relative to it.
+            var c = simd_float3(0, 0, 0)
+            for v in quad { c += v }
+            c /= Float(quad.count)
+            return Self.makeQuadOutlineNode(
+                relCorners: quad.map { $0 - c },
+                color: overlay.color, label: overlay.label)
+        }
+        return Self.makeBillboardNode(
+            sizeMeters: overlay.sizeMeters, color: overlay.color,
+            label: overlay.label)
+    }
+
+    /// Diff the overlay store against the live anchors: add an ARAnchor for
+    /// each new/changed overlay, remove anchors whose overlay is gone.
+    private func syncOverlayAnchors() {
+        let session = arSCNView.session
+        let overlays = RNISAROverlayStore.shared.snapshot()
+        var liveIDs = Set<String>()
+        liveIDs.reserveCapacity(overlays.count)
+
+        for overlay in overlays {
+            liveIDs.insert(overlay.id)
+            anchorLock.lock()
+            let existing = overlayAnchors[overlay.id]
+            anchorLock.unlock()
+            if let existing = existing, existing.overlay == overlay { continue }
+
+            // New or changed → drop the old anchor, add a fresh one.
+            if let existing = existing {
+                session.remove(anchor: existing.anchor)
+                anchorLock.lock()
+                anchorOverlays[existing.anchor.identifier] = nil
+                overlayAnchors[overlay.id] = nil
+                anchorLock.unlock()
+            }
+            guard let pose = Self.anchorPose(for: overlay) else { continue }
+            let anchor = ARAnchor(transform: pose)
+            anchorLock.lock()
+            anchorOverlays[anchor.identifier] = overlay
+            overlayAnchors[overlay.id] = (anchor, overlay)
+            anchorLock.unlock()
+            session.add(anchor: anchor)
         }
 
-        // Build the world corners to project.
-        let worldCorners: [simd_float3]
+        // Remove anchors whose overlay id is gone (snapshot under the lock,
+        // call session.remove outside it).
+        anchorLock.lock()
+        let goneIDs = overlayAnchors.keys.filter { !liveIDs.contains($0) }
+        let goneAnchors = goneIDs.compactMap { overlayAnchors[$0]?.anchor }
+        for id in goneIDs {
+            if let a = overlayAnchors[id]?.anchor { anchorOverlays[a.identifier] = nil }
+            overlayAnchors[id] = nil
+        }
+        anchorLock.unlock()
+        for a in goneAnchors { session.remove(anchor: a) }
+    }
+
+    // MARK: - v0.20.0 overlay node builders (RELATIVE to the anchor origin)
+
+    /// World transform for an overlay's anchor: a translation-only pose at the
+    /// `worldPosition`, or at the centroid of `worldQuad`.  nil if no geometry.
+    private static func anchorPose(for overlay: RNISAROverlay) -> simd_float4x4? {
+        let p: simd_float3
         if let quad = overlay.worldQuad, quad.count >= 3 {
-            worldCorners = quad
+            var c = simd_float3(0, 0, 0)
+            for v in quad { c += v }
+            p = c / Float(quad.count)
         } else if let center = overlay.worldPosition {
-            worldCorners = billboardCorners(
-                center: center,
-                sizeMeters: overlay.sizeMeters,
-                camera: camera
-            )
+            p = center
         } else {
             return nil
         }
-
-        // Drop the shape if ANY corner is behind the camera.  Camera-space
-        // Z >= 0 means at/behind the lens (ARKit camera looks down -Z).
-        let viewMatrix = camera.viewMatrix(for: orientation)
-        for corner in worldCorners {
-            let cam = viewMatrix * simd_float4(corner.x, corner.y, corner.z, 1)
-            if cam.z >= 0 { return nil }
-        }
-
-        // Project each corner with ARKit's built-in projection (correct
-        // for the device's intrinsics + lens distortion model).
-        var screenPoints: [CGPoint] = []
-        screenPoints.reserveCapacity(worldCorners.count)
-        for corner in worldCorners {
-            let pt = camera.projectPoint(
-                corner,
-                orientation: orientation,
-                viewportSize: viewportSize
-            )
-            // Guard against NaN/inf from a degenerate projection.
-            guard pt.x.isFinite, pt.y.isFinite else { return nil }
-            screenPoints.append(pt)
-        }
-
-        // Hide entirely-off-screen shapes (all corners outside the
-        // viewport rect) — keeps the draw layer clean and avoids drawing
-        // labels for things the user can't see.
-        let viewportRect = CGRect(origin: .zero, size: viewportSize)
-        let anyVisible = screenPoints.contains { viewportRect.contains($0) }
-        if !anyVisible { return nil }
-
-        return AROverlayDrawView.ProjectedShape(
-            id: overlay.id,
-            points: screenPoints,
-            color: overlay.color,
-            label: overlay.label,
-            closed: true
-        )
+        var m = matrix_identity_float4x4
+        m.columns.3 = simd_float4(p.x, p.y, p.z, 1)
+        return m
     }
 
-    /// Four world corners of an axis-screen-aligned billboard centred at
-    /// `center`, half-extents from `sizeMeters` (default a small marker).
-    /// The billboard faces the camera by spanning the camera's RIGHT and
-    /// UP world axes (columns 0 and 1 of the camera transform) so the
-    /// marker always presents flat to the viewer.
-    private static func billboardCorners(
-        center: simd_float3,
+    /// A camera-facing billboard plane (at the anchor origin), sized in metres,
+    /// textured with a stroked outline + optional centred label.  Always drawn
+    /// on top (depth read/write off) so an annotation is never hidden.
+    private static func makeBillboardNode(
         sizeMeters: CGSize?,
-        camera: ARCamera
-    ) -> [simd_float3] {
-        let halfW = Float((sizeMeters?.width
-            ?? RNISAROverlay.defaultMarkerExtent)) * 0.5
-        let halfH = Float((sizeMeters?.height
-            ?? RNISAROverlay.defaultMarkerExtent)) * 0.5
-        let t = camera.transform
-        let right = simd_normalize(simd_float3(
-            t.columns.0.x, t.columns.0.y, t.columns.0.z))
-        let up = simd_normalize(simd_float3(
-            t.columns.1.x, t.columns.1.y, t.columns.1.z))
-        let rW = right * halfW
-        let uH = up * halfH
-        // CW from top-left for a clean stroked quad.
-        return [
-            center - rW + uH,  // top-left
-            center + rW + uH,  // top-right
-            center + rW - uH,  // bottom-right
-            center - rW - uH,  // bottom-left
-        ]
+        color: UIColor,
+        label: String?
+    ) -> SCNNode {
+        let w = sizeMeters?.width ?? RNISAROverlay.defaultMarkerExtent
+        let h = sizeMeters?.height ?? RNISAROverlay.defaultMarkerExtent
+        let plane = SCNPlane(width: w, height: h)
+        let mat = SCNMaterial()
+        mat.diffuse.contents = overlayImage(color: color, label: label)
+        mat.isDoubleSided = true
+        mat.lightingModel = .constant      // unlit — show the texture as-is
+        mat.writesToDepthBuffer = false
+        mat.readsFromDepthBuffer = false   // never occluded by the scene
+        plane.firstMaterial = mat
+
+        let node = SCNNode(geometry: plane)
+        node.renderingOrder = 1000         // draw after the camera background
+        let billboard = SCNBillboardConstraint()
+        billboard.freeAxes = .all          // always face the camera, flat
+        node.constraints = [billboard]
+        return node
     }
 
-    /// Current interface orientation, read on the main thread.  Falls
-    /// back to `.portrait` (the SDK's default capture orientation) when a
-    /// window scene isn't available yet.
-    private func currentInterfaceOrientation() -> UIInterfaceOrientation {
-        if let scene = window?.windowScene {
-            return scene.interfaceOrientation
+    /// A 3D line-loop through corners expressed RELATIVE to the anchor origin
+    /// (the anchor is at the quad centroid), with an optional camera-facing
+    /// label at the centre.
+    private static func makeQuadOutlineNode(
+        relCorners: [simd_float3],
+        color: UIColor,
+        label: String?
+    ) -> SCNNode {
+        let vertices = relCorners.map { SCNVector3($0.x, $0.y, $0.z) }
+        var indices: [Int32] = []
+        let n = vertices.count
+        indices.reserveCapacity(n * 2)
+        for i in 0..<n {
+            indices.append(Int32(i))
+            indices.append(Int32((i + 1) % n))   // close the loop
         }
-        for scene in UIApplication.shared.connectedScenes {
-            if let ws = scene as? UIWindowScene {
-                return ws.interfaceOrientation
-            }
+        let src = SCNGeometrySource(vertices: vertices)
+        let elem = SCNGeometryElement(indices: indices, primitiveType: .line)
+        let geo = SCNGeometry(sources: [src], elements: [elem])
+        let mat = SCNMaterial()
+        mat.diffuse.contents = color
+        mat.lightingModel = .constant
+        mat.writesToDepthBuffer = false
+        mat.readsFromDepthBuffer = false
+        geo.firstMaterial = mat
+
+        let node = SCNNode(geometry: geo)
+        node.renderingOrder = 1000
+
+        if let label = label, !label.isEmpty {
+            // Label at the centroid (≈ local origin in relative space).
+            let labelNode = makeBillboardNode(
+                sizeMeters: CGSize(width: 0.12, height: 0.12),
+                color: color, label: label)
+            node.addChildNode(labelNode)
         }
-        return .portrait
+        return node
     }
 
-    /// One-time warning that `mode:'3d'` is a scaffold (rendered as 2D).
-    private static var did3DScaffoldWarn = false
-    private static let warnLock = NSLock()
-    private static func warnOnce3DScaffold() {
-        warnLock.lock()
-        defer { warnLock.unlock() }
-        guard !did3DScaffoldWarn else { return }
-        did3DScaffoldWarn = true
-        NSLog("[RNSARCameraView] AROverlay mode:'3d' is a scaffold in this "
-            + "release — rendering as 2D.  A SceneKit-backed 3D renderer "
-            + "is coming in a later release.")
+    /// Render a stroked rounded-rect outline + optional centred label chip to
+    /// a square image, used as the billboard plane's texture.  Transparent
+    /// background so only the outline + chip show over the camera feed.
+    private static func overlayImage(color: UIColor, label: String?) -> UIImage {
+        let px: CGFloat = 512
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: px, height: px))
+        return renderer.image { ctx in
+            let cg = ctx.cgContext
+            let inset = px * 0.07
+            let rect = CGRect(x: inset, y: inset,
+                              width: px - 2 * inset, height: px - 2 * inset)
+            let path = UIBezierPath(roundedRect: rect, cornerRadius: px * 0.05)
+            cg.setStrokeColor(color.cgColor)
+            cg.setLineWidth(px * 0.03)
+            path.stroke()
+
+            guard let label = label, !label.isEmpty else { return }
+            let fontSize = px * 0.13
+            let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font, .foregroundColor: UIColor.white,
+            ]
+            let ts = (label as NSString).size(withAttributes: attrs)
+            let pad = fontSize * 0.35
+            let chip = CGRect(x: (px - ts.width) / 2 - pad,
+                              y: (px - ts.height) / 2 - pad,
+                              width: ts.width + 2 * pad,
+                              height: ts.height + 2 * pad)
+            color.withAlphaComponent(0.9).setFill()
+            UIBezierPath(roundedRect: chip, cornerRadius: pad).fill()
+            (label as NSString).draw(
+                at: CGPoint(x: (px - ts.width) / 2, y: (px - ts.height) / 2),
+                withAttributes: attrs)
+        }
     }
+
 }
-
-
-// MARK: - AROverlayDrawView (v0.20.0)
-
-/// Transparent overlay layer that strokes the projected overlay shapes +
-/// labels.  Geometry is recomputed every AR frame by `RNSARCameraView`
-/// and pushed via `update(projected:)`; this view just draws what it's
-/// told in `draw(_:)` — a thin, allocation-light Core Graphics pass.
-final class AROverlayDrawView: UIView {
-
-    /// One overlay's screen-space geometry for the current frame.  A
-    /// value type so `update(projected:)` swaps an immutable snapshot
-    /// (no shared mutable state between the producing/drawing steps).
-    struct ProjectedShape {
-        let id: String
-        /// Screen points (in this view's coordinate space) to connect.
-        let points: [CGPoint]
-        /// Stroke + label color.
-        let color: UIColor
-        /// Optional text label, drawn near the shape's centroid.
-        let label: String?
-        /// Whether to close the polygon (connect last→first).
-        let closed: Bool
-    }
-
-    private var shapes: [ProjectedShape] = []
-
-    /// Whether anything was drawn last update — lets the camera view skip
-    /// a redundant clear when the overlay set empties.
-    var hasProjectedShapes: Bool { !shapes.isEmpty }
-
-    /// Stroke width (points) for outlines / boxes.
-    private let strokeWidth: CGFloat = 2.5
-    /// Label font.
-    private let labelFont = UIFont.systemFont(ofSize: 13, weight: .semibold)
-
-    /// Replace the geometry to draw and request a redraw.  Called on the
-    /// main thread from `RNSARCameraView.renderer(_:updateAtTime:)`.
-    func update(projected: [ProjectedShape]) {
-        shapes = projected
-        setNeedsDisplay()
-    }
-
-    override func draw(_ rect: CGRect) {
-        guard let ctx = UIGraphicsGetCurrentContext() else { return }
-        ctx.setLineWidth(strokeWidth)
-        ctx.setLineJoin(.round)
-        ctx.setLineCap(.round)
-
-        for shape in shapes {
-            guard shape.points.count >= 2 else {
-                // A single projected point (degenerate) — draw a small dot
-                // so a marker that collapsed to one pixel is still visible.
-                if let p = shape.points.first {
-                    drawDot(at: p, color: shape.color, in: ctx)
-                    drawLabel(shape.label, near: p, color: shape.color)
-                }
-                continue
-            }
-
-            ctx.setStrokeColor(shape.color.cgColor)
-            ctx.beginPath()
-            ctx.move(to: shape.points[0])
-            for i in 1..<shape.points.count {
-                ctx.addLine(to: shape.points[i])
-            }
-            if shape.closed {
-                ctx.closePath()
-            }
-            ctx.strokePath()
-
-            // Label at the centroid (or above the top-most point).
-            drawLabel(shape.label, near: centroid(of: shape.points),
-                      color: shape.color)
-        }
-    }
-
-    private func drawDot(at p: CGPoint, color: UIColor, in ctx: CGContext) {
-        let r: CGFloat = 4
-        ctx.setFillColor(color.cgColor)
-        ctx.fillEllipse(in: CGRect(x: p.x - r, y: p.y - r,
-                                   width: 2 * r, height: 2 * r))
-    }
-
-    private func centroid(of points: [CGPoint]) -> CGPoint {
-        guard !points.isEmpty else { return .zero }
-        var sx: CGFloat = 0, sy: CGFloat = 0
-        for p in points { sx += p.x; sy += p.y }
-        return CGPoint(x: sx / CGFloat(points.count),
-                       y: sy / CGFloat(points.count))
-    }
-
-    private func drawLabel(_ text: String?, near point: CGPoint,
-                           color: UIColor) {
-        guard let text = text, !text.isEmpty else { return }
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: labelFont,
-            .foregroundColor: UIColor.white,
-        ]
-        let size = (text as NSString).size(withAttributes: attrs)
-        let padding: CGFloat = 4
-        // Background chip for legibility over the camera feed.
-        let chipRect = CGRect(
-            x: point.x - size.width / 2 - padding,
-            y: point.y - size.height / 2 - padding,
-            width: size.width + 2 * padding,
-            height: size.height + 2 * padding
-        )
-        let chipPath = UIBezierPath(roundedRect: chipRect, cornerRadius: 4)
-        color.withAlphaComponent(0.85).setFill()
-        chipPath.fill()
-        (text as NSString).draw(
-            at: CGPoint(x: chipRect.minX + padding,
-                        y: chipRect.minY + padding),
-            withAttributes: attrs
-        )
-    }
-}
-
 

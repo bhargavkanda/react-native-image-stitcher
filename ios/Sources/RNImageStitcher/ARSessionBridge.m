@@ -64,6 +64,12 @@ RCT_EXTERN_METHOD(setOverlays:(nonnull NSArray *)overlays
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// v0.20.0 — raycast from the crosshair (screen centre) to the first real
+// surface hit → { worldPosition: [x,y,z] } or null.  Used to place an
+// overlay ON the aimed surface (then anchor it), vs a guessed distance ahead.
+RCT_EXTERN_METHOD(raycast:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 RCT_EXTERN_METHOD(snapshotPoseLog:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 

@@ -40,11 +40,14 @@ const { NativeModules } = require('react-native') as {
 };
 
 const setOverlaysSpy = jest.fn();
+const raycastSpy = jest.fn();
 
 beforeEach(() => {
   setOverlaysSpy.mockClear();
+  raycastSpy.mockReset();
   (NativeModules as Record<string, unknown>).RNSARSession = {
     setOverlays: (...args: unknown[]) => setOverlaysSpy(...args),
+    raycast: (...args: unknown[]) => raycastSpy(...args),
   };
 });
 
@@ -176,6 +179,48 @@ describe('createAROverlayController behaviour', () => {
   });
 });
 
+describe('createAROverlayController.raycast', () => {
+  it('resolves the [x,y,z] tuple when native returns a hit', async () => {
+    raycastSpy.mockResolvedValue({ worldPosition: [1, 2, 3] });
+    const c = createAROverlayController();
+    await expect(c.raycast()).resolves.toEqual([1, 2, 3]);
+    expect(raycastSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('coerces numeric strings/values to numbers', async () => {
+    // The native bridge may marshal as NSNumber → JS number, but guard anyway.
+    raycastSpy.mockResolvedValue({ worldPosition: ['1.5', 2, 3] as unknown[] });
+    const c = createAROverlayController();
+    await expect(c.raycast()).resolves.toEqual([1.5, 2, 3]);
+  });
+
+  it('resolves null when native reports no hit', async () => {
+    raycastSpy.mockResolvedValue(null);
+    const c = createAROverlayController();
+    await expect(c.raycast()).resolves.toBeNull();
+  });
+
+  it('resolves null on a malformed/short worldPosition', async () => {
+    raycastSpy.mockResolvedValue({ worldPosition: [1, 2] });
+    const c = createAROverlayController();
+    await expect(c.raycast()).resolves.toBeNull();
+  });
+
+  it('resolves null (never throws) when native rejects', async () => {
+    raycastSpy.mockRejectedValue(new Error('session not running'));
+    const c = createAROverlayController();
+    await expect(c.raycast()).resolves.toBeNull();
+  });
+
+  it('resolves null when the native raycast method is absent', async () => {
+    (NativeModules as Record<string, unknown>).RNSARSession = {
+      setOverlays: setOverlaysSpy,
+    };
+    const c = createAROverlayController();
+    await expect(c.raycast()).resolves.toBeNull();
+  });
+});
+
 describe('public ref-handle + prop type wiring', () => {
   it('both component handles expose the same overlay methods', () => {
     // A value typed as the shared method set is assignable to either handle's
@@ -187,6 +232,7 @@ describe('public ref-handle + prop type wiring', () => {
       updateOverlay: () => undefined,
       removeOverlay: () => undefined,
       clearOverlays: () => undefined,
+      raycast: () => Promise.resolve(null),
     };
     const cam: Pick<CameraHandle, keyof AROverlayMethods> = methods;
     const arView: Pick<ARCameraViewHandle, keyof AROverlayMethods> = methods;

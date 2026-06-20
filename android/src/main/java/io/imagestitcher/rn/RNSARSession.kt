@@ -256,6 +256,21 @@ class RNSARSession(reactContext: ReactApplicationContext)
         view.clearOverlaysFromJs()
     }
 
+    // v0.20.0 — raycast from the screen-centre crosshair to the nearest real
+    // surface; resolves `{ worldPosition: [x,y,z] }` or null.  The hitTest
+    // needs the live ARCore frame on the GL thread, so the view fulfils it on
+    // the next render tick.  Resolves null (not reject) when no view is bound
+    // so the JS controller falls back to its fixed 1 m-ahead placement.
+    @ReactMethod
+    fun raycast(promise: Promise) {
+        val view = attachedView ?: run {
+            Log.d(TAG, "raycast: no AR camera view bound — resolving null")
+            promise.resolve(null)
+            return
+        }
+        view.requestRaycast(promise)
+    }
+
     @ReactMethod
     fun isSupported(promise: Promise) {
         // `checkAvailability` can return UNKNOWN_CHECKING if the

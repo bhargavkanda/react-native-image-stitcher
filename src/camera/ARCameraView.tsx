@@ -498,6 +498,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       updateOverlay: overlayController.updateOverlay,
       removeOverlay: overlayController.removeOverlay,
       clearOverlays: overlayController.clearOverlays,
+      raycast: overlayController.raycast,
       takePhoto: async (options = {}) => {
         const native: any =
           (NativeModules as Record<string, unknown>).RNSARSession;

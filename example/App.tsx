@@ -233,7 +233,25 @@ function App(): React.JSX.Element {
   // overlay state so it's verifiable even before pointing at a plane.
   const cameraRef = useRef<CameraHandle | null>(null);
   const overlayPinnedRef = useRef(false);
-  const [overlayText, setOverlayText] = useState('overlay: (no plane yet)');
+  const [overlayText, setOverlayText] = useState(
+    'overlay: tap "Pin marker" to drop one 1 m ahead',
+  );
+  // The FIXED world point the demo overlay is pinned to (set on "Lock"), + a
+  // pending request set by the button.  On the next AR frame after a tap we
+  // compute a point 1 m straight ahead along the camera's view ray (the
+  // crosshair direction) and pin the overlay there — a fixed WORLD point, so
+  // it stays put as you move (that's the world-anchored tracking under test),
+  // and it's guaranteed in view at lock time.  No plane detection needed.
+  const lockedWorldPointRef = useRef<[number, number, number] | null>(null);
+  const pendingLockRef = useRef(false);
+  // Most-recent AR pose (updated every onArFrame).  Lets "Pin marker" drop
+  // the overlay IMMEDIATELY from the last-known pose instead of waiting for
+  // the next AR frame.
+  const latestPoseRef = useRef<{
+    t: [number, number, number];
+    r: [number, number, number, number];
+  } | null>(null);
+  const [planeLocked, setPlaneLocked] = useState(false);
 
   const stitcher = useStitcherWorklet();
   const exampleFrameProcessor = useFrameProcessor(
@@ -265,6 +283,50 @@ function App(): React.JSX.Element {
   // thread (NOT a worklet), so capturing `setArMetaText` is perfectly safe.
   // Formats the light `ARFrameMeta` (pose / tracking / intrinsics / depth
   // dims / anchor + mesh counts) into the green on-screen readout.
+  // v0.20.0 — drop the demo overlay at a FIXED world point.  Native creates an
+  // ARAnchor there + renders a SceneKit node, so it stays glued to the spot
+  // (ARKit refines the anchor through drift / re-localization).  The live
+  // distance readout is refreshed every onArFrame below.
+  const pinAt = useCallback((wp: [number, number, number]) => {
+    lockedWorldPointRef.current = wp;
+    overlayPinnedRef.current = true;
+    cameraRef.current?.setOverlays([
+      {
+        id: 'demo',
+        worldPosition: wp,
+        sizeMeters: [0.3, 0.3],
+        shape: 'outline',
+        label: 'AR',
+        color: '#00E5FF',
+      },
+    ]);
+    setOverlayText(
+      `overlay: locked @ [${wp[0].toFixed(2)}, ${wp[1].toFixed(2)}, ${wp[2].toFixed(
+        2,
+      )}]`,
+    );
+  }, []);
+
+  // Fallback placement when raycast finds no surface: a point 1 m straight
+  // ahead along the camera's view ray (the crosshair).  Camera looks down its
+  // local −Z; forward(world) = −(third column of R(q)).
+  const pinMarker = useCallback(
+    (
+      t: [number, number, number],
+      r: [number, number, number, number],
+    ) => {
+      const [qx, qy, qz, qw] = r;
+      const fwd: [number, number, number] = [
+        -2 * (qx * qz + qw * qy),
+        -2 * (qy * qz - qw * qx),
+        -(1 - 2 * (qx * qx + qy * qy)),
+      ];
+      const D = 1.0; // metres ahead
+      pinAt([t[0] + fwd[0] * D, t[1] + fwd[1] * D, t[2] + fwd[2] * D]);
+    },
+    [pinAt],
+  );
+
   const arFrameCountRef = useRef(0);
   const handleArFrame = useCallback((m: ARFrameMeta) => {
     arFrameCountRef.current += 1;
@@ -292,43 +354,26 @@ function App(): React.JSX.Element {
         `intr=${intrStr}`,
     );
 
-    // v0.20.0 — pin a demo overlay to the FIRST detected plane anchor.  The
-    // anchor's `transform` is a row-major 4×4 anchor→world matrix; its
-    // translation (the anchor's world origin) lives at indices [12],[13],[14].
-    // We update the overlay's world position every frame the anchor is visible
-    // so it tracks if the plane re-centres; the native layer handles the
-    // per-frame screen reprojection.  Imperative (via the ref) so there's no
-    // React re-render on the AR frame cadence.
-    const plane = m.anchors.find((a) => a.type === 'plane');
-    if (plane && plane.transform.length >= 16) {
-      const worldPosition: [number, number, number] = [
-        plane.transform[12],
-        plane.transform[13],
-        plane.transform[14],
-      ];
-      const overlay: AROverlay = {
-        id: 'demo',
-        worldPosition,
-        sizeMeters: [0.2, 0.2],
-        shape: 'outline',
-        label: 'AR',
-        color: '#00E5FF',
-      };
-      // setOverlays replaces the whole JS-set; with one overlay that's the same
-      // as add/update but keeps the demo trivially simple.
-      cameraRef.current?.setOverlays([overlay]);
-      overlayPinnedRef.current = true;
+    // Cache the latest pose so "Pin marker" can drop the overlay instantly
+    // from the last-known pose (no wait for the next AR frame).
+    const cam = m.pose.translation ?? [0, 0, 0];
+    latestPoseRef.current = { t: cam, r: m.pose.rotation };
+
+    // Fallback path: if the user tapped "Pin marker" BEFORE any AR frame had
+    // arrived, the tap set `pendingLockRef`; pin now that we have a pose.
+    if (pendingLockRef.current) {
+      pendingLockRef.current = false;
+      pinMarker(cam, m.pose.rotation);
+    }
+
+    const wp = lockedWorldPointRef.current;
+    if (Array.isArray(wp) && wp.length >= 3) {
+      const d = Math.hypot(wp[0] - cam[0], wp[1] - cam[1], wp[2] - cam[2]);
       setOverlayText(
-        `overlay: demo @ [${worldPosition
-          .map((v) => v.toFixed(2))
-          .join(', ')}]`,
+        `overlay: locked ${d.toFixed(2)}m @ [${wp[0].toFixed(2)}, ${wp[1].toFixed(
+          2,
+        )}, ${wp[2].toFixed(2)}]`,
       );
-    } else if (overlayPinnedRef.current && m.anchors.length === 0) {
-      // No anchors tracked anymore — clear so the overlay doesn't linger at a
-      // stale world point.
-      cameraRef.current?.clearOverlays();
-      overlayPinnedRef.current = false;
-      setOverlayText('overlay: (cleared — no plane)');
     }
 
     // v0.19.0 — surface the sample plugin's SYNC result.  The native
@@ -356,7 +401,49 @@ function App(): React.JSX.Element {
       // idle copy so the overlay still proves the field is plumbed.
       setPluginText('plugins: (none)');
     }
-  }, []);
+  }, [pinMarker]);
+
+  // v0.20.0 — "Pin marker" / "Reset" button.  Tap (aiming the center
+  // crosshair where you want the marker) to drop the demo overlay 1 m ahead;
+  // tap again to release.  Pins IMMEDIATELY from the last-known pose; only if
+  // no AR frame has arrived yet does it defer to the next frame (pendingLock).
+  const toggleLockPlane = useCallback(() => {
+    if (planeLocked) {
+      lockedWorldPointRef.current = null;
+      pendingLockRef.current = false;
+      setPlaneLocked(false);
+      cameraRef.current?.clearOverlays();
+      overlayPinnedRef.current = false;
+      setOverlayText('overlay: tap "Pin marker" to drop one on the surface');
+      return;
+    }
+    setPlaneLocked(true);
+    setOverlayText('overlay: pinning…');
+    // Raycast from the crosshair first → land the marker ON the real surface
+    // at the real distance.  Fall back to 1 m ahead when nothing is hit.
+    const fallback = () => {
+      const pose = latestPoseRef.current;
+      if (pose) {
+        pinMarker(pose.t, pose.r);
+      } else {
+        pendingLockRef.current = true; // no pose yet → pin on first AR frame
+      }
+    };
+    const ray = cameraRef.current?.raycast();
+    if (ray) {
+      ray
+        .then((hit) => {
+          if (hit) {
+            pinAt(hit);
+          } else {
+            fallback();
+          }
+        })
+        .catch(fallback);
+    } else {
+      fallback();
+    }
+  }, [planeLocked, pinMarker, pinAt]);
 
   // v0.19.0 — the ASYNC plugin-result channel.  Fires when a registered
   // plugin offloads heavy work and later calls `registry.emit(name, result)`
@@ -631,6 +718,27 @@ function App(): React.JSX.Element {
           </Text>
         </View>
 
+        {/* v0.20.0 — center crosshair: aim this where you want the marker,
+            then tap "Pin marker" to drop the demo overlay 1 m ahead there. */}
+        <View style={styles.crosshair} pointerEvents="none">
+          <Text style={styles.crosshairText}>＋</Text>
+        </View>
+
+        {/* v0.20.0 — Lock/Reset the demo overlay onto the plane you're aiming at. */}
+        <Pressable
+          style={[
+            styles.lockPlaneBtn,
+            planeLocked && styles.lockPlaneBtnActive,
+          ]}
+          onPress={toggleLockPlane}
+          accessibilityRole="button"
+          accessibilityLabel={planeLocked ? 'Reset plane lock' : 'Lock plane'}
+        >
+          <Text style={styles.lockPlaneText}>
+            {planeLocked ? 'Reset' : 'Pin marker'}
+          </Text>
+        </Pressable>
+
         {refine !== null && (
           <View
             style={[
@@ -703,6 +811,47 @@ function App(): React.JSX.Element {
 
 
 const styles = StyleSheet.create({
+  // v0.20.0 — center crosshair marking where you're "pointing" for plane lock.
+  crosshair: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  crosshairText: {
+    color: '#00E5FF',
+    fontSize: 30,
+    fontWeight: '700',
+    opacity: 0.85,
+    backgroundColor: 'transparent',
+  },
+  // v0.20.0 — Pin/Reset the demo overlay onto the aimed-at surface.  Lower-
+  // right, ABOVE the bottom readout strip (`arMetaOverlay` at bottom:96) and
+  // clear of the SDK's top-right pill stack (AR toggle + flash) and the
+  // bottom-center shutter — those zones are owned by `<Camera>`.
+  lockPlaneBtn: {
+    position: 'absolute',
+    bottom: 170,
+    right: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#00E5FF',
+  },
+  lockPlaneBtnActive: {
+    backgroundColor: 'rgba(255, 90, 90, 0.85)',
+    borderColor: '#FFFFFF',
+  },
+  lockPlaneText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
   // AR metadata readout — fed from the worklet-free `onArFrame` callback
   // (see `handleArFrame`).  Bottom strip so it doesn't collide with the
   // top-left dev toggles or the guidance banner.

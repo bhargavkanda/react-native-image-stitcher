@@ -1576,6 +1576,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     updateOverlay: (id, patch) => arViewRef.current?.updateOverlay(id, patch),
     removeOverlay: (id) => arViewRef.current?.removeOverlay(id),
     clearOverlays: () => arViewRef.current?.clearOverlays(),
+    raycast: () => arViewRef.current?.raycast() ?? Promise.resolve(null),
   }), []);
 
   // Effect that does the async transition work whenever the settled

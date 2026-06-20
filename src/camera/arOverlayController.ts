@@ -56,6 +56,16 @@ export interface AROverlayMethods {
   removeOverlay: (id: string) => void;
   /** Remove all JS-set overlays. */
   clearOverlays: () => void;
+  /**
+   * Raycast from the screen centre (the crosshair) to the first real-world
+   * surface and resolve its world position `[x, y, z]` in metres (ARKit/ARCore
+   * world frame), or `null` when nothing is hit (e.g. a featureless wall before
+   * any plane is detected).  Use it to place an overlay ON the aimed surface at
+   * the real distance — pass the result as a `worldPosition` to
+   * {@link setOverlays} / {@link addOverlay} — instead of guessing a distance.
+   * Resolves `null` (never throws) when the native module / method is absent.
+   */
+  raycast: () => Promise<[number, number, number] | null>;
 }
 
 interface RNSARSessionOverlayModule {
@@ -63,6 +73,8 @@ interface RNSARSessionOverlayModule {
   // RN-injected); on Android it's `void`.  We call it fire-and-forget but
   // type it as possibly-thenable so the defensive `.catch` below compiles.
   setOverlays?: (overlays: AROverlay[]) => void | Promise<unknown>;
+  // Raycast resolves `{ worldPosition: [x,y,z] }` on a hit, or `null`.
+  raycast?: () => Promise<{ worldPosition?: number[] } | null>;
 }
 
 /** The `RNSARSession` native-module method name overlays dispatch through. */
@@ -145,6 +157,27 @@ export function createAROverlayController(): AROverlayMethods & {
       if (overlaysById.size > 0) {
         overlaysById.clear();
         flush();
+      }
+    },
+
+    raycast: async (): Promise<[number, number, number] | null> => {
+      const native = (NativeModules as Record<string, unknown>)
+        .RNSARSession as RNSARSessionOverlayModule | undefined;
+      const fn = native?.raycast;
+      // Native module / method unavailable (web, or a native build predating
+      // the raycast channel): resolve null — the caller falls back.
+      if (typeof fn !== 'function') {
+        return null;
+      }
+      try {
+        const res = await fn();
+        const wp = res?.worldPosition;
+        if (Array.isArray(wp) && wp.length >= 3) {
+          return [Number(wp[0]), Number(wp[1]), Number(wp[2])];
+        }
+        return null;
+      } catch {
+        return null;
       }
     },
   };

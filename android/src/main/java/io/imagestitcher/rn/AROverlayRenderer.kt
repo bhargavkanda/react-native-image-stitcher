@@ -75,6 +75,20 @@ internal class AROverlayRenderer(
     @Volatile
     private var camera: CameraState? = null
 
+    // v0.20.0 — per-overlay anchor positions (overlay id → live world [x,y,z]),
+    // published from the GL thread each frame after the view reconciles ARCore
+    // anchors.  When present for an overlay, onDraw uses this DRIFT-CORRECTED
+    // position instead of the overlay's frozen worldPosition / worldQuad — so
+    // ARCore can keep the marker on the real spot across re-localization.
+    @Volatile
+    private var anchorPositions: Map<String, FloatArray> = emptyMap()
+
+    /// Publish drift-corrected anchor positions for the current frame (called
+    /// on the GL thread before [updateCamera]).  Empty = no anchored overlays.
+    fun setAnchorPositions(positions: Map<String, FloatArray>) {
+        anchorPositions = positions
+    }
+
     // Reusable paints (allocate once — onDraw runs at display rate).
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -183,10 +197,29 @@ internal class AROverlayRenderer(
         //   - worldPosition + sizeMeters: 4 corners of a billboard quad
         //     facing the camera (so the box always presents flat to the
         //     viewer regardless of camera angle).
+        // v0.20.0 — prefer the drift-corrected ARCore anchor position when the
+        // view has published one for this overlay; else the frozen geometry.
+        val anchorPos = anchorPositions[overlay.id]
         val worldCorners: Array<FloatArray> = when {
-            overlay.worldQuad != null -> overlay.worldQuad
+            overlay.worldQuad != null -> {
+                val q = overlay.worldQuad
+                if (anchorPos != null) {
+                    // Translate the quad so its centroid sits at the anchor.
+                    var cx = 0f; var cy = 0f; var cz = 0f
+                    for (v in q) { cx += v[0]; cy += v[1]; cz += v[2] }
+                    val n = q.size.toFloat()
+                    val dx = anchorPos[0] - cx / n
+                    val dy = anchorPos[1] - cy / n
+                    val dz = anchorPos[2] - cz / n
+                    Array(q.size) { i ->
+                        floatArrayOf(q[i][0] + dx, q[i][1] + dy, q[i][2] + dz)
+                    }
+                } else {
+                    q
+                }
+            }
             overlay.worldPosition != null ->
-                billboardCorners(overlay.worldPosition, overlay.sizeMeters, cam)
+                billboardCorners(anchorPos ?: overlay.worldPosition, overlay.sizeMeters, cam)
             else -> return
         }
 
