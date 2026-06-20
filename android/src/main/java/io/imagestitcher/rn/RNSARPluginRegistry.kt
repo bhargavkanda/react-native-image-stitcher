@@ -5,6 +5,7 @@ import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.WritableMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 0.19.0 — process-wide registry of [ARFramePlugin]s (iOS twin:
@@ -39,6 +40,73 @@ object RNSARPluginRegistry {
     const val AR_PLUGIN_RESULT_EVENT = "RNImageStitcherARPluginResult"
 
     private val registered = CopyOnWriteArrayList<ARFramePlugin>()
+
+    // ── 0.20.0 — native-plugin overlay path ──────────────────────────────
+    //
+    // A native plugin can place AR overlays DIRECTLY (native→native, zero JS
+    // latency) via [setOverlays] / [addOverlay] / [removeOverlay] /
+    // [clearOverlays].  These write the **plugin namespace** of the bound
+    // view's [AROverlayStore]; the renderer draws the UNION of plugin + JS
+    // overlays, so a JS `setOverlays` never clobbers plugin overlays (and
+    // vice-versa).
+    //
+    // We CACHE the latest plugin overlay set here so a view that binds AFTER
+    // a plugin placed overlays (e.g. plugin registered + overlays set in
+    // MainApplication.onCreate, before any ARCameraView mounts) still picks
+    // them up — [RNSARCameraView] replays the cache into its store when it
+    // binds (see [currentPluginOverlays]).
+    private val pluginOverlays = AtomicReference<List<AROverlayData>>(emptyList())
+
+    /**
+     * Replace the ENTIRE native-plugin overlay set.  Merges with (does NOT
+     * clobber) JS-set overlays — the renderer draws the union.  Safe from
+     * any thread (a plugin's own work queue, typically).
+     *
+     * @param overlays the plugin overlays to render (an empty list clears
+     *                 the plugin namespace; JS overlays untouched).
+     */
+    @JvmStatic
+    fun setOverlays(overlays: List<AROverlayData>) {
+        pluginOverlays.set(overlays.toList())
+        boundStore()?.setPluginOverlays(overlays)
+    }
+
+    /** Add or replace one plugin overlay by id. */
+    @JvmStatic
+    fun addOverlay(overlay: AROverlayData) {
+        pluginOverlays.updateAndGet { cur ->
+            val idx = cur.indexOfFirst { it.id == overlay.id }
+            if (idx < 0) cur + overlay else cur.toMutableList().also { it[idx] = overlay }
+        }
+        boundStore()?.addPluginOverlay(overlay)
+    }
+
+    /** Remove one plugin overlay by id (no-op if unknown). */
+    @JvmStatic
+    fun removeOverlay(id: String) {
+        pluginOverlays.updateAndGet { cur -> cur.filterNot { it.id == id } }
+        boundStore()?.removePluginOverlay(id)
+    }
+
+    /** Clear ALL plugin overlays (JS overlays untouched). */
+    @JvmStatic
+    fun clearOverlays() {
+        pluginOverlays.set(emptyList())
+        boundStore()?.clearPluginOverlays()
+    }
+
+    /**
+     * The cached plugin overlay set — replayed into a freshly-bound view's
+     * store so plugins that placed overlays before any view mounted still
+     * render.  Called by [RNSARCameraView.onAttachedToWindow].
+     */
+    @JvmStatic
+    internal fun currentPluginOverlays(): List<AROverlayData> = pluginOverlays.get()
+
+    /// The bound AR camera view's overlay store, or null when no view is
+    /// mounted yet (overlays land in the cache until one binds).
+    private fun boundStore(): AROverlayStore? =
+        RNSARSession.instance?.boundOverlayStore()
 
     /**
      * Register a plugin.  Idempotent by [ARFramePlugin.name]: registering a

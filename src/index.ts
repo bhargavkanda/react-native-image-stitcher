@@ -27,6 +27,7 @@
 export { Camera, CameraError } from './camera/Camera';
 export type {
   CameraProps,
+  CameraHandle,
   CameraCaptureResult,
   PanoramaCaptureResult,
   CameraErrorCode,
@@ -272,6 +273,20 @@ export type { ARFrameMeta } from './stitching/ARFrameMeta';
 // `onArPluginResult` callback (a plugin's out-of-band `registry.emit(...)`
 // result).  The SDK ships only the generic framework — no built-in plugins.
 export type { ARPluginResult } from './stitching/ARFrameMeta';
+// v0.20.0 — AR OVERLAY / ANNOTATION renderer data model.  A 2D shape anchored
+// to a world point (or world quad) and reprojected to screen every AR frame.
+// Drive it via the declarative `overlays` prop or the imperative ref methods
+// (`setOverlays` / `addOverlay` / `updateOverlay` / `removeOverlay` /
+// `clearOverlays`) on both `<Camera>` and `<ARCameraView>`.
+export type { AROverlay } from './stitching/AROverlay';
+// The shared imperative-overlay method signatures (the `<Camera>` /
+// `<ARCameraView>` ref handles extend this).  Plus the agreed native channel
+// names, for hosts / native plugins matching the wire contract.
+export type { AROverlayMethods } from './camera/arOverlayController';
+export {
+  AR_OVERLAY_SET_METHOD,
+  AR_OVERLAY_VIEW_COMMAND,
+} from './camera/arOverlayController';
 // NOTE: the host-worklet / frame-stream hooks `useFrameProcessor`,
 // `useThrottledFrameProcessor` and `useFrameStream` (v0.8–v0.9) were
 // archived in the batch-keyframe cleanup — they drove the third-party

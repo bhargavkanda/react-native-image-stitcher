@@ -11,7 +11,9 @@ import android.util.Log
 import android.view.Surface
 import android.view.WindowManager
 import android.widget.FrameLayout
+import com.google.ar.core.Anchor
 import com.google.ar.core.Camera
+import com.google.ar.core.Pose
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
@@ -78,6 +80,38 @@ class RNSARCameraView @JvmOverloads constructor(
     private val backgroundRenderer = BackgroundRenderer()
     private val sessionRef = AtomicReference<Session?>(null)
     private var sessionTextureBound = false
+
+    // ── 0.20.0 — AR overlay/annotation renderer ─────────────────────────
+    //
+    // [overlayStore] is the single source of truth for the overlays to
+    // draw (UNION of JS-set + native-plugin-set; see [AROverlayStore]);
+    // [overlayRenderer] is the transparent Canvas View stacked ABOVE the
+    // GLSurfaceView in this FrameLayout.  Per frame, [onDrawFrame] snapshots
+    // the camera view/projection matrices + the letterbox box and pushes
+    // them into the renderer (which reprojects + redraws on the UI thread).
+    //
+    // The store is exposed (via [overlayStore] internal) so the native
+    // plugin path ([RNSARPluginRegistry.setOverlays] etc.) and the JS
+    // imperative path ([RNSARSession] @ReactMethods → bound view) both write
+    // to it; the JS imperative path uses the JS namespace, plugins the
+    // plugin namespace.
+    val overlayStore = AROverlayStore()
+    private val overlayRenderer = AROverlayRenderer(context, overlayStore)
+
+    // v0.20.0 — one ARCore Anchor per world-anchored overlay (parity with
+    // iOS' ARAnchor) so ARCore refines the pose against drift / re-localization
+    // instead of trusting a frozen world coordinate.  GL-thread only (created /
+    // read / detached inside [reconcileOverlayAnchors] from onDrawFrame).
+    private val overlayAnchors = HashMap<String, Anchor>()
+    // The source world point each anchor was created at — used to detect when
+    // an overlay's position changed (JS re-set it) and recreate the anchor.
+    private val overlayAnchorSrc = HashMap<String, FloatArray>()
+
+    // Scratch matrices for the per-frame overlay camera snapshot — reused
+    // each frame so the GL thread does no per-frame allocation when overlays
+    // are active.  ARCore returns COLUMN-MAJOR (OpenGL) matrices.
+    private val overlayViewMatrix = FloatArray(16)
+    private val overlayProjMatrix = FloatArray(16)
     /// Last known display rotation; consulted on each setDisplayGeometry
     /// call so we can recompute when the user rotates the device.
     private var lastDisplayRotation: Int = -1
@@ -131,6 +165,21 @@ class RNSARCameraView @JvmOverloads constructor(
         glView.requestRender()
     }
 
+    /// Pending crosshair raycast (v0.20.0).  Fulfilled on the next render
+    /// tick with the live ARCore frame — `Frame.hitTest` must run on the GL
+    /// thread, so a JS `raycast()` call can't resolve synchronously.
+    private val pendingRaycast =
+        AtomicReference<com.facebook.react.bridge.Promise?>(null)
+
+    /// Called from the bridge (RNSARSession.raycast @ReactMethod).  Stores a
+    /// promise fulfilled on the next render tick by hitTest from the screen
+    /// centre.  Supersedes any queued raycast.
+    internal fun requestRaycast(promise: com.facebook.react.bridge.Promise) {
+        val previous = pendingRaycast.getAndSet(promise)
+        previous?.resolve(null) // superseded → null (caller falls back)
+        glView.requestRender()
+    }
+
     init {
         // Black background avoids a flash before the GL surface starts
         // clearing itself black each frame (the GL-level letterbox draws
@@ -138,6 +187,14 @@ class RNSARCameraView @JvmOverloads constructor(
         setBackgroundColor(android.graphics.Color.BLACK)
         addView(
             glView,
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
+        )
+        // 0.20.0 — overlay renderer stacked ABOVE the GLSurfaceView (added
+        // after glView so it draws on top).  Full-screen + transparent; it
+        // reprojects world overlays into the same letterbox box the camera
+        // feed fills, so its coordinate space matches the preview.
+        addView(
+            overlayRenderer,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
         )
     }
@@ -215,6 +272,11 @@ class RNSARCameraView @JvmOverloads constructor(
         // Pause the GL thread so we stop drawing frames.
         glView.onPause()
         sessionTextureBound = false
+        // 0.20.0 — stop drawing overlays; we drop the camera snapshot so a
+        // stale pose isn't reused if the view re-attaches.  The overlay SET
+        // itself is left intact (the host may keep the same overlays across
+        // a remount); only the per-frame camera state is cleared.
+        overlayRenderer.clear()
         IncrementalStitcher.bridgeInstance?.unbindArCameraView(this)
         RNSARSession.instance?.unbindCameraView(this)
         // iOS parity (didMoveToWindow else-branch): stop the session
@@ -398,6 +460,18 @@ class RNSARCameraView @JvmOverloads constructor(
         // contract was already in place for Phase 4.
         appendPose(camera, frame.timestamp)
 
+        // ── 0.20.0 — feed the overlay renderer this frame's camera ───────
+        //
+        // Only when overlays exist (cheap AtomicReference emptiness check),
+        // snapshot the view + projection matrices and the letterbox box so
+        // the overlay View can reproject world points → screen and redraw.
+        // Runs every render frame so overlays track at display rate.
+        //
+        // First reconcile ARCore anchors + publish their drift-corrected poses
+        // so the renderer projects the refined positions, not frozen coords.
+        reconcileOverlayAnchors(session)
+        maybeUpdateOverlayCamera(camera, box)
+
         // Forward to the incremental stitcher when capture is engaged,
         // OR when an AR frame-processor host worklet is registered (the
         // v0.8.0 Phase 4b.iii fan-out forwards preview frames whenever
@@ -444,6 +518,65 @@ class RNSARCameraView @JvmOverloads constructor(
         // pending; cheap atomic CAS on the hot path.
         pendingTakePhoto.getAndSet(null)?.let { req ->
             fulfilTakePhoto(frame, req)
+        }
+
+        // raycast consumer (v0.20.0) — same pattern: a JS raycast() request
+        // is fulfilled here with the live frame's hitTest from the crosshair.
+        pendingRaycast.getAndSet(null)?.let { promise ->
+            fulfilRaycast(frame, camera, promise)
+        }
+    }
+
+    /// Raycast from the screen-centre crosshair to the nearest real-world
+    /// surface; resolve `{ worldPosition: [x,y,z] }` (or null when nothing is
+    /// hit / not tracking).  Runs on the GL render thread from onDrawFrame.
+    /// hitTest coordinates are in the `setDisplayGeometry` space — which we
+    /// feed the LETTERBOX BOX — so the crosshair is the box centre.  Mirrors
+    /// iOS `RNSARSession.raycast`; the JS controller falls back to a fixed
+    /// 1 m-ahead point when this resolves null.
+    private fun fulfilRaycast(
+        frame: com.google.ar.core.Frame,
+        camera: Camera,
+        promise: com.facebook.react.bridge.Promise,
+    ) {
+        try {
+            if (camera.trackingState != TrackingState.TRACKING) {
+                promise.resolve(null)
+                return
+            }
+            val box = letterboxBox()
+            val cx = box[2] / 2f // box width  / 2
+            val cy = box[3] / 2f // box height / 2
+            val hits = frame.hitTest(cx, cy)
+            // hits are sorted near→far.  Prefer a plane hit inside the
+            // detected polygon, then a depth / feature point, then any hit.
+            val hit = hits.firstOrNull { h ->
+                when (val t = h.trackable) {
+                    is com.google.ar.core.Plane ->
+                        t.trackingState == TrackingState.TRACKING &&
+                            t.isPoseInPolygon(h.hitPose)
+                    is com.google.ar.core.DepthPoint -> true
+                    is com.google.ar.core.Point -> true
+                    else -> false
+                }
+            } ?: hits.firstOrNull()
+            if (hit == null) {
+                promise.resolve(null)
+                return
+            }
+            val p = hit.hitPose
+            val wp = com.facebook.react.bridge.Arguments.createArray().apply {
+                pushDouble(p.tx().toDouble())
+                pushDouble(p.ty().toDouble())
+                pushDouble(p.tz().toDouble())
+            }
+            val result = com.facebook.react.bridge.Arguments.createMap().apply {
+                putArray("worldPosition", wp)
+            }
+            promise.resolve(result)
+        } catch (t: Throwable) {
+            Log.w(TAG, "raycast failed: ${t.message}")
+            promise.resolve(null)
         }
     }
 
@@ -545,6 +678,163 @@ class RNSARCameraView @JvmOverloads constructor(
         )
         RNSARSession.instance?.appendPose(framePose)
         RNSARSession.instance?.updateTrackingState(camera.trackingState)
+    }
+
+    /// v0.20.0 — keep one ARCore Anchor per world-anchored overlay so ARCore
+    /// refines its pose against drift / re-localization (parity with iOS'
+    /// ARAnchor).  Runs on the GL thread each frame: create anchors for new
+    /// overlays, recreate when an overlay's source pose changes, detach removed
+    /// ones, then publish the live anchor positions to the renderer (which uses
+    /// them instead of the frozen world coordinates).  Cheap no-op when there
+    /// are neither overlays nor lingering anchors.
+    private fun reconcileOverlayAnchors(session: Session) {
+        if (overlayStore.isEmpty() && overlayAnchors.isEmpty()) return
+
+        val overlays = overlayStore.snapshot()
+        val live = HashSet<String>(overlays.size)
+        val positions = HashMap<String, FloatArray>(overlays.size)
+
+        for (o in overlays) {
+            val target = anchorTarget(o) ?: continue
+            live.add(o.id)
+            val prev = overlayAnchorSrc[o.id]
+            if (prev == null || !prev.contentEquals(target)) {
+                // New overlay, or its position changed → (re)create the anchor.
+                overlayAnchors.remove(o.id)?.detach()
+                val anchor = try {
+                    session.createAnchor(
+                        Pose(target, floatArrayOf(0f, 0f, 0f, 1f)),
+                    )
+                } catch (t: Throwable) {
+                    Log.w(TAG, "createAnchor failed for '${o.id}': ${t.message}")
+                    null
+                }
+                if (anchor != null) {
+                    overlayAnchors[o.id] = anchor
+                    overlayAnchorSrc[o.id] = target.copyOf()
+                } else {
+                    overlayAnchorSrc.remove(o.id)
+                }
+            }
+            // Publish the live (tracking) anchor pose, else the source pose.
+            val a = overlayAnchors[o.id]
+            positions[o.id] = if (a != null && a.trackingState == TrackingState.TRACKING) {
+                val p = a.pose
+                floatArrayOf(p.tx(), p.ty(), p.tz())
+            } else {
+                overlayAnchorSrc[o.id] ?: target
+            }
+        }
+
+        // Detach anchors for overlays that no longer exist.
+        if (overlayAnchors.keys.any { it !in live }) {
+            for (id in overlayAnchors.keys.filter { it !in live }) {
+                overlayAnchors.remove(id)?.detach()
+                overlayAnchorSrc.remove(id)
+            }
+        }
+
+        overlayRenderer.setAnchorPositions(positions)
+    }
+
+    /// The world point to anchor an overlay at: its `worldPosition`, or the
+    /// centroid of its `worldQuad`.  null when it has no world geometry.
+    private fun anchorTarget(o: AROverlayData): FloatArray? {
+        o.worldPosition?.let { return it }
+        val q = o.worldQuad ?: return null
+        if (q.isEmpty()) return null
+        var cx = 0f; var cy = 0f; var cz = 0f
+        for (v in q) { cx += v[0]; cy += v[1]; cz += v[2] }
+        val n = q.size.toFloat()
+        return floatArrayOf(cx / n, cy / n, cz / n)
+    }
+
+    // ── 0.20.0 — per-frame overlay camera snapshot + JS imperative API ──
+
+    /**
+     * Snapshot this frame's camera view + projection matrices and the
+     * letterbox box into the [overlayRenderer], then trigger a redraw.
+     *
+     * Cheap no-op when no overlays are set (single AtomicReference
+     * emptiness check) so the common no-overlay preview path pays almost
+     * nothing.  ARCore's `getViewMatrix` / `getProjectionMatrix` are
+     * COLUMN-MAJOR (OpenGL) — exactly what `android.opengl.Matrix` and the
+     * renderer expect.  The near/far planes (0.05 m / 100 m) bound depth
+     * precision; they don't affect XY projection.
+     *
+     * @param camera the ARCore camera for this frame (pose + intrinsics).
+     * @param glBox  the letterbox box [x, y, w, h] in GL pixel space
+     *               (origin BOTTOM-left, as used by `glViewport`).  We flip
+     *               Y to the overlay View's TOP-left origin here.
+     */
+    private fun maybeUpdateOverlayCamera(camera: Camera, glBox: IntArray) {
+        if (overlayStore.isEmpty()) return
+
+        // ARCore projection matrix: near=0.05 m, far=100 m (matches the
+        // BackgroundRenderer's typical range; depth bounds only).
+        try {
+            camera.getViewMatrix(overlayViewMatrix, 0)
+            camera.getProjectionMatrix(overlayProjMatrix, 0, 0.05f, 100f)
+        } catch (t: Throwable) {
+            // Camera not ready (early frames) — skip this frame's overlay
+            // update; the feed keeps drawing and we retry next frame.
+            return
+        }
+
+        // GL viewport box → overlay View box.  GL origin is bottom-left;
+        // the View is top-left.  Both share surfaceWidth × surfaceHeight.
+        val boxX = glBox[0].toFloat()
+        val boxW = glBox[2].toFloat()
+        val boxH = glBox[3].toFloat()
+        val boxYTop = (surfaceHeight - (glBox[1] + glBox[3])).toFloat()
+
+        val tracking = camera.trackingState == TrackingState.TRACKING
+
+        overlayRenderer.updateCamera(
+            viewMatrix = overlayViewMatrix,
+            projectionMatrix = overlayProjMatrix,
+            boxX = boxX,
+            boxY = boxYTop,
+            boxW = boxW,
+            boxH = boxH,
+            tracking = tracking,
+        )
+    }
+
+    // ── JS imperative overlay API (forwarded from RNSARSession) ──────────
+    //
+    // The JS `ARCameraViewHandle` / `<Camera>` ref methods (setOverlays /
+    // addOverlay / updateOverlay / removeOverlay / clearOverlays) route
+    // through the singleton `RNSARSession` native module — the SAME idiom
+    // takePhoto uses — which forwards to the bound view's [overlayStore]
+    // (JS namespace).  These run on the bridge thread; the store's
+    // AtomicReferences make that safe against the GL thread's per-frame
+    // read.  An overlay set change triggers an immediate redraw so the
+    // overlay appears without waiting for the next AR frame's snapshot.
+
+    internal fun setOverlaysFromJs(overlays: List<AROverlayData>) {
+        overlayStore.setJsOverlays(overlays)
+        overlayRenderer.postInvalidateOnAnimation()
+    }
+
+    internal fun addOverlayFromJs(overlay: AROverlayData) {
+        overlayStore.addJsOverlay(overlay)
+        overlayRenderer.postInvalidateOnAnimation()
+    }
+
+    internal fun updateOverlayFromJs(id: String, patch: com.facebook.react.bridge.ReadableMap) {
+        overlayStore.updateJsOverlay(id, patch)
+        overlayRenderer.postInvalidateOnAnimation()
+    }
+
+    internal fun removeOverlayFromJs(id: String) {
+        overlayStore.removeJsOverlay(id)
+        overlayRenderer.postInvalidateOnAnimation()
+    }
+
+    internal fun clearOverlaysFromJs() {
+        overlayStore.clearJsOverlays()
+        overlayRenderer.postInvalidateOnAnimation()
     }
 
     /// P3-G diagnostic — rate-limit the per-frame log so we can see

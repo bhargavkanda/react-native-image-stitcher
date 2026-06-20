@@ -36,5 +36,27 @@ public final class RNSARCameraViewManager: RCTViewManager {
     public override class func requiresMainQueueSetup() -> Bool {
         return true
     }
+
+    // MARK: - v0.20.0 — AR overlays
+    //
+    // OVERLAY WIRE PATH (shared cross-platform contract, see
+    // `src/camera/arOverlayController.ts`): the JS imperative methods
+    // (setOverlays / addOverlay / updateOverlay / removeOverlay /
+    // clearOverlays) AND the declarative `overlays` prop both resolve, in
+    // JS, to the FULL current overlay array and dispatch it through the
+    // `RNSARSession.setOverlays(_:)` native MODULE method (see
+    // `ARSessionBridge.swift`).  Native replaces its JS-overlay namespace
+    // in `RNISAROverlayStore` wholesale and merges with the SEPARATE
+    // plugin-overlay namespace (`RNISARPluginRegistry.setOverlays`) — the
+    // draw view renders the UNION every ARFrame.
+    //
+    // The module method is the chosen mechanism (matching every other AR
+    // setting: setPlaneDetection / setArFrameMetaEnabled /
+    // setSceneReconstructionEnabled) because there is exactly ONE
+    // `RNSARCameraView` mounted (ARKit can't share the camera), so there's
+    // nothing to key by view tag.  We ALSO honor the declarative
+    // `overlays` view prop here on the view (`RNSARCameraView.overlays`
+    // KVC setter) so a host can drive overlays purely declaratively
+    // without the module — both land in the same store namespace.
 }
 #endif

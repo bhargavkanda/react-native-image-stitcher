@@ -56,6 +56,20 @@ RCT_EXTERN_METHOD(setArFrameMetaEnabled:(nonnull NSNumber *)enabled
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// v0.20.0 — AR overlay renderer.  Replace the entire JS-set overlay
+// collection (the shared arOverlayController sends the full array every
+// mutation).  Native merges with the namespaced plugin-overlay set + the
+// RNSARCameraView draw view reprojects them each ARFrame.
+RCT_EXTERN_METHOD(setOverlays:(nonnull NSArray *)overlays
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
+// v0.20.0 — raycast from the crosshair (screen centre) to the first real
+// surface hit → { worldPosition: [x,y,z] } or null.  Used to place an
+// overlay ON the aimed surface (then anchor it), vs a guessed distance ahead.
+RCT_EXTERN_METHOD(raycast:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 RCT_EXTERN_METHOD(snapshotPoseLog:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 

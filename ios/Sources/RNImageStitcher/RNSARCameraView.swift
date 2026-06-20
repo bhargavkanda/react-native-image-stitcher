@@ -31,16 +31,36 @@
 
 import Foundation
 import ARKit
+import SceneKit
 import UIKit
+import simd
 
 
 @objc(RNSARCameraView)
-public final class RNSARCameraView: UIView {
+public final class RNSARCameraView: UIView, ARSCNViewDelegate {
 
     /// The ARSCNView that does the actual rendering.  Bound to the
     /// singleton's ARSession so all preview surfaces share the same
     /// session (and the same pose log that the stitcher consumes).
     private var arSCNView: ARSCNView!
+
+    /// v0.20.0 — world-anchored overlays backed by REAL `ARAnchor`s.  Each
+    /// overlay becomes an `ARAnchor` added to the session; ARSCNView creates a
+    /// node per anchor (via `renderer(_:nodeFor:)`) and keeps its transform
+    /// synced to the anchor every frame — and crucially ARKit *refines* the
+    /// anchor as its world understanding improves (drift / re-localization),
+    /// so the marker stays glued to the real-world spot across a long session,
+    /// not just a short one (which a fixed world coordinate would not survive).
+    /// Diffed against the overlay store each render pass (`RNISAROverlay` is
+    /// `Equatable`): add new ids, rebuild changed ones, remove gone ones.
+    ///
+    /// Two maps, guarded by `anchorLock` because `nodeFor` may run on a
+    /// different (render) thread than the `updateAtTime` diff:
+    ///   - `overlayAnchors`: overlay id → (its anchor, the overlay it came from)
+    ///   - `anchorOverlays`: anchor UUID → overlay (so `nodeFor` can build it)
+    private var overlayAnchors: [String: (anchor: ARAnchor, overlay: RNISAROverlay)] = [:]
+    private var anchorOverlays: [UUID: RNISAROverlay] = [:]
+    private let anchorLock = NSLock()
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
@@ -68,6 +88,14 @@ public final class RNSARCameraView: UIView {
         //     a renderer.
         arSCNView.session = RNSARSession.shared.arSession
 
+        // v0.20.0 — become the ARSCNView's render delegate so
+        // `renderer(_:updateAtTime:)` fires once per render pass (display
+        // rate) on the MAIN thread.  This is our per-frame overlay redraw
+        // hook: cheap (a handful of overlays), already on the main thread,
+        // and gives us smooth display-rate tracking without touching the
+        // ARSession delegate (which `RNSARSession` owns for pose logging).
+        arSCNView.delegate = self
+
         // We don't draw any 3D content in Phase 4.4.  Disable
         // SceneKit's automatic statistics overlay and lighting model
         // — we just want the camera feed.
@@ -78,6 +106,39 @@ public final class RNSARCameraView: UIView {
         // this view outside ARSCNView's letterboxed sub-rect).
         backgroundColor = .black
         addSubview(arSCNView)
+
+        // v0.20.0 — overlays render as world-anchored SceneKit nodes inside
+        // `arSCNView.scene` (see `syncOverlayNodes`), so there is no separate
+        // 2D overlay UIView to add here.
+    }
+
+    // MARK: - v0.20.0 — declarative `overlays` prop (KVC from RN)
+
+    /// Declarative `overlays` prop.  RN sets this via KVC
+    /// (`RCT_EXPORT_VIEW_PROPERTY(overlays, NSArray)`) whenever the prop
+    /// changes; we replace the JS overlay namespace wholesale (declarative
+    /// = the full set each render).  Forwarded to the global store rather
+    /// than held per-view because the overlay world is global to the single
+    /// AR session.  `@objc` + `NSArray` so KVC can set it.
+    @objc public var overlays: NSArray = [] {
+        didSet {
+            Self.applyJSSetOverlays(overlays)
+        }
+    }
+
+    /// Parse a JS overlay-dictionary array and replace the JS overlay
+    /// namespace in the shared store.  Shared by the declarative prop
+    /// setter (above) and the imperative `setOverlays` view command (in
+    /// `RNSARCameraViewManager`).
+    static func applyJSSetOverlays(_ overlays: NSArray) {
+        var parsed: [RNISAROverlay] = []
+        parsed.reserveCapacity(overlays.count)
+        for item in overlays {
+            guard let dict = item as? [String: Any],
+                  let o = RNISAROverlay.from(dictionary: dict) else { continue }
+            parsed.append(o)
+        }
+        RNISAROverlayStore.shared.setJSOverlays(parsed)
     }
 
     public override func layoutSubviews() {
@@ -96,7 +157,12 @@ public final class RNSARCameraView: UIView {
         // ARSCNView fills a same-AR sub-rect, there is nothing to crop
         // and the user sees the full captured scene.  The parent view's
         // black background fills the remainder.
-        arSCNView.frame = letterboxedFrame()
+        let lb = letterboxedFrame()
+        arSCNView.frame = lb
+        // Overlay nodes live in `arSCNView.scene` and are rendered by the
+        // same (letterboxed) ARSCNView against the live AR camera, so they
+        // need no separate framing — they align with the camera feed
+        // automatically.
     }
 
     /// Returns the largest `CGRect` inside `bounds` that matches the
@@ -184,6 +250,218 @@ public final class RNSARCameraView: UIView {
             }
         }
     }
-}
 
+    // MARK: - ARSCNViewDelegate (v0.20.0 overlay redraw hook)
+
+    /// Called once per ARSCNView render pass.  Keeps the set of overlay
+    /// ARAnchors in sync with the overlay store (add / rebuild / remove).
+    /// ARKit then tracks each anchor and ARSCNView positions its node — we do
+    /// NOT project or position anything by hand.  Cheap: an `==` diff over a
+    /// handful of overlays.
+    ///
+    /// We deliberately do NOT touch `RNSARSession`'s pose log / plugin /
+    /// onArFrame paths — those ride the ARSession delegate which the singleton
+    /// owns.  This delegate is purely the overlay-sync hook.
+    public func renderer(
+        _ renderer: SCNSceneRenderer,
+        updateAtTime time: TimeInterval
+    ) {
+        syncOverlayAnchors()
+    }
+
+    /// ARSCNViewDelegate: vend the node for one of our overlay anchors.  May
+    /// run on the render thread; ARSCNView keeps the returned node's transform
+    /// synced to the (ARKit-refined) anchor.  We build the visual RELATIVE to
+    /// the anchor origin — the anchor carries the world position.
+    public func renderer(
+        _ renderer: SCNSceneRenderer,
+        nodeFor anchor: ARAnchor
+    ) -> SCNNode? {
+        anchorLock.lock()
+        let overlay = anchorOverlays[anchor.identifier]
+        anchorLock.unlock()
+        guard let overlay = overlay else { return nil }
+
+        if let quad = overlay.worldQuad, quad.count >= 3 {
+            // Anchor sits at the centroid; draw the loop relative to it.
+            var c = simd_float3(0, 0, 0)
+            for v in quad { c += v }
+            c /= Float(quad.count)
+            return Self.makeQuadOutlineNode(
+                relCorners: quad.map { $0 - c },
+                color: overlay.color, label: overlay.label)
+        }
+        return Self.makeBillboardNode(
+            sizeMeters: overlay.sizeMeters, color: overlay.color,
+            label: overlay.label)
+    }
+
+    /// Diff the overlay store against the live anchors: add an ARAnchor for
+    /// each new/changed overlay, remove anchors whose overlay is gone.
+    private func syncOverlayAnchors() {
+        let session = arSCNView.session
+        let overlays = RNISAROverlayStore.shared.snapshot()
+        var liveIDs = Set<String>()
+        liveIDs.reserveCapacity(overlays.count)
+
+        for overlay in overlays {
+            liveIDs.insert(overlay.id)
+            anchorLock.lock()
+            let existing = overlayAnchors[overlay.id]
+            anchorLock.unlock()
+            if let existing = existing, existing.overlay == overlay { continue }
+
+            // New or changed → drop the old anchor, add a fresh one.
+            if let existing = existing {
+                session.remove(anchor: existing.anchor)
+                anchorLock.lock()
+                anchorOverlays[existing.anchor.identifier] = nil
+                overlayAnchors[overlay.id] = nil
+                anchorLock.unlock()
+            }
+            guard let pose = Self.anchorPose(for: overlay) else { continue }
+            let anchor = ARAnchor(transform: pose)
+            anchorLock.lock()
+            anchorOverlays[anchor.identifier] = overlay
+            overlayAnchors[overlay.id] = (anchor, overlay)
+            anchorLock.unlock()
+            session.add(anchor: anchor)
+        }
+
+        // Remove anchors whose overlay id is gone (snapshot under the lock,
+        // call session.remove outside it).
+        anchorLock.lock()
+        let goneIDs = overlayAnchors.keys.filter { !liveIDs.contains($0) }
+        let goneAnchors = goneIDs.compactMap { overlayAnchors[$0]?.anchor }
+        for id in goneIDs {
+            if let a = overlayAnchors[id]?.anchor { anchorOverlays[a.identifier] = nil }
+            overlayAnchors[id] = nil
+        }
+        anchorLock.unlock()
+        for a in goneAnchors { session.remove(anchor: a) }
+    }
+
+    // MARK: - v0.20.0 overlay node builders (RELATIVE to the anchor origin)
+
+    /// World transform for an overlay's anchor: a translation-only pose at the
+    /// `worldPosition`, or at the centroid of `worldQuad`.  nil if no geometry.
+    private static func anchorPose(for overlay: RNISAROverlay) -> simd_float4x4? {
+        let p: simd_float3
+        if let quad = overlay.worldQuad, quad.count >= 3 {
+            var c = simd_float3(0, 0, 0)
+            for v in quad { c += v }
+            p = c / Float(quad.count)
+        } else if let center = overlay.worldPosition {
+            p = center
+        } else {
+            return nil
+        }
+        var m = matrix_identity_float4x4
+        m.columns.3 = simd_float4(p.x, p.y, p.z, 1)
+        return m
+    }
+
+    /// A camera-facing billboard plane (at the anchor origin), sized in metres,
+    /// textured with a stroked outline + optional centred label.  Always drawn
+    /// on top (depth read/write off) so an annotation is never hidden.
+    private static func makeBillboardNode(
+        sizeMeters: CGSize?,
+        color: UIColor,
+        label: String?
+    ) -> SCNNode {
+        let w = sizeMeters?.width ?? RNISAROverlay.defaultMarkerExtent
+        let h = sizeMeters?.height ?? RNISAROverlay.defaultMarkerExtent
+        let plane = SCNPlane(width: w, height: h)
+        let mat = SCNMaterial()
+        mat.diffuse.contents = overlayImage(color: color, label: label)
+        mat.isDoubleSided = true
+        mat.lightingModel = .constant      // unlit — show the texture as-is
+        mat.writesToDepthBuffer = false
+        mat.readsFromDepthBuffer = false   // never occluded by the scene
+        plane.firstMaterial = mat
+
+        let node = SCNNode(geometry: plane)
+        node.renderingOrder = 1000         // draw after the camera background
+        let billboard = SCNBillboardConstraint()
+        billboard.freeAxes = .all          // always face the camera, flat
+        node.constraints = [billboard]
+        return node
+    }
+
+    /// A 3D line-loop through corners expressed RELATIVE to the anchor origin
+    /// (the anchor is at the quad centroid), with an optional camera-facing
+    /// label at the centre.
+    private static func makeQuadOutlineNode(
+        relCorners: [simd_float3],
+        color: UIColor,
+        label: String?
+    ) -> SCNNode {
+        let vertices = relCorners.map { SCNVector3($0.x, $0.y, $0.z) }
+        var indices: [Int32] = []
+        let n = vertices.count
+        indices.reserveCapacity(n * 2)
+        for i in 0..<n {
+            indices.append(Int32(i))
+            indices.append(Int32((i + 1) % n))   // close the loop
+        }
+        let src = SCNGeometrySource(vertices: vertices)
+        let elem = SCNGeometryElement(indices: indices, primitiveType: .line)
+        let geo = SCNGeometry(sources: [src], elements: [elem])
+        let mat = SCNMaterial()
+        mat.diffuse.contents = color
+        mat.lightingModel = .constant
+        mat.writesToDepthBuffer = false
+        mat.readsFromDepthBuffer = false
+        geo.firstMaterial = mat
+
+        let node = SCNNode(geometry: geo)
+        node.renderingOrder = 1000
+
+        if let label = label, !label.isEmpty {
+            // Label at the centroid (≈ local origin in relative space).
+            let labelNode = makeBillboardNode(
+                sizeMeters: CGSize(width: 0.12, height: 0.12),
+                color: color, label: label)
+            node.addChildNode(labelNode)
+        }
+        return node
+    }
+
+    /// Render a stroked rounded-rect outline + optional centred label chip to
+    /// a square image, used as the billboard plane's texture.  Transparent
+    /// background so only the outline + chip show over the camera feed.
+    private static func overlayImage(color: UIColor, label: String?) -> UIImage {
+        let px: CGFloat = 512
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: px, height: px))
+        return renderer.image { ctx in
+            let cg = ctx.cgContext
+            let inset = px * 0.07
+            let rect = CGRect(x: inset, y: inset,
+                              width: px - 2 * inset, height: px - 2 * inset)
+            let path = UIBezierPath(roundedRect: rect, cornerRadius: px * 0.05)
+            cg.setStrokeColor(color.cgColor)
+            cg.setLineWidth(px * 0.03)
+            path.stroke()
+
+            guard let label = label, !label.isEmpty else { return }
+            let fontSize = px * 0.13
+            let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font, .foregroundColor: UIColor.white,
+            ]
+            let ts = (label as NSString).size(withAttributes: attrs)
+            let pad = fontSize * 0.35
+            let chip = CGRect(x: (px - ts.width) / 2 - pad,
+                              y: (px - ts.height) / 2 - pad,
+                              width: ts.width + 2 * pad,
+                              height: ts.height + 2 * pad)
+            color.withAlphaComponent(0.9).setFill()
+            UIBezierPath(roundedRect: chip, cornerRadius: pad).fill()
+            (label as NSString).draw(
+                at: CGPoint(x: (px - ts.width) / 2, y: (px - ts.height) / 2),
+                withAttributes: attrs)
+        }
+    }
+
+}
 

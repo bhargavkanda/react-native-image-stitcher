@@ -21,13 +21,20 @@
 
 @interface RCT_EXTERN_MODULE(RNSARCameraViewManager, RCTViewManager)
 
-// No exposed view props for Phase 4.4 — the view's behaviour is
-// fully driven by mount/unmount lifecycle (the AR session
-// starts/stops automatically when the view enters/leaves the
-// window hierarchy).  Future phases may add props for:
-//   - tracking-state HUD visibility
-//   - exposure / focus controls
-//   - debug overlay (feature points, planes)
-// Each of these will land here as RCT_EXPORT_VIEW_PROPERTY lines.
+// v0.20.0 — declarative AR overlay set.  React-state-driven array of
+// overlay dictionaries (the JS `AROverlay[]` shape).  RN sets this via KVC
+// on the VIEW (`RNSARCameraView.overlays`); the view's `@objc` setter
+// forwards the array to the JS namespace of `RNISAROverlayStore.shared`,
+// which the per-frame draw view reprojects + strokes.  (We forward through
+// the view rather than store per-view state because the overlay set is
+// global to the single AR session.)
+//
+// The IMPERATIVE overlay API (setOverlays / addOverlay / updateOverlay /
+// removeOverlay / clearOverlays on the ref) is NOT a view command — per
+// the shared contract (src/camera/arOverlayController.ts) it dispatches
+// through the `RNSARSession.setOverlays(_:)` native MODULE method (see
+// ARSessionBridge.{swift,m}), matching every other AR setting.  Only the
+// declarative prop lives on the view manager.
+RCT_EXPORT_VIEW_PROPERTY(overlays, NSArray)
 
 @end
