@@ -14,6 +14,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.20.0] — 2026-06-20
+
+### Added — AR overlay / annotation renderer
+
+AR-mode `<Camera>` can now draw **world-anchored 2D overlays** — outlines,
+boxes, markers + labels pinned to a real-world point (or explicit quad) and
+tracked as the device moves. Drive them from **JS** (declarative `overlays`
+prop + imperative ref: `setOverlays` / `addOverlay` / `updateOverlay` /
+`removeOverlay` / `clearOverlays`) or from **native plugins**
+(`RNISARPluginRegistry` / `RNSARPluginRegistry` `setOverlays`); the two
+namespaces render as a union.
+
+- **`AROverlay`** shape: `{ id, worldPosition? | worldQuad?, sizeMeters?,
+  shape: 'box' | 'outline', label?, color?, mode: '2d' | '3d' }`.
+- **Real anchoring, not hand-projection.** Each overlay is pinned to a true AR
+  anchor — an `ARAnchor` rendered as a SceneKit node on iOS, an ARCore
+  `Anchor` projected over the camera on Android — so the framework tracks and
+  *refines* the point against drift / re-localization. The marker stays glued
+  to the real-world spot instead of riding the screen.
+- **`raycast()`** (Camera ref): casts from the screen-centre crosshair to the
+  nearest real surface and resolves its world point — so a marker can be
+  dropped **on** the aimed object at its true depth (ARKit raycast on iOS,
+  ARCore `hitTest` on Android). Resolves `null` when nothing is hit, so callers
+  can fall back to a fixed placement.
+- The example demos a crosshair + "Pin marker" that raycasts, anchors, and
+  tracks a cyan marker on the aimed surface.
+
+Device-verified on iPhone (LiDAR — precise raycast depth) and a Galaxy A35
+(ARCore depth-from-motion — softer placement on depth-sensorless devices, as
+expected). `mode:'3d'` renders as a world-anchored 2D billboard this release;
+a future release can extend the SceneKit/Anchor path to richer 3D content.
+
 ## [0.19.0] — 2026-06-19
 
 ### Added — Native AR frame-processor plugins
