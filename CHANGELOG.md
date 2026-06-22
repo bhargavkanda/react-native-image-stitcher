@@ -14,6 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.20.4] — 2026-06-22
+
+### Added
+
+- **`shutterDisabled` prop** (`<Camera>`) — when `true`, taps + holds are
+  ignored and the shutter paints in its disabled visual. For host-driven
+  capture gating: e.g. a document scanner that only allows capture once the
+  document fills the framing guide, or a fixture flow at its max photo count.
+  Independent of the SDK's stitching-in-progress disable. Default `false`.
+- **`RectCropPreview` `initialQuad` prop** — seed the crop editor's draggable
+  quad from a free 4-corner quad (e.g. detected document corners) rather than
+  an axis-aligned `initialRect`, so the editor opens on the actual (possibly
+  perspective) outline. Takes precedence over `initialRect`. The editor now
+  also re-seeds when `imageUri` changes, so a host can keep one editor mounted
+  and swap images between captures.
+
 ## [0.20.3] — 2026-06-22
 
 ### Added

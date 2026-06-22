@@ -39,6 +39,7 @@
 
 import React, {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -145,9 +146,18 @@ export interface RectCropPreviewProps {
   showCropControls?: boolean;
   /**
    * Optional image-pixel seed rect for the draggable quad.  Defaults to
-   * an 8 %-inset rectangle of the full image.  Ignored in preview-only mode.
+   * an 8 %-inset rectangle of the full image.  Ignored in preview-only mode,
+   * and overridden by `initialQuad` when both are given.
    */
   initialRect?: ImageRect;
+  /**
+   * Optional image-pixel seed QUAD (free 4-corner, any order) for the
+   * draggable quad — e.g. detected document corners, so the editor opens on
+   * the actual (possibly perspective) document outline rather than an
+   * axis-aligned rectangle.  Takes precedence over `initialRect`.  Ignored in
+   * preview-only mode.  "Reset" returns to this quad.
+   */
+  initialQuad?: Quad;
   /** Copy overrides (cropConfirm / cropReset). Falls back to defaults. */
   copy?: Partial<GuidanceCopy>;
   /**
@@ -184,15 +194,19 @@ const HANDLE_HIT_RADIUS = 28;
 
 
 /**
- * Build the seed quad in IMAGE-PIXEL coords: the host's `initialRect` if
- * given, else an inset rectangle of the full image.  Always returned in
- * [TL, TR, BR, BL] order.
+ * Build the seed quad in IMAGE-PIXEL coords.  Precedence: the host's free
+ * `initialQuad` (e.g. detected document corners) → `initialRect` →  an inset
+ * rectangle of the full image.  Always returned in [TL, TR, BR, BL] order.
  */
 function seedImageQuad(
   imageWidth: number,
   imageHeight: number,
   initialRect?: ImageRect,
+  initialQuad?: Quad,
 ): Quad {
+  if (initialQuad) {
+    return orderQuadCorners(initialQuad);
+  }
   if (initialRect) {
     const { x, y, width, height } = initialRect;
     return [
@@ -227,6 +241,7 @@ export function RectCropPreview(
     warnings,
     showCropControls = true,
     initialRect,
+    initialQuad,
     copy,
     topInset = 0,
     bottomInset = 0,
@@ -240,8 +255,18 @@ export function RectCropPreview(
   // survive layout-box changes (rotation, keyboard) without drift.  We map
   // to screen for rendering and back on every drag via cropGeometry.
   const [imageQuad, setImageQuad] = useState<Quad>(() =>
-    seedImageQuad(imageWidth, imageHeight, initialRect),
+    seedImageQuad(imageWidth, imageHeight, initialRect, initialQuad),
   );
+
+  // Re-seed when a NEW image is shown — a host may keep this editor mounted
+  // and swap `imageUri` + `visible` between captures (e.g. a document scanner
+  // re-using one editor across pages).  Keyed on the image identity, not on
+  // the `initialRect`/`initialQuad` array identity, so it never clobbers an
+  // in-progress drag.
+  useEffect(() => {
+    setImageQuad(seedImageQuad(imageWidth, imageHeight, initialRect, initialQuad));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageUri, imageWidth, imageHeight]);
 
   const [box, setBox] = useState<ContainLayout | null>(null);
 
