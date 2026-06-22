@@ -14,6 +14,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.20.1] — 2026-06-21
+
+### Fixed
+
+- **AR camera intrinsics principal point (`cx`/`cy`).** `RNISARFrameContext`
+  and `onArFrame`'s `intrinsics` reported `cx`/`cy` as `0` — they were read
+  from the wrong indices of the **column-major** `ARCamera.intrinsics` matrix
+  (`fx`/`fy` survived because they sit on the diagonal). Any pixel↔world
+  unprojection that used the principal point was therefore wrong. Now reads
+  `cx = k[2][0]`, `cy = k[2][1]`.
+- **AR `takePhoto` resolution.** AR-mode photo capture used the low-resolution
+  AR video frame (and then downscaled it to the stitch-keyframe budget) — far
+  too low-res for document OCR / detail capture. It now captures a
+  **full-resolution still** via `ARSession.captureHighResolutionFrame`
+  (iOS 16+), falling back to the live frame on older OS. Non-AR capture is
+  unchanged.
+- **AR overlay `worldQuad` outline thickness.** The outline drew as 1px
+  SceneKit `.line` primitives (unscalable). Edges now render as thin cylinders
+  so the outline is actually visible.
+
 ## [0.20.0] — 2026-06-20
 
 ### Added — AR overlay / annotation renderer

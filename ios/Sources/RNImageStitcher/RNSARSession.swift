@@ -1103,54 +1103,67 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         } else {
             resolvedPath = rawPath
         }
-        guard let frame = arSession.currentFrame else {
-            completion(nil, NSError(
-                domain: "RNImageStitcherARCapture",
-                code: 2001,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "AR session has no current frame — start the session first."]
-            ))
-            return
+        // Capture a HIGH-RESOLUTION still.  ARKit's live `capturedImage` is the
+        // small AR video format (and the SDK picks the SMALLEST 4:3 format), far
+        // too low-res for document OCR / detail capture.
+        // `captureHighResolutionFrame` (iOS 16+) grabs a full-resolution photo
+        // WITHOUT leaving the AR session.  Fall back to the live frame on older
+        // OS or if the high-res grab fails.
+        let encode: (CVPixelBuffer) -> Void = { [weak self] pixelBuffer in
+            self?.encodeArPhoto(
+                pixelBuffer: pixelBuffer,
+                toPath: resolvedPath,
+                quality: quality,
+                orientation: orientation,
+                completion: completion
+            )
         }
-        let pixelBuffer = frame.capturedImage
+        if #available(iOS 16.0, *) {
+            arSession.captureHighResolutionFrame { [weak self] hiResFrame, error in
+                if let hiResFrame = hiResFrame {
+                    encode(hiResFrame.capturedImage)
+                } else if let live = self?.arSession.currentFrame {
+                    encode(live.capturedImage)
+                } else {
+                    completion(nil, NSError(
+                        domain: "RNImageStitcherARCapture",
+                        code: 2001,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "AR high-res capture failed: \(error?.localizedDescription ?? "no current frame")."]
+                    ))
+                }
+            }
+        } else {
+            guard let frame = arSession.currentFrame else {
+                completion(nil, NSError(
+                    domain: "RNImageStitcherARCapture",
+                    code: 2001,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "AR session has no current frame — start the session first."]
+                ))
+                return
+            }
+            encode(frame.capturedImage)
+        }
+    }
 
-        // v0.12.0 — Pre-v0.12 this method hardcoded `.right` (90° CW)
-        // to rotate-to-portrait, assuming the user always held the
-        // phone in portrait.  Under R2-lite the device can be in
-        // any orientation, so we pick the CIImage orientation per
-        // the JS-supplied `orientation` arg (from
-        // `useDeviceOrientation()`).
-        //
-        // Empirical mapping (on-device test 2026-05-28):
-        //   portrait              → .right  (90° CW — preserved from pre-v0.12)
-        //   landscape-left        → .up     (sensor matches device tilt; no rotation)
-        //   landscape-right       → .down   (180° — sensor opposite of device tilt)
-        //   portrait-upside-down  → .left   (90° CCW)
-        //
-        // The landscape mapping (landscape-left → .up) was determined
-        // empirically and is the opposite of what Apple's ARKit
-        // pixel-buffer-orientation docs would imply.  Likely because
-        // `useDeviceOrientation()` reports `landscape-left` via the
-        // `UIDeviceOrientation` convention (home indicator on user-
-        // right) while iOS's sensor-native orientation matches that
-        // tilt direction directly.  Without this fix, AR-mode single
-        // photos in landscape come out upside-down.
-        // v0.12.0 — Pre-v0.12 this method hardcoded `.right` (90° CW)
-        // to rotate-to-portrait, assuming the user always held the
-        // phone in portrait.  Under R2-lite the device can be in
-        // any orientation, so we pick the CIImage orientation per
-        // the JS-supplied `orientation` arg (from
-        // `useDeviceOrientation()`).
-        //
-        // Empirical mapping (on-device test 2026-05-28):
-        //   portrait              → .right  (90° CW — preserved from pre-v0.12)
-        //   landscape-left        → .up     (sensor matches device tilt; no rotation)
-        //   landscape-right       → .down   (180° — sensor opposite of device tilt)
-        //   portrait-upside-down  → .left   (90° CCW)
-        //
-        // The landscape mapping (landscape-left → .up) was determined
-        // empirically; the user reported AR landscape photos came out
-        // upside-down with .down and correctly upright with .up.
+    /// Encode an AR pixel buffer → an oriented, FULL-RESOLUTION JPEG at `path`.
+    /// Unlike stitch keyframes, a user / document photo is NOT downscaled — OCR
+    /// and detail capture need the full resolution that
+    /// `captureHighResolutionFrame` provides.
+    ///
+    /// Orientation maps the JS `useDeviceOrientation()` value → CIImage
+    /// orientation (empirical, on-device 2026-05-28): portrait → .right,
+    /// landscape-left → .up, landscape-right → .down,
+    /// portrait-upside-down → .left.  Without this, AR-mode landscape photos
+    /// come out upside-down.
+    private func encodeArPhoto(
+        pixelBuffer: CVPixelBuffer,
+        toPath resolvedPath: String,
+        quality: Int,
+        orientation: String,
+        completion: @escaping ([String: Any]?, NSError?) -> Void
+    ) {
         let exifOrientation: CGImagePropertyOrientation
         switch orientation {
         case "landscape-left":        exifOrientation = .up
@@ -1158,21 +1171,9 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         case "portrait-upside-down":  exifOrientation = .left
         default:                       exifOrientation = .right  // portrait + unknown
         }
-        var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            .oriented(exifOrientation)
-        // AR keyframe downscale guard — normalise long edge to the budget so
-        // every device produces a ~0.3 MP keyframe (cross-device-consistent
-        // stitch memory).  Mirrors Android's downscale in YuvImageConverter.
-        let kfLongEdge = max(ciImage.extent.width, ciImage.extent.height)
-        if kfLongEdge > Self.arKeyframeMaxLongEdge {
-            let kfScale = Self.arKeyframeMaxLongEdge / kfLongEdge
-            ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: kfScale, y: kfScale))
-        }
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(exifOrientation)
         let context = CIContext(options: nil)
-        guard let cgImage = context.createCGImage(
-            ciImage,
-            from: ciImage.extent
-        ) else {
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
             completion(nil, NSError(
                 domain: "RNImageStitcherARCapture",
                 code: 2002,
@@ -1194,7 +1195,6 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             ))
             return
         }
-
         let cleanedPath = Self.normalisePath(resolvedPath)
         let url = URL(fileURLWithPath: cleanedPath)
         // Best-effort delete an existing file at the same path —
@@ -1574,8 +1574,13 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // simd_quatf from a 4x4 matrix uses the rotational part.
         let q = simd_quatf(t)
 
-        // Camera intrinsics.  Apple gives us a 3x3 matrix where
-        // [0][0] = fx, [1][1] = fy, [0][2] = cx, [1][2] = cy.
+        // Camera intrinsics.  `simd_float3x3` subscripts as k[column][row]
+        // (COLUMN-MAJOR).  ARKit's K is:
+        //   column 0 = (fx, 0, 0), column 1 = (0, fy, 0), column 2 = (cx, cy, 1)
+        // so fx = k[0][0], fy = k[1][1], cx = k[2][0], cy = k[2][1].
+        // (Pre-0.20.1 bug: read cx/cy as k[0][2]/k[1][2] = 0 — fx/fy survived
+        // because they're on the diagonal, so the principal point came through
+        // as 0,0 and broke any pixel↔world unprojection.)
         let k = frame.camera.intrinsics
         let imageRes = frame.camera.imageResolution
 
@@ -1596,8 +1601,8 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             qw: Double(q.real),
             fx: Double(k[0][0]),
             fy: Double(k[1][1]),
-            cx: Double(k[0][2]),
-            cy: Double(k[1][2]),
+            cx: Double(k[2][0]),
+            cy: Double(k[2][1]),
             imageWidth: Int(imageRes.width),
             imageHeight: Int(imageRes.height),
             timestampMs: frame.timestamp * 1000.0,
