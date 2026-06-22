@@ -237,6 +237,10 @@ export type {
 // path; hosts driving their own crop UI call it directly.
 export { cropQuad } from './stitching/cropQuad';
 export type { CropQuadOptions, CropQuadResult } from './stitching/cropQuad';
+// File copy — pairs with the in-place `cropQuad` so a host can crop a COPY of
+// a capture (preserving the original + landing the result on a fresh URI,
+// avoiding image-cache collisions).
+export { copyFile } from './utils/files';
 
 // ── Incremental stitching engine ──────────────────────────────────────
 // JS bindings around the native `IncrementalStitcher` module.  Use

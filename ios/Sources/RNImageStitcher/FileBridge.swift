@@ -81,6 +81,44 @@ public class FileBridge: NSObject {
     }
   }
 
+  /// Copy a file from `from` to `to`, leaving the source in place.  Both
+  /// paths can be bare or `file://`-prefixed.  Creates the destination's
+  /// parent directory tree if missing; overwrites an existing destination.
+  /// Resolves to the bare destination path.  Used by hosts that need a
+  /// distinct output path for an in-place native op (e.g. cropping a copy of
+  /// a captured photo so the original survives and the new bytes land on a
+  /// fresh URI — avoiding image-cache collisions).
+  @objc(copyFile:to:resolver:rejecter:)
+  public func copyFile(_ from: String,
+                       to dst: String,
+                       resolver: @escaping RCTPromiseResolveBlock,
+                       rejecter: @escaping RCTPromiseRejectBlock) {
+    let fm = FileManager.default
+    let cleanFrom = from.hasPrefix("file://") ? String(from.dropFirst(7)) : from
+    let cleanTo = dst.hasPrefix("file://") ? String(dst.dropFirst(7)) : dst
+    do {
+      let dstDir = (cleanTo as NSString).deletingLastPathComponent
+      if !fm.fileExists(atPath: dstDir) {
+        try fm.createDirectory(
+          atPath: dstDir,
+          withIntermediateDirectories: true,
+          attributes: nil,
+        )
+      }
+      if fm.fileExists(atPath: cleanTo) {
+        try fm.removeItem(atPath: cleanTo)
+      }
+      try fm.copyItem(atPath: cleanFrom, toPath: cleanTo)
+      resolver(cleanTo)
+    } catch {
+      rejecter(
+        "FILE_COPY_FAILED",
+        "Failed to copy \(cleanFrom) → \(cleanTo): \(error.localizedDescription)",
+        error,
+      )
+    }
+  }
+
   /// Resolve the lib's canonical default capture dir, creating it on
   /// demand.  Returns a bare absolute path.
   @objc(defaultCaptureDir:rejecter:)
