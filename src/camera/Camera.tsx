@@ -465,6 +465,16 @@ export interface CameraProps {
    */
   outputDir?: string;
 
+  /**
+   * Disable the shutter — taps + holds are ignored and the button paints in
+   * its disabled visual.  The host drives this for capture-gating use cases:
+   * e.g. a document scanner that only allows capture once the document fills
+   * the framing guide, or a fixture flow that has reached its max photo count.
+   * Independent of the SDK's own stitching-in-progress disable.  Default
+   * `false`.
+   */
+  shutterDisabled?: boolean;
+
   // ── Callbacks ─────────────────────────────────────────────────────
   onCapture?: (result: CameraCaptureResult) => void;
   onCaptureSourceChange?: (source: CaptureSource) => void;
@@ -1279,6 +1289,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     showSettingsButton = false,
     style,
     outputDir,
+    shutterDisabled = false,
     onCapture,
     onCaptureSourceChange,
     onLensChange,
@@ -1907,7 +1918,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // ── Shutter handlers ────────────────────────────────────────────
 
   const handleTap = useCallback(async () => {
-    if (!enablePhotoMode) return;
+    if (!enablePhotoMode || shutterDisabled) return;
     try {
       let uri: string;
       let width: number;
@@ -1981,7 +1992,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       onError?.(e);
       onCapture?.({ ok: false, type: 'photo', error: e, warnings: [] });
     }
-  }, [enablePhotoMode, isAR, capture, outputDir, onCapture, onError]);
+  }, [enablePhotoMode, shutterDisabled, isAR, capture, outputDir, onCapture, onError]);
 
   // ── startCapture — the "actually start recording" logic ─────────
   // Extracted from `handleHoldStart` so the rotate-to-landscape gate
@@ -2859,7 +2870,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               onHoldStart={enablePanoramaMode ? handleHoldStart : noop}
               onHoldComplete={enablePanoramaMode ? handleHoldEnd : noop}
               isProcessing={statusPhase === 'stitching'}
-              disabled={statusPhase === 'stitching'}
+              disabled={statusPhase === 'stitching' || shutterDisabled}
             />
           </View>
         </View>

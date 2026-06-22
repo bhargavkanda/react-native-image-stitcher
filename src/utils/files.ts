@@ -27,6 +27,7 @@ import { NativeModules } from 'react-native';
 
 interface FileUtilsBridge {
   moveFile(from: string, to: string): Promise<string>;
+  copyFile(from: string, to: string): Promise<string>;
   defaultCaptureDir(): Promise<string>;
 }
 
@@ -53,6 +54,27 @@ export async function moveFile(from: string, to: string): Promise<string> {
     );
   }
   return b.moveFile(from, to);
+}
+
+
+/**
+ * Copy a file via the native bridge, leaving the source in place.  Both paths
+ * accepted in bare or `file://`-prefixed form.  Resolves to the bare
+ * destination path on success.  Throws on disk failure.  Useful when a host
+ * needs a distinct output path for an in-place native op (e.g. perspective-
+ * cropping a copy of a captured photo so the original survives and the result
+ * lands on a fresh URI, avoiding image-cache collisions).
+ */
+export async function copyFile(from: string, to: string): Promise<string> {
+  const b = bridge();
+  if (!b) {
+    throw new Error(
+      'react-native-image-stitcher: RNImageStitcherFileUtils native '
+      + 'module is not registered.  Check that the host app has '
+      + 'rebuilt against the latest pod/Gradle install.',
+    );
+  }
+  return b.copyFile(from, to);
 }
 
 
