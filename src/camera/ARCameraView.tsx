@@ -99,6 +99,16 @@ export interface ARCameraViewProps {
    */
   enableDepth?: boolean;
   /**
+   * Opt in to high-resolution photo capture (iOS 16+).  When `true`, the AR
+   * session runs on the smallest video format that supports
+   * `captureHighResolutionFrame`, so `takePhoto()` returns a true full-res
+   * still (for document OCR / detail capture).  Default `false` — the live
+   * stream stays as small as possible (cheapest for the panorama-stitch
+   * path, whose keyframes are downscaled to a fixed budget regardless).
+   * No-op on Android (no equivalent high-res capture API).
+   */
+  highResCapture?: boolean;
+  /**
    * Opt in to per-frame AR anchor extraction (`CameraFrame.arAnchors` —
    * detected planes / augmented images).  Default `false`.
    */
@@ -290,6 +300,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       guidance,
       arFrameProcessor,
       enableDepth,
+      highResCapture,
       enableAnchors,
       enableMesh,
       planeDetection,
@@ -371,6 +382,19 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
         session?.setSceneReconstructionEnabled?.(mesh);
       }
     }, [enableDepth, enableAnchors, enableMesh]);
+
+    // Push the high-res-capture flag to native (iOS only — Android has no
+    // equivalent).  Routes through the RNSARSession native module like the
+    // scene-reconstruction / plane-detection session settings; toggling it
+    // live re-picks the AR video format in place.
+    useEffect(() => {
+      if (Platform.OS !== 'ios') return;
+      const session = (NativeModules as Record<string, unknown>)
+        .RNSARSession as
+        | { setHighResCaptureEnabled?(on: boolean): void }
+        | undefined;
+      session?.setHighResCaptureEnabled?.(highResCapture === true);
+    }, [highResCapture]);
 
     // Push the plane-detection mode to native.  Unlike the extraction
     // config above this is a SESSION setting, so it routes through the
