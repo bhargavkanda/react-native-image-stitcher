@@ -654,16 +654,47 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         config.isAutoFocusEnabled = true
         Self.applySceneReconstruction(to: config,
                                       enabled: isSceneReconstructionEnabled)
-        if let fmt = ARWorldTrackingConfiguration.supportedVideoFormats.min(by: { a, b in
-            let da = abs(a.imageResolution.width / a.imageResolution.height - 4.0 / 3.0)
-            let db = abs(b.imageResolution.width / b.imageResolution.height - 4.0 / 3.0)
-            if abs(da - db) > 0.001 { return da < db }
-            return a.imageResolution.width * a.imageResolution.height
-                 < b.imageResolution.width * b.imageResolution.height
-        }) {
+        if let fmt = Self.pickVideoFormat() {
             config.videoFormat = fmt
         }
         return config
+    }
+
+    /// Choose the AR video format.  We want the LIVE stream as small as
+    /// possible (cheap per-frame processing + stitch memory) WHILE still
+    /// enabling `captureHighResolutionFrame` for crisp document / detail
+    /// stills in `takePhoto`.  So: among formats that support high-resolution
+    /// one-off capture (`isRecommendedForHighResolutionFrameCapturing`,
+    /// iOS 16+), pick the most-4:3 + smallest live resolution.  Fall back to
+    /// the smallest 4:3 format when none are high-res-capable (or pre-iOS-16,
+    /// which has no high-res capture anyway).  The high-res capture is a
+    /// separate one-off photo — it does NOT raise the live frame rate/size.
+    private static func pickVideoFormat() -> ARConfiguration.VideoFormat? {
+        let formats = ARWorldTrackingConfiguration.supportedVideoFormats
+        func aspectErr(_ f: ARConfiguration.VideoFormat) -> CGFloat {
+            abs(f.imageResolution.width / f.imageResolution.height - 4.0 / 3.0)
+        }
+        // most-4:3, then smallest live area.
+        func smaller(_ a: ARConfiguration.VideoFormat, _ b: ARConfiguration.VideoFormat) -> Bool {
+            let da = aspectErr(a), db = aspectErr(b)
+            if abs(da - db) > 0.001 { return da < db }
+            return a.imageResolution.width * a.imageResolution.height
+                 < b.imageResolution.width * b.imageResolution.height
+        }
+        if #available(iOS 16.0, *) {
+            let hiRes = formats.filter { $0.isRecommendedForHighResolutionFrameCapturing }
+            if let fmt = hiRes.min(by: smaller) {
+                NSLog("[RNIS] AR videoFormat %.0fx%.0f (high-res capture: YES)",
+                      fmt.imageResolution.width, fmt.imageResolution.height)
+                return fmt
+            }
+        }
+        let fmt = formats.min(by: smaller)
+        if let fmt = fmt {
+            NSLog("[RNIS] AR videoFormat %.0fx%.0f (high-res capture: NO — smallest 4:3 fallback)",
+                  fmt.imageResolution.width, fmt.imageResolution.height)
+        }
+        return fmt
     }
 
     /// Set the ARWorldTrackingConfiguration's `sceneReconstruction`

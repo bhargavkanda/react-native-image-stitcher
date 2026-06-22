@@ -14,6 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.20.2] — 2026-06-22
+
+### Fixed
+
+- **AR high-res capture now actually engages.** 0.20.1 called
+  `captureHighResolutionFrame`, but the SDK ran the AR session on the
+  *smallest* video format, which isn't high-res-capable — so the call fell
+  back to the low-res live frame (AR `takePhoto` came out ~½ the linear
+  resolution of a non-AR photo). The session now picks the smallest video
+  format that **is** `isRecommendedForHighResolutionFrameCapturing`, so AR
+  `takePhoto` returns a true full-resolution still (≈4× the pixels — fixes
+  AR document OCR quality). The high-res capture is a one-off photo, so the
+  **live stream stays small** and per-frame processing is unaffected; the
+  chosen live resolution is logged (`[RNIS] AR videoFormat …`).
+
 ## [0.20.1] — 2026-06-21
 
 ### Fixed
