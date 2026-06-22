@@ -388,41 +388,61 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         return node
     }
 
-    /// A 3D line-loop through corners expressed RELATIVE to the anchor origin
-    /// (the anchor is at the quad centroid), with an optional camera-facing
-    /// label at the centre.
+    /// A THICK 3D outline through corners expressed RELATIVE to the anchor
+    /// origin (anchor at the quad centroid).  Each edge is a thin cylinder —
+    /// SceneKit `.line` primitives are always 1px and unscalable, so a visible
+    /// outline must be real geometry.  Optional camera-facing label at centre.
     private static func makeQuadOutlineNode(
         relCorners: [simd_float3],
         color: UIColor,
         label: String?
     ) -> SCNNode {
-        let vertices = relCorners.map { SCNVector3($0.x, $0.y, $0.z) }
-        var indices: [Int32] = []
-        let n = vertices.count
-        indices.reserveCapacity(n * 2)
-        for i in 0..<n {
-            indices.append(Int32(i))
-            indices.append(Int32((i + 1) % n))   // close the loop
-        }
-        let src = SCNGeometrySource(vertices: vertices)
-        let elem = SCNGeometryElement(indices: indices, primitiveType: .line)
-        let geo = SCNGeometry(sources: [src], elements: [elem])
-        let mat = SCNMaterial()
-        mat.diffuse.contents = color
-        mat.lightingModel = .constant
-        mat.writesToDepthBuffer = false
-        mat.readsFromDepthBuffer = false
-        geo.firstMaterial = mat
-
-        let node = SCNNode(geometry: geo)
+        let node = SCNNode()
         node.renderingOrder = 1000
-
+        let n = relCorners.count
+        for i in 0..<n {
+            if let edge = edgeCylinder(
+                from: relCorners[i], to: relCorners[(i + 1) % n], color: color) {
+                node.addChildNode(edge)
+            }
+        }
         if let label = label, !label.isEmpty {
             // Label at the centroid (≈ local origin in relative space).
             let labelNode = makeBillboardNode(
                 sizeMeters: CGSize(width: 0.12, height: 0.12),
                 color: color, label: label)
             node.addChildNode(labelNode)
+        }
+        return node
+    }
+
+    /// A thin cylinder (≈4 mm) spanning two points — one edge of a quad
+    /// outline.  SCNCylinder's axis is +Y, so we centre it at the midpoint and
+    /// rotate +Y onto the edge direction.
+    private static func edgeCylinder(
+        from a: simd_float3, to b: simd_float3, color: UIColor
+    ) -> SCNNode? {
+        let d = b - a
+        let len = simd_length(d)
+        guard len > 1e-5 else { return nil }
+        let cyl = SCNCylinder(radius: 0.004, height: CGFloat(len))
+        let mat = SCNMaterial()
+        mat.diffuse.contents = color
+        mat.lightingModel = .constant
+        mat.writesToDepthBuffer = false
+        mat.readsFromDepthBuffer = false
+        cyl.firstMaterial = mat
+        let node = SCNNode(geometry: cyl)
+        node.renderingOrder = 1000
+        node.simdPosition = (a + b) * 0.5
+        let yAxis = simd_float3(0, 1, 0)
+        let dir = d / len
+        let dot = simd_dot(yAxis, dir)
+        if dot < -0.9999 {
+            node.simdOrientation = simd_quatf(angle: .pi, axis: simd_float3(1, 0, 0))
+        } else if dot < 0.9999 {
+            let axis = simd_normalize(simd_cross(yAxis, dir))
+            node.simdOrientation = simd_quatf(angle: acos(dot), axis: axis)
         }
         return node
     }
