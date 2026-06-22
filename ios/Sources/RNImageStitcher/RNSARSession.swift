@@ -168,10 +168,10 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         attributes: .concurrent
     )
     private static let MAX_POSE_LOG = 600  // ~10 s @ 60Hz
-    /// AR keyframe long-edge budget (px) — downscale every device's frame to
-    /// this before encoding so stitch memory is consistent cross-device.
-    /// Mirrors Android's AR_KEYFRAME_MAX_LONG_EDGE.
-    private static let arKeyframeMaxLongEdge: CGFloat = 640
+    // NOTE: the AR keyframe long-edge budget lives in the keyframe collector
+    // (`kKeyframeMaxLongEdge = 1280` in OpenCVKeyframeCollector.mm), applied
+    // in `saveKeyframe` before the JPEG is written — so the stitch keyframe
+    // size is independent of the AR video format / `highResCapture`.
 
     /// Latest tracking state.  Read by JS for UI feedback.
     @objc public private(set) var currentTrackingState: RNSARTrackingState = .notAvailable
@@ -198,6 +198,21 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     /// `supportsSceneReconstruction` (the flag is stored but produces
     /// no mesh).
     @objc public private(set) var isSceneReconstructionEnabled: Bool = false
+
+    // ──────────────────────────────────────────────────────────────
+    // v0.20.3 — opt-in high-resolution photo capture (highResCapture prop)
+    // ──────────────────────────────────────────────────────────────
+    /// When true, `pickVideoFormat` selects the smallest video format that
+    /// supports `captureHighResolutionFrame` (so `takePhoto` returns a true
+    /// full-resolution still — for document OCR / detail capture).  When
+    /// false (default), it selects the absolute smallest 4:3 format — the
+    /// long-standing behaviour, cheapest for the panorama-stitch path (whose
+    /// keyframes are downscaled to a fixed budget regardless).  Driven from
+    /// JS via `NativeModules.RNSARSession.setHighResCaptureEnabled(bool)`
+    /// (the `<Camera>` `highResCapture` prop / DocumentScanCamera opts in).
+    /// Stored so `start()` and the live-reconfigure path read one source of
+    /// truth.  iOS-only effect; Android has no equivalent high-res capture.
+    @objc public private(set) var prefersHighResCapture: Bool = false
 
     // ──────────────────────────────────────────────────────────────
     // v0.18.0 — configurable plane detection (planeDetection prop)
@@ -638,8 +653,10 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     /// - autofocus: on, for feature tracking on shelves with small text.
     /// - sceneReconstruction: from the stored `isSceneReconstructionEnabled`
     ///   flag (no-ops on non-LiDAR devices).
-    /// - videoFormat: prefer 4:3 for full sensor FOV (keyframe is
-    ///   downscaled to `arKeyframeMaxLongEdge` later for memory parity).
+    /// - videoFormat: from `pickVideoFormat(preferHighRes:)` — smallest 4:3
+    ///   by default (cheap live stream; stitch keyframes are downscaled to a
+    ///   fixed budget regardless), or the smallest high-res-capable format
+    ///   when the `highResCapture` prop is on (for full-res `takePhoto`).
     private func makeBaseConfiguration() -> ARWorldTrackingConfiguration {
         let config = ARWorldTrackingConfiguration()
         var depthSemantics: ARConfiguration.FrameSemantics = []
@@ -654,22 +671,30 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         config.isAutoFocusEnabled = true
         Self.applySceneReconstruction(to: config,
                                       enabled: isSceneReconstructionEnabled)
-        if let fmt = Self.pickVideoFormat() {
+        if let fmt = Self.pickVideoFormat(preferHighRes: prefersHighResCapture) {
             config.videoFormat = fmt
         }
         return config
     }
 
-    /// Choose the AR video format.  We want the LIVE stream as small as
-    /// possible (cheap per-frame processing + stitch memory) WHILE still
-    /// enabling `captureHighResolutionFrame` for crisp document / detail
-    /// stills in `takePhoto`.  So: among formats that support high-resolution
-    /// one-off capture (`isRecommendedForHighResolutionFrameCapturing`,
-    /// iOS 16+), pick the most-4:3 + smallest live resolution.  Fall back to
-    /// the smallest 4:3 format when none are high-res-capable (or pre-iOS-16,
-    /// which has no high-res capture anyway).  The high-res capture is a
-    /// separate one-off photo — it does NOT raise the live frame rate/size.
-    private static func pickVideoFormat() -> ARConfiguration.VideoFormat? {
+    /// Choose the AR video format.
+    ///
+    /// - When `preferHighRes` is true (the `highResCapture` prop — document
+    ///   OCR / detail capture): among formats that support high-resolution
+    ///   one-off capture (`isRecommendedForHighResolutionFrameCapturing`,
+    ///   iOS 16+), pick the most-4:3 + smallest LIVE resolution.  This keeps
+    ///   the live stream as small as the high-res feature allows while making
+    ///   `captureHighResolutionFrame` return a true full-res still in
+    ///   `takePhoto`.  The high-res capture is a separate one-off photo — it
+    ///   does not raise the live frame rate.  (On some devices the smallest
+    ///   high-res-capable live format is a notch larger than the absolute
+    ///   smallest 4:3, so the live frame can be bigger when this is on.)
+    /// - When `preferHighRes` is false (default — panorama stitching / plain
+    ///   AR): pick the absolute smallest 4:3 format.  Cheapest live stream;
+    ///   stitch keyframes are downscaled to a fixed budget
+    ///   (`kKeyframeMaxLongEdge` in OpenCVKeyframeCollector) regardless, so
+    ///   the format never affects stitch quality/memory.
+    private static func pickVideoFormat(preferHighRes: Bool) -> ARConfiguration.VideoFormat? {
         let formats = ARWorldTrackingConfiguration.supportedVideoFormats
         func aspectErr(_ f: ARConfiguration.VideoFormat) -> CGFloat {
             abs(f.imageResolution.width / f.imageResolution.height - 4.0 / 3.0)
@@ -681,7 +706,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             return a.imageResolution.width * a.imageResolution.height
                  < b.imageResolution.width * b.imageResolution.height
         }
-        if #available(iOS 16.0, *) {
+        if preferHighRes, #available(iOS 16.0, *) {
             let hiRes = formats.filter { $0.isRecommendedForHighResolutionFrameCapturing }
             if let fmt = hiRes.min(by: smaller) {
                 NSLog("[RNIS] AR videoFormat %.0fx%.0f (high-res capture: YES)",
@@ -691,8 +716,9 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         }
         let fmt = formats.min(by: smaller)
         if let fmt = fmt {
-            NSLog("[RNIS] AR videoFormat %.0fx%.0f (high-res capture: NO — smallest 4:3 fallback)",
-                  fmt.imageResolution.width, fmt.imageResolution.height)
+            NSLog("[RNIS] AR videoFormat %.0fx%.0f (high-res capture: %@)",
+                  fmt.imageResolution.width, fmt.imageResolution.height,
+                  preferHighRes ? "NO — none high-res-capable" : "OFF — smallest 4:3")
         }
         return fmt
     }
@@ -759,6 +785,20 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // semantics + plane-detection mode, so a mesh toggle never
         // silently drops those.  Re-run in place — NO reset/removeAnchors
         // so existing tracking, pose log, and latched plane survive.
+        let config = makeBaseConfiguration()
+        arSession.run(config)
+    }
+
+    /// Toggle opt-in high-resolution photo capture (the `<Camera>`
+    /// `highResCapture` prop, routed via
+    /// `NativeModules.RNSARSession.setHighResCaptureEnabled(bool)`).  Stores
+    /// the flag (honored by the next `start()`) and, if a session is live,
+    /// rebuilds the config — which re-runs `pickVideoFormat` with the new
+    /// flag — and re-runs in place (no reset; tracking / pose log / latched
+    /// plane survive).  Mirrors `setSceneReconstructionEnabled`.
+    @objc public func setHighResCaptureEnabled(_ enabled: Bool) {
+        prefersHighResCapture = enabled
+        guard isRunning else { return }
         let config = makeBaseConfiguration()
         arSession.run(config)
     }

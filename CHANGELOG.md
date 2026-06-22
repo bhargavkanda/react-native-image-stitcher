@@ -14,6 +14,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.20.3] — 2026-06-22
+
+### Added
+
+- **`highResCapture` prop** (`<Camera>` / `ARCameraView`) — opt-in
+  high-resolution photo capture. When `true` (iOS 16+), the AR session runs
+  on the smallest video format that supports `captureHighResolutionFrame`, so
+  `takePhoto()` returns a true full-resolution still (for document OCR /
+  detail capture). Toggling it live re-picks the video format in place. No-op
+  on Android (no equivalent high-res capture API).
+
+### Changed
+
+- **High-res AR capture is now opt-in.** 0.20.2 made the AR session *always*
+  pick a high-res-capable video format; 0.20.3 gates that behind the new
+  `highResCapture` prop (default `false`). Pure panorama-stitching / plain-AR
+  sessions return to the smallest video format (cheapest live stream); only
+  callers that set `highResCapture` (e.g. a document scanner) take on any
+  live-frame cost. **Stitching is unaffected either way** — keyframes are
+  downscaled to a fixed budget (`kKeyframeMaxLongEdge` = 1280 px in the
+  keyframe collector) regardless of the AR video format, and
+  `captureHighResolutionFrame` is used only by `takePhoto`, never by the
+  stitch keyframe path.
+
+### Removed
+
+- Dead `arKeyframeMaxLongEdge` constant in `RNSARSession` (was unused — the
+  real AR keyframe budget is `kKeyframeMaxLongEdge` in the keyframe
+  collector); corrected the stale doc comments that referenced it.
+
 ## [0.20.2] — 2026-06-22
 
 ### Fixed

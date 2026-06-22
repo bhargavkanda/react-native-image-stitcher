@@ -776,6 +776,16 @@ export interface CameraProps {
    */
   enableDepth?: boolean;
   /**
+   * Opt in to high-resolution photo capture (iOS 16+, AR capture path).
+   * When `true`, the AR session runs on the smallest video format that
+   * supports `captureHighResolutionFrame`, so `takePhoto()` returns a true
+   * full-res still (for document OCR / detail capture).  Default `false` —
+   * the live stream stays as small as possible; the panorama-stitch path is
+   * unaffected (its keyframes are downscaled to a fixed budget regardless).
+   * No-op on Android.
+   */
+  highResCapture?: boolean;
+  /**
    * Opt in to per-frame AR anchors (`CameraFrame.arAnchors` — detected
    * planes / images).  Default `false`.
    */
@@ -1293,6 +1303,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     frameProcessor: hostFrameProcessor,
     arFrameProcessor,
     enableDepth,
+    highResCapture,
     enableAnchors,
     enableMesh,
     planeDetection,
@@ -2581,6 +2592,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           style={StyleSheet.absoluteFill}
           arFrameProcessor={arFrameProcessor}
           enableDepth={enableDepth}
+          highResCapture={highResCapture}
           enableAnchors={enableAnchors}
           enableMesh={enableMesh}
           planeDetection={planeDetection}

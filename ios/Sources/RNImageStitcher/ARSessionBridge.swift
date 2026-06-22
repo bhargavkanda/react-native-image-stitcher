@@ -223,6 +223,24 @@ public final class RNSARSessionBridge: RCTEventEmitter {
         }
     }
 
+    /// Toggle opt-in high-resolution photo capture (the `<Camera>`
+    /// `highResCapture` prop).  Hops to the main queue:
+    /// `setHighResCaptureEnabled` may call `arSession.run(config)` to
+    /// reconfigure a live session (re-pick the video format), and ARKit
+    /// session lifecycle must run on the main thread.
+    @objc(setHighResCaptureEnabled:resolver:rejecter:)
+    public func setHighResCaptureEnabled(
+        enabled: NSNumber,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        let on = enabled.boolValue
+        DispatchQueue.main.async {
+            RNSARSession.shared.setHighResCaptureEnabled(on)
+            resolver(nil)
+        }
+    }
+
     /// Hops to the main queue: `setPlaneDetection` may call
     /// `arSession.run(config)` to reconfigure a live session, and ARKit
     /// session lifecycle must run on the main thread (same constraint as
