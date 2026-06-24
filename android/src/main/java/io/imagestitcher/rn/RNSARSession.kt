@@ -58,6 +58,11 @@ class RNSARSession(reactContext: ReactApplicationContext)
     /// JS code does not need conditional branching across platforms.
     private val trackingStateRef = AtomicReference(TRACKING_NOT_AVAILABLE)
     private val sessionRef = AtomicReference<Session?>(null)
+    /// When set (document scanning), [selectMatchingCameraConfig] picks the
+    /// LARGEST 4:3 CPU image instead of the smallest, so AR `takePhoto`
+    /// captures at the device's highest ARCore CPU resolution.  Gated so
+    /// generic AR / stitching consumers keep the cheap small-config streaming.
+    @Volatile private var prefersHighResCapture = false
     private val poseLog = mutableListOf<RNSARFramePose>()
     private val poseLogLock = ReentrantReadWriteLock()
 
@@ -1066,6 +1071,30 @@ class RNSARSession(reactContext: ReactApplicationContext)
     }
 
     /**
+     * Document scanning opts in to the device's HIGHEST 4:3 ARCore CPU image
+     * (vs the default smallest) so AR `takePhoto` captures at full ARCore
+     * resolution.  Gated — generic AR / stitching keep the small, cheap
+     * config.  If a session is already live we re-apply the config in place
+     * (best-effort; setCameraConfig needs the session paused).  Called from
+     * JS via the `highResCapture` prop on `<ARCameraView>` (no-op until now
+     * on Android — the method didn't exist).
+     */
+    @ReactMethod
+    fun setHighResCaptureEnabled(on: Boolean) {
+        if (prefersHighResCapture == on) return
+        prefersHighResCapture = on
+        val session = sessionRef.get() ?: return
+        try {
+            session.pause()
+            selectMatchingCameraConfig(session)
+            session.resume()
+            Log.i(TAG, "setHighResCaptureEnabled=$on; re-applied config to live session")
+        } catch (t: Throwable) {
+            Log.w(TAG, "setHighResCaptureEnabled reconfig failed (ignoring): ${t.message}")
+        }
+    }
+
+    /**
      * Pick an ARCore camera config whose CPU image and GPU texture share
      * the same aspect ratio, so the preview (texture) and the captured /
      * stitched frames (acquireCameraImage) cover the SAME field of view.
@@ -1099,17 +1128,27 @@ class RNSARSession(reactContext: ReactApplicationContext)
             // device's 4:3 image is chosen, then normalised by the downscale
             // guard in YuvImageConverter.  Trade-off: the 16:9 preview texture
             // shows less than the 4:3 capture (accepted for max FOV).
-            val chosen = configs.sortedWith(
-                compareBy<CameraConfig> { kotlin.math.abs(aspect(it.imageSize) - 4f / 3f) }
-                    .thenBy { it.imageSize.width * it.imageSize.height },
-            ).firstOrNull() ?: return
+            // Document scanning: MAXIMISE resolution regardless of aspect.  On
+            // the A35 the only 4:3 ARCore config is 640×480 (0.3 MP), but its
+            // 1920×1080 (16:9) is 2 MP — 6× the pixels; crop-to-document doesn't
+            // need the 4:3 FOV, so the bigger 16:9 image wins for OCR.  Generic
+            // AR / stitching keep the 4:3 + SMALLEST pick (max FOV, cheap stream
+            // — keyframes downscale anyway).
+            val chosen = if (prefersHighResCapture) {
+                configs.maxByOrNull { it.imageSize.width * it.imageSize.height }
+            } else {
+                configs.sortedWith(
+                    compareBy<CameraConfig> { kotlin.math.abs(aspect(it.imageSize) - 4f / 3f) }
+                        .thenBy { it.imageSize.width * it.imageSize.height },
+                ).firstOrNull()
+            } ?: return
             session.setCameraConfig(chosen)
             Log.i(
                 TAG,
-                "selectMatchingCameraConfig: chose 4:3-pref image=" +
+                "selectMatchingCameraConfig: highRes=$prefersHighResCapture chose image=" +
                     "${chosen.imageSize.width}x${chosen.imageSize.height} texture=" +
-                    "${chosen.textureSize.width}x${chosen.textureSize.height} " +
-                    "(from ${configs.size} configs)",
+                    "${chosen.textureSize.width}x${chosen.textureSize.height} | all=[" +
+                    configs.joinToString { "${it.imageSize.width}x${it.imageSize.height}" } + "]",
             )
         } catch (t: Throwable) {
             Log.w(TAG, "selectMatchingCameraConfig failed; keeping default config: ${t.message}")

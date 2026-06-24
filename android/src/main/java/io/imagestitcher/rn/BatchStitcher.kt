@@ -254,47 +254,82 @@ class BatchStitcher(reactContext: ReactApplicationContext)
 
     // ── Normalise photo orientation (bake EXIF into pixels) ──────
 
+    /**
+     * Bake EXIF rotation into pixels + strip the tag.  JS calls this
+     * `normaliseOrientation` (matching the iOS bridge); historically the
+     * Android method was named `normaliseImage`, so the JS lookup found
+     * nothing on Android and silently no-op'd — leaving every Android capture
+     * with an un-baked EXIF orientation tag (RN's <Image> honoured it, OpenCV
+     * did not → the crop-preview image was squished and the detected quad was
+     * rotated 90°).  Renamed to match JS; `normaliseImage` kept as an alias.
+     */
     @ReactMethod
-    fun normaliseImage(options: ReadableMap, promise: Promise) {
+    fun normaliseOrientation(options: ReadableMap, promise: Promise) {
         val imagePath = options.getString("imagePath")
             ?: return promise.reject("invalid-options", "imagePath required")
 
         CoroutineScope(Dispatchers.Default).launch {
             try {
-                ensureOpenCv()
                 val cleaned = stripFileScheme(imagePath)
                 if (!File(cleaned).exists()) {
                     promise.reject("read-failed", "Image not found: $imagePath")
                     return@launch
                 }
-                // First rotate the source on the Java side using
-                // ExifInterface — Android's cv::imread, unlike iOS',
-                // doesn't auto-honour EXIF.  We re-write a rotated
-                // intermediate to disk THEN call the JNI normalise
-                // (which re-reads + re-writes via cv::imread/imwrite,
-                // stripping EXIF metadata for good measure).
-                val img = Imgcodecs.imread(cleaned, Imgcodecs.IMREAD_COLOR)
-                if (img.empty()) {
-                    promise.reject("read-failed", "Could not decode $imagePath")
-                    return@launch
+                // DETERMINISTIC orientation bake.  OpenCV's imread auto-applies
+                // EXIF INCONSISTENTLY (verified on-device: the same pipeline
+                // returned 1080x1440 for one shot and 1440x1080 for the next —
+                // the phone is held flat over the document so the device
+                // orientation is ambiguous).  Android's BitmapFactory.decodeFile
+                // NEVER auto-orients, so we read the RAW pixels, read the EXIF
+                // tag explicitly, rotate with a Matrix, and re-encode upright
+                // with NO orientation metadata — consistent for RN <Image> AND
+                // OpenCV (detectDocument / cropQuad).
+                val exif = androidx.exifinterface.media.ExifInterface(cleaned)
+                val exifOrient = exif.getAttributeInt(
+                    androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+                    androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL,
+                )
+                val raw = android.graphics.BitmapFactory.decodeFile(cleaned)
+                    ?: return@launch promise.reject("read-failed", "Could not decode $imagePath")
+                val matrix = android.graphics.Matrix()
+                when (exifOrient) {
+                    androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                    androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                    androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                    androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                    androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                    androidx.exifinterface.media.ExifInterface.ORIENTATION_TRANSPOSE -> {
+                        matrix.postRotate(90f); matrix.postScale(-1f, 1f)
+                    }
+                    androidx.exifinterface.media.ExifInterface.ORIENTATION_TRANSVERSE -> {
+                        matrix.postRotate(270f); matrix.postScale(-1f, 1f)
+                    }
+                    else -> {}
                 }
-                val rotated = applyExifOrientation(cleaned, img)
-                val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, 92)
-                if (!Imgcodecs.imwrite(cleaned, rotated, params)) {
-                    promise.reject("write-failed", "Could not rewrite $imagePath")
-                    return@launch
+                val upright = if (matrix.isIdentity) raw else android.graphics.Bitmap.createBitmap(
+                    raw, 0, 0, raw.width, raw.height, matrix, true,
+                )
+                val outW = upright.width
+                val outH = upright.height
+                java.io.FileOutputStream(cleaned).use { fos ->
+                    upright.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, fos)
                 }
+                if (upright !== raw) upright.recycle()
+                raw.recycle()
                 promise.resolve(WritableNativeMap().apply {
-                    putInt("width", rotated.cols())
-                    putInt("height", rotated.rows())
+                    putInt("width", outW)
+                    putInt("height", outH)
                 })
-                img.release()
-                if (rotated !== img) rotated.release()
             } catch (t: Throwable) {
                 promise.reject("normalise-failed", t.message, t)
             }
         }
     }
+
+    /** Back-compat alias for the historical Android method name. */
+    @ReactMethod
+    fun normaliseImage(options: ReadableMap, promise: Promise) =
+        normaliseOrientation(options, promise)
 
     // ── v0.15 inscribed-rect debug harness (iOS parity) ──────────
     //

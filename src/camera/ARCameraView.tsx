@@ -383,12 +383,13 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       }
     }, [enableDepth, enableAnchors, enableMesh]);
 
-    // Push the high-res-capture flag to native (iOS only — Android has no
-    // equivalent).  Routes through the RNSARSession native module like the
-    // scene-reconstruction / plane-detection session settings; toggling it
-    // live re-picks the AR video format in place.
+    // Push the high-res-capture flag to native on BOTH platforms.  iOS re-picks
+    // the AR video format; Android (added 0.20.5) re-picks the ARCore camera
+    // config to the largest available so AR takePhoto captures at full
+    // resolution.  Routes through the RNSARSession native module like the
+    // scene-reconstruction / plane-detection session settings.  The `?.` keeps
+    // it a no-op on any build that doesn't expose the method.
     useEffect(() => {
-      if (Platform.OS !== 'ios') return;
       const session = (NativeModules as Record<string, unknown>)
         .RNSARSession as
         | { setHighResCaptureEnabled?(on: boolean): void }
