@@ -323,3 +323,18 @@ export type {
 // incremental pipeline.  Useful when you have content captured
 // outside the SDK and just want a panorama out.
 export { stitchVideo } from './stitching/stitchVideo';
+
+// ── Image quality ─────────────────────────────────────────────────────
+// Run the SDK's blur / brightness / veiling-glare checks on an arbitrary
+// image file (e.g. a gallery import) — the same native `measure()` the
+// <Camera> runs internally on shutter captures (surfaced there via
+// `CameraCaptureResult.warnings`).  Returns a QualityReport whose `passed`
+// only blocks on error-severity issues (blur); brightness + glare are
+// advisory warnings.  Glare is opt-in via the optional `maxGlare`
+// threshold (≈33; see cpp/glare.hpp).
+export { runQualityCheck } from './quality/runQualityCheck';
+export type {
+  QualityThresholds,
+  QualityReport,
+  QualityIssue,
+} from './types';
