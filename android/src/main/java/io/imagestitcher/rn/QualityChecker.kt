@@ -40,6 +40,93 @@ class QualityChecker(reactContext: ReactApplicationContext)
 
     override fun getName(): String = "RNImageStitcherQualityChecker"
 
+    /**
+     * Three-axis image quality measurement for a single still image.
+     * STRING-path surface (JS: `native.measure(path)`), matching the
+     * iOS QualityChecker `measure:` selector.  Distinct from
+     * [runQualityCheck], which keeps the legacy ReadableMap/options +
+     * pass/fail/issues surface and is left untouched.
+     *
+     * Scores (all on OpenCV's native scales):
+     *   - blurScore       : variance of the Laplacian of the gray
+     *                       image (same computation as runQualityCheck;
+     *                       higher = sharper).
+     *   - brightnessScore : mean luminance on the 0..255 scale (NOT
+     *                       divided by 255 — matches iOS `measure`,
+     *                       which returns the raw 0..255 mean; this is
+     *                       deliberately different from runQualityCheck,
+     *                       whose `brightnessScore` is normalised 0..1).
+     *   - glareScore      : mean dark-channel veiling-glare score
+     *                       (0..255, higher = more glare), computed in
+     *                       shared C++ via [nativeComputeGlareScore].
+     *                       The COLOUR (BGR) Mat is passed through — the
+     *                       C++ dark-channel prior takes the per-pixel
+     *                       min over B,G,R, so it needs colour, not the
+     *                       gray image.
+     */
+    @ReactMethod
+    fun measure(imagePath: String, promise: Promise) {
+        // Same threading rationale as runQualityCheck: decode +
+        // Laplacian + dark-channel erode is tens of ms — keep it off
+        // the JS thread.
+        CoroutineScope(Dispatchers.Default).launch {
+            var color: Mat? = null
+            var gray: Mat? = null
+            var lap: Mat? = null
+            var mean: MatOfDouble? = null
+            var stddev: MatOfDouble? = null
+            try {
+                ensureOpenCv()
+                val cleaned = stripFileScheme(imagePath)
+                // COLOUR (BGR, CV_8UC3) — the C++ glare detector needs
+                // all three channels for the dark-channel-prior min.
+                color = Imgcodecs.imread(cleaned, Imgcodecs.IMREAD_COLOR)
+                if (color.empty()) {
+                    promise.reject(
+                        "read-failed",
+                        "Could not decode image at $imagePath",
+                    )
+                    return@launch
+                }
+
+                gray = Mat()
+                Imgproc.cvtColor(color, gray, Imgproc.COLOR_BGR2GRAY)
+
+                // Laplacian variance — EXACTLY as runQualityCheck.
+                lap = Mat()
+                Imgproc.Laplacian(gray, lap, CvType.CV_64F)
+                mean = MatOfDouble()
+                stddev = MatOfDouble()
+                Core.meanStdDev(lap, mean, stddev)
+                val blurScore = stddev.toArray()[0].let { it * it }
+
+                // Mean luminance on the 0..255 scale (iOS-parity —
+                // NOT divided by 255, unlike runQualityCheck).
+                val brightnessScore = Core.mean(gray).`val`[0]
+
+                // Veiling-glare score (0..255) from shared C++.  Pass
+                // the COLOUR Mat's nativeObjAddr; V1 uses the default
+                // central-box ROI (no roi argument).
+                val glareScore = nativeComputeGlareScore(color.nativeObjAddr)
+
+                val result = WritableNativeMap().apply {
+                    putDouble("blurScore", blurScore)
+                    putDouble("brightnessScore", brightnessScore)
+                    putDouble("glareScore", glareScore)
+                }
+                promise.resolve(result)
+            } catch (t: Throwable) {
+                promise.reject("quality-check-failed", t.message, t)
+            } finally {
+                color?.release()
+                gray?.release()
+                lap?.release()
+                mean?.release()
+                stddev?.release()
+            }
+        }
+    }
+
     @ReactMethod
     fun runQualityCheck(options: ReadableMap, promise: Promise) {
         val imagePath = options.getString("imagePath")
@@ -157,7 +244,30 @@ class QualityChecker(reactContext: ReactApplicationContext)
         }
     }
 
+    // ── JNI thunk ───────────────────────────────────────────────
+    //
+    // Bridges to the shared C++ retailens::computeGlareScore (see
+    // cpp/glare.{hpp,cpp}) via glare_jni.cpp.  matAddr is the
+    // OpenCV-Java Mat.nativeObjAddr of a COLOUR (BGR, CV_8UC3) Mat;
+    // returns the mean dark-channel veiling-glare score on a 0..255
+    // scale.  INSTANCE method → the JNI thunk takes a jobject (the
+    // symbol lives in libimage_stitcher.so, loaded in the companion
+    // init below).
+    private external fun nativeComputeGlareScore(matAddr: Long): Double
+
     companion object {
+        init {
+            // The glare JNI thunk (nativeComputeGlareScore) lives in
+            // libimage_stitcher.so — load it so the external fun above
+            // resolves.  Distinct from the opencv_java4 load in
+            // ensureOpenCv(): that one initialises the org.opencv.*
+            // Java classes (imread/Laplacian/etc.) this module also
+            // uses.  System.loadLibrary is idempotent, so loading
+            // image_stitcher here (it dynamically links opencv_java4)
+            // and opencv_java4 again in ensureOpenCv() is safe.
+            System.loadLibrary("image_stitcher")
+        }
+
         @Volatile
         private var opencvInitialised: Boolean = false
 

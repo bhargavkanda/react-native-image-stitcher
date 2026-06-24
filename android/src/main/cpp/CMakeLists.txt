@@ -100,6 +100,12 @@ add_library(image_stitcher SHARED
     image_stitcher_jni.cpp
     keyframe_gate_jni.cpp
     "${SHARED_CPP_DIR}/keyframe_gate.cpp"
+    # Veiling-glare detector (dark-channel prior) shared with iOS.
+    # glare_jni.cpp bridges QualityChecker.nativeComputeGlareScore to
+    # the shared retailens::computeGlareScore free function in
+    # cpp/glare.cpp.  See cpp/glare.hpp for the algorithm rationale.
+    glare_jni.cpp
+    "${SHARED_CPP_DIR}/glare.cpp"
     # 2026-05-15 — shared stitcher.cpp, used by BOTH platforms.
     # Owns the cv::Stitcher orchestration + C+D progressive-confidence
     # retry + dimension/memory instrumentation.  Used to live in this

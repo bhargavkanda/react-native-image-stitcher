@@ -48,6 +48,7 @@ public class QualityCheckerBridge: NSObject {
       resolver([
         "blurScore": scores.blurScore,
         "brightnessScore": scores.brightnessScore,
+        "glareScore": scores.glareScore,
       ])
     } catch let err as QualityCheckError {
       switch err {

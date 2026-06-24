@@ -30,6 +30,7 @@ let warnedOnce = false;
 interface NativeQualityScores {
   blurScore: number;
   brightnessScore: number;
+  glareScore: number;
 }
 
 
@@ -115,6 +116,15 @@ export function scoreToReport(
       message:
         `Image is overexposed (mean luminance ${scores.brightnessScore.toFixed(0)} `
         + `> ${thresholds.maxBrightness}). Reduce light or move out of direct sunlight.`,
+      severity: 'warning',
+    });
+  }
+  if (thresholds.maxGlare != null && scores.glareScore > thresholds.maxGlare) {
+    issues.push({
+      type: 'glare',
+      message:
+        `Glare/reflection detected (dark-channel ${Math.round(scores.glareScore)}/255). `
+        + 'Tilt the camera to avoid the reflection.',
       severity: 'warning',
     });
   }

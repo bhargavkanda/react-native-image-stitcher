@@ -55,9 +55,21 @@ public struct QualityScores: Equatable {
   /// vImage would produce had we asked it directly.
   public let brightnessScore: Double
 
-  public init(blurScore: Double, brightnessScore: Double) {
+  /// Veiling-glare score in [0, 255] from the shared C++ dark-channel
+  /// detector (`retailens::computeGlareScore`, via GlareBridge).
+  /// Higher = more specular-veiling reflection (e.g. a glass cooler
+  /// door reflecting the bright outdoor scene over the products).
+  /// The pass/fail `maxGlare` cutoff (≈33) lives on the JS side so
+  /// there is a single source of truth; this struct only carries the
+  /// raw measurement.  0.0 means the glare path could not score the
+  /// frame (e.g. native decode failed) — distinct from a measured
+  /// clean frame, which still floors well above 0.
+  public let glareScore: Double
+
+  public init(blurScore: Double, brightnessScore: Double, glareScore: Double) {
     self.blurScore = blurScore
     self.brightnessScore = brightnessScore
+    self.glareScore = glareScore
   }
 }
 
@@ -77,7 +89,24 @@ public enum QualityChecker {
 
     let brightness = grayBuffer.mean()
     let blur = try grayBuffer.varianceOfLaplacian()
-    return QualityScores(blurScore: blur, brightnessScore: brightness)
+    // Glare is measured by the shared C++ dark-channel detector via the
+    // Obj-C++ GlareBridge (it re-decodes the file as a BGR cv::Mat — the
+    // vImage grayscale buffer above can't feed the per-channel-min the
+    // glare score needs).  Returns 0.0 on its own decode failure rather
+    // than throwing, so a glare-path hiccup never masks a usable
+    // blur/brightness result.  The original `imagePath` (file:// scheme
+    // intact) is passed through; GlareBridge strips it internally.
+    let glare: Double
+#if SWIFT_PACKAGE
+    // GlareBridge is an Obj-C++ (.mm) symbol absent from the SwiftPM
+    // macOS test target (Package.swift compiles QualityChecker.swift
+    // standalone). Under CocoaPods/Xcode SWIFT_PACKAGE is undefined and
+    // the real bridge runs.
+    glare = 0.0
+#else
+    glare = GlareBridge.glareScore(forImageAtPath: imagePath)
+#endif
+    return QualityScores(blurScore: blur, brightnessScore: brightness, glareScore: glare)
   }
 
   /// Convenience: measure blur only.  Provided so unit tests can call
