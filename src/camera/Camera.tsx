@@ -243,9 +243,14 @@ export type CameraCaptureResult =
        */
       debugSummary?: string;
       /**
-       * 2026-06-15 (iOS) — keyframe JPEG paths used for this stitch, so the
-       * preview can re-stitch them on demand via `refinePanorama` (the
-       * high-level tab).  iOS only; undefined elsewhere.
+       * Keyframe JPEG paths used for this stitch — the raw frames the panorama
+       * was built from, so a host can re-stitch (`refinePanorama`) or run its
+       * own processing.  Returned on BOTH iOS and Android.  All frames for one
+       * capture live in a single per-capture cache dir, so the folder is
+       * `dirname(keyframePaths[0])`.  Kept after a successful stitch; removed by
+       * `cleanupKeyframes`, the auto-GC on the next `startPanorama` (the
+       * `autoCleanupKeyframes` stitcher config, default on), or OS cache
+       * eviction — copy them out promptly if you process them asynchronously.
        */
       keyframePaths?: string[];
       /**

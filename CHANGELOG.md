@@ -14,6 +14,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.16.3] — 2026-06-24
+
+### Added
+
+- **Auto-GC of keyframe sessions + `autoCleanupKeyframes` /
+  `keyframeGcOlderThanMs` stitcher config.** Each panorama capture's keyframe
+  JPEGs (the raw frames it stitches — surfaced as `keyframePaths` on the capture
+  result) are kept under the cache dir after a successful stitch so a host can
+  reprocess them. They now **auto-GC** at the next `startPanorama`: prior
+  per-capture `rlis-capture-*` dirs whose newest file is older than
+  `keyframeGcOlderThanMs` (default 24h) are deleted, so they don't accumulate
+  unbounded if the host never calls `cleanupKeyframes`. The current capture's
+  fresh dir is never collected. Default on; set `autoCleanupKeyframes: false`
+  to opt out. iOS + Android.
+
+### Fixed
+
+- **`keyframePaths` doc-comment** corrected — the field is returned on **both
+  iOS and Android** (the "iOS only" note was stale; Android has emitted the
+  paths since the batch-keyframe flow landed).
+
 ## [0.16.2] — 2026-06-17
 
 ### Added — reuse the bundled OpenCV from your host app's native code (Android)

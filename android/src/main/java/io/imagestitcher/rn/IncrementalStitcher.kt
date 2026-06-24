@@ -360,6 +360,23 @@ class IncrementalStitcher(
                 reactContext.cacheDir,
                 "rlis-capture-${java.util.UUID.randomUUID()}",
             ).also { it.mkdirs() }
+            // 0.16.3 (goal b) — auto-GC stale keyframe session dirs at
+            // capture start so the per-capture frame dirs the SDK keeps
+            // for reprocessing don't accumulate unbounded if the host
+            // never calls cleanupKeyframes().  Opt-out via
+            // config.autoCleanupKeyframes=false; cutoff age is
+            // config.keyframeGcOlderThanMs (default 24h).  The freshly
+            // created captureSessionDir above is NEWER than the cutoff so
+            // it is never collected.  Deferred onto workScope (serial,
+            // off the @ReactMethod thread) so the scan never delays the
+            // capture-start promise.
+            if (configOverrides?.getBooleanOrDefault("autoCleanupKeyframes", true) != false) {
+                val gcCutoff = System.currentTimeMillis() -
+                    (configOverrides?.getDoubleOrDefault(
+                        "keyframeGcOlderThanMs", 24.0 * 3600.0 * 1000.0,
+                    ) ?: (24.0 * 3600.0 * 1000.0)).toLong()
+                workScope.launch { gcStaleKeyframeSessions(gcCutoff) }
+            }
             batchKeyframeMaxCount = configOverrides
                 ?.getIntOrDefault("keyframeMaxCount", 6) ?: 6
             batchWarperType = configOverrides?.getString("warperType")
@@ -1345,28 +1362,20 @@ class IncrementalStitcher(
     }
 
     /**
-     * 2026-05-18 (Iss 3) — GC stale keyframe-session directories under
-     * the SDK's cacheDir.  Scans `cacheDir` for `rlis-capture-*`
+     * 2026-06-24 (0.16.3 backport, goal b) — shared scan-and-delete core
+     * behind both the public `cleanupKeyframes` @ReactMethod and the
+     * auto-GC fired from `start()`.  Scans `cacheDir` for `rlis-capture-*`
      * subdirectories (created by start() above) and removes those whose
-     * newest file mtime is older than `olderThanMs` (default 24h).
+     * newest file mtime is strictly older than `cutoffMs` (an absolute
+     * epoch-millis cutoff, i.e. `now - olderThanMs`).
      *
-     * iOS sibling: `IncrementalStitcher.swift::cleanupKeyframes`.
+     * Best-effort: never throws.  Filesystem failures (missing dir,
+     * permission errors) are swallowed and reported as whatever counts
+     * were accumulated before the failure.
      *
-     * Resolves with `{ sessionsDeleted, bytesFreed }`.  Never rejects —
-     * filesystem failures (missing dir, permission errors) resolve with
-     * zero counts so the host can call this unconditionally on launch.
-     *
-     * Note: Android's OS already evicts cacheDir entries under storage
-     * pressure, so this is a "be a good citizen and free space sooner"
-     * helper rather than a hard requirement.  Still useful so the user's
-     * disk-usage report doesn't show 100s of MB of stale captures.
+     * @return Pair(sessionsDeleted, bytesFreed).
      */
-    @ReactMethod
-    fun cleanupKeyframes(options: ReadableMap?, promise: Promise) {
-        val olderThanMs = options?.getDoubleOrDefault(
-            "olderThanMs", 24.0 * 3600.0 * 1000.0,
-        ) ?: (24.0 * 3600.0 * 1000.0)
-        val cutoffMs = System.currentTimeMillis() - olderThanMs.toLong()
+    private fun gcStaleKeyframeSessions(cutoffMs: Long): Pair<Int, Long> {
         var sessionsDeleted = 0
         var bytesFreed = 0L
         try {
@@ -1398,9 +1407,36 @@ class IncrementalStitcher(
         } catch (e: Exception) {
             android.util.Log.w(
                 "IncrementalStitcher",
-                "cleanupKeyframes: ${e.message}",
+                "gcStaleKeyframeSessions: ${e.message}",
             )
         }
+        return Pair(sessionsDeleted, bytesFreed)
+    }
+
+    /**
+     * 2026-05-18 (Iss 3) — GC stale keyframe-session directories under
+     * the SDK's cacheDir.  Scans `cacheDir` for `rlis-capture-*`
+     * subdirectories (created by start() above) and removes those whose
+     * newest file mtime is older than `olderThanMs` (default 24h).
+     *
+     * iOS sibling: `IncrementalStitcher.swift::cleanupKeyframes`.
+     *
+     * Resolves with `{ sessionsDeleted, bytesFreed }`.  Never rejects —
+     * filesystem failures (missing dir, permission errors) resolve with
+     * zero counts so the host can call this unconditionally on launch.
+     *
+     * Note: Android's OS already evicts cacheDir entries under storage
+     * pressure, so this is a "be a good citizen and free space sooner"
+     * helper rather than a hard requirement.  Still useful so the user's
+     * disk-usage report doesn't show 100s of MB of stale captures.
+     */
+    @ReactMethod
+    fun cleanupKeyframes(options: ReadableMap?, promise: Promise) {
+        val olderThanMs = options?.getDoubleOrDefault(
+            "olderThanMs", 24.0 * 3600.0 * 1000.0,
+        ) ?: (24.0 * 3600.0 * 1000.0)
+        val cutoffMs = System.currentTimeMillis() - olderThanMs.toLong()
+        val (sessionsDeleted, bytesFreed) = gcStaleKeyframeSessions(cutoffMs)
         val map = Arguments.createMap()
         map.putInt("sessionsDeleted", sessionsDeleted)
         map.putDouble("bytesFreed", bytesFreed.toDouble())

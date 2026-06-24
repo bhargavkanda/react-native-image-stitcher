@@ -1032,6 +1032,39 @@ public final class IncrementalStitcher: NSObject {
         if frameSourceMode == "arSession" {
             RNSARSession.shared.incrementalConsumer = self
         }
+
+        // 2026-06-24 (Iss 3, parity with Android) — auto-GC stale
+        // keyframe-session directories when a new capture starts.  The
+        // freshly-created session dir for THIS capture is newer than the
+        // cutoff, so it's never deleted.  Runs OFF the stateLock (already
+        // unlocked above), on a utility background queue, and reuses the
+        // existing cleanupKeyframes scan (does its own FS walk, touches no
+        // stateLock-guarded state, never throws).  Gated by
+        // `autoCleanupKeyframes` (default true); cutoff age via
+        // `keyframeGcOlderThanMs` ms (default 24h).  Read with the same
+        // configOverrides[...] as? T pattern as keyframeMaxCount above.
+        let autoCleanup =
+            (configOverrides["autoCleanupKeyframes"] as? Bool) ?? true
+        let gcOlderThanMs: Double = {
+            if let v = configOverrides["keyframeGcOlderThanMs"] as? Double {
+                return max(0.0, v)
+            }
+            if let v = configOverrides["keyframeGcOlderThanMs"] as? Int {
+                return max(0.0, Double(v))
+            }
+            return 24.0 * 3600.0 * 1000.0
+        }()
+        if autoCleanup {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self = self else { return }
+                let r = self.cleanupKeyframes(olderThanMs: gcOlderThanMs)
+                os_log(.fault, log: Self.diagLog,
+                       "[V16-orchestrator] start: auto-GC olderThanMs=%.0f sessionsDeleted=%@ bytesFreed=%@",
+                       gcOlderThanMs,
+                       "\(r["sessionsDeleted"] ?? 0)",
+                       "\(r["bytesFreed"] ?? 0)")
+            }
+        }
     }
 
     /// Stop ingestion + write the final panorama to `outputPath`.

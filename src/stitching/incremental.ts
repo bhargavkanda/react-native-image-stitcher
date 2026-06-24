@@ -478,6 +478,21 @@ export interface StitcherConfig {
    *  rejected and the host should auto-finalize. */
   keyframeMaxCount: number;
 
+  /**
+   * 0.16.3 — auto-GC stale keyframe session dirs at the next capture start.
+   * The SDK keeps each capture's keyframe JPEGs (under `cache/rlis-capture-*`)
+   * after a successful stitch so they can be reprocessed; when `true` (default)
+   * a new `startPanorama` first deletes prior session dirs whose newest file is
+   * older than `keyframeGcOlderThanMs`, so they don't accumulate unbounded if
+   * the host never calls `cleanupKeyframes`.  The current capture's fresh dir is
+   * never collected.  Set `false` if your app manages keyframe cleanup itself or
+   * needs frames to persist beyond the cutoff. */
+  autoCleanupKeyframes?: boolean;
+
+  /** 0.16.3 — staleness cutoff (ms) for `autoCleanupKeyframes`.  Default
+   *  86_400_000 (24h). */
+  keyframeGcOlderThanMs?: number;
+
   /** V16 A2 — flow-based mode: max Shi-Tomasi corners detected per
    *  accepted keyframe.  Range 50 – 300, default 150.  Higher =
    *  more robust median pan-axis displacement; slower detect. */
