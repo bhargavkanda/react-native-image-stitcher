@@ -142,6 +142,7 @@ import { useFrameProcessorDriver } from '../stitching/useFrameProcessorDriver';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
 import { toBareFilePath, toFileUri } from '../utils/paths';
+import { normaliseOrientation } from '../quality/normaliseOrientation';
 import {
   defaultPanoramaFilename,
   defaultPhotoFilename,
@@ -979,11 +980,22 @@ export interface CameraProps {
  * whenever `<ARCameraView>` (re)mounts.
  *
  * The shape is identical to {@link ARCameraViewHandle}'s overlay subset so a
- * host can use either component with the same overlay code.  Photo / panorama
- * capture remain driven by the built-in shutter (no imperative capture methods
- * on this handle — see the component docstring's scope note).
+ * host can use either component with the same overlay code.  Panorama capture
+ * remains driven by the built-in shutter; single-photo capture can also be
+ * triggered imperatively via {@link CameraHandle.takePhoto} (added 0.20.5 for
+ * hands-free / auto-capture flows like the document scanner).
  */
-export interface CameraHandle extends AROverlayMethods {}
+export interface CameraHandle extends AROverlayMethods {
+  /**
+   * Imperatively fire a single-photo capture — identical to the user tapping
+   * the shutter (same AR / non-AR routing, same `onCapture` callback, same
+   * output path rules).  Respects `enablePhotoMode` and `shutterDisabled`: a
+   * no-op while photo mode is off or the shutter is gated, so callers can fire
+   * it freely and let the gate decide.  Resolves once the capture attempt
+   * settles (success or handled error reported through `onCapture`).
+   */
+  takePhoto(): Promise<void>;
+}
 
 
 // ─── Sub-components ─────────────────────────────────────────────────
@@ -1584,6 +1596,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const incremental = useIncrementalStitcher();
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);
+  // Latest `handleTap` (the shutter handler), kept in a ref so the imperative
+  // `takePhoto()` always calls the current closure.  `handleTap` is declared
+  // far below (after the refs/state it closes over), so the imperative handle
+  // can't reference it directly without a TDZ error — the ref bridges that.
+  const handleTapRef = useRef<(() => Promise<void>) | null>(null);
 
   // v0.20.0 — AR overlay imperative handle.  `<Camera>` itself renders no
   // overlay layer; the overlay methods forward to the mounted
@@ -1599,6 +1616,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     removeOverlay: (id) => arViewRef.current?.removeOverlay(id),
     clearOverlays: () => arViewRef.current?.clearOverlays(),
     raycast: () => arViewRef.current?.raycast() ?? Promise.resolve(null),
+    takePhoto: () => handleTapRef.current?.() ?? Promise.resolve(),
   }), []);
 
   // Effect that does the async transition work whenever the settled
@@ -1939,9 +1957,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // native CIImage rotation matches the user's view.  Pre-
         // v0.12 the native side hardcoded portrait, so landscape
         // photos came out sideways.
+        //
+        // 0.20.5 — for HIGH-RES document capture, force 'portrait' instead of
+        // the live gyro.  Scanning holds the phone FLAT over the doc, so the
+        // accelerometer (deviceOrientation) is ambiguous and the FIRST shot
+        // after entering AR came out sideways (gyro hadn't settled).  The
+        // doc-scan UI is portrait, so a fixed 'portrait' is the stable,
+        // WYSIWYG choice — the AR analogue of the non-AR `'preview'` path.
         const photo = await arViewRef.current.takePhoto({
           quality: 90,
-          orientation: deviceOrientation,
+          orientation: highResCapture ? 'portrait' : deviceOrientation,
         });
         try {
           await moveFile(photo.path, photoOutputPath);
@@ -1953,11 +1978,23 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             moveErr,
           );
         }
+        // Bake EXIF orientation into pixels (parity with the non-AR path,
+        // which does this inside useCapture.takePhoto).  Android's AR
+        // takePhoto can return a file with an EXIF orientation tag over
+        // un-rotated pixels; RN's <Image> honours the tag but OpenCV
+        // (detectDocument / cropQuad) does NOT — so a downstream crop preview
+        // would be squished and the detected quad rotated 90°.
+        // normaliseOrientation re-encodes upright with no tag and returns the
+        // true post-rotation dims.  No-op on already-upright files.
+        const arNorm = await normaliseOrientation(photoOutputPath, {
+          width: photo.width,
+          height: photo.height,
+        });
         // Android <Image> needs the `file://` scheme to render the
         // returned uri; iOS is OK either way.  Normalise once here.
         uri = toFileUri(photoOutputPath);
-        width = photo.width;
-        height = photo.height;
+        width = arNorm.width;
+        height = arNorm.height;
       } else {
         if (!visionCameraRef.current) {
           throw new CameraError(
@@ -2109,6 +2146,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     maxPanDurationMs,
     clearPanTimer,
   ]);
+
+  // Bridge the latest `handleTap` to the imperative `takePhoto()` (declared
+  // above the imperative handle, so it can't be referenced there directly).
+  // Assigning a ref during render is the canonical "latest callback" pattern.
+  handleTapRef.current = handleTap;
 
   // Keep the ref current so the auto-finalize timer + the rotate-resume
   // effect can invoke the latest `startCapture` without taking it as a
@@ -2617,6 +2659,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           ref={visionCameraRef}
           device={capture.device}
           isActive
+          // High-res still capture (document scanning): raises the photo cap so
+          // the non-AR tap photo uses the device's largest 4:3 still (e.g.
+          // 12.5 MP), while the 4:3 video/preview the frame-processor runs on is
+          // unchanged.  Stitching/keyframes unaffected (they downscale
+          // regardless); only the tap photo benefits.
+          highResCapture={highResCapture}
           // `video={true}` is REQUIRED for takeSnapshot to work on iOS.
           // vision-camera v4's iOS implementation of takeSnapshot waits
           // for a frame on the video pipeline; with video disabled, the

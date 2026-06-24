@@ -51,6 +51,13 @@ import { pickCaptureFormat } from './pickCaptureFormat';
  * the 0.5× panorama 8-bit check passes on-device.
  */
 const PHOTO_LONG_EDGE_CAP = 4032;
+/**
+ * Photo long-edge cap when `highResCapture` is set (document scanning).  4096
+ * admits the common 12.5 MP 4:3 still (4080×3060) that the 4032 cap excluded,
+ * without chasing 48 MP+ stills (memory).  The chosen format's video stream is
+ * still bounded by the 4:3 + preferHighFps logic, so the preview is unchanged.
+ */
+const HIGH_RES_PHOTO_LONG_EDGE_CAP = 4096;
 
 
 export interface CameraViewProps {
@@ -78,6 +85,16 @@ export interface CameraViewProps {
    * hold (video → stitch) flows.
    */
   video?: boolean;
+  /**
+   * Opt into HIGH-RESOLUTION still capture (e.g. document scanning).  Raises
+   * the photo-resolution cap so the picker selects the device's largest 4:3
+   * still (e.g. 12.5 MP / 4080×3060 on the A35) and runs the camera at
+   * `photoQualityBalance="quality"`.  The chosen format's VIDEO stream is
+   * unchanged (still the 4:3 preview the frame-processor detection runs on),
+   * so the preview + detection are unaffected — only the captured photo gets
+   * bigger.  Default off (keeps the 4032px cap for back-compat).
+   */
+  highResCapture?: boolean;
   /** Optional themed guidance banner.  Renders over the preview at the top. */
   guidance?: string;
   /** Extra style layer applied on top of the default full-screen layout. */
@@ -137,6 +154,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     zoom,
     isActive = true,
     video = false,
+    highResCapture = false,
     guidance,
     style,
     cameraProps,
@@ -218,13 +236,20 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // 640/1280 px before stitching, so the extra video resolution buys nothing
   // here; a 60 fps stream just looks right.  We opt the panorama camera in.
   const format = useMemo(
-    () =>
-      pickCaptureFormat(device?.formats ?? [], {
-        maxPhotoLongEdge: PHOTO_LONG_EDGE_CAP,
+    () => {
+      const picked = pickCaptureFormat(device?.formats ?? [], {
+        // highResCapture (document scanning) raises the photo cap so the
+        // device's largest 4:3 still is selected (e.g. 4080×3060 on the A35,
+        // which 4032 was excluding).  preferHighFps stays on, so the chosen
+        // format's VIDEO/preview stream is unchanged — detection is untouched,
+        // only the captured photo gets bigger.
+        maxPhotoLongEdge: highResCapture ? HIGH_RES_PHOTO_LONG_EDGE_CAP : PHOTO_LONG_EDGE_CAP,
         aspect: 4 / 3,
         preferHighFps: true,
-      }),
-    [device],
+      });
+      return picked;
+    },
+    [device, highResCapture],
   );
 
   // Pin the session frame rate to the format's max, capped at 60.  Picking a
@@ -309,16 +334,14 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         {...(fps != null ? { fps } : {})}
         // v0.13.2 — multi-cam lens switch via zoom (undefined = default).
         {...(zoom != null ? { zoom } : {})}
-        // Bake the device orientation into the captured pixels.
-        // Without this, vision-camera writes the file in the camera
-        // sensor's native landscape and relies on EXIF metadata to
-        // tell viewers "rotate me" — but RN's <Image> on iOS often
-        // ignores EXIF, leading to thumbnails / previews appearing
-        // sideways even though the user shot in portrait.  Setting
-        // `outputOrientation="device"` rotates the pixels to match
-        // how the user is holding the phone, so the saved JPEG is
-        // "what you see is what was taken".
-        outputOrientation="device"
+        // Orient the captured pixels.  Default `"device"` follows the
+        // accelerometer — but when the phone is held FLAT over a document
+        // (scanning), the device orientation is ambiguous, so the first shot
+        // after launch can come out sideways.  For high-res document capture
+        // we use `"preview"`, which matches the on-screen PREVIEW/UI
+        // orientation (stable, what the user actually sees) instead of the
+        // accelerometer — "what you see is what was taken", deterministically.
+        outputOrientation={highResCapture ? 'preview' : 'device'}
         // Show the full camera FOV — no cropping.  'contain' maps to
         // AVLayerVideoGravity.resizeAspect on iOS and the equivalent
         // on Android, letterboxing the preview to the sensor's exact
@@ -338,6 +361,11 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         // the bars outside the letterboxed area are transparent,
         // revealing the parent's black backgroundColor.
         androidPreviewViewType="texture-view"
+        // High-res document capture: prioritise image QUALITY (multi-frame
+        // fusion / less noise) over shutter speed.  Only when highResCapture
+        // is set — quality mode adds latency that would hurt rapid panorama
+        // keyframe grabs.
+        {...(highResCapture ? { photoQualityBalance: 'quality' as const } : {})}
         torch={flash === 'on' ? 'on' : 'off'}
         onError={handleVcError}
         {...cameraProps}

@@ -14,6 +14,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.20.5] — 2026-06-23
+
+### Added
+
+- **`takePhoto()` on the `<Camera>` ref** ({@link CameraHandle}) — imperatively
+  fire a single-photo capture, identical to tapping the shutter (same AR /
+  non-AR routing, same `onCapture` callback, same output-path rules). Respects
+  `enablePhotoMode` / `shutterDisabled`, so callers can fire it freely and let
+  the gate decide. Enables hands-free / auto-capture flows (e.g. a document
+  scanner that fires once the page is framed).
+
+### Changed
+
+- **High-res AR capture now works on Android too.** `highResCapture` previously
+  no-op'd on Android; it now reconfigures the live ARCore session to the
+  device's largest camera config, so the AR `takePhoto()` returns a
+  full-resolution still. The AR keyframe stream + stitching are unaffected (the
+  keyframe down-clamp still applies to those — only the tapped/auto still goes
+  full-res). For flat document capture the AR still is also baked to a fixed
+  portrait orientation, since the live accelerometer orientation is ambiguous
+  when the phone is held flat over a table.
+
+### Fixed
+
+- **Android photo orientation is now baked deterministically.** The normalise
+  step rewrites the JPEG upright via `BitmapFactory` + `ExifInterface` + an
+  explicit matrix rotation, replacing an `imread`-based path whose inconsistent
+  EXIF handling produced sideways / squished stills when the phone was held
+  flat (e.g. scanning a document on a table).
+
 ## [0.20.4] — 2026-06-22
 
 ### Added

@@ -1628,7 +1628,15 @@ class RNSARCameraView @JvmOverloads constructor(
         //    Omitted entirely when no plugin produced a sync result (JS sees
         //    `meta.plugins === undefined`), matching the optional `plugins?`
         //    field in the ARFrameMeta contract.
+        // Take ownership of the stashed plugin maps and CLEAR the field
+        // immediately.  `putMap` CONSUMES each WritableMap; if the field kept
+        // pointing at the now-consumed maps and a later emit ran before
+        // runArPlugins refreshed them (this emit is throttled, runArPlugins is
+        // not), putMap would throw `ObjectAlreadyConsumedException: Map already
+        // consumed` on the GL thread and crash AR.  Nulling here makes a
+        // consumed map un-reusable.
         val pluginResults = lastPluginSyncResults
+        lastPluginSyncResults = null
         if (!pluginResults.isNullOrEmpty()) {
             val pluginsMap = com.facebook.react.bridge.Arguments.createMap()
             for ((name, value) in pluginResults) {

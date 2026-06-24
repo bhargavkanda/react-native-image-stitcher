@@ -216,6 +216,10 @@ internal object YuvImageConverter {
         outputPath: String,
         jpegQuality: Int = 70,
         displayRotation: Int = Surface.ROTATION_0,
+        // Long-edge clamp.  Default = AR keyframe budget (cheap, cross-device
+        // consistent stitch memory).  Pass 0 to DISABLE — the takePhoto still
+        // is the user's full-res photo and must NOT be downscaled to 640.
+        maxLongEdge: Int = AR_KEYFRAME_MAX_LONG_EDGE,
     ): String? {
         val yuvImage = YuvImage(
             packed.nv21,
@@ -237,11 +241,11 @@ internal object YuvImageConverter {
         // stitch memory cross-device.  Only the SAVED keyframe is scaled; the
         // C++ keyframe gate already ran on the full-res Y plane upstream.
         var jpegBytes = baos.toByteArray()
-        if (max(packed.width, packed.height) > AR_KEYFRAME_MAX_LONG_EDGE) {
+        if (maxLongEdge > 0 && max(packed.width, packed.height) > maxLongEdge) {
             val src = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
             if (src != null) {
                 val scale =
-                    AR_KEYFRAME_MAX_LONG_EDGE.toFloat() / max(src.width, src.height)
+                    maxLongEdge.toFloat() / max(src.width, src.height)
                 val dst = Bitmap.createScaledBitmap(
                     src,
                     (src.width * scale).roundToInt().coerceAtLeast(1),
@@ -327,6 +331,9 @@ internal object YuvImageConverter {
             outputPath,
             jpegQuality = jpegQuality,
             displayRotation = displayRotation,
+            // takePhoto is the user's full-res still — do NOT apply the AR
+            // keyframe 640px downscale (that's only for streaming keyframes).
+            maxLongEdge = 0,
         )
     }
 }
