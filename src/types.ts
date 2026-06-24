@@ -23,6 +23,13 @@ export interface QualityThresholds {
   minBrightness: number;
   /** Maximum brightness (0-255) */
   maxBrightness: number;
+  /**
+   * Mean dark-channel 0..255 over the product region (see cpp/glare.hpp).
+   * When set, a non-blocking veiling-glare warning fires if the score
+   * exceeds it. OPTIONAL — omit to disable the glare check entirely.
+   * Recommended ≈ 33 (calibrated; consumer-owned single source of truth).
+   */
+  maxGlare?: number;
 }
 
 export interface QualityReport {
@@ -33,7 +40,7 @@ export interface QualityReport {
 }
 
 export interface QualityIssue {
-  type: 'blur' | 'brightness_low' | 'brightness_high' | 'framing';
+  type: 'blur' | 'brightness_low' | 'brightness_high' | 'framing' | 'glare';
   message: string;
   severity: 'warning' | 'error';
 }
