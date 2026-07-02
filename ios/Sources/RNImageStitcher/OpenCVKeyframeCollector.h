@@ -86,6 +86,18 @@ NS_ASSUME_NONNULL_BEGIN
                                     jpegQuality:(NSInteger)jpegQuality
                                           error:(NSError **)error;
 
+/// v0.21 — variance-of-Laplacian sharpness score for the
+/// pick-sharpest-in-window anti-blur keyframe selection.  NV12 buffers
+/// are scored directly on the Y plane (no BGR conversion); BGRA buffers
+/// are converted to gray.  The shared metric downscales internally
+/// (cpp/sharpness.hpp, kSharpnessWorkingLongEdge) so the cost is
+/// ~1-3 ms regardless of capture resolution.  Returns 0.0 for NULL /
+/// unsupported-format buffers.  Scores are content-dependent: only
+/// compare them BETWEEN FRAMES OF THE SAME SCENE (within one selection
+/// window), never against an absolute threshold.
+- (double)sharpnessScoreForPixelBuffer:(nullable CVPixelBufferRef)pixelBuffer
+    NS_SWIFT_NAME(sharpnessScore(for:));
+
 /// Remove the session directory and any saved keyframes.  Idempotent.
 /// Called from IncrementalStitcher's `cancel` / on
 /// successful finalize when the operator hasn't opted into

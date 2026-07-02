@@ -478,6 +478,22 @@ export interface StitcherConfig {
    *  rejected and the host should auto-finalize. */
   keyframeMaxCount: number;
 
+  /** v0.21 — pick-sharpest-in-window anti-blur keyframe selection
+   *  (pose-based + flow-based modes; ignored by the time-based
+   *  passthrough).  When the gate accepts a frame the engine scores
+   *  it plus up to K−1 subsequent gate-evaluated frames with a
+   *  variance-of-Laplacian sharpness metric (shared C++, computed on
+   *  the downscaled gray frame — ~1–3 ms per candidate) and saves the
+   *  SHARPEST of the K, buffering at most ONE candidate frame
+   *  (streaming max).  The saved keyframe's recorded pose is the
+   *  chosen frame's pose.
+   *
+   *  Range 1 – 10.  `1` = off (immediate save, pre-v0.21 behaviour).
+   *  Default 4 when the key is absent — the anti-blur selection is ON
+   *  by default; the trade-off is up to K−1 evaluated frames of extra
+   *  latency between gate-accept and the keyframe event. */
+  sharpnessWindow: number;
+
   /** V16 A2 — flow-based mode: max Shi-Tomasi corners detected per
    *  accepted keyframe.  Range 50 – 300, default 150.  Higher =
    *  more robust median pan-axis displacement; slower detect. */

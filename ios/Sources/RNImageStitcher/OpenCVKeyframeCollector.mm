@@ -12,6 +12,10 @@
 #include <opencv2/imgcodecs.hpp>
 #pragma pop_macro("NO")
 
+// v0.21 — shared variance-of-Laplacian sharpness metric (compiled into
+// the pod from cpp/sharpness.cpp via the podspec's cpp/*.cpp glob).
+#import "sharpness.hpp"
+
 // v0.16 — keyframe long-edge clamp (px) applied before the JPEG is written.
 // The stitcher composites at ~1 MP (COMPOSE_MP) and `compose_scale` never
 // upscales, so a keyframe larger than ~1.2 MP only inflates the held-set RAM
@@ -261,6 +265,49 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
                                               index:idx
                                               width:w
                                              height:h];
+}
+
+// ── v0.21 — sharpness scoring (pick-sharpest-in-window) ────────────
+
+- (double)sharpnessScoreForPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+  if (!pixelBuffer) return 0.0;
+  OSType pf = CVPixelBufferGetPixelFormatType(pixelBuffer);
+  CVReturn lockResult =
+      CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+  if (lockResult != kCVReturnSuccess) return 0.0;
+  double score = 0.0;
+  @try {
+    if (pf == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+        pf == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
+      // NV12 — the Y plane IS the gray frame; wrap without copying.
+      // retailens::sharpnessScore reads (its first step is an
+      // INTER_AREA downscale into its own buffer) and never mutates,
+      // so aliasing the read-locked plane is safe for the lock's
+      // duration.
+      void *base = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
+      size_t w = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0);
+      size_t h = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
+      size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
+      if (base != NULL && w > 0 && h > 0) {
+        cv::Mat yPlane((int)h, (int)w, CV_8UC1, base, stride);
+        score = retailens::sharpnessScore(yPlane);
+      }
+    } else if (pf == kCVPixelFormatType_32BGRA) {
+      void *base = CVPixelBufferGetBaseAddress(pixelBuffer);
+      size_t w = CVPixelBufferGetWidth(pixelBuffer);
+      size_t h = CVPixelBufferGetHeight(pixelBuffer);
+      size_t stride = CVPixelBufferGetBytesPerRow(pixelBuffer);
+      if (base != NULL && w > 0 && h > 0) {
+        cv::Mat bgra((int)h, (int)w, CV_8UC4, base, stride);
+        score = retailens::sharpnessScore(bgra);  // converted to gray inside
+      }
+    }
+    // Any other format scores 0.0 — saveKeyframe rejects those buffers
+    // anyway (error 1201), so they can never win a window.
+  } @finally {
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+  }
+  return score;
 }
 
 - (void)cleanup {

@@ -70,6 +70,7 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.keyframeMaxCount).toBe(6);
     expect(cfg.keyframeOverlapThreshold).toBe(0.20);
     expect(cfg.maxKeyframeIntervalMs).toBe(1500);
+    expect(cfg.sharpnessWindow).toBe(4);
 
     // FlowGateSettings (flow is defined in the default)
     expect(cfg.flowNoveltyPercentile).toBe(0.85);
@@ -155,9 +156,48 @@ describe('panoramaSettingsToNativeConfig', () => {
       'keyframeOverlapThreshold',
       'maxKeyframeIntervalMs',
       'seamFinderType',
+      'sharpnessWindow',
       'stitchMode',
       'warperType',
     ]);
+  });
+
+  it('defaults sharpnessWindow to 4 when absent and passes explicit values through', () => {
+    // v0.21 — pick-sharpest-in-window anti-blur selection.  The field
+    // is optional on FrameSelectionSettings (hosts with pre-v0.21
+    // settings literals must keep compiling), but the bridge ALWAYS
+    // emits the key so the JS default (4 — feature ON) is canonical
+    // on the wire, same policy as the flow knobs.
+    const sparse: PanoramaSettings = {
+      ...DEFAULT_PANORAMA_SETTINGS,
+      frameSelection: {
+        mode: 'flow-based',
+        maxKeyframes: 6,
+        overlapThreshold: 0.20,
+        maxKeyframeIntervalMs: 1500,
+        // sharpnessWindow omitted — legal per the optional `?`
+      },
+    };
+    expect(panoramaSettingsToNativeConfig(sparse).sharpnessWindow).toBe(4);
+
+    // Explicit value passes through untouched (1 = feature off —
+    // native reproduces the pre-v0.21 immediate-save path).
+    const off: PanoramaSettings = {
+      ...DEFAULT_PANORAMA_SETTINGS,
+      frameSelection: {
+        ...DEFAULT_PANORAMA_SETTINGS.frameSelection,
+        sharpnessWindow: 1,
+      },
+    };
+    expect(panoramaSettingsToNativeConfig(off).sharpnessWindow).toBe(1);
+    const wide: PanoramaSettings = {
+      ...DEFAULT_PANORAMA_SETTINGS,
+      frameSelection: {
+        ...DEFAULT_PANORAMA_SETTINGS.frameSelection,
+        sharpnessWindow: 8,
+      },
+    };
+    expect(panoramaSettingsToNativeConfig(wide).sharpnessWindow).toBe(8);
   });
 
   it('honours captureSource and stitcher overrides', () => {

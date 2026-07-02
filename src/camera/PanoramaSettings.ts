@@ -217,6 +217,26 @@ export interface FrameSelectionSettings {
   maxKeyframeIntervalMs: number;
 
   /**
+   * v0.21 — pick-sharpest-in-window anti-blur keyframe selection.
+   * When the gate ACCEPTS a frame, the engine does not save it
+   * immediately: it scores the accepted frame plus up to K−1
+   * subsequent gate-evaluated frames with a variance-of-Laplacian
+   * sharpness metric (shared C++, scored on the downscaled gray
+   * frame, ~1–3 ms) and saves the SHARPEST of the K.  Fixes
+   * motion-blurred keyframes slipping into the stitch — the gate
+   * itself selects purely by overlap/novelty/time.
+   *
+   * K = this value.  Clamped natively to `[1, 10]`.  `1` disables
+   * the window (immediate save — the pre-v0.21 behaviour).  Default
+   * `4` — NOTE this means the feature is ON by default; omitting
+   * the field opts you IN, at the cost of up to K−1 evaluated
+   * frames of extra latency between gate-accept and the keyframe
+   * thumbnail appearing.  Memory cost: at most ONE extra buffered
+   * frame (streaming max), regardless of K.
+   */
+  sharpnessWindow?: number;
+
+  /**
    * Sparse-optical-flow strategy tunables.  Consulted only when
    * `mode === 'flow-based'`; safe to omit otherwise.  Defaults
    * track [DEFAULT_PANORAMA_SETTINGS.frameSelection.flow].
@@ -300,6 +320,17 @@ export interface FlowGateSettings {
  * the bridge always-emitting these on the wire (see
  * `PanoramaSettingsBridge.ts:panoramaSettingsToNativeConfig`).
  */
+/**
+ * v0.21 — canonical default for `frameSelection.sharpnessWindow` (the
+ * pick-sharpest-in-window anti-blur selection; see the field's JSDoc).
+ * Exported standalone for the same reason as
+ * [DEFAULT_FLOW_GATE_SETTINGS]: the bridge and prop translators need
+ * the value without reaching through the default tree's optional
+ * fields.
+ */
+export const DEFAULT_SHARPNESS_WINDOW = 4;
+
+
 export const DEFAULT_FLOW_GATE_SETTINGS: FlowGateSettings = {
   noveltyPercentile: 0.85,
   evalEveryNFrames: 5,
@@ -347,6 +378,8 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     maxKeyframes: 6,
     overlapThreshold: 0.20,
     maxKeyframeIntervalMs: 1500,
+    // v0.21 — anti-blur keyframe selection ON by default (K=4).
+    sharpnessWindow: DEFAULT_SHARPNESS_WINDOW,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
   },
 };

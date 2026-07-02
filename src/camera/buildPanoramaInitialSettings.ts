@@ -67,6 +67,13 @@ export interface PanoramaPropOverrides {
    */
   defaultMaxKeyframeIntervalMs?: number;
   /**
+   * v0.21 — initial value for `frameSelection.sharpnessWindow` (the
+   * pick-sharpest-in-window anti-blur selection).  `1` disables the
+   * window (immediate save).  Default 4 — the feature is ON unless
+   * explicitly turned off.
+   */
+  defaultSharpnessWindow?: number;
+  /**
    * v0.15 — initial value for `stitcher.enableMaxInscribedRectCrop`.
    * Maps from the standalone `maxInscribedRectCrop` <Camera> prop.
    * Omitted ⇒ the stitcher default (false = bounding-rect crop).
@@ -161,6 +168,9 @@ export function buildPanoramaInitialSettings(
       maxKeyframeIntervalMs:
         overrides.defaultMaxKeyframeIntervalMs
         ?? base.frameSelection.maxKeyframeIntervalMs,
+      sharpnessWindow:
+        overrides.defaultSharpnessWindow
+        ?? base.frameSelection.sharpnessWindow,
       // The JSON-object prop wins over the flat default* props above for the
       // scalar fields (mode / maxKeyframes / overlapThreshold / intervalMs).
       // Its `flow` (if any) is dropped here and DEEP-merged in the explicit

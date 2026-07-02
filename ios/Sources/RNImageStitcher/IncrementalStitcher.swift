@@ -458,6 +458,24 @@ public final class IncrementalStitcher: NSObject {
     /// treated as "portrait" (no rotation) by the .mm side.
     private var captureOrientation: String = "portrait"
 
+    // ── v0.21 — pick-sharpest-in-window anti-blur selection state ──
+    /// K — total candidate frames per accepted keyframe (the gate-
+    /// accepted frame itself + up to K−1 subsequent gate-EVALUATED
+    /// frames).  From JS config `sharpnessWindow`; clamped [1, 10].
+    /// Default 4.  1 = feature off (immediate save, pre-v0.21
+    /// behaviour byte-for-byte).  Only consulted when the keyframe
+    /// gate is enabled — the time-based passthrough saves every frame
+    /// and has no meaningful "window" to select within.
+    private var sharpnessWindowK: Int = 4
+    /// Candidate slots left in the currently-open window.  0 = closed.
+    private var sharpnessWindowRemaining: Int = 0
+    /// Streaming max — ONLY the best candidate so far is buffered
+    /// (deep-copied CVPixelBuffer + its pose + its score), never all K
+    /// frames.  Bound: one extra frame of memory per capture.
+    private var sharpnessBestBuffer: CVPixelBuffer? = nil
+    private var sharpnessBestPose: RNSARFramePose? = nil
+    private var sharpnessBestScore: Double = -1.0
+
     private override init() {
         super.init()
         // F8.3.H2 — runtime check that Swift's auto-bridged ObjC
@@ -913,6 +931,26 @@ public final class IncrementalStitcher: NSObject {
         } else {
             self.keyframeGate.maxCount = 6
         }
+        // v0.21 — pick-sharpest-in-window anti-blur keyframe selection.
+        // K = total candidates per gate-accept (the accepted frame + up
+        // to K−1 subsequent evaluated frames); the SHARPEST of the K is
+        // the frame that actually gets saved.  1 = off (immediate save,
+        // pre-v0.21 behaviour).  Default 4 when the key is ABSENT — a
+        // deliberate behaviour change: existing callers gain anti-blur
+        // selection without opting in (accepting up to K−1 evaluated
+        // frames of extra save latency per keyframe).  Clamp [1, 10].
+        if let v = configOverrides["sharpnessWindow"] as? Int {
+            self.sharpnessWindowK = max(1, min(10, v))
+        } else if let v = configOverrides["sharpnessWindow"] as? Double {
+            self.sharpnessWindowK = max(1, min(10, Int(v)))
+        } else {
+            self.sharpnessWindowK = 4
+        }
+        // Drop any window state a previous capture left behind.
+        self.sharpnessWindowRemaining = 0
+        self.sharpnessBestBuffer = nil
+        self.sharpnessBestPose = nil
+        self.sharpnessBestScore = -1.0
         // V16 A2 — flow tuning.  C++ side also clamps defensively
         // (setFlowMaxCorners ≥ 30, setFlowQualityLevel ∈ (0, 1],
         // setFlowMinDistance ≥ 1.0) so we layer the JS-side modal
@@ -1068,7 +1106,20 @@ public final class IncrementalStitcher: NSObject {
         stateLock.lock()
         let inBatchKeyframeMode = self.batchKeyframeMode
         let collector = self.keyframeCollector
-        let paths = self.keyframePaths
+        var paths = self.keyframePaths
+        // v0.21 — sharpness-window snapshot: if a window is still open
+        // (the LAST accepted keyframe is typically waiting in it),
+        // take its buffered best under this same lock and clear the
+        // window state.  Saved synchronously right after unlock (the
+        // async flush path can't run here: isRunning flips false in
+        // this section, which makes the workQueue save body bail).
+        let sharpnessFlushBuffer = self.sharpnessBestBuffer
+        let sharpnessFlushPose = self.sharpnessBestPose
+        self.sharpnessBestBuffer = nil
+        self.sharpnessBestPose = nil
+        self.sharpnessBestScore = -1.0
+        self.sharpnessWindowRemaining = 0
+        let rotationDegreesForFlush = self.keyframeRotationDegrees
         // V16 Phase 1b.fix4 — snapshot the cv::Stitcher knobs and
         // EXIF orientation under stateLock so the workQueue closure
         // has a stable view of these values, independent of any
@@ -1157,6 +1208,53 @@ public final class IncrementalStitcher: NSObject {
         //   Net effect: the closure literally cannot read any
         //   stitcher ivar.  Any future edit that re-introduces a
         //   `self.` reference inside the closure is caught at CI.
+        // v0.21 — synchronous sharpness-window flush (snapshot taken
+        // under stateLock above).  One JPEG encode (~50-100 ms), once
+        // per capture, ahead of the multi-second stitch.  The recorded
+        // pose is the BEST frame's pose — it matches the saved pixels,
+        // so the stitch-mode auto-resolver sees consistent data.  No
+        // accepted-state event is emitted this late; the JS side is
+        // already tearing down the capture UI, and the finalize result
+        // carries the authoritative acceptedCount.
+        if inBatchKeyframeMode,
+           let flushBuffer = sharpnessFlushBuffer,
+           let flushPose = sharpnessFlushPose,
+           let coll = collector {
+            // workQueue.sync — NOT a direct call: a window-full flush
+            // dispatched moments ago could still be mid-JPEG-encode on
+            // the work queue.  saveKeyframe on the same collector from
+            // this thread would race its acceptedCount/filename
+            // increment.  Serialising through the (serial) work queue
+            // makes the in-flight save finish first; its own
+            // stillRunning re-check happens at task START, so a task
+            // already past it simply completes normally before ours
+            // runs.  Same sync-on-workQueue pattern the stitch itself
+            // uses below (V16 Phase 1b.fix6).
+            workQueue.sync {
+                do {
+                    let record = try coll.saveKeyframe(
+                        flushBuffer,
+                        rotationDegrees: rotationDegreesForFlush,
+                        exifOrientation: keyframeExifOrientation,
+                        jpegQuality: 80
+                    )
+                    paths.append(record.path)
+                    let poseArr = [flushPose.tx, flushPose.ty, flushPose.tz,
+                                   flushPose.qx, flushPose.qy, flushPose.qz,
+                                   flushPose.qw]
+                    if batchFirstAcceptedPose == nil { batchFirstAcceptedPose = poseArr }
+                    batchLastAcceptedPose = poseArr
+                    os_log(.fault, log: Self.diagLog,
+                           "[v0.21-sharpness] finalize flush saved keyframe → %{public}@",
+                           record.path)
+                } catch let err as NSError {
+                    os_log(.fault, log: Self.diagLog,
+                           "[v0.21-sharpness] finalize flush saveKeyframe failed: %{public}@",
+                           err.localizedDescription)
+                }
+            }
+        }
+
         let arWasRunning = inBatchKeyframeMode
             && RNSARSession.shared.isRunning
         let cleaned = (outputPath.hasPrefix("file://"))
@@ -1912,6 +2010,12 @@ public final class IncrementalStitcher: NSObject {
         // delegate (consumeFrame) and the JS thread (start/cancel
         // /markNextFrameAsLastKeyframe), all serialized via this lock.
         self.keyframeGate.reset()
+        // v0.21 — discard any open sharpness window; the operator
+        // aborted, so its buffered best belongs to a dead capture.
+        self.sharpnessBestBuffer = nil
+        self.sharpnessBestPose = nil
+        self.sharpnessBestScore = -1.0
+        self.sharpnessWindowRemaining = 0
         stateLock.unlock()
         RNSARSession.shared.incrementalConsumer = nil
         // Clean up on the work queue so we don't race with an in-flight
@@ -2322,7 +2426,38 @@ public final class IncrementalStitcher: NSObject {
         // could itself acquire other locks; keeping it outside stateLock
         // is the safe call.
         if let decision = gateDecision, !decision.accept {
+            // v0.21 — pick-sharpest-in-window: a gate-rejected frame
+            // that arrives while a window is open is a CANDIDATE for
+            // the pending keyframe (the gate necessarily rejects the
+            // frames right after an accept — novelty resets there, so
+            // the window's candidates all flow through this branch).
+            // Score it, keep it when it beats the buffered best, and
+            // close the window (save the best) once the K−1 candidate
+            // slots are used up.  No-op when no window is open.
+            self.sharpnessWindowIngestCandidate(
+                pixelBuffer: pixelBuffer,
+                pose: pose,
+                collector: collector
+            )
             self.emitKeyframeRejectState(decision: decision)
+            return
+        }
+
+        // v0.21 — gate-ACCEPTED frame with the sharpness window active
+        // (gate enabled + K > 1): do NOT save immediately.  Open a
+        // K-frame window seeded with this frame; the sharpest of the K
+        // candidates is the one that gets saved (streaming max — only
+        // the best candidate is ever buffered).  K == 1, and the
+        // gate-disabled time-based passthrough (gateDecision == nil),
+        // fall through to the pre-v0.21 immediate-save path below,
+        // byte-for-byte.
+        if let decision = gateDecision, decision.accept,
+           self.sharpnessWindowK > 1 {
+            self.sharpnessWindowOpen(
+                pixelBuffer: pixelBuffer,
+                pose: pose,
+                collector: collector
+            )
             return
         }
 
@@ -2370,6 +2505,37 @@ public final class IncrementalStitcher: NSObject {
             self.workInFlight = false
             return
         }
+        self.dispatchKeyframeSave(
+            pbCopy: pbCopy,
+            pose: pose,
+            collector: collector,
+            inBatchKeyframeMode: inBatchKeyframeMode,
+            rotationDegrees: rotationDegreesForBatch,
+            exifOrientation: exifOrientationForBatch
+        )
+    }
+
+    /// Shared keyframe-save pipeline: JPEG-encode + persist `pbCopy`
+    /// via the collector on the work queue, append path + pose, track
+    /// first/last accepted pose for the stitch-mode auto-resolver, and
+    /// emit the accepted-state event JS renders in LiveFrameStrip.
+    ///
+    /// Used by BOTH the immediate accept path (sharpness window off /
+    /// K == 1 / gate-disabled passthrough) and the sharpness-window
+    /// flush — the body is the V16 batch-keyframe save, extracted
+    /// verbatim so the two callers can’t drift.
+    ///
+    /// Contract: caller has already set `workInFlight = true` (cleared
+    /// here via defer) and `pbCopy` is a DEEP COPY the pixel-buffer
+    /// pool can’t recycle.
+    private func dispatchKeyframeSave(
+        pbCopy: CVPixelBuffer,
+        pose: RNSARFramePose,
+        collector: OpenCVKeyframeCollector?,
+        inBatchKeyframeMode: Bool,
+        rotationDegrees: Int,
+        exifOrientation: Int
+    ) {
         workQueue.async { [weak self] in
             defer { self?.workInFlight = false }
             guard let self = self else { return }
@@ -2395,8 +2561,8 @@ public final class IncrementalStitcher: NSObject {
                 do {
                     let record = try coll.saveKeyframe(
                         pbCopy,
-                        rotationDegrees: rotationDegreesForBatch,
-                        exifOrientation: exifOrientationForBatch,
+                        rotationDegrees: rotationDegrees,
+                        exifOrientation: exifOrientation,
                         jpegQuality: 80
                     )
                     self.stateLock.lock()
@@ -2435,6 +2601,176 @@ public final class IncrementalStitcher: NSObject {
                 }
             }
         }
+    }
+
+    // ── v0.21 — pick-sharpest-in-window anti-blur selection ────────
+    //
+    // When the keyframe gate ACCEPTS a frame, the frame is NOT saved
+    // immediately: a K-frame window opens (K = `sharpnessWindow`
+    // config, default 4, clamp [1, 10]).  The accepted frame plus up
+    // to K−1 subsequent gate-EVALUATED frames are scored with the
+    // shared variance-of-Laplacian metric (cpp/sharpness.{hpp,cpp} —
+    // scored on the downscaled Y plane, ~1-3 ms) and the SHARPEST one
+    // is saved.  Rationale: the gate selects by overlap/novelty/time
+    // only, so a motion-blurred frame crossing the threshold used to
+    // be stitched as-is — panos showed blur even on slow pans.
+    //
+    // Candidate cadence: candidates are the frames the gate actually
+    // EVALUATES (the eval-throttle's cadence).  Throttle-skipped
+    // frames are dropped before any window bookkeeping, exactly like
+    // they are dropped before gate evaluation.
+    //
+    // Memory: streaming max — at most ONE deep-copied candidate (the
+    // best so far) is buffered, never all K frames.
+    //
+    // Pose pairing: the pose buffered alongside the best candidate is
+    // the pose of THAT frame, so the saved keyframe's recorded pose
+    // (keyframePoses / first-last auto-resolver tracking / the
+    // accepted-state event) always matches the saved pixels.
+    //
+    // Threading: window state is mutated on the AR-delegate /
+    // frame-processor producer thread (consumeFrame — serial) and
+    // cleared by start()/cancel()/finalize() on the JS thread; every
+    // mutation is under stateLock.  Scoring + deep copy (the expensive
+    // parts) run OUTSIDE the lock.
+
+    /// Open a fresh window seeded with the gate-accepted frame.  If a
+    /// window is somehow still open (force-last / time-budget accepts
+    /// can re-accept before the previous window filled), flush it
+    /// first so its best frame isn't lost.
+    private func sharpnessWindowOpen(
+        pixelBuffer: CVPixelBuffer,
+        pose: RNSARFramePose,
+        collector: OpenCVKeyframeCollector?
+    ) {
+        stateLock.lock()
+        let windowAlreadyOpen = (self.sharpnessBestBuffer != nil)
+        stateLock.unlock()
+        if windowAlreadyOpen {
+            self.flushSharpnessWindow(reason: "new-accept")
+        }
+
+        let score = collector?.sharpnessScore(for: pixelBuffer) ?? 0.0
+        guard let pbCopy = Self.deepCopyPixelBuffer(pixelBuffer) else {
+            // Allocation failure — drop the frame, same as the
+            // immediate-save path's pbCopy failure.
+            os_log(.fault, log: Self.diagLog,
+                   "[v0.21-sharpness] deepCopy failed; dropping accepted frame")
+            return
+        }
+        stateLock.lock()
+        guard self.isRunning, self.batchKeyframeMode else {
+            // cancel()/finalize() raced us while scoring — the capture
+            // is over, the buffer belongs to a dead session.
+            stateLock.unlock()
+            return
+        }
+        self.sharpnessBestBuffer = pbCopy
+        self.sharpnessBestPose = pose
+        self.sharpnessBestScore = score
+        self.sharpnessWindowRemaining = self.sharpnessWindowK - 1
+        let k = self.sharpnessWindowK
+        stateLock.unlock()
+        os_log(.fault, log: Self.diagLog,
+               "[v0.21-sharpness] window OPEN k=%d seedScore=%.1f",
+               Int32(k), score)
+    }
+
+    /// Score one gate-rejected frame against the open window's best
+    /// (streaming max).  No-op when no window is open.
+    private func sharpnessWindowIngestCandidate(
+        pixelBuffer: CVPixelBuffer,
+        pose: RNSARFramePose,
+        collector: OpenCVKeyframeCollector?
+    ) {
+        stateLock.lock()
+        let windowOpen = (self.sharpnessBestBuffer != nil
+                          && self.sharpnessWindowRemaining > 0)
+        let bestScore = self.sharpnessBestScore
+        stateLock.unlock()
+        guard windowOpen else { return }
+
+        // Scoring + (conditional) deep copy outside the lock — only
+        // the pointer swap needs mutual exclusion.  consumeFrame is
+        // the sole mid-capture mutator (serial producer thread), so
+        // bestScore can't move between the read above and the swap
+        // below; cancel()/finalize() can only CLEAR the window, which
+        // the re-check catches.
+        let score = collector?.sharpnessScore(for: pixelBuffer) ?? 0.0
+        var challenger: CVPixelBuffer? = nil
+        if score > bestScore {
+            // Deep-copy ONLY when this frame actually beats the best —
+            // losing candidates cost one score (~1-3 ms), no memcpy.
+            challenger = Self.deepCopyPixelBuffer(pixelBuffer)
+            // nil (allocation failure) → keep the current best.
+        }
+
+        stateLock.lock()
+        guard self.sharpnessBestBuffer != nil,
+              self.sharpnessWindowRemaining > 0 else {
+            stateLock.unlock()
+            return
+        }
+        if let newBest = challenger {
+            self.sharpnessBestBuffer = newBest   // old best released by ARC
+            self.sharpnessBestPose = pose
+            self.sharpnessBestScore = score
+        }
+        self.sharpnessWindowRemaining -= 1
+        let shouldFlush = (self.sharpnessWindowRemaining == 0)
+        stateLock.unlock()
+        if shouldFlush {
+            self.flushSharpnessWindow(reason: "window-full")
+        }
+    }
+
+    /// Close the window: hand its best candidate to the same save
+    /// pipeline the immediate accept path uses (workInFlight
+    /// backpressure + workQueue JPEG encode + accepted-state event).
+    /// Reasons: "window-full" (K candidates seen) and "new-accept"
+    /// (gate re-accepted while a window was still open).  finalize()
+    /// does NOT come through here — it flushes synchronously in its
+    /// prologue because isRunning flips false there, which makes this
+    /// async path bail by design.
+    private func flushSharpnessWindow(reason: String) {
+        stateLock.lock()
+        guard let bestBuffer = self.sharpnessBestBuffer,
+              let bestPose = self.sharpnessBestPose else {
+            self.sharpnessWindowRemaining = 0
+            stateLock.unlock()
+            return
+        }
+        let bestScore = self.sharpnessBestScore
+        self.sharpnessBestBuffer = nil
+        self.sharpnessBestPose = nil
+        self.sharpnessBestScore = -1.0
+        self.sharpnessWindowRemaining = 0
+        let stillActive = self.isRunning && self.batchKeyframeMode
+        let collector = self.keyframeCollector
+        let rotationDegrees = self.keyframeRotationDegrees
+        let exifOrientation = self.keyframeExifOrientation
+        stateLock.unlock()
+        guard stillActive else { return }
+        // Same backpressure semantics as the immediate accept path: if
+        // the previous save is still encoding, this keyframe is
+        // dropped (pre-window behaviour dropped the ACCEPT in exactly
+        // this situation).
+        if self.workInFlight {
+            self.droppedBackpressure += 1
+            return
+        }
+        self.workInFlight = true
+        os_log(.fault, log: Self.diagLog,
+               "[v0.21-sharpness] window FLUSH (%{public}@) bestScore=%.1f",
+               reason, bestScore)
+        self.dispatchKeyframeSave(
+            pbCopy: bestBuffer,
+            pose: bestPose,
+            collector: collector,
+            inBatchKeyframeMode: true,
+            rotationDegrees: rotationDegrees,
+            exifOrientation: exifOrientation
+        )
     }
 
     // ── Debug log file ──────────────────────────────────────────────

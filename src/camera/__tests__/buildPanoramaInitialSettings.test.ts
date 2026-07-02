@@ -119,6 +119,35 @@ describe('buildPanoramaInitialSettings', () => {
     ).toBe(1500);
   });
 
+  it('maps defaultSharpnessWindow → frameSelection.sharpnessWindow', () => {
+    // v0.21 — pick-sharpest-in-window anti-blur selection.
+    expect(
+      buildPanoramaInitialSettings({ defaultSharpnessWindow: 6 }, false)
+        .frameSelection.sharpnessWindow,
+    ).toBe(6);
+    // 1 explicitly disables the window (immediate save) — it is NOT
+    // nullish, so `??` must not replace it with the default.
+    expect(
+      buildPanoramaInitialSettings({ defaultSharpnessWindow: 1 }, false)
+        .frameSelection.sharpnessWindow,
+    ).toBe(1);
+    // Omitted ⇒ the default 4 (feature on).
+    expect(
+      buildPanoramaInitialSettings({}, false)
+        .frameSelection.sharpnessWindow,
+    ).toBe(4);
+    // The frameSelection JSON-object prop wins over the flat prop.
+    expect(
+      buildPanoramaInitialSettings(
+        {
+          defaultSharpnessWindow: 6,
+          frameSelection: { sharpnessWindow: 2 },
+        },
+        false,
+      ).frameSelection.sharpnessWindow,
+    ).toBe(2);
+  });
+
   it('leaves non-overridden fields at the default (partial override)', () => {
     const s = buildPanoramaInitialSettings(
       { defaultStitchMode: 'panorama' },

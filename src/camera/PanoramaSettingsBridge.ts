@@ -43,6 +43,7 @@
 
 import {
   DEFAULT_FLOW_GATE_SETTINGS,
+  DEFAULT_SHARPNESS_WINDOW,
   type PanoramaSettings,
 } from './PanoramaSettings';
 
@@ -87,6 +88,13 @@ export function panoramaSettingsToNativeConfig(
     // Time-budget force-accept (both strategies).  Native reads
     // configOverrides["maxKeyframeIntervalMs"] → setMaxKeyframeIntervalMs.
     maxKeyframeIntervalMs: s.frameSelection.maxKeyframeIntervalMs,
+    // v0.21 — pick-sharpest-in-window anti-blur selection.  The field
+    // is optional on the type (pre-v0.21 settings literals must keep
+    // compiling) but ALWAYS emitted on the wire with the JS default
+    // filled in, same canonical-defaults policy as the flow knobs
+    // below.  Native re-clamps to [1, 10].
+    sharpnessWindow:
+      s.frameSelection.sharpnessWindow ?? DEFAULT_SHARPNESS_WINDOW,
   };
 
   // Flow strategy knobs — always serialised, regardless of
