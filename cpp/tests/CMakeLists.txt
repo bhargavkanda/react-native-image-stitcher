@@ -86,14 +86,17 @@ include_directories(
 # Test executable
 # ─────────────────────────────────────────────────────────────────────
 add_executable(stitcher_cpp_tests
-  # Test sources.  All subjects are header-only (Pose / PlaneTransform,
-  # CameraFrameData, and the gate's inline `timeBudgetCrossed`
-  # predicate), so no production .cpp needs linking here.
+  # Test sources.  Subjects are header-only (Pose / PlaneTransform,
+  # CameraFrameData, the gate's inline `timeBudgetCrossed` predicate)
+  # or OpenCV-free .cpp (sharpness_window.cpp — the pick-sharpest-in-
+  # window decision machine both platforms consult per frame).
   ${CMAKE_CURRENT_SOURCE_DIR}/pose_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/camera_frame_data_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/keyframe_timebudget_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/warp_guard_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/crop_quad_test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/sharpness_window_test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../sharpness_window.cpp
 )
 
 target_link_libraries(stitcher_cpp_tests

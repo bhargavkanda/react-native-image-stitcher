@@ -491,7 +491,23 @@ export interface StitcherConfig {
    *  Range 1 – 10.  `1` = off (immediate save, pre-v0.21 behaviour).
    *  Default 4 when the key is absent — the anti-blur selection is ON
    *  by default; the trade-off is up to K−1 evaluated frames of extra
-   *  latency between gate-accept and the keyframe event. */
+   *  latency between gate-accept and the keyframe event.
+   *
+   *  Interaction with `keyframeOverlapThreshold` and
+   *  `flowEvalEveryNFrames`: window candidates arrive AFTER the
+   *  accepted frame, so the saved frame can drift from the pose the
+   *  gate accepted.  Candidates are only the frames the gate actually
+   *  evaluates, so a raw window spans up to
+   *  `sharpnessWindow × flowEvalEveryNFrames` camera frames — on a
+   *  fast pan that could be a lot of motion.  The engine therefore
+   *  closes the window EARLY (saving the best-so-far, excluding the
+   *  drifted frame) as soon as a candidate's own gate novelty exceeds
+   *  `0.5 × keyframeOverlapThreshold`, i.e. once the camera is
+   *  half-way to the next keyframe boundary.  Net effect: the saved
+   *  frame's overlap drift is bounded by the threshold itself,
+   *  independent of `sharpnessWindow` and the eval cadence — raising
+   *  K or the cadence only ever widens the selection pool on SLOW
+   *  pans, where drift is small. */
   sharpnessWindow: number;
 
   /** V16 A2 — flow-based mode: max Shi-Tomasi corners detected per

@@ -467,14 +467,20 @@ public final class IncrementalStitcher: NSObject {
     /// gate is enabled — the time-based passthrough saves every frame
     /// and has no meaningful "window" to select within.
     private var sharpnessWindowK: Int = 4
-    /// Candidate slots left in the currently-open window.  0 = closed.
-    private var sharpnessWindowRemaining: Int = 0
+    /// Shared-C++ window DECISION machine (cpp/sharpness_window.*,
+    /// via SharpnessWindowBridge).  Owns open/closed state, the
+    /// remaining candidate slots, the streaming-max best score and the
+    /// overlap-drift guard — the SAME logic Android consults, so the
+    /// two platforms cannot drift.  This class only buffers pixels
+    /// (below) and acts on the machine's returned action.  Every call
+    /// is serialised under stateLock (the machine is not thread-safe).
+    private let sharpnessWindow = RNISSharpnessWindowBridge()
     /// Streaming max — ONLY the best candidate so far is buffered
-    /// (deep-copied CVPixelBuffer + its pose + its score), never all K
-    /// frames.  Bound: one extra frame of memory per capture.
+    /// (deep-copied CVPixelBuffer + its pose; its score lives in the
+    /// machine), never all K frames.  Bound: one extra frame of
+    /// memory per capture.
     private var sharpnessBestBuffer: CVPixelBuffer? = nil
     private var sharpnessBestPose: RNSARFramePose? = nil
-    private var sharpnessBestScore: Double = -1.0
 
     private override init() {
         super.init()
@@ -946,11 +952,12 @@ public final class IncrementalStitcher: NSObject {
         } else {
             self.sharpnessWindowK = 4
         }
-        // Drop any window state a previous capture left behind.
-        self.sharpnessWindowRemaining = 0
+        // Push the new K into the shared decision machine (which also
+        // discards any window state a previous capture left behind)
+        // and drop the matching platform-side buffer.
+        self.sharpnessWindow.setWindowSize(self.sharpnessWindowK)
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
-        self.sharpnessBestScore = -1.0
         // V16 A2 — flow tuning.  C++ side also clamps defensively
         // (setFlowMaxCorners ≥ 30, setFlowQualityLevel ∈ (0, 1],
         // setFlowMinDistance ≥ 1.0) so we layer the JS-side modal
@@ -1109,16 +1116,18 @@ public final class IncrementalStitcher: NSObject {
         var paths = self.keyframePaths
         // v0.21 — sharpness-window snapshot: if a window is still open
         // (the LAST accepted keyframe is typically waiting in it),
-        // take its buffered best under this same lock and clear the
-        // window state.  Saved synchronously right after unlock (the
-        // async flush path can't run here: isRunning flips false in
-        // this section, which makes the workQueue save body bail).
-        let sharpnessFlushBuffer = self.sharpnessBestBuffer
-        let sharpnessFlushPose = self.sharpnessBestPose
+        // drain the shared decision machine and take its buffered
+        // best under this same lock.  Saved synchronously right after
+        // unlock (the async flush path can't run here: isRunning flips
+        // false in this section, which makes the workQueue save body
+        // bail).
+        let sharpnessHasPending = self.sharpnessWindow.drain()
+        let sharpnessFlushBuffer =
+            sharpnessHasPending ? self.sharpnessBestBuffer : nil
+        let sharpnessFlushPose =
+            sharpnessHasPending ? self.sharpnessBestPose : nil
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
-        self.sharpnessBestScore = -1.0
-        self.sharpnessWindowRemaining = 0
         let rotationDegreesForFlush = self.keyframeRotationDegrees
         // V16 Phase 1b.fix4 — snapshot the cv::Stitcher knobs and
         // EXIF orientation under stateLock so the workQueue closure
@@ -2012,10 +2021,11 @@ public final class IncrementalStitcher: NSObject {
         self.keyframeGate.reset()
         // v0.21 — discard any open sharpness window; the operator
         // aborted, so its buffered best belongs to a dead capture.
+        // Reset the shared decision machine + the platform buffer as
+        // one unit so they can't disagree.
+        self.sharpnessWindow.reset()
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
-        self.sharpnessBestScore = -1.0
-        self.sharpnessWindowRemaining = 0
         stateLock.unlock()
         RNSARSession.shared.incrementalConsumer = nil
         // Clean up on the work queue so we don't race with an in-flight
@@ -2433,11 +2443,18 @@ public final class IncrementalStitcher: NSObject {
             // the window's candidates all flow through this branch).
             // Score it, keep it when it beats the buffered best, and
             // close the window (save the best) once the K−1 candidate
-            // slots are used up.  No-op when no window is open.
+            // slots are used up OR the candidate's own novelty exceeds
+            // half the gate threshold (overlap-drift guard — bounds
+            // how far the saved frame can drift from the accepted
+            // pose, independent of K and the eval cadence).  All
+            // decisions come from the shared C++ machine.  No-op when
+            // no window is open.
             self.sharpnessWindowIngestCandidate(
                 pixelBuffer: pixelBuffer,
                 pose: pose,
-                collector: collector
+                collector: collector,
+                noveltyFraction: decision.newContentFraction,
+                overlapThreshold: self.keyframeGate.overlapThreshold
             )
             self.emitKeyframeRejectState(decision: decision)
             return
@@ -2453,10 +2470,12 @@ public final class IncrementalStitcher: NSObject {
         // byte-for-byte.
         if let decision = gateDecision, decision.accept,
            self.sharpnessWindowK > 1 {
-            self.sharpnessWindowOpen(
+            self.sharpnessWindowHandleAccept(
                 pixelBuffer: pixelBuffer,
                 pose: pose,
-                collector: collector
+                collector: collector,
+                noveltyFraction: decision.newContentFraction,
+                overlapThreshold: self.keyframeGate.overlapThreshold
             )
             return
         }
@@ -2620,6 +2639,15 @@ public final class IncrementalStitcher: NSObject {
     // frames are dropped before any window bookkeeping, exactly like
     // they are dropped before gate evaluation.
     //
+    // Decisions come from the SHARED C++ machine
+    // (cpp/sharpness_window.{hpp,cpp} via RNISSharpnessWindowBridge) —
+    // the same class Android consults, gtest-covered in
+    // cpp/tests/sharpness_window_test.cpp.  This file only buffers
+    // pixels and acts on the returned action; window open/close,
+    // streaming-max replacement and the overlap-drift guard (close
+    // early once a candidate's novelty exceeds overlapThreshold / 2)
+    // all live in the machine.
+    //
     // Memory: streaming max — at most ONE deep-copied candidate (the
     // best so far) is buffered, never all K frames.
     //
@@ -2634,30 +2662,27 @@ public final class IncrementalStitcher: NSObject {
     // mutation is under stateLock.  Scoring + deep copy (the expensive
     // parts) run OUTSIDE the lock.
 
-    /// Open a fresh window seeded with the gate-accepted frame.  If a
-    /// window is somehow still open (force-last / time-budget accepts
-    /// can re-accept before the previous window filled), flush it
-    /// first so its best frame isn't lost.
-    private func sharpnessWindowOpen(
+    /// Gate-ACCEPTED frame with the window feature active (K > 1):
+    /// consult the shared machine.  OpenWindow seeds a fresh window
+    /// with this frame; FlushThenOpen (force-last / time-budget
+    /// accepts can re-accept before the previous window filled) saves
+    /// the previous window's best FIRST so a selected keyframe is
+    /// never lost, then seeds.
+    private func sharpnessWindowHandleAccept(
         pixelBuffer: CVPixelBuffer,
         pose: RNSARFramePose,
-        collector: OpenCVKeyframeCollector?
+        collector: OpenCVKeyframeCollector?,
+        noveltyFraction: Double,
+        overlapThreshold: Double
     ) {
-        stateLock.lock()
-        let windowAlreadyOpen = (self.sharpnessBestBuffer != nil)
-        stateLock.unlock()
-        if windowAlreadyOpen {
-            self.flushSharpnessWindow(reason: "new-accept")
-        }
-
+        // The expensive parts (score ~1-3 ms, deep copy ~1-2 ms) run
+        // OUTSIDE the lock; the machine consult + buffer swap below
+        // hold it.  consumeFrame is the sole mid-capture mutator
+        // (serial producer thread); cancel()/finalize() can only tear
+        // the capture down, which the isRunning re-check catches.
         let score = collector?.sharpnessScore(for: pixelBuffer) ?? 0.0
-        guard let pbCopy = Self.deepCopyPixelBuffer(pixelBuffer) else {
-            // Allocation failure — drop the frame, same as the
-            // immediate-save path's pbCopy failure.
-            os_log(.fault, log: Self.diagLog,
-                   "[v0.21-sharpness] deepCopy failed; dropping accepted frame")
-            return
-        }
+        let pbCopy = Self.deepCopyPixelBuffer(pixelBuffer)
+
         stateLock.lock()
         guard self.isRunning, self.batchKeyframeMode else {
             // cancel()/finalize() raced us while scoring — the capture
@@ -2665,86 +2690,166 @@ public final class IncrementalStitcher: NSObject {
             stateLock.unlock()
             return
         }
-        self.sharpnessBestBuffer = pbCopy
+        guard let copy = pbCopy else {
+            // Allocation failure (OOM edge) — drop the ACCEPTED frame,
+            // same as the immediate-save path's pbCopy failure.  If a
+            // window was open its pending best is still a SELECTED
+            // keyframe: drain the machine (keeps C++/platform state in
+            // lock-step) and flush that best below.
+            let hadPending = self.sharpnessWindow.drain()
+            let pendingScore = self.sharpnessWindow.bestScore()
+            let flushBuffer = hadPending ? self.sharpnessBestBuffer : nil
+            let flushPose = hadPending ? self.sharpnessBestPose : nil
+            self.sharpnessBestBuffer = nil
+            self.sharpnessBestPose = nil
+            stateLock.unlock()
+            os_log(.fault, log: Self.diagLog,
+                   "[v0.21-sharpness] deepCopy failed; dropping accepted frame")
+            if let b = flushBuffer, let p = flushPose {
+                self.dispatchWindowSave(bestBuffer: b, bestPose: p,
+                                        bestScore: pendingScore,
+                                        reason: "new-accept")
+            }
+            return
+        }
+        var replaceBest: ObjCBool = false
+        var driftClosed: ObjCBool = false
+        let action = self.sharpnessWindow.ingest(
+            withAccept: true,
+            score: score,
+            noveltyFraction: noveltyFraction,
+            overlapThreshold: overlapThreshold,
+            replaceBest: &replaceBest,
+            driftClosed: &driftClosed
+        )
+        // Seed swap: grab the previous window's best (FlushThenOpen
+        // must save it), then buffer this frame as the new seed.
+        let previousBuffer = self.sharpnessBestBuffer
+        let previousPose = self.sharpnessBestPose
+        let previousScore = self.sharpnessWindow.bestScore()
+        self.sharpnessBestBuffer = copy
         self.sharpnessBestPose = pose
-        self.sharpnessBestScore = score
-        self.sharpnessWindowRemaining = self.sharpnessWindowK - 1
         let k = self.sharpnessWindowK
         stateLock.unlock()
+
+        if action == RNISSharpnessWindowAction.flushThenOpen,
+           let b = previousBuffer, let p = previousPose {
+            self.dispatchWindowSave(bestBuffer: b, bestPose: p,
+                                    bestScore: previousScore,
+                                    reason: "new-accept")
+        }
         os_log(.fault, log: Self.diagLog,
                "[v0.21-sharpness] window OPEN k=%d seedScore=%.1f",
                Int32(k), score)
     }
 
     /// Score one gate-rejected frame against the open window's best
-    /// (streaming max).  No-op when no window is open.
+    /// (streaming max — the shared machine decides).  No-op when no
+    /// window is open.
     private func sharpnessWindowIngestCandidate(
         pixelBuffer: CVPixelBuffer,
         pose: RNSARFramePose,
-        collector: OpenCVKeyframeCollector?
+        collector: OpenCVKeyframeCollector?,
+        noveltyFraction: Double,
+        overlapThreshold: Double
     ) {
         stateLock.lock()
-        let windowOpen = (self.sharpnessBestBuffer != nil
-                          && self.sharpnessWindowRemaining > 0)
-        let bestScore = self.sharpnessBestScore
+        let windowOpen = self.sharpnessWindow.isOpen()
+            && self.sharpnessBestBuffer != nil
+        let bestScore = self.sharpnessWindow.bestScore()
         stateLock.unlock()
         guard windowOpen else { return }
 
         // Scoring + (conditional) deep copy outside the lock — only
-        // the pointer swap needs mutual exclusion.  consumeFrame is
-        // the sole mid-capture mutator (serial producer thread), so
-        // bestScore can't move between the read above and the swap
-        // below; cancel()/finalize() can only CLEAR the window, which
-        // the re-check catches.
+        // the machine consult + pointer swap need mutual exclusion.
+        // consumeFrame is the sole mid-capture mutator (serial
+        // producer thread), so bestScore can't move between the read
+        // above and the consult below; cancel()/finalize() can only
+        // CLEAR the window, which the re-check catches.
         let score = collector?.sharpnessScore(for: pixelBuffer) ?? 0.0
         var challenger: CVPixelBuffer? = nil
         if score > bestScore {
             // Deep-copy ONLY when this frame actually beats the best —
             // losing candidates cost one score (~1-3 ms), no memcpy.
             challenger = Self.deepCopyPixelBuffer(pixelBuffer)
-            // nil (allocation failure) → keep the current best.
         }
+        // Deep-copy failure (OOM edge): report the score as "no better
+        // than the best" so the machine's streaming max stays in
+        // lock-step with the platform buffer (which still holds the
+        // previous best pixels).
+        let scoreForMachine =
+            (score > bestScore && challenger == nil) ? bestScore : score
 
         stateLock.lock()
-        guard self.sharpnessBestBuffer != nil,
-              self.sharpnessWindowRemaining > 0 else {
+        guard self.sharpnessWindow.isOpen(),
+              self.sharpnessBestBuffer != nil else {
             stateLock.unlock()
             return
         }
-        if let newBest = challenger {
+        var replaceBest: ObjCBool = false
+        var driftClosed: ObjCBool = false
+        let action = self.sharpnessWindow.ingest(
+            withAccept: false,
+            score: scoreForMachine,
+            noveltyFraction: noveltyFraction,
+            overlapThreshold: overlapThreshold,
+            replaceBest: &replaceBest,
+            driftClosed: &driftClosed
+        )
+        if replaceBest.boolValue, let newBest = challenger {
             self.sharpnessBestBuffer = newBest   // old best released by ARC
             self.sharpnessBestPose = pose
-            self.sharpnessBestScore = score
         }
-        self.sharpnessWindowRemaining -= 1
-        let shouldFlush = (self.sharpnessWindowRemaining == 0)
         stateLock.unlock()
-        if shouldFlush {
-            self.flushSharpnessWindow(reason: "window-full")
+        if action == RNISSharpnessWindowAction.closeAndSave {
+            // Window closed: K−1 candidate slots used up, or the
+            // overlap-drift guard fired (this candidate's novelty
+            // exceeded overlapThreshold / 2 — save the best-so-far
+            // before the content drifts further from the accepted
+            // pose).
+            self.flushSharpnessWindow(
+                reason: driftClosed.boolValue ? "novelty-drift" : "window-full")
         }
     }
 
     /// Close the window: hand its best candidate to the same save
     /// pipeline the immediate accept path uses (workInFlight
     /// backpressure + workQueue JPEG encode + accepted-state event).
-    /// Reasons: "window-full" (K candidates seen) and "new-accept"
-    /// (gate re-accepted while a window was still open).  finalize()
-    /// does NOT come through here — it flushes synchronously in its
-    /// prologue because isRunning flips false there, which makes this
-    /// async path bail by design.
+    /// Reasons: "window-full" (K candidates seen), "novelty-drift"
+    /// (overlap-drift guard) and "new-accept" (gate re-accepted while
+    /// a window was still open).  finalize() does NOT come through
+    /// here — it flushes synchronously in its prologue because
+    /// isRunning flips false there, which makes this async path bail
+    /// by design.
     private func flushSharpnessWindow(reason: String) {
         stateLock.lock()
         guard let bestBuffer = self.sharpnessBestBuffer,
               let bestPose = self.sharpnessBestPose else {
-            self.sharpnessWindowRemaining = 0
             stateLock.unlock()
             return
         }
-        let bestScore = self.sharpnessBestScore
+        let bestScore = self.sharpnessWindow.bestScore()
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
-        self.sharpnessBestScore = -1.0
-        self.sharpnessWindowRemaining = 0
+        stateLock.unlock()
+        self.dispatchWindowSave(bestBuffer: bestBuffer,
+                                bestPose: bestPose,
+                                bestScore: bestScore,
+                                reason: reason)
+    }
+
+    /// Save one window-selected keyframe through the shared V16 save
+    /// pipeline.  Split out of flushSharpnessWindow so the
+    /// FlushThenOpen path (which must save the PREVIOUS window's best
+    /// while the ivars already hold the NEW seed) can reuse it with
+    /// explicit values.
+    private func dispatchWindowSave(
+        bestBuffer: CVPixelBuffer,
+        bestPose: RNSARFramePose,
+        bestScore: Double,
+        reason: String
+    ) {
+        stateLock.lock()
         let stillActive = self.isRunning && self.batchKeyframeMode
         let collector = self.keyframeCollector
         let rotationDegrees = self.keyframeRotationDegrees

@@ -233,6 +233,18 @@ export interface FrameSelectionSettings {
    * frames of extra latency between gate-accept and the keyframe
    * thumbnail appearing.  Memory cost: at most ONE extra buffered
    * frame (streaming max), regardless of K.
+   *
+   * Interaction with `overlapThreshold` and `flow.evalEveryNFrames`:
+   * candidates are only the frames the gate actually evaluates, so a
+   * raw window spans up to `sharpnessWindow × evalEveryNFrames`
+   * camera frames of motion after the accepted pose.  To bound that
+   * drift the engine closes the window EARLY (saving the best-so-far
+   * and excluding the drifted frame) as soon as a candidate's own
+   * gate novelty exceeds `0.5 × overlapThreshold` — i.e. once the
+   * camera is half-way to the next keyframe boundary.  Raising K or
+   * the eval cadence therefore only widens the selection pool on
+   * SLOW pans; on fast pans the overlap guard closes the window
+   * first.
    */
   sharpnessWindow?: number;
 

@@ -113,6 +113,15 @@ add_library(image_stitcher SHARED
     # selection).  See cpp/sharpness.hpp for the algorithm rationale.
     sharpness_jni.cpp
     "${SHARED_CPP_DIR}/sharpness.cpp"
+    # v0.21.1 — shared pick-sharpest-in-window DECISION machine.
+    # sharpness_window_jni.cpp bridges the Kotlin SharpnessWindow
+    # facade to retailens::SharpnessWindowMachine — the SAME class the
+    # iOS engine consults (SharpnessWindowBridge.mm), so window
+    # open/replace/close decisions (incl. the overlap-drift guard)
+    # cannot drift across platforms.  OpenCV-free; gtest-covered in
+    # cpp/tests/sharpness_window_test.cpp.
+    sharpness_window_jni.cpp
+    "${SHARED_CPP_DIR}/sharpness_window.cpp"
     # 2026-05-15 — shared stitcher.cpp, used by BOTH platforms.
     # Owns the cv::Stitcher orchestration + C+D progressive-confidence
     # retry + dimension/memory instrumentation.  Used to live in this
