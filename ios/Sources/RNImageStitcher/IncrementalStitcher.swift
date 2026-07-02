@@ -481,6 +481,15 @@ public final class IncrementalStitcher: NSObject {
     /// memory per capture.
     private var sharpnessBestBuffer: CVPixelBuffer? = nil
     private var sharpnessBestPose: RNSARFramePose? = nil
+    /// v0.21.1 (review d2) — set by cancel() (and cleared by start())
+    /// so a queued WINDOW-FLUSH save can tell an operator abort apart
+    /// from finalize.  A window-flush save carries a keyframe the gate
+    /// already SELECTED, so finalize must let it complete (it belongs
+    /// in the stitch set); cancel must still discard it (the session
+    /// dir is being deleted).  The plain immediate-path save keeps the
+    /// strict isRunning bail — that path's task really is a phantom
+    /// frame once the capture stopped.
+    private var savesAbandoned: Bool = false
 
     private override init() {
         super.init()
@@ -947,8 +956,13 @@ public final class IncrementalStitcher: NSObject {
         // frames of extra save latency per keyframe).  Clamp [1, 10].
         if let v = configOverrides["sharpnessWindow"] as? Int {
             self.sharpnessWindowK = max(1, min(10, v))
-        } else if let v = configOverrides["sharpnessWindow"] as? Double {
-            self.sharpnessWindowK = max(1, min(10, Int(v)))
+        } else if let v = configOverrides["sharpnessWindow"] as? Double,
+                  v.isFinite {
+            // Clamp in Double BEFORE the Int conversion: Int(NaN) and
+            // Int(±inf / anything past Int.max) TRAP in Swift, so a
+            // malformed JS value would crash the capture start.
+            // Non-finite values fall through to the default.
+            self.sharpnessWindowK = Int(max(1.0, min(10.0, v)))
         } else {
             self.sharpnessWindowK = 4
         }
@@ -958,6 +972,9 @@ public final class IncrementalStitcher: NSObject {
         self.sharpnessWindow.setWindowSize(self.sharpnessWindowK)
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
+        // v0.21.1 (review d2) — fresh capture: queued saves belong to
+        // it again.
+        self.savesAbandoned = false
         // V16 A2 — flow tuning.  C++ side also clamps defensively
         // (setFlowMaxCorners ≥ 30, setFlowQualityLevel ∈ (0, 1],
         // setFlowMinDistance ≥ 1.0) so we layer the JS-side modal
@@ -1110,6 +1127,27 @@ public final class IncrementalStitcher: NSObject {
         // catch it, but only just.  Flipping isRunning first
         // collapses the race: any consumeFrame entered after this
         // line sees isRunning=false at its very first guard.
+        // v0.21.1 (review d2) — TWO-PHASE stop.  Phase 1: flip the
+        // ingest gates under a short lock so no NEW frame enters the
+        // pipeline.  Phase 2: drain the (serial) workQueue so a save
+        // that was ALREADY QUEUED when the shutter released — in
+        // particular a sharpness-window-full flush, which carries a
+        // gate-SELECTED keyframe — completes and appends its path to
+        // keyframePaths BEFORE the snapshot below.  Pre-d2 that queued
+        // save was silently dropped by its own stillRunning bail and
+        // the selected keyframe never reached the stitch set.  The
+        // immediate-path save still bails (phantom-frame protection,
+        // V12.1); only isWindowFlush saves ride through (see
+        // dispatchKeyframeSave).  Bounded cost: at most the one
+        // in-flight/queued JPEG encode (~50-100 ms) ahead of a
+        // multi-second stitch.  JS calls finalize/start sequentially,
+        // so nothing can start a new capture inside this window.
+        stateLock.lock()
+        self.isRunning = false
+        self.frameProcessorIngestEnabled = false
+        stateLock.unlock()
+        workQueue.sync {}
+
         stateLock.lock()
         let inBatchKeyframeMode = self.batchKeyframeMode
         let collector = self.keyframeCollector
@@ -1118,14 +1156,15 @@ public final class IncrementalStitcher: NSObject {
         // (the LAST accepted keyframe is typically waiting in it),
         // drain the shared decision machine and take its buffered
         // best under this same lock.  Saved synchronously right after
-        // unlock (the async flush path can't run here: isRunning flips
-        // false in this section, which makes the workQueue save body
-        // bail).
-        let sharpnessHasPending = self.sharpnessWindow.drain()
-        let sharpnessFlushBuffer =
-            sharpnessHasPending ? self.sharpnessBestBuffer : nil
-        let sharpnessFlushPose =
-            sharpnessHasPending ? self.sharpnessBestPose : nil
+        // unlock.  The buffer (not the machine) is the source of truth
+        // for "pixels awaiting save": it also covers the corner where
+        // a flush already CLOSED the machine's window but was bailed
+        // out by a racing teardown before dispatching (the buffer is
+        // left in place for exactly this snapshot — see
+        // flushSharpnessWindow).
+        self.sharpnessWindow.drain()
+        let sharpnessFlushBuffer = self.sharpnessBestBuffer
+        let sharpnessFlushPose = self.sharpnessBestPose
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
         let rotationDegreesForFlush = self.keyframeRotationDegrees
@@ -1221,10 +1260,13 @@ public final class IncrementalStitcher: NSObject {
         // under stateLock above).  One JPEG encode (~50-100 ms), once
         // per capture, ahead of the multi-second stitch.  The recorded
         // pose is the BEST frame's pose — it matches the saved pixels,
-        // so the stitch-mode auto-resolver sees consistent data.  No
-        // accepted-state event is emitted this late; the JS side is
-        // already tearing down the capture UI, and the finalize result
-        // carries the authoritative acceptedCount.
+        // so the stitch-mode auto-resolver sees consistent data.
+        //
+        // v0.21.1 (review d1) — the flush-saved frame emits the SAME
+        // accepted-state event the mid-capture saves emit (exactly
+        // once, with the collector-assigned index): the JS thumbnail
+        // strip / acceptedCount subscribers must include the trailing
+        // keyframe, not discover it only in the finalize result.
         if inBatchKeyframeMode,
            let flushBuffer = sharpnessFlushBuffer,
            let flushPose = sharpnessFlushPose,
@@ -1251,11 +1293,32 @@ public final class IncrementalStitcher: NSObject {
                     let poseArr = [flushPose.tx, flushPose.ty, flushPose.tz,
                                    flushPose.qx, flushPose.qy, flushPose.qz,
                                    flushPose.qw]
+                    // v0.21.1 (review d4) — ivar writes under
+                    // stateLock like every other mutation site (the
+                    // pre-d4 code wrote them bare inside this
+                    // closure).
+                    stateLock.lock()
                     if batchFirstAcceptedPose == nil { batchFirstAcceptedPose = poseArr }
                     batchLastAcceptedPose = poseArr
+                    stateLock.unlock()
                     os_log(.fault, log: Self.diagLog,
                            "[v0.21-sharpness] finalize flush saved keyframe → %{public}@",
                            record.path)
+                    // v0.21.1 (review d1) — accepted-state event for
+                    // the trailing keyframe.  keyframeCount comes
+                    // from the local `paths` snapshot (the ivar was
+                    // already cleared by the prologue lock block
+                    // above; `paths` is the authoritative list the
+                    // stitch consumes).
+                    self.emitBatchKeyframeAcceptedState(
+                        thumbnailPath: record.path,
+                        keyframeIndex: Int(record.index),
+                        keyframeCount: paths.count,
+                        keyframeMax: self.keyframeGate.maxCount,
+                        isLandscape: flushPose.imageWidth >= flushPose.imageHeight,
+                        pose: flushPose,
+                        acceptedAtMs: Date().timeIntervalSince1970 * 1000
+                    )
                 } catch let err as NSError {
                     os_log(.fault, log: Self.diagLog,
                            "[v0.21-sharpness] finalize flush saveKeyframe failed: %{public}@",
@@ -2026,6 +2089,10 @@ public final class IncrementalStitcher: NSObject {
         self.sharpnessWindow.reset()
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
+        // v0.21.1 (review d2) — also discard any QUEUED window-flush
+        // save: the session dir is deleted below, so letting it
+        // complete would write into (or recreate) a dead session.
+        self.savesAbandoned = true
         stateLock.unlock()
         RNSARSession.shared.incrementalConsumer = nil
         // Clean up on the work queue so we don't race with an in-flight
@@ -2547,13 +2614,22 @@ public final class IncrementalStitcher: NSObject {
     /// Contract: caller has already set `workInFlight = true` (cleared
     /// here via defer) and `pbCopy` is a DEEP COPY the pixel-buffer
     /// pool can’t recycle.
+    ///
+    /// `isWindowFlush` (v0.21.1, review d2): true when this save was
+    /// dispatched by the sharpness-window flush — the frame is an
+    /// already-SELECTED keyframe (the gate accepted it earlier), so a
+    /// finalize() that raced this task must NOT drop it via the
+    /// isRunning bail (finalize drains the queue before snapshotting
+    /// so the path lands in the stitch set).  cancel() still discards
+    /// it via `savesAbandoned`.
     private func dispatchKeyframeSave(
         pbCopy: CVPixelBuffer,
         pose: RNSARFramePose,
         collector: OpenCVKeyframeCollector?,
         inBatchKeyframeMode: Bool,
         rotationDegrees: Int,
-        exifOrientation: Int
+        exifOrientation: Int,
+        isWindowFlush: Bool = false
     ) {
         workQueue.async { [weak self] in
             defer { self?.workInFlight = false }
@@ -2566,10 +2642,18 @@ public final class IncrementalStitcher: NSObject {
             // the shutter — ingesting it now is exactly the
             // "phantom frame after release" the user observed.  Bail
             // before touching the engine.
+            //
+            // v0.21.1 (review d2) — EXCEPTION: a window-flush save is
+            // not a phantom.  Its frame was gate-accepted and window-
+            // selected while the capture ran; only the JPEG encode is
+            // late.  Let it complete across a finalize (which drains
+            // this queue before snapshotting keyframePaths), but not
+            // across a cancel (savesAbandoned).
             self.stateLock.lock()
             let stillRunning = self.isRunning
+            let abandoned = self.savesAbandoned
             self.stateLock.unlock()
-            guard stillRunning else { return }
+            guard stillRunning || (isWindowFlush && !abandoned) else { return }
 
             // V16 Phase 1 — batch-keyframe path: save the buffer as
             // a JPEG via the collector, append the pose, emit a
@@ -2828,6 +2912,18 @@ public final class IncrementalStitcher: NSObject {
             stateLock.unlock()
             return
         }
+        // v0.21.1 (review d2) — teardown re-check BEFORE clearing the
+        // buffer.  If finalize() raced us here (producer thread mid-
+        // candidate while the JS thread released the shutter), leave
+        // the buffered best IN PLACE: finalize's prologue snapshot
+        // saves it synchronously, so the selected keyframe still
+        // reaches the stitch set.  cancel() clears the buffer itself.
+        // Pre-d2 this cleared first and bailed after — silently
+        // dropping the frame on exactly that race.
+        guard self.isRunning, self.batchKeyframeMode else {
+            stateLock.unlock()
+            return
+        }
         let bestScore = self.sharpnessWindow.bestScore()
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
@@ -2874,7 +2970,8 @@ public final class IncrementalStitcher: NSObject {
             collector: collector,
             inBatchKeyframeMode: true,
             rotationDegrees: rotationDegrees,
-            exifOrientation: exifOrientation
+            exifOrientation: exifOrientation,
+            isWindowFlush: true
         )
     }
 
