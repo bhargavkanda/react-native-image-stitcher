@@ -24,6 +24,17 @@
 #    archived in the Phase-3 cleanup — its CMake entries had gone stale
 #    and broke the whole suite's configure step.)
 #
+# What this tests WHEN A HOST OpenCV IS AVAILABLE (find_package below):
+#   - `varianceOfLaplacian` / `sharpnessScore` — the shared sharpness
+#     metric behind the pick-sharpest-in-window anti-blur keyframe
+#     selection (sharpness_test.cpp + cpp/sharpness.cpp).  These need
+#     cv::Laplacian / cv::meanStdDev, so they are compiled into a
+#     SECOND test binary that links OpenCV, added only when
+#     find_package(OpenCV) succeeds.  Provide OpenCV either via a
+#     system install or by pointing OpenCV_DIR at a local build —
+#     scripts/run-cpp-tests.sh auto-detects a minimal host build under
+#     build/opencv-host/install (core+imgproc static is enough).
+#
 # What this DOES NOT test yet (deferred to v0.11.0+):
 #   - `KeyframeGate` (the full gate) — depends on OpenCV.  Will need an
 #     OpenCV-aware CMake config (link the same opencv_world the prod
@@ -105,3 +116,36 @@ endif()
 # build time, no manual ADD_TEST per case).
 include(GoogleTest)
 gtest_discover_tests(stitcher_cpp_tests)
+
+# ─────────────────────────────────────────────────────────────────────
+# OpenCV-dependent tests (separate binary, added only when OpenCV is
+# findable).  Kept OUT of stitcher_cpp_tests so the OpenCV-free suite
+# above stays runnable on any machine with zero native dependencies.
+# ─────────────────────────────────────────────────────────────────────
+find_package(OpenCV QUIET COMPONENTS core imgproc)
+if(OpenCV_FOUND)
+  message(STATUS "OpenCV ${OpenCV_VERSION} found — building sharpness tests")
+  add_executable(stitcher_cpp_opencv_tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/sharpness_test.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sharpness.cpp
+  )
+  target_include_directories(stitcher_cpp_opencv_tests PRIVATE
+    ${OpenCV_INCLUDE_DIRS}
+  )
+  target_link_libraries(stitcher_cpp_opencv_tests
+    PRIVATE
+      GTest::gtest_main
+      ${OpenCV_LIBS}
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(stitcher_cpp_opencv_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Werror
+    )
+  endif()
+  gtest_discover_tests(stitcher_cpp_opencv_tests)
+else()
+  message(WARNING
+    "OpenCV not found — sharpness_test.cpp SKIPPED.  Provide OpenCV via "
+    "a system install or set OpenCV_DIR (scripts/run-cpp-tests.sh "
+    "auto-detects build/opencv-host/install).")
+endif()

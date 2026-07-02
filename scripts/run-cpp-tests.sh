@@ -23,6 +23,22 @@ if [[ "${1:-}" == "--clean" ]]; then
   rm -rf "${BUILD_DIR}"
 fi
 
+# OpenCV-dependent tests (cpp/tests/sharpness_test.cpp) need a host
+# OpenCV (core+imgproc).  Honour an explicit OpenCV_DIR from the
+# environment; otherwise auto-detect the local minimal host build under
+# build/opencv-host/install (a static core+imgproc build is enough --
+# cmake -DBUILD_LIST=core,imgproc -DBUILD_SHARED_LIBS=OFF against the
+# OpenCV 4.x source tree, installed to that prefix).  When neither is
+# present the OpenCV-dependent tests are skipped with a CMake warning;
+# everything else still runs.
+if [[ -z "${OpenCV_DIR:-}" ]]; then
+  LOCAL_OPENCV="${REPO_ROOT}/build/opencv-host/install/lib/cmake/opencv4"
+  if [[ -d "${LOCAL_OPENCV}" ]]; then
+    export OpenCV_DIR="${LOCAL_OPENCV}"
+    echo "[run-cpp-tests] using local host OpenCV at ${LOCAL_OPENCV}"
+  fi
+fi
+
 cmake -S "${REPO_ROOT}/cpp/tests" -B "${BUILD_DIR}"
 cmake --build "${BUILD_DIR}"
 
