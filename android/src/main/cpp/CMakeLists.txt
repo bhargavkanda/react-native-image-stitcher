@@ -106,6 +106,13 @@ add_library(image_stitcher SHARED
     # cpp/glare.cpp.  See cpp/glare.hpp for the algorithm rationale.
     glare_jni.cpp
     "${SHARED_CPP_DIR}/glare.cpp"
+    # v0.21 — variance-of-Laplacian sharpness metric shared with iOS.
+    # sharpness_jni.cpp bridges IncrementalStitcher.nativeSharpnessScore
+    # to the shared retailens::sharpnessScore free function in
+    # cpp/sharpness.cpp (the pick-sharpest-in-window anti-blur keyframe
+    # selection).  See cpp/sharpness.hpp for the algorithm rationale.
+    sharpness_jni.cpp
+    "${SHARED_CPP_DIR}/sharpness.cpp"
     # 2026-05-15 — shared stitcher.cpp, used by BOTH platforms.
     # Owns the cv::Stitcher orchestration + C+D progressive-confidence
     # retry + dimension/memory instrumentation.  Used to live in this
