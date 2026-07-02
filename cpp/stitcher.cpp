@@ -1063,26 +1063,28 @@ static StitchResult stitchFramePathsImpl_(
                      (int)framePaths.size() - framesIncluded, thresh);
         }
     }
-    // Partial-success recovery (2026-07-01, review f1): re-apply the BEST
-    // attempt's exact tune and run ONE more estimateTransform when either
-    //   (a) the final attempt failed/threw after an earlier attempt
-    //       estimated OK, or
-    //   (b) the final attempt succeeded but retained FEWER frames than an
-    //       earlier attempt — looser matching can create garbage pairwise
-    //       matches that leaveBiggestComponent then prunes harder, so
-    //       "went further down the ladder" is not "kept more frames".
-    // framesIncluded holds the LAST OK attempt's count, so (b)'s
-    // framesIncluded < bestFrames already implies the best came from a
-    // DIFFERENT (earlier) attempt.  estimateTransform is deterministic for
-    // identical inputs + params (fixed RANSAC seeds), so the re-run
-    // reproduces the best attempt's registration.
-    const bool finalFailed = (status != cv::Stitcher::OK);
-    const bool finalOkButWorse =
-        (status == cv::Stitcher::OK && framesIncluded < bestFrames);
+    // Partial-success recovery (2026-07-01 f1/f2; hardened 2026-07-02 review):
+    // when the ladder's final attempt FAILED or THREW but an EARLIER attempt
+    // estimated OK, that earlier estimate is no longer loaded in the stitcher
+    // (the failed final attempt overwrote its internal camera/transform
+    // state), so composePanorama would have nothing valid to warp.  Re-apply
+    // the best earlier attempt's exact tune and run ONE more estimateTransform
+    // to RELOAD a working registration.  This can only ever REPLACE a
+    // no-result-yet failure with a success — it has nothing to demote.
+    //
+    // We deliberately DO NOT recover when the final attempt SUCCEEDED with
+    // fewer frames than an earlier attempt: that result is already a working
+    // panorama loaded in the stitcher, and re-estimating to chase a few more
+    // frames could itself fail and demote a good stitch to a hard error.
+    // cv::Stitcher registration is NOT reproducible run-to-run (multi-threaded
+    // bundle adjustment has no fixed reduction order and RANSAC draws from the
+    // shared thread-local RNG), so a recovery re-run is never guaranteed to
+    // reproduce the earlier frame count.  Keeping the working final result is
+    // the safe, engineered-enough choice.
     bool recoveryAttempted = false;
     bool recoveryThrew = false;
     std::string recoveryFailureWhat;
-    if (bestAttempt >= 0 && (finalFailed || finalOkButWorse)) {
+    if (status != cv::Stitcher::OK && bestAttempt >= 0) {
         recoveryAttempted = true;
         // Re-apply the best attempt's exact tune — including RESETTING
         // matcher/resol to attempt-1 defaults (default match_conf /
@@ -1105,9 +1107,8 @@ static StitchResult stitchFramePathsImpl_(
         finalAttempt = bestAttempt + 1;
         finalThreshold = best.thresh;
         log_info(logFn, "[stitch-retry]",
-                 "%s — recovering best attempt %d (thresh=%.2f, %d frames)",
-                 finalFailed ? "later attempt failed"
-                             : "final attempt kept fewer frames",
+                 "final attempt failed — recovering best attempt %d "
+                 "(thresh=%.2f, previously %d frames)",
                  bestAttempt + 1, best.thresh, bestFrames);
         try {
             status = stitcher->estimateTransform(images);
