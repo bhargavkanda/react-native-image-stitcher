@@ -978,12 +978,37 @@ class RNSARCameraView @JvmOverloads constructor(
                 // NV21 bytes — the ARCore Image has been closed since
                 // ~25 ms ago (right after packNV21), so no
                 // Image-hold cost on this slow path.
-                YuvImageConverter.encodeJpegFromNV21(
-                    packed,
-                    targetPath,
-                    jpegQuality = 70,
+                //
+                // v0.21.1 (review C) — try/catch mirrors the plugin
+                // path's onAccept: an encoder throw (EXIF write, disk
+                // full, degenerate dims) must report "not persisted"
+                // (false) instead of killing the ARCore frame-listener
+                // thread.
+                try {
+                    YuvImageConverter.encodeJpegFromNV21(
+                        packed,
+                        targetPath,
+                        jpegQuality = 70,
+                        displayRotation = rotationForEncode,
+                    ) != null
+                } catch (t: Throwable) {
+                    Log.w(TAG, "forwardToIncremental: JPEG encode failed " +
+                        "for $targetPath: ${t.javaClass.simpleName}: ${t.message}")
+                    false
+                }
+            },
+            retainFrame = {
+                // v0.21.1 (review C) — RAM retention for the sharpness
+                // window: `packed` is this frame's own JVM array (the
+                // ARCore Image is already closed), so retaining it is
+                // a reference grab — no copy, no disk write.  Encode
+                // params mirror onAccept above so the commit-time
+                // encode is byte-identical to an immediate save.
+                SharpnessCandidateFrame(
+                    packed = packed,
                     displayRotation = rotationForEncode,
-                ) != null
+                    jpegQuality = 70,
+                )
             },
         )
         }  // closes `if (ingestActive)` (v0.8.0 Phase 4b.iii)

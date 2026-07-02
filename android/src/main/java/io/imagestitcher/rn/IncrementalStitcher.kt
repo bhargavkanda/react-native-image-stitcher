@@ -73,6 +73,22 @@ import java.util.concurrent.atomic.AtomicBoolean
  *     on the producer thread, gated by `frameProcessorIngestEnabled`.
  *   The pre-v0.6 `processFrameAtPath` JS-driver entry point is gone.
  */
+
+/**
+ * v0.21.1 (review C) — an encode-ready RAM snapshot of one camera
+ * frame for the pick-sharpest-in-window selection.  Wraps the
+ * per-frame packed NV21 the ingest paths ALREADY allocate (so
+ * retaining one is a reference grab, not a copy) plus the exact
+ * JPEG-encode parameters that path would have used, so the single
+ * commit-time encode is byte-identical to what the immediate-save
+ * path produces.
+ */
+internal class SharpnessCandidateFrame(
+    val packed: YuvImageConverter.PackedYuv,
+    val displayRotation: Int,
+    val jpegQuality: Int,
+)
+
 class IncrementalStitcher(
     private val reactContext: ReactApplicationContext,
 ) : ReactContextBaseJavaModule(reactContext) {
@@ -192,24 +208,35 @@ class IncrementalStitcher(
     // a motion-blurred frame crossing the threshold used to be
     // stitched as-is — panos showed blur even on slow pans.
     //
-    // Buffering: unlike iOS (which deep-copies the best CVPixelBuffer
-    // in RAM), the Android accept path can only persist a frame while
-    // the caller's onAccept lambda is alive (the ARCore Image closes
-    // when the ingest call returns).  So the best candidate is
-    // buffered ON DISK: each frame that beats the current best is
-    // JPEG-encoded to `<keyframe-N>.jpg.tmp` and renamed over
-    // `keyframe-N.jpg` (rename keeps the previous best intact if an
-    // encode fails).  Committing the window is then pure bookkeeping.
-    // Extra cost: one JPEG encode (~25 ms) per improvement, zero
-    // extra RAM.
+    // Buffering (v0.21.1, review C): the best candidate is buffered
+    // IN RAM — its already-packed NV21 ByteArray (~0.5–3 MB depending
+    // on camera resolution) + JPEG-encode params + pose, wrapped in a
+    // SharpnessCandidateFrame.  BOTH ingest paths already hold the
+    // frame in a per-frame JVM array before calling the engine (AR:
+    // RNSARCameraView packs NV21 and closes the ARCore Image FIRST —
+    // audit #19; plugin: consumeFrameFromPlugin packs NV21 at entry),
+    // so "retaining" a winner is a reference grab — zero copy, zero
+    // disk I/O.  The JPEG encode happens ONCE, at window commit.
     //
-    // Threading: mutated only on the single producer thread
-    // (ingestFromARCameraView — ARCore frame listener in AR mode,
-    // vision-camera's serial frame-processor executor in non-AR
-    // mode) and read/cleared by start()/cancel()/finalize() on the
-    // bridge thread AFTER ingestion is disengaged — the same
-    // unsynchronised-but-sequenced pattern the rest of the batch
-    // state uses.
+    // History: the first cut buffered candidates ON DISK (one JPEG
+    // encode per improvement + a .tmp/rename dance) on the mistaken
+    // belief that the frame was only reachable while the caller's
+    // onAccept lambda ran.  That spent ~25 ms of producer-thread
+    // encode per improvement and — worse — left a rename able to land
+    // AFTER finalize had already committed/snapshotted the keyframe
+    // (rename-after-commit race).  Encoding once at commit, under the
+    // window lock, removes both.
+    //
+    // Threading (v0.21.1, review C): ALL window state (the decision
+    // machine + the sharpnessBest* fields + the commit) is guarded by
+    // `sharpnessWindowLock`.  Producers (ARCore frame listener in AR
+    // mode, vision-camera's serial executor in non-AR mode) mutate
+    // under the lock; finalize()/cancel()/start() on the bridge
+    // thread acquire the SAME lock, so an in-flight ingest either
+    // completes its commit before the finalize snapshot or is
+    // excluded atomically by the isRunning re-check — no
+    // half-committed window state, no post-snapshot writes.
+    private val sharpnessWindowLock = Any()
     private var sharpnessWindowK: Int = 4
     /// Shared-C++ window DECISION machine (cpp/sharpness_window.*,
     /// via the SharpnessWindow JNI facade).  Owns open/closed state,
@@ -220,7 +247,10 @@ class IncrementalStitcher(
     /// returned action.  Closed in onCatalystInstanceDestroy() like
     /// keyframeGate.
     private val sharpnessWindow = SharpnessWindow()
-    private var sharpnessBestPath: String? = null
+    /// The buffered best candidate — an encode-ready RAM snapshot
+    /// (packed NV21 + encode params).  Non-null exactly while an
+    /// uncommitted selected keyframe exists.
+    private var sharpnessBestFrame: SharpnessCandidateFrame? = null
     /// Pose of the CURRENT BEST candidate — [tx, ty, tz, qx, qy, qz,
     /// qw], same layout as batchFirst/LastAcceptedPose.  The committed
     /// keyframe's recorded pose must match the saved pixels, not the
@@ -508,10 +538,13 @@ class IncrementalStitcher(
             sharpnessWindowK = sharpWin.coerceIn(1, 10)
             // Push the new K into the shared decision machine (which
             // also discards any window state a previous capture left
-            // behind) and drop the matching platform-side buffer.
-            sharpnessWindow.setWindowSize(sharpnessWindowK)
-            sharpnessBestPath = null
-            sharpnessBestPose = null
+            // behind) and drop the matching platform-side buffer —
+            // under the window lock like every other window mutation.
+            synchronized(sharpnessWindowLock) {
+                sharpnessWindow.setWindowSize(sharpnessWindowK)
+                sharpnessBestFrame = null
+                sharpnessBestPose = null
+            }
 
             // 2026-05-22 — non-AR mode opt-out for angular fallback.
             // captureSource = 'non-ar' means the host is using
@@ -702,17 +735,24 @@ class IncrementalStitcher(
         // dispatching" pattern, then null out the live state.
         // v0.21 — drain + commit an open sharpness window so the
         // trailing keyframe isn't lost (the LAST accepted keyframe is
-        // typically still waiting in it).  The best candidate's JPEG
-        // is already on disk (candidates are encoded eagerly from the
-        // packed NV21), so this is pure bookkeeping.  No
-        // accepted-state event this late — the JS side is tearing down
-        // the capture UI; the finalize result carries the
-        // authoritative acceptedCount.  Safe here: ingestion was
-        // disengaged + isRunning flipped above, so no producer-thread
-        // call can race this.  iOS parity: the synchronous flush in
-        // IncrementalStitcher.swift's finalize prologue.
-        sharpnessWindow.drain()
-        commitSharpnessWindow("finalize", emitEvent = false)
+        // typically still waiting in it).  One JPEG encode (~25 ms),
+        // once per capture, ahead of the multi-second stitch.
+        //
+        // v0.21.1 (review C) — under the WINDOW LOCK: a producer-
+        // thread ingest that already passed its isRunning re-check is
+        // mid-mutation right now; taking the same lock means it either
+        // completes its own commit first (the path lands in
+        // batchKeyframePaths before the snapshot below) or we commit
+        // after it finished a replace — never interleaved.  The
+        // commit is idempotent, so the double-commit shapes
+        // (producer's window-full commit + this drain) are safe.
+        // The committed keyframe also emits the accepted-state event
+        // (iOS review-d1 parity): the JS thumbnail strip must include
+        // the trailing keyframe.
+        synchronized(sharpnessWindowLock) {
+            sharpnessWindow.drain()
+            commitSharpnessWindowLocked("finalize")
+        }
 
         val wasBatchKeyframe = batchKeyframeMode
         val keyframePathsSnapshot = batchKeyframePaths.toList()
@@ -918,13 +958,17 @@ class IncrementalStitcher(
         captureSessionDir = null
         batchKeyframeMode = false
         batchKeyframePaths.clear()
-        // v0.21 — discard any open sharpness window; its candidate
-        // file lives inside the session dir deleted below.  Reset the
-        // shared decision machine + the platform buffer as one unit
-        // so they can't disagree.
-        sharpnessWindow.reset()
-        sharpnessBestPath = null
-        sharpnessBestPose = null
+        // v0.21 — discard any open sharpness window; the operator
+        // aborted, so its buffered best belongs to a dead capture.
+        // Reset the shared decision machine + the platform buffer as
+        // one unit, under the window lock (an in-flight producer
+        // ingest completes or sees the cleared state — never a
+        // half-reset window).
+        synchronized(sharpnessWindowLock) {
+            sharpnessWindow.reset()
+            sharpnessBestFrame = null
+            sharpnessBestPose = null
+        }
         // Defer the session-dir cleanup onto the work queue so we don't
         // race with an ingest that already passed the null-check and is
         // mid-execution on a captured local reference.
@@ -959,8 +1003,14 @@ class IncrementalStitcher(
      *   • Per-frame disk I/O eliminated for rejected frames
      *     (the typical 95%+ of frames in a capture).
      *   • Lazy JPEG encode + write happens at most ~6 times per
-     *     capture (the gate's keyframeMaxCount), inside the lambda
-     *     while the caller still holds the ARCore Image open.
+     *     capture (the gate's keyframeMaxCount).  NOTE (v0.21.1,
+     *     review C — stale-contract fix): both callers encode from a
+     *     frame ALREADY PACKED into a JVM NV21 array before this call
+     *     (the ARCore Image is closed right after packNV21 — audit
+     *     #19; the plugin packs at entry), NOT from a live camera
+     *     Image.  The frame therefore outlives this call, which is
+     *     what lets the sharpness window buffer winners in RAM via
+     *     `retainFrame`.
      *
      * @param grayData    Y-plane (or otherwise grayscale) bytes.
      *                    Length must be ≥ grayStride * grayHeight.
@@ -968,15 +1018,25 @@ class IncrementalStitcher(
      * @param grayHeight  Image height in pixels.
      * @param grayStride  Bytes per row; may exceed grayWidth when
      *                    the source plane has padding (ARCore can pad).
-     * @param onAccept    Invoked ONLY if the gate accepts this frame.
-     *                    Receives the absolute target path
+     * @param onAccept    Invoked ONLY if the gate accepts this frame
+     *                    AND the sharpness window is off (K == 1 /
+     *                    gate-disabled passthrough).  Receives the
+     *                    absolute target path
      *                    `<captureSessionDir>/keyframe-N.jpg` that the
      *                    callee MUST write a full-resolution JPEG of
-     *                    the current camera image to.  Returns true
+     *                    the current camera frame to.  Returns true
      *                    on success, false if the encode/write
      *                    failed (the frame is then dropped; gate
      *                    counter was already incremented, next
      *                    acceptable frame still lands on its own).
+     * @param retainFrame v0.21.1 (review C) — returns an encode-ready
+     *                    RAM snapshot of THIS frame (the caller's
+     *                    already-packed NV21 + the JPEG params the
+     *                    caller's onAccept would have used), or null
+     *                    for a degenerate frame.  Called at most once
+     *                    per frame, only when the sharpness window
+     *                    needs to buffer this frame (seed or
+     *                    improvement).  Must be side-effect free.
      */
     internal fun ingestFromARCameraView(
         tx: Double, ty: Double, tz: Double,
@@ -993,6 +1053,7 @@ class IncrementalStitcher(
         grayHeight: Int,
         grayStride: Int,
         onAccept: (targetPath: String) -> Boolean,
+        retainFrame: () -> SharpnessCandidateFrame?,
         // 2026-06-16 (audit #8/L3) — the live-engine ingest params
         // (legacyJpegPath / nv21PixelData / nv21PixelWidth/Height) were
         // removed here.  The live engines were archived in 2026-06, so the
@@ -1022,6 +1083,16 @@ class IncrementalStitcher(
         // accept.  We do the gate-evaluate BEFORE the copy so we
         // skip the ~5 ms JPEG copy on rejected frames.
         if (batchKeyframeMode) {
+            // v0.21.1 (review C) — teardown re-check.  finalize() and
+            // cancel() flip isRunning on the bridge thread BEFORE they
+            // snapshot/clear the batch state; a producer-thread frame
+            // that already passed the view-level ingest gate must not
+            // run the gate/save pipeline against a tearing-down
+            // capture (pre-fix, a late frame could append a keyframe
+            // after finalize snapshotted the path list — silently
+            // dropped from the stitch — or race the session-dir
+            // delete in cancel()).
+            if (!isRunning.get()) return
             // Build the POD pose for the gate.  tx/ty/tz are passed
             // through from the AR camera view (camera.pose.tx() etc.);
             // they're required for the plane-overlap math.  Falling
@@ -1104,7 +1175,7 @@ class IncrementalStitcher(
                     decision.newContentFraction,
                     grayData, grayWidth, grayHeight, grayStride,
                     tx, ty, tz, qx, qy, qz, qw,
-                    onAccept,
+                    retainFrame,
                 )
                 // 2026-05-22 (audit follow-up) — emit a reject-state
                 // event so the JS debug overlay sees a live overlap %
@@ -1135,19 +1206,20 @@ class IncrementalStitcher(
                     grayData, grayWidth, grayHeight, grayStride,
                     imageWidth, imageHeight,
                     tx, ty, tz, qx, qy, qz, qw,
-                    onAccept,
+                    retainFrame,
                 )
                 return
             }
 
             // Accepted — generate the per-keyframe target path and
             // invoke the caller's onAccept lambda for the lazy JPEG
-            // encode + write.  The caller (the AR camera view) still
-            // holds the ARCore Image open at this point, so it can
-            // encode raw camera pixels directly to disk without any
-            // redundant copy.  Single disk write per accepted frame
-            // (pre-0.3 was: write to tmp, then copy to store = two
-            // disk writes; now we write to the final path directly).
+            // encode + write.  The caller encodes from its per-frame
+            // packed NV21 array (the ARCore Image was closed right
+            // after packNV21 — audit #19; v0.21.1 review C fixed this
+            // comment, which used to claim the Image was still open).
+            // Single disk write per accepted frame (pre-0.3 was:
+            // write to tmp, then copy to store = two disk writes; now
+            // we write to the final path directly).
             val dir = captureSessionDir
             if (dir == null) {
                 android.util.Log.w(
@@ -1217,33 +1289,14 @@ class IncrementalStitcher(
 
     // ── v0.21 — pick-sharpest-in-window helpers ─────────────────────
     //
-    // See the field-block comment (`sharpnessWindowK` &co) for the
-    // design and the disk-buffering rationale.  iOS parity:
-    // IncrementalStitcher.swift's sharpnessWindowOpen /
+    // See the field-block comment (`sharpnessWindowLock` &co) for the
+    // design and the RAM-buffering rationale.  iOS parity:
+    // IncrementalStitcher.swift's sharpnessWindowHandleAccept /
     // sharpnessWindowIngestCandidate / flushSharpnessWindow — same
-    // window semantics, same shared-C++ metric, different buffering
-    // medium (iOS deep-copies the pixel buffer in RAM; Android
-    // encodes to disk because the frame is only reachable through
-    // the per-call onAccept lambda).
-
-    /// Persist the CURRENT frame (via the caller's onAccept lambda —
-    /// the only way to encode a frame; the camera Image closes when
-    /// the ingest call returns) at `finalPath`, going through a
-    /// `.tmp` sibling + rename so a failed encode can't destroy the
-    /// previous best candidate already sitting at `finalPath`.
-    private fun writeSharpnessCandidate(
-        finalPath: String,
-        onAccept: (targetPath: String) -> Boolean,
-    ): Boolean {
-        val tmp = java.io.File("$finalPath.tmp")
-        if (!onAccept(tmp.absolutePath)) {
-            tmp.delete()
-            return false
-        }
-        val ok = tmp.renameTo(java.io.File(finalPath))
-        if (!ok) tmp.delete()
-        return ok
-    }
+    // window semantics (one shared C++ decision machine), same shared
+    // metric, same buffering shape (one retained frame in RAM; iOS
+    // deep-copies a CVPixelBuffer, Android grabs a reference to the
+    // caller's per-frame packed NV21).
 
     /// Gate-ACCEPTED frame with the window feature active (K > 1):
     /// consult the shared machine.  OPEN_WINDOW seeds a fresh window
@@ -1261,60 +1314,61 @@ class IncrementalStitcher(
         imageHeight: Int,
         tx: Double, ty: Double, tz: Double,
         qx: Double, qy: Double, qz: Double, qw: Double,
-        onAccept: (targetPath: String) -> Boolean,
+        retainFrame: () -> SharpnessCandidateFrame?,
     ) {
-        val dir = captureSessionDir
-        if (dir == null) {
-            android.util.Log.w(
-                "IncrementalStitcher",
-                "sharpnessWindowHandleAccept: ACCEPTED but captureSessionDir " +
-                    "is null — frame dropped (start() should have created it)",
-            )
-            return
-        }
+        // Score OUTSIDE the lock (~1-3 ms of OpenCV work) so
+        // finalize()/cancel() never block behind it.
         val score = nativeSharpnessScore(
             grayData, grayWidth, grayHeight, grayStride)
-        val decision = sharpnessWindow.ingest(
-            isAccept = true,
-            score = score,
-            noveltyFraction = newContentFraction,
-            overlapThreshold = keyframeGate.overlapThreshold,
-        )
-        if (decision.action == SharpnessWindow.Action.FLUSH_THEN_OPEN) {
-            commitSharpnessWindow("new-accept")
-        }
-        // Seed the (new) window: persist this frame as the initial
-        // best.  Path index is computed AFTER any FLUSH_THEN_OPEN
-        // commit so keyframe numbering stays gap-free.
-        val finalPath = java.io.File(
-            dir, "keyframe-${batchKeyframePaths.size}.jpg"
-        ).absolutePath
-        if (!writeSharpnessCandidate(finalPath, onAccept)) {
-            // Encode failed — drop the accept, same as the pre-v0.21
-            // path's onAccept-false handling (the gate counter was
-            // already incremented; the next acceptable frame still
-            // lands on its own merits).  Reset the machine so its
-            // freshly-opened window can't outlive the missing seed.
-            sharpnessWindow.reset()
-            android.util.Log.w(
-                "IncrementalStitcher",
-                "sharpnessWindowHandleAccept: encode failed — accept dropped",
+        synchronized(sharpnessWindowLock) {
+            // Teardown re-check under the lock: finalize/cancel may
+            // have raced the scoring above; their window state is
+            // authoritative once isRunning flipped.
+            if (!isRunning.get()) return
+            val decision = sharpnessWindow.ingest(
+                isAccept = true,
+                score = score,
+                noveltyFraction = newContentFraction,
+                overlapThreshold = keyframeGate.overlapThreshold,
             )
-            return
+            if (decision.action == SharpnessWindow.Action.FLUSH_THEN_OPEN) {
+                commitSharpnessWindowLocked("new-accept")
+            }
+            // Seed the (new) window: retain this frame in RAM (a
+            // reference grab — the caller's packed NV21 already
+            // outlives this call).  The JPEG encode happens once, at
+            // commit.
+            val frame = retainFrame()
+            if (frame == null) {
+                // Degenerate frame (packNV21 shape the encoder can't
+                // take) — drop the accept, same as the pre-v0.21
+                // path's onAccept-false handling.  Reset the machine
+                // so its freshly-opened window can't outlive the
+                // missing seed.
+                sharpnessWindow.reset()
+                sharpnessBestFrame = null
+                sharpnessBestPose = null
+                android.util.Log.w(
+                    "IncrementalStitcher",
+                    "sharpnessWindowHandleAccept: retainFrame returned " +
+                        "null — accept dropped",
+                )
+                return
+            }
+            sharpnessBestFrame = frame
+            sharpnessBestPose = doubleArrayOf(tx, ty, tz, qx, qy, qz, qw)
+            sharpnessBestNewContentFraction = newContentFraction
+            sharpnessBestIsLandscape = imageWidth >= imageHeight
+            android.util.Log.i(
+                "IncrementalStitcher",
+                "sharpness window OPEN k=$sharpnessWindowK " +
+                    "seedScore=${"%.1f".format(score)}",
+            )
         }
-        sharpnessBestPath = finalPath
-        sharpnessBestPose = doubleArrayOf(tx, ty, tz, qx, qy, qz, qw)
-        sharpnessBestNewContentFraction = newContentFraction
-        sharpnessBestIsLandscape = imageWidth >= imageHeight
-        android.util.Log.i(
-            "IncrementalStitcher",
-            "sharpness window OPEN k=$sharpnessWindowK " +
-                "seedScore=${"%.1f".format(score)} → $finalPath",
-        )
     }
 
     /// Score one gate-rejected frame against the open window's best
-    /// (streaming max, buffered on disk — the shared machine decides).
+    /// (streaming max, buffered in RAM — the shared machine decides).
     /// No-op when no window is open.
     private fun sharpnessWindowIngestCandidate(
         newContentFraction: Double,
@@ -1324,56 +1378,108 @@ class IncrementalStitcher(
         grayStride: Int,
         tx: Double, ty: Double, tz: Double,
         qx: Double, qy: Double, qz: Double, qw: Double,
-        onAccept: (targetPath: String) -> Boolean,
+        retainFrame: () -> SharpnessCandidateFrame?,
     ) {
-        val bestPath = sharpnessBestPath ?: return
-        if (!sharpnessWindow.isOpen) return  // defensive
+        // Cheap open-check before the multi-ms score.
+        synchronized(sharpnessWindowLock) {
+            if (sharpnessBestFrame == null || !sharpnessWindow.isOpen) return
+        }
         val score = nativeSharpnessScore(
             grayData, grayWidth, grayHeight, grayStride)
-        val decision = sharpnessWindow.ingest(
-            isAccept = false,
-            score = score,
-            noveltyFraction = newContentFraction,
-            overlapThreshold = keyframeGate.overlapThreshold,
-        )
-        // The machine decides BEFORE any disk work so the overlap-
-        // drift guard can exclude a drifted candidate without the
-        // eager encode destroying the buffered best first.
-        if (decision.replaceBest) {
-            if (writeSharpnessCandidate(bestPath, onAccept)) {
-                sharpnessBestPose = doubleArrayOf(tx, ty, tz, qx, qy, qz, qw)
-                android.util.Log.i(
-                    "IncrementalStitcher",
-                    "sharpness window IMPROVED score=${"%.1f".format(score)}",
-                )
+        synchronized(sharpnessWindowLock) {
+            // Re-check: finalize/cancel may have consumed the window
+            // while we were scoring.
+            if (sharpnessBestFrame == null || !sharpnessWindow.isOpen) return
+            val decision = sharpnessWindow.ingest(
+                isAccept = false,
+                score = score,
+                noveltyFraction = newContentFraction,
+                overlapThreshold = keyframeGate.overlapThreshold,
+            )
+            if (decision.replaceBest) {
+                val frame = retainFrame()
+                if (frame != null) {
+                    sharpnessBestFrame = frame
+                    sharpnessBestPose = doubleArrayOf(tx, ty, tz, qx, qy, qz, qw)
+                    android.util.Log.i(
+                        "IncrementalStitcher",
+                        "sharpness window IMPROVED score=${"%.1f".format(score)}",
+                    )
+                }
+                // null retain (degenerate frame) keeps the previous
+                // best; the machine's streaming max advanced past it —
+                // the only cost of this rare edge is that a later
+                // candidate must beat THIS frame's score to replace
+                // the buffer.
             }
-            // Encode failure keeps the previous best on disk — its
-            // file is intact thanks to writeSharpnessCandidate's
-            // tmp+rename.  (The machine's streaming max has advanced
-            // past it; the only cost of this rare I/O-failure edge is
-            // that a later candidate must beat the FAILED frame's
-            // score to replace the file.)
-        }
-        if (decision.action == SharpnessWindow.Action.CLOSE_AND_SAVE) {
-            commitSharpnessWindow(
-                if (decision.driftClosed) "novelty-drift" else "window-full")
+            if (decision.action == SharpnessWindow.Action.CLOSE_AND_SAVE) {
+                commitSharpnessWindowLocked(
+                    if (decision.driftClosed) "novelty-drift" else "window-full")
+            }
         }
     }
 
-    /// Close the window: commit its best candidate (already on disk)
-    /// to `batchKeyframePaths`, record the pose bookkeeping, and —
-    /// unless finalize is tearing the capture down — emit the
-    /// accepted-state event JS renders in LiveFrameStrip.
-    private fun commitSharpnessWindow(reason: String, emitEvent: Boolean = true) {
-        val path = sharpnessBestPath ?: return
+    /// Close the window: JPEG-encode the buffered best ONCE (the only
+    /// encode the window path ever performs), commit the path to
+    /// `batchKeyframePaths`, record the pose bookkeeping, and emit the
+    /// accepted-state event JS renders in LiveFrameStrip (including at
+    /// finalize — iOS review-d1 parity: the trailing keyframe must
+    /// reach the thumbnail strip).
+    ///
+    /// Caller MUST hold `sharpnessWindowLock`.  Idempotent: the
+    /// buffered best is cleared up-front, so a second call (or a call
+    /// with no pending window) is a no-op — a producer's window-full
+    /// commit and finalize's drain-commit can never double-append.
+    private fun commitSharpnessWindowLocked(reason: String) {
+        val frame = sharpnessBestFrame ?: return
         val pose = sharpnessBestPose
         val newContent = sharpnessBestNewContentFraction
         val isLandscape = sharpnessBestIsLandscape
         // Sticky post-close score from the machine (for the log line).
         val score = sharpnessWindow.bestScore
-        sharpnessBestPath = null
+        sharpnessBestFrame = null
         sharpnessBestPose = null
         sharpnessBestNewContentFraction = -1.0
+        val dir = captureSessionDir
+        if (dir == null) {
+            android.util.Log.w(
+                "IncrementalStitcher",
+                "commitSharpnessWindow($reason): captureSessionDir is " +
+                    "null — keyframe dropped",
+            )
+            return
+        }
+        val path = java.io.File(
+            dir, "keyframe-${batchKeyframePaths.size}.jpg"
+        ).absolutePath
+        // The single JPEG encode for this keyframe, under the window
+        // lock — after this returns there is no pending write left
+        // that could land after a finalize snapshot (the
+        // rename-after-commit race the disk-buffered first cut had).
+        val ok = try {
+            YuvImageConverter.encodeJpegFromNV21(
+                frame.packed,
+                path,
+                jpegQuality = frame.jpegQuality,
+                displayRotation = frame.displayRotation,
+            ) != null
+        } catch (t: Throwable) {
+            android.util.Log.w(
+                "IncrementalStitcher",
+                "commitSharpnessWindow($reason): encode threw for $path: " +
+                    "${t.javaClass.simpleName}: ${t.message}",
+                t,
+            )
+            false
+        }
+        if (!ok) {
+            android.util.Log.w(
+                "IncrementalStitcher",
+                "commitSharpnessWindow($reason): encode failed — " +
+                    "keyframe dropped",
+            )
+            return
+        }
         batchKeyframePaths.add(path)
         if (pose != null) {
             if (batchFirstAcceptedPose == null) batchFirstAcceptedPose = pose
@@ -1385,7 +1491,6 @@ class IncrementalStitcher(
                 "score=${"%.1f".format(score)} " +
                 "keyframe #${batchKeyframePaths.size} → $path",
         )
-        if (!emitEvent) return
         emitBatchKeyframeAcceptedState(
             thumbnailPath = path,
             keyframeIndex = batchKeyframePaths.size - 1,
@@ -1426,13 +1531,16 @@ class IncrementalStitcher(
     // ## Why pass `Image` (not just the Y bytes)
     //
     // The engine's `ingestFromARCameraView` uses Y-only for the
-    // keyframe gate.  But when the gate ACCEPTS, the host (us) is
-    // responsible for encoding the accepted frame as JPEG before
-    // `ingestFromARCameraView` returns.  YuvImage / NV21 needs the
-    // full Y + interleaved VU planes, so we keep the Image
-    // reachable through the lambda.  Image's lifetime is bounded
-    // by the plugin callback's return — vision-camera closes the
-    // ImageProxy automatically — so the encode MUST be synchronous.
+    // keyframe gate, but the JPEG encode needs the full Y +
+    // interleaved VU planes.  The Image itself is only valid until
+    // the plugin callback returns (vision-camera closes the
+    // ImageProxy automatically), so this wrapper packs the FULL NV21
+    // into a JVM array at entry (F8.6) and everything downstream —
+    // the gate read, the accept-path encode, and the sharpness
+    // window's RAM retention — runs on that copy, which freely
+    // outlives the callback.  (v0.21.1 review C fixed this comment:
+    // it used to claim the encode read the live Image and therefore
+    // had to complete synchronously.)
     //
     // ## Threading
     //
@@ -1521,6 +1629,17 @@ class IncrementalStitcher(
         // (failing closed; symmetric with iOS C2).
         val trackingPoor = trackingStateRaw != 2
 
+        // Shared by the accept-path encode AND the sharpness window's
+        // commit-time encode (via retainFrame), so the two produce
+        // byte-identical EXIF rotation handling.
+        val displayRotation = when (sensorRotationDegrees) {
+            0   -> android.view.Surface.ROTATION_90
+            90  -> android.view.Surface.ROTATION_0
+            180 -> android.view.Surface.ROTATION_270
+            270 -> android.view.Surface.ROTATION_180
+            else -> android.view.Surface.ROTATION_0
+        }
+
         ingestFromARCameraView(
             tx = tx, ty = ty, tz = tz,
             qx = qx, qy = qy, qz = qz, qw = qw,
@@ -1553,13 +1672,6 @@ class IncrementalStitcher(
                 // Returning `true` tells the engine the keyframe was
                 // persisted; `false` tells it to drop the accept.
                 try {
-                    val displayRotation = when (sensorRotationDegrees) {
-                        0   -> android.view.Surface.ROTATION_90
-                        90  -> android.view.Surface.ROTATION_0
-                        180 -> android.view.Surface.ROTATION_270
-                        270 -> android.view.Surface.ROTATION_180
-                        else -> android.view.Surface.ROTATION_0
-                    }
                     val outPath = YuvImageConverter.encodeJpegFromNV21(
                         packed,
                         targetPath,
@@ -1575,6 +1687,18 @@ class IncrementalStitcher(
                     )
                     false
                 }
+            },
+            retainFrame = {
+                // v0.21.1 (review C) — RAM retention for the sharpness
+                // window: the NV21 was packed at entry and outlives
+                // this callback, so this is a reference grab (no
+                // copy).  Encode params mirror the onAccept lambda
+                // above so the commit-time encode is byte-identical.
+                SharpnessCandidateFrame(
+                    packed = packed,
+                    displayRotation = displayRotation,
+                    jpegQuality = 80,
+                )
             },
         )
     }
