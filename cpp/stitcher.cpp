@@ -923,22 +923,84 @@ static StitchResult stitchFramePathsImpl_(
         }
     }
     log_memstat(logFn, memstat, "before_stitch");
-    const double kRetryThresholds[] = {1.0, 0.5, 0.3};
-    const int kNumAttempts = sizeof(kRetryThresholds) / sizeof(double);
+    // 2026-07-01 — combined-lever retry.  Rather than ADD attempts (more
+    // wall-clock, still no guaranteed result), the 2nd/3rd reduced-confidence
+    // attempts ALSO loosen the feature matcher and raise the registration
+    // resolution.  The resolution lever works through finer feature
+    // LOCALIZATION, not feature count: cv::Stitcher's ORB detector caps at
+    // 500 features per frame regardless of scale, but keypoints detected on
+    // a larger working image sit closer to their true sub-pixel positions,
+    // which is exactly what weak-overlap pairs need to survive the ratio
+    // test + RANSAC.  Attempt 1 is left untouched so the happy path keeps
+    // its speed; the extra registration cost is paid ONLY on captures that
+    // already failed attempt 1.  PANORAMA only: SCANS uses an affine
+    // matcher/estimator/warper, so we never swap its matcher.
+    //
+    // match_conf semantics (verified against the vendored OpenCV 4.10.0):
+    // BestOf2NearestMatcher's ratio test keeps a match iff
+    //   d0 < (1 - match_conf) * d1,
+    // and cv::Stitcher::create(PANORAMA)'s default matcher uses
+    // match_conf = 0.3 (ratio < 0.70).  LOWER match_conf = LOOSER matching.
+    // So the escalation must go BELOW 0.3: 0.25 (ratio < 0.75) then 0.20
+    // (ratio < 0.80).  [2026-07-01 adversarial review: the first cut used
+    // 0.5/0.4, which is STRICTER than the default — inverted lever.]
+    struct RetryTune {
+        double thresh;      // panoConfidenceThresh
+        float  matchConf;   // BestOf2NearestMatcher confidence; <0 -> leave default
+        double regResolMP;  // registration resolution (MP); <0 -> leave config/default
+    };
+    const RetryTune kRetries[] = {
+        //  thresh  matchConf  regResolMP
+        {   1.0,    -1.0f,     -1.0 },   // attempt 1: unchanged (fast happy path)
+        {   0.5,     0.25f,     1.0 },   // attempt 2: looser matcher + ~1.0 MP
+        {   0.3,     0.20f,     1.3 },   // attempt 3: loosest matcher + ~1.3 MP
+    };
+    const int kNumAttempts = sizeof(kRetries) / sizeof(kRetries[0]);
     cv::Mat panorama;
     cv::Stitcher::Status status = cv::Stitcher::ERR_NEED_MORE_IMGS;
     int framesIncluded = 0;
     double finalThreshold = -1.0;
     int finalAttempt = 0;
+    // Best successful attempt so far (partial-success recovery: a later,
+    // harder attempt must not discard an earlier viable estimate).
+    int bestAttempt = -1;
+    int bestFrames = -1;
+    // Last cv::Exception message seen inside the ladder — surfaced in the
+    // final error when every attempt fails so the diagnostic isn't just an
+    // opaque status code.
+    std::string lastExceptionWhat;
+    const double baseRegResol = stitcher->registrationResol();
     for (int attempt = 0; attempt < kNumAttempts; ++attempt) {
-        const double thresh = kRetryThresholds[attempt];
+        const RetryTune& tune = kRetries[attempt];
+        const double thresh = tune.thresh;
         if (cvMode == cv::Stitcher::SCANS && thresh > 0.31) continue;
         stitcher->setPanoConfidenceThresh(thresh);
+        // Registration escalation on the fallback attempts (PANORAMA only).
+        // Swapping in a BestOf2NearestMatcher would break SCANS (affine
+        // matcher/estimator/warper), so the whole escalation is gated to
+        // PANORAMA to keep SCANS behaviour byte-for-byte unchanged.
+        float  appliedMatchConf  = -1.0f;
+        double appliedRegResolMP = -1.0;
+        if (cvMode == cv::Stitcher::PANORAMA) {
+            if (tune.matchConf > 0.0f) {
+                stitcher->setFeaturesMatcher(
+                    cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, tune.matchConf));
+                appliedMatchConf = tune.matchConf;
+            }
+            if (tune.regResolMP > 0.0) {
+                // Escalation may only RAISE resolution — never clobber an
+                // explicit caller registrationResolMP downward.
+                const double rr = std::max(tune.regResolMP, config.registrationResolMP);
+                stitcher->setRegistrationResol(rr);
+                appliedRegResolMP = rr;
+            }
+        }
         finalAttempt = attempt + 1;
         finalThreshold = thresh;
         log_info(logFn, "[stitch-retry]",
-                 "attempt %d/%d panoConfidenceThresh=%.2f",
-                 finalAttempt, kNumAttempts, thresh);
+                 "attempt %d/%d panoConfidenceThresh=%.2f matchConf=%.2f regResolMP=%.2f",
+                 finalAttempt, kNumAttempts, thresh,
+                 appliedMatchConf, appliedRegResolMP);
         try {
             // 2026-06-16 (review #2) — TWO-PHASE: estimateTransform (registration
             // + BA + leaveBiggestComponent at this threshold) here; composePanorama
@@ -946,11 +1008,32 @@ static StitchResult stitchFramePathsImpl_(
             // to inspect the estimated canvas BEFORE the warp/blend allocates it.
             status = stitcher->estimateTransform(images);
         } catch (const cv::Exception& e) {
-            result.errorCode = StitchErrorCode::UnknownCvException;
-            result.errorMessage = std::string("Stitcher::estimateTransform threw on attempt ") +
-                std::to_string(finalAttempt) + ": " + e.what();
-            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
-            return result;
+            // 2026-07-01 (review f2) — an exception at attempt N does NOT
+            // abort the ladder: the next attempt's estimateTransform()
+            // re-runs the whole registration from scratch (fresh
+            // features/matches/BA at the new tune), so it is unaffected by
+            // the throwing attempt's half-mutated internal state.  Only a
+            // throw on the FINAL attempt with NO earlier success is
+            // terminal here; a final-attempt throw with an earlier OK
+            // falls out of the loop into the best-attempt recovery below.
+            lastExceptionWhat = e.what() ? e.what() : "(no message)";
+            log_error(logFn, "[stitch-retry]",
+                      "attempt %d threw cv::Exception: %s — %s",
+                      finalAttempt, lastExceptionWhat.c_str(),
+                      (attempt + 1 < kNumAttempts)
+                          ? "trying next tune"
+                          : "no attempts left");
+            // Don't let a previous attempt's stale OK leak out of the loop.
+            status = cv::Stitcher::ERR_NEED_MORE_IMGS;
+            if (attempt + 1 >= kNumAttempts && bestAttempt < 0) {
+                result.errorCode = StitchErrorCode::UnknownCvException;
+                result.errorMessage =
+                    std::string("Stitcher::estimateTransform threw on attempt ") +
+                    std::to_string(finalAttempt) + ": " + lastExceptionWhat;
+                log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+                return result;
+            }
+            continue;
         }
         if (status != cv::Stitcher::OK) {
             log_info(logFn, "[stitch-retry]",
@@ -960,6 +1043,10 @@ static StitchResult stitchFramePathsImpl_(
         }
         const std::vector<int>& component = stitcher->component();
         framesIncluded = static_cast<int>(component.size());
+        if (framesIncluded > bestFrames) {
+            bestFrames = framesIncluded;
+            bestAttempt = attempt;
+        }
         log_info(logFn, "[stitch-retry]",
                  "attempt %d OK: framesIncluded=%d of %zu (thresh=%.2f)",
                  finalAttempt, framesIncluded, framePaths.size(), thresh);
@@ -976,11 +1063,96 @@ static StitchResult stitchFramePathsImpl_(
                      (int)framePaths.size() - framesIncluded, thresh);
         }
     }
+    // Partial-success recovery (2026-07-01, review f1): re-apply the BEST
+    // attempt's exact tune and run ONE more estimateTransform when either
+    //   (a) the final attempt failed/threw after an earlier attempt
+    //       estimated OK, or
+    //   (b) the final attempt succeeded but retained FEWER frames than an
+    //       earlier attempt — looser matching can create garbage pairwise
+    //       matches that leaveBiggestComponent then prunes harder, so
+    //       "went further down the ladder" is not "kept more frames".
+    // framesIncluded holds the LAST OK attempt's count, so (b)'s
+    // framesIncluded < bestFrames already implies the best came from a
+    // DIFFERENT (earlier) attempt.  estimateTransform is deterministic for
+    // identical inputs + params (fixed RANSAC seeds), so the re-run
+    // reproduces the best attempt's registration.
+    const bool finalFailed = (status != cv::Stitcher::OK);
+    const bool finalOkButWorse =
+        (status == cv::Stitcher::OK && framesIncluded < bestFrames);
+    bool recoveryAttempted = false;
+    bool recoveryThrew = false;
+    std::string recoveryFailureWhat;
+    if (bestAttempt >= 0 && (finalFailed || finalOkButWorse)) {
+        recoveryAttempted = true;
+        // Re-apply the best attempt's exact tune — including RESETTING
+        // matcher/resol to attempt-1 defaults (default match_conf /
+        // baseRegResol) when the best attempt didn't touch them.
+        const RetryTune& best = kRetries[bestAttempt];
+        stitcher->setPanoConfidenceThresh(best.thresh);
+        if (cvMode == cv::Stitcher::PANORAMA) {
+            stitcher->setFeaturesMatcher(
+                best.matchConf > 0.0f
+                    ? cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, best.matchConf)
+                    : cv::makePtr<cv::detail::BestOf2NearestMatcher>(false));
+            stitcher->setRegistrationResol(
+                best.regResolMP > 0.0
+                    ? std::max(best.regResolMP, config.registrationResolMP)
+                    : baseRegResol);
+        }
+        // Telemetry reflects what actually ran LAST (review f3): from here
+        // on the stitcher state carries the best attempt's tune whether the
+        // re-estimate succeeds or not.
+        finalAttempt = bestAttempt + 1;
+        finalThreshold = best.thresh;
+        log_info(logFn, "[stitch-retry]",
+                 "%s — recovering best attempt %d (thresh=%.2f, %d frames)",
+                 finalFailed ? "later attempt failed"
+                             : "final attempt kept fewer frames",
+                 bestAttempt + 1, best.thresh, bestFrames);
+        try {
+            status = stitcher->estimateTransform(images);
+        } catch (const cv::Exception& e) {
+            recoveryThrew = true;
+            recoveryFailureWhat = e.what() ? e.what() : "(no message)";
+            status = cv::Stitcher::ERR_NEED_MORE_IMGS;
+        }
+        if (status == cv::Stitcher::OK) {
+            framesIncluded = static_cast<int>(stitcher->component().size());
+            result.errorCode = StitchErrorCode::Ok;
+            result.errorMessage.clear();
+        } else if (!recoveryThrew) {
+            recoveryFailureWhat =
+                "estimateTransform returned status code " +
+                std::to_string(static_cast<int>(status));
+        }
+    }
     if (status != cv::Stitcher::OK) {
-        result.errorCode = statusToErrorCode(status);
-        result.errorMessage = "Stitcher::estimateTransform failed at all " +
-            std::to_string(finalAttempt) + " thresholds, last status code " +
-            std::to_string(static_cast<int>(status));
+        // Review f3 — the error must tell the truth about recovery: that it
+        // ran, which tune it re-applied, and why it failed.  A recovery
+        // exception maps to UnknownCvException (not the generic
+        // status-derived code).
+        result.errorCode = recoveryThrew ? StitchErrorCode::UnknownCvException
+                                         : statusToErrorCode(status);
+        if (recoveryAttempted) {
+            char threshBuf[32];
+            std::snprintf(threshBuf, sizeof(threshBuf), "%.2f",
+                          kRetries[bestAttempt].thresh);
+            result.errorMessage =
+                "Stitcher::estimateTransform failed across the " +
+                std::to_string(kNumAttempts) +
+                "-attempt ladder; best-attempt recovery (attempt " +
+                std::to_string(bestAttempt + 1) + ", thresh=" + threshBuf +
+                ", previously " + std::to_string(bestFrames) +
+                " frames) was attempted and failed: " + recoveryFailureWhat;
+        } else {
+            result.errorMessage = "Stitcher::estimateTransform failed at all " +
+                std::to_string(finalAttempt) + " thresholds, last status code " +
+                std::to_string(static_cast<int>(status));
+            if (!lastExceptionWhat.empty()) {
+                result.errorMessage +=
+                    "; last cv::Exception: " + lastExceptionWhat;
+            }
+        }
         log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
         return result;
     }
