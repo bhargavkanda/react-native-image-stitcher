@@ -223,6 +223,21 @@ public final class RNSARSessionBridge: RCTEventEmitter {
         }
     }
 
+    /// Toggle opt-in ARKit feature-point cloud exposure to AR plugins
+    /// (the `<Camera>` `enableFeaturePoints` prop).  No main-queue hop
+    /// needed: `setFeaturePointsEnabled` only writes a Bool — no ARKit
+    /// session lifecycle call (`arSession.run`) is made.  Resolves with
+    /// no value.
+    @objc(setFeaturePointsEnabled:resolver:rejecter:)
+    public func setFeaturePointsEnabled(
+        enabled: NSNumber,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        RNSARSession.shared.setFeaturePointsEnabled(enabled.boolValue)
+        resolver(nil)
+    }
+
     /// Toggle opt-in high-resolution photo capture (the `<Camera>`
     /// `highResCapture` prop).  Hops to the main queue:
     /// `setHighResCaptureEnabled` may call `arSession.run(config)` to

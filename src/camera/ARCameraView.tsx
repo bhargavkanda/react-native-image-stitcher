@@ -99,6 +99,14 @@ export interface ARCameraViewProps {
    */
   enableDepth?: boolean;
   /**
+   * Opt in to the ARKit SLAM feature-point cloud in AR plugin contexts
+   * (`RNISARFrameContext.featurePoints` — world-space `[simd_float3]`).
+   * Default `false`.  Available on ALL ARKit-capable devices — no LiDAR
+   * required.  Consumed natively by AR plugins only; does not appear in
+   * {@link ARFrameMeta} or `CameraFrame`.
+   */
+  enableFeaturePoints?: boolean;
+  /**
    * Opt in to high-resolution photo capture (iOS 16+).  When `true`, the AR
    * session runs on the smallest video format that supports
    * `captureHighResolutionFrame`, so `takePhoto()` returns a true full-res
@@ -303,6 +311,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       highResCapture,
       enableAnchors,
       enableMesh,
+      enableFeaturePoints,
       planeDetection,
       onArFrame,
       arFrameMetaInterval,
@@ -382,6 +391,22 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
         session?.setSceneReconstructionEnabled?.(mesh);
       }
     }, [enableDepth, enableAnchors, enableMesh]);
+
+    // Push the feature-point-cloud flag to native (iOS only — ARCore does
+    // not expose a raw SLAM feature-point API).  Routes through the
+    // RNSARSession native module, mirroring the scene-reconstruction toggle.
+    // No session reconfiguration is triggered; the flag is read synchronously
+    // in invokeArPlugins on the next ARFrame.  The `?.` keeps it a no-op on
+    // any build that doesn't expose the method.
+    useEffect(() => {
+      if (Platform.OS === 'ios') {
+        const session = (NativeModules as Record<string, unknown>)
+          .RNSARSession as
+          | { setFeaturePointsEnabled?(on: boolean): void }
+          | undefined;
+        session?.setFeaturePointsEnabled?.(enableFeaturePoints === true);
+      }
+    }, [enableFeaturePoints]);
 
     // Push the high-res-capture flag to native on BOTH platforms.  iOS re-picks
     // the AR video format; Android (added 0.20.5) re-picks the ARCore camera

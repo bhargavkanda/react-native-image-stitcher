@@ -809,6 +809,14 @@ export interface CameraProps {
    */
   enableMesh?: boolean;
   /**
+   * Opt in to the ARKit SLAM feature-point cloud in AR plugin contexts
+   * (`RNISARFrameContext.featurePoints` — world-space `[simd_float3]`).
+   * Default `false`.  Available on ALL ARKit-capable devices — no LiDAR
+   * required.  Consumed natively by AR plugins only; does not appear in
+   * {@link ARFrameMeta} or `CameraFrame`.  iOS only — no ARCore equivalent.
+   */
+  enableFeaturePoints?: boolean;
+  /**
    * Which plane orientations to surface in `CameraFrame.arAnchors`
    * (requires `enableAnchors`; AR capture only).  Default `'vertical'`
    * — the orientation the plane-projected stitch path has always used.
@@ -1329,6 +1337,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     highResCapture,
     enableAnchors,
     enableMesh,
+    enableFeaturePoints,
     planeDetection,
     onArFrame,
     arFrameMetaInterval,
@@ -2648,6 +2657,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           highResCapture={highResCapture}
           enableAnchors={enableAnchors}
           enableMesh={enableMesh}
+          enableFeaturePoints={enableFeaturePoints}
           planeDetection={planeDetection}
           onArFrame={onArFrame}
           arFrameMetaInterval={arFrameMetaInterval}

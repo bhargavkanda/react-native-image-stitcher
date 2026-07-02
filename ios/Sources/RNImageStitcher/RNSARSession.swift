@@ -200,6 +200,19 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     @objc public private(set) var isSceneReconstructionEnabled: Bool = false
 
     // ──────────────────────────────────────────────────────────────
+    // Feature-point cloud — opt-in
+    // ──────────────────────────────────────────────────────────────
+    /// Whether the ARKit SLAM raw feature-point cloud
+    /// (`ARFrame.rawFeaturePoints`) should be exposed to AR plugins via
+    /// `RNISARFrameContext.featurePoints`.  Off by default — building the
+    /// `[simd_float3]` value copy per frame has a small but non-zero
+    /// cost, and most apps don't need it.  Driven from JS via
+    /// `NativeModules.RNSARSession.setFeaturePointsEnabled(bool)`
+    /// (the `<Camera>` `enableFeaturePoints` prop).  Available on ALL
+    /// ARKit-capable devices — no LiDAR required.
+    @objc public private(set) var isFeaturePointsEnabled: Bool = false
+
+    // ──────────────────────────────────────────────────────────────
     // v0.20.3 — opt-in high-resolution photo capture (highResCapture prop)
     // ──────────────────────────────────────────────────────────────
     /// When true, `pickVideoFormat` selects the smallest video format that
@@ -787,6 +800,17 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // so existing tracking, pose log, and latched plane survive.
         let config = makeBaseConfiguration()
         arSession.run(config)
+    }
+
+    /// Toggle opt-in ARKit feature-point cloud exposure to AR plugins
+    /// (the `<Camera>` `enableFeaturePoints` prop, routed via
+    /// `NativeModules.RNSARSession.setFeaturePointsEnabled(bool)`).  Stores
+    /// the flag; takes effect on the very next frame `invokeArPlugins`
+    /// processes.  No ARKit session reconfiguration needed —
+    /// `rawFeaturePoints` is populated by the SLAM tracker on every ARFrame
+    /// on all ARKit-capable devices regardless of the session config.
+    @objc public func setFeaturePointsEnabled(_ enabled: Bool) {
+        isFeaturePointsEnabled = enabled
     }
 
     /// Toggle opt-in high-resolution photo capture (the `<Camera>`
@@ -1597,6 +1621,18 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         let anchorDicts = CameraFrameHostObject.arAnchorDicts(from: frame)
         let anchors = anchorDicts as? [[String: Any]] ?? []
 
+        // featurePoints: expose the ARKit SLAM raw feature-point cloud ONLY
+        // when the `<Camera enableFeaturePoints>` prop is on.  No LiDAR
+        // required — rawFeaturePoints is populated by the SLAM visual tracker
+        // on all ARKit devices.  `points` is a `[simd_float3]` in world
+        // space (ARKit right-handed Y-up, metres).  This is a value copy, so
+        // unlike pixelBuffer/depthBuffer the array is safe to retain beyond
+        // process(_:) — but the protocol comment still warns to copy before
+        // offloading to keep the semantics consistent across all fields.
+        let featurePoints: [simd_float3]? = isFeaturePointsEnabled
+            ? frame.rawFeaturePoints?.points
+            : nil
+
         let context = RNISARFrameContext(
             pixelBuffer: frame.capturedImage,
             timestampNs: frame.timestamp * 1e9,
@@ -1606,7 +1642,8 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             poseTranslation: [pose.tx, pose.ty, pose.tz],
             trackingState: Self.trackingStateString(pose.trackingState),
             depthBuffer: depthBuffer,
-            anchors: anchors
+            anchors: anchors,
+            featurePoints: featurePoints
         )
 
         var syncResults: [String: Any] = [:]

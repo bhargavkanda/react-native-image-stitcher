@@ -35,6 +35,7 @@
 import Foundation
 import ARKit
 import CoreVideo
+import simd
 
 // MARK: - Async result event channel
 
@@ -136,7 +137,21 @@ public final class RNISARFrameContext: NSObject {
     /// `<Camera enableAnchors>` prop is on.
     @objc public let anchors: [[String: Any]]
 
-    @objc public init(
+    /// ARKit SLAM feature-point cloud in world space — each element is
+    /// a `simd_float3` (x, y, z) in metres in ARKit's right-handed Y-up
+    /// world frame.  `nil` unless the `<Camera enableFeaturePoints>` prop
+    /// is on.  Available on ALL ARKit-capable devices — no LiDAR required.
+    /// Unlike `pixelBuffer` / `depthBuffer`, this array is a VALUE copy from
+    /// ARKit and is safe to retain beyond the `process(_:)` call.
+    public let featurePoints: [simd_float3]?
+
+    // NOTE: @objc is intentionally dropped from this init.  Swift refuses to
+    // expose an @objc init whose parameter list includes a type that is not
+    // ObjC-bridgeable ([simd_float3]? is a Swift-only value type).  The class
+    // itself remains @objc(RNISARFrameContext) for ObjC visibility; only the
+    // designated init is Swift-only.  All existing callers are Swift
+    // (invokeArPlugins in RNSARSession.swift), so nothing breaks.
+    public init(
         pixelBuffer: CVPixelBuffer,
         timestampNs: Double,
         fx: Double, fy: Double, cx: Double, cy: Double,
@@ -145,7 +160,8 @@ public final class RNISARFrameContext: NSObject {
         poseTranslation: [Double],
         trackingState: String,
         depthBuffer: CVPixelBuffer?,
-        anchors: [[String: Any]]
+        anchors: [[String: Any]],
+        featurePoints: [simd_float3]?
     ) {
         self.pixelBuffer = pixelBuffer
         self.timestampNs = timestampNs
@@ -157,6 +173,7 @@ public final class RNISARFrameContext: NSObject {
         self.trackingState = trackingState
         self.depthBuffer = depthBuffer
         self.anchors = anchors
+        self.featurePoints = featurePoints
     }
 }
 
