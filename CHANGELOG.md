@@ -14,6 +14,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [Unreleased] — next MINOR (behaviour change)
+
+### Added
+
+- **Anti-blur keyframe selection — `frameSelection.sharpnessWindow`
+  (default `4` = ON).** When the keyframe gate accepts a frame, the
+  engine no longer saves it immediately: it scores the accepted frame
+  plus up to K−1 subsequent gate-evaluated frames with a shared-C++
+  variance-of-Laplacian sharpness metric (~1–3 ms per candidate) and
+  saves the **sharpest** of the K, buffering at most one candidate
+  frame (streaming max).  Fixes motion-blurred keyframes reaching the
+  stitch — the gate itself selects purely by overlap/novelty/time.
+  Also exposed as the `defaultSharpnessWindow` `<Camera>` prop.  The
+  window decision logic (open / replace / close, incl. the drift guard
+  below) lives in one shared C++ state machine consulted by both
+  platforms and is unit-tested (`cpp/sharpness_window.*`).
+- **Overlap-drift guard.** Window candidates arrive *after* the
+  accepted frame, so the saved frame could drift from the accepted
+  pose on a fast pan.  The window now closes early — saving the
+  best-so-far and excluding the drifted frame — as soon as a
+  candidate's own gate novelty exceeds `0.5 × keyframeOverlapThreshold`,
+  bounding the drift independent of `sharpnessWindow` and the
+  eval-throttle cadence.
+
+### Changed
+
+- **BEHAVIOUR CHANGE (reason this is a MINOR bump): anti-blur
+  selection is ON by default.**  Captures that don't set
+  `frameSelection.sharpnessWindow` now trade up to K−1 gate-evaluated
+  frames of latency between a gate-accept and the keyframe
+  event/thumbnail for sharper keyframes.  Set `sharpnessWindow: 1` to
+  restore the previous immediate-save behaviour exactly.
+- **Registration retry now escalates matcher + resolution, and
+  recovers the best attempt.**  The 2nd/3rd reduced-confidence
+  `cv::Stitcher` attempts (PANORAMA only) also loosen the feature
+  matcher's ratio test (`match_conf` 0.3 → 0.25 → 0.20) and raise the
+  registration resolution (→ ~1.0 / ~1.3 MP — never below an explicit
+  caller `registrationResolMP`), so retries change the *registration*,
+  not just the acceptance threshold.  If a later attempt estimates
+  worse (fewer retained frames) or throws, the stitcher re-applies the
+  best earlier attempt's exact tune and re-estimates instead of
+  discarding a viable partial panorama; recovery failures surface a
+  truthful error + telemetry.
+
+### Fixed
+
+- **iOS:** the sharpness window's trailing keyframe (flushed during
+  `finalize`) now emits the same accepted-keyframe event as
+  mid-capture saves (thumbnail strip / acceptedCount include it); a
+  queued window-full save is no longer dropped when `finalize` races
+  it; `sharpnessWindow` config values like `NaN`/`Infinity` no longer
+  crash `start()`; window-state writes are fully lock-protected.
+- **Android:** the sharpness window buffers the best candidate in RAM
+  (single JPEG encode at commit) instead of JPEG-encoding every
+  improvement to disk through a `.tmp`/rename dance — removing ~25 ms
+  of producer-thread encode per improvement and a rename that could
+  land after `finalize` had already snapshotted the keyframe list;
+  all window state is guarded by one lock shared with
+  finalize/cancel; the AR-path JPEG encode is try/caught like the
+  plugin path.
+
 ## [0.20.5] — 2026-06-23
 
 ### Added

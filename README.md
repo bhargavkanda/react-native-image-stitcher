@@ -209,8 +209,39 @@ These mirror the in-app settings panel; most apps never set them.
 | `defaultKeyframeMaxCount` | `number` | `6` | Keyframe cap per capture (3–10). |
 | `defaultKeyframeOverlapThreshold` | `number` | `0.20` | Min overlap to accept a keyframe (0.20–0.60). |
 | `defaultMaxKeyframeIntervalMs` | `number` | `2000` | Time-budget force-accept: take a keyframe at least every N ms during a pan even if the overlap/novelty threshold isn't met, so a slow or static pan never leaves a temporal gap. Force-accepted keyframes still count toward the keyframe cap. `0` = disabled. AR + non-AR. Also exposed as the `FrameSelectionSettings.maxKeyframeIntervalMs` settings field and in the in-app settings panel. |
+| `defaultSharpnessWindow` | `number` | `4` | Anti-blur pick-sharpest-in-window keyframe selection (1–10). `1` = off. See [Anti-blur keyframe selection](#anti-blur-keyframe-selection-sharpnesswindow) below. Also exposed as the `FrameSelectionSettings.sharpnessWindow` settings field. |
 | `defaultCompositingResolMP` / `defaultRegistrationResolMP` / `defaultSeamEstimationResolMP` | `number` | — | Forward-looking cv::Stitcher resolution knobs (currently no-ops). |
 | `maxInscribedRectCrop` | `boolean` | `false` | Opt in with `true` to crop the panorama to the largest inscribed rectangle (clean edges, no black corners) instead of the bounding box. Default keeps the bounding-box crop (all stitched content; may show black corners). Inscribed-rect can shrink the output on lopsided / ultra-wide masks. |
+
+### Anti-blur keyframe selection (`sharpnessWindow`)
+
+The keyframe gate picks frames by overlap/novelty/time only, so a
+motion-blurred frame that crosses the threshold used to be stitched
+as-is.  With `sharpnessWindow` = K, a gate-accept opens a K-frame
+window: the accepted frame plus up to K−1 subsequent gate-evaluated
+frames are scored with a variance-of-Laplacian sharpness metric
+(shared C++, ~1–3 ms per candidate on a downscaled gray frame) and the
+**sharpest** of the K is the keyframe that gets saved.  Only one
+candidate frame is ever buffered (streaming max), and the saved
+keyframe's recorded pose is the chosen frame's pose.
+
+- **Default `4` — the feature is ON by default.**  This is a
+  behaviour change (shipped as a minor version bump): existing callers
+  gain anti-blur selection without opting in, at the cost of up to
+  K−1 gate-evaluated frames of latency between the gate-accept and
+  the keyframe event/thumbnail.
+- **`sharpnessWindow: 1` restores the previous behaviour exactly**
+  (immediate save on gate-accept).
+- **Interaction with `keyframeOverlapThreshold` / eval cadence:**
+  window candidates arrive after the accepted frame, so on a fast pan
+  the saved frame could drift from the accepted pose (a raw window
+  spans up to `sharpnessWindow × flowEvalEveryNFrames` camera frames).
+  The engine therefore closes the window early — saving the
+  best-so-far and excluding the drifted frame — as soon as a
+  candidate's own gate novelty exceeds `0.5 × keyframeOverlapThreshold`.
+  The saved frame's drift is bounded by the overlap threshold itself;
+  raising K or the eval cadence only widens the selection pool on slow
+  pans.
 
 ### UI toggles
 
