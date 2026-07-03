@@ -50,6 +50,10 @@ import {
   createAROverlayController,
   type AROverlayMethods,
 } from './arOverlayController';
+import {
+  resolveOverlayPush,
+  resolveOverlayUnmount,
+} from './arOverlayLifecycle';
 
 
 // React Native looks up the component by its NATIVE name.
@@ -99,11 +103,18 @@ export interface ARCameraViewProps {
    */
   enableDepth?: boolean;
   /**
-   * Opt in to the ARKit SLAM feature-point cloud in AR plugin contexts
-   * (`RNISARFrameContext.featurePoints` — world-space `[simd_float3]`).
-   * Default `false`.  Available on ALL ARKit-capable devices — no LiDAR
-   * required.  Consumed natively by AR plugins only; does not appear in
+   * Opt in to the SLAM feature-point cloud in AR plugin contexts.  Default
+   * `false`.  Available on ALL AR-capable devices — no LiDAR required.
+   * Consumed natively by AR plugins only; does not appear in
    * {@link ARFrameMeta} or `CameraFrame`.
+   *
+   *   - iOS   → ARKit `rawFeaturePoints` in `RNISARFrameContext.featurePoints`
+   *             as world-space `[simd_float3]` (bare `x, y, z`).
+   *   - Android → ARCore `Frame.acquirePointCloud()` in
+   *             `ARFrameContext.featurePoints` as a flat stride-4
+   *             `[x, y, z, confidence]` world-space `FloatArray` (the extra
+   *             per-point confidence lets native plugins filter ARCore's
+   *             sparser cloud).
    */
   enableFeaturePoints?: boolean;
   /**
@@ -392,20 +403,24 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       }
     }, [enableDepth, enableAnchors, enableMesh]);
 
-    // Push the feature-point-cloud flag to native (iOS only — ARCore does
-    // not expose a raw SLAM feature-point API).  Routes through the
-    // RNSARSession native module, mirroring the scene-reconstruction toggle.
-    // No session reconfiguration is triggered; the flag is read synchronously
-    // in invokeArPlugins on the next ARFrame.  The `?.` keeps it a no-op on
-    // any build that doesn't expose the method.
+    // Push the feature-point-cloud flag to native on BOTH platforms.  ARCore
+    // DOES expose a raw SLAM feature-point API — `Frame.acquirePointCloud()`
+    // returns world-space `[x, y, z, confidence]` points, the ARCore
+    // equivalent of ARKit's `ARFrame.rawFeaturePoints`.  On iOS the flag
+    // populates `RNISARFrameContext.featurePoints` (`[simd_float3]`); on
+    // Android it drives `Frame.acquirePointCloud()` into
+    // `ARFrameContext.featurePoints` (stride-4 `[x, y, z, confidence]`).
+    // Routes through the RNSARSession native module, mirroring the
+    // scene-reconstruction toggle.  No session reconfiguration is triggered;
+    // the flag is read per-frame on the AR thread (iOS: invokeArPlugins;
+    // Android: runArPlugins) on the next frame.  The `?.` keeps it a no-op on
+    // any older native build that doesn't expose the method.
     useEffect(() => {
-      if (Platform.OS === 'ios') {
-        const session = (NativeModules as Record<string, unknown>)
-          .RNSARSession as
-          | { setFeaturePointsEnabled?(on: boolean): void }
-          | undefined;
-        session?.setFeaturePointsEnabled?.(enableFeaturePoints === true);
-      }
+      const session = (NativeModules as Record<string, unknown>)
+        .RNSARSession as
+        | { setFeaturePointsEnabled?(on: boolean): void }
+        | undefined;
+      session?.setFeaturePointsEnabled?.(enableFeaturePoints === true);
     }, [enableFeaturePoints]);
 
     // Push the high-res-capture flag to native on BOTH platforms.  iOS re-picks
@@ -543,20 +558,29 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
     // detection quads persisting into an unrelated photo-mode AR view). The
     // clear is gated on this instance having actually driven declaratively —
     // an imperative-only host keeps full ownership across remounts.
+    // Decision logic is the pure {@link resolveOverlayPush} /
+    // {@link resolveOverlayUnmount} pair (arOverlayLifecycle.ts, unit-tested);
+    // these effects only apply the decisions. `hasDriven` (the ownership token)
+    // lives in a ref: an imperative-only host never drives declaratively, so it
+    // never clears the singleton and keeps control across remounts.
     const declarativeOverlaysDroveRef = useRef(false);
     useEffect(() => {
-      if (overlays == null) {
-        return;
+      const { dispatch, hasDriven } = resolveOverlayPush(
+        overlays,
+        declarativeOverlaysDroveRef.current,
+      );
+      declarativeOverlaysDroveRef.current = hasDriven;
+      if (dispatch !== null) {
+        overlayController.setOverlays(dispatch);
       }
-      declarativeOverlaysDroveRef.current = true;
-      overlayController.setOverlays(overlays);
     }, [overlays, overlayController]);
     useEffect(() => {
       return () => {
-        if (declarativeOverlaysDroveRef.current) {
-          // Unmount-only (and controller-swap) clear of the declaratively-set
-          // collection. Module-level dispatch — safe while the view tears down.
-          overlayController.setOverlays([]);
+        const dispatch = resolveOverlayUnmount(
+          declarativeOverlaysDroveRef.current,
+        );
+        if (dispatch !== null) {
+          overlayController.setOverlays(dispatch);
         }
       };
     }, [overlayController]);
