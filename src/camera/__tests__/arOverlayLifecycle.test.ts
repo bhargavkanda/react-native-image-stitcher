@@ -45,6 +45,12 @@ describe('resolveOverlayPush', () => {
     expect(d.hasDriven).toBe(true);
   });
 
+  it('re-drive while already owning pushes the new array and keeps ownership', () => {
+    const d = resolveOverlayPush([quad('a')], true);
+    expect(d.dispatch).toEqual([quad('a')]);
+    expect(d.hasDriven).toBe(true);
+  });
+
   it('undefined + never-drove → no dispatch, no ownership (imperative-only host)', () => {
     for (const v of [undefined, null] as const) {
       const d = resolveOverlayPush(v, false);

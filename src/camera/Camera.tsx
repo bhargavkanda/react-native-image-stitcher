@@ -809,11 +809,18 @@ export interface CameraProps {
    */
   enableMesh?: boolean;
   /**
-   * Opt in to the ARKit SLAM feature-point cloud in AR plugin contexts
-   * (`RNISARFrameContext.featurePoints` — world-space `[simd_float3]`).
-   * Default `false`.  Available on ALL ARKit-capable devices — no LiDAR
-   * required.  Consumed natively by AR plugins only; does not appear in
-   * {@link ARFrameMeta} or `CameraFrame`.  iOS only — no ARCore equivalent.
+   * Opt in to the SLAM feature-point cloud in AR plugin contexts.  Default
+   * `false`.  Available on ALL AR-capable devices — no LiDAR required.
+   * Consumed natively by AR plugins only; does not appear in
+   * {@link ARFrameMeta} or `CameraFrame`.
+   *
+   *   - iOS   → ARKit `rawFeaturePoints` in `RNISARFrameContext.featurePoints`
+   *             as world-space `[simd_float3]` (bare `x, y, z`).
+   *   - Android → ARCore `Frame.acquirePointCloud()` in
+   *             `ARFrameContext.featurePoints` as a flat stride-4
+   *             `[x, y, z, confidence]` world-space `FloatArray` (the extra
+   *             per-point confidence lets native plugins filter ARCore's
+   *             sparser cloud).
    */
   enableFeaturePoints?: boolean;
   /**
