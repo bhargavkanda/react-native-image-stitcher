@@ -17,6 +17,9 @@ import com.google.ar.core.Pose
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
+import com.google.ar.core.exceptions.DeadlineExceededException
+import com.google.ar.core.exceptions.NotTrackingException
+import com.google.ar.core.exceptions.ResourceExhaustedException
 import com.google.ar.core.exceptions.SessionPausedException
 import io.imagestitcher.rn.ar.BackgroundRenderer
 import io.imagestitcher.rn.ar.YuvImageConverter
@@ -1231,6 +1234,62 @@ class RNSARCameraView @JvmOverloads constructor(
                 m
             }
 
+        // ── enableFeaturePoints — ARCore SLAM point cloud (opt-in) ───────
+        //
+        // Only when the host opted in (`<Camera enableFeaturePoints>` →
+        // `RNSARSession.featurePointsEnabled`) do we pay the acquire cost.
+        // ARCore's `Frame.acquirePointCloud()` hands back a `PointCloud`
+        // whose native buffer MUST be released — it is `Closeable`, and
+        // there is a small fixed pool of them (ARCore recommends acquiring at
+        // most one per frame).  Leaking it throws `ResourceExhaustedException`
+        // on a later acquire.  `.use { }` guarantees `close()` even on an
+        // early return / exception inside the block.
+        //
+        // The `points` buffer is a direct `FloatBuffer` with a native
+        // stride-4 `[x, y, z, confidence]` layout in world space.  We copy it
+        // out to a plain `FloatArray` INSIDE `.use { }` (before close) so the
+        // plugin gets a stable array that outlives the (immediately-closed)
+        // PointCloud.  A brand-new frame with no cloud yields position=0 →
+        // an empty array (harmless; count = 0).
+        //
+        // Documented ARCore throws are caught → featurePoints stays null; we
+        // never crash the render loop over a missing point cloud:
+        //   - NotTrackingException        (session not yet TRACKING)
+        //   - DeadlineExceededException   (frame already superseded)
+        //   - ResourceExhaustedException  (too many un-closed acquirables)
+        var featurePoints: FloatArray? = null
+        if (RNSARSession.featurePointsCloudEnabled) {
+            try {
+                frame.acquirePointCloud().use { cloud ->
+                    val buf = cloud.points  // direct FloatBuffer, stride-4
+                    val n = buf.remaining()
+                    if (n > 0) {
+                        val out = FloatArray(n)
+                        buf.get(out)  // copies [x,y,z,confidence] * pointCount
+                        featurePoints = out
+                    } else {
+                        featurePoints = FloatArray(0)
+                    }
+                }
+            } catch (e: NotTrackingException) {
+                featurePoints = null
+            } catch (e: DeadlineExceededException) {
+                featurePoints = null
+            } catch (e: ResourceExhaustedException) {
+                if (forwardLogTick % 30 == 1) {
+                    Log.w(TAG, "acquirePointCloud: resource exhausted (leak?) — ${e.message}")
+                }
+                featurePoints = null
+            } catch (t: Throwable) {
+                // Defensive: any other ARCore/runtime failure must not take
+                // down the AR render loop.  Feature points are best-effort.
+                if (forwardLogTick % 30 == 1) {
+                    Log.w(TAG, "acquirePointCloud failed (ignoring): ${t.message}")
+                }
+                featurePoints = null
+            }
+        }
+
         val ctx = ARFrameContext(
             nv21 = packed.nv21,
             width = packed.width,
@@ -1254,6 +1313,7 @@ class RNSARCameraView @JvmOverloads constructor(
             depthWidth = depth?.width ?: 0,
             depthHeight = depth?.height ?: 0,
             anchors = anchorMaps,
+            featurePoints = featurePoints,
         )
 
         var sync: HashMap<String, Any?>? = null

@@ -191,6 +191,44 @@ class RNSARSession(reactContext: ReactApplicationContext)
         arFrameMetaLastEmitNs = 0L
     }
 
+    // ── enableFeaturePoints — opt-in ARCore SLAM point cloud (Android) ──
+    //
+    // Android twin of iOS' `RNSARSession.setFeaturePointsEnabled(_:)`.  Same
+    // JS surface (`NativeModules.RNSARSession.setFeaturePointsEnabled(bool)`,
+    // driven by the `<Camera enableFeaturePoints>` prop): while enabled, the
+    // GL render thread acquires ARCore's sparse SLAM point cloud
+    // (`Frame.acquirePointCloud()`) once per plugin-bearing frame and exposes
+    // it to native AR plugins via [ARFrameContext.featurePoints] (stride-4
+    // `[x, y, z, confidence]`, world space).  Off by default — when off the
+    // render thread never calls `acquirePointCloud`, so a host that doesn't
+    // opt in pays ZERO ARCore cost.  No session reconfiguration is needed;
+    // ARCore populates the point cloud on every `Frame` regardless of config,
+    // so the flag takes effect on the very next frame [RNSARCameraView]
+    // processes.
+    //
+    // Threading mirrors [setArFrameMetaEnabled]: the flag is a `@Volatile`
+    // companion field written here on the JS bridge thread and read on the GL
+    // render thread in [RNSARCameraView.runArPlugins].
+    //
+    // Fire-and-forget (no Promise) — mirrors the other config-prop setters
+    // (setPlaneDetection, setArFrameMetaEnabled, lockPortrait).
+
+    /**
+     * JS-facing gate for the ARCore feature-point cloud.  Method name matches
+     * iOS exactly (`setFeaturePointsEnabled`) so the shared TS layer calls one
+     * name on both platforms.
+     */
+    @ReactMethod
+    fun setFeaturePointsEnabled(enabled: Boolean) {
+        // NOTE the backing companion flag is named `featurePointsCloudEnabled`,
+        // NOT `featurePointsEnabled`: a `@JvmStatic var featurePointsEnabled`
+        // would synthesise a static `setFeaturePointsEnabled(Boolean)` setter
+        // whose JVM signature collides with THIS @ReactMethod (same `(Z)V`),
+        // failing compilation with "Platform declaration clash".  The distinct
+        // name sidesteps that while keeping the JS-facing method name exact.
+        featurePointsCloudEnabled = enabled
+    }
+
     // ── 0.20.0 — AR overlay/annotation imperative API ────────────────────
     //
     // JS-facing methods backing the `<Camera>` / `<ARCameraView>` ref's
@@ -1226,6 +1264,23 @@ class RNSARSession(reactContext: ReactApplicationContext)
         @JvmStatic
         @Volatile
         var arFrameMetaLastEmitNs: Long = 0L
+
+        // ── enableFeaturePoints gate (Android feature-point cloud) ────
+        //
+        // Written from the JS thread via [setFeaturePointsEnabled]; read on
+        // the GL render thread in [RNSARCameraView.runArPlugins] — hence
+        // `@Volatile`.  When false the render thread never calls
+        // `Frame.acquirePointCloud()`, so a non-opted-in host pays no ARCore
+        // cost.  Default off (parity with iOS `isFeaturePointsEnabled`).
+        //
+        // Named `featurePointsCloudEnabled` (not `featurePointsEnabled`) on
+        // purpose: as a `@JvmStatic var`, the shorter name would emit a static
+        // `setFeaturePointsEnabled(Boolean)` setter that clashes with the
+        // instance `@ReactMethod setFeaturePointsEnabled(Boolean)` (identical
+        // `(Z)V` JVM signature).  See the note in [setFeaturePointsEnabled].
+        @JvmStatic
+        @Volatile
+        var featurePointsCloudEnabled: Boolean = false
 
         /// Event name carrying the [ARFrameMeta] payload to JS.  MUST
         /// match the shared contract + the iOS `supportedEvents` entry +

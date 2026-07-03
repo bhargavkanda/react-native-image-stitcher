@@ -21,6 +21,30 @@ package io.imagestitcher.rn
  *   - bytes `[width*height .. width*height*3/2)` = interleaved V-U chroma
  * [yPlane] is a convenience read-only window onto just the Y plane.
  *
+ * ## Feature-point cloud — STRIDE-4 [x, y, z, confidence]
+ *
+ * [featurePoints], when non-null, is ARCore's sparse SLAM point cloud
+ * (`Frame.acquirePointCloud().getPoints()`) copied out verbatim as a flat
+ * `FloatArray` in ARCore's **native stride-4** layout: four floats per
+ * point — `[x, y, z, confidence]` — in WORLD space (metres), where
+ * `confidence` ∈ [0, 1] is ARCore's per-point tracking confidence.  Point
+ * count is therefore `featurePoints.size / 4`.
+ *
+ * This layout DELIBERATELY DIFFERS from iOS's `RNISARFrameContext`
+ * `featurePoints: [simd_float3]` (bare `x, y, z`, no confidence).  The
+ * divergence is intentional, not an oversight: this field is read ONLY by
+ * platform-specific NATIVE plugins (e.g. Phase C's Kotlin PCA liveness
+ * plugin), never by cross-platform JS, so byte-parity with iOS buys
+ * nothing.  ARCore's cloud is sparser and noisier than ARKit's, so the
+ * per-point `confidence` is load-bearing — Phase C filters the cloud on it
+ * before fitting a plane.  Dropping it to match iOS's stride-3 shape would
+ * discard the one signal that makes the Android cloud usable.
+ *
+ * Null when `enableFeaturePoints` is off (zero ARCore cost — no
+ * `acquirePointCloud`), or when ARCore couldn't deliver a cloud this frame
+ * (not tracking / deadline / resource-exhausted — see
+ * [RNSARCameraView.runArPlugins]).
+ *
  * ## Lifetime — COPY BEFORE OFFLOADING
  *
  * [nv21] / [yPlane] / [depthBytes] are the SDK's own arrays, reused on the
@@ -28,7 +52,9 @@ package io.imagestitcher.rn
  * [ARFramePlugin.process] call.  A plugin that hands bytes to another
  * thread (async OCR, network upload, etc.) **MUST copy** them first
  * (`bytes.copyOf()`), or it will read torn/overwritten data on the next AR
- * frame.
+ * frame.  [featurePoints] follows the SAME contract — it is a fresh copy
+ * of the (now-closed) ARCore `PointCloud`, but the SDK does not promise the
+ * array reference survives the frame; copy it too before offloading.
  *
  * @property nv21            Full NV21 camera image (Y plane then interleaved VU).
  * @property width           Camera image width (px).
@@ -52,6 +78,12 @@ package io.imagestitcher.rn
  *                           Each map: { id, type, transform[16 row-major],
  *                           alignment?, extent? } — same shape the JS
  *                           `ARAnchor` contract uses.
+ * @property featurePoints   ARCore SLAM point cloud, flat stride-4
+ *                           `[x, y, z, confidence]` per point in world
+ *                           metres, or null (null unless `enableFeaturePoints`
+ *                           AND ARCore delivered a cloud this frame).  Count
+ *                           = `featurePoints.size / 4`.  See the stride-4
+ *                           section above for why this differs from iOS.
  */
 class ARFrameContext(
     @JvmField val nv21: ByteArray,
@@ -71,6 +103,7 @@ class ARFrameContext(
     @JvmField val depthWidth: Int = 0,
     @JvmField val depthHeight: Int = 0,
     @JvmField val anchors: List<Map<String, Any?>> = emptyList(),
+    @JvmField val featurePoints: FloatArray? = null,
 ) {
     /**
      * Read-only window onto JUST the Y (luminance) plane of [nv21] — the
