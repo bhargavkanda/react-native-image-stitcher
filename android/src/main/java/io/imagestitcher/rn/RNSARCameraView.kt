@@ -17,8 +17,6 @@ import com.google.ar.core.Pose
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
-import com.google.ar.core.exceptions.DeadlineExceededException
-import com.google.ar.core.exceptions.NotTrackingException
 import com.google.ar.core.exceptions.ResourceExhaustedException
 import com.google.ar.core.exceptions.SessionPausedException
 import io.imagestitcher.rn.ar.BackgroundRenderer
@@ -1237,26 +1235,35 @@ class RNSARCameraView @JvmOverloads constructor(
         // ── enableFeaturePoints — ARCore SLAM point cloud (opt-in) ───────
         //
         // Only when the host opted in (`<Camera enableFeaturePoints>` →
-        // `RNSARSession.featurePointsEnabled`) do we pay the acquire cost.
-        // ARCore's `Frame.acquirePointCloud()` hands back a `PointCloud`
-        // whose native buffer MUST be released — it is `Closeable`, and
-        // there is a small fixed pool of them (ARCore recommends acquiring at
-        // most one per frame).  Leaking it throws `ResourceExhaustedException`
-        // on a later acquire.  `.use { }` guarantees `close()` even on an
-        // early return / exception inside the block.
+        // `setFeaturePointsEnabled` → `RNSARSession.featurePointsCloudEnabled`)
+        // do we pay the acquire cost.  ARCore's `Frame.acquirePointCloud()`
+        // hands back a `PointCloud` whose native buffer MUST be released — it
+        // is `Closeable`, and there is a small fixed pool of them (ARCore
+        // recommends acquiring at most one per frame).  Leaking it throws
+        // `ResourceExhaustedException` on a later acquire.  `.use { }`
+        // guarantees `close()` even on an early return / exception inside the
+        // block.
         //
         // The `points` buffer is a direct `FloatBuffer` with a native
         // stride-4 `[x, y, z, confidence]` layout in world space.  We copy it
         // out to a plain `FloatArray` INSIDE `.use { }` (before close) so the
         // plugin gets a stable array that outlives the (immediately-closed)
-        // PointCloud.  A brand-new frame with no cloud yields position=0 →
-        // an empty array (harmless; count = 0).
+        // PointCloud.
         //
-        // Documented ARCore throws are caught → featurePoints stays null; we
-        // never crash the render loop over a missing point cloud:
-        //   - NotTrackingException        (session not yet TRACKING)
-        //   - DeadlineExceededException   (frame already superseded)
-        //   - ResourceExhaustedException  (too many un-closed acquirables)
+        // NULL-vs-EMPTY contract (cross-platform parity, review F3): iOS sets
+        // featurePoints = frame.rawFeaturePoints?.points, so "no usable cloud"
+        // is NIL.  We mirror that here — an empty cloud (session not yet
+        // TRACKING / SLAM not converged yields position=0) becomes NULL, never
+        // an empty FloatArray, so a plugin's `context.featurePoints == null`
+        // gate means the same thing on both platforms.  A non-null array
+        // therefore always carries at least one point.
+        //
+        // Exception contract: acquirePointCloud()'s DOCUMENTED throws are
+        // DeadlineExceededException (frame already superseded) and
+        // ResourceExhaustedException (too many un-closed acquirables); a
+        // not-yet-TRACKING session returns an empty cloud rather than throwing.
+        // A single Throwable backstop catches everything (all unchecked) →
+        // featurePoints stays null; we never crash the render loop.
         var featurePoints: FloatArray? = null
         if (RNSARSession.featurePointsCloudEnabled) {
             try {
@@ -1267,14 +1274,9 @@ class RNSARCameraView @JvmOverloads constructor(
                         val out = FloatArray(n)
                         buf.get(out)  // copies [x,y,z,confidence] * pointCount
                         featurePoints = out
-                    } else {
-                        featurePoints = FloatArray(0)
                     }
+                    // n == 0 → leave featurePoints null (parity with iOS nil).
                 }
-            } catch (e: NotTrackingException) {
-                featurePoints = null
-            } catch (e: DeadlineExceededException) {
-                featurePoints = null
             } catch (e: ResourceExhaustedException) {
                 if (forwardLogTick % 30 == 1) {
                     Log.w(TAG, "acquirePointCloud: resource exhausted (leak?) — ${e.message}")
