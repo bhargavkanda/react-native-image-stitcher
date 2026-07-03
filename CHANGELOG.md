@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
-## [Unreleased] — next MINOR (behaviour change)
+## [0.21.0] — 2026-07-03
 
 ### Added
 
@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   candidate's own gate novelty exceeds `0.5 × keyframeOverlapThreshold`,
   bounding the drift independent of `sharpnessWindow` and the
   eval-throttle cadence.
+- **`enableFeaturePoints` prop (`<Camera>` / `ARCameraView`).** Opt in to the
+  SLAM feature-point cloud in AR-plugin contexts. Default `false`, no LiDAR
+  required; consumed natively by registered AR plugins only (it does not appear
+  in `ARFrameMeta` or `CameraFrame`). iOS exposes ARKit `rawFeaturePoints` on
+  `RNISARFrameContext.featurePoints` as world-space `[simd_float3]`; Android
+  exposes ARCore `Frame.acquirePointCloud()` on `ARFrameContext.featurePoints`
+  as a flat stride-4 `[x, y, z, confidence]` `FloatArray` (the extra per-point
+  confidence lets plugins filter ARCore's sparser cloud). Enables
+  scene-liveness / geometry plugins to reason about the live point cloud.
 
 ### Changed
 
@@ -74,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all window state is guarded by one lock shared with
   finalize/cancel; the AR-path JPEG encode is try/caught like the
   plugin path.
+- **AR overlays no longer leak across mounts.** The native declarative-overlay
+  collection is process-wide; an `ARCameraView` driving overlays via the
+  `overlays` prop now clears them on unmount (and on a mid-life
+  array→undefined transition), so a subsequently-mounted AR view no longer
+  renders the previous instance's stale shapes. Imperative-only hosts keep full
+  ownership of the collection.
 
 ## [0.20.5] — 2026-06-23
 
