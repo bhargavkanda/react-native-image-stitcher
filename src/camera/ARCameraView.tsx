@@ -535,12 +535,31 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
     // changes, and native overlay set is cheap (a handful of shapes).  When the
     // prop is omitted we DON'T touch the controller, so a host driving overlays
     // purely imperatively (via the ref) isn't clobbered by an undefined prop.
+    //
+    // Declarative overlays are cleared on UNMOUNT (effect below): the native
+    // JS-overlay collection is a process-wide singleton that outlives this
+    // component AND session restarts, so without the clear the NEXT mounted
+    // AR view renders this instance's stale shapes (observed: digital-twin
+    // detection quads persisting into an unrelated photo-mode AR view). The
+    // clear is gated on this instance having actually driven declaratively —
+    // an imperative-only host keeps full ownership across remounts.
+    const declarativeOverlaysDroveRef = useRef(false);
     useEffect(() => {
       if (overlays == null) {
         return;
       }
+      declarativeOverlaysDroveRef.current = true;
       overlayController.setOverlays(overlays);
     }, [overlays, overlayController]);
+    useEffect(() => {
+      return () => {
+        if (declarativeOverlaysDroveRef.current) {
+          // Unmount-only (and controller-swap) clear of the declaratively-set
+          // collection. Module-level dispatch — safe while the view tears down.
+          overlayController.setOverlays([]);
+        }
+      };
+    }, [overlayController]);
 
     useImperativeHandle(ref, () => ({
       setOverlays: overlayController.setOverlays,
