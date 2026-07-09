@@ -175,6 +175,52 @@ public class StitcherBridge: NSObject {
     }
   }
 
+  /// Extract the auxiliary depth map embedded in the photo at
+  /// `options.imagePath` (captured with vision-camera `enableDepthData`)
+  /// into a sidecar container at `options.outputPath` — see
+  /// `PhotoDepthSidecar.swift` for the format.
+  ///
+  /// ORDER MATTERS: must be called BEFORE `normaliseOrientation` on the
+  /// same file — the OpenCV re-encode strips auxiliary images, after which
+  /// this resolves `{ found: false }` forever.
+  ///
+  /// Resolves `{ found: false, reason }` when the file simply carries no
+  /// depth (single-lens device, depth-less format, flag off) — that is an
+  /// expected outcome, not a rejection.  Rejects only on real I/O errors.
+  @objc(extractPhotoDepth:resolver:rejecter:)
+  public func extractPhotoDepth(
+    options: NSDictionary,
+    resolver: @escaping RCTPromiseResolveBlock,
+    rejecter: @escaping RCTPromiseRejectBlock
+  ) {
+    guard let imagePath = options["imagePath"] as? String else {
+      rejecter("invalid-options", "imagePath must be a string", nil)
+      return
+    }
+    guard let outputPath = options["outputPath"] as? String else {
+      rejecter("invalid-options", "outputPath must be a string", nil)
+      return
+    }
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        resolver(try PhotoDepthSidecar.extract(
+          fromImageAtPath: imagePath,
+          toSidecarPath: outputPath))
+      } catch let err as PhotoDepthSidecarError {
+        switch err {
+        case .readFailed(let path):
+          rejecter("read-failed", "Could not read image: \(path)", err)
+        case .writeFailed(let path):
+          rejecter("write-failed", "Could not write depth sidecar: \(path)", err)
+        case .malformed(let message):
+          rejecter("malformed-depth", message, err)
+        }
+      } catch {
+        rejecter("unknown", "Unexpected extractPhotoDepth failure: \(error)", error)
+      }
+    }
+  }
+
   /// v0.15 debug — compute the max-inscribed rectangle of `imagePath`
   /// without modifying it.  Resolves
   /// `{ x, y, width, height, imageWidth, imageHeight }`.

@@ -49,6 +49,7 @@ type CameraCaptureResult =
       uri: string;
       width: number;
       height: number;
+      depthPath?: string; // iOS-only, captureDepthData opt-in
       warnings: CaptureWarning[];
     }
   // VARIANT 2 — panorama succeeded
@@ -108,6 +109,12 @@ import type { PanoramaCaptureResult } from 'react-native-image-stitcher';
   ratio). Don't depend on them in production.
 - `keyframePaths` / `captureOrientation` — **iOS-only**. The on-disk
   keyframe paths and the device orientation at capture.
+- `depthPath` — **iOS-only**, present when the [`captureDepthData`
+  prop](./photo-depth.md) is on, the capture was **non-AR**, and the
+  device delivered a depth map. Points at the `<photo>.depth.bin`
+  sidecar saved next to `uri` (float32 metres + JSON header — see
+  [Photo depth sidecar](./photo-depth.md) for the format). Never
+  present on Android or for AR captures.
 
 ## Recommended `onCapture` handler
 

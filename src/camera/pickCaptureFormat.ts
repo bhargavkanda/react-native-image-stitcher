@@ -36,6 +36,12 @@ export interface FormatLike {
   videoHeight: number;
   maxFps: number;
   supportsVideoHdr: boolean;
+  /**
+   * iOS: whether AVFoundation can deliver an AVDepthData alongside stills
+   * on this format (`!supportedDepthDataFormats.isEmpty`).  Optional so
+   * plain fixtures / Android formats (always depth-less) stay assignable.
+   */
+  supportsDepthCapture?: boolean;
 }
 
 export interface PickFormatOptions {
@@ -66,6 +72,15 @@ export interface PickFormatOptions {
    * instead of chasing 120 fps at a lower resolution).  Default 60.
    */
   fpsTarget?: number;
+  /**
+   * Restrict to formats with `supportsDepthCapture` when any exist (the
+   * `captureDepthData` path — depth delivery silently produces nothing on a
+   * depth-less format).  Falls back to the full set when the device offers
+   * no depth format at all, so opting in never breaks capture on
+   * single-lens hardware.  Applied AFTER the aspect filter (WYSIWYG 4:3
+   * still wins) and BEFORE the photo cap.  Default off.
+   */
+  preferDepthCapture?: boolean;
 }
 
 const DEFAULT_MAX_PHOTO_LONG_EDGE = 4032;
@@ -103,11 +118,21 @@ export function pickCaptureFormat<F extends FormatLike>(
   const fourThree = formats.filter(matchesAspect);
   const base = fourThree.length > 0 ? fourThree : formats.slice();
 
+  // captureDepthData: among the aspect-matched formats, keep only the
+  // depth-capable ones when any exist — a depth-less format makes iOS
+  // depth delivery silently produce nothing.  No depth format on this
+  // device → fall through unchanged (graceful no-depth capture).
+  let depthBase = base;
+  if (opts.preferDepthCapture) {
+    const withDepth = base.filter((f) => f.supportsDepthCapture === true);
+    if (withDepth.length > 0) depthBase = withDepth;
+  }
+
   // Among those within the photo cap; if none fit, fall back to all (which
   // then resolves to the max-video format — never worse than today).
   const withinCap =
-    cap > 0 ? base.filter((f) => longEdge(f) <= cap) : base.slice();
-  const candidates = withinCap.length > 0 ? withinCap : base;
+    cap > 0 ? depthBase.filter((f) => longEdge(f) <= cap) : depthBase.slice();
+  const candidates = withinCap.length > 0 ? withinCap : depthBase;
 
   return candidates.slice().sort((a, b) => {
     if (preferHighFps) {

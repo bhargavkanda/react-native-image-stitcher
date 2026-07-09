@@ -28,6 +28,7 @@ import React, {
   useState,
 } from 'react';
 import {
+  Platform,
   StyleSheet,
   Text,
   View,
@@ -95,6 +96,18 @@ export interface CameraViewProps {
    * bigger.  Default off (keeps the 4032px cap for back-compat).
    */
   highResCapture?: boolean;
+  /**
+   * iOS: opt into AVDepthData delivery for stills, so `useCapture` can save
+   * a `<photo>.depth.bin` sidecar (see `extractPhotoDepth`).  Biases the
+   * format picker toward `supportsDepthCapture` formats and sets
+   * vision-camera's `enableDepthData`.  Depth only materialises when the
+   * MOUNTED DEVICE is depth-capable (a multi-lens virtual device or the
+   * LiDAR camera — the lens-driven `selectCaptureDevice` multicam pick
+   * qualifies; a plain single wide-angle does not).  No-op on Android and
+   * on depth-less devices/formats — capture proceeds without a sidecar.
+   * Default off (depth delivery adds per-shot latency).
+   */
+  captureDepthData?: boolean;
   /** Optional themed guidance banner.  Renders over the preview at the top. */
   guidance?: string;
   /** Extra style layer applied on top of the default full-screen layout. */
@@ -155,6 +168,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     isActive = true,
     video = false,
     highResCapture = false,
+    captureDepthData = false,
     guidance,
     style,
     cameraProps,
@@ -246,10 +260,14 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         maxPhotoLongEdge: highResCapture ? HIGH_RES_PHOTO_LONG_EDGE_CAP : PHOTO_LONG_EDGE_CAP,
         aspect: 4 / 3,
         preferHighFps: true,
+        // captureDepthData: keep only depth-capable 4:3 formats when the
+        // device has any — depth delivery on a depth-less format silently
+        // produces nothing.  Falls through unchanged on depth-less devices.
+        preferDepthCapture: captureDepthData && Platform.OS === 'ios',
       });
       return picked;
     },
-    [device, highResCapture],
+    [device, highResCapture, captureDepthData],
   );
 
   // Pin the session frame rate to the format's max, capped at 60.  Picking a
@@ -366,6 +384,14 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         // is set — quality mode adds latency that would hurt rapid panorama
         // keyframe grabs.
         {...(highResCapture ? { photoQualityBalance: 'quality' as const } : {})}
+        // iOS depth sidecar (captureDepthData): AVFoundation embeds the
+        // AVDepthData in the written JPEG; `useCapture` extracts it to a
+        // `<photo>.depth.bin` BEFORE the normaliseOrientation re-encode
+        // strips it.  vision-camera itself re-asserts this on every session
+        // reconfigure, so it survives prop-driven output rebuilds.
+        {...(captureDepthData && Platform.OS === 'ios'
+          ? { enableDepthData: true }
+          : {})}
         torch={flash === 'on' ? 'on' : 'off'}
         onError={handleVcError}
         {...cameraProps}

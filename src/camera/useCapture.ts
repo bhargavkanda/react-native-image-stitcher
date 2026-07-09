@@ -26,6 +26,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Platform } from 'react-native';
 import {
   Camera,
   useCameraDevice,
@@ -44,6 +45,7 @@ import {
 } from './selectCaptureDevice';
 import { runQualityCheck } from '../quality/runQualityCheck';
 import { normaliseOrientation } from '../quality/normaliseOrientation';
+import { extractPhotoDepth } from '../quality/extractPhotoDepth';
 import { toBareFilePath } from '../utils/paths';
 import {
   defaultPhotoFilename,
@@ -114,6 +116,18 @@ export interface UseCaptureOptions {
    * `preferredPhysicalDevice` path is used (backwards-compatible).
    */
   lens?: '1x' | '0.5x';
+  /**
+   * iOS: save the still's AVDepthData as a `<photo>.depth.bin` sidecar
+   * (float32 metres + JSON header; see `extractPhotoDepth`) and return its
+   * path as `CaptureResult.depthPath`.  Requires the mounted `<CameraView>`
+   * to also set `captureDepthData` (that's what turns on depth delivery and
+   * biases the format pick); this option adds the extraction leg, which
+   * MUST run before the orientation re-encode strips the embedded depth.
+   * Works on dual-camera iPhones (stereo disparity) and LiDAR models
+   * (absolute depth).  No-op on Android and on depth-less devices —
+   * `depthPath` is simply absent.  Default off.
+   */
+  captureDepthData?: boolean;
 }
 
 
@@ -217,9 +231,11 @@ export interface UseCaptureReturn {
 function makeCaptureResult(
   photo: PhotoFile,
   qualityReport: QualityReport | undefined,
+  depthPath?: string,
 ): CaptureResult {
   const capturedAt = new Date().toISOString();
   return {
+    ...(depthPath ? { depthPath } : {}),
     // The device UUID the host wants to identify this capture with is
     // app-specific.  We synthesise a deterministic ish value so the
     // host gets a placeholder; most hosts will swap it out for a uuid
@@ -254,6 +270,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     takePhotoOptions,
     preferredPhysicalDevice,
     lens,
+    captureDepthData = false,
   } = options;
 
   const cameraRef = useRef<Camera | null>(null);
@@ -400,6 +417,28 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
           flash,
           ...takePhotoOptions,
         });
+        // iOS depth sidecar — MUST run BEFORE normaliseOrientation below:
+        // the OpenCV re-encode strips the auxiliary depth image embedded by
+        // vision-camera's `enableDepthData`, so this is the only window to
+        // save it.  Failure/absence never blocks the capture — the sidecar
+        // is an advisory extra (`depthPath` simply stays unset).
+        let depthTmpPath: string | undefined;
+        if (captureDepthData && Platform.OS === 'ios') {
+          const depth = await extractPhotoDepth(
+            photo.path,
+            `${photo.path}.depth.bin`,
+          );
+          if (depth?.found) {
+            depthTmpPath = depth.sidecarPath ?? `${photo.path}.depth.bin`;
+          } else if (__DEV__ && depth) {
+            // eslint-disable-next-line no-console
+            console.log(
+              '[rnimagestitcher] captureDepthData: no depth in this capture '
+              + `(${depth.reason ?? 'unknown'}) — is the mounted device `
+              + 'depth-capable (dual-camera / LiDAR)?',
+            );
+          }
+        }
         // Bake EXIF rotation into pixels so the file on disk matches
         // what the operator just saw on the preview, regardless of
         // how downstream consumers handle EXIF.  Returns the
@@ -423,12 +462,30 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
         // vision-camera's auto-generated UUID-named tmp file).  The
         // move is performed via the `RNImageStitcherFileUtils` native
         // bridge — no peer-dep on `expo-file-system` etc.
+        let depthPath: string | undefined;
         try {
           const dstPath = callOptions?.outputPath
             ? toBareFilePath(callOptions.outputPath)
             : `${await getDefaultCaptureDir()}/${defaultPhotoFilename()}`;
           await moveFile(orientedPhoto.path, dstPath);
           orientedPhoto = { ...orientedPhoto, path: dstPath };
+          // Keep the depth sidecar NEXT TO the photo (`<photo>.depth.bin`)
+          // wherever it lands.  A sidecar move failure only drops the depth
+          // (advisory), never the capture.
+          if (depthTmpPath) {
+            const sidecarDst = `${dstPath}.depth.bin`;
+            try {
+              await moveFile(depthTmpPath, sidecarDst);
+              depthPath = sidecarDst;
+            } catch (sidecarErr) {
+              // eslint-disable-next-line no-console
+              console.warn(
+                '[rnimagestitcher] captureDepthData: failed to move the depth '
+                + `sidecar to ${sidecarDst}; continuing without depth.`,
+                sidecarErr,
+              );
+            }
+          }
         } catch (e) {
           throw new Error(
             'useCapture.takePhoto: failed to move captured photo to its '
@@ -441,7 +498,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
         if (enableQualityChecks && qualityThresholds) {
           report = await runQualityCheck(orientedPhoto.path, qualityThresholds);
         }
-        return makeCaptureResult(orientedPhoto, report);
+        return makeCaptureResult(orientedPhoto, report, depthPath);
       } finally {
         setIsCapturing(false);
         inFlightRef.current = null;
@@ -449,7 +506,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     })();
     inFlightRef.current = promise;
     return promise;
-  }, [flash, enableQualityChecks, qualityThresholds, takePhotoOptions]);
+  }, [flash, enableQualityChecks, qualityThresholds, takePhotoOptions, captureDepthData]);
 
   return {
     cameraRef,

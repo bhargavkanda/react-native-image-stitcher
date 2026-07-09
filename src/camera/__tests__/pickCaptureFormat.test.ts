@@ -134,3 +134,74 @@ describe('pickCaptureFormat — preferHighFps (smooth-preview opt-in)', () => {
     expect(chosen!.maxFps).toBe(120);
   });
 });
+
+describe('preferDepthCapture (captureDepthData format bias)', () => {
+  const withDepth = (fmt: FormatLike, supportsDepthCapture: boolean): FormatLike => ({
+    ...fmt,
+    supportsDepthCapture,
+  });
+
+  it('off → depth support is ignored (back-compat)', () => {
+    const formats = [
+      withDepth(f(4032, 3024, 3264, 2448, 30), false),
+      withDepth(f(4032, 3024, 1920, 1440, 30), true),
+    ];
+    const chosen = pickCaptureFormat(formats, { maxPhotoLongEdge: 4032 });
+    expect(chosen!.videoWidth).toBe(3264); // sharpest video wins as before
+  });
+
+  it('on → restricts to depth-capable formats when any exist', () => {
+    const formats = [
+      withDepth(f(4032, 3024, 3264, 2448, 30), false), // sharper video, no depth
+      withDepth(f(4032, 3024, 1920, 1440, 30), true),
+    ];
+    const chosen = pickCaptureFormat(formats, {
+      maxPhotoLongEdge: 4032,
+      preferDepthCapture: true,
+    });
+    expect(chosen!.supportsDepthCapture).toBe(true);
+    expect(chosen!.videoWidth).toBe(1920);
+  });
+
+  it('on + no depth format on the device → falls back unchanged (no capture break)', () => {
+    const formats = [
+      withDepth(f(4032, 3024, 3264, 2448, 30), false),
+      f(4032, 3024, 1920, 1440, 60), // field absent entirely (Android shape)
+    ];
+    const chosen = pickCaptureFormat(formats, {
+      maxPhotoLongEdge: 4032,
+      preferDepthCapture: true,
+    });
+    expect(chosen!.videoWidth).toBe(3264); // same pick as with the flag off
+  });
+
+  it('on → aspect still outranks depth (WYSIWYG 4:3 first)', () => {
+    const formats = [
+      // 16:9 depth-capable vs 4:3 depth-less: 4:3 wins, depth is dropped.
+      withDepth(f(4032, 2268, 3840, 2160, 30), true),
+      withDepth(f(4032, 3024, 3264, 2448, 30), false),
+    ];
+    const chosen = pickCaptureFormat(formats, {
+      maxPhotoLongEdge: 4032,
+      preferDepthCapture: true,
+    });
+    expect(chosen!.photoHeight).toBe(3024);
+    expect(chosen!.supportsDepthCapture).toBe(false);
+  });
+
+  it('on → the photo cap fallback keeps the depth restriction', () => {
+    const formats = [
+      withDepth(f(8064, 6048, 4032, 3024, 30), true), // depth but over cap
+      withDepth(f(4032, 3024, 3264, 2448, 30), false), // under cap, no depth
+    ];
+    const chosen = pickCaptureFormat(formats, {
+      maxPhotoLongEdge: 4032,
+      preferDepthCapture: true,
+    });
+    // No depth format fits the cap → cap falls back WITHIN the depth set
+    // (depth capture is the caller's explicit intent; the cap is a memory
+    // guard with an existing "never returns nothing" fallback).
+    expect(chosen!.supportsDepthCapture).toBe(true);
+    expect(chosen!.photoWidth).toBe(8064);
+  });
+});

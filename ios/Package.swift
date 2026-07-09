@@ -67,6 +67,10 @@ let package = Package(
       // that needs iOS-Simulator infrastructure to run.
       sources: [
         "QualityChecker.swift",
+        // PhotoDepthSidecar.swift — AVFoundation/ImageIO/CoreVideo only
+        // (no UIKit/React), so the sidecar container codec round-trips
+        // under `swift test` on macOS.
+        "PhotoDepthSidecar.swift",
         // KeyframeGate.swift depends on `KeyframeGateBridge` (ObjC
         // class in .mm) and `RNSARFramePose` (from a UIKit-using
         // Swift file), so it doesn't compile standalone under

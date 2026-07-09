@@ -234,6 +234,15 @@ for the full key list and defaults.
 | `showSettingsButton` | `boolean` | `false` | Show the gear button that opens the internal settings modal. Off by default so public consumers don't see it (absorbed into the header's right side when `headerTitle` is set). |
 | `style` | `StyleProp<ViewStyle>` | — | Style applied to the `Camera` root container. |
 
+## Photo depth sidecar (iOS)
+
+| Prop | Type | Default | Description |
+|---|---|---|---|
+| `captureDepthData` | `boolean` | `false` | **iOS, non-AR photo path.** Save each tap photo's `AVDepthData` as a `<photo>.depth.bin` sidecar (float32 metres + JSON header) and return its path as `depthPath` on the photo result. Stereo depth on dual-camera iPhones, LiDAR-backed absolute depth on Pro models. Silently yields no sidecar on Android, in AR capture, and on single-lens hardware. Adds per-shot latency while depth delivery runs. |
+
+See [Photo depth sidecar](./photo-depth.md) for the sidecar file format,
+device requirements, and consumption notes.
+
 ## Flash
 
 Controlled or uncontrolled. See [Flash & lenses](./flash-and-lenses.md).

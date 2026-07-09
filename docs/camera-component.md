@@ -117,6 +117,12 @@ corresponding `on*Change` callback.
 | `enablePanoramaMode` | `boolean` | `true` | Allow hold-to-pan panorama captures.  When `false`, holding the shutter is a no-op. |
 | `showSettingsButton` | `boolean` | `false` | Render the internal settings gear (top-right standalone, or absorbed into `CaptureHeader` if `headerTitle` is set).  Internal-tester surface — public consumers leave this off and ship their own settings UX. |
 
+### Photo depth sidecar (iOS, non-AR)
+
+| Prop | Type | Default | Purpose |
+|---|---|---|---|
+| `captureDepthData` | `boolean` | `false` | Save each non-AR tap photo's `AVDepthData` as a `<photo>.depth.bin` sidecar (float32 metres + JSON header) and return its path as `depthPath` on the photo result.  Stereo depth on dual-camera iPhones, LiDAR-backed absolute depth on Pro models.  No sidecar on Android, in AR capture, or on single-lens hardware — the capture itself is unaffected.  Format spec + consumption notes: `website/docs/photo-depth.md`. |
+
 ### Output destination
 
 | Prop | Type | Default | Purpose |
@@ -212,6 +218,7 @@ type CameraCaptureResult =
       uri: string;
       width: number;
       height: number;
+      depthPath?: string; // iOS-only, captureDepthData opt-in (photo-depth.md)
     }
   | {
       type: 'panorama';

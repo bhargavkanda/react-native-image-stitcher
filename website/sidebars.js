@@ -16,6 +16,7 @@ const sidebars = {
         'full-example',
         'orientation',
         'flash-and-lenses',
+        'photo-depth',
         'recipes',
         'dev-testing',
       ],

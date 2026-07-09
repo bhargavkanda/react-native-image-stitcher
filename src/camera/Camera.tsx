@@ -207,6 +207,15 @@ export type CameraCaptureResult =
       uri: string;
       width: number;
       height: number;
+      /**
+       * iOS `captureDepthData` (NON-AR captures only) — path of the
+       * `<photo>.depth.bin` depth sidecar saved next to the photo
+       * (float32 metres row-major + JSON header with dims/intrinsics;
+       * format spec in `website/docs/photo-depth.md`).  Absent on
+       * Android, in AR capture, on depth-less devices/formats, and
+       * whenever the opt-in is off.
+       */
+      depthPath?: string;
       /** Non-fatal quality signals (empty when none). */
       warnings: CaptureWarning[];
     }
@@ -797,6 +806,23 @@ export interface CameraProps {
    */
   highResCapture?: boolean;
   /**
+   * iOS, NON-AR photo path — save each tap photo's AVDepthData as a
+   * `<photo>.depth.bin` sidecar (float32 metres row-major + JSON header
+   * with dims/intrinsics) and return its path as `depthPath` on the
+   * photo {@link CameraCaptureResult}.  Enables vision-camera depth
+   * delivery, biases the format pick toward `supportsDepthCapture`
+   * formats, and extracts the depth BEFORE the orientation re-encode
+   * strips it.  Produces stereo disparity-derived depth on dual-camera
+   * iPhones and absolute LiDAR-backed depth on Pro models; requires the
+   * mounted device to be depth-capable (the lens-driven multicam
+   * selection qualifies — a plain single wide-angle does not).  Silently
+   * yields no sidecar on Android, in AR capture, and on depth-less
+   * hardware.  Distinct from `enableDepth` above, which is the AR
+   * frame-processor's per-frame depth.  Default `false` (depth delivery
+   * adds per-shot latency).
+   */
+  captureDepthData?: boolean;
+  /**
    * Opt in to per-frame AR anchors (`CameraFrame.arAnchors` — detected
    * planes / images).  Default `false`.
    */
@@ -1342,6 +1368,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     arFrameProcessor,
     enableDepth,
     highResCapture,
+    captureDepthData,
     enableAnchors,
     enableMesh,
     enableFeaturePoints,
@@ -1601,6 +1628,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     cameraPosition: 'back',
     enableQualityChecks: false,
     lens,
+    // iOS depth sidecar for non-AR tap photos; the matching <CameraView
+    // captureDepthData> below turns on depth delivery + the format bias.
+    captureDepthData,
   });
 
   // ── Lens chip availability ──────────────────────────────────────
@@ -1957,6 +1987,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       let uri: string;
       let width: number;
       let height: number;
+      // iOS captureDepthData — set by the NON-AR branch only (the AR
+      // path never produces a depth sidecar).
+      let depthPath: string | undefined;
       // Compose the destination path BEFORE the capture so both the
       // AR and non-AR branches land at the same predictable location.
       // If `outputDir` is set, the lib lands the file at a host-
@@ -2029,9 +2062,18 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         uri = result.compressedUri;
         width = result.width;
         height = result.height;
+        depthPath = result.depthPath;
       }
 
-      onCapture?.({ ok: true, type: 'photo', uri, width, height, warnings: [] });
+      onCapture?.({
+        ok: true,
+        type: 'photo',
+        uri,
+        width,
+        height,
+        ...(depthPath ? { depthPath } : {}),
+        warnings: [],
+      });
     } catch (err) {
       const e = err instanceof CameraError
         ? err
@@ -2676,6 +2718,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           ref={visionCameraRef}
           device={capture.device}
           isActive
+          // iOS depth sidecar for tap photos (non-AR only): turns on
+          // vision-camera depth delivery + the depth-capable format bias;
+          // useCapture (threaded above) extracts the sidecar before the
+          // orientation re-encode.
+          captureDepthData={captureDepthData}
           // High-res still capture (document scanning): raises the photo cap so
           // the non-AR tap photo uses the device's largest 4:3 still (e.g.
           // 12.5 MP), while the 4:3 video/preview the frame-processor runs on is

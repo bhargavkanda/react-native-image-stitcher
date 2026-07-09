@@ -82,4 +82,11 @@ export interface CaptureResult {
   qualityReport?: QualityReport;
   /** Device metadata at capture time */
   deviceMetadata: DeviceMetadata;
+  /**
+   * iOS `captureDepthData` — path of the `<photo>.depth.bin` sidecar
+   * (float32 metres + JSON header; see `extractPhotoDepth`) saved next to
+   * `compressedUri`.  Absent on Android, on depth-less devices/formats,
+   * and whenever the opt-in is off.
+   */
+  depthPath?: string;
 }

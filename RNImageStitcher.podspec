@@ -55,8 +55,11 @@ Pod::Spec.new do |s|
   # below; they just don't get pulled into the umbrella.
   s.public_header_files = ['ios/Sources/**/*.h']
 
-  # Frameworks shipped with iOS itself — no binary cost.
-  s.frameworks = ['Accelerate', 'CoreImage', 'UIKit', 'ARKit']
+  # Frameworks shipped with iOS itself — no binary cost.  AVFoundation +
+  # ImageIO back the captureDepthData sidecar extraction (AVDepthData from
+  # the photo's auxiliary image).
+  s.frameworks = ['Accelerate', 'CoreImage', 'UIKit', 'ARKit',
+                  'AVFoundation', 'ImageIO']
 
   s.dependency 'React-Core'
 
