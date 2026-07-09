@@ -56,6 +56,7 @@ import {
   StyleSheet,
   Text,
   View,
+  findNodeHandle,
   useWindowDimensions,
   type StyleProp,
   type ViewStyle,
@@ -97,6 +98,12 @@ import {
   type PanoramaPropOverrides,
 } from './buildPanoramaInitialSettings';
 import { isLowMemDevice } from './lowMemDevice';
+import {
+  getExposureBurstNativeModule,
+  setExposureBurstArmed,
+  type ExposureBurstOptions,
+  type ExposureBurstResult,
+} from './exposureBurst';
 import {
   getPreviewFrameGrabberModule,
   usePreviewFrameGrab,
@@ -324,6 +331,15 @@ export type CameraErrorCode =
   | 'STITCH_LOW_QUALITY'
   | 'STITCH_OOM'
   | 'OUTPUT_WRITE_FAILED'
+  /**
+   * v0.22 — `captureExposureBurst` was rejected or failed: called in AR
+   * mode (the burst drives vision-camera's session, which isn't mounted
+   * under ARKit/ARCore), called mid-panorama / mid-photo, manual
+   * exposure unsupported on the device, the native module/plugin is
+   * missing, or the capture itself timed out or errored.  The message
+   * says which; the underlying native error (if any) is on `.cause`.
+   */
+  | 'EXPOSURE_BURST_FAILED'
   /**
    * v0.22 — `captureTorchPair` was rejected or failed.  The message
    * ALWAYS starts with one of these stable reason slugs (a colon
@@ -1066,6 +1082,61 @@ export interface CameraHandle extends AROverlayMethods {
   takePhoto(): Promise<void>;
 
   /**
+   * v0.22.0 — capture N (default 3) CONSECUTIVE video-stream frames at a
+   * FIXED SHORT exposure (default 2 ms, ISO raised to compensate), saved
+   * as JPEGs, restoring auto-exposure afterwards.  **Non-AR mode only** —
+   * rejects with `CameraError('EXPOSURE_BURST_FAILED')` in AR capture
+   * (ARKit/ARCore own the camera there; vision-camera's session, which
+   * this drives, isn't mounted), and also while a panorama, photo, or
+   * {@link captureTorchPair} is in flight (the burst's dark frames /
+   * manual exposure would contaminate them).  The exclusion is mutual:
+   * shutter taps and panorama starts are likewise rejected while a
+   * burst holds the session (they'd capture at the 2 ms manual
+   * exposure), surfacing through the normal `onCapture`/`onError`
+   * channels.
+   *
+   * ## What it's for
+   *
+   * Display-refresh / PWM rolling-shutter **banding probing** (anti-
+   * screen-spoof): at ≤2 ms exposure a real scene photographs uniformly,
+   * while an emissive display (LCD/OLED showing a photo of the scene)
+   * refreshes top-to-bottom and imprints horizontal luminance bands on a
+   * rolling-shutter sensor.  A consumer row-mean-FFTs the frames over its
+   * region of interest to decide screen-vs-real; that analysis is
+   * intentionally out of scope here — this is only the capture primitive.
+   *
+   * ## Output
+   *
+   * Frames are saved from the camera VIDEO stream (single-integration —
+   * still-photo pipelines run multi-frame fusion that averages the
+   * banding away) in SENSOR-NATIVE orientation with no rotation and no
+   * EXIF tag: image rows are sensor rows, the axis banding runs along.
+   * Dimensions are stream-bound: Android's frame-processor stream is
+   * typically 640×480, iOS delivers the pinned 4:3 video format — see
+   * {@link ExposureBurstResult.width}.  Result carries the applied
+   * exposure/ISO and per-frame timestamps so the consumer can verify
+   * the frames are truly consecutive.
+   *
+   * ## Platform notes
+   *
+   *   - iOS: `AVCaptureDevice.setExposureModeCustom(duration:iso:)` on
+   *     the same device vision-camera streams from (public API); frames
+   *     are gated on the exposure-applied sync timestamp.
+   *   - Android: CameraX `Camera2CameraControl` interop (AE off +
+   *     `SENSOR_EXPOSURE_TIME` + `SENSOR_SENSITIVITY`) on vision-camera's
+   *     running session.  Devices whose camera lacks manual-sensor
+   *     support (`CONTROL_AE_MODE_OFF` unavailable) reject with a clear
+   *     message.  A few frames are skipped after applying exposure (no
+   *     per-frame AE actuals are observable through CameraX).
+   *
+   * Requires the lib's default non-AR frame processor (or a host worklet
+   * composed via `useStitcherWorklet`) to be mounted — the burst taps
+   * frames through it.  Hosts that replaced the frame processor without
+   * composing `stitcher.call` get a timeout rejection.
+   */
+  captureExposureBurst(options?: ExposureBurstOptions): Promise<ExposureBurstResult>;
+
+  /**
    * v0.22.0 — capture a fast PREVIEW-FRAME pair across a torch flip
    * (torch-differential probe v3): grab a video-stream frame with the
    * torch off → drive the torch ON → wait `settleMs` (default 250 ms)
@@ -1087,9 +1158,8 @@ export interface CameraHandle extends AROverlayMethods {
    *
    * Both frames are written SENSOR-ORIENTED through the identical
    * encode path, so they are mutually aligned — which is all a
-   * pair-differential scorer needs.  Files land in an OS-evictable app
-   * temp dir (`rnis-torchpair-*.jpg`; Android `cacheDir`, iOS
-   * `NSTemporaryDirectory()`); the CALLER owns deleting them (they are
+   * pair-differential scorer needs.  Files land in the app cache dir
+   * (`rnis-torchpair-*.jpg`); the CALLER owns deleting them (they are
    * probe artifacts, not captures — nothing else references them).
    *
    * ## Interactions
@@ -1720,6 +1790,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // far below (after the refs/state it closes over), so the imperative handle
   // can't reference it directly without a TDZ error — the ref bridges that.
   const handleTapRef = useRef<(() => Promise<void>) | null>(null);
+  // Same ref-bridge for the imperative `captureExposureBurst` (declared
+  // far below, next to `handleTap`, for the same TDZ reason).
+  const captureExposureBurstRef = useRef<
+    ((options?: ExposureBurstOptions) => Promise<ExposureBurstResult>) | null
+  >(null);
   // And for the imperative `captureTorchPair` (same TDZ reason).
   const captureTorchPairRef = useRef<
     ((options?: CaptureTorchPairOptions) => Promise<TorchPairResult>) | null
@@ -1740,6 +1815,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     clearOverlays: () => arViewRef.current?.clearOverlays(),
     raycast: () => arViewRef.current?.raycast() ?? Promise.resolve(null),
     takePhoto: () => handleTapRef.current?.() ?? Promise.resolve(),
+    captureExposureBurst: (options?: ExposureBurstOptions) =>
+      captureExposureBurstRef.current?.(options)
+      ?? Promise.reject(new CameraError(
+        'EXPOSURE_BURST_FAILED',
+        'captureExposureBurst called before <Camera> finished mounting.',
+      )),
     captureTorchPair: (options?: CaptureTorchPairOptions) =>
       captureTorchPairRef.current?.(options)
       ?? Promise.reject(new CameraError(
@@ -2063,10 +2144,43 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     }
   }, [incrementalState?.acceptedCount, isNonAR, imuGate]);
 
+  // ── Anti-spoof probe in-flight latches ──────────────────────────
+  // Declared ABOVE the shutter handlers AND both probe implementations
+  // (captureExposureBurst / captureTorchPair, further down) because
+  // mutual exclusion here is a full matrix, not pairwise: each probe
+  // rejects while the other runs, and the CAPTURE paths (handleTap /
+  // startCapture) reject while either probe holds camera state — a
+  // burst pins the session at a 2 ms manual exposure for up to its
+  // timeout, and a torch pair both forces the torch on and swaps the
+  // frame processor out from under the stitcher.  Each probe's own
+  // implementation owns setting/clearing its latch.
+  const exposureBurstInFlightRef = useRef<Promise<ExposureBurstResult> | null>(null);
+  const torchPairActiveRef = useRef(false);
+  /** True while either probe owns the camera (see the block comment). */
+  const probeInFlight = useCallback(
+    () => exposureBurstInFlightRef.current != null || torchPairActiveRef.current,
+    [],
+  );
+
   // ── Shutter handlers ────────────────────────────────────────────
 
   const handleTap = useCallback(async () => {
     if (!enablePhotoMode || shutterDisabled) return;
+    if (probeInFlight()) {
+      // Report through the standard capture channels (v0.16 contract:
+      // every capture attempt surfaces via onCapture) instead of a
+      // silent drop — the probe windows are short (torch pair ≲1 s,
+      // burst ≤ its timeout), so "retry in a moment" is actionable.
+      const e = new CameraError(
+        'PHOTO_CAPTURE_FAILED',
+        'Photo capture rejected: an anti-spoof probe (exposure burst / '
+        + 'torch pair) is in flight — its manual-exposure / torch state '
+        + 'would corrupt the photo.  Retry once it settles.',
+      );
+      onError?.(e);
+      onCapture?.({ ok: false, type: 'photo', error: e, warnings: [] });
+      return;
+    }
     try {
       let uri: string;
       let width: number;
@@ -2171,7 +2285,118 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       onError?.(e);
       onCapture?.({ ok: false, type: 'photo', error: e, warnings: [] });
     }
-  }, [enablePhotoMode, shutterDisabled, isAR, capture, outputDir, onCapture, onError]);
+  }, [enablePhotoMode, shutterDisabled, probeInFlight, isAR, capture, outputDir, onCapture, onError]);
+
+  // ── captureExposureBurst — fixed-short-exposure frame burst ──────
+  // See the CameraHandle docstring for the contract.  Orchestration
+  // only — the heavy lifting (manual exposure on vision-camera's
+  // session, per-frame gating, JPEG encode, auto-exposure restore)
+  // lives in the RNISExposureBurst native module + the
+  // `rnis_exposure_burst_sink` frame-processor plugin; this wrapper
+  // guards the states the burst must not run in, arms the worklet-side
+  // frame tap, and composes the output directory.  Its in-flight latch
+  // (`exposureBurstInFlightRef`) is declared up with the shutter
+  // handlers — see the probe-latch block comment there.
+  const captureExposureBurst = useCallback(
+    async (options?: ExposureBurstOptions): Promise<ExposureBurstResult> => {
+      // Single-flight: mirror `useCapture.takePhoto` — a second call
+      // while one is running returns the in-flight promise (the native
+      // side would reject a concurrent burst anyway).
+      if (exposureBurstInFlightRef.current) {
+        return exposureBurstInFlightRef.current;
+      }
+      if (isAR) {
+        throw new CameraError(
+          'EXPOSURE_BURST_FAILED',
+          'captureExposureBurst is non-AR only: AR capture mounts '
+          + 'ARKit/ARCore (which own the camera), not the vision-camera '
+          + 'session this burst drives.  Toggle to non-AR capture first.',
+        );
+      }
+      if (statusPhase !== 'idle') {
+        throw new CameraError(
+          'EXPOSURE_BURST_FAILED',
+          `captureExposureBurst rejected: a panorama capture is ${statusPhase}. `
+          + 'The burst\'s deliberately dark frames would feed the same '
+          + 'frame-processor stream the stitcher ingests.',
+        );
+      }
+      if (capture.isCapturing) {
+        throw new CameraError(
+          'EXPOSURE_BURST_FAILED',
+          'captureExposureBurst rejected: a photo capture is in flight '
+          + '(its auto-exposure metering would fight the manual exposure).',
+        );
+      }
+      if (torchPairActiveRef.current) {
+        throw new CameraError(
+          'EXPOSURE_BURST_FAILED',
+          'captureExposureBurst rejected: a torch pair is in flight — '
+          + 'the pair holds the frame processor the burst taps frames '
+          + 'through, and the burst\'s manual exposure would corrupt '
+          + 'the pair\'s torch differential.',
+        );
+      }
+      const native = getExposureBurstNativeModule();
+      if (native == null) {
+        throw new CameraError(
+          'EXPOSURE_BURST_FAILED',
+          'RNISExposureBurst native module is not registered.  Rebuild '
+          + 'the host app against the latest pod/Gradle install.',
+        );
+      }
+      const deviceId = capture.device?.id;
+      const viewTag = visionCameraRef.current != null
+        ? findNodeHandle(visionCameraRef.current)
+        : null;
+      if (deviceId == null || viewTag == null) {
+        throw new CameraError(
+          'EXPOSURE_BURST_FAILED',
+          'captureExposureBurst rejected: the vision-camera view is not '
+          + 'mounted yet (no device / view handle).  Wait for the preview '
+          + 'to be live before probing.',
+        );
+      }
+      const burstDir = `${
+        outputDir
+          ? toBareFilePath(outputDir).replace(/\/$/, '')
+          : await getDefaultCaptureDir()
+      }/exposure-burst-${Date.now()}`;
+
+      const promise = (async () => {
+        // Arm the worklet-side tap for the duration of the native call.
+        // The native controller does the precise gating; the shared
+        // value only exists so idle frames don't pay a plugin call.
+        setExposureBurstArmed(true);
+        try {
+          return await native.capture({
+            viewTag,
+            deviceId,
+            frameCount: options?.frameCount ?? 3,
+            exposureDurationMs: options?.exposureDurationMs ?? 2,
+            iso: options?.iso ?? -1,
+            quality: options?.quality ?? 85,
+            outputDir: burstDir,
+            timeoutMs: options?.timeoutMs ?? 5000,
+          });
+        } catch (err) {
+          throw err instanceof CameraError
+            ? err
+            : new CameraError(
+              'EXPOSURE_BURST_FAILED',
+              err instanceof Error ? err.message : String(err),
+              err,
+            );
+        } finally {
+          setExposureBurstArmed(false);
+          exposureBurstInFlightRef.current = null;
+        }
+      })();
+      exposureBurstInFlightRef.current = promise;
+      return promise;
+    },
+    [isAR, statusPhase, capture, outputDir],
+  );
 
   // ── captureTorchPair — fast preview-frame pair across a torch flip ─
   // See the CameraHandle docstring for the contract.  Orchestration
@@ -2189,9 +2414,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // While true, the grab worklet is attached IN PLACE OF the regular
   // non-AR frame processor (restored in the finally below).
   const [torchPairAttached, setTorchPairAttached] = useState(false);
-  // Synchronous single-flight latch — a double-call lands before the
-  // state above commits; the ref doesn't lag.
-  const torchPairActiveRef = useRef(false);
+  // The pair's synchronous single-flight latch (`torchPairActiveRef`)
+  // is declared up with the shutter handlers — see the probe-latch
+  // block comment there (the capture paths and the burst read it too).
   // Live AR-mode mirror so the post-settle recheck sees a mid-flight
   // AR toggle (the callback's closed-over `isAR` is stale across its
   // own awaits).  Render-assigned, same pattern as handleTapRef.
@@ -2228,6 +2453,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         throw fail(
           'busy: a photo capture is in flight (its flash/AE would '
           + 'contaminate the pair).',
+        );
+      }
+      if (exposureBurstInFlightRef.current) {
+        throw fail(
+          'busy: an exposure burst is in flight (the pair would swap '
+          + 'out the frame processor the burst taps frames through).',
         );
       }
       if (!capture.deviceHasTorch) {
@@ -2337,6 +2568,26 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // line is the item-5 auto-finalize timer scheduled right after
   // `setRecordingStartedAt`.
   const startCapture = useCallback(async () => {
+    // Guard here rather than only in handleHoldStart: the
+    // rotate-to-landscape resume effect re-enters via startCaptureRef
+    // AFTER an arbitrary delay (the user rotating), so a probe started
+    // during the rotate prompt would otherwise slip past a
+    // hold-start-only check.  A burst pins the session at a 2 ms
+    // manual exposure (near-black keyframes); a torch pair has the
+    // stitcher's frame processor swapped out entirely (zero ingest)
+    // and flips the torch mid-pan.
+    if (probeInFlight()) {
+      onError?.(
+        new CameraError(
+          'PANORAMA_START_FAILED',
+          'Panorama start rejected: an anti-spoof probe (exposure burst '
+          + '/ torch pair) is in flight — its manual-exposure / '
+          + 'frame-processor state would corrupt the opening keyframes.  '
+          + 'Retry once it settles.',
+        ),
+      );
+      return;
+    }
     try {
       // 2026-05-23 (race fix) — synchronously clear thumbnails +
       // engine state at the top of startCapture, BEFORE awaiting
@@ -2443,12 +2694,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     onError,
     maxPanDurationMs,
     clearPanTimer,
+    probeInFlight,
   ]);
 
   // Bridge the latest `handleTap` to the imperative `takePhoto()` (declared
   // above the imperative handle, so it can't be referenced there directly).
   // Assigning a ref during render is the canonical "latest callback" pattern.
   handleTapRef.current = handleTap;
+  captureExposureBurstRef.current = captureExposureBurst;
   captureTorchPairRef.current = captureTorchPair;
 
   // Keep the ref current so the auto-finalize timer + the rotate-resume

@@ -46,6 +46,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture-free worklet the lib swaps in as the frame processor only
   while a pair is in flight (`video` is always on in non-AR, so the
   swap is a worklet rebind, not a session reconfig).
+- **`CameraHandle.captureExposureBurst(options?)` — fixed-short-exposure
+  frame burst (refresh-banding probe primitive).**  Captures N
+  (default 3) CONSECUTIVE video-stream frames at a manual short
+  exposure (default 2 ms; ISO raised to compensate), saves them as
+  JPEGs, restores auto-exposure, and resolves
+  `{ frames, width, height, exposureDurationMs, iso, timestampsNs }`
+  (per-frame timestamps let the consumer verify the frames are truly
+  consecutive).  At ≤2 ms a real scene photographs uniformly while an
+  emissive display imprints horizontal rolling-shutter bands a
+  consumer can row-mean-FFT over its region of interest — the
+  analysis is intentionally NOT part of this lib; this is only the
+  capture primitive.  Non-AR mode only: rejects with the new
+  `CameraError` code `EXPOSURE_BURST_FAILED` in AR capture and while
+  a panorama / photo / torch-pair capture is in flight — and the
+  exclusion is a full matrix, in BOTH directions: the two probes
+  reject each other, and shutter taps / panorama starts are rejected
+  (via the normal `onCapture`/`onError` channels) while either probe
+  holds camera state, since a burst pins a 2 ms manual exposure and a
+  torch pair swaps the frame processor + forces the torch.  Frames are saved
+  SENSOR-ORIENTED (rows = sensor rows = the banding axis; no
+  rotation, no effective EXIF orientation) at the frame-processor
+  stream's resolution (Android ImageAnalysis is typically 640×480 —
+  observed on the Galaxy A35, where the whole flow is verified
+  end-to-end — while iOS delivers the pinned 4:3 video format; 480
+  sensor rows comfortably resolve refresh banding), and
+  from the VIDEO stream on purpose — still-photo pipelines run
+  multi-frame fusion (Smart HDR / Deep Fusion / vendor merges) that
+  averages the banding phases away.  Manual exposure drives
+  vision-camera's running session without forking it:
+    - iOS: `AVCaptureDevice(uniqueID: device.id)` +
+      `setExposureModeCustom(duration:iso:)` — public AVFoundation
+      (the JS `device.id` IS the `AVCaptureDevice.uniqueID`); frames
+      are gated on the exact exposure-applied sync timestamp, and ISO
+      defaults to the live AE operating point scaled to the new
+      duration.
+    - Android: vision-camera 4.7.3 is CameraX-based, so the manual
+      exposure rides the public `Camera2CameraControl` interop
+      (`CONTROL_AE_MODE_OFF` + `SENSOR_EXPOSURE_TIME` +
+      `SENSOR_SENSITIVITY` merged into the live repeating request),
+      reached via two reflected private fields
+      (`CameraView.cameraSession` → `CameraSession.camera`; kept
+      rename-safe in minified consumer builds by the new
+      `consumer-rules.pro`).  Cameras without `CONTROL_AE_MODE_OFF`
+      (no manual-sensor capability) reject with a clear message; a
+      few frames are skipped after applying exposure since CameraX
+      exposes no per-frame AE actuals (ISO therefore defaults to a
+      fixed 800, clamped — pass `iso` to override).
+  New exported types: `ExposureBurstOptions` / `ExposureBurstResult`.
+  Internals: `RNISExposureBurst` module + `rnis_exposure_burst_sink`
+  vision-camera plugin on both platforms; the lib's stitcher worklet
+  taps frames to the sink only while a burst is armed (module-level
+  shared value → one shared-value read per idle frame), so hosts that
+  compose `useStitcherWorklet().call` get burst support automatically.
 
 ## [0.21.0] — 2026-07-03
 

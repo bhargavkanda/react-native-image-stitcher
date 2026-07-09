@@ -127,6 +127,10 @@ import type {
 } from 'react-native-vision-camera';
 
 import type { CameraFrame } from './CameraFrame';
+import {
+  EXPOSURE_BURST_SINK_PLUGIN,
+  exposureBurstArmed,
+} from '../camera/exposureBurst';
 
 /**
  * Frames the lib's stitching worklet accepts.  Accepting either a
@@ -253,6 +257,36 @@ export function useStitcherWorklet(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // v0.22.0 — exposure-burst frame sink (see `../camera/exposureBurst`).
+  // Acquired with the same retry loop as the flow-gate plugin above.
+  // The worklet body forwards frames to it ONLY while the module-level
+  // `exposureBurstArmed` shared value is set (armed by
+  // `Camera.captureExposureBurst` for the sub-second burst window), so
+  // the idle per-frame cost is a single shared-value read.
+  const [burstPlugin, setBurstPlugin] = useState<FrameProcessorPlugin | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    const tryAcquire = () => {
+      if (cancelled) return;
+      const p = VisionCameraProxy.initFrameProcessorPlugin(
+        EXPOSURE_BURST_SINK_PLUGIN,
+        {},
+      );
+      if (p != null) {
+        setBurstPlugin(p);
+        return;
+      }
+      timerId = setTimeout(tryAcquire, 16);
+    };
+    tryAcquire();
+    return () => {
+      cancelled = true;
+      if (timerId != null) clearTimeout(timerId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Shared values (worklet ↔ JS thread) ─────────────────────────
   const sharedYaw = useSharedValue(0);
   const sharedPitch = useSharedValue(0);
@@ -334,6 +368,22 @@ export function useStitcherWorklet(
   // `useFrameProcessor` worklet body call it without a thread hop.
   const call = useCallback((frame: StitcherWorkletInput) => {
     'worklet';
+    // v0.22.0 — exposure-burst frame tap.  MUST run before the
+    // flow-gate plugin's null check AND before the eval-throttle: the
+    // burst needs EVERY producer-thread frame (consecutive frames are
+    // part of its contract), while the stitching path below is free to
+    // throttle.  Gated on the module-level shared value so the idle
+    // cost is one read per frame; the native controller does the
+    // precise gating (exposure-applied timestamp, frame count) and
+    // no-ops on calls outside a burst window.  AR frames can't reach
+    // here in practice (the AR check below would be first) — but the
+    // burst is a non-AR-only feature either way, and `<Camera>`
+    // rejects `captureExposureBurst` in AR mode before arming.
+    if ((frame as CameraFrame).source !== 'ar'
+        && exposureBurstArmed.value === 1
+        && burstPlugin != null) {
+      burstPlugin.call(frame as unknown as Frame, {});
+    }
     if (plugin == null) return;
 
     // v0.11.1 — AR-source frames are stitched natively by the AR-
@@ -402,6 +452,7 @@ export function useStitcherWorklet(
     });
   }, [
     plugin,
+    burstPlugin,
     sharedFrameCounter,
     sharedEvalEveryN,
     sharedYaw,
