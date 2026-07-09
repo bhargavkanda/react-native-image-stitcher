@@ -289,7 +289,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
             c /= Float(quad.count)
             return Self.makeQuadOutlineNode(
                 relCorners: quad.map { $0 - c },
-                color: overlay.color, label: overlay.label)
+                color: overlay.color, label: overlay.label,
+                shape: overlay.shape)
         }
         return Self.makeBillboardNode(
             sizeMeters: overlay.sizeMeters, color: overlay.color,
@@ -388,21 +389,41 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         return node
     }
 
-    /// A THICK 3D outline through corners expressed RELATIVE to the anchor
+    /// Edge-cylinder radii per overlay shape.  `.outline` keeps the original
+    /// prominent 4 mm stroke.  `.box` — the SDK's "filled + subtle border"
+    /// intent (see RNISAROverlay shape docs; Android draws a 4 *screen*-px
+    /// stroke + 22% fill) — uses 1.5 mm: at the 0.5–0.8 m shelf stand-off
+    /// that subtends ≈5–8 px, matching Android instead of the ≈15–25 px the
+    /// 4 mm cylinders read as (reported as "box edges got so much thicker").
+    private static let outlineEdgeRadius: CGFloat = 0.004
+    private static let boxEdgeRadius: CGFloat = 0.0015
+    /// `.box` fill opacity — Android parity (BOX_FILL_ALPHA 0x38 ≈ 22%).
+    private static let boxFillAlpha: CGFloat = 0.22
+
+    /// A 3D outline through corners expressed RELATIVE to the anchor
     /// origin (anchor at the quad centroid).  Each edge is a thin cylinder —
     /// SceneKit `.line` primitives are always 1px and unscalable, so a visible
-    /// outline must be real geometry.  Optional camera-facing label at centre.
+    /// outline must be real geometry.  `shape == .box` additionally renders
+    /// the translucent face the SDK asked for (previously ignored on iOS —
+    /// Android has always honoured it) and thins the edges to the border
+    /// role.  Optional camera-facing label at centre.
     private static func makeQuadOutlineNode(
         relCorners: [simd_float3],
         color: UIColor,
-        label: String?
+        label: String?,
+        shape: RNISAROverlay.Shape
     ) -> SCNNode {
         let node = SCNNode()
         node.renderingOrder = 1000
+        let radius = shape == .box ? boxEdgeRadius : outlineEdgeRadius
         let n = relCorners.count
+        if shape == .box, let fill = quadFillNode(relCorners: relCorners, color: color) {
+            node.addChildNode(fill)
+        }
         for i in 0..<n {
             if let edge = edgeCylinder(
-                from: relCorners[i], to: relCorners[(i + 1) % n], color: color) {
+                from: relCorners[i], to: relCorners[(i + 1) % n], color: color,
+                radius: radius) {
                 node.addChildNode(edge)
             }
         }
@@ -416,16 +437,51 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         return node
     }
 
-    /// A thin cylinder (≈4 mm) spanning two points — one edge of a quad
-    /// outline.  SCNCylinder's axis is +Y, so we centre it at the midpoint and
+    /// The translucent face of a `.box` quad: the polygon fan-triangulated
+    /// about corner 0 (corners arrive in loop order from the detector).
+    /// Double-sided so the fill reads from either side of the plane; no
+    /// depth interaction, matching the edges.
+    private static func quadFillNode(
+        relCorners: [simd_float3], color: UIColor
+    ) -> SCNNode? {
+        let n = relCorners.count
+        guard n >= 3 else { return nil }
+        let source = SCNGeometrySource(
+            vertices: relCorners.map { SCNVector3($0.x, $0.y, $0.z) })
+        var indices: [Int32] = []
+        indices.reserveCapacity((n - 2) * 3)
+        for i in 1..<(n - 1) {
+            indices.append(0)
+            indices.append(Int32(i))
+            indices.append(Int32(i + 1))
+        }
+        let element = SCNGeometryElement(indices: indices, primitiveType: .triangles)
+        let geom = SCNGeometry(sources: [source], elements: [element])
+        let mat = SCNMaterial()
+        mat.diffuse.contents = color.withAlphaComponent(boxFillAlpha)
+        mat.lightingModel = .constant
+        mat.isDoubleSided = true
+        mat.writesToDepthBuffer = false
+        mat.readsFromDepthBuffer = false
+        geom.firstMaterial = mat
+        let node = SCNNode(geometry: geom)
+        // Under the edges/label (parent order is not a z-guarantee in
+        // SceneKit — renderingOrder is).
+        node.renderingOrder = 999
+        return node
+    }
+
+    /// A thin cylinder spanning two points — one edge of a quad outline.
+    /// SCNCylinder's axis is +Y, so we centre it at the midpoint and
     /// rotate +Y onto the edge direction.
     private static func edgeCylinder(
-        from a: simd_float3, to b: simd_float3, color: UIColor
+        from a: simd_float3, to b: simd_float3, color: UIColor,
+        radius: CGFloat
     ) -> SCNNode? {
         let d = b - a
         let len = simd_length(d)
         guard len > 1e-5 else { return nil }
-        let cyl = SCNCylinder(radius: 0.004, height: CGFloat(len))
+        let cyl = SCNCylinder(radius: radius, height: CGFloat(len))
         let mat = SCNMaterial()
         mat.diffuse.contents = color
         mat.lightingModel = .constant

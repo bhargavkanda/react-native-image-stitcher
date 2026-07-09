@@ -47,8 +47,10 @@ public struct RNISAROverlay: Equatable {
         /// Stroked outline only (default) — a polygon connecting the
         /// projected corners.
         case outline
-        /// Stroked box (same as outline for a 4-corner quad; for a
-        /// `worldPosition` marker, a small square billboard).
+        /// FILLED box: a semi-transparent face (~22% alpha, Android
+        /// `BOX_FILL_ALPHA` parity) behind a thin border — the TS contract
+        /// (AROverlay.ts `shape`) both platforms honour for `worldQuad`
+        /// overlays. For a `worldPosition` marker, a small square billboard.
         case box
     }
 
