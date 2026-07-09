@@ -125,7 +125,7 @@ public final class ExposureBurstController: NSObject {
       return
     }
 
-    guard let device = AVCaptureDevice(uniqueID: deviceId) else {
+    guard let mounted = AVCaptureDevice(uniqueID: deviceId) else {
       lock.unlock()
       rejecter(
         "EXPOSURE_BURST_DEVICE_NOT_FOUND",
@@ -133,6 +133,27 @@ public final class ExposureBurstController: NSObject {
         nil,
       )
       return
+    }
+    // VIRTUAL devices (Back Dual/Dual Wide/Triple Camera — any multi-cam
+    // mount) reject `setExposureModeCustom` themselves; the exposure must
+    // be driven on the ACTIVE PHYSICAL constituent instead — the session
+    // streams from that constituent, so the custom exposure lands on the
+    // very frames the sink taps. (Field finding 2026-07-09: a 'Back Dual
+    // Camera' mount rejected every burst.)
+    let device: AVCaptureDevice
+    if mounted.isVirtualDevice {
+      if #available(iOS 15.0, *),
+         let active = mounted.activePrimaryConstituent {
+        device = active
+      } else {
+        // Fallback: the wide-angle constituent (the 1x member every
+        // virtual back device contains and streams from at 1x+).
+        device = mounted.constituentDevices.first {
+          $0.deviceType == .builtInWideAngleCamera
+        } ?? mounted
+      }
+    } else {
+      device = mounted
     }
     guard device.isExposureModeSupported(.custom) else {
       lock.unlock()

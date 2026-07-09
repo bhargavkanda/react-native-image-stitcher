@@ -79,6 +79,16 @@ export async function extractPhotoDepth(
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn('[capture-sdk] extractPhotoDepth failed', err);
-    return null;
+    // A NATIVE THROW is not "module missing" — report found:false WITH the
+    // error as the reason so the result's `depthUnavailableReason` names
+    // the real failure ('native-error(…)') instead of the misleading
+    // 'native-module-missing' a bare null produces upstream.
+    return {
+      found: false,
+      reason:
+        'native-error('
+        + String((err as Error)?.message ?? err).slice(0, 100)
+        + ')',
+    };
   }
 }

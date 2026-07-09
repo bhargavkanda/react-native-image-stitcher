@@ -165,11 +165,24 @@ export function selectCaptureDevice<D extends DeviceLike>(
     back.find((d) => !d.isMultiCam && hasLens(d, 'ultra-wide-angle-camera')) ??
     null;
 
+  // "Simplest wide" order — fewest physical lenses first — so a PLAIN
+  // physical wide-angle beats a virtual multi-lens device (Back Dual
+  // Camera etc.) as the 1× mount. The preference below always PROMISED
+  // this; the code took the first torch-bearer in enumeration order,
+  // which could mount a VIRTUAL device: custom exposure (the
+  // exposure-burst probe) is rejected there, and depth-biased formats
+  // shift the 1× FOV (field finding 2026-07-09: an iPhone mounted
+  // 'Back Dual Camera' — "1x appearing a lot more zoomed in" + every
+  // burst rejected).
+  const simplestWideFirst = [...wideDevices].sort(
+    (a, b) => a.physicalDevices.length - b.physicalDevices.length,
+  );
+
   if (wideDevices.length > 0 && ultraWide != null) {
     // Prefer the simplest wide device (fewest extra lenses) with a torch
     // as the 1× mount, so 1× flash works.  Falls back to any wide device.
     const primary =
-      wideDevices.find((d) => d.hasTorch) ?? wideDevices[0];
+      simplestWideFirst.find((d) => d.hasTorch) ?? simplestWideFirst[0];
     return {
       device: primary,
       ultraWideDevice: ultraWide,
@@ -181,7 +194,9 @@ export function selectCaptureDevice<D extends DeviceLike>(
 
   // ── 3. Wide-angle only (no ultra-wide reachable on this device).
   const wideOnly =
-    wideDevices.find((d) => d.hasTorch) ?? wideDevices[0] ?? back[0];
+    simplestWideFirst.find((d) => d.hasTorch)
+    ?? simplestWideFirst[0]
+    ?? back[0];
   return {
     device: wideOnly,
     ultraWideDevice: null,
