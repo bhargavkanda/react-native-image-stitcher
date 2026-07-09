@@ -97,6 +97,12 @@ import {
   type PanoramaPropOverrides,
 } from './buildPanoramaInitialSettings';
 import { isLowMemDevice } from './lowMemDevice';
+import {
+  getPreviewFrameGrabberModule,
+  usePreviewFrameGrab,
+  type CaptureTorchPairOptions,
+  type TorchPairResult,
+} from './usePreviewFrameGrab';
 import { useCapture } from './useCapture';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
 import { useContentRotation } from './useContentRotation';
@@ -318,6 +324,28 @@ export type CameraErrorCode =
   | 'STITCH_LOW_QUALITY'
   | 'STITCH_OOM'
   | 'OUTPUT_WRITE_FAILED'
+  /**
+   * v0.22 — `captureTorchPair` was rejected or failed.  The message
+   * ALWAYS starts with one of these stable reason slugs (a colon
+   * follows), so consumers can branch without string-matching prose:
+   *
+   *   - `unavailable:` native module / vc plugin missing (host binary
+   *     predates v0.22), or the vision-camera preview isn't mounted.
+   *     The canonical "fall back to a still-photo pair" signal.
+   *   - `busy:` another torch pair, a panorama, or a photo capture is
+   *     in flight.
+   *   - `ar-mode:` called in AR capture (ARKit/ARCore own the torch
+   *     and the camera; the pair drives vision-camera's session).
+   *   - `no-torch:` the active device has no torch unit (ultra-wide
+   *     0.5× lens on most hardware, front camera).
+   *   - `torch-in-use:` the host/user torch is already ON — frame A
+   *     would be torch-lit, so no valid differential exists (and the
+   *     lib must not turn the user's torch off).
+   *   - `source-changed:` the capture source flipped to AR mid-pair.
+   *   - `grab-failed:` a native frame grab rejected (timeout / encode
+   *     error); the native error is on `.cause`.
+   */
+  | 'TORCH_PAIR_FAILED'
   /**
    * Vision-camera surfaced a runtime error that isn't a known
    * transient lifecycle event (those are swallowed inside the SDK's
@@ -1036,6 +1064,51 @@ export interface CameraHandle extends AROverlayMethods {
    * settles (success or handled error reported through `onCapture`).
    */
   takePhoto(): Promise<void>;
+
+  /**
+   * v0.22.0 — capture a fast PREVIEW-FRAME pair across a torch flip
+   * (torch-differential probe v3): grab a video-stream frame with the
+   * torch off → drive the torch ON → wait `settleMs` (default 250 ms)
+   * → grab a second frame → restore the torch → resolve both as small
+   * JPEGs (default ≤1280 px long edge).  **Non-AR mode only.**
+   *
+   * ## What it's for
+   *
+   * Anti-screen-spoof torch differentials.  A still-photo pair takes
+   * ~1 s between shots — long enough for auto-exposure to partially
+   * compensate for the torch, shrinking the differential — and each
+   * still passes through the full capture+re-encode pipeline.  Preview
+   * frames land ~150-300 ms apart, faster than AE convergence, with no
+   * still pipeline: a real (reflective) scene lifts under the torch,
+   * an emissive display doesn't.  Scoring is intentionally out of
+   * scope — this is only the capture primitive.
+   *
+   * ## Output
+   *
+   * Both frames are written SENSOR-ORIENTED through the identical
+   * encode path, so they are mutually aligned — which is all a
+   * pair-differential scorer needs.  Files land in an OS-evictable app
+   * temp dir (`rnis-torchpair-*.jpg`; Android `cacheDir`, iOS
+   * `NSTemporaryDirectory()`); the CALLER owns deleting them (they are
+   * probe artifacts, not captures — nothing else references them).
+   *
+   * ## Interactions
+   *
+   * While a pair is in flight (~600 ms) the lib swaps its internal
+   * grab worklet in as the vision-camera frame processor, suspending
+   * the regular non-AR processor (first-party stitching driver or a
+   * host-composed worklet) for that window; panorama capture is never
+   * affected because the pair rejects unless the camera is idle.
+   * Unlike `captureExposureBurst`, a REENTRANT call rejects (`busy:`)
+   * instead of returning the in-flight promise — each caller must own
+   * its result files exclusively (the first caller deletes them).
+   *
+   * Rejects with `CameraError('TORCH_PAIR_FAILED', …)` whose message
+   * starts with a stable reason slug — see the code's docstring.
+   * `unavailable:` is the feature-detect signal for consumers that
+   * fall back to a still-photo pair on older binaries.
+   */
+  captureTorchPair(options?: CaptureTorchPairOptions): Promise<TorchPairResult>;
 }
 
 
@@ -1647,6 +1720,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // far below (after the refs/state it closes over), so the imperative handle
   // can't reference it directly without a TDZ error — the ref bridges that.
   const handleTapRef = useRef<(() => Promise<void>) | null>(null);
+  // And for the imperative `captureTorchPair` (same TDZ reason).
+  const captureTorchPairRef = useRef<
+    ((options?: CaptureTorchPairOptions) => Promise<TorchPairResult>) | null
+  >(null);
 
   // v0.20.0 — AR overlay imperative handle.  `<Camera>` itself renders no
   // overlay layer; the overlay methods forward to the mounted
@@ -1663,6 +1740,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     clearOverlays: () => arViewRef.current?.clearOverlays(),
     raycast: () => arViewRef.current?.raycast() ?? Promise.resolve(null),
     takePhoto: () => handleTapRef.current?.() ?? Promise.resolve(),
+    captureTorchPair: (options?: CaptureTorchPairOptions) =>
+      captureTorchPairRef.current?.(options)
+      ?? Promise.reject(new CameraError(
+        'TORCH_PAIR_FAILED',
+        'unavailable: captureTorchPair called before <Camera> finished '
+        + 'mounting.',
+      )),
   }), []);
 
   // Effect that does the async transition work whenever the settled
@@ -2089,6 +2173,162 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     }
   }, [enablePhotoMode, shutterDisabled, isAR, capture, outputDir, onCapture, onError]);
 
+  // ── captureTorchPair — fast preview-frame pair across a torch flip ─
+  // See the CameraHandle docstring for the contract.  Orchestration
+  // only — the one-shot frame grabs live in the RNISPreviewFrameGrabber
+  // native module + the `grab_preview_frame` frame-processor plugin;
+  // this wrapper guards the states a pair must not run in, swaps
+  // `previewGrab`'s minimal worklet in as the frame processor for the
+  // flight, and drives the torch through the same vision-camera torch
+  // prop the flash button uses.
+  const previewGrab = usePreviewFrameGrab();
+  // 'on' overrides the user-facing flash state at the <CameraView>
+  // torch prop for the pair's settle window.  Never applied in AR mode
+  // (effectiveFlash's forced-'off' must win there).
+  const [torchPairFlash, setTorchPairFlash] = useState<'on' | null>(null);
+  // While true, the grab worklet is attached IN PLACE OF the regular
+  // non-AR frame processor (restored in the finally below).
+  const [torchPairAttached, setTorchPairAttached] = useState(false);
+  // Synchronous single-flight latch — a double-call lands before the
+  // state above commits; the ref doesn't lag.
+  const torchPairActiveRef = useRef(false);
+  // Live AR-mode mirror so the post-settle recheck sees a mid-flight
+  // AR toggle (the callback's closed-over `isAR` is stale across its
+  // own awaits).  Render-assigned, same pattern as handleTapRef.
+  const isARNowRef = useRef(isAR);
+  isARNowRef.current = isAR;
+
+  const captureTorchPair = useCallback(
+    async (options?: CaptureTorchPairOptions): Promise<TorchPairResult> => {
+      const fail = (message: string, cause?: unknown): CameraError =>
+        new CameraError('TORCH_PAIR_FAILED', message, cause);
+      // Guards, cheapest-first.  Reason slugs are the stable contract —
+      // see the TORCH_PAIR_FAILED docstring on CameraErrorCode.
+      if (torchPairActiveRef.current) {
+        throw fail(
+          'busy: a torch pair is already in flight (reentrant calls are '
+          + 'rejected, not shared — each caller must own its result '
+          + 'files exclusively).',
+        );
+      }
+      if (isAR) {
+        throw fail(
+          'ar-mode: captureTorchPair is non-AR only — ARKit/ARCore own '
+          + 'the camera and torch in AR capture.  Toggle to non-AR '
+          + 'capture first.',
+        );
+      }
+      if (statusPhase !== 'idle') {
+        throw fail(
+          `busy: a panorama capture is ${statusPhase} — the pair would `
+          + 'hijack the frame-processor stream the stitcher ingests.',
+        );
+      }
+      if (capture.isCapturing) {
+        throw fail(
+          'busy: a photo capture is in flight (its flash/AE would '
+          + 'contaminate the pair).',
+        );
+      }
+      if (!capture.deviceHasTorch) {
+        throw fail(
+          'no-torch: the active camera device has no torch unit (the '
+          + 'ultra-wide 0.5× lens on most hardware).  Switch to the 1× '
+          + 'lens first.',
+        );
+      }
+      if ((controlledFlash ?? internalFlash) === 'on') {
+        throw fail(
+          'torch-in-use: the torch is already on — frame A would be '
+          + 'torch-lit, so no valid differential exists (and the lib '
+          + "must not turn the user's torch off).",
+        );
+      }
+      const native = getPreviewFrameGrabberModule();
+      if (native == null) {
+        throw fail(
+          'unavailable: RNISPreviewFrameGrabber native module is not '
+          + 'registered.  Rebuild the host app against the latest '
+          + 'pod/Gradle install.',
+        );
+      }
+      if (previewGrab.frameProcessor == null) {
+        throw fail(
+          'unavailable: the grab_preview_frame vision-camera plugin did '
+          + 'not load (vision-camera missing, or the host binary '
+          + 'predates it).',
+        );
+      }
+      const settleMs = Math.min(2000, Math.max(80, options?.settleMs ?? 250));
+      const maxLongEdge = options?.maxLongEdge ?? 1280;
+      const quality = options?.quality ?? 80;
+
+      torchPairActiveRef.current = true;
+      setTorchPairAttached(true);
+      try {
+        // Grab A (torch off).  Generous window: the worklet swap has to
+        // commit and the first frame reach the plugin inside it.
+        const off = await native
+          .grab({ maxLongEdge, quality, timeoutMs: 3000 })
+          .catch((err: unknown) => {
+            throw fail(
+              'grab-failed: torch-off frame: '
+              + (err instanceof Error ? err.message : String(err)),
+              err,
+            );
+          });
+        const offResolvedAt = Date.now();
+
+        // Torch ON + settle.  The await yields to the event loop, so
+        // React commits the flash-prop flip at the top of the window;
+        // the LED ramp (~50-150 ms) eats settle budget by design —
+        // captureTorchPair's whole point is staying inside AE's
+        // convergence time.
+        setTorchPairFlash('on');
+        await new Promise((r) => setTimeout(r, settleMs));
+        if (isARNowRef.current) {
+          throw fail(
+            'source-changed: the capture source flipped to AR mid-pair; '
+            + 'the torch-on frame would be garbage.',
+          );
+        }
+
+        // Grab B (torch on).  Worklet already attached → tight window.
+        // (On failure the torch-off JPEG is orphaned in the cache dir —
+        // OS-evictable, and the next successful pair doesn't reuse it.)
+        const on = await native
+          .grab({ maxLongEdge, quality, timeoutMs: 1500 })
+          .catch((err: unknown) => {
+            throw fail(
+              'grab-failed: torch-on frame: '
+              + (err instanceof Error ? err.message : String(err)),
+              err,
+            );
+          });
+
+        return {
+          offUri: toFileUri(off.path),
+          onUri: toFileUri(on.path),
+          width: on.width,
+          height: on.height,
+          gapMs: Date.now() - offResolvedAt,
+        };
+      } finally {
+        setTorchPairFlash(null);
+        setTorchPairAttached(false);
+        torchPairActiveRef.current = false;
+      }
+    },
+    [
+      isAR,
+      statusPhase,
+      capture,
+      controlledFlash,
+      internalFlash,
+      previewGrab.frameProcessor,
+    ],
+  );
+
   // ── startCapture — the "actually start recording" logic ─────────
   // Extracted from `handleHoldStart` so the rotate-to-landscape gate
   // (item 1/2) can DEFER it: a portrait Mode-A hold latches
@@ -2209,6 +2449,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // above the imperative handle, so it can't be referenced there directly).
   // Assigning a ref during render is the canonical "latest callback" pattern.
   handleTapRef.current = handleTap;
+  captureTorchPairRef.current = captureTorchPair;
 
   // Keep the ref current so the auto-finalize timer + the rotate-resume
   // effect can invoke the latest `startCapture` without taking it as a
@@ -2737,7 +2978,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           // works either way.  Pattern matches AuditCaptureScreen.tsx
           // which has run on `video` (true) for months without issue.
           video
-          flash={effectiveFlash}
+          // v0.22.0 — captureTorchPair's in-flight torch override wins
+          // over the user-facing flash state (guards upstream ensure it
+          // is only ever set from flash-off, torch-capable, non-AR
+          // states; the !isAR check is belt-and-braces for a mid-pair
+          // AR flip, where effectiveFlash's forced-'off' must win).
+          flash={torchPairFlash != null && !isAR ? torchPairFlash : effectiveFlash}
           // v0.13.2 — in multi-cam mode the lens is switched via zoom
           // on a single mounted device (0.5× → ultra-wide end, 1× →
           // wide baseline).  undefined in standalone/wide-only modes
@@ -2749,9 +2995,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           // in non-AR mode; AR mode uses ARCameraView which doesn't
           // expose a frame-processor seam.  See
           // docs/f8-frame-processor-plan.md.
-          cameraProps={effectiveFrameProcessor != null
-            ? { frameProcessor: effectiveFrameProcessor }
-            : undefined}
+          // v0.22.0 — while a captureTorchPair is in flight, the grab
+          // worklet REPLACES the regular processor (video stays true,
+          // so the swap is a worklet rebind, not a session reconfig);
+          // the regular processor is restored in the pair's finally.
+          cameraProps={torchPairAttached && previewGrab.frameProcessor != null
+            ? { frameProcessor: previewGrab.frameProcessor }
+            : effectiveFrameProcessor != null
+              ? { frameProcessor: effectiveFrameProcessor }
+              : undefined}
           onError={(err) => {
             // CameraView already filters known transient lifecycle
             // errors (screen-lock, etc.) before invoking this.  What

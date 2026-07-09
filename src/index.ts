@@ -40,6 +40,13 @@ export type {
   Warper,
   FramesDroppedInfo,
 } from './camera/Camera';
+// v0.22.0 — options/result for `CameraHandle.captureTorchPair`
+// (fast preview-frame pair across a torch flip for torch-differential
+// anti-screen-spoof probes).
+export type {
+  CaptureTorchPairOptions,
+  TorchPairResult,
+} from './camera/usePreviewFrameGrab';
 // Non-fatal capture quality signals carried on `CameraCaptureResult.warnings`.
 export type {
   CaptureWarning,

@@ -27,6 +27,11 @@ module.exports = {
   // a transitive import we don't want a hard error.
   moduleNameMapper: {
     '^react-native$': '<rootDir>/jest.mocks/react-native.js',
+    // Worklets-core needs its native JSI runtime; Camera.tsx's import
+    // chain now evaluates module-scope worklets calls (exposureBurst
+    // armed flag), so map it to a `.value`-shaped stub.
+    '^react-native-worklets-core$':
+      '<rootDir>/jest.mocks/react-native-worklets-core.js',
   },
   transform: {
     '^.+\\.tsx?$': [

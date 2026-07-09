@@ -46,7 +46,12 @@ jest.mock('react-native-sensors', () => ({
   setUpdateIntervalForType: jest.fn(),
   SensorTypes: { accelerometer: 'accelerometer' },
 }));
-jest.mock('react-native-worklets-core', () => ({ Worklets: {} }));
+jest.mock('react-native-worklets-core', () => ({
+  // Camera.tsx's import chain evaluates Worklets.createSharedValue at
+  // MODULE SCOPE (exposureBurst.ts armed flag) — must be callable.
+  Worklets: { createSharedValue: (v: unknown) => ({ value: v }) },
+  useSharedValue: (v: unknown) => ({ value: v }),
+}));
 jest.mock('react-native-vision-camera', () => ({
   Camera: 'Camera',
   useCameraDevice: jest.fn(),
