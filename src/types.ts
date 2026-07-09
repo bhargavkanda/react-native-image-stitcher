@@ -89,4 +89,13 @@ export interface CaptureResult {
    * and whenever the opt-in is off.
    */
   depthPath?: string;
+  /**
+   * WHY `depthPath` is absent although `captureDepthData` was requested
+   * (iOS): the extractor's reason slug — `no-depth-aux` = the capture
+   * carried no auxiliary depth (typically a non-depth-capable mounted
+   * device); `native-module-missing` = the JS is newer than the installed
+   * binary.  Diagnostic only.  Absent when depth was produced or never
+   * requested.
+   */
+  depthUnavailableReason?: string;
 }

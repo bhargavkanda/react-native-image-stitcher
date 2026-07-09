@@ -229,6 +229,14 @@ export type CameraCaptureResult =
        * whenever the opt-in is off.
        */
       depthPath?: string;
+      /**
+       * WHY `depthPath` is absent although `captureDepthData` was
+       * requested (iOS non-AR): the extractor's reason slug
+       * (`no-depth-aux` = no auxiliary depth in the capture — typically
+       * a non-depth-capable mounted device; `native-module-missing` =
+       * JS newer than the installed binary).  Diagnostic only.
+       */
+      depthUnavailableReason?: string;
       /** Non-fatal quality signals (empty when none). */
       warnings: CaptureWarning[];
     }
@@ -2188,6 +2196,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // iOS captureDepthData — set by the NON-AR branch only (the AR
       // path never produces a depth sidecar).
       let depthPath: string | undefined;
+      let depthUnavailableReason: string | undefined;
       // Compose the destination path BEFORE the capture so both the
       // AR and non-AR branches land at the same predictable location.
       // If `outputDir` is set, the lib lands the file at a host-
@@ -2261,6 +2270,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         width = result.width;
         height = result.height;
         depthPath = result.depthPath;
+        depthUnavailableReason = result.depthUnavailableReason;
       }
 
       onCapture?.({
@@ -2270,6 +2280,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         width,
         height,
         ...(depthPath ? { depthPath } : {}),
+        ...(depthUnavailableReason ? { depthUnavailableReason } : {}),
         warnings: [],
       });
     } catch (err) {

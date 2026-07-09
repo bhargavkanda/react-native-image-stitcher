@@ -232,10 +232,12 @@ function makeCaptureResult(
   photo: PhotoFile,
   qualityReport: QualityReport | undefined,
   depthPath?: string,
+  depthUnavailableReason?: string,
 ): CaptureResult {
   const capturedAt = new Date().toISOString();
   return {
     ...(depthPath ? { depthPath } : {}),
+    ...(depthUnavailableReason ? { depthUnavailableReason } : {}),
     // The device UUID the host wants to identify this capture with is
     // app-specific.  We synthesise a deterministic ish value so the
     // host gets a placeholder; most hosts will swap it out for a uuid
@@ -423,6 +425,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
         // save it.  Failure/absence never blocks the capture — the sidecar
         // is an advisory extra (`depthPath` simply stays unset).
         let depthTmpPath: string | undefined;
+        let depthUnavailableReason: string | undefined;
         if (captureDepthData && Platform.OS === 'ios') {
           const depth = await extractPhotoDepth(
             photo.path,
@@ -430,13 +433,23 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
           );
           if (depth?.found) {
             depthTmpPath = depth.sidecarPath ?? `${photo.path}.depth.bin`;
-          } else if (__DEV__ && depth) {
-            // eslint-disable-next-line no-console
-            console.log(
-              '[rnimagestitcher] captureDepthData: no depth in this capture '
-              + `(${depth.reason ?? 'unknown'}) — is the mounted device `
-              + 'depth-capable (dual-camera / LiDAR)?',
-            );
+          } else {
+            // Surface WHY on the result (`depthUnavailableReason`): the
+            // silent-omission form left consumers staring at an absent
+            // `depthPath` with zero signal outside a dev console.
+            // `native-module-missing` = the JS is newer than the installed
+            // binary (extractPhotoDepth resolved null).
+            depthUnavailableReason = depth
+              ? depth.reason ?? 'no-depth-aux'
+              : 'native-module-missing';
+            if (__DEV__) {
+              // eslint-disable-next-line no-console
+              console.log(
+                '[rnimagestitcher] captureDepthData: no depth in this capture '
+                + `(${depthUnavailableReason}) — is the mounted device `
+                + 'depth-capable (dual-camera / LiDAR)?',
+              );
+            }
           }
         }
         // Bake EXIF rotation into pixels so the file on disk matches
@@ -498,7 +511,12 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
         if (enableQualityChecks && qualityThresholds) {
           report = await runQualityCheck(orientedPhoto.path, qualityThresholds);
         }
-        return makeCaptureResult(orientedPhoto, report, depthPath);
+        return makeCaptureResult(
+          orientedPhoto,
+          report,
+          depthPath,
+          depthUnavailableReason,
+        );
       } finally {
         setIsCapturing(false);
         inFlightRef.current = null;
