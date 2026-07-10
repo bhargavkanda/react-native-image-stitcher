@@ -19,6 +19,8 @@
 
 import { NativeModules } from 'react-native';
 
+import { toBareFilePath } from '../utils/paths';
+
 
 export interface ExtractPhotoDepthResult {
   /** True when a depth map was found and the sidecar was written. */
@@ -75,7 +77,14 @@ export async function extractPhotoDepth(
   if (!fn) return null;
 
   try {
-    return await fn({ imagePath, outputPath });
+    // Native bridges take BARE paths (src/utils/paths.ts): vision-camera's
+    // photo.path can carry the file:// scheme, and CGImageSource treats a
+    // scheme-prefixed "path" as an unreadable filename (field 2026-07-10:
+    // every extract rejected 'Could not read image: file:///…').
+    return await fn({
+      imagePath: toBareFilePath(imagePath),
+      outputPath: toBareFilePath(outputPath),
+    });
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn('[capture-sdk] extractPhotoDepth failed', err);

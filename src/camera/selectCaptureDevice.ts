@@ -93,14 +93,18 @@ export interface SelectCaptureDeviceOptions {
    * physical wide-angle never delivers it.  Effect on the pick:
    *   - multicam mode (virtual wide+ultra-wide) already qualifies — depth
    *     comes from the wide+uw overlap at FULL wide FOV.  Unchanged.
-   *   - standalone-uw / wide-only: the 1× primary becomes the FEWEST-LENS
-   *     virtual multi-cam containing the wide (typically the wide+tele
-   *     'Back Dual Camera') instead of the plain wide.  KNOWN TRADE: on a
-   *     wide+tele pair, stereo depth exists only in the lens-overlap
-   *     region, so depth-biased formats sit at roughly the TELE FOV — the
-   *     preview/capture is tighter than the plain wide.  Consumers opting
-   *     into depth accept this on such hardware (LiDAR / dual-wide phones
-   *     keep full FOV parity).
+   *   - standalone-uw / wide-only: the 1× primary becomes the best
+   *     depth-capable VIRTUAL device, ranked by the FOV its depth (and
+   *     depth-biased formats) actually cover — see `depthMountRank`:
+   *       1. wide-only virtual (`Back LiDAR Depth Camera`) — sensor depth
+   *          at the full wide FOV; nothing visible changes at 1×.
+   *       2. ultra-wide-containing virtual (Dual Wide / Triple) — the
+   *          stereo pair is uw+wide, whose overlap IS the wide FOV; 1×
+   *          still looks normal.
+   *       3. wide+tele virtual (`Back Dual Camera`) — LAST RESORT: the
+   *          overlap is the TELE FOV, so 1× reads ~2× tighter (field
+   *          finding 2026-07-10).  Only phones with no better depth
+   *          source pay this, knowingly.
    * Falls through to the normal pick when no depth-capable device exists.
    */
   preferDepth?: boolean;
@@ -198,23 +202,47 @@ export function selectCaptureDevice<D extends DeviceLike>(
   // lot more zoomed in").
   //
   // preferDepth INVERTS this for the primary only: AVDepthData needs a
-  // multi-lens mount, so the fewest-lens VIRTUAL wide-containing device
-  // wins instead (see SelectCaptureDeviceOptions.preferDepth for the
-  // FOV trade on wide+tele hardware). Depth capability DOMINATES torch
-  // there — a torch-bearing plain wide never delivers depth, so torch
-  // only tiebreaks within the virtuals. No virtual → plain pick as usual.
+  // virtual (multi-cam) mount, so the best depth-capable virtual wins
+  // instead. Rank = the FOV the depth actually covers (NOT lens count —
+  // lens count picked 'Back Dual Camera' over the full-FOV mounts and
+  // zoomed 1× to the tele overlap, field 2026-07-10):
+  //   0 — wide-only virtual (LiDAR Depth Camera): full wide FOV,
+  //       sensor depth.  A plain physical wide is isMultiCam=false, so
+  //       this cannot capture it.
+  //   1 — ultra-wide-containing virtual (Dual Wide / Triple): the depth
+  //       pair is uw+wide, overlap = the wide FOV.  Fewer lenses first
+  //       within the rank (Dual Wide over Triple — smaller session).
+  //   2 — wide+tele virtual: overlap = TELE FOV, the documented
+  //       last-resort trade.
+  // Rank DOMINATES torch (a torch-bearing worse-rank mount must not
+  // steal the pick); torch tiebreaks within the winning rank only.
+  // No virtual at all → plain pick as usual.
+  // PLAIN (non-virtual) before virtual, then fewest lenses: a wide-only
+  // VIRTUAL (LiDAR Depth Camera) ties a plain wide on lens count, and
+  // enumeration order must not hand the default 1× to a virtual mount.
   const simplestWideFirst = [...wideDevices].sort(
-    (a, b) => a.physicalDevices.length - b.physicalDevices.length,
+    (a, b) =>
+      (a.isMultiCam === b.isMultiCam ? 0 : a.isMultiCam ? 1 : -1)
+      || a.physicalDevices.length - b.physicalDevices.length,
   );
+  const depthMountRank = (d: DeviceLike): number => {
+    if (!hasLens(d, 'ultra-wide-angle-camera') && !hasLens(d, 'telephoto-camera')) {
+      return 0; // wide-only virtual = LiDAR-style
+    }
+    return hasLens(d, 'ultra-wide-angle-camera') ? 1 : 2;
+  };
   const pickPrimary = (): D | undefined => {
     if (opts.preferDepth) {
-      // filter() keeps the fewest-lens-first order: Dual before Triple —
-      // smaller session cost, same depth delivery.
-      const virtuals = simplestWideFirst.filter(
-        (d) => d.isMultiCam && d.physicalDevices.length >= 2,
-      );
-      const depthPick = virtuals.find((d) => d.hasTorch) ?? virtuals[0];
-      if (depthPick != null) return depthPick;
+      // Stable sort over the fewest-lens order keeps "fewer lenses
+      // first" as the within-rank tiebreak.
+      const virtuals = simplestWideFirst
+        .filter((d) => d.isMultiCam)
+        .sort((a, b) => depthMountRank(a) - depthMountRank(b));
+      if (virtuals.length > 0) {
+        const bestRank = depthMountRank(virtuals[0]);
+        const cohort = virtuals.filter((d) => depthMountRank(d) === bestRank);
+        return cohort.find((d) => d.hasTorch) ?? cohort[0];
+      }
     }
     return simplestWideFirst.find((d) => d.hasTorch) ?? simplestWideFirst[0];
   };

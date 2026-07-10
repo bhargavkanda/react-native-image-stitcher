@@ -172,9 +172,16 @@ enum PhotoDepthSidecar {
   ///   accuracy, quality, hasIntrinsics, validRatio, bytes }`.
   /// Throws `PhotoDepthSidecarError` only for real I/O failures.
   static func extract(
-    fromImageAtPath imagePath: String,
-    toSidecarPath outputPath: String
+    fromImageAtPath imagePathRaw: String,
+    toSidecarPath outputPathRaw: String
   ) throws -> [String: Any] {
+    // Every path-taking bridge in this library tolerates a file:// scheme
+    // (FileBridge, QualityChecker, …) — fileURLWithPath would otherwise
+    // treat the scheme as literal filename characters.
+    let imagePath = imagePathRaw.hasPrefix("file://")
+      ? String(imagePathRaw.dropFirst(7)) : imagePathRaw
+    let outputPath = outputPathRaw.hasPrefix("file://")
+      ? String(outputPathRaw.dropFirst(7)) : outputPathRaw
     let url = URL(fileURLWithPath: imagePath)
     guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
       throw PhotoDepthSidecarError.readFailed(imagePath)

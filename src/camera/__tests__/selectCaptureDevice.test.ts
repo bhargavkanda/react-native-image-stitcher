@@ -193,9 +193,10 @@ describe('selectCaptureDevice', () => {
 });
 
 describe('selectCaptureDevice preferDepth (captureDepthData device pick)', () => {
-  // iPhone-like enumeration where the wide+uw grouping is NOT zoomable
-  // (or absent) so the pick lands in standalone-uw: plain wide + plain
-  // ultra-wide + virtual Dual (wide+tele) + virtual Triple.
+  // iPhone-like enumeration: iOS virtual devices report factor-style
+  // zoom (minZoom 1.0 even when they contain the ultra-wide), so the
+  // multicam branch never matches and the pick lands in standalone-uw
+  // via the standalone ultra-wide.  Builders mirror the real lineup.
   const dualWideTele = (p: Partial<DeviceLike> = {}) =>
     dev({
       physicalDevices: ['wide-angle-camera', 'telephoto-camera'],
@@ -206,19 +207,77 @@ describe('selectCaptureDevice preferDepth (captureDepthData device pick)', () =>
       maxZoom: 15,
       ...p,
     });
+  // 'Back LiDAR Depth Camera': virtual, single wide constituent.
+  const lidarDepthCam = (p: Partial<DeviceLike> = {}) =>
+    dev({
+      physicalDevices: ['wide-angle-camera'],
+      isMultiCam: true,
+      hasTorch: true,
+      minZoom: 1,
+      neutralZoom: 1,
+      maxZoom: 6,
+      ...p,
+    });
 
-  it('standalone-uw: primary becomes the FEWEST-LENS virtual (Dual over Triple over plain wide)', () => {
+  it('16-Pro-like lineup: LiDAR virtual wins (full wide FOV + sensor depth)', () => {
     const plainWide = standaloneWide();
     const uw = standaloneUltraWide();
-    const dual = dualWideTele();
-    const triple = tripleCam({ minZoom: 1 }); // not zoom-reachable → no multicam mode
-    const sel = selectCaptureDevice([plainWide, uw, triple, dual], {
-      preferDepth: true,
-    });
+    const dualTele = dualWideTele();
+    const dualUwWide = dualWide({ minZoom: 1 }); // factor-style zoom → not multicam-reachable
+    const triple = tripleCam({ minZoom: 1 });
+    const lidar = lidarDepthCam();
+    // Apple enumerates Dual (w+tele) BEFORE the full-FOV mounts — order
+    // must not decide.
+    const sel = selectCaptureDevice(
+      [plainWide, uw, dualTele, dualUwWide, triple, lidar],
+      { preferDepth: true },
+    );
     expect(sel.mode).toBe('standalone-uw');
-    expect(sel.device).toBe(dual);
+    expect(sel.device).toBe(lidar);
     expect(sel.ultraWideDevice).toBe(uw); // 0.5× swap unchanged
     expect(sel.has0_5x).toBe(true);
+  });
+
+  it('no LiDAR: ultra-wide-containing virtual (uw+wide overlap = wide FOV) beats wide+tele', () => {
+    const plainWide = standaloneWide();
+    const uw = standaloneUltraWide();
+    const dualTele = dualWideTele(); // enumerated first — must still lose
+    const dualUwWide = dualWide({ minZoom: 1 });
+    const sel = selectCaptureDevice([plainWide, uw, dualTele, dualUwWide], {
+      preferDepth: true,
+    });
+    expect(sel.device).toBe(dualUwWide);
+  });
+
+  it('within the uw rank, fewer lenses win (Dual Wide over Triple)', () => {
+    const uw = standaloneUltraWide();
+    const triple = tripleCam({ minZoom: 1 });
+    const dualUwWide = dualWide({ minZoom: 1 });
+    const sel = selectCaptureDevice([uw, triple, dualUwWide], {
+      preferDepth: true,
+    });
+    expect(sel.device).toBe(dualUwWide);
+  });
+
+  it('wide+tele is the LAST RESORT: picked only when no full-FOV depth mount exists', () => {
+    const plainWide = standaloneWide();
+    const uw = standaloneUltraWide();
+    const dualTele = dualWideTele();
+    const sel = selectCaptureDevice([plainWide, uw, dualTele], {
+      preferDepth: true,
+    });
+    expect(sel.device).toBe(dualTele); // documented tele-FOV trade
+  });
+
+  it('rank DOMINATES torch: torchless LiDAR beats a torch-bearing wide+tele', () => {
+    const uw = standaloneUltraWide();
+    const dualTeleTorch = dualWideTele({ hasTorch: true });
+    const lidarNoTorch = lidarDepthCam({ hasTorch: false });
+    const sel = selectCaptureDevice([uw, dualTeleTorch, lidarNoTorch], {
+      preferDepth: true,
+    });
+    expect(sel.device).toBe(lidarNoTorch);
+    expect(sel.hasTorch).toBe(false); // honest: this mount can't flash
   });
 
   it('depth DOMINATES torch: torchless virtual beats a torch-bearing plain wide', () => {
@@ -229,14 +288,13 @@ describe('selectCaptureDevice preferDepth (captureDepthData device pick)', () =>
       preferDepth: true,
     });
     expect(sel.device).toBe(dualNoTorch);
-    expect(sel.hasTorch).toBe(false); // honest: this mount can't flash
   });
 
-  it('torch tiebreaks WITHIN virtuals (torch-bearing triple over torchless dual)', () => {
+  it('torch tiebreaks WITHIN a rank (torch-bearing triple over torchless dual-wide)', () => {
     const uw = standaloneUltraWide();
-    const dualNoTorch = dualWideTele({ hasTorch: false });
+    const dualUwWideNoTorch = dualWide({ minZoom: 1, hasTorch: false });
     const tripleTorch = tripleCam({ minZoom: 1, hasTorch: true });
-    const sel = selectCaptureDevice([uw, dualNoTorch, tripleTorch], {
+    const sel = selectCaptureDevice([uw, dualUwWideNoTorch, tripleTorch], {
       preferDepth: true,
     });
     expect(sel.device).toBe(tripleTorch);
@@ -273,7 +331,8 @@ describe('selectCaptureDevice preferDepth (captureDepthData device pick)', () =>
     const plainWide = standaloneWide();
     const uw = standaloneUltraWide();
     const dual = dualWideTele();
-    const sel = selectCaptureDevice([dual, plainWide, uw]);
+    const lidar = lidarDepthCam();
+    const sel = selectCaptureDevice([dual, lidar, plainWide, uw]);
     expect(sel.device).toBe(plainWide);
   });
 });
