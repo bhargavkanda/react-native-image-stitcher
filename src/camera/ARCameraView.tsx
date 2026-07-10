@@ -128,6 +128,17 @@ export interface ARCameraViewProps {
    */
   highResCapture?: boolean;
   /**
+   * Opt in to PANORAMA-QUALITY keyframes (Android).  Picks a larger ARCore
+   * CPU-image config (largest long-edge ≤ 1920 — e.g. the A35's 1920×1080
+   * over its tiny 640×480 sole-4:3 config) and lifts the keyframe encode
+   * budget 640 → 1280, so stitches stop being assembled from 0.3 MP tiles.
+   * Costs stitch memory (~4× pixels per keyframe) — pano flows only; DT /
+   * liveness sessions must not set it.  Default `false`.  No-op on iOS
+   * (keyframes are already saved at native resolution there) and on
+   * binaries older than the feature (optional-chained native call).
+   */
+  keyframeQualityCapture?: boolean;
+  /**
    * Opt in to per-frame AR anchor extraction (`CameraFrame.arAnchors` —
    * detected planes / augmented images).  Default `false`.
    */
@@ -320,6 +331,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       arFrameProcessor,
       enableDepth,
       highResCapture,
+      keyframeQualityCapture,
       enableAnchors,
       enableMesh,
       enableFeaturePoints,
@@ -436,6 +448,23 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
         | undefined;
       session?.setHighResCaptureEnabled?.(highResCapture === true);
     }, [highResCapture]);
+
+    // Pano keyframe quality (Android; see the prop doc).  Same optional-
+    // chained session-module route.  The CLEANUP resets the flag: the
+    // native side flips a process-global keyframe-encode budget, and a
+    // later NON-pano ARCameraView (DT capture) must never inherit 1280.
+    useEffect(() => {
+      const session = (NativeModules as Record<string, unknown>)
+        .RNSARSession as
+        | { setKeyframeQualityCaptureEnabled?(on: boolean): void }
+        | undefined;
+      session?.setKeyframeQualityCaptureEnabled?.(
+        keyframeQualityCapture === true,
+      );
+      return () => {
+        session?.setKeyframeQualityCaptureEnabled?.(false);
+      };
+    }, [keyframeQualityCapture]);
 
     // Push the plane-detection mode to native.  Unlike the extraction
     // config above this is a SESSION setting, so it routes through the

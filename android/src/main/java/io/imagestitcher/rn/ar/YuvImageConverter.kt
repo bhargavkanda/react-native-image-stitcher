@@ -21,6 +21,14 @@ import kotlin.math.roundToInt
  *  their ARCore 4:3 image resolution.  Matches the non-AR keyframe size. */
 private const val AR_KEYFRAME_MAX_LONG_EDGE = 640
 
+/** Keyframe-quality budget (px) — the lifted long edge applied while a
+ *  panorama session opts into `keyframeQualityCapture` (RNSARSession sets
+ *  {@link YuvImageConverter.keyframeMaxLongEdge}).  4× the pixel count of
+ *  the 640 default: chosen so a typical 10–15-keyframe pan stays inside
+ *  the stitch-memory envelope the 0.16.x OOM hardening was validated
+ *  against (device-validated on the A35 before shipping). */
+private const val AR_KEYFRAME_QUALITY_LONG_EDGE = 1280
+
 /**
  * Convert an ARCore `Image` (YUV_420_888) to a JPEG file on disk.
  *
@@ -58,6 +66,23 @@ private const val AR_KEYFRAME_MAX_LONG_EDGE = 640
  * responsible for that.
  */
 internal object YuvImageConverter {
+
+    /**
+     * Live keyframe long-edge budget — the DEFAULT `maxLongEdge` every
+     * keyframe encode reads (Kotlin default params evaluate at call time).
+     * RNSARSession flips it to {@link AR_KEYFRAME_QUALITY_LONG_EDGE} while
+     * a panorama session opts into `keyframeQualityCapture`, and restores
+     * 640 on opt-out/unmount — so DT/liveness sessions (which never opt
+     * in) always encode at the memory-cheap 640 budget.
+     */
+    @Volatile var keyframeMaxLongEdge: Int = AR_KEYFRAME_MAX_LONG_EDGE
+        private set
+
+    /** RNSARSession-only setter (single writer keeps the flips auditable). */
+    fun setKeyframeQuality(on: Boolean) {
+        keyframeMaxLongEdge =
+            if (on) AR_KEYFRAME_QUALITY_LONG_EDGE else AR_KEYFRAME_MAX_LONG_EDGE
+    }
 
     /**
      * Packed NV21 pixel data extracted from an ARCore `Image`.
@@ -219,7 +244,9 @@ internal object YuvImageConverter {
         // Long-edge clamp.  Default = AR keyframe budget (cheap, cross-device
         // consistent stitch memory).  Pass 0 to DISABLE — the takePhoto still
         // is the user's full-res photo and must NOT be downscaled to 640.
-        maxLongEdge: Int = AR_KEYFRAME_MAX_LONG_EDGE,
+        // Default reads the LIVE budget (640, or 1280 while a pano session
+        // opts into keyframeQualityCapture) — evaluated per call.
+        maxLongEdge: Int = keyframeMaxLongEdge,
     ): String? {
         val yuvImage = YuvImage(
             packed.nv21,

@@ -63,6 +63,7 @@ class RNSARSession(reactContext: ReactApplicationContext)
     /// captures at the device's highest ARCore CPU resolution.  Gated so
     /// generic AR / stitching consumers keep the cheap small-config streaming.
     @Volatile private var prefersHighResCapture = false
+    @Volatile private var prefersKeyframeQuality = false
     private val poseLog = mutableListOf<RNSARFramePose>()
     private val poseLogLock = ReentrantReadWriteLock()
 
@@ -1133,6 +1134,32 @@ class RNSARSession(reactContext: ReactApplicationContext)
     }
 
     /**
+     * Panorama keyframe QUALITY opt-in (`keyframeQualityCapture` prop on
+     * `<ARCameraView>`): picks a larger ARCore CPU-image config (largest
+     * long-edge ≤ 1920, aspect as tiebreak — see selectMatchingCameraConfig)
+     * and lifts the keyframe encoder's long-edge budget 640 → 1280.  The
+     * pano flows opt in; DT/liveness sessions never set it, so their frame
+     * costs stay at the cheap 640×480 default.  The ARCameraView effect
+     * resets it to false on unmount (single-camera app: no concurrent
+     * session can observe the global encoder budget mid-flip).
+     */
+    @ReactMethod
+    fun setKeyframeQualityCaptureEnabled(on: Boolean) {
+        if (prefersKeyframeQuality == on) return
+        prefersKeyframeQuality = on
+        io.imagestitcher.rn.ar.YuvImageConverter.setKeyframeQuality(on)
+        val session = sessionRef.get() ?: return
+        try {
+            session.pause()
+            selectMatchingCameraConfig(session)
+            session.resume()
+            Log.i(TAG, "setKeyframeQualityCaptureEnabled=$on; re-applied config to live session")
+        } catch (t: Throwable) {
+            Log.w(TAG, "setKeyframeQualityCaptureEnabled reconfig failed (ignoring): ${t.message}")
+        }
+    }
+
+    /**
      * Pick an ARCore camera config whose CPU image and GPU texture share
      * the same aspect ratio, so the preview (texture) and the captured /
      * stitched frames (acquireCameraImage) cover the SAME field of view.
@@ -1172,18 +1199,49 @@ class RNSARSession(reactContext: ReactApplicationContext)
             // need the 4:3 FOV, so the bigger 16:9 image wins for OCR.  Generic
             // AR / stitching keep the 4:3 + SMALLEST pick (max FOV, cheap stream
             // — keyframes downscale anyway).
-            val chosen = if (prefersHighResCapture) {
+            // NB the parentheses around the whole if-chain: with a bare
+            // `if/else-if/else ?: return`, Kotlin binds the elvis to the
+            // LAST branch only, leaving `chosen` nullable (compile error at
+            // the Log below).
+            val chosen: CameraConfig = (if (prefersHighResCapture) {
                 configs.maxByOrNull { it.imageSize.width * it.imageSize.height }
+            } else if (prefersKeyframeQuality) {
+                // PANO KEYFRAME QUALITY (keyframeQualityCapture): the
+                // smallest-4:3 default is 640×480 on devices like the A35 —
+                // panos assembled from 0.3 MP tiles read as "very blurry"
+                // regardless of hand steadiness.  Pick the LARGEST image
+                // whose long edge fits the 1920 source budget (the keyframe
+                // encoder then downsamples to its lifted 1280 budget —
+                // ~2× supersampled).  Aspect is a tiebreak only: on the A35
+                // the sole 4:3 config IS the tiny one, so insisting on 4:3
+                // would defeat the feature; the 16:9 1920×1080 (2 MP, 6×
+                // the pixels) wins.  Falls through to the default pick when
+                // nothing fits the budget.
+                configs
+                    .filter {
+                        kotlin.math.max(it.imageSize.width, it.imageSize.height) <=
+                            KEYFRAME_QUALITY_SOURCE_MAX_LONG_EDGE
+                    }
+                    .sortedWith(
+                        compareByDescending<CameraConfig> {
+                            it.imageSize.width * it.imageSize.height
+                        }.thenBy { kotlin.math.abs(aspect(it.imageSize) - 4f / 3f) },
+                    ).firstOrNull()
+                    ?: configs.sortedWith(
+                        compareBy<CameraConfig> { kotlin.math.abs(aspect(it.imageSize) - 4f / 3f) }
+                            .thenBy { it.imageSize.width * it.imageSize.height },
+                    ).firstOrNull()
             } else {
                 configs.sortedWith(
                     compareBy<CameraConfig> { kotlin.math.abs(aspect(it.imageSize) - 4f / 3f) }
                         .thenBy { it.imageSize.width * it.imageSize.height },
                 ).firstOrNull()
-            } ?: return
+            }) ?: return
             session.setCameraConfig(chosen)
             Log.i(
                 TAG,
-                "selectMatchingCameraConfig: highRes=$prefersHighResCapture chose image=" +
+                "selectMatchingCameraConfig: highRes=$prefersHighResCapture " +
+                    "kfQuality=$prefersKeyframeQuality chose image=" +
                     "${chosen.imageSize.width}x${chosen.imageSize.height} texture=" +
                     "${chosen.textureSize.width}x${chosen.textureSize.height} | all=[" +
                     configs.joinToString { "${it.imageSize.width}x${it.imageSize.height}" } + "]",
@@ -1203,6 +1261,10 @@ class RNSARSession(reactContext: ReactApplicationContext)
 
         private const val TAG = "RNSARSession"
         private const val MAX_POSE_LOG = 600  // ~10 s @ 60Hz
+        /** keyframeQualityCapture source budget: largest ARCore CPU image
+         *  whose long edge fits this (A35: picks 1920×1080 over 640×480);
+         *  the keyframe encoder then downsamples to its 1280 budget. */
+        private const val KEYFRAME_QUALITY_SOURCE_MAX_LONG_EDGE = 1920
 
         // Sentinel for "no prior Activity orientation captured yet".
         // Distinct from any real ActivityInfo.SCREEN_ORIENTATION_*

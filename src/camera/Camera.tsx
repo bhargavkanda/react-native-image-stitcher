@@ -858,6 +858,16 @@ export interface CameraProps {
    */
   highResCapture?: boolean;
   /**
+   * PANORAMA-QUALITY keyframes (Android; see `ARCameraView` prop of the
+   * same name): larger ARCore CPU-image config (long-edge ≤ 1920) + a
+   * lifted keyframe encode budget (640 → 1280) so stitches stop being
+   * assembled from 0.3 MP tiles on devices whose sole 4:3 config is tiny
+   * (e.g. Galaxy A35).  Costs stitch memory (~4× pixels per keyframe).
+   * Default `false`.  No-op on iOS (native-res keyframes already) and on
+   * older binaries.
+   */
+  keyframeQualityCapture?: boolean;
+  /**
    * iOS, NON-AR photo path — save each tap photo's AVDepthData as a
    * `<photo>.depth.bin` sidecar (float32 metres row-major + JSON header
    * with dims/intrinsics) and return its path as `depthPath` on the
@@ -1519,6 +1529,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     arFrameProcessor,
     enableDepth,
     highResCapture,
+    keyframeQualityCapture,
     captureDepthData,
     enableAnchors,
     enableMesh,
@@ -3209,6 +3220,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           arFrameProcessor={arFrameProcessor}
           enableDepth={enableDepth}
           highResCapture={highResCapture}
+          keyframeQualityCapture={keyframeQualityCapture}
           enableAnchors={enableAnchors}
           enableMesh={enableMesh}
           enableFeaturePoints={enableFeaturePoints}
