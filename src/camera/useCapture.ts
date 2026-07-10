@@ -290,8 +290,15 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
   // where the ultra-wide is only inside a multi-cam device, and (b)
   // flash being unavailable on the torchless standalone ultra-wide.
   const selection = useMemo(
-    () => selectCaptureDevice(allDevices as unknown as DeviceLike[]),
-    [allDevices],
+    () =>
+      selectCaptureDevice(allDevices as unknown as DeviceLike[], {
+        // captureDepthData: AVDepthData needs a multi-lens mount — prefer
+        // a depth-capable virtual device as the 1× primary (iOS only; see
+        // SelectCaptureDeviceOptions.preferDepth for the wide+tele FOV
+        // trade). Without the opt-in the plain-wide pick is unchanged.
+        preferDepth: captureDepthData === true && Platform.OS === 'ios',
+      }),
+    [allDevices, captureDepthData],
   );
 
 

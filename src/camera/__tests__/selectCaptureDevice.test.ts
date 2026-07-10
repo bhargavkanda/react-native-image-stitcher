@@ -192,6 +192,92 @@ describe('selectCaptureDevice', () => {
   });
 });
 
+describe('selectCaptureDevice preferDepth (captureDepthData device pick)', () => {
+  // iPhone-like enumeration where the wide+uw grouping is NOT zoomable
+  // (or absent) so the pick lands in standalone-uw: plain wide + plain
+  // ultra-wide + virtual Dual (wide+tele) + virtual Triple.
+  const dualWideTele = (p: Partial<DeviceLike> = {}) =>
+    dev({
+      physicalDevices: ['wide-angle-camera', 'telephoto-camera'],
+      isMultiCam: true,
+      hasTorch: true,
+      minZoom: 1,
+      neutralZoom: 1,
+      maxZoom: 15,
+      ...p,
+    });
+
+  it('standalone-uw: primary becomes the FEWEST-LENS virtual (Dual over Triple over plain wide)', () => {
+    const plainWide = standaloneWide();
+    const uw = standaloneUltraWide();
+    const dual = dualWideTele();
+    const triple = tripleCam({ minZoom: 1 }); // not zoom-reachable → no multicam mode
+    const sel = selectCaptureDevice([plainWide, uw, triple, dual], {
+      preferDepth: true,
+    });
+    expect(sel.mode).toBe('standalone-uw');
+    expect(sel.device).toBe(dual);
+    expect(sel.ultraWideDevice).toBe(uw); // 0.5× swap unchanged
+    expect(sel.has0_5x).toBe(true);
+  });
+
+  it('depth DOMINATES torch: torchless virtual beats a torch-bearing plain wide', () => {
+    const plainWideTorch = standaloneWide({ hasTorch: true });
+    const uw = standaloneUltraWide();
+    const dualNoTorch = dualWideTele({ hasTorch: false });
+    const sel = selectCaptureDevice([plainWideTorch, uw, dualNoTorch], {
+      preferDepth: true,
+    });
+    expect(sel.device).toBe(dualNoTorch);
+    expect(sel.hasTorch).toBe(false); // honest: this mount can't flash
+  });
+
+  it('torch tiebreaks WITHIN virtuals (torch-bearing triple over torchless dual)', () => {
+    const uw = standaloneUltraWide();
+    const dualNoTorch = dualWideTele({ hasTorch: false });
+    const tripleTorch = tripleCam({ minZoom: 1, hasTorch: true });
+    const sel = selectCaptureDevice([uw, dualNoTorch, tripleTorch], {
+      preferDepth: true,
+    });
+    expect(sel.device).toBe(tripleTorch);
+  });
+
+  it('no depth-capable virtual → plain-wide pick unchanged', () => {
+    const plainWide = standaloneWide();
+    const uw = standaloneUltraWide();
+    const sel = selectCaptureDevice([plainWide, uw], { preferDepth: true });
+    expect(sel.mode).toBe('standalone-uw');
+    expect(sel.device).toBe(plainWide);
+  });
+
+  it('multicam mode is UNAFFECTED (wide+uw virtual already depth-capable)', () => {
+    const wideUwVirtual = dualWide();
+    const plain = selectCaptureDevice([wideUwVirtual]);
+    const depth = selectCaptureDevice([wideUwVirtual], { preferDepth: true });
+    expect(depth.mode).toBe('multicam');
+    expect(depth.device).toBe(plain.device);
+  });
+
+  it('wide-only: virtual wins under preferDepth, plain wide without', () => {
+    const plainWide = standaloneWide();
+    const dual = dualWideTele();
+    const base = selectCaptureDevice([plainWide, dual]);
+    expect(base.mode).toBe('wide-only');
+    expect(base.device).toBe(plainWide); // simplest-wide regression guard
+    const depth = selectCaptureDevice([plainWide, dual], { preferDepth: true });
+    expect(depth.mode).toBe('wide-only');
+    expect(depth.device).toBe(dual);
+  });
+
+  it('DEFAULT (no opts) keeps the simplest-wide pick — 09d41e7 regression guard', () => {
+    const plainWide = standaloneWide();
+    const uw = standaloneUltraWide();
+    const dual = dualWideTele();
+    const sel = selectCaptureDevice([dual, plainWide, uw]);
+    expect(sel.device).toBe(plainWide);
+  });
+});
+
 describe('zoomForLens (multicam lens→zoom mapping)', () => {
   const d = { minZoom: 0.5, neutralZoom: 1 };
 

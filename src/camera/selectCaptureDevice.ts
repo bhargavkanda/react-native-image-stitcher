@@ -85,6 +85,27 @@ const hasLens = (d: DeviceLike, lens: LensType) =>
  */
 const UW_ZOOM_REACH_MAX = 0.7;
 
+/** Options for {@link selectCaptureDevice}. */
+export interface SelectCaptureDeviceOptions {
+  /**
+   * `captureDepthData` (iOS): prefer a DEPTH-CAPABLE 1× mount.  AVDepthData
+   * only flows from a virtual multi-lens device (or LiDAR) — a plain
+   * physical wide-angle never delivers it.  Effect on the pick:
+   *   - multicam mode (virtual wide+ultra-wide) already qualifies — depth
+   *     comes from the wide+uw overlap at FULL wide FOV.  Unchanged.
+   *   - standalone-uw / wide-only: the 1× primary becomes the FEWEST-LENS
+   *     virtual multi-cam containing the wide (typically the wide+tele
+   *     'Back Dual Camera') instead of the plain wide.  KNOWN TRADE: on a
+   *     wide+tele pair, stereo depth exists only in the lens-overlap
+   *     region, so depth-biased formats sit at roughly the TELE FOV — the
+   *     preview/capture is tighter than the plain wide.  Consumers opting
+   *     into depth accept this on such hardware (LiDAR / dual-wide phones
+   *     keep full FOV parity).
+   * Falls through to the normal pick when no depth-capable device exists.
+   */
+  preferDepth?: boolean;
+}
+
 /**
  * Choose the back-camera device(s) for capture.
  *
@@ -97,9 +118,11 @@ const UW_ZOOM_REACH_MAX = 0.7;
  *   3. wide-only — no ultra-wide reachable; wide-angle only.
  *
  * @param devices  All enumerated camera devices (any position).
+ * @param opts     See {@link SelectCaptureDeviceOptions}.
  */
 export function selectCaptureDevice<D extends DeviceLike>(
   devices: readonly D[],
+  opts: SelectCaptureDeviceOptions = {},
 ): CaptureDeviceSelection<D> {
   const back = devices.filter((d) => d.position === 'back');
 
@@ -169,20 +192,38 @@ export function selectCaptureDevice<D extends DeviceLike>(
   // physical wide-angle beats a virtual multi-lens device (Back Dual
   // Camera etc.) as the 1× mount. The preference below always PROMISED
   // this; the code took the first torch-bearer in enumeration order,
-  // which could mount a VIRTUAL device: custom exposure (the
-  // exposure-burst probe) is rejected there, and depth-biased formats
-  // shift the 1× FOV (field finding 2026-07-09: an iPhone mounted
-  // 'Back Dual Camera' — "1x appearing a lot more zoomed in" + every
-  // burst rejected).
+  // which could mount a VIRTUAL device: custom exposure was rejected
+  // there, and depth-biased formats shift the 1× FOV (field finding
+  // 2026-07-09: an iPhone mounted 'Back Dual Camera' — "1x appearing a
+  // lot more zoomed in").
+  //
+  // preferDepth INVERTS this for the primary only: AVDepthData needs a
+  // multi-lens mount, so the fewest-lens VIRTUAL wide-containing device
+  // wins instead (see SelectCaptureDeviceOptions.preferDepth for the
+  // FOV trade on wide+tele hardware). Depth capability DOMINATES torch
+  // there — a torch-bearing plain wide never delivers depth, so torch
+  // only tiebreaks within the virtuals. No virtual → plain pick as usual.
   const simplestWideFirst = [...wideDevices].sort(
     (a, b) => a.physicalDevices.length - b.physicalDevices.length,
   );
+  const pickPrimary = (): D | undefined => {
+    if (opts.preferDepth) {
+      // filter() keeps the fewest-lens-first order: Dual before Triple —
+      // smaller session cost, same depth delivery.
+      const virtuals = simplestWideFirst.filter(
+        (d) => d.isMultiCam && d.physicalDevices.length >= 2,
+      );
+      const depthPick = virtuals.find((d) => d.hasTorch) ?? virtuals[0];
+      if (depthPick != null) return depthPick;
+    }
+    return simplestWideFirst.find((d) => d.hasTorch) ?? simplestWideFirst[0];
+  };
 
   if (wideDevices.length > 0 && ultraWide != null) {
     // Prefer the simplest wide device (fewest extra lenses) with a torch
     // as the 1× mount, so 1× flash works.  Falls back to any wide device.
-    const primary =
-      simplestWideFirst.find((d) => d.hasTorch) ?? simplestWideFirst[0];
+    // (preferDepth picks the simplest depth-capable virtual instead.)
+    const primary = pickPrimary() as D;
     return {
       device: primary,
       ultraWideDevice: ultraWide,
@@ -193,10 +234,7 @@ export function selectCaptureDevice<D extends DeviceLike>(
   }
 
   // ── 3. Wide-angle only (no ultra-wide reachable on this device).
-  const wideOnly =
-    simplestWideFirst.find((d) => d.hasTorch)
-    ?? simplestWideFirst[0]
-    ?? back[0];
+  const wideOnly = pickPrimary() ?? back[0];
   return {
     device: wideOnly,
     ultraWideDevice: null,
