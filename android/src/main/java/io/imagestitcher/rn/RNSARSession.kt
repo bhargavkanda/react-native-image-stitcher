@@ -63,7 +63,18 @@ class RNSARSession(reactContext: ReactApplicationContext)
     /// captures at the device's highest ARCore CPU resolution.  Gated so
     /// generic AR / stitching consumers keep the cheap small-config streaming.
     @Volatile private var prefersHighResCapture = false
-    @Volatile private var prefersKeyframeQuality = false
+    /**
+     * keyframeQualityCapture holders — a REFCOUNT, not a boolean: the
+     * stitcher Camera can overlap two ARCameraView mounts during a
+     * source/lens swap, and mount-B's enable(true) followed by
+     * unmount-A's cleanup(false) must NOT switch the live session back
+     * to the 640×480 config mid-pan (field finding 2026-07-10: keyframes
+     * stayed 640×480 with `kfQuality=true chose 1920x1080` in the log —
+     * the cleanup re-pick had yanked it back seconds later).
+     */
+    @Volatile private var keyframeQualityHolders = 0
+    private val prefersKeyframeQuality: Boolean
+        get() = keyframeQualityHolders > 0
     private val poseLog = mutableListOf<RNSARFramePose>()
     private val poseLogLock = ReentrantReadWriteLock()
 
@@ -1145,15 +1156,32 @@ class RNSARSession(reactContext: ReactApplicationContext)
      */
     @ReactMethod
     fun setKeyframeQualityCaptureEnabled(on: Boolean) {
-        if (prefersKeyframeQuality == on) return
-        prefersKeyframeQuality = on
-        io.imagestitcher.rn.ar.YuvImageConverter.setKeyframeQuality(on)
+        // ACQUIRE/RELEASE semantics (see keyframeQualityHolders): each
+        // ARCameraView mount that opts in calls (true) once and its
+        // unmount cleanup calls (false) once; overlapping mounts during a
+        // camera swap keep the count > 0 so the live session never
+        // downgrades mid-pan. Only an EFFECTIVE state change re-picks.
+        val wasOn: Boolean
+        val isOn: Boolean
+        synchronized(this) {
+            wasOn = keyframeQualityHolders > 0
+            keyframeQualityHolders =
+                (keyframeQualityHolders + if (on) 1 else -1).coerceAtLeast(0)
+            isOn = keyframeQualityHolders > 0
+        }
+        Log.i(
+            TAG,
+            "setKeyframeQualityCaptureEnabled($on): holders=$keyframeQualityHolders " +
+                "effective=$isOn",
+        )
+        if (wasOn == isOn) return
+        io.imagestitcher.rn.ar.YuvImageConverter.setKeyframeQuality(isOn)
         val session = sessionRef.get() ?: return
         try {
             session.pause()
             selectMatchingCameraConfig(session)
             session.resume()
-            Log.i(TAG, "setKeyframeQualityCaptureEnabled=$on; re-applied config to live session")
+            Log.i(TAG, "keyframeQuality effective=$isOn; re-applied config to live session")
         } catch (t: Throwable) {
             Log.w(TAG, "setKeyframeQualityCaptureEnabled reconfig failed (ignoring): ${t.message}")
         }
