@@ -14,39 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
-## [Unreleased]
-
-### Added
-
-- **`CameraHandle.captureTorchPair(options?)` — fast preview-frame
-  pair across a torch flip (torch-differential probe v3).**  Grabs a
-  video-stream frame with the torch off, drives the torch on, waits
-  `settleMs` (default 250 ms, clamped [80, 2000]), grabs a second
-  frame, restores the torch, and resolves both as small JPEGs
-  (`maxLongEdge` default 1280 px, `quality` default 80) —
-  `{ offUri, onUri, width, height, gapMs }`.  Non-AR mode only.
-  Unlike a still-photo pair (~1 s apart, auto-exposure partially
-  compensates for the torch and both shots pass through the full
-  capture+re-encode pipeline), the preview frames land ~150-300 ms
-  apart — inside AE's convergence time — so the torch differential
-  survives intact for anti-screen-spoof scoring (a reflective scene
-  lifts under the torch; an emissive display doesn't).  Scoring is
-  out of scope; this is only the capture primitive.  Both frames are
-  written sensor-oriented through one encode path (mutually aligned
-  — all a pair scorer needs); files land in the app cache dir and
-  the caller owns deleting them.  Rejections use the new
-  `CameraError` code `TORCH_PAIR_FAILED` with a stable
-  machine-readable reason slug prefixed to the message
-  (`unavailable:` / `busy:` / `ar-mode:` / `no-torch:` /
-  `torch-in-use:` / `source-changed:` / `grab-failed:`), so
-  consumers can feature-detect + fall back to a still pair on older
-  binaries.  Internals: a one-shot native grab coordinator
-  (`RNISPreviewFrameGrabber` module + `grab_preview_frame`
-  vision-camera plugin on both platforms) serviced by a minimal
-  capture-free worklet the lib swaps in as the frame processor only
-  while a pair is in flight (`video` is always on in non-AR, so the
-  swap is a worklet rebind, not a session reconfig).
-
 ## [0.21.0] — 2026-07-03
 
 ### Added

@@ -66,13 +66,6 @@ class RNImageStitcherPackage : ReactPackage {
                 ) { proxy, options ->
                     SaveFrameAsJpegPlugin(proxy, options)
                 }
-                // v0.22.0 — `grab_preview_frame` (captureTorchPair's
-                // one-shot preview grab).  Same all-or-nothing posture.
-                FrameProcessorPluginRegistry.addFrameProcessorPlugin(
-                    PreviewFrameGrabPlugin.PLUGIN_NAME,
-                ) { proxy, options ->
-                    PreviewFrameGrabPlugin(proxy, options)
-                }
                 fpPluginRegistered = true
             } catch (e: NoClassDefFoundError) {
                 android.util.Log.i(
@@ -114,10 +107,6 @@ class RNImageStitcherPackage : ReactPackage {
             // on the main JS runtime (AR frame-processor host-worklet
             // registration).  Mirror of iOS' StitcherJsiInstaller.
             StitcherJsiInstallerModule(reactContext),
-            // v0.22.0 — arms one-shot preview-frame grabs for
-            // `<Camera>`'s captureTorchPair(); serviced by the
-            // `grab_preview_frame` vc plugin registered above.
-            PreviewFrameGrabber(reactContext),
         )
     }
 

@@ -54,9 +54,6 @@ jest.mock('react-native-vision-camera', () => ({
 // ─── Mock react-native-worklets-core ─────────────────────────────
 jest.mock('react-native-worklets-core', () => ({
   useSharedValue: (initial: number) => ({ value: initial }),
-  // Camera.tsx's import chain evaluates Worklets.createSharedValue at
-  // MODULE SCOPE (exposureBurst.ts armed flag) — must be callable.
-  Worklets: { createSharedValue: (initial: unknown) => ({ value: initial }) },
 }));
 
 // ─── Mock react-native-sensors ───────────────────────────────────
