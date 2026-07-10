@@ -1772,6 +1772,25 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     };
   }, []);
 
+  // keyframeQualityCapture also drives the ANDROID keyframe ENCODE budget
+  // (RNSARSession's holder refcount → YuvImageConverter): in NON-AR mode
+  // no ARCameraView is mounted to hold it, yet the non-AR keyframe writes
+  // read the same global budget.  Acquire per Camera mount / release on
+  // unmount or prop-off — the native refcount makes the double-hold
+  // (this + a mounted ARCameraView's own effect) safe, and overlapping
+  // Camera swaps can't downgrade a live pan.  iOS / old binaries: no-op.
+  useEffect(() => {
+    if (keyframeQualityCapture !== true) return undefined;
+    const arModule = (NativeModules as Record<string, unknown>)
+      .RNSARSession as
+      | { setKeyframeQualityCaptureEnabled?: (on: boolean) => void }
+      | undefined;
+    arModule?.setKeyframeQualityCaptureEnabled?.(true);
+    return () => {
+      arModule?.setKeyframeQualityCaptureEnabled?.(false);
+    };
+  }, [keyframeQualityCapture]);
+
   // ── Notify parent of capture-source changes ─────────────────────
   const lastEmittedSourceRef = useRef<CaptureSource | null>(null);
   useEffect(() => {
@@ -3246,6 +3265,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           // unchanged.  Stitching/keyframes unaffected (they downscale
           // regardless); only the tap photo benefits.
           highResCapture={highResCapture}
+          // Non-AR pano keyframe quality: floors the VIDEO stream at 1280
+          // long edge (the FP stream IS the keyframe source here).
+          keyframeQualityCapture={keyframeQualityCapture}
           // `video={true}` is REQUIRED for takeSnapshot to work on iOS.
           // vision-camera v4's iOS implementation of takeSnapshot waits
           // for a frame on the video pipeline; with video disabled, the

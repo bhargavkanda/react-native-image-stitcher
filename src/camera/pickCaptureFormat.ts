@@ -81,6 +81,18 @@ export interface PickFormatOptions {
    * still wins) and BEFORE the photo cap.  Default off.
    */
   preferDepthCapture?: boolean;
+  /**
+   * VIDEO long-edge floor (`keyframeQualityCapture`): restrict to formats
+   * whose video long edge is at least this, when any exist — the non-AR
+   * panorama keyframes come from the VIDEO stream, and on devices whose
+   * fps-preferred pick lands 640×480 the pano is assembled from 0.3 MP
+   * tiles.  The fps preference still ranks WITHIN the floored set (a
+   * 1920×1080@60 beats a 1920×1440@30 where both exist).  Falls back to
+   * the unfloored set when nothing qualifies, so opting in never breaks
+   * capture.  Applied after the aspect/depth filters, before the photo
+   * cap.  Default off (0).
+   */
+  minVideoLongEdge?: number;
 }
 
 const DEFAULT_MAX_PHOTO_LONG_EDGE = 4032;
@@ -128,11 +140,23 @@ export function pickCaptureFormat<F extends FormatLike>(
     if (withDepth.length > 0) depthBase = withDepth;
   }
 
+  // keyframeQualityCapture: video long-edge floor (see the option doc) —
+  // keeps the fps preference from landing a tiny 640×480 video stream that
+  // becomes 0.3 MP pano keyframes.  Soft: no qualifying format → unfloored.
+  let sizedBase = depthBase;
+  const videoFloor = opts.minVideoLongEdge ?? 0;
+  if (videoFloor > 0) {
+    const bigEnough = depthBase.filter(
+      (f) => Math.max(f.videoWidth, f.videoHeight) >= videoFloor,
+    );
+    if (bigEnough.length > 0) sizedBase = bigEnough;
+  }
+
   // Among those within the photo cap; if none fit, fall back to all (which
   // then resolves to the max-video format — never worse than today).
   const withinCap =
-    cap > 0 ? depthBase.filter((f) => longEdge(f) <= cap) : depthBase.slice();
-  const candidates = withinCap.length > 0 ? withinCap : depthBase;
+    cap > 0 ? sizedBase.filter((f) => longEdge(f) <= cap) : sizedBase.slice();
+  const candidates = withinCap.length > 0 ? withinCap : sizedBase;
 
   return candidates.slice().sort((a, b) => {
     if (preferHighFps) {

@@ -449,18 +449,19 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       session?.setHighResCaptureEnabled?.(highResCapture === true);
     }, [highResCapture]);
 
-    // Pano keyframe quality (Android; see the prop doc).  Same optional-
-    // chained session-module route.  The CLEANUP resets the flag: the
-    // native side flips a process-global keyframe-encode budget, and a
-    // later NON-pano ARCameraView (DT capture) must never inherit 1280.
+    // Pano keyframe quality (Android; see the prop doc).  ACQUIRE/RELEASE
+    // against the native holder REFCOUNT — and only when the prop is
+    // actually on: an unconditional set(false) here would let a prop-less
+    // mount (the DT capture surface) STEAL a holder another view acquired.
+    // The refcount (not a boolean) is what keeps overlapping camera-view
+    // mounts during a source/lens swap from downgrading a live pan.
     useEffect(() => {
+      if (keyframeQualityCapture !== true) return undefined;
       const session = (NativeModules as Record<string, unknown>)
         .RNSARSession as
         | { setKeyframeQualityCaptureEnabled?(on: boolean): void }
         | undefined;
-      session?.setKeyframeQualityCaptureEnabled?.(
-        keyframeQualityCapture === true,
-      );
+      session?.setKeyframeQualityCaptureEnabled?.(true);
       return () => {
         session?.setKeyframeQualityCaptureEnabled?.(false);
       };

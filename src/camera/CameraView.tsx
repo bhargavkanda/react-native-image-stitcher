@@ -60,6 +60,11 @@ const PHOTO_LONG_EDGE_CAP = 4032;
  */
 const HIGH_RES_PHOTO_LONG_EDGE_CAP = 4096;
 
+/** keyframeQualityCapture video floor — matches the AR path's 1280 keyframe
+ *  budget (stitcher ef1a326/8e655c8) so both pano sources deliver comparable
+ *  tiles. */
+const KEYFRAME_QUALITY_MIN_VIDEO_LONG_EDGE = 1280;
+
 
 export interface CameraViewProps {
   /** Output of ``useCapture().device``.  If null, a placeholder is shown. */
@@ -108,6 +113,14 @@ export interface CameraViewProps {
    * Default off (depth delivery adds per-shot latency).
    */
   captureDepthData?: boolean;
+  /**
+   * Panorama keyframe QUALITY (non-AR path): floors the picked format's
+   * VIDEO long edge at 1280 so the frame-processor stream — the source of
+   * non-AR pano keyframes — stops delivering 640×480 tiles.  The 60 fps
+   * preference still ranks within the floored set.  Soft on devices with
+   * no qualifying format.  Default off.
+   */
+  keyframeQualityCapture?: boolean;
   /** Optional themed guidance banner.  Renders over the preview at the top. */
   guidance?: string;
   /** Extra style layer applied on top of the default full-screen layout. */
@@ -169,6 +182,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     video = false,
     highResCapture = false,
     captureDepthData = false,
+    keyframeQualityCapture = false,
     guidance,
     style,
     cameraProps,
@@ -264,10 +278,16 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         // device has any — depth delivery on a depth-less format silently
         // produces nothing.  Falls through unchanged on depth-less devices.
         preferDepthCapture: captureDepthData && Platform.OS === 'ios',
+        // keyframeQualityCapture: floor the VIDEO stream at 1280 long edge
+        // so non-AR pano keyframes stop being 640×480 tiles; fps still
+        // ranks within the floored set (see pickCaptureFormat).
+        minVideoLongEdge: keyframeQualityCapture
+          ? KEYFRAME_QUALITY_MIN_VIDEO_LONG_EDGE
+          : 0,
       });
       return picked;
     },
-    [device, highResCapture, captureDepthData],
+    [device, highResCapture, captureDepthData, keyframeQualityCapture],
   );
 
   // Pin the session frame rate to the format's max, capped at 60.  Picking a
