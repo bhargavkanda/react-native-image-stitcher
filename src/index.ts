@@ -40,12 +40,6 @@ export type {
   Warper,
   FramesDroppedInfo,
 } from './camera/Camera';
-// v0.22.0 — options/result for `CameraHandle.captureExposureBurst`
-// (fixed-short-exposure frame burst for display-refresh banding probes).
-export type {
-  ExposureBurstOptions,
-  ExposureBurstResult,
-} from './camera/exposureBurst';
 // v0.22.0 — options/result for `CameraHandle.captureTorchPair`
 // (fast preview-frame pair across a torch flip for torch-differential
 // anti-screen-spoof probes).

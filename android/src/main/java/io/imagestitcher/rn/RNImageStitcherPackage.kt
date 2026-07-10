@@ -73,13 +73,6 @@ class RNImageStitcherPackage : ReactPackage {
                 ) { proxy, options ->
                     PreviewFrameGrabPlugin(proxy, options)
                 }
-                // v0.22.0 — `rnis_exposure_burst_sink` (captureExposureBurst's
-                // frame tap).  Same all-or-nothing posture.
-                FrameProcessorPluginRegistry.addFrameProcessorPlugin(
-                    ExposureBurstSinkPlugin.PLUGIN_NAME,
-                ) { proxy, options ->
-                    ExposureBurstSinkPlugin(proxy, options)
-                }
                 fpPluginRegistered = true
             } catch (e: NoClassDefFoundError) {
                 android.util.Log.i(
@@ -125,10 +118,6 @@ class RNImageStitcherPackage : ReactPackage {
             // `<Camera>`'s captureTorchPair(); serviced by the
             // `grab_preview_frame` vc plugin registered above.
             PreviewFrameGrabber(reactContext),
-            // v0.22.0 — drives `<Camera>`'s captureExposureBurst():
-            // manual short exposure on vision-camera's CameraX session
-            // (Camera2 interop), frames via `rnis_exposure_burst_sink`.
-            ExposureBurstModule(reactContext),
         )
     }
 

@@ -71,12 +71,6 @@ android {
         versionCode 1
         versionName "0.1.0"
 
-        // v0.22.0 — keep-rules shipped to CONSUMER builds.  The
-        // exposure-burst probe reaches vision-camera's CameraX handle
-        // through two reflected private fields; a minified host app
-        // must not rename them.  See consumer-rules.pro.
-        consumerProguardFiles 'consumer-rules.pro'
-
         // ── ABI filter ───────────────────────────────────────────
         // Only build arm64-v8a.  Our custom OpenCV is built for
         // arm64-v8a only (matches the production Samsung physical
@@ -299,22 +293,12 @@ dependencies {
         // `compileOnly` because the host app already ships these via
         // vision-camera's transitive runtime dep.
         compileOnly "androidx.camera:camera-core:1.5.0-alpha03"
-        // v0.22.0 — CameraX Camera2 interop (`Camera2CameraControl` /
-        // `CaptureRequestOptions` / `Camera2CameraInfo`) for the
-        // exposure-burst probe's manual-exposure control.  Same
-        // rationale: runtime classes arrive via vision-camera's own
-        // camera-camera2 dependency; we only need compile-time symbols.
-        compileOnly "androidx.camera:camera-camera2:1.5.0-alpha03"
     } else {
         // Without vision-camera on the classpath the Frame
         // Processor plugin source can't compile (imports unresolved).
         // Exclude it from the source set so the rest of the SDK
         // still builds for non-camera consumers.
         android.sourceSets.main.java.exclude '**/CvFlowGateFrameProcessor.kt'
-        // v0.22.0 — the exposure-burst probe compiles against both
-        // vision-camera and the CameraX interop; exclude with the rest.
-        android.sourceSets.main.java.exclude '**/ExposureBurstModule.kt'
-        android.sourceSets.main.java.exclude '**/ExposureBurstSinkPlugin.kt'
     }
 
     // v0.8.0 Phase 4b.ii/iii — react-native-worklets-core, consumed

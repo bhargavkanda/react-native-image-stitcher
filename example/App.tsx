@@ -253,32 +253,6 @@ function App(): React.JSX.Element {
   } | null>(null);
   const [planeLocked, setPlaneLocked] = useState(false);
 
-  // v0.22.0 — exposure-burst probe (captureExposureBurst) readout.  The
-  // button fires the fixed-short-exposure burst; the label shows the
-  // applied exposure/ISO + inter-frame gaps so consecutive-ness is
-  // verifiable on-device at a glance.  Paths land in console.log.
-  const [burstStatus, setBurstStatus] = useState<string | null>(null);
-  const runExposureBurst = useCallback(async () => {
-    setBurstStatus('capturing…');
-    try {
-      const res = await cameraRef.current!.captureExposureBurst();
-      console.log('[example] exposure burst frames', res.frames, res);
-      const gapsMs = res.timestampsNs
-        .slice(1)
-        .map((t, i) => Math.round((t - res.timestampsNs[i]) / 1e6));
-      setBurstStatus(
-        `${res.frames.length} × ${res.width}×${res.height} @ `
-        + `${res.exposureDurationMs.toFixed(2)}ms iso${Math.round(res.iso)}`
-        + (gapsMs.length > 0 ? ` gaps[${gapsMs.join(',')}]ms` : ''),
-      );
-    } catch (e) {
-      console.warn('[example] exposure burst failed', e);
-      setBurstStatus(
-        `✗ ${e instanceof Error ? e.message.slice(0, 90) : String(e)}`,
-      );
-    }
-  }, []);
-
   const stitcher = useStitcherWorklet();
   const exampleFrameProcessor = useFrameProcessor(
     (frame: Frame) => {
@@ -826,18 +800,6 @@ function App(): React.JSX.Element {
               <Text style={styles.devToggleText}>
                 🖼️ showPreview: {showPreview ? 'ON' : 'OFF'}
                 {rectCrop ? ' (overridden by rectCrop)' : ''}
-              </Text>
-            </Pressable>
-
-            {/* v0.22.0 — refresh-banding probe: 3 frames @ 2 ms fixed
-                exposure (non-AR only; rejects with a message in AR). */}
-            <Pressable
-              style={[styles.devToggle, { top: 230 }]}
-              onPress={runExposureBurst}
-              accessibilityRole="button"
-            >
-              <Text style={styles.devToggleText}>
-                🩻 burst: {burstStatus ?? 'tap to probe (2 ms ×3)'}
               </Text>
             </Pressable>
           </>
