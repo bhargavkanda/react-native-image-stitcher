@@ -446,9 +446,16 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
             // `depthPath` with zero signal outside a dev console.
             // `native-module-missing` = the JS is newer than the installed
             // binary (extractPhotoDepth resolved null).
-            depthUnavailableReason = depth
-              ? depth.reason ?? 'no-depth-aux'
-              : 'native-module-missing';
+            // 0.5× gets its own slug: stereo depth exists only in the lens
+            // pair's OVERLAP (= the narrower lens's FOV), so no current
+            // hardware can cover an ultra-wide capture — a physics
+            // limitation, not a per-device failure.
+            depthUnavailableReason =
+              lens === '0.5x'
+                ? 'ultra-wide-no-depth'
+                : depth
+                  ? depth.reason ?? 'no-depth-aux'
+                  : 'native-module-missing';
             if (__DEV__) {
               // eslint-disable-next-line no-console
               console.log(
@@ -531,7 +538,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     })();
     inFlightRef.current = promise;
     return promise;
-  }, [flash, enableQualityChecks, qualityThresholds, takePhotoOptions, captureDepthData]);
+  }, [flash, enableQualityChecks, qualityThresholds, takePhotoOptions, captureDepthData, lens]);
 
   return {
     cameraRef,
