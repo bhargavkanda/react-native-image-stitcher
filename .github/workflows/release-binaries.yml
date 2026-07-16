@@ -190,6 +190,6 @@ jobs:
           fi
 
       - name: Publish to npm
-        run: npm publish --access public
+        run: npm publish --access public --tag maintenance-016
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

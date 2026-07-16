@@ -45,6 +45,16 @@ export interface PickFormatOptions {
    * (reverts to pure max-video).  Default 4032 (≈12 MP at 4:3, "4K"-ish).
    */
   maxPhotoLongEdge?: number;
+  /**
+   * v0.16.4 — SOFT ceiling on the chosen format's VIDEO long edge, in px.
+   * The default sort deliberately takes the LARGEST video format, which on
+   * Android streams far more pixels through the preview/analysis path than
+   * the (640 px-clamped) keyframes can ever use — mid-range devices drop
+   * preview frames.  When set (e.g. 1920), formats at/under the ceiling are
+   * preferred; if none qualify, all formats are considered (never worse
+   * than before).  `0`/absent = existing behaviour, unchanged.
+   */
+  maxVideoLongEdge?: number;
   /** Target capture aspect (W/H in landscape). Default 4/3. */
   aspect?: number;
   /** Aspect match tolerance. Default 0.05. */
@@ -107,7 +117,18 @@ export function pickCaptureFormat<F extends FormatLike>(
   // then resolves to the max-video format — never worse than today).
   const withinCap =
     cap > 0 ? base.filter((f) => longEdge(f) <= cap) : base.slice();
-  const candidates = withinCap.length > 0 ? withinCap : base;
+  const photoCandidates = withinCap.length > 0 ? withinCap : base;
+
+  // Video ceiling (v0.16.4): soft-prefer formats whose VIDEO long edge fits.
+  const videoCeil = opts.maxVideoLongEdge ?? 0;
+  const videoLongEdge = (f: FormatLike): number =>
+    Math.max(f.videoWidth, f.videoHeight);
+  const withinVideoCeil =
+    videoCeil > 0
+      ? photoCandidates.filter((f) => videoLongEdge(f) <= videoCeil)
+      : photoCandidates;
+  const candidates =
+    withinVideoCeil.length > 0 ? withinVideoCeil : photoCandidates;
 
   return candidates.slice().sort((a, b) => {
     if (preferHighFps) {

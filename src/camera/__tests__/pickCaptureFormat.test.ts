@@ -134,3 +134,27 @@ describe('pickCaptureFormat — preferHighFps (smooth-preview opt-in)', () => {
     expect(chosen!.maxFps).toBe(120);
   });
 });
+
+describe('maxVideoLongEdge (v0.16.4 preview-stream ceiling)', () => {
+  const fmt = (pw: number, ph: number, vw: number, vh: number, fps: number) => ({
+    photoWidth: pw, photoHeight: ph, videoWidth: vw, videoHeight: vh,
+    maxFps: fps, supportsVideoHdr: false,
+  });
+  it('prefers the largest video AT/UNDER the ceiling', () => {
+    const big = fmt(4032, 3024, 3264, 2448, 60);
+    const small = fmt(4032, 3024, 1920, 1440, 60);
+    const picked = pickCaptureFormat([big, small], {
+      maxPhotoLongEdge: 4032, preferHighFps: true, maxVideoLongEdge: 1920,
+    });
+    expect(picked).toBe(small);
+  });
+  it('falls back to all candidates when nothing fits the ceiling', () => {
+    const big = fmt(4032, 3024, 3264, 2448, 60);
+    expect(pickCaptureFormat([big], { maxVideoLongEdge: 1920 })).toBe(big);
+  });
+  it('absent ceiling = unchanged behaviour (largest video wins)', () => {
+    const big = fmt(4032, 3024, 3264, 2448, 60);
+    const small = fmt(4032, 3024, 1920, 1440, 60);
+    expect(pickCaptureFormat([big, small], { preferHighFps: true })).toBe(big);
+  });
+});

@@ -347,6 +347,17 @@ export interface FramesDroppedInfo {
  * section for the full rationale per field.
  */
 export interface CameraProps {
+  /**
+   * v0.16.4 — opt-in capture-format overrides forwarded to the preview
+   * pick.  `maxVideoLongEdge` (e.g. 1920) bounds the preview/analysis
+   * stream resolution — the fix for choppy Android previews where the
+   * default pick streams the largest video format while keyframes are
+   * clamped to 640 px anyway.  Absent = existing behaviour.
+   */
+  captureFormatOverrides?: {
+    maxPhotoLongEdge?: number;
+    maxVideoLongEdge?: number;
+  };
   // ── Initial values (uncontrolled — read once at mount) ────────────
   defaultCaptureSource?: CaptureSource;
   defaultLens?: CameraLens;
@@ -1172,6 +1183,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     rectCrop = false,
     showPreview = false,
     guidanceCopy,
+    captureFormatOverrides,
   } = props;
 
   // Derived guidance state.  The landscape-only gate decision itself is
@@ -2430,6 +2442,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
         <CameraView
           ref={visionCameraRef}
           device={capture.device}
+          captureFormatOverrides={captureFormatOverrides}
           isActive
           // `video={true}` is REQUIRED for takeSnapshot to work on iOS.
           // vision-camera v4's iOS implementation of takeSnapshot waits

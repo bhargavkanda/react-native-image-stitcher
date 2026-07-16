@@ -56,6 +56,17 @@ const PHOTO_LONG_EDGE_CAP = 4032;
 export interface CameraViewProps {
   /** Output of ``useCapture().device``.  If null, a placeholder is shown. */
   device: CameraDevice | null | undefined;
+  /**
+   * v0.16.4 — opt-in overrides for the capture-format pick.  Notably
+   * `maxVideoLongEdge` (e.g. 1920) bounds the preview/analysis stream:
+   * the default pick takes the LARGEST video format, which on Android
+   * costs preview smoothness while keyframes are clamped to 640 px
+   * anyway.  Absent = existing behaviour, byte-identical.
+   */
+  captureFormatOverrides?: {
+    maxPhotoLongEdge?: number;
+    maxVideoLongEdge?: number;
+  };
   /** Flash / torch state from ``useCapture().flash``. */
   flash?: 'off' | 'on';
   /**
@@ -133,6 +144,7 @@ const VC_LIFECYCLE_ERROR_CODES: ReadonlySet<string> = new Set([
 export const CameraView = forwardRef<Camera | null, CameraViewProps>(function CameraView(
   {
     device,
+    captureFormatOverrides,
     flash = 'off',
     zoom,
     isActive = true,
@@ -220,11 +232,13 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   const format = useMemo(
     () =>
       pickCaptureFormat(device?.formats ?? [], {
-        maxPhotoLongEdge: PHOTO_LONG_EDGE_CAP,
+        maxPhotoLongEdge:
+          captureFormatOverrides?.maxPhotoLongEdge ?? PHOTO_LONG_EDGE_CAP,
+        maxVideoLongEdge: captureFormatOverrides?.maxVideoLongEdge,
         aspect: 4 / 3,
         preferHighFps: true,
       }),
-    [device],
+    [device, captureFormatOverrides?.maxPhotoLongEdge, captureFormatOverrides?.maxVideoLongEdge],
   );
 
   // Pin the session frame rate to the format's max, capped at 60.  Picking a
