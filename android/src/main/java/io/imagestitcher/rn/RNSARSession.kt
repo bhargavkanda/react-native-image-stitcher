@@ -696,7 +696,7 @@ class RNSARSession(reactContext: ReactApplicationContext)
             return
         }
         val rawPath = if (options.hasKey("path")) options.getString("path") ?: "" else ""
-        val quality = if (options.hasKey("quality")) options.getInt("quality") else 90
+        val quality = readJpegQuality(options)
         // v0.13.2 — physical device orientation from JS (useDeviceOrientation).
         // Drives the saved JPEG's rotation so landscape AR captures are
         // upright even under a portrait-locked host.  Defaults to
@@ -717,6 +717,48 @@ class RNSARSession(reactContext: ReactApplicationContext)
         // plugins ([RNSPhotoCapturePlugin]) receive it verbatim.  With no
         // plugin registered the extra keys are never read.
         view.requestTakePhoto(resolvedPath, quality, orientation, promise, options)
+    }
+
+    /**
+     * Read the `quality` option as a JPEG quality in **0..100**, falling back to
+     * [DEFAULT_JPEG_QUALITY] for anything that isn't a usable value.
+     *
+     * WHY THIS IS NOT `options.getInt("quality")`: `getInt` TRUNCATES a JS double,
+     * so a caller passing vision-camera's 0..1 convention (`quality: 0.95` — an
+     * easy mistake, since `Camera.takePhoto` there is 0..1) yielded 0, and the
+     * downstream `coerceIn(1, 100)` turned that into **1 — the single worst JPEG
+     * the encoder can emit**.  At quality 1 every quantisation-table entry is 255,
+     * so the chroma DC quantises to zero and the photo lands as near-greyscale
+     * with only a few extreme-saturation blocks surviving.  That was field-reported
+     * as "colour space corruption" (A35, Jul 2026); it was never a gamut problem.
+     *
+     * A fractional quality is therefore treated as CALLER CONFUSION and resolved to
+     * the documented default rather than clipped — the same fallback-not-clip rule
+     * the overlay alphas use, and for the same reason: silently producing the worst
+     * possible output is never the charitable reading of a nonsense value.  It also
+     * makes Android match iOS, where `as? Int` already REJECTS a non-integral
+     * NSNumber and falls through to the default (which is why this only ever
+     * reproduced on Android).
+     *
+     * Deliberately NOT auto-scaling 0..1 → 0..100: `quality: 1` is a legal (if
+     * awful) request, so `1.0` cannot be reinterpreted as 100 without breaking it.
+     */
+    private fun readJpegQuality(options: com.facebook.react.bridge.ReadableMap): Int {
+        if (!options.hasKey("quality")) return DEFAULT_JPEG_QUALITY
+        if (options.getType("quality") != com.facebook.react.bridge.ReadableType.Number) {
+            return DEFAULT_JPEG_QUALITY
+        }
+        val raw = options.getDouble("quality")
+        // Non-finite, out-of-range, or fractional (never an integral 0..100).
+        if (!raw.isFinite() || raw < 1.0 || raw > 100.0 || raw != kotlin.math.floor(raw)) {
+            android.util.Log.w(
+                "RNSARSession",
+                "takePhoto: ignoring unusable quality=$raw — expected an INTEGER 0..100 " +
+                    "(not vision-camera's 0..1); using $DEFAULT_JPEG_QUALITY",
+            )
+            return DEFAULT_JPEG_QUALITY
+        }
+        return raw.toInt()
     }
 
     @ReactMethod
@@ -1370,6 +1412,13 @@ class RNSARSession(reactContext: ReactApplicationContext)
 
         private const val TAG = "RNSARSession"
         private const val MAX_POSE_LOG = 600  // ~10 s @ 60Hz
+
+        /**
+         * `takePhoto` JPEG quality (0..100) when the caller omits `quality` or
+         * passes something unusable — see [readJpegQuality].  Matches the iOS
+         * default in `ARSessionBridge.takePhoto`.
+         */
+        private const val DEFAULT_JPEG_QUALITY = 90
         /** keyframeQualityCapture source budget: largest ARCore CPU image
          *  whose long edge fits this (A35: picks 1920×1080 over 640×480);
          *  the keyframe encoder then downsamples to its 1280 budget. */
