@@ -95,6 +95,24 @@ export interface AROverlay {
   color?: string;
 
   /**
+   * Fill opacity `0..1` for a `'box'` overlay (0 = no fill, 1 = opaque).
+   * Optional; when omitted the native renderer uses its default fill opacity.
+   * SCAFFOLD this release: the field is part of the overlay data model so
+   * consumers can express per-overlay fill/stroke opacity (e.g. a tiled
+   * coverage region that must fill without per-strip outlines), but the native
+   * overlay layers do not yet read it — they draw at their default opacity.
+   * Document-only forward compatibility, matching `mode: '3d'` above.
+   */
+  fillAlpha?: number;
+
+  /**
+   * Stroke (outline) opacity `0..1` for the overlay edges (0 = no outline).
+   * Same optional / scaffold semantics as {@link fillAlpha}: honoured by the
+   * native renderer where supported, otherwise the default outline is drawn.
+   */
+  strokeAlpha?: number;
+
+  /**
    * Render mode.  Default `'2d'` — a flat shape reprojected to screen.
    * `'3d'` is SCAFFOLD ONLY this release: the data-model field exists and the
    * native renderers leave a marked hook for a future SceneKit (iOS) / Android
