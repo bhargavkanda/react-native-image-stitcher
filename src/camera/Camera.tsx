@@ -2867,12 +2867,30 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         <CameraView
           ref={visionCameraRef}
           device={capture.device}
-          // Lifecycle-drive `isActive` ONLY when the native-0.5× fallback is
-          // actually being offered (this device hands off to the OS camera and
-          // must release the device for it). In every other case — feature
-          // off, non-hidden-UW device, iOS — keep the constant `true` the
-          // preview always had, so the shipped capture flow is byte-identical.
-          isActive={offerNativeUW ? appActive : true}
+          // Release the camera whenever the app is genuinely BACKGROUNDED, and
+          // rebind on return — the standard vision-camera lifecycle contract
+          // (v4 does not observe the host activity itself; the session follows
+          // `isActive` alone). Holding a camera we cannot draw is wrong on its
+          // own terms: it blocks other apps, burns battery, and Android may
+          // revoke it anyway, surfacing as the swallowed
+          // `camera-has-been-disconnected` → silent black preview.
+          //
+          // DEVICE EVIDENCE (Galaxy A35, 2026-07-24): this was previously gated
+          // on the native-0.5× affordance being OFFERED, which meant a device
+          // with a reachable ultra-wide kept its camera + AR session fully open
+          // while the OEM camera launched over it. Samsung's `lmkd` runs a
+          // camera-open "kill boost" (`camkillboostmode`, targeting the pid
+          // that opened the camera) and KILLED the app mid-hand-off — with
+          // 2.2 GB still free, so it is Samsung's camera-specific reclaim, not
+          // generic pressure. The in-flight capture died with the process.
+          // Staying small exactly when that reclaim runs is the whole point, so
+          // the release must NOT be conditional on why we backgrounded.
+          //
+          // Only a true `'background'` releases — never iOS's transient
+          // `'inactive'` (Control Centre, the notification shade, a
+          // permission/Face-ID prompt, the app-switcher peek), which would
+          // black-flash the preview mid-capture. See the `appActive` note.
+          isActive={appActive}
           // iOS depth sidecar for tap photos (non-AR only): turns on
           // vision-camera depth delivery + the depth-capable format bias;
           // useCapture (threaded above) extracts the sidecar before the
