@@ -50,6 +50,7 @@ import React, {
   useState,
 } from 'react';
 import {
+  AppState,
   NativeModules,
   Platform,
   Pressable,
@@ -98,6 +99,7 @@ import {
 } from './buildPanoramaInitialSettings';
 import { isLowMemDevice } from './lowMemDevice';
 import { useCapture } from './useCapture';
+import { shouldOfferNativeUltraWide } from './nativeUltraWide';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
 import { useContentRotation } from './useContentRotation';
 import { useOrientationDrift } from './useOrientationDrift';
@@ -824,6 +826,27 @@ export interface CameraProps {
    */
   keyframeQualityCapture?: boolean;
   /**
+   * Native-camera 0.5× fallback (Android; default OFF).  A list of device
+   * MODEL identifiers (matched case-insensitively as a PREFIX of
+   * `Platform.constants.Model`, so `"SM-A346"` covers every A34 SKU) or
+   * `"manufacturer:<brand>"` wildcards, on which the ultra-wide is a
+   * SYSTEM-ONLY camera unreachable by any third-party app (proven on the
+   * Galaxy A34).  On a matching device that ALSO has no in-app 0.5×
+   * (`has0_5x=false`), the lens chip renders a "0.5×⤢" pill that fires
+   * {@link onRequestNativeUltraWide} instead of a dead 1× label — the host
+   * then hands off to the OS camera.  Absent/empty → feature OFF, no change.
+   * iOS ignores this (its virtual devices already reach the ultra-wide).
+   */
+  nativeUltraWideModels?: readonly string[];
+  /**
+   * Fired when the operator taps the "0.5×⤢" native-ultra-wide fallback pill
+   * (see {@link nativeUltraWideModels}).  The host launches the OS camera
+   * (e.g. `react-native-image-picker` `launchCamera`) and routes the
+   * returned photo into its own capture flow marked as external provenance —
+   * the library does NOT launch anything or deliver the external photo.
+   */
+  onRequestNativeUltraWide?: () => void;
+  /**
    * iOS, NON-AR photo path — save each tap photo's AVDepthData as a
    * `<photo>.depth.bin` sidecar (float32 metres row-major + JSON header
    * with dims/intrinsics) and return its path as `depthPath` on the
@@ -1077,9 +1100,40 @@ interface LensChipProps {
    * itself stays fixed in the layout.  `{}` (no-op) in the upright cases.
    */
   contentRotation?: { transform?: ViewStyle['transform'] };
+  /**
+   * Native-camera 0.5× fallback (see `nativeUltraWide.ts`): when the device
+   * has NO in-app ultra-wide (`has0_5x=false`) but is a known system-only-UW
+   * model, render a "0.5× ⤢" pill that hands off to the OS camera instead of
+   * the plain "1×".  Only consulted when `!has0_5x`.
+   */
+  offerNativeUltraWide?: boolean;
+  onNativeUltraWide?: () => void;
 }
-function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): React.JSX.Element {
+function LensChip({
+  lens,
+  onChange,
+  has0_5x,
+  contentRotation,
+  offerNativeUltraWide = false,
+  onNativeUltraWide,
+}: LensChipProps): React.JSX.Element {
   if (!has0_5x) {
+    if (offerNativeUltraWide && onNativeUltraWide) {
+      // The ultra-wide is unreachable in-app on this device — offer a
+      // hand-off to the OS camera. The ⤢ glyph signals it leaves the app.
+      return (
+        <View style={lensChipStyles.container}>
+          <Pressable
+            onPress={onNativeUltraWide}
+            accessibilityRole="button"
+            accessibilityLabel="0.5x ultra-wide via phone camera"
+            style={[lensChipStyles.pill, lensChipStyles.nativeUwPill]}
+          >
+            <Text style={[lensChipStyles.label, contentRotation]}>0.5×⤢</Text>
+          </Pressable>
+        </View>
+      );
+    }
     return (
       <View style={[lensChipStyles.container, lensChipStyles.singleLens]}>
         <Text style={[lensChipStyles.label, contentRotation]}>1×</Text>
@@ -1152,6 +1206,12 @@ const lensChipStyles = StyleSheet.create({
   },
   pillActive: {
     backgroundColor: '#ffd34d',
+  },
+  nativeUwPill: {
+    // Distinct from the normal lens pill — a subtle outline so the ⤢
+    // hand-off reads as "opens your phone camera", not a live lens toggle.
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.6)',
   },
   label: {
     color: '#ffffff',
@@ -1387,6 +1447,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     enableDepth,
     highResCapture,
     keyframeQualityCapture,
+    nativeUltraWideModels,
+    onRequestNativeUltraWide,
     captureDepthData,
     enableAnchors,
     enableMesh,
@@ -1677,6 +1739,52 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // an ultra-wide reachable via a multi-cam zoom OR a standalone
   // ultra-wide device; false on wide-only hardware (chip hides).
   const has0_5x = capture.has0_5x;
+  // Native-camera 0.5× fallback: only when the host opted in (a non-empty
+  // model list) AND this Android device has no in-app 0.5× AND its model
+  // matches. `Platform.constants` carries Model/Manufacturer on Android.
+  const offerNativeUW = useMemo(() => {
+    // Photo-only: the fallback captures ONE external still, so it must not
+    // sit where a 0.5× PANORAMA would be expected. A pano-only <Camera>
+    // never shows it.
+    if (!enablePhotoMode) return false;
+    const c = (
+      Platform as unknown as {
+        constants?: { Model?: string; Manufacturer?: string };
+      }
+    ).constants;
+    return shouldOfferNativeUltraWide({
+      hasInAppUltraWide: has0_5x,
+      models: nativeUltraWideModels,
+      platformOS: Platform.OS,
+      deviceModel: c?.Model,
+      deviceManufacturer: c?.Manufacturer,
+    });
+  }, [has0_5x, nativeUltraWideModels, enablePhotoMode]);
+  // App foreground state drives the non-AR preview's `isActive` — but ONLY
+  // when the native-0.5× fallback is being offered (see `isActive=` below);
+  // otherwise `isActive` stays the constant `true` it always was (the shipped
+  // capture flow is byte-identical). vision-camera 4.x does NOT observe the
+  // host activity lifecycle — its session is driven only by `isActive` — so
+  // when the OS camera launched by the fallback comes to the foreground we
+  // must proactively release the device and re-acquire on return; relying on
+  // CameraX's opportunistic reopen is unreliable on the Samsung OEM devices
+  // that are the native-UW target class (a swallowed
+  // `camera-has-been-disconnected` → silent black preview).
+  //
+  // Release ONLY on a true `'background'` — NOT on iOS's transient
+  // `'inactive'` (Control Center, the notification shade, a permission/Face-ID
+  // prompt, the app-switcher peek): those must NOT cycle the session, or the
+  // preview black-flashes mid-capture. The OS-camera hand-off backgrounds our
+  // activity, which is exactly `'background'`.
+  const [appActive, setAppActive] = useState(
+    AppState.currentState !== 'background',
+  );
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (s) =>
+      setAppActive(s !== 'background'),
+    );
+    return () => sub.remove();
+  }, []);
   const incremental = useIncrementalStitcher();
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);
@@ -2759,7 +2867,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         <CameraView
           ref={visionCameraRef}
           device={capture.device}
-          isActive
+          // Lifecycle-drive `isActive` ONLY when the native-0.5× fallback is
+          // actually being offered (this device hands off to the OS camera and
+          // must release the device for it). In every other case — feature
+          // off, non-hidden-UW device, iOS — keep the constant `true` the
+          // preview always had, so the shipped capture flow is byte-identical.
+          isActive={offerNativeUW ? appActive : true}
           // iOS depth sidecar for tap photos (non-AR only): turns on
           // vision-camera depth delivery + the depth-capable format bias;
           // useCapture (threaded above) extracts the sidecar before the
@@ -3019,6 +3132,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               onChange={handleLensChange}
               has0_5x={has0_5x}
               contentRotation={contentRotation}
+              offerNativeUltraWide={offerNativeUW}
+              onNativeUltraWide={onRequestNativeUltraWide}
             />
           )}
           <View style={styles.shutterWrap}>
