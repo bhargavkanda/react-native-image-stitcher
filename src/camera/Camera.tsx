@@ -431,6 +431,29 @@ export interface CameraProps {
   // ── UI knobs ──────────────────────────────────────────────────────
   enablePhotoMode?: boolean;
   enablePanoramaMode?: boolean;
+  /**
+   * Hide the built-in shutter + AR-toggle so a HOST can render its own capture
+   * controls and drive capture through the imperative handle
+   * ({@link CameraHandle.takePhoto} / {@link CameraHandle.startPanorama} /
+   * {@link CameraHandle.stopPanorama}). The lens chip is KEPT — it is a lens
+   * selector, not a capture control, and the whole point is that the library
+   * still owns lens selection. Default `false` (built-in shutter shown, every
+   * existing consumer unchanged).
+   */
+  hideBuiltInShutter?: boolean;
+  /**
+   * When a device offers only ONE usable lens (no in-app ultra-wide and no
+   * native-0.5× fallback on offer), render NOTHING instead of a static "1×"
+   * label — there is nothing to switch, so the chip is noise. Default `false`
+   * keeps the "1×" label for back-compat.
+   */
+  hideLensChipWhenSingle?: boolean;
+  /**
+   * Lift the bottom control cluster (lens chip + built-in shutter, if shown) by
+   * this many px, so a host chrome docked below the preview (e.g. a mode
+   * switcher) doesn't overlap it. Default `0`. Layout-only; no behaviour change.
+   */
+  bottomBarOffset?: number;
   showSettingsButton?: boolean;
   /**
    * v0.13.2 — which capture sources the host allows (default `'both'`).
@@ -1077,6 +1100,20 @@ export interface CameraHandle extends AROverlayMethods {
    * settles (success or handled error reported through `onCapture`).
    */
   takePhoto(): Promise<void>;
+  /**
+   * Imperatively START a panorama sweep — identical to the user beginning a
+   * hold on the shutter (the incremental stitcher starts ingesting AR frames).
+   * A no-op unless `enablePanoramaMode` is on. Pair with {@link stopPanorama}.
+   * Added for hosts that render their OWN shutter (see `hideBuiltInShutter`)
+   * and drive capture through this handle instead of the built-in button.
+   */
+  startPanorama(): void;
+  /**
+   * Imperatively STOP an in-flight panorama sweep — identical to releasing the
+   * shutter hold: finalize the stitch and emit `onCapture`. Idempotent (a safe
+   * no-op when nothing is recording). Resolves once the stop is dispatched.
+   */
+  stopPanorama(): Promise<void>;
 }
 
 
@@ -1108,6 +1145,9 @@ interface LensChipProps {
    */
   offerNativeUltraWide?: boolean;
   onNativeUltraWide?: () => void;
+  /** When the device offers only ONE lens (no 0.5× and no native fallback),
+   *  render null instead of the static "1×" label. Default false. */
+  hideWhenSingle?: boolean;
 }
 function LensChip({
   lens,
@@ -1116,7 +1156,8 @@ function LensChip({
   contentRotation,
   offerNativeUltraWide = false,
   onNativeUltraWide,
-}: LensChipProps): React.JSX.Element {
+  hideWhenSingle = false,
+}: LensChipProps): React.JSX.Element | null {
   if (!has0_5x) {
     if (offerNativeUltraWide && onNativeUltraWide) {
       // The ultra-wide is unreachable in-app on this device — offer a
@@ -1134,6 +1175,9 @@ function LensChip({
         </View>
       );
     }
+    // Only one usable lens. Nothing to switch — hide entirely, or keep the
+    // legacy static "1×" label.
+    if (hideWhenSingle) return null;
     return (
       <View style={[lensChipStyles.container, lensChipStyles.singleLens]}>
         <Text style={[lensChipStyles.label, contentRotation]}>1×</Text>
@@ -1417,6 +1461,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     captureSources = 'both',
     enablePhotoMode = true,
     enablePanoramaMode = true,
+    hideBuiltInShutter = false,
+    hideLensChipWhenSingle = false,
+    bottomBarOffset = 0,
     showSettingsButton = false,
     style,
     outputDir,
@@ -1793,6 +1840,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // far below (after the refs/state it closes over), so the imperative handle
   // can't reference it directly without a TDZ error — the ref bridges that.
   const handleTapRef = useRef<(() => Promise<void>) | null>(null);
+  // Latest hold-start callback, kept in a ref so the imperative `startPanorama`
+  // can reach it (handleHoldStart is defined below the handle). Mirrors
+  // handleTapRef; handleHoldEndRef (the stop side) already exists further down.
+  const handleHoldStartRef = useRef<(() => void) | null>(null);
 
   // v0.20.0 — AR overlay imperative handle.  `<Camera>` itself renders no
   // overlay layer; the overlay methods forward to the mounted
@@ -1809,6 +1860,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     clearOverlays: () => arViewRef.current?.clearOverlays(),
     raycast: () => arViewRef.current?.raycast() ?? Promise.resolve(null),
     takePhoto: () => handleTapRef.current?.() ?? Promise.resolve(),
+    startPanorama: () => handleHoldStartRef.current?.(),
+    stopPanorama: () => {
+      handleHoldEndRef.current?.();
+      return Promise.resolve();
+    },
   }), []);
 
   // Effect that does the async transition work whenever the settled
@@ -2635,6 +2691,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // adding it as a dep (it changes identity on every recording tick).
   useEffect(() => {
     handleHoldEndRef.current = () => { void handleHoldEnd(); };
+    // Assigned here (not with handleTapRef) because handleHoldStart is declared
+    // below that point — this site is after both hold handlers exist.
+    handleHoldStartRef.current = handleHoldStart;
   });
 
   // ── Item 6 — lateral drift → FINALIZE + popup ───────────────────
@@ -3136,7 +3195,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             top/bottom (lens left / shutter center / AR right);
             vertical column when on left/right (slots stack along
             the narrow strip).  Touch targets stay axis-aligned. */}
-        <View style={bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}>
+        <View
+          style={[
+            bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation)),
+            // Host chrome docked below? Lift the whole cluster clear of it.
+            bottomBarOffset > 0 && { transform: [{ translateY: -bottomBarOffset }] },
+          ]}
+        >
         {/* v0.13.1 — flash + AR moved to the top-right pill stack (see
             below).  Left/right slots stay as flex spacers so the shutter
             + lens chip remain centred. */}
@@ -3152,17 +3217,23 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               contentRotation={contentRotation}
               offerNativeUltraWide={offerNativeUW}
               onNativeUltraWide={onRequestNativeUltraWide}
+              hideWhenSingle={hideLensChipWhenSingle}
             />
           )}
-          <View style={styles.shutterWrap}>
-            <CameraShutter
-              onTap={handleTap}
-              onHoldStart={enablePanoramaMode ? handleHoldStart : noop}
-              onHoldComplete={enablePanoramaMode ? handleHoldEnd : noop}
-              isProcessing={statusPhase === 'stitching'}
-              disabled={statusPhase === 'stitching' || shutterDisabled}
-            />
-          </View>
+          {!hideBuiltInShutter && (
+            <View style={styles.shutterWrap}>
+              <CameraShutter
+                onTap={handleTap}
+                onHoldStart={enablePanoramaMode ? handleHoldStart : noop}
+                onHoldComplete={enablePanoramaMode ? handleHoldEnd : noop}
+                // Tap-only when panorama is off — no dead "recording" ring on a
+                // hold that does nothing (the split-Photo-mode case).
+                holdEnabled={enablePanoramaMode}
+                isProcessing={statusPhase === 'stitching'}
+                disabled={statusPhase === 'stitching' || shutterDisabled}
+              />
+            </View>
+          )}
         </View>
         <View style={styles.bottomBarRight} />
         </View>
@@ -3183,7 +3254,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         {/* v0.13.2 — AR toggle only when BOTH sources are allowed
             (captureSources='both'); a single-source constraint has
             nothing to toggle.  Still gated on 1× + device AR support. */}
-        {arAllowed && nonArAllowed && lens === '1x' && isARSupportedOnDevice && (
+        {!hideBuiltInShutter && arAllowed && nonArAllowed && lens === '1x' && isARSupportedOnDevice && (
           <ARToggle arEnabled={arPreference} onToggle={handleARToggle} contentRotation={contentRotation} />
         )}
         {showFlashButton && !isAR && deviceHasTorch && (
