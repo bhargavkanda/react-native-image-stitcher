@@ -1103,7 +1103,9 @@ export interface CameraHandle extends AROverlayMethods {
   /**
    * Imperatively START a panorama sweep — identical to the user beginning a
    * hold on the shutter (the incremental stitcher starts ingesting AR frames).
-   * A no-op unless `enablePanoramaMode` is on. Pair with {@link stopPanorama}.
+   * A no-op unless `enablePanoramaMode` is on and the shutter is not gated
+   * (`shutterDisabled`), and while a capture is already recording/stitching —
+   * the same gates `takePhoto` respects. Pair with {@link stopPanorama}.
    * Added for hosts that render their OWN shutter (see `hideBuiltInShutter`)
    * and drive capture through this handle instead of the built-in button.
    */
@@ -2428,7 +2430,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // `pendingPanStart` instead (item 1/2) and the resume effect below
   // starts the capture once the user rotates to landscape.
   const handleHoldStart = useCallback(() => {
-    if (!enablePanoramaMode) return;
+    // Gate symmetrically with handleTap (shutterDisabled) AND guard
+    // re-entrancy: the built-in shutter's phase machine prevents a
+    // double-start, but the imperative startPanorama() has no such machine, so
+    // a repeat call — or one while a capture is recording/stitching — would
+    // re-enter incremental.start() on a live engine.
+    if (!enablePanoramaMode || shutterDisabled) return;
+    if (statusPhase === 'recording' || statusPhase === 'stitching') return;
     if (!incrementalStitcherIsAvailable()) {
       onError?.(
         new CameraError(
@@ -2447,6 +2455,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     void startCapture();
   }, [
     enablePanoramaMode,
+    shutterDisabled,
+    statusPhase,
     onError,
     panMode,
     deviceOrientation,

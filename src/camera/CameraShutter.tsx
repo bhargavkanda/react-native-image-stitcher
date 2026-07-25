@@ -172,6 +172,14 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
       clearMaxHoldTimer();
     }, [clearHoldTimer, clearMaxHoldTimer]);
 
+    // If hold is disabled mid-press (e.g. a Pano→Photo switch while the finger
+    // is down), disarm the pending hold timer so it can't still enter the
+    // holding phase — paint the recording ring and fire onHoldStart — on a
+    // shutter that is now tap-only.
+    useEffect(() => {
+      if (!holdEnabled) clearHoldTimer();
+    }, [holdEnabled, clearHoldTimer]);
+
     const handlePressIn = useCallback(() => {
       if (disabled || isProcessing) return;
       setPhaseBoth('pressing');
