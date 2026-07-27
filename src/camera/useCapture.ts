@@ -26,6 +26,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Platform } from 'react-native';
 import {
   Camera,
   useCameraDevice,
@@ -271,7 +272,14 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
   // where the ultra-wide is only inside a multi-cam device, and (b)
   // flash being unavailable on the torchless standalone ultra-wide.
   const selection = useMemo(
-    () => selectCaptureDevice(allDevices as unknown as DeviceLike[]),
+    () =>
+      selectCaptureDevice(allDevices as unknown as DeviceLike[], {
+        // Galaxy S24 Ultra field finding (SCG26, 2026-07-27): on Android,
+        // don't trust a multicam device's zoom-reach claim to the
+        // ultra-wide when a real standalone ultra-wide id exists — see
+        // SelectCaptureDeviceOptions.platform.
+        platform: Platform.OS,
+      }),
     [allDevices],
   );
 

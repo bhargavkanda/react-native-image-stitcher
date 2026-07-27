@@ -14,6 +14,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.16.5] — 2026-07-27
+
+### Fixed
+
+- **Android: 0.5× silently stayed on the wide lens on some Samsung
+  multi-cam devices.** `selectCaptureDevice`'s multicam qualification
+  trusts a logical device's `minZoom` to decide whether it can reach the
+  ultra-wide by zoom alone (`UW_ZOOM_REACH_MAX = 0.7`). On a real Galaxy
+  S24 Ultra (SCG26) the logical device reported `minZoom: 0.6` — inside
+  that threshold — but the Samsung camera HAL never actually crossed
+  physical sensors: `adb logcat` showed the identical vendor stream id
+  (`MultiCameraRealtime1_IFE0_cam0`) at both 1× and the "0.5×"-zoomed
+  request, and the captured frame's field of view did not widen. New
+  `SelectCaptureDeviceOptions.platform` (threaded from `Platform.OS` at
+  the `useCapture` call site): on `'android'`, when a genuine standalone
+  ultra-wide device id is ALSO enumerated, the multicam zoom-reach claim
+  is no longer trusted and the selector swaps to that standalone device
+  instead (`mode: 'standalone-uw'`) — matching what the device can
+  actually deliver. 1× is unaffected (still the same multicam device,
+  torch/format continuity preserved); only the 0.5× target changes. iOS
+  is untouched — it keeps preferring multicam whenever it qualifies (the
+  original fix that keeps flash working on 0.5× for real iPhones, which
+  enumerate a standalone ultra-wide alongside the same triple-cam).
+
+### Documentation
+
+- Clarified that `enablePhotoMode={false}` (with `enablePanoramaMode` at
+  its default `true`) is already a pano-only `<Camera>` — no separate
+  flag needed.
+
 ## [0.16.3] — 2026-06-24
 
 ### Added

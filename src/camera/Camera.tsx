@@ -419,6 +419,17 @@ export interface CameraProps {
   maxInscribedRectCrop?: boolean;
 
   // ── UI knobs ──────────────────────────────────────────────────────
+  /**
+   * Default `true`. Set `false` to disable single-TAP photo capture
+   * entirely (`handleTap` no-ops).
+   *
+   * PANO-ONLY RECIPE: `enablePhotoMode={false}` with `enablePanoramaMode`
+   * left at its default `true` is already a pano-only `<Camera>` — tap is
+   * disabled, hold-to-pan still fires a capture. No separate flag needed.
+   * Lens switching (the 0.5×/1× chip) is unaffected either way — it
+   * selects which device the eventual hold-to-pan uses, it does not
+   * itself capture.
+   */
   enablePhotoMode?: boolean;
   enablePanoramaMode?: boolean;
   showSettingsButton?: boolean;

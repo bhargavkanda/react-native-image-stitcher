@@ -85,21 +85,59 @@ const hasLens = (d: DeviceLike, lens: LensType) =>
  */
 const UW_ZOOM_REACH_MAX = 0.7;
 
+/** Options for {@link selectCaptureDevice}. */
+export interface SelectCaptureDeviceOptions {
+  /**
+   * `Platform.OS` at the call site.  Threaded in (not read directly) so
+   * this module stays pure/synchronous and unit-testable without a
+   * react-native mock — see the file header.
+   *
+   * ANDROID FIELD FINDING (Galaxy S24 Ultra / SCG26, 2026-07-27): the
+   * logical multi-cam device reported `minZoom: 0.6` — inside
+   * `UW_ZOOM_REACH_MAX`, so the multicam branch trusted it — but the
+   * Samsung camera HAL never actually crossed physical sensors: a captured
+   * `adb logcat` showed the identical vendor stream id
+   * (`MultiCameraRealtime1_IFE0_cam0`) at both 1× and the "0.5×"-zoomed
+   * request, and the captured frame's FOV visibly did not widen. Android's
+   * Camera2 `CONTROL_ZOOM_RATIO` cross-physical-camera switch is
+   * documented as OEM-inconsistent for non-first-party apps, so on
+   * `'android'` we do NOT trust the zoom-reach claim when a genuine
+   * standalone ultra-wide id exists to swap to instead — see the multicam
+   * qualification check below.
+   *
+   * iOS is UNCHANGED: AVFoundation's virtual multi-cam devices are the
+   * OS-native mechanism this file's original fix relies on (multicam
+   * keeps flash working on 0.5× — see the SYMPTOM 1/2 tests), so iOS keeps
+   * preferring multicam whenever it qualifies, even when a standalone
+   * ultra-wide ALSO happens to be enumerated (real iPhones enumerate
+   * both simultaneously).
+   *
+   * Omitted / any value other than `'android'` → today's behaviour
+   * (prefer multicam), so an untested platform can't silently regress.
+   */
+  platform?: string;
+}
+
 /**
  * Choose the back-camera device(s) for capture.
  *
  * Priority:
  *   1. multicam — a multi-cam device containing BOTH wide + ultra-wide
  *      (best: one device, zoom-switch, torch via the wide member).
+ *      SKIPPED on `platform: 'android'` when a standalone ultra-wide is
+ *      ALSO enumerated — the zoom-reach claim is not trustworthy there
+ *      (see {@link SelectCaptureDeviceOptions.platform}).
  *   2. standalone-uw — a standalone wide AND a standalone ultra-wide
  *      exist as separate devices (device-swap on lens change; flash
  *      hidden on the torchless ultra-wide).
  *   3. wide-only — no ultra-wide reachable; wide-angle only.
  *
  * @param devices  All enumerated camera devices (any position).
+ * @param opts     See {@link SelectCaptureDeviceOptions}.
  */
 export function selectCaptureDevice<D extends DeviceLike>(
   devices: readonly D[],
+  opts: SelectCaptureDeviceOptions = {},
 ): CaptureDeviceSelection<D> {
   const back = devices.filter((d) => d.position === 'back');
 
@@ -129,7 +167,20 @@ export function selectCaptureDevice<D extends DeviceLike>(
       // does NOT qualify -- we fall through to the device-swap path below.
       d.minZoom <= UW_ZOOM_REACH_MAX,
   );
-  if (multicamCandidates.length > 0) {
+  // ANDROID ONLY: even a "qualifying" multicam claim (minZoom <=
+  // UW_ZOOM_REACH_MAX) is not trustworthy -- see the field finding on
+  // SelectCaptureDeviceOptions.platform.  When a genuine standalone
+  // ultra-wide id is ALSO enumerated, skip the multicam early-return here
+  // and let it fall through to the standalone-uw branch below, which
+  // device-swaps onto hardware that actually delivers the ultra-wide. 1×
+  // is unaffected either way (see the branch below -- the 1× primary pick
+  // still mounts this same multicam device, so torch/format continuity at
+  // 1× does not change; only the 0.5× target does). iOS is untouched:
+  // this whole gate is a no-op unless platform === 'android'.
+  const androidDistrustsMulticamUw =
+    opts.platform === 'android'
+    && back.some((d) => !d.isMultiCam && hasLens(d, 'ultra-wide-angle-camera'));
+  if (multicamCandidates.length > 0 && !androidDistrustsMulticamUw) {
     const device = multicamCandidates.reduce((best, d) => {
       // torch-bearing wins; then wider zoom span; then more lenses.
       if (d.hasTorch !== best.hasTorch) return d.hasTorch ? d : best;
