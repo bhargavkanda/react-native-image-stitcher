@@ -314,6 +314,18 @@ export function RectCropPreview(
         PanResponder.create({
           onStartShouldSetPanResponder: () => true,
           onMoveShouldSetPanResponder: () => true,
+          // Corner drags must never be stolen mid-gesture by an ancestor
+          // responder (e.g. the host's screen-wide swipe-to-switch-mode
+          // PanResponder, RetaiLensCaptureCamera.tsx's modeSwipeResponder).
+          // RN's default (no handler = grant) let an ancestor take over the
+          // instant a drag went horizontal-dominant -- exactly the shape of
+          // dragging a corner to fix the TOP edge -- firing a mode switch
+          // that unmounted the whole capture surface mid-edit and discarded
+          // every captured page. onPanResponderTerminate (forced OS-level
+          // termination, e.g. an incoming call) is unaffected -- RN still
+          // delivers it even when a termination REQUEST is refused, so the
+          // cleanup below still runs on a genuine interruption.
+          onPanResponderTerminationRequest: () => false,
           onPanResponderGrant: () => {
             dragCornerRef.current = corner;
             const layout = boxRef.current;

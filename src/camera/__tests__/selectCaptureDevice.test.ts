@@ -183,6 +183,58 @@ describe('selectCaptureDevice', () => {
     expect(sel.ultraWideDevice).toBeNull();
   });
 
+  it('S24 ULTRA FIELD FINDING (SCG26, 2026-07-27): multicam CLAIMS zoom reaches uw (minZoom 0.6 <= 0.7) but the Samsung HAL never crosses over -- android prefers the real standalone uw; iOS/unspecified is UNCHANGED', () => {
+    // Reproduced on a real Galaxy S24 Ultra: `adb logcat` showed the SAME
+    // vendor physical-stream id (MultiCameraRealtime1_IFE0_cam0) at both 1x
+    // and the "0.5x"-zoomed request, and the captured frame's FOV did not
+    // widen -- this device's minZoom is not honoured by its camera HAL.
+    // Fixture is the exact enumeration from the SDK's own
+    // `[rnimagestitcher] lens-select` diagnostic on that device.
+    const multicam = dev({
+      id: '0',
+      physicalDevices: [
+        'wide-angle-camera', 'ultra-wide-angle-camera', 'wide-angle-camera',
+        'telephoto-camera', 'telephoto-camera',
+      ],
+      isMultiCam: true,
+      hasTorch: true,
+      minZoom: 0.6,
+      neutralZoom: 1,
+      maxZoom: 10,
+    });
+    const uw = dev({
+      id: '2',
+      physicalDevices: ['ultra-wide-angle-camera'],
+      isMultiCam: false,
+      hasTorch: false,
+      minZoom: 1,
+      neutralZoom: 1,
+      maxZoom: 8,
+    });
+
+    // No platform / iOS: UNCHANGED -- still trusts the multicam zoom claim.
+    // This is the behaviour that keeps flash working on 0.5x for real
+    // iPhones (which enumerate a standalone uw ALONGSIDE the triple-cam,
+    // same shape as this fixture) -- it must not regress.
+    const noPlatform = selectCaptureDevice([multicam, uw]);
+    expect(noPlatform.mode).toBe('multicam');
+    expect(noPlatform.device).toBe(multicam);
+    const iosLike = selectCaptureDevice([multicam, uw], { platform: 'ios' });
+    expect(iosLike.mode).toBe('multicam');
+    expect(iosLike.device).toBe(multicam);
+
+    // Android: the real standalone ultra-wide wins instead. 1x is
+    // UNCHANGED (still the multicam device -- torch/format continuity at
+    // 1x is preserved); only 0.5x now swaps to hardware that actually
+    // works.
+    const androidReal = selectCaptureDevice([multicam, uw], { platform: 'android' });
+    expect(androidReal.mode).toBe('standalone-uw');
+    expect(androidReal.device).toBe(multicam);
+    expect(androidReal.ultraWideDevice).toBe(uw);
+    expect(androidReal.has0_5x).toBe(true);
+    expect(androidReal.hasTorch).toBe(true); // the 1x mount still has its torch
+  });
+
   it('minZoom threshold: <=0.7 zoom-switches, >0.7 falls through to swap', () => {
     const atThreshold = dualWide({ minZoom: 0.7 });
     expect(selectCaptureDevice([atThreshold]).mode).toBe('multicam');

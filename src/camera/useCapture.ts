@@ -297,6 +297,11 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
         // SelectCaptureDeviceOptions.preferDepth for the wide+tele FOV
         // trade). Without the opt-in the plain-wide pick is unchanged.
         preferDepth: captureDepthData === true && Platform.OS === 'ios',
+        // Galaxy S24 Ultra field finding (SCG26, 2026-07-27): on Android,
+        // don't trust a multicam device's zoom-reach claim to the
+        // ultra-wide when a real standalone ultra-wide id exists — see
+        // SelectCaptureDeviceOptions.platform.
+        platform: Platform.OS,
       }),
     [allDevices, captureDepthData],
   );
