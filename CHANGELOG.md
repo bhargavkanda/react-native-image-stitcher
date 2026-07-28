@@ -14,6 +14,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.16.6] — 2026-07-27
+
+### Changed
+
+- **The lens chip now shows the device's REAL ultra-wide factor** instead of a
+  hardcoded `0.5×`. Real ultra-wides differ — a Galaxy S24 Ultra's is `0.6×`
+  (what Samsung's own camera app shows, and exactly what its logical device
+  reports as `minZoom`), while a typical iPhone is `0.5×`. New
+  `CaptureDeviceSelection.ultraWideFactor`, threaded through `useCapture` to
+  the chip alongside the existing `has0_5x`.
+
+  **Label only** — the `CameraLens` identifier stays `'1x' | '0.5x'`, because
+  it is also the stitcher's warper-tree zoom signal; making that
+  device-dependent would change stitching behaviour, not just text.
+
+  The factor is deliberately **not** read off the mounted device: in
+  `standalone-uw` mode the `0.5×` mount *is* the ultra-wide, so it reports its
+  own native `minZoom: 1` and would render a nonsensical `1×` — the very case
+  an S24 Ultra takes after the 0.16.5 fix. Instead the whole back-camera set is
+  scanned for the smallest sub-1× `minZoom` any ultra-wide-carrying device
+  advertises (the OEM's own declaration of where the ultra-wide sits).
+
+  When nothing advertises a sub-1× range the factor is genuinely unknowable
+  from what the platform reports, so it stays `null` and the chip keeps its
+  historical `0.5×` text rather than inventing a number. Values are rounded to
+  1 dp (vision-camera surfaces float32 — the S24 Ultra reports
+  `0.6000000238418579`).
+
 ## [0.16.5] — 2026-07-27
 
 ### Fixed

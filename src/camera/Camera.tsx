@@ -886,8 +886,28 @@ interface LensChipProps {
    * itself stays fixed in the layout.  `{}` (no-op) in the upright cases.
    */
   contentRotation?: { transform?: ViewStyle['transform'] };
+  /**
+   * The device's REAL ultra-wide factor, for this chip's label only — `0.6`
+   * on a Galaxy S24 Ultra, `0.5` on a typical iPhone.  The `CameraLens`
+   * identifier stays `'0.5x'` regardless (it is also the stitcher's
+   * warper-tree zoom signal).  Null/absent ⇒ keep the historical `0.5×`
+   * text rather than invent a number.
+   */
+  ultraWideFactor?: number | null;
 }
-function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): React.JSX.Element {
+function LensChip({
+  lens,
+  onChange,
+  has0_5x,
+  contentRotation,
+  ultraWideFactor,
+}: LensChipProps): React.JSX.Element {
+  // Label only — never the `CameraLens` value. `0.6` → "0.6×"; the fallback
+  // keeps every device that reports nothing on the text it has always shown.
+  const uwLabel =
+    ultraWideFactor != null && Number.isFinite(ultraWideFactor)
+      ? `${ultraWideFactor}×`
+      : '0.5×';
   if (!has0_5x) {
     return (
       <View style={[lensChipStyles.container, lensChipStyles.singleLens]}>
@@ -900,7 +920,7 @@ function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): 
       <Pressable
         onPress={() => onChange('0.5x')}
         accessibilityRole="button"
-        accessibilityLabel="0.5x ultra-wide lens"
+        accessibilityLabel={`${uwLabel.replace('×', 'x')} ultra-wide lens`}
         accessibilityState={{ selected: lens === '0.5x' }}
         style={[
           lensChipStyles.pill,
@@ -914,7 +934,7 @@ function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): 
             contentRotation,
           ]}
         >
-          0.5×
+          {uwLabel}
         </Text>
       </Pressable>
       <Pressable
@@ -2700,6 +2720,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
               onChange={handleLensChange}
               has0_5x={has0_5x}
               contentRotation={contentRotation}
+              ultraWideFactor={capture.ultraWideFactor}
             />
           )}
           <View style={styles.shutterWrap}>

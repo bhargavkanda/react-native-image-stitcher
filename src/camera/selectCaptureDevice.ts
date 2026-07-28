@@ -70,10 +70,54 @@ export interface CaptureDeviceSelection<D extends DeviceLike = DeviceLike> {
   has0_5x: boolean;
   /** Whether the `1×`/primary mounted device can flash (drives flash UI). */
   hasTorch: boolean;
+  /**
+   * The device's REAL ultra-wide zoom factor, for the lens chip's LABEL only
+   * (the `CameraLens` identifier stays `'0.5x'` — it is also the stitcher's
+   * warper-tree zoom signal, so it must not become device-dependent).
+   * `0.6` on a Galaxy S24 Ultra, `0.5` on a typical iPhone.
+   *
+   * `null` when no back device advertises a sub-1× zoom range, i.e. the
+   * factor is genuinely unknowable from what the platform reports — the UI
+   * falls back to its historical `0.5×` label rather than inventing a number.
+   *
+   * See {@link ultraWideFactorOf} for why this is NOT read off the mounted
+   * device.
+   */
+  ultraWideFactor: number | null;
 }
 
 const hasLens = (d: DeviceLike, lens: LensType) =>
   d.physicalDevices.includes(lens);
+
+/**
+ * The OEM-declared ultra-wide zoom factor across the WHOLE back-camera set.
+ *
+ * Deliberately not read off the mounted device: in `standalone-uw` mode the
+ * 0.5× mount IS the ultra-wide, so it reports its own native range
+ * (`minZoom: 1`) and would render a nonsensical "1×" label.  The real factor
+ * is declared by the sibling LOGICAL device that spans wide→ultra-wide — on a
+ * Galaxy S24 Ultra that is `minZoom: 0.6`, matching what Samsung's own camera
+ * app shows.  So: scan every back device that carries an ultra-wide and take
+ * the smallest sub-1× `minZoom` any of them advertises.
+ *
+ * Returns null when nothing advertises a sub-1× range (a pure standalone-UW
+ * phone where no logical device declares the crossover) — the caller must then
+ * fall back rather than guess.  Non-finite / non-positive values are ignored.
+ */
+function ultraWideFactorOf(back: readonly DeviceLike[]): number | null {
+  let best: number | null = null;
+  for (const d of back) {
+    if (!hasLens(d, 'ultra-wide-angle-camera')) continue;
+    const z = d.minZoom;
+    // `< 1` is the whole point: a device merely LISTING the ultra-wide reports
+    // 1.0 and tells us nothing about where the ultra-wide sits.
+    if (!Number.isFinite(z) || z <= 0 || z >= 1) continue;
+    if (best == null || z < best) best = z;
+  }
+  // Round to 1dp: vision-camera surfaces float32 (the S24 Ultra reports
+  // 0.6000000238418579), which would otherwise render verbatim in the chip.
+  return best == null ? null : Math.round(best * 10) / 10;
+}
 
 /**
  * Max `minZoom` a multi-cam device may report and still count as able to
@@ -148,8 +192,12 @@ export function selectCaptureDevice<D extends DeviceLike>(
       mode: 'wide-only',
       has0_5x: false,
       hasTorch: false,
+      ultraWideFactor: null,
     };
   }
+
+  // Label-only; computed once over the whole back set (see ultraWideFactorOf).
+  const ultraWideFactor = ultraWideFactorOf(back);
 
   // ── 1. Prefer a multi-cam device that carries BOTH wide + ultra-wide.
   // Among candidates, prefer the one that ALSO has a torch (so flash
@@ -195,6 +243,7 @@ export function selectCaptureDevice<D extends DeviceLike>(
       mode: 'multicam',
       has0_5x: true,
       hasTorch: device.hasTorch,
+      ultraWideFactor,
     };
   }
 
@@ -227,6 +276,7 @@ export function selectCaptureDevice<D extends DeviceLike>(
       mode: 'standalone-uw',
       has0_5x: true,
       hasTorch: primary.hasTorch,
+      ultraWideFactor,
     };
   }
 
@@ -239,6 +289,9 @@ export function selectCaptureDevice<D extends DeviceLike>(
     mode: 'wide-only',
     has0_5x: false,
     hasTorch: wideOnly.hasTorch,
+    // Reported even here (has0_5x is false so no chip consumes it today), so
+    // the field never lies about the hardware just because the chooser is off.
+    ultraWideFactor,
   };
 }
 
