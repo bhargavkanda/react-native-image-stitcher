@@ -214,6 +214,13 @@ export interface UseCaptureReturn {
    */
   has0_5x: boolean;
   /**
+   * The device's real ultra-wide factor for the lens chip's LABEL (0.6 on a
+   * Galaxy S24 Ultra, 0.5 on a typical iPhone); null when the platform never
+   * advertises it, so the UI keeps its historical `0.5×` text.  See
+   * `CaptureDeviceSelection.ultraWideFactor`.
+   */
+  ultraWideFactor: number | null;
+  /**
    * v0.13.2 — whether the currently-MOUNTED device has a torch.  Drives
    * the flash control's availability (the standalone ultra-wide has none).
    */
@@ -371,6 +378,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
           lens: lens ?? null,
           mode: selection.mode,
           has0_5x: selection.has0_5x,
+          ultraWideFactor: selection.ultraWideFactor,
           activeZoom: activeZoom ?? null,
           selected: summarise(selection.device),
           ultraWide: summarise(selection.ultraWideDevice),
@@ -557,6 +565,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     availablePhysicalDevices,
     captureMode: selection.mode,
     has0_5x: selection.has0_5x,
+    ultraWideFactor: selection.ultraWideFactor,
     deviceHasTorch: device?.hasTorch ?? false,
     deviceZoom: activeZoom,
   };

@@ -1164,6 +1164,14 @@ interface LensChipProps {
   /** When the device offers only ONE lens (no 0.5× and no native fallback),
    *  render null instead of the static "1×" label. Default false. */
   hideWhenSingle?: boolean;
+  /**
+   * The device's REAL ultra-wide factor, for this chip's label only — `0.6`
+   * on a Galaxy S24 Ultra, `0.5` on a typical iPhone.  The `CameraLens`
+   * identifier stays `'0.5x'` regardless (it is also the stitcher's
+   * warper-tree zoom signal).  Null/absent ⇒ keep the historical `0.5×`
+   * text rather than invent a number.
+   */
+  ultraWideFactor?: number | null;
 }
 function LensChip({
   lens,
@@ -1173,7 +1181,14 @@ function LensChip({
   offerNativeUltraWide = false,
   onNativeUltraWide,
   hideWhenSingle = false,
+  ultraWideFactor,
 }: LensChipProps): React.JSX.Element | null {
+  // Label only — never the `CameraLens` value. `0.6` → "0.6×"; the fallback
+  // keeps every device that reports nothing on the text it has always shown.
+  const uwLabel =
+    ultraWideFactor != null && Number.isFinite(ultraWideFactor)
+      ? `${ultraWideFactor}×`
+      : '0.5×';
   if (!has0_5x) {
     if (offerNativeUltraWide && onNativeUltraWide) {
       // The ultra-wide is unreachable in-app on this device — offer a
@@ -1205,7 +1220,7 @@ function LensChip({
       <Pressable
         onPress={() => onChange('0.5x')}
         accessibilityRole="button"
-        accessibilityLabel="0.5x ultra-wide lens"
+        accessibilityLabel={`${uwLabel.replace('×', 'x')} ultra-wide lens`}
         accessibilityState={{ selected: lens === '0.5x' }}
         style={[
           lensChipStyles.pill,
@@ -1219,7 +1234,7 @@ function LensChip({
             contentRotation,
           ]}
         >
-          0.5×
+          {uwLabel}
         </Text>
       </Pressable>
       <Pressable
@@ -3242,6 +3257,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               offerNativeUltraWide={offerNativeUW}
               onNativeUltraWide={onRequestNativeUltraWide}
               hideWhenSingle={hideLensChipWhenSingle}
+              ultraWideFactor={capture.ultraWideFactor}
             />
           )}
           {!hideBuiltInShutter && (
