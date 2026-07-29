@@ -6,7 +6,11 @@
  *
  * Pure-TS (structural FormatLike, no vision-camera import).
  */
-import { pickCaptureFormat, type FormatLike } from '../pickCaptureFormat';
+import {
+  exposureCapToFps,
+  pickCaptureFormat,
+  type FormatLike,
+} from '../pickCaptureFormat';
 
 const f = (
   photoWidth: number,
@@ -203,5 +207,82 @@ describe('preferDepthCapture (captureDepthData format bias)', () => {
     // guard with an existing "never returns nothing" fallback).
     expect(chosen!.supportsDepthCapture).toBe(true);
     expect(chosen!.photoWidth).toBe(8064);
+  });
+});
+
+describe('exposureCapToFps (anti-blur exposure cap → session fps)', () => {
+  it('is DISABLED (0) for the default and all non-positive/degenerate inputs', () => {
+    // The whole feature is off by default; disabled must be an unambiguous 0
+    // so the caller floors it against 60 and leaves today's behaviour intact.
+    expect(exposureCapToFps(0)).toBe(0);
+    expect(exposureCapToFps(-5)).toBe(0);
+    expect(exposureCapToFps(NaN)).toBe(0);
+    expect(exposureCapToFps(Infinity)).toBe(0);
+  });
+
+  it('maps a millisecond ceiling to the fps that enforces it (fps = 1000/ms)', () => {
+    expect(exposureCapToFps(8)).toBe(125);   // 1/125 s  (shelf default)
+    expect(exposureCapToFps(20)).toBe(50);   // 1/50 s
+    expect(exposureCapToFps(10)).toBe(100);  // 1/100 s
+  });
+
+  it('rounds UP so the exposure never exceeds the requested ceiling', () => {
+    // 1000/16.6 = 60.2 → 61: a fractional requirement must round toward a
+    // SHORTER exposure, not a longer one, or the cap could be silently missed.
+    expect(exposureCapToFps(16.6)).toBe(61);
+  });
+
+  it('clamps to 240 so a sub-ms misconfig cannot demand an absurd rate', () => {
+    expect(exposureCapToFps(0.1)).toBe(240); // 10000 unclamped
+    expect(exposureCapToFps(2)).toBe(240);   // 500 unclamped → clamped
+    expect(exposureCapToFps(4)).toBe(240);   // 250 unclamped → clamped
+  });
+});
+
+describe('exposure cap picks a fast format AND the caller floors the ceiling', () => {
+  it('an 8 ms cap steers the picker to 120 fps when a 120 fps format exists', () => {
+    // Models CameraView passing fpsTarget = max(60, exposureCapToFps(8)) = 125.
+    const formats: FormatLike[] = [
+      f(2016, 1512, 640, 480, 120),
+      f(2016, 1512, 1920, 1440, 60),
+    ];
+    const chosen = pickCaptureFormat(formats, {
+      maxPhotoLongEdge: 2048,
+      preferHighFps: true,
+      fpsTarget: Math.max(60, exposureCapToFps(8)),
+    });
+    expect(chosen!.maxFps).toBe(120);
+  });
+
+  it('degrades gracefully when no format reaches the requested rate', () => {
+    // Device tops out at 60 fps: the picker returns the 60 fps format, and the
+    // caller's min(maxFps, ceiling) yields 60 — a shortened-but-not-8ms
+    // exposure, never slower than today.
+    const formats: FormatLike[] = [f(2016, 1512, 1920, 1440, 60)];
+    const chosen = pickCaptureFormat(formats, {
+      maxPhotoLongEdge: 2048,
+      preferHighFps: true,
+      fpsTarget: Math.max(60, exposureCapToFps(8)),
+    });
+    expect(chosen!.maxFps).toBe(60);
+    const sessionFps = Math.min(chosen!.maxFps, Math.max(60, exposureCapToFps(8)));
+    expect(sessionFps).toBe(60);
+  });
+
+  it('default (cap off) leaves the session ceiling at 60 — byte-identical', () => {
+    const formats: FormatLike[] = [
+      f(2016, 1512, 640, 480, 120),
+      f(2016, 1512, 1920, 1440, 60),
+    ];
+    // fpsTarget = max(60, 0) = 60 → the 120 fps format is NOT preferred over
+    // the higher-resolution 60 fps one (today's behaviour).
+    const chosen = pickCaptureFormat(formats, {
+      maxPhotoLongEdge: 2048,
+      preferHighFps: true,
+      fpsTarget: Math.max(60, exposureCapToFps(0)),
+    });
+    expect(chosen!.maxFps).toBe(60);
+    const sessionFps = Math.min(chosen!.maxFps, Math.max(60, exposureCapToFps(0)));
+    expect(sessionFps).toBe(60);
   });
 });

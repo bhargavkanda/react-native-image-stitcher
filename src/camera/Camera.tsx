@@ -3003,6 +3003,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           // Non-AR pano keyframe quality: floors the VIDEO stream at 1280
           // long edge (the FP stream IS the keyframe source here).
           keyframeQualityCapture={keyframeQualityCapture}
+          // v0.23 anti-blur EXPOSURE CAP (non-AR): translated to an fps floor
+          // on this vision-camera instance (see CameraView). 0/absent = off.
+          maxExposureMs={settings.frameSelection.antiBlur?.maxExposureMs ?? 0}
           // `video={true}` is REQUIRED for takeSnapshot to work on iOS.
           // vision-camera v4's iOS implementation of takeSnapshot waits
           // for a frame on the video pipeline; with video disabled, the
