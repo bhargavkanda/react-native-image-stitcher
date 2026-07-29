@@ -55,6 +55,23 @@ typedef NS_ENUM(NSInteger, RNISSharpnessWindowAction) {
 /// candidate is pending and MUST be saved (the trailing keyframe).
 - (BOOL)drain;
 
+/// v0.23 (anti-blur admission) — RE-OPEN the window around the SAME
+/// buffered best after the admission policy HELD a CloseAndSave.
+///
+/// A hold means "this keyframe is not committable yet"; keeping the
+/// window open is what makes the hold FREE — the frames that arrive
+/// while the operator steadies keep flowing in as candidates and can
+/// still beat the held best.  Feeding the machine an accept event that
+/// carries its own current best score restores the K−1 candidate slots
+/// without disturbing the streaming max, so no platform-side window
+/// state has to be invented alongside the shared machine.  The caller
+/// keeps its pixel buffer — there is no new frame to buffer.
+///
+/// NO (and nothing changes) when the window is still open, when K == 1,
+/// or when no candidate has been scored yet: in each of those the hold
+/// would have nowhere to live and the caller must commit instead.
+- (BOOL)reopenKeepingBest;
+
 /// Cancel / start: discard any open window.
 - (void)reset;
 

@@ -48,6 +48,10 @@ import ARKit
 import simd
 import UIKit
 import os.log
+// CACurrentMediaTime — the monotonic time base for the anti-blur pan-rate
+// finite difference (pose payloads carry no usable timestamp on the
+// non-AR path; see updateBlurPanRate).
+import QuartzCore
 
 /// Public outcome enum so JS callers can inspect what happened to
 /// each frame.  Values 0-6 historically mirrored the (now-archived)
@@ -481,6 +485,21 @@ public final class IncrementalStitcher: NSObject {
     /// memory per capture.
     private var sharpnessBestBuffer: CVPixelBuffer? = nil
     private var sharpnessBestPose: RNSARFramePose? = nil
+    /// v0.23 — the sharpness score OF THE BUFFERED PIXELS above, tracked
+    /// platform-side rather than read back from the machine.
+    ///
+    /// WHY NOT `sharpnessWindow.bestScore()`: on a FlushThenOpen the
+    /// machine has ALREADY been re-seeded with the new accepted frame's
+    /// score by the time we dispatch the previous window's best, so
+    /// reading it back describes the wrong frame. That was harmless when
+    /// the value was only a log line, but v0.23 feeds it into the
+    /// anti-blur running median — recording a frame that was never
+    /// committed would drag the median (and with it the relative
+    /// softness floor) toward whatever the re-accept happened to score.
+    /// Kept in lock-step with `sharpnessBestBuffer`: every assignment to
+    /// that buffer assigns this too, under the same stateLock hold.
+    /// -1.0 = nothing buffered. (Mirrors Android's `sharpnessBestScore`.)
+    private var sharpnessBestScore: Double = -1.0
     /// v0.21.1 (review d2) — set by cancel() (and cleared by start())
     /// so a queued WINDOW-FLUSH save can tell an operator abort apart
     /// from finalize.  A window-flush save carries a keyframe the gate
@@ -490,6 +509,57 @@ public final class IncrementalStitcher: NSObject {
     /// strict isRunning bail — that path's task really is a phantom
     /// frame once the capture stopped.
     private var savesAbandoned: Bool = false
+
+    // ── v0.23 — anti-blur ADMISSION policy + capture controls ──────
+    //
+    // The sharpness window picks the sharpest of K frames — a purely
+    // RELATIVE choice, which wins on the operator's micro-pauses and
+    // has nothing better to offer when a steady pan smears every
+    // candidate equally (blur extent ≈ angular-velocity × exposure).
+    // These knobs attack the two terms directly.  ALL DEFAULT OFF: with
+    // the JS defaults this whole block is inert and the capture path is
+    // byte-identical to v0.22.
+
+    /// Shared-C++ admission policy (cpp/blur_policy.{hpp,cpp} via
+    /// RNISBlurPolicyBridge) — the SAME thresholds/precedence/fail-open
+    /// rules Android consults.  Owns this capture's running median of
+    /// accepted keyframe scores.  Not thread-safe; every call is under
+    /// stateLock, like the sharpness-window machine.
+    private let blurPolicy = RNISBlurPolicyBridge()
+    /// Mirror of `blurPolicy.isEnabled()`, snapshotted at start() so the
+    /// commit path can skip the policy entirely (and the lock traffic
+    /// that goes with it) without reaching into the bridge.
+    private var blurPolicyActive: Bool = false
+    /// True only while the MOTION gate is configured on.  Gates the
+    /// per-frame pan-rate maths so a default capture does no extra work
+    /// on the AR-delegate thread.
+    private var blurMotionGateActive: Bool = false
+    /// How many consecutive times the CURRENT pending keyframe has been
+    /// held.  Reset the moment that keyframe resolves (committed or
+    /// dropped) and at start()/cancel().  Feeds the shared policy's
+    /// forward-progress cap.
+    private var blurConsecutiveHolds: Int = 0
+    /// Latest |angular rate| estimate about the pan axis, rad/s.
+    /// -1 = UNKNOWN, the sentinel that makes the motion gate fail open.
+    private var blurPanRateRadPerSec: Double = -1.0
+    /// Previous frame's normalised rotation + the MONOTONIC clock time
+    /// (CACurrentMediaTime, ms) at which we sampled it — the baseline
+    /// for the finite-difference rate above.  nil = no usable baseline
+    /// (first frame, tracking not healthy, degenerate quat).
+    ///
+    /// Deliberately NOT the pose's own `timestampMs`: the non-AR driver
+    /// sends 0 for every frame, which would make every dt zero and kill
+    /// the motion gate on that path.
+    private var blurLastPoseQ: (x: Double, y: Double, z: Double, w: Double)? = nil
+    private var blurLastPoseTimestampMs: Double = 0.0
+    /// Exposure ceiling in ms requested by JS
+    /// (`frameSelection.antiBlur.maxExposureMs`).  Parsed and stored for
+    /// diagnostics ONLY — see ExposureCap.swift for why iOS cannot act
+    /// on it from inside this library on either capture path.
+    private var antiBlurMaxExposureMs: Double = 0.0
+    /// Whether this capture asked ARKit for the fastest video format
+    /// (anti-blur (5)).  Pushed to RNSARSession at start().
+    private var antiBlurPreferHighFpsFormat: Bool = false
 
     private override init() {
         super.init()
@@ -972,9 +1042,74 @@ public final class IncrementalStitcher: NSObject {
         self.sharpnessWindow.setWindowSize(self.sharpnessWindowK)
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
+        self.sharpnessBestScore = -1.0
         // v0.21.1 (review d2) — fresh capture: queued saves belong to
         // it again.
         self.savesAbandoned = false
+
+        // v0.23 — anti-blur capture controls
+        // (`frameSelection.antiBlur`).  EVERY knob is OFF unless the
+        // host opts in: an absent key must reproduce v0.22 exactly, so
+        // the fallbacks below are the disabled sentinels (0 / false),
+        // never a "sensible" value.  `antiBlurMaxConsecutiveHolds` is
+        // the one exception — it is a SAFETY cap on the other two and
+        // only bites once one of them is enabled, so it defaults to the
+        // JS default (12) rather than to "no cap".
+        //
+        // JS ships Ints whenever a value happens to be integral, so
+        // every numeric knob has to accept both NSNumber shapes — the
+        // same defensive read the flow knobs above do inline.  Clamped
+        // in Double BEFORE any Int conversion: Int(NaN)/Int(±inf) TRAP
+        // in Swift, so a malformed value would otherwise crash start().
+        func antiBlurDouble(_ key: String) -> Double? {
+            if let v = configOverrides[key] as? Double { return v.isFinite ? v : nil }
+            if let v = configOverrides[key] as? Int { return Double(v) }
+            return nil
+        }
+        // 0…100 ms: a cap above ~100 ms is longer than any hand-held
+        // frame interval and would be indistinguishable from "off".
+        self.antiBlurMaxExposureMs =
+            max(0.0, min(100.0, antiBlurDouble("antiBlurMaxExposureMs") ?? 0.0))
+        // 0…20 rad/s: the JS pan coach warns at 1.0 rad/s, so 20 is
+        // already far past any sweep an operator can hold; the ceiling
+        // exists to keep a garbage value from disabling the gate by
+        // making it unreachable.
+        let antiBlurPanRate =
+            max(0.0, min(20.0, antiBlurDouble("antiBlurMaxCommitPanRateRadPerSec") ?? 0.0))
+        // 0…1: the knob is a FRACTION of the running median.  > 1 would
+        // demand every keyframe beat the median it feeds — a guaranteed
+        // hold streak that only the cap could break.
+        let antiBlurFraction =
+            max(0.0, min(1.0, antiBlurDouble("antiBlurMinScoreFractionOfMedian") ?? 0.0))
+        // 0…100 holds.  0 = no cap (the C++ honours that, and it is a
+        // legitimate opt-out); 100 holds at the eval cadence is already
+        // seconds of waiting, so the ceiling bounds the worst case.
+        let antiBlurHolds =
+            Int(max(0.0, min(100.0, antiBlurDouble("antiBlurMaxConsecutiveHolds") ?? 12.0)))
+        let antiBlurHighFps =
+            (configOverrides["antiBlurPreferHighFpsFormat"] as? Bool) ?? false
+        self.antiBlurPreferHighFpsFormat = antiBlurHighFps
+        self.blurPolicy.configure(withMaxCommitPanRate: antiBlurPanRate,
+                                  minScoreFractionOfMedian: antiBlurFraction,
+                                  maxConsecutiveHolds: antiBlurHolds)
+        // Per-capture state: the median describes THIS scene and the
+        // hold streak THIS capture's pending keyframe — neither may
+        // survive into the next one.
+        self.blurPolicy.resetHistory()
+        self.blurPolicyActive = self.blurPolicy.isEnabled()
+        self.blurMotionGateActive = (antiBlurPanRate > 0.0)
+        self.blurConsecutiveHolds = 0
+        self.blurPanRateRadPerSec = -1.0
+        self.blurLastPoseQ = nil
+        self.blurLastPoseTimestampMs = 0.0
+        if self.blurPolicyActive || self.antiBlurPreferHighFpsFormat
+            || self.antiBlurMaxExposureMs > 0 {
+            os_log(.fault, log: Self.diagLog,
+                   "[v0.23-antiblur] start panRate=%.2f frac=%.2f holds=%d highFps=%d exposureMs=%.1f",
+                   antiBlurPanRate, antiBlurFraction, Int32(antiBlurHolds),
+                   self.antiBlurPreferHighFpsFormat ? Int32(1) : Int32(0),
+                   self.antiBlurMaxExposureMs)
+        }
         // V16 A2 — flow tuning.  C++ side also clamps defensively
         // (setFlowMaxCorners ≥ 30, setFlowQualityLevel ∈ (0, 1],
         // setFlowMinDistance ≥ 1.0) so we layer the JS-side modal
@@ -1091,6 +1226,28 @@ public final class IncrementalStitcher: NSObject {
         // The pre-v0.6 `jsDriver` mode (which pushed frames via
         // `processFrameAtPath` and also skipped registration) has
         // been removed.
+        // v0.23 anti-blur (5) — hand the high-fps preference to the AR
+        // session.  Outside stateLock on purpose: the setter can call
+        // `arSession.run(config)`, which we must never do while holding
+        // the engine's lock.
+        //
+        // BEFORE the consumer is attached below.  `run(config)` re-
+        // negotiates the capture format and resets tracking; doing it
+        // after ingestion is armed means the sweep's first keyframe can
+        // be captured at the OLD format and the operator's opening
+        // frames land in a relocalisation gap (adversarial review).
+        // Settling the format first costs nothing — this only ever fires
+        // on a flag CHANGE.
+        //
+        // Only on a CHANGE.  A redundant call re-negotiates the capture
+        // format (a visible hiccup + dropped frames) at the top of every
+        // single capture, which would break the "off = byte-identical"
+        // contract for a feature nobody enabled.  The session keeps the
+        // flag across captures, so this converges after the first one.
+        if RNSARSession.shared.prefersHighFpsFormat != antiBlurHighFps {
+            RNSARSession.shared.setHighFpsFormatEnabled(antiBlurHighFps)
+        }
+
         if frameSourceMode == "arSession" {
             RNSARSession.shared.incrementalConsumer = self
         }
@@ -1167,6 +1324,7 @@ public final class IncrementalStitcher: NSObject {
         let sharpnessFlushPose = self.sharpnessBestPose
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
+        self.sharpnessBestScore = -1.0
         let rotationDegreesForFlush = self.keyframeRotationDegrees
         // V16 Phase 1b.fix4 — snapshot the cv::Stitcher knobs and
         // EXIF orientation under stateLock so the workQueue closure
@@ -2089,6 +2247,16 @@ public final class IncrementalStitcher: NSObject {
         self.sharpnessWindow.reset()
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
+        self.sharpnessBestScore = -1.0
+        // v0.23 — the admission policy's state describes the window and
+        // the scene that just died: the score median belongs to that
+        // scene, the hold streak to a pending keyframe that no longer
+        // exists, and the pan-rate baseline to a frame stream that has
+        // stopped.  Cleared as one unit with the window above.
+        self.blurPolicy.resetHistory()
+        self.blurConsecutiveHolds = 0
+        self.blurPanRateRadPerSec = -1.0
+        self.blurLastPoseQ = nil
         // v0.21.1 (review d2) — also discard any QUEUED window-flush
         // save: the session dir is deleted below, so letting it
         // complete would write into (or recreate) a dead session.
@@ -2408,6 +2576,18 @@ public final class IncrementalStitcher: NSObject {
                        "[V13.0c-trans] #%d delta_t_world=(%+.4f,%+.4f,%+.4f) magnitude=%.4f m",
                        self.consumeFrameCounter, dx, dy, dz, mag)
             }
+        }
+
+        // v0.23 anti-blur (2) — refresh the pan-rate estimate the
+        // admission policy gates on.  Runs on EVERY delivered frame
+        // (not the gate's eval cadence): the rate is a finite
+        // difference, so the shorter the baseline the closer it is to
+        // the instantaneous motion that actually smears the frame we
+        // may be about to commit.  Skipped entirely unless the motion
+        // gate is configured on, so a default capture pays nothing on
+        // the AR-delegate thread.
+        if isRunning, self.blurMotionGateActive {
+            self.updateBlurPanRate(pose: pose)
         }
 
         // V16 Phase 2 (C1 fix) — evaluate the pose-driven keyframe gate
@@ -2781,11 +2961,14 @@ public final class IncrementalStitcher: NSObject {
             // keyframe: drain the machine (keeps C++/platform state in
             // lock-step) and flush that best below.
             let hadPending = self.sharpnessWindow.drain()
-            let pendingScore = self.sharpnessWindow.bestScore()
+            // Tracked ivar, not the machine: this score describes the
+            // pixels being flushed and feeds the anti-blur median.
+            let pendingScore = self.sharpnessBestScore
             let flushBuffer = hadPending ? self.sharpnessBestBuffer : nil
             let flushPose = hadPending ? self.sharpnessBestPose : nil
             self.sharpnessBestBuffer = nil
             self.sharpnessBestPose = nil
+            self.sharpnessBestScore = -1.0
             stateLock.unlock()
             os_log(.fault, log: Self.diagLog,
                    "[v0.21-sharpness] deepCopy failed; dropping accepted frame")
@@ -2808,11 +2991,19 @@ public final class IncrementalStitcher: NSObject {
         )
         // Seed swap: grab the previous window's best (FlushThenOpen
         // must save it), then buffer this frame as the new seed.
+        //
+        // `previousScore` comes from the platform-tracked ivar, NOT from
+        // `sharpnessWindow.bestScore()`: the ingest() above has already
+        // re-seeded the machine with THIS frame's score, so reading the
+        // machine back here would attribute the new seed's score to the
+        // previous window's committed keyframe — and that value feeds
+        // the anti-blur running median (see `sharpnessBestScore`).
         let previousBuffer = self.sharpnessBestBuffer
         let previousPose = self.sharpnessBestPose
-        let previousScore = self.sharpnessWindow.bestScore()
+        let previousScore = self.sharpnessBestScore
         self.sharpnessBestBuffer = copy
         self.sharpnessBestPose = pose
+        self.sharpnessBestScore = score
         let k = self.sharpnessWindowK
         stateLock.unlock()
 
@@ -2883,6 +3074,12 @@ public final class IncrementalStitcher: NSObject {
         if replaceBest.boolValue, let newBest = challenger {
             self.sharpnessBestBuffer = newBest   // old best released by ARC
             self.sharpnessBestPose = pose
+            // Keep the tracked score describing the BUFFERED pixels.
+            // `scoreForMachine` (not `score`) is deliberate: on the
+            // deep-copy-failure edge they differ, and the machine's
+            // streaming max was advanced with scoreForMachine — the two
+            // must not drift apart.
+            self.sharpnessBestScore = scoreForMachine
         }
         stateLock.unlock()
         if action == RNISSharpnessWindowAction.closeAndSave {
@@ -2891,6 +3088,18 @@ public final class IncrementalStitcher: NSObject {
             // exceeded overlapThreshold / 2 — save the best-so-far
             // before the content drifts further from the accepted
             // pose).
+            //
+            // v0.23 — the window has now NOMINATED a keyframe; the
+            // shared admission policy gets the last word before it is
+            // committed (see blurPolicyHoldsCommit).  A drift-triggered
+            // close is EXEMPT: the shared contract names the drift
+            // guard as one of the three things that ENDS a hold, and
+            // holding past it would let the committed pixels drift
+            // arbitrarily far from the pose the gate accepted — exactly
+            // the failure the guard exists to prevent.
+            if !driftClosed.boolValue, self.blurPolicyHoldsCommit() {
+                return
+            }
             self.flushSharpnessWindow(
                 reason: driftClosed.boolValue ? "novelty-drift" : "window-full")
         }
@@ -2924,9 +3133,12 @@ public final class IncrementalStitcher: NSObject {
             stateLock.unlock()
             return
         }
-        let bestScore = self.sharpnessWindow.bestScore()
+        // Tracked ivar, not the machine: this score describes the pixels
+        // about to be committed and feeds the anti-blur median.
+        let bestScore = self.sharpnessBestScore
         self.sharpnessBestBuffer = nil
         self.sharpnessBestPose = nil
+        self.sharpnessBestScore = -1.0
         stateLock.unlock()
         self.dispatchWindowSave(bestBuffer: bestBuffer,
                                 bestPose: bestPose,
@@ -2952,6 +3164,18 @@ public final class IncrementalStitcher: NSObject {
         let exifOrientation = self.keyframeExifOrientation
         stateLock.unlock()
         guard stillActive else { return }
+        // v0.23 — this is the ONE funnel every window-selected keyframe
+        // passes through (window-full, novelty-drift AND the
+        // FlushThenOpen re-accept), so it is where the admission
+        // policy's per-keyframe state resolves.  Whatever happens
+        // below, the pending keyframe stops being pending — it is
+        // either dispatched or dropped by backpressure — so the hold
+        // streak counted against it ends here either way.
+        if self.blurPolicyActive {
+            stateLock.lock()
+            self.blurConsecutiveHolds = 0
+            stateLock.unlock()
+        }
         // Same backpressure semantics as the immediate accept path: if
         // the previous save is still encoding, this keyframe is
         // dropped (pre-window behaviour dropped the ACCEPT in exactly
@@ -2961,6 +3185,15 @@ public final class IncrementalStitcher: NSObject {
             return
         }
         self.workInFlight = true
+        // Only a keyframe that actually reaches the save pipeline feeds
+        // the running median: the median is the reference the softness
+        // floor judges LATER keyframes against, so it must describe the
+        // frames the stitch will really see, not the ones we dropped.
+        if self.blurPolicyActive {
+            stateLock.lock()
+            self.blurPolicy.recordAcceptedScore(bestScore)
+            stateLock.unlock()
+        }
         os_log(.fault, log: Self.diagLog,
                "[v0.21-sharpness] window FLUSH (%{public}@) bestScore=%.1f",
                reason, bestScore)
@@ -2973,6 +3206,167 @@ public final class IncrementalStitcher: NSObject {
             exifOrientation: exifOrientation,
             isWindowFlush: true
         )
+    }
+
+    // ── v0.23 — anti-blur ADMISSION policy ─────────────────────────
+    //
+    // The sharpness window answers "which of these K frames is the
+    // sharpest".  It cannot answer "should ANY of them be committed
+    // yet", because it only ever compares candidates against each
+    // other: a steady pan smears them all by the same amount and the
+    // best-of-K max is still blurry.  The shared policy
+    // (cpp/blur_policy.{hpp,cpp}) adds the two judgements that need
+    // information from OUTSIDE the window —
+    //
+    //   (2) MOTION GATE — the device's angular rate, the CAUSE term of
+    //       motion blur.  Derived here from consecutive ARKit frame
+    //       rotations (updateBlurPanRate); no CoreMotion dependency.
+    //   (3) SOFTNESS FLOOR — the candidate's score as a FRACTION of
+    //       this capture's running median of accepted keyframes.
+    //
+    // — and returns Commit / HoldForMotion / HoldForSoftness.  A hold
+    // keeps the window OPEN around the same buffered best, which is
+    // what makes it free: the frames that arrive while the operator
+    // steadies keep competing, and the moment one wins it is the frame
+    // that gets committed.
+    //
+    // FAIL-OPEN, and the hold can never outlive the capture:
+    //   • both knobs default to 0 = disabled → Commit, and
+    //     `blurPolicyActive` short-circuits before any of this runs;
+    //   • an unknown pan rate (-1) or an empty median skips its check;
+    //   • the shared policy's consecutive-hold cap forces Commit after
+    //     `maxConsecutiveHolds` evaluated frames (default 12);
+    //   • the overlap-drift guard is exempt from holding, so content
+    //     drift closes the window for good;
+    //   • the next gate ACCEPT flushes the held best (FlushThenOpen);
+    //   • finalize()'s drain() takes the buffer synchronously.
+
+    /// Consult the shared admission policy for a window-full commit.
+    /// Returns true when the commit must be HELD — the window has been
+    /// re-opened around the SAME buffered best and the caller must NOT
+    /// dispatch a save.
+    ///
+    /// Called from the candidate path (producer thread) after the
+    /// machine returned CloseAndSave and stateLock was released, so it
+    /// re-takes the lock itself.
+    private func blurPolicyHoldsCommit() -> Bool {
+        // Cheap OFF check BEFORE any locking: with both hold-producing
+        // knobs at 0 this branch is the entire cost of the feature on
+        // the commit path.
+        guard self.blurPolicyActive else { return false }
+        stateLock.lock()
+        guard self.isRunning, self.batchKeyframeMode else {
+            // Teardown raced us: never hold a keyframe a dying capture
+            // still needs — finalize's drain is about to claim it.
+            stateLock.unlock()
+            return false
+        }
+        // Tracked ivar, not the machine: the policy must judge the score
+        // of the frame we would actually commit.
+        let candidateScore = self.sharpnessBestScore
+        let panRate = self.blurPanRateRadPerSec
+        let median = self.blurPolicy.sessionMedianScore()
+        let holds = self.blurConsecutiveHolds
+        let admission = self.blurPolicy.admit(withCandidateScore: candidateScore,
+                                              panRateRadPerSec: panRate,
+                                              consecutiveHolds: holds)
+        guard admission != RNISBlurAdmission.commit else {
+            stateLock.unlock()
+            return false
+        }
+        // Re-open around the buffered best.  If the machine refuses
+        // (K == 1, nothing scored, window somehow still open) there is
+        // nowhere for the pending keyframe to live, so COMMIT — a held
+        // frame with no open window would sit untouched until finalize.
+        guard self.sharpnessWindow.reopenKeepingBest() else {
+            stateLock.unlock()
+            return false
+        }
+        self.blurConsecutiveHolds = holds + 1
+        let heldCount = self.blurConsecutiveHolds
+        stateLock.unlock()
+        os_log(.fault, log: Self.diagLog,
+               "[v0.23-antiblur] HOLD (%{public}@) #%d score=%.1f median=%.1f panRate=%.2f",
+               admission == RNISBlurAdmission.holdForMotion ? "motion" : "softness",
+               Int32(heldCount), candidateScore, median, panRate)
+        return true
+    }
+
+    /// Refresh `blurPanRateRadPerSec` from CONSECUTIVE frame rotations.
+    ///
+    /// ARKit already hands us a world rotation per frame, so the gyro
+    /// signal is available without a CoreMotion dependency — which would
+    /// mean a second sensor pipeline, its own start/stop lifecycle and
+    /// another permission surface, all for one scalar.  The estimate is
+    /// the geodesic angle between the two unit quaternions over their
+    /// timestamp delta; sign is dropped because blur only cares about
+    /// magnitude.
+    ///
+    /// Every degenerate input sets -1 = UNKNOWN, which the shared policy
+    /// treats as "skip the motion gate" — the fail-open contract.  This
+    /// matters most for `.limited` tracking: a relocalisation snap can
+    /// move the pose by radians between frames, and reporting that as a
+    /// pan rate would hold every commit until the cap broke the streak.
+    ///
+    /// Caller must hold `stateLock`.
+    private func updateBlurPanRate(pose: RNSARFramePose) {
+        let previous = self.blurLastPoseQ
+        let previousMs = self.blurLastPoseTimestampMs
+        guard pose.trackingState == .tracking else {
+            // Drop the baseline too: the next healthy frame must not
+            // difference against a pose from before the tracking gap.
+            self.blurPanRateRadPerSec = -1.0
+            self.blurLastPoseQ = nil
+            return
+        }
+        let norm = (pose.qx * pose.qx + pose.qy * pose.qy
+                    + pose.qz * pose.qz + pose.qw * pose.qw).squareRoot()
+        guard norm.isFinite, norm > 1.0e-6 else {
+            // Non-AR captures synthesise their quaternion on the JS
+            // side; a zero/NaN one means the driver has no usable
+            // rotation, not that the device is still.
+            self.blurPanRateRadPerSec = -1.0
+            self.blurLastPoseQ = nil
+            return
+        }
+        let q = (x: pose.qx / norm, y: pose.qy / norm,
+                 z: pose.qz / norm, w: pose.qw / norm)
+        // TIME BASE: a locally-sampled MONOTONIC clock, never the pose's
+        // own timestamp.  The non-AR frame-processor driver sends
+        // `timestampMs: 0` for every frame (useStitcherWorklet.ts), so
+        // differencing the payload yields dt == 0 on that entire path —
+        // the plausibility guard below would reject every sample and the
+        // motion gate would be silently dead on half the capture surface
+        // (found in the v0.23 adversarial review).  CACurrentMediaTime()
+        // is monotonic, host-independent, and mirrors Android's
+        // SystemClock.elapsedRealtimeNanos(), which keeps the two
+        // platforms' estimators comparable.
+        let nowMs = CACurrentMediaTime() * 1000.0
+        self.blurLastPoseQ = q
+        self.blurLastPoseTimestampMs = nowMs
+        guard let p = previous else {
+            self.blurPanRateRadPerSec = -1.0   // first frame: no baseline
+            return
+        }
+        let dtSec = (nowMs - previousMs) / 1000.0
+        // Plausibility window.  Below 1 ms is faster than any camera
+        // cadence (duplicate sample) and would divide by ~0.  The upper
+        // bound must clear the SLOWEST legal evaluation cadence, not
+        // just the frame rate: `flow.evalEveryNFrames` is clamped to 10
+        // and the JS driver's own throttle stacks on top, so samples can
+        // legitimately be ~300+ ms apart.  1.0 s keeps a genuine stall
+        // (where an average rate says nothing about the frame we may
+        // commit) out while letting a slow-cadence host still gate.
+        guard dtSec.isFinite, dtSec >= 0.001, dtSec <= 1.0 else {
+            self.blurPanRateRadPerSec = -1.0
+            return
+        }
+        // |dot| folds q and -q together (double cover: they are the
+        // same rotation), and the clamp absorbs the float error that
+        // would otherwise make acos() NaN at rest.
+        let dot = min(1.0, abs(p.x * q.x + p.y * q.y + p.z * q.z + p.w * q.w))
+        let rate = (2.0 * acos(dot)) / dtSec
+        self.blurPanRateRadPerSec = rate.isFinite ? rate : -1.0
     }
 
     // ── Debug log file ──────────────────────────────────────────────

@@ -75,6 +75,16 @@ class RNSARSession(reactContext: ReactApplicationContext)
     @Volatile private var keyframeQualityHolders = 0
     private val prefersKeyframeQuality: Boolean
         get() = keyframeQualityHolders > 0
+    /// v0.23 anti-blur (`frameSelection.antiBlur.preferHighFpsFormat`) —
+    /// when set, [selectMatchingCameraConfig] restricts its pick to
+    /// ARCore configs that stream at >= 60 fps.  This is the ONLY
+    /// exposure lever this library owns on Android: ARCore exposes no
+    /// AE / SENSOR_EXPOSURE_TIME API at all, but a 60 fps config bounds
+    /// exposure at 1/60 s BY CONSTRUCTION (the sensor cannot integrate
+    /// longer than the frame interval), and it doubles the candidate
+    /// count each sharpness window gets to choose from.  Costs stream
+    /// throughput, hence opt-in.  Default false = today's pick.
+    @Volatile private var prefersHighFpsFormat = false
     private val poseLog = mutableListOf<RNSARFramePose>()
     private val poseLogLock = ReentrantReadWriteLock()
 
@@ -1188,6 +1198,34 @@ class RNSARSession(reactContext: ReactApplicationContext)
     }
 
     /**
+     * v0.23 anti-blur — opt in to a >= 60 fps ARCore camera config
+     * (`frameSelection.antiBlur.preferHighFpsFormat`).  Called from
+     * `IncrementalStitcher.start()` through the singleton, mirroring
+     * iOS' `RNSARSession.setHighFpsFormatEnabled`.
+     *
+     * Same live-session semantics as [setHighResCaptureEnabled]: the
+     * config can only be swapped on a PAUSED session, so an already
+     * running session is paused/reconfigured/resumed in place.  That
+     * costs an ARCore tracking reset, which is why the no-change guard
+     * comes first — a host that leaves the setting alone (the default)
+     * never touches the session at all.  Best-effort: any failure keeps
+     * the current config and the capture proceeds.
+     */
+    internal fun setHighFpsFormatEnabled(on: Boolean) {
+        if (prefersHighFpsFormat == on) return
+        prefersHighFpsFormat = on
+        val session = sessionRef.get() ?: return
+        try {
+            session.pause()
+            selectMatchingCameraConfig(session)
+            session.resume()
+            Log.i(TAG, "setHighFpsFormatEnabled=$on; re-applied config to live session")
+        } catch (t: Throwable) {
+            Log.w(TAG, "setHighFpsFormatEnabled reconfig failed (ignoring): ${t.message}")
+        }
+    }
+
+    /**
      * Pick an ARCore camera config whose CPU image and GPU texture share
      * the same aspect ratio, so the preview (texture) and the captured /
      * stitched frames (acquireCameraImage) cover the SAME field of view.
@@ -1207,9 +1245,23 @@ class RNSARSession(reactContext: ReactApplicationContext)
      */
     private fun selectMatchingCameraConfig(session: Session) {
         try {
-            val configs = session.getSupportedCameraConfigs(CameraConfigFilter(session))
-            if (configs.isEmpty()) return
+            val allConfigs = session.getSupportedCameraConfigs(CameraConfigFilter(session))
+            if (allConfigs.isEmpty()) return
             fun aspect(s: android.util.Size): Float = s.width.toFloat() / s.height.toFloat()
+
+            // v0.23 anti-blur — narrow the field to >= 60 fps configs
+            // first, so the resolution rules below choose WITHIN the
+            // short-exposure set rather than against it.  Falls back to
+            // the full list when the device has no 60 fps config (many
+            // don't): a missing high-fps option must never cost the
+            // caller their resolution preference.
+            val configs = if (prefersHighFpsFormat) {
+                allConfigs
+                    .filter { (it.fpsRange?.upper ?: 0) >= 60 }
+                    .ifEmpty { allConfigs }
+            } else {
+                allConfigs
+            }
 
             // Option B (max FOV + bounded memory): prefer the 4:3-aspect
             // IMAGE for full vertical sensor FOV, regardless of texture aspect
@@ -1269,10 +1321,14 @@ class RNSARSession(reactContext: ReactApplicationContext)
             Log.i(
                 TAG,
                 "selectMatchingCameraConfig: highRes=$prefersHighResCapture " +
-                    "kfQuality=$prefersKeyframeQuality chose image=" +
+                    "kfQuality=$prefersKeyframeQuality highFps=$prefersHighFpsFormat " +
+                    "chose image=" +
                     "${chosen.imageSize.width}x${chosen.imageSize.height} texture=" +
-                    "${chosen.textureSize.width}x${chosen.textureSize.height} | all=[" +
-                    configs.joinToString { "${it.imageSize.width}x${it.imageSize.height}" } + "]",
+                    "${chosen.textureSize.width}x${chosen.textureSize.height} fps=" +
+                    "${chosen.fpsRange} | all=[" +
+                    allConfigs.joinToString {
+                        "${it.imageSize.width}x${it.imageSize.height}@${it.fpsRange?.upper}"
+                    } + "]",
             )
         } catch (t: Throwable) {
             Log.w(TAG, "selectMatchingCameraConfig failed; keeping default config: ${t.message}")

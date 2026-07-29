@@ -228,6 +228,25 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     @objc public private(set) var prefersHighResCapture: Bool = false
 
     // ──────────────────────────────────────────────────────────────
+    // v0.23 — anti-blur (5): high-frame-rate AR video format
+    // ──────────────────────────────────────────────────────────────
+    /// When true, `pickVideoFormat` prefers the HIGHEST-fps 4:3 format
+    /// instead of the smallest.  Two compounding wins for a pano sweep:
+    /// the frame interval is a hard ceiling on exposure time (60 fps ⇒
+    /// ≤ 1/60 s), which attacks motion blur at its source, and twice the
+    /// frames per second means twice the candidates in each sharpness
+    /// window.  This is the ONLY exposure lever on the ARKit path —
+    /// ARKit owns the capture device and exposes no exposure API.
+    ///
+    /// False by default: a faster format costs live-stream throughput
+    /// (more delegate callbacks, more per-frame gate work) for a
+    /// benefit only a moving capture sees, so it is opt-in via the JS
+    /// `frameSelection.antiBlur.preferHighFpsFormat` knob.  Stored so
+    /// `start()` and the live-reconfigure path read one source of
+    /// truth, exactly like `prefersHighResCapture`.
+    @objc public private(set) var prefersHighFpsFormat: Bool = false
+
+    // ──────────────────────────────────────────────────────────────
     // v0.18.0 — configurable plane detection (planeDetection prop)
     // ──────────────────────────────────────────────────────────────
     /// Which plane orientations ARKit should detect, driven from JS via
@@ -684,7 +703,8 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         config.isAutoFocusEnabled = true
         Self.applySceneReconstruction(to: config,
                                       enabled: isSceneReconstructionEnabled)
-        if let fmt = Self.pickVideoFormat(preferHighRes: prefersHighResCapture) {
+        if let fmt = Self.pickVideoFormat(preferHighRes: prefersHighResCapture,
+                                          preferHighFps: prefersHighFpsFormat) {
             config.videoFormat = fmt
         }
         return config
@@ -707,10 +727,22 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     ///   stitch keyframes are downscaled to a fixed budget
     ///   (`kKeyframeMaxLongEdge` in OpenCVKeyframeCollector) regardless, so
     ///   the format never affects stitch quality/memory.
-    private static func pickVideoFormat(preferHighRes: Bool) -> ARConfiguration.VideoFormat? {
+    /// - When `preferHighFps` is true (v0.23 anti-blur (5), the
+    ///   `frameSelection.antiBlur.preferHighFpsFormat` knob): among the
+    ///   most-4:3 formats pick the HIGHEST frame rate, smallest area breaking
+    ///   ties.  The frame interval is a hard ceiling on exposure time, which
+    ///   is the only way to shorten exposure on the ARKit path, and the extra
+    ///   frames double the sharpness window's candidate pool.  Composes with
+    ///   `preferHighRes`: the high-res filter still applies first, the
+    ///   ordering within the survivors is what changes.
+    private static func pickVideoFormat(preferHighRes: Bool,
+                                        preferHighFps: Bool = false) -> ARConfiguration.VideoFormat? {
         let formats = ARWorldTrackingConfiguration.supportedVideoFormats
         func aspectErr(_ f: ARConfiguration.VideoFormat) -> CGFloat {
             abs(f.imageResolution.width / f.imageResolution.height - 4.0 / 3.0)
+        }
+        func area(_ f: ARConfiguration.VideoFormat) -> CGFloat {
+            f.imageResolution.width * f.imageResolution.height
         }
         // most-4:3, then smallest live area.
         func smaller(_ a: ARConfiguration.VideoFormat, _ b: ARConfiguration.VideoFormat) -> Bool {
@@ -719,19 +751,36 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             return a.imageResolution.width * a.imageResolution.height
                  < b.imageResolution.width * b.imageResolution.height
         }
+        // v0.23: most-4:3, then FASTEST, then smallest live area.  Aspect
+        // still ranks first — a non-4:3 format would change the stitch's
+        // input geometry, which no exposure win justifies.
+        func faster(_ a: ARConfiguration.VideoFormat, _ b: ARConfiguration.VideoFormat) -> Bool {
+            let da = aspectErr(a), db = aspectErr(b)
+            if abs(da - db) > 0.001 { return da < db }
+            if a.framesPerSecond != b.framesPerSecond {
+                return a.framesPerSecond > b.framesPerSecond
+            }
+            return area(a) < area(b)
+        }
+        let better: (ARConfiguration.VideoFormat, ARConfiguration.VideoFormat) -> Bool =
+            preferHighFps ? faster : smaller
         if preferHighRes, #available(iOS 16.0, *) {
             let hiRes = formats.filter { $0.isRecommendedForHighResolutionFrameCapturing }
-            if let fmt = hiRes.min(by: smaller) {
-                NSLog("[RNIS] AR videoFormat %.0fx%.0f (high-res capture: YES)",
-                      fmt.imageResolution.width, fmt.imageResolution.height)
+            if let fmt = hiRes.min(by: better) {
+                NSLog("[RNIS] AR videoFormat %.0fx%.0f @%ldfps (high-res capture: YES, high-fps: %@)",
+                      fmt.imageResolution.width, fmt.imageResolution.height,
+                      fmt.framesPerSecond,
+                      preferHighFps ? "ON" : "OFF")
                 return fmt
             }
         }
-        let fmt = formats.min(by: smaller)
+        let fmt = formats.min(by: better)
         if let fmt = fmt {
-            NSLog("[RNIS] AR videoFormat %.0fx%.0f (high-res capture: %@)",
+            NSLog("[RNIS] AR videoFormat %.0fx%.0f @%ldfps (high-res capture: %@, high-fps: %@)",
                   fmt.imageResolution.width, fmt.imageResolution.height,
-                  preferHighRes ? "NO — none high-res-capable" : "OFF — smallest 4:3")
+                  fmt.framesPerSecond,
+                  preferHighRes ? "NO — none high-res-capable" : "OFF — smallest 4:3",
+                  preferHighFps ? "ON — fastest 4:3" : "OFF")
         }
         return fmt
     }
@@ -822,6 +871,26 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     /// plane survive).  Mirrors `setSceneReconstructionEnabled`.
     @objc public func setHighResCaptureEnabled(_ enabled: Bool) {
         prefersHighResCapture = enabled
+        guard isRunning else { return }
+        let config = makeBaseConfiguration()
+        arSession.run(config)
+    }
+
+    /// v0.23 anti-blur (5) — toggle the high-frame-rate video format.
+    /// Stores the flag (honored by the next `start()`) and, if a session
+    /// is live, rebuilds the config — which re-runs `pickVideoFormat`
+    /// with the new flag — and re-runs in place (no reset; tracking /
+    /// pose log / latched plane survive).  Exact mirror of
+    /// `setHighResCaptureEnabled`; the two flags compose in
+    /// `pickVideoFormat`.
+    ///
+    /// Driven from `IncrementalStitcher.start()` (the JS knob rides the
+    /// capture's `configOverrides`, not a view prop).  NOTE for callers:
+    /// `arSession.run` re-negotiates the capture format, which drops a
+    /// few frames — so call this only when the value actually CHANGES,
+    /// exactly as the `highResCapture` prop does.
+    @objc public func setHighFpsFormatEnabled(_ enabled: Bool) {
+        prefersHighFpsFormat = enabled
         guard isRunning else { return }
         let config = makeBaseConfiguration()
         arSession.run(config)

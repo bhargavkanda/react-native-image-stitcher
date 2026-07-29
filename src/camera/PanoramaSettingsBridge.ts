@@ -42,6 +42,7 @@
  */
 
 import {
+  DEFAULT_ANTI_BLUR_SETTINGS,
   DEFAULT_FLOW_GATE_SETTINGS,
   DEFAULT_SHARPNESS_WINDOW,
   type PanoramaSettings,
@@ -95,6 +96,28 @@ export function panoramaSettingsToNativeConfig(
     // below.  Native re-clamps to [1, 10].
     sharpnessWindow:
       s.frameSelection.sharpnessWindow ?? DEFAULT_SHARPNESS_WINDOW,
+
+    // v0.23 — anti-blur CAPTURE controls (exposure cap, motion gate,
+    // relative sharpness floor, high-fps format).  Same always-emit
+    // policy as the flow knobs below: a host writing a sparse settings
+    // literal must not inherit whatever the native side happens to
+    // compile in.  Every value here defaults to OFF (0/false), so the
+    // wire is explicit that the features are disabled unless opted in.
+    antiBlurMaxExposureMs:
+      s.frameSelection.antiBlur?.maxExposureMs
+        ?? DEFAULT_ANTI_BLUR_SETTINGS.maxExposureMs,
+    antiBlurMaxCommitPanRateRadPerSec:
+      s.frameSelection.antiBlur?.maxCommitPanRateRadPerSec
+        ?? DEFAULT_ANTI_BLUR_SETTINGS.maxCommitPanRateRadPerSec,
+    antiBlurMinScoreFractionOfMedian:
+      s.frameSelection.antiBlur?.minScoreFractionOfMedian
+        ?? DEFAULT_ANTI_BLUR_SETTINGS.minScoreFractionOfMedian,
+    antiBlurMaxConsecutiveHolds:
+      s.frameSelection.antiBlur?.maxConsecutiveHolds
+        ?? DEFAULT_ANTI_BLUR_SETTINGS.maxConsecutiveHolds,
+    antiBlurPreferHighFpsFormat:
+      s.frameSelection.antiBlur?.preferHighFpsFormat
+        ?? DEFAULT_ANTI_BLUR_SETTINGS.preferHighFpsFormat,
   };
 
   // Flow strategy knobs — always serialised, regardless of

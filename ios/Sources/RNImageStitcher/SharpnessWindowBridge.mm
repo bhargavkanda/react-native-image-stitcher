@@ -68,6 +68,26 @@ static_assert((NSInteger)RNISSharpnessWindowActionCloseAndSave ==
     return _machine->drain() ? YES : NO;
 }
 
+- (BOOL)reopenKeepingBest {
+    // Refuse anything that isn't the documented post-CloseAndSave
+    // state.  On an OPEN window `ingest(accept)` means FlushThenOpen —
+    // it would tell the caller to save a previous best that doesn't
+    // exist.  K == 1 never opens a window at all, and a best score of
+    // -1 means nothing has been scored since reset().
+    const double best = _machine->bestScore();
+    if (_machine->isOpen() || _machine->windowSize() <= 1 || !(best > 0.0)) {
+        return NO;
+    }
+    // Seeding with the machine's OWN best score re-arms the candidate
+    // slots and leaves the streaming max exactly where it was, so a
+    // held candidate still has to be beaten on merit.  novelty = -1 /
+    // threshold = 0 keep the drift guard out of a seed event (it only
+    // inspects candidates anyway).
+    const retailens::SharpnessWindowDecision d =
+        _machine->ingest(true, best, -1.0, 0.0);
+    return d.action == retailens::SharpnessWindowAction::OpenWindow ? YES : NO;
+}
+
 - (void)reset {
     _machine->reset();
 }
