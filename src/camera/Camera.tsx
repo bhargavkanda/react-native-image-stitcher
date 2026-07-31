@@ -436,6 +436,12 @@ export interface CameraProps {
    */
   enablePhotoMode?: boolean;
   enablePanoramaMode?: boolean;
+  /**
+   * Lift the bottom control cluster (lens chip + built-in shutter, if shown) by
+   * this many px, so a host chrome docked below the preview (e.g. a mode
+   * switcher) doesn't overlap it. Default `0`. Layout-only; no behaviour change.
+   */
+  bottomBarOffset?: number;
   showSettingsButton?: boolean;
   /**
    * v0.13.2 — which capture sources the host allows (default `'both'`).
@@ -1183,6 +1189,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     captureSources = 'both',
     enablePhotoMode = true,
     enablePanoramaMode = true,
+    bottomBarOffset = 0,
     showSettingsButton = false,
     style,
     outputDir,
@@ -2741,7 +2748,13 @@ export function Camera(props: CameraProps): React.JSX.Element {
             top/bottom (lens left / shutter center / AR right);
             vertical column when on left/right (slots stack along
             the narrow strip).  Touch targets stay axis-aligned. */}
-        <View style={bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}>
+        <View
+          style={[
+            bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation)),
+            // Host chrome docked below? Lift the whole cluster clear of it.
+            bottomBarOffset > 0 && { transform: [{ translateY: -bottomBarOffset }] },
+          ]}
+        >
         {/* v0.13.1 — flash + AR moved to the top-right pill stack (see
             below).  Left/right slots stay as flex spacers so the shutter
             + lens chip remain centred. */}
