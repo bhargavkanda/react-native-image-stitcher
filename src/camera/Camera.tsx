@@ -99,7 +99,11 @@ import {
 import { isLowMemDevice } from './lowMemDevice';
 import { useCapture } from './useCapture';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
-import { useContentRotation } from './useContentRotation';
+import {
+  contentRotationDeg,
+  HostJsLandscapeContext,
+  type ContentRotationStyle,
+} from './useContentRotation';
 import { useOrientationDrift } from './useOrientationDrift';
 import { OrientationDriftModal } from './OrientationDriftModal';
 // ── Panorama GUIDANCE building blocks (feature/pano-ux-guidance) ─────
@@ -1435,7 +1439,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // pick the JS edge corresponding to the home-indicator side of
   // the device — see `homeIndicatorEdge` below.
   const jsWindow = useWindowDimensions();
-  const jsLandscape = jsWindow.width > jsWindow.height;
+  // Measured size of our own root view.  `useWindowDimensions` freezes
+  // at its open-time value inside an iOS RN `Modal` (the modal rotates
+  // but no dimension-change event fires), so modal hosts would pin the
+  // controls to the wrong edge after rotation.  `onLayout` on our root
+  // view is reliable in every container; the window dims are only the
+  // pre-first-layout fallback.
+  const [measuredRoot, setMeasuredRoot] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
+  const jsLandscape = measuredRoot
+    ? measuredRoot.width > measuredRoot.height
+    : jsWindow.width > jsWindow.height;
 
   // ── State ───────────────────────────────────────────────────────
   // v0.13.2 — initial AR preference honours `defaultCaptureSource` but
@@ -1567,7 +1583,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // without this the labels render at 90°).  Returns `{}` (no-op) in the
   // common upright cases, including non-locked hosts where the OS already
   // rotated the framebuffer.  See `useContentRotation` truth table.
-  const contentRotation = useContentRotation();
+  // Computed from `contentRotationDeg` directly (not the hook) so it
+  // uses the measured `jsLandscape` above — the hook's own context
+  // fallback only reaches descendants of the provider below.
+  const contentRotationDegree = contentRotationDeg(jsLandscape, deviceOrientation);
+  const contentRotation: ContentRotationStyle =
+    contentRotationDegree === 0
+      ? {}
+      : { transform: [{ rotate: `${contentRotationDegree}deg` }] };
 
   // ── Camera handoff gate ─────────────────────────────────────────
   //
@@ -2721,7 +2744,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // ── JSX ─────────────────────────────────────────────────────────
 
   return (
-    <View style={[styles.container, style]}>
+    <HostJsLandscapeContext.Provider value={jsLandscape}>
+    <View
+      style={[styles.container, style]}
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        if (width <= 0 || height <= 0) return;
+        setMeasuredRoot((prev) =>
+          prev && prev.width === width && prev.height === height
+            ? prev
+            : { width, height },
+        );
+      }}
+    >
       {/* Preview — AR or non-AR (or the brief "switching…" placeholder
           while the previous session tears down).  Conditional mount so
           only ONE camera component is alive at a time; matches the
@@ -3263,6 +3298,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         }}
       />
     </View>
+    </HostJsLandscapeContext.Provider>
   );
 });
 

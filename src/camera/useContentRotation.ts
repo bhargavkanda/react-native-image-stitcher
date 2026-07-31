@@ -71,12 +71,30 @@
  *   own rotation handling.
  */
 
+import { createContext, useContext } from 'react';
 import { useWindowDimensions, type ViewStyle } from 'react-native';
 
 import {
   useDeviceOrientation,
   type DeviceOrientation,
 } from './useDeviceOrientation';
+
+
+/**
+ * Measured JS-layout orientation provided by `<Camera>`.
+ *
+ * `useWindowDimensions()` freezes at its open-time value inside an iOS
+ * RN `Modal` (any presentationStyle): the modal rotates but RN's global
+ * window-dimension state never receives a change event, so hosts that
+ * present `<Camera>` in a modal would get a stale `jsLandscape` and the
+ * bottom controls would anchor to the wrong edge after rotation.
+ *
+ * `<Camera>` therefore measures its own root view via `onLayout` (which
+ * IS reliable inside modals) and provides `width > height` here.  The
+ * hook below prefers this context and only falls back to
+ * `useWindowDimensions` when rendered outside a `<Camera>` tree.
+ */
+export const HostJsLandscapeContext = createContext<boolean | null>(null);
 
 
 export type ContentRotationDeg = 0 | 90 | -90 | 180;
@@ -141,7 +159,10 @@ export function contentRotationDeg(
 export function useContentRotation(): ContentRotationStyle {
   const orient = useDeviceOrientation();
   const { width, height } = useWindowDimensions();
-  const jsLandscape = width > height;
+  // Prefer the layout measured by <Camera> — window dimensions freeze
+  // inside iOS modals (see HostJsLandscapeContext).
+  const measuredLandscape = useContext(HostJsLandscapeContext);
+  const jsLandscape = measuredLandscape ?? width > height;
   const deg = contentRotationDeg(jsLandscape, orient);
   return deg === 0
     ? {}
