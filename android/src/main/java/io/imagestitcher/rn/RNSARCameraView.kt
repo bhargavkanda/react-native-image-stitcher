@@ -318,6 +318,37 @@ class RNSARCameraView @JvmOverloads constructor(
         ingestActive = active
     }
 
+    // ── Stitch-phase render throttle ──────────────────────────────────
+    //
+    // During finalize the GL render thread is pure overhead — the camera
+    // feed is visible but no frames are ingested, yet ARCore
+    // session.update() + BackgroundRenderer.draw at 30-60 Hz saturate
+    // one CPU core and (on low-end SoCs) trigger thermal throttling
+    // that multiplicatively slows down the cv::Stitcher worker.
+    //
+    // pauseRenderingForStitch / resumeRenderingAfterStitch switch the
+    // GLSurfaceView to RENDERMODE_WHEN_DIRTY (stops the GL thread's
+    // busy-loop) and back.  Called from IncrementalStitcher.finalize()
+    // before/after the stitch body.  The camera preview freezes for
+    // the stitch duration (~5-40 s) — acceptable because the user is
+    // waiting for the result anyway.  iOS parity: the SCNView pauses
+    // its scene update loop at the same boundary.
+    @Volatile private var renderPausedForStitch: Boolean = false
+
+    fun pauseRenderingForStitch() {
+        if (renderPausedForStitch) return
+        renderPausedForStitch = true
+        Log.i(TAG, "pauseRenderingForStitch: switching to RENDERMODE_WHEN_DIRTY")
+        glView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
+    }
+
+    fun resumeRenderingAfterStitch() {
+        if (!renderPausedForStitch) return
+        renderPausedForStitch = false
+        Log.i(TAG, "resumeRenderingAfterStitch: switching to RENDERMODE_CONTINUOUSLY")
+        glView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+    }
+
     // ── GL-level letterbox ─────────────────────────────────────────
     //
     // The [glView] stays full-screen (MATCH_PARENT); we letterbox at the
