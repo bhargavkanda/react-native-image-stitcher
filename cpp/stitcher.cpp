@@ -40,6 +40,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <mutex>
 #include <unistd.h>
 #include <vector>
 
@@ -582,29 +583,46 @@ StitchResult stitchFramePaths(
     const StitchConfig&             config,
     LogFn                           logFn)
 {
-    // ── v0.16.1 — native-heap leak fix (one-time) — ANDROID ONLY ────────
-    // The ~7-9 MB/stitch LIVE native-heap creep is OpenCV core's OWN pooled
-    // scratch — TBB per-worker TLS — re-primed as the calling thread migrates
-    // across the Kotlin Dispatchers.Default pool.  It is NOT app memory (every
-    // cv::Mat below is RAII / explicitly .release()'d) and NOT reclaimable by
-    // mallopt(M_PURGE) (those pools aren't serviced by bionic malloc).
-    // setNumThreads(1) removes the TBB worker pool so no per-worker scratch can
-    // accumulate.  Stitches are serialized and the keyframes are small, so the
-    // single-threaded cost is minor.  C++11 static-init is thread-safe; runs once.
+    // ── perf-3b item 1 — serialize entries + restore parallelism (ANDROID)
+    // ANDROID-ONLY, and deliberately so.  On Android, finalize (workExecutor)
+    // and refine (refineExecutor) are SEPARATE dedicated threads, and
+    // cv::setNumThreads below is a PROCESS-GLOBAL set per-call, so two
+    // concurrent entries here would race on that global (+ the parallel-
+    // backend pools).  A process-wide mutex held for the whole stitch
+    // serializes them.  stitchFramePathsManual()/stitchFramePathsImpl_() are
+    // reached ONLY from here (internal routing) → NOT locked, so no self-
+    // deadlock (std::mutex, non-recursive, is correct).  This does NOT block
+    // Android ingest: consumeFrameFromPlugin/ingestFromARCameraView run the
+    // gate + JPEG encode synchronously on the vision-camera producer thread
+    // (no workExecutor dispatch), so they never call stitchFramePaths.
     //
-    // 2026-06-16 (audit) — ANDROID-GATED.  The prebuilt iOS opencv2.xcframework
-    // uses the GCD parallel backend (NOT TBB — getBuildInformation reads
-    // "Parallel framework: GCD"), so there is no TBB pool to remove; pinning to
-    // 1 thread there is pure cost (serialized ORB/matcher/warp/blend + a
-    // single-core per-frame KeyframeGate) for ZERO memory benefit.  Recovering
-    // iOS's multi-core path.  setUseIPP(false) was dropped entirely — IPP is
-    // x86-only, a no-op on arm64 (both Android NDK and iOS).
+    // NOT applied on iOS: it drives independent GCD queues (workQueue vs
+    // refineQueue) BY DESIGN — a 2-5s refine must not gate the next capture's
+    // ingest (which finalize shares via workQueue.sync).  iOS never mutates a
+    // global here (GCD backend; no setNumThreads), so there is nothing to
+    // serialize and a mutex would only re-couple those queues.
+    //
+    // setNumThreads: v0.16.1 pinned it to 1 to stop a ~7-9 MB/stitch native-
+    // heap creep (OpenCV/TBB per-worker TLS scratch, re-primed as the calling
+    // thread MIGRATED across Kotlin's Dispatchers.Default pool).  The stitch
+    // now runs on a STABLE dedicated thread, so that TLS primes ONCE per
+    // process — the creep is bounded (verified: RSS plateaus across N stitches)
+    // and multi-threading is safe again.  config.numThreads: 0 = AUTO
+    // (min(4, max(2, cores/2))), 1 = single kill-switch, N = explicit.  Set
+    // per-call under the lock (no restore needed — every entry sets it, and
+    // entries are serialized).  iOS keeps its GCD backend untouched.
 #if defined(__ANDROID__)
-    static const bool s_cvTuned = []() {
-        cv::setNumThreads(1);
-        return true;
-    }();
-    (void)s_cvTuned;
+    static std::mutex s_stitchNativeMutex;
+    std::lock_guard<std::mutex> stitchNativeLock(s_stitchNativeMutex);
+    {
+        int nt = config.numThreads;
+        if (nt <= 0) {
+            const unsigned hc = std::thread::hardware_concurrency();
+            const int cores = (hc > 0u) ? static_cast<int>(hc) : 4;
+            nt = std::min(4, std::max(2, cores / 2));
+        }
+        cv::setNumThreads(nt);
+    }
 #endif
 
     // ── 2026-06-16 — per-stitch memory profiling (DEV; gated) ───────────

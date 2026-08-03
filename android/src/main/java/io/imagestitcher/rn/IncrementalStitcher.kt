@@ -13,7 +13,7 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.opencv.calib3d.Calib3d
@@ -242,6 +242,10 @@ class IncrementalStitcher(
     /// the `stitchRangeMatcherWidth` start() config key.  0 = OFF (default,
     /// full-pairwise). Passed to BatchStitcher.stitchSync at finalize().
     private var stitchRangeMatcherWidth: Int = 0
+    /// perf-3b item 1 — OpenCV thread count, set from the `stitchNumThreads`
+    /// start() config key.  0 = auto-multi (default), 1 = single kill-switch,
+    /// N = explicit.  Passed to stitchSync at finalize()/refine().
+    private var stitchNumThreads: Int = 0
     /// Shared-C++ window DECISION machine (cpp/sharpness_window.*,
     /// via the SharpnessWindow JNI facade).  Owns open/closed state,
     /// remaining candidate slots, the streaming-max best score and the
@@ -320,11 +324,23 @@ class IncrementalStitcher(
     /// Critic #5 fix: serial dispatcher so concurrent per-frame
     /// ingest calls (today: `ingestFromARCameraView` in AR mode,
     /// `consumeFrameFromPlugin` in frame-processor mode) can't race
-    /// on the engine's canvas.  `limitedParallelism(1)` guarantees
-    /// one-at-a-time execution while still backing onto the Default
-    /// pool — matches iOS' `workQueue` (DispatchQueue.serial).
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private val workScope = CoroutineScope(Dispatchers.Default.limitedParallelism(1))
+    /// on the engine's canvas.  One-at-a-time execution, matching iOS'
+    /// `workQueue` (DispatchQueue.serial).
+    ///
+    /// perf-3b item 1 — a DEDICATED single-thread executor (was
+    /// `Dispatchers.Default.limitedParallelism(1)`, which serialized but
+    /// MIGRATED the calling thread across the shared pool).  A stable
+    /// thread lets OpenCV's parallel-backend per-worker TLS scratch prime
+    /// ONCE per process instead of re-priming on each stitch's thread
+    /// migration — that re-priming was the ~7-9 MB/stitch native-heap
+    /// creep that forced `cv::setNumThreads(1)`.  With the thread pinned,
+    /// multi-threading is safe again (see stitcher.cpp numThreads).  Shut
+    /// down in onCatalystInstanceDestroy(); daemon so it can't block exit.
+    private val workExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "rnis-stitch").apply { isDaemon = true }
+        }
+    private val workScope = CoroutineScope(workExecutor.asCoroutineDispatcher())
 
     /// 2026-05-16 — realtime+batch fusion (Option A "Replace on
     /// completion") scope.  Kept SEPARATE from `workScope` so the
@@ -343,9 +359,18 @@ class IncrementalStitcher(
     /// Every `refineScope.launch { … }` already has a try/catch
     /// around the throwing surface; SupervisorJob is defense-in-
     /// depth for future code added outside that catch.
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    /// perf-3b item 1 — its OWN dedicated single-thread executor, SEPARATE
+    /// from workExecutor (a refine must not delay a new start()/ingest, per
+    /// the design note above), and stable-threaded for the same TLS-creep
+    /// reason as workExecutor.  Concurrent finalize (workExecutor) + refine
+    /// (refineExecutor) native entries are serialized at the C++ boundary by
+    /// the stitch mutex in stitchFramePaths.  SupervisorJob retained.
+    private val refineExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "rnis-refine").apply { isDaemon = true }
+        }
     private val refineScope = CoroutineScope(
-        SupervisorJob() + Dispatchers.Default.limitedParallelism(1)
+        SupervisorJob() + refineExecutor.asCoroutineDispatcher()
     )
 
     /// Reference to a mounted ARCameraView (if any).  Set by the view
@@ -558,6 +583,13 @@ class IncrementalStitcher(
             // Applied at finalize() → stitchSync.  Clamp ≥ 0.
             stitchRangeMatcherWidth = (configOverrides
                 ?.getIntOrDefault("stitchRangeMatcherWidth", 0) ?: 0)
+                .coerceAtLeast(0)
+
+            // perf-3b item 1 — OpenCV thread count.  0 = auto-multi (default),
+            // 1 = single-threaded kill-switch (revert if a device regresses on
+            // the native-heap memstat gate), N = explicit.  Clamp ≥ 0.
+            stitchNumThreads = (configOverrides
+                ?.getIntOrDefault("stitchNumThreads", 0) ?: 0)
                 .coerceAtLeast(0)
 
             // v0.21 — pick-sharpest-in-window anti-blur selection.
@@ -983,6 +1015,7 @@ class IncrementalStitcher(
                         stitchMode = "panorama",         // always high-level PANORAMA
                         useManualPipeline = false,       // high level across the board
                         rangeMatcherWidth = stitchRangeMatcherWidth,  // perf-3b (0 = off)
+                        numThreads = stitchNumThreads,   // perf-3b item 1 (0 = auto-multi)
                     )
                     stitchWallMs =
                         android.os.SystemClock.elapsedRealtime() - tStitchStart
@@ -1687,11 +1720,16 @@ class IncrementalStitcher(
     //
     // Called on vision-camera's frame-processor thread (a single-
     // thread executor).  `frameProcessorIngestEnabled` is read
-    // lock-free via AtomicBoolean.  `ingestFromARCameraView`
-    // dispatches the heavy engine work to `workScope` (serial),
-    // so producer-thread blocking is bounded to the synchronous
-    // gate evaluation + (on accept) JPEG encode — typically
-    // 5–10 ms reject, 30–50 ms accept on a mid-tier device.
+    // lock-free via AtomicBoolean.  In the current batch-keyframe-only
+    // engine `consumeFrameFromPlugin` / `ingestFromARCameraView` run the
+    // keyframe-gate evaluation and (on accept) the JPEG encode
+    // SYNCHRONOUSLY on this producer thread — there is NO workExecutor
+    // dispatch on the ingest path (the only workExecutor.launch sites are
+    // finalize + cancel-cleanup).  So producer-thread blocking is bounded
+    // to that synchronous gate + encode — typically 5–10 ms reject,
+    // 30–50 ms accept on a mid-tier device — and ingest is INDEPENDENT of
+    // the finalize/refine native-stitch mutex (perf-3b item 1): a stitch
+    // holding that lock never stalls frame ingestion here.
     fun consumeFrameFromPlugin(
         image: android.media.Image,
         tx: Double, ty: Double, tz: Double,
@@ -2162,6 +2200,7 @@ class IncrementalStitcher(
                     // pipeline.  Sourced from the JS config above.
                     useManualPipeline = useManualPipeline,
                     rangeMatcherWidth = refineRangeMatcherWidth,  // perf-3b — match finalize
+                    numThreads = stitchNumThreads,   // perf-3b item 1 (0 = auto-multi)
                 )
                 // Stitch returned — BatchStitcher writes the JPEG
                 // synchronously, so "writing" reflects the final
@@ -2343,48 +2382,81 @@ class IncrementalStitcher(
         }
     }
 
+    /// perf-3b item 1 — guards teardownOnce() so the native-heap + executor
+    /// cleanup runs exactly once even if BOTH invalidate() and the deprecated
+    /// onCatalystInstanceDestroy() fire (RN version-dependent).
+    private val didTeardown = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /**
-     * Release the C++ KeyframeGate heap allocation when RN tears
-     * down the bridge module (e.g. on a JS reload).  Without this,
-     * each reload leaks ~100 bytes of native heap — small but
-     * unbounded over a long dev session.
+     * Idempotent module teardown: release the C++ KeyframeGate +
+     * SharpnessWindow native heap, the per-session dir, the static back-
+     * pointer, and the dedicated stitch/refine executor threads.
+     *
+     * Invoked from BOTH `invalidate()` (the RN 0.74+ / New-Architecture
+     * teardown hook — under bridgeless/New Arch the framework calls
+     * invalidate(), NOT onCatalystInstanceDestroy()) and the deprecated
+     * `onCatalystInstanceDestroy()` (older RN), guarded so it runs once.
+     * Without routing through invalidate(), on RN 0.84 New Arch none of this
+     * cleanup ran and every JS reload leaked native heap + 2 daemon threads.
      */
-    override fun onCatalystInstanceDestroy() {
+    private fun teardownOnce() {
+        if (!didTeardown.compareAndSet(false, true)) return
         try {
             keyframeGate.close()
         } catch (t: Throwable) {
-            android.util.Log.w(
-                "IncrementalStitcher",
-                "onCatalystInstanceDestroy: keyframeGate.close failed: ${t.message}",
-            )
+            android.util.Log.w("IncrementalStitcher", "teardown: keyframeGate.close failed: ${t.message}")
         }
         // v0.21.1 — release the shared-C++ sharpness-window machine's
         // native allocation too (same lifecycle as keyframeGate).
         try {
             sharpnessWindow.close()
         } catch (t: Throwable) {
-            android.util.Log.w(
-                "IncrementalStitcher",
-                "onCatalystInstanceDestroy: sharpnessWindow.close failed: ${t.message}",
-            )
+            android.util.Log.w("IncrementalStitcher", "teardown: sharpnessWindow.close failed: ${t.message}")
         }
-        // V16 Phase 2 (Android Fix-1) — best-effort cleanup of the
-        // current per-session subdir.  Prevents leftover dirs
-        // accumulating across dev-time RN reloads.  OS cache cleanup
-        // would eventually reclaim cacheDir entries anyway, but this
-        // makes the dev loop tidy.
+        // V16 Phase 2 (Android Fix-1) — best-effort cleanup of the current
+        // per-session subdir.  Prevents leftover dirs accumulating across
+        // dev-time RN reloads.
         try {
             captureSessionDir?.deleteRecursively()
         } catch (t: Throwable) {
             // Ignore — not critical at teardown.
         }
         captureSessionDir = null
-        // F8.4 — release the static back-pointer so the Frame
-        // Processor plugin sees a clean nil after bridge teardown.
-        // A new bridge will set it again via the init block.
+        // F8.4 — release the static back-pointer so the Frame Processor
+        // plugin sees a clean nil after bridge teardown.  A new bridge will
+        // set it again via the init block.
         if (bridgeInstance === this) {
             bridgeInstance = null
         }
+        // perf-3b item 1 — release the dedicated stitch/refine threads so they
+        // don't accumulate across dev-time RN reloads.  shutdown() (not
+        // shutdownNow()) lets an in-flight stitch finish rather than
+        // interrupting it mid-cv::Stitcher.
+        try { workExecutor.shutdown() } catch (t: Throwable) {
+            android.util.Log.w("IncrementalStitcher", "teardown: workExecutor.shutdown failed: ${t.message}")
+        }
+        try { refineExecutor.shutdown() } catch (t: Throwable) {
+            android.util.Log.w("IncrementalStitcher", "teardown: refineExecutor.shutdown failed: ${t.message}")
+        }
+    }
+
+    /**
+     * RN 0.74+ / New-Architecture teardown hook.  Under bridgeless/New Arch
+     * the framework tears modules down via invalidate() and NEVER calls the
+     * deprecated onCatalystInstanceDestroy().
+     */
+    override fun invalidate() {
+        teardownOnce()
+        super.invalidate()
+    }
+
+    /**
+     * Deprecated pre-0.74 teardown hook, retained for older-RN consumers
+     * (peerDep is RN >= 0.72).  Delegates to the same idempotent teardown.
+     */
+    @Suppress("DEPRECATION")
+    override fun onCatalystInstanceDestroy() {
+        teardownOnce()
         super.onCatalystInstanceDestroy()
     }
 

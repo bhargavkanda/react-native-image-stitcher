@@ -87,6 +87,9 @@ export function panoramaSettingsToNativeConfig(
     // value.  Native reads configOverrides["stitchRangeMatcherWidth"]
     // and clamps ≥ 0.
     stitchRangeMatcherWidth: s.stitcher.rangeMatcherWidth ?? 0,
+    // perf-3b item 1 — OpenCV thread count (0 = auto-multi).  Native reads
+    // configOverrides["stitchNumThreads"]; clamps ≥ 0.
+    stitchNumThreads: s.stitcher.numThreads ?? 0,
 
     // ── FrameSelectionSettings → KeyframeGate knobs ──────────────
     frameSelectionMode: s.frameSelection.mode,

@@ -180,6 +180,18 @@ struct StitchConfig {
     // captures are handled at capture time (perf-5), not by a full-matcher
     // rescue.  PANORAMA only (SCANS uses the affine matcher family).
     int         rangeMatcherWidth    = 0;
+    // OpenCV intra-stitch parallelism (perf-3b item 1, ANDROID only).
+    //   0 = AUTO (default): cv::setNumThreads(min(4, max(2, cores/2))) —
+    //       restores the multi-core warp/blend/feature parallelism the
+    //       v0.16.1 `setNumThreads(1)` native-heap-creep workaround removed.
+    //       Safe because the stitch now runs on a STABLE dedicated thread
+    //       (Kotlin side), so the TBB per-worker TLS that caused the creep
+    //       primes ONCE per process instead of on every thread migration.
+    //   1 = single-threaded (legacy kill-switch — revert here if the memstat
+    //       plateau gate ever regresses on a device).
+    //   N = explicit thread count.
+    // iOS is unaffected (GCD backend already multi-core; block is __ANDROID__).
+    int         numThreads           = 0;
     int         jpegQuality          = 85;
 
     // Total device RAM in megabytes.  Used by the manual pipeline's

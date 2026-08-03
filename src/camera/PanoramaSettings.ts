@@ -175,6 +175,17 @@ export interface BatchStitcherSettings {
    * manual pipeline.
    */
   rangeMatcherWidth?: number;
+
+  /**
+   * perf-3b item 1 — OpenCV intra-stitch thread count (Android only).
+   * `0`/undefined (default) = AUTO (`min(4, max(2, cores/2))`), restoring
+   * the multi-core warp/blend/feature parallelism that `setNumThreads(1)`
+   * removed to work around a native-heap creep — now safe because the
+   * stitch runs on a stable dedicated thread. `1` = single-threaded
+   * kill-switch (revert here if a device regresses on the memory gate).
+   * `N` = explicit. iOS ignores this (its GCD backend is already multi-core).
+   */
+  numThreads?: number;
 }
 
 
@@ -403,6 +414,9 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // more at higher keyframe counts).  Set to 0 to fall back to the legacy
     // full-pairwise ladder.  See docs/perf-3b.
     rangeMatcherWidth: 3,
+    // perf-3b item 1 — OpenCV threads: 0 = auto-multi (default). Set 1 to
+    // kill-switch back to single-threaded if a device regresses on memory.
+    numThreads: 0,
   },
   frameSelection: {
     mode: 'flow-based',
