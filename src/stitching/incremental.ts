@@ -1139,3 +1139,59 @@ export function subscribeIncrementalState(
   );
   return emitter.addListener('IncrementalStateUpdate', listener);
 }
+
+
+/** Phase of the finalize() stitch, as reported by `StitchingPhaseChanged`. */
+export type StitchingPhase = 'started' | 'finished';
+
+/**
+ * Subscribe to stitch-phase transitions around `finalize()`.
+ *
+ * `'started'` fires just before the multi-second `cv::Stitcher` run
+ * begins; `'finished'` fires when it settles (success OR failure).
+ * Use this ONLY if you COMPOSE your own vision-camera `<Camera>` and
+ * want to stop feeding it frames during the stitch — the first-party
+ * `<Camera>` already unmounts the camera for the stitch, so it needs
+ * nothing here.
+ *
+ * ## Correct usage — `isActive`, not a `pause()` method
+ *
+ * vision-camera v4 has NO `camera.pause()` / `resume()`; drive the
+ * `isActive` prop (or unmount) instead:
+ *
+ * ```ts
+ * const [camActive, setCamActive] = useState(true);
+ * useEffect(() => {
+ *   const sub = subscribeStitchingPhase((phase) => {
+ *     setCamActive(phase !== 'started');
+ *   });
+ *   return () => sub?.remove();
+ * }, []);
+ * // <Camera isActive={camActive} ... />
+ * ```
+ *
+ * ## IMPORTANT — also restore on the finalize()/cancel() promise
+ *
+ * `cancel()` does NOT emit `'finished'`, and an error path is not
+ * guaranteed to reach the host before the promise settles.  So ALSO
+ * set the camera back to active when your `finalize()` / `cancel()`
+ * call resolves or rejects — do not rely on the `'finished'` event
+ * alone, or a cancelled capture can leave the camera stopped forever.
+ *
+ * The returned `EmitterSubscription` MUST be removed when no longer
+ * needed (`subscription.remove()`).
+ *
+ * Platform note: currently emitted on **Android only**; the listener
+ * simply never fires on iOS (where the first-party `<Camera>` already
+ * unmounts during the stitch).  iOS emission is a parity follow-up.
+ */
+export function subscribeStitchingPhase(
+  listener: (event: { phase: StitchingPhase }) => void,
+): EmitterSubscription | null {
+  const native = getIncrementalNativeModule();
+  if (!native) return null;
+  const emitter = new NativeEventEmitter(
+    NativeModules.IncrementalStitcher as unknown as NativeModule,
+  );
+  return emitter.addListener('StitchingPhaseChanged', listener);
+}

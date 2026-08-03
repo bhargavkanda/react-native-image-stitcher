@@ -318,36 +318,17 @@ class RNSARCameraView @JvmOverloads constructor(
         ingestActive = active
     }
 
-    // ── Stitch-phase render throttle ──────────────────────────────────
-    //
-    // During finalize the GL render thread is pure overhead — the camera
-    // feed is visible but no frames are ingested, yet ARCore
-    // session.update() + BackgroundRenderer.draw at 30-60 Hz saturate
-    // one CPU core and (on low-end SoCs) trigger thermal throttling
-    // that multiplicatively slows down the cv::Stitcher worker.
-    //
-    // pauseRenderingForStitch / resumeRenderingAfterStitch switch the
-    // GLSurfaceView to RENDERMODE_WHEN_DIRTY (stops the GL thread's
-    // busy-loop) and back.  Called from IncrementalStitcher.finalize()
-    // before/after the stitch body.  The camera preview freezes for
-    // the stitch duration (~5-40 s) — acceptable because the user is
-    // waiting for the result anyway.  iOS parity: the SCNView pauses
-    // its scene update loop at the same boundary.
-    @Volatile private var renderPausedForStitch: Boolean = false
-
-    fun pauseRenderingForStitch() {
-        if (renderPausedForStitch) return
-        renderPausedForStitch = true
-        Log.i(TAG, "pauseRenderingForStitch: switching to RENDERMODE_WHEN_DIRTY")
-        glView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
-    }
-
-    fun resumeRenderingAfterStitch() {
-        if (!renderPausedForStitch) return
-        renderPausedForStitch = false
-        Log.i(TAG, "resumeRenderingAfterStitch: switching to RENDERMODE_CONTINUOUSLY")
-        glView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-    }
+    // NOTE (2026-08-03): pauseRenderingForStitch / resumeRenderingAfterStitch
+    // (switching the GLSurfaceView to RENDERMODE_WHEN_DIRTY during finalize)
+    // were REMOVED.  In the first-party <Camera> flow the AR view is already
+    // unmounted before finalize (nothing to pause); in composed integrations
+    // that keep it mounted, the pause/resume pair — resolved against the
+    // live arCameraViewRef, not the paused instance — froze the preview and
+    // dropped the next capture's frames when the view detached/reattached
+    // mid-stitch (the render mode survives reattach).  See the adversarial
+    // review of 7df2dba.  A host that wants to stop feeding frames during
+    // the stitch should listen for the "StitchingPhaseChanged" event and
+    // toggle its own <Camera isActive> (docs/perf-3a).
 
     // ── GL-level letterbox ─────────────────────────────────────────
     //

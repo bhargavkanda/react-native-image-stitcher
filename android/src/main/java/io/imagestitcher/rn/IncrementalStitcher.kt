@@ -532,6 +532,21 @@ class IncrementalStitcher(
                 ?.getIntOrDefault("flowEvalEveryNFrames", 1) ?: 1
             keyframeGate.flowEvalEveryNFrames = evalCadence.coerceIn(1, 10)
 
+            // Reject-event emit throttle.  Default 0 = OFF (emit every
+            // reject), which restores iOS parity — iOS never throttles
+            // reject emits.  The reviewed 7df2dba commit hardcoded a
+            // 250 ms throttle; the adversarial review found it a measured
+            // placebo (≤6 events/s) that also let the overlap-% overlay
+            // and gate-reason go stale for up to 250 ms.  A host that
+            // genuinely needs to cap bridge traffic on an old-arch device
+            // can set rejectEmitMinIntervalMs > 0.  Clamp ≥ 0.  See
+            // docs/perf-3a for the JS-side (coalescing) alternative that
+            // relieves the render cost the wire throttle can't touch.
+            val rejectThrottleMs = (configOverrides
+                ?.getIntOrDefault("rejectEmitMinIntervalMs", 0) ?: 0)
+                .coerceAtLeast(0)
+            rejectEmitMinIntervalNanos = rejectThrottleMs.toLong() * 1_000_000L
+
             // v0.21 — pick-sharpest-in-window anti-blur selection.
             // 1 = off (immediate commit, pre-v0.21 behaviour).
             // Default 4 when the key is absent — a deliberate
@@ -831,37 +846,59 @@ class IncrementalStitcher(
         batchFirstAcceptedPose = null
         batchLastAcceptedPose = null
 
-        // Pause AR rendering for the stitch duration.  The GL render
-        // thread runs ARCore session.update() + draw at 30-60 Hz,
-        // saturating one CPU core during the entire multi-second stitch.
-        // On low-end SoCs this triggers thermal throttling and
-        // multiplicatively slows the cv::Stitcher worker.  Switching
-        // to RENDERMODE_WHEN_DIRTY freezes the camera preview (the user
-        // is waiting for the result anyway) and frees that core.  Resume
-        // in the finally block so the preview always recovers.
-        arCameraViewRef?.pauseRenderingForStitch()
-
-        // Emit a stitching-phase event so the host's JS layer can
-        // optionally pause the vision-camera `<Camera>` during the
-        // stitch.  In non-AR mode the camera + frame processor thread
-        // continue running at 30 fps — significant CPU overhead on
-        // low-end devices.  The host can subscribe to
-        // "StitchingPhaseChanged" and call camera.current?.pause()
-        // on "started", camera.current?.resume() on "finished".
+        // Emit a stitching-phase event so a host that COMPOSES its own
+        // vision-camera `<Camera>` can stop feeding frames during the
+        // multi-second stitch (in non-AR mode the camera + frame-
+        // processor thread otherwise keep running at 30-60 fps, eating
+        // CPU the cv::Stitcher worker needs).  The correct vision-camera
+        // v4 control is the `isActive` prop — render `<Camera
+        // isActive={false}>` (or unmount) on "started" and restore on
+        // "finished".  There is NO `camera.pause()` / `resume()` method
+        // in vision-camera v4; an earlier version of this comment
+        // recommended one that does not exist.  The first-party
+        // `<Camera>` already unmounts the camera during the stitch, so
+        // this event exists for composed hosts only.  Hosts MUST also
+        // restore on the finalize()/cancel() PROMISE settling, not the
+        // event alone, because cancel() does not emit "finished".  See
+        // the TS wrapper `subscribeStitchingPhase()` (src/stitching/
+        // incremental.ts) and docs/host-app-integration.md.
+        //
+        // NOTE (2026-08-03): the AR GL-render pause that used to sit here
+        // was removed — it was a no-op in the first-party flow (the AR
+        // view is already unmounted before finalize) and, in composed
+        // Layer-2 integrations that keep the view mounted, it froze the
+        // preview and dropped the next capture's frames on view
+        // detach/reattach.  See the adversarial review of 7df2dba and
+        // docs/perf-3a / perf-3b.
         emitStitchingPhase("started")
 
         workScope.launch {
-            // Boost the stitch thread's priority so the OS scheduler
-            // prefers it over vision-camera's ImageAnalysis thread and
-            // other background work.  Default priority (5) competes
-            // equally with camera threads; bumping to 8 gives the
-            // stitch ~60% more scheduler weight on CFS.  Declared
-            // outside try so finally can restore it.
-            val origPriority = Thread.currentThread().priority
+            // Nudge the stitch thread into the foreground scheduler band
+            // so the multi-second blocking cv::Stitcher call isn't
+            // scheduled on par with background / camera-analysis threads.
+            // `android.os.Process.setThreadPriority` maps directly to the
+            // Linux nice value the CFS scheduler actually uses — unlike
+            // `java.lang.Thread.priority` (the previous approach), whose
+            // coarse 1-10 scale barely moves nice on ART.  Held at
+            // FOREGROUND (not URGENT_DISPLAY/AUDIO) so it can never starve
+            // the UI thread.  Captured outside try so finally can restore.
+            //
+            // NOTE: this boosts only THIS orchestrating thread.  The
+            // OpenCV worker pool — where most cycles go once intra-stitch
+            // parallelism is restored (docs/perf-3b item 1/3) — is not
+            // covered here; making the boost reach the pool is a perf-3b
+            // task.
+            val origThreadPriority = try {
+                android.os.Process.getThreadPriority(android.os.Process.myTid())
+            } catch (_: Throwable) {
+                android.os.Process.THREAD_PRIORITY_DEFAULT
+            }
             try {
                 try {
-                    Thread.currentThread().priority = Thread.MAX_PRIORITY - 2  // 8
-                } catch (_: Throwable) { /* SecurityManager — ignore */ }
+                    android.os.Process.setThreadPriority(
+                        android.os.Process.THREAD_PRIORITY_FOREGROUND
+                    )
+                } catch (_: Throwable) { /* unsupported / denied — ignore */ }
 
                 val map = Arguments.createMap()
                 if (wasBatchKeyframe) {
@@ -891,36 +928,20 @@ class IncrementalStitcher(
                                 "— module hasn't been instantiated yet. " +
                                 "Check RNImageStitcherPackage registration."
                         )
-                    // Adaptive resolution budgets: on low-RAM devices
-                    // (≤ 4 GB or isLowRamDevice) reduce BOTH the feature-
-                    // registration resolution AND the compositing resolution.
-                    //
-                    //   registrationResolMP: ORB feature detection + BundleAdjust
-                    //     phase.  Default -1 → cv::Stitcher default (~0.6 MP).
-                    //     On low-RAM: 0.4 MP cuts feature-matching CPU ~35%.
-                    //
-                    //   compositingResolMP: warp + blend phase (dominates time).
-                    //     Default 1.0 MP.  On low-RAM: 0.6 MP cuts compositing
-                    //     CPU ~40% and peak memory ~35%.  Output ~1000×600
-                    //     instead of ~1300×770 — acceptable for shelf-scan.
-                    //
-                    // Together they reduce end-to-end stitch time ~45% on
-                    // budget SoCs while keeping quality within tolerance.
-                    val am = reactContext.getSystemService(
-                        android.content.Context.ACTIVITY_SERVICE
-                    ) as? android.app.ActivityManager
-                    val memInfo = android.app.ActivityManager.MemoryInfo()
-                    am?.getMemoryInfo(memInfo)
-                    val totalGb = (memInfo.totalMem / (1024.0 * 1024.0 * 1024.0))
-                    val isLowRam = am?.isLowRamDevice == true || totalGb <= 4.0
-                    val adaptiveRegistrationMP = if (isLowRam) 0.4 else -1.0
-                    val adaptiveComposeMP = if (isLowRam) 0.6 else 1.0
-                    android.util.Log.i(
-                        "IncrementalStitcher",
-                        "finalize adaptive resolution: isLowRam=$isLowRam " +
-                            "totalGb=${"%.1f".format(totalGb)} " +
-                            "regMP=$adaptiveRegistrationMP composeMP=$adaptiveComposeMP",
-                    )
+                    // Resolution budgets: use the stitchSync defaults
+                    // (registrationResolMP=-1.0 → cv::Stitcher/JNI default;
+                    // compositingResolMP=1.0 → the OOM-safe high-level
+                    // default).  The RAM-keyed adaptive cut that used to
+                    // sit here (regMP=0.4 / composeMP=0.6 on ≤4 GB devices)
+                    // was REMOVED (2026-08-03): the adversarial review of
+                    // 7df2dba found it a no-op on default 640 px keyframes,
+                    // a silent ~40% output-pixel cut on quality captures,
+                    // fired on unaffected RN 0.83 hosts, mis-classified any
+                    // device on ActivityManager-null, and cut registration
+                    // to 0.4 MP where the pipeline's own analysis wants
+                    // MORE resolution (raising drops/failures).  The
+                    // correct, opt-in, measured replacement is specified in
+                    // docs/perf-4a-measured-resolution-adaptation.md.
                     val dims = stitcher.stitchSync(
                         keyframePathsSnapshot.toTypedArray(),
                         outputPath,
@@ -930,8 +951,6 @@ class IncrementalStitcher(
                         seamFinderTypeSnapshot,
                         captureOrientationSnapshot,
                         useInscribedRectCropSnapshot,
-                        registrationResolMP = adaptiveRegistrationMP,
-                        compositingResolMP = adaptiveComposeMP,
                         stitchMode = "panorama",         // always high-level PANORAMA
                         useManualPipeline = false,       // high level across the board
                     )
@@ -1005,15 +1024,14 @@ class IncrementalStitcher(
             } catch (t: Throwable) {
                 promise.reject("incremental-finalize-failed", t.message, t)
             } finally {
-                // Restore thread priority.
+                // Restore the thread's original scheduler priority.
                 try {
-                    Thread.currentThread().priority = origPriority
+                    android.os.Process.setThreadPriority(origThreadPriority)
                 } catch (_: Throwable) { /* ignore */ }
-                // Resume AR rendering regardless of success/failure so
-                // the camera preview recovers if the view is still mounted.
-                arCameraViewRef?.resumeRenderingAfterStitch()
-                // Signal JS that the stitch is done so the host can
-                // resume the vision-camera `<Camera>` if it paused it.
+                // Signal JS that the stitch is done so a composed host can
+                // re-activate its vision-camera `<Camera>` (see the
+                // "started" emit above; the host must also key off the
+                // finalize/cancel promise, since cancel() emits nothing).
                 emitStitchingPhase("finished")
             }
         }
@@ -2378,27 +2396,29 @@ class IncrementalStitcher(
      *
      * Outcome enum: 5 = RejectedOverlap (matches iOS' RLISFrameOutcomeRejectedOverlap).
      *
-     * Throttled to at most once per 250 ms.  On older RN versions
-     * (≤ 0.79) every event crosses the old bridge (JSON serialize →
-     * queue → deserialize → JS handler → React re-render).  At the
-     * default eval cadence of 5 the unthrottled rate is ~6 events/sec
-     * — each one allocates a WritableNativeMap + triggers a React
-     * setState.  On low-end SoCs the cumulative bridge + JS overhead
-     * eats CPU time the cv::Stitcher worker needs.  250 ms caps the
-     * rate at ~4/sec (still responsive for the overlap % overlay)
-     * while cutting bridge overhead ~35%.  Accept events are NEVER
-     * throttled — they carry thumbnails the UI must show immediately.
+     * Emit throttle is OFF by default (rejectEmitMinIntervalNanos = 0),
+     * matching iOS, which never throttles reject emits.  A host that
+     * needs to cap bridge traffic on an old-arch device can opt in via
+     * the `rejectEmitMinIntervalMs` config key (set in start()).  Accept
+     * events are NEVER throttled — they carry thumbnails the UI must show
+     * immediately.  (The 7df2dba commit's hardcoded 250 ms throttle was
+     * removed: measured placebo, and it staled the overlap-% overlay.)
      */
     private var lastRejectEmitNanos: Long = 0L
+    /// Min interval between reject emits, nanos.  0 = off (default).
+    /// Set from the `rejectEmitMinIntervalMs` start() config key.
+    private var rejectEmitMinIntervalNanos: Long = 0L
     private fun emitBatchKeyframeRejectState(
         decision: KeyframeGateDecision,
         keyframeCount: Int,
         keyframeMax: Int,
         isLandscape: Boolean,
     ) {
-        // Time-based throttle: skip if < 250 ms since the last emit.
+        // Optional time-based throttle (default off): skip if an interval
+        // is configured and too little time has passed since the last emit.
         val now = System.nanoTime()
-        if (now - lastRejectEmitNanos < 250_000_000L) return
+        if (rejectEmitMinIntervalNanos > 0L &&
+            now - lastRejectEmitNanos < rejectEmitMinIntervalNanos) return
         lastRejectEmitNanos = now
 
         val state = Arguments.createMap()

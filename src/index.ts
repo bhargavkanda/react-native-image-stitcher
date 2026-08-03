@@ -251,10 +251,15 @@ export {
   IncrementalOutcome,
   incrementalStitcherIsAvailable,
   subscribeIncrementalState,
+  subscribeStitchingPhase,
   getIncrementalNativeModule,
   cleanupOldKeyframes,
 } from './stitching/incremental';
-export type { IncrementalState, AcceptedKeyframe } from './stitching/incremental';
+export type {
+  IncrementalState,
+  AcceptedKeyframe,
+  StitchingPhase,
+} from './stitching/incremental';
 export { useIncrementalStitcher } from './stitching/useIncrementalStitcher';
 // v0.7.0 — Tier 1 subscriber API.  Fires on each accepted keyframe
 // in batch-keyframe captures (see hook's docstring for engine-mode
