@@ -2099,6 +2099,13 @@ class IncrementalStitcher(
             config?.getBooleanOrDefault("useManualPipeline", false) ?: false
         val jpegQuality = max(1, min(100,
             config?.getIntOrDefault("jpegQuality", 90) ?: 90))
+        // perf-3b — the re-stitch must use the SAME range-matcher width the
+        // original finalize used, or the preview differs from the capture.
+        // Prefer an explicit refine-config value; else fall back to the
+        // session field set at start() (0 if the module was never started).
+        val refineRangeMatcherWidth = (config
+            ?.getIntOrDefault("stitchRangeMatcherWidth", stitchRangeMatcherWidth)
+            ?: stitchRangeMatcherWidth).coerceAtLeast(0)
 
         // Pre-flight existence check — same defensive layer iOS has.
         for (p in framePaths) {
@@ -2154,6 +2161,7 @@ class IncrementalStitcher(
                     // HIGH-LEVEL preview tab); true would force the manual
                     // pipeline.  Sourced from the JS config above.
                     useManualPipeline = useManualPipeline,
+                    rangeMatcherWidth = refineRangeMatcherWidth,  // perf-3b — match finalize
                 )
                 // Stitch returned — BatchStitcher writes the JPEG
                 // synchronously, so "writing" reflects the final

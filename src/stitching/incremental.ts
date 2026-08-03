@@ -845,6 +845,13 @@ export interface IncrementalRefineOptions {
    * (Android refine is always cv::Stitcher).
    */
   useManualPipeline?: boolean;
+  /**
+   * perf-3b — PANORAMA range-matcher width for the re-stitch. Omit to
+   * inherit the value the session's `start()` used (so the preview matches
+   * the original finalize); pass explicitly for a standalone refine. `0`
+   * forces full-pairwise. See `BatchStitcherSettings.rangeMatcherWidth`.
+   */
+  stitchRangeMatcherWidth?: number;
 }
 
 
