@@ -414,9 +414,17 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // more at higher keyframe counts).  Set to 0 to fall back to the legacy
     // full-pairwise ladder.  See docs/perf-3b.
     rangeMatcherWidth: 3,
-    // perf-3b item 1 — OpenCV threads: 0 = auto-multi (default). Set 1 to
-    // kill-switch back to single-threaded if a device regresses on memory.
-    numThreads: 0,
+    // perf-3b item 1 — OpenCV threads: 1 = single-threaded (DEFAULT).
+    // On-device measurement (incl. an independent adversarial re-review)
+    // proved multi-threading is a NET REGRESSION of -7..-18% at the fleet's
+    // 4-15 keyframe / 0.3-1.2MP captures: cv::Stitcher is dominated by
+    // strictly-serial phases (graphcut seam ~41%, ORB/bundle-adjust), and
+    // its nominally-parallel pixel work is too small to scale at 1MP compose
+    // while TBB worker overhead makes it a net loss. Single-threaded is BOTH
+    // the fastest AND the most memory-safe config here. Set 0 for auto-multi
+    // or N to experiment, but it will not help at these sizes — the real
+    // lever is the seam finder (see docs/perf-3b).
+    numThreads: 1,
   },
   frameSelection: {
     mode: 'flow-based',
