@@ -395,16 +395,28 @@ zero bridge changes; enabling on iOS later is an `OpenCVStitcher.mm` cfg line.
 order.  On a linear pan, non-adjacent pairs are exactly the pairs with
 near-zero overlap — computing them buys ~nothing and costs the O(N²) bulk.
 
-**API verification obligations** (vendored headers absent in a fresh worktree —
-§2.2): before implementation, read
-`android/vendor/OpenCV-android-sdk/sdk/native/jni/include/opencv2/stitching/detail/matchers.hpp`
-(post-`postinstall`) and confirm against upstream 4.10.0:
+**API verification** (2026-08-03 — **constructor CONFIRMED** against the
+vendored `android/vendor/OpenCV-android-sdk/.../stitching/detail/matchers.hpp`,
+`CV_VERSION 4.10`):
 
-1. Constructor `BestOf2NearestRangeMatcher(int range_width = 5, bool try_use_gpu
-   = false, float match_conf = 0.3f, …)` and that `match()` computes only pairs
-   with `j < i + range_width` (upstream: the `near_pairs` loop), honoring the
+```cpp
+BestOf2NearestRangeMatcher(int range_width = 5, bool try_use_gpu = false,
+                           float match_conf = 0.3f,
+                           int num_matches_thresh1 = 6,
+                           int num_matches_thresh2 = 6);
+```
+
+So `makePtr<cv::detail::BestOf2NearestRangeMatcher>(width, false, 0.3f)` binds
+`range_width=width, try_use_gpu=false, match_conf=0.3f` — the two thresholds keep
+their `BestOf2NearestMatcher` defaults (6/6), matching attempt 1's current
+`create(PANORAMA)` default. It subclasses `BestOf2NearestMatcher` and overrides
+`match()` (honoring the passed `mask`). Two obligations REMAIN (need the `.cpp`,
+not just the header):
+
+1. Confirm the `match()` `near_pairs` window is `|i−j| < range_width` (so
+   `range_width=3` ⇒ neighbours at distance 1 and 2) and that it honors the
    Stitcher's `matching_mask_`.
-2. Uncomputed pairs remain default `MatchesInfo` (confidence 0) — i.e. they are
+2. Confirm uncomputed pairs remain default `MatchesInfo` (confidence 0) — i.e.
    *absent edges* for `leaveBiggestComponent`, not spurious weak edges.
 
 **Failure semantics — fall through, never silently degrade:** on a pan-back
