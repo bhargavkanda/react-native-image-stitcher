@@ -946,14 +946,19 @@ static StitchResult stitchFramePathsImpl_(
     // 0.5/0.4, which is STRICTER than the default — inverted lever.]
     struct RetryTune {
         double thresh;      // panoConfidenceThresh
-        float  matchConf;   // BestOf2NearestMatcher confidence; <0 -> leave default
+        float  matchConf;   // matcher confidence; <0 -> default 0.3
         double regResolMP;  // registration resolution (MP); <0 -> leave config/default
+        int    rangeWidth;  // perf-3b — range-matcher window for THIS attempt
+                            // when the range ladder is enabled
+                            // (config.rangeMatcherWidth > 0).  0 here == "use
+                            // config.rangeMatcherWidth" (the operator-set final
+                            // width).  Ignored when the range ladder is off.
     };
     const RetryTune kRetries[] = {
-        //  thresh  matchConf  regResolMP
-        {   1.0,    -1.0f,     -1.0 },   // attempt 1: unchanged (fast happy path)
-        {   0.5,     0.25f,     1.0 },   // attempt 2: looser matcher + ~1.0 MP
-        {   0.3,     0.20f,     1.3 },   // attempt 3: loosest matcher + ~1.3 MP
+        //  thresh  matchConf  regResolMP  rangeWidth
+        {   1.0,    -1.0f,     -1.0,       2 },   // attempt 1: consecutive-only (fast happy path)
+        {   0.5,     0.25f,     1.0,       2 },   // attempt 2: consecutive + looser matcher + ~1.0 MP
+        {   0.3,     0.20f,     1.3,       0 },   // attempt 3: widen to config width at min thresh + ~1.3 MP
     };
     const int kNumAttempts = sizeof(kRetries) / sizeof(kRetries[0]);
     cv::Mat panorama;
@@ -981,26 +986,36 @@ static StitchResult stitchFramePathsImpl_(
         // PANORAMA to keep SCANS behaviour byte-for-byte unchanged.
         float  appliedMatchConf  = -1.0f;
         double appliedRegResolMP = -1.0;
+        int    appliedRangeWidth = 0;
         if (cvMode == cv::Stitcher::PANORAMA) {
-            // perf-3b — attempt 1 (only): swap the full-pairwise
-            // BestOf2NearestMatcher for a RANGE matcher that computes only
-            // pairs within |i-j| < rangeMatcherWidth.  Keyframes are
-            // capture-ordered (JNI preserves accept order), so on a linear
-            // pan the skipped non-adjacent pairs share ~no overlap and their
-            // O(N^2) matching is pure waste.  The ladder reuses one
-            // cv::Stitcher instance, so attempt 1 must set its matcher
-            // explicitly here (it inherited the create() default before);
-            // attempts 2/3 overwrite it with the loosened FULL matcher below
-            // (tune.matchConf), which is the rescue for pan-back / weak-
-            // adjacency captures.  match_conf stays 0.3f = attempt 1's
-            // previous (create-default) looseness — only the pair SET changes.
-            if (attempt == 0 && config.rangeMatcherWidth > 0) {
+            if (config.rangeMatcherWidth > 0) {
+                // perf-3b — RANGE-MATCHER LADDER.  Match only capture-adjacent
+                // keyframes (|i-j| < width); keyframes are capture-ordered (JNI
+                // preserves accept order), so on a linear pan the non-adjacent
+                // pairs share ~no overlap and their O(N^2) matching is waste.
+                // The window WIDENS across the ladder: 2 (consecutive-only) on
+                // the fast attempts, then out to config.rangeMatcherWidth on the
+                // final, minimum-threshold attempt — so a chain broken at a weak
+                // consecutive link gets BRIDGED (distance-2+) only as a last
+                // resort.  This REPLACES the full-pairwise matcher on every
+                // attempt: distant-overlap (pan-back) captures are handled at
+                // capture time (perf-5 capture-pause), not by a full-matcher
+                // rescue here.  match_conf tracks the same loosening the legacy
+                // ladder used (0.3 -> 0.25 -> 0.20).
+                const int rw = (tune.rangeWidth > 0)
+                    ? tune.rangeWidth
+                    : std::max(2, config.rangeMatcherWidth);
+                const float mc = (tune.matchConf > 0.0f) ? tune.matchConf : 0.3f;
                 stitcher->setFeaturesMatcher(
-                    cv::makePtr<cv::detail::BestOf2NearestRangeMatcher>(
-                        config.rangeMatcherWidth, false, 0.3f));
-                appliedMatchConf = 0.3f;
-            }
-            if (tune.matchConf > 0.0f) {
+                    cv::makePtr<cv::detail::BestOf2NearestRangeMatcher>(rw, false, mc));
+                appliedMatchConf = mc;
+                appliedRangeWidth = rw;
+            } else if (tune.matchConf > 0.0f) {
+                // Legacy full-pairwise ladder (range matcher OFF): loosened FULL
+                // matcher on the fallback attempts; attempt 1 keeps the create()
+                // default matcher.  Byte-identical to pre-perf-3b.  Swapping a
+                // matcher would break SCANS (affine family), so this whole block
+                // is PANORAMA-gated.
                 stitcher->setFeaturesMatcher(
                     cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, tune.matchConf));
                 appliedMatchConf = tune.matchConf;
@@ -1016,9 +1031,9 @@ static StitchResult stitchFramePathsImpl_(
         finalAttempt = attempt + 1;
         finalThreshold = thresh;
         log_info(logFn, "[stitch-retry]",
-                 "attempt %d/%d panoConfidenceThresh=%.2f matchConf=%.2f regResolMP=%.2f",
+                 "attempt %d/%d panoConfidenceThresh=%.2f matchConf=%.2f regResolMP=%.2f rangeWidth=%d",
                  finalAttempt, kNumAttempts, thresh,
-                 appliedMatchConf, appliedRegResolMP);
+                 appliedMatchConf, appliedRegResolMP, appliedRangeWidth);
         try {
             // 2026-06-16 (review #2) — TWO-PHASE: estimateTransform (registration
             // + BA + leaveBiggestComponent at this threshold) here; composePanorama
@@ -1110,14 +1125,18 @@ static StitchResult stitchFramePathsImpl_(
         const RetryTune& best = kRetries[bestAttempt];
         stitcher->setPanoConfidenceThresh(best.thresh);
         if (cvMode == cv::Stitcher::PANORAMA) {
-            // perf-3b — when the best attempt was attempt 1 AND the range
-            // matcher is enabled, the recovery re-run must use the RANGE
-            // matcher (what attempt 1 actually ran), not the full matcher —
-            // otherwise it isn't reproducing the attempt it claims to.
-            if (bestAttempt == 0 && config.rangeMatcherWidth > 0) {
+            // perf-3b — reproduce the BEST attempt's exact matcher.  With the
+            // range ladder on, that means the range matcher at the best
+            // attempt's own window (2 on attempts 1-2, config width on the
+            // final attempt) + its match_conf — NOT the full matcher, or the
+            // recovery wouldn't reproduce the attempt it claims to.
+            if (config.rangeMatcherWidth > 0) {
+                const int rw = (best.rangeWidth > 0)
+                    ? best.rangeWidth
+                    : std::max(2, config.rangeMatcherWidth);
+                const float mc = (best.matchConf > 0.0f) ? best.matchConf : 0.3f;
                 stitcher->setFeaturesMatcher(
-                    cv::makePtr<cv::detail::BestOf2NearestRangeMatcher>(
-                        config.rangeMatcherWidth, false, 0.3f));
+                    cv::makePtr<cv::detail::BestOf2NearestRangeMatcher>(rw, false, mc));
             } else {
                 stitcher->setFeaturesMatcher(
                     best.matchConf > 0.0f

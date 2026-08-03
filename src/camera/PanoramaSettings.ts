@@ -158,17 +158,21 @@ export interface BatchStitcherSettings {
   enableMaxInscribedRectCrop: boolean;
 
   /**
-   * perf-3b — PANORAMA feature-matcher range width.  `0`/undefined
-   * (default) = OFF: the stock full-pairwise `BestOf2NearestMatcher`
-   * (byte-identical to before this knob existed).  `> 0` swaps
-   * attempt 1 of the finalize retry ladder for a
-   * `BestOf2NearestRangeMatcher(width)` that only matches keyframes
-   * within `|i − j| < width`.  Keyframes are strictly capture-ordered,
+   * perf-3b — PANORAMA feature-matcher range.  `0`/undefined (default)
+   * = OFF: the stock full-pairwise `BestOf2NearestMatcher` ladder
+   * (byte-identical to before this knob existed).  `> 0` enables the
+   * `BestOf2NearestRangeMatcher` ladder, which matches only keyframes
+   * within `|i − j| < width` — keyframes are strictly capture-ordered,
    * so on a linear shelf pan the skipped non-adjacent pairs share ~no
-   * overlap and their O(N²) matching is wasted work; a capture that
-   * pans back falls through to the attempts-2/3 full-matcher rescue.
-   * Recommended `3` once validated on-device (see docs/perf-3b).
-   * PANORAMA/high-level only; ignored by SCANS and the manual pipeline.
+   * overlap and their O(N²) matching is wasted work.  The window widens
+   * across the finalize retry ladder: **consecutive-only (width 2) on
+   * attempts 1–2, then out to THIS value on the final, lowest-threshold
+   * attempt** — so `3` gives a 2/2/3 schedule, bridging a chain broken
+   * at a weak consecutive link only as a last resort.  This replaces the
+   * full-pairwise matcher on every attempt; pan-back captures (distant
+   * overlap) are handled at capture time (perf-5), not by a rescue here.
+   * Recommended `3`.  PANORAMA/high-level only; ignored by SCANS and the
+   * manual pipeline.
    */
   rangeMatcherWidth?: number;
 }
@@ -392,9 +396,13 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // it on in settings) for a clean-cornered rectangle — but it can shrink the
     // output a lot on lopsided / ultra-wide masks, which is why it's opt-in.
     enableMaxInscribedRectCrop: false,
-    // perf-3b — range matcher OFF by default (full-pairwise, unchanged).
-    // Set to 3 once validated on-device to speed up linear-pan finalize.
-    rangeMatcherWidth: 0,
+    // perf-3b — range-matcher ladder ON by default (2/2/3 schedule):
+    // consecutive-only matching on the fast attempts, widening to 3 only on
+    // the final minimum-threshold attempt.  Validated on-device (parity:
+    // identical framesIncluded, no ghosting; ~5-6% faster on small corpora,
+    // more at higher keyframe counts).  Set to 0 to fall back to the legacy
+    // full-pairwise ladder.  See docs/perf-3b.
+    rangeMatcherWidth: 3,
   },
   frameSelection: {
     mode: 'flow-based',

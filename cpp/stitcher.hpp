@@ -168,13 +168,17 @@ struct StitchConfig {
     double      seamEstimationResolMP = -1.0;          // < 0 = cv default (0.1 MP)
     double      compositingResolMP   = -1.0;           // < 0 = entry-specific default (high-level: 1.0 MP, manual: 0.6 MP)
     // PANORAMA feature-matcher range (perf-3b).  0 = OFF (default full-
-    // pairwise BestOf2NearestMatcher — byte-identical to before this knob).
-    // > 0 = swap attempt 1 for BestOf2NearestRangeMatcher(range_width),
-    // matching only keyframes within |i-j| < range_width.  Keyframes are
-    // strictly capture-ordered (JNI preserves accept order), so on a
-    // linear pan non-adjacent pairs share ~no overlap and computing them
-    // is O(N^2) waste; a pan-back falls through to the attempts-2/3 full
-    // matcher rescue.  PANORAMA only (SCANS uses the affine matcher family).
+    // pairwise BestOf2NearestMatcher ladder — byte-identical to before this
+    // knob).  > 0 = enable the RANGE-MATCHER ladder on EVERY attempt: match
+    // only keyframes within |i-j| < width (keyframes are capture-ordered, so
+    // non-adjacent pairs share ~no overlap on a linear pan and their O(N^2)
+    // matching is waste).  The window widens across the retry ladder —
+    // consecutive-only (width 2) on attempts 1-2, then out to THIS value on
+    // the final, minimum-threshold attempt (so 3 => 2/2/3) — bridging a
+    // chain broken at a weak link only as a last resort.  This REPLACES the
+    // full-pairwise matcher on all attempts; distant-overlap (pan-back)
+    // captures are handled at capture time (perf-5), not by a full-matcher
+    // rescue.  PANORAMA only (SCANS uses the affine matcher family).
     int         rangeMatcherWidth    = 0;
     int         jpegQuality          = 85;
 
