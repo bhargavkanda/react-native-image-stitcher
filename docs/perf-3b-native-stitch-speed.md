@@ -17,6 +17,46 @@ rather than trusted from memory — and that check matters here (§2.1).
 
 ---
 
+## 0. ON-DEVICE FINDINGS (2026-08-03) — supersede the item 1/3 estimates
+
+Implemented items 1 (`f36449a`) and 2 (range matcher, `23a4971`), then MEASURED
+them on the A35 (an independent adversarial re-review with a second model
+reproduced the numbers). The measurements overturned two of this spec's
+estimates and surfaced the real lever:
+
+- **Item 2 (range matcher): SHIPPED + validated.** 2/2/3 ladder, default on;
+  identical `framesIncluded`, no ghosting, ~5-6% faster. Good.
+- **Item 1 (restore multi-threading): the "2-4x" estimate was WRONG — it is a
+  NET REGRESSION of −7% to −18%** at fleet captures (4-15 keyframes, 0.3-1.2 MP).
+  OpenCV *is* TBB 2021.11 and `setNumThreads` works (microbench: GaussianBlur
+  3.9× on 9 MP mats), but `cv::Stitcher` is dominated by STRICTLY-SERIAL phases —
+  **graphcut seam ~41% of wall time**, ORB + bundle-adjust ~22% — and its
+  nominally-parallel warp/blend is too small to scale at 1 MP compose while TBB
+  worker overhead makes it a net loss. More keyframes make it WORSE (graphcut
+  seam count grows superlinearly). **Action taken:** `numThreads` default flipped
+  to **1** (`05311e3`) — single-threaded is fastest AND most memory-safe here.
+  The item-1 CORRECTNESS work (native-entry lock, stable dedicated threads,
+  kill-switch) stands; only the perf premise didn't hold.
+- **Item 3 (ADPF / make-the-boost-reach-the-pool): DROP.** Its whole point was
+  scaling the parallel phases; they don't scale, and the ~1.7s stitches don't
+  thermal-throttle. Not worth the API-31 complexity.
+- **THE REAL LEVER — the seam finder.** Swapping graphcut → a cheaper finder
+  (voronoi, or `skip`/NoSeamFinder) removes ~680 ms ≈ **1.7× end-to-end** on the
+  1280 px corpus (measured ~free for speed). `make_seam_finder` (cpp/stitcher.cpp:216)
+  already supports `"voronoi"`; `voronoi` is now exposed in the TS
+  `seamFinderType` enum. **BUT seam choice changes output pixels** (voronoi
+  follows geometry, not content → exposure/parallax seams can ghost), so the
+  DEFAULT stays `graphcut` until an on-device output-quality gate passes (SSIM +
+  visual, same rig as the range matcher). **This gate is device-verify-pending**
+  (the A35 was disconnected mid-session). When it runs: stitch each corpus with
+  graphcut vs voronoi, require no new ghosting/visible-seam artifacts before
+  considering a default flip; ship `voronoi` opt-in regardless.
+
+Evidence + probes: `/private/tmp/claude-501/parity/` (`seam_probe.cpp`,
+`memstat_probe.cpp`, `phase_probe.cpp`, `parbench.cpp`, `cvinfo`; per-phase logs).
+
+---
+
 ## 1. Summary
 
 Three independently-togglable changes that attack the *stitch wall-clock* itself

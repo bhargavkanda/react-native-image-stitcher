@@ -143,11 +143,25 @@ export interface BatchStitcherSettings {
   blenderType: 'multiband' | 'feather';
 
   /**
-   * Seam-finder strategy.  `'graphcut'` finds optimal seams before
-   * blending (pair with multiband); `'skip'` streams warp+feed (pair
-   * with feather for the lowest-memory configuration).
+   * Seam-finder strategy.
+   *   `'graphcut'` (default) — optimal min-cost seams (COST_COLOR_GRAD)
+   *     before blending (pair with multiband). Highest quality, but
+   *     STRICTLY SERIAL and, per on-device profiling (fable review), ~41%
+   *     of total stitch wall-time at fleet keyframe counts — the single
+   *     biggest phase.
+   *   `'voronoi'` — distance-based seams. Much cheaper than graphcut
+   *     (potential ~1.7x end-to-end), but seams follow geometry not image
+   *     content, so exposure/parallax mismatches can show as visible seams
+   *     or ghosting. This is the real speed lever identified by profiling,
+   *     but flipping the default to it REQUIRES on-device output-quality
+   *     validation (SSIM + visual, per the range-matcher gate) because it
+   *     changes pixels — see docs/perf-3b. Exposed here as opt-in; default
+   *     stays graphcut until that gate passes.
+   *   `'skip'` — no seam optimization (NoSeamFinder); streams warp+feed
+   *     (pair with feather for the lowest-memory configuration). Cheapest,
+   *     lowest quality.
    */
-  seamFinderType: 'graphcut' | 'skip';
+  seamFinderType: 'graphcut' | 'voronoi' | 'skip';
 
   /**
    * Output crop strategy.  `false` (default) crops to the bounding

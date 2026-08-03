@@ -451,7 +451,20 @@ N = 5, four of every five `packNV21` copies (~12–16 MB/s of allocation + copy)
 four of five plugin JNI dispatches, and four of five `Frame`/ImageProxy acquisitions
 disappear from the producer thread. At 60 fps the saving doubles.
 
-### 4.3 Change 3 — accept-path JPEG encode onto `workScope` (Android)
+### 4.3 Change 3 — accept-path JPEG encode onto `workScope` (Android) — DROPPED (2026-08-03)
+
+> **DROPPED per on-device profiling.** The fable per-phase profile of the real
+> stitch path measured JPEG **decode + encode at 2.7%** of stitch wall-time (imread
+> 38 ms + imwrite 8 ms on the 1280 px corpus) — this change offloads a ~30-50 ms
+> per-accept encode off the *producer* thread (a capture-time frame-drop concern,
+> not stitch time), and the intricate producer/serial-scope concurrency it needs
+> (append-under-lock, FIFO ordering, exists-filter, accept/reject reordering
+> window) is not worth that marginal, capture-only benefit. Not implementing.
+> The producer-thread relief that DOES matter — skipping the whole gate+encode
+> for decimated frames — is delivered by Changes 1 + 2 (worklet gate + decimation
+> before `packNV21`), which remain. Section kept for the record.
+
+
 
 **Structural fix:** the producer thread's job is to gate frames; persistence belongs
 on the engine's serial work queue. The packed NV21 already outlives the callback
