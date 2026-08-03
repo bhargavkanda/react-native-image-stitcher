@@ -982,6 +982,24 @@ static StitchResult stitchFramePathsImpl_(
         float  appliedMatchConf  = -1.0f;
         double appliedRegResolMP = -1.0;
         if (cvMode == cv::Stitcher::PANORAMA) {
+            // perf-3b — attempt 1 (only): swap the full-pairwise
+            // BestOf2NearestMatcher for a RANGE matcher that computes only
+            // pairs within |i-j| < rangeMatcherWidth.  Keyframes are
+            // capture-ordered (JNI preserves accept order), so on a linear
+            // pan the skipped non-adjacent pairs share ~no overlap and their
+            // O(N^2) matching is pure waste.  The ladder reuses one
+            // cv::Stitcher instance, so attempt 1 must set its matcher
+            // explicitly here (it inherited the create() default before);
+            // attempts 2/3 overwrite it with the loosened FULL matcher below
+            // (tune.matchConf), which is the rescue for pan-back / weak-
+            // adjacency captures.  match_conf stays 0.3f = attempt 1's
+            // previous (create-default) looseness — only the pair SET changes.
+            if (attempt == 0 && config.rangeMatcherWidth > 0) {
+                stitcher->setFeaturesMatcher(
+                    cv::makePtr<cv::detail::BestOf2NearestRangeMatcher>(
+                        config.rangeMatcherWidth, false, 0.3f));
+                appliedMatchConf = 0.3f;
+            }
             if (tune.matchConf > 0.0f) {
                 stitcher->setFeaturesMatcher(
                     cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, tune.matchConf));
@@ -1092,10 +1110,20 @@ static StitchResult stitchFramePathsImpl_(
         const RetryTune& best = kRetries[bestAttempt];
         stitcher->setPanoConfidenceThresh(best.thresh);
         if (cvMode == cv::Stitcher::PANORAMA) {
-            stitcher->setFeaturesMatcher(
-                best.matchConf > 0.0f
-                    ? cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, best.matchConf)
-                    : cv::makePtr<cv::detail::BestOf2NearestMatcher>(false));
+            // perf-3b — when the best attempt was attempt 1 AND the range
+            // matcher is enabled, the recovery re-run must use the RANGE
+            // matcher (what attempt 1 actually ran), not the full matcher —
+            // otherwise it isn't reproducing the attempt it claims to.
+            if (bestAttempt == 0 && config.rangeMatcherWidth > 0) {
+                stitcher->setFeaturesMatcher(
+                    cv::makePtr<cv::detail::BestOf2NearestRangeMatcher>(
+                        config.rangeMatcherWidth, false, 0.3f));
+            } else {
+                stitcher->setFeaturesMatcher(
+                    best.matchConf > 0.0f
+                        ? cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, best.matchConf)
+                        : cv::makePtr<cv::detail::BestOf2NearestMatcher>(false));
+            }
             stitcher->setRegistrationResol(
                 best.regResolMP > 0.0
                     ? std::max(best.regResolMP, config.registrationResolMP)

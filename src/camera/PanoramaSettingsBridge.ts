@@ -80,6 +80,13 @@ export function panoramaSettingsToNativeConfig(
     blenderType: s.stitcher.blenderType,
     seamFinderType: s.stitcher.seamFinderType,
     enableMaxInscribedRectCrop: s.stitcher.enableMaxInscribedRectCrop,
+    // perf-3b — PANORAMA attempt-1 range matcher (0 = off = full
+    // pairwise, byte-identical).  Always serialised with the default
+    // filled in (same canonical-defaults policy as the flow knobs),
+    // so a mid-session change doesn't slip back to a stale native
+    // value.  Native reads configOverrides["stitchRangeMatcherWidth"]
+    // and clamps ≥ 0.
+    stitchRangeMatcherWidth: s.stitcher.rangeMatcherWidth ?? 0,
 
     // ── FrameSelectionSettings → KeyframeGate knobs ──────────────
     frameSelectionMode: s.frameSelection.mode,

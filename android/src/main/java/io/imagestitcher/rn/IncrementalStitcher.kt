@@ -238,6 +238,10 @@ class IncrementalStitcher(
     // half-committed window state, no post-snapshot writes.
     private val sharpnessWindowLock = Any()
     private var sharpnessWindowK: Int = 4
+    /// perf-3b — PANORAMA attempt-1 feature-matcher range width, set from
+    /// the `stitchRangeMatcherWidth` start() config key.  0 = OFF (default,
+    /// full-pairwise). Passed to BatchStitcher.stitchSync at finalize().
+    private var stitchRangeMatcherWidth: Int = 0
     /// Shared-C++ window DECISION machine (cpp/sharpness_window.*,
     /// via the SharpnessWindow JNI facade).  Owns open/closed state,
     /// remaining candidate slots, the streaming-max best score and the
@@ -546,6 +550,15 @@ class IncrementalStitcher(
                 ?.getIntOrDefault("rejectEmitMinIntervalMs", 0) ?: 0)
                 .coerceAtLeast(0)
             rejectEmitMinIntervalNanos = rejectThrottleMs.toLong() * 1_000_000L
+
+            // perf-3b — PANORAMA attempt-1 feature-matcher range width.
+            // 0 (default) = OFF (full-pairwise, byte-identical to before).
+            // > 0 matches only capture-adjacent keyframes on attempt 1;
+            // attempts 2/3 keep the full matcher as the pan-back rescue.
+            // Applied at finalize() → stitchSync.  Clamp ≥ 0.
+            stitchRangeMatcherWidth = (configOverrides
+                ?.getIntOrDefault("stitchRangeMatcherWidth", 0) ?: 0)
+                .coerceAtLeast(0)
 
             // v0.21 — pick-sharpest-in-window anti-blur selection.
             // 1 = off (immediate commit, pre-v0.21 behaviour).
@@ -872,7 +885,17 @@ class IncrementalStitcher(
         // docs/perf-3a / perf-3b.
         emitStitchingPhase("started")
 
+        // Phase 0 telemetry — timestamp the launch so the coroutine body
+        // can measure queue delay (backlog on the serial workScope: a
+        // pending ingest or a previous capture's stitch delays the body).
+        val tStitchDispatch = android.os.SystemClock.elapsedRealtime()
+
         workScope.launch {
+            // Phase 0 telemetry — queue delay = dispatch → body start.
+            val queueDelayMs =
+                android.os.SystemClock.elapsedRealtime() - tStitchDispatch
+            // Wall time of the blocking stitchSync JNI call, filled in below.
+            var stitchWallMs = -1L
             // Nudge the stitch thread into the foreground scheduler band
             // so the multi-second blocking cv::Stitcher call isn't
             // scheduled on par with background / camera-analysis threads.
@@ -942,6 +965,12 @@ class IncrementalStitcher(
                     // MORE resolution (raising drops/failures).  The
                     // correct, opt-in, measured replacement is specified in
                     // docs/perf-4a-measured-resolution-adaptation.md.
+                    // Phase 0 telemetry — wall time of the blocking native
+                    // cv::Stitcher JNI call.  This is the RN-version-invariant
+                    // number: on the same device it should not move between a
+                    // 0.79 and an 0.83 host.  (Kotlin-side measurement; ≈ the
+                    // C++ durationMs minus negligible JNI overhead.)
+                    val tStitchStart = android.os.SystemClock.elapsedRealtime()
                     val dims = stitcher.stitchSync(
                         keyframePathsSnapshot.toTypedArray(),
                         outputPath,
@@ -953,7 +982,10 @@ class IncrementalStitcher(
                         useInscribedRectCropSnapshot,
                         stitchMode = "panorama",         // always high-level PANORAMA
                         useManualPipeline = false,       // high level across the board
+                        rangeMatcherWidth = stitchRangeMatcherWidth,  // perf-3b (0 = off)
                     )
+                    stitchWallMs =
+                        android.os.SystemClock.elapsedRealtime() - tStitchStart
                     // 2026-05-15 (D) — dims layout from native JNI:
                     //   [0] width, [1] height, [2] framesRequested,
                     //   [3] framesIncluded, [4] finalThresholdMilli
@@ -1020,6 +1052,18 @@ class IncrementalStitcher(
                     )
                 }
                 map.putInt("droppedBackpressure", 0)
+                // Phase 0 telemetry — attach the native/JS timing block so
+                // the host can attribute a stitch-time regression to native
+                // (stitchWallMs) vs bridge/JS.  Additive + optional on the TS
+                // side (IncrementalTimings); keyframeCount + budgets let a
+                // host normalise across captures.  See perfTrace.ts.
+                val timings = Arguments.createMap()
+                timings.putDouble("queueDelayMs", queueDelayMs.toDouble())
+                if (stitchWallMs >= 0)
+                    timings.putDouble("stitchWallMs", stitchWallMs.toDouble())
+                timings.putInt("keyframeCount", keyframePathsSnapshot.size)
+                timings.putInt("rangeMatcherWidth", stitchRangeMatcherWidth)
+                map.putMap("timings", timings)
                 promise.resolve(map)
             } catch (t: Throwable) {
                 promise.reject("incremental-finalize-failed", t.message, t)

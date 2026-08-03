@@ -156,6 +156,21 @@ export interface BatchStitcherSettings {
    * with no black corners, more CPU at finalize.
    */
   enableMaxInscribedRectCrop: boolean;
+
+  /**
+   * perf-3b — PANORAMA feature-matcher range width.  `0`/undefined
+   * (default) = OFF: the stock full-pairwise `BestOf2NearestMatcher`
+   * (byte-identical to before this knob existed).  `> 0` swaps
+   * attempt 1 of the finalize retry ladder for a
+   * `BestOf2NearestRangeMatcher(width)` that only matches keyframes
+   * within `|i − j| < width`.  Keyframes are strictly capture-ordered,
+   * so on a linear shelf pan the skipped non-adjacent pairs share ~no
+   * overlap and their O(N²) matching is wasted work; a capture that
+   * pans back falls through to the attempts-2/3 full-matcher rescue.
+   * Recommended `3` once validated on-device (see docs/perf-3b).
+   * PANORAMA/high-level only; ignored by SCANS and the manual pipeline.
+   */
+  rangeMatcherWidth?: number;
 }
 
 
@@ -377,6 +392,9 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // it on in settings) for a clean-cornered rectangle — but it can shrink the
     // output a lot on lopsided / ultra-wide masks, which is why it's opt-in.
     enableMaxInscribedRectCrop: false,
+    // perf-3b — range matcher OFF by default (full-pairwise, unchanged).
+    // Set to 3 once validated on-device to speed up linear-pan finalize.
+    rangeMatcherWidth: 0,
   },
   frameSelection: {
     mode: 'flow-based',
