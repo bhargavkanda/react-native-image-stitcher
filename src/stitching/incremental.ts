@@ -12,6 +12,8 @@
 import { NativeModules, NativeEventEmitter } from 'react-native';
 import type { EmitterSubscription, NativeModule } from 'react-native';
 
+import type { IncrementalTimings } from './perfTrace';
+
 
 /**
  * Per-frame outcome returned by the engine.  Mirrors the iOS
@@ -758,6 +760,14 @@ export interface IncrementalFinalizeResult {
    * result comes out in the raw sensor landscape (sideways).  iOS only.
    */
   captureOrientation?: string;
+  /**
+   * Phase 0 — native + JS stitch timings for the RN-version regression
+   * investigation.  Optional and additive so the shape stays stable
+   * while the native side fills it in incrementally and iOS (initially
+   * missing some fields) doesn't break the type.  See
+   * `perfTrace.ts::IncrementalTimings` and docs/perf-3b.
+   */
+  timings?: IncrementalTimings;
 }
 
 

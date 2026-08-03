@@ -260,6 +260,20 @@ export type {
   AcceptedKeyframe,
   StitchingPhase,
 } from './stitching/incremental';
+// Phase 0 — stitch performance measurement (arch fingerprint, native/JS
+// timings, per-capture event/render counters).  See docs/perf-3a…3b.
+export {
+  getArchFingerprint,
+  parseTimingsFromDebugSummary,
+  bumpPerfCounter,
+  snapshotPerfCounters,
+  resetPerfCounters,
+  perfNow,
+} from './stitching/perfTrace';
+export type {
+  ArchFingerprint,
+  IncrementalTimings,
+} from './stitching/perfTrace';
 export { useIncrementalStitcher } from './stitching/useIncrementalStitcher';
 // v0.7.0 — Tier 1 subscriber API.  Fires on each accepted keyframe
 // in batch-keyframe captures (see hook's docstring for engine-mode
