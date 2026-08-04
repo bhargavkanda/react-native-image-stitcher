@@ -200,6 +200,49 @@ export interface BatchStitcherSettings {
    * `N` = explicit. iOS ignores this (its GCD backend is already multi-core).
    */
   numThreads?: number;
+
+  /**
+   * perf-4a — opt-in, MEASURED compositing-resolution adaptation (Android).
+   * `false`/undefined (default) = OFF, byte-identical (compose stays 1.0 MP).
+   * When `true`, finalize reduces `compositingResolMP` to `adaptiveMinOutputMP`
+   * ONLY on devices MEASURED slow — a persisted rolling median of per-keyframe
+   * stitch wall time (`stitchWallMs / acceptedCount`, from the Phase 0
+   * `timings`) exceeding `adaptiveSlowStitchMsPerFrame`, with hysteresis (enter
+   * above the threshold, exit below 0.8×).
+   *
+   * "Measured" is enforced by two invariants: (1) it NEVER cuts before it has
+   * measured this device — the first finalize for a capture config runs the
+   * default budget and records a sample, so the first cut is always driven by a
+   * real measurement (no core-count guess); (2) while cutting, every 4th
+   * finalize is a default-budget PROBE that re-measures, so a device that
+   * recovers (thermal/background load) can pull its median back under the exit
+   * line and un-fire — the hysteresis never latches permanently.
+   *
+   * This is the correct, opt-in replacement for the RAM-keyed cut removed in
+   * Phase 1: it targets the actual signal (measured slowness), never RAM, and
+   * reports every applied budget on the result (`appliedBudgets.source` is
+   * `default`|`seeded`|`probe`|`adapted`). Compose never drops below
+   * `adaptiveMinOutputMP` — the downstream OD/OCR floor. (Registration
+   * adaptation + thermal signal are deferred; registration is a no-op on
+   * default 640px captures anyway. See docs/perf-4a.)
+   */
+  adaptiveStitchResolution?: boolean;
+  /**
+   * perf-4a — floor (megapixels) the adapted compositing resolution is cut to
+   * on a slow device. Default `0.6` (the downstream OD/OCR minimum). Native
+   * clamps to `[0.6, 1.0]`: `0.6` is the hard OD/OCR floor, `1.0` (the default
+   * budget) makes compose adaptation a no-op — a value above the default would
+   * make a "cut" RAISE resolution and pollute the measured history. Only
+   * consulted when `adaptiveStitchResolution` is `true`.
+   */
+  adaptiveMinOutputMP?: number;
+  /**
+   * perf-4a — the per-keyframe stitch-wall-time median (ms) above which a
+   * device is considered slow and compose adaptation fires. Default `1000`
+   * (estimated; calibrate against Phase 0 `stitchWallMs`). Only consulted
+   * when `adaptiveStitchResolution` is `true`.
+   */
+  adaptiveSlowStitchMsPerFrame?: number;
 }
 
 
@@ -449,6 +492,10 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // or N to experiment, but it will not help at these sizes — the real
     // lever is the seam finder (see docs/perf-3b).
     numThreads: 1,
+    // perf-4a — measured compose-resolution adaptation OFF by default (opt-in).
+    adaptiveStitchResolution: false,
+    adaptiveMinOutputMP: 0.6,
+    adaptiveSlowStitchMsPerFrame: 1000,
   },
   frameSelection: {
     mode: 'flow-based',

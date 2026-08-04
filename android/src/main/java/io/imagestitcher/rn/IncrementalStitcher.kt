@@ -246,6 +246,11 @@ class IncrementalStitcher(
     /// start() config key.  0 = auto-multi (default), 1 = single kill-switch,
     /// N = explicit.  Passed to stitchSync at finalize()/refine().
     private var stitchNumThreads: Int = 0
+    /// perf-4a — opt-in measured compose-resolution adaptation, from start()
+    /// config.  Off by default (byte-identical).  See AdaptiveStitchResolution.
+    private var adaptiveStitchResolution: Boolean = false
+    private var adaptiveMinOutputMP: Double = 0.6
+    private var adaptiveSlowStitchMsPerFrame: Double = 1000.0
     /// Shared-C++ window DECISION machine (cpp/sharpness_window.*,
     /// via the SharpnessWindow JNI facade).  Owns open/closed state,
     /// remaining candidate slots, the streaming-max best score and the
@@ -592,6 +597,19 @@ class IncrementalStitcher(
                 ?.getIntOrDefault("stitchNumThreads", 0) ?: 0)
                 .coerceAtLeast(0)
 
+            // perf-4a — opt-in measured compose-resolution adaptation.
+            adaptiveStitchResolution = configOverrides
+                ?.getBooleanOrDefault("adaptiveStitchResolution", false) ?: false
+            // Clamped to [0.6, 1.0]: 0.6 is the OD/OCR output-pixel floor, and
+            // 1.0 is the default budget — a floor above the default would make a
+            // "cut" raise resolution (slower) and pollute default-budget history.
+            adaptiveMinOutputMP = (configOverrides
+                ?.getDoubleOrDefault("adaptiveMinOutputMP", 0.6) ?: 0.6)
+                .coerceIn(0.6, 1.0)
+            adaptiveSlowStitchMsPerFrame = (configOverrides
+                ?.getDoubleOrDefault("adaptiveSlowStitchMsPerFrame", 1000.0) ?: 1000.0)
+                .coerceAtLeast(1.0)
+
             // v0.21 — pick-sharpest-in-window anti-blur selection.
             // 1 = off (immediate commit, pre-v0.21 behaviour).
             // Default 4 when the key is absent — a deliberate
@@ -928,6 +946,13 @@ class IncrementalStitcher(
                 android.os.SystemClock.elapsedRealtime() - tStitchDispatch
             // Wall time of the blocking stitchSync JNI call, filled in below.
             var stitchWallMs = -1L
+            // perf-4a — compose-resolution adaptation state.  Computed inside
+            // the batch-stitch block below but read again in the shared
+            // `timings`/`appliedBudgets` reporting AFTER that block closes, so
+            // it is hoisted to the launch scope alongside stitchWallMs (same
+            // reason).  Stays 1.0 / null on the opted-out path (byte-identical).
+            var adaptiveComposeMP = 1.0
+            var adaptiveDecision: AdaptiveStitchResolution.Decision? = null
             // Nudge the stitch thread into the foreground scheduler band
             // so the multi-second blocking cv::Stitcher call isn't
             // scheduled on par with background / camera-analysis threads.
@@ -997,6 +1022,36 @@ class IncrementalStitcher(
                     // MORE resolution (raising drops/failures).  The
                     // correct, opt-in, measured replacement is specified in
                     // docs/perf-4a-measured-resolution-adaptation.md.
+                    // perf-4a — opt-in measured compose-resolution adaptation.
+                    // compositingResolMP stays 1.0 (byte-identical) unless the
+                    // host opted in AND the persisted per-keyframe wall-time
+                    // median for this capture config says the device is slow.
+                    // Floored at adaptiveMinOutputMP (the OD/OCR floor).
+                    // (adaptiveComposeMP / adaptiveDecision hoisted to the
+                    // launch scope above — they are read in the timings block
+                    // after this batch block closes.)
+                    var adaptiveKey: String? = null
+                    if (adaptiveStitchResolution) {
+                        val longEdge = firstKeyframeLongEdge(keyframePathsSnapshot)
+                        // A header-decode failure (longEdge ≤ 0) must NOT pool
+                        // distinct capture sizes under a shared le=0 bucket
+                        // (nor read/write it) — skip the store and run the
+                        // default budget for this finalize.
+                        if (longEdge > 0) {
+                            adaptiveKey = AdaptiveStitchResolution.key(longEdge, keyframeGate.maxCount)
+                            adaptiveDecision = AdaptiveStitchResolution.evaluate(
+                                reactContext, adaptiveKey, adaptiveSlowStitchMsPerFrame,
+                            )
+                            if (adaptiveDecision.adapt) {
+                                // adaptiveMinOutputMP is clamped to [0.6, 1.0] at
+                                // read (start()), so the cut never exceeds the 1.0
+                                // default budget (which would slow the device AND
+                                // pollute default-budget history) and never drops
+                                // below the 0.6 OD/OCR floor.
+                                adaptiveComposeMP = adaptiveMinOutputMP
+                            }
+                        }
+                    }
                     // Phase 0 telemetry — wall time of the blocking native
                     // cv::Stitcher JNI call.  This is the RN-version-invariant
                     // number: on the same device it should not move between a
@@ -1012,6 +1067,7 @@ class IncrementalStitcher(
                         seamFinderTypeSnapshot,
                         captureOrientationSnapshot,
                         useInscribedRectCropSnapshot,
+                        compositingResolMP = adaptiveComposeMP,  // perf-4a (1.0 unless adapted)
                         stitchMode = "panorama",         // always high-level PANORAMA
                         useManualPipeline = false,       // high level across the board
                         rangeMatcherWidth = stitchRangeMatcherWidth,  // perf-3b (0 = off)
@@ -1019,6 +1075,28 @@ class IncrementalStitcher(
                     )
                     stitchWallMs =
                         android.os.SystemClock.elapsedRealtime() - tStitchStart
+                    // perf-4a — record a DEFAULT-budget (compose 1.0), non-ladder-
+                    // escalated success so the median reflects device speed at
+                    // the default budget. finalConfidenceThresh (dims[4]/1000) <
+                    // 1.0 ⇒ the ladder escalated (scene-hard, not device-slow) —
+                    // skip. Recording is unconditional on the fire decision so a
+                    // slow device keeps refreshing its default-budget history.
+                    // COVERAGE NOTE: a device whose captures ALWAYS escalate never
+                    // accrues the MIN_SAMPLES needed to fire, so it stays at the
+                    // safe 1.0 default forever. Intended: its cost is scene-driven
+                    // registration retries, which a compositing cut does not
+                    // reduce — the fallback is conservative, never a wrong result.
+                    if (adaptiveStitchResolution && adaptiveComposeMP >= 1.0) {
+                        val threshMilli = if (dims.size > 4) dims[4] else 1000
+                        val escalated = threshMilli < 1000
+                        if (!escalated) {
+                            adaptiveKey?.let {
+                                AdaptiveStitchResolution.recordDefaultRun(
+                                    reactContext, it, stitchWallMs, keyframePathsSnapshot.size,
+                                )
+                            }
+                        }
+                    }
                     // 2026-05-15 (D) — dims layout from native JNI:
                     //   [0] width, [1] height, [2] framesRequested,
                     //   [3] framesIncluded, [4] finalThresholdMilli
@@ -1096,6 +1174,39 @@ class IncrementalStitcher(
                     timings.putDouble("stitchWallMs", stitchWallMs.toDouble())
                 timings.putInt("keyframeCount", keyframePathsSnapshot.size)
                 timings.putInt("rangeMatcherWidth", stitchRangeMatcherWidth)
+                // perf-4a — surface every applied budget so no cut is silent
+                // (the removed RAM cut's core defect). Only present when the
+                // host opted in.
+                if (adaptiveStitchResolution) {
+                    val ab = Arguments.createMap()
+                    ab.putDouble("compositingResolMP", adaptiveComposeMP)
+                    // Did THIS run actually cut compose below the 1.0 default?
+                    val adapted = adaptiveComposeMP < 1.0
+                    val probe = adaptiveDecision?.probe == true
+                    val seeded = adaptiveDecision?.seeded == true
+                    // adaptiveDecision is null ONLY when the header decode failed
+                    // (longEdge ≤ 0) so the store was skipped — report it honestly
+                    // rather than as a measured "default" run.
+                    val decodeFailed = adaptiveDecision == null
+                    ab.putString(
+                        "source",
+                        when {
+                            decodeFailed -> "decode-failed"  // longEdge ≤ 0, ran default, not recorded
+                            adapted -> "adapted"     // fired regime, cut this run
+                            probe -> "probe"         // fired regime, forced default re-measure
+                            seeded -> "seeded"       // < MIN_SAMPLES history, measuring
+                            else -> "default"        // measured-fast (not fired)
+                        },
+                    )
+                    ab.putBoolean("adapted", adapted)
+                    ab.putBoolean("probe", probe)
+                    ab.putBoolean("seeded", seeded)
+                    adaptiveDecision?.medianMsPerKeyframe?.let {
+                        ab.putDouble("medianStitchMsPerKeyframe", it)
+                    }
+                    ab.putDouble("floorMP", adaptiveMinOutputMP)
+                    timings.putMap("appliedBudgets", ab)
+                }
                 map.putMap("timings", timings)
                 promise.resolve(map)
             } catch (t: Throwable) {
@@ -1590,6 +1701,24 @@ class IncrementalStitcher(
                 commitSharpnessWindowLocked(
                     if (decision.driftClosed) "novelty-drift" else "window-full")
             }
+        }
+    }
+
+    /// perf-4a — read the long edge (max of width/height) of the FIRST
+    /// keyframe via a header-only decode (inJustDecodeBounds — no pixel
+    /// decode, ~1 ms) so the adaptive-resolution key reflects what was
+    /// actually captured (640 vs 1280 px), not a prop. Returns 0 (its own
+    /// bucket) on any read failure.
+    private fun firstKeyframeLongEdge(paths: List<String>): Int {
+        val p = paths.firstOrNull() ?: return 0
+        return try {
+            val opts = android.graphics.BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            android.graphics.BitmapFactory.decodeFile(p, opts)
+            kotlin.math.max(opts.outWidth, opts.outHeight).coerceAtLeast(0)
+        } catch (t: Throwable) {
+            0
         }
     }
 
