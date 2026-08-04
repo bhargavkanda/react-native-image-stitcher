@@ -2790,8 +2790,18 @@ StitchResult stitchFramePathsManual(
             composeCanvasMpFinal > kLowMemCanvasMP
             || composeHeldSetMpFinal > kMaxBatchHeldSetMP
             || lowHeadroom;
+        // perf-3b — the manual (BATCH) route runs GraphCutSeamFinder; it has
+        // no Voronoi variant. Route ANY non-skip finder here so an opt-in
+        // 'voronoi' falls back to GRAPHCUT (safe, high-quality) on this path
+        // rather than to STREAM/NoSeamFinder (which an earlier bug did —
+        // 'voronoi' failed the graphcut-only equality and silently disabled
+        // seam finding, double-exposing overlaps). Only an explicit 'skip'/'no'
+        // (or the low-mem canvas guard) streams without a seam. Voronoi's real
+        // speedup is delivered on the HIGH-LEVEL path (make_seam_finder, :876),
+        // which iOS-only manual finalize does not use.
         const bool useSeam =
-            (config.seamFinderType == "graphcut") && !lowMemCanvas;
+            (config.seamFinderType != "skip" && config.seamFinderType != "no")
+            && !lowMemCanvas;
         if (lowMemCanvas) {
             log_info(logFn, "[stitch-bc]",
                      "step8: union=%.1f MP held-set=%.1f MP rss=%.0fMB "

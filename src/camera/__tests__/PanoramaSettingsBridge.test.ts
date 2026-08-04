@@ -62,7 +62,7 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.stitchMode).toBe('auto'); // v0.16 — default reverted to auto (matches v0.15.2)
     expect(cfg.warperType).toBe('plane'); // v0.16 — default reverted to plane (matches v0.15.2)
     expect(cfg.blenderType).toBe('multiband');
-    expect(cfg.seamFinderType).toBe('voronoi'); // perf-3b — default flipped graphcut -> voronoi (~1.7x)
+    expect(cfg.seamFinderType).toBe('graphcut'); // perf-3b — voronoi default reverted (shelf tearing; see docs/perf-3b §0)
     expect(cfg.enableMaxInscribedRectCrop).toBe(false);
     // perf-3b — range matcher (2/2/3 ladder) on by default; single-threaded default.
     expect(cfg.stitchRangeMatcherWidth).toBe(3);

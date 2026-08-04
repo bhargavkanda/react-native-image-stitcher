@@ -40,17 +40,30 @@ estimates and surfaced the real lever:
 - **Item 3 (ADPF / make-the-boost-reach-the-pool): DROP.** Its whole point was
   scaling the parallel phases; they don't scale, and the ~1.7s stitches don't
   thermal-throttle. Not worth the API-31 complexity.
-- **THE REAL LEVER — the seam finder.** Swapping graphcut → a cheaper finder
-  (voronoi, or `skip`/NoSeamFinder) removes ~680 ms ≈ **1.7× end-to-end** on the
-  1280 px corpus (measured ~free for speed). `make_seam_finder` (cpp/stitcher.cpp:216)
-  already supports `"voronoi"`; `voronoi` is now exposed in the TS
-  `seamFinderType` enum. **BUT seam choice changes output pixels** (voronoi
-  follows geometry, not content → exposure/parallax seams can ghost), so the
-  DEFAULT stays `graphcut` until an on-device output-quality gate passes (SSIM +
-  visual, same rig as the range matcher). **This gate is device-verify-pending**
-  (the A35 was disconnected mid-session). When it runs: stitch each corpus with
-  graphcut vs voronoi, require no new ghosting/visible-seam artifacts before
-  considering a default flip; ship `voronoi` opt-in regardless.
+- **THE SEAM FINDER — real speed, but voronoi is UNSAFE as default (shipped
+  opt-in only).** Swapping graphcut → voronoi is a measured **1.6-2.3× end-to-end
+  win** (c4ad 1.63×, 59fab 2.29×, ea62 1.92×; on-device best-of-5) with identical
+  `framesIncluded`. `make_seam_finder` (cpp/stitcher.cpp:216) supports `"voronoi"`
+  and it is exposed in the TS `seamFinderType` enum. A default flip to voronoi was
+  tried (`0e032b3`) then **REVERTED (`graphcut` restored)** after an adversarial
+  seam-quality review (fable, seam-isolated probe with frozen cameras + a
+  synthetic SHELF corpus) found:
+    1. **A bug**: `voronoi` flowed to the MANUAL pipeline too (iOS
+       finalize/`refinePanorama`), whose seam gate (cpp/stitcher.cpp:2793) was
+       `seamFinderType == "graphcut"` — so `"voronoi"` there silently disabled
+       seam finding entirely (STREAM/NoSeamFinder = double-exposed overlaps). The
+       manual gate is now `!= "skip"/"no"` so any non-skip finder falls back to
+       GRAPHCUT there (safe), never skip.
+    2. **Quality**: voronoi's content-blind seams **tear product labels at
+       parallax** on repetitive facings (graphcut routes seams through
+       inter-facing gaps); worst exactly on shelf scans, where a torn label also
+       degrades downstream OD/OCR. My earlier "visually equivalent" call was on
+       indoor ROOM corpora that underexercise near-field parallax — the actual
+       use case (shelves) does not.
+  So: **default `graphcut`; `voronoi` opt-in** (a genuine ~1.7× win and better
+  than skip). Flipping the default needs a real shelf-corpus A/B that clears the
+  tearing. Evidence: `/private/tmp/claude-501/parity/adv_review/` (seam-isolated
+  crops, `seam_iso_probe.cpp`, synthetic `shelf2/`).
 
 Evidence + probes: `/private/tmp/claude-501/parity/` (`seam_probe.cpp`,
 `memstat_probe.cpp`, `phase_probe.cpp`, `parbench.cpp`, `cvinfo`; per-phase logs).

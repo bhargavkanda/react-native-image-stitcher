@@ -415,17 +415,17 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // warperType != 'spherical'), keeping wide/off-axis pans safe.
     warperType: 'plane',
     blenderType: 'multiband',
-    // perf-3b — DEFAULT flipped graphcut -> voronoi (the ~1.7x lever).
-    // On-device gate (3 real corpora): voronoi is 1.6-2.3x faster than
-    // graphcut with identical framesIncluded and visually-equivalent output
-    // (diff heatmaps show only benign edge/canvas noise — no ghosting, no
-    // visible seam lines; the multiband blender smooths both seam choices).
-    // CAVEAT (field-confirm required): corpora were indoor ROOM scenes, not
-    // retail SHELF scans — voronoi's known weakness is parallax-at-seams on
-    // close repetitive products, which those corpora underexercise. Revert to
-    // 'graphcut' (kill-switch) if a shelf-scan A/B shows product-crossing seam
-    // artifacts. See docs/perf-3b §0.
-    seamFinderType: 'voronoi',
+    // perf-3b — DEFAULT stays 'graphcut'. A default flip to voronoi (~1.7x)
+    // was tried and REVERTED: an adversarial seam-quality review (fable) with
+    // a seam-isolated probe on a synthetic SHELF corpus showed voronoi's
+    // content-blind seams TEAR product labels at parallax (graphcut routes
+    // around them through inter-facing gaps) — worst exactly on repetitive
+    // facings, where a damaged label also degrades downstream OD/OCR. My
+    // earlier "equivalent" call was on indoor ROOM corpora that underexercise
+    // near-field parallax. voronoi remains available OPT-IN (it is a real
+    // ~1.7x win and genuinely better than skip), but shipping it as the
+    // default needs a real shelf-corpus A/B first. See docs/perf-3b §0.
+    seamFinderType: 'graphcut',
     // v0.15 — inscribed-rect crop is OFF by default (bbox crop keeps all
     // stitched content).  Opt in with `maxInscribedRectCrop={true}` (or toggle
     // it on in settings) for a clean-cornered rectangle — but it can shrink the
