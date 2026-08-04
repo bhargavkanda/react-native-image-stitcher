@@ -62,8 +62,11 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.stitchMode).toBe('auto'); // v0.16 — default reverted to auto (matches v0.15.2)
     expect(cfg.warperType).toBe('plane'); // v0.16 — default reverted to plane (matches v0.15.2)
     expect(cfg.blenderType).toBe('multiband');
-    expect(cfg.seamFinderType).toBe('graphcut');
+    expect(cfg.seamFinderType).toBe('voronoi'); // perf-3b — default flipped graphcut -> voronoi (~1.7x)
     expect(cfg.enableMaxInscribedRectCrop).toBe(false);
+    // perf-3b — range matcher (2/2/3 ladder) on by default; single-threaded default.
+    expect(cfg.stitchRangeMatcherWidth).toBe(3);
+    expect(cfg.stitchNumThreads).toBe(1);
 
     // FrameSelectionSettings
     expect(cfg.frameSelectionMode).toBe('flow-based');
@@ -158,6 +161,8 @@ describe('panoramaSettingsToNativeConfig', () => {
       'seamFinderType',
       'sharpnessWindow',
       'stitchMode',
+      'stitchNumThreads',
+      'stitchRangeMatcherWidth',
       'warperType',
     ]);
   });
