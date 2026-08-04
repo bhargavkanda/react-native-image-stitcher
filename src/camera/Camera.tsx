@@ -89,7 +89,7 @@ import { CaptureKeyframePill } from './CaptureKeyframePill';
 import { CaptureOrientationPill } from './CaptureOrientationPill';
 import { CaptureStitchStatsToast, useStitchStatsToast } from './CaptureStitchStatsToast';
 import { PanoramaBandOverlay } from './PanoramaBandOverlay';
-import { type PanoramaSettings } from './PanoramaSettings';
+import { type PanoramaSettings, DEFAULT_FLOW_GATE_SETTINGS } from './PanoramaSettings';
 import { panoramaSettingsToNativeConfig } from './PanoramaSettingsBridge';
 import { PanoramaSettingsModal } from './PanoramaSettingsModal';
 import {
@@ -1790,7 +1790,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // subsequent ingest sees pose=(0,0) and is rejected as a duplicate".
   // The imperative pattern (start on hold-start, stop on hold-end)
   // avoids the re-render churn entirely.
-  const fpDriver = useFrameProcessorDriver();
+  // perf-3a change 2 — pass the eval cadence so the WORKLET decimates
+  // (before packNV21), paired with the bridge forcing native cadence to 1
+  // for frameProcessor mode (see the incremental.start config below). The
+  // effective product cadence is unchanged from today's native-only throttle.
+  const fpDriver = useFrameProcessorDriver({
+    evalEveryNFrames:
+      settings.frameSelection.flow?.evalEveryNFrames ??
+      DEFAULT_FLOW_GATE_SETTINGS.evalEveryNFrames,
+  });
   // Safety: stop the driver AND clear the pan-duration auto-finalize
   // timer if the component unmounts mid-recording (item 5 exit path #4).
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2188,6 +2196,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // operator can see is what native is told it is.  The settings
       // modal's `captureSource` control has been removed for the same
       // reason — see PanoramaSettingsModal.tsx for the rationale.
+      //
+      // perf-3a change 1 (open early) — start the FP driver (non-AR) BEFORE
+      // the native start await, so its ingest gate opens and its cadence
+      // counter is anchored (via reset()) at the hold-start moment rather
+      // than one bridge round-trip later. Interval-containment guarantees
+      // pixel neutrality: the gate-open window strictly contains native's
+      // ingest-enabled window (native flips its AtomicBoolean INSIDE
+      // incremental.start), so no frame native would accept is gated;
+      // pre-enable strays are dropped by that AtomicBoolean anyway. On any
+      // start failure the catch below closes the gate. See docs/perf-3a §4.1.
+      if (isNonAR) {
+        fpDriver.start();
+      }
       await incremental.start({
         snapshotJpegQuality: 75,
         snapshotEveryNAccepts: 1,
@@ -2203,25 +2224,28 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         canvasWidth: 5000,
         canvasHeight: 5000,
         engine,
-        config: panoramaSettingsToNativeConfig({
-          ...settings,
-          captureSource: effectiveCaptureSource,
-        }),
+        // perf-3a change 2 — pass the frame-source mode so the bridge emits
+        // flowEvalEveryNFrames=1 for the frameProcessor path: the worklet now
+        // does the decimation (before the ~3-4 MB packNV21 copy) and native's
+        // cadence is 1, so the effective product cadence is unchanged. AR mode
+        // keeps native-side decimation (AR frames never pass the worklet).
+        config: panoramaSettingsToNativeConfig(
+          { ...settings, captureSource: effectiveCaptureSource },
+          { frameSourceMode: isNonAR ? 'frameProcessor' : 'arSession' },
+        ),
       });
       // F8.3 review-of-review (M3 revert): `imuGate.resetAnchor()`
       // is load-bearing for the stitchMode auto-resolver (see the
       // matching comment on the per-accept reset useEffect above).
       // Keep firing it on every capture start, not just legacy mode.
       imuGate.resetAnchor();
-      // Start the Frame Processor driver for non-AR captures.  AR
-      // mode feeds natively from ARSession so the driver stays idle.
-      // Imperative pattern (vs useEffect) because the driver's start
-      // resets pose accumulators that should only fire at the
-      // hold-start moment, not on every re-render.
-      if (isNonAR) {
-        fpDriver.start();
-      }
     } catch (err) {
+      // perf-3a change 1 — native start failed: close the ingest gate we
+      // opened before the await (below), so a failed start doesn't leave the
+      // worklet feeding a not-started engine.
+      if (isNonAR) {
+        fpDriver.stop();
+      }
       setStatusPhase('idle');
       clearPanTimer();
       onError?.(
@@ -2328,10 +2352,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       );
     }
     setStatusPhase('stitching');
-    // Stop pumping new frames before finalizing so the engine isn't
-    // racing the final cv::Stitcher pass against late-arriving
-    // keyframes.  No-op in AR mode (the driver was never started).
-    fpDriver.stop();
+    // perf-3a change 1 — `fpDriver.stop()` moved from HERE to the finally
+    // below (close-late), so the ingest gate stays open through the 50 ms
+    // yield + finalize bridge hop (the window native still ingests). The
+    // <CameraView> unmount driven by statusPhase==='stitching' (just set)
+    // stops frame delivery within a frame or two regardless, so no frames
+    // race the stitch — the engine still isn't fed late keyframes.
     // V12.14.8 restore (regressed in the SDK camera extraction): the
     // render below unmounts <CameraView>/<ARCameraView> while
     // statusPhase==='stitching'.  Yield a macrotask so React commits that
@@ -2484,6 +2510,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         }),
       });
     } finally {
+      // perf-3a change 1 (close late) — stop the FP driver (→ close the
+      // ingest gate) AFTER finalize settles, not before the 50 ms yield.
+      // The gate-open interval must strictly CONTAIN native's ingest-enabled
+      // interval (native cuts ingest synchronously at the top of finalize):
+      // closing earlier would gate the 1-3 tail frames that native still
+      // ingests during the yield + finalize bridge hop and that feed the
+      // sharpness window / trailing keyframe → keyframe loss. No stitch-phase
+      // waste: <CameraView> unmounts at statusPhase==='stitching' (set above)
+      // so no frames reach the still-open gate during the multi-second stitch.
+      fpDriver.stop();
       finalizingRef.current = false;
       setStatusPhase('idle');
       setRecordingStartedAt(null);

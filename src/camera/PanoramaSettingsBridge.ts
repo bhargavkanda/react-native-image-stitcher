@@ -69,6 +69,12 @@ export type NativeConfigDict = Record<string, boolean | number | string>;
  */
 export function panoramaSettingsToNativeConfig(
   s: PanoramaSettings,
+  // perf-3a change 2 — the frame source for THIS capture. For
+  // 'frameProcessor' the worklet does the eval decimation (before the
+  // packNV21 copy), so native's cadence is forced to 1 and the effective
+  // product cadence is unchanged. 'arSession'/undefined keep native-side
+  // decimation (AR frames never pass through the worklet).
+  opts?: { frameSourceMode?: 'frameProcessor' | 'arSession' },
 ): NativeConfigDict {
   const cfg: NativeConfigDict = {
     // ── Cross-cutting ────────────────────────────────────────────
@@ -135,7 +141,12 @@ export function panoramaSettingsToNativeConfig(
   // discussion of why this matters.
   const f = s.frameSelection.flow ?? DEFAULT_FLOW_GATE_SETTINGS;
   cfg.flowNoveltyPercentile = f.noveltyPercentile;
-  cfg.flowEvalEveryNFrames = f.evalEveryNFrames;
+  // perf-3a change 2 — frameProcessor mode: the worklet decimates (every
+  // Nth frame, before packNV21), so native runs its gate every frame it
+  // receives (cadence 1). Product = N_worklet × 1 = N, unchanged. AR mode
+  // keeps native-side decimation (AR frames bypass the worklet).
+  cfg.flowEvalEveryNFrames =
+    opts?.frameSourceMode === 'frameProcessor' ? 1 : f.evalEveryNFrames;
   cfg.flowMaxTranslationCm = f.maxTranslationCm;
   cfg.flowMaxCorners = f.maxCorners;
   cfg.flowQualityLevel = f.qualityLevel;
