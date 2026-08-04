@@ -135,8 +135,6 @@ import {
 import {
   getIncrementalNativeModule,
   incrementalStitcherIsAvailable,
-  subscribeIncrementalState,
-  type IncrementalState,
 } from '../stitching/incremental';
 import { useFrameProcessorDriver } from '../stitching/useFrameProcessorDriver';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
@@ -1464,7 +1462,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(
     null,
   );
-  const [incrementalState, setIncrementalState] = useState<IncrementalState | null>(null);
+  // perf-3a change 4: `incrementalState` useState + its subscription were
+  // removed — Camera renders from `incremental.state` (coalesced by the
+  // useIncrementalStitcher hook). See the thumbnail effect below.
   // ── Panorama GUIDANCE state (feature/pano-ux-guidance) ──────────
   // Item 1/2 — a hold that was BLOCKED on the rotate-to-landscape gate.
   // Latches when the user holds the shutter in portrait under Mode A;
@@ -1942,23 +1942,23 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Host's wins if supplied; lib's internal driver otherwise.
   const effectiveFrameProcessor = hostFrameProcessor ?? fpDriver.frameProcessor;
 
-  // ── Subscribe to engine state for live keyframe thumbs ──────────
+  // ── Accumulate keyframe thumbnails from the (coalesced) engine state ──
+  // perf-3a change 4: Camera.tsx no longer keeps its OWN
+  // `subscribeIncrementalState` + `incrementalState` useState — that was
+  // the SECOND per-event re-render of this large tree (the review's
+  // finding). It now renders from `incremental.state`, which the hook
+  // coalesces (reject/skip/overlap ticks → ≤ 1 commit/animation-frame)
+  // while flushing accepts + refine transitions immediately. Because
+  // accepts are immediate-flush, each accepted keyframe yields a distinct
+  // committed state carrying its `batchKeyframeThumbnailPath`; accumulate
+  // off that (same de-dupe + `file://` normalisation as before, so the
+  // Android <Image> band overlay renders).
   useEffect(() => {
-    const sub = subscribeIncrementalState((state) => {
-      setIncrementalState(state);
-      if (state?.batchKeyframeThumbnailPath) {
-        setBatchKeyframeThumbnails((prev) => {
-          // De-dupe — same path may emit on subsequent ticks.
-          // Normalise to `file://...` so Android <Image> in the band
-          // overlay can actually render the thumbnail.
-          const path = toFileUri(state.batchKeyframeThumbnailPath!);
-          if (prev.includes(path)) return prev;
-          return [...prev, path];
-        });
-      }
-    });
-    return () => { sub?.remove?.(); };
-  }, []);
+    const p = incremental.state?.batchKeyframeThumbnailPath;
+    if (!p) return;
+    const path = toFileUri(p);
+    setBatchKeyframeThumbnails((prev) => (prev.includes(path) ? prev : [...prev, path]));
+  }, [incremental.state?.batchKeyframeThumbnailPath]);
   // 2026-05-23 (race fix) — Previously this useEffect cleared
   // `batchKeyframeThumbnails` + `incrementalState` when statusPhase
   // transitioned to 'recording'.  But handleHoldStart is async
@@ -1994,7 +1994,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // translation magnitude is preserved across non-IMU accepts.
   const lastAcceptedCountRef = useRef(0);
   useEffect(() => {
-    const accepted = incrementalState?.acceptedCount ?? 0;
+    const accepted = incremental.state?.acceptedCount ?? 0;
     if (accepted > lastAcceptedCountRef.current) {
       lastAcceptedCountRef.current = accepted;
       // F8.3 review-of-review (M3 revert): an earlier draft gated
@@ -2015,7 +2015,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // New capture (state cleared) — reset our edge-detect ref.
       lastAcceptedCountRef.current = 0;
     }
-  }, [incrementalState?.acceptedCount, isNonAR, imuGate]);
+  }, [incremental.state?.acceptedCount, isNonAR, imuGate]);
 
   // ── Shutter handlers ────────────────────────────────────────────
 
@@ -2139,17 +2139,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // `setRecordingStartedAt`.
   const startCapture = useCallback(async () => {
     try {
-      // 2026-05-23 (race fix) — synchronously clear thumbnails +
-      // engine state at the top of startCapture, BEFORE awaiting
-      // incremental.start().  In the previous effect-based design
-      // the GL thread could ingest an AR frame during the await
-      // window and add to thumbnails BEFORE React's
-      // statusPhase-effect ran and wiped them.  See the removed
-      // useEffect a few hundred lines above for the full log trace.
-      // Synchronous reset here means any racing frame ingest sees
-      // an empty array and accumulates from there.
+      // 2026-05-23 (race fix) — synchronously clear thumbnails at the top
+      // of startCapture, BEFORE awaiting incremental.start().  In the
+      // previous effect-based design the GL thread could ingest an AR
+      // frame during the await window and add to thumbnails BEFORE React's
+      // statusPhase-effect ran and wiped them.  Synchronous reset here
+      // means any racing frame ingest sees an empty array and accumulates
+      // from there.  (perf-3a change 4: the engine-state clear that used
+      // to sit here is now done inside the hook's start() — resetCoalescer
+      // + setState(null) BEFORE its await — so an accept during the
+      // start-await window survives instead of being wiped.)
       setBatchKeyframeThumbnails([]);
-      setIncrementalState(null);
       // Item 4 — fresh capture: clear the latched too-fast flag.
       fastPanRef.current = false;
       setStatusPhase('recording');
@@ -2586,7 +2586,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // re-entrancy latch makes this idempotent vs. a manual release in the
   // same tick.  This is the PRIMARY auto-stop (the time cap is opt-in).
   const keyframeMaxCount = settings.frameSelection.maxKeyframes;
-  const acceptedKeyframeCount = incrementalState?.acceptedCount ?? 0;
+  const acceptedKeyframeCount = incremental.state?.acceptedCount ?? 0;
   // Item 4 — speed cue routed into the REC banner/border colour (green→red).
   // Gated on panGuidance so opting out keeps the banner calm/green.
   const recordingTooFast =
@@ -2888,12 +2888,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             topInset={insets.top}
           />
           <CaptureKeyframePill
-            state={incrementalState}
+            state={incremental.state}
             topInset={insets.top}
           />
           <CaptureMemoryPill topInset={insets.top} />
           <CaptureDebugOverlay
-            incrementalState={incrementalState}
+            incrementalState={incremental.state}
             imuTranslationMetres={
               isNonAR ? imuGate.getTranslationMetres() : null
             }
@@ -2968,7 +2968,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             column.  Otherwise it's a horizontal strip. */}
         {statusPhase === 'recording' && (
           <PanoramaBandOverlay
-            state={incrementalState}
+            state={incremental.state}
             frameUris={batchKeyframeThumbnails}
             captureOrientation={deviceOrientation}
             vertical={isSideEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}
