@@ -166,7 +166,7 @@ export interface UseStitcherWorkletOptions {
   /**
    * Evaluate the plugin every Nth producer-thread frame.  Default 1
    * (every frame).  Clamped to [1, 10] to match native's cadence clamp
-   * (`IncrementalStitcher.kt:531-533`) so an out-of-range host setting
+   * (IncrementalStitcher.kt `evalCadence.coerceIn(1, 10)`) so an out-of-range host setting
    * keeps its effective cadence once the throttle runs JS-side.
    */
   evalEveryNFrames?: number;
@@ -224,6 +224,14 @@ export interface StitcherWorkletHandle {
   setActive: (active: boolean) => void;
 
   /**
+   * perf-3a change 2 — zero ONLY the decimation frame counter (not pose),
+   * re-anchoring the every-Nth grid. Managed drivers call this right after
+   * the native `start()` await so the grid anchors at native-ingest-enable
+   * (frame-identical decimation) despite the gate opening before the await.
+   */
+  resetCadence: () => void;
+
+  /**
    * `true` once the JSI Frame Processor plugin
    * (`cv_flow_gate_process_frame`) has resolved.  Before this flips
    * `true`, `call(frame)` is a no-op (the plugin reference is
@@ -247,7 +255,7 @@ export function useStitcherWorklet(
     initialIngestActive = true,
   } = options;
 
-  // Clamp cadence to [1, 10], matching native (IncrementalStitcher.kt:531-533).
+  // Clamp cadence to [1, 10], matching native (IncrementalStitcher.kt `evalCadence.coerceIn(1, 10)`).
   const clampEval = (n: number): number => Math.min(10, Math.max(1, Math.floor(n)));
 
   // ── Plugin acquisition ──────────────────────────────────────────
@@ -362,6 +370,17 @@ export function useStitcherWorklet(
     sharedIngestActive.value = active;
   }, [sharedIngestActive]);
 
+  // perf-3a change 2 (review fix) — zero ONLY the decimation frame counter,
+  // re-anchoring the {0, N, 2N, …} grid without touching pose. The managed
+  // driver opens the gate BEFORE the native-start await (so no keyframe is
+  // lost while native enables), but that lets frames delivered during the
+  // await advance the counter; calling this right AFTER the await re-anchors
+  // the grid at native-ingest-enable, matching native's old post-enable
+  // anchor → frame-identical decimation (not just a bounded phase offset).
+  const resetCadence = useCallback(() => {
+    sharedFrameCounter.value = 0;
+  }, [sharedFrameCounter]);
+
   // ── Worklet body ────────────────────────────────────────────────
   //
   // Returned as `handle.call`.  Re-created when `plugin` changes
@@ -412,7 +431,7 @@ export function useStitcherWorklet(
     if (!sharedIngestActive.value) return;
 
     // Throttle (0-based: frame 0 always evaluates for any N; matches
-    // native's (counter-1)%N semantics, IncrementalStitcher.kt:284-291).
+    // native's (consumeFrameCounter - 1) % evalCadence gate).
     const c = sharedFrameCounter.value;
     sharedFrameCounter.value = c + 1;
     const N = sharedEvalEveryN.value;
@@ -464,5 +483,5 @@ export function useStitcherWorklet(
     sharedFyNumerator,
   ]);
 
-  return { call, reset, setActive, isReady: plugin != null };
+  return { call, reset, setActive, resetCadence, isReady: plugin != null };
 }

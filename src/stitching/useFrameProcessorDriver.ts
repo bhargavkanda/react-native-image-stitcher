@@ -108,6 +108,14 @@ export interface FrameProcessorDriverHandle {
   /** Reset pose + mark the driver as stopped.  Idempotent. */
   stop: () => void;
   /**
+   * perf-3a change 2 — re-anchor the decimation grid (zero the frame
+   * counter only, not pose). Call right AFTER the native `start()` await
+   * resolves so the every-Nth grid anchors at native-ingest-enable, keeping
+   * frame-identical decimation even though `start()` opened the gate before
+   * the await. No-op in AR mode (the driver is never started).
+   */
+  resetCadence: () => void;
+  /**
    * Pass this to `<Camera frameProcessor={...} />`.  `null` until
    * the JSI plugin is loaded (typically resolves within ~1 frame of
    * mount); the consumer should fall back to undefined / a no-op
@@ -152,6 +160,12 @@ export function useFrameProcessorDriver(
     isRunningRef.current = false;
   }, [stitcher]);
 
+  // perf-3a change 2 — re-anchor the decimation grid at native-ingest-enable
+  // (called by the host right after the native start() await). See the handle.
+  const resetCadence = useCallback(() => {
+    stitcher.resetCadence();
+  }, [stitcher]);
+
   // ── Worklet binding ─────────────────────────────────────────────
   //
   // `stitcher.call` is itself a worklet (see `useStitcherWorklet`),
@@ -171,7 +185,8 @@ export function useFrameProcessorDriver(
   return useMemo<FrameProcessorDriverHandle>(() => ({
     start,
     stop,
+    resetCadence,
     frameProcessor: stitcher.isReady ? frameProcessor : null,
     get isRunning() { return isRunningRef.current; },
-  }), [start, stop, frameProcessor, stitcher.isReady]);
+  }), [start, stop, resetCadence, frameProcessor, stitcher.isReady]);
 }

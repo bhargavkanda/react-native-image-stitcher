@@ -1508,9 +1508,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // on every successful finalize when settings.debug is on (gated
   // a few hundred lines below in handleHoldEnd's onCapture branch).
   const stitchToast = useStitchStatsToast();
-  const [batchKeyframeThumbnails, setBatchKeyframeThumbnails] = useState<
-    string[]
-  >([]);
+  // perf-3a change 4 — keyframe thumbnails are owned by the hook now
+  // (incremental.keyframeThumbnails); see keyframeThumbnailUris below.
   const [cameraTransitioning, setCameraTransitioning] = useState(false);
 
   // ARKit / ARCore device-support probe.  `isAvailable` is `false`
@@ -1950,23 +1949,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Host's wins if supplied; lib's internal driver otherwise.
   const effectiveFrameProcessor = hostFrameProcessor ?? fpDriver.frameProcessor;
 
-  // ── Accumulate keyframe thumbnails from the (coalesced) engine state ──
+  // ── Keyframe thumbnails ──────────────────────────────────────────────
   // perf-3a change 4: Camera.tsx no longer keeps its OWN
-  // `subscribeIncrementalState` + `incrementalState` useState — that was
-  // the SECOND per-event re-render of this large tree (the review's
-  // finding). It now renders from `incremental.state`, which the hook
-  // coalesces (reject/skip/overlap ticks → ≤ 1 commit/animation-frame)
-  // while flushing accepts + refine transitions immediately. Because
-  // accepts are immediate-flush, each accepted keyframe yields a distinct
-  // committed state carrying its `batchKeyframeThumbnailPath`; accumulate
-  // off that (same de-dupe + `file://` normalisation as before, so the
-  // Android <Image> band overlay renders).
-  useEffect(() => {
-    const p = incremental.state?.batchKeyframeThumbnailPath;
-    if (!p) return;
-    const path = toFileUri(p);
-    setBatchKeyframeThumbnails((prev) => (prev.includes(path) ? prev : [...prev, path]));
-  }, [incremental.state?.batchKeyframeThumbnailPath]);
+  // `subscribeIncrementalState` + `incrementalState` useState (the SECOND
+  // per-event re-render of this large tree). It renders from the hook's
+  // coalesced `incremental.state`, and the keyframe thumbnails are now
+  // OWNED BY THE HOOK too (`incremental.keyframeThumbnails`) — accumulated
+  // per RAW accept event with a functional updater so two accepts in one
+  // React batch both survive (the earlier draft accumulated off the
+  // coalesced state and dropped one — 3a review finding). Normalise to
+  // `file://` here for the Android <Image> band overlay.
+  const keyframeThumbnailUris = useMemo(
+    () => incremental.keyframeThumbnails.map(toFileUri),
+    [incremental.keyframeThumbnails],
+  );
   // 2026-05-23 (race fix) — Previously this useEffect cleared
   // `batchKeyframeThumbnails` + `incrementalState` when statusPhase
   // transitioned to 'recording'.  But handleHoldStart is async
@@ -2147,17 +2143,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // `setRecordingStartedAt`.
   const startCapture = useCallback(async () => {
     try {
-      // 2026-05-23 (race fix) — synchronously clear thumbnails at the top
-      // of startCapture, BEFORE awaiting incremental.start().  In the
-      // previous effect-based design the GL thread could ingest an AR
-      // frame during the await window and add to thumbnails BEFORE React's
-      // statusPhase-effect ran and wiped them.  Synchronous reset here
-      // means any racing frame ingest sees an empty array and accumulates
-      // from there.  (perf-3a change 4: the engine-state clear that used
-      // to sit here is now done inside the hook's start() — resetCoalescer
-      // + setState(null) BEFORE its await — so an accept during the
-      // start-await window survives instead of being wiped.)
-      setBatchKeyframeThumbnails([]);
+      // perf-3a change 4 — thumbnails + engine state are cleared inside the
+      // hook's start() (resetCoalescer + setState(null)) BEFORE its native
+      // start await, preserving the 2026-05-23 race fix: a frame the GL/FP
+      // thread ingests during the await window accumulates from the just-
+      // cleared array (functional updater) instead of being wiped by a
+      // post-await reset. So no synchronous clear is needed here.
       // Item 4 — fresh capture: clear the latched too-fast flag.
       fastPanRef.current = false;
       setStatusPhase('recording');
@@ -2239,6 +2230,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // matching comment on the per-accept reset useEffect above).
       // Keep firing it on every capture start, not just legacy mode.
       imuGate.resetAnchor();
+      // perf-3a change 2 (review fix) — re-anchor the worklet decimation
+      // grid NOW that native has enabled ingestion. The gate was opened
+      // before this await (open-early, so no keyframe is lost), which let
+      // await-window frames advance the counter; re-zeroing it here anchors
+      // the {0,N,2N,…} grid at native-ingest-enable, matching native's old
+      // post-enable anchor → frame-identical decimation (not a phase offset).
+      if (isNonAR) {
+        fpDriver.resetCadence();
+      }
     } catch (err) {
       // perf-3a change 1 — native start failed: close the ingest gate we
       // opened before the await (below), so a failed start doesn't leave the
@@ -3005,7 +3005,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         {statusPhase === 'recording' && (
           <PanoramaBandOverlay
             state={incremental.state}
-            frameUris={batchKeyframeThumbnails}
+            frameUris={keyframeThumbnailUris}
             captureOrientation={deviceOrientation}
             vertical={isSideEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}
           />

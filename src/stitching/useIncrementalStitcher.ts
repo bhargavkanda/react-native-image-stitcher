@@ -46,6 +46,16 @@ export interface UseIncrementalStitcherReturn {
   /** Latest state pushed by the native engine, or null pre-start. */
   state: IncrementalState | null;
   /**
+   * perf-3a change 4 (review fix) — accumulated keyframe thumbnail paths
+   * (raw native paths, capture-ordered, de-duped) for the live strip.
+   * Accumulated per RAW accept event inside the subscription (via a
+   * functional setState updater), NOT off the coalesced `state`, so two
+   * accepts landing in one React batch both survive — the collapsed-render
+   * effect the earlier draft used dropped one. Cleared on start/finalize/
+   * cancel. Consumers normalise to `file://` at render time.
+   */
+  keyframeThumbnails: string[];
+  /**
    * Convenience: which UX hint to show, derived from the latest
    * state.outcome.  null when nothing should be shown (silent
    * accepts, skips inside the overlap window).
@@ -179,6 +189,11 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
   const isAvailable = incrementalStitcherIsAvailable();
   const [isRunning, setIsRunning] = useState(false);
   const [state, setState] = useState<IncrementalState | null>(null);
+  // perf-3a change 4 (review fix) — keyframe thumbnails accumulated per RAW
+  // accept event (see the return-type doc). Owned here (not by the consumer)
+  // so a functional updater captures every accept regardless of React
+  // auto-batching of the coalesced `state`.
+  const [keyframeThumbnails, setKeyframeThumbnails] = useState<string[]>([]);
 
   // Keep the latest hint/confidence sticky for a few frames after a
   // skip — otherwise the UI flickers since SkippedTooClose returns
@@ -226,6 +241,7 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
     committedRef.current = null;
     prevAcceptedRef.current = 0;
     prevRefineStageRef.current = undefined;
+    setKeyframeThumbnails([]);
   }, [cancelPending]);
 
   useEffect(() => {
@@ -241,6 +257,14 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
         nextState.outcome === IncrementalOutcome.AcceptedMedium
       ) {
         lastHintRef.current = null;
+      }
+
+      // Accumulate keyframe thumbnails per RAW event (before any coalescing):
+      // a functional updater is applied in sequence by React, so two accepts
+      // in one batch both append (the collapsed-state effect dropped one).
+      const thumb = nextState.batchKeyframeThumbnailPath;
+      if (thumb) {
+        setKeyframeThumbnails((prev) => (prev.includes(thumb) ? prev : [...prev, thumb]));
       }
 
       // Classify immediate-flush (accept / refine transition) vs coalesced.
@@ -379,6 +403,7 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
     isAvailable,
     isRunning,
     state,
+    keyframeThumbnails,
     hint: lastHintRef.current,
     confidenceLevel,
     start,
