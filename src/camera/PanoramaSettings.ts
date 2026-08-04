@@ -415,7 +415,17 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // warperType != 'spherical'), keeping wide/off-axis pans safe.
     warperType: 'plane',
     blenderType: 'multiband',
-    seamFinderType: 'graphcut',
+    // perf-3b — DEFAULT flipped graphcut -> voronoi (the ~1.7x lever).
+    // On-device gate (3 real corpora): voronoi is 1.6-2.3x faster than
+    // graphcut with identical framesIncluded and visually-equivalent output
+    // (diff heatmaps show only benign edge/canvas noise — no ghosting, no
+    // visible seam lines; the multiband blender smooths both seam choices).
+    // CAVEAT (field-confirm required): corpora were indoor ROOM scenes, not
+    // retail SHELF scans — voronoi's known weakness is parallax-at-seams on
+    // close repetitive products, which those corpora underexercise. Revert to
+    // 'graphcut' (kill-switch) if a shelf-scan A/B shows product-crossing seam
+    // artifacts. See docs/perf-3b §0.
+    seamFinderType: 'voronoi',
     // v0.15 — inscribed-rect crop is OFF by default (bbox crop keeps all
     // stitched content).  Opt in with `maxInscribedRectCrop={true}` (or toggle
     // it on in settings) for a clean-cornered rectangle — but it can shrink the
