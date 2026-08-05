@@ -253,7 +253,7 @@ export function PanoramaSettingsModal({
                 onChange={(v) => updateFrameSelection({
                   maxKeyframes: parseInt(v, 10),
                 })}
-                caption="Hard cap on accepted keyframes; native clamps to [3, 10].  8 (default) is the sweet spot for cv::detail BA convergence while giving the 15%-overlap + 1 s time gate room to land frames."
+                caption="Hard cap on accepted keyframes; native clamps to [3, 10].  6 (default).  Raising it (8–10) gives denser overlap per pair — fewer attempt-1 registration failures on wide pans — while the range matcher bounds the extra match cost (O(N·width))."
               />
               <SectionHeader title="Overlap threshold (new content per keyframe)" />
               <SegmentedControl
@@ -262,20 +262,22 @@ export function PanoramaSettingsModal({
                 onChange={(v) => updateFrameSelection({
                   overlapThreshold: parseInt(v, 10) / 100,
                 })}
-                caption="Required NEW-content fraction (lower = denser keyframes, more overlap).  15% (default): ~7–9 keyframes for a 90° pan.  10% is the native clamp floor."
+                caption="Required NEW-content fraction (lower = denser keyframes, more overlap).  20% (default).  Lower it (10–15%) for more overlap per pair on hard scenes.  10% is the native clamp floor."
               />
               <SectionHeader title="Keyframe interval (time-budget force-accept)" />
               <SegmentedControl
-                options={['off', '1s', '2s', '3s', '5s']}
+                options={['off', '1s', '1.5s', '2s', '3s', '5s']}
                 value={
                   settings.frameSelection.maxKeyframeIntervalMs === 0
                     ? 'off'
                     : `${settings.frameSelection.maxKeyframeIntervalMs / 1000}s`
                 }
                 onChange={(v) => updateFrameSelection({
-                  maxKeyframeIntervalMs: v === 'off' ? 0 : parseInt(v, 10) * 1000,
+                  // parseFloat so the 1.5s option round-trips (parseInt would
+                  // truncate it to 1s); Math.round guards float noise.
+                  maxKeyframeIntervalMs: v === 'off' ? 0 : Math.round(parseFloat(v) * 1000),
                 })}
-                caption="Force-accept a keyframe at least this often even if novelty is low, so slow / static pans don't leave gaps.  Counts toward the keyframe cap.  off = disabled.  1s (default).  Applies to AR + non-AR."
+                caption="Force-accept a keyframe at least this often even if novelty is low, so slow / static pans don't leave gaps.  Counts toward the keyframe cap.  off = disabled.  1.5s (default).  On FAST pans a long interval can force a low-overlap pair → attempt-1 failure; shorten it (or rely on the novelty gate) then.  Applies to AR + non-AR."
               />
 
               {showFlowTunables && (
