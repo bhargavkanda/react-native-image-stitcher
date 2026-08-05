@@ -252,6 +252,12 @@ class IncrementalStitcher(
     private var adaptiveStitchMode: String = "off"
     private var adaptiveMinOutputMP: Double = 0.6
     private var adaptiveSlowStitchMsPerFrame: Double = 1000.0
+    /// RCA — when true, a successful finalize drops a self-describing
+    /// `pack.json` next to the (already-persisted) keyframes so a field
+    /// capture can be pulled and replayed offline (keyframe images + config +
+    /// timings + result). Off by default; a pure diagnostic, never alters the
+    /// stitch. See docs + the offline compare tool.
+    private var debugPackEnabled: Boolean = false
     /// Shared-C++ window DECISION machine (cpp/sharpness_window.*,
     /// via the SharpnessWindow JNI facade).  Owns open/closed state,
     /// remaining candidate slots, the streaming-max best score and the
@@ -612,6 +618,10 @@ class IncrementalStitcher(
                 ?.getDoubleOrDefault("adaptiveSlowStitchMsPerFrame", 1000.0) ?: 1000.0)
                 .coerceAtLeast(1.0)
 
+            // RCA — debug pack: write pack.json next to the keyframes on finalize.
+            debugPackEnabled = configOverrides
+                ?.getBooleanOrDefault("debugPack", false) ?: false
+
             // v0.21 — pick-sharpest-in-window anti-blur selection.
             // 1 = off (immediate commit, pre-v0.21 behaviour).
             // Default 4 when the key is absent — a deliberate
@@ -843,6 +853,11 @@ class IncrementalStitcher(
         val wasBatchKeyframe = batchKeyframeMode
         val keyframePathsSnapshot = batchKeyframePaths.toList()
         val captureOrientationSnapshot = batchCaptureOrientation
+        // Snapshot the session dir on the bridge thread BEFORE the async stitch:
+        // if a second capture starts before this finalize resolves it reassigns
+        // the captureSessionDir FIELD, and the debug-pack write (async, minutes
+        // later) would otherwise land in the wrong capture's dir.
+        val captureSessionDirSnapshot = captureSessionDir
         // batchWarperType (settings) is superseded by the high-level warper tree
         // (pickHighLevelWarper) below — kept as a field for back-compat, unused here.
         val blenderTypeSnapshot = batchBlenderType
@@ -1163,6 +1178,71 @@ class IncrementalStitcher(
                     // pill shows the same detail, not just mode/score/frames.
                     val dbg = stitcher.lastDebugSummary
                     if (dbg.isNotEmpty()) map.putString("debugSummary", dbg)
+
+                    // RCA — debug pack. When enabled, drop a self-describing
+                    // pack.json next to the (persisted) keyframes so this exact
+                    // capture can be pulled and replayed OFFLINE: keyframe images
+                    // + the recipe + the result + the timing decomposition
+                    // (stitchWallMs is the RN-version-INVARIANT native cost;
+                    // queueDelayMs is bridge/JS). This is what turns a field
+                    // "it's slow" into a decomposable measurement. Never fails
+                    // the finalize — a pack-write error is logged and swallowed.
+                    if (debugPackEnabled) {
+                        captureSessionDirSnapshot?.let { dir ->
+                            try {
+                                val pack = org.json.JSONObject().apply {
+                                    put("schema", "rlis-debug-pack/v1")
+                                    put("timestampMs", System.currentTimeMillis())
+                                    put("device", org.json.JSONObject().apply {
+                                        put("model", android.os.Build.MODEL)
+                                        put("manufacturer", android.os.Build.MANUFACTURER)
+                                        put("abi", android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "")
+                                        put("cores", Runtime.getRuntime().availableProcessors())
+                                        put("sdkInt", android.os.Build.VERSION.SDK_INT)
+                                    })
+                                    put("capture", org.json.JSONObject().apply {
+                                        put("keyframeCount", keyframePathsSnapshot.size)
+                                        put("keyframeFiles", org.json.JSONArray(
+                                            keyframePathsSnapshot.map { java.io.File(it).name }))
+                                        put("firstKeyframeLongEdge",
+                                            firstKeyframeLongEdge(keyframePathsSnapshot))
+                                        put("captureOrientation", captureOrientationSnapshot)
+                                    })
+                                    put("config", org.json.JSONObject().apply {
+                                        put("adaptiveStitchMode", adaptiveStitchMode)
+                                        put("adaptiveMinOutputMP", adaptiveMinOutputMP)
+                                        put("compositingResolMP", adaptiveComposeMP)
+                                        put("stitchModeResolved", stitchModeResolved)
+                                        put("warper", highLevelWarper)
+                                        put("blender", blenderTypeSnapshot)
+                                        put("seamFinder", seamFinderTypeSnapshot)
+                                        put("rangeMatcherWidth", stitchRangeMatcherWidth)
+                                        put("numThreads", stitchNumThreads)
+                                        put("inscribedRectCrop", useInscribedRectCropSnapshot)
+                                    })
+                                    put("result", org.json.JSONObject().apply {
+                                        put("width", dims[0])
+                                        put("height", dims[1])
+                                        put("framesRequested", framesRequested)
+                                        put("framesIncluded", framesIncluded)
+                                        put("framesDropped", framesRequested - framesIncluded)
+                                        put("finalConfidenceThresh", finalConfidenceThresh)
+                                    })
+                                    put("timings", org.json.JSONObject().apply {
+                                        put("stitchWallMs", stitchWallMs)
+                                        put("queueDelayMs", queueDelayMs)
+                                    })
+                                    put("debugSummary", dbg)
+                                }
+                                java.io.File(dir, "pack.json").writeText(pack.toString(2))
+                            } catch (t: Throwable) {
+                                android.util.Log.w(
+                                    "IncrementalStitcher",
+                                    "debug pack write failed: ${t.message}",
+                                )
+                            }
+                        }
+                    }
                 } else {
                     // The live engines (hybrid + firstwins/slit) and their
                     // auto-refine hook were archived in the 2026-06 batch-

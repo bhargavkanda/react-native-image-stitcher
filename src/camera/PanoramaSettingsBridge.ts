@@ -103,6 +103,8 @@ export function panoramaSettingsToNativeConfig(
     adaptiveStitchMode: s.stitcher.adaptiveStitchMode ?? 'off',
     adaptiveMinOutputMP: s.stitcher.adaptiveMinOutputMP ?? 0.6,
     adaptiveSlowStitchMsPerFrame: s.stitcher.adaptiveSlowStitchMsPerFrame ?? 1000,
+    // RCA diagnostic — write pack.json next to the keyframes on finalize.
+    debugPack: s.stitcher.debugPack ?? false,
 
     // ── FrameSelectionSettings → KeyframeGate knobs ──────────────
     frameSelectionMode: s.frameSelection.mode,

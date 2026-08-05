@@ -397,6 +397,15 @@ export function PanoramaSettingsModal({
                 })}
                 caption="Shrinks the final panorama to the floor MP (faster stitch, lower-res output) — FIELD-TEST whether it hurts OD/OCR.  off (default): full 1.0 MP always.  always: DETERMINISTIC — cut every capture to the floor (the clean A/B treatment; off vs always is a controlled comparison).  measured: self-tuning — cut only on devices measured slow, and un-cut when they recover (the mode you'd ship after the A/B)."
               />
+              <SectionHeader title="Debug pack" />
+              <SegmentedControl
+                options={['off', 'on']}
+                value={settings.stitcher.debugPack ? 'on' : 'off'}
+                onChange={(v) => updateStitcher({
+                  debugPack: v === 'on',
+                })}
+                caption="on: after each capture, write pack.json (device + recipe + result + timings incl. the native stitchWallMs) next to the persisted keyframes in the app cache dir, so a field capture can be PULLED and replayed offline for root-cause analysis instead of eyeballed.  off (default): no write."
+              />
             </Accordion>
 
             {/* ──────────────────────────────────────────────

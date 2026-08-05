@@ -71,6 +71,8 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.adaptiveStitchMode).toBe('off');
     expect(cfg.adaptiveMinOutputMP).toBe(0.6);
     expect(cfg.adaptiveSlowStitchMsPerFrame).toBe(1000);
+    // RCA — debug pack OFF by default.
+    expect(cfg.debugPack).toBe(false);
 
     // FrameSelectionSettings
     expect(cfg.frameSelectionMode).toBe('flow-based');
@@ -154,6 +156,7 @@ describe('panoramaSettingsToNativeConfig', () => {
       'adaptiveStitchMode',
       'blenderType',
       'captureSource',
+      'debugPack',
       'enableMaxInscribedRectCrop',
       'flowEvalEveryNFrames',
       'flowMaxCorners',

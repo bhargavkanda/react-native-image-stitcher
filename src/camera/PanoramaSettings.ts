@@ -244,6 +244,17 @@ export interface BatchStitcherSettings {
    * `adaptiveStitchMode` is `'measured'` (`'always'` ignores it).
    */
   adaptiveSlowStitchMsPerFrame?: number;
+  /**
+   * RCA / diagnostics — when `true` (Android), a successful finalize writes a
+   * self-describing `pack.json` next to the (already-persisted) keyframe JPEGs
+   * in the capture session dir under `cacheDir`. The pack records the device,
+   * the full stitch recipe, the result dims/frame counts, and the timing
+   * decomposition (`stitchWallMs` = RN-version-invariant native cost;
+   * `queueDelayMs` = bridge/JS) — so a field capture can be pulled and replayed
+   * OFFLINE instead of eyeballed. `false`/undefined (default) = OFF, no write.
+   * Pure diagnostic; never alters the stitch. See the offline compare tool.
+   */
+  debugPack?: boolean;
 }
 
 
@@ -497,6 +508,7 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     adaptiveStitchMode: 'off',
     adaptiveMinOutputMP: 0.6,
     adaptiveSlowStitchMsPerFrame: 1000,
+    debugPack: false,
   },
   frameSelection: {
     mode: 'flow-based',
