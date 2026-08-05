@@ -99,16 +99,22 @@ to confirm.
 
 ## 6. Optimization levers (ranked by measured impact)
 
-1. **Cap the ladder's registration resolution (biggest win, recommended).** The
-   1.3 MP attempt-3 rung is pathological — measured 20–25× slower *and it dropped
-   frames*, so it is not even buying quality. Cap attempt 3 at ~1.0–1.2 MP (or
-   drop the rung). This alone can turn a 29 s escalated stitch back into a few
-   seconds. **Needs a code change to `cpp/stitcher.cpp:979` + validation that no
-   legitimately-hard scene regresses** (why the recommendation is to measure,
-   not blind-cap).
-2. **Reduce attempt-1 failures** so captures never reach the ladder: better
-   keyframe overlap (the deferred perf-5 capture-pause-on-reversal), the range
-   matcher (shipped, width 3) bridging weak links.
+1. **Cap the ladder's registration resolution — DONE (biggest win).** The 1.3 MP
+   attempt-3 rung is pathological — measured 20–25× slower *and it dropped
+   frames*, so it wasn't buying quality. **Shipped:** `cpp/stitcher.cpp` now caps
+   the ladder's registration escalation at `kLadderRegResolCeilingMP = 1.0` (a
+   `std::min` clamp on both the forward attempt and the best-attempt recovery
+   re-estimate), so attempt 3 keeps its *real* rescue levers (lower confidence
+   threshold 0.3 + wider range matcher) but runs registration at the proven-safe
+   1.0 MP. An **explicit** caller `registrationResolMP > 1.0` still wins (the
+   caller owns that trade-off). Validated on-device: attempt-1 scenes byte-
+   identical (5/5), attempt-3 registration `1.30 → 1.00` in the ladder log; a
+   capture that reaches attempt 3 now pays ~2 s registration instead of 48–60 s.
+   (Ceiling is 1.0 not 1.2 because the knee "shifts with scene texture" and is
+   razor-sharp — 1.0 = attempt-2's proven value, with margin.) The end-to-end
+   field improvement lands once the A34 pack confirms `finalConfidenceThresh=0.3`.
+2. **Reduce attempt-1 failures** so captures never reach the ladder at all — see
+   §6a; this is the *upstream* fix.
 3. **Seam finder → voronoi** (~40 %) — the `seamFinder` A/B knob (watch shelf
    label tearing at parallax).
 4. **Compose cut** — `adaptiveStitchMode = always/measured` (~10–15 %); quantify
@@ -118,8 +124,53 @@ to confirm.
 6. **Spread canonical settings** so the fleet doesn't get `numThreads=0` /
    `rangeMatcherWidth=0` (H5).
 
-These stack multiplicatively. **The single highest-leverage action is #1** —
-gated on confirming `finalConfidenceThresh = 0.3` in the A34 pack.
+These stack multiplicatively. **#1 is shipped**; #2 (below) is the upstream fix.
+
+## 6a. Reducing attempt-1 failures (the upstream lever)
+
+Attempt 1 fails when **consecutive keyframes don't match** at
+`panoConfidenceThresh = 1.0` — i.e. adjacent frames share too little
+well-featured overlap. On the A34 that's more likely than on a clean reference
+(noisier camera, faster pan, rolling shutter, low-texture shelf gaps). What
+governs consecutive overlap, and the levers:
+
+- **Overlap between consecutive keyframes.** Two gates decide when a frame
+  becomes a keyframe:
+  - **Novelty / overlap gate** — `frameSelection.overlapThreshold` (default
+    **0.20**: accept once ~20 % novel ⇒ ~80 % overlap). Lowering it (e.g. 0.15)
+    accepts keyframes *closer together* ⇒ more overlap ⇒ better matching. But
+    with `maxKeyframes` fixed at **6**, denser frames cover a *narrower* pan, so
+    for a wide shelf the trade is coverage.
+  - Better lever for wide pans: **raise `maxKeyframes`** (6 → 8–10). More frames
+    across the same pan ⇒ more overlap per pair ⇒ fewer attempt-1 failures. The
+    range matcher (shipped, width 3) keeps the extra matching cost at O(N·3), not
+    O(N²), and with the ladder cap the downside of more frames is bounded.
+- **Motion blur** — already mitigated: the sharpness window
+  (`frameSelection.sharpnessWindow`, default 4) picks the sharpest frame in a
+  window, so keyframes aren't blurry ⇒ more/stronger features.
+- **Reversals** — a backward pan drops a keyframe that doesn't match the forward
+  chain. The deferred **perf-5 capture-pause-on-reversal** (red border + "paused"
+  until the operator resumes past the frontier) prevents chain-breaking frames.
+
+### The time-based keyframe gate (your question)
+
+Yes — there is a **time-budget force-accept**: `maxKeyframeIntervalMs`. It accepts
+a keyframe once this much wall-clock has elapsed since the last accept **even if
+the novelty gate hasn't tripped**, so a slow/static/hesitant pan doesn't leave a
+big gap.
+
+- **Interval:** native default is `0.0` (disabled), but the **JS/fleet default is
+  `1500` ms (1.5 s)** — sent over the wire, and the example app sets
+  `defaultMaxKeyframeIntervalMs={1500}`.
+- **Configurable:** yes — `frameSelection.maxKeyframeIntervalMs` per capture, the
+  settings modal ("Keyframe interval"), and it counts toward the `maxKeyframes=6`
+  cap (`keyframe_gate.cpp:292`, `PanoramaSettings.ts` frameSelection).
+- **Interaction with attempt-1 failures:** it cuts both ways. On a *slow* pan it
+  helps (fills gaps). On a *fast* pan a 1.5 s force-accept can fire *after* the
+  operator has already swept far, producing a low-overlap pair → an attempt-1
+  failure. If the A34 captures are fast pans, a *shorter* interval (or leaning on
+  the novelty gate) gives tighter, better-overlapping keyframes. The debug pack's
+  `keyframeCount` + the per-pair overlap tell you which regime you're in.
 
 ## 7. Instruments (this RCA's tooling)
 

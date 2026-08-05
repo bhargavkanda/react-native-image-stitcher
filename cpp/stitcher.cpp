@@ -972,11 +972,21 @@ static StitchResult stitchFramePathsImpl_(
                             // config.rangeMatcherWidth" (the operator-set final
                             // width).  Ignored when the range ladder is off.
     };
+    // Measured cliff guard (docs/perf-rca-079-stitch-time.md): registration
+    // above ~1.2 MP makes the ORB feature count + BundleAdjusterRay explode
+    // super-quadratically — a ~20-25x wall-time cliff that ALSO finds worse
+    // matches and drops frames (A35, 5 kf @ 2560x1440: regMP 1.2 = 2.3 s vs
+    // 1.3 = 48-60 s, framesIncluded 5/5 -> 3/5). The fallback attempts' rescue
+    // value comes from the lower panoConfidenceThresh + the wider range matcher,
+    // NOT from raising resolution, so the ladder's registration escalation is
+    // capped at this cliff-safe ceiling (1.0 = attempt-2's proven-safe value,
+    // with margin below the 1.2-1.3 knee, which shifts with scene texture).
+    constexpr double kLadderRegResolCeilingMP = 1.0;
     const RetryTune kRetries[] = {
-        //  thresh  matchConf  regResolMP  rangeWidth
-        {   1.0,    -1.0f,     -1.0,       2 },   // attempt 1: consecutive-only (fast happy path)
-        {   0.5,     0.25f,     1.0,       2 },   // attempt 2: consecutive + looser matcher + ~1.0 MP
-        {   0.3,     0.20f,     1.3,       0 },   // attempt 3: widen to config width at min thresh + ~1.3 MP
+        //  thresh  matchConf  regResolMP                 rangeWidth
+        {   1.0,    -1.0f,     -1.0,                       2 },   // attempt 1: consecutive-only (fast happy path)
+        {   0.5,     0.25f,    1.0,                        2 },   // attempt 2: consecutive + looser matcher + 1.0 MP
+        {   0.3,     0.20f,    kLadderRegResolCeilingMP,   0 },   // attempt 3: min thresh + widest matcher; reg capped (was 1.3 — the cliff)
     };
     const int kNumAttempts = sizeof(kRetries) / sizeof(kRetries[0]);
     cv::Mat panorama;
@@ -1039,9 +1049,13 @@ static StitchResult stitchFramePathsImpl_(
                 appliedMatchConf = tune.matchConf;
             }
             if (tune.regResolMP > 0.0) {
-                // Escalation may only RAISE resolution — never clobber an
-                // explicit caller registrationResolMP downward.
-                const double rr = std::max(tune.regResolMP, config.registrationResolMP);
+                // Cap the ladder's escalation at the cliff-safe ceiling (defence
+                // in depth against any future rung value), but still honour an
+                // explicit caller registrationResolMP above it — the caller owns
+                // that time/quality trade-off; escalation may only RAISE
+                // resolution, never clobber an explicit caller value downward.
+                const double capped = std::min(tune.regResolMP, kLadderRegResolCeilingMP);
+                const double rr = std::max(capped, config.registrationResolMP);
                 stitcher->setRegistrationResol(rr);
                 appliedRegResolMP = rr;
             }
@@ -1163,7 +1177,13 @@ static StitchResult stitchFramePathsImpl_(
             }
             stitcher->setRegistrationResol(
                 best.regResolMP > 0.0
-                    ? std::max(best.regResolMP, config.registrationResolMP)
+                    // Same cliff-safe ceiling as the forward ladder (:1057) — a
+                    // true invariant across both registration-apply sites, so a
+                    // future rung raised above the ceiling can't reach the cliff
+                    // via the recovery re-estimate either. Caller override above
+                    // the ceiling still wins (never clobbered down).
+                    ? std::max(std::min(best.regResolMP, kLadderRegResolCeilingMP),
+                               config.registrationResolMP)
                     : baseRegResol);
         }
         // Telemetry reflects what actually ran LAST (review f3): from here
