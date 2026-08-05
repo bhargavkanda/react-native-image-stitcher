@@ -17,9 +17,9 @@ its insertion point. See §9.
 Replace the removed always-on, RAM-keyed resolution cut with an **opt-in,
 measured, floor-protected** adaptation:
 
-- Fires only when the host opts in (`adaptiveStitchResolution: true` +
-  an explicit `adaptiveMinOutputMP` floor) **and** a measured signal says the
-  device is actually slow: a persisted rolling median of previous
+- Fires only when the host selects `adaptiveStitchMode: 'measured'` **and** a
+  measured signal says the device is actually slow: a persisted rolling median
+  of previous
   **per-keyframe** stitch wall times (normalized by the accepted keyframe
   count so the signal measures the device, not the capture size — §4.2;
   keyed by capture configuration, seeded from core count on first run)
@@ -526,22 +526,27 @@ New flat keys in the existing `config` map (`configOverrides`,
 
 ```ts
 // StitcherConfig additions (all optional)
-adaptiveStitchResolution?: boolean;   // default false — master opt-in
-adaptiveMinOutputMP?: number;         // REQUIRED when opted in; no default
+// AS SHIPPED (perf-4a focused build), the original boolean opt-in was
+// generalized to a 3-position mode so a DETERMINISTIC cut is available for a
+// clean field A/B alongside the measured/self-tuning path:
+adaptiveStitchMode?: 'off' | 'always' | 'measured'; // default 'off'
+                                              // 'always' = deterministic cut
+                                              // 'measured' = self-tuning
+adaptiveMinOutputMP?: number;         // floor MP; default 0.6, clamped [0.6,1.0]
 adaptiveSlowStitchMsPerFrame?: number;        // default 1000 ms/keyframe
-                                              // (estimated, §4.2)
-adaptiveSlowRegistrationMsPerFrame?: number;  // default 350 ms/keyframe
-                                              // (estimated, §4.4)
+                                              // ('measured' only; §4.2)
+// Deferred (registration adaptation + thermal — see notes below):
+// adaptiveSlowRegistrationMsPerFrame?: number;  // default 350 (§4.4)
 ```
 
-Both thresholds are per-accepted-keyframe (§4.2's normalization) — an
+The stitch threshold is per-accepted-keyframe (§4.2's normalization) — an
 absolute-ms threshold would conflate device slowness with capture size.
 
-`start()` **rejects** (`incremental-invalid-config`) when
-`adaptiveStitchResolution === true` and `adaptiveMinOutputMP` is absent or
-`<= 0` — a silently-defaulted floor on the input to OD is exactly the class
-of quiet quality cut this spec exists to kill. Values are snapshotted into
-`batch*` fields at start like every other knob.
+As shipped, rather than rejecting a missing floor, `adaptiveMinOutputMP` is
+clamped to `[0.6, 1.0]` at read (0.6 = hard OD/OCR floor, 1.0 = no-op), so a
+cut can never silently exceed the default budget or drop below the OD/OCR
+minimum. Values are snapshotted into `batch*` fields at start like every other
+knob.
 
 **Why `start().config` and not the alternatives considered:**
 

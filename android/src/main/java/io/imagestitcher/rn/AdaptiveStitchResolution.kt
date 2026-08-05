@@ -35,9 +35,8 @@ import android.content.SharedPreferences
  *      cooled device pull its median back under the exit line and un-fire.
  *
  * Hysteresis: enter above the threshold, exit below 0.8× — prevents flapping.
- * Fully off unless the host opts in (`adaptiveStitchResolution`); an opted-out
- * finalize still RECORDS its default-budget entry so a later opt-in starts
- * from measured history.
+ * This store is used ONLY by the "measured" adaptation mode; the "off" and the
+ * deterministic "always" modes never read or write it.
  *
  * This focused build does COMPOSE adaptation only (the real lever). The
  * registration-resolution adaptation + thermal signal from docs/perf-4a are

@@ -96,11 +96,11 @@ export function panoramaSettingsToNativeConfig(
     // perf-3b item 1 — OpenCV thread count (0 = auto-multi).  Native reads
     // configOverrides["stitchNumThreads"]; clamps ≥ 0.
     stitchNumThreads: s.stitcher.numThreads ?? 0,
-    // perf-4a — opt-in measured compose-resolution adaptation. Always
-    // serialised (canonical defaults on the wire): off by default, so an
-    // opted-out capture is byte-identical. Native reads these from
-    // configOverrides at start().
-    adaptiveStitchResolution: s.stitcher.adaptiveStitchResolution ?? false,
+    // perf-4a — compose-resolution adaptation mode. Always serialised
+    // (canonical defaults on the wire): 'off' by default, so an opted-out
+    // capture is byte-identical. Native reads these from configOverrides at
+    // start(). 'off' | 'always' (deterministic) | 'measured' (self-tuning).
+    adaptiveStitchMode: s.stitcher.adaptiveStitchMode ?? 'off',
     adaptiveMinOutputMP: s.stitcher.adaptiveMinOutputMP ?? 0.6,
     adaptiveSlowStitchMsPerFrame: s.stitcher.adaptiveSlowStitchMsPerFrame ?? 1000,
 

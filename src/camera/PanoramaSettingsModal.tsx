@@ -388,6 +388,15 @@ export function PanoramaSettingsModal({
                 })}
                 caption="off (default): crop to cv::boundingRect of non-black pixels — preserves all stitched content; may leave black corners.  on: run MaxInscribedRectFromMask + column-projection second-pass for a clean rectangle (can shrink output a lot if mask is lopsided / ultra-wide)."
               />
+              <SectionHeader title="Compose-resolution adaptation" />
+              <SegmentedControl
+                options={['off', 'always', 'measured']}
+                value={settings.stitcher.adaptiveStitchMode ?? 'off'}
+                onChange={(v) => updateStitcher({
+                  adaptiveStitchMode: v as BatchStitcherSettings['adaptiveStitchMode'],
+                })}
+                caption="Shrinks the final panorama to the floor MP (faster stitch, lower-res output) — FIELD-TEST whether it hurts OD/OCR.  off (default): full 1.0 MP always.  always: DETERMINISTIC — cut every capture to the floor (the clean A/B treatment; off vs always is a controlled comparison).  measured: self-tuning — cut only on devices measured slow, and un-cut when they recover (the mode you'd ship after the A/B)."
+              />
             </Accordion>
 
             {/* ──────────────────────────────────────────────

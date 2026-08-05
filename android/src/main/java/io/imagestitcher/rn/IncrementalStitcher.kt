@@ -246,9 +246,10 @@ class IncrementalStitcher(
     /// start() config key.  0 = auto-multi (default), 1 = single kill-switch,
     /// N = explicit.  Passed to stitchSync at finalize()/refine().
     private var stitchNumThreads: Int = 0
-    /// perf-4a — opt-in measured compose-resolution adaptation, from start()
-    /// config.  Off by default (byte-identical).  See AdaptiveStitchResolution.
-    private var adaptiveStitchResolution: Boolean = false
+    /// perf-4a — compose-resolution adaptation mode, from start() config.
+    /// "off" (default, byte-identical) | "always" (deterministic cut every
+    /// finalize) | "measured" (self-tuning, see AdaptiveStitchResolution).
+    private var adaptiveStitchMode: String = "off"
     private var adaptiveMinOutputMP: Double = 0.6
     private var adaptiveSlowStitchMsPerFrame: Double = 1000.0
     /// Shared-C++ window DECISION machine (cpp/sharpness_window.*,
@@ -597,9 +598,10 @@ class IncrementalStitcher(
                 ?.getIntOrDefault("stitchNumThreads", 0) ?: 0)
                 .coerceAtLeast(0)
 
-            // perf-4a — opt-in measured compose-resolution adaptation.
-            adaptiveStitchResolution = configOverrides
-                ?.getBooleanOrDefault("adaptiveStitchResolution", false) ?: false
+            // perf-4a — compose-resolution adaptation mode. Unknown/absent
+            // values fall back to the safe "off" (byte-identical).
+            adaptiveStitchMode = (configOverrides?.getString("adaptiveStitchMode") ?: "off")
+                .let { if (it == "always" || it == "measured") it else "off" }
             // Clamped to [0.6, 1.0]: 0.6 is the OD/OCR output-pixel floor, and
             // 1.0 is the default budget — a floor above the default would make a
             // "cut" raise resolution (slower) and pollute default-budget history.
@@ -1031,26 +1033,34 @@ class IncrementalStitcher(
                     // launch scope above — they are read in the timings block
                     // after this batch block closes.)
                     var adaptiveKey: String? = null
-                    if (adaptiveStitchResolution) {
-                        val longEdge = firstKeyframeLongEdge(keyframePathsSnapshot)
-                        // A header-decode failure (longEdge ≤ 0) must NOT pool
-                        // distinct capture sizes under a shared le=0 bucket
-                        // (nor read/write it) — skip the store and run the
-                        // default budget for this finalize.
-                        if (longEdge > 0) {
-                            adaptiveKey = AdaptiveStitchResolution.key(longEdge, keyframeGate.maxCount)
-                            adaptiveDecision = AdaptiveStitchResolution.evaluate(
-                                reactContext, adaptiveKey, adaptiveSlowStitchMsPerFrame,
-                            )
-                            if (adaptiveDecision.adapt) {
-                                // adaptiveMinOutputMP is clamped to [0.6, 1.0] at
-                                // read (start()), so the cut never exceeds the 1.0
-                                // default budget (which would slow the device AND
-                                // pollute default-budget history) and never drops
-                                // below the 0.6 OD/OCR floor.
-                                adaptiveComposeMP = adaptiveMinOutputMP
+                    when (adaptiveStitchMode) {
+                        "always" -> {
+                            // DETERMINISTIC knob: cut every finalize to the floor,
+                            // unconditionally. No measurement, no persistence — the
+                            // clean A/B treatment. Floor clamped [0.6, 1.0] at read.
+                            adaptiveComposeMP = adaptiveMinOutputMP
+                        }
+                        "measured" -> {
+                            val longEdge = firstKeyframeLongEdge(keyframePathsSnapshot)
+                            // A header-decode failure (longEdge ≤ 0) must NOT pool
+                            // distinct capture sizes under a shared le=0 bucket (nor
+                            // read/write it) — skip the store and run the default
+                            // budget for this finalize.
+                            if (longEdge > 0) {
+                                adaptiveKey = AdaptiveStitchResolution.key(longEdge, keyframeGate.maxCount)
+                                adaptiveDecision = AdaptiveStitchResolution.evaluate(
+                                    reactContext, adaptiveKey, adaptiveSlowStitchMsPerFrame,
+                                )
+                                if (adaptiveDecision.adapt) {
+                                    // Floor clamped [0.6, 1.0] at read, so the cut
+                                    // never exceeds the 1.0 default (which would slow
+                                    // the device AND pollute default-budget history)
+                                    // and never drops below the 0.6 OD/OCR floor.
+                                    adaptiveComposeMP = adaptiveMinOutputMP
+                                }
                             }
                         }
+                        else -> { /* "off" → compose stays 1.0 (byte-identical) */ }
                     }
                     // Phase 0 telemetry — wall time of the blocking native
                     // cv::Stitcher JNI call.  This is the RN-version-invariant
@@ -1086,7 +1096,7 @@ class IncrementalStitcher(
                     // safe 1.0 default forever. Intended: its cost is scene-driven
                     // registration retries, which a compositing cut does not
                     // reduce — the fallback is conservative, never a wrong result.
-                    if (adaptiveStitchResolution && adaptiveComposeMP >= 1.0) {
+                    if (adaptiveStitchMode == "measured" && adaptiveComposeMP >= 1.0) {
                         val threshMilli = if (dims.size > 4) dims[4] else 1000
                         val escalated = threshMilli < 1000
                         if (!escalated) {
@@ -1177,34 +1187,41 @@ class IncrementalStitcher(
                 // perf-4a — surface every applied budget so no cut is silent
                 // (the removed RAM cut's core defect). Only present when the
                 // host opted in.
-                if (adaptiveStitchResolution) {
+                if (adaptiveStitchMode != "off") {
                     val ab = Arguments.createMap()
                     ab.putDouble("compositingResolMP", adaptiveComposeMP)
+                    ab.putString("mode", adaptiveStitchMode)
                     // Did THIS run actually cut compose below the 1.0 default?
                     val adapted = adaptiveComposeMP < 1.0
-                    val probe = adaptiveDecision?.probe == true
-                    val seeded = adaptiveDecision?.seeded == true
-                    // adaptiveDecision is null ONLY when the header decode failed
-                    // (longEdge ≤ 0) so the store was skipped — report it honestly
-                    // rather than as a measured "default" run.
-                    val decodeFailed = adaptiveDecision == null
-                    ab.putString(
-                        "source",
-                        when {
-                            decodeFailed -> "decode-failed"  // longEdge ≤ 0, ran default, not recorded
-                            adapted -> "adapted"     // fired regime, cut this run
-                            probe -> "probe"         // fired regime, forced default re-measure
-                            seeded -> "seeded"       // < MIN_SAMPLES history, measuring
-                            else -> "default"        // measured-fast (not fired)
-                        },
-                    )
                     ab.putBoolean("adapted", adapted)
-                    ab.putBoolean("probe", probe)
-                    ab.putBoolean("seeded", seeded)
-                    adaptiveDecision?.medianMsPerKeyframe?.let {
-                        ab.putDouble("medianStitchMsPerKeyframe", it)
-                    }
                     ab.putDouble("floorMP", adaptiveMinOutputMP)
+                    if (adaptiveStitchMode == "always") {
+                        // Deterministic — no measurement state to report.
+                        ab.putString("source", "always")
+                    } else {
+                        // "measured": distinguish the measured sub-states. adaptiveDecision
+                        // is null ONLY when the header decode failed (longEdge ≤ 0), the
+                        // store was skipped, and we ran the default budget — report that
+                        // honestly rather than as a measured "default" run.
+                        val probe = adaptiveDecision?.probe == true
+                        val seeded = adaptiveDecision?.seeded == true
+                        val decodeFailed = adaptiveDecision == null
+                        ab.putString(
+                            "source",
+                            when {
+                                decodeFailed -> "decode-failed"  // longEdge ≤ 0, ran default, not recorded
+                                adapted -> "adapted"     // fired regime, cut this run
+                                probe -> "probe"         // fired regime, forced default re-measure
+                                seeded -> "seeded"       // < MIN_SAMPLES history, measuring
+                                else -> "default"        // measured-fast (not fired)
+                            },
+                        )
+                        ab.putBoolean("probe", probe)
+                        ab.putBoolean("seeded", seeded)
+                        adaptiveDecision?.medianMsPerKeyframe?.let {
+                            ab.putDouble("medianStitchMsPerKeyframe", it)
+                        }
+                    }
                     timings.putMap("appliedBudgets", ab)
                 }
                 map.putMap("timings", timings)

@@ -67,8 +67,8 @@ describe('panoramaSettingsToNativeConfig', () => {
     // perf-3b — range matcher (2/2/3 ladder) on by default; single-threaded default.
     expect(cfg.stitchRangeMatcherWidth).toBe(3);
     expect(cfg.stitchNumThreads).toBe(1);
-    // perf-4a — measured compose-resolution adaptation OFF by default (opt-in).
-    expect(cfg.adaptiveStitchResolution).toBe(false);
+    // perf-4a — compose-resolution adaptation mode OFF by default (opt-in).
+    expect(cfg.adaptiveStitchMode).toBe('off');
     expect(cfg.adaptiveMinOutputMP).toBe(0.6);
     expect(cfg.adaptiveSlowStitchMsPerFrame).toBe(1000);
 
@@ -151,7 +151,7 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(Object.keys(cfg).sort()).toEqual([
       'adaptiveMinOutputMP',
       'adaptiveSlowStitchMsPerFrame',
-      'adaptiveStitchResolution',
+      'adaptiveStitchMode',
       'blenderType',
       'captureSource',
       'enableMaxInscribedRectCrop',
