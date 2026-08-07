@@ -717,6 +717,48 @@ StitchResult stitchFramePaths(
     return finish(firstAttempt);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Single-keyframe output — shared by the incremental (stitchFramePathsImpl_)
+// and manual (stitchFramePathsManual) entrypoints so the ">= 1 frame" boundary
+// AND the rotation stay identical on both paths.  A lone keyframe is a valid
+// one-shot panorama: bake the capture-orientation rotation into it with the
+// SAME `bake_rotation` primitive + `config` the multi-frame path applies to its
+// final image, then JPEG-encode with the quality CLAMPED to [0, 100] to match
+// the multi-frame writers (the single-frame path previously passed jpegQuality
+// through unclamped).  Mutates + returns the caller's `result`.
+static StitchResult& writeSingleFrameResult(
+    StitchResult&                   result,
+    const std::string&              framePath,
+    const std::string&              outputPath,
+    const StitchConfig&             config,
+    const LogFn&                    logFn,
+    const char*                     logTag) {
+    log_info(logFn, "[stitch]", "%s: processing 1 frame via bake_rotation", logTag);
+    cv::Mat mat = cv::imread(framePath, cv::IMREAD_COLOR);
+    if (mat.empty()) {
+        result.errorCode = StitchErrorCode::ImageReadFailed;
+        result.errorMessage = "Could not read single keyframe: " + framePath;
+        log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+        return result;
+    }
+    cv::Mat finalImage = bake_rotation(mat, config.captureOrientation, logFn);
+    const int q = std::max(0, std::min(100, config.jpegQuality));
+    std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, q };
+    if (!cv::imwrite(outputPath, finalImage, params)) {
+        result.errorCode = StitchErrorCode::ImageWriteFailed;
+        result.errorMessage = "Could not write single keyframe to " + outputPath;
+        log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+        return result;
+    }
+    result.errorCode = StitchErrorCode::Ok;
+    result.success = true;
+    result.width = finalImage.cols;
+    result.height = finalImage.rows;
+    result.framesRequested = 1;
+    result.framesIncluded = 1;
+    return result;
+}
+
 // 2026-05-22 (audit follow-up) — renamed inner entry point so the
 // public `stitchFramePaths` wrapper above can layer the mode-fallback
 // retry on top.  This used to be the public function.
@@ -785,30 +827,8 @@ static StitchResult stitchFramePathsImpl_(
         return result;
     }
     if (framePaths.size() == 1) {
-        log_info(logFn, "[stitch]", "single-frame stitch: processing 1 frame via bake_rotation");
-        cv::Mat mat = cv::imread(framePaths[0], cv::IMREAD_COLOR);
-        if (mat.empty()) {
-            result.errorCode = StitchErrorCode::ImageReadFailed;
-            result.errorMessage = "Could not read single keyframe: " + framePaths[0];
-            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
-            return result;
-        }
-        cv::Mat finalImage = bake_rotation(mat, config.captureOrientation, logFn);
-        std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config.jpegQuality };
-        bool ok = cv::imwrite(outputPath, finalImage, params);
-        if (!ok) {
-            result.errorCode = StitchErrorCode::ImageWriteFailed;
-            result.errorMessage = "Could not write single keyframe to " + outputPath;
-            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
-            return result;
-        }
-        result.errorCode = StitchErrorCode::Ok;
-        result.success = true;
-        result.width = finalImage.cols;
-        result.height = finalImage.rows;
-        result.framesRequested = 1;
-        result.framesIncluded = 1;
-        return result;
+        return writeSingleFrameResult(
+            result, framePaths[0], outputPath, config, logFn, "single-frame stitch");
     }
     if (outputPath.empty()) {
         result.errorCode = StitchErrorCode::InvalidArgument;
@@ -1643,30 +1663,8 @@ StitchResult stitchFramePathsManual(
         return result;
     }
     if (framePaths.size() == 1) {
-        log_info(logFn, "[stitch]", "single-frame stitch (manual): processing 1 frame via bake_rotation");
-        cv::Mat mat = cv::imread(framePaths[0], cv::IMREAD_COLOR);
-        if (mat.empty()) {
-            result.errorCode = StitchErrorCode::ImageReadFailed;
-            result.errorMessage = "Could not read single keyframe: " + framePaths[0];
-            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
-            return result;
-        }
-        cv::Mat finalImage = bake_rotation(mat, config.captureOrientation, logFn);
-        std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config.jpegQuality };
-        bool ok = cv::imwrite(outputPath, finalImage, params);
-        if (!ok) {
-            result.errorCode = StitchErrorCode::ImageWriteFailed;
-            result.errorMessage = "Could not write single keyframe to " + outputPath;
-            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
-            return result;
-        }
-        result.errorCode = StitchErrorCode::Ok;
-        result.success = true;
-        result.width = finalImage.cols;
-        result.height = finalImage.rows;
-        result.framesRequested = 1;
-        result.framesIncluded = 1;
-        return result;
+        return writeSingleFrameResult(
+            result, framePaths[0], outputPath, config, logFn, "single-frame stitch (manual)");
     }
     if (outputPath.empty()) {
         result.errorCode = StitchErrorCode::InvalidArgument;
