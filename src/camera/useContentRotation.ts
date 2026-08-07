@@ -201,7 +201,7 @@ export interface EdgePlacement {
  * (deg=90) → `bottom` +1 step → `left` = `alignItems:'flex-start'`, exactly
  * what the old `topCenterForOrientation` produced.
  */
-function framebufferEdge(userEdge: UserEdge, deg: ContentRotationDeg): UserEdge {
+export function framebufferEdge(userEdge: UserEdge, deg: ContentRotationDeg): UserEdge {
   const steps = deg / 90; // 0 | 1 | -1 | 2
   const idx = (EDGE_ORDER.indexOf(userEdge) + steps + 4) % 4;
   return EDGE_ORDER[idx];

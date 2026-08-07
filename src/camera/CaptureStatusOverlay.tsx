@@ -40,7 +40,11 @@ import {
   type ViewStyle,
 } from 'react-native';
 
-import { HostJsLandscapeContext } from './useContentRotation';
+import {
+  HostJsLandscapeContext,
+  contentRotationDeg,
+  framebufferEdge,
+} from './useContentRotation';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
 
 
@@ -286,113 +290,55 @@ export function CaptureStatusOverlay({
  * to the element's OWN dimensions, which is exactly what self-
  * centering an unknown-width element needs.
  */
-function bannerStyleForOrientation(
+export function bannerStyleForOrientation(
   orientation: DeviceOrientation,
   topInset: number,
   jsLandscape: boolean = false,
 ): ViewStyle {
-  if (jsLandscape) {
-    switch (orientation) {
-      case 'portrait':
-        return {
-          position: 'absolute',
-          left: 34,
-          top: '50%',
-          transform: [
-            { translateY: '-50%' },
-            { translateX: '-50%' },
-            { rotate: '-90deg' },
-          ],
-        };
-      case 'portrait-upside-down':
-        return {
-          position: 'absolute',
-          right: 34,
-          top: '50%',
-          transform: [
-            { translateY: '-50%' },
-            { translateX: '50%' },
-            { rotate: '90deg' },
-          ],
-        };
-      case 'landscape-right':
-      case 'landscape-left':
-      default:
-        return {
-          position: 'absolute',
-          top: topInset + 8,
-          left: '50%',
-          transform: [
-            { translateX: '-50%' },
-          ],
-        };
-    }
-  }
+  // Single source of truth, shared with the k/n counter's
+  // `placeAtUserEdge('bottom')`: the net rotation from `contentRotationDeg`
+  // (device − framebuffer) and the framebuffer edge that maps to the user's
+  // TOP.  This replaces the previous hand-rolled jsLandscape + per-orientation
+  // switch, so the pill and the counter can never drift apart.
+  const net = contentRotationDeg(jsLandscape, orientation);
+  const edge = framebufferEdge('top', net);
+  const rotate = `${net}deg`;
 
-  switch (orientation) {
-    case 'landscape-left':
-      // 2026-05-18 round 2 — pre-rotation `right: 8` put the
-      // banner's right edge at layout right minus 8; after 90° CW
-      // rotation around banner CENTER, the banner's bbox center
-      // ended up at layout-x = W - 8 - banner_width/2.  The
-      // banner's user-top edge (post-rotation max layout-x) then
-      // landed at user_y = (banner_width - banner_height) / 2 + 8
-      // ≈ 130 px from user-top — way too far down, hence the
-      // "appearing in center vertically" complaint.
-      //
-      // Fix: shift banner's center to layout-x = W - 34 (= 8 +
-      // estimated banner_height/2 ≈ 26).  Achieved by anchoring
-      // at `right: 34` (banner right edge = W-34) and then
-      // `translateX('50%')` (shifts center right by banner_width/
-      // 2 = back to W-34).  Post-rotation max layout-x = W - 34 +
-      // banner_height/2 = W - 8 → user_y = 8 px from user-top.
-      // Works regardless of banner_width because the translateX
-      // percentage cancels the W_b/2 offset.
-      //
-      // Landscape user-top has no notch (the Dynamic Island sits
-      // on user-LEFT in landscape-left, user-RIGHT in landscape-
-      // right), so we don't add topInset here — 8 px is the tight
-      // visual minimum the user asked for.
+  // Keep the pill's DIRECT absolute + percentage-translate self-centering
+  // (NOT the counter's flex layer): the banner is wide, so on the ±90° side
+  // edges it needs `translateX(±50%)` to cancel its own width — a flex anchor
+  // would offset it by half its length.  Side edges use the tuned 34 px anchor
+  // (8 px gap + banner_height/2 after the self-centre); top/bottom read
+  // horizontally so only need `topInset + 8` + `translateX(-50%)`.
+  switch (edge) {
+    case 'right': // user-top when the framebuffer is rotated +90° (locked landscape-left)
       return {
         position: 'absolute',
         right: 34,
         top: '50%',
-        transform: [
-          { translateY: '-50%' },
-          { translateX: '50%' },
-          { rotate: '90deg' },
-        ],
+        transform: [{ translateY: '-50%' }, { translateX: '50%' }, { rotate }],
       };
-    case 'landscape-right':
+    case 'left': // user-top when rotated −90° (locked landscape-right)
       return {
         position: 'absolute',
         left: 34,
         top: '50%',
-        transform: [
-          { translateY: '-50%' },
-          { translateX: '-50%' },
-          { rotate: '-90deg' },
-        ],
+        transform: [{ translateY: '-50%' }, { translateX: '-50%' }, { rotate }],
       };
-    case 'portrait-upside-down':
+    case 'bottom': // user-top when rotated 180° (locked upside-down)
       return {
         position: 'absolute',
         bottom: topInset + 8,
         left: '50%',
-        transform: [
-          { translateX: '-50%' },
-          { rotate: '180deg' },
-        ],
+        transform: [{ translateX: '-50%' }, { rotate }],
       };
-    case 'portrait':
+    case 'top': // user-top with no rotation (portrait, or any non-locked landscape)
     default:
       return {
         position: 'absolute',
         top: topInset + 8,
         left: '50%',
-        transform: [
-          { translateX: '-50%' },
-        ],
+        transform: [{ translateX: '-50%' }, { rotate }],
       };
   }
 }
