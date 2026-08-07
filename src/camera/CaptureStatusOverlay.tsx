@@ -28,17 +28,19 @@
  * unconditionally without conditional layout shifts.
  */
 
-import React, { useEffect, useRef } from 'react';
+import React, { useContext, useEffect, useRef } from 'react';
 import {
   Animated,
   Easing,
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
 
+import { HostJsLandscapeContext } from './useContentRotation';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
 
 
@@ -150,6 +152,9 @@ export function CaptureStatusOverlay({
   // hook-order rule isn't violated.  The accelerometer subscription
   // is cheap and stays alive for the screen's lifetime.
   const deviceOrientation = useDeviceOrientation();
+  const { width, height } = useWindowDimensions();
+  const measuredLandscape = useContext(HostJsLandscapeContext);
+  const isJsLandscape = measuredLandscape ?? width > height;
 
   if (phase === 'idle') return null;
 
@@ -203,6 +208,7 @@ export function CaptureStatusOverlay({
   const bannerOrientationStyle = bannerStyleForOrientation(
     deviceOrientation,
     topInset,
+    isJsLandscape,
   );
 
   return (
@@ -283,7 +289,46 @@ export function CaptureStatusOverlay({
 function bannerStyleForOrientation(
   orientation: DeviceOrientation,
   topInset: number,
+  jsLandscape: boolean = false,
 ): ViewStyle {
+  if (jsLandscape) {
+    switch (orientation) {
+      case 'portrait':
+        return {
+          position: 'absolute',
+          left: 34,
+          top: '50%',
+          transform: [
+            { translateY: '-50%' },
+            { translateX: '-50%' },
+            { rotate: '-90deg' },
+          ],
+        };
+      case 'portrait-upside-down':
+        return {
+          position: 'absolute',
+          right: 34,
+          top: '50%',
+          transform: [
+            { translateY: '-50%' },
+            { translateX: '50%' },
+            { rotate: '90deg' },
+          ],
+        };
+      case 'landscape-right':
+      case 'landscape-left':
+      default:
+        return {
+          position: 'absolute',
+          top: topInset + 8,
+          left: '50%',
+          transform: [
+            { translateX: '-50%' },
+          ],
+        };
+    }
+  }
+
   switch (orientation) {
     case 'landscape-left':
       // 2026-05-18 round 2 — pre-rotation `right: 8` put the

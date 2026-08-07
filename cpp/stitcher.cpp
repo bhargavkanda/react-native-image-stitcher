@@ -778,11 +778,36 @@ static StitchResult stitchFramePathsImpl_(
     // path's ladder so any throw becomes a clean StitchResult error (which also
     // makes the spherical rescue eligible).  The JNI adds a backstop too.
     try {
-    if (framePaths.size() < 2) {
+    if (framePaths.empty()) {
         result.errorCode = StitchErrorCode::InvalidArgument;
-        result.errorMessage = "Need at least 2 frames to stitch (got " +
-                              std::to_string(framePaths.size()) + ")";
+        result.errorMessage = "Need at least 1 frame to stitch (got 0)";
         log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+        return result;
+    }
+    if (framePaths.size() == 1) {
+        log_info(logFn, "[stitch]", "single-frame stitch: processing 1 frame via bake_rotation");
+        cv::Mat mat = cv::imread(framePaths[0], cv::IMREAD_COLOR);
+        if (mat.empty()) {
+            result.errorCode = StitchErrorCode::ImageReadFailed;
+            result.errorMessage = "Could not read single keyframe: " + framePaths[0];
+            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+            return result;
+        }
+        cv::Mat finalImage = bake_rotation(mat, config.captureOrientation, logFn);
+        std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config.jpegQuality };
+        bool ok = cv::imwrite(outputPath, finalImage, params);
+        if (!ok) {
+            result.errorCode = StitchErrorCode::ImageWriteFailed;
+            result.errorMessage = "Could not write single keyframe to " + outputPath;
+            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+            return result;
+        }
+        result.errorCode = StitchErrorCode::Ok;
+        result.success = true;
+        result.width = finalImage.cols;
+        result.height = finalImage.rows;
+        result.framesRequested = 1;
+        result.framesIncluded = 1;
         return result;
     }
     if (outputPath.empty()) {
@@ -1611,12 +1636,36 @@ StitchResult stitchFramePathsManual(
         return result;
     }
 
-    if (framePaths.size() < 2) {
-        // V16 fix-attempt 9 — sentinel return.
+    if (framePaths.empty()) {
         result.errorCode = StitchErrorCode::InvalidArgument;
-        result.errorMessage = "Need at least 2 frames to stitch (got " +
-                              std::to_string(framePaths.size()) + ")";
+        result.errorMessage = "Need at least 1 frame to stitch (got 0)";
         log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+        return result;
+    }
+    if (framePaths.size() == 1) {
+        log_info(logFn, "[stitch]", "single-frame stitch (manual): processing 1 frame via bake_rotation");
+        cv::Mat mat = cv::imread(framePaths[0], cv::IMREAD_COLOR);
+        if (mat.empty()) {
+            result.errorCode = StitchErrorCode::ImageReadFailed;
+            result.errorMessage = "Could not read single keyframe: " + framePaths[0];
+            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+            return result;
+        }
+        cv::Mat finalImage = bake_rotation(mat, config.captureOrientation, logFn);
+        std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config.jpegQuality };
+        bool ok = cv::imwrite(outputPath, finalImage, params);
+        if (!ok) {
+            result.errorCode = StitchErrorCode::ImageWriteFailed;
+            result.errorMessage = "Could not write single keyframe to " + outputPath;
+            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+            return result;
+        }
+        result.errorCode = StitchErrorCode::Ok;
+        result.success = true;
+        result.width = finalImage.cols;
+        result.height = finalImage.rows;
+        result.framesRequested = 1;
+        result.framesIncluded = 1;
         return result;
     }
     if (outputPath.empty()) {

@@ -1516,63 +1516,7 @@ public final class IncrementalStitcher: NSObject {
                     // fix4/fix6 closed.  Returning the single frame as
                     // the output is the right UX: a single keyframe IS
                     // a valid panorama capture (just one shot).
-                    if payload.paths.count < 2 {
-                        if payload.paths.count == 1 {
-                            let src = payload.paths[0]
-                            do {
-                                // Remove any pre-existing file at the
-                                // output path — copyItem refuses to
-                                // overwrite, and a stale tmp file from
-                                // a prior auto-finalize attempt is the
-                                // common case.
-                                let fm = FileManager.default
-                                if fm.fileExists(atPath: payload.cleaned) {
-                                    try fm.removeItem(atPath: payload.cleaned)
-                                }
-                                try fm.copyItem(atPath: src, toPath: payload.cleaned)
-                                // Read back the JPEG dimensions for
-                                // the result dictionary — match
-                                // OpenCVStitcher.stitchFramePaths'
-                                // {width, height} contract so JS
-                                // doesn't have to special-case a
-                                // single-frame result.
-                                var width: Int = 0
-                                var height: Int = 0
-                                if let provider = CGDataProvider(filename: payload.cleaned),
-                                   let img = CGImage(
-                                    jpegDataProviderSource: provider,
-                                    decode: nil,
-                                    shouldInterpolate: false,
-                                    intent: .defaultIntent) {
-                                    width = img.width
-                                    height = img.height
-                                }
-                                os_log(.fault, log: Self.diagLog,
-                                       "[V16-batch-keyframe.fix7] single-keyframe finalize: copied %{public}@ → %{public}@ (%dx%d)",
-                                       src, payload.cleaned,
-                                       Int32(width), Int32(height))
-                                completion([
-                                    "panoramaPath": payload.cleaned,
-                                    "width": width,
-                                    "height": height,
-                                    "acceptedCount": 1,
-                                    "droppedBackpressure": payload.drops,
-                                    "batchKeyframeSessionDir":
-                                        payload.collector?.sessionDir ?? "",
-                                    "batchKeyframeCount": 1,
-                                    "singleKeyframe": true,
-                                ], nil)
-                                return
-                            } catch let copyErr as NSError {
-                                // Fall through to the legacy "not
-                                // enough keyframes" rejection so the
-                                // user at least gets a discoverable
-                                // error rather than a silent hang.
-                                os_log(.fault, log: Self.diagLog,
-                                       "[V16-batch-keyframe.fix7] single-keyframe copy failed: %{public}@",
-                                       copyErr.localizedDescription)
-                            }
-                        }
+                    if payload.paths.count < 1 {
                         payload.collector?.cleanup()
                         completion(nil, NSError(
                             domain: "RNImageStitcherIncremental",
@@ -1713,6 +1657,7 @@ public final class IncrementalStitcher: NSObject {
                             "width": Int(r.width),
                             "height": Int(r.height),
                             "acceptedCount": payload.paths.count,
+                            "singleKeyframe": payload.paths.count == 1,
                             "droppedBackpressure": payload.drops,
                             "batchKeyframeSessionDir":
                                 payload.collector?.sessionDir ?? "",

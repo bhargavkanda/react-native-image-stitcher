@@ -831,12 +831,12 @@ class IncrementalStitcher(
                 if (wasBatchKeyframe) {
                     // V16 batch-keyframe: hand keyframe paths to the
                     // JNI shim for one-shot cv::Stitcher processing.
-                    if (keyframePathsSnapshot.size < 2) {
-                        throw IllegalStateException(
-                            "Batch-keyframe finalize: only " +
-                            "${keyframePathsSnapshot.size} keyframe(s) " +
-                            "captured — at least 2 required."
+                    if (keyframePathsSnapshot.isEmpty()) {
+                        promise.reject(
+                            "9003",
+                            "Batch-keyframe finalize: 0 keyframes captured — at least 1 required."
                         )
+                        return@launch
                     }
                     // Use the static `bridgeInstance` accessor on
                     // BatchStitcher rather than
