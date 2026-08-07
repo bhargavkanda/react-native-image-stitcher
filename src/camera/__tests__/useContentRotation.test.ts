@@ -22,7 +22,7 @@ jest.mock('react-native-sensors', () => ({
   SensorTypes: { accelerometer: 'accelerometer', gyroscope: 'gyroscope' },
 }));
 
-import { contentRotationDeg } from '../useContentRotation';
+import { contentRotationDeg, placeAtUserEdge } from '../useContentRotation';
 
 describe('contentRotationDeg', () => {
   // Locked-portrait host: jsLandscape is ALWAYS false (window dims stay
@@ -83,6 +83,81 @@ describe('contentRotationDeg', () => {
     for (const o of orientations) {
       for (const jsl of [true, false]) {
         expect([0, 90, -90, 180]).toContain(contentRotationDeg(jsl, o));
+      }
+    }
+  });
+});
+
+
+describe('placeAtUserEdge', () => {
+  // Reference cases calibrated against the shipped per-orientation placement:
+  // each asserts the framebuffer flex anchor + rotation for a target USER edge.
+  // Bottom-anchored (the k/n counter) and top-anchored (the status pill) both
+  // come from ONE derivation, correct on locked + non-locked hosts.
+
+  const INSET = 16;
+
+  describe("bottom-anchored (counter) — always user's bottom", () => {
+    it('locked-portrait + device-portrait → framebuffer bottom, 0°', () => {
+      const p = placeAtUserEdge('portrait', false, 'bottom', INSET);
+      expect(p.rotate).toBe('0deg');
+      expect(p.container.justifyContent).toBe('flex-end');
+      expect(p.container.alignItems).toBe('center');
+      expect(p.container.paddingBottom).toBe(INSET);
+    });
+
+    it('locked-portrait + landscape-left → framebuffer LEFT + 90° (matches old topCenterForOrientation)', () => {
+      const p = placeAtUserEdge('landscape-left', false, 'bottom', INSET);
+      expect(p.rotate).toBe('90deg');
+      expect(p.container.justifyContent).toBe('center');
+      expect(p.container.alignItems).toBe('flex-start');
+      expect(p.container.paddingLeft).toBe(INSET);
+    });
+
+    it('locked-portrait + landscape-right → framebuffer RIGHT + -90°', () => {
+      const p = placeAtUserEdge('landscape-right', false, 'bottom', INSET);
+      expect(p.rotate).toBe('-90deg');
+      expect(p.container.alignItems).toBe('flex-end');
+      expect(p.container.paddingRight).toBe(INSET);
+    });
+
+    it('NON-locked + landscape → framebuffer bottom, 0° (the fix: no double-rotation, correct edge)', () => {
+      for (const o of ['landscape-left', 'landscape-right'] as const) {
+        const p = placeAtUserEdge(o, true, 'bottom', INSET);
+        expect(p.rotate).toBe('0deg');
+        expect(p.container.justifyContent).toBe('flex-end');
+        expect(p.container.alignItems).toBe('center');
+      }
+    });
+  });
+
+  describe("top-anchored (status pill) — always user's top", () => {
+    it('locked-portrait + landscape-left → framebuffer RIGHT + 90°', () => {
+      const p = placeAtUserEdge('landscape-left', false, 'top', INSET);
+      expect(p.rotate).toBe('90deg');
+      expect(p.container.alignItems).toBe('flex-end');
+    });
+
+    it('NON-locked + landscape → framebuffer top, 0°', () => {
+      const p = placeAtUserEdge('landscape-left', true, 'top', INSET);
+      expect(p.rotate).toBe('0deg');
+      expect(p.container.justifyContent).toBe('flex-start');
+      expect(p.container.alignItems).toBe('center');
+    });
+  });
+
+  it('top and bottom land on OPPOSITE framebuffer edges in every state', () => {
+    const OPP: Record<string, string> = {
+      'flex-start': 'flex-end',
+      'flex-end': 'flex-start',
+      center: 'center',
+    };
+    for (const jsl of [false, true]) {
+      for (const o of ['portrait', 'landscape-left', 'landscape-right', 'portrait-upside-down'] as const) {
+        const top = placeAtUserEdge(o, jsl, 'top', 0).container;
+        const bot = placeAtUserEdge(o, jsl, 'bottom', 0).container;
+        expect(bot.justifyContent).toBe(OPP[String(top.justifyContent)]);
+        expect(bot.alignItems).toBe(OPP[String(top.alignItems)]);
       }
     }
   });

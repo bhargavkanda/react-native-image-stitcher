@@ -168,3 +168,99 @@ export function useContentRotation(): ContentRotationStyle {
     ? {}
     : { transform: [{ rotate: `${deg}deg` }] };
 }
+
+
+/**
+ * A user-perceived screen edge — the side of the device the operator sees,
+ * independent of how the OS laid out the framebuffer.
+ */
+export type UserEdge = 'top' | 'bottom' | 'left' | 'right';
+
+/** Clockwise edge order used to rotate a user edge into a framebuffer edge. */
+const EDGE_ORDER: readonly UserEdge[] = ['top', 'right', 'bottom', 'left'];
+
+/**
+ * Placement for a full-screen HUD layer: the flex anchor (applied to the
+ * layer) plus the rotation (applied to the pill inside it).
+ */
+export interface EdgePlacement {
+  /** Flex alignment for a `StyleSheet.absoluteFill` layer. */
+  container: ViewStyle;
+  /** Content rotation, e.g. `'90deg'`, that reads upright to the user. */
+  rotate: string;
+}
+
+/**
+ * Rotate a USER edge into the FRAMEBUFFER edge that currently sits at it.
+ *
+ * The framebuffer is rotated relative to the user by exactly `deg`
+ * (= {@link contentRotationDeg}: `deviceRot − framebufferRot`).  So the
+ * framebuffer edge coinciding with a given user edge is that edge stepped
+ * clockwise by `deg`.  Calibrated against the existing per-orientation
+ * placement: e.g. a user-`bottom` counter in locked-portrait landscape-left
+ * (deg=90) → `bottom` +1 step → `left` = `alignItems:'flex-start'`, exactly
+ * what the old `topCenterForOrientation` produced.
+ */
+function framebufferEdge(userEdge: UserEdge, deg: ContentRotationDeg): UserEdge {
+  const steps = deg / 90; // 0 | 1 | -1 | 2
+  const idx = (EDGE_ORDER.indexOf(userEdge) + steps + 4) % 4;
+  return EDGE_ORDER[idx];
+}
+
+/** Flex alignment (+inset padding) that pins a child to a framebuffer edge. */
+function flexForFramebufferEdge(edge: UserEdge, inset: number): ViewStyle {
+  switch (edge) {
+    case 'top':
+      return { justifyContent: 'flex-start', alignItems: 'center', paddingTop: inset };
+    case 'bottom':
+      return { justifyContent: 'flex-end', alignItems: 'center', paddingBottom: inset };
+    case 'left':
+      return { justifyContent: 'center', alignItems: 'flex-start', paddingLeft: inset };
+    case 'right':
+      return { justifyContent: 'center', alignItems: 'flex-end', paddingRight: inset };
+  }
+}
+
+/**
+ * Pure placement: pin a HUD pill to a USER-perceived edge, upright, on ANY
+ * host configuration.  Single source of truth combining the net content
+ * rotation ({@link contentRotationDeg}) with the framebuffer anchor that maps
+ * to `userEdge`.
+ *
+ * Correct on BOTH host configs from one derivation:
+ *   - locked-portrait (jsLandscape always false): reproduces the classic
+ *     per-orientation anchor+rotate (deviceRot, framebuffer edge = userEdge
+ *     stepped by deviceRot);
+ *   - non-locked (jsLandscape true in landscape): net rotation collapses to
+ *     0° and the anchor stays at the user edge, because the OS already
+ *     rotated the framebuffer to match the device.
+ *
+ * `inset` is the gap from that edge (px).
+ */
+export function placeAtUserEdge(
+  deviceOrient: DeviceOrientation,
+  jsLandscape: boolean,
+  userEdge: UserEdge,
+  inset: number,
+): EdgePlacement {
+  const deg = contentRotationDeg(jsLandscape, deviceOrient);
+  return {
+    container: flexForFramebufferEdge(framebufferEdge(userEdge, deg), inset),
+    rotate: `${deg}deg`,
+  };
+}
+
+/**
+ * Hook form of {@link placeAtUserEdge}: reads the physical device orientation
+ * and the measured jsLandscape (preferring `<Camera>`'s
+ * {@link HostJsLandscapeContext}, since `useWindowDimensions` freezes inside
+ * iOS modals).  HUD overlays call this instead of hand-rolling their own
+ * orientation switch, so they can never disagree.
+ */
+export function useEdgePlacement(userEdge: UserEdge, inset: number): EdgePlacement {
+  const orient = useDeviceOrientation();
+  const { width, height } = useWindowDimensions();
+  const measuredLandscape = useContext(HostJsLandscapeContext);
+  const jsLandscape = measuredLandscape ?? width > height;
+  return placeAtUserEdge(orient, jsLandscape, userEdge, inset);
+}

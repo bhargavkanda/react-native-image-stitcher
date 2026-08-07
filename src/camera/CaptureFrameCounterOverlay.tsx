@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * CaptureFrameCounterOverlay — a live "k / n" keyframe counter shown at the
- * user-perceived TOP-CENTRE during a panorama capture.
+ * user-perceived BOTTOM-CENTRE during a panorama capture.
  *
  *   ┌──────────────────────────────────────────────────┐
- *   │                     ● 3 / 6                       │ ← top-centre
- *   │                                                   │
  *   │            (camera preview / pan in progress)     │
+ *   │                                                   │
+ *   │                     ● 3 / 6                       │ ← bottom-centre
  *   └──────────────────────────────────────────────────┘
  *
  * Replaces the time countdown (item 5) as the primary capture HUD: instead
@@ -17,16 +17,20 @@
  *
  * Pure-presentational + `pointerEvents="none"` (never steals taps); renders
  * nothing when `!visible` so the host can mount it unconditionally.  Pins
- * itself to the user-perceived TOP-CENTRE across all four orientations: the
- * app is typically portrait-locked, so we anchor the pill to the layout edge
- * that maps to the user's top and counter-rotate it to read upright (same
- * idea as CaptureCountdownOverlay, but centre-anchored instead of corner).
+ * itself to the user-perceived BOTTOM-CENTRE across all four orientations AND
+ * both host configs, via the shared {@link placeAtUserEdge} model: it combines
+ * the physical device orientation with the measured `jsLandscape` (whether the
+ * OS already rotated the framebuffer) so a portrait-LOCKED host (device tilted)
+ * and a NON-locked host (framebuffer rotated) both render identically — upright
+ * at the user's bottom-centre.  The status pill ({@link CaptureStatusOverlay})
+ * anchors to the top-centre by the same model, so the two never collide.
  */
 
-import React from 'react';
+import React, { useContext } from 'react';
 import {
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
   type StyleProp,
   type ViewStyle,
@@ -34,14 +38,7 @@ import {
 
 import { GUIDANCE_COUNTDOWN, GUIDANCE_PILL, GUIDANCE_TOKENS } from './guidanceTokens';
 import { type DeviceOrientation } from './useDeviceOrientation';
-
-
-/**
- * Extra distance (px) to drop the counter from the user-top in landscape so it
- * clears the pan how-to coach-mark's bouncing arrow.  Landscape only; portrait
- * is unaffected.  72 px (the symmetric lift) over-cleared, so this is smaller.
- */
-const COUNTER_LANDSCAPE_EXTRA_INSET = 40;
+import { HostJsLandscapeContext, placeAtUserEdge } from './useContentRotation';
 
 
 export interface CaptureFrameCounterOverlayProps {
@@ -65,21 +62,30 @@ export function CaptureFrameCounterOverlay({
   orientation,
   style,
 }: CaptureFrameCounterOverlayProps): React.JSX.Element | null {
+  // Rules of hooks: read the orientation signals every render, BEFORE the
+  // early return below.  `jsLandscape` = whether the OS already rotated the
+  // framebuffer (measured by <Camera> via context; window dims fall back
+  // outside it).  The accelerometer subscription is cheap.
+  const { width, height } = useWindowDimensions();
+  const measuredLandscape = useContext(HostJsLandscapeContext);
+  const jsLandscape = measuredLandscape ?? width > height;
+
   if (!visible || framesMax <= 0) return null;
 
   // Clamp the displayed numerator into [0, framesMax] — the engine can
   // briefly report the cap-th accept before the parent finalizes.
   const k = Math.max(0, Math.min(framesCaptured, framesMax));
 
-  // 2026-06-16 — in LANDSCAPE, push the counter further from the user-top so it
-  // clears the pan how-to coach-mark's bouncing amber arrow, which sits near the
-  // top there and otherwise overlaps it.  Portrait keeps the standard inset.
-  // Tune COUNTER_LANDSCAPE_EXTRA_INSET if the gap is too small / too large.
-  const isLandscape =
-    orientation === 'landscape-left' || orientation === 'landscape-right';
-  const { container, rotate } = topCenterForOrientation(
+  // Pin to the user-perceived BOTTOM-CENTRE, upright, on every host config.
+  // `orientation` is the physical hold (from the host).  The shared
+  // `placeAtUserEdge` model subtracts the framebuffer rotation, so a
+  // portrait-locked host (device tilted) and a non-locked host (framebuffer
+  // rotated) render identically — no double-rotation, correct edge.
+  const { container, rotate } = placeAtUserEdge(
     orientation,
-    GUIDANCE_COUNTDOWN.inset + (isLandscape ? COUNTER_LANDSCAPE_EXTRA_INSET : 0),
+    jsLandscape,
+    'bottom',
+    GUIDANCE_COUNTDOWN.inset,
   );
 
   return (
