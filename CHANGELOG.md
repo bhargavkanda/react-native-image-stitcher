@@ -14,44 +14,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
-## [0.23.1] - 2026-08-11
+## [0.24.0] - 2026-08-11
 
-> **Version note:** 0.23.0 was briefly published with an unrelated stream of
-> work (the anti-blur / adaptive-perf release-candidate line) merged in by
-> mistake, and has been withdrawn. This release is the **plugin-hooks stream
-> only**; the rc line ships separately as **0.24.0**.
+### Fixed
 
-### Added
+- **Android:** a fractional `takePhoto` `quality` (e.g. `0.9`) now resolves to
+  the default 90 instead of truncating to quality=1 (near-greyscale output).
+- **iOS:** `highResCapture={false}` is now honoured in `takePhoto` — the live
+  AR frame is captured instead of the unconditional 12 MP hi-res path.
+  Default `true` keeps historical behaviour byte-identical.
 
-- **AR `takePhoto` results now carry a `pose` field (both platforms).**
-  The AR camera pose of the exact frame whose pixels became the photo —
-  the same shape (full intrinsics included) as the per-frame pose ledger
-  (`getFramePoses`), built by the same shared native builder.  This is an
-  **additive result field**: it is stamped on every AR photo regardless of
-  whether any photo-capture plugin is registered, so results are not
-  byte-identical to previous releases even with an empty plugin registry.
-  Pre-existing result fields (`path`, `width`, `height`, `isMirrored`,
-  `isRawPhoto`) are unchanged; on iOS a failed pose read omits the field
-  rather than failing the photo.  The photo-capture plugin hook's own
-  no-op guarantee is separate and still holds: with no plugin registered
-  the hook's merge is the identity (it adds, removes, and changes
-  nothing).
-- **`AROverlay.depthOcclusion` — per-overlay OPT-IN for the iOS
-  box-vs-box depth-occlusion scheme.**  Default `false`: a `'box'`
-  overlay that does not set the flag renders with the legacy pipeline
-  exactly as before (no depth writer, no depth reads, fill under stroke
-  in the historical overlay order — including the historical artifact
-  that a box further back can draw its stroke over a nearer box's fill).
-  `true`: the box participates in the new two-tier depth scheme — an
-  invisible depth writer 3 cm behind the box occludes other opted-in
-  boxes genuinely behind it while coplanar neighbours still draw.
-  Occlusion is strictly between opted-in boxes; `'outline'` overlays,
-  labels, and badges never participate.  A non-boolean value falls back
-  to `false` (legacy) on both platforms rather than being coerced.
-  Android's screen-space renderer has no depth scheme and ignores the
-  flag.
+_The features below were originally staged as the 0.23.0 release-candidate
+line (`v0.23.0-rc.1`/`rc.2`) and ship here as 0.24.0._
 
-## [0.23.0] — 2026-08-03
 
 Remediation of the `fix/RN0.79.X_optimize_process_time` optimization pass
 (`7df2dba`) after an adversarial review found each of its five mechanisms
@@ -101,6 +76,44 @@ either inert for the stated goal or actively harmful.  See `docs/perf-3a`…
   `camera.current?.pause()` / `.resume()`, which do not exist in
   vision-camera v4 and threw `TypeError` at every finalize for hosts that
   followed it.
+
+## [0.23.1] - 2026-08-11
+
+> **Version note:** 0.23.0 was briefly published with an unrelated stream of
+> work (the anti-blur / adaptive-perf release-candidate line) merged in by
+> mistake, and has been withdrawn. This release is the **plugin-hooks stream
+> only**; the rc line ships separately as **0.24.0**.
+
+### Added
+
+- **AR `takePhoto` results now carry a `pose` field (both platforms).**
+  The AR camera pose of the exact frame whose pixels became the photo —
+  the same shape (full intrinsics included) as the per-frame pose ledger
+  (`getFramePoses`), built by the same shared native builder.  This is an
+  **additive result field**: it is stamped on every AR photo regardless of
+  whether any photo-capture plugin is registered, so results are not
+  byte-identical to previous releases even with an empty plugin registry.
+  Pre-existing result fields (`path`, `width`, `height`, `isMirrored`,
+  `isRawPhoto`) are unchanged; on iOS a failed pose read omits the field
+  rather than failing the photo.  The photo-capture plugin hook's own
+  no-op guarantee is separate and still holds: with no plugin registered
+  the hook's merge is the identity (it adds, removes, and changes
+  nothing).
+- **`AROverlay.depthOcclusion` — per-overlay OPT-IN for the iOS
+  box-vs-box depth-occlusion scheme.**  Default `false`: a `'box'`
+  overlay that does not set the flag renders with the legacy pipeline
+  exactly as before (no depth writer, no depth reads, fill under stroke
+  in the historical overlay order — including the historical artifact
+  that a box further back can draw its stroke over a nearer box's fill).
+  `true`: the box participates in the new two-tier depth scheme — an
+  invisible depth writer 3 cm behind the box occludes other opted-in
+  boxes genuinely behind it while coplanar neighbours still draw.
+  Occlusion is strictly between opted-in boxes; `'outline'` overlays,
+  labels, and badges never participate.  A non-boolean value falls back
+  to `false` (legacy) on both platforms rather than being coerced.
+  Android's screen-space renderer has no depth scheme and ignores the
+  flag.
+
 
 ## [0.21.0] — 2026-07-03
 
