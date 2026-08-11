@@ -1325,7 +1325,16 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
                 completion: completion
             )
         }
-        if #available(iOS 16.0, *) {
+        // `prefersHighResCapture` was previously ignored here: iOS 16+ ALWAYS
+        // took the 12 MP path, so `highResCapture={false}` — whose own prop doc
+        // promises "the live stream stays as small as possible" — silently
+        // delivered a 4032x3024 still anyway. Measured on 6 field Mosaic packs:
+        // every shot JPEG was 4032x3024 while its own intrinsics reported
+        // 1920x1440, i.e. the AR live format the caller actually asked for.
+        // Honouring the flag lets a live-capture flow use the current AR frame
+        // (4.3x fewer pixels) instead of stills; the `else` branch below is the
+        // live-frame path that already existed for the pre-iOS-16 case.
+        if #available(iOS 16.0, *), prefersHighResCapture {
             arSession.captureHighResolutionFrame { [weak self] hiResFrame, error in
                 if let hiResFrame = hiResFrame {
                     // Pose from the hi-res frame: its camera intrinsics /
