@@ -40,6 +40,14 @@ export type {
   Warper,
   FramesDroppedInfo,
 } from './camera/Camera';
+// The dual-mode shutter button (tap = photo, hold = panorama). Exposed so a host
+// that hides the built-in shutter (`hideBuiltInShutter`) can render it itself in
+// a custom bottom bar and drive capture through the CameraHandle.
+export { CameraShutter } from './camera/CameraShutter';
+export type {
+  CameraShutterProps,
+  CameraShutterHandle,
+} from './camera/CameraShutter';
 // Non-fatal capture quality signals carried on `CameraCaptureResult.warnings`.
 export type {
   CaptureWarning,
@@ -239,8 +247,10 @@ export { cropQuad } from './stitching/cropQuad';
 export type { CropQuadOptions, CropQuadResult } from './stitching/cropQuad';
 // File copy — pairs with the in-place `cropQuad` so a host can crop a COPY of
 // a capture (preserving the original + landing the result on a fresh URI,
-// avoiding image-cache collisions).
-export { copyFile } from './utils/files';
+// avoiding image-cache collisions).  `moveFile` + `getDefaultCaptureDir` let a
+// host assemble a debug/output pack next to its captures (used by the example
+// app's auto A/B pack writer).
+export { copyFile, moveFile, getDefaultCaptureDir } from './utils/files';
 
 // ── Incremental stitching engine ──────────────────────────────────────
 // JS bindings around the native `IncrementalStitcher` module.  Use
@@ -251,10 +261,29 @@ export {
   IncrementalOutcome,
   incrementalStitcherIsAvailable,
   subscribeIncrementalState,
+  subscribeStitchingPhase,
   getIncrementalNativeModule,
   cleanupOldKeyframes,
 } from './stitching/incremental';
-export type { IncrementalState, AcceptedKeyframe } from './stitching/incremental';
+export type {
+  IncrementalState,
+  AcceptedKeyframe,
+  StitchingPhase,
+} from './stitching/incremental';
+// Phase 0 — stitch performance measurement (arch fingerprint, native/JS
+// timings, per-capture event/render counters).  See docs/perf-3a…3b.
+export {
+  getArchFingerprint,
+  parseTimingsFromDebugSummary,
+  bumpPerfCounter,
+  snapshotPerfCounters,
+  resetPerfCounters,
+  perfNow,
+} from './stitching/perfTrace';
+export type {
+  ArchFingerprint,
+  IncrementalTimings,
+} from './stitching/perfTrace';
 export { useIncrementalStitcher } from './stitching/useIncrementalStitcher';
 // v0.7.0 — Tier 1 subscriber API.  Fires on each accepted keyframe
 // in batch-keyframe captures (see hook's docstring for engine-mode

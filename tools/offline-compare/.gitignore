@@ -1,0 +1,7 @@
+# built probe binary (arm64; rebuild with build_stitch_probe.sh)
+stitch_probe
+# pulled packs + comparison outputs
+*.jpg
+*.png
+pack/
+*-pack/

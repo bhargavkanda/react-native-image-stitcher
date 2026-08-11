@@ -214,6 +214,13 @@ export interface UseCaptureReturn {
    */
   has0_5x: boolean;
   /**
+   * The device's real ultra-wide factor for the lens chip's LABEL (0.6 on a
+   * Galaxy S24 Ultra, 0.5 on a typical iPhone); null when the platform never
+   * advertises it, so the UI keeps its historical `0.5×` text.  See
+   * `CaptureDeviceSelection.ultraWideFactor`.
+   */
+  ultraWideFactor: number | null;
+  /**
    * v0.13.2 — whether the currently-MOUNTED device has a torch.  Drives
    * the flash control's availability (the standalone ultra-wide has none).
    */
@@ -297,6 +304,11 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
         // SelectCaptureDeviceOptions.preferDepth for the wide+tele FOV
         // trade). Without the opt-in the plain-wide pick is unchanged.
         preferDepth: captureDepthData === true && Platform.OS === 'ios',
+        // Galaxy S24 Ultra field finding (SCG26, 2026-07-27): on Android,
+        // don't trust a multicam device's zoom-reach claim to the
+        // ultra-wide when a real standalone ultra-wide id exists — see
+        // SelectCaptureDeviceOptions.platform.
+        platform: Platform.OS,
       }),
     [allDevices, captureDepthData],
   );
@@ -366,6 +378,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
           lens: lens ?? null,
           mode: selection.mode,
           has0_5x: selection.has0_5x,
+          ultraWideFactor: selection.ultraWideFactor,
           activeZoom: activeZoom ?? null,
           selected: summarise(selection.device),
           ultraWide: summarise(selection.ultraWideDevice),
@@ -552,6 +565,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     availablePhysicalDevices,
     captureMode: selection.mode,
     has0_5x: selection.has0_5x,
+    ultraWideFactor: selection.ultraWideFactor,
     deviceHasTorch: device?.hasTorch ?? false,
     deviceZoom: activeZoom,
   };

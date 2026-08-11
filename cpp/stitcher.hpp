@@ -167,6 +167,31 @@ struct StitchConfig {
     double      registrationResolMP  = -1.0;           // < 0 = cv default (0.6 MP)
     double      seamEstimationResolMP = -1.0;          // < 0 = cv default (0.1 MP)
     double      compositingResolMP   = -1.0;           // < 0 = entry-specific default (high-level: 1.0 MP, manual: 0.6 MP)
+    // PANORAMA feature-matcher range (perf-3b).  0 = OFF (default full-
+    // pairwise BestOf2NearestMatcher ladder — byte-identical to before this
+    // knob).  > 0 = enable the RANGE-MATCHER ladder on EVERY attempt: match
+    // only keyframes within |i-j| < width (keyframes are capture-ordered, so
+    // non-adjacent pairs share ~no overlap on a linear pan and their O(N^2)
+    // matching is waste).  The window widens across the retry ladder —
+    // consecutive-only (width 2) on attempts 1-2, then out to THIS value on
+    // the final, minimum-threshold attempt (so 3 => 2/2/3) — bridging a
+    // chain broken at a weak link only as a last resort.  This REPLACES the
+    // full-pairwise matcher on all attempts; distant-overlap (pan-back)
+    // captures are handled at capture time (perf-5), not by a full-matcher
+    // rescue.  PANORAMA only (SCANS uses the affine matcher family).
+    int         rangeMatcherWidth    = 0;
+    // OpenCV intra-stitch parallelism (perf-3b item 1, ANDROID only).
+    //   0 = AUTO (default): cv::setNumThreads(min(4, max(2, cores/2))) —
+    //       restores the multi-core warp/blend/feature parallelism the
+    //       v0.16.1 `setNumThreads(1)` native-heap-creep workaround removed.
+    //       Safe because the stitch now runs on a STABLE dedicated thread
+    //       (Kotlin side), so the TBB per-worker TLS that caused the creep
+    //       primes ONCE per process instead of on every thread migration.
+    //   1 = single-threaded (legacy kill-switch — revert here if the memstat
+    //       plateau gate ever regresses on a device).
+    //   N = explicit thread count.
+    // iOS is unaffected (GCD backend already multi-core; block is __ANDROID__).
+    int         numThreads           = 0;
     int         jpegQuality          = 85;
 
     // Total device RAM in megabytes.  Used by the manual pipeline's

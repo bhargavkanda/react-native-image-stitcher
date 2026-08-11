@@ -82,6 +82,19 @@ export interface CameraShutterProps {
   isProcessing?: boolean;
   /** Disable the whole button (e.g. while permissions are loading). */
   disabled?: boolean;
+  /**
+   * Whether the HOLD gesture is live (default `true`). Set `false` for a
+   * tap-only shutter: the press never transitions to the holding phase, so
+   * `onHoldStart`/`onHoldComplete` never fire, the red recording ring never
+   * paints, and the a11y label drops the "hold for panorama" half.
+   *
+   * WHY IT EXISTS: without it, a host that wires `onHoldStart` to a no-op (a
+   * capture mode with no panorama) still gets the full press→hold transition —
+   * the button paints a red "Recording — release to stitch panorama" ring while
+   * NOTHING records. This is the tap-only shutter Photo mode needs once Pano is
+   * its own mode. Default `true` keeps every existing consumer byte-identical.
+   */
+  holdEnabled?: boolean;
   /** Optional style applied to the outer touch target. */
   style?: ViewStyle;
 }
@@ -106,6 +119,7 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
       maxHoldMs,
       isProcessing = false,
       disabled = false,
+      holdEnabled = true,
       style,
     },
     ref,
@@ -158,9 +172,21 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
       clearMaxHoldTimer();
     }, [clearHoldTimer, clearMaxHoldTimer]);
 
+    // If hold is disabled mid-press (e.g. a Pano→Photo switch while the finger
+    // is down), disarm the pending hold timer so it can't still enter the
+    // holding phase — paint the recording ring and fire onHoldStart — on a
+    // shutter that is now tap-only.
+    useEffect(() => {
+      if (!holdEnabled) clearHoldTimer();
+    }, [holdEnabled, clearHoldTimer]);
+
     const handlePressIn = useCallback(() => {
       if (disabled || isProcessing) return;
       setPhaseBoth('pressing');
+      // Tap-only: never arm the hold transition, so the button stays in
+      // 'pressing' until release (→ a tap) and can never paint the recording
+      // ring or fire the hold callbacks.
+      if (!holdEnabled) return;
       holdTimerRef.current = setTimeout(() => {
         // Threshold elapsed → enter hold mode + notify.
         if (phaseRef.current === 'pressing') {
@@ -186,7 +212,7 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
           }
         }
       }, HOLD_THRESHOLD_MS);
-    }, [disabled, isProcessing, onHoldStart, onHoldComplete, maxHoldMs, setPhaseBoth]);
+    }, [disabled, isProcessing, holdEnabled, onHoldStart, onHoldComplete, maxHoldMs, setPhaseBoth]);
 
     const handlePressOut = useCallback(() => {
       // CRITICAL: release ALWAYS stops the recording, regardless of
@@ -233,7 +259,9 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
         accessibilityLabel={
           phase === 'holding'
             ? 'Recording — release to stitch panorama'
-            : 'Tap for photo, hold for panorama'
+            : holdEnabled
+              ? 'Tap for photo, hold for panorama'
+              : 'Take photo'
         }
         accessibilityState={{ disabled: disabled || isProcessing }}
         disabled={disabled || isProcessing}

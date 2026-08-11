@@ -324,6 +324,18 @@ class RNSARCameraView @JvmOverloads constructor(
         ingestActive = active
     }
 
+    // NOTE (2026-08-03): pauseRenderingForStitch / resumeRenderingAfterStitch
+    // (switching the GLSurfaceView to RENDERMODE_WHEN_DIRTY during finalize)
+    // were REMOVED.  In the first-party <Camera> flow the AR view is already
+    // unmounted before finalize (nothing to pause); in composed integrations
+    // that keep it mounted, the pause/resume pair — resolved against the
+    // live arCameraViewRef, not the paused instance — froze the preview and
+    // dropped the next capture's frames when the view detached/reattached
+    // mid-stitch (the render mode survives reattach).  See the adversarial
+    // review of 7df2dba.  A host that wants to stop feeding frames during
+    // the stitch should listen for the "StitchingPhaseChanged" event and
+    // toggle its own <Camera isActive> (docs/perf-3a).
+
     // ── GL-level letterbox ─────────────────────────────────────────
     //
     // The [glView] stays full-screen (MATCH_PARENT); we letterbox at the

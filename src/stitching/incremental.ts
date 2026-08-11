@@ -12,6 +12,8 @@
 import { NativeModules, NativeEventEmitter } from 'react-native';
 import type { EmitterSubscription, NativeModule } from 'react-native';
 
+import type { IncrementalTimings } from './perfTrace';
+
 
 /**
  * Per-frame outcome returned by the engine.  Mirrors the iOS
@@ -595,7 +597,7 @@ export interface StitcherConfig {
    *  - 'graphcut' (default): cv::detail::GraphCutSeamFinder; optimal
    *    seams, pairs with multi-band, holds all warped frames in memory.
    *  - 'skip': stream warp+feed, lower peak memory, fine with feather. */
-  seamFinderType: 'graphcut' | 'skip';
+  seamFinderType: 'graphcut' | 'voronoi' | 'skip';
 
   /** V16 Phase 1b.fix5c — toggle the max-inscribed-rectangle crop in
    *  the batch-keyframe finalize pipeline.  When false (default), the
@@ -758,6 +760,14 @@ export interface IncrementalFinalizeResult {
    * result comes out in the raw sensor landscape (sideways).  iOS only.
    */
   captureOrientation?: string;
+  /**
+   * Phase 0 — native + JS stitch timings for the RN-version regression
+   * investigation.  Optional and additive so the shape stays stable
+   * while the native side fills it in incrementally and iOS (initially
+   * missing some fields) doesn't break the type.  See
+   * `perfTrace.ts::IncrementalTimings` and docs/perf-3b.
+   */
+  timings?: IncrementalTimings;
 }
 
 
@@ -800,8 +810,8 @@ export interface IncrementalRefineOptions {
   warperType?: 'plane' | 'cylindrical' | 'spherical';
   /** "multiband" | "feather".  Default "multiband". */
   blenderType?: 'multiband' | 'feather';
-  /** "graphcut" | "skip".  Default "graphcut". */
-  seamFinderType?: 'graphcut' | 'skip';
+  /** "graphcut" | "voronoi" | "skip".  Default "graphcut". */
+  seamFinderType?: 'graphcut' | 'voronoi' | 'skip';
   /** Drives the OUTPUT bake-rotation.  Default "portrait". */
   captureOrientation?:
     | 'portrait'
@@ -835,6 +845,22 @@ export interface IncrementalRefineOptions {
    * (Android refine is always cv::Stitcher).
    */
   useManualPipeline?: boolean;
+  /**
+   * perf-3b — PANORAMA range-matcher width for the re-stitch. Omit to
+   * inherit the value the session's `start()` used (so the preview matches
+   * the original finalize); pass explicitly for a standalone refine. `0`
+   * forces full-pairwise. See `BatchStitcherSettings.rangeMatcherWidth`.
+   */
+  stitchRangeMatcherWidth?: number;
+  /**
+   * perf-3b item 1 — OpenCV thread count for the re-stitch. Omit to inherit
+   * the value the session's `start()` used; pass explicitly for a standalone
+   * refine. `1` = single-threaded (the on-device-fastest config at fleet
+   * keyframe/MP sizes), `0` = auto-multi, `N` = N threads. Android only —
+   * iOS's GCD backend has no `setNumThreads`, so the value is a no-op there.
+   * See `BatchStitcherSettings.numThreads`.
+   */
+  stitchNumThreads?: number;
 }
 
 
@@ -1138,4 +1164,60 @@ export function subscribeIncrementalState(
     NativeModules.IncrementalStitcher as unknown as NativeModule,
   );
   return emitter.addListener('IncrementalStateUpdate', listener);
+}
+
+
+/** Phase of the finalize() stitch, as reported by `StitchingPhaseChanged`. */
+export type StitchingPhase = 'started' | 'finished';
+
+/**
+ * Subscribe to stitch-phase transitions around `finalize()`.
+ *
+ * `'started'` fires just before the multi-second `cv::Stitcher` run
+ * begins; `'finished'` fires when it settles (success OR failure).
+ * Use this ONLY if you COMPOSE your own vision-camera `<Camera>` and
+ * want to stop feeding it frames during the stitch — the first-party
+ * `<Camera>` already unmounts the camera for the stitch, so it needs
+ * nothing here.
+ *
+ * ## Correct usage — `isActive`, not a `pause()` method
+ *
+ * vision-camera v4 has NO `camera.pause()` / `resume()`; drive the
+ * `isActive` prop (or unmount) instead:
+ *
+ * ```ts
+ * const [camActive, setCamActive] = useState(true);
+ * useEffect(() => {
+ *   const sub = subscribeStitchingPhase((phase) => {
+ *     setCamActive(phase !== 'started');
+ *   });
+ *   return () => sub?.remove();
+ * }, []);
+ * // <Camera isActive={camActive} ... />
+ * ```
+ *
+ * ## IMPORTANT — also restore on the finalize()/cancel() promise
+ *
+ * `cancel()` does NOT emit `'finished'`, and an error path is not
+ * guaranteed to reach the host before the promise settles.  So ALSO
+ * set the camera back to active when your `finalize()` / `cancel()`
+ * call resolves or rejects — do not rely on the `'finished'` event
+ * alone, or a cancelled capture can leave the camera stopped forever.
+ *
+ * The returned `EmitterSubscription` MUST be removed when no longer
+ * needed (`subscription.remove()`).
+ *
+ * Platform note: currently emitted on **Android only**; the listener
+ * simply never fires on iOS (where the first-party `<Camera>` already
+ * unmounts during the stitch).  iOS emission is a parity follow-up.
+ */
+export function subscribeStitchingPhase(
+  listener: (event: { phase: StitchingPhase }) => void,
+): EmitterSubscription | null {
+  const native = getIncrementalNativeModule();
+  if (!native) return null;
+  const emitter = new NativeEventEmitter(
+    NativeModules.IncrementalStitcher as unknown as NativeModule,
+  );
+  return emitter.addListener('StitchingPhaseChanged', listener);
 }
