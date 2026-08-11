@@ -861,6 +861,15 @@ export interface IncrementalRefineOptions {
    * See `BatchStitcherSettings.numThreads`.
    */
   stitchNumThreads?: number;
+  /**
+   * perf-4a — compositing-resolution cap (megapixels) for the re-stitch. This
+   * is the lever `adaptiveStitchMode` drives at finalize (downscales the final
+   * compose to `adaptiveMinOutputMP` when a stitch is slow); passing it to a
+   * standalone refine makes it a deterministic knob for A/B attribution — e.g.
+   * `1.0` (full) vs `0.6` (the adaptive floor). Omit ⇒ 1.0. Android only (the
+   * iOS refine path applies its own RAM-aware compose cap).
+   */
+  compositingResolMP?: number;
 }
 
 

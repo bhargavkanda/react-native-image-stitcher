@@ -2718,6 +2718,15 @@ class IncrementalStitcher(
         val refineNumThreads = (config
             ?.getIntOrDefault("stitchNumThreads", stitchNumThreads)
             ?: stitchNumThreads).coerceAtLeast(0)
+        // perf-4a — compositing-resolution override for the re-stitch. This is
+        // the SAME lever `adaptiveStitchMode` drives at finalize (it downscales
+        // compose to adaptiveMinOutputMP when a stitch is slow); passing it here
+        // makes it a DETERMINISTIC ablation knob (full 1.0 vs the 0.6 floor) on
+        // fixed frames. Absent key ⇒ 1.0 = stitchSync's default = today's refine
+        // behaviour. `> 0` wins in cpp (StitchConfig.compositingResolMP, :947).
+        val refineComposeMP = (config
+            ?.getDoubleOrDefault("compositingResolMP", 1.0) ?: 1.0)
+            .coerceAtLeast(0.1)
 
         // Pre-flight existence check — same defensive layer iOS has.
         for (p in framePaths) {
@@ -2775,6 +2784,7 @@ class IncrementalStitcher(
                     useManualPipeline = useManualPipeline,
                     rangeMatcherWidth = refineRangeMatcherWidth,  // perf-3b — config or finalize
                     numThreads = refineNumThreads,   // perf-3b item 1 — config or finalize (0 = auto-multi)
+                    compositingResolMP = refineComposeMP,  // perf-4a — config or 1.0 (full)
                 )
                 // Stitch returned — BatchStitcher writes the JPEG
                 // synchronously, so "writing" reflects the final
