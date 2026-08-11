@@ -287,10 +287,41 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
             var c = simd_float3(0, 0, 0)
             for v in quad { c += v }
             c /= Float(quad.count)
+            let rel = quad.map { $0 - c }
+            // Unit vector centroid → CAMERA, in world space.  The anchor pose
+            // is translation-only (see `anchorPose`), so a world direction is
+            // also a node-local direction and needs no basis change.  Used
+            // ONLY to give "1.5 mm in front of the fill" an unambiguous sign
+            // for a plane-oriented quad (whose normal direction depends on
+            // the producer's corner winding, which we do not control).  nil ⇒
+            // the winding's own normal is used; the worst case is a stroke
+            // drawn 1.5 mm BEHIND its own fill and therefore tinted by it —
+            // never a vanished box, because nothing in the visible tier
+            // writes depth.
+            let camDir: simd_float3? = {
+                guard let pov = renderer.pointOfView else { return nil }
+                let d = pov.simdWorldPosition - c
+                let len = simd_length(d)
+                guard len.isFinite, len > 1e-4 else { return nil }
+                return d / len
+            }()
+            // `orient:'camera'` box ⇒ draw a GRAVITY-UP, YAW-TO-CAMERA box
+            // (see `makeBillboardBoxNode`) — for corners that are not on a
+            // reliable plane yet.  Default 'plane' keeps the world-corner
+            // outline, which foreshortens correctly with the surface.
+            if overlay.billboard, overlay.shape == .box {
+                return Self.makeBillboardBoxNode(
+                    relCorners: rel, color: overlay.color, label: overlay.label,
+                    fillAlpha: overlay.fillAlpha, strokeAlpha: overlay.strokeAlpha,
+                    imageUri: overlay.imageUri)
+            }
             return Self.makeQuadOutlineNode(
-                relCorners: quad.map { $0 - c },
+                relCorners: rel,
                 color: overlay.color, label: overlay.label,
-                shape: overlay.shape)
+                shape: overlay.shape, fillAlpha: overlay.fillAlpha,
+                strokeAlpha: overlay.strokeAlpha,
+                imageUri: overlay.imageUri,
+                camDir: camDir)
         }
         return Self.makeBillboardNode(
             sizeMeters: overlay.sizeMeters, color: overlay.color,
@@ -365,6 +396,11 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     /// A camera-facing billboard plane (at the anchor origin), sized in metres,
     /// textured with a stroked outline + optional centred label.  Always drawn
     /// on top (depth read/write off) so an annotation is never hidden.
+    ///
+    /// Keeps `freeAxes = .all` on purpose while `makeBillboardBoxNode` drops
+    /// to `.Y`: this is a TEXT/marker annotation, 2-D chrome whose whole job
+    /// is to stay legible and screen-aligned.  A world-anchored box marks a
+    /// physical thing and must not roll with the device; a caption may.
     private static func makeBillboardNode(
         sizeMeters: CGSize?,
         color: UIColor,
@@ -382,7 +418,75 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         plane.firstMaterial = mat
 
         let node = SCNNode(geometry: plane)
-        node.renderingOrder = 1000         // draw after the camera background
+        // `overlayOrder`, not a third value: the depth scheme has exactly TWO
+        // tiers and an auditable "one renderingOrder for everything visible"
+        // invariant.  This was 1000, which after the collapse would have sat
+        // BETWEEN the writers (999) and every box (1001) — a marker drawn
+        // before the boxes and therefore tinted by any fill over it.
+        node.renderingOrder = overlayOrder  // after the camera background
+        let billboard = SCNBillboardConstraint()
+        billboard.freeAxes = .all          // always face the camera, flat
+        node.constraints = [billboard]
+        return node
+    }
+
+    /// Decoded badge-image cache.  A tracked overlay re-sends the SAME
+    /// `imageUri` on EVERY frame, so decoding per frame would burn CPU and
+    /// heat the device for no pixel change.  Bounded by count; `NSCache`
+    /// also evicts under memory pressure, and a miss simply re-decodes.
+    private static let badgeImageCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 128
+        return cache
+    }()
+
+    /// Load (and cache) an overlay's badge image.  Returns nil when the path
+    /// is missing or undecodable — the box then draws WITHOUT a badge rather
+    /// than the overlay failing, so a stale path degrades gracefully.
+    private static func badgeImage(_ uri: String) -> UIImage? {
+        let key = uri as NSString
+        if let hit = badgeImageCache.object(forKey: key) { return hit }
+        let path = uri.hasPrefix("file://") ? (URL(string: uri)?.path ?? uri) : uri
+        guard let img = UIImage(contentsOfFile: path) else { return nil }
+        badgeImageCache.setObject(img, forKey: key)
+        return img
+    }
+
+    /// A camera-facing plane textured with the overlay's badge image (no
+    /// outline, no label).  Aspect-preserving: the image fits INSIDE
+    /// `extent` so a tall image and a wide one both read correctly instead
+    /// of being squashed to a square.
+    ///
+    /// Stays fully billboarded (`.all`): this is a small identification
+    /// BADGE, not the marked object itself — it should read the same however
+    /// the surface is angled, and a badge that rolls with the device is
+    /// exactly what "screen-upright" means for 2-D chrome.
+    ///
+    /// Keeps depth read AND write OFF, deliberately.  A camera-facing badge
+    /// is NOT parallel to the quad it annotates, so at a grazing angle it
+    /// intersects that plane; depth-reading it would slice the badge in half
+    /// against its own box's writer instead of occluding it.  The price is
+    /// that a badge belonging to an occluded box still shows — a ≤5 cm chip,
+    /// and strictly better than the whole box showing.  The caller offsets
+    /// it towards the viewer so the transparent sort puts it last within its
+    /// own box.
+    private static func makeBadgeImageNode(
+        image: UIImage, extent: CGFloat
+    ) -> SCNNode {
+        let ar = image.size.height > 0 ? image.size.width / image.size.height : 1
+        let w = ar >= 1 ? extent : extent * ar
+        let h = ar >= 1 ? extent / ar : extent
+        let plane = SCNPlane(width: w, height: h)
+        let mat = SCNMaterial()
+        mat.diffuse.contents = image
+        mat.isDoubleSided = true
+        mat.lightingModel = .constant      // unlit — show the image as-is
+        mat.writesToDepthBuffer = false
+        mat.readsFromDepthBuffer = false    // chrome — see the doc comment
+        plane.firstMaterial = mat
+
+        let node = SCNNode(geometry: plane)
+        node.renderingOrder = overlayOrder  // ONE tier for every visible part
         let billboard = SCNBillboardConstraint()
         billboard.freeAxes = .all          // always face the camera, flat
         node.constraints = [billboard]
@@ -397,53 +501,221 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     /// 4 mm cylinders read as (reported as "box edges got so much thicker").
     private static let outlineEdgeRadius: CGFloat = 0.004
     private static let boxEdgeRadius: CGFloat = 0.0015
-    /// `.box` fill opacity — Android parity (BOX_FILL_ALPHA 0x38 ≈ 22%).
-    private static let boxFillAlpha: CGFloat = 0.22
+    // NOTE: `.box` fill opacity is no longer a constant here — it is
+    // per-overlay (`RNISAROverlay.fillAlpha`, already sanitised to 0...1 by
+    // the model's init).  The old hardcoded 0.22 now lives as
+    // `RNISAROverlay.defaultFillAlpha`, so a JS overlay that omits the key
+    // still fills at exactly 22%.
 
-    /// A 3D outline through corners expressed RELATIVE to the anchor
-    /// origin (anchor at the quad centroid).  Each edge is a thin cylinder —
-    /// SceneKit `.line` primitives are always 1px and unscalable, so a visible
-    /// outline must be real geometry.  `shape == .box` additionally renders
-    /// the translucent face the SDK asked for (previously ignored on iOS —
-    /// Android has always honoured it) and thins the edges to the border
-    /// role.  Optional camera-facing label at centre.
-    private static func makeQuadOutlineNode(
-        relCorners: [simd_float3],
-        color: UIColor,
-        label: String?,
-        shape: RNISAROverlay.Shape
-    ) -> SCNNode {
-        let node = SCNNode()
-        node.renderingOrder = 1000
-        let radius = shape == .box ? boxEdgeRadius : outlineEdgeRadius
+    // MARK: - Depth participation (box-vs-box occlusion)
+    //
+    // BEFORE: every overlay material had `readsFromDepthBuffer = false` AND
+    // `writesToDepthBuffer = false`, and the parts of a box carried THREE
+    // different `renderingOrder`s (999 fill / 1000 edges / 1000 label).
+    // `renderingOrder` is GLOBAL, not per-node-tree, so a box 10 cm BEHIND
+    // another drew its stroke (1000) straight over the near box's fill (999)
+    // at full alpha — overlapping world-anchored boxes were unreadable.
+    //
+    // AFTER: a two-tier scheme.
+    //
+    //   tier `depthWriterOrder` — one INVISIBLE, colour-masked plane per
+    //       `.box`, sitting `occluderSetbackM` BEHIND the box along its own
+    //       normal.  It writes depth and nothing else.
+    //   tier `overlayOrder`    — EVERY visible part of EVERY box (fill,
+    //       stroke, badge) at ONE value, reading depth, writing none.  With
+    //       a single value SceneKit's own back-to-front transparent sort is
+    //       the only thing that orders them, so "far box's stroke over near
+    //       box's fill" is structurally impossible.
+    //
+    // Why a separate SET-BACK writer rather than simply turning
+    // `writesToDepthBuffer` on for the fill:
+    //
+    //   Boxes marking objects on one surface are COPLANAR.  Two coplanar
+    //   translucent fills that both write depth z-fight — half the overlap
+    //   pixels blend twice and half once, which reads as a moiré wash in the
+    //   SAME colour, i.e. dirt rather than depth.  With the writer set back
+    //   3 cm, a coplanar neighbour is always IN FRONT of every writer and
+    //   always draws.  Only something more than `occluderSetbackM` behind is
+    //   culled — the genuinely-behind case the scheme exists for, with
+    //   comfortable margin over typical plane-fit residuals (~1 cm).
+    //
+    // Why the writer is PARALLEL to the geometry it guards (and not, say, a
+    // camera-facing plane at the centroid): a quad seen at θ off-axis spans
+    // a RANGE of depths — 0.15 m of quad at 45° spans 10.6 cm, far more than
+    // the 3 cm setback.  A view-facing writer has one uniform depth, so its
+    // near half would sit BEHIND the box's far half and cull it: the box
+    // would lose its far edge exactly when viewed off-axis.  A writer built
+    // from the same corners, pushed along the quad's own normal, holds the
+    // same 3 cm gap at every point of the quad however oblique the view, and
+    // its footprint is the box's footprint exactly (no over-occlusion).
+    //
+    // The normal's SIGN comes from the camera at node-build time
+    // (`QuadBasis.front`), because corner winding is the producer's
+    // business, not ours.  Two guards make a stale sign harmless:
+    //   * no camera direction (`pointOfView` nil) ⇒ NO writer at all.  No
+    //     occlusion is strictly better than a writer that might sit in front
+    //     of its own box and erase it.
+    //   * a quad more than ~75° off head-on (`frontCos` ≤ `minWriterFrontCos`)
+    //     ⇒ no writer.  There the 3 cm normal offset projects to under ~8 mm
+    //     of depth and the sign is numerically unstable, while the box
+    //     itself covers almost no screen area.
+    // Beyond that a stale sign needs the viewer to cross to the far side of
+    // the quad's plane between node rebuilds.
+    //
+    // NOT real-world occlusion: with `sceneReconstruction` off there is no
+    // scene mesh, and a hand or a passer-by will NOT hide a box.  Only
+    // overlay-vs-overlay is occluded.
+    //
+    // `.outline` overlays deliberately stay OUT of the depth scheme entirely
+    // — no writer, depth read off — so a guidance/reticle affordance can
+    // never be hidden by the boxes it is guiding.  Badge images and labels
+    // likewise keep depth read OFF: they are chrome, they are small, and a
+    // billboarded badge intersects the plane it annotates at a grazing
+    // angle, so depth-reading it would clip the badge in half rather than
+    // occlude it.
+    private static let depthWriterOrder = 999
+    private static let overlayOrder = 1001
+    /// How far behind a box its depth writer sits, along the quad normal, in
+    /// metres.  A box further back than this is occluded; anything within it
+    /// (a coplanar neighbour, plane-fit residual) still draws.
+    private static let occluderSetbackM: Float = 0.03
+    /// Minimum |cos| between the quad normal and the view before a writer is
+    /// emitted at all (≈75° off head-on).  Below it the projected depth gap
+    /// falls under ~8 mm and the normal's sign is numerically unstable.
+    private static let minWriterFrontCos: Float = 0.25
+    /// Separation between a box's stacked layers (fill → stroke → badge).
+    /// 0.5 mm is fine at a 1 m stand-off but falls under a depth-buffer
+    /// quantum at very close range, where the layers could sort arbitrarily;
+    /// 1.5 mm holds at both.
+    private static let layerGapM: Float = 0.0015
+
+    /// The in-plane basis of a quad, plus its extents in that basis.
+    /// `front` is the quad's own normal FLIPPED to point at the camera when a
+    /// camera direction is known, so a caller can offset "towards the viewer"
+    /// without depending on the producer's corner winding.
+    private struct QuadBasis {
+        let right: simd_float3
+        let up: simd_float3
+        let front: simd_float3
+        /// |cos| between the quad normal and the camera direction — 0 when no
+        /// camera direction was supplied, so `front`'s sign is untrustworthy.
+        let frontCos: Float
+        let minR: Float
+        let minU: Float
+        let width: Float
+        let height: Float
+    }
+
+    /// Build `QuadBasis` for a set of relative corners.  `up` is world-up
+    /// projected into the quad's plane (so "bottom-left" is what the VIEWER
+    /// sees, not what the corner ordering says); a quad lying in the
+    /// horizontal plane has no world-up component to project, so it falls
+    /// back to an in-plane edge rather than dividing by ~0.  Returns nil for
+    /// a degenerate quad (fewer than 3 corners, or collinear corners →
+    /// zero/NaN normal).
+    private static func quadBasis(
+        relCorners: [simd_float3], camDir: simd_float3?
+    ) -> QuadBasis? {
         let n = relCorners.count
-        if shape == .box, let fill = quadFillNode(relCorners: relCorners, color: color) {
-            node.addChildNode(fill)
+        guard n >= 3 else { return nil }
+        let e1 = relCorners[1] - relCorners[0]
+        let e2 = relCorners[2] - relCorners[0]
+        let cross = simd_cross(e1, e2)
+        let crossLen = simd_length(cross)
+        guard crossLen.isFinite, crossLen > 1e-9 else { return nil }
+        let normal = cross / crossLen
+        let worldUp = simd_float3(0, 1, 0)
+        var up = worldUp - normal * simd_dot(worldUp, normal)
+        if simd_length(up) < 1e-5 {
+            let alt = e2 - normal * simd_dot(e2, normal)
+            guard simd_length(alt) > 1e-9 else { return nil }
+            up = simd_normalize(alt)
+        } else {
+            up = simd_normalize(up)
         }
-        for i in 0..<n {
-            if let edge = edgeCylinder(
-                from: relCorners[i], to: relCorners[(i + 1) % n], color: color,
-                radius: radius) {
-                node.addChildNode(edge)
-            }
+        let right = simd_normalize(simd_cross(up, normal))
+        guard right.x.isFinite, up.x.isFinite else { return nil }
+        var front = normal
+        var frontCos: Float = 0
+        if let cam = camDir {
+            let d = simd_dot(front, cam)
+            if d < 0 { front = -front }
+            frontCos = abs(d)
+            if !frontCos.isFinite { frontCos = 0 }
         }
-        if let label = label, !label.isEmpty {
-            // Label at the centroid (≈ local origin in relative space).
-            let labelNode = makeBillboardNode(
-                sizeMeters: CGSize(width: 0.12, height: 0.12),
-                color: color, label: label)
-            node.addChildNode(labelNode)
+
+        var minR = Float.greatestFiniteMagnitude
+        var maxR = -Float.greatestFiniteMagnitude
+        var minU = Float.greatestFiniteMagnitude
+        var maxU = -Float.greatestFiniteMagnitude
+        for v in relCorners {
+            let r = simd_dot(v, right), u = simd_dot(v, up)
+            minR = min(minR, r); maxR = max(maxR, r)
+            minU = min(minU, u); maxU = max(maxU, u)
         }
+        let w = maxR - minR, h = maxU - minU
+        guard w.isFinite, h.isFinite else { return nil }
+        return QuadBasis(
+            right: right, up: up, front: front, frontCos: frontCos,
+            minR: minR, minU: minU, width: w, height: h)
+    }
+
+    /// The material every depth writer shares: writes depth, paints nothing.
+    ///
+    /// Deliberately OPAQUE (`blendMode = .replace`, alpha 1) even though it
+    /// paints nothing: SceneKit renders the opaque pass before the
+    /// transparent pass, so an opaque writer is guaranteed to precede the
+    /// translucent geometry it must occlude — belt AND braces alongside the
+    /// lower `renderingOrder`.  A transparent writer would be sorted amongst
+    /// the very fills it exists to gate.
+    private static func depthWriterMaterial() -> SCNMaterial {
+        let mat = SCNMaterial()
+        mat.diffuse.contents = UIColor.black
+        mat.lightingModel = .constant
+        mat.isDoubleSided = true
+        mat.colorBufferWriteMask = []      // depth only — paints no pixels
+        mat.blendMode = .replace           // ⇒ classified opaque, drawn first
+        mat.writesToDepthBuffer = true
+        mat.readsFromDepthBuffer = true    // a far writer must not clobber a near one
+        return mat
+    }
+
+    /// Depth writer for a PLANE-ORIENTED quad: the same polygon as the fill,
+    /// pushed `occluderSetbackM` along the quad's own normal, away from the
+    /// camera.  Parallel to the fill by construction, so the depth gap is the
+    /// same at every point of the quad no matter how oblique the view.
+    /// Returns nil when the basis is missing or too edge-on to trust (see
+    /// `minWriterFrontCos`) — the box then simply does not occlude.
+    private static func depthWriterQuadNode(
+        relCorners: [simd_float3], basis: QuadBasis
+    ) -> SCNNode? {
+        guard basis.frontCos > minWriterFrontCos else { return nil }
+        guard let geom = quadGeometry(relCorners: relCorners) else { return nil }
+        geom.firstMaterial = depthWriterMaterial()
+        let node = SCNNode(geometry: geom)
+        node.renderingOrder = depthWriterOrder
+        node.simdPosition = -basis.front * occluderSetbackM
         return node
     }
 
-    /// The translucent face of a `.box` quad: the polygon fan-triangulated
-    /// about corner 0 (corners arrive in loop order from the detector).
-    /// Double-sided so the fill reads from either side of the plane; no
-    /// depth interaction, matching the edges.
-    private static func quadFillNode(
-        relCorners: [simd_float3], color: UIColor
-    ) -> SCNNode? {
+    /// Depth writer for the GRAVITY-UP/YAW-TO-CAMERA box: a plane of the
+    /// box's own size at local −Z.  The parent's constraint keeps the box's
+    /// plane and this writer parallel, so the same "uniform gap" property
+    /// holds without needing a normal sign at all.
+    private static func depthWriterPlaneNode(
+        width: CGFloat, height: CGFloat
+    ) -> SCNNode {
+        let plane = SCNPlane(width: max(width, 0.001), height: max(height, 0.001))
+        plane.firstMaterial = depthWriterMaterial()
+        let node = SCNNode(geometry: plane)
+        node.renderingOrder = depthWriterOrder
+        node.simdPosition = simd_float3(0, 0, -occluderSetbackM)
+        return node
+    }
+
+    /// Fan-triangulated geometry for a quad's corners (shared by the fill and
+    /// its depth writer, so the two can never disagree about the shape).
+    private static func quadGeometry(relCorners: [simd_float3]) -> SCNGeometry? {
         let n = relCorners.count
         guard n >= 3 else { return nil }
         let source = SCNGeometrySource(
@@ -456,18 +728,272 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
             indices.append(Int32(i + 1))
         }
         let element = SCNGeometryElement(indices: indices, primitiveType: .triangles)
-        let geom = SCNGeometry(sources: [source], elements: [element])
+        return SCNGeometry(sources: [source], elements: [element])
+    }
+
+    /// A GRAVITY-UP, YAW-TO-CAMERA box for a `.box` `worldQuad` overlay with
+    /// `orient:'camera'`.  Sized by the quad's OWN edge lengths (width/height
+    /// in metres, orientation-independent) and centred at the anchor (the
+    /// quad centroid).
+    ///
+    /// THIS IS THE FALLBACK ORIENTATION, not the primary one.  It exists for
+    /// a quad whose corners are NOT yet on a reliably fitted plane.  When
+    /// the corners do come from a real plane, the overlay should be sent as
+    /// `orient:'plane'` and drawn by `makeQuadOutlineNode`, where
+    /// orientation is implicit in the corners and the box foreshortens by
+    /// cos θ like the surface it marks.
+    ///
+    /// The billboard constraint frees ONLY the yaw axis (`.Y`), NOT `.all`:
+    /// a full billboard matches the camera's orientation on all three axes,
+    /// so it also copies the camera's ROLL — tilt the device and every box
+    /// tilts with it.  With `.Y` the box turns to face the viewer while its
+    /// up vector stays the AR world's +Y, which is gravity under the default
+    /// `.gravity` world alignment — "camera-facing + screen-upright".
+    ///
+    /// It does NOT foreshorten: a box that always turns to face the viewer
+    /// always presents its full metric width, so at θ off-axis it covers
+    /// 1/cos θ of what the marked object covers (1.41× at 45°).  Only the
+    /// plane path foreshortens.  That is why this is the fallback.
+    private static func makeBillboardBoxNode(
+        relCorners: [simd_float3],
+        color: UIColor,
+        label: String?,
+        fillAlpha: CGFloat,
+        strokeAlpha: CGFloat,
+        imageUri: String?
+    ) -> SCNNode {
+        // Box dims from the quad's own in-plane basis: the edge lengths are
+        // the metric width/height whatever the quad's orientation, so the box
+        // is the right size even when the source plane is edge-on.  (Same
+        // basis the badge placement below uses.)  A degenerate quad yields no
+        // basis → fall back to the default marker extent rather than a
+        // NaN-sized plane.
+        let basis = quadBasis(relCorners: relCorners, camDir: nil)
+        var w = CGFloat(basis?.width ?? 0)
+        var h = CGFloat(basis?.height ?? 0)
+        if !(w > 0.0001) { w = RNISAROverlay.defaultMarkerExtent }
+        if !(h > 0.0001) { h = RNISAROverlay.defaultMarkerExtent }
+
+        // Parent node: yaws to face the camera, stays gravity-upright.
+        // SceneKit re-orients it every frame at render rate; the anchor world
+        // position is fixed, so there is no per-frame node churn (the whole
+        // point of a stable world-anchored overlay).
+        let node = SCNNode()
+        node.renderingOrder = overlayOrder
+        let billboard = SCNBillboardConstraint()
+        // NOT `.all`: `.all` copies the camera's roll onto the box.
+        billboard.freeAxes = .Y
+        node.constraints = [billboard]
+
+        // Depth writer — `occluderSetbackM` behind, so a box further back
+        // than that is genuinely occluded instead of drawing over this one.
+        // Parallel to the box because the parent's constraint rotates both.
+        node.addChildNode(depthWriterPlaneNode(width: w, height: h))
+
+        // Translucent fill (behind the outline), matching the plane-oriented
+        // box.
+        if fillAlpha > 0 {
+            let plane = SCNPlane(width: w, height: h)
+            let mat = SCNMaterial()
+            mat.diffuse.contents = color.withAlphaComponent(fillAlpha)
+            mat.isDoubleSided = true
+            mat.lightingModel = .constant
+            mat.writesToDepthBuffer = false     // writers own the depth buffer
+            mat.readsFromDepthBuffer = true
+            plane.firstMaterial = mat
+            let fillNode = SCNNode(geometry: plane)
+            fillNode.renderingOrder = overlayOrder
+            node.addChildNode(fillNode)
+        }
+        // Stroked outline — CONSTANT-WORLD-THICKNESS bars (≈3 mm), NOT a
+        // texture stroke scaled to the box.  A proportional stroke collapses
+        // to sub-millimetre (and vanishes) on a small or distant box; four
+        // thin billboard-plane bars hold a fixed 3 mm edge at EVERY box size.
+        if strokeAlpha > 0 {
+            let strokeColor = strokeAlpha >= 1 ? color : color.withAlphaComponent(strokeAlpha)
+            let t: CGFloat = 0.003  // ~3mm world, scale/size-independent
+            func addBar(_ bw: CGFloat, _ bh: CGFloat, _ dx: CGFloat, _ dy: CGFloat) {
+                let bar = SCNPlane(width: max(bw, t), height: max(bh, t))
+                let mat = SCNMaterial()
+                mat.diffuse.contents = strokeColor
+                mat.isDoubleSided = true
+                mat.lightingModel = .constant
+                mat.writesToDepthBuffer = false  // writers own the depth buffer
+                mat.readsFromDepthBuffer = true
+                bar.firstMaterial = mat
+                let barNode = SCNNode(geometry: bar)
+                barNode.simdPosition = simd_float3(Float(dx), Float(dy), layerGapM)
+                barNode.renderingOrder = overlayOrder
+                node.addChildNode(barNode)
+            }
+            addBar(w, t, 0, (h - t) / 2)    // top
+            addBar(w, t, 0, -(h - t) / 2)   // bottom
+            addBar(t, h, -(w - t) / 2, 0)   // left
+            addBar(t, h, (w - t) / 2, 0)    // right
+        }
+        // Badge image bottom-left INSIDE the box.  The parent faces the
+        // camera, so local −X/−Y is screen bottom-left; same proportional
+        // sizing as the plane-oriented path (≈26% of the shorter side,
+        // clamped).
+        if let uri = imageUri, w > 0.012, h > 0.012, let img = badgeImage(uri) {
+            let extent = min(max(min(w, h) * 0.26, 0.004), 0.05)
+            let pad = Float(extent) * 0.25
+            let badge = makeBadgeImageNode(image: img, extent: extent)
+            badge.simdPosition = simd_float3(
+                Float(-w / 2) + Float(extent) / 2 + pad,
+                Float(-h / 2) + Float(extent) / 2 + pad,
+                2 * layerGapM)
+            node.addChildNode(badge)
+        } else if let label = label, !label.isEmpty {
+            let labelNode = makeBillboardNode(
+                sizeMeters: CGSize(width: 0.12, height: 0.12),
+                color: color, label: label)
+            node.addChildNode(labelNode)
+        }
+        return node
+    }
+
+    /// A 3D outline through corners expressed RELATIVE to the anchor
+    /// origin (anchor at the quad centroid).  Each edge is a thin cylinder —
+    /// SceneKit `.line` primitives are always 1px and unscalable, so a visible
+    /// outline must be real geometry.  `shape == .box` additionally renders
+    /// the translucent face the SDK asked for (previously ignored on iOS —
+    /// Android has always honoured it) and thins the edges to the border
+    /// role.  Optional camera-facing label at centre.
+    private static func makeQuadOutlineNode(
+        relCorners: [simd_float3],
+        color: UIColor,
+        label: String?,
+        shape: RNISAROverlay.Shape,
+        fillAlpha: CGFloat = RNISAROverlay.defaultFillAlpha,
+        strokeAlpha: CGFloat = RNISAROverlay.defaultStrokeAlpha,
+        imageUri: String? = nil,
+        camDir: simd_float3? = nil
+    ) -> SCNNode {
+        let node = SCNNode()
+        node.renderingOrder = overlayOrder
+        let radius = shape == .box ? boxEdgeRadius : outlineEdgeRadius
+        let n = relCorners.count
+        // Depth participation is for `.box` only.  `.outline` is a guidance
+        // affordance that must never be hidden by the boxes it is guiding,
+        // so it neither writes depth (no writer) nor reads it.
+        let isBox = shape == .box
+        // In-plane basis + the quad normal SIGNED towards the camera, so
+        // "1.5 mm in front of the fill" has an unambiguous direction that
+        // does not depend on the producer's corner winding.
+        let basis = quadBasis(relCorners: relCorners, camDir: camDir)
+        let front = basis?.front ?? simd_float3(0, 0, 0)
+        // Depth writer FIRST (order within a parent is irrelevant — the tiers
+        // are what sequence the draw — but it keeps the intent adjacent to
+        // the geometry it gates).  nil ⇒ no camera direction or too edge-on
+        // to trust the normal's sign; the box then does not occlude, which is
+        // the safe direction of that failure.
+        if isBox, let b = basis,
+           let writer = depthWriterQuadNode(relCorners: relCorners, basis: b) {
+            node.addChildNode(writer)
+        }
+        if isBox,
+           let fill = quadFillNode(
+               relCorners: relCorners, color: color, fillAlpha: fillAlpha,
+               depthRead: true) {
+            node.addChildNode(fill)
+        }
+        // strokeAlpha == 0 ⇒ FILL-ONLY: emit no edge geometry at all (not
+        // just transparent edges) so a tiled set of adjacent quads reads as
+        // ONE continuous region with no internal seams — and so N quads cost
+        // N fewer × 4 SCNNodes.  Default 1 keeps the historical opaque
+        // outline.
+        if strokeAlpha > 0 {
+            let edgeColor = strokeAlpha >= 1
+                ? color : color.withAlphaComponent(strokeAlpha)
+            // Nudged `layerGapM` towards the viewer: fill and stroke are now
+            // on ONE renderingOrder, so their draw order is decided purely by
+            // SceneKit's back-to-front transparent sort and a coplanar stroke
+            // would tie with the fill and could be drawn under it (picking up
+            // the fill's tint).  1.5 mm settles the tie at every stand-off.
+            let edgeOffset = front * layerGapM
+            for i in 0..<n {
+                if let edge = edgeCylinder(
+                    from: relCorners[i], to: relCorners[(i + 1) % n],
+                    color: edgeColor, radius: radius,
+                    depthRead: isBox, offset: edgeOffset) {
+                    node.addChildNode(edge)
+                }
+            }
+        }
+        // A badge image REPLACES the centroid text label: a chip over the
+        // middle of the box would cover exactly what the box marks.  Drawn
+        // inside the quad at its BOTTOM-LEFT, inset.
+        if let uri = imageUri, let b = basis, let img = badgeImage(uri) {
+            // Plane basis from world-up projected into the quad's plane, so
+            // "bottom-left" is what the VIEWER sees and does not depend on
+            // the producer's corner ordering.  Computed once at the top of
+            // this function (`quadBasis`) and shared with the depth writer
+            // and the stroke offset, rather than recomputed here.
+            let right = b.right, up = b.up
+            let minR = b.minR, minU = b.minU
+            let qw = CGFloat(b.width), qh = CGFloat(b.height)
+            // Skip only a DEGENERATE quad — a small box still gets a small
+            // badge.  (A larger cutoff would suppress the badge on every
+            // near-minimum-size box, i.e. most of them at close range.)
+            if qw > 0.012, qh > 0.012 {
+                // Proportional BADGE — NOT an absolute floor.  An absolute
+                // floor can be half of a small box and cover it; ~26% of the
+                // shorter side reads the same on a tiny quad and a 15 cm one.
+                // The tiny floor only avoids a zero-size plane, the cap only
+                // stops a huge quad's badge dwarfing the feed.
+                let extent = min(max(min(qw, qh) * 0.26, 0.004), 0.05)
+                let pad = Float(extent) * 0.25
+                let badge = makeBadgeImageNode(image: img, extent: extent)
+                // `front * 2 * layerGapM` — one tier above the stroke in the
+                // transparent sort, for the same tie-break reason as the
+                // stroke.
+                badge.simdPosition =
+                    right * (minR + Float(extent) / 2 + pad)
+                    + up * (minU + Float(extent) / 2 + pad)
+                    + front * (2 * layerGapM)
+                node.addChildNode(badge)
+            }
+        } else if let label = label, !label.isEmpty {
+            // Label at the centroid (≈ local origin in relative space).
+            let labelNode = makeBillboardNode(
+                sizeMeters: CGSize(width: 0.12, height: 0.12),
+                color: color, label: label)
+            node.addChildNode(labelNode)
+        }
+        return node
+    }
+
+    /// The translucent face of a `.box` quad: the polygon fan-triangulated
+    /// about corner 0 (corners arrive in loop order from the producer).
+    /// Double-sided so the fill reads from either side of the plane.  READS
+    /// depth (so a box behind another box's writer is culled) but never
+    /// WRITES it — the box's own depth writer, 3 cm back, owns that.
+    private static func quadFillNode(
+        relCorners: [simd_float3], color: UIColor, fillAlpha: CGFloat,
+        depthRead: Bool
+    ) -> SCNNode? {
+        guard let geom = quadGeometry(relCorners: relCorners) else { return nil }
         let mat = SCNMaterial()
-        mat.diffuse.contents = color.withAlphaComponent(boxFillAlpha)
+        // `fillAlpha` REPLACES any alpha carried by the overlay colour (the
+        // colour channel drives hue only) — same rule as Android, which masks
+        // the colour's alpha out.  Callers pass `RNISAROverlay.fillAlpha`,
+        // which the model's init already sanitised to 0...1.
+        mat.diffuse.contents = color.withAlphaComponent(fillAlpha)
         mat.lightingModel = .constant
         mat.isDoubleSided = true
-        mat.writesToDepthBuffer = false
-        mat.readsFromDepthBuffer = false
+        mat.writesToDepthBuffer = false     // the box's depth writer owns depth
+        mat.readsFromDepthBuffer = depthRead
         geom.firstMaterial = mat
         let node = SCNNode(geometry: geom)
-        // Under the edges/label (parent order is not a z-guarantee in
-        // SceneKit — renderingOrder is).
-        node.renderingOrder = 999
+        // ONE renderingOrder for every visible part of every box.  This used
+        // to be 999 (under the edges/label) — but `renderingOrder` is GLOBAL,
+        // so "under my edges" also meant "under a completely different box's
+        // edges", which is how a box further back drew its stroke over this
+        // fill.  Ordering within a box is now the geometric `layerGapM`
+        // offset plus SceneKit's transparent sort; ordering BETWEEN boxes is
+        // the depth buffer.
+        node.renderingOrder = overlayOrder
         return node
     }
 
@@ -476,7 +1002,7 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     /// rotate +Y onto the edge direction.
     private static func edgeCylinder(
         from a: simd_float3, to b: simd_float3, color: UIColor,
-        radius: CGFloat
+        radius: CGFloat, depthRead: Bool, offset: simd_float3
     ) -> SCNNode? {
         let d = b - a
         let len = simd_length(d)
@@ -485,12 +1011,12 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         let mat = SCNMaterial()
         mat.diffuse.contents = color
         mat.lightingModel = .constant
-        mat.writesToDepthBuffer = false
-        mat.readsFromDepthBuffer = false
+        mat.writesToDepthBuffer = false     // the box's depth writer owns depth
+        mat.readsFromDepthBuffer = depthRead
         cyl.firstMaterial = mat
         let node = SCNNode(geometry: cyl)
-        node.renderingOrder = 1000
-        node.simdPosition = (a + b) * 0.5
+        node.renderingOrder = overlayOrder
+        node.simdPosition = (a + b) * 0.5 + offset
         let yAxis = simd_float3(0, 1, 0)
         let dir = d / len
         let dot = simd_dot(yAxis, dir)

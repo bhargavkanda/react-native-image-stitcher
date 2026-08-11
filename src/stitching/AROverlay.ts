@@ -89,10 +89,37 @@ export interface AROverlay {
   label?: string;
 
   /**
+   * Optional IMAGE drawn INSIDE a `'box'` overlay, anchored bottom-left and
+   * inset, so it annotates without covering what the box marks.  A local
+   * `file://` path (or plain filesystem path); the native renderers decode
+   * and CACHE it by URI and silently ignore an undecodable file (the box
+   * then draws without it).  When present it REPLACES the centroid `label`.
+   */
+  imageUri?: string;
+
+  /**
    * Stroke / fill colour as a hex string (e.g. `'#00E5FF'`).  Defaults to a
    * theme colour on the native side when omitted.
    */
   color?: string;
+
+  /**
+   * Fill opacity `0..1` for a `'box'` overlay (0 = no fill).  Omitted = the
+   * native default (~22%, identical on both platforms), so pre-existing
+   * overlays render pixel-identically.  A non-finite or out-of-range value
+   * falls back to the default rather than being clipped — nonsense never
+   * silently produces an invisible or opaque fill.
+   */
+  fillAlpha?: number;
+
+  /**
+   * Stroke (outline) opacity `0..1` for the overlay edges.  Omitted = 1
+   * (the historical fully-opaque outline).  `0` yields a FILL-ONLY quad —
+   * what lets a tiled set of adjacent quads read as one continuous region
+   * with no internal seams.  Same fallback-not-clip rule as
+   * {@link fillAlpha}.
+   */
+  strokeAlpha?: number;
 
   /**
    * Render mode.  Default `'2d'` — a flat shape reprojected to screen.
@@ -102,4 +129,19 @@ export interface AROverlay {
    * warning).  Document-only forward compatibility.
    */
   mode?: '2d' | '3d';
+
+  /**
+   * Orientation of a `worldQuad` `'box'` overlay (iOS renderer).  Default
+   * `'plane'` — the box is drawn in the plane of its world corners (tilts
+   * and foreshortens with the surface it marks), matching every pre-`orient`
+   * build byte-for-byte.  `'camera'` re-orients the box to FACE THE CAMERA
+   * and stay gravity-upright on screen regardless of the quad's orientation
+   * (a billboard sized by the quad's own edge lengths at its centroid) —
+   * for a live detection box that must stay readable when the fitted plane
+   * is oblique or edge-on (where a plane-oriented box foreshortens to a
+   * sliver).  Ignored for `'outline'` shapes and for overlays without a
+   * `worldQuad`; Android's screen-space renderer projects corners directly
+   * and ignores it too.
+   */
+  orient?: 'plane' | 'camera';
 }
