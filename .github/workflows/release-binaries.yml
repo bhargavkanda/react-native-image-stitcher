@@ -145,6 +145,9 @@ jobs:
             ./assets/*.zip
           fail_on_unmatched_files: true
           generate_release_notes: true
+          # RC / prerelease tags (contain a hyphen, e.g. v0.23.0-rc.1) are
+          # marked as GitHub prereleases so they don't show as the latest release.
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
 
   # ── Publish to npm ─────────────────────────────────────────────────
   # Runs AFTER the binaries are attached to the GH Release.  Order
@@ -190,6 +193,13 @@ jobs:
           fi
 
       - name: Publish to npm
-        run: npm publish --access public
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "Prerelease $VERSION -> publishing under dist-tag 'rc' (NOT latest)"
+            npm publish --access public --tag rc
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
