@@ -313,7 +313,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                 return Self.makeBillboardBoxNode(
                     relCorners: rel, color: overlay.color, label: overlay.label,
                     fillAlpha: overlay.fillAlpha, strokeAlpha: overlay.strokeAlpha,
-                    imageUri: overlay.imageUri)
+                    imageUri: overlay.imageUri,
+                    depthOcclusion: overlay.depthOcclusion)
             }
             return Self.makeQuadOutlineNode(
                 relCorners: rel,
@@ -321,7 +322,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                 shape: overlay.shape, fillAlpha: overlay.fillAlpha,
                 strokeAlpha: overlay.strokeAlpha,
                 imageUri: overlay.imageUri,
-                camDir: camDir)
+                camDir: camDir,
+                depthOcclusion: overlay.depthOcclusion)
         }
         return Self.makeBillboardNode(
             sizeMeters: overlay.sizeMeters, color: overlay.color,
@@ -507,16 +509,27 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     // `RNISAROverlay.defaultFillAlpha`, so a JS overlay that omits the key
     // still fills at exactly 22%.
 
-    // MARK: - Depth participation (box-vs-box occlusion)
+    // MARK: - Depth participation (box-vs-box occlusion) — PER-OVERLAY OPT-IN
     //
-    // BEFORE: every overlay material had `readsFromDepthBuffer = false` AND
+    // The scheme below is gated on the overlay's `depthOcclusion` flag
+    // (default false).  A `.box` that does NOT opt in renders with the
+    // LEGACY pipeline exactly as every pre-`depthOcclusion` build drew it:
+    // no depth writer, no depth reads, fill at `legacyFillOrder` under
+    // edges at `legacyChromeOrder`, and no stroke offset — including the
+    // historical artifact that a box further back can draw its stroke over
+    // a nearer box's fill.  That artifact is precisely what the opt-in
+    // fixes; keeping the default at the legacy pipeline means no existing
+    // public consumer's boxes change appearance without asking.
+    //
+    // LEGACY (and the `depthOcclusion:false` path today): every overlay
+    // material had `readsFromDepthBuffer = false` AND
     // `writesToDepthBuffer = false`, and the parts of a box carried THREE
     // different `renderingOrder`s (999 fill / 1000 edges / 1000 label).
     // `renderingOrder` is GLOBAL, not per-node-tree, so a box 10 cm BEHIND
     // another drew its stroke (1000) straight over the near box's fill (999)
     // at full alpha — overlapping world-anchored boxes were unreadable.
     //
-    // AFTER: a two-tier scheme.
+    // OPT-IN (`depthOcclusion:true`): a two-tier scheme.
     //
     //   tier `depthWriterOrder` — one INVISIBLE, colour-masked plane per
     //       `.box`, sitting `occluderSetbackM` BEHIND the box along its own
@@ -573,8 +586,23 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     // billboarded badge intersects the plane it annotates at a grazing
     // angle, so depth-reading it would clip the badge in half rather than
     // occlude it.
+    //
+    // MIXED SCENES: occlusion is strictly BETWEEN opted-in boxes.  A
+    // non-opted-in box writes no depth (it cannot occlude an opted-in box)
+    // and reads none (opted-in writers cannot occlude it) — the flag is a
+    // pure per-overlay property with no action at a distance on overlays
+    // that did not set it.
     private static let depthWriterOrder = 999
     private static let overlayOrder = 1001
+    /// Legacy per-part tiers for a `.box` that has NOT opted into depth
+    /// occlusion (`depthOcclusion` absent/false — every pre-existing public
+    /// consumer): fill under edges, exactly the pre-`depthOcclusion`
+    /// pipeline.  `legacyFillOrder` numerically equals `depthWriterOrder`
+    /// by historical accident; the two never interact because writers exist
+    /// only for opted-in boxes and are opaque-pass, while the legacy fill
+    /// neither reads nor writes depth.
+    private static let legacyFillOrder = 999
+    private static let legacyChromeOrder = 1000
     /// How far behind a box its depth writer sits, along the quad normal, in
     /// metres.  A box further back than this is occluded; anything within it
     /// (a coplanar neighbour, plane-fit residual) still draws.
@@ -760,7 +788,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         label: String?,
         fillAlpha: CGFloat,
         strokeAlpha: CGFloat,
-        imageUri: String?
+        imageUri: String?,
+        depthOcclusion: Bool = false
     ) -> SCNNode {
         // Box dims from the quad's own in-plane basis: the edge lengths are
         // the metric width/height whatever the quad's orientation, so the box
@@ -788,7 +817,11 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         // Depth writer — `occluderSetbackM` behind, so a box further back
         // than that is genuinely occluded instead of drawing over this one.
         // Parallel to the box because the parent's constraint rotates both.
-        node.addChildNode(depthWriterPlaneNode(width: w, height: h))
+        // Opt-in only (`depthOcclusion`): a non-opted-in box neither
+        // occludes nor is occluded.
+        if depthOcclusion {
+            node.addChildNode(depthWriterPlaneNode(width: w, height: h))
+        }
 
         // Translucent fill (behind the outline), matching the plane-oriented
         // box.
@@ -799,7 +832,7 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
             mat.isDoubleSided = true
             mat.lightingModel = .constant
             mat.writesToDepthBuffer = false     // writers own the depth buffer
-            mat.readsFromDepthBuffer = true
+            mat.readsFromDepthBuffer = depthOcclusion
             plane.firstMaterial = mat
             let fillNode = SCNNode(geometry: plane)
             fillNode.renderingOrder = overlayOrder
@@ -819,7 +852,7 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                 mat.isDoubleSided = true
                 mat.lightingModel = .constant
                 mat.writesToDepthBuffer = false  // writers own the depth buffer
-                mat.readsFromDepthBuffer = true
+                mat.readsFromDepthBuffer = depthOcclusion
                 bar.firstMaterial = mat
                 let barNode = SCNNode(geometry: bar)
                 barNode.simdPosition = simd_float3(Float(dx), Float(dy), layerGapM)
@@ -868,16 +901,22 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         fillAlpha: CGFloat = RNISAROverlay.defaultFillAlpha,
         strokeAlpha: CGFloat = RNISAROverlay.defaultStrokeAlpha,
         imageUri: String? = nil,
-        camDir: simd_float3? = nil
+        camDir: simd_float3? = nil,
+        depthOcclusion: Bool = false
     ) -> SCNNode {
         let node = SCNNode()
         node.renderingOrder = overlayOrder
         let radius = shape == .box ? boxEdgeRadius : outlineEdgeRadius
         let n = relCorners.count
-        // Depth participation is for `.box` only.  `.outline` is a guidance
-        // affordance that must never be hidden by the boxes it is guiding,
-        // so it neither writes depth (no writer) nor reads it.
+        // Depth participation is for `.box` only, and ONLY when the overlay
+        // opted in (`depthOcclusion`).  `.outline` is a guidance affordance
+        // that must never be hidden by the boxes it is guiding, so it
+        // neither writes depth (no writer) nor reads it; a non-opted-in box
+        // renders with the LEGACY pipeline (no writer, no depth reads,
+        // legacy per-part tiers, no stroke offset) so pre-existing
+        // consumers' boxes draw exactly as before this scheme existed.
         let isBox = shape == .box
+        let participatesInDepth = isBox && depthOcclusion
         // In-plane basis + the quad normal SIGNED towards the camera, so
         // "1.5 mm in front of the fill" has an unambiguous direction that
         // does not depend on the producer's corner winding.
@@ -888,14 +927,16 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         // the geometry it gates).  nil ⇒ no camera direction or too edge-on
         // to trust the normal's sign; the box then does not occlude, which is
         // the safe direction of that failure.
-        if isBox, let b = basis,
+        if participatesInDepth, let b = basis,
            let writer = depthWriterQuadNode(relCorners: relCorners, basis: b) {
             node.addChildNode(writer)
         }
         if isBox,
            let fill = quadFillNode(
                relCorners: relCorners, color: color, fillAlpha: fillAlpha,
-               depthRead: true) {
+               depthRead: participatesInDepth,
+               renderingOrder: participatesInDepth
+                   ? overlayOrder : legacyFillOrder) {
             node.addChildNode(fill)
         }
         // strokeAlpha == 0 ⇒ FILL-ONLY: emit no edge geometry at all (not
@@ -906,17 +947,25 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         if strokeAlpha > 0 {
             let edgeColor = strokeAlpha >= 1
                 ? color : color.withAlphaComponent(strokeAlpha)
-            // Nudged `layerGapM` towards the viewer: fill and stroke are now
-            // on ONE renderingOrder, so their draw order is decided purely by
-            // SceneKit's back-to-front transparent sort and a coplanar stroke
-            // would tie with the fill and could be drawn under it (picking up
-            // the fill's tint).  1.5 mm settles the tie at every stand-off.
-            let edgeOffset = front * layerGapM
+            // Nudged `layerGapM` towards the viewer — OPT-IN BOXES ONLY:
+            // there, fill and stroke share ONE renderingOrder, so their draw
+            // order is decided purely by SceneKit's back-to-front transparent
+            // sort and a coplanar stroke would tie with the fill and could be
+            // drawn under it (picking up the fill's tint); 1.5 mm settles the
+            // tie at every stand-off.  A legacy box (and every `.outline`)
+            // keeps the un-offset legacy geometry: its edges draw after its
+            // fill by TIER (`legacyChromeOrder` > `legacyFillOrder`), exactly
+            // as before, so no tie-break is needed.
+            let edgeOffset = participatesInDepth
+                ? front * layerGapM : simd_float3(0, 0, 0)
+            let edgeOrder = (isBox && !participatesInDepth)
+                ? legacyChromeOrder : overlayOrder
             for i in 0..<n {
                 if let edge = edgeCylinder(
                     from: relCorners[i], to: relCorners[(i + 1) % n],
                     color: edgeColor, radius: radius,
-                    depthRead: isBox, offset: edgeOffset) {
+                    depthRead: participatesInDepth, offset: edgeOffset,
+                    renderingOrder: edgeOrder) {
                     node.addChildNode(edge)
                 }
             }
@@ -966,12 +1015,14 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
 
     /// The translucent face of a `.box` quad: the polygon fan-triangulated
     /// about corner 0 (corners arrive in loop order from the producer).
-    /// Double-sided so the fill reads from either side of the plane.  READS
-    /// depth (so a box behind another box's writer is culled) but never
-    /// WRITES it — the box's own depth writer, 3 cm back, owns that.
+    /// Double-sided so the fill reads from either side of the plane.  For an
+    /// OPT-IN (`depthOcclusion`) box it READS depth (so a box behind another
+    /// opted-in box's writer is culled) but never WRITES it — the box's own
+    /// depth writer, 3 cm back, owns that.  A legacy box's fill neither
+    /// reads nor writes depth, exactly as before the scheme existed.
     private static func quadFillNode(
         relCorners: [simd_float3], color: UIColor, fillAlpha: CGFloat,
-        depthRead: Bool
+        depthRead: Bool, renderingOrder: Int
     ) -> SCNNode? {
         guard let geom = quadGeometry(relCorners: relCorners) else { return nil }
         let mat = SCNMaterial()
@@ -986,14 +1037,16 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         mat.readsFromDepthBuffer = depthRead
         geom.firstMaterial = mat
         let node = SCNNode(geometry: geom)
-        // ONE renderingOrder for every visible part of every box.  This used
-        // to be 999 (under the edges/label) — but `renderingOrder` is GLOBAL,
-        // so "under my edges" also meant "under a completely different box's
-        // edges", which is how a box further back drew its stroke over this
-        // fill.  Ordering within a box is now the geometric `layerGapM`
-        // offset plus SceneKit's transparent sort; ordering BETWEEN boxes is
-        // the depth buffer.
-        node.renderingOrder = overlayOrder
+        // Caller-selected tier.  Opt-in box: `overlayOrder` — ONE
+        // renderingOrder for every visible part of every opted-in box
+        // (`renderingOrder` is GLOBAL, so "under my edges" also means "under
+        // a completely different box's edges"; ordering within a box is the
+        // geometric `layerGapM` offset plus SceneKit's transparent sort, and
+        // ordering BETWEEN boxes is the depth buffer).  Legacy box:
+        // `legacyFillOrder` — the historical under-the-edges tier, kept
+        // byte-for-byte so non-opted-in consumers see the pre-scheme
+        // rendering, warts and all.
+        node.renderingOrder = renderingOrder
         return node
     }
 
@@ -1002,7 +1055,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     /// rotate +Y onto the edge direction.
     private static func edgeCylinder(
         from a: simd_float3, to b: simd_float3, color: UIColor,
-        radius: CGFloat, depthRead: Bool, offset: simd_float3
+        radius: CGFloat, depthRead: Bool, offset: simd_float3,
+        renderingOrder: Int
     ) -> SCNNode? {
         let d = b - a
         let len = simd_length(d)
@@ -1015,7 +1069,10 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         mat.readsFromDepthBuffer = depthRead
         cyl.firstMaterial = mat
         let node = SCNNode(geometry: cyl)
-        node.renderingOrder = overlayOrder
+        // Caller-selected tier: `overlayOrder` for opt-in boxes and
+        // `.outline`s, `legacyChromeOrder` for a legacy box's edges (the
+        // historical over-the-fill tier).
+        node.renderingOrder = renderingOrder
         node.simdPosition = (a + b) * 0.5 + offset
         let yAxis = simd_float3(0, 1, 0)
         let dir = d / len

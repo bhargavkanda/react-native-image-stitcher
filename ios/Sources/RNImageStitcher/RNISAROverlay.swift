@@ -24,6 +24,7 @@
 //     color?: string;                              // hex; default theme color
 //     mode?: '2d' | '3d';                          // default '2d'; '3d' SCAFFOLD only
 //     orient?: 'plane' | 'camera';                 // default 'plane'
+//     depthOcclusion?: boolean;                    // default false (legacy rendering)
 //   }
 //
 // TWO overlay namespaces, rendered as a UNION (see `AROverlayStore`):
@@ -129,6 +130,15 @@ public struct RNISAROverlay: Equatable {
     /// AROverlay.ts `orient`.
     public let billboard: Bool
 
+    /// Opt-in for the renderer's box-vs-box depth-occlusion scheme on a
+    /// `.box` overlay.  Default false = the LEGACY rendering pipeline,
+    /// exactly as every pre-`depthOcclusion` build drew it (no depth
+    /// writer, no depth reads, fill under stroke in the historical overlay
+    /// order).  true = the box participates in depth occlusion (see the
+    /// "Depth participation" section in `RNSARCameraView`).  Occlusion is
+    /// strictly between opted-in boxes.  See AROverlay.ts `depthOcclusion`.
+    public let depthOcclusion: Bool
+
     public init(
         id: String,
         worldPosition: simd_float3?,
@@ -144,7 +154,8 @@ public struct RNISAROverlay: Equatable {
         fillAlpha: CGFloat = RNISAROverlay.defaultFillAlpha,
         strokeAlpha: CGFloat = RNISAROverlay.defaultStrokeAlpha,
         imageUri: String? = nil,
-        billboard: Bool = false
+        billboard: Bool = false,
+        depthOcclusion: Bool = false
     ) {
         self.id = id
         self.worldPosition = worldPosition
@@ -156,6 +167,7 @@ public struct RNISAROverlay: Equatable {
         self.mode = mode
         self.imageUri = imageUri
         self.billboard = billboard
+        self.depthOcclusion = depthOcclusion
         // Sanitise HERE (not just in `from(dictionary:)`) so the 0...1
         // invariant holds for the native-plugin path too — this is the one
         // funnel every overlay passes through.
@@ -270,6 +282,18 @@ public struct RNISAROverlay: Equatable {
         // `orient: 'camera'` ⇒ billboard.  Any other / absent value ⇒ 'plane'
         // (false) ⇒ byte-identical to pre-`orient` builds.
         let billboard = (dict["orient"] as? String) == "camera"
+        // `depthOcclusion` — genuine-boolean gate (fallback-not-clip, the
+        // mirror of `numeric`'s boolean REJECTION): only a real bridged
+        // boolean opts in.  A number, string, or any other nonsense falls
+        // back to false — the legacy rendering — rather than being coerced,
+        // so a malformed value can never silently change how a pre-existing
+        // consumer's boxes draw.  Android gates on ReadableType.Boolean for
+        // the same result.
+        let depthOcclusion: Bool = {
+            guard let n = dict["depthOcclusion"] as? NSNumber,
+                  CFGetTypeID(n) == CFBooleanGetTypeID() else { return false }
+            return n.boolValue
+        }()
 
         return RNISAROverlay(
             id: id,
@@ -283,7 +307,8 @@ public struct RNISAROverlay: Equatable {
             fillAlpha: fillAlpha,
             strokeAlpha: strokeAlpha,
             imageUri: imageUri,
-            billboard: billboard
+            billboard: billboard,
+            depthOcclusion: depthOcclusion
         )
     }
 

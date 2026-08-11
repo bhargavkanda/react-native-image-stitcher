@@ -144,4 +144,21 @@ export interface AROverlay {
    * and ignores it too.
    */
   orient?: 'plane' | 'camera';
+
+  /**
+   * Opt-in for the iOS renderer's box-vs-box DEPTH-OCCLUSION scheme on a
+   * `'box'` overlay.  Default `false` — the box renders with the legacy
+   * pipeline exactly as it did before this field existed: no depth writer,
+   * no depth reads, fill under stroke in the historical overlay order, and
+   * overlapping boxes draw over each other regardless of world depth.
+   * `true` — the box participates in depth occlusion: an invisible depth
+   * writer 3 cm behind the box culls other opted-in boxes genuinely behind
+   * it, while coplanar neighbours still draw.  Occlusion is strictly
+   * between opted-in boxes; non-opted-in boxes, `'outline'` overlays,
+   * labels, and badges neither occlude nor are occluded.  Same
+   * fallback-not-clip rule as the other new fields: a non-boolean value
+   * reads as `false` (legacy) rather than being coerced.  Android's
+   * screen-space renderer has no depth scheme and ignores the flag.
+   */
+  depthOcclusion?: boolean;
 }

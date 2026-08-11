@@ -31,6 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no-op guarantee is separate and still holds: with no plugin registered
   the hook's merge is the identity (it adds, removes, and changes
   nothing).
+- **`AROverlay.depthOcclusion` — per-overlay OPT-IN for the iOS
+  box-vs-box depth-occlusion scheme.**  Default `false`: a `'box'`
+  overlay that does not set the flag renders with the legacy pipeline
+  exactly as before (no depth writer, no depth reads, fill under stroke
+  in the historical overlay order — including the historical artifact
+  that a box further back can draw its stroke over a nearer box's fill).
+  `true`: the box participates in the new two-tier depth scheme — an
+  invisible depth writer 3 cm behind the box occludes other opted-in
+  boxes genuinely behind it while coplanar neighbours still draw.
+  Occlusion is strictly between opted-in boxes; `'outline'` overlays,
+  labels, and badges never participate.  A non-boolean value falls back
+  to `false` (legacy) on both platforms rather than being coerced.
+  Android's screen-space renderer has no depth scheme and ignores the
+  flag.
 
 ## [0.21.0] — 2026-07-03
 

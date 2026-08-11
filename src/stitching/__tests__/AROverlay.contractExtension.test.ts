@@ -7,6 +7,7 @@
  *   strokeAlpha?: number;      // 0..1 outline opacity; absent = opaque; 0 = fill-only
  *   imageUri?: string;         // image badge drawn inside a 'box'
  *   orient?: 'plane'|'camera'; // 'camera' = gravity-upright billboard box (iOS)
+ *   depthOcclusion?: boolean;  // opt-in iOS box occlusion; absent/false = legacy
  *
  * Two properties are pinned:
  *
@@ -15,9 +16,12 @@
  *      `AROverlay.types.test.ts`.
  *   2. The controller forwards the new fields to native UNTOUCHED and, just
  *      as importantly, does NOT materialise them when the caller omits them
- *      — the native defaults (22% fill, opaque stroke, plane orientation)
- *      only apply to ABSENT keys, so a JS layer that invented values would
- *      silently change rendering for every pre-existing consumer.
+ *      — the native defaults (22% fill, opaque stroke, plane orientation,
+ *      legacy no-occlusion rendering) only apply to ABSENT keys, so a JS
+ *      layer that invented values would silently change rendering for every
+ *      pre-existing consumer.  For `depthOcclusion` the absent-key half IS
+ *      the back-compat guarantee: absent ⇒ the native side renders the
+ *      legacy pre-`depthOcclusion` pipeline unchanged.
  */
 
 import type { AROverlay } from '../AROverlay';
@@ -77,12 +81,29 @@ describe('AROverlay contract extension — types', () => {
     expect(box.imageUri).toBe('file:///tmp/badge.png');
   });
 
+  it('models an opt-in depth-occluding box (depthOcclusion true)', () => {
+    const occluder: AROverlay = {
+      id: 'occ-1',
+      worldQuad: [
+        [0, 0, 0],
+        [0.2, 0, 0],
+        [0.2, 0.3, 0],
+        [0, 0.3, 0],
+      ],
+      shape: 'box',
+      depthOcclusion: true,
+    };
+    expect(occluder.depthOcclusion).toBe(true);
+  });
+
   it('keeps every new field optional (back-compat: the minimal overlay still compiles)', () => {
     const minimal: AROverlay = { id: 'm1' };
     expect(minimal.fillAlpha).toBeUndefined();
     expect(minimal.strokeAlpha).toBeUndefined();
     expect(minimal.imageUri).toBeUndefined();
     expect(minimal.orient).toBeUndefined();
+    // Absent = legacy rendering is the depthOcclusion back-compat contract.
+    expect(minimal.depthOcclusion).toBeUndefined();
   });
 
   it('rejects wrong types on the new fields', () => {
@@ -101,7 +122,18 @@ describe('AROverlay contract extension — types', () => {
       // @ts-expect-error — imageUri is a string path, not a require() number.
       imageUri: 42,
     };
-    expect([bad1.id, bad2.id, bad3.id]).toEqual(['x', 'y', 'z']);
+    const bad4: AROverlay = {
+      id: 'w',
+      // @ts-expect-error — depthOcclusion is a boolean, not a string.
+      depthOcclusion: 'true',
+    };
+    const bad5: AROverlay = {
+      id: 'v',
+      // @ts-expect-error — depthOcclusion is a boolean, not a number.
+      depthOcclusion: 1,
+    };
+    expect([bad1.id, bad2.id, bad3.id, bad4.id, bad5.id])
+      .toEqual(['x', 'y', 'z', 'w', 'v']);
   });
 });
 
@@ -120,6 +152,7 @@ describe('AROverlay contract extension — controller dispatch', () => {
       strokeAlpha: 0.8,
       imageUri: 'file:///tmp/badge.png',
       orient: 'camera',
+      depthOcclusion: true,
     };
     c.setOverlays([overlay]);
     expect(setOverlaysSpy).toHaveBeenCalledTimes(1);
@@ -129,6 +162,9 @@ describe('AROverlay contract extension — controller dispatch', () => {
     expect(sent[0].strokeAlpha).toBe(0.8);
     expect(sent[0].imageUri).toBe('file:///tmp/badge.png');
     expect(sent[0].orient).toBe('camera');
+    // Opt-in selects the new depth-occlusion scheme on the native side —
+    // the flag must arrive exactly as set.
+    expect(sent[0].depthOcclusion).toBe(true);
   });
 
   it('does NOT materialise absent fields (absent = native default is the contract)', () => {
@@ -139,5 +175,10 @@ describe('AROverlay contract extension — controller dispatch', () => {
     expect('strokeAlpha' in sent[0]).toBe(false);
     expect('imageUri' in sent[0]).toBe(false);
     expect('orient' in sent[0]).toBe(false);
+    // The depthOcclusion back-compat guarantee: an overlay that never set
+    // the flag reaches native WITHOUT the key, and the native default
+    // (false) selects the legacy pre-`depthOcclusion` rendering pipeline
+    // for it — pre-existing box overlays are visually unchanged.
+    expect('depthOcclusion' in sent[0]).toBe(false);
   });
 });

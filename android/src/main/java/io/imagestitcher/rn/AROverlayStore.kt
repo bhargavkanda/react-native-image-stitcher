@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicReference
  *     imageUri?: string;              // image badge inside a box
  *     color?: string;                 // hex; default a theme colour
  *     mode?: '2d' | '3d';             // default '2d'; '3d' is SCAFFOLD ONLY
+ *     depthOcclusion?: boolean;       // default false; iOS-renderer opt-in
  *   }
  *
  * A valid overlay carries EITHER a [worldPosition] (with optional
@@ -78,6 +79,13 @@ data class AROverlayData(
     /// ignores an undecodable file.  Trailing + defaulted like the alphas
     /// above, so native-plugin SPI callers keep compiling.
     val imageUri: String? = null,
+    /// Opt-in for the iOS renderer's box-vs-box depth-occlusion scheme.
+    /// Default false = the legacy rendering, exactly as before the field
+    /// existed.  Android's screen-space Canvas renderer has no depth scheme,
+    /// so this flag is parsed for cross-platform contract parity and IGNORED
+    /// by [AROverlayRenderer].  Trailing + defaulted like its siblings so
+    /// native-plugin SPI callers keep compiling.
+    val depthOcclusion: Boolean = false,
 ) {
     // data class with array fields — override equals/hashCode by `id` only.
     // Identity for diffing the declarative `overlays` prop / imperative set
@@ -214,6 +222,16 @@ data class AROverlayData(
             val strokeAlpha =
                 readAlpha(map, "strokeAlpha", DEFAULT_STROKE_ALPHA) ?: DEFAULT_STROKE_ALPHA
 
+            // Boolean type gate (fallback-not-clip, like the alphas): only a
+            // genuine JS boolean opts in.  A number, string, or any other
+            // nonsense falls back to false — the legacy rendering — rather
+            // than being coerced, so a malformed value can never change how
+            // a pre-existing consumer's boxes draw.  iOS gates on
+            // CFBooleanGetTypeID for the same result.
+            val depthOcclusion = map.hasKey("depthOcclusion") &&
+                map.getType("depthOcclusion") == ReadableType.Boolean &&
+                map.getBoolean("depthOcclusion")
+
             return AROverlayData(
                 id = id,
                 worldPosition = worldPosition,
@@ -226,6 +244,7 @@ data class AROverlayData(
                 fillAlpha = fillAlpha,
                 strokeAlpha = strokeAlpha,
                 imageUri = imageUri,
+                depthOcclusion = depthOcclusion,
             )
         }
 
@@ -480,6 +499,9 @@ class AROverlayStore {
                     strokeAlpha =
                         if (patch.hasKey("strokeAlpha")) parsed.strokeAlpha else base.strokeAlpha,
                     imageUri = if (patch.hasKey("imageUri")) parsed.imageUri else base.imageUri,
+                    depthOcclusion = if (patch.hasKey("depthOcclusion")) {
+                        parsed.depthOcclusion
+                    } else base.depthOcclusion,
                 )
             }
 
@@ -521,6 +543,12 @@ class AROverlayStore {
                 patch.getType("imageUri") == ReadableType.String
             ) patch.getString("imageUri")?.takeIf { it.isNotEmpty() } else base.imageUri
 
+            // Same boolean type gate as [fromReadableMap]: a present-but-
+            // non-boolean patch value keeps the base rather than coercing.
+            val depthOcclusion = if (patch.hasKey("depthOcclusion") &&
+                patch.getType("depthOcclusion") == ReadableType.Boolean
+            ) patch.getBoolean("depthOcclusion") else base.depthOcclusion
+
             return base.copy(
                 sizeMeters = size,
                 shape = shape,
@@ -530,6 +558,7 @@ class AROverlayStore {
                 fillAlpha = fillAlpha,
                 strokeAlpha = strokeAlpha,
                 imageUri = imageUri,
+                depthOcclusion = depthOcclusion,
             )
         }
 
