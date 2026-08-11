@@ -633,15 +633,17 @@ function App(): React.JSX.Element {
           enablePhotoMode
           enablePanoramaMode
           keyframeQualityCapture={kfQuality}
-          // v0.23 anti-blur — the single 🌀 toggle below drives the whole
-          // bundle.  ON = recommended values; OFF = every knob disabled
-          // (today's behaviour), so a paired capture isolates the feature.
           frameSelection={{
             // Raised to 10 (default 6) so a wide pan yields 8-10 keyframes —
             // the regime where the range-matcher / threading / compose-res
             // levers actually bite (they're ~flat at 5 frames). Do a WIDER pan.
             maxKeyframes: 10,
-            antiBlur: antiBlurOn
+          }}
+          // v0.24 anti-blur — the single 🌀 toggle below drives the whole `blur`
+          // group.  ON = recommended values; OFF = every knob disabled (pre-
+          // anti-blur behaviour), so a paired capture isolates the feature.
+          blur={
+            antiBlurOn
               ? {
                   maxExposureMs: 8,
                   maxCommitPanRateRadPerSec: 1.0,
@@ -653,8 +655,8 @@ function App(): React.JSX.Element {
                   maxCommitPanRateRadPerSec: 0,
                   minScoreFractionOfMedian: 0,
                   preferHighFpsFormat: false,
-                },
-          }}
+                }
+          }
           panMode={panMode}
           rectCrop={rectCrop}
           showPreview={showPreview}
