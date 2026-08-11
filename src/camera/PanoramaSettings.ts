@@ -633,12 +633,15 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // a seam-isolated probe on a synthetic SHELF corpus showed voronoi's
     // content-blind seams TEAR product labels at parallax (graphcut routes
     // around them through inter-facing gaps) — worst exactly on repetitive
-    // facings, where a damaged label also degrades downstream OD/OCR. My
-    // earlier "equivalent" call was on indoor ROOM corpora that underexercise
-    // near-field parallax. voronoi remains available OPT-IN (it is a real
-    // ~1.7x win and genuinely better than skip), but shipping it as the
-    // default needs a real shelf-corpus A/B first. See docs/perf-3b §0.
-    seamFinderType: 'graphcut',
+    // v0.24 — DEFAULT flipped to voronoi.  The on-device A/B the earlier note
+    // asked for ran (2026-08-11/12, A35 + iPhone, 5 and 8-10 keyframes, same
+    // frames re-stitched): voronoi is 1.6-1.9x faster and VISUALLY IDENTICAL to
+    // graphcut (no ghosting/seam tears; SSIM ~0.95 where output dims match), on
+    // both devices, at both frame counts.  It is the single dominant stitch-
+    // speed lever.  graphcut remains available (perf.seamFinderType='graphcut')
+    // for corpora where near-field parallax makes seam placement matter; re-
+    // validate there before assuming parity.  See docs/perf-3b.
+    seamFinderType: 'voronoi',
     // v0.15 — inscribed-rect crop is OFF by default (bbox crop keeps all
     // stitched content).  Opt in with `maxInscribedRectCrop={true}` (or toggle
     // it on in settings) for a clean-cornered rectangle — but it can shrink the
@@ -651,17 +654,15 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // more at higher keyframe counts).  Set to 0 to fall back to the legacy
     // full-pairwise ladder.  See docs/perf-3b.
     rangeMatcherWidth: 3,
-    // perf-3b item 1 — OpenCV threads: 1 = single-threaded (DEFAULT).
-    // On-device measurement (incl. an independent adversarial re-review)
-    // proved multi-threading is a NET REGRESSION of -7..-18% at the fleet's
-    // 4-15 keyframe / 0.3-1.2MP captures: cv::Stitcher is dominated by
-    // strictly-serial phases (graphcut seam ~41%, ORB/bundle-adjust), and
-    // its nominally-parallel pixel work is too small to scale at 1MP compose
-    // while TBB worker overhead makes it a net loss. Single-threaded is BOTH
-    // the fastest AND the most memory-safe config here. Set 0 for auto-multi
-    // or N to experiment, but it will not help at these sizes — the real
-    // lever is the seam finder (see docs/perf-3b).
-    numThreads: 1,
+    // v0.24 — DEFAULT flipped to 0 (auto-multi).  A prior fleet note claimed
+    // single-threaded was fastest, but the 2026-08-12 same-frames ablation at
+    // 8-10 keyframes on the A35 measured single-threading CONSISTENTLY SLOWER
+    // than multi (-12..-23% in both captures); it also matches iOS, which is
+    // always multi-core (GCD, ignores this field).  `1` remains the single-
+    // thread kill-switch — note multi uses higher PEAK RAM (the original reason
+    // for the `1` default), now mitigated by running the stitch on a stable
+    // dedicated thread; revert to `1` if a device regresses on the memory gate.
+    numThreads: 0,
     // perf-4a — measured compose-resolution adaptation ON by default (0.23):
     // 'measured' downscales the final compose to adaptiveMinOutputMP ONLY when
     // a stitch is measured to be slow.  Set 'off' to disable, 'always' to force.

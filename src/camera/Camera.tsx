@@ -375,7 +375,6 @@ export interface CameraProps {
   defaultLens?: CameraLens;
   defaultStitchMode?: StitchMode;
   defaultBlender?: Blender;
-  defaultSeamFinder?: SeamFinder;
   defaultWarper?: Warper;
   defaultFlowNoveltyPercentile?: number;
   defaultFlowEvalEveryNFrames?: number;
@@ -395,18 +394,28 @@ export interface CameraProps {
   /** Forward-looking — see above. */
   defaultSeamEstimationResolMP?: number;
   /**
-   * v0.16 — pass the whole stitcher config as a JSON object instead of the
-   * individual `default*` props above (canonical field names: `warperType` /
-   * `blenderType` / `seamFinderType` / `stitchMode` /
-   * `enableMaxInscribedRectCrop`).  Partial; any field set here wins over the
-   * matching flat prop.  Runtime ⚙️-panel edits still override at capture time. */
+   * v0.16 — the stitch RECIPE as a JSON object (`stitchMode` / `warperType` /
+   * `blenderType` / `enableMaxInscribedRectCrop` / `debugPack`).  Partial; wins
+   * over the flat `default*` props.  v0.24 — the speed levers moved to {@link
+   * perf}. */
   stitcher?: PanoramaPropOverrides['stitcher'];
   /**
-   * v0.16 — pass the whole frame-gate config as a JSON object (canonical field
-   * names: `mode` / `maxKeyframes` / `overlapThreshold` / `maxKeyframeIntervalMs`
-   * / `flow`).  Partial; `flow` is deep-merged.  Wins over the flat `default*`
-   * props. */
+   * v0.16 — the keyframe GATE as a JSON object (`mode` / `maxKeyframes` /
+   * `overlapThreshold` / `maxKeyframeIntervalMs` / `flow`).  Partial; `flow` is
+   * deep-merged.  v0.24 — the anti-blur controls moved to {@link blur}. */
   frameSelection?: PanoramaPropOverrides['frameSelection'];
+  /**
+   * v0.24 — **anti-blur** controls in one group: `sharpnessWindow` (pick-
+   * sharpest-of-K) + exposure cap + motion gate + sharpness floor + hi-fps
+   * format.  Deep-merged over the SDK defaults (all ON).  Set a knob to 0 /
+   * false (or `sharpnessWindow: 1`) to disable it. */
+  blur?: PanoramaPropOverrides['blur'];
+  /**
+   * v0.24 — **perf** (stitch-speed) levers in one group: `seamFinderType`
+   * (default 'voronoi'), `rangeMatcherWidth` (3), `numThreads` (0 = multi),
+   * `adaptiveStitchMode` ('measured') + its `adaptiveMinOutputMP` /
+   * `adaptiveSlowStitchMsPerFrame`.  Wins over `stitcher`. */
+  perf?: PanoramaPropOverrides['perf'];
 
   // ── Inscribed-rect crop (v0.15) ───────────────────────────────────
   /**
@@ -1444,7 +1453,6 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
     defaultCaptureSource: props.defaultCaptureSource,
     defaultStitchMode: props.defaultStitchMode,
     defaultBlender: props.defaultBlender,
-    defaultSeamFinder: props.defaultSeamFinder,
     defaultWarper: props.defaultWarper,
     defaultFlowNoveltyPercentile: props.defaultFlowNoveltyPercentile,
     defaultFlowEvalEveryNFrames: props.defaultFlowEvalEveryNFrames,
@@ -1455,6 +1463,9 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
     // v0.16 — JSON-object form (wins over the flat default* props above).
     stitcher: props.stitcher,
     frameSelection: props.frameSelection,
+    // v0.24 — the grouped blur / perf props.
+    blur: props.blur,
+    perf: props.perf,
     // Item 2 — the interactive crop editor OWNS cropping, so when it's on we
     // force the native auto-crop OFF: the editor needs the full un-cropped
     // panorama (black borders included) so the user can drag the inscribed-

@@ -55,7 +55,7 @@ describe('buildPanoramaInitialSettings', () => {
         defaultCaptureSource: 'non-ar',
         defaultStitchMode: 'scans',
         defaultBlender: 'feather',
-        defaultSeamFinder: 'skip',
+        perf: { seamFinderType: 'skip' },
         defaultWarper: 'cylindrical',
         defaultFlowNoveltyPercentile: 0.70,
         defaultFlowEvalEveryNFrames: 3,
@@ -119,16 +119,16 @@ describe('buildPanoramaInitialSettings', () => {
     ).toBe(1500);
   });
 
-  it('maps defaultSharpnessWindow → frameSelection.sharpnessWindow', () => {
-    // v0.21 — pick-sharpest-in-window anti-blur selection.
+  it('maps blur.sharpnessWindow → frameSelection.sharpnessWindow', () => {
+    // v0.24 — pick-sharpest-in-window lives in the `blur` prop group now.
     expect(
-      buildPanoramaInitialSettings({ defaultSharpnessWindow: 6 }, false)
+      buildPanoramaInitialSettings({ blur: { sharpnessWindow: 6 } }, false)
         .frameSelection.sharpnessWindow,
     ).toBe(6);
     // 1 explicitly disables the window (immediate save) — it is NOT
     // nullish, so `??` must not replace it with the default.
     expect(
-      buildPanoramaInitialSettings({ defaultSharpnessWindow: 1 }, false)
+      buildPanoramaInitialSettings({ blur: { sharpnessWindow: 1 } }, false)
         .frameSelection.sharpnessWindow,
     ).toBe(1);
     // Omitted ⇒ the default 4 (feature on).
@@ -136,16 +136,14 @@ describe('buildPanoramaInitialSettings', () => {
       buildPanoramaInitialSettings({}, false)
         .frameSelection.sharpnessWindow,
     ).toBe(4);
-    // The frameSelection JSON-object prop wins over the flat prop.
-    expect(
-      buildPanoramaInitialSettings(
-        {
-          defaultSharpnessWindow: 6,
-          frameSelection: { sharpnessWindow: 2 },
-        },
-        false,
-      ).frameSelection.sharpnessWindow,
-    ).toBe(2);
+    // The rest of the blur group deep-merges into frameSelection.antiBlur
+    // without disturbing sharpnessWindow.
+    const s = buildPanoramaInitialSettings(
+      { blur: { sharpnessWindow: 2, preferHighFpsFormat: false } },
+      false,
+    );
+    expect(s.frameSelection.sharpnessWindow).toBe(2);
+    expect(s.frameSelection.antiBlur?.preferHighFpsFormat).toBe(false);
   });
 
   it('leaves non-overridden fields at the default (partial override)', () => {

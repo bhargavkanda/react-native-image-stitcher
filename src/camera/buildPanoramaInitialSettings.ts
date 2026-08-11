@@ -32,11 +32,50 @@
 import {
   DEFAULT_FLOW_GATE_SETTINGS,
   DEFAULT_PANORAMA_SETTINGS,
+  type AntiBlurSettings,
   type BatchStitcherSettings,
   type FlowGateSettings,
   type FrameSelectionSettings,
   type PanoramaSettings,
 } from './PanoramaSettings';
+
+
+/**
+ * v0.24 — the perf-lever keys that moved OUT of the `stitcher` prop and into
+ * the dedicated `perf` prop group.  Kept as one list so the `stitcher` prop
+ * type (which Omits them) and the `PerfPropOverrides` type (which Picks them)
+ * can never drift apart.
+ */
+type PerfLeverKey =
+  | 'seamFinderType'
+  | 'rangeMatcherWidth'
+  | 'numThreads'
+  | 'adaptiveStitchMode'
+  | 'adaptiveMinOutputMP'
+  | 'adaptiveSlowStitchMsPerFrame';
+
+
+/**
+ * v0.24 — **`blur` prop group.**  Every motion-blur defense in ONE object
+ * (previously split across `frameSelection.sharpnessWindow` and
+ * `frameSelection.antiBlur`).  All fields optional; all default ON (see
+ * `DEFAULT_ANTI_BLUR_SETTINGS` + `SUGGESTED_ANTI_BLUR_SETTINGS`).  Set a value
+ * to `0` / `false` (or `sharpnessWindow: 1`) to disable that one mechanism.
+ */
+export interface BlurPropOverrides extends AntiBlurSettings {
+  /** Pick-sharpest-of-K keyframe selection.  `1` disables it.  Default `4`. */
+  sharpnessWindow?: number;
+}
+
+
+/**
+ * v0.24 — **`perf` prop group.**  The stitch-SPEED levers, grouped out of
+ * `stitcher` (which now carries only the stitch *recipe*: mode/warper/blender/
+ * crop).  All optional; each falls back to the SDK default.  See the docs for
+ * how to flip each.  0.24 defaults: `seamFinderType:'voronoi'`, `numThreads:0`
+ * (multi-core), `rangeMatcherWidth:3`, `adaptiveStitchMode:'measured'`.
+ */
+export type PerfPropOverrides = Partial<Pick<BatchStitcherSettings, PerfLeverKey>>;
 
 
 /**
@@ -54,7 +93,6 @@ export interface PanoramaPropOverrides {
   defaultCaptureSource?: 'ar' | 'non-ar';
   defaultStitchMode?: 'auto' | 'panorama' | 'scans';
   defaultBlender?: 'multiband' | 'feather';
-  defaultSeamFinder?: 'graphcut' | 'skip';
   defaultWarper?: 'plane' | 'cylindrical' | 'spherical';
   defaultFlowNoveltyPercentile?: number;
   defaultFlowEvalEveryNFrames?: number;
@@ -67,35 +105,46 @@ export interface PanoramaPropOverrides {
    */
   defaultMaxKeyframeIntervalMs?: number;
   /**
-   * v0.21 — initial value for `frameSelection.sharpnessWindow` (the
-   * pick-sharpest-in-window anti-blur selection).  `1` disables the
-   * window (immediate save).  Default 4 — the feature is ON unless
-   * explicitly turned off.
-   */
-  defaultSharpnessWindow?: number;
-  /**
    * v0.15 — initial value for `stitcher.enableMaxInscribedRectCrop`.
    * Maps from the standalone `maxInscribedRectCrop` <Camera> prop.
    * Omitted ⇒ the stitcher default (false = bounding-rect crop).
    */
   maxInscribedRectCrop?: boolean;
   /**
-   * v0.16 — pass the stitcher config as a JSON OBJECT (canonical field names:
-   * `warperType` / `blenderType` / `seamFinderType` / `stitchMode` /
-   * `enableMaxInscribedRectCrop`).  Any field set here OVERRIDES the matching
-   * flat `default*` prop; unset fields fall back to the flat prop, then the SDK
-   * default.  Partial — set only what you want.
+   * v0.16 — the stitch **recipe** as a JSON OBJECT: `stitchMode` / `warperType`
+   * / `blenderType` / `enableMaxInscribedRectCrop` / `debugPack`.  Overrides the
+   * matching flat `default*` props; unset fields fall back to the SDK default.
+   * Partial — set only what you want.
+   *
+   * v0.24 — the stitch-SPEED levers (seam finder, range-matcher, threads,
+   * adaptive resolution) MOVED OUT of here into the dedicated {@link perf}
+   * group.  Setting them here is now a type error; use `perf={{…}}`.
    */
-  stitcher?: Partial<BatchStitcherSettings>;
+  stitcher?: Partial<Omit<BatchStitcherSettings, PerfLeverKey>>;
   /**
-   * v0.16 — pass the frame-gate config as a JSON OBJECT (canonical field names:
-   * `mode` / `maxKeyframes` / `overlapThreshold` / `maxKeyframeIntervalMs` /
-   * `flow`).  Overrides the matching flat `default*` props; `flow` is
-   * DEEP-merged so you can set a single flow knob without restating the rest.
+   * v0.16 — the keyframe **gate** as a JSON OBJECT: `mode` / `maxKeyframes` /
+   * `overlapThreshold` / `maxKeyframeIntervalMs` / `flow` (deep-merged).
+   *
+   * v0.24 — the anti-blur controls (`sharpnessWindow` + `antiBlur.*`) MOVED OUT
+   * of here into the dedicated {@link blur} group.  Use `blur={{…}}`.
    */
-  frameSelection?: Partial<Omit<FrameSelectionSettings, 'flow'>> & {
+  frameSelection?: Partial<
+    Omit<FrameSelectionSettings, 'flow' | 'antiBlur' | 'sharpnessWindow'>
+  > & {
     flow?: Partial<FlowGateSettings>;
   };
+  /**
+   * v0.24 — **anti-blur prop group.**  Every motion-blur defense in one object
+   * (pick-sharpest window + exposure cap + motion gate + sharpness floor +
+   * hi-fps format).  Deep-merged over the SDK defaults, so setting one knob
+   * doesn't wipe the rest.  See {@link BlurPropOverrides}.
+   */
+  blur?: BlurPropOverrides;
+  /**
+   * v0.24 — **perf prop group.**  The stitch-speed levers, grouped out of
+   * `stitcher`.  See {@link PerfPropOverrides}.
+   */
+  perf?: PerfPropOverrides;
 }
 
 
@@ -140,6 +189,12 @@ export function buildPanoramaInitialSettings(
   // type and is type-checked.  See F10 Phase 2 review (NIT-4).
   const flowDefaults = DEFAULT_FLOW_GATE_SETTINGS;
 
+  // v0.24 — split the flat `blur` prop group into its two settings-tree homes:
+  // `sharpnessWindow` (a frameSelection scalar) and the rest (the `antiBlur`
+  // sub-object).  Both deep-merge over the defaults below.
+  const { sharpnessWindow: blurSharpnessWindow, ...blurAntiBlur } =
+    overrides.blur ?? {};
+
   return {
     captureSource: overrides.defaultCaptureSource ?? base.captureSource,
     debug: base.debug,
@@ -149,13 +204,14 @@ export function buildPanoramaInitialSettings(
       stitchMode: overrides.defaultStitchMode ?? stitcherDefaults.stitchMode,
       warperType: overrides.defaultWarper ?? stitcherDefaults.warperType,
       blenderType: overrides.defaultBlender ?? stitcherDefaults.blenderType,
-      seamFinderType:
-        overrides.defaultSeamFinder ?? stitcherDefaults.seamFinderType,
       enableMaxInscribedRectCrop:
         overrides.maxInscribedRectCrop
         ?? stitcherDefaults.enableMaxInscribedRectCrop,
-      // The JSON-object prop wins over the flat default* props above.
+      // The `stitcher` recipe object wins over the flat default* props above…
       ...(overrides.stitcher ?? {}),
+      // …and the `perf` group (seam finder / range-matcher / threads / adaptive)
+      // wins over both — it's the canonical home for the speed levers (v0.24).
+      ...(overrides.perf ?? {}),
     },
 
     frameSelection: {
@@ -168,14 +224,14 @@ export function buildPanoramaInitialSettings(
       maxKeyframeIntervalMs:
         overrides.defaultMaxKeyframeIntervalMs
         ?? base.frameSelection.maxKeyframeIntervalMs,
-      sharpnessWindow:
-        overrides.defaultSharpnessWindow
-        ?? base.frameSelection.sharpnessWindow,
-      // The JSON-object prop wins over the flat default* props above for the
-      // scalar fields (mode / maxKeyframes / overlapThreshold / intervalMs).
-      // Its `flow` (if any) is dropped here and DEEP-merged in the explicit
-      // `flow:` key below, so a partial flow object doesn't wipe the rest.
+      // The `frameSelection` gate object wins over the flat default* props above
+      // for the scalar fields (mode / maxKeyframes / overlapThreshold /
+      // intervalMs).  Its `flow` is DEEP-merged in the explicit `flow:` key
+      // below, so a partial flow object doesn't wipe the rest.
       ...(overrides.frameSelection ?? {}),
+      // v0.24 — pick-sharpest window now comes from the `blur` group.
+      sharpnessWindow:
+        blurSharpnessWindow ?? base.frameSelection.sharpnessWindow,
       flow: {
         ...flowDefaults,
         noveltyPercentile:
@@ -190,14 +246,13 @@ export function buildPanoramaInitialSettings(
         // The object prop's flow wins over the flat default*Flow* props.
         ...(overrides.frameSelection?.flow ?? {}),
       },
-      // v0.23 anti-blur — DEEP-merged like `flow`, so a host can set a
-      // single knob (e.g. just `preferHighFpsFormat`) without restating
-      // the rest and silently losing the safety `maxConsecutiveHolds`
-      // default.  `...overrides.frameSelection` above shallow-replaced
-      // the whole sub-tree; this restores the defaults it dropped.
+      // v0.24 anti-blur — from the `blur` group, DEEP-merged like `flow` so a
+      // host can set a single knob (e.g. just `preferHighFpsFormat`) without
+      // restating the rest and silently losing the safety `maxConsecutiveHolds`
+      // default.
       antiBlur: {
         ...base.frameSelection.antiBlur,
-        ...(overrides.frameSelection?.antiBlur ?? {}),
+        ...blurAntiBlur,
       },
     },
   };
