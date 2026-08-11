@@ -45,7 +45,6 @@ precedence over the flat props below.
 |---|---|---|---|
 | `defaultStitchMode` | `StitchMode` (`'auto' \| 'panorama' \| 'scans'`) | `'auto'` | Initial `cv::Stitcher` pipeline mode seed. Resolves through `DEFAULT_PANORAMA_SETTINGS.stitcher.stitchMode`. |
 | `defaultBlender` | `Blender` (`'multiband' \| 'feather'`) | `'multiband'` | Initial pixel blender seed (`DEFAULT_PANORAMA_SETTINGS.stitcher.blenderType`). |
-| `defaultSeamFinder` | `SeamFinder` (`'graphcut' \| 'skip'`) | `'graphcut'` | Initial seam-finder strategy seed (`DEFAULT_PANORAMA_SETTINGS.stitcher.seamFinderType`). |
 | `defaultWarper` | `Warper` (`'plane' \| 'cylindrical' \| 'spherical'`) | `'plane'` | Initial output projection seed (PANORAMA mode only; SCANS hard-wires `plane`). Resolves to `DEFAULT_PANORAMA_SETTINGS.stitcher.warperType` — v0.16 reverted this from `'spherical'` back to `'plane'`. |
 | `maxInscribedRectCrop` | `boolean` | `false` | Crop-strategy seed. `false` keeps the non-black bounding rect; `true` crops to the max inscribed rectangle (no black corners, more CPU). Forced **off** internally when [`rectCrop`](#panorama-capture--guidance-v016) is on. Maps to `stitcher.enableMaxInscribedRectCrop`. See [Inscribed-rect crop](#inscribed-rect-crop). |
 | `defaultFlowNoveltyPercentile` | `number` | `0.85` | Flow-gate novelty percentile seed (flow-based mode). `DEFAULT_FLOW_GATE_SETTINGS.noveltyPercentile`. Clamped natively to `[0.50, 0.99]`. |
@@ -57,14 +56,53 @@ precedence over the flat props below.
 | `defaultCompositingResolMP` | `number` | — | Forward-looking; accepted for API stability but currently a **no-op**. Will wire to `cv::Stitcher` compositing resolution later. |
 | `defaultRegistrationResolMP` | `number` | — | Forward-looking; accepted but currently a **no-op**. |
 | `defaultSeamEstimationResolMP` | `number` | — | Forward-looking; accepted but currently a **no-op**. |
-| `stitcher` | `Partial<BatchStitcherSettings>` | — | v0.16 JSON-object form of the stitcher config (`warperType` / `blenderType` / `seamFinderType` / `stitchMode` / `enableMaxInscribedRectCrop`). Any field set here wins over the matching flat `default*` prop. See [Settings JSON objects](#settings-json-objects). |
-| `frameSelection` | `Partial<FrameSelectionSettings>` | — | v0.16 JSON-object form of the frame-gate config (`mode` / `maxKeyframes` / `overlapThreshold` / `maxKeyframeIntervalMs` / `flow`). `flow` is deep-merged. Wins over the flat `default*` props. See [Settings JSON objects](#settings-json-objects). |
+| `stitcher` | `Partial<Omit<BatchStitcherSettings, perf keys>>` | — | The stitch **recipe** object: `stitchMode` / `warperType` / `blenderType` / `enableMaxInscribedRectCrop` / `debugPack`. Wins over the flat `default*` props. **v0.24** — the speed levers moved to [`perf`](#anti-blur--perf-groups-v024). |
+| `frameSelection` | `Partial<...gate fields>` | — | The keyframe **gate** object: `mode` / `maxKeyframes` / `overlapThreshold` / `maxKeyframeIntervalMs` / `flow` (deep-merged). **v0.24** — the anti-blur controls moved to [`blur`](#anti-blur--perf-groups-v024). |
+| `blur` | `BlurPropOverrides` | — | **v0.24** anti-blur group. See [below](#anti-blur--perf-groups-v024). |
+| `perf` | `PerfPropOverrides` | — | **v0.24** perf-lever group. See [below](#anti-blur--perf-groups-v024). |
 
 :::tip Runtime gear panel
 The in-app settings modal (gear, shown via `showSettingsButton`) can edit
 the stitcher and frame-gate fields at runtime; those edits override these
 seed props at capture time.
 :::
+
+## Anti-blur & perf groups (v0.24)
+
+v0.24 groups the anti-blur and stitch-speed knobs into two dedicated prop
+objects. Both are partial + deep-merged over the SDK defaults, so set only what
+you want. Upgrading from v0.23? See the
+[migration guide](https://github.com/bhargavkanda/react-native-image-stitcher/blob/main/docs/migrations/v0.23-to-v0.24.md).
+
+### `blur` — motion-blur defenses
+
+```tsx
+<Camera blur={{ sharpnessWindow: 4, maxExposureMs: 8, preferHighFpsFormat: true }} />
+```
+
+| Field | Type | Default | How to flip / what it does |
+|---|---|---|---|
+| `sharpnessWindow` | `number` | `4` | Pick the sharpest of K gate-evaluated frames. **`1` disables** (immediate save). |
+| `maxExposureMs` | `number` | `8` | Exposure-cap target (ms) shared with the host capture session. **`0` = don't cap.** |
+| `maxCommitPanRateRadPerSec` | `number` | `1.0` | Hold keyframe commit while slewing faster than this (rad/s). **`0` = no motion gate.** |
+| `minScoreFractionOfMedian` | `number` | `0.6` | Hold commit while the best candidate is below this fraction of the session sharpness median. **`0` = off.** |
+| `maxConsecutiveHolds` | `number` | `12` | Forward-progress guard: never hold the same pending keyframe more than this many evaluated frames. |
+| `preferHighFpsFormat` | `boolean` | `true` | Prefer the highest-fps capture format (bounds exposure + doubles candidates). **`false` = smallest format.** The only exposure lever on the iOS AR path. |
+
+### `perf` — stitch-speed levers
+
+```tsx
+<Camera perf={{ seamFinderType: 'voronoi', numThreads: 0 }} />
+```
+
+| Field | Type | Default (v0.24) | How to flip / what it does |
+|---|---|---|---|
+| `seamFinderType` | `'voronoi' \| 'graphcut' \| 'skip'` | **`'voronoi'`** | The dominant speed lever. `voronoi` is ~1.6–1.9× faster than `graphcut` with no visible quality loss on-device. Use `'graphcut'` for high near-field-parallax corpora; `'skip'` for the lowest-memory config (pair with `blenderType:'feather'`). |
+| `rangeMatcherWidth` | `number` | `3` | PANORAMA feature-matcher window (2/2/3 ladder). **`0` = legacy full-pairwise.** Android/high-level only. |
+| `numThreads` | `number` | **`0`** | OpenCV intra-stitch threads. `0` = auto multi-core (fastest on-device at 8–10 keyframes). **`1` = single-thread kill-switch** (lower peak RAM). Android only (iOS is always multi-core). |
+| `adaptiveStitchMode` | `'measured' \| 'off' \| 'always'` | `'measured'` | Compose-resolution adaptation. `'measured'` shrinks the output to `adaptiveMinOutputMP` only on devices proven slow. **`'off'` = never shrink.** Android only. |
+| `adaptiveMinOutputMP` | `number` | `0.6` | Compose-resolution floor (MP) when adapting. Native clamps `[0.6, 1.0]`. |
+| `adaptiveSlowStitchMsPerFrame` | `number` | `1000` | Per-keyframe wall-time (ms) above which `'measured'` fires. |
 
 ### Inscribed-rect crop
 
