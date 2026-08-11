@@ -40,6 +40,14 @@ export type {
   Warper,
   FramesDroppedInfo,
 } from './camera/Camera';
+// The dual-mode shutter button (tap = photo, hold = panorama). Exposed so a host
+// that hides the built-in shutter (`hideBuiltInShutter`) can render it itself in
+// a custom bottom bar and drive capture through the CameraHandle.
+export { CameraShutter } from './camera/CameraShutter';
+export type {
+  CameraShutterProps,
+  CameraShutterHandle,
+} from './camera/CameraShutter';
 // Non-fatal capture quality signals carried on `CameraCaptureResult.warnings`.
 export type {
   CaptureWarning,

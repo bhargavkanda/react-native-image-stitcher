@@ -142,6 +142,11 @@ describe('panoramaSettingsToNativeConfig', () => {
     // this test immediately.
     const cfg = panoramaSettingsToNativeConfig(DEFAULT_PANORAMA_SETTINGS);
     expect(Object.keys(cfg).sort()).toEqual([
+      'antiBlurMaxCommitPanRateRadPerSec',
+      'antiBlurMaxConsecutiveHolds',
+      'antiBlurMaxExposureMs',
+      'antiBlurMinScoreFractionOfMedian',
+      'antiBlurPreferHighFpsFormat',
       'blenderType',
       'captureSource',
       'enableMaxInscribedRectCrop',
@@ -160,6 +165,84 @@ describe('panoramaSettingsToNativeConfig', () => {
       'stitchMode',
       'warperType',
     ]);
+  });
+
+  it('emits every antiBlur knob OFF by default (v0.23 must be byte-identical to v0.22)', () => {
+    // THE load-bearing guarantee of the anti-blur release: a host that
+    // upgrades and changes nothing must get exactly the previous
+    // behaviour. Every source-side control is therefore disabled on the
+    // wire unless explicitly opted into. `maxConsecutiveHolds` is the
+    // exception — a SAFETY cap that only takes effect once one of the
+    // hold-producing knobs is on, so its non-zero value is inert here.
+    const cfg = panoramaSettingsToNativeConfig(DEFAULT_PANORAMA_SETTINGS);
+    expect(cfg.antiBlurMaxExposureMs).toBe(0);
+    expect(cfg.antiBlurMaxCommitPanRateRadPerSec).toBe(0);
+    expect(cfg.antiBlurMinScoreFractionOfMedian).toBe(0);
+    expect(cfg.antiBlurPreferHighFpsFormat).toBe(false);
+    expect(cfg.antiBlurMaxConsecutiveHolds).toBe(12);
+  });
+
+  it('fills antiBlur defaults when the sub-tree is omitted entirely', () => {
+    // `antiBlur` is optional, so pre-v0.23 settings literals keep
+    // compiling. The bridge must still emit concrete values rather than
+    // letting the native side fall back to whatever it compiles in —
+    // the same always-emit policy the flow knobs use.
+    const sparse: PanoramaSettings = {
+      ...DEFAULT_PANORAMA_SETTINGS,
+      frameSelection: {
+        mode: 'flow-based',
+        maxKeyframes: 6,
+        overlapThreshold: 0.20,
+        maxKeyframeIntervalMs: 1500,
+        // antiBlur omitted — legal per the optional `?`
+      },
+    };
+    const cfg = panoramaSettingsToNativeConfig(sparse);
+    expect(cfg.antiBlurMaxExposureMs).toBe(0);
+    expect(cfg.antiBlurMaxCommitPanRateRadPerSec).toBe(0);
+    expect(cfg.antiBlurMinScoreFractionOfMedian).toBe(0);
+    expect(cfg.antiBlurMaxConsecutiveHolds).toBe(12);
+    expect(cfg.antiBlurPreferHighFpsFormat).toBe(false);
+  });
+
+  it('passes explicit antiBlur opt-in values through untouched', () => {
+    const on: PanoramaSettings = {
+      ...DEFAULT_PANORAMA_SETTINGS,
+      frameSelection: {
+        ...DEFAULT_PANORAMA_SETTINGS.frameSelection,
+        antiBlur: {
+          maxExposureMs: 8,              // 1/125 s ceiling
+          maxCommitPanRateRadPerSec: 1.0, // just above the coach's warn bucket
+          minScoreFractionOfMedian: 0.6,
+          maxConsecutiveHolds: 20,
+          preferHighFpsFormat: true,
+        },
+      },
+    };
+    const cfg = panoramaSettingsToNativeConfig(on);
+    expect(cfg.antiBlurMaxExposureMs).toBe(8);
+    expect(cfg.antiBlurMaxCommitPanRateRadPerSec).toBe(1.0);
+    expect(cfg.antiBlurMinScoreFractionOfMedian).toBe(0.6);
+    expect(cfg.antiBlurMaxConsecutiveHolds).toBe(20);
+    expect(cfg.antiBlurPreferHighFpsFormat).toBe(true);
+  });
+
+  it('allows partial antiBlur opt-in (one knob on, the rest stay off)', () => {
+    // The knobs are independent: a host can take the high-fps format
+    // (the only exposure lever on the iOS AR path) without opting into
+    // motion gating, and vice versa.
+    const partial: PanoramaSettings = {
+      ...DEFAULT_PANORAMA_SETTINGS,
+      frameSelection: {
+        ...DEFAULT_PANORAMA_SETTINGS.frameSelection,
+        antiBlur: { preferHighFpsFormat: true },
+      },
+    };
+    const cfg = panoramaSettingsToNativeConfig(partial);
+    expect(cfg.antiBlurPreferHighFpsFormat).toBe(true);
+    expect(cfg.antiBlurMaxExposureMs).toBe(0);
+    expect(cfg.antiBlurMaxCommitPanRateRadPerSec).toBe(0);
+    expect(cfg.antiBlurMinScoreFractionOfMedian).toBe(0);
   });
 
   it('defaults sharpnessWindow to 4 when absent and passes explicit values through', () => {

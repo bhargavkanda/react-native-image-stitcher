@@ -122,6 +122,15 @@ add_library(image_stitcher SHARED
     # cpp/tests/sharpness_window_test.cpp.
     sharpness_window_jni.cpp
     "${SHARED_CPP_DIR}/sharpness_window.cpp"
+    # v0.23 — shared anti-blur ADMISSION policy.  blur_policy_jni.cpp
+    # bridges the Kotlin BlurPolicy facade to retailens::admitKeyframe
+    # + retailens::RunningScoreMedian — the motion gate and relative
+    # sharpness floor the window machine structurally cannot apply
+    # (it only ranks candidates against each other).  Same C++ the iOS
+    # bridge consults, so the verdicts cannot drift.  OpenCV-free;
+    # gtest-covered in cpp/tests/blur_policy_test.cpp.
+    blur_policy_jni.cpp
+    "${SHARED_CPP_DIR}/blur_policy.cpp"
     # 2026-05-15 — shared stitcher.cpp, used by BOTH platforms.
     # Owns the cv::Stitcher orchestration + C+D progressive-confidence
     # retry + dimension/memory instrumentation.  Used to live in this

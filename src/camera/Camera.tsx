@@ -50,6 +50,7 @@ import React, {
   useState,
 } from 'react';
 import {
+  AppState,
   NativeModules,
   Platform,
   Pressable,
@@ -98,6 +99,7 @@ import {
 } from './buildPanoramaInitialSettings';
 import { isLowMemDevice } from './lowMemDevice';
 import { useCapture } from './useCapture';
+import { shouldOfferNativeUltraWide } from './nativeUltraWide';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
 import {
   contentRotationDeg,
@@ -431,8 +433,45 @@ export interface CameraProps {
   maxInscribedRectCrop?: boolean;
 
   // ── UI knobs ──────────────────────────────────────────────────────
+  /**
+   * Default `true`. Set `false` to disable single-TAP photo capture
+   * entirely (`handleTap` no-ops, same as `shutterDisabled`) and hide the
+   * native-0.5× external-camera fallback (`offerNativeUW`) — that
+   * fallback captures ONE still via the OS camera, the same shape of
+   * action this flag disables.
+   *
+   * PANO-ONLY RECIPE: `enablePhotoMode={false}` with `enablePanoramaMode`
+   * left at its default `true` is already a pano-only `<Camera>` — tap is
+   * disabled, hold-to-pan still fires a capture. No separate flag needed.
+   * Lens switching (the 0.5×/1× chip) is unaffected either way — it
+   * selects which device the eventual hold-to-pan uses, it does not
+   * itself capture.
+   */
   enablePhotoMode?: boolean;
   enablePanoramaMode?: boolean;
+  /**
+   * Hide the built-in shutter + AR-toggle so a HOST can render its own capture
+   * controls and drive capture through the imperative handle
+   * ({@link CameraHandle.takePhoto} / {@link CameraHandle.startPanorama} /
+   * {@link CameraHandle.stopPanorama}). The lens chip is KEPT — it is a lens
+   * selector, not a capture control, and the whole point is that the library
+   * still owns lens selection. Default `false` (built-in shutter shown, every
+   * existing consumer unchanged).
+   */
+  hideBuiltInShutter?: boolean;
+  /**
+   * When a device offers only ONE usable lens (no in-app ultra-wide and no
+   * native-0.5× fallback on offer), render NOTHING instead of a static "1×"
+   * label — there is nothing to switch, so the chip is noise. Default `false`
+   * keeps the "1×" label for back-compat.
+   */
+  hideLensChipWhenSingle?: boolean;
+  /**
+   * Lift the bottom control cluster (lens chip + built-in shutter, if shown) by
+   * this many px, so a host chrome docked below the preview (e.g. a mode
+   * switcher) doesn't overlap it. Default `0`. Layout-only; no behaviour change.
+   */
+  bottomBarOffset?: number;
   showSettingsButton?: boolean;
   /**
    * v0.13.2 — which capture sources the host allows (default `'both'`).
@@ -828,6 +867,27 @@ export interface CameraProps {
    */
   keyframeQualityCapture?: boolean;
   /**
+   * Native-camera 0.5× fallback (Android; default OFF).  A list of device
+   * MODEL identifiers (matched case-insensitively as a PREFIX of
+   * `Platform.constants.Model`, so `"SM-A346"` covers every A34 SKU) or
+   * `"manufacturer:<brand>"` wildcards, on which the ultra-wide is a
+   * SYSTEM-ONLY camera unreachable by any third-party app (proven on the
+   * Galaxy A34).  On a matching device that ALSO has no in-app 0.5×
+   * (`has0_5x=false`), the lens chip renders a "0.5×⤢" pill that fires
+   * {@link onRequestNativeUltraWide} instead of a dead 1× label — the host
+   * then hands off to the OS camera.  Absent/empty → feature OFF, no change.
+   * iOS ignores this (its virtual devices already reach the ultra-wide).
+   */
+  nativeUltraWideModels?: readonly string[];
+  /**
+   * Fired when the operator taps the "0.5×⤢" native-ultra-wide fallback pill
+   * (see {@link nativeUltraWideModels}).  The host launches the OS camera
+   * (e.g. `react-native-image-picker` `launchCamera`) and routes the
+   * returned photo into its own capture flow marked as external provenance —
+   * the library does NOT launch anything or deliver the external photo.
+   */
+  onRequestNativeUltraWide?: () => void;
+  /**
    * iOS, NON-AR photo path — save each tap photo's AVDepthData as a
    * `<photo>.depth.bin` sidecar (float32 metres row-major + JSON header
    * with dims/intrinsics) and return its path as `depthPath` on the
@@ -1058,6 +1118,22 @@ export interface CameraHandle extends AROverlayMethods {
    * settles (success or handled error reported through `onCapture`).
    */
   takePhoto(): Promise<void>;
+  /**
+   * Imperatively START a panorama sweep — identical to the user beginning a
+   * hold on the shutter (the incremental stitcher starts ingesting AR frames).
+   * A no-op unless `enablePanoramaMode` is on and the shutter is not gated
+   * (`shutterDisabled`), and while a capture is already recording/stitching —
+   * the same gates `takePhoto` respects. Pair with {@link stopPanorama}.
+   * Added for hosts that render their OWN shutter (see `hideBuiltInShutter`)
+   * and drive capture through this handle instead of the built-in button.
+   */
+  startPanorama(): void;
+  /**
+   * Imperatively STOP an in-flight panorama sweep — identical to releasing the
+   * shutter hold: finalize the stitch and emit `onCapture`. Idempotent (a safe
+   * no-op when nothing is recording). Resolves once the stop is dispatched.
+   */
+  stopPanorama(): Promise<void>;
 }
 
 
@@ -1081,9 +1157,62 @@ interface LensChipProps {
    * itself stays fixed in the layout.  `{}` (no-op) in the upright cases.
    */
   contentRotation?: { transform?: ViewStyle['transform'] };
+  /**
+   * Native-camera 0.5× fallback (see `nativeUltraWide.ts`): when the device
+   * has NO in-app ultra-wide (`has0_5x=false`) but is a known system-only-UW
+   * model, render a "0.5× ⤢" pill that hands off to the OS camera instead of
+   * the plain "1×".  Only consulted when `!has0_5x`.
+   */
+  offerNativeUltraWide?: boolean;
+  onNativeUltraWide?: () => void;
+  /** When the device offers only ONE lens (no 0.5× and no native fallback),
+   *  render null instead of the static "1×" label. Default false. */
+  hideWhenSingle?: boolean;
+  /**
+   * The device's REAL ultra-wide factor, for this chip's label only — `0.6`
+   * on a Galaxy S24 Ultra, `0.5` on a typical iPhone.  The `CameraLens`
+   * identifier stays `'0.5x'` regardless (it is also the stitcher's
+   * warper-tree zoom signal).  Null/absent ⇒ keep the historical `0.5×`
+   * text rather than invent a number.
+   */
+  ultraWideFactor?: number | null;
 }
-function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): React.JSX.Element {
+function LensChip({
+  lens,
+  onChange,
+  has0_5x,
+  contentRotation,
+  offerNativeUltraWide = false,
+  onNativeUltraWide,
+  hideWhenSingle = false,
+  ultraWideFactor,
+}: LensChipProps): React.JSX.Element | null {
+  // Label only — never the `CameraLens` value. `0.6` → "0.6×"; the fallback
+  // keeps every device that reports nothing on the text it has always shown.
+  const uwLabel =
+    ultraWideFactor != null && Number.isFinite(ultraWideFactor)
+      ? `${ultraWideFactor}×`
+      : '0.5×';
   if (!has0_5x) {
+    if (offerNativeUltraWide && onNativeUltraWide) {
+      // The ultra-wide is unreachable in-app on this device — offer a
+      // hand-off to the OS camera. The ⤢ glyph signals it leaves the app.
+      return (
+        <View style={lensChipStyles.container}>
+          <Pressable
+            onPress={onNativeUltraWide}
+            accessibilityRole="button"
+            accessibilityLabel="0.5x ultra-wide via phone camera"
+            style={[lensChipStyles.pill, lensChipStyles.nativeUwPill]}
+          >
+            <Text style={[lensChipStyles.label, contentRotation]}>0.5×⤢</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    // Only one usable lens. Nothing to switch — hide entirely, or keep the
+    // legacy static "1×" label.
+    if (hideWhenSingle) return null;
     return (
       <View style={[lensChipStyles.container, lensChipStyles.singleLens]}>
         <Text style={[lensChipStyles.label, contentRotation]}>1×</Text>
@@ -1095,7 +1224,7 @@ function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): 
       <Pressable
         onPress={() => onChange('0.5x')}
         accessibilityRole="button"
-        accessibilityLabel="0.5x ultra-wide lens"
+        accessibilityLabel={`${uwLabel.replace('×', 'x')} ultra-wide lens`}
         accessibilityState={{ selected: lens === '0.5x' }}
         style={[
           lensChipStyles.pill,
@@ -1109,7 +1238,7 @@ function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): 
             contentRotation,
           ]}
         >
-          0.5×
+          {uwLabel}
         </Text>
       </Pressable>
       <Pressable
@@ -1156,6 +1285,12 @@ const lensChipStyles = StyleSheet.create({
   },
   pillActive: {
     backgroundColor: '#ffd34d',
+  },
+  nativeUwPill: {
+    // Distinct from the normal lens pill — a subtle outline so the ⤢
+    // hand-off reads as "opens your phone camera", not a live lens toggle.
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.6)',
   },
   label: {
     color: '#ffffff',
@@ -1361,6 +1496,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     captureSources = 'both',
     enablePhotoMode = true,
     enablePanoramaMode = true,
+    hideBuiltInShutter = false,
+    hideLensChipWhenSingle = false,
+    bottomBarOffset = 0,
     showSettingsButton = false,
     style,
     outputDir,
@@ -1391,6 +1529,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     enableDepth,
     highResCapture,
     keyframeQualityCapture,
+    nativeUltraWideModels,
+    onRequestNativeUltraWide,
     captureDepthData,
     enableAnchors,
     enableMesh,
@@ -1700,6 +1840,52 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // an ultra-wide reachable via a multi-cam zoom OR a standalone
   // ultra-wide device; false on wide-only hardware (chip hides).
   const has0_5x = capture.has0_5x;
+  // Native-camera 0.5× fallback: only when the host opted in (a non-empty
+  // model list) AND this Android device has no in-app 0.5× AND its model
+  // matches. `Platform.constants` carries Model/Manufacturer on Android.
+  const offerNativeUW = useMemo(() => {
+    // Photo-only: the fallback captures ONE external still, so it must not
+    // sit where a 0.5× PANORAMA would be expected. A pano-only <Camera>
+    // never shows it.
+    if (!enablePhotoMode) return false;
+    const c = (
+      Platform as unknown as {
+        constants?: { Model?: string; Manufacturer?: string };
+      }
+    ).constants;
+    return shouldOfferNativeUltraWide({
+      hasInAppUltraWide: has0_5x,
+      models: nativeUltraWideModels,
+      platformOS: Platform.OS,
+      deviceModel: c?.Model,
+      deviceManufacturer: c?.Manufacturer,
+    });
+  }, [has0_5x, nativeUltraWideModels, enablePhotoMode]);
+  // App foreground state drives the non-AR preview's `isActive` — but ONLY
+  // when the native-0.5× fallback is being offered (see `isActive=` below);
+  // otherwise `isActive` stays the constant `true` it always was (the shipped
+  // capture flow is byte-identical). vision-camera 4.x does NOT observe the
+  // host activity lifecycle — its session is driven only by `isActive` — so
+  // when the OS camera launched by the fallback comes to the foreground we
+  // must proactively release the device and re-acquire on return; relying on
+  // CameraX's opportunistic reopen is unreliable on the Samsung OEM devices
+  // that are the native-UW target class (a swallowed
+  // `camera-has-been-disconnected` → silent black preview).
+  //
+  // Release ONLY on a true `'background'` — NOT on iOS's transient
+  // `'inactive'` (Control Center, the notification shade, a permission/Face-ID
+  // prompt, the app-switcher peek): those must NOT cycle the session, or the
+  // preview black-flashes mid-capture. The OS-camera hand-off backgrounds our
+  // activity, which is exactly `'background'`.
+  const [appActive, setAppActive] = useState(
+    AppState.currentState !== 'background',
+  );
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (s) =>
+      setAppActive(s !== 'background'),
+    );
+    return () => sub.remove();
+  }, []);
   const incremental = useIncrementalStitcher();
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);
@@ -1708,6 +1894,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // far below (after the refs/state it closes over), so the imperative handle
   // can't reference it directly without a TDZ error — the ref bridges that.
   const handleTapRef = useRef<(() => Promise<void>) | null>(null);
+  // Latest hold-start callback, kept in a ref so the imperative `startPanorama`
+  // can reach it (handleHoldStart is defined below the handle). Mirrors
+  // handleTapRef; handleHoldEndRef (the stop side) already exists further down.
+  const handleHoldStartRef = useRef<(() => void) | null>(null);
 
   // v0.20.0 — AR overlay imperative handle.  `<Camera>` itself renders no
   // overlay layer; the overlay methods forward to the mounted
@@ -1724,6 +1914,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     clearOverlays: () => arViewRef.current?.clearOverlays(),
     raycast: () => arViewRef.current?.raycast() ?? Promise.resolve(null),
     takePhoto: () => handleTapRef.current?.() ?? Promise.resolve(),
+    startPanorama: () => handleHoldStartRef.current?.(),
+    stopPanorama: () => {
+      handleHoldEndRef.current?.();
+      return Promise.resolve();
+    },
   }), []);
 
   // Effect that does the async transition work whenever the settled
@@ -2287,7 +2482,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // `pendingPanStart` instead (item 1/2) and the resume effect below
   // starts the capture once the user rotates to landscape.
   const handleHoldStart = useCallback(() => {
-    if (!enablePanoramaMode) return;
+    // Gate symmetrically with handleTap (shutterDisabled) AND guard
+    // re-entrancy: the built-in shutter's phase machine prevents a
+    // double-start, but the imperative startPanorama() has no such machine, so
+    // a repeat call — or one while a capture is recording/stitching — would
+    // re-enter incremental.start() on a live engine.
+    if (!enablePanoramaMode || shutterDisabled) return;
+    if (statusPhase === 'recording' || statusPhase === 'stitching') return;
     if (!incrementalStitcherIsAvailable()) {
       onError?.(
         new CameraError(
@@ -2306,6 +2507,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     void startCapture();
   }, [
     enablePanoramaMode,
+    shutterDisabled,
+    statusPhase,
     onError,
     panMode,
     deviceOrientation,
@@ -2550,6 +2753,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // adding it as a dep (it changes identity on every recording tick).
   useEffect(() => {
     handleHoldEndRef.current = () => { void handleHoldEnd(); };
+    // Assigned here (not with handleTapRef) because handleHoldStart is declared
+    // below that point — this site is after both hold handlers exist.
+    handleHoldStartRef.current = handleHoldStart;
   });
 
   // ── Item 6 — lateral drift → FINALIZE + popup ───────────────────
@@ -2794,7 +3000,30 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         <CameraView
           ref={visionCameraRef}
           device={capture.device}
-          isActive
+          // Release the camera whenever the app is genuinely BACKGROUNDED, and
+          // rebind on return — the standard vision-camera lifecycle contract
+          // (v4 does not observe the host activity itself; the session follows
+          // `isActive` alone). Holding a camera we cannot draw is wrong on its
+          // own terms: it blocks other apps, burns battery, and Android may
+          // revoke it anyway, surfacing as the swallowed
+          // `camera-has-been-disconnected` → silent black preview.
+          //
+          // DEVICE EVIDENCE (Galaxy A35, 2026-07-24): this was previously gated
+          // on the native-0.5× affordance being OFFERED, which meant a device
+          // with a reachable ultra-wide kept its camera + AR session fully open
+          // while the OEM camera launched over it. Samsung's `lmkd` runs a
+          // camera-open "kill boost" (`camkillboostmode`, targeting the pid
+          // that opened the camera) and KILLED the app mid-hand-off — with
+          // 2.2 GB still free, so it is Samsung's camera-specific reclaim, not
+          // generic pressure. The in-flight capture died with the process.
+          // Staying small exactly when that reclaim runs is the whole point, so
+          // the release must NOT be conditional on why we backgrounded.
+          //
+          // Only a true `'background'` releases — never iOS's transient
+          // `'inactive'` (Control Centre, the notification shade, a
+          // permission/Face-ID prompt, the app-switcher peek), which would
+          // black-flash the preview mid-capture. See the `appActive` note.
+          isActive={appActive}
           // iOS depth sidecar for tap photos (non-AR only): turns on
           // vision-camera depth delivery + the depth-capable format bias;
           // useCapture (threaded above) extracts the sidecar before the
@@ -2809,6 +3038,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           // Non-AR pano keyframe quality: floors the VIDEO stream at 1280
           // long edge (the FP stream IS the keyframe source here).
           keyframeQualityCapture={keyframeQualityCapture}
+          // v0.23 anti-blur EXPOSURE CAP (non-AR): translated to an fps floor
+          // on this vision-camera instance (see CameraView). 0/absent = off.
+          maxExposureMs={settings.frameSelection.antiBlur?.maxExposureMs ?? 0}
           // `video={true}` is REQUIRED for takeSnapshot to work on iOS.
           // vision-camera v4's iOS implementation of takeSnapshot waits
           // for a frame on the video pipeline; with video disabled, the
@@ -3040,7 +3272,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             top/bottom (lens left / shutter center / AR right);
             vertical column when on left/right (slots stack along
             the narrow strip).  Touch targets stay axis-aligned. */}
-        <View style={bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}>
+        <View
+          style={[
+            bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation)),
+            // Host chrome docked below? Lift the whole cluster clear of it.
+            bottomBarOffset > 0 && { transform: [{ translateY: -bottomBarOffset }] },
+          ]}
+        >
         {/* v0.13.1 — flash + AR moved to the top-right pill stack (see
             below).  Left/right slots stay as flex spacers so the shutter
             + lens chip remain centred. */}
@@ -3054,17 +3292,26 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               onChange={handleLensChange}
               has0_5x={has0_5x}
               contentRotation={contentRotation}
+              offerNativeUltraWide={offerNativeUW}
+              onNativeUltraWide={onRequestNativeUltraWide}
+              hideWhenSingle={hideLensChipWhenSingle}
+              ultraWideFactor={capture.ultraWideFactor}
             />
           )}
-          <View style={styles.shutterWrap}>
-            <CameraShutter
-              onTap={handleTap}
-              onHoldStart={enablePanoramaMode ? handleHoldStart : noop}
-              onHoldComplete={enablePanoramaMode ? handleHoldEnd : noop}
-              isProcessing={statusPhase === 'stitching'}
-              disabled={statusPhase === 'stitching' || shutterDisabled}
-            />
-          </View>
+          {!hideBuiltInShutter && (
+            <View style={styles.shutterWrap}>
+              <CameraShutter
+                onTap={handleTap}
+                onHoldStart={enablePanoramaMode ? handleHoldStart : noop}
+                onHoldComplete={enablePanoramaMode ? handleHoldEnd : noop}
+                // Tap-only when panorama is off — no dead "recording" ring on a
+                // hold that does nothing (the split-Photo-mode case).
+                holdEnabled={enablePanoramaMode}
+                isProcessing={statusPhase === 'stitching'}
+                disabled={statusPhase === 'stitching' || shutterDisabled}
+              />
+            </View>
+          )}
         </View>
         <View style={styles.bottomBarRight} />
         </View>
@@ -3085,7 +3332,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         {/* v0.13.2 — AR toggle only when BOTH sources are allowed
             (captureSources='both'); a single-source constraint has
             nothing to toggle.  Still gated on 1× + device AR support. */}
-        {arAllowed && nonArAllowed && lens === '1x' && isARSupportedOnDevice && (
+        {!hideBuiltInShutter && arAllowed && nonArAllowed && lens === '1x' && isARSupportedOnDevice && (
           <ARToggle arEnabled={arPreference} onToggle={handleARToggle} contentRotation={contentRotation} />
         )}
         {showFlashButton && !isAR && deviceHasTorch && (

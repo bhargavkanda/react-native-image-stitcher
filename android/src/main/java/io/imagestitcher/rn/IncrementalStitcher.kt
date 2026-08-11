@@ -261,6 +261,87 @@ class IncrementalStitcher(
     /// the window.
     private var sharpnessBestNewContentFraction: Double = -1.0
     private var sharpnessBestIsLandscape: Boolean = true
+    /// v0.23 — sharpness score of the BUFFERED best, tracked
+    /// platform-side rather than read back from the machine.  The
+    /// machine's `bestScore` is the window's streaming max, which
+    /// diverges from the buffered frame in two places: a FlushThenOpen
+    /// overwrites it with the NEW seed's score before we commit the old
+    /// best, and a candidate that wins the max but fails `retainFrame`
+    /// advances it past the frame we actually kept.  The admission
+    /// policy compares the score of the frame we are about to WRITE, so
+    /// it needs this one.  -1.0 = nothing buffered.
+    private var sharpnessBestScore: Double = -1.0
+
+    // ── v0.23 — anti-blur ADMISSION policy (motion gate + softness) ──
+    //
+    // OFF BY DEFAULT.  Every knob below defaults to 0/false, and the
+    // engine short-circuits on `blurPolicy.admissionEnabled` before it
+    // touches the policy at all — a capture that doesn't opt in runs
+    // the pre-v0.23 path with no extra JNI crossings, no pan-rate
+    // tracking and no median bookkeeping on the producer thread.
+    //
+    // Where it is consulted: the sharpness window's natural CLOSE
+    // (window-full / novelty-drift), i.e. the moment a selected
+    // keyframe is about to be written.  A HOLD there is free — the
+    // buffered best stays in RAM and the window is re-opened seeded
+    // with its own score, so later (steadier) frames can still beat it.
+    //
+    // Where it is deliberately NOT consulted, because a hold would
+    // LOSE a keyframe instead of deferring one:
+    //   • FlushThenOpen ("new-accept") — the gate has already accepted
+    //     a new frame; the pending best is about to be replaced, so it
+    //     must be written now or never.
+    //   • finalize()'s drain — the capture is over.
+    //   • the K == 1 / gate-disabled immediate-commit path — there is
+    //     no window to hold in, and the gate has already advanced its
+    //     reference pose, so skipping the frame would leave a real
+    //     coverage gap rather than a deferred commit.
+    // Those three paths commit unconditionally, which is also what
+    // guarantees forward progress when `maxConsecutiveHolds` is 0.
+    //
+    // Threading: guarded by `sharpnessWindowLock` like every other
+    // window field — the policy is only ever consulted from inside a
+    // locked section of the window helpers.
+    private val blurPolicy = BlurPolicy()
+    /// Consecutive holds of the CURRENT pending keyframe.  Reset when a
+    /// keyframe commits and when a new window is seeded.
+    private var sharpnessHoldCount: Int = 0
+    /// Last evaluated frame's orientation quaternion [qx, qy, qz, qw]
+    /// and the monotonic clock reading it was sampled at — the two
+    /// halves of the pan-rate estimate.  Null/0 = no anchor yet.
+    private var panRateLastQuat: DoubleArray? = null
+    private var panRateLastSampleNanos: Long = 0L
+    /// Magnitude of the device's angular rate, rad/s, from the most
+    /// recent usable pose pair.  -1.0 is the shared C++ "unknown"
+    /// sentinel and makes the motion gate fail open.
+    private var panRateRadPerSec: Double = -1.0
+
+    /// v0.23 — the exposure-cap milliseconds JS asked for.  STORED BUT
+    /// NOT ACTIONED on Android, because this library owns neither
+    /// capture session that could honour it:
+    ///   • non-AR — vision-camera owns the CameraX/Camera2 session; we
+    ///     only ever see an already-captured `android.media.Image` in
+    ///     the frame-processor plugin.  There is no CameraDevice, no
+    ///     CaptureRequest.Builder and no CameraCharacteristics on this
+    ///     side of the boundary, so CONTROL_AE_MODE_OFF +
+    ///     SENSOR_EXPOSURE_TIME is simply not reachable.  The HOST must
+    ///     apply it through vision-camera's Camera2 interop
+    ///     (Camera2CameraControl — the same interop retailens-camera-sdk
+    ///     already uses for manual exposure), or the softer
+    ///     CONTROL_AE_TARGET_FPS_RANGE floor.
+    ///   • AR — ARCore owns the camera and exposes NO exposure API at
+    ///     all.  Its only related lever is the frame rate, which
+    ///     `antiBlurPreferHighFpsFormat` below drives.
+    /// Kept as a field so the wire contract stays honest (JS always
+    /// emits the key) and so the reach is documented in one place.
+    private var antiBlurMaxExposureMs: Double = 0.0
+    /// v0.23 — ACTIONED on the AR path only: forwarded to
+    /// RNSARSession.setHighFpsFormatEnabled, which restricts the ARCore
+    /// camera-config pick to >= 60 fps.  A 60 fps stream bounds exposure
+    /// at 1/60 s by construction, which is the closest thing to an
+    /// exposure cap ARCore permits.  Inert on the non-AR path (no AR
+    /// session exists; vision-camera's format is the host's choice).
+    private var antiBlurPreferHighFpsFormat: Boolean = false
 
     /// V16 Phase 1 / P3-F — shared-C++ KeyframeGate.  Replaces the
     /// V16-Phase-1 frame-counter MVP placeholder
@@ -544,6 +625,57 @@ class IncrementalStitcher(
                 sharpnessWindow.setWindowSize(sharpnessWindowK)
                 sharpnessBestFrame = null
                 sharpnessBestPose = null
+                sharpnessBestScore = -1.0
+            }
+
+            // v0.23 — anti-blur CAPTURE controls.  ALL DEFAULT OFF
+            // (0/false) except the hold cap, so a host that never sets
+            // `frameSelection.antiBlur` gets byte-identical v0.22
+            // behaviour.  Clamps match iOS so a mis-typed setting can
+            // never produce a different verdict per platform.
+            //
+            // The knobs arrive pre-flattened by
+            // PanoramaSettingsBridge.panoramaSettingsToNativeConfig,
+            // which always emits all five keys; the ?: defaults below
+            // cover older JS bundles.
+            //
+            // Read as Double even for the integer knob: RN delivers
+            // every JS number as a double, and ReadableMap.getInt()
+            // THROWS on a fractional one.  A host typo must not be able
+            // to fail start() — this whole feature is fail-open.
+            val abPanRate = configOverrides
+                ?.getDoubleOrDefault("antiBlurMaxCommitPanRateRadPerSec", 0.0) ?: 0.0
+            val abFraction = configOverrides
+                ?.getDoubleOrDefault("antiBlurMinScoreFractionOfMedian", 0.0) ?: 0.0
+            val abHolds = configOverrides
+                ?.getDoubleOrDefault("antiBlurMaxConsecutiveHolds", 12.0) ?: 12.0
+            val abExposureMs = configOverrides
+                ?.getDoubleOrDefault("antiBlurMaxExposureMs", 0.0) ?: 0.0
+            // Stored-only on Android — see the field declarations for
+            // which session owns exposure and what the host must do.
+            antiBlurMaxExposureMs = abExposureMs.coerceIn(0.0, 100.0)
+            antiBlurPreferHighFpsFormat = configOverrides
+                ?.getBooleanOrDefault("antiBlurPreferHighFpsFormat", false) ?: false
+            // The one exposure-adjacent lever this library DOES own on
+            // Android: an ARCore config that streams at >= 60 fps caps
+            // exposure at 1/60 s by construction.  No-ops when the flag
+            // is unchanged (so the default capture never pauses the AR
+            // session) and when no AR session exists — the non-AR path
+            // runs on vision-camera, where the host owns the controls.
+            // iOS parity: RNSARSession.setHighFpsFormatEnabled.
+            RNSARSession.instance?.setHighFpsFormatEnabled(antiBlurPreferHighFpsFormat)
+            synchronized(sharpnessWindowLock) {
+                blurPolicy.maxCommitPanRateRadPerSec = abPanRate.coerceIn(0.0, 20.0)
+                blurPolicy.minScoreFractionOfMedian = abFraction.coerceIn(0.0, 1.0)
+                blurPolicy.maxConsecutiveHolds =
+                    abHolds.coerceIn(0.0, 100.0).toInt()
+                // A new capture is a new scene: the previous session's
+                // accepted-score median would mis-calibrate the floor.
+                blurPolicy.resetHistory()
+                sharpnessHoldCount = 0
+                panRateLastQuat = null
+                panRateLastSampleNanos = 0L
+                panRateRadPerSec = -1.0
             }
 
             // 2026-05-22 — non-AR mode opt-out for angular fallback.
@@ -607,6 +739,14 @@ class IncrementalStitcher(
                     "gate.maxCount=${keyframeGate.maxCount} " +
                     "gate.threshold=${keyframeGate.overlapThreshold} " +
                     "arCameraViewBound=${arCameraViewRef != null} " +
+                    // v0.23 — the anti-blur admission state, so a
+                    // device log says whether the knobs actually
+                    // reached native (all-zero = the v0.22 path).
+                    "antiBlur.panRate=${blurPolicy.maxCommitPanRateRadPerSec} " +
+                    "antiBlur.minFraction=${blurPolicy.minScoreFractionOfMedian} " +
+                    "antiBlur.maxHolds=${blurPolicy.maxConsecutiveHolds} " +
+                    "antiBlur.exposureMs=$antiBlurMaxExposureMs(host-applied) " +
+                    "antiBlur.preferHighFps=$antiBlurPreferHighFpsFormat " +
                     "isRunning=${isRunning.get()}",
             )
 
@@ -968,6 +1108,16 @@ class IncrementalStitcher(
             sharpnessWindow.reset()
             sharpnessBestFrame = null
             sharpnessBestPose = null
+            sharpnessBestScore = -1.0
+            // v0.23 — the aborted capture's accepted scores and pose
+            // anchor describe a scene we're leaving; carrying them into
+            // the next capture would mis-calibrate the softness floor
+            // and manufacture a bogus first pan-rate sample.
+            blurPolicy.resetHistory()
+            sharpnessHoldCount = 0
+            panRateLastQuat = null
+            panRateLastSampleNanos = 0L
+            panRateRadPerSec = -1.0
         }
         // Defer the session-dir cleanup onto the work queue so we don't
         // race with an ingest that already passed the null-check and is
@@ -1175,6 +1325,7 @@ class IncrementalStitcher(
                     decision.newContentFraction,
                     grayData, grayWidth, grayHeight, grayStride,
                     tx, ty, tz, qx, qy, qz, qw,
+                    trackingPoor,
                     retainFrame,
                 )
                 // 2026-05-22 (audit follow-up) — emit a reject-state
@@ -1206,6 +1357,7 @@ class IncrementalStitcher(
                     grayData, grayWidth, grayHeight, grayStride,
                     imageWidth, imageHeight,
                     tx, ty, tz, qx, qy, qz, qw,
+                    trackingPoor,
                     retainFrame,
                 )
                 return
@@ -1314,6 +1466,9 @@ class IncrementalStitcher(
         imageHeight: Int,
         tx: Double, ty: Double, tz: Double,
         qx: Double, qy: Double, qz: Double, qw: Double,
+        /// v0.23 — degraded tracking makes the pose delta meaningless
+        /// as a pan rate; see samplePanRateLocked.
+        trackingPoor: Boolean,
         retainFrame: () -> SharpnessCandidateFrame?,
     ) {
         // Score OUTSIDE the lock (~1-3 ms of OpenCV work) so
@@ -1325,6 +1480,7 @@ class IncrementalStitcher(
             // have raced the scoring above; their window state is
             // authoritative once isRunning flipped.
             if (!isRunning.get()) return
+            samplePanRateLocked(qx, qy, qz, qw, trackingPoor)
             val decision = sharpnessWindow.ingest(
                 isAccept = true,
                 score = score,
@@ -1332,7 +1488,18 @@ class IncrementalStitcher(
                 overlapThreshold = keyframeGate.overlapThreshold,
             )
             if (decision.action == SharpnessWindow.Action.FLUSH_THEN_OPEN) {
-                commitSharpnessWindowLocked("new-accept")
+                // v0.23 — NO admission consult here: the gate has
+                // already accepted a new frame, so the pending best is
+                // about to be overwritten by the seed below.  Holding
+                // would drop a selected keyframe rather than defer it,
+                // which the fail-open contract forbids.
+                val pendingScore = sharpnessBestScore
+                val committed = commitSharpnessWindowLocked("new-accept")
+                // Guarded so the disabled configuration crosses no JNI
+                // boundary at all on this path.
+                if (committed && blurPolicy.admissionEnabled) {
+                    blurPolicy.recordAccepted(pendingScore)
+                }
             }
             // Seed the (new) window: retain this frame in RAM (a
             // reference grab — the caller's packed NV21 already
@@ -1348,6 +1515,7 @@ class IncrementalStitcher(
                 sharpnessWindow.reset()
                 sharpnessBestFrame = null
                 sharpnessBestPose = null
+                sharpnessBestScore = -1.0
                 android.util.Log.w(
                     "IncrementalStitcher",
                     "sharpnessWindowHandleAccept: retainFrame returned " +
@@ -1359,6 +1527,10 @@ class IncrementalStitcher(
             sharpnessBestPose = doubleArrayOf(tx, ty, tz, qx, qy, qz, qw)
             sharpnessBestNewContentFraction = newContentFraction
             sharpnessBestIsLandscape = imageWidth >= imageHeight
+            sharpnessBestScore = score
+            // v0.23 — a fresh pending keyframe starts with a clean hold
+            // budget; the cap counts holds of the SAME frame.
+            sharpnessHoldCount = 0
             android.util.Log.i(
                 "IncrementalStitcher",
                 "sharpness window OPEN k=$sharpnessWindowK " +
@@ -1378,6 +1550,8 @@ class IncrementalStitcher(
         grayStride: Int,
         tx: Double, ty: Double, tz: Double,
         qx: Double, qy: Double, qz: Double, qw: Double,
+        /// v0.23 — see samplePanRateLocked.
+        trackingPoor: Boolean,
         retainFrame: () -> SharpnessCandidateFrame?,
     ) {
         // Cheap open-check before the multi-ms score.
@@ -1390,6 +1564,7 @@ class IncrementalStitcher(
             // Re-check: finalize/cancel may have consumed the window
             // while we were scoring.
             if (sharpnessBestFrame == null || !sharpnessWindow.isOpen) return
+            samplePanRateLocked(qx, qy, qz, qw, trackingPoor)
             val decision = sharpnessWindow.ingest(
                 isAccept = false,
                 score = score,
@@ -1401,6 +1576,7 @@ class IncrementalStitcher(
                 if (frame != null) {
                     sharpnessBestFrame = frame
                     sharpnessBestPose = doubleArrayOf(tx, ty, tz, qx, qy, qz, qw)
+                    sharpnessBestScore = score
                     android.util.Log.i(
                         "IncrementalStitcher",
                         "sharpness window IMPROVED score=${"%.1f".format(score)}",
@@ -1413,10 +1589,167 @@ class IncrementalStitcher(
                 // the buffer.
             }
             if (decision.action == SharpnessWindow.Action.CLOSE_AND_SAVE) {
-                commitSharpnessWindowLocked(
-                    if (decision.driftClosed) "novelty-drift" else "window-full")
+                closeOrHoldWindowLocked(
+                    reason = if (decision.driftClosed) "novelty-drift" else "window-full",
+                    driftClosed = decision.driftClosed,
+                )
             }
         }
+    }
+
+    /// v0.23 — the ADMISSION point.  The window machine has decided to
+    /// close; the anti-blur policy gets the last word on whether the
+    /// buffered best is good enough to write.
+    ///
+    /// Commit  → write it, feed its score to the running median (so the
+    ///           softness floor calibrates on what this scene actually
+    ///           yields), clear the hold counter.
+    /// Hold*   → keep the buffered best and RE-OPEN the window seeded
+    ///           with its own score, so the K−1 frames that arrive
+    ///           while the operator steadies compete against it exactly
+    ///           as normal candidates.  Re-seeding is what makes a hold
+    ///           worth anything: leaving the machine closed would just
+    ///           commit the same soft frame later.
+    ///
+    /// A NOVELTY-DRIFT close is exempt and commits unconditionally.
+    /// That guard fires before the score comparison, so once it is
+    /// firing no later candidate can compete for the buffer — a hold
+    /// there could not improve the keyframe, only postpone it (and burn
+    /// the hold budget that the window-full path needs).  Consequence,
+    /// stated plainly: on pans fast enough that every window ends in
+    /// drift rather than in exhausted slots, the motion gate has no
+    /// teeth.  The lever for that regime is the exposure cap, which on
+    /// Android only the host can apply (see `antiBlurMaxExposureMs`).
+    ///
+    /// Bounded by construction: `maxConsecutiveHolds` caps the retries
+    /// natively, and even with the cap disabled the next gate-accept
+    /// (FlushThenOpen) or finalize commits unconditionally.
+    ///
+    /// Caller MUST hold `sharpnessWindowLock`.
+    private fun closeOrHoldWindowLocked(reason: String, driftClosed: Boolean) {
+        // Default-off fast path: with both gates at 0 the shared C++
+        // would answer Commit for every input, so skip the crossing
+        // entirely and stay byte-identical to v0.22.
+        if (!blurPolicy.admissionEnabled || driftClosed) {
+            val pendingScore = sharpnessBestScore
+            val committed = commitSharpnessWindowLocked(reason)
+            if (blurPolicy.admissionEnabled) {
+                // A drift-closed keyframe is still one this capture
+                // accepted, so it still calibrates the softness floor.
+                if (committed) blurPolicy.recordAccepted(pendingScore)
+                sharpnessHoldCount = 0
+            }
+            return
+        }
+        // Nothing buffered: the commit helper is a no-op and there is
+        // no candidate to judge.
+        if (sharpnessBestFrame == null) return
+        val verdict = blurPolicy.admit(
+            candidateScore = sharpnessBestScore,
+            panRateRadPerSec = panRateRadPerSec,
+            consecutiveHolds = sharpnessHoldCount,
+        )
+        if (verdict == BlurPolicy.Admission.COMMIT) {
+            val pendingScore = sharpnessBestScore
+            // The pending frame is consumed either way (the commit
+            // helper clears the buffer before it can fail), so the hold
+            // budget resets regardless; only a keyframe that actually
+            // landed belongs in the median.
+            if (commitSharpnessWindowLocked(reason)) {
+                blurPolicy.recordAccepted(pendingScore)
+            }
+            sharpnessHoldCount = 0
+            return
+        }
+        // Re-open around the buffered best.  If the machine refuses
+        // (K == 1, nothing scored, window somehow still open) there is
+        // nowhere for the pending keyframe to live, so COMMIT — a held
+        // frame with no open window would sit untouched until finalize.
+        if (!sharpnessWindow.reopenKeepingBest()) {
+            val pendingScore = sharpnessBestScore
+            if (commitSharpnessWindowLocked(reason)) {
+                blurPolicy.recordAccepted(pendingScore)
+            }
+            sharpnessHoldCount = 0
+            return
+        }
+        sharpnessHoldCount += 1
+        android.util.Log.i(
+            "IncrementalStitcher",
+            "sharpness window HOLD ($reason) verdict=$verdict " +
+                "holds=$sharpnessHoldCount/${blurPolicy.maxConsecutiveHolds} " +
+                "score=${"%.1f".format(sharpnessBestScore)} " +
+                "median=${"%.1f".format(blurPolicy.medianScore)} " +
+                "panRate=${"%.2f".format(panRateRadPerSec)}",
+        )
+    }
+
+    /// v0.23 — update the pan-rate estimate from consecutive frame
+    /// orientations.  Deliberately NOT a SensorManager listener: the
+    /// pose already reaching this engine (ARCore in AR mode, the
+    /// gyro-integrated quaternion the JS driver supplies in non-AR
+    /// mode) carries the same rotation, costs nothing extra, and can't
+    /// add a sensor lifecycle to get wrong.
+    ///
+    /// Every degenerate case resolves to -1.0 (the shared C++ "unknown"
+    /// sentinel → motion gate skipped): degraded tracking, a non-unit
+    /// quaternion, a missing anchor, or a sample interval outside the
+    /// plausible frame-cadence band.  The wide dt band matters because
+    /// the window only feeds us frames while it is open, so a gap
+    /// between windows must re-anchor rather than divide a large
+    /// rotation by a large dt.  The tracking guard matters most for
+    /// ARCore relocalisation: a snap can move the pose by radians
+    /// between frames, and reporting that as a pan rate would hold
+    /// every commit until the cap broke the streak.
+    ///
+    /// Caller MUST hold `sharpnessWindowLock`.
+    private fun samplePanRateLocked(
+        qx: Double, qy: Double, qz: Double, qw: Double,
+        trackingPoor: Boolean,
+    ) {
+        // No motion gate armed → don't even track (default-off path).
+        if (blurPolicy.maxCommitPanRateRadPerSec <= 0.0) return
+        val norm = kotlin.math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+        if (trackingPoor || !norm.isFinite() || norm < 0.9 || norm > 1.1) {
+            // Hosts that supply no orientation at all send zeros here.
+            // Dropping the anchor (not just the rate) stops the frame
+            // AFTER a bad one from measuring across the gap.
+            panRateLastQuat = null
+            panRateRadPerSec = -1.0
+            return
+        }
+        val q = doubleArrayOf(qx / norm, qy / norm, qz / norm, qw / norm)
+        val now = android.os.SystemClock.elapsedRealtimeNanos()
+        val prev = panRateLastQuat
+        val prevNanos = panRateLastSampleNanos
+        panRateLastQuat = q
+        panRateLastSampleNanos = now
+        if (prev == null || prevNanos <= 0L) {
+            panRateRadPerSec = -1.0
+            return
+        }
+        val dtSec = (now - prevNanos) / 1_000_000_000.0
+        // 1 ms floor guards against a divide-by-almost-zero.  The
+        // ceiling must clear the SLOWEST legal evaluation cadence, not
+        // just the frame rate: `flowEvalEveryNFrames` is clamped to 10
+        // and the JS driver's throttle stacks on top, so samples can sit
+        // ~300+ ms apart on a legal config — a 250 ms ceiling rejected
+        // every one of them and left the motion gate permanently (and
+        // silently) inert.  1.0 s still keeps a genuine stall out, and
+        // matches the iOS bound so both platforms gate alike.
+        if (dtSec < 0.001 || dtSec > 1.0) {
+            panRateRadPerSec = -1.0
+            return
+        }
+        // Angle of the relative rotation between the two orientations:
+        // |q0 · q1| = cos(theta/2).  abs() collapses the double-cover
+        // (q and -q are the same rotation), so the result is always the
+        // short way round.
+        val dot = kotlin.math.abs(
+            prev[0] * q[0] + prev[1] * q[1] + prev[2] * q[2] + prev[3] * q[3])
+        val angle = 2.0 * kotlin.math.acos(dot.coerceIn(0.0, 1.0))
+        val rate = angle / dtSec
+        panRateRadPerSec = if (rate.isFinite()) rate else -1.0
     }
 
     /// Close the window: JPEG-encode the buffered best ONCE (the only
@@ -1430,8 +1763,13 @@ class IncrementalStitcher(
     /// buffered best is cleared up-front, so a second call (or a call
     /// with no pending window) is a no-op — a producer's window-full
     /// commit and finalize's drain-commit can never double-append.
-    private fun commitSharpnessWindowLocked(reason: String) {
-        val frame = sharpnessBestFrame ?: return
+    ///
+    /// v0.23 — returns true only when a keyframe actually landed in
+    /// `batchKeyframePaths`.  The admission policy feeds its running
+    /// median from that signal, so a dropped encode must not calibrate
+    /// the softness floor against a frame nobody will ever stitch.
+    private fun commitSharpnessWindowLocked(reason: String): Boolean {
+        val frame = sharpnessBestFrame ?: return false
         val pose = sharpnessBestPose
         val newContent = sharpnessBestNewContentFraction
         val isLandscape = sharpnessBestIsLandscape
@@ -1440,6 +1778,7 @@ class IncrementalStitcher(
         sharpnessBestFrame = null
         sharpnessBestPose = null
         sharpnessBestNewContentFraction = -1.0
+        sharpnessBestScore = -1.0
         val dir = captureSessionDir
         if (dir == null) {
             android.util.Log.w(
@@ -1447,7 +1786,7 @@ class IncrementalStitcher(
                 "commitSharpnessWindow($reason): captureSessionDir is " +
                     "null — keyframe dropped",
             )
-            return
+            return false
         }
         val path = java.io.File(
             dir, "keyframe-${batchKeyframePaths.size}.jpg"
@@ -1478,7 +1817,7 @@ class IncrementalStitcher(
                 "commitSharpnessWindow($reason): encode failed — " +
                     "keyframe dropped",
             )
-            return
+            return false
         }
         batchKeyframePaths.add(path)
         if (pose != null) {
@@ -1507,6 +1846,7 @@ class IncrementalStitcher(
             poseTz = pose?.get(2) ?: 0.0,
             acceptedAtMs = System.currentTimeMillis(),
         )
+        return true
     }
 
     // ─── F8.4 — Frame Processor entry point ──────────────────────
@@ -2217,6 +2557,16 @@ class IncrementalStitcher(
             android.util.Log.w(
                 "IncrementalStitcher",
                 "onCatalystInstanceDestroy: sharpnessWindow.close failed: ${t.message}",
+            )
+        }
+        // v0.23 — same for the admission policy's running-median
+        // allocation (one small C++ object per module instance).
+        try {
+            blurPolicy.close()
+        } catch (t: Throwable) {
+            android.util.Log.w(
+                "IncrementalStitcher",
+                "onCatalystInstanceDestroy: blurPolicy.close failed: ${t.message}",
             )
         }
         // V16 Phase 2 (Android Fix-1) — best-effort cleanup of the

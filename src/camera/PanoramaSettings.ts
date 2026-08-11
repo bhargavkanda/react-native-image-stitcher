@@ -254,6 +254,123 @@ export interface FrameSelectionSettings {
    * track [DEFAULT_PANORAMA_SETTINGS.frameSelection.flow].
    */
   flow?: FlowGateSettings;
+
+  /**
+   * Anti-blur capture controls (v0.23).  ALL OFF BY DEFAULT — omitting
+   * this sub-tree reproduces today's behaviour exactly.  See
+   * [AntiBlurSettings] for what each knob attacks.
+   */
+  antiBlur?: AntiBlurSettings;
+}
+
+
+/**
+ * Anti-blur capture controls — the mechanisms that attack motion blur
+ * at its SOURCE, complementing `sharpnessWindow` (which only picks the
+ * sharpest of the frames it is given).
+ *
+ * Motion blur extent ≈ angular-velocity × exposure-time.  A smooth
+ * continuous pan blurs EVERY frame in a selection window by the same
+ * amount, so best-of-K has nothing better to pick — the selector only
+ * wins on the operator's natural micro-pauses.  These knobs shorten the
+ * exposure term, gate on the velocity term, and refuse frames that are
+ * anomalously soft for the scene.
+ *
+ * Every field is optional and defaults to "off / today's behaviour":
+ * a host that never sets `antiBlur` is byte-identical to v0.22.
+ */
+export interface AntiBlurSettings {
+  /**
+   * (1) EXPOSURE CAP — the root-cause fix.  Maximum exposure time, in
+   * milliseconds, requested from the camera while a panorama sweep is
+   * running; the driver raises ISO to compensate and the cap is
+   * released when the sweep ends.
+   *
+   * Why trade noise for speed: sensor noise is recoverable (denoise,
+   * and multi-band blending averages the overlap region across frames),
+   * while motion blur is NOT — deconvolution isn't viable on-device,
+   * and smeared frames also degrade feature matching, so blur corrupts
+   * the stitch GEOMETRY, not just the look.
+   *
+   * Suggested 8 ms (1/125 s) for shelf work; 4 ms (1/250 s) for fast
+   * operators in good light.  0 / omitted = don't touch exposure.
+   *
+   * ⚠ HOST-APPLIED ON EVERY PLATFORM TODAY.  This library never owns the
+   * capture session: the non-AR path is react-native-vision-camera's
+   * (AVCaptureSession / CameraX), and the AR paths are ARKit's and
+   * ARCore's, neither of which exposes an exposure API at all.  The
+   * value is therefore parsed, clamped and logged, but the LIBRARY does
+   * not apply it — fighting the session owner for device configuration
+   * would race its reconfigures and could not hold the cap as an
+   * invariant.  It is carried so hosts and diagnostics share one number.
+   *
+   * What actually caps exposure, per path:
+   *   • iOS / Android non-AR — the HOST sets it on vision-camera.  The
+   *     reachable lever is `minFps` (+ a high-fps `format`): vision-
+   *     camera maps it to `activeVideoMaxFrameDuration`, and AE cannot
+   *     expose longer than a frame interval, so `minFps: 60` ⇒ ≲1/60 s.
+   *     On Android the stronger option is Camera2 interop
+   *     (`Camera2CameraControl`: CONTROL_AE_MODE_OFF +
+   *     SENSOR_EXPOSURE_TIME + a compensating SENSOR_SENSITIVITY).
+   *     NOTE: vision-camera's `exposure` prop is NOT this — it maps to
+   *     `setExposureTargetBias` (EV bias only).
+   *   • iOS AR (ARKit) / Android AR (ARCore) — no exposure API exists.
+   *     Use {@link preferHighFpsFormat}, which the library DOES apply:
+   *     a ≥60 fps capture format bounds exposure by construction.
+   */
+  maxExposureMs?: number;
+
+  /**
+   * (2) MOTION GATE — hold keyframe commit while the device is slewing
+   * faster than this (rad/s, magnitude about the pan axis).  Converts
+   * "commit a blurred keyframe" into "wait a beat"; the selection
+   * window stays open meanwhile, so the wait costs nothing and the
+   * frames that arrive once the operator steadies are simply better
+   * candidates.
+   *
+   * Reference points: the JS pan coach buckets at 0.5 rad/s (good) and
+   * 1.0 rad/s (warn), so ~1.0 gates only genuinely-too-fast sweeps.
+   * 0 / omitted = no motion gating.
+   */
+  maxCommitPanRateRadPerSec?: number;
+
+  /**
+   * (3) RELATIVE SHARPNESS FLOOR — hold commit while the best candidate
+   * scores below this FRACTION of the running median of the keyframes
+   * already accepted this capture.
+   *
+   * Variance-of-Laplacian is content-dependent (a blank wall scores ~0
+   * however sharp), which is why the selection window never uses an
+   * absolute threshold.  A ratio against the session's own median keeps
+   * that self-calibrating property while adding the one judgement the
+   * window structurally cannot make: "ALL of these candidates are
+   * anomalously soft".
+   *
+   * ~0.6 flags clearly-softer-than-usual frames.  0 / omitted = off.
+   */
+  minScoreFractionOfMedian?: number;
+
+  /**
+   * Forward-progress guarantee for (2) and (3): never hold the same
+   * pending keyframe more than this many consecutive evaluated frames.
+   * Protects against an operator who simply cannot steady (moving
+   * vehicle, tremor) — after this many holds the frame is committed
+   * regardless.  Default 12; 0 disables the cap (not recommended).
+   */
+  maxConsecutiveHolds?: number;
+
+  /**
+   * (5) HIGH-FRAME-RATE CAPTURE FORMAT — prefer the highest-fps camera
+   * format available instead of the smallest.  Two compounding wins:
+   * a shorter frame interval bounds exposure time by construction
+   * (60 fps ⇒ ≤ 1/60 s), and twice the frames per second means twice
+   * the candidates in each selection window.
+   *
+   * This is the ONLY exposure lever available on the iOS AR path, where
+   * ARKit owns the capture device.  Costs more live-stream throughput,
+   * so it is opt-in.  Default false.
+   */
+  preferHighFpsFormat?: boolean;
 }
 
 
@@ -343,6 +460,47 @@ export interface FlowGateSettings {
 export const DEFAULT_SHARPNESS_WINDOW = 4;
 
 
+/**
+ * v0.23 — canonical default for `frameSelection.antiBlur`: every
+ * source-side anti-blur control OFF, so the release is byte-identical
+ * to v0.22 for hosts that don't opt in.
+ *
+ * Why off rather than a "sensible" default: the right exposure cap and
+ * pan-rate gate depend on the deployment's light levels and how fast
+ * its operators actually sweep. A global default would either be too
+ * aggressive (noisy frames, stalled captures in dim aisles) or too weak
+ * to matter. `maxConsecutiveHolds` is the exception — it is a SAFETY
+ * cap, so it carries a real value that only takes effect once one of
+ * the hold-producing knobs is enabled.
+ */
+export const DEFAULT_ANTI_BLUR_SETTINGS: Required<AntiBlurSettings> = {
+  maxExposureMs: 0,
+  maxCommitPanRateRadPerSec: 0,
+  minScoreFractionOfMedian: 0,
+  maxConsecutiveHolds: 12,
+  preferHighFpsFormat: false,
+};
+
+
+/**
+ * Recommended STARTING values for a retail-shelf deployment, for hosts
+ * that want the anti-blur controls on without tuning from scratch:
+ * a 1/125 s exposure ceiling, a motion gate just above the pan coach's
+ * "warn" bucket, a 0.6 softness floor, and the high-fps format (the
+ * only exposure lever that reaches the iOS AR path).
+ *
+ * NOT applied automatically — spread it into `frameSelection.antiBlur`
+ * to adopt it, then tune per deployment.
+ */
+export const SUGGESTED_ANTI_BLUR_SETTINGS: AntiBlurSettings = {
+  maxExposureMs: 8,
+  maxCommitPanRateRadPerSec: 1.0,
+  minScoreFractionOfMedian: 0.6,
+  maxConsecutiveHolds: 12,
+  preferHighFpsFormat: true,
+};
+
+
 export const DEFAULT_FLOW_GATE_SETTINGS: FlowGateSettings = {
   noveltyPercentile: 0.85,
   evalEveryNFrames: 5,
@@ -393,5 +551,13 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // v0.21 — anti-blur keyframe selection ON by default (K=4).
     sharpnessWindow: DEFAULT_SHARPNESS_WINDOW,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
+    // v0.23 — anti-blur CAPTURE controls, all OFF by default so this
+    // release is byte-identical to v0.22 for every existing host. The
+    // selection window (above) keeps working exactly as before; these
+    // add the source-side levers a host opts into per-deployment (light
+    // levels and operator pace differ too much for a safe global
+    // default). See AntiBlurSettings for the recommended starting
+    // values (8 ms exposure cap, 1.0 rad/s motion gate, 0.6 floor).
+    antiBlur: DEFAULT_ANTI_BLUR_SETTINGS,
   },
 };

@@ -97,6 +97,11 @@ add_executable(stitcher_cpp_tests
   ${CMAKE_CURRENT_SOURCE_DIR}/crop_quad_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sharpness_window_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../sharpness_window.cpp
+  # blur_policy.cpp — the anti-blur ADMISSION policy (motion gate +
+  # relative sharpness floor) both platforms consult before committing a
+  # keyframe.  OpenCV-free by design, so it belongs in this suite.
+  ${CMAKE_CURRENT_SOURCE_DIR}/blur_policy_test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../blur_policy.cpp
 )
 
 target_link_libraries(stitcher_cpp_tests
