@@ -46,6 +46,16 @@ export interface UseIncrementalStitcherReturn {
   /** Latest state pushed by the native engine, or null pre-start. */
   state: IncrementalState | null;
   /**
+   * perf-3a change 4 (review fix) — accumulated keyframe thumbnail paths
+   * (raw native paths, capture-ordered, de-duped) for the live strip.
+   * Accumulated per RAW accept event inside the subscription (via a
+   * functional setState updater), NOT off the coalesced `state`, so two
+   * accepts landing in one React batch both survive — the collapsed-render
+   * effect the earlier draft used dropped one. Cleared on start/finalize/
+   * cancel. Consumers normalise to `file://` at render time.
+   */
+  keyframeThumbnails: string[];
+  /**
    * Convenience: which UX hint to show, derived from the latest
    * state.outcome.  null when nothing should be shown (silent
    * accepts, skips inside the overlap window).
@@ -128,11 +138,62 @@ function outcomeToConfidence(
 }
 
 
+// ── perf-3a change 4 — coalescer pure logic (exported for unit test) ──
+
+/**
+ * Sticky-snapshot merge: keep the last-good snapshot fields so the PiP
+ * shows the most recent panorama continuously between accepts (the native
+ * engine emits `panoramaPath` only on accept; reject/skip ticks carry
+ * none — a naive replace would blank the live preview ~60×/s).
+ */
+export function stickyMergeIncremental(
+  prev: IncrementalState | null,
+  next: IncrementalState,
+): IncrementalState {
+  if (!next.panoramaPath && prev?.panoramaPath) {
+    return {
+      ...next,
+      panoramaPath: prev.panoramaPath,
+      width: prev.width,
+      height: prev.height,
+    };
+  }
+  return next;
+}
+
+/**
+ * Classify an event as immediate-flush (must render now) vs coalesced.
+ * Immediate: an ACCEPT (a keyframe thumbnail is present, or the accepted
+ * count went up, or the outcome is an `Accepted*`) or a refine-stage
+ * transition (including the terminal `done`/`error` stages). Everything
+ * else — rejects, skips, overlap %, hints — coalesces.
+ */
+export function isImmediateIncrementalEvent(
+  next: IncrementalState,
+  prevAcceptedCount: number,
+  prevRefineStage: IncrementalState['refineStage'],
+): boolean {
+  const isAccept =
+    !!next.batchKeyframeThumbnailPath ||
+    next.acceptedCount > prevAcceptedCount ||
+    next.outcome === IncrementalOutcome.AcceptedHigh ||
+    next.outcome === IncrementalOutcome.AcceptedMedium;
+  const stage = next.refineStage;
+  const refineTransition = stage != null && stage !== prevRefineStage;
+  return isAccept || refineTransition;
+}
+
+
 export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
   const native = getIncrementalNativeModule();
   const isAvailable = incrementalStitcherIsAvailable();
   const [isRunning, setIsRunning] = useState(false);
   const [state, setState] = useState<IncrementalState | null>(null);
+  // perf-3a change 4 (review fix) — keyframe thumbnails accumulated per RAW
+  // accept event (see the return-type doc). Owned here (not by the consumer)
+  // so a functional updater captures every accept regardless of React
+  // auto-batching of the coalesced `state`.
+  const [keyframeThumbnails, setKeyframeThumbnails] = useState<string[]>([]);
 
   // Keep the latest hint/confidence sticky for a few frames after a
   // skip — otherwise the UI flickers since SkippedTooClose returns
@@ -141,31 +202,53 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
   // accept, leaving non-hint skips alone.
   const lastHintRef = useRef<IncrementalHint>(null);
 
-  // Subscribe to native events on mount.  The subscription itself
-  // is cheap; the native side gates `hasListeners` so events are
-  // only emitted when JS is listening.
+  // ── Coalesced state commits (perf-3a change 4) ───────────────────
+  // The native engine emits a state event for EVERY processed ARFrame
+  // (~60 Hz in AR mode), most of them SkippedTooClose. Committing each
+  // to React state re-renders the (large) consumer tree per event — on
+  // an old-architecture/RN-0.79 host that is bridge + legacy-UIManager
+  // cost per event. Instead: ACCEPTS and refine-stage transitions flush
+  // IMMEDIATELY (the UI must show a new thumbnail / stage now); rejects,
+  // skips, overlap %, and hints COALESCE into `pendingRef` and commit at
+  // most once per animation frame. The wire contract is untouched (see
+  // `subscribeIncrementalState`); only this default consumer's commit
+  // frequency changes. Bounds renders at ≤ display-rate + one per accept.
+  const pendingRef = useRef<IncrementalState | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const committedRef = useRef<IncrementalState | null>(null);
+  const prevAcceptedRef = useRef(0);
+  const prevRefineStageRef = useRef<IncrementalState['refineStage']>(undefined);
+
+  const commit = useCallback((next: IncrementalState) => {
+    committedRef.current = next;
+    setState(next);
+  }, []);
+
+  const cancelPending = useCallback(() => {
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    pendingRef.current = null;
+  }, []);
+
+  // Reset the coalescer to its pre-capture state. Called BEFORE
+  // setState(null) on start/finalize/cancel so a late coalesced event
+  // can't resurrect stale state after the capture ended (discard, not
+  // flush — see docs/perf-3a §4.4: nothing act-on-able is ever pending).
+  const resetCoalescer = useCallback(() => {
+    cancelPending();
+    committedRef.current = null;
+    prevAcceptedRef.current = 0;
+    prevRefineStageRef.current = undefined;
+    setKeyframeThumbnails([]);
+  }, [cancelPending]);
+
   useEffect(() => {
     if (!native) return undefined;
     const sub = subscribeIncrementalState((nextState) => {
-      // Sticky-snapshot merge: the native side emits a state event
-      // for EVERY ARFrame the engine processes (~60 Hz), most of
-      // which are SkippedTooClose with NO snapshot path.  A naive
-      // `setState(nextState)` would wipe the panoramaPath to null
-      // 60 times per second, blanking the live preview between
-      // accepts.  Keep the last-good snapshot fields so the PiP
-      // shows the most recent panorama continuously between accepts;
-      // other fields (outcome, confidence, hint) update normally.
-      setState((prev) => {
-        if (!nextState.panoramaPath && prev?.panoramaPath) {
-          return {
-            ...nextState,
-            panoramaPath: prev.panoramaPath,
-            width: prev.width,
-            height: prev.height,
-          };
-        }
-        return nextState;
-      });
+      // Hint stays sticky, updated per RAW event (ref write, no render);
+      // renders pick it up at the next commit.
       const newHint = outcomeToHint(nextState.outcome);
       if (newHint !== null) {
         lastHintRef.current = newHint;
@@ -173,13 +256,51 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
         nextState.outcome === IncrementalOutcome.AcceptedHigh ||
         nextState.outcome === IncrementalOutcome.AcceptedMedium
       ) {
-        // An accept clears any prior hint — operator's back on track.
         lastHintRef.current = null;
       }
-      // Else: SkippedTooClose etc. — leave the hint alone.
+
+      // Accumulate keyframe thumbnails per RAW event (before any coalescing):
+      // a functional updater is applied in sequence by React, so two accepts
+      // in one batch both append (the collapsed-state effect dropped one).
+      const thumb = nextState.batchKeyframeThumbnailPath;
+      if (thumb) {
+        setKeyframeThumbnails((prev) => (prev.includes(thumb) ? prev : [...prev, thumb]));
+      }
+
+      // Classify immediate-flush (accept / refine transition) vs coalesced.
+      const immediate = isImmediateIncrementalEvent(
+        nextState,
+        prevAcceptedRef.current,
+        prevRefineStageRef.current,
+      );
+      prevAcceptedRef.current = nextState.acceptedCount;
+      prevRefineStageRef.current = nextState.refineStage;
+
+      if (immediate) {
+        // Accept / refine transition supersedes any pending coalesced
+        // event and commits now.
+        cancelPending();
+        commit(stickyMergeIncremental(committedRef.current, nextState));
+        return;
+      }
+      // Coalesced (reject / skip / overlap / hint): merge into pending
+      // (per-event sticky merge) and schedule a single rAF commit.
+      const base = pendingRef.current ?? committedRef.current;
+      pendingRef.current = stickyMergeIncremental(base, nextState);
+      if (rafRef.current == null) {
+        rafRef.current = requestAnimationFrame(() => {
+          rafRef.current = null;
+          const p = pendingRef.current;
+          pendingRef.current = null;
+          if (p != null) commit(p);
+        });
+      }
     });
-    return () => sub?.remove();
-  }, [native]);
+    return () => {
+      sub?.remove();
+      cancelPending();
+    };
+  }, [native, cancelPending, commit]);
 
   const start = useCallback(
     async (options: IncrementalStartOptions = {}) => {
@@ -190,12 +311,18 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
           + 'rebuilt against the host app.',
         );
       }
-      await native.start(options);
-      setIsRunning(true);
+      // Clear the coalescer + state BEFORE the await (perf-3a §4.4, mirrors
+      // the Camera.tsx 2026-05-23 race fix): the AR GL thread can deliver an
+      // ACCEPT during the start-await window, and a post-await clear would
+      // wipe it (keyframe 0 lost from the strip). Clearing first lets that
+      // accept's immediate commit survive into `state`.
+      resetCoalescer();
       setState(null);
       lastHintRef.current = null;
+      await native.start(options);
+      setIsRunning(true);
     },
-    [native],
+    [native, resetCoalescer],
   );
 
   const finalize = useCallback(
@@ -231,25 +358,27 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
         lens,
       });
       setIsRunning(false);
-      // Clear React state on finalize so the next start doesn't
-      // briefly show stale frame counts / hint banners from the
-      // previous capture.  Without this, the IncrementalStitcherView
-      // displayed acceptedCount from the prior pan if a late event
-      // had already updated state.
+      // Clear React state on finalize so the next start doesn't briefly
+      // show stale frame counts / hint banners from the previous capture.
+      // resetCoalescer() first cancels any pending rAF + drops pendingRef
+      // so a late coalesced event can't resurrect stale state (discard,
+      // not flush — perf-3a §4.4).
+      resetCoalescer();
       setState(null);
       lastHintRef.current = null;
       return result;
     },
-    [native],
+    [native, resetCoalescer],
   );
 
   const cancel = useCallback(async () => {
     if (!native) return;
     await native.cancel();
     setIsRunning(false);
+    resetCoalescer();
     setState(null);
     lastHintRef.current = null;
-  }, [native]);
+  }, [native, resetCoalescer]);
 
   // Cleanup-on-unmount that actually works.  The previous version
   // captured `isRunning` from the initial render (false), so the
@@ -274,6 +403,7 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
     isAvailable,
     isRunning,
     state,
+    keyframeThumbnails,
     hint: lastHintRef.current,
     confidenceLevel,
     start,

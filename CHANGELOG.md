@@ -46,6 +46,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Android's screen-space renderer has no depth scheme and ignores the
   flag.
 
+## [0.23.0] — 2026-08-03
+
+Remediation of the `fix/RN0.79.X_optimize_process_time` optimization pass
+(`7df2dba`) after an adversarial review found each of its five mechanisms
+either inert for the stated goal or actively harmful.  See `docs/perf-3a`…
+`docs/perf-5` for the full analysis and the follow-on optimization specs.
+
+### Removed
+
+- **AR GL-render pause during `finalize()` (Android).** Switching the
+  `GLSurfaceView` to `RENDERMODE_WHEN_DIRTY` for the stitch was a no-op in
+  the first-party `<Camera>` flow (the AR view is already unmounted before
+  finalize) and, in composed integrations that keep the view mounted, froze
+  the preview and dropped the next capture's frames on view detach/reattach
+  mid-stitch (the render mode survived reattach; resume targeted the live,
+  not the paused, view).  Removed entirely.
+- **RAM-keyed adaptive resolution cut (Android).** The `≤ 4 GB || isLowRam`
+  branch that dropped registration to 0.4 MP and compositing to 0.6 MP was a
+  no-op on default 640 px keyframes, a silent ~40 % output-pixel cut on
+  quality captures, fired on unaffected RN 0.83 hosts, misclassified any
+  device when `ActivityManager` was null, and reduced registration where the
+  pipeline's own analysis needs *more*.  Removed; the correct opt-in, measured
+  replacement is specified in `docs/perf-4a`.
+
+### Changed
+
+- **Stitch-thread priority** now uses `android.os.Process.setThreadPriority(
+  THREAD_PRIORITY_FOREGROUND)` (maps to the Linux nice value CFS actually
+  uses) instead of `java.lang.Thread.priority`, and is restored to the
+  thread's original value afterward.
+- **Reject-event emit throttle is now opt-in.** The hardcoded 250 ms throttle
+  (a measured placebo that also staled the overlap-% overlay) is gone; the
+  default is now **off** (parity with iOS, which never throttles).  Opt in via
+  the new `rejectEmitMinIntervalMs` config key on `start()`.
+
+### Added
+
+- **`subscribeStitchingPhase(listener)` + `StitchingPhase` type.** A real TS
+  surface for the `StitchingPhaseChanged` event (Android-only for now), with
+  `isActive`-based guidance for composed hosts that want to stop feeding
+  vision-camera during the stitch.  Replaces a shipped doc-comment that
+  recommended a non-existent `camera.pause()` API.
+- **`rejectEmitMinIntervalMs` config key** (`start()`), default `0` = off.
+
+### Fixed
+
+- The `StitchingPhaseChanged` guidance no longer recommends
+  `camera.current?.pause()` / `.resume()`, which do not exist in
+  vision-camera v4 and threw `TypeError` at every finalize for hosts that
+  followed it.
+
 ## [0.21.0] — 2026-07-03
 
 ### Added

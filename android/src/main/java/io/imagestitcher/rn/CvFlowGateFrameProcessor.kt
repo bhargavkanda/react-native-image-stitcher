@@ -80,20 +80,25 @@ class CvFlowGateFrameProcessor(
 
     @Suppress("UNCHECKED_CAST")
     override fun callback(frame: Frame, params: Map<String, Any>?): Any? {
+        // Fast-exit: when the stitcher isn't actively ingesting (either
+        // not started yet, or finalize() has been called and the stitch
+        // is in flight), bail BEFORE touching `frame.image`.  On the
+        // old bridge (RN ≤ 0.79) each plugin callback — even a no-op —
+        // involves JNI + ImageProxy overhead at 30 fps.  Skipping the
+        // Image acquisition during the multi-second stitch phase frees
+        // CPU that the cv::Stitcher worker needs.
+        val stitcher = IncrementalStitcher.bridgeInstance
+            ?: return mapOf("submitted" to false, "error" to "stitcher not registered")
+        if (!stitcher.isFrameProcessorIngestEnabled) {
+            return mapOf("submitted" to false, "error" to "ingest disabled")
+        }
+
         // Frame may throw `FrameInvalidError` if vision-camera has
         // already released it.  Defensive: swallow and return.
         val image: Image = try {
             frame.image
         } catch (e: Throwable) {
             return mapOf("submitted" to false, "error" to "frame invalid")
-        }
-
-        val stitcher = IncrementalStitcher.bridgeInstance
-        if (stitcher == null) {
-            // Module never registered (host hasn't initialised the
-            // React bridge yet, or autolinking skipped us).  Drop
-            // the call; JS sees `submitted: false` and can detect.
-            return mapOf("submitted" to false, "error" to "stitcher not registered")
         }
 
         // F8.4-Android-c rotation fix: read CameraX's authoritative

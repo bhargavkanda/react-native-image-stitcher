@@ -144,7 +144,9 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         jdouble seamEstimationResolMP,
         jdouble compositingResolMP,
         jstring stitchModeStr,
-        jboolean useManualPipeline) {
+        jboolean useManualPipeline,
+        jint rangeMatcherWidth,
+        jint numThreads) {
 
     if (framePaths == nullptr) {
         throw_runtime(env, "framePaths is null");
@@ -195,6 +197,10 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
     // re-arms the manual pipeline's dynamic plane→spherical fallback/divergence
     // switch (they only fire when warperType != "spherical").
     cfg.useManualPipeline = (useManualPipeline == JNI_TRUE);
+    // perf-3b — PANORAMA attempt-1 range matcher width (0 = off).
+    cfg.rangeMatcherWidth = rangeMatcherWidth;
+    // perf-3b item 1 — OpenCV thread count (0 = auto-multi, 1 = single).
+    cfg.numThreads = numThreads;
     // 2026-06-16 — memory profiling (DEV).  Gated by the compile flag (debug-on,
     // release-off); Android leaves memProbeFn null so rss_mb() uses /proc.
     cfg.enableMemoryProfiling = (RNIS_MEMORY_PROFILING != 0);

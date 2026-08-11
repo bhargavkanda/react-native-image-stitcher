@@ -40,6 +40,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <mutex>
 #include <unistd.h>
 #include <vector>
 
@@ -582,29 +583,46 @@ StitchResult stitchFramePaths(
     const StitchConfig&             config,
     LogFn                           logFn)
 {
-    // ── v0.16.1 — native-heap leak fix (one-time) — ANDROID ONLY ────────
-    // The ~7-9 MB/stitch LIVE native-heap creep is OpenCV core's OWN pooled
-    // scratch — TBB per-worker TLS — re-primed as the calling thread migrates
-    // across the Kotlin Dispatchers.Default pool.  It is NOT app memory (every
-    // cv::Mat below is RAII / explicitly .release()'d) and NOT reclaimable by
-    // mallopt(M_PURGE) (those pools aren't serviced by bionic malloc).
-    // setNumThreads(1) removes the TBB worker pool so no per-worker scratch can
-    // accumulate.  Stitches are serialized and the keyframes are small, so the
-    // single-threaded cost is minor.  C++11 static-init is thread-safe; runs once.
+    // ── perf-3b item 1 — serialize entries + restore parallelism (ANDROID)
+    // ANDROID-ONLY, and deliberately so.  On Android, finalize (workExecutor)
+    // and refine (refineExecutor) are SEPARATE dedicated threads, and
+    // cv::setNumThreads below is a PROCESS-GLOBAL set per-call, so two
+    // concurrent entries here would race on that global (+ the parallel-
+    // backend pools).  A process-wide mutex held for the whole stitch
+    // serializes them.  stitchFramePathsManual()/stitchFramePathsImpl_() are
+    // reached ONLY from here (internal routing) → NOT locked, so no self-
+    // deadlock (std::mutex, non-recursive, is correct).  This does NOT block
+    // Android ingest: consumeFrameFromPlugin/ingestFromARCameraView run the
+    // gate + JPEG encode synchronously on the vision-camera producer thread
+    // (no workExecutor dispatch), so they never call stitchFramePaths.
     //
-    // 2026-06-16 (audit) — ANDROID-GATED.  The prebuilt iOS opencv2.xcframework
-    // uses the GCD parallel backend (NOT TBB — getBuildInformation reads
-    // "Parallel framework: GCD"), so there is no TBB pool to remove; pinning to
-    // 1 thread there is pure cost (serialized ORB/matcher/warp/blend + a
-    // single-core per-frame KeyframeGate) for ZERO memory benefit.  Recovering
-    // iOS's multi-core path.  setUseIPP(false) was dropped entirely — IPP is
-    // x86-only, a no-op on arm64 (both Android NDK and iOS).
+    // NOT applied on iOS: it drives independent GCD queues (workQueue vs
+    // refineQueue) BY DESIGN — a 2-5s refine must not gate the next capture's
+    // ingest (which finalize shares via workQueue.sync).  iOS never mutates a
+    // global here (GCD backend; no setNumThreads), so there is nothing to
+    // serialize and a mutex would only re-couple those queues.
+    //
+    // setNumThreads: v0.16.1 pinned it to 1 to stop a ~7-9 MB/stitch native-
+    // heap creep (OpenCV/TBB per-worker TLS scratch, re-primed as the calling
+    // thread MIGRATED across Kotlin's Dispatchers.Default pool).  The stitch
+    // now runs on a STABLE dedicated thread, so that TLS primes ONCE per
+    // process — the creep is bounded (verified: RSS plateaus across N stitches)
+    // and multi-threading is safe again.  config.numThreads: 0 = AUTO
+    // (min(4, max(2, cores/2))), 1 = single kill-switch, N = explicit.  Set
+    // per-call under the lock (no restore needed — every entry sets it, and
+    // entries are serialized).  iOS keeps its GCD backend untouched.
 #if defined(__ANDROID__)
-    static const bool s_cvTuned = []() {
-        cv::setNumThreads(1);
-        return true;
-    }();
-    (void)s_cvTuned;
+    static std::mutex s_stitchNativeMutex;
+    std::lock_guard<std::mutex> stitchNativeLock(s_stitchNativeMutex);
+    {
+        int nt = config.numThreads;
+        if (nt <= 0) {
+            const unsigned hc = std::thread::hardware_concurrency();
+            const int cores = (hc > 0u) ? static_cast<int>(hc) : 4;
+            nt = std::min(4, std::max(2, cores / 2));
+        }
+        cv::setNumThreads(nt);
+    }
 #endif
 
     // ── 2026-06-16 — per-stitch memory profiling (DEV; gated) ───────────
@@ -991,14 +1009,29 @@ static StitchResult stitchFramePathsImpl_(
     // 0.5/0.4, which is STRICTER than the default — inverted lever.]
     struct RetryTune {
         double thresh;      // panoConfidenceThresh
-        float  matchConf;   // BestOf2NearestMatcher confidence; <0 -> leave default
+        float  matchConf;   // matcher confidence; <0 -> default 0.3
         double regResolMP;  // registration resolution (MP); <0 -> leave config/default
+        int    rangeWidth;  // perf-3b — range-matcher window for THIS attempt
+                            // when the range ladder is enabled
+                            // (config.rangeMatcherWidth > 0).  0 here == "use
+                            // config.rangeMatcherWidth" (the operator-set final
+                            // width).  Ignored when the range ladder is off.
     };
+    // Measured cliff guard (docs/perf-rca-079-stitch-time.md): registration
+    // above ~1.2 MP makes the ORB feature count + BundleAdjusterRay explode
+    // super-quadratically — a ~20-25x wall-time cliff that ALSO finds worse
+    // matches and drops frames (A35, 5 kf @ 2560x1440: regMP 1.2 = 2.3 s vs
+    // 1.3 = 48-60 s, framesIncluded 5/5 -> 3/5). The fallback attempts' rescue
+    // value comes from the lower panoConfidenceThresh + the wider range matcher,
+    // NOT from raising resolution, so the ladder's registration escalation is
+    // capped at this cliff-safe ceiling (1.0 = attempt-2's proven-safe value,
+    // with margin below the 1.2-1.3 knee, which shifts with scene texture).
+    constexpr double kLadderRegResolCeilingMP = 1.0;
     const RetryTune kRetries[] = {
-        //  thresh  matchConf  regResolMP
-        {   1.0,    -1.0f,     -1.0 },   // attempt 1: unchanged (fast happy path)
-        {   0.5,     0.25f,     1.0 },   // attempt 2: looser matcher + ~1.0 MP
-        {   0.3,     0.20f,     1.3 },   // attempt 3: loosest matcher + ~1.3 MP
+        //  thresh  matchConf  regResolMP                 rangeWidth
+        {   1.0,    -1.0f,     -1.0,                       2 },   // attempt 1: consecutive-only (fast happy path)
+        {   0.5,     0.25f,    1.0,                        2 },   // attempt 2: consecutive + looser matcher + 1.0 MP
+        {   0.3,     0.20f,    kLadderRegResolCeilingMP,   0 },   // attempt 3: min thresh + widest matcher; reg capped (was 1.3 — the cliff)
     };
     const int kNumAttempts = sizeof(kRetries) / sizeof(kRetries[0]);
     cv::Mat panorama;
@@ -1026,16 +1059,48 @@ static StitchResult stitchFramePathsImpl_(
         // PANORAMA to keep SCANS behaviour byte-for-byte unchanged.
         float  appliedMatchConf  = -1.0f;
         double appliedRegResolMP = -1.0;
+        int    appliedRangeWidth = 0;
         if (cvMode == cv::Stitcher::PANORAMA) {
-            if (tune.matchConf > 0.0f) {
+            if (config.rangeMatcherWidth > 0) {
+                // perf-3b — RANGE-MATCHER LADDER.  Match only capture-adjacent
+                // keyframes (|i-j| < width); keyframes are capture-ordered (JNI
+                // preserves accept order), so on a linear pan the non-adjacent
+                // pairs share ~no overlap and their O(N^2) matching is waste.
+                // The window WIDENS across the ladder: 2 (consecutive-only) on
+                // the fast attempts, then out to config.rangeMatcherWidth on the
+                // final, minimum-threshold attempt — so a chain broken at a weak
+                // consecutive link gets BRIDGED (distance-2+) only as a last
+                // resort.  This REPLACES the full-pairwise matcher on every
+                // attempt: distant-overlap (pan-back) captures are handled at
+                // capture time (perf-5 capture-pause), not by a full-matcher
+                // rescue here.  match_conf tracks the same loosening the legacy
+                // ladder used (0.3 -> 0.25 -> 0.20).
+                const int rw = (tune.rangeWidth > 0)
+                    ? tune.rangeWidth
+                    : std::max(2, config.rangeMatcherWidth);
+                const float mc = (tune.matchConf > 0.0f) ? tune.matchConf : 0.3f;
+                stitcher->setFeaturesMatcher(
+                    cv::makePtr<cv::detail::BestOf2NearestRangeMatcher>(rw, false, mc));
+                appliedMatchConf = mc;
+                appliedRangeWidth = rw;
+            } else if (tune.matchConf > 0.0f) {
+                // Legacy full-pairwise ladder (range matcher OFF): loosened FULL
+                // matcher on the fallback attempts; attempt 1 keeps the create()
+                // default matcher.  Byte-identical to pre-perf-3b.  Swapping a
+                // matcher would break SCANS (affine family), so this whole block
+                // is PANORAMA-gated.
                 stitcher->setFeaturesMatcher(
                     cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, tune.matchConf));
                 appliedMatchConf = tune.matchConf;
             }
             if (tune.regResolMP > 0.0) {
-                // Escalation may only RAISE resolution — never clobber an
-                // explicit caller registrationResolMP downward.
-                const double rr = std::max(tune.regResolMP, config.registrationResolMP);
+                // Cap the ladder's escalation at the cliff-safe ceiling (defence
+                // in depth against any future rung value), but still honour an
+                // explicit caller registrationResolMP above it — the caller owns
+                // that time/quality trade-off; escalation may only RAISE
+                // resolution, never clobber an explicit caller value downward.
+                const double capped = std::min(tune.regResolMP, kLadderRegResolCeilingMP);
+                const double rr = std::max(capped, config.registrationResolMP);
                 stitcher->setRegistrationResol(rr);
                 appliedRegResolMP = rr;
             }
@@ -1043,9 +1108,9 @@ static StitchResult stitchFramePathsImpl_(
         finalAttempt = attempt + 1;
         finalThreshold = thresh;
         log_info(logFn, "[stitch-retry]",
-                 "attempt %d/%d panoConfidenceThresh=%.2f matchConf=%.2f regResolMP=%.2f",
+                 "attempt %d/%d panoConfidenceThresh=%.2f matchConf=%.2f regResolMP=%.2f rangeWidth=%d",
                  finalAttempt, kNumAttempts, thresh,
-                 appliedMatchConf, appliedRegResolMP);
+                 appliedMatchConf, appliedRegResolMP, appliedRangeWidth);
         try {
             // 2026-06-16 (review #2) — TWO-PHASE: estimateTransform (registration
             // + BA + leaveBiggestComponent at this threshold) here; composePanorama
@@ -1137,13 +1202,33 @@ static StitchResult stitchFramePathsImpl_(
         const RetryTune& best = kRetries[bestAttempt];
         stitcher->setPanoConfidenceThresh(best.thresh);
         if (cvMode == cv::Stitcher::PANORAMA) {
-            stitcher->setFeaturesMatcher(
-                best.matchConf > 0.0f
-                    ? cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, best.matchConf)
-                    : cv::makePtr<cv::detail::BestOf2NearestMatcher>(false));
+            // perf-3b — reproduce the BEST attempt's exact matcher.  With the
+            // range ladder on, that means the range matcher at the best
+            // attempt's own window (2 on attempts 1-2, config width on the
+            // final attempt) + its match_conf — NOT the full matcher, or the
+            // recovery wouldn't reproduce the attempt it claims to.
+            if (config.rangeMatcherWidth > 0) {
+                const int rw = (best.rangeWidth > 0)
+                    ? best.rangeWidth
+                    : std::max(2, config.rangeMatcherWidth);
+                const float mc = (best.matchConf > 0.0f) ? best.matchConf : 0.3f;
+                stitcher->setFeaturesMatcher(
+                    cv::makePtr<cv::detail::BestOf2NearestRangeMatcher>(rw, false, mc));
+            } else {
+                stitcher->setFeaturesMatcher(
+                    best.matchConf > 0.0f
+                        ? cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, best.matchConf)
+                        : cv::makePtr<cv::detail::BestOf2NearestMatcher>(false));
+            }
             stitcher->setRegistrationResol(
                 best.regResolMP > 0.0
-                    ? std::max(best.regResolMP, config.registrationResolMP)
+                    // Same cliff-safe ceiling as the forward ladder (:1057) — a
+                    // true invariant across both registration-apply sites, so a
+                    // future rung raised above the ceiling can't reach the cliff
+                    // via the recovery re-estimate either. Caller override above
+                    // the ceiling still wins (never clobbered down).
+                    ? std::max(std::min(best.regResolMP, kLadderRegResolCeilingMP),
+                               config.registrationResolMP)
                     : baseRegResol);
         }
         // Telemetry reflects what actually ran LAST (review f3): from here
@@ -2772,8 +2857,18 @@ StitchResult stitchFramePathsManual(
             composeCanvasMpFinal > kLowMemCanvasMP
             || composeHeldSetMpFinal > kMaxBatchHeldSetMP
             || lowHeadroom;
+        // perf-3b — the manual (BATCH) route runs GraphCutSeamFinder; it has
+        // no Voronoi variant. Route ANY non-skip finder here so an opt-in
+        // 'voronoi' falls back to GRAPHCUT (safe, high-quality) on this path
+        // rather than to STREAM/NoSeamFinder (which an earlier bug did —
+        // 'voronoi' failed the graphcut-only equality and silently disabled
+        // seam finding, double-exposing overlaps). Only an explicit 'skip'/'no'
+        // (or the low-mem canvas guard) streams without a seam. Voronoi's real
+        // speedup is delivered on the HIGH-LEVEL path (make_seam_finder, :876),
+        // which iOS-only manual finalize does not use.
         const bool useSeam =
-            (config.seamFinderType == "graphcut") && !lowMemCanvas;
+            (config.seamFinderType != "skip" && config.seamFinderType != "no")
+            && !lowMemCanvas;
         if (lowMemCanvas) {
             log_info(logFn, "[stitch-bc]",
                      "step8: union=%.1f MP held-set=%.1f MP rss=%.0fMB "

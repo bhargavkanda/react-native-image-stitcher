@@ -13,16 +13,23 @@
  *     itself does not call `requestPermission`).
  *   - All callback props are wired to console.log so the event flow
  *     is observable on-device.
+ *
+ * On-screen dev controls are deliberately minimal: a ⚙️ gear opens a
+ * small settings modal (rect-crop / preview / keyframe quality), and a
+ * short chip stack exposes panMode + the anti-blur A/B toggles — the
+ * knobs you actually flip while testing captures on-device.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Modal,
   Platform,
   Pressable,
   SafeAreaView,
   StatusBar,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
@@ -39,16 +46,17 @@ import {
 import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
+  copyFile,
+  moveFile,
+  getDefaultCaptureDir,
   getIncrementalNativeModule,
   subscribeIncrementalState,
   useKeyframeStream,
   useStitcherWorklet,
   userFacingStitchError,
   type AcceptedKeyframe,
-  type AROverlay,
   type CameraCaptureResult,
   type CameraError,
-  type CameraHandle,
   type CaptureSource,
   type CameraLens,
   type CaptureThumbnailItem,
@@ -56,10 +64,31 @@ import {
   type FramesDroppedInfo,
   type IncrementalState,
   type PanMode,
-  type CameraFrame,
-  type ARFrameMeta,
-  type ARPluginResult,
 } from 'react-native-image-stitcher';
+
+
+/** One labelled on/off row inside the dev settings modal. */
+function DevSettingRow({
+  label,
+  help,
+  value,
+  onValueChange,
+}: {
+  label: string;
+  help?: string;
+  value: boolean;
+  onValueChange: (v: boolean) => void;
+}): React.JSX.Element {
+  return (
+    <View style={styles.settingRow}>
+      <View style={styles.settingRowText}>
+        <Text style={styles.settingLabel}>{label}</Text>
+        {help ? <Text style={styles.settingHelp}>{help}</Text> : null}
+      </View>
+      <Switch value={value} onValueChange={onValueChange} />
+    </View>
+  );
+}
 
 
 function App(): React.JSX.Element {
@@ -84,14 +113,16 @@ function App(): React.JSX.Element {
     Extract<CameraCaptureResult, { ok: true }> | null
   >(null);
 
-  // v0.16 — post-capture review surface toggles (dev tools, exposed as
-  // on-screen toggles below).  `rectCrop` shows the draggable-quad crop
-  // editor; `showPreview` shows a plain image preview with Retake/Confirm;
-  // both off → onCapture fires immediately with no review screen.
-  // NOTE: showPreview defaults ON here (the SDK prop default is still OFF) so
-  // the post-capture preview mounts — that's where the rRadians readout and the
-  // 3-tab Spherical/Plane/High-level projection comparison live.  Flip it off
-  // via the on-screen toggle for the immediate-onCapture flow.
+  // Example dev-settings modal (⚙️ gear).  Holds the post-capture review
+  // surface toggles + keyframe quality — knobs you set once and leave, kept
+  // off the camera view so it stays uncluttered.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // v0.16 — post-capture review surface toggles (in the ⚙️ settings modal).
+  // `rectCrop` shows the draggable-quad crop editor; `showPreview` shows a
+  // plain image preview with Retake/Confirm; both off → onCapture fires
+  // immediately with no review screen.  showPreview defaults ON so the
+  // post-capture preview (rRadians readout + projection comparison) mounts.
   const [rectCrop, setRectCrop] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
   // panMode flag (guidance item 1).  'vertical' (default) = landscape-only
@@ -100,6 +131,19 @@ function App(): React.JSX.Element {
   // rotate-to-portrait prompt.  'both' = either, no prompt.  Toggle cycles
   // all three to verify the gates on-device.
   const [panMode, setPanMode] = useState<PanMode>('vertical');
+  // Keyframe-resolution QUALITY toggle (v0.22): ON lifts the keyframe
+  // long-edge budget (Android 640→1280; iOS is 1280 either way) + floors
+  // the picked video format ≥1280.  The capture format is chosen at mount,
+  // so we key the <Camera> on this to force a clean re-pick when flipped.
+  const [kfQuality, setKfQuality] = useState(true);
+  // v0.23 anti-blur — ONE high-level toggle.  This is a capture-MECHANISM
+  // feature (it changes which frames the engine accepts), so an honest A/B
+  // needs two separate captures — flip it, capture, flip back, capture.  ON =
+  // the recommended bundle (8 ms exposure cap, 1.0 rad/s motion gate, 0.6×
+  // softness floor, high-fps format); OFF disables every knob (byte-identical
+  // to pre-anti-blur behaviour).  The exposure cap is a capture-FORMAT change,
+  // so the <Camera> key includes this to force a clean format re-pick on flip.
+  const [antiBlurOn, setAntiBlurOn] = useState(true);
 
   // v0.13.0 — controlled flash state demo.  The host owns the
   // `'on' | 'off'` value; the built-in flash button drives the
@@ -129,13 +173,27 @@ function App(): React.JSX.Element {
   // `src/stitching/useKeyframeStream.ts` for the AcceptedKeyframe
   // contract + an OCR-plugin example.
   // v0.10.0 — also collect each keyframe path into a ref so the
-  // Re-refine button below can pass them straight to
-  // `module.refinePanorama(...)`.  Cleared whenever a new panorama
-  // capture starts (onCaptureSourceChange to panorama mode) or when
-  // the preview is dismissed (effectively a fresh session).
+  // Re-refine button below (and the auto A/B pack) can pass them straight
+  // to `module.refinePanorama(...)`.  RESET at the start of each panorama:
+  // `kf.index === 0` is the first keyframe of a fresh capture (zero-based
+  // per panorama), so we clear then — this is robust to abandoned captures
+  // AND back-to-back captures (the pano flow never opens the photo-only
+  // preview, so we must NOT rely on closePreview to clear it).
   const collectedKeyframesRef = useRef<string[]>([]);
+  // Serialise the auto A/B packs: each pack runs 2 (iOS) or 6 (Android) heavy
+  // re-stitches, and the native stitcher serialises stitches on a global
+  // mutex/queue — so if two packs overlapped, one's `await` would block on the
+  // other's stitch and the JS wall-times (the whole point) would be inflated.
+  // Chaining guarantees at most one pack runs at a time, contention-free.
+  const packChainRef = useRef<Promise<void>>(Promise.resolve());
+  // Monotonic counter → collision-proof packIds even if two captures land in
+  // the same millisecond (Date.now alone is not unique enough).
+  const packSeqRef = useRef(0);
   useKeyframeStream(
     useCallback((kf: AcceptedKeyframe) => {
+      // Fresh capture → drop the previous capture's keyframes so a pack never
+      // re-stitches a mix of two unrelated panoramas.
+      if (kf.index === 0) collectedKeyframesRef.current = [];
       collectedKeyframesRef.current.push(kf.jpegPath);
       // eslint-disable-next-line no-console
       console.log('[example] useKeyframeStream', {
@@ -199,60 +257,6 @@ function App(): React.JSX.Element {
   // `__stitcherProxy` is what fires the worklet (the
   // `frameProcessor` prop has no effect on AR mode because vc's
   // `<Camera>` isn't mounted in that path).
-  // v0.18.0 — AR depth/anchor/mesh/intrinsics readout, driven by the
-  // worklet-FREE `onArFrame` callback (see `handleArFrame` below).
-  //
-  // Previously this rode a worklets-core SHARED VALUE written from inside
-  // the AR worklet: capturing a `createRunOnJS` callback in an AR worklet
-  // makes worklets-core's closure-wrap recurse without termination →
-  // SIGBUS the instant AR mode mounts, so a shared value (a host object the
-  // wrapper references rather than deep-copies) was the only safe channel.
-  // `onArFrame` removes that hazard entirely: native builds the metadata
-  // and emits a device event, and the handler runs on the JS MAIN thread
-  // with a plain `setState`.  THIS is the pattern AR-metadata consumers
-  // should use — no worklet, no shared value, no polling.
-  const [arMetaText, setArMetaText] = useState('AR: (idle)');
-
-  // v0.19.0 — AR PLUGIN FRAMEWORK readout.  The example registers a tiny
-  // native `FrameBrightnessPlugin` (iOS RNISARPluginRegistry / Android
-  // RNSARPluginRegistry, wired in AppDelegate / MainApplication) that
-  // computes the mean luma of each AR frame and returns `{ brightness: 0..1 }`
-  // SYNCHRONOUSLY — so its result rides the throttled `onArFrame` event on
-  // `meta.plugins.brightness` (read in `handleArFrame`).  This proves the
-  // generic plugin framework end-to-end without shipping any OCR (OCR is
-  // private to RetaiLens, written against this same framework).
-  const [pluginText, setPluginText] = useState('plugins: (none)');
-
-  // v0.20.0 — AR OVERLAY renderer demo.  We drive a single overlay imperatively
-  // through the `<Camera>` ref so it tracks a detected plane WITHOUT a React
-  // re-render per frame.  When `onArFrame` reports a plane anchor we derive its
-  // world position from the anchor→world transform (translation = elements
-  // [12],[13],[14] of the row-major 4×4) and pin an outline marker there; the
-  // native overlay layer reprojects it to screen every AR frame so it stays
-  // glued to the plane as the camera moves.  A small text readout mirrors the
-  // overlay state so it's verifiable even before pointing at a plane.
-  const cameraRef = useRef<CameraHandle | null>(null);
-  const overlayPinnedRef = useRef(false);
-  const [overlayText, setOverlayText] = useState(
-    'overlay: tap "Pin marker" to drop one 1 m ahead',
-  );
-  // The FIXED world point the demo overlay is pinned to (set on "Lock"), + a
-  // pending request set by the button.  On the next AR frame after a tap we
-  // compute a point 1 m straight ahead along the camera's view ray (the
-  // crosshair direction) and pin the overlay there — a fixed WORLD point, so
-  // it stays put as you move (that's the world-anchored tracking under test),
-  // and it's guaranteed in view at lock time.  No plane detection needed.
-  const lockedWorldPointRef = useRef<[number, number, number] | null>(null);
-  const pendingLockRef = useRef(false);
-  // Most-recent AR pose (updated every onArFrame).  Lets "Pin marker" drop
-  // the overlay IMMEDIATELY from the last-known pose instead of waiting for
-  // the next AR frame.
-  const latestPoseRef = useRef<{
-    t: [number, number, number];
-    r: [number, number, number, number];
-  } | null>(null);
-  const [planeLocked, setPlaneLocked] = useState(false);
-
   const stitcher = useStitcherWorklet();
   const exampleFrameProcessor = useFrameProcessor(
     (frame: Frame) => {
@@ -270,190 +274,6 @@ function App(): React.JSX.Element {
     },
     [stitcher.call, fireFrameProcessorLog],
   );
-
-  // NOTE: this example intentionally does NOT pass an `arFrameProcessor`.
-  // All AR data reaches JS through the worklet-free `onArFrame` callback
-  // (see `handleArFrame` below), which is the recommended path.  Mounting
-  // an `arFrameProcessor` (even a no-op) turns on the heavy worklet
-  // extraction path; with `enableMesh` that path marshals the LiDAR
-  // ARMeshAnchor each frame and currently faults on mesh warmup — onArFrame
-  // avoids it entirely (it reports mesh as light counts, no buffer copy).
-
-  // v0.18.0 — the worklet-free AR metadata handler.  Runs on the JS MAIN
-  // thread (NOT a worklet), so capturing `setArMetaText` is perfectly safe.
-  // Formats the light `ARFrameMeta` (pose / tracking / intrinsics / depth
-  // dims / anchor + mesh counts) into the green on-screen readout.
-  // v0.20.0 — drop the demo overlay at a FIXED world point.  Native creates an
-  // ARAnchor there + renders a SceneKit node, so it stays glued to the spot
-  // (ARKit refines the anchor through drift / re-localization).  The live
-  // distance readout is refreshed every onArFrame below.
-  const pinAt = useCallback((wp: [number, number, number]) => {
-    lockedWorldPointRef.current = wp;
-    overlayPinnedRef.current = true;
-    cameraRef.current?.setOverlays([
-      {
-        id: 'demo',
-        worldPosition: wp,
-        sizeMeters: [0.3, 0.3],
-        shape: 'outline',
-        label: 'AR',
-        color: '#00E5FF',
-      },
-    ]);
-    setOverlayText(
-      `overlay: locked @ [${wp[0].toFixed(2)}, ${wp[1].toFixed(2)}, ${wp[2].toFixed(
-        2,
-      )}]`,
-    );
-  }, []);
-
-  // Fallback placement when raycast finds no surface: a point 1 m straight
-  // ahead along the camera's view ray (the crosshair).  Camera looks down its
-  // local −Z; forward(world) = −(third column of R(q)).
-  const pinMarker = useCallback(
-    (
-      t: [number, number, number],
-      r: [number, number, number, number],
-    ) => {
-      const [qx, qy, qz, qw] = r;
-      const fwd: [number, number, number] = [
-        -2 * (qx * qz + qw * qy),
-        -2 * (qy * qz - qw * qx),
-        -(1 - 2 * (qx * qx + qy * qy)),
-      ];
-      const D = 1.0; // metres ahead
-      pinAt([t[0] + fwd[0] * D, t[1] + fwd[1] * D, t[2] + fwd[2] * D]);
-    },
-    [pinAt],
-  );
-
-  const arFrameCountRef = useRef(0);
-  const handleArFrame = useCallback((m: ARFrameMeta) => {
-    arFrameCountRef.current += 1;
-    let vPlanes = 0;
-    let hPlanes = 0;
-    for (const a of m.anchors) {
-      if (a.type === 'plane') {
-        if (a.alignment === 'vertical') vPlanes += 1;
-        else if (a.alignment === 'horizontal') hPlanes += 1;
-      }
-    }
-    const depthStr = m.depth
-      ? `${m.depth.width}x${m.depth.height}${m.depth.hasConfidence ? '+conf' : ''}`
-      : 'none';
-    const intrStr = m.intrinsics
-      ? `fx${Math.round(m.intrinsics.fx)} ${m.intrinsics.imageWidth}x${m.intrinsics.imageHeight}`
-      : 'none';
-    const meshStr = m.mesh
-      ? `${m.mesh.anchorCount}/${m.mesh.vertexCount}v/${m.mesh.faceCount}f`
-      : 'none';
-    setArMetaText(
-      `AR#${arFrameCountRef.current} track=${m.trackingState} ` +
-        `depth=${depthStr} anchors=${m.anchors.length} ` +
-        `planes[v:${vPlanes} h:${hPlanes}] mesh=${meshStr} ` +
-        `intr=${intrStr}`,
-    );
-
-    // Cache the latest pose so "Pin marker" can drop the overlay instantly
-    // from the last-known pose (no wait for the next AR frame).
-    const cam = m.pose.translation ?? [0, 0, 0];
-    latestPoseRef.current = { t: cam, r: m.pose.rotation };
-
-    // Fallback path: if the user tapped "Pin marker" BEFORE any AR frame had
-    // arrived, the tap set `pendingLockRef`; pin now that we have a pose.
-    if (pendingLockRef.current) {
-      pendingLockRef.current = false;
-      pinMarker(cam, m.pose.rotation);
-    }
-
-    const wp = lockedWorldPointRef.current;
-    if (Array.isArray(wp) && wp.length >= 3) {
-      const d = Math.hypot(wp[0] - cam[0], wp[1] - cam[1], wp[2] - cam[2]);
-      setOverlayText(
-        `overlay: locked ${d.toFixed(2)}m @ [${wp[0].toFixed(2)}, ${wp[1].toFixed(
-          2,
-        )}, ${wp[2].toFixed(2)}]`,
-      );
-    }
-
-    // v0.19.0 — surface the sample plugin's SYNC result.  The native
-    // FrameBrightnessPlugin (name() === 'frameBrightness') returns
-    // `{ brightness: 0..1 }` each frame; the SDK folds it into `meta.plugins`
-    // KEYED BY PLUGIN NAME, so the result lives at
-    // `meta.plugins.frameBrightness.brightness`.  Values are typed `unknown`
-    // (each plugin defines its own shape), so narrow per-key.
-    const frameBrightness = m.plugins?.frameBrightness as
-      | { brightness?: number }
-      | undefined;
-    const brightness =
-      typeof frameBrightness?.brightness === 'number'
-        ? frameBrightness.brightness
-        : undefined;
-    if (brightness !== undefined) {
-      // 12-cell bar so the live luma is readable at a glance on-device.
-      const cells = Math.max(0, Math.min(12, Math.round(brightness * 12)));
-      const bar = '█'.repeat(cells) + '░'.repeat(12 - cells);
-      setPluginText(
-        `plugins: brightness=${brightness.toFixed(2)} ${bar}`,
-      );
-    } else if (m.plugins == null) {
-      // Registry empty (no native plugin registered on this build) — keep the
-      // idle copy so the overlay still proves the field is plumbed.
-      setPluginText('plugins: (none)');
-    }
-  }, [pinMarker]);
-
-  // v0.20.0 — "Pin marker" / "Reset" button.  Tap (aiming the center
-  // crosshair where you want the marker) to drop the demo overlay 1 m ahead;
-  // tap again to release.  Pins IMMEDIATELY from the last-known pose; only if
-  // no AR frame has arrived yet does it defer to the next frame (pendingLock).
-  const toggleLockPlane = useCallback(() => {
-    if (planeLocked) {
-      lockedWorldPointRef.current = null;
-      pendingLockRef.current = false;
-      setPlaneLocked(false);
-      cameraRef.current?.clearOverlays();
-      overlayPinnedRef.current = false;
-      setOverlayText('overlay: tap "Pin marker" to drop one on the surface');
-      return;
-    }
-    setPlaneLocked(true);
-    setOverlayText('overlay: pinning…');
-    // Raycast from the crosshair first → land the marker ON the real surface
-    // at the real distance.  Fall back to 1 m ahead when nothing is hit.
-    const fallback = () => {
-      const pose = latestPoseRef.current;
-      if (pose) {
-        pinMarker(pose.t, pose.r);
-      } else {
-        pendingLockRef.current = true; // no pose yet → pin on first AR frame
-      }
-    };
-    const ray = cameraRef.current?.raycast();
-    if (ray) {
-      ray
-        .then((hit) => {
-          if (hit) {
-            pinAt(hit);
-          } else {
-            fallback();
-          }
-        })
-        .catch(fallback);
-    } else {
-      fallback();
-    }
-  }, [planeLocked, pinMarker, pinAt]);
-
-  // v0.19.0 — the ASYNC plugin-result channel.  Fires when a registered
-  // plugin offloads heavy work and later calls `registry.emit(name, result)`
-  // (worklet-free, JS MAIN thread).  The sample FrameBrightnessPlugin reports
-  // SYNCHRONOUSLY (via `meta.plugins` above), so this handler is wired purely
-  // to verify the out-of-band channel — and so a host with an async plugin
-  // (e.g. RetaiLens's OCR) has a worked example to copy.
-  const handleArPluginResult = useCallback((e: ARPluginResult) => {
-    setPluginText(`plugin[${e.plugin}]: ${JSON.stringify(e.result)}`);
-  }, []);
 
   // v0.10.0 (PR B) — visible pill that surfaces refinePanorama
   // progress events.  Subscribes to the IncrementalStateUpdate
@@ -497,6 +317,126 @@ function App(): React.JSX.Element {
     return () => clearTimeout(id);
   }, [refine]);
 
+  // ── Auto A/B debug pack ──────────────────────────────────────────────
+  // On every PANORAMA capture, drop a self-contained pack into the default
+  // capture dir so it can be pulled off-device and analysed:
+  //
+  //   pack-<ts>__ab-<on|off>__kf-NN.jpg               the input keyframes
+  //   pack-<ts>__ab-<on|off>__live.jpg                the live output
+  //   pack-<ts>__ab-<on|off>__out-<v>__<cfg>__<ms>ms.jpg   per-variant re-stitch
+  //
+  // The ab-on / ab-off tag comes from the anti-blur toggle — a capture-
+  // MECHANISM change (different frames), so its A/B is the paired capture
+  // (flip, shoot, flip, shoot).  The per-variant re-stitches are the PERF
+  // ablation: SAME frames, the high-level PANORAMA path (identical to live),
+  // varying only the perf levers so each one's contribution is attributable.
+  //
+  //   iOS  — only the seam finder is plumbed on the iOS refine path, so we
+  //          ablate graphcut (live baseline) vs voronoi (the speed variant).
+  //   Android — all three refine-ablatable levers are one-at-a-time'd from a
+  //          "legacy" (all-off) baseline: +range-matcher, +single-thread,
+  //          +voronoi, then the RC default and RC+voronoi endpoints.  Each
+  //          OAT delta vs `legacy` is that lever's contribution; `rc-voronoi`
+  //          vs `rc-default` is voronoi's marginal gain on the shipped config.
+  //          (adaptive-compose is a finalize-only knob, not refine-ablatable —
+  //          it's excluded here; its effect shows only in the live output.)
+  //
+  // Wall-time per variant is JS (Date.now) — the same fixed bridge overhead on
+  // every variant, so the between-variant DELTA is the native cost difference.
+  const writeDebugPack = useCallback(
+    // `frames` is a SNAPSHOT taken at capture time by the caller (not read
+    // from the ref here) so a serialised/queued pack can't pick up a later
+    // capture's keyframes.  `liveUri` may carry a `?t=<ms>` cache-buster on
+    // some capture paths (rect-crop / alt-pipeline); we strip it below.
+    async (frames: string[], liveUri: string, abOn: boolean): Promise<void> => {
+      try {
+        const native = getIncrementalNativeModule();
+        if (!native?.refinePanorama || frames.length < 2) {
+          // eslint-disable-next-line no-console
+          console.log(`[pack] skipped (need ≥2 keyframes; had ${frames.length})`);
+          return;
+        }
+        const dir = await getDefaultCaptureDir();
+        // Collision-proof id: Date.now can repeat within a millisecond, so we
+        // also append a monotonic sequence number.
+        packSeqRef.current += 1;
+        const packId = `pack-${Date.now()}-${packSeqRef.current}__ab-${abOn ? 'on' : 'off'}`;
+        // 1) + 2) copy the inputs (keyframes) and the live output into the
+        // pack.  These are NOT the payload (the ablation below is), so a copy
+        // failure — e.g. a stale/GC'd keyframe path — must only warn, never
+        // abort the re-stitches.  Native copyFile strips `file://` but not a
+        // `?t=…` query string, so strip that off the live uri first.
+        try {
+          for (let i = 0; i < frames.length; i++) {
+            await copyFile(frames[i], `${dir}/${packId}__kf-${String(i).padStart(2, '0')}.jpg`);
+          }
+          await copyFile(liveUri.split('?')[0], `${dir}/${packId}__live.jpg`);
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn('[pack] input/live copy failed (continuing to ablation)', e);
+        }
+        // 3) perf ablation — same frames, high-level PANORAMA path.  seam =
+        //    seam finder; rw = stitchRangeMatcherWidth (0 = full-pairwise);
+        //    nt = stitchNumThreads (0 = auto-multi, 1 = single).  rw/nt are
+        //    Android-only levers (iOS ignores them → its two variants differ
+        //    only in seam, exactly what we want there).
+        type Variant = {
+          name: string;
+          seam: 'graphcut' | 'voronoi';
+          rw: number;
+          nt: number;
+        };
+        const androidVariants: Variant[] = [
+          { name: 'legacy', seam: 'graphcut', rw: 0, nt: 0 }, // all-off baseline
+          { name: 'rangematch', seam: 'graphcut', rw: 3, nt: 0 }, // +range-matcher
+          { name: 'singlethread', seam: 'graphcut', rw: 0, nt: 1 }, // +single-thread
+          { name: 'voronoi', seam: 'voronoi', rw: 0, nt: 0 }, // +voronoi
+          { name: 'rc-default', seam: 'graphcut', rw: 3, nt: 1 }, // shipped RC config
+          { name: 'rc-voronoi', seam: 'voronoi', rw: 3, nt: 1 }, // RC + voronoi
+        ];
+        const iosVariants: Variant[] = [
+          { name: 'graphcut', seam: 'graphcut', rw: 0, nt: 0 },
+          { name: 'voronoi', seam: 'voronoi', rw: 0, nt: 0 },
+        ];
+        const variants = Platform.OS === 'android' ? androidVariants : iosVariants;
+        for (const v of variants) {
+          const cfg = `seam-${v.seam}_rw${v.rw}_nt${v.nt}`;
+          const tmp = `${dir}/${packId}__out-${v.name}.jpg`;
+          const t0 = Date.now();
+          try {
+            const r = await native.refinePanorama({
+              framePaths: frames,
+              outputPath: tmp,
+              config: {
+                warperType: 'spherical',
+                blenderType: 'multiband',
+                stitchMode: 'panorama',
+                useManualPipeline: false,
+                seamFinderType: v.seam,
+                stitchRangeMatcherWidth: v.rw,
+                stitchNumThreads: v.nt,
+                jpegQuality: 90,
+              },
+            });
+            const ms = Date.now() - t0;
+            await moveFile(tmp, `${dir}/${packId}__out-${v.name}__${cfg}__${ms}ms.jpg`);
+            // eslint-disable-next-line no-console
+            console.log(`[pack] ${v.name} (${cfg}): ${ms}ms  ${r?.debugSummary ?? ''}`);
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.warn(`[pack] variant ${v.name} FAILED`, e);
+          }
+        }
+        // eslint-disable-next-line no-console
+        console.log(`[pack] wrote ${packId} (${frames.length} frames, ${variants.length} variants) → ${dir}`);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[pack] failed', e);
+      }
+    },
+    [],
+  );
+
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
@@ -514,6 +454,19 @@ function App(): React.JSX.Element {
     // showPreview) — that screen IS the preview, so don't pop a second
     // preview modal for them.  Photos (no review step) still get the modal.
     if (result.type === 'photo') setPreview(result);
+    // Every panorama auto-writes an A/B debug pack (fire-and-forget so it
+    // doesn't block the UI); tagged with the current anti-blur state.  Snapshot
+    // the keyframes NOW (the ref is reset on the next capture's first frame)
+    // and run packs through a chain so they never overlap + contend on the
+    // native stitch queue.  `.catch` keeps a failed pack from breaking the chain.
+    if (result.type === 'panorama') {
+      const frames = [...collectedKeyframesRef.current];
+      const liveUri = result.uri;
+      const abOn = antiBlurOn;
+      packChainRef.current = packChainRef.current
+        .catch(() => undefined)
+        .then(() => writeDebugPack(frames, liveUri, abOn));
+    }
     // Dedup by uri — a capture-history strip should never show the same
     // capture twice, and a duplicate `id` (uri) throws React's "two children
     // with the same key".  Robust against any double onCapture delivery.
@@ -667,19 +620,40 @@ function App(): React.JSX.Element {
       <StatusBar barStyle="light-content" />
       <SafeAreaView style={styles.safe}>
         <Camera
-          ref={cameraRef}
+          // Re-pick the capture format when the KF-quality toggle OR the
+          // anti-blur exposure cap flips (both change which format
+          // vision-camera picks).
+          key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-ab${antiBlurOn ? 1 : 0}`}
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
+          keyframeQualityCapture={kfQuality}
+          // v0.23 anti-blur — the single 🌀 toggle below drives the whole
+          // bundle.  ON = recommended values; OFF = every knob disabled
+          // (today's behaviour), so a paired capture isolates the feature.
+          frameSelection={{
+            antiBlur: antiBlurOn
+              ? {
+                  maxExposureMs: 8,
+                  maxCommitPanRateRadPerSec: 1.0,
+                  minScoreFractionOfMedian: 0.6,
+                  preferHighFpsFormat: true,
+                }
+              : {
+                  maxExposureMs: 0,
+                  maxCommitPanRateRadPerSec: 0,
+                  minScoreFractionOfMedian: 0,
+                  preferHighFpsFormat: false,
+                },
+          }}
           panMode={panMode}
           rectCrop={rectCrop}
           showPreview={showPreview}
-          // Time-budget force-accept ON at 1 s (the SDK default) — a keyframe is
-          // accepted every second even if the 15 % novelty gate hasn't tripped,
-          // so slow/static pans don't leave gaps.  (Was previously disabled to
-          // test novelty in isolation.)  Adjust via the ⚙️ Keyframe interval.
+          // Time-budget force-accept ON at 1.5 s — a keyframe is accepted on
+          // that interval even if the novelty gate hasn't tripped, so slow/
+          // static pans don't leave gaps.  Adjust via the ⚙️ Keyframe interval.
           defaultMaxKeyframeIntervalMs={1500}
-          showSettingsButton={__DEV__}
+          showSettingsButton
           headerTitle="Image Stitcher Demo"
           headerGuidance="Tap shutter for a photo. Hold + pan + release for a panorama."
           flash={flash}
@@ -689,55 +663,12 @@ function App(): React.JSX.Element {
           capturePreviewActions={capturePreviewActions}
           onCapturePreviewClose={closePreview}
           frameProcessor={exampleFrameProcessor}
-          onArFrame={handleArFrame}
-          onArPluginResult={handleArPluginResult}
-          enableDepth
-          enableAnchors
-          planeDetection="both"
           onCapture={handleCapture}
           onCaptureSourceChange={handleCaptureSourceChange}
           onLensChange={handleLensChange}
           onFramesDropped={handleFramesDropped}
           onError={handleError}
         />
-
-        {/* Always rendered (not __DEV__-gated) so it's visible in the
-            Release build used to verify AR metadata without the Debug
-            inspector's Hermes allocation tracker. */}
-        <View style={styles.arMetaOverlay} pointerEvents="none">
-          <Text style={styles.arMetaText} numberOfLines={3}>
-            {arMetaText}
-          </Text>
-          {/* v0.19.0 — AR plugin framework readout (sample FrameBrightnessPlugin). */}
-          <Text style={styles.arPluginText} numberOfLines={1}>
-            {pluginText}
-          </Text>
-          {/* v0.20.0 — AR overlay renderer readout (demo plane-pinned marker). */}
-          <Text style={styles.arOverlayText} numberOfLines={1}>
-            {overlayText}
-          </Text>
-        </View>
-
-        {/* v0.20.0 — center crosshair: aim this where you want the marker,
-            then tap "Pin marker" to drop the demo overlay 1 m ahead there. */}
-        <View style={styles.crosshair} pointerEvents="none">
-          <Text style={styles.crosshairText}>＋</Text>
-        </View>
-
-        {/* v0.20.0 — Lock/Reset the demo overlay onto the plane you're aiming at. */}
-        <Pressable
-          style={[
-            styles.lockPlaneBtn,
-            planeLocked && styles.lockPlaneBtnActive,
-          ]}
-          onPress={toggleLockPlane}
-          accessibilityRole="button"
-          accessibilityLabel={planeLocked ? 'Reset plane lock' : 'Lock plane'}
-        >
-          <Text style={styles.lockPlaneText}>
-            {planeLocked ? 'Reset' : 'Pin marker'}
-          </Text>
-        </Pressable>
 
         {refine !== null && (
           <View
@@ -760,50 +691,99 @@ function App(): React.JSX.Element {
           </View>
         )}
 
-        {__DEV__ && (
-          <>
-            <Pressable
-              style={[styles.devToggle, { top: 110 }]}
-              onPress={() =>
-                setPanMode((m) =>
-                  m === 'vertical' ? 'horizontal' : m === 'horizontal' ? 'both' : 'vertical',
-                )
-              }
-              accessibilityRole="button"
-            >
-              <Text style={styles.devToggleText}>
-                🧭 panMode: {panMode === 'vertical'
-                  ? 'vertical (landscape)'
-                  : panMode === 'horizontal'
-                    ? 'horizontal (portrait)'
-                    : 'both'}
-              </Text>
-            </Pressable>
+        {/* Dev controls — rendered UNCONDITIONALLY (this example's "debug"
+            APK builds non-debuggable, so __DEV__ is false and a __DEV__ gate
+            would hide them).  A ⚙️ gear opens the settings modal; the chips
+            below are the pano + anti-blur A/B knobs flipped most on-device. */}
+        <Pressable
+          style={[styles.devToggle, { top: 110 }]}
+          onPress={() => setSettingsOpen(true)}
+          accessibilityRole="button"
+          accessibilityLabel="Open dev settings"
+        >
+          <Text style={styles.devToggleText}>⚙️ Dev settings</Text>
+        </Pressable>
 
-            {/* v0.16 — review-surface toggles. rectCrop wins over showPreview;
-                both off → onCapture fires immediately (no review screen). */}
-            <Pressable
-              style={[styles.devToggle, { top: 150 }]}
-              onPress={() => setRectCrop((v) => !v)}
-              accessibilityRole="button"
-            >
-              <Text style={styles.devToggleText}>
-                ✂️ rectCrop: {rectCrop ? 'ON' : 'OFF'}
-              </Text>
-            </Pressable>
+        <Pressable
+          style={[styles.devToggle, { top: 150 }]}
+          onPress={() =>
+            setPanMode((m) =>
+              m === 'vertical' ? 'horizontal' : m === 'horizontal' ? 'both' : 'vertical',
+            )
+          }
+          accessibilityRole="button"
+        >
+          <Text style={styles.devToggleText}>
+            🧭 panMode: {panMode === 'vertical'
+              ? 'vertical (landscape)'
+              : panMode === 'horizontal'
+                ? 'horizontal (portrait)'
+                : 'both'}
+          </Text>
+        </Pressable>
 
-            <Pressable
-              style={[styles.devToggle, { top: 190 }]}
-              onPress={() => setShowPreview((v) => !v)}
-              accessibilityRole="button"
-            >
-              <Text style={styles.devToggleText}>
-                🖼️ showPreview: {showPreview ? 'ON' : 'OFF'}
-                {rectCrop ? ' (overridden by rectCrop)' : ''}
-              </Text>
+        {/* v0.23 anti-blur — ONE high-level toggle.  Flip OFF, capture a pano,
+            flip ON, capture again: each capture auto-writes a debug pack (see
+            writeDebugPack) tagged ab-on / ab-off, so the two can be compared
+            for blur + a same-frames perf-lever ablation. */}
+        <Pressable
+          style={[styles.devToggle, { top: 190 }]}
+          onPress={() => setAntiBlurOn((v) => !v)}
+          accessibilityRole="button"
+        >
+          <Text style={styles.devToggleText}>
+            🌀 anti-blur: {antiBlurOn ? 'ON' : 'OFF'}
+          </Text>
+        </Pressable>
+
+        {/* ⚙️ Dev settings — the set-once knobs, kept off the camera view. */}
+        <Modal
+          visible={settingsOpen}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setSettingsOpen(false)}
+        >
+          <Pressable
+            style={styles.modalBackdrop}
+            onPress={() => setSettingsOpen(false)}
+            accessibilityRole="button"
+            accessibilityLabel="Close dev settings"
+          >
+            {/* Stop taps inside the card from closing the modal. */}
+            <Pressable style={styles.modalCard} onPress={() => undefined}>
+              <Text style={styles.modalTitle}>Dev settings</Text>
+              <DevSettingRow
+                label="Rect crop editor"
+                help="Draggable-quad crop after capture"
+                value={rectCrop}
+                onValueChange={setRectCrop}
+              />
+              <DevSettingRow
+                label="Show preview"
+                help={
+                  rectCrop
+                    ? 'Overridden by rect crop'
+                    : 'Plain preview with Retake / Confirm'
+                }
+                value={showPreview}
+                onValueChange={setShowPreview}
+              />
+              <DevSettingRow
+                label="Keyframe quality (1280)"
+                help="OFF = 640 tiles · remounts the camera to re-pick the format"
+                value={kfQuality}
+                onValueChange={setKfQuality}
+              />
+              <Pressable
+                style={styles.modalDoneBtn}
+                onPress={() => setSettingsOpen(false)}
+                accessibilityRole="button"
+              >
+                <Text style={styles.modalDoneText}>Done</Text>
+              </Pressable>
             </Pressable>
-          </>
-        )}
+          </Pressable>
+        </Modal>
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -811,81 +791,6 @@ function App(): React.JSX.Element {
 
 
 const styles = StyleSheet.create({
-  // v0.20.0 — center crosshair marking where you're "pointing" for plane lock.
-  crosshair: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  crosshairText: {
-    color: '#00E5FF',
-    fontSize: 30,
-    fontWeight: '700',
-    opacity: 0.85,
-    backgroundColor: 'transparent',
-  },
-  // v0.20.0 — Pin/Reset the demo overlay onto the aimed-at surface.  Lower-
-  // right, ABOVE the bottom readout strip (`arMetaOverlay` at bottom:96) and
-  // clear of the SDK's top-right pill stack (AR toggle + flash) and the
-  // bottom-center shutter — those zones are owned by `<Camera>`.
-  lockPlaneBtn: {
-    position: 'absolute',
-    bottom: 170,
-    right: 16,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: '#00E5FF',
-  },
-  lockPlaneBtnActive: {
-    backgroundColor: 'rgba(255, 90, 90, 0.85)',
-    borderColor: '#FFFFFF',
-  },
-  lockPlaneText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  // AR metadata readout — fed from the worklet-free `onArFrame` callback
-  // (see `handleArFrame`).  Bottom strip so it doesn't collide with the
-  // top-left dev toggles or the guidance banner.
-  arMetaOverlay: {
-    position: 'absolute',
-    left: 8,
-    right: 8,
-    bottom: 96,
-    backgroundColor: 'rgba(0, 0, 0, 0.62)',
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 8,
-  },
-  arMetaText: {
-    color: '#7CFC9A',
-    fontSize: 11,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  // v0.19.0 — AR plugin framework readout, distinct amber tint so the plugin
-  // result is visually separable from the green AR-metadata line above.
-  arPluginText: {
-    color: '#FFD34D',
-    fontSize: 11,
-    marginTop: 3,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  // v0.20.0 — AR overlay renderer readout, cyan to match the demo overlay's
-  // colour (#00E5FF) so the on-screen text and the drawn marker read as a set.
-  arOverlayText: {
-    color: '#00E5FF',
-    fontSize: 11,
-    marginTop: 3,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
   // Shared dev toggle chip (top-left stack); `top` set per-instance.
   devToggle: {
     position: 'absolute',
@@ -899,6 +804,60 @@ const styles = StyleSheet.create({
     color: '#00E5FF',
     fontSize: 13,
     fontWeight: '600',
+  },
+  // ⚙️ Dev settings modal.
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'flex-end',
+  },
+  modalCard: {
+    backgroundColor: '#1c1c1e',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 34,
+  },
+  modalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  settingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#3a3a3c',
+  },
+  settingRowText: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  settingLabel: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  settingHelp: {
+    color: '#8e8e93',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  modalDoneBtn: {
+    marginTop: 18,
+    backgroundColor: '#0A84FF',
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  modalDoneText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
   },
   safe: {
     flex: 1,

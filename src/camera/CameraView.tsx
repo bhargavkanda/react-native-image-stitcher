@@ -41,7 +41,7 @@ import {
   type CameraProps,
 } from 'react-native-vision-camera';
 
-import { pickCaptureFormat } from './pickCaptureFormat';
+import { exposureCapToFps, pickCaptureFormat } from './pickCaptureFormat';
 
 
 /**
@@ -121,6 +121,28 @@ export interface CameraViewProps {
    * no qualifying format.  Default off.
    */
   keyframeQualityCapture?: boolean;
+  /**
+   * v0.23 anti-blur EXPOSURE CAP (non-AR path): the maximum exposure time,
+   * in milliseconds, to allow while capturing.  0 / omitted = don't cap
+   * (today's behaviour, session pinned at ≤60 fps).
+   *
+   * Implemented as an fps FLOOR, because the library owns THIS vision-camera
+   * instance and vision-camera bounds exposure by the frame interval: it maps
+   * the `fps` prop to `activeVideoMaxFrameDuration = 1/fps`, and auto-exposure
+   * can never expose longer than one frame.  So requesting `maxExposureMs=8`
+   * asks for a ≥125 fps session (≤1/125 s exposure); the format picker is
+   * steered toward a high-fps format and the session fps ceiling is raised to
+   * match.  This is NOT a fight with the session owner (the failure mode of a
+   * raw AVCaptureDevice cap) — it is this instance's own public knob.
+   *
+   * Degrades gracefully: if the device's fastest 4:3 format tops out below the
+   * requested rate, the session runs at that max (a looser-than-requested but
+   * still-shortened exposure), never slower than today's 60 fps.  Interacts
+   * with `keyframeQualityCapture`: a 1280-video floor can exclude the highest-
+   * fps formats (often 720p), so enabling both trades some exposure ceiling
+   * for keyframe resolution.
+   */
+  maxExposureMs?: number;
   /** Optional themed guidance banner.  Renders over the preview at the top. */
   guidance?: string;
   /** Extra style layer applied on top of the default full-screen layout. */
@@ -183,6 +205,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     highResCapture = false,
     captureDepthData = false,
     keyframeQualityCapture = false,
+    maxExposureMs = 0,
     guidance,
     style,
     cameraProps,
@@ -190,6 +213,10 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   },
   ref,
 ): React.JSX.Element {
+  // v0.23 anti-blur exposure cap → an fps FLOOR (0 = disabled). vision-camera
+  // bounds exposure at 1/fps, so `maxExposureMs = 8` needs a ≥125 fps session.
+  // Pure translation lives in `exposureCapToFps` (unit-tested).
+  const exposureCapFps = exposureCapToFps(maxExposureMs);
   // Error filter — see `VC_LIFECYCLE_ERROR_CODES` for the swallow
   // list rationale.  `code` on vision-camera's `CameraRuntimeError`
   // is typed as a string; treat any non-string defensively as a
@@ -274,6 +301,12 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         maxPhotoLongEdge: highResCapture ? HIGH_RES_PHOTO_LONG_EDGE_CAP : PHOTO_LONG_EDGE_CAP,
         aspect: 4 / 3,
         preferHighFps: true,
+        // Anti-blur exposure cap: steer the picker toward a format fast
+        // enough to hit the requested exposure ceiling. Above the default
+        // 60 target, higher fps outranks resolution (the picker's tie-break),
+        // which is what we want — keyframes downscale to 640/1280 anyway, so a
+        // faster-but-smaller format costs the stitch nothing. 0 → default 60.
+        fpsTarget: Math.max(60, exposureCapFps),
         // captureDepthData: keep only depth-capable 4:3 formats when the
         // device has any — depth delivery on a depth-less format silently
         // produces nothing.  Falls through unchanged on depth-less devices.
@@ -287,16 +320,22 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
       });
       return picked;
     },
-    [device, highResCapture, captureDepthData, keyframeQualityCapture],
+    [device, highResCapture, captureDepthData, keyframeQualityCapture, exposureCapFps],
   );
 
-  // Pin the session frame rate to the format's max, capped at 60.  Picking a
-  // 60 fps-capable format is necessary but NOT sufficient — without an explicit
+  // Pin the session frame rate to the format's max, capped at the fps ceiling.
+  // Picking a fast format is necessary but NOT sufficient — without an explicit
   // `fps`, vision-camera can leave the session at a lower default, which is the
-  // jitter the user saw.  min(maxFps, 60) is always within the format's range.
+  // jitter the user saw.  min(maxFps, ceiling) is always within the format's
+  // range.  The ceiling is 60 by default (smooth pan) and rises to the anti-
+  // blur exposure cap's required fps when one is set — a higher session fps is
+  // exactly what shortens the exposure (vision-camera's activeVideoMaxFrame-
+  // Duration = 1/fps).  The device max still bounds it, so an unreachable cap
+  // degrades to the fastest the hardware offers rather than failing.
+  const fpsCeiling = Math.max(60, exposureCapFps);
   const fps = useMemo(
-    () => (format ? Math.min(format.maxFps ?? 30, 60) : undefined),
-    [format],
+    () => (format ? Math.min(format.maxFps ?? 30, fpsCeiling) : undefined),
+    [format, fpsCeiling],
   );
 
   // Measured size of our container, so we can size the <Camera> view to

@@ -330,3 +330,71 @@ TEST(SharpnessWindowTest, TypicalCaptureSequence) {
     EXPECT_EQ(m.remainingSlots(), 3);
     EXPECT_DOUBLE_EQ(m.bestScore(), 150.0);
 }
+
+// ── The HOLD re-open sequence (v0.23 anti-blur) ─────────────────────
+//
+// When the admission policy holds a keyframe, the platforms re-open the
+// just-closed window by feeding an ACCEPT carrying the machine's OWN
+// bestScore. That re-arms the candidate slots without disturbing the
+// streaming max, so the held frame still has to be beaten on merit.
+//
+// The guard logic around this lives in two bridges
+// (SharpnessWindowBridge.mm and SharpnessWindow.kt) rather than in the
+// machine, which is exactly the drift risk the shared port exists to
+// remove — the v0.23 review found the two spellings already disagreed on
+// NaN. These cases pin the MACHINE-side contract both bridges depend on,
+// so a future change to the machine can't silently break the hold path.
+TEST(SharpnessWindowMachine, ReopenAfterCloseRearmsSlotsAndKeepsBest) {
+    SharpnessWindowMachine m(4);
+
+    EXPECT_EQ(accept(m, 200.0).action, SharpnessWindowAction::OpenWindow);
+    EXPECT_EQ(candidate(m, 240.0).action, SharpnessWindowAction::ReplaceBest);
+    EXPECT_EQ(candidate(m, 100.0).action, SharpnessWindowAction::KeepBest);
+    EXPECT_EQ(candidate(m, 110.0).action, SharpnessWindowAction::CloseAndSave);
+    ASSERT_FALSE(m.isOpen());
+    const double bestAtClose = m.bestScore();
+    EXPECT_DOUBLE_EQ(bestAtClose, 240.0);
+
+    // The re-open: an accept seeded with the machine's own best.
+    const auto reopened = accept(m, bestAtClose);
+    EXPECT_EQ(reopened.action, SharpnessWindowAction::OpenWindow);
+    EXPECT_TRUE(m.isOpen());
+    // Slots are re-armed …
+    EXPECT_EQ(m.remainingSlots(), 3);
+    // … and the streaming max is unchanged, so a held candidate is not
+    // silently promoted: a WORSE frame must still lose.
+    EXPECT_DOUBLE_EQ(m.bestScore(), 240.0);
+    EXPECT_EQ(candidate(m, 200.0).action, SharpnessWindowAction::KeepBest);
+    EXPECT_DOUBLE_EQ(m.bestScore(), 240.0);
+    // … while a genuinely sharper one still wins.
+    EXPECT_EQ(candidate(m, 300.0).action, SharpnessWindowAction::ReplaceBest);
+    EXPECT_DOUBLE_EQ(m.bestScore(), 300.0);
+}
+
+TEST(SharpnessWindowMachine, RepeatedReopenTerminatesAtFinalizeDrain) {
+    // A hold must never outlive the capture. Even if the policy held on
+    // every close, drain() at finalize still claims the buffered best —
+    // the capture cannot hang and the keyframe cannot be lost.
+    SharpnessWindowMachine m(2);
+    EXPECT_EQ(accept(m, 50.0).action, SharpnessWindowAction::OpenWindow);
+    for (int i = 0; i < 25; ++i) {
+        const auto closing = candidate(m, 10.0);
+        ASSERT_EQ(closing.action, SharpnessWindowAction::CloseAndSave);
+        ASSERT_FALSE(m.isOpen());
+        ASSERT_EQ(accept(m, m.bestScore()).action,
+                  SharpnessWindowAction::OpenWindow);
+    }
+    EXPECT_TRUE(m.drain());   // the pending best is still claimable
+    EXPECT_FALSE(m.drain());  // idempotent
+}
+
+TEST(SharpnessWindowMachine, KOneNeverOpensSoReopenHasNothingToRearm) {
+    // K == 1 bypasses the window entirely (SaveImmediately), which is
+    // why both bridges refuse to re-open there: a hold would have
+    // nowhere to live and would drop the keyframe outright.
+    SharpnessWindowMachine m(1);
+    EXPECT_EQ(accept(m, 100.0).action, SharpnessWindowAction::SaveImmediately);
+    EXPECT_FALSE(m.isOpen());
+    EXPECT_EQ(accept(m, 100.0).action, SharpnessWindowAction::SaveImmediately);
+    EXPECT_FALSE(m.isOpen());
+}

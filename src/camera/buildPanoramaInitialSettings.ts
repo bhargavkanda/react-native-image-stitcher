@@ -190,6 +190,15 @@ export function buildPanoramaInitialSettings(
         // The object prop's flow wins over the flat default*Flow* props.
         ...(overrides.frameSelection?.flow ?? {}),
       },
+      // v0.23 anti-blur — DEEP-merged like `flow`, so a host can set a
+      // single knob (e.g. just `preferHighFpsFormat`) without restating
+      // the rest and silently losing the safety `maxConsecutiveHolds`
+      // default.  `...overrides.frameSelection` above shallow-replaced
+      // the whole sub-tree; this restores the defaults it dropped.
+      antiBlur: {
+        ...base.frameSelection.antiBlur,
+        ...(overrides.frameSelection?.antiBlur ?? {}),
+      },
     },
   };
 }

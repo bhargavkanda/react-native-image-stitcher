@@ -62,8 +62,17 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.stitchMode).toBe('auto'); // v0.16 — default reverted to auto (matches v0.15.2)
     expect(cfg.warperType).toBe('plane'); // v0.16 — default reverted to plane (matches v0.15.2)
     expect(cfg.blenderType).toBe('multiband');
-    expect(cfg.seamFinderType).toBe('graphcut');
+    expect(cfg.seamFinderType).toBe('graphcut'); // perf-3b — voronoi default reverted (shelf tearing; see docs/perf-3b §0)
     expect(cfg.enableMaxInscribedRectCrop).toBe(false);
+    // perf-3b — range matcher (2/2/3 ladder) on by default; single-threaded default.
+    expect(cfg.stitchRangeMatcherWidth).toBe(3);
+    expect(cfg.stitchNumThreads).toBe(1);
+    // perf-4a — compose-resolution adaptation ON by default (0.23): 'measured'.
+    expect(cfg.adaptiveStitchMode).toBe('measured');
+    expect(cfg.adaptiveMinOutputMP).toBe(0.6);
+    expect(cfg.adaptiveSlowStitchMsPerFrame).toBe(1000);
+    // RCA — debug pack OFF by default.
+    expect(cfg.debugPack).toBe(false);
 
     // FrameSelectionSettings
     expect(cfg.frameSelectionMode).toBe('flow-based');
@@ -142,8 +151,17 @@ describe('panoramaSettingsToNativeConfig', () => {
     // this test immediately.
     const cfg = panoramaSettingsToNativeConfig(DEFAULT_PANORAMA_SETTINGS);
     expect(Object.keys(cfg).sort()).toEqual([
+      'adaptiveMinOutputMP',
+      'adaptiveSlowStitchMsPerFrame',
+      'adaptiveStitchMode',
+      'antiBlurMaxCommitPanRateRadPerSec',
+      'antiBlurMaxConsecutiveHolds',
+      'antiBlurMaxExposureMs',
+      'antiBlurMinScoreFractionOfMedian',
+      'antiBlurPreferHighFpsFormat',
       'blenderType',
       'captureSource',
+      'debugPack',
       'enableMaxInscribedRectCrop',
       'flowEvalEveryNFrames',
       'flowMaxCorners',
@@ -158,8 +176,87 @@ describe('panoramaSettingsToNativeConfig', () => {
       'seamFinderType',
       'sharpnessWindow',
       'stitchMode',
+      'stitchNumThreads',
+      'stitchRangeMatcherWidth',
       'warperType',
     ]);
+  });
+
+  it('emits the recommended antiBlur values ON by default (0.23 ships anti-blur on; opt-out per knob)', () => {
+    // 0.23 turns the source-side anti-blur controls ON by default with the
+    // recommended values; a host disables any knob by setting it to 0 / false
+    // in frameSelection.antiBlur (the all-off baseline is
+    // DEFAULT_ANTI_BLUR_SETTINGS, still used when the sub-tree is omitted).
+    // `maxConsecutiveHolds` is the forward-progress SAFETY cap.
+    const cfg = panoramaSettingsToNativeConfig(DEFAULT_PANORAMA_SETTINGS);
+    expect(cfg.antiBlurMaxExposureMs).toBe(8);
+    expect(cfg.antiBlurMaxCommitPanRateRadPerSec).toBe(1);
+    expect(cfg.antiBlurMinScoreFractionOfMedian).toBe(0.6);
+    expect(cfg.antiBlurPreferHighFpsFormat).toBe(true);
+    expect(cfg.antiBlurMaxConsecutiveHolds).toBe(12);
+  });
+
+  it('fills antiBlur defaults when the sub-tree is omitted entirely', () => {
+    // `antiBlur` is optional, so pre-v0.23 settings literals keep
+    // compiling. The bridge must still emit concrete values rather than
+    // letting the native side fall back to whatever it compiles in —
+    // the same always-emit policy the flow knobs use.
+    const sparse: PanoramaSettings = {
+      ...DEFAULT_PANORAMA_SETTINGS,
+      frameSelection: {
+        mode: 'flow-based',
+        maxKeyframes: 6,
+        overlapThreshold: 0.20,
+        maxKeyframeIntervalMs: 1500,
+        // antiBlur omitted — legal per the optional `?`
+      },
+    };
+    const cfg = panoramaSettingsToNativeConfig(sparse);
+    expect(cfg.antiBlurMaxExposureMs).toBe(0);
+    expect(cfg.antiBlurMaxCommitPanRateRadPerSec).toBe(0);
+    expect(cfg.antiBlurMinScoreFractionOfMedian).toBe(0);
+    expect(cfg.antiBlurMaxConsecutiveHolds).toBe(12);
+    expect(cfg.antiBlurPreferHighFpsFormat).toBe(false);
+  });
+
+  it('passes explicit antiBlur opt-in values through untouched', () => {
+    const on: PanoramaSettings = {
+      ...DEFAULT_PANORAMA_SETTINGS,
+      frameSelection: {
+        ...DEFAULT_PANORAMA_SETTINGS.frameSelection,
+        antiBlur: {
+          maxExposureMs: 8,              // 1/125 s ceiling
+          maxCommitPanRateRadPerSec: 1.0, // just above the coach's warn bucket
+          minScoreFractionOfMedian: 0.6,
+          maxConsecutiveHolds: 20,
+          preferHighFpsFormat: true,
+        },
+      },
+    };
+    const cfg = panoramaSettingsToNativeConfig(on);
+    expect(cfg.antiBlurMaxExposureMs).toBe(8);
+    expect(cfg.antiBlurMaxCommitPanRateRadPerSec).toBe(1.0);
+    expect(cfg.antiBlurMinScoreFractionOfMedian).toBe(0.6);
+    expect(cfg.antiBlurMaxConsecutiveHolds).toBe(20);
+    expect(cfg.antiBlurPreferHighFpsFormat).toBe(true);
+  });
+
+  it('allows partial antiBlur opt-in (one knob on, the rest stay off)', () => {
+    // The knobs are independent: a host can take the high-fps format
+    // (the only exposure lever on the iOS AR path) without opting into
+    // motion gating, and vice versa.
+    const partial: PanoramaSettings = {
+      ...DEFAULT_PANORAMA_SETTINGS,
+      frameSelection: {
+        ...DEFAULT_PANORAMA_SETTINGS.frameSelection,
+        antiBlur: { preferHighFpsFormat: true },
+      },
+    };
+    const cfg = panoramaSettingsToNativeConfig(partial);
+    expect(cfg.antiBlurPreferHighFpsFormat).toBe(true);
+    expect(cfg.antiBlurMaxExposureMs).toBe(0);
+    expect(cfg.antiBlurMaxCommitPanRateRadPerSec).toBe(0);
+    expect(cfg.antiBlurMinScoreFractionOfMedian).toBe(0);
   });
 
   it('defaults sharpnessWindow to 4 when absent and passes explicit values through', () => {

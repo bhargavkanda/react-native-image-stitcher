@@ -143,11 +143,25 @@ export interface BatchStitcherSettings {
   blenderType: 'multiband' | 'feather';
 
   /**
-   * Seam-finder strategy.  `'graphcut'` finds optimal seams before
-   * blending (pair with multiband); `'skip'` streams warp+feed (pair
-   * with feather for the lowest-memory configuration).
+   * Seam-finder strategy.
+   *   `'graphcut'` (default) — optimal min-cost seams (COST_COLOR_GRAD)
+   *     before blending (pair with multiband). Highest quality, but
+   *     STRICTLY SERIAL and, per on-device profiling (fable review), ~41%
+   *     of total stitch wall-time at fleet keyframe counts — the single
+   *     biggest phase.
+   *   `'voronoi'` — distance-based seams. Much cheaper than graphcut
+   *     (potential ~1.7x end-to-end), but seams follow geometry not image
+   *     content, so exposure/parallax mismatches can show as visible seams
+   *     or ghosting. This is the real speed lever identified by profiling,
+   *     but flipping the default to it REQUIRES on-device output-quality
+   *     validation (SSIM + visual, per the range-matcher gate) because it
+   *     changes pixels — see docs/perf-3b. Exposed here as opt-in; default
+   *     stays graphcut until that gate passes.
+   *   `'skip'` — no seam optimization (NoSeamFinder); streams warp+feed
+   *     (pair with feather for the lowest-memory configuration). Cheapest,
+   *     lowest quality.
    */
-  seamFinderType: 'graphcut' | 'skip';
+  seamFinderType: 'graphcut' | 'voronoi' | 'skip';
 
   /**
    * Output crop strategy.  `false` (default) crops to the bounding
@@ -156,6 +170,91 @@ export interface BatchStitcherSettings {
    * with no black corners, more CPU at finalize.
    */
   enableMaxInscribedRectCrop: boolean;
+
+  /**
+   * perf-3b — PANORAMA feature-matcher range.  `0`/undefined (default)
+   * = OFF: the stock full-pairwise `BestOf2NearestMatcher` ladder
+   * (byte-identical to before this knob existed).  `> 0` enables the
+   * `BestOf2NearestRangeMatcher` ladder, which matches only keyframes
+   * within `|i − j| < width` — keyframes are strictly capture-ordered,
+   * so on a linear shelf pan the skipped non-adjacent pairs share ~no
+   * overlap and their O(N²) matching is wasted work.  The window widens
+   * across the finalize retry ladder: **consecutive-only (width 2) on
+   * attempts 1–2, then out to THIS value on the final, lowest-threshold
+   * attempt** — so `3` gives a 2/2/3 schedule, bridging a chain broken
+   * at a weak consecutive link only as a last resort.  This replaces the
+   * full-pairwise matcher on every attempt; pan-back captures (distant
+   * overlap) are handled at capture time (perf-5), not by a rescue here.
+   * Recommended `3`.  PANORAMA/high-level only; ignored by SCANS and the
+   * manual pipeline.
+   */
+  rangeMatcherWidth?: number;
+
+  /**
+   * perf-3b item 1 — OpenCV intra-stitch thread count (Android only).
+   * `0`/undefined (default) = AUTO (`min(4, max(2, cores/2))`), restoring
+   * the multi-core warp/blend/feature parallelism that `setNumThreads(1)`
+   * removed to work around a native-heap creep — now safe because the
+   * stitch runs on a stable dedicated thread. `1` = single-threaded
+   * kill-switch (revert here if a device regresses on the memory gate).
+   * `N` = explicit. iOS ignores this (its GCD backend is already multi-core).
+   */
+  numThreads?: number;
+
+  /**
+   * perf-4a — compositing-resolution adaptation MODE (Android). Shrinking the
+   * final panorama to `adaptiveMinOutputMP` makes the stitch faster on slow
+   * devices at the cost of output pixels (a downstream OD/OCR trade-off to
+   * field-test). Three positions:
+   *
+   *   `'off'` (default) — never shrink; compose stays 1.0 MP. Byte-identical
+   *      (no SharedPreferences or header touch).
+   *   `'always'` — DETERMINISTIC: cut every finalize to `adaptiveMinOutputMP`,
+   *      unconditionally. No measurement, no persistence. This is the clean A/B
+   *      TREATMENT — every capture is shrunk the same way, so `off` vs `always`
+   *      is a controlled comparison of "does shrinking hurt detection?".
+   *   `'measured'` — SELF-TUNING (the "thermostat"): shrink only on devices a
+   *      persisted rolling median of per-keyframe stitch wall time
+   *      (`stitchWallMs / acceptedCount`) proves slow (> `adaptiveSlowStitchMs
+   *      PerFrame`), with hysteresis. Two invariants keep it honest: (1) it
+   *      never cuts before it has measured THIS device (≥3 real samples), so
+   *      the first cut is never a cold-start/thermal fluke or a core-count
+   *      guess; (2) while cutting, every 4th finalize is a default-budget PROBE
+   *      that re-measures, so a recovered device un-fires — the regime never
+   *      latches permanently. This is the mode you'd SHIP once the A/B confirms
+   *      shrinking is safe; it only helps the devices that need it.
+   *
+   * `appliedBudgets.source` on the result reports which path ran
+   * (`default`|`seeded`|`probe`|`adapted`|`always`|`decode-failed`). See
+   * docs/perf-4a.
+   */
+  adaptiveStitchMode?: 'off' | 'always' | 'measured';
+  /**
+   * perf-4a — floor (megapixels) the compositing resolution is cut to. Default
+   * `0.6` (the downstream OD/OCR minimum). Native clamps to `[0.6, 1.0]`: `0.6`
+   * is the hard OD/OCR floor, `1.0` (the default budget) makes a "cut" a no-op —
+   * a value above the default would RAISE resolution and pollute the measured
+   * history. Consulted by `adaptiveStitchMode` `'always'` and `'measured'`.
+   */
+  adaptiveMinOutputMP?: number;
+  /**
+   * perf-4a — the per-keyframe stitch-wall-time median (ms) above which a
+   * device is considered slow and compose adaptation fires. Default `1000`
+   * (estimated; calibrate against Phase 0 `stitchWallMs`). Only consulted when
+   * `adaptiveStitchMode` is `'measured'` (`'always'` ignores it).
+   */
+  adaptiveSlowStitchMsPerFrame?: number;
+  /**
+   * RCA / diagnostics — when `true` (Android), a successful finalize writes a
+   * self-describing `pack.json` next to the (already-persisted) keyframe JPEGs
+   * in the capture session dir under `cacheDir`. The pack records the device,
+   * the full stitch recipe, the result dims/frame counts, and the timing
+   * decomposition (`stitchWallMs` = RN-version-invariant native cost;
+   * `queueDelayMs` = bridge/JS) — so a field capture can be pulled and replayed
+   * OFFLINE instead of eyeballed. `false`/undefined (default) = OFF, no write.
+   * Pure diagnostic; never alters the stitch. See the offline compare tool.
+   */
+  debugPack?: boolean;
 }
 
 
@@ -254,6 +353,123 @@ export interface FrameSelectionSettings {
    * track [DEFAULT_PANORAMA_SETTINGS.frameSelection.flow].
    */
   flow?: FlowGateSettings;
+
+  /**
+   * Anti-blur capture controls (v0.23).  ALL OFF BY DEFAULT — omitting
+   * this sub-tree reproduces today's behaviour exactly.  See
+   * [AntiBlurSettings] for what each knob attacks.
+   */
+  antiBlur?: AntiBlurSettings;
+}
+
+
+/**
+ * Anti-blur capture controls — the mechanisms that attack motion blur
+ * at its SOURCE, complementing `sharpnessWindow` (which only picks the
+ * sharpest of the frames it is given).
+ *
+ * Motion blur extent ≈ angular-velocity × exposure-time.  A smooth
+ * continuous pan blurs EVERY frame in a selection window by the same
+ * amount, so best-of-K has nothing better to pick — the selector only
+ * wins on the operator's natural micro-pauses.  These knobs shorten the
+ * exposure term, gate on the velocity term, and refuse frames that are
+ * anomalously soft for the scene.
+ *
+ * Every field is optional and defaults to "off / today's behaviour":
+ * a host that never sets `antiBlur` is byte-identical to v0.22.
+ */
+export interface AntiBlurSettings {
+  /**
+   * (1) EXPOSURE CAP — the root-cause fix.  Maximum exposure time, in
+   * milliseconds, requested from the camera while a panorama sweep is
+   * running; the driver raises ISO to compensate and the cap is
+   * released when the sweep ends.
+   *
+   * Why trade noise for speed: sensor noise is recoverable (denoise,
+   * and multi-band blending averages the overlap region across frames),
+   * while motion blur is NOT — deconvolution isn't viable on-device,
+   * and smeared frames also degrade feature matching, so blur corrupts
+   * the stitch GEOMETRY, not just the look.
+   *
+   * Suggested 8 ms (1/125 s) for shelf work; 4 ms (1/250 s) for fast
+   * operators in good light.  0 / omitted = don't touch exposure.
+   *
+   * ⚠ HOST-APPLIED ON EVERY PLATFORM TODAY.  This library never owns the
+   * capture session: the non-AR path is react-native-vision-camera's
+   * (AVCaptureSession / CameraX), and the AR paths are ARKit's and
+   * ARCore's, neither of which exposes an exposure API at all.  The
+   * value is therefore parsed, clamped and logged, but the LIBRARY does
+   * not apply it — fighting the session owner for device configuration
+   * would race its reconfigures and could not hold the cap as an
+   * invariant.  It is carried so hosts and diagnostics share one number.
+   *
+   * What actually caps exposure, per path:
+   *   • iOS / Android non-AR — the HOST sets it on vision-camera.  The
+   *     reachable lever is `minFps` (+ a high-fps `format`): vision-
+   *     camera maps it to `activeVideoMaxFrameDuration`, and AE cannot
+   *     expose longer than a frame interval, so `minFps: 60` ⇒ ≲1/60 s.
+   *     On Android the stronger option is Camera2 interop
+   *     (`Camera2CameraControl`: CONTROL_AE_MODE_OFF +
+   *     SENSOR_EXPOSURE_TIME + a compensating SENSOR_SENSITIVITY).
+   *     NOTE: vision-camera's `exposure` prop is NOT this — it maps to
+   *     `setExposureTargetBias` (EV bias only).
+   *   • iOS AR (ARKit) / Android AR (ARCore) — no exposure API exists.
+   *     Use {@link preferHighFpsFormat}, which the library DOES apply:
+   *     a ≥60 fps capture format bounds exposure by construction.
+   */
+  maxExposureMs?: number;
+
+  /**
+   * (2) MOTION GATE — hold keyframe commit while the device is slewing
+   * faster than this (rad/s, magnitude about the pan axis).  Converts
+   * "commit a blurred keyframe" into "wait a beat"; the selection
+   * window stays open meanwhile, so the wait costs nothing and the
+   * frames that arrive once the operator steadies are simply better
+   * candidates.
+   *
+   * Reference points: the JS pan coach buckets at 0.5 rad/s (good) and
+   * 1.0 rad/s (warn), so ~1.0 gates only genuinely-too-fast sweeps.
+   * 0 / omitted = no motion gating.
+   */
+  maxCommitPanRateRadPerSec?: number;
+
+  /**
+   * (3) RELATIVE SHARPNESS FLOOR — hold commit while the best candidate
+   * scores below this FRACTION of the running median of the keyframes
+   * already accepted this capture.
+   *
+   * Variance-of-Laplacian is content-dependent (a blank wall scores ~0
+   * however sharp), which is why the selection window never uses an
+   * absolute threshold.  A ratio against the session's own median keeps
+   * that self-calibrating property while adding the one judgement the
+   * window structurally cannot make: "ALL of these candidates are
+   * anomalously soft".
+   *
+   * ~0.6 flags clearly-softer-than-usual frames.  0 / omitted = off.
+   */
+  minScoreFractionOfMedian?: number;
+
+  /**
+   * Forward-progress guarantee for (2) and (3): never hold the same
+   * pending keyframe more than this many consecutive evaluated frames.
+   * Protects against an operator who simply cannot steady (moving
+   * vehicle, tremor) — after this many holds the frame is committed
+   * regardless.  Default 12; 0 disables the cap (not recommended).
+   */
+  maxConsecutiveHolds?: number;
+
+  /**
+   * (5) HIGH-FRAME-RATE CAPTURE FORMAT — prefer the highest-fps camera
+   * format available instead of the smallest.  Two compounding wins:
+   * a shorter frame interval bounds exposure time by construction
+   * (60 fps ⇒ ≤ 1/60 s), and twice the frames per second means twice
+   * the candidates in each selection window.
+   *
+   * This is the ONLY exposure lever available on the iOS AR path, where
+   * ARKit owns the capture device.  Costs more live-stream throughput,
+   * so it is opt-in.  Default false.
+   */
+  preferHighFpsFormat?: boolean;
 }
 
 
@@ -343,6 +559,47 @@ export interface FlowGateSettings {
 export const DEFAULT_SHARPNESS_WINDOW = 4;
 
 
+/**
+ * v0.23 — canonical default for `frameSelection.antiBlur`: every
+ * source-side anti-blur control OFF, so the release is byte-identical
+ * to v0.22 for hosts that don't opt in.
+ *
+ * Why off rather than a "sensible" default: the right exposure cap and
+ * pan-rate gate depend on the deployment's light levels and how fast
+ * its operators actually sweep. A global default would either be too
+ * aggressive (noisy frames, stalled captures in dim aisles) or too weak
+ * to matter. `maxConsecutiveHolds` is the exception — it is a SAFETY
+ * cap, so it carries a real value that only takes effect once one of
+ * the hold-producing knobs is enabled.
+ */
+export const DEFAULT_ANTI_BLUR_SETTINGS: Required<AntiBlurSettings> = {
+  maxExposureMs: 0,
+  maxCommitPanRateRadPerSec: 0,
+  minScoreFractionOfMedian: 0,
+  maxConsecutiveHolds: 12,
+  preferHighFpsFormat: false,
+};
+
+
+/**
+ * Recommended STARTING values for a retail-shelf deployment, for hosts
+ * that want the anti-blur controls on without tuning from scratch:
+ * a 1/125 s exposure ceiling, a motion gate just above the pan coach's
+ * "warn" bucket, a 0.6 softness floor, and the high-fps format (the
+ * only exposure lever that reaches the iOS AR path).
+ *
+ * NOT applied automatically — spread it into `frameSelection.antiBlur`
+ * to adopt it, then tune per deployment.
+ */
+export const SUGGESTED_ANTI_BLUR_SETTINGS: AntiBlurSettings = {
+  maxExposureMs: 8,
+  maxCommitPanRateRadPerSec: 1.0,
+  minScoreFractionOfMedian: 0.6,
+  maxConsecutiveHolds: 12,
+  preferHighFpsFormat: true,
+};
+
+
 export const DEFAULT_FLOW_GATE_SETTINGS: FlowGateSettings = {
   noveltyPercentile: 0.85,
   evalEveryNFrames: 5,
@@ -371,12 +628,47 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // warperType != 'spherical'), keeping wide/off-axis pans safe.
     warperType: 'plane',
     blenderType: 'multiband',
+    // perf-3b — DEFAULT stays 'graphcut'. A default flip to voronoi (~1.7x)
+    // was tried and REVERTED: an adversarial seam-quality review (fable) with
+    // a seam-isolated probe on a synthetic SHELF corpus showed voronoi's
+    // content-blind seams TEAR product labels at parallax (graphcut routes
+    // around them through inter-facing gaps) — worst exactly on repetitive
+    // facings, where a damaged label also degrades downstream OD/OCR. My
+    // earlier "equivalent" call was on indoor ROOM corpora that underexercise
+    // near-field parallax. voronoi remains available OPT-IN (it is a real
+    // ~1.7x win and genuinely better than skip), but shipping it as the
+    // default needs a real shelf-corpus A/B first. See docs/perf-3b §0.
     seamFinderType: 'graphcut',
     // v0.15 — inscribed-rect crop is OFF by default (bbox crop keeps all
     // stitched content).  Opt in with `maxInscribedRectCrop={true}` (or toggle
     // it on in settings) for a clean-cornered rectangle — but it can shrink the
     // output a lot on lopsided / ultra-wide masks, which is why it's opt-in.
     enableMaxInscribedRectCrop: false,
+    // perf-3b — range-matcher ladder ON by default (2/2/3 schedule):
+    // consecutive-only matching on the fast attempts, widening to 3 only on
+    // the final minimum-threshold attempt.  Validated on-device (parity:
+    // identical framesIncluded, no ghosting; ~5-6% faster on small corpora,
+    // more at higher keyframe counts).  Set to 0 to fall back to the legacy
+    // full-pairwise ladder.  See docs/perf-3b.
+    rangeMatcherWidth: 3,
+    // perf-3b item 1 — OpenCV threads: 1 = single-threaded (DEFAULT).
+    // On-device measurement (incl. an independent adversarial re-review)
+    // proved multi-threading is a NET REGRESSION of -7..-18% at the fleet's
+    // 4-15 keyframe / 0.3-1.2MP captures: cv::Stitcher is dominated by
+    // strictly-serial phases (graphcut seam ~41%, ORB/bundle-adjust), and
+    // its nominally-parallel pixel work is too small to scale at 1MP compose
+    // while TBB worker overhead makes it a net loss. Single-threaded is BOTH
+    // the fastest AND the most memory-safe config here. Set 0 for auto-multi
+    // or N to experiment, but it will not help at these sizes — the real
+    // lever is the seam finder (see docs/perf-3b).
+    numThreads: 1,
+    // perf-4a — measured compose-resolution adaptation ON by default (0.23):
+    // 'measured' downscales the final compose to adaptiveMinOutputMP ONLY when
+    // a stitch is measured to be slow.  Set 'off' to disable, 'always' to force.
+    adaptiveStitchMode: 'measured',
+    adaptiveMinOutputMP: 0.6,
+    adaptiveSlowStitchMsPerFrame: 1000,
+    debugPack: false,
   },
   frameSelection: {
     mode: 'flow-based',
@@ -393,5 +685,11 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // v0.21 — anti-blur keyframe selection ON by default (K=4).
     sharpnessWindow: DEFAULT_SHARPNESS_WINDOW,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
+    // v0.23 — anti-blur CAPTURE controls ON by default (the recommended
+    // starting values: 8 ms exposure cap, 1.0 rad/s motion gate, 0.6 softness
+    // floor, high-fps format).  Each knob is independently opt-OUT via
+    // frameSelection.antiBlur (set a value to 0 / false to disable it); the
+    // all-off baseline is DEFAULT_ANTI_BLUR_SETTINGS.
+    antiBlur: { ...DEFAULT_ANTI_BLUR_SETTINGS, ...SUGGESTED_ANTI_BLUR_SETTINGS },
   },
 };

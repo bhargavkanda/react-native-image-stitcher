@@ -183,6 +183,58 @@ describe('selectCaptureDevice', () => {
     expect(sel.ultraWideDevice).toBeNull();
   });
 
+  it('S24 ULTRA FIELD FINDING (SCG26, 2026-07-27): multicam CLAIMS zoom reaches uw (minZoom 0.6 <= 0.7) but the Samsung HAL never crosses over -- android prefers the real standalone uw; iOS/unspecified is UNCHANGED', () => {
+    // Reproduced on a real Galaxy S24 Ultra: `adb logcat` showed the SAME
+    // vendor physical-stream id (MultiCameraRealtime1_IFE0_cam0) at both 1x
+    // and the "0.5x"-zoomed request, and the captured frame's FOV did not
+    // widen -- this device's minZoom is not honoured by its camera HAL.
+    // Fixture is the exact enumeration from the SDK's own
+    // `[rnimagestitcher] lens-select` diagnostic on that device.
+    const multicam = dev({
+      id: '0',
+      physicalDevices: [
+        'wide-angle-camera', 'ultra-wide-angle-camera', 'wide-angle-camera',
+        'telephoto-camera', 'telephoto-camera',
+      ],
+      isMultiCam: true,
+      hasTorch: true,
+      minZoom: 0.6,
+      neutralZoom: 1,
+      maxZoom: 10,
+    });
+    const uw = dev({
+      id: '2',
+      physicalDevices: ['ultra-wide-angle-camera'],
+      isMultiCam: false,
+      hasTorch: false,
+      minZoom: 1,
+      neutralZoom: 1,
+      maxZoom: 8,
+    });
+
+    // No platform / iOS: UNCHANGED -- still trusts the multicam zoom claim.
+    // This is the behaviour that keeps flash working on 0.5x for real
+    // iPhones (which enumerate a standalone uw ALONGSIDE the triple-cam,
+    // same shape as this fixture) -- it must not regress.
+    const noPlatform = selectCaptureDevice([multicam, uw]);
+    expect(noPlatform.mode).toBe('multicam');
+    expect(noPlatform.device).toBe(multicam);
+    const iosLike = selectCaptureDevice([multicam, uw], { platform: 'ios' });
+    expect(iosLike.mode).toBe('multicam');
+    expect(iosLike.device).toBe(multicam);
+
+    // Android: the real standalone ultra-wide wins instead. 1x is
+    // UNCHANGED (still the multicam device -- torch/format continuity at
+    // 1x is preserved); only 0.5x now swaps to hardware that actually
+    // works.
+    const androidReal = selectCaptureDevice([multicam, uw], { platform: 'android' });
+    expect(androidReal.mode).toBe('standalone-uw');
+    expect(androidReal.device).toBe(multicam);
+    expect(androidReal.ultraWideDevice).toBe(uw);
+    expect(androidReal.has0_5x).toBe(true);
+    expect(androidReal.hasTorch).toBe(true); // the 1x mount still has its torch
+  });
+
   it('minZoom threshold: <=0.7 zoom-switches, >0.7 falls through to swap', () => {
     const atThreshold = dualWide({ minZoom: 0.7 });
     expect(selectCaptureDevice([atThreshold]).mode).toBe('multicam');
@@ -334,6 +386,82 @@ describe('selectCaptureDevice preferDepth (captureDepthData device pick)', () =>
     const lidar = lidarDepthCam();
     const sel = selectCaptureDevice([dual, lidar, plainWide, uw]);
     expect(sel.device).toBe(plainWide);
+  });
+});
+
+describe('ultraWideFactor (lens-chip LABEL — never the CameraLens identifier)', () => {
+  it('S24 Ultra: reads the OEM factor off the SIBLING logical device, not the mounted 0.5x device', () => {
+    // The trap: after the android multicam-distrust fix this device runs in
+    // standalone-uw mode, so the 0.5x MOUNT is the ultra-wide itself and
+    // reports its own native minZoom of 1. Reading the mounted device would
+    // render a nonsensical "1x". The real 0.6 is declared by the logical
+    // device that spans wide->ultra-wide (matches Samsung's own camera app).
+    const multicam = dev({
+      id: '0',
+      physicalDevices: [
+        'wide-angle-camera', 'ultra-wide-angle-camera', 'wide-angle-camera',
+        'telephoto-camera', 'telephoto-camera',
+      ],
+      isMultiCam: true, hasTorch: true, minZoom: 0.6, neutralZoom: 1, maxZoom: 10,
+    });
+    const uw = dev({
+      id: '2', physicalDevices: ['ultra-wide-angle-camera'],
+      isMultiCam: false, hasTorch: false, minZoom: 1, neutralZoom: 1, maxZoom: 8,
+    });
+    const sel = selectCaptureDevice([multicam, uw], { platform: 'android' });
+    expect(sel.mode).toBe('standalone-uw'); // the mount IS the ultra-wide...
+    expect(sel.ultraWideDevice).toBe(uw);
+    expect(sel.ultraWideFactor).toBe(0.6); // ...yet the label is still right
+  });
+
+  it('rounds float32 noise (0.6000000238418579 -> 0.6) so the chip renders cleanly', () => {
+    const multicam = dualWide({ minZoom: 0.6000000238418579 });
+    expect(selectCaptureDevice([multicam]).ultraWideFactor).toBe(0.6);
+  });
+
+  it('iPhone-style triple cam reports 0.5', () => {
+    expect(selectCaptureDevice([tripleCam({ minZoom: 0.5 })]).ultraWideFactor).toBe(0.5);
+  });
+
+  it('takes the SMALLEST sub-1x declaration when several disagree', () => {
+    const a = dualWide({ minZoom: 0.6 });
+    const b = tripleCam({ minZoom: 0.5 });
+    expect(selectCaptureDevice([a, b]).ultraWideFactor).toBe(0.5);
+  });
+
+  it('null when nothing advertises a sub-1x range (unknowable -> UI keeps 0.5x)', () => {
+    // A device that merely LISTS the ultra-wide reports minZoom 1.0, which
+    // says nothing about where the ultra-wide actually sits.
+    const listsOnly = dualWide({ minZoom: 1 });
+    const uw = standaloneUltraWide();
+    const sel = selectCaptureDevice([listsOnly, uw]);
+    expect(sel.has0_5x).toBe(true); // the chooser still shows...
+    expect(sel.ultraWideFactor).toBeNull(); // ...but we refuse to guess a number
+  });
+
+  it('ignores devices with no ultra-wide, and non-finite / non-positive zooms', () => {
+    // A wide-only device with a weird sub-1x minZoom must not be mistaken
+    // for an ultra-wide declaration.
+    const oddWide = standaloneWide({ minZoom: 0.8 });
+    expect(selectCaptureDevice([oddWide]).ultraWideFactor).toBeNull();
+    const bogus = dualWide({ minZoom: Number.NaN });
+    expect(selectCaptureDevice([bogus]).ultraWideFactor).toBeNull();
+    const zero = dualWide({ minZoom: 0 });
+    expect(selectCaptureDevice([zero]).ultraWideFactor).toBeNull();
+  });
+
+  it('front-facing devices never contribute', () => {
+    const front = dev({
+      position: 'front',
+      physicalDevices: ['ultra-wide-angle-camera', 'wide-angle-camera'],
+      isMultiCam: true, minZoom: 0.5,
+    });
+    const backWide = standaloneWide();
+    expect(selectCaptureDevice([front, backWide]).ultraWideFactor).toBeNull();
+  });
+
+  it('empty device list → null (no crash)', () => {
+    expect(selectCaptureDevice([]).ultraWideFactor).toBeNull();
   });
 });
 

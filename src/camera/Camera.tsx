@@ -50,6 +50,7 @@ import React, {
   useState,
 } from 'react';
 import {
+  AppState,
   NativeModules,
   Platform,
   Pressable,
@@ -89,7 +90,7 @@ import { CaptureKeyframePill } from './CaptureKeyframePill';
 import { CaptureOrientationPill } from './CaptureOrientationPill';
 import { CaptureStitchStatsToast, useStitchStatsToast } from './CaptureStitchStatsToast';
 import { PanoramaBandOverlay } from './PanoramaBandOverlay';
-import { type PanoramaSettings } from './PanoramaSettings';
+import { type PanoramaSettings, DEFAULT_FLOW_GATE_SETTINGS } from './PanoramaSettings';
 import { panoramaSettingsToNativeConfig } from './PanoramaSettingsBridge';
 import { PanoramaSettingsModal } from './PanoramaSettingsModal';
 import {
@@ -98,6 +99,7 @@ import {
 } from './buildPanoramaInitialSettings';
 import { isLowMemDevice } from './lowMemDevice';
 import { useCapture } from './useCapture';
+import { shouldOfferNativeUltraWide } from './nativeUltraWide';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
 import {
   contentRotationDeg,
@@ -139,8 +141,6 @@ import {
 import {
   getIncrementalNativeModule,
   incrementalStitcherIsAvailable,
-  subscribeIncrementalState,
-  type IncrementalState,
 } from '../stitching/incremental';
 import { useFrameProcessorDriver } from '../stitching/useFrameProcessorDriver';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
@@ -431,8 +431,45 @@ export interface CameraProps {
   maxInscribedRectCrop?: boolean;
 
   // ── UI knobs ──────────────────────────────────────────────────────
+  /**
+   * Default `true`. Set `false` to disable single-TAP photo capture
+   * entirely (`handleTap` no-ops, same as `shutterDisabled`) and hide the
+   * native-0.5× external-camera fallback (`offerNativeUW`) — that
+   * fallback captures ONE still via the OS camera, the same shape of
+   * action this flag disables.
+   *
+   * PANO-ONLY RECIPE: `enablePhotoMode={false}` with `enablePanoramaMode`
+   * left at its default `true` is already a pano-only `<Camera>` — tap is
+   * disabled, hold-to-pan still fires a capture. No separate flag needed.
+   * Lens switching (the 0.5×/1× chip) is unaffected either way — it
+   * selects which device the eventual hold-to-pan uses, it does not
+   * itself capture.
+   */
   enablePhotoMode?: boolean;
   enablePanoramaMode?: boolean;
+  /**
+   * Hide the built-in shutter + AR-toggle so a HOST can render its own capture
+   * controls and drive capture through the imperative handle
+   * ({@link CameraHandle.takePhoto} / {@link CameraHandle.startPanorama} /
+   * {@link CameraHandle.stopPanorama}). The lens chip is KEPT — it is a lens
+   * selector, not a capture control, and the whole point is that the library
+   * still owns lens selection. Default `false` (built-in shutter shown, every
+   * existing consumer unchanged).
+   */
+  hideBuiltInShutter?: boolean;
+  /**
+   * When a device offers only ONE usable lens (no in-app ultra-wide and no
+   * native-0.5× fallback on offer), render NOTHING instead of a static "1×"
+   * label — there is nothing to switch, so the chip is noise. Default `false`
+   * keeps the "1×" label for back-compat.
+   */
+  hideLensChipWhenSingle?: boolean;
+  /**
+   * Lift the bottom control cluster (lens chip + built-in shutter, if shown) by
+   * this many px, so a host chrome docked below the preview (e.g. a mode
+   * switcher) doesn't overlap it. Default `0`. Layout-only; no behaviour change.
+   */
+  bottomBarOffset?: number;
   showSettingsButton?: boolean;
   /**
    * v0.13.2 — which capture sources the host allows (default `'both'`).
@@ -828,6 +865,27 @@ export interface CameraProps {
    */
   keyframeQualityCapture?: boolean;
   /**
+   * Native-camera 0.5× fallback (Android; default OFF).  A list of device
+   * MODEL identifiers (matched case-insensitively as a PREFIX of
+   * `Platform.constants.Model`, so `"SM-A346"` covers every A34 SKU) or
+   * `"manufacturer:<brand>"` wildcards, on which the ultra-wide is a
+   * SYSTEM-ONLY camera unreachable by any third-party app (proven on the
+   * Galaxy A34).  On a matching device that ALSO has no in-app 0.5×
+   * (`has0_5x=false`), the lens chip renders a "0.5×⤢" pill that fires
+   * {@link onRequestNativeUltraWide} instead of a dead 1× label — the host
+   * then hands off to the OS camera.  Absent/empty → feature OFF, no change.
+   * iOS ignores this (its virtual devices already reach the ultra-wide).
+   */
+  nativeUltraWideModels?: readonly string[];
+  /**
+   * Fired when the operator taps the "0.5×⤢" native-ultra-wide fallback pill
+   * (see {@link nativeUltraWideModels}).  The host launches the OS camera
+   * (e.g. `react-native-image-picker` `launchCamera`) and routes the
+   * returned photo into its own capture flow marked as external provenance —
+   * the library does NOT launch anything or deliver the external photo.
+   */
+  onRequestNativeUltraWide?: () => void;
+  /**
    * iOS, NON-AR photo path — save each tap photo's AVDepthData as a
    * `<photo>.depth.bin` sidecar (float32 metres row-major + JSON header
    * with dims/intrinsics) and return its path as `depthPath` on the
@@ -1058,6 +1116,22 @@ export interface CameraHandle extends AROverlayMethods {
    * settles (success or handled error reported through `onCapture`).
    */
   takePhoto(): Promise<void>;
+  /**
+   * Imperatively START a panorama sweep — identical to the user beginning a
+   * hold on the shutter (the incremental stitcher starts ingesting AR frames).
+   * A no-op unless `enablePanoramaMode` is on and the shutter is not gated
+   * (`shutterDisabled`), and while a capture is already recording/stitching —
+   * the same gates `takePhoto` respects. Pair with {@link stopPanorama}.
+   * Added for hosts that render their OWN shutter (see `hideBuiltInShutter`)
+   * and drive capture through this handle instead of the built-in button.
+   */
+  startPanorama(): void;
+  /**
+   * Imperatively STOP an in-flight panorama sweep — identical to releasing the
+   * shutter hold: finalize the stitch and emit `onCapture`. Idempotent (a safe
+   * no-op when nothing is recording). Resolves once the stop is dispatched.
+   */
+  stopPanorama(): Promise<void>;
 }
 
 
@@ -1081,9 +1155,62 @@ interface LensChipProps {
    * itself stays fixed in the layout.  `{}` (no-op) in the upright cases.
    */
   contentRotation?: { transform?: ViewStyle['transform'] };
+  /**
+   * Native-camera 0.5× fallback (see `nativeUltraWide.ts`): when the device
+   * has NO in-app ultra-wide (`has0_5x=false`) but is a known system-only-UW
+   * model, render a "0.5× ⤢" pill that hands off to the OS camera instead of
+   * the plain "1×".  Only consulted when `!has0_5x`.
+   */
+  offerNativeUltraWide?: boolean;
+  onNativeUltraWide?: () => void;
+  /** When the device offers only ONE lens (no 0.5× and no native fallback),
+   *  render null instead of the static "1×" label. Default false. */
+  hideWhenSingle?: boolean;
+  /**
+   * The device's REAL ultra-wide factor, for this chip's label only — `0.6`
+   * on a Galaxy S24 Ultra, `0.5` on a typical iPhone.  The `CameraLens`
+   * identifier stays `'0.5x'` regardless (it is also the stitcher's
+   * warper-tree zoom signal).  Null/absent ⇒ keep the historical `0.5×`
+   * text rather than invent a number.
+   */
+  ultraWideFactor?: number | null;
 }
-function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): React.JSX.Element {
+function LensChip({
+  lens,
+  onChange,
+  has0_5x,
+  contentRotation,
+  offerNativeUltraWide = false,
+  onNativeUltraWide,
+  hideWhenSingle = false,
+  ultraWideFactor,
+}: LensChipProps): React.JSX.Element | null {
+  // Label only — never the `CameraLens` value. `0.6` → "0.6×"; the fallback
+  // keeps every device that reports nothing on the text it has always shown.
+  const uwLabel =
+    ultraWideFactor != null && Number.isFinite(ultraWideFactor)
+      ? `${ultraWideFactor}×`
+      : '0.5×';
   if (!has0_5x) {
+    if (offerNativeUltraWide && onNativeUltraWide) {
+      // The ultra-wide is unreachable in-app on this device — offer a
+      // hand-off to the OS camera. The ⤢ glyph signals it leaves the app.
+      return (
+        <View style={lensChipStyles.container}>
+          <Pressable
+            onPress={onNativeUltraWide}
+            accessibilityRole="button"
+            accessibilityLabel="0.5x ultra-wide via phone camera"
+            style={[lensChipStyles.pill, lensChipStyles.nativeUwPill]}
+          >
+            <Text style={[lensChipStyles.label, contentRotation]}>0.5×⤢</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    // Only one usable lens. Nothing to switch — hide entirely, or keep the
+    // legacy static "1×" label.
+    if (hideWhenSingle) return null;
     return (
       <View style={[lensChipStyles.container, lensChipStyles.singleLens]}>
         <Text style={[lensChipStyles.label, contentRotation]}>1×</Text>
@@ -1095,7 +1222,7 @@ function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): 
       <Pressable
         onPress={() => onChange('0.5x')}
         accessibilityRole="button"
-        accessibilityLabel="0.5x ultra-wide lens"
+        accessibilityLabel={`${uwLabel.replace('×', 'x')} ultra-wide lens`}
         accessibilityState={{ selected: lens === '0.5x' }}
         style={[
           lensChipStyles.pill,
@@ -1109,7 +1236,7 @@ function LensChip({ lens, onChange, has0_5x, contentRotation }: LensChipProps): 
             contentRotation,
           ]}
         >
-          0.5×
+          {uwLabel}
         </Text>
       </Pressable>
       <Pressable
@@ -1156,6 +1283,12 @@ const lensChipStyles = StyleSheet.create({
   },
   pillActive: {
     backgroundColor: '#ffd34d',
+  },
+  nativeUwPill: {
+    // Distinct from the normal lens pill — a subtle outline so the ⤢
+    // hand-off reads as "opens your phone camera", not a live lens toggle.
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.6)',
   },
   label: {
     color: '#ffffff',
@@ -1361,6 +1494,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     captureSources = 'both',
     enablePhotoMode = true,
     enablePanoramaMode = true,
+    hideBuiltInShutter = false,
+    hideLensChipWhenSingle = false,
+    bottomBarOffset = 0,
     showSettingsButton = false,
     style,
     outputDir,
@@ -1391,6 +1527,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     enableDepth,
     highResCapture,
     keyframeQualityCapture,
+    nativeUltraWideModels,
+    onRequestNativeUltraWide,
     captureDepthData,
     enableAnchors,
     enableMesh,
@@ -1480,7 +1618,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(
     null,
   );
-  const [incrementalState, setIncrementalState] = useState<IncrementalState | null>(null);
+  // perf-3a change 4: `incrementalState` useState + its subscription were
+  // removed — Camera renders from `incremental.state` (coalesced by the
+  // useIncrementalStitcher hook). See the thumbnail effect below.
   // ── Panorama GUIDANCE state (feature/pano-ux-guidance) ──────────
   // Item 1/2 — a hold that was BLOCKED on the rotate-to-landscape gate.
   // Latches when the user holds the shutter in portrait under Mode A;
@@ -1524,9 +1664,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // on every successful finalize when settings.debug is on (gated
   // a few hundred lines below in handleHoldEnd's onCapture branch).
   const stitchToast = useStitchStatsToast();
-  const [batchKeyframeThumbnails, setBatchKeyframeThumbnails] = useState<
-    string[]
-  >([]);
+  // perf-3a change 4 — keyframe thumbnails are owned by the hook now
+  // (incremental.keyframeThumbnails); see keyframeThumbnailUris below.
   const [cameraTransitioning, setCameraTransitioning] = useState(false);
 
   // ARKit / ARCore device-support probe.  `isAvailable` is `false`
@@ -1700,6 +1839,52 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // an ultra-wide reachable via a multi-cam zoom OR a standalone
   // ultra-wide device; false on wide-only hardware (chip hides).
   const has0_5x = capture.has0_5x;
+  // Native-camera 0.5× fallback: only when the host opted in (a non-empty
+  // model list) AND this Android device has no in-app 0.5× AND its model
+  // matches. `Platform.constants` carries Model/Manufacturer on Android.
+  const offerNativeUW = useMemo(() => {
+    // Photo-only: the fallback captures ONE external still, so it must not
+    // sit where a 0.5× PANORAMA would be expected. A pano-only <Camera>
+    // never shows it.
+    if (!enablePhotoMode) return false;
+    const c = (
+      Platform as unknown as {
+        constants?: { Model?: string; Manufacturer?: string };
+      }
+    ).constants;
+    return shouldOfferNativeUltraWide({
+      hasInAppUltraWide: has0_5x,
+      models: nativeUltraWideModels,
+      platformOS: Platform.OS,
+      deviceModel: c?.Model,
+      deviceManufacturer: c?.Manufacturer,
+    });
+  }, [has0_5x, nativeUltraWideModels, enablePhotoMode]);
+  // App foreground state drives the non-AR preview's `isActive` — but ONLY
+  // when the native-0.5× fallback is being offered (see `isActive=` below);
+  // otherwise `isActive` stays the constant `true` it always was (the shipped
+  // capture flow is byte-identical). vision-camera 4.x does NOT observe the
+  // host activity lifecycle — its session is driven only by `isActive` — so
+  // when the OS camera launched by the fallback comes to the foreground we
+  // must proactively release the device and re-acquire on return; relying on
+  // CameraX's opportunistic reopen is unreliable on the Samsung OEM devices
+  // that are the native-UW target class (a swallowed
+  // `camera-has-been-disconnected` → silent black preview).
+  //
+  // Release ONLY on a true `'background'` — NOT on iOS's transient
+  // `'inactive'` (Control Center, the notification shade, a permission/Face-ID
+  // prompt, the app-switcher peek): those must NOT cycle the session, or the
+  // preview black-flashes mid-capture. The OS-camera hand-off backgrounds our
+  // activity, which is exactly `'background'`.
+  const [appActive, setAppActive] = useState(
+    AppState.currentState !== 'background',
+  );
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (s) =>
+      setAppActive(s !== 'background'),
+    );
+    return () => sub.remove();
+  }, []);
   const incremental = useIncrementalStitcher();
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);
@@ -1708,6 +1893,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // far below (after the refs/state it closes over), so the imperative handle
   // can't reference it directly without a TDZ error — the ref bridges that.
   const handleTapRef = useRef<(() => Promise<void>) | null>(null);
+  // Latest hold-start callback, kept in a ref so the imperative `startPanorama`
+  // can reach it (handleHoldStart is defined below the handle). Mirrors
+  // handleTapRef; handleHoldEndRef (the stop side) already exists further down.
+  const handleHoldStartRef = useRef<(() => void) | null>(null);
 
   // v0.20.0 — AR overlay imperative handle.  `<Camera>` itself renders no
   // overlay layer; the overlay methods forward to the mounted
@@ -1724,6 +1913,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     clearOverlays: () => arViewRef.current?.clearOverlays(),
     raycast: () => arViewRef.current?.raycast() ?? Promise.resolve(null),
     takePhoto: () => handleTapRef.current?.() ?? Promise.resolve(),
+    startPanorama: () => handleHoldStartRef.current?.(),
+    stopPanorama: () => {
+      handleHoldEndRef.current?.();
+      return Promise.resolve();
+    },
   }), []);
 
   // Effect that does the async transition work whenever the settled
@@ -1813,7 +2007,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // subsequent ingest sees pose=(0,0) and is rejected as a duplicate".
   // The imperative pattern (start on hold-start, stop on hold-end)
   // avoids the re-render churn entirely.
-  const fpDriver = useFrameProcessorDriver();
+  // perf-3a change 2 — pass the eval cadence so the WORKLET decimates
+  // (before packNV21), paired with the bridge forcing native cadence to 1
+  // for frameProcessor mode (see the incremental.start config below). The
+  // effective product cadence is unchanged from today's native-only throttle.
+  const fpDriver = useFrameProcessorDriver({
+    evalEveryNFrames:
+      settings.frameSelection.flow?.evalEveryNFrames ??
+      DEFAULT_FLOW_GATE_SETTINGS.evalEveryNFrames,
+  });
   // Safety: stop the driver AND clear the pan-duration auto-finalize
   // timer if the component unmounts mid-recording (item 5 exit path #4).
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1965,23 +2167,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Host's wins if supplied; lib's internal driver otherwise.
   const effectiveFrameProcessor = hostFrameProcessor ?? fpDriver.frameProcessor;
 
-  // ── Subscribe to engine state for live keyframe thumbs ──────────
-  useEffect(() => {
-    const sub = subscribeIncrementalState((state) => {
-      setIncrementalState(state);
-      if (state?.batchKeyframeThumbnailPath) {
-        setBatchKeyframeThumbnails((prev) => {
-          // De-dupe — same path may emit on subsequent ticks.
-          // Normalise to `file://...` so Android <Image> in the band
-          // overlay can actually render the thumbnail.
-          const path = toFileUri(state.batchKeyframeThumbnailPath!);
-          if (prev.includes(path)) return prev;
-          return [...prev, path];
-        });
-      }
-    });
-    return () => { sub?.remove?.(); };
-  }, []);
+  // ── Keyframe thumbnails ──────────────────────────────────────────────
+  // perf-3a change 4: Camera.tsx no longer keeps its OWN
+  // `subscribeIncrementalState` + `incrementalState` useState (the SECOND
+  // per-event re-render of this large tree). It renders from the hook's
+  // coalesced `incremental.state`, and the keyframe thumbnails are now
+  // OWNED BY THE HOOK too (`incremental.keyframeThumbnails`) — accumulated
+  // per RAW accept event with a functional updater so two accepts in one
+  // React batch both survive (the earlier draft accumulated off the
+  // coalesced state and dropped one — 3a review finding). Normalise to
+  // `file://` here for the Android <Image> band overlay.
+  const keyframeThumbnailUris = useMemo(
+    () => incremental.keyframeThumbnails.map(toFileUri),
+    [incremental.keyframeThumbnails],
+  );
   // 2026-05-23 (race fix) — Previously this useEffect cleared
   // `batchKeyframeThumbnails` + `incrementalState` when statusPhase
   // transitioned to 'recording'.  But handleHoldStart is async
@@ -2017,7 +2216,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // translation magnitude is preserved across non-IMU accepts.
   const lastAcceptedCountRef = useRef(0);
   useEffect(() => {
-    const accepted = incrementalState?.acceptedCount ?? 0;
+    const accepted = incremental.state?.acceptedCount ?? 0;
     if (accepted > lastAcceptedCountRef.current) {
       lastAcceptedCountRef.current = accepted;
       // F8.3 review-of-review (M3 revert): an earlier draft gated
@@ -2038,7 +2237,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // New capture (state cleared) — reset our edge-detect ref.
       lastAcceptedCountRef.current = 0;
     }
-  }, [incrementalState?.acceptedCount, isNonAR, imuGate]);
+  }, [incremental.state?.acceptedCount, isNonAR, imuGate]);
 
   // ── Shutter handlers ────────────────────────────────────────────
 
@@ -2162,17 +2361,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // `setRecordingStartedAt`.
   const startCapture = useCallback(async () => {
     try {
-      // 2026-05-23 (race fix) — synchronously clear thumbnails +
-      // engine state at the top of startCapture, BEFORE awaiting
-      // incremental.start().  In the previous effect-based design
-      // the GL thread could ingest an AR frame during the await
-      // window and add to thumbnails BEFORE React's
-      // statusPhase-effect ran and wiped them.  See the removed
-      // useEffect a few hundred lines above for the full log trace.
-      // Synchronous reset here means any racing frame ingest sees
-      // an empty array and accumulates from there.
-      setBatchKeyframeThumbnails([]);
-      setIncrementalState(null);
+      // perf-3a change 4 — thumbnails + engine state are cleared inside the
+      // hook's start() (resetCoalescer + setState(null)) BEFORE its native
+      // start await, preserving the 2026-05-23 race fix: a frame the GL/FP
+      // thread ingests during the await window accumulates from the just-
+      // cleared array (functional updater) instead of being wiped by a
+      // post-await reset. So no synchronous clear is needed here.
       // Item 4 — fresh capture: clear the latched too-fast flag.
       fastPanRef.current = false;
       setStatusPhase('recording');
@@ -2211,6 +2405,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // operator can see is what native is told it is.  The settings
       // modal's `captureSource` control has been removed for the same
       // reason — see PanoramaSettingsModal.tsx for the rationale.
+      //
+      // perf-3a change 1 (open early) — start the FP driver (non-AR) BEFORE
+      // the native start await, so its ingest gate opens and its cadence
+      // counter is anchored (via reset()) at the hold-start moment rather
+      // than one bridge round-trip later. Interval-containment guarantees
+      // pixel neutrality: the gate-open window strictly contains native's
+      // ingest-enabled window (native flips its AtomicBoolean INSIDE
+      // incremental.start), so no frame native would accept is gated;
+      // pre-enable strays are dropped by that AtomicBoolean anyway. On any
+      // start failure the catch below closes the gate. See docs/perf-3a §4.1.
+      if (isNonAR) {
+        fpDriver.start();
+      }
       await incremental.start({
         snapshotJpegQuality: 75,
         snapshotEveryNAccepts: 1,
@@ -2226,25 +2433,37 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         canvasWidth: 5000,
         canvasHeight: 5000,
         engine,
-        config: panoramaSettingsToNativeConfig({
-          ...settings,
-          captureSource: effectiveCaptureSource,
-        }),
+        // perf-3a change 2 — pass the frame-source mode so the bridge emits
+        // flowEvalEveryNFrames=1 for the frameProcessor path: the worklet now
+        // does the decimation (before the ~3-4 MB packNV21 copy) and native's
+        // cadence is 1, so the effective product cadence is unchanged. AR mode
+        // keeps native-side decimation (AR frames never pass the worklet).
+        config: panoramaSettingsToNativeConfig(
+          { ...settings, captureSource: effectiveCaptureSource },
+          { frameSourceMode: isNonAR ? 'frameProcessor' : 'arSession' },
+        ),
       });
       // F8.3 review-of-review (M3 revert): `imuGate.resetAnchor()`
       // is load-bearing for the stitchMode auto-resolver (see the
       // matching comment on the per-accept reset useEffect above).
       // Keep firing it on every capture start, not just legacy mode.
       imuGate.resetAnchor();
-      // Start the Frame Processor driver for non-AR captures.  AR
-      // mode feeds natively from ARSession so the driver stays idle.
-      // Imperative pattern (vs useEffect) because the driver's start
-      // resets pose accumulators that should only fire at the
-      // hold-start moment, not on every re-render.
+      // perf-3a change 2 (review fix) — re-anchor the worklet decimation
+      // grid NOW that native has enabled ingestion. The gate was opened
+      // before this await (open-early, so no keyframe is lost), which let
+      // await-window frames advance the counter; re-zeroing it here anchors
+      // the {0,N,2N,…} grid at native-ingest-enable, matching native's old
+      // post-enable anchor → frame-identical decimation (not a phase offset).
       if (isNonAR) {
-        fpDriver.start();
+        fpDriver.resetCadence();
       }
     } catch (err) {
+      // perf-3a change 1 — native start failed: close the ingest gate we
+      // opened before the await (below), so a failed start doesn't leave the
+      // worklet feeding a not-started engine.
+      if (isNonAR) {
+        fpDriver.stop();
+      }
       setStatusPhase('idle');
       clearPanTimer();
       onError?.(
@@ -2287,7 +2506,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // `pendingPanStart` instead (item 1/2) and the resume effect below
   // starts the capture once the user rotates to landscape.
   const handleHoldStart = useCallback(() => {
-    if (!enablePanoramaMode) return;
+    // Gate symmetrically with handleTap (shutterDisabled) AND guard
+    // re-entrancy: the built-in shutter's phase machine prevents a
+    // double-start, but the imperative startPanorama() has no such machine, so
+    // a repeat call — or one while a capture is recording/stitching — would
+    // re-enter incremental.start() on a live engine.
+    if (!enablePanoramaMode || shutterDisabled) return;
+    if (statusPhase === 'recording' || statusPhase === 'stitching') return;
     if (!incrementalStitcherIsAvailable()) {
       onError?.(
         new CameraError(
@@ -2306,6 +2531,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     void startCapture();
   }, [
     enablePanoramaMode,
+    shutterDisabled,
+    statusPhase,
     onError,
     panMode,
     deviceOrientation,
@@ -2351,10 +2578,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       );
     }
     setStatusPhase('stitching');
-    // Stop pumping new frames before finalizing so the engine isn't
-    // racing the final cv::Stitcher pass against late-arriving
-    // keyframes.  No-op in AR mode (the driver was never started).
-    fpDriver.stop();
+    // perf-3a change 1 — `fpDriver.stop()` moved from HERE to the finally
+    // below (close-late), so the ingest gate stays open through the 50 ms
+    // yield + finalize bridge hop (the window native still ingests). The
+    // <CameraView> unmount driven by statusPhase==='stitching' (just set)
+    // stops frame delivery within a frame or two regardless, so no frames
+    // race the stitch — the engine still isn't fed late keyframes.
     // V12.14.8 restore (regressed in the SDK camera extraction): the
     // render below unmounts <CameraView>/<ARCameraView> while
     // statusPhase==='stitching'.  Yield a macrotask so React commits that
@@ -2507,6 +2736,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         }),
       });
     } finally {
+      // perf-3a change 1 (close late) — stop the FP driver (→ close the
+      // ingest gate) AFTER finalize settles, not before the 50 ms yield.
+      // The gate-open interval must strictly CONTAIN native's ingest-enabled
+      // interval (native cuts ingest synchronously at the top of finalize):
+      // closing earlier would gate the 1-3 tail frames that native still
+      // ingests during the yield + finalize bridge hop and that feed the
+      // sharpness window / trailing keyframe → keyframe loss. No stitch-phase
+      // waste: <CameraView> unmounts at statusPhase==='stitching' (set above)
+      // so no frames reach the still-open gate during the multi-second stitch.
+      fpDriver.stop();
       finalizingRef.current = false;
       setStatusPhase('idle');
       setRecordingStartedAt(null);
@@ -2550,6 +2789,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // adding it as a dep (it changes identity on every recording tick).
   useEffect(() => {
     handleHoldEndRef.current = () => { void handleHoldEnd(); };
+    // Assigned here (not with handleTapRef) because handleHoldStart is declared
+    // below that point — this site is after both hold handlers exist.
+    handleHoldStartRef.current = handleHoldStart;
   });
 
   // ── Item 6 — lateral drift → FINALIZE + popup ───────────────────
@@ -2609,7 +2851,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // re-entrancy latch makes this idempotent vs. a manual release in the
   // same tick.  This is the PRIMARY auto-stop (the time cap is opt-in).
   const keyframeMaxCount = settings.frameSelection.maxKeyframes;
-  const acceptedKeyframeCount = incrementalState?.acceptedCount ?? 0;
+  const acceptedKeyframeCount = incremental.state?.acceptedCount ?? 0;
   // Item 4 — speed cue routed into the REC banner/border colour (green→red).
   // Gated on panGuidance so opting out keeps the banner calm/green.
   const recordingTooFast =
@@ -2794,7 +3036,30 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         <CameraView
           ref={visionCameraRef}
           device={capture.device}
-          isActive
+          // Release the camera whenever the app is genuinely BACKGROUNDED, and
+          // rebind on return — the standard vision-camera lifecycle contract
+          // (v4 does not observe the host activity itself; the session follows
+          // `isActive` alone). Holding a camera we cannot draw is wrong on its
+          // own terms: it blocks other apps, burns battery, and Android may
+          // revoke it anyway, surfacing as the swallowed
+          // `camera-has-been-disconnected` → silent black preview.
+          //
+          // DEVICE EVIDENCE (Galaxy A35, 2026-07-24): this was previously gated
+          // on the native-0.5× affordance being OFFERED, which meant a device
+          // with a reachable ultra-wide kept its camera + AR session fully open
+          // while the OEM camera launched over it. Samsung's `lmkd` runs a
+          // camera-open "kill boost" (`camkillboostmode`, targeting the pid
+          // that opened the camera) and KILLED the app mid-hand-off — with
+          // 2.2 GB still free, so it is Samsung's camera-specific reclaim, not
+          // generic pressure. The in-flight capture died with the process.
+          // Staying small exactly when that reclaim runs is the whole point, so
+          // the release must NOT be conditional on why we backgrounded.
+          //
+          // Only a true `'background'` releases — never iOS's transient
+          // `'inactive'` (Control Centre, the notification shade, a
+          // permission/Face-ID prompt, the app-switcher peek), which would
+          // black-flash the preview mid-capture. See the `appActive` note.
+          isActive={appActive}
           // iOS depth sidecar for tap photos (non-AR only): turns on
           // vision-camera depth delivery + the depth-capable format bias;
           // useCapture (threaded above) extracts the sidecar before the
@@ -2809,6 +3074,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           // Non-AR pano keyframe quality: floors the VIDEO stream at 1280
           // long edge (the FP stream IS the keyframe source here).
           keyframeQualityCapture={keyframeQualityCapture}
+          // v0.23 anti-blur EXPOSURE CAP (non-AR): translated to an fps floor
+          // on this vision-camera instance (see CameraView). 0/absent = off.
+          maxExposureMs={settings.frameSelection.antiBlur?.maxExposureMs ?? 0}
           // `video={true}` is REQUIRED for takeSnapshot to work on iOS.
           // vision-camera v4's iOS implementation of takeSnapshot waits
           // for a frame on the video pipeline; with video disabled, the
@@ -2923,12 +3191,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             topInset={insets.top}
           />
           <CaptureKeyframePill
-            state={incrementalState}
+            state={incremental.state}
             topInset={insets.top}
           />
           <CaptureMemoryPill topInset={insets.top} />
           <CaptureDebugOverlay
-            incrementalState={incrementalState}
+            incrementalState={incremental.state}
             imuTranslationMetres={
               isNonAR ? imuGate.getTranslationMetres() : null
             }
@@ -3003,8 +3271,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             column.  Otherwise it's a horizontal strip. */}
         {statusPhase === 'recording' && (
           <PanoramaBandOverlay
-            state={incrementalState}
-            frameUris={batchKeyframeThumbnails}
+            state={incremental.state}
+            frameUris={keyframeThumbnailUris}
             captureOrientation={deviceOrientation}
             vertical={isSideEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}
           />
@@ -3040,7 +3308,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             top/bottom (lens left / shutter center / AR right);
             vertical column when on left/right (slots stack along
             the narrow strip).  Touch targets stay axis-aligned. */}
-        <View style={bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}>
+        <View
+          style={[
+            bottomBarStyleForEdge(homeIndicatorEdge(jsLandscape, deviceOrientation)),
+            // Host chrome docked below? Lift the whole cluster clear of it.
+            bottomBarOffset > 0 && { transform: [{ translateY: -bottomBarOffset }] },
+          ]}
+        >
         {/* v0.13.1 — flash + AR moved to the top-right pill stack (see
             below).  Left/right slots stay as flex spacers so the shutter
             + lens chip remain centred. */}
@@ -3054,17 +3328,26 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               onChange={handleLensChange}
               has0_5x={has0_5x}
               contentRotation={contentRotation}
+              offerNativeUltraWide={offerNativeUW}
+              onNativeUltraWide={onRequestNativeUltraWide}
+              hideWhenSingle={hideLensChipWhenSingle}
+              ultraWideFactor={capture.ultraWideFactor}
             />
           )}
-          <View style={styles.shutterWrap}>
-            <CameraShutter
-              onTap={handleTap}
-              onHoldStart={enablePanoramaMode ? handleHoldStart : noop}
-              onHoldComplete={enablePanoramaMode ? handleHoldEnd : noop}
-              isProcessing={statusPhase === 'stitching'}
-              disabled={statusPhase === 'stitching' || shutterDisabled}
-            />
-          </View>
+          {!hideBuiltInShutter && (
+            <View style={styles.shutterWrap}>
+              <CameraShutter
+                onTap={handleTap}
+                onHoldStart={enablePanoramaMode ? handleHoldStart : noop}
+                onHoldComplete={enablePanoramaMode ? handleHoldEnd : noop}
+                // Tap-only when panorama is off — no dead "recording" ring on a
+                // hold that does nothing (the split-Photo-mode case).
+                holdEnabled={enablePanoramaMode}
+                isProcessing={statusPhase === 'stitching'}
+                disabled={statusPhase === 'stitching' || shutterDisabled}
+              />
+            </View>
+          )}
         </View>
         <View style={styles.bottomBarRight} />
         </View>
@@ -3085,7 +3368,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         {/* v0.13.2 — AR toggle only when BOTH sources are allowed
             (captureSources='both'); a single-source constraint has
             nothing to toggle.  Still gated on 1× + device AR support. */}
-        {arAllowed && nonArAllowed && lens === '1x' && isARSupportedOnDevice && (
+        {!hideBuiltInShutter && arAllowed && nonArAllowed && lens === '1x' && isARSupportedOnDevice && (
           <ARToggle arEnabled={arPreference} onToggle={handleARToggle} contentRotation={contentRotation} />
         )}
         {showFlashButton && !isAR && deviceHasTorch && (

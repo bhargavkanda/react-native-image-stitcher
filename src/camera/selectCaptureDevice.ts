@@ -70,10 +70,54 @@ export interface CaptureDeviceSelection<D extends DeviceLike = DeviceLike> {
   has0_5x: boolean;
   /** Whether the `1×`/primary mounted device can flash (drives flash UI). */
   hasTorch: boolean;
+  /**
+   * The device's REAL ultra-wide zoom factor, for the lens chip's LABEL only
+   * (the `CameraLens` identifier stays `'0.5x'` — it is also the stitcher's
+   * warper-tree zoom signal, so it must not become device-dependent).
+   * `0.6` on a Galaxy S24 Ultra, `0.5` on a typical iPhone.
+   *
+   * `null` when no back device advertises a sub-1× zoom range, i.e. the
+   * factor is genuinely unknowable from what the platform reports — the UI
+   * falls back to its historical `0.5×` label rather than inventing a number.
+   *
+   * See {@link ultraWideFactorOf} for why this is NOT read off the mounted
+   * device.
+   */
+  ultraWideFactor: number | null;
 }
 
 const hasLens = (d: DeviceLike, lens: LensType) =>
   d.physicalDevices.includes(lens);
+
+/**
+ * The OEM-declared ultra-wide zoom factor across the WHOLE back-camera set.
+ *
+ * Deliberately not read off the mounted device: in `standalone-uw` mode the
+ * 0.5× mount IS the ultra-wide, so it reports its own native range
+ * (`minZoom: 1`) and would render a nonsensical "1×" label.  The real factor
+ * is declared by the sibling LOGICAL device that spans wide→ultra-wide — on a
+ * Galaxy S24 Ultra that is `minZoom: 0.6`, matching what Samsung's own camera
+ * app shows.  So: scan every back device that carries an ultra-wide and take
+ * the smallest sub-1× `minZoom` any of them advertises.
+ *
+ * Returns null when nothing advertises a sub-1× range (a pure standalone-UW
+ * phone where no logical device declares the crossover) — the caller must then
+ * fall back rather than guess.  Non-finite / non-positive values are ignored.
+ */
+function ultraWideFactorOf(back: readonly DeviceLike[]): number | null {
+  let best: number | null = null;
+  for (const d of back) {
+    if (!hasLens(d, 'ultra-wide-angle-camera')) continue;
+    const z = d.minZoom;
+    // `< 1` is the whole point: a device merely LISTING the ultra-wide reports
+    // 1.0 and tells us nothing about where the ultra-wide sits.
+    if (!Number.isFinite(z) || z <= 0 || z >= 1) continue;
+    if (best == null || z < best) best = z;
+  }
+  // Round to 1dp: vision-camera surfaces float32 (the S24 Ultra reports
+  // 0.6000000238418579), which would otherwise render verbatim in the chip.
+  return best == null ? null : Math.round(best * 10) / 10;
+}
 
 /**
  * Max `minZoom` a multi-cam device may report and still count as able to
@@ -108,6 +152,35 @@ export interface SelectCaptureDeviceOptions {
    * Falls through to the normal pick when no depth-capable device exists.
    */
   preferDepth?: boolean;
+  /**
+   * `Platform.OS` at the call site.  Threaded in (not read directly) so
+   * this module stays pure/synchronous and unit-testable without a
+   * react-native mock — see the file header.
+   *
+   * ANDROID FIELD FINDING (Galaxy S24 Ultra / SCG26, 2026-07-27): the
+   * logical multi-cam device reported `minZoom: 0.6` — inside
+   * `UW_ZOOM_REACH_MAX`, so the multicam branch trusted it — but the
+   * Samsung camera HAL never actually crossed physical sensors: a captured
+   * `adb logcat` showed the identical vendor stream id
+   * (`MultiCameraRealtime1_IFE0_cam0`) at both 1× and the "0.5×"-zoomed
+   * request, and the captured frame's FOV visibly did not widen. Android's
+   * Camera2 `CONTROL_ZOOM_RATIO` cross-physical-camera switch is
+   * documented as OEM-inconsistent for non-first-party apps, so on
+   * `'android'` we do NOT trust the zoom-reach claim when a genuine
+   * standalone ultra-wide id exists to swap to instead — see the multicam
+   * qualification check below.
+   *
+   * iOS is UNCHANGED: AVFoundation's virtual multi-cam devices are the
+   * OS-native mechanism this file's original fix relies on (multicam
+   * keeps flash working on 0.5× — see the SYMPTOM 1/2 tests), so iOS keeps
+   * preferring multicam whenever it qualifies, even when a standalone
+   * ultra-wide ALSO happens to be enumerated (real iPhones enumerate
+   * both simultaneously).
+   *
+   * Omitted / any value other than `'android'` → today's behaviour
+   * (prefer multicam), so an untested platform can't silently regress.
+   */
+  platform?: string;
 }
 
 /**
@@ -116,6 +189,9 @@ export interface SelectCaptureDeviceOptions {
  * Priority:
  *   1. multicam — a multi-cam device containing BOTH wide + ultra-wide
  *      (best: one device, zoom-switch, torch via the wide member).
+ *      SKIPPED on `platform: 'android'` when a standalone ultra-wide is
+ *      ALSO enumerated — the zoom-reach claim is not trustworthy there
+ *      (see {@link SelectCaptureDeviceOptions.platform}).
  *   2. standalone-uw — a standalone wide AND a standalone ultra-wide
  *      exist as separate devices (device-swap on lens change; flash
  *      hidden on the torchless ultra-wide).
@@ -137,8 +213,12 @@ export function selectCaptureDevice<D extends DeviceLike>(
       mode: 'wide-only',
       has0_5x: false,
       hasTorch: false,
+      ultraWideFactor: null,
     };
   }
+
+  // Label-only; computed once over the whole back set (see ultraWideFactorOf).
+  const ultraWideFactor = ultraWideFactorOf(back);
 
   // ── 1. Prefer a multi-cam device that carries BOTH wide + ultra-wide.
   // Among candidates, prefer the one that ALSO has a torch (so flash
@@ -156,7 +236,20 @@ export function selectCaptureDevice<D extends DeviceLike>(
       // does NOT qualify -- we fall through to the device-swap path below.
       d.minZoom <= UW_ZOOM_REACH_MAX,
   );
-  if (multicamCandidates.length > 0) {
+  // ANDROID ONLY: even a "qualifying" multicam claim (minZoom <=
+  // UW_ZOOM_REACH_MAX) is not trustworthy -- see the field finding on
+  // SelectCaptureDeviceOptions.platform.  When a genuine standalone
+  // ultra-wide id is ALSO enumerated, skip the multicam early-return here
+  // and let it fall through to the standalone-uw branch below, which
+  // device-swaps onto hardware that actually delivers the ultra-wide.  1×
+  // is unaffected either way (see the branch below -- `pickPrimary` still
+  // mounts this same multicam device as the 1× primary, so torch/format
+  // continuity at 1× does not change; only the 0.5× target does). iOS is
+  // untouched: this whole gate is a no-op unless platform === 'android'.
+  const androidDistrustsMulticamUw =
+    opts.platform === 'android'
+    && back.some((d) => !d.isMultiCam && hasLens(d, 'ultra-wide-angle-camera'));
+  if (multicamCandidates.length > 0 && !androidDistrustsMulticamUw) {
     const device = multicamCandidates.reduce((best, d) => {
       // torch-bearing wins; then wider zoom span; then more lenses.
       if (d.hasTorch !== best.hasTorch) return d.hasTorch ? d : best;
@@ -171,6 +264,7 @@ export function selectCaptureDevice<D extends DeviceLike>(
       mode: 'multicam',
       has0_5x: true,
       hasTorch: device.hasTorch,
+      ultraWideFactor,
     };
   }
 
@@ -258,6 +352,7 @@ export function selectCaptureDevice<D extends DeviceLike>(
       mode: 'standalone-uw',
       has0_5x: true,
       hasTorch: primary.hasTorch,
+      ultraWideFactor,
     };
   }
 
@@ -269,6 +364,9 @@ export function selectCaptureDevice<D extends DeviceLike>(
     mode: 'wide-only',
     has0_5x: false,
     hasTorch: wideOnly.hasTorch,
+    // Reported even here (has0_5x is false so no chip consumes it today), so
+    // the field never lies about the hardware just because the chooser is off.
+    ultraWideFactor,
   };
 }
 

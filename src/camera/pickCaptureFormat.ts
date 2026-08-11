@@ -98,6 +98,26 @@ export interface PickFormatOptions {
 const DEFAULT_MAX_PHOTO_LONG_EDGE = 4032;
 const DEFAULT_FPS_TARGET = 60;
 
+/**
+ * Anti-blur exposure cap → the session fps that enforces it.
+ *
+ * Exposure is physically bounded by the frame interval (auto-exposure
+ * can never expose longer than one frame), and vision-camera maps its
+ * `fps` prop to `activeVideoMaxFrameDuration = 1/fps`.  So capping
+ * exposure at `maxExposureMs` means running at ≥ 1000/maxExposureMs fps.
+ *
+ * @returns the required fps, or 0 when the cap is disabled
+ *          (`maxExposureMs <= 0` / non-finite).  Clamped to 240 so a
+ *          mis-set sub-millisecond value can't demand an absurd rate; no
+ *          phone exceeds ~240 fps at capture resolutions, and the caller
+ *          floors this against 60 and against the device's real max
+ *          anyway, so an unreachable cap degrades gracefully.
+ */
+export function exposureCapToFps(maxExposureMs: number): number {
+  if (!Number.isFinite(maxExposureMs) || maxExposureMs <= 0) return 0;
+  return Math.min(240, Math.ceil(1000 / maxExposureMs));
+}
+
 const longEdge = (f: FormatLike): number =>
   Math.max(f.photoWidth, f.photoHeight);
 const videoPixels = (f: FormatLike): number => f.videoWidth * f.videoHeight;
