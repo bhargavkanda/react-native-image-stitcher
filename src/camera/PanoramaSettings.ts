@@ -662,8 +662,10 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // or N to experiment, but it will not help at these sizes — the real
     // lever is the seam finder (see docs/perf-3b).
     numThreads: 1,
-    // perf-4a — measured compose-resolution adaptation OFF by default (opt-in).
-    adaptiveStitchMode: 'off',
+    // perf-4a — measured compose-resolution adaptation ON by default (0.23):
+    // 'measured' downscales the final compose to adaptiveMinOutputMP ONLY when
+    // a stitch is measured to be slow.  Set 'off' to disable, 'always' to force.
+    adaptiveStitchMode: 'measured',
     adaptiveMinOutputMP: 0.6,
     adaptiveSlowStitchMsPerFrame: 1000,
     debugPack: false,
@@ -683,13 +685,11 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     // v0.21 — anti-blur keyframe selection ON by default (K=4).
     sharpnessWindow: DEFAULT_SHARPNESS_WINDOW,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
-    // v0.23 — anti-blur CAPTURE controls, all OFF by default so this
-    // release is byte-identical to v0.22 for every existing host. The
-    // selection window (above) keeps working exactly as before; these
-    // add the source-side levers a host opts into per-deployment (light
-    // levels and operator pace differ too much for a safe global
-    // default). See AntiBlurSettings for the recommended starting
-    // values (8 ms exposure cap, 1.0 rad/s motion gate, 0.6 floor).
-    antiBlur: DEFAULT_ANTI_BLUR_SETTINGS,
+    // v0.23 — anti-blur CAPTURE controls ON by default (the recommended
+    // starting values: 8 ms exposure cap, 1.0 rad/s motion gate, 0.6 softness
+    // floor, high-fps format).  Each knob is independently opt-OUT via
+    // frameSelection.antiBlur (set a value to 0 / false to disable it); the
+    // all-off baseline is DEFAULT_ANTI_BLUR_SETTINGS.
+    antiBlur: { ...DEFAULT_ANTI_BLUR_SETTINGS, ...SUGGESTED_ANTI_BLUR_SETTINGS },
   },
 };

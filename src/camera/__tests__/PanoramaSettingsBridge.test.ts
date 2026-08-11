@@ -67,8 +67,8 @@ describe('panoramaSettingsToNativeConfig', () => {
     // perf-3b — range matcher (2/2/3 ladder) on by default; single-threaded default.
     expect(cfg.stitchRangeMatcherWidth).toBe(3);
     expect(cfg.stitchNumThreads).toBe(1);
-    // perf-4a — compose-resolution adaptation mode OFF by default (opt-in).
-    expect(cfg.adaptiveStitchMode).toBe('off');
+    // perf-4a — compose-resolution adaptation ON by default (0.23): 'measured'.
+    expect(cfg.adaptiveStitchMode).toBe('measured');
     expect(cfg.adaptiveMinOutputMP).toBe(0.6);
     expect(cfg.adaptiveSlowStitchMsPerFrame).toBe(1000);
     // RCA — debug pack OFF by default.
@@ -182,18 +182,17 @@ describe('panoramaSettingsToNativeConfig', () => {
     ]);
   });
 
-  it('emits every antiBlur knob OFF by default (v0.23 must be byte-identical to v0.22)', () => {
-    // THE load-bearing guarantee of the anti-blur release: a host that
-    // upgrades and changes nothing must get exactly the previous
-    // behaviour. Every source-side control is therefore disabled on the
-    // wire unless explicitly opted into. `maxConsecutiveHolds` is the
-    // exception — a SAFETY cap that only takes effect once one of the
-    // hold-producing knobs is on, so its non-zero value is inert here.
+  it('emits the recommended antiBlur values ON by default (0.23 ships anti-blur on; opt-out per knob)', () => {
+    // 0.23 turns the source-side anti-blur controls ON by default with the
+    // recommended values; a host disables any knob by setting it to 0 / false
+    // in frameSelection.antiBlur (the all-off baseline is
+    // DEFAULT_ANTI_BLUR_SETTINGS, still used when the sub-tree is omitted).
+    // `maxConsecutiveHolds` is the forward-progress SAFETY cap.
     const cfg = panoramaSettingsToNativeConfig(DEFAULT_PANORAMA_SETTINGS);
-    expect(cfg.antiBlurMaxExposureMs).toBe(0);
-    expect(cfg.antiBlurMaxCommitPanRateRadPerSec).toBe(0);
-    expect(cfg.antiBlurMinScoreFractionOfMedian).toBe(0);
-    expect(cfg.antiBlurPreferHighFpsFormat).toBe(false);
+    expect(cfg.antiBlurMaxExposureMs).toBe(8);
+    expect(cfg.antiBlurMaxCommitPanRateRadPerSec).toBe(1);
+    expect(cfg.antiBlurMinScoreFractionOfMedian).toBe(0.6);
+    expect(cfg.antiBlurPreferHighFpsFormat).toBe(true);
     expect(cfg.antiBlurMaxConsecutiveHolds).toBe(12);
   });
 
