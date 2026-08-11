@@ -14,7 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
-## [0.23.0] - 2026-08-11
+## [0.23.1] - 2026-08-11
+
+> **Version note:** 0.23.0 was briefly published with an unrelated stream of
+> work (the anti-blur / adaptive-perf release-candidate line) merged in by
+> mistake, and has been withdrawn. This release is the **plugin-hooks stream
+> only**; the rc line ships separately as **0.24.0**.
 
 ### Added
 
