@@ -62,8 +62,17 @@ describe('panoramaSettingsToNativeConfig', () => {
     expect(cfg.stitchMode).toBe('auto'); // v0.16 — default reverted to auto (matches v0.15.2)
     expect(cfg.warperType).toBe('plane'); // v0.16 — default reverted to plane (matches v0.15.2)
     expect(cfg.blenderType).toBe('multiband');
-    expect(cfg.seamFinderType).toBe('graphcut');
+    expect(cfg.seamFinderType).toBe('graphcut'); // perf-3b — voronoi default reverted (shelf tearing; see docs/perf-3b §0)
     expect(cfg.enableMaxInscribedRectCrop).toBe(false);
+    // perf-3b — range matcher (2/2/3 ladder) on by default; single-threaded default.
+    expect(cfg.stitchRangeMatcherWidth).toBe(3);
+    expect(cfg.stitchNumThreads).toBe(1);
+    // perf-4a — compose-resolution adaptation mode OFF by default (opt-in).
+    expect(cfg.adaptiveStitchMode).toBe('off');
+    expect(cfg.adaptiveMinOutputMP).toBe(0.6);
+    expect(cfg.adaptiveSlowStitchMsPerFrame).toBe(1000);
+    // RCA — debug pack OFF by default.
+    expect(cfg.debugPack).toBe(false);
 
     // FrameSelectionSettings
     expect(cfg.frameSelectionMode).toBe('flow-based');
@@ -142,6 +151,9 @@ describe('panoramaSettingsToNativeConfig', () => {
     // this test immediately.
     const cfg = panoramaSettingsToNativeConfig(DEFAULT_PANORAMA_SETTINGS);
     expect(Object.keys(cfg).sort()).toEqual([
+      'adaptiveMinOutputMP',
+      'adaptiveSlowStitchMsPerFrame',
+      'adaptiveStitchMode',
       'antiBlurMaxCommitPanRateRadPerSec',
       'antiBlurMaxConsecutiveHolds',
       'antiBlurMaxExposureMs',
@@ -149,6 +161,7 @@ describe('panoramaSettingsToNativeConfig', () => {
       'antiBlurPreferHighFpsFormat',
       'blenderType',
       'captureSource',
+      'debugPack',
       'enableMaxInscribedRectCrop',
       'flowEvalEveryNFrames',
       'flowMaxCorners',
@@ -163,6 +176,8 @@ describe('panoramaSettingsToNativeConfig', () => {
       'seamFinderType',
       'sharpnessWindow',
       'stitchMode',
+      'stitchNumThreads',
+      'stitchRangeMatcherWidth',
       'warperType',
     ]);
   });

@@ -13,7 +13,7 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.opencv.calib3d.Calib3d
@@ -238,6 +238,26 @@ class IncrementalStitcher(
     // half-committed window state, no post-snapshot writes.
     private val sharpnessWindowLock = Any()
     private var sharpnessWindowK: Int = 4
+    /// perf-3b — PANORAMA attempt-1 feature-matcher range width, set from
+    /// the `stitchRangeMatcherWidth` start() config key.  0 = OFF (default,
+    /// full-pairwise). Passed to BatchStitcher.stitchSync at finalize().
+    private var stitchRangeMatcherWidth: Int = 0
+    /// perf-3b item 1 — OpenCV thread count, set from the `stitchNumThreads`
+    /// start() config key.  0 = auto-multi (default), 1 = single kill-switch,
+    /// N = explicit.  Passed to stitchSync at finalize()/refine().
+    private var stitchNumThreads: Int = 0
+    /// perf-4a — compose-resolution adaptation mode, from start() config.
+    /// "off" (default, byte-identical) | "always" (deterministic cut every
+    /// finalize) | "measured" (self-tuning, see AdaptiveStitchResolution).
+    private var adaptiveStitchMode: String = "off"
+    private var adaptiveMinOutputMP: Double = 0.6
+    private var adaptiveSlowStitchMsPerFrame: Double = 1000.0
+    /// RCA — when true, a successful finalize drops a self-describing
+    /// `pack.json` next to the (already-persisted) keyframes so a field
+    /// capture can be pulled and replayed offline (keyframe images + config +
+    /// timings + result). Off by default; a pure diagnostic, never alters the
+    /// stitch. See docs + the offline compare tool.
+    private var debugPackEnabled: Boolean = false
     /// Shared-C++ window DECISION machine (cpp/sharpness_window.*,
     /// via the SharpnessWindow JNI facade).  Owns open/closed state,
     /// remaining candidate slots, the streaming-max best score and the
@@ -388,14 +408,32 @@ class IncrementalStitcher(
     /// (start/cancel/finalize) writes via `set()`/`compareAndSet()`.
     /// Mirror of iOS' `frameProcessorIngestEnabled` ivar.
     private val frameProcessorIngestEnabled = AtomicBoolean(false)
+    /// Public read-only accessor so the Frame Processor plugin can
+    /// fast-exit BEFORE touching `frame.image` when ingest is off
+    /// (e.g. during the multi-second stitch phase).  Avoids per-frame
+    /// ImageProxy/JNI overhead at 30 fps on the producer thread.
+    val isFrameProcessorIngestEnabled: Boolean
+        get() = frameProcessorIngestEnabled.get()
     /// Critic #5 fix: serial dispatcher so concurrent per-frame
     /// ingest calls (today: `ingestFromARCameraView` in AR mode,
     /// `consumeFrameFromPlugin` in frame-processor mode) can't race
-    /// on the engine's canvas.  `limitedParallelism(1)` guarantees
-    /// one-at-a-time execution while still backing onto the Default
-    /// pool — matches iOS' `workQueue` (DispatchQueue.serial).
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private val workScope = CoroutineScope(Dispatchers.Default.limitedParallelism(1))
+    /// on the engine's canvas.  One-at-a-time execution, matching iOS'
+    /// `workQueue` (DispatchQueue.serial).
+    ///
+    /// perf-3b item 1 — a DEDICATED single-thread executor (was
+    /// `Dispatchers.Default.limitedParallelism(1)`, which serialized but
+    /// MIGRATED the calling thread across the shared pool).  A stable
+    /// thread lets OpenCV's parallel-backend per-worker TLS scratch prime
+    /// ONCE per process instead of re-priming on each stitch's thread
+    /// migration — that re-priming was the ~7-9 MB/stitch native-heap
+    /// creep that forced `cv::setNumThreads(1)`.  With the thread pinned,
+    /// multi-threading is safe again (see stitcher.cpp numThreads).  Shut
+    /// down in onCatalystInstanceDestroy(); daemon so it can't block exit.
+    private val workExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "rnis-stitch").apply { isDaemon = true }
+        }
+    private val workScope = CoroutineScope(workExecutor.asCoroutineDispatcher())
 
     /// 2026-05-16 — realtime+batch fusion (Option A "Replace on
     /// completion") scope.  Kept SEPARATE from `workScope` so the
@@ -414,9 +452,18 @@ class IncrementalStitcher(
     /// Every `refineScope.launch { … }` already has a try/catch
     /// around the throwing surface; SupervisorJob is defense-in-
     /// depth for future code added outside that catch.
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    /// perf-3b item 1 — its OWN dedicated single-thread executor, SEPARATE
+    /// from workExecutor (a refine must not delay a new start()/ingest, per
+    /// the design note above), and stable-threaded for the same TLS-creep
+    /// reason as workExecutor.  Concurrent finalize (workExecutor) + refine
+    /// (refineExecutor) native entries are serialized at the C++ boundary by
+    /// the stitch mutex in stitchFramePaths.  SupervisorJob retained.
+    private val refineExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "rnis-refine").apply { isDaemon = true }
+        }
     private val refineScope = CoroutineScope(
-        SupervisorJob() + Dispatchers.Default.limitedParallelism(1)
+        SupervisorJob() + refineExecutor.asCoroutineDispatcher()
     )
 
     /// Reference to a mounted ARCameraView (if any).  Set by the view
@@ -606,6 +653,55 @@ class IncrementalStitcher(
             val evalCadence = configOverrides
                 ?.getIntOrDefault("flowEvalEveryNFrames", 1) ?: 1
             keyframeGate.flowEvalEveryNFrames = evalCadence.coerceIn(1, 10)
+
+            // Reject-event emit throttle.  Default 0 = OFF (emit every
+            // reject), which restores iOS parity — iOS never throttles
+            // reject emits.  The reviewed 7df2dba commit hardcoded a
+            // 250 ms throttle; the adversarial review found it a measured
+            // placebo (≤6 events/s) that also let the overlap-% overlay
+            // and gate-reason go stale for up to 250 ms.  A host that
+            // genuinely needs to cap bridge traffic on an old-arch device
+            // can set rejectEmitMinIntervalMs > 0.  Clamp ≥ 0.  See
+            // docs/perf-3a for the JS-side (coalescing) alternative that
+            // relieves the render cost the wire throttle can't touch.
+            val rejectThrottleMs = (configOverrides
+                ?.getIntOrDefault("rejectEmitMinIntervalMs", 0) ?: 0)
+                .coerceAtLeast(0)
+            rejectEmitMinIntervalNanos = rejectThrottleMs.toLong() * 1_000_000L
+
+            // perf-3b — PANORAMA attempt-1 feature-matcher range width.
+            // 0 (default) = OFF (full-pairwise, byte-identical to before).
+            // > 0 matches only capture-adjacent keyframes on attempt 1;
+            // attempts 2/3 keep the full matcher as the pan-back rescue.
+            // Applied at finalize() → stitchSync.  Clamp ≥ 0.
+            stitchRangeMatcherWidth = (configOverrides
+                ?.getIntOrDefault("stitchRangeMatcherWidth", 0) ?: 0)
+                .coerceAtLeast(0)
+
+            // perf-3b item 1 — OpenCV thread count.  0 = auto-multi (default),
+            // 1 = single-threaded kill-switch (revert if a device regresses on
+            // the native-heap memstat gate), N = explicit.  Clamp ≥ 0.
+            stitchNumThreads = (configOverrides
+                ?.getIntOrDefault("stitchNumThreads", 0) ?: 0)
+                .coerceAtLeast(0)
+
+            // perf-4a — compose-resolution adaptation mode. Unknown/absent
+            // values fall back to the safe "off" (byte-identical).
+            adaptiveStitchMode = (configOverrides?.getString("adaptiveStitchMode") ?: "off")
+                .let { if (it == "always" || it == "measured") it else "off" }
+            // Clamped to [0.6, 1.0]: 0.6 is the OD/OCR output-pixel floor, and
+            // 1.0 is the default budget — a floor above the default would make a
+            // "cut" raise resolution (slower) and pollute default-budget history.
+            adaptiveMinOutputMP = (configOverrides
+                ?.getDoubleOrDefault("adaptiveMinOutputMP", 0.6) ?: 0.6)
+                .coerceIn(0.6, 1.0)
+            adaptiveSlowStitchMsPerFrame = (configOverrides
+                ?.getDoubleOrDefault("adaptiveSlowStitchMsPerFrame", 1000.0) ?: 1000.0)
+                .coerceAtLeast(1.0)
+
+            // RCA — debug pack: write pack.json next to the keyframes on finalize.
+            debugPackEnabled = configOverrides
+                ?.getBooleanOrDefault("debugPack", false) ?: false
 
             // v0.21 — pick-sharpest-in-window anti-blur selection.
             // 1 = off (immediate commit, pre-v0.21 behaviour).
@@ -897,6 +993,11 @@ class IncrementalStitcher(
         val wasBatchKeyframe = batchKeyframeMode
         val keyframePathsSnapshot = batchKeyframePaths.toList()
         val captureOrientationSnapshot = batchCaptureOrientation
+        // Snapshot the session dir on the bridge thread BEFORE the async stitch:
+        // if a second capture starts before this finalize resolves it reassigns
+        // the captureSessionDir FIELD, and the debug-pack write (async, minutes
+        // later) would otherwise land in the wrong capture's dir.
+        val captureSessionDirSnapshot = captureSessionDir
         // batchWarperType (settings) is superseded by the high-level warper tree
         // (pickHighLevelWarper) below — kept as a field for back-compat, unused here.
         val blenderTypeSnapshot = batchBlenderType
@@ -965,8 +1066,77 @@ class IncrementalStitcher(
         batchFirstAcceptedPose = null
         batchLastAcceptedPose = null
 
+        // Emit a stitching-phase event so a host that COMPOSES its own
+        // vision-camera `<Camera>` can stop feeding frames during the
+        // multi-second stitch (in non-AR mode the camera + frame-
+        // processor thread otherwise keep running at 30-60 fps, eating
+        // CPU the cv::Stitcher worker needs).  The correct vision-camera
+        // v4 control is the `isActive` prop — render `<Camera
+        // isActive={false}>` (or unmount) on "started" and restore on
+        // "finished".  There is NO `camera.pause()` / `resume()` method
+        // in vision-camera v4; an earlier version of this comment
+        // recommended one that does not exist.  The first-party
+        // `<Camera>` already unmounts the camera during the stitch, so
+        // this event exists for composed hosts only.  Hosts MUST also
+        // restore on the finalize()/cancel() PROMISE settling, not the
+        // event alone, because cancel() does not emit "finished".  See
+        // the TS wrapper `subscribeStitchingPhase()` (src/stitching/
+        // incremental.ts) and docs/host-app-integration.md.
+        //
+        // NOTE (2026-08-03): the AR GL-render pause that used to sit here
+        // was removed — it was a no-op in the first-party flow (the AR
+        // view is already unmounted before finalize) and, in composed
+        // Layer-2 integrations that keep the view mounted, it froze the
+        // preview and dropped the next capture's frames on view
+        // detach/reattach.  See the adversarial review of 7df2dba and
+        // docs/perf-3a / perf-3b.
+        emitStitchingPhase("started")
+
+        // Phase 0 telemetry — timestamp the launch so the coroutine body
+        // can measure queue delay (backlog on the serial workScope: a
+        // pending ingest or a previous capture's stitch delays the body).
+        val tStitchDispatch = android.os.SystemClock.elapsedRealtime()
+
         workScope.launch {
+            // Phase 0 telemetry — queue delay = dispatch → body start.
+            val queueDelayMs =
+                android.os.SystemClock.elapsedRealtime() - tStitchDispatch
+            // Wall time of the blocking stitchSync JNI call, filled in below.
+            var stitchWallMs = -1L
+            // perf-4a — compose-resolution adaptation state.  Computed inside
+            // the batch-stitch block below but read again in the shared
+            // `timings`/`appliedBudgets` reporting AFTER that block closes, so
+            // it is hoisted to the launch scope alongside stitchWallMs (same
+            // reason).  Stays 1.0 / null on the opted-out path (byte-identical).
+            var adaptiveComposeMP = 1.0
+            var adaptiveDecision: AdaptiveStitchResolution.Decision? = null
+            // Nudge the stitch thread into the foreground scheduler band
+            // so the multi-second blocking cv::Stitcher call isn't
+            // scheduled on par with background / camera-analysis threads.
+            // `android.os.Process.setThreadPriority` maps directly to the
+            // Linux nice value the CFS scheduler actually uses — unlike
+            // `java.lang.Thread.priority` (the previous approach), whose
+            // coarse 1-10 scale barely moves nice on ART.  Held at
+            // FOREGROUND (not URGENT_DISPLAY/AUDIO) so it can never starve
+            // the UI thread.  Captured outside try so finally can restore.
+            //
+            // NOTE: this boosts only THIS orchestrating thread.  The
+            // OpenCV worker pool — where most cycles go once intra-stitch
+            // parallelism is restored (docs/perf-3b item 1/3) — is not
+            // covered here; making the boost reach the pool is a perf-3b
+            // task.
+            val origThreadPriority = try {
+                android.os.Process.getThreadPriority(android.os.Process.myTid())
+            } catch (_: Throwable) {
+                android.os.Process.THREAD_PRIORITY_DEFAULT
+            }
             try {
+                try {
+                    android.os.Process.setThreadPriority(
+                        android.os.Process.THREAD_PRIORITY_FOREGROUND
+                    )
+                } catch (_: Throwable) { /* unsupported / denied — ignore */ }
+
                 val map = Arguments.createMap()
                 if (wasBatchKeyframe) {
                     // V16 batch-keyframe: hand keyframe paths to the
@@ -995,6 +1165,64 @@ class IncrementalStitcher(
                                 "— module hasn't been instantiated yet. " +
                                 "Check RNImageStitcherPackage registration."
                         )
+                    // Resolution budgets: use the stitchSync defaults
+                    // (registrationResolMP=-1.0 → cv::Stitcher/JNI default;
+                    // compositingResolMP=1.0 → the OOM-safe high-level
+                    // default).  The RAM-keyed adaptive cut that used to
+                    // sit here (regMP=0.4 / composeMP=0.6 on ≤4 GB devices)
+                    // was REMOVED (2026-08-03): the adversarial review of
+                    // 7df2dba found it a no-op on default 640 px keyframes,
+                    // a silent ~40% output-pixel cut on quality captures,
+                    // fired on unaffected RN 0.83 hosts, mis-classified any
+                    // device on ActivityManager-null, and cut registration
+                    // to 0.4 MP where the pipeline's own analysis wants
+                    // MORE resolution (raising drops/failures).  The
+                    // correct, opt-in, measured replacement is specified in
+                    // docs/perf-4a-measured-resolution-adaptation.md.
+                    // perf-4a — opt-in measured compose-resolution adaptation.
+                    // compositingResolMP stays 1.0 (byte-identical) unless the
+                    // host opted in AND the persisted per-keyframe wall-time
+                    // median for this capture config says the device is slow.
+                    // Floored at adaptiveMinOutputMP (the OD/OCR floor).
+                    // (adaptiveComposeMP / adaptiveDecision hoisted to the
+                    // launch scope above — they are read in the timings block
+                    // after this batch block closes.)
+                    var adaptiveKey: String? = null
+                    when (adaptiveStitchMode) {
+                        "always" -> {
+                            // DETERMINISTIC knob: cut every finalize to the floor,
+                            // unconditionally. No measurement, no persistence — the
+                            // clean A/B treatment. Floor clamped [0.6, 1.0] at read.
+                            adaptiveComposeMP = adaptiveMinOutputMP
+                        }
+                        "measured" -> {
+                            val longEdge = firstKeyframeLongEdge(keyframePathsSnapshot)
+                            // A header-decode failure (longEdge ≤ 0) must NOT pool
+                            // distinct capture sizes under a shared le=0 bucket (nor
+                            // read/write it) — skip the store and run the default
+                            // budget for this finalize.
+                            if (longEdge > 0) {
+                                adaptiveKey = AdaptiveStitchResolution.key(longEdge, keyframeGate.maxCount)
+                                adaptiveDecision = AdaptiveStitchResolution.evaluate(
+                                    reactContext, adaptiveKey, adaptiveSlowStitchMsPerFrame,
+                                )
+                                if (adaptiveDecision.adapt) {
+                                    // Floor clamped [0.6, 1.0] at read, so the cut
+                                    // never exceeds the 1.0 default (which would slow
+                                    // the device AND pollute default-budget history)
+                                    // and never drops below the 0.6 OD/OCR floor.
+                                    adaptiveComposeMP = adaptiveMinOutputMP
+                                }
+                            }
+                        }
+                        else -> { /* "off" → compose stays 1.0 (byte-identical) */ }
+                    }
+                    // Phase 0 telemetry — wall time of the blocking native
+                    // cv::Stitcher JNI call.  This is the RN-version-invariant
+                    // number: on the same device it should not move between a
+                    // 0.79 and an 0.83 host.  (Kotlin-side measurement; ≈ the
+                    // C++ durationMs minus negligible JNI overhead.)
+                    val tStitchStart = android.os.SystemClock.elapsedRealtime()
                     val dims = stitcher.stitchSync(
                         keyframePathsSnapshot.toTypedArray(),
                         outputPath,
@@ -1004,9 +1232,36 @@ class IncrementalStitcher(
                         seamFinderTypeSnapshot,
                         captureOrientationSnapshot,
                         useInscribedRectCropSnapshot,
+                        compositingResolMP = adaptiveComposeMP,  // perf-4a (1.0 unless adapted)
                         stitchMode = "panorama",         // always high-level PANORAMA
                         useManualPipeline = false,       // high level across the board
+                        rangeMatcherWidth = stitchRangeMatcherWidth,  // perf-3b (0 = off)
+                        numThreads = stitchNumThreads,   // perf-3b item 1 (0 = auto-multi)
                     )
+                    stitchWallMs =
+                        android.os.SystemClock.elapsedRealtime() - tStitchStart
+                    // perf-4a — record a DEFAULT-budget (compose 1.0), non-ladder-
+                    // escalated success so the median reflects device speed at
+                    // the default budget. finalConfidenceThresh (dims[4]/1000) <
+                    // 1.0 ⇒ the ladder escalated (scene-hard, not device-slow) —
+                    // skip. Recording is unconditional on the fire decision so a
+                    // slow device keeps refreshing its default-budget history.
+                    // COVERAGE NOTE: a device whose captures ALWAYS escalate never
+                    // accrues the MIN_SAMPLES needed to fire, so it stays at the
+                    // safe 1.0 default forever. Intended: its cost is scene-driven
+                    // registration retries, which a compositing cut does not
+                    // reduce — the fallback is conservative, never a wrong result.
+                    if (adaptiveStitchMode == "measured" && adaptiveComposeMP >= 1.0) {
+                        val threshMilli = if (dims.size > 4) dims[4] else 1000
+                        val escalated = threshMilli < 1000
+                        if (!escalated) {
+                            adaptiveKey?.let {
+                                AdaptiveStitchResolution.recordDefaultRun(
+                                    reactContext, it, stitchWallMs, keyframePathsSnapshot.size,
+                                )
+                            }
+                        }
+                    }
                     // 2026-05-15 (D) — dims layout from native JNI:
                     //   [0] width, [1] height, [2] framesRequested,
                     //   [3] framesIncluded, [4] finalThresholdMilli
@@ -1063,6 +1318,71 @@ class IncrementalStitcher(
                     // pill shows the same detail, not just mode/score/frames.
                     val dbg = stitcher.lastDebugSummary
                     if (dbg.isNotEmpty()) map.putString("debugSummary", dbg)
+
+                    // RCA — debug pack. When enabled, drop a self-describing
+                    // pack.json next to the (persisted) keyframes so this exact
+                    // capture can be pulled and replayed OFFLINE: keyframe images
+                    // + the recipe + the result + the timing decomposition
+                    // (stitchWallMs is the RN-version-INVARIANT native cost;
+                    // queueDelayMs is bridge/JS). This is what turns a field
+                    // "it's slow" into a decomposable measurement. Never fails
+                    // the finalize — a pack-write error is logged and swallowed.
+                    if (debugPackEnabled) {
+                        captureSessionDirSnapshot?.let { dir ->
+                            try {
+                                val pack = org.json.JSONObject().apply {
+                                    put("schema", "rlis-debug-pack/v1")
+                                    put("timestampMs", System.currentTimeMillis())
+                                    put("device", org.json.JSONObject().apply {
+                                        put("model", android.os.Build.MODEL)
+                                        put("manufacturer", android.os.Build.MANUFACTURER)
+                                        put("abi", android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "")
+                                        put("cores", Runtime.getRuntime().availableProcessors())
+                                        put("sdkInt", android.os.Build.VERSION.SDK_INT)
+                                    })
+                                    put("capture", org.json.JSONObject().apply {
+                                        put("keyframeCount", keyframePathsSnapshot.size)
+                                        put("keyframeFiles", org.json.JSONArray(
+                                            keyframePathsSnapshot.map { java.io.File(it).name }))
+                                        put("firstKeyframeLongEdge",
+                                            firstKeyframeLongEdge(keyframePathsSnapshot))
+                                        put("captureOrientation", captureOrientationSnapshot)
+                                    })
+                                    put("config", org.json.JSONObject().apply {
+                                        put("adaptiveStitchMode", adaptiveStitchMode)
+                                        put("adaptiveMinOutputMP", adaptiveMinOutputMP)
+                                        put("compositingResolMP", adaptiveComposeMP)
+                                        put("stitchModeResolved", stitchModeResolved)
+                                        put("warper", highLevelWarper)
+                                        put("blender", blenderTypeSnapshot)
+                                        put("seamFinder", seamFinderTypeSnapshot)
+                                        put("rangeMatcherWidth", stitchRangeMatcherWidth)
+                                        put("numThreads", stitchNumThreads)
+                                        put("inscribedRectCrop", useInscribedRectCropSnapshot)
+                                    })
+                                    put("result", org.json.JSONObject().apply {
+                                        put("width", dims[0])
+                                        put("height", dims[1])
+                                        put("framesRequested", framesRequested)
+                                        put("framesIncluded", framesIncluded)
+                                        put("framesDropped", framesRequested - framesIncluded)
+                                        put("finalConfidenceThresh", finalConfidenceThresh)
+                                    })
+                                    put("timings", org.json.JSONObject().apply {
+                                        put("stitchWallMs", stitchWallMs)
+                                        put("queueDelayMs", queueDelayMs)
+                                    })
+                                    put("debugSummary", dbg)
+                                }
+                                java.io.File(dir, "pack.json").writeText(pack.toString(2))
+                            } catch (t: Throwable) {
+                                android.util.Log.w(
+                                    "IncrementalStitcher",
+                                    "debug pack write failed: ${t.message}",
+                                )
+                            }
+                        }
+                    }
                 } else {
                     // The live engines (hybrid + firstwins/slit) and their
                     // auto-refine hook were archived in the 2026-06 batch-
@@ -1073,9 +1393,71 @@ class IncrementalStitcher(
                     )
                 }
                 map.putInt("droppedBackpressure", 0)
+                // Phase 0 telemetry — attach the native/JS timing block so
+                // the host can attribute a stitch-time regression to native
+                // (stitchWallMs) vs bridge/JS.  Additive + optional on the TS
+                // side (IncrementalTimings); keyframeCount + budgets let a
+                // host normalise across captures.  See perfTrace.ts.
+                val timings = Arguments.createMap()
+                timings.putDouble("queueDelayMs", queueDelayMs.toDouble())
+                if (stitchWallMs >= 0)
+                    timings.putDouble("stitchWallMs", stitchWallMs.toDouble())
+                timings.putInt("keyframeCount", keyframePathsSnapshot.size)
+                timings.putInt("rangeMatcherWidth", stitchRangeMatcherWidth)
+                // perf-4a — surface every applied budget so no cut is silent
+                // (the removed RAM cut's core defect). Only present when the
+                // host opted in.
+                if (adaptiveStitchMode != "off") {
+                    val ab = Arguments.createMap()
+                    ab.putDouble("compositingResolMP", adaptiveComposeMP)
+                    ab.putString("mode", adaptiveStitchMode)
+                    // Did THIS run actually cut compose below the 1.0 default?
+                    val adapted = adaptiveComposeMP < 1.0
+                    ab.putBoolean("adapted", adapted)
+                    ab.putDouble("floorMP", adaptiveMinOutputMP)
+                    if (adaptiveStitchMode == "always") {
+                        // Deterministic — no measurement state to report.
+                        ab.putString("source", "always")
+                    } else {
+                        // "measured": distinguish the measured sub-states. adaptiveDecision
+                        // is null ONLY when the header decode failed (longEdge ≤ 0), the
+                        // store was skipped, and we ran the default budget — report that
+                        // honestly rather than as a measured "default" run.
+                        val probe = adaptiveDecision?.probe == true
+                        val seeded = adaptiveDecision?.seeded == true
+                        val decodeFailed = adaptiveDecision == null
+                        ab.putString(
+                            "source",
+                            when {
+                                decodeFailed -> "decode-failed"  // longEdge ≤ 0, ran default, not recorded
+                                adapted -> "adapted"     // fired regime, cut this run
+                                probe -> "probe"         // fired regime, forced default re-measure
+                                seeded -> "seeded"       // < MIN_SAMPLES history, measuring
+                                else -> "default"        // measured-fast (not fired)
+                            },
+                        )
+                        ab.putBoolean("probe", probe)
+                        ab.putBoolean("seeded", seeded)
+                        adaptiveDecision?.medianMsPerKeyframe?.let {
+                            ab.putDouble("medianStitchMsPerKeyframe", it)
+                        }
+                    }
+                    timings.putMap("appliedBudgets", ab)
+                }
+                map.putMap("timings", timings)
                 promise.resolve(map)
             } catch (t: Throwable) {
                 promise.reject("incremental-finalize-failed", t.message, t)
+            } finally {
+                // Restore the thread's original scheduler priority.
+                try {
+                    android.os.Process.setThreadPriority(origThreadPriority)
+                } catch (_: Throwable) { /* ignore */ }
+                // Signal JS that the stitch is done so a composed host can
+                // re-activate its vision-camera `<Camera>` (see the
+                // "started" emit above; the host must also key off the
+                // finalize/cancel promise, since cancel() emits nothing).
+                emitStitchingPhase("finished")
             }
         }
     }
@@ -1752,6 +2134,24 @@ class IncrementalStitcher(
         panRateRadPerSec = if (rate.isFinite()) rate else -1.0
     }
 
+    /// perf-4a — read the long edge (max of width/height) of the FIRST
+    /// keyframe via a header-only decode (inJustDecodeBounds — no pixel
+    /// decode, ~1 ms) so the adaptive-resolution key reflects what was
+    /// actually captured (640 vs 1280 px), not a prop. Returns 0 (its own
+    /// bucket) on any read failure.
+    private fun firstKeyframeLongEdge(paths: List<String>): Int {
+        val p = paths.firstOrNull() ?: return 0
+        return try {
+            val opts = android.graphics.BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            android.graphics.BitmapFactory.decodeFile(p, opts)
+            kotlin.math.max(opts.outWidth, opts.outHeight).coerceAtLeast(0)
+        } catch (t: Throwable) {
+            0
+        }
+    }
+
     /// Close the window: JPEG-encode the buffered best ONCE (the only
     /// encode the window path ever performs), commit the path to
     /// `batchKeyframePaths`, record the pose bookkeeping, and emit the
@@ -1886,11 +2286,16 @@ class IncrementalStitcher(
     //
     // Called on vision-camera's frame-processor thread (a single-
     // thread executor).  `frameProcessorIngestEnabled` is read
-    // lock-free via AtomicBoolean.  `ingestFromARCameraView`
-    // dispatches the heavy engine work to `workScope` (serial),
-    // so producer-thread blocking is bounded to the synchronous
-    // gate evaluation + (on accept) JPEG encode — typically
-    // 5–10 ms reject, 30–50 ms accept on a mid-tier device.
+    // lock-free via AtomicBoolean.  In the current batch-keyframe-only
+    // engine `consumeFrameFromPlugin` / `ingestFromARCameraView` run the
+    // keyframe-gate evaluation and (on accept) the JPEG encode
+    // SYNCHRONOUSLY on this producer thread — there is NO workExecutor
+    // dispatch on the ingest path (the only workExecutor.launch sites are
+    // finalize + cancel-cleanup).  So producer-thread blocking is bounded
+    // to that synchronous gate + encode — typically 5–10 ms reject,
+    // 30–50 ms accept on a mid-tier device — and ingest is INDEPENDENT of
+    // the finalize/refine native-stitch mutex (perf-3b item 1): a stitch
+    // holding that lock never stalls frame ingestion here.
     fun consumeFrameFromPlugin(
         image: android.media.Image,
         tx: Double, ty: Double, tz: Double,
@@ -2298,6 +2703,13 @@ class IncrementalStitcher(
             config?.getBooleanOrDefault("useManualPipeline", false) ?: false
         val jpegQuality = max(1, min(100,
             config?.getIntOrDefault("jpegQuality", 90) ?: 90))
+        // perf-3b — the re-stitch must use the SAME range-matcher width the
+        // original finalize used, or the preview differs from the capture.
+        // Prefer an explicit refine-config value; else fall back to the
+        // session field set at start() (0 if the module was never started).
+        val refineRangeMatcherWidth = (config
+            ?.getIntOrDefault("stitchRangeMatcherWidth", stitchRangeMatcherWidth)
+            ?: stitchRangeMatcherWidth).coerceAtLeast(0)
 
         // Pre-flight existence check — same defensive layer iOS has.
         for (p in framePaths) {
@@ -2353,6 +2765,8 @@ class IncrementalStitcher(
                     // HIGH-LEVEL preview tab); true would force the manual
                     // pipeline.  Sourced from the JS config above.
                     useManualPipeline = useManualPipeline,
+                    rangeMatcherWidth = refineRangeMatcherWidth,  // perf-3b — match finalize
+                    numThreads = stitchNumThreads,   // perf-3b item 1 (0 = auto-multi)
                 )
                 // Stitch returned — BatchStitcher writes the JPEG
                 // synchronously, so "writing" reflects the final
@@ -2534,30 +2948,36 @@ class IncrementalStitcher(
         }
     }
 
+    /// perf-3b item 1 — guards teardownOnce() so the native-heap + executor
+    /// cleanup runs exactly once even if BOTH invalidate() and the deprecated
+    /// onCatalystInstanceDestroy() fire (RN version-dependent).
+    private val didTeardown = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /**
-     * Release the C++ KeyframeGate heap allocation when RN tears
-     * down the bridge module (e.g. on a JS reload).  Without this,
-     * each reload leaks ~100 bytes of native heap — small but
-     * unbounded over a long dev session.
+     * Idempotent module teardown: release the C++ KeyframeGate +
+     * SharpnessWindow native heap, the per-session dir, the static back-
+     * pointer, and the dedicated stitch/refine executor threads.
+     *
+     * Invoked from BOTH `invalidate()` (the RN 0.74+ / New-Architecture
+     * teardown hook — under bridgeless/New Arch the framework calls
+     * invalidate(), NOT onCatalystInstanceDestroy()) and the deprecated
+     * `onCatalystInstanceDestroy()` (older RN), guarded so it runs once.
+     * Without routing through invalidate(), on RN 0.84 New Arch none of this
+     * cleanup ran and every JS reload leaked native heap + 2 daemon threads.
      */
-    override fun onCatalystInstanceDestroy() {
+    private fun teardownOnce() {
+        if (!didTeardown.compareAndSet(false, true)) return
         try {
             keyframeGate.close()
         } catch (t: Throwable) {
-            android.util.Log.w(
-                "IncrementalStitcher",
-                "onCatalystInstanceDestroy: keyframeGate.close failed: ${t.message}",
-            )
+            android.util.Log.w("IncrementalStitcher", "teardown: keyframeGate.close failed: ${t.message}")
         }
         // v0.21.1 — release the shared-C++ sharpness-window machine's
         // native allocation too (same lifecycle as keyframeGate).
         try {
             sharpnessWindow.close()
         } catch (t: Throwable) {
-            android.util.Log.w(
-                "IncrementalStitcher",
-                "onCatalystInstanceDestroy: sharpnessWindow.close failed: ${t.message}",
-            )
+            android.util.Log.w("IncrementalStitcher", "teardown: sharpnessWindow.close failed: ${t.message}")
         }
         // v0.23 — same for the admission policy's running-median
         // allocation (one small C++ object per module instance).
@@ -2580,12 +3000,41 @@ class IncrementalStitcher(
             // Ignore — not critical at teardown.
         }
         captureSessionDir = null
-        // F8.4 — release the static back-pointer so the Frame
-        // Processor plugin sees a clean nil after bridge teardown.
-        // A new bridge will set it again via the init block.
+        // F8.4 — release the static back-pointer so the Frame Processor
+        // plugin sees a clean nil after bridge teardown.  A new bridge will
+        // set it again via the init block.
         if (bridgeInstance === this) {
             bridgeInstance = null
         }
+        // perf-3b item 1 — release the dedicated stitch/refine threads so they
+        // don't accumulate across dev-time RN reloads.  shutdown() (not
+        // shutdownNow()) lets an in-flight stitch finish rather than
+        // interrupting it mid-cv::Stitcher.
+        try { workExecutor.shutdown() } catch (t: Throwable) {
+            android.util.Log.w("IncrementalStitcher", "teardown: workExecutor.shutdown failed: ${t.message}")
+        }
+        try { refineExecutor.shutdown() } catch (t: Throwable) {
+            android.util.Log.w("IncrementalStitcher", "teardown: refineExecutor.shutdown failed: ${t.message}")
+        }
+    }
+
+    /**
+     * RN 0.74+ / New-Architecture teardown hook.  Under bridgeless/New Arch
+     * the framework tears modules down via invalidate() and NEVER calls the
+     * deprecated onCatalystInstanceDestroy().
+     */
+    override fun invalidate() {
+        teardownOnce()
+        super.invalidate()
+    }
+
+    /**
+     * Deprecated pre-0.74 teardown hook, retained for older-RN consumers
+     * (peerDep is RN >= 0.72).  Delegates to the same idempotent teardown.
+     */
+    @Suppress("DEPRECATION")
+    override fun onCatalystInstanceDestroy() {
+        teardownOnce()
         super.onCatalystInstanceDestroy()
     }
 
@@ -2597,6 +3046,35 @@ class IncrementalStitcher(
         reactContext
             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             .emit("IncrementalStateUpdate", state)
+    }
+
+    /**
+     * Emit a "StitchingPhaseChanged" event so the host's JS layer can
+     * pause or resume vision-camera during the stitch.  In non-AR mode
+     * the camera + frame-processor thread continue at 30 fps during
+     * the multi-second stitch, eating CPU the cv::Stitcher worker
+     * needs.  Host code can listen:
+     *
+     *   DeviceEventEmitter.addListener('StitchingPhaseChanged', ({ phase }) => {
+     *     if (phase === 'started') camera.current?.pause();
+     *     if (phase === 'finished') camera.current?.resume();
+     *   });
+     */
+    private fun emitStitchingPhase(phase: String) {
+        try {
+            val payload = Arguments.createMap()
+            payload.putString("phase", phase)
+            reactContext
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit("StitchingPhaseChanged", payload)
+        } catch (t: Throwable) {
+            // Best-effort — don't let an emission failure break the
+            // stitch lifecycle.
+            android.util.Log.w(
+                "IncrementalStitcher",
+                "emitStitchingPhase($phase) failed: ${t.message}",
+            )
+        }
     }
 
     /**
@@ -2619,13 +3097,32 @@ class IncrementalStitcher(
      * frames" but not "currently 92% overlap, need to pan more".
      *
      * Outcome enum: 5 = RejectedOverlap (matches iOS' RLISFrameOutcomeRejectedOverlap).
+     *
+     * Emit throttle is OFF by default (rejectEmitMinIntervalNanos = 0),
+     * matching iOS, which never throttles reject emits.  A host that
+     * needs to cap bridge traffic on an old-arch device can opt in via
+     * the `rejectEmitMinIntervalMs` config key (set in start()).  Accept
+     * events are NEVER throttled — they carry thumbnails the UI must show
+     * immediately.  (The 7df2dba commit's hardcoded 250 ms throttle was
+     * removed: measured placebo, and it staled the overlap-% overlay.)
      */
+    private var lastRejectEmitNanos: Long = 0L
+    /// Min interval between reject emits, nanos.  0 = off (default).
+    /// Set from the `rejectEmitMinIntervalMs` start() config key.
+    private var rejectEmitMinIntervalNanos: Long = 0L
     private fun emitBatchKeyframeRejectState(
         decision: KeyframeGateDecision,
         keyframeCount: Int,
         keyframeMax: Int,
         isLandscape: Boolean,
     ) {
+        // Optional time-based throttle (default off): skip if an interval
+        // is configured and too little time has passed since the last emit.
+        val now = System.nanoTime()
+        if (rejectEmitMinIntervalNanos > 0L &&
+            now - lastRejectEmitNanos < rejectEmitMinIntervalNanos) return
+        lastRejectEmitNanos = now
+
         val state = Arguments.createMap()
         state.putNull("panoramaPath")
         state.putInt("width", 0)

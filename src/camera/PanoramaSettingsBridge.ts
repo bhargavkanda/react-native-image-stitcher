@@ -70,6 +70,12 @@ export type NativeConfigDict = Record<string, boolean | number | string>;
  */
 export function panoramaSettingsToNativeConfig(
   s: PanoramaSettings,
+  // perf-3a change 2 — the frame source for THIS capture. For
+  // 'frameProcessor' the worklet does the eval decimation (before the
+  // packNV21 copy), so native's cadence is forced to 1 and the effective
+  // product cadence is unchanged. 'arSession'/undefined keep native-side
+  // decimation (AR frames never pass through the worklet).
+  opts?: { frameSourceMode?: 'frameProcessor' | 'arSession' },
 ): NativeConfigDict {
   const cfg: NativeConfigDict = {
     // ── Cross-cutting ────────────────────────────────────────────
@@ -81,6 +87,25 @@ export function panoramaSettingsToNativeConfig(
     blenderType: s.stitcher.blenderType,
     seamFinderType: s.stitcher.seamFinderType,
     enableMaxInscribedRectCrop: s.stitcher.enableMaxInscribedRectCrop,
+    // perf-3b — PANORAMA attempt-1 range matcher (0 = off = full
+    // pairwise, byte-identical).  Always serialised with the default
+    // filled in (same canonical-defaults policy as the flow knobs),
+    // so a mid-session change doesn't slip back to a stale native
+    // value.  Native reads configOverrides["stitchRangeMatcherWidth"]
+    // and clamps ≥ 0.
+    stitchRangeMatcherWidth: s.stitcher.rangeMatcherWidth ?? 0,
+    // perf-3b item 1 — OpenCV thread count (0 = auto-multi).  Native reads
+    // configOverrides["stitchNumThreads"]; clamps ≥ 0.
+    stitchNumThreads: s.stitcher.numThreads ?? 0,
+    // perf-4a — compose-resolution adaptation mode. Always serialised
+    // (canonical defaults on the wire): 'off' by default, so an opted-out
+    // capture is byte-identical. Native reads these from configOverrides at
+    // start(). 'off' | 'always' (deterministic) | 'measured' (self-tuning).
+    adaptiveStitchMode: s.stitcher.adaptiveStitchMode ?? 'off',
+    adaptiveMinOutputMP: s.stitcher.adaptiveMinOutputMP ?? 0.6,
+    adaptiveSlowStitchMsPerFrame: s.stitcher.adaptiveSlowStitchMsPerFrame ?? 1000,
+    // RCA diagnostic — write pack.json next to the keyframes on finalize.
+    debugPack: s.stitcher.debugPack ?? false,
 
     // ── FrameSelectionSettings → KeyframeGate knobs ──────────────
     frameSelectionMode: s.frameSelection.mode,
@@ -148,7 +173,12 @@ export function panoramaSettingsToNativeConfig(
   // discussion of why this matters.
   const f = s.frameSelection.flow ?? DEFAULT_FLOW_GATE_SETTINGS;
   cfg.flowNoveltyPercentile = f.noveltyPercentile;
-  cfg.flowEvalEveryNFrames = f.evalEveryNFrames;
+  // perf-3a change 2 — frameProcessor mode: the worklet decimates (every
+  // Nth frame, before packNV21), so native runs its gate every frame it
+  // receives (cadence 1). Product = N_worklet × 1 = N, unchanged. AR mode
+  // keeps native-side decimation (AR frames bypass the worklet).
+  cfg.flowEvalEveryNFrames =
+    opts?.frameSourceMode === 'frameProcessor' ? 1 : f.evalEveryNFrames;
   cfg.flowMaxTranslationCm = f.maxTranslationCm;
   cfg.flowMaxCorners = f.maxCorners;
   cfg.flowQualityLevel = f.qualityLevel;

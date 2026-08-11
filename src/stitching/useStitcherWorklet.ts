@@ -165,9 +165,21 @@ export interface UseStitcherWorkletOptions {
 
   /**
    * Evaluate the plugin every Nth producer-thread frame.  Default 1
-   * (every frame).
+   * (every frame).  Clamped to [1, 10] to match native's cadence clamp
+   * (IncrementalStitcher.kt `evalCadence.coerceIn(1, 10)`) so an out-of-range host setting
+   * keeps its effective cadence once the throttle runs JS-side.
    */
   evalEveryNFrames?: number;
+
+  /**
+   * perf-3a change 1 — initial ingest-gate state.  `true` (default) =
+   * gate OPEN, so a bare `useStitcherWorklet()` behaves exactly as before
+   * (every frame runs pose synthesis + `plugin.call`).  Managed
+   * integrations (`useFrameProcessorDriver`) pass `false` and drive the
+   * gate via `setActive()` so idle / stitch-phase frames cost only a
+   * shared-value read instead of a full JSI→JNI plugin dispatch.
+   */
+  initialIngestActive?: boolean;
 }
 
 
@@ -201,6 +213,25 @@ export interface StitcherWorkletHandle {
   reset: () => void;
 
   /**
+   * perf-3a change 1 — open/close the ingest gate.  While closed, `call`
+   * returns after a single shared-value read (no pose synthesis, no
+   * plugin dispatch) and the gyro handler skips its accumulator writes.
+   * The native `AtomicBoolean` fast-exit stays authoritative; this is the
+   * cheap JS-side gate and may lag native by a frame or two.  Bare-hook
+   * users leave the gate open (`initialIngestActive` default `true`);
+   * `useFrameProcessorDriver` drives it from `start()`/`stop()`.
+   */
+  setActive: (active: boolean) => void;
+
+  /**
+   * perf-3a change 2 — zero ONLY the decimation frame counter (not pose),
+   * re-anchoring the every-Nth grid. Managed drivers call this right after
+   * the native `start()` await so the grid anchors at native-ingest-enable
+   * (frame-identical decimation) despite the gate opening before the await.
+   */
+  resetCadence: () => void;
+
+  /**
    * `true` once the JSI Frame Processor plugin
    * (`cv_flow_gate_process_frame`) has resolved.  Before this flips
    * `true`, `call(frame)` is a no-op (the plugin reference is
@@ -221,7 +252,11 @@ export function useStitcherWorklet(
     fovHorizDegrees = 65,
     fovVertDegrees = 50,
     evalEveryNFrames = 1,
+    initialIngestActive = true,
   } = options;
+
+  // Clamp cadence to [1, 10], matching native (IncrementalStitcher.kt `evalCadence.coerceIn(1, 10)`).
+  const clampEval = (n: number): number => Math.min(10, Math.max(1, Math.floor(n)));
 
   // ── Plugin acquisition ──────────────────────────────────────────
   //
@@ -258,7 +293,9 @@ export function useStitcherWorklet(
   const sharedPitch = useSharedValue(0);
   const sharedRoll = useSharedValue(0);
   const sharedFrameCounter = useSharedValue(0);
-  const sharedEvalEveryN = useSharedValue(Math.max(1, evalEveryNFrames));
+  const sharedEvalEveryN = useSharedValue(clampEval(evalEveryNFrames));
+  // perf-3a change 1 — ingest gate (worklet reads it lock-free).
+  const sharedIngestActive = useSharedValue(initialIngestActive);
   const sharedFxNumerator = useSharedValue(
     1.0 / (2.0 * Math.tan((fovHorizDegrees * Math.PI / 180) / 2)),
   );
@@ -268,7 +305,7 @@ export function useStitcherWorklet(
 
   // Prop-derived shared values stay in sync via cheap effects.
   useEffect(() => {
-    sharedEvalEveryN.value = Math.max(1, evalEveryNFrames);
+    sharedEvalEveryN.value = clampEval(evalEveryNFrames);
   }, [evalEveryNFrames, sharedEvalEveryN]);
   useEffect(() => {
     sharedFxNumerator.value =
@@ -299,6 +336,13 @@ export function useStitcherWorklet(
         }
         const dt = (now - lastGyroAt) / 1000.0;
         lastGyroAt = now;
+        // perf-3a change 1 — while the gate is closed, skip the three
+        // accumulator writes (they'd be dead work: reset() zeros the
+        // accumulators at every capture start, so idle accumulation is
+        // provably discarded). Keep advancing lastGyroAt above so the
+        // first sample after reactivation doesn't integrate a giant
+        // idle-gap dt. Bare-hook users keep the gate open → unchanged.
+        if (!sharedIngestActive.value) return;
         sharedYaw.value += y * dt;
         sharedPitch.value += x * dt;
         sharedRoll.value += z * dt;
@@ -311,7 +355,7 @@ export function useStitcherWorklet(
     return () => {
       sub.unsubscribe();
     };
-  }, [gyroIntervalMs, sharedYaw, sharedPitch, sharedRoll]);
+  }, [gyroIntervalMs, sharedYaw, sharedPitch, sharedRoll, sharedIngestActive]);
 
   // ── Explicit reset (for per-capture pose zero-ing) ──────────────
   const reset = useCallback(() => {
@@ -320,6 +364,22 @@ export function useStitcherWorklet(
     sharedRoll.value = 0;
     sharedFrameCounter.value = 0;
   }, [sharedYaw, sharedPitch, sharedRoll, sharedFrameCounter]);
+
+  // perf-3a change 1 — open/close the ingest gate (see the handle doc).
+  const setActive = useCallback((active: boolean) => {
+    sharedIngestActive.value = active;
+  }, [sharedIngestActive]);
+
+  // perf-3a change 2 (review fix) — zero ONLY the decimation frame counter,
+  // re-anchoring the {0, N, 2N, …} grid without touching pose. The managed
+  // driver opens the gate BEFORE the native-start await (so no keyframe is
+  // lost while native enables), but that lets frames delivered during the
+  // await advance the counter; calling this right AFTER the await re-anchors
+  // the grid at native-ingest-enable, matching native's old post-enable
+  // anchor → frame-identical decimation (not just a bounded phase offset).
+  const resetCadence = useCallback(() => {
+    sharedFrameCounter.value = 0;
+  }, [sharedFrameCounter]);
 
   // ── Worklet body ────────────────────────────────────────────────
   //
@@ -361,10 +421,21 @@ export function useStitcherWorklet(
     // does — see `CameraFrameHostObject.mm`) get short-circuited.
     if ((frame as CameraFrame).source === 'ar') return;
 
-    // Throttle (verbatim from useFrameProcessorDriver).
-    sharedFrameCounter.value += 1;
+    // perf-3a change 1 — ingest gate: while closed, skip the entire
+    // per-frame cost (pose synthesis + the 13-key params object + the
+    // JSI→JNI plugin dispatch), paying only this shared-value read. The
+    // gate check sits BEFORE the counter increment so idle/gated frames
+    // don't advance the cadence grid (reset() re-anchors it at every
+    // capture start regardless). Bare-hook users keep the gate open
+    // (initialIngestActive default true) → this is a no-op for them.
+    if (!sharedIngestActive.value) return;
+
+    // Throttle (0-based: frame 0 always evaluates for any N; matches
+    // native's (consumeFrameCounter - 1) % evalCadence gate).
+    const c = sharedFrameCounter.value;
+    sharedFrameCounter.value = c + 1;
     const N = sharedEvalEveryN.value;
-    if (N > 1 && (sharedFrameCounter.value % N) !== 0) return;
+    if (N > 1 && (c % N) !== 0) return;
 
     // Pose synthesis (verbatim from useFrameProcessorDriver).
     const halfYaw = sharedYaw.value / 2;
@@ -404,6 +475,7 @@ export function useStitcherWorklet(
     plugin,
     sharedFrameCounter,
     sharedEvalEveryN,
+    sharedIngestActive,
     sharedYaw,
     sharedPitch,
     sharedRoll,
@@ -411,5 +483,5 @@ export function useStitcherWorklet(
     sharedFyNumerator,
   ]);
 
-  return { call, reset, isReady: plugin != null };
+  return { call, reset, setActive, resetCadence, isReady: plugin != null };
 }

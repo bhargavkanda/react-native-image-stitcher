@@ -118,6 +118,15 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         // in image_stitcher_jni.cpp — order/count/type must line up
         // exactly or it's an UnsatisfiedLinkError at runtime.
         useManualPipeline: Boolean,
+        // perf-3b — PANORAMA attempt-1 feature-matcher range (0 = off =
+        // full-pairwise, byte-identical to before).  Appended LAST after
+        // useManualPipeline — mirror this exact position in the JNI C
+        // signature.
+        rangeMatcherWidth: Int,
+        // perf-3b item 1 — OpenCV thread count (0 = auto-multi, 1 = single
+        // kill-switch).  Appended LAST after rangeMatcherWidth — mirror this
+        // exact position in the JNI C signature.
+        numThreads: Int,
     ): IntArray
 
     // 2026-06-15 — getter for the last successful stitch's debugSummary
@@ -203,6 +212,17 @@ class BatchStitcher(reactContext: ReactApplicationContext)
                     // Direct @ReactMethod batch stitch → MANUAL pipeline
                     // (the memory-safe default; mirrors iOS).
                     true,
+                    // perf-3b range matcher is PANORAMA-high-level only; this
+                    // manual path never uses it → 0 (off).
+                    0,
+                    // perf-3b item 1 — this direct @ReactMethod path runs on
+                    // the migrating Dispatchers.Default (below), so keep it
+                    // single-threaded (1): no TBB worker pool → no per-worker-
+                    // TLS creep on repeated CLI/test calls.  Behaviour-identical
+                    // to the pre-item-1 global setNumThreads(1).  The fleet
+                    // finalize path (IncrementalStitcher, pinned thread) gets
+                    // auto-multi via stitchSync's default.
+                    1,
                 )
                 val duration = System.currentTimeMillis() - start
                 // 2026-05-15 (D) — dims layout from native JNI:
@@ -875,6 +895,14 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         // manual path without re-stating it.  The refine/high-level
         // path passes false to drive the stock cv::Stitcher pipeline.
         useManualPipeline: Boolean = true,
+        // perf-3b — PANORAMA attempt-1 feature-matcher range width.
+        // 0 (default) = OFF = full-pairwise, byte-identical to before.
+        // > 0 matches only keyframes within |i-j| < width (linear pans).
+        rangeMatcherWidth: Int = 0,
+        // perf-3b item 1 — OpenCV thread count.  0 (default) = auto-multi
+        // (safe here: this path is dispatched on a STABLE dedicated thread
+        // by IncrementalStitcher).  1 = single kill-switch.  N = explicit.
+        numThreads: Int = 0,
     ): IntArray {
         ensureNativeStitcher()
         val dims = nativeStitchFramePaths(
@@ -891,6 +919,8 @@ class BatchStitcher(reactContext: ReactApplicationContext)
             compositingResolMP,
             stitchMode,
             useManualPipeline,
+            rangeMatcherWidth,
+            numThreads,
         )
         // Capture the run's debugSummary (pipe/warp/route/seam/blend) for the
         // DEV overlay; best-effort so a getter hiccup never fails the stitch.
