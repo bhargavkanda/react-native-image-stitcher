@@ -71,6 +71,10 @@ let package = Package(
         // (no UIKit/React), so the sidecar container codec round-trips
         // under `swift test` on macOS.
         "PhotoDepthSidecar.swift",
+        // RNSPhotoCapturePayload.swift — Foundation-only merge rule for
+        // photo-capture-plugin payloads; the ARKit-dependent protocol +
+        // registry stay out (RNSPhotoCapturePlugin.swift, CocoaPods-only).
+        "RNSPhotoCapturePayload.swift",
         // KeyframeGate.swift depends on `KeyframeGateBridge` (ObjC
         // class in .mm) and `RNSARFramePose` (from a UIKit-using
         // Swift file), so it doesn't compile standalone under

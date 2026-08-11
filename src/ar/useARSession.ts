@@ -100,8 +100,16 @@ export interface UseARSessionReturn {
    * Snapshot the per-frame pose log captured since the last
    * `start()`.  Used by the stitcher and measurement APIs after
    * recording stops.
+   *
+   * `sinceNs` (optional): a watermark in NANOSECONDS on the AR clock (the
+   * same clock `FramePose.timestampMs` is expressed in, ×10⁶).  When set,
+   * only poses whose timestamp is STRICTLY AFTER the watermark are
+   * returned — an incremental poller passes the last pose's
+   * `timestampMs * 1e6` and never re-reads entries it already has.
+   * Omitted (or ≤ 0) = the full log, exactly as before the parameter
+   * existed.
    */
-  getFramePoses: () => Promise<FramePose[]>;
+  getFramePoses: (sinceNs?: number) => Promise<FramePose[]>;
   /**
    * Drop everything in the pose log.  Call before each new
    * panorama capture so the log doesn't carry stale poses from
@@ -117,6 +125,10 @@ interface NativeARSessionModule {
   stop(): Promise<void>;
   getState(): Promise<{ isRunning: boolean; trackingState: number }>;
   snapshotPoseLog(): Promise<FramePose[]>;
+  /** Watermark accessor — poses strictly after `sinceNs`.  Optional at the
+   *  type level so the JS layer can degrade against an older native binary
+   *  that predates the method (see `getFramePoses` below). */
+  getFramePoses?(sinceNs: number): Promise<FramePose[]>;
   clearPoseLog(): Promise<void>;
 }
 
@@ -217,10 +229,25 @@ export function useARSession(): UseARSessionReturn {
     setTrackingState(ARTrackingState.NotAvailable);
   }, [native, stopPolling]);
 
-  const getFramePoses = useCallback(async (): Promise<FramePose[]> => {
-    if (!native) return [];
-    return native.snapshotPoseLog();
-  }, [native]);
+  const getFramePoses = useCallback(
+    async (sinceNs?: number): Promise<FramePose[]> => {
+      if (!native) return [];
+      // No watermark (or a non-filtering one) → the historical full-log
+      // call, byte-identical to before `sinceNs` existed.
+      if (sinceNs === undefined || sinceNs <= 0) {
+        return native.snapshotPoseLog();
+      }
+      // Watermarked read — native filters when it can; against an older
+      // binary that predates `getFramePoses` we fetch the full log and
+      // apply the identical strictly-after filter here.
+      if (typeof native.getFramePoses === 'function') {
+        return native.getFramePoses(sinceNs);
+      }
+      const all = await native.snapshotPoseLog();
+      return all.filter((p) => p.timestampMs * 1e6 > sinceNs);
+    },
+    [native],
+  );
 
   const clearPoseLog = useCallback(async (): Promise<void> => {
     if (!native) return;

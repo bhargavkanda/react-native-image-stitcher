@@ -370,6 +370,21 @@ public final class RNSARSessionBridge: RCTEventEmitter {
         resolver(nil)
     }
 
+    /// Pose-ledger accessor with a watermark: resolves every pose whose
+    /// frame timestamp is STRICTLY AFTER `sinceNs` (nanoseconds on the AR
+    /// clock — `timestampMs * 1e6`), in capture order.  `0` = the full log
+    /// (same as `snapshotPoseLog`).
+    @objc(getFramePoses:resolver:rejecter:)
+    public func getFramePoses(
+        sinceNs: NSNumber,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        let poses = RNSARSession.shared.getFramePoses(
+            sinceNs: sinceNs.doubleValue)
+        resolver(poses.map { $0.asDictionary() })
+    }
+
     // MARK: - Phase 5: AR-backed photo + video capture
 
     /// `options` keys: `path` (required), `quality` (optional, 0-100,
@@ -388,10 +403,16 @@ public final class RNSARSessionBridge: RCTEventEmitter {
         // "portrait" if absent, preserving pre-v0.12 behavior for
         // any caller that hasn't been updated.
         let orientation = (options["orientation"] as? String) ?? "portrait"
+        // Forward the FULL options dictionary: registered photo-capture
+        // plugins (`RNSPhotoCapturePlugin`) receive it verbatim, so hosts
+        // can route per-call flags to their plugins without a library
+        // change.  With no plugin registered the extra keys are never read.
+        let allOptions = (options as? [String: Any]) ?? [:]
         RNSARSession.shared.takePhoto(
             toPath: path,
             quality: quality,
-            orientation: orientation
+            orientation: orientation,
+            options: allOptions
         ) { result, error in
             if let error = error {
                 rejecter("ar-photo-failed", error.localizedDescription, error)

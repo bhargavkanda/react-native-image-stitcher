@@ -46,6 +46,7 @@ import { ensureStitcherProxyInstalled } from '../stitching/ensureStitcherProxyIn
 import type { CameraFrameProcessor } from '../stitching/CameraFrame';
 import type { ARFrameMeta, ARPluginResult } from '../stitching/ARFrameMeta';
 import type { AROverlay } from '../stitching/AROverlay';
+import type { FramePose } from '../ar/useARSession';
 import {
   createAROverlayController,
   type AROverlayMethods,
@@ -280,12 +281,35 @@ export interface ARCameraViewHandle extends AROverlayMethods {
       | 'portrait-upside-down'
       | 'landscape-left'
       | 'landscape-right';
+    /**
+     * Photo-capture plugin passthrough: EVERY extra key is forwarded
+     * verbatim to the native takePhoto options, where registered
+     * `RNSPhotoCapturePlugin`s receive the full dictionary.  Lets a host
+     * route per-call flags to its own native plugin without a library
+     * change.  With no plugin registered, extra keys are never read.
+     */
+    [pluginOption: string]: unknown;
   }) => Promise<{
     path: string;
     width: number;
     height: number;
     isMirrored: boolean;
     isRawPhoto: boolean;
+    /**
+     * AR camera pose of the EXACT frame whose pixels became the photo —
+     * the same shape (full intrinsics included) as the per-frame pose
+     * ledger (`getFramePoses`), built by one shared native builder.
+     * Intrinsics/dims describe the AR camera's native (unoriented) frame,
+     * not the oriented JPEG dims above.  Absent only when the native pose
+     * read failed (a failed pose never blocks the photo).
+     */
+    pose?: FramePose;
+    /**
+     * Registered photo-capture plugins may merge additional fields into
+     * the result (the library's own keys always win).  Typed open so a
+     * host can read its plugin's fields without casting through `any`.
+     */
+    [pluginField: string]: unknown;
   }>;
   /**
    * Begin recording AR frames into an mp4.  Mirrors vision-camera's
@@ -630,7 +654,13 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
             'ARCameraView.takePhoto: native RNSARSession module not registered',
           );
         }
+        // Spread FIRST so the library-owned keys below always win, then
+        // pin path/quality/orientation.  Extra keys ride through verbatim
+        // for registered photo-capture plugins (see the handle's option
+        // docs); with no plugin registered the native side never reads
+        // them, so pre-existing callers are behaviour-identical.
         return native.takePhoto({
+          ...options,
           path: '',
           quality: options.quality ?? 90,
           orientation: options.orientation ?? 'portrait',
