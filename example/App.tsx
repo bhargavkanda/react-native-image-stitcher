@@ -333,13 +333,13 @@ function App(): React.JSX.Element {
   //
   //   iOS  — only the seam finder is plumbed on the iOS refine path, so we
   //          ablate graphcut (live baseline) vs voronoi (the speed variant).
-  //   Android — all three refine-ablatable levers are one-at-a-time'd from a
-  //          "legacy" (all-off) baseline: +range-matcher, +single-thread,
-  //          +voronoi, then the RC default and RC+voronoi endpoints.  Each
-  //          OAT delta vs `legacy` is that lever's contribution; `rc-voronoi`
-  //          vs `rc-default` is voronoi's marginal gain on the shipped config.
-  //          (adaptive-compose is a finalize-only knob, not refine-ablatable —
-  //          it's excluded here; its effect shows only in the live output.)
+  //   Android — all FOUR refine-ablatable levers are one-at-a-time'd from an
+  //          all-off "legacy" baseline: +range-matcher, +single-thread,
+  //          +voronoi, +lowres (compose-downscale = the adaptive-resolution
+  //          floor), then an `rc-all` everything-on endpoint.  Each OAT delta
+  //          vs `legacy` is that lever's contribution; `rc-all` vs `legacy` is
+  //          the combined gain.  The levers matter most at 8-10 keyframes (the
+  //          example raises maxKeyframes to 10) — they're ~flat at 5.
   //
   // Wall-time per variant is JS (Date.now) — the same fixed bridge overhead on
   // every variant, so the between-variant DELTA is the native cost difference.
@@ -375,32 +375,36 @@ function App(): React.JSX.Element {
           // eslint-disable-next-line no-console
           console.warn('[pack] input/live copy failed (continuing to ablation)', e);
         }
-        // 3) perf ablation — same frames, high-level PANORAMA path.  seam =
-        //    seam finder; rw = stitchRangeMatcherWidth (0 = full-pairwise);
-        //    nt = stitchNumThreads (0 = auto-multi, 1 = single).  rw/nt are
-        //    Android-only levers (iOS ignores them → its two variants differ
-        //    only in seam, exactly what we want there).
+        // 3) perf ablation — same frames, high-level PANORAMA path.  Four
+        //    levers, one-at-a-time from an all-off `legacy` baseline so each
+        //    delta attributes ONE lever, plus an `rc-all` everything-on endpoint:
+        //    seam = seam finder; rw = stitchRangeMatcherWidth (0 = full-pairwise);
+        //    nt = stitchNumThreads (0 = auto-multi, 1 = single); cm =
+        //    compositingResolMP (1.0 = full, 0.6 = the adaptive-resolution floor).
+        //    All four are Android-only refine levers; iOS ignores rw/nt/cm, so
+        //    its two variants differ only in the seam finder.
         type Variant = {
           name: string;
           seam: 'graphcut' | 'voronoi';
           rw: number;
           nt: number;
+          cm: number;
         };
         const androidVariants: Variant[] = [
-          { name: 'legacy', seam: 'graphcut', rw: 0, nt: 0 }, // all-off baseline
-          { name: 'rangematch', seam: 'graphcut', rw: 3, nt: 0 }, // +range-matcher
-          { name: 'singlethread', seam: 'graphcut', rw: 0, nt: 1 }, // +single-thread
-          { name: 'voronoi', seam: 'voronoi', rw: 0, nt: 0 }, // +voronoi
-          { name: 'rc-default', seam: 'graphcut', rw: 3, nt: 1 }, // shipped RC config
-          { name: 'rc-voronoi', seam: 'voronoi', rw: 3, nt: 1 }, // RC + voronoi
+          { name: 'legacy', seam: 'graphcut', rw: 0, nt: 0, cm: 1.0 }, // all-off baseline
+          { name: 'rangematch', seam: 'graphcut', rw: 3, nt: 0, cm: 1.0 }, // +range-matcher
+          { name: 'singlethread', seam: 'graphcut', rw: 0, nt: 1, cm: 1.0 }, // +single-thread
+          { name: 'voronoi', seam: 'voronoi', rw: 0, nt: 0, cm: 1.0 }, // +voronoi
+          { name: 'lowres', seam: 'graphcut', rw: 0, nt: 0, cm: 0.6 }, // +compose-downscale (adaptive floor)
+          { name: 'rc-all', seam: 'voronoi', rw: 3, nt: 1, cm: 0.6 }, // everything on
         ];
         const iosVariants: Variant[] = [
-          { name: 'graphcut', seam: 'graphcut', rw: 0, nt: 0 },
-          { name: 'voronoi', seam: 'voronoi', rw: 0, nt: 0 },
+          { name: 'graphcut', seam: 'graphcut', rw: 0, nt: 0, cm: 1.0 },
+          { name: 'voronoi', seam: 'voronoi', rw: 0, nt: 0, cm: 1.0 },
         ];
         const variants = Platform.OS === 'android' ? androidVariants : iosVariants;
         for (const v of variants) {
-          const cfg = `seam-${v.seam}_rw${v.rw}_nt${v.nt}`;
+          const cfg = `seam-${v.seam}_rw${v.rw}_nt${v.nt}_cm${v.cm}`;
           const tmp = `${dir}/${packId}__out-${v.name}.jpg`;
           const t0 = Date.now();
           try {
@@ -415,6 +419,7 @@ function App(): React.JSX.Element {
                 seamFinderType: v.seam,
                 stitchRangeMatcherWidth: v.rw,
                 stitchNumThreads: v.nt,
+                compositingResolMP: v.cm,
                 jpegQuality: 90,
               },
             });
@@ -632,6 +637,10 @@ function App(): React.JSX.Element {
           // bundle.  ON = recommended values; OFF = every knob disabled
           // (today's behaviour), so a paired capture isolates the feature.
           frameSelection={{
+            // Raised to 10 (default 6) so a wide pan yields 8-10 keyframes —
+            // the regime where the range-matcher / threading / compose-res
+            // levers actually bite (they're ~flat at 5 frames). Do a WIDER pan.
+            maxKeyframes: 10,
             antiBlur: antiBlurOn
               ? {
                   maxExposureMs: 8,
