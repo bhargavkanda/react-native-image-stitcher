@@ -658,7 +658,10 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
         // pin path/quality/orientation.  Extra keys ride through verbatim
         // for registered photo-capture plugins (see the handle's option
         // docs); with no plugin registered the native side never reads
-        // them, so pre-existing callers are behaviour-identical.
+        // them, so the passthrough itself changes nothing for pre-existing
+        // callers.  (Their RESULT does gain the new additive `pose` field —
+        // that is takePhoto's own pose stamp, present regardless of
+        // plugins; see the handle's result docs.)
         return native.takePhoto({
           ...options,
           path: '',

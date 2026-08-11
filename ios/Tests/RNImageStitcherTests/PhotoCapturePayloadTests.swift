@@ -4,11 +4,17 @@
 // photo-capture-plugin payloads fold into a takePhoto result.
 //
 // The contract under test (see RNSPhotoCapturePayload.swift):
-//   1. no payloads ⇒ the result comes back IDENTICAL (the no-plugin path
-//      adds/removes/changes nothing),
+//   1. no payloads ⇒ the result comes back IDENTICAL — the plugin MERGE is
+//      the identity (the hook adds/removes/changes nothing),
 //   2. plugin fields merge in,
 //   3. the library's own keys always win a collision,
 //   4. between plugins, the FIRST to claim a key wins.
+//
+// SCOPE: clause 1 is a statement about the HOOK, not about the whole
+// takePhoto payload.  The `pose` field is an ADDITIVE takePhoto feature
+// stamped upstream of the merge (RNSARSession.encodeArPhoto), present
+// whether or not any plugin is registered.  The merge neither invents nor
+// strips it — the pose-additivity tests below pin that split explicitly.
 
 import XCTest
 @testable import RNImageStitcher
@@ -26,20 +32,56 @@ final class PhotoCapturePayloadTests: XCTestCase {
         "pose": ["tx": 0.1, "ty": 0.2],
     ]
 
-    func testNoPayloadsIsIdentity() {
+    func testNoPayloadsMergeIsTheIdentity() {
         let merged = RNSPhotoCapturePayload.merge(result: core, payloads: [])
         XCTAssertEqual(
             NSDictionary(dictionary: merged),
             NSDictionary(dictionary: core),
-            "zero plugins must leave the result byte-identical"
+            "zero plugins ⇒ the MERGE must be the identity — the hook " +
+            "adds, removes, and changes nothing in the result it was given"
         )
     }
 
-    func testEmptyPayloadIsIdentity() {
+    func testEmptyPayloadMergeIsTheIdentity() {
         let merged = RNSPhotoCapturePayload.merge(result: core, payloads: [[:]])
         XCTAssertEqual(
             NSDictionary(dictionary: merged),
             NSDictionary(dictionary: core)
+        )
+    }
+
+    // MARK: Pose additivity vs merge identity — the two are SEPARATE.
+    //
+    // `pose` is stamped by takePhoto itself (an additive result field new
+    // relative to earlier releases), upstream of this merge and regardless
+    // of plugin registration.  These tests pin the split: the identity
+    // guarantee is about the hook, and the merge neither invents a `pose`
+    // that takePhoto did not stamp nor strips the one it did.
+
+    func testMergeIdentityDoesNotInventPose() {
+        // A result WITHOUT a pose (e.g. the native pose read failed) passes
+        // through the empty-registry merge with no pose materialised.
+        var poseless = core
+        poseless.removeValue(forKey: "pose")
+        let merged = RNSPhotoCapturePayload.merge(result: poseless, payloads: [])
+        XCTAssertNil(merged["pose"],
+                     "the merge must not invent a pose — pose presence is " +
+                     "decided by takePhoto's own stamp, not by the hook")
+        XCTAssertEqual(
+            NSDictionary(dictionary: merged),
+            NSDictionary(dictionary: poseless)
+        )
+    }
+
+    func testPoseRidesThroughTheIdentityUntouched() {
+        // A result WITH the (unconditionally stamped) pose keeps it —
+        // byte-for-byte — through the empty-registry merge.
+        let merged = RNSPhotoCapturePayload.merge(result: core, payloads: [])
+        XCTAssertEqual(
+            NSDictionary(dictionary: merged["pose"] as? [String: Any] ?? [:]),
+            NSDictionary(dictionary: core["pose"] as? [String: Any] ?? [:]),
+            "the additive pose stamp must survive the no-plugin merge " +
+            "untouched — it is present with or without plugins"
         )
     }
 

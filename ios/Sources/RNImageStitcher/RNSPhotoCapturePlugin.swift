@@ -44,8 +44,11 @@
 // Result merge: the returned dictionary is merged into the takePhoto result
 // via `RNSPhotoCapturePayload.merge` — the library's own keys always win,
 // and between plugins the first to claim a key wins.  With NO plugin
-// registered the library's behaviour (and its result payload) is
-// byte-identical to a build without this hook.
+// registered the merge is the IDENTITY: the hook adds, removes, and changes
+// nothing in the result.  Note the scope of that guarantee: it covers the
+// HOOK, not the whole takePhoto payload.  The `pose` field is a separate,
+// ADDITIVE takePhoto feature stamped on every AR photo result regardless of
+// plugin registration (see `RNSARSession.encodeArPhoto`).
 
 #if canImport(ARKit)
 import ARKit
@@ -122,8 +125,10 @@ public final class RNSPhotoCapturePluginRegistry: NSObject {
 
     /// Whether any plugin is registered.  Cheap gate `takePhoto` checks
     /// BEFORE deciding to forward the ARFrame into the encode path — a
-    /// zero-plugin app never retains the frame past the grab and its result
-    /// payload is byte-identical to the pre-hook library.
+    /// zero-plugin app never retains the frame past the grab, and the hook
+    /// contributes nothing to its result payload (the merge is the
+    /// identity; the additive `pose` stamp is takePhoto's own, not the
+    /// hook's).
     @objc public var isEmpty: Bool {
         lock.lock()
         defer { lock.unlock() }

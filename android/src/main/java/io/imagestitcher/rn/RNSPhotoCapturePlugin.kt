@@ -52,8 +52,11 @@ import java.util.concurrent.CopyOnWriteArrayList
  * keys (`path`, `width`, `height`, `isMirrored`, `isRawPhoto`, `pose`, …)
  * always win, and between plugins the first to claim a key wins — identical
  * to iOS' `RNSPhotoCapturePayload.merge`.  With NO plugin registered the
- * library's behaviour (and its result payload) is byte-identical to a build
- * without this hook.
+ * merge is the IDENTITY: the hook adds, removes, and changes nothing in the
+ * result.  That guarantee covers the HOOK, not the whole takePhoto payload —
+ * the `pose` field is a separate, ADDITIVE takePhoto feature stamped on
+ * every AR photo result regardless of plugin registration (see
+ * [RNSARCameraView.fulfilTakePhoto]).
  */
 interface RNSPhotoCapturePlugin {
     /**

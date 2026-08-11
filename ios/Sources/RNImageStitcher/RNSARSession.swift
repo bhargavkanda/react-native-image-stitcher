@@ -1229,15 +1229,19 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // The pose is captured from the SAME ARFrame that produced the pixels
         // (the shared `makePose(from:)` builder — one shape for the per-frame
         // ledger and this stamp).  It is optional: a nil pose simply omits the
-        // result field, so a failed pose read never blocks the photo.
+        // result field, so a failed pose read never blocks the photo.  The
+        // stamp is a feature of takePhoto ITSELF: it rides on every AR photo
+        // result, plugins or none — it is an ADDITIVE result field relative
+        // to earlier releases, deliberately outside the plugin hook's no-op
+        // guarantee.
         //
         // Photo-capture plugins (`RNSPhotoCapturePluginRegistry`): when at
         // least one plugin is registered, the SAME ARFrame is forwarded so
         // `encodeArPhoto` can hand it to `photoCaptured(frame:photoPath:
         // options:)` after the JPEG is written.  With NO plugin registered the
         // frame is NOT forwarded (nil) and nothing is retained beyond the
-        // pixel buffer the encode already holds — the zero-plugin path is
-        // byte-identical to the pre-hook library.
+        // pixel buffer the encode already holds — the hook then contributes
+        // nothing to the result (its merge is the identity).
         let wantPluginFrame = !RNSPhotoCapturePluginRegistry.shared.isEmpty
         let encode: (CVPixelBuffer, RNSARFramePose?, ARFrame?) -> Void = {
             [weak self] pixelBuffer, pose, pluginFrame in
@@ -1355,7 +1359,10 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             // AR camera pose at capture time — same shape as the per-frame
             // pose ledger (one shared `makePose(from:)` builder).  The
             // intrinsics/dims are the AR camera's native (unoriented) frame,
-            // not the oriented JPEG dims above.
+            // not the oriented JPEG dims above.  Stamped UNCONDITIONALLY (an
+            // additive result field, new relative to earlier releases) —
+            // presence of `pose` does not depend on plugin registration and
+            // is not covered by the plugin hook's no-op guarantee below.
             if let pose = pose {
                 out["pose"] = pose.asDictionary()
             }
@@ -1364,8 +1371,8 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             // (so a plugin may read it / write sidecar files beside it) and
             // BEFORE the promise resolves (so merged fields always describe
             // files that exist).  `pluginFrame` is nil when no plugin is
-            // registered — this branch then never runs and the result dict
-            // is byte-identical to the pre-hook library.
+            // registered — this branch then never runs and the HOOK leaves
+            // the result dict untouched (its merge is the identity).
             //
             // THREADING / BUDGET: this runs on the same background thread
             // that just wrote the multi-MB JPEG (never the main thread, never

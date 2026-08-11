@@ -640,6 +640,10 @@ class RNSARCameraView @JvmOverloads constructor(
                 // per-frame pose ledger (one shared [makeFramePose]
                 // builder; iOS `encodeArPhoto` parity).  Intrinsics/dims
                 // are the AR camera's native frame, not the rotated JPEG.
+                // Stamped UNCONDITIONALLY: an additive result field (new
+                // relative to earlier releases) that rides on every AR
+                // photo, plugins or none — deliberately outside the plugin
+                // hook's no-op guarantee below.
                 putMap("pose", makeFramePose(frame.camera, frame.timestamp).toWritableMap())
             }
             // Photo-capture plugins — called synchronously with the EXACT
@@ -647,8 +651,9 @@ class RNSARCameraView @JvmOverloads constructor(
             // resolves.  Runs on this GL thread: plugin cost adds to the
             // promise latency AND stalls the render loop, so plugins must be
             // cheap and must NOT retain the Frame (see the
-            // [RNSPhotoCapturePlugin] contract).  Registry-empty = zero work
-            // and a byte-identical result payload.
+            // [RNSPhotoCapturePlugin] contract).  Registry-empty = zero
+            // plugin work and an untouched result map (the hook's merge is
+            // the identity).
             if (!RNSPhotoCapturePluginRegistry.isEmpty) {
                 RNSPhotoCapturePluginRegistry.invoke(
                     frame,

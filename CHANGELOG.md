@@ -14,6 +14,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [Unreleased]
+
+### Added
+
+- **AR `takePhoto` results now carry a `pose` field (both platforms).**
+  The AR camera pose of the exact frame whose pixels became the photo —
+  the same shape (full intrinsics included) as the per-frame pose ledger
+  (`getFramePoses`), built by the same shared native builder.  This is an
+  **additive result field**: it is stamped on every AR photo regardless of
+  whether any photo-capture plugin is registered, so results are not
+  byte-identical to previous releases even with an empty plugin registry.
+  Pre-existing result fields (`path`, `width`, `height`, `isMirrored`,
+  `isRawPhoto`) are unchanged; on iOS a failed pose read omits the field
+  rather than failing the photo.  The photo-capture plugin hook's own
+  no-op guarantee is separate and still holds: with no plugin registered
+  the hook's merge is the identity (it adds, removes, and changes
+  nothing).
+
 ## [0.21.0] — 2026-07-03
 
 ### Added
