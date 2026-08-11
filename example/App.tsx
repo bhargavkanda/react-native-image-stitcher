@@ -24,6 +24,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Modal,
+  Platform,
   Pressable,
   SafeAreaView,
   StatusBar,
@@ -45,6 +46,9 @@ import {
 import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
+  copyFile,
+  moveFile,
+  getDefaultCaptureDir,
   getIncrementalNativeModule,
   subscribeIncrementalState,
   useKeyframeStream,
@@ -132,15 +136,14 @@ function App(): React.JSX.Element {
   // the picked video format ≥1280.  The capture format is chosen at mount,
   // so we key the <Camera> on this to force a clean re-pick when flipped.
   const [kfQuality, setKfQuality] = useState(true);
-  // v0.23 anti-blur — one toggle per change so each can be A/B'd on-device.
-  // All default ON (the branch's showcase); flip OFF to compare against
-  // today's behaviour. Exposure cap is a capture-FORMAT change, so it's in
-  // the <Camera> key (clean re-pick on flip); the other three are read at the
-  // start of each capture, so they take effect on the NEXT pano after a flip.
-  const [abExposureCap, setAbExposureCap] = useState(true); // 8 ms ↔ off
-  const [abMotionGate, setAbMotionGate] = useState(true);   // 1.0 rad/s ↔ off
-  const [abSharpFloor, setAbSharpFloor] = useState(true);   // 0.6× median ↔ off
-  const [abHighFps, setAbHighFps] = useState(true);         // ≥60 fps AR format
+  // v0.23 anti-blur — ONE high-level toggle.  This is a capture-MECHANISM
+  // feature (it changes which frames the engine accepts), so an honest A/B
+  // needs two separate captures — flip it, capture, flip back, capture.  ON =
+  // the recommended bundle (8 ms exposure cap, 1.0 rad/s motion gate, 0.6×
+  // softness floor, high-fps format); OFF disables every knob (byte-identical
+  // to pre-anti-blur behaviour).  The exposure cap is a capture-FORMAT change,
+  // so the <Camera> key includes this to force a clean format re-pick on flip.
+  const [antiBlurOn, setAntiBlurOn] = useState(true);
 
   // v0.13.0 — controlled flash state demo.  The host owns the
   // `'on' | 'off'` value; the built-in flash button drives the
@@ -170,13 +173,27 @@ function App(): React.JSX.Element {
   // `src/stitching/useKeyframeStream.ts` for the AcceptedKeyframe
   // contract + an OCR-plugin example.
   // v0.10.0 — also collect each keyframe path into a ref so the
-  // Re-refine button below can pass them straight to
-  // `module.refinePanorama(...)`.  Cleared whenever a new panorama
-  // capture starts (onCaptureSourceChange to panorama mode) or when
-  // the preview is dismissed (effectively a fresh session).
+  // Re-refine button below (and the auto A/B pack) can pass them straight
+  // to `module.refinePanorama(...)`.  RESET at the start of each panorama:
+  // `kf.index === 0` is the first keyframe of a fresh capture (zero-based
+  // per panorama), so we clear then — this is robust to abandoned captures
+  // AND back-to-back captures (the pano flow never opens the photo-only
+  // preview, so we must NOT rely on closePreview to clear it).
   const collectedKeyframesRef = useRef<string[]>([]);
+  // Serialise the auto A/B packs: each pack runs 2 (iOS) or 6 (Android) heavy
+  // re-stitches, and the native stitcher serialises stitches on a global
+  // mutex/queue — so if two packs overlapped, one's `await` would block on the
+  // other's stitch and the JS wall-times (the whole point) would be inflated.
+  // Chaining guarantees at most one pack runs at a time, contention-free.
+  const packChainRef = useRef<Promise<void>>(Promise.resolve());
+  // Monotonic counter → collision-proof packIds even if two captures land in
+  // the same millisecond (Date.now alone is not unique enough).
+  const packSeqRef = useRef(0);
   useKeyframeStream(
     useCallback((kf: AcceptedKeyframe) => {
+      // Fresh capture → drop the previous capture's keyframes so a pack never
+      // re-stitches a mix of two unrelated panoramas.
+      if (kf.index === 0) collectedKeyframesRef.current = [];
       collectedKeyframesRef.current.push(kf.jpegPath);
       // eslint-disable-next-line no-console
       console.log('[example] useKeyframeStream', {
@@ -300,6 +317,126 @@ function App(): React.JSX.Element {
     return () => clearTimeout(id);
   }, [refine]);
 
+  // ── Auto A/B debug pack ──────────────────────────────────────────────
+  // On every PANORAMA capture, drop a self-contained pack into the default
+  // capture dir so it can be pulled off-device and analysed:
+  //
+  //   pack-<ts>__ab-<on|off>__kf-NN.jpg               the input keyframes
+  //   pack-<ts>__ab-<on|off>__live.jpg                the live output
+  //   pack-<ts>__ab-<on|off>__out-<v>__<cfg>__<ms>ms.jpg   per-variant re-stitch
+  //
+  // The ab-on / ab-off tag comes from the anti-blur toggle — a capture-
+  // MECHANISM change (different frames), so its A/B is the paired capture
+  // (flip, shoot, flip, shoot).  The per-variant re-stitches are the PERF
+  // ablation: SAME frames, the high-level PANORAMA path (identical to live),
+  // varying only the perf levers so each one's contribution is attributable.
+  //
+  //   iOS  — only the seam finder is plumbed on the iOS refine path, so we
+  //          ablate graphcut (live baseline) vs voronoi (the speed variant).
+  //   Android — all three refine-ablatable levers are one-at-a-time'd from a
+  //          "legacy" (all-off) baseline: +range-matcher, +single-thread,
+  //          +voronoi, then the RC default and RC+voronoi endpoints.  Each
+  //          OAT delta vs `legacy` is that lever's contribution; `rc-voronoi`
+  //          vs `rc-default` is voronoi's marginal gain on the shipped config.
+  //          (adaptive-compose is a finalize-only knob, not refine-ablatable —
+  //          it's excluded here; its effect shows only in the live output.)
+  //
+  // Wall-time per variant is JS (Date.now) — the same fixed bridge overhead on
+  // every variant, so the between-variant DELTA is the native cost difference.
+  const writeDebugPack = useCallback(
+    // `frames` is a SNAPSHOT taken at capture time by the caller (not read
+    // from the ref here) so a serialised/queued pack can't pick up a later
+    // capture's keyframes.  `liveUri` may carry a `?t=<ms>` cache-buster on
+    // some capture paths (rect-crop / alt-pipeline); we strip it below.
+    async (frames: string[], liveUri: string, abOn: boolean): Promise<void> => {
+      try {
+        const native = getIncrementalNativeModule();
+        if (!native?.refinePanorama || frames.length < 2) {
+          // eslint-disable-next-line no-console
+          console.log(`[pack] skipped (need ≥2 keyframes; had ${frames.length})`);
+          return;
+        }
+        const dir = await getDefaultCaptureDir();
+        // Collision-proof id: Date.now can repeat within a millisecond, so we
+        // also append a monotonic sequence number.
+        packSeqRef.current += 1;
+        const packId = `pack-${Date.now()}-${packSeqRef.current}__ab-${abOn ? 'on' : 'off'}`;
+        // 1) + 2) copy the inputs (keyframes) and the live output into the
+        // pack.  These are NOT the payload (the ablation below is), so a copy
+        // failure — e.g. a stale/GC'd keyframe path — must only warn, never
+        // abort the re-stitches.  Native copyFile strips `file://` but not a
+        // `?t=…` query string, so strip that off the live uri first.
+        try {
+          for (let i = 0; i < frames.length; i++) {
+            await copyFile(frames[i], `${dir}/${packId}__kf-${String(i).padStart(2, '0')}.jpg`);
+          }
+          await copyFile(liveUri.split('?')[0], `${dir}/${packId}__live.jpg`);
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn('[pack] input/live copy failed (continuing to ablation)', e);
+        }
+        // 3) perf ablation — same frames, high-level PANORAMA path.  seam =
+        //    seam finder; rw = stitchRangeMatcherWidth (0 = full-pairwise);
+        //    nt = stitchNumThreads (0 = auto-multi, 1 = single).  rw/nt are
+        //    Android-only levers (iOS ignores them → its two variants differ
+        //    only in seam, exactly what we want there).
+        type Variant = {
+          name: string;
+          seam: 'graphcut' | 'voronoi';
+          rw: number;
+          nt: number;
+        };
+        const androidVariants: Variant[] = [
+          { name: 'legacy', seam: 'graphcut', rw: 0, nt: 0 }, // all-off baseline
+          { name: 'rangematch', seam: 'graphcut', rw: 3, nt: 0 }, // +range-matcher
+          { name: 'singlethread', seam: 'graphcut', rw: 0, nt: 1 }, // +single-thread
+          { name: 'voronoi', seam: 'voronoi', rw: 0, nt: 0 }, // +voronoi
+          { name: 'rc-default', seam: 'graphcut', rw: 3, nt: 1 }, // shipped RC config
+          { name: 'rc-voronoi', seam: 'voronoi', rw: 3, nt: 1 }, // RC + voronoi
+        ];
+        const iosVariants: Variant[] = [
+          { name: 'graphcut', seam: 'graphcut', rw: 0, nt: 0 },
+          { name: 'voronoi', seam: 'voronoi', rw: 0, nt: 0 },
+        ];
+        const variants = Platform.OS === 'android' ? androidVariants : iosVariants;
+        for (const v of variants) {
+          const cfg = `seam-${v.seam}_rw${v.rw}_nt${v.nt}`;
+          const tmp = `${dir}/${packId}__out-${v.name}.jpg`;
+          const t0 = Date.now();
+          try {
+            const r = await native.refinePanorama({
+              framePaths: frames,
+              outputPath: tmp,
+              config: {
+                warperType: 'spherical',
+                blenderType: 'multiband',
+                stitchMode: 'panorama',
+                useManualPipeline: false,
+                seamFinderType: v.seam,
+                stitchRangeMatcherWidth: v.rw,
+                stitchNumThreads: v.nt,
+                jpegQuality: 90,
+              },
+            });
+            const ms = Date.now() - t0;
+            await moveFile(tmp, `${dir}/${packId}__out-${v.name}__${cfg}__${ms}ms.jpg`);
+            // eslint-disable-next-line no-console
+            console.log(`[pack] ${v.name} (${cfg}): ${ms}ms  ${r?.debugSummary ?? ''}`);
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.warn(`[pack] variant ${v.name} FAILED`, e);
+          }
+        }
+        // eslint-disable-next-line no-console
+        console.log(`[pack] wrote ${packId} (${frames.length} frames, ${variants.length} variants) → ${dir}`);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[pack] failed', e);
+      }
+    },
+    [],
+  );
+
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
@@ -317,6 +454,19 @@ function App(): React.JSX.Element {
     // showPreview) — that screen IS the preview, so don't pop a second
     // preview modal for them.  Photos (no review step) still get the modal.
     if (result.type === 'photo') setPreview(result);
+    // Every panorama auto-writes an A/B debug pack (fire-and-forget so it
+    // doesn't block the UI); tagged with the current anti-blur state.  Snapshot
+    // the keyframes NOW (the ref is reset on the next capture's first frame)
+    // and run packs through a chain so they never overlap + contend on the
+    // native stitch queue.  `.catch` keeps a failed pack from breaking the chain.
+    if (result.type === 'panorama') {
+      const frames = [...collectedKeyframesRef.current];
+      const liveUri = result.uri;
+      const abOn = antiBlurOn;
+      packChainRef.current = packChainRef.current
+        .catch(() => undefined)
+        .then(() => writeDebugPack(frames, liveUri, abOn));
+    }
     // Dedup by uri — a capture-history strip should never show the same
     // capture twice, and a duplicate `id` (uri) throws React's "two children
     // with the same key".  Robust against any double onCapture delivery.
@@ -473,21 +623,28 @@ function App(): React.JSX.Element {
           // Re-pick the capture format when the KF-quality toggle OR the
           // anti-blur exposure cap flips (both change which format
           // vision-camera picks).
-          key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-exp${abExposureCap ? 1 : 0}`}
+          key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-ab${antiBlurOn ? 1 : 0}`}
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
           keyframeQualityCapture={kfQuality}
-          // v0.23 anti-blur — driven by the four dev toggles below so each
-          // change can be A/B'd on-device. A value of 0 / false disables that
-          // control (today's behaviour). (Local test enablement — not committed.)
+          // v0.23 anti-blur — the single 🌀 toggle below drives the whole
+          // bundle.  ON = recommended values; OFF = every knob disabled
+          // (today's behaviour), so a paired capture isolates the feature.
           frameSelection={{
-            antiBlur: {
-              maxExposureMs: abExposureCap ? 8 : 0,
-              maxCommitPanRateRadPerSec: abMotionGate ? 1.0 : 0,
-              minScoreFractionOfMedian: abSharpFloor ? 0.6 : 0,
-              preferHighFpsFormat: abHighFps,
-            },
+            antiBlur: antiBlurOn
+              ? {
+                  maxExposureMs: 8,
+                  maxCommitPanRateRadPerSec: 1.0,
+                  minScoreFractionOfMedian: 0.6,
+                  preferHighFpsFormat: true,
+                }
+              : {
+                  maxExposureMs: 0,
+                  maxCommitPanRateRadPerSec: 0,
+                  minScoreFractionOfMedian: 0,
+                  preferHighFpsFormat: false,
+                },
           }}
           panMode={panMode}
           rectCrop={rectCrop}
@@ -565,44 +722,17 @@ function App(): React.JSX.Element {
           </Text>
         </Pressable>
 
-        {/* v0.23 anti-blur A/B toggles — one per change. Flip OFF, capture a
-            pano, flip ON, capture again, and compare the results. Exposure
-            cap re-picks the format immediately (camera key); the other three
-            apply on the NEXT capture after a flip. */}
+        {/* v0.23 anti-blur — ONE high-level toggle.  Flip OFF, capture a pano,
+            flip ON, capture again: each capture auto-writes a debug pack (see
+            writeDebugPack) tagged ab-on / ab-off, so the two can be compared
+            for blur + a same-frames perf-lever ablation. */}
         <Pressable
           style={[styles.devToggle, { top: 190 }]}
-          onPress={() => setAbExposureCap((v) => !v)}
+          onPress={() => setAntiBlurOn((v) => !v)}
           accessibilityRole="button"
         >
           <Text style={styles.devToggleText}>
-            ⚡ exposure cap: {abExposureCap ? 'ON (8 ms)' : 'OFF'}
-          </Text>
-        </Pressable>
-        <Pressable
-          style={[styles.devToggle, { top: 230 }]}
-          onPress={() => setAbMotionGate((v) => !v)}
-          accessibilityRole="button"
-        >
-          <Text style={styles.devToggleText}>
-            🎯 motion gate: {abMotionGate ? 'ON (1.0 rad/s)' : 'OFF'}
-          </Text>
-        </Pressable>
-        <Pressable
-          style={[styles.devToggle, { top: 270 }]}
-          onPress={() => setAbSharpFloor((v) => !v)}
-          accessibilityRole="button"
-        >
-          <Text style={styles.devToggleText}>
-            🔬 sharp floor: {abSharpFloor ? 'ON (0.6×)' : 'OFF'}
-          </Text>
-        </Pressable>
-        <Pressable
-          style={[styles.devToggle, { top: 310 }]}
-          onPress={() => setAbHighFps((v) => !v)}
-          accessibilityRole="button"
-        >
-          <Text style={styles.devToggleText}>
-            🎞️ high-fps AR: {abHighFps ? 'ON' : 'OFF'}
+            🌀 anti-blur: {antiBlurOn ? 'ON' : 'OFF'}
           </Text>
         </Pressable>
 

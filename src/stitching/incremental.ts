@@ -597,7 +597,7 @@ export interface StitcherConfig {
    *  - 'graphcut' (default): cv::detail::GraphCutSeamFinder; optimal
    *    seams, pairs with multi-band, holds all warped frames in memory.
    *  - 'skip': stream warp+feed, lower peak memory, fine with feather. */
-  seamFinderType: 'graphcut' | 'skip';
+  seamFinderType: 'graphcut' | 'voronoi' | 'skip';
 
   /** V16 Phase 1b.fix5c — toggle the max-inscribed-rectangle crop in
    *  the batch-keyframe finalize pipeline.  When false (default), the
@@ -810,8 +810,8 @@ export interface IncrementalRefineOptions {
   warperType?: 'plane' | 'cylindrical' | 'spherical';
   /** "multiband" | "feather".  Default "multiband". */
   blenderType?: 'multiband' | 'feather';
-  /** "graphcut" | "skip".  Default "graphcut". */
-  seamFinderType?: 'graphcut' | 'skip';
+  /** "graphcut" | "voronoi" | "skip".  Default "graphcut". */
+  seamFinderType?: 'graphcut' | 'voronoi' | 'skip';
   /** Drives the OUTPUT bake-rotation.  Default "portrait". */
   captureOrientation?:
     | 'portrait'
@@ -852,6 +852,15 @@ export interface IncrementalRefineOptions {
    * forces full-pairwise. See `BatchStitcherSettings.rangeMatcherWidth`.
    */
   stitchRangeMatcherWidth?: number;
+  /**
+   * perf-3b item 1 — OpenCV thread count for the re-stitch. Omit to inherit
+   * the value the session's `start()` used; pass explicitly for a standalone
+   * refine. `1` = single-threaded (the on-device-fastest config at fleet
+   * keyframe/MP sizes), `0` = auto-multi, `N` = N threads. Android only —
+   * iOS's GCD backend has no `setNumThreads`, so the value is a no-op there.
+   * See `BatchStitcherSettings.numThreads`.
+   */
+  stitchNumThreads?: number;
 }
 
 

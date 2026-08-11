@@ -2710,6 +2710,14 @@ class IncrementalStitcher(
         val refineRangeMatcherWidth = (config
             ?.getIntOrDefault("stitchRangeMatcherWidth", stitchRangeMatcherWidth)
             ?: stitchRangeMatcherWidth).coerceAtLeast(0)
+        // perf-3b item 1 — like the range-matcher width, allow an explicit
+        // refine-config override of the OpenCV thread count so a standalone
+        // refine (e.g. an A/B perf pack ablating threading) can pin it; else
+        // inherit the session field set at start(). Absent key ⇒ unchanged
+        // behaviour (whatever the session used). 0 = auto-multi, 1 = single.
+        val refineNumThreads = (config
+            ?.getIntOrDefault("stitchNumThreads", stitchNumThreads)
+            ?: stitchNumThreads).coerceAtLeast(0)
 
         // Pre-flight existence check — same defensive layer iOS has.
         for (p in framePaths) {
@@ -2765,8 +2773,8 @@ class IncrementalStitcher(
                     // HIGH-LEVEL preview tab); true would force the manual
                     // pipeline.  Sourced from the JS config above.
                     useManualPipeline = useManualPipeline,
-                    rangeMatcherWidth = refineRangeMatcherWidth,  // perf-3b — match finalize
-                    numThreads = stitchNumThreads,   // perf-3b item 1 (0 = auto-multi)
+                    rangeMatcherWidth = refineRangeMatcherWidth,  // perf-3b — config or finalize
+                    numThreads = refineNumThreads,   // perf-3b item 1 — config or finalize (0 = auto-multi)
                 )
                 // Stitch returned — BatchStitcher writes the JPEG
                 // synchronously, so "writing" reflects the final

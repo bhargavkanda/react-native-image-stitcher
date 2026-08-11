@@ -247,8 +247,10 @@ export { cropQuad } from './stitching/cropQuad';
 export type { CropQuadOptions, CropQuadResult } from './stitching/cropQuad';
 // File copy — pairs with the in-place `cropQuad` so a host can crop a COPY of
 // a capture (preserving the original + landing the result on a fresh URI,
-// avoiding image-cache collisions).
-export { copyFile } from './utils/files';
+// avoiding image-cache collisions).  `moveFile` + `getDefaultCaptureDir` let a
+// host assemble a debug/output pack next to its captures (used by the example
+// app's auto A/B pack writer).
+export { copyFile, moveFile, getDefaultCaptureDir } from './utils/files';
 
 // ── Incremental stitching engine ──────────────────────────────────────
 // JS bindings around the native `IncrementalStitcher` module.  Use
