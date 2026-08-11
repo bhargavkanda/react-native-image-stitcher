@@ -35,10 +35,39 @@ public struct StitchOptions {
   public let framePaths: [String]
   public let outputPath: String
   public let jpegQuality: Int
-  public init(framePaths: [String], outputPath: String, jpegQuality: Int = 85) {
+  /// Registration model passthrough: `"scans"` selects cv::Stitcher's SCANS
+  /// mode (affine model — suited to translational captures); `"panorama"` the
+  /// rotational Panorama model.  nil keeps the historical Panorama
+  /// fall-through in OpenCVStitcher.mm.
+  public let stitchMode: String?
+  /// Per-frame compose budget in megapixels; > 0 overrides the wrapper's
+  /// 1.0 MP high-level pin (the shared-C++ canvas guard still bounds memory).
+  /// nil / <= 0 keeps the historical default.
+  public let compositingResolMP: Double?
+  /// Feature-registration budget in megapixels; > 0 overrides the wrapper's
+  /// 0.6 MP pin (cv::Stitcher's own default).  nil / <= 0 keeps the
+  /// historical default.
+  public let registrationResolMP: Double?
+  /// true → the manual cv::detail pipeline (graphcut + multiband with the
+  /// full memory-guard machinery); false → stock high-level cv::Stitcher.
+  /// nil keeps this API's historical high-level behaviour.
+  public let useManualPipeline: Bool?
+  public init(
+    framePaths: [String],
+    outputPath: String,
+    jpegQuality: Int = 85,
+    stitchMode: String? = nil,
+    compositingResolMP: Double? = nil,
+    registrationResolMP: Double? = nil,
+    useManualPipeline: Bool? = nil
+  ) {
     self.framePaths = framePaths
     self.outputPath = outputPath
     self.jpegQuality = jpegQuality
+    self.stitchMode = stitchMode
+    self.compositingResolMP = compositingResolMP
+    self.registrationResolMP = registrationResolMP
+    self.useManualPipeline = useManualPipeline
   }
 }
 
@@ -157,15 +186,18 @@ public enum Stitcher {
         // Callers that want inscribed-rect can use IncrementalStitcher
         // with the toggle on.
         useInscribedRectCrop: false,
-        // 2026-05-22 (audit F2) — legacy video-stitch API doesn't
-        // expose stitchMode in its options dict yet.  nil falls
-        // through to Panorama in OpenCVStitcher.mm (preserves
-        // historical behaviour).
-        stitchMode: nil,
-        // Generic one-shot API keeps the high-level cv::Stitcher pipeline
-        // (its historical behaviour); the batch capture is what defaults to
+        // Forwarded from StitchOptions (the JS bridge's options dict).
+        // nil still falls through to Panorama in OpenCVStitcher.mm —
+        // historical behaviour for callers that don't set it.
+        stitchMode: options.stitchMode,
+        // Absent = the high-level cv::Stitcher pipeline (this API's
+        // historical behaviour); the batch capture is what defaults to
         // manual.  warperType "plane" above only matters on the manual path.
-        useManualPipeline: false
+        useManualPipeline: options.useManualPipeline ?? false,
+        // Explicit staged-resolution budgets; <= 0 keeps the historical
+        // pins (compose 1.0 MP / registration 0.6 MP).
+        compositingResolMP: options.compositingResolMP ?? -1.0,
+        registrationResolMP: options.registrationResolMP ?? -1.0
       )
       return StitchResult(
         outputPath: result.outputPath,

@@ -128,6 +128,34 @@ extern NSString *const RNImageStitcherErrorDomain;
                                    useManualPipeline:(BOOL)useManualPipeline
                                                error:(NSError **)error;
 
+/// Overload adding explicit staged-resolution budgets (StitchOptions
+/// passthroughs).
+///
+/// `compositingResolMP` > 0 overrides the wrapper's 1.0 MP per-frame compose
+/// pin (megapixels; the shared-C++ canvas-budget guard still downscales when
+/// the total canvas exceeds the RAM budget, so a large value stays
+/// memory-safe).  <= 0 keeps the historical 1.0 MP.
+///
+/// `registrationResolMP` > 0 overrides the 0.6 MP registration budget
+/// (cv::Stitcher's own default) the wrapper pins.  <= 0 keeps the historical
+/// 0.6 MP.
+///
+/// The legacy selector above delegates here with -1/-1, so existing callers
+/// are behaviour-identical.
++ (nullable RNStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
+                                          outputPath:(NSString *)outputPath
+                                         jpegQuality:(NSInteger)quality
+                                          warperType:(nullable NSString *)warperType
+                                         blenderType:(nullable NSString *)blenderType
+                                      seamFinderType:(nullable NSString *)seamFinderType
+                                  captureOrientation:(nullable NSString *)captureOrientation
+                                useInscribedRectCrop:(BOOL)useInscribedRectCrop
+                                          stitchMode:(nullable NSString *)stitchMode
+                                   useManualPipeline:(BOOL)useManualPipeline
+                                  compositingResolMP:(double)compositingResolMP
+                                 registrationResolMP:(double)registrationResolMP
+                                               error:(NSError **)error;
+
 /// Extract `maxFrames` evenly-spaced frames from the video at
 /// `videoPath`, write each as a JPEG into `outputDir`, return the
 /// list of file paths in capture order.

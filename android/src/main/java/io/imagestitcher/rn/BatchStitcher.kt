@@ -182,6 +182,11 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         // translation-heavy input).
         val stitchMode = (options.getString("stitchMode") ?: "scans")
             .let { if (it in setOf("panorama", "scans")) it else "scans" }
+        // Pipeline passthrough.  Absent = this path's historical MANUAL
+        // pipeline (the memory-safe default; mirrors iOS' batch capture).
+        // An explicit false selects the stock high-level cv::Stitcher.
+        val useManualPipeline = if (options.hasKey("useManualPipeline"))
+            options.getBoolean("useManualPipeline") else true
 
         CoroutineScope(Dispatchers.Default).launch {
             val start = System.currentTimeMillis()
@@ -200,9 +205,7 @@ class BatchStitcher(reactContext: ReactApplicationContext)
                     seamEstimationResolMP,
                     compositingResolMP,
                     stitchMode,
-                    // Direct @ReactMethod batch stitch → MANUAL pipeline
-                    // (the memory-safe default; mirrors iOS).
-                    true,
+                    useManualPipeline,
                 )
                 val duration = System.currentTimeMillis() - start
                 // 2026-05-15 (D) — dims layout from native JNI:
