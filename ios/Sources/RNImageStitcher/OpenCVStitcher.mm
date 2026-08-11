@@ -425,6 +425,37 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                           stitchMode:(NSString *)stitchMode
                                    useManualPipeline:(BOOL)useManualPipeline
                                                error:(NSError **)error {
+  // Legacy selector — behaviour-identical delegate.  The -1 sentinels keep
+  // the historical staged-resolution pins (compose 1.0 MP / registration
+  // 0.6 MP) exactly as before the overload existed.
+  return [OpenCVStitcher stitchFramePaths:framePaths
+                               outputPath:outputPath
+                              jpegQuality:quality
+                               warperType:warperType
+                              blenderType:blenderType
+                           seamFinderType:seamFinderType
+                       captureOrientation:captureOrientation
+                     useInscribedRectCrop:useInscribedRectCrop
+                               stitchMode:stitchMode
+                        useManualPipeline:useManualPipeline
+                       compositingResolMP:-1.0
+                      registrationResolMP:-1.0
+                                    error:error];
+}
+
++ (nullable RNStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
+                                          outputPath:(NSString *)outputPath
+                                         jpegQuality:(NSInteger)quality
+                                          warperType:(NSString *)warperType
+                                         blenderType:(NSString *)blenderType
+                                      seamFinderType:(NSString *)seamFinderType
+                                  captureOrientation:(NSString *)captureOrientation
+                                useInscribedRectCrop:(BOOL)useInscribedRectCrop
+                                          stitchMode:(NSString *)stitchMode
+                                   useManualPipeline:(BOOL)useManualPipeline
+                                  compositingResolMP:(double)compositingResolMP
+                                 registrationResolMP:(double)registrationResolMP
+                                               error:(NSError **)error {
   // ── Phase 2 (2026-05-16): delegated to shared C++ ───────────────────
   //
   // The hand-rolled cv::detail::* pipeline that used to live here
@@ -472,6 +503,12 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   cfg.captureOrientation   = captureOrientation.UTF8String;
   cfg.useInscribedRectCrop = (useInscribedRectCrop != NO);
   cfg.jpegQuality          = (int)quality;
+  // Explicit caller budgets win (> 0); <= 0 keeps the pins above.  The
+  // shared-C++ canvas guard still downscales when the total compose canvas
+  // exceeds the RAM budget, so a full-res request degrades instead of
+  // OOMing.
+  if (compositingResolMP > 0.0)  cfg.compositingResolMP  = compositingResolMP;
+  if (registrationResolMP > 0.0) cfg.registrationResolMP = registrationResolMP;
   // 2026-05-22 (audit F2) — stitchMode is now wired through.  Caller
   // (IncrementalStitcher.swift) reads the JS setting and, when set
   // to 'auto', resolves to 'panorama' or 'scans' based on accumulated

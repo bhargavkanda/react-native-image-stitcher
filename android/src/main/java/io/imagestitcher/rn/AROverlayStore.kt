@@ -24,9 +24,13 @@ import java.util.concurrent.atomic.AtomicReference
  *     sizeMeters?: [w, h];            // box extent at worldPosition
  *     worldQuad?: Array<[x, y, z]>;   // 3-4 explicit world corners
  *     shape?: 'box' | 'outline';      // default 'outline'
+ *     fillAlpha?: number;             // 0..1; default 0.22 (box fill opacity)
+ *     strokeAlpha?: number;           // 0..1; default 1 (opaque outline)
  *     label?: string;
+ *     imageUri?: string;              // image badge inside a box
  *     color?: string;                 // hex; default a theme colour
  *     mode?: '2d' | '3d';             // default '2d'; '3d' is SCAFFOLD ONLY
+ *     depthOcclusion?: boolean;       // default false; iOS-renderer opt-in
  *   }
  *
  * A valid overlay carries EITHER a [worldPosition] (with optional
@@ -58,6 +62,30 @@ data class AROverlayData(
     /// '2d' (rendered) or '3d' (SCAFFOLD ONLY this release — treated as
     /// '2d' with a one-time warning; see [AROverlayRenderer]).
     val mode: String,
+    /// Opacity (0..1) of the 'box' fill face; ignored by 'outline' (no fill).
+    /// Trailing + defaulted ON PURPOSE: this constructor is native-plugin SPI,
+    /// so pre-existing callers keep compiling AND keep the legacy ~22% fill.
+    /// Always read it through [AROverlayRenderer]'s byte conversion, which
+    /// re-applies [sanitizeFillAlpha] — a plugin can bypass [fromReadableMap]
+    /// and hand us a NaN here.
+    val fillAlpha: Float = DEFAULT_FILL_ALPHA,
+    /// Stroke (outline) opacity 0..1.  Default 1 = the historical fully-opaque
+    /// outline.  0 ⇒ FILL-ONLY, so adjacent tiled quads read as ONE continuous
+    /// region (no internal seams).  Sanitised like [fillAlpha].
+    val strokeAlpha: Float = DEFAULT_STROKE_ALPHA,
+    /// Optional IMAGE drawn INSIDE the box, anchored bottom-left and inset,
+    /// so it annotates without covering what the box marks.  A local
+    /// `file://` path; [AROverlayRenderer] decodes and CACHES it by URI and
+    /// ignores an undecodable file.  Trailing + defaulted like the alphas
+    /// above, so native-plugin SPI callers keep compiling.
+    val imageUri: String? = null,
+    /// Opt-in for the iOS renderer's box-vs-box depth-occlusion scheme.
+    /// Default false = the legacy rendering, exactly as before the field
+    /// existed.  Android's screen-space Canvas renderer has no depth scheme,
+    /// so this flag is parsed for cross-platform contract parity and IGNORED
+    /// by [AROverlayRenderer].  Trailing + defaulted like its siblings so
+    /// native-plugin SPI callers keep compiling.
+    val depthOcclusion: Boolean = false,
 ) {
     // data class with array fields — override equals/hashCode by `id` only.
     // Identity for diffing the declarative `overlays` prop / imperative set
@@ -76,6 +104,69 @@ data class AROverlayData(
         /// Default overlay colour when `color` is absent / unparseable —
         /// the theme cyan used across the SDK's AR UI.
         const val DEFAULT_COLOR_ARGB = 0xFF00E5FF.toInt()
+
+        /// Default 'box' fill opacity when `fillAlpha` is absent / unusable.
+        /// EXACTLY reproduces the legacy hardcoded byte: Math.round(0.22f *
+        /// 255f) == 56 == 0x38 (the old AROverlayRenderer.BOX_FILL_ALPHA), so
+        /// every pre-`fillAlpha` caller renders the identical pixel.  Matches
+        /// iOS `RNISAROverlay.defaultFillAlpha`.
+        const val DEFAULT_FILL_ALPHA = 0.22f
+
+        /// Default stroke opacity when `strokeAlpha` is absent / unusable:
+        /// fully opaque — every shape was unconditionally stroked before the
+        /// field existed, so pre-`strokeAlpha` callers stay pixel-identical.
+        /// Matches iOS `RNISAROverlay.defaultStrokeAlpha`.
+        const val DEFAULT_STROKE_ALPHA = 1.0f
+
+        /**
+         * Coerce a caller-supplied alpha to the honoured range.  Anything
+         * non-finite (NaN / ±Inf) or outside 0..1 falls back to [fallback]
+         * rather than being silently clipped — a nonsense value means the
+         * caller is confused, and the safest read of "I asked for an alpha"
+         * is the documented default, not "invisible" (0) or "opaque" (1).
+         *
+         * MUST run before the *255 byte conversion: NaN would round to 0 (an
+         * invisible fill / erased outline) and a huge value would overflow
+         * the byte and wrap.
+         */
+        @JvmStatic
+        fun sanitizeAlpha(raw: Float, fallback: Float): Float =
+            if (!raw.isFinite() || raw < 0f || raw > 1f) fallback else raw
+
+        /// [sanitizeAlpha] bound to the fill default.  Public because the
+        /// native-plugin SPI may legitimately want the same coercion.
+        @JvmStatic
+        fun sanitizeFillAlpha(raw: Float): Float = sanitizeAlpha(raw, DEFAULT_FILL_ALPHA)
+
+        /// [sanitizeAlpha] bound to the stroke default — nonsense falls back
+        /// to OPAQUE, so a malformed value can never silently erase an
+        /// outline.
+        @JvmStatic
+        fun sanitizeStrokeAlpha(raw: Float): Float = sanitizeAlpha(raw, DEFAULT_STROKE_ALPHA)
+
+        /**
+         * Read an alpha key (`fillAlpha` / `strokeAlpha`) → a SANITISED 0..1
+         * float, or null when the key is absent / not a number (the caller
+         * keeps whatever value it already had).  A present-but-out-of-range /
+         * non-finite number is sanitised HERE against [fallback] — JS is
+         * never trusted to be in range.
+         *
+         * The [ReadableType.Number] gate also rejects a JS BOOLEAN, which
+         * would otherwise read as 1.0/0.0 and land inside 0..1 untouched
+         * (`fillAlpha: true` ⇒ an opaque fill hiding the camera feed;
+         * `fillAlpha: cond && 0.5` ⇒ the invisible fill this field exists to
+         * prevent).  iOS's `numeric` rejects `__NSCFBoolean` for the same
+         * reason, so both platforms land on the same default.
+         *
+         * `internal`, not `private`: [AROverlayStore.applyPatch] reuses it so
+         * the parse rule exists in exactly one place.  Kept out of the public
+         * plugin SPI (unlike [sanitizeFillAlpha] / [sanitizeStrokeAlpha],
+         * which plugin code may legitimately want).
+         */
+        internal fun readAlpha(map: ReadableMap, key: String, fallback: Float): Float? {
+            if (!map.hasKey(key) || map.getType(key) != ReadableType.Number) return null
+            return sanitizeAlpha(map.getDouble(key).toFloat(), fallback)
+        }
 
         /**
          * Parse one [ReadableMap] (the JS `AROverlay` shape) into an
@@ -109,6 +200,13 @@ data class AROverlayData(
             val label = if (map.hasKey("label") && map.getType("label") == ReadableType.String)
                 map.getString("label") else null
 
+            // Empty string -> null: JS clearing the badge image sends '' on
+            // some paths, and an empty path must read as "no image", not a
+            // failure.
+            val imageUri = if (map.hasKey("imageUri") &&
+                map.getType("imageUri") == ReadableType.String
+            ) map.getString("imageUri")?.takeIf { it.isNotEmpty() } else null
+
             val colorArgb = if (map.hasKey("color") && map.getType("color") == ReadableType.String)
                 parseColor(map.getString("color")) else DEFAULT_COLOR_ARGB
 
@@ -119,6 +217,21 @@ data class AROverlayData(
                 }
             } else "2d"
 
+            val fillAlpha =
+                readAlpha(map, "fillAlpha", DEFAULT_FILL_ALPHA) ?: DEFAULT_FILL_ALPHA
+            val strokeAlpha =
+                readAlpha(map, "strokeAlpha", DEFAULT_STROKE_ALPHA) ?: DEFAULT_STROKE_ALPHA
+
+            // Boolean type gate (fallback-not-clip, like the alphas): only a
+            // genuine JS boolean opts in.  A number, string, or any other
+            // nonsense falls back to false — the legacy rendering — rather
+            // than being coerced, so a malformed value can never change how
+            // a pre-existing consumer's boxes draw.  iOS gates on
+            // CFBooleanGetTypeID for the same result.
+            val depthOcclusion = map.hasKey("depthOcclusion") &&
+                map.getType("depthOcclusion") == ReadableType.Boolean &&
+                map.getBoolean("depthOcclusion")
+
             return AROverlayData(
                 id = id,
                 worldPosition = worldPosition,
@@ -128,6 +241,10 @@ data class AROverlayData(
                 label = label,
                 colorArgb = colorArgb,
                 mode = mode,
+                fillAlpha = fillAlpha,
+                strokeAlpha = strokeAlpha,
+                imageUri = imageUri,
+                depthOcclusion = depthOcclusion,
             )
         }
 
@@ -372,6 +489,19 @@ class AROverlayStore {
                     label = if (patch.hasKey("label")) parsed.label else base.label,
                     colorArgb = if (patch.hasKey("color")) parsed.colorArgb else base.colorArgb,
                     mode = if (patch.hasKey("mode")) parsed.mode else base.mode,
+                    // Without these an anchor-moving patch would silently
+                    // reset the alphas/badge to their defaults (the re-parse
+                    // can't know the base's values) — which for a fill-only
+                    // tiled quad means its outline comes BACK on the next
+                    // move, the exact seams `strokeAlpha` exists to remove.
+                    // Same hasKey rule as their siblings.
+                    fillAlpha = if (patch.hasKey("fillAlpha")) parsed.fillAlpha else base.fillAlpha,
+                    strokeAlpha =
+                        if (patch.hasKey("strokeAlpha")) parsed.strokeAlpha else base.strokeAlpha,
+                    imageUri = if (patch.hasKey("imageUri")) parsed.imageUri else base.imageUri,
+                    depthOcclusion = if (patch.hasKey("depthOcclusion")) {
+                        parsed.depthOcclusion
+                    } else base.depthOcclusion,
                 )
             }
 
@@ -400,12 +530,35 @@ class AROverlayStore {
                 (if (patch.getString("mode") == "3d") "3d" else "2d")
             else base.mode
 
+            // Reuses AROverlayData's parse+sanitise so the rules live in ONE
+            // place; null (absent / not a number) keeps the base value, which
+            // is this branch's "present AND right type wins" convention.
+            val fillAlpha = AROverlayData.readAlpha(
+                patch, "fillAlpha", AROverlayData.DEFAULT_FILL_ALPHA,
+            ) ?: base.fillAlpha
+            val strokeAlpha = AROverlayData.readAlpha(
+                patch, "strokeAlpha", AROverlayData.DEFAULT_STROKE_ALPHA,
+            ) ?: base.strokeAlpha
+            val imageUri = if (patch.hasKey("imageUri") &&
+                patch.getType("imageUri") == ReadableType.String
+            ) patch.getString("imageUri")?.takeIf { it.isNotEmpty() } else base.imageUri
+
+            // Same boolean type gate as [fromReadableMap]: a present-but-
+            // non-boolean patch value keeps the base rather than coercing.
+            val depthOcclusion = if (patch.hasKey("depthOcclusion") &&
+                patch.getType("depthOcclusion") == ReadableType.Boolean
+            ) patch.getBoolean("depthOcclusion") else base.depthOcclusion
+
             return base.copy(
                 sizeMeters = size,
                 shape = shape,
                 label = label,
                 colorArgb = color,
                 mode = mode,
+                fillAlpha = fillAlpha,
+                strokeAlpha = strokeAlpha,
+                imageUri = imageUri,
+                depthOcclusion = depthOcclusion,
             )
         }
 

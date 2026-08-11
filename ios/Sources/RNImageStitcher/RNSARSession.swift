@@ -970,6 +970,26 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         return result
     }
 
+    /// Pose-ledger accessor with a watermark: every pose whose frame
+    /// timestamp is STRICTLY AFTER `sinceNs` (nanoseconds on the AR
+    /// framework's monotonic clock — the same clock `RNSARFramePose.
+    /// timestampMs` is expressed in, ×10⁶), in capture order.
+    ///
+    /// Pass `0` (or any negative value) for the full log — equivalent to
+    /// `snapshotPoseLog()`.  A caller polling incrementally passes the last
+    /// pose's `timestampMs * 1e6` as the next watermark and never re-reads
+    /// entries it already has.
+    @objc public func getFramePoses(sinceNs: Double) -> [RNSARFramePose] {
+        var result: [RNSARFramePose] = []
+        poseLogQueue.sync {
+            for entry in poseLog
+            where entry.1.timestampMs * 1_000_000.0 > sinceNs {
+                result.append(entry.1)
+            }
+        }
+        return result
+    }
+
     /// Find the pose closest to the given timestamp (in ms).
     /// Used by the stitcher to match each video frame to a pose.
     /// Returns nil if the log is empty or the closest is farther
@@ -1256,6 +1276,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         toPath rawPath: String,
         quality: Int,
         orientation: String,
+        options: [String: Any] = [:],
         completion: @escaping ([String: Any]?, NSError?) -> Void
     ) {
         let resolvedPath: String
@@ -1273,21 +1294,48 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // `captureHighResolutionFrame` (iOS 16+) grabs a full-resolution photo
         // WITHOUT leaving the AR session.  Fall back to the live frame on older
         // OS or if the high-res grab fails.
-        let encode: (CVPixelBuffer) -> Void = { [weak self] pixelBuffer in
+        //
+        // The pose is captured from the SAME ARFrame that produced the pixels
+        // (the shared `makePose(from:)` builder — one shape for the per-frame
+        // ledger and this stamp).  It is optional: a nil pose simply omits the
+        // result field, so a failed pose read never blocks the photo.  The
+        // stamp is a feature of takePhoto ITSELF: it rides on every AR photo
+        // result, plugins or none — it is an ADDITIVE result field relative
+        // to earlier releases, deliberately outside the plugin hook's no-op
+        // guarantee.
+        //
+        // Photo-capture plugins (`RNSPhotoCapturePluginRegistry`): when at
+        // least one plugin is registered, the SAME ARFrame is forwarded so
+        // `encodeArPhoto` can hand it to `photoCaptured(frame:photoPath:
+        // options:)` after the JPEG is written.  With NO plugin registered the
+        // frame is NOT forwarded (nil) and nothing is retained beyond the
+        // pixel buffer the encode already holds — the hook then contributes
+        // nothing to the result (its merge is the identity).
+        let wantPluginFrame = !RNSPhotoCapturePluginRegistry.shared.isEmpty
+        let encode: (CVPixelBuffer, RNSARFramePose?, ARFrame?) -> Void = {
+            [weak self] pixelBuffer, pose, pluginFrame in
             self?.encodeArPhoto(
                 pixelBuffer: pixelBuffer,
                 toPath: resolvedPath,
                 quality: quality,
                 orientation: orientation,
+                pose: pose,
+                pluginFrame: pluginFrame,
+                pluginOptions: options,
                 completion: completion
             )
         }
         if #available(iOS 16.0, *) {
             arSession.captureHighResolutionFrame { [weak self] hiResFrame, error in
                 if let hiResFrame = hiResFrame {
-                    encode(hiResFrame.capturedImage)
+                    // Pose from the hi-res frame: its camera intrinsics /
+                    // resolution match the encoded photo, not the smaller AR
+                    // video format.
+                    encode(hiResFrame.capturedImage, self?.makePose(from: hiResFrame),
+                           wantPluginFrame ? hiResFrame : nil)
                 } else if let live = self?.arSession.currentFrame {
-                    encode(live.capturedImage)
+                    encode(live.capturedImage, self?.makePose(from: live),
+                           wantPluginFrame ? live : nil)
                 } else {
                     completion(nil, NSError(
                         domain: "RNImageStitcherARCapture",
@@ -1307,7 +1355,8 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
                 ))
                 return
             }
-            encode(frame.capturedImage)
+            encode(frame.capturedImage, makePose(from: frame),
+                   wantPluginFrame ? frame : nil)
         }
     }
 
@@ -1326,6 +1375,9 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         toPath resolvedPath: String,
         quality: Int,
         orientation: String,
+        pose: RNSARFramePose?,
+        pluginFrame: ARFrame? = nil,
+        pluginOptions: [String: Any] = [:],
         completion: @escaping ([String: Any]?, NSError?) -> Void
     ) {
         let exifOrientation: CGImagePropertyOrientation
@@ -1366,13 +1418,47 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         try? FileManager.default.removeItem(at: url)
         do {
             try jpegData.write(to: url)
-            completion([
+            var out: [String: Any] = [
                 "path": cleanedPath,
                 "width": cgImage.width,
                 "height": cgImage.height,
                 "isMirrored": false,
                 "isRawPhoto": false,
-            ], nil)
+            ]
+            // AR camera pose at capture time — same shape as the per-frame
+            // pose ledger (one shared `makePose(from:)` builder).  The
+            // intrinsics/dims are the AR camera's native (unoriented) frame,
+            // not the oriented JPEG dims above.  Stamped UNCONDITIONALLY (an
+            // additive result field, new relative to earlier releases) —
+            // presence of `pose` does not depend on plugin registration and
+            // is not covered by the plugin hook's no-op guarantee below.
+            if let pose = pose {
+                out["pose"] = pose.asDictionary()
+            }
+            // Photo-capture plugins — called synchronously with the EXACT
+            // ARFrame whose pixels became this photo, AFTER the JPEG landed
+            // (so a plugin may read it / write sidecar files beside it) and
+            // BEFORE the promise resolves (so merged fields always describe
+            // files that exist).  `pluginFrame` is nil when no plugin is
+            // registered — this branch then never runs and the HOOK leaves
+            // the result dict untouched (its merge is the identity).
+            //
+            // THREADING / BUDGET: this runs on the same background thread
+            // that just wrote the multi-MB JPEG (never the main thread, never
+            // the AR render callback), but the plugin's work adds latency to
+            // the takePhoto promise 1:1 AND extends how long this one ARFrame
+            // is retained.  Plugins must stay in the tens-of-milliseconds
+            // range and copy any frame buffers they need before returning —
+            // see the `RNSPhotoCapturePlugin` contract.
+            if let frame = pluginFrame {
+                out = RNSPhotoCapturePluginRegistry.shared.invoke(
+                    frame: frame,
+                    photoPath: cleanedPath,
+                    options: pluginOptions,
+                    result: out
+                )
+            }
+            completion(out, nil)
         } catch {
             completion(nil, error as NSError)
         }

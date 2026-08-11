@@ -81,6 +81,12 @@ RCT_EXTERN_METHOD(raycast:(RCTPromiseResolveBlock)resolver
 RCT_EXTERN_METHOD(snapshotPoseLog:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// Pose-ledger accessor with a watermark: poses whose frame timestamp is
+// strictly after `sinceNs` (nanoseconds; timestampMs * 1e6).  0 = full log.
+RCT_EXTERN_METHOD(getFramePoses:(nonnull NSNumber *)sinceNs
+                  resolver:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 RCT_EXTERN_METHOD(clearPoseLog:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 

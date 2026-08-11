@@ -142,6 +142,11 @@ class RNSARCameraView @JvmOverloads constructor(
         // held — the cause of the "landscape AR photo is sideways" bug).
         val orientation: String,
         val promise: com.facebook.react.bridge.Promise,
+        // The FULL takePhoto options map as JS sent it.  Handed verbatim to
+        // registered photo-capture plugins ([RNSPhotoCapturePlugin]) so a
+        // host can route per-call flags to its plugin without a library
+        // change.  Null only for legacy callers of the 4-arg overload.
+        val options: com.facebook.react.bridge.ReadableMap? = null,
     )
     private val pendingTakePhoto =
         AtomicReference<TakePhotoRequest?>(null)
@@ -155,8 +160,9 @@ class RNSARCameraView @JvmOverloads constructor(
         quality: Int,
         orientation: String,
         promise: com.facebook.react.bridge.Promise,
+        options: com.facebook.react.bridge.ReadableMap? = null,
     ) {
-        val req = TakePhotoRequest(outputPath, quality, orientation, promise)
+        val req = TakePhotoRequest(outputPath, quality, orientation, promise, options)
         val previous = pendingTakePhoto.getAndSet(req)
         previous?.promise?.reject(
             "ar-photo-superseded",
@@ -642,6 +648,31 @@ class RNSARCameraView @JvmOverloads constructor(
                 putInt("height", height)
                 putBoolean("isMirrored", false)
                 putBoolean("isRawPhoto", false)
+                // AR camera pose at capture time — same shape as the
+                // per-frame pose ledger (one shared [makeFramePose]
+                // builder; iOS `encodeArPhoto` parity).  Intrinsics/dims
+                // are the AR camera's native frame, not the rotated JPEG.
+                // Stamped UNCONDITIONALLY: an additive result field (new
+                // relative to earlier releases) that rides on every AR
+                // photo, plugins or none — deliberately outside the plugin
+                // hook's no-op guarantee below.
+                putMap("pose", makeFramePose(frame.camera, frame.timestamp).toWritableMap())
+            }
+            // Photo-capture plugins — called synchronously with the EXACT
+            // pool-backed Frame, AFTER the JPEG landed and BEFORE the promise
+            // resolves.  Runs on this GL thread: plugin cost adds to the
+            // promise latency AND stalls the render loop, so plugins must be
+            // cheap and must NOT retain the Frame (see the
+            // [RNSPhotoCapturePlugin] contract).  Registry-empty = zero
+            // plugin work and an untouched result map (the hook's merge is
+            // the identity).
+            if (!RNSPhotoCapturePluginRegistry.isEmpty) {
+                RNSPhotoCapturePluginRegistry.invoke(
+                    frame,
+                    written,
+                    req.options ?: com.facebook.react.bridge.Arguments.createMap(),
+                    result,
+                )
             }
             req.promise.resolve(result)
         } catch (t: Throwable) {
@@ -656,7 +687,12 @@ class RNSARCameraView @JvmOverloads constructor(
         }
     }
 
-    private fun appendPose(camera: Camera, timestampNs: Long) {
+    /// Build an [RNSARFramePose] from an ARCore [Camera] at `timestampNs`
+    /// (world-space translation + rotation quaternion + full image
+    /// intrinsics).  Shared by the per-frame pose ledger ([appendPose]) and
+    /// the takePhoto pose stamp ([fulfilTakePhoto]) so both emit the
+    /// identical shape — the Android twin of iOS `RNSARSession.makePose(from:)`.
+    private fun makeFramePose(camera: Camera, timestampNs: Long): RNSARFramePose {
         val pose = camera.pose
         val translation = pose.translation
         val rotation = pose.rotationQuaternion  // x, y, z, w
@@ -672,7 +708,7 @@ class RNSARCameraView @JvmOverloads constructor(
             else -> RNSARSession.TRACKING_NOT_AVAILABLE
         }
 
-        val framePose = RNSARFramePose(
+        return RNSARFramePose(
             tx = translation[0].toDouble(),
             ty = translation[1].toDouble(),
             tz = translation[2].toDouble(),
@@ -689,7 +725,10 @@ class RNSARCameraView @JvmOverloads constructor(
             timestampMs = timestampNs / 1_000_000.0,
             trackingState = tracking,
         )
-        RNSARSession.instance?.appendPose(framePose)
+    }
+
+    private fun appendPose(camera: Camera, timestampNs: Long) {
+        RNSARSession.instance?.appendPose(makeFramePose(camera, timestampNs))
         RNSARSession.instance?.updateTrackingState(camera.trackingState)
     }
 

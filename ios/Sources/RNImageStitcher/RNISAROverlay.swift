@@ -17,9 +17,14 @@
 //     sizeMeters?: [number, number];               // box extent at worldPosition
 //     worldQuad?: Array<[number, number, number]>; // 3-4 explicit world corners
 //     shape?: 'box' | 'outline';                   // default 'outline'
+//     fillAlpha?: number;                          // 0..1; default 0.22 (box fill)
+//     strokeAlpha?: number;                        // 0..1; default 1 (opaque outline)
 //     label?: string;
+//     imageUri?: string;                           // image badge inside a box
 //     color?: string;                              // hex; default theme color
 //     mode?: '2d' | '3d';                          // default '2d'; '3d' SCAFFOLD only
+//     orient?: 'plane' | 'camera';                 // default 'plane'
+//     depthOcclusion?: boolean;                    // default false (legacy rendering)
 //   }
 //
 // TWO overlay namespaces, rendered as a UNION (see `AROverlayStore`):
@@ -47,10 +52,11 @@ public struct RNISAROverlay: Equatable {
         /// Stroked outline only (default) — a polygon connecting the
         /// projected corners.
         case outline
-        /// FILLED box: a semi-transparent face (~22% alpha, Android
-        /// `BOX_FILL_ALPHA` parity) behind a thin border — the TS contract
-        /// (AROverlay.ts `shape`) both platforms honour for `worldQuad`
-        /// overlays. For a `worldPosition` marker, a small square billboard.
+        /// FILLED box: a semi-transparent face behind a thin border — the TS
+        /// contract (AROverlay.ts `shape`) both platforms honour for
+        /// `worldQuad` overlays.  Fill opacity is the overlay's `fillAlpha`
+        /// (default `defaultFillAlpha` ≈ 22%, Android `DEFAULT_FILL_ALPHA`
+        /// parity).  For a `worldPosition` marker, a small square billboard.
         case box
     }
 
@@ -85,8 +91,29 @@ public struct RNISAROverlay: Equatable {
     /// Shape style — `.outline` (default) or `.box`.
     public let shape: Shape
 
+    /// Opacity (0...1) of the `.box` fill face.  Ignored by `.outline`
+    /// (which has no fill).  Defaults to `defaultFillAlpha` (~22%), so an
+    /// overlay that omits the JS `fillAlpha` key renders EXACTLY as it did
+    /// before the field existed.  Always in 0...1: the init sanitises, so
+    /// no consumer needs to re-validate.
+    public let fillAlpha: CGFloat
+
+    /// Opacity (0...1) of the quad's STROKE (outline).  Defaults to
+    /// `defaultStrokeAlpha` (1 — fully opaque), so an overlay that omits the
+    /// JS `strokeAlpha` key renders EXACTLY as it did before the field
+    /// existed.  `0` yields a FILL-ONLY quad, which is what lets a tiled set
+    /// of adjacent quads read as one continuous region (no internal seams).
+    /// Always in 0...1: the init sanitises.
+    public let strokeAlpha: CGFloat
+
     /// Optional text label drawn near the overlay's centroid.
     public let label: String?
+
+    /// Optional IMAGE drawn INSIDE the box, anchored bottom-left and inset,
+    /// so it annotates without covering what the box marks.  A local
+    /// `file://` path; `RNSARCameraView` loads and CACHES it by URI and
+    /// silently ignores an undecodable file.
+    public let imageUri: String?
 
     /// Stroke / label color.  Defaults to a theme color when the JS hex
     /// is absent / unparseable.
@@ -96,6 +123,22 @@ public struct RNISAROverlay: Equatable {
     /// `Mode`).
     public let mode: Mode
 
+    /// `orient == 'camera'` on a `.box` `worldQuad` overlay ⇒ draw the box
+    /// as a camera-facing, screen-upright BILLBOARD (sized by the quad's
+    /// edges at its centroid) instead of a plane-oriented outline.  Default
+    /// false = 'plane' = byte-identical to every pre-`orient` build.  See
+    /// AROverlay.ts `orient`.
+    public let billboard: Bool
+
+    /// Opt-in for the renderer's box-vs-box depth-occlusion scheme on a
+    /// `.box` overlay.  Default false = the LEGACY rendering pipeline,
+    /// exactly as every pre-`depthOcclusion` build drew it (no depth
+    /// writer, no depth reads, fill under stroke in the historical overlay
+    /// order).  true = the box participates in depth occlusion (see the
+    /// "Depth participation" section in `RNSARCameraView`).  Occlusion is
+    /// strictly between opted-in boxes.  See AROverlay.ts `depthOcclusion`.
+    public let depthOcclusion: Bool
+
     public init(
         id: String,
         worldPosition: simd_float3?,
@@ -104,7 +147,15 @@ public struct RNISAROverlay: Equatable {
         shape: Shape,
         label: String?,
         color: UIColor,
-        mode: Mode
+        mode: Mode,
+        // Trailing + defaulted ON PURPOSE: this memberwise init is public SPI
+        // (native plugins construct overlays with it), so every pre-existing
+        // call site keeps compiling unchanged and keeps the ~22% fill.
+        fillAlpha: CGFloat = RNISAROverlay.defaultFillAlpha,
+        strokeAlpha: CGFloat = RNISAROverlay.defaultStrokeAlpha,
+        imageUri: String? = nil,
+        billboard: Bool = false,
+        depthOcclusion: Bool = false
     ) {
         self.id = id
         self.worldPosition = worldPosition
@@ -114,6 +165,34 @@ public struct RNISAROverlay: Equatable {
         self.label = label
         self.color = color
         self.mode = mode
+        self.imageUri = imageUri
+        self.billboard = billboard
+        self.depthOcclusion = depthOcclusion
+        // Sanitise HERE (not just in `from(dictionary:)`) so the 0...1
+        // invariant holds for the native-plugin path too — this is the one
+        // funnel every overlay passes through.
+        self.fillAlpha = Self.sanitizedFillAlpha(fillAlpha)
+        self.strokeAlpha = Self.sanitizedStrokeAlpha(strokeAlpha)
+    }
+
+    /// Coerce a caller-supplied fill alpha to the honoured range.  Anything
+    /// non-finite (NaN / ±inf) or outside 0...1 falls back to
+    /// `defaultFillAlpha` rather than being silently clipped — a nonsense
+    /// value means the caller is confused, and the safest read of "I asked
+    /// for a fill" is the documented default, not "invisible" (0) or
+    /// "opaque" (1), either of which would hide the subject or the feed.
+    public static func sanitizedFillAlpha(_ raw: CGFloat) -> CGFloat {
+        guard raw.isFinite, raw >= 0, raw <= 1 else { return defaultFillAlpha }
+        return raw
+    }
+
+    /// Coerce a caller-supplied stroke alpha to the honoured range.  Same
+    /// contract as `sanitizedFillAlpha`: nonsense (NaN, 3, -1, a bridged
+    /// boolean) falls back to the OPAQUE default rather than being clipped,
+    /// so a malformed value can never silently erase an outline.
+    public static func sanitizedStrokeAlpha(_ raw: CGFloat) -> CGFloat {
+        guard raw.isFinite, raw >= 0, raw <= 1 else { return defaultStrokeAlpha }
+        return raw
     }
 
     /// Default theme color when none / an unparseable hex is supplied.
@@ -125,6 +204,18 @@ public struct RNISAROverlay: Equatable {
     /// Default marker extent (metres) for a bare `worldPosition` with no
     /// `sizeMeters` — a ~6 cm square so a single anchor point is visible.
     public static let defaultMarkerExtent: CGFloat = 0.06
+
+    /// Default `.box` fill opacity when JS omits `fillAlpha`.  This is the
+    /// value `RNSARCameraView` hardcoded before the field existed, and the
+    /// Android twin's `DEFAULT_FILL_ALPHA` (which rounds back to the legacy
+    /// 0x38 byte ≈ 22%) — keeping the two platforms and every pre-`fillAlpha`
+    /// caller pixel-identical.
+    public static let defaultFillAlpha: CGFloat = 0.22
+
+    /// Default stroke opacity when JS omits `strokeAlpha`: fully opaque —
+    /// every shape was unconditionally stroked before the field existed, so
+    /// this keeps every pre-`strokeAlpha` caller pixel-identical.
+    public static let defaultStrokeAlpha: CGFloat = 1.0
 
     /// Build from the JS bridge dictionary shape (the same keys the TS
     /// `AROverlay` interface serialises to).  Returns `nil` when there's
@@ -173,6 +264,37 @@ public struct RNISAROverlay: Equatable {
 
         let label = dict["label"] as? String
 
+        // Empty string → nil: JS clearing the badge image sends '' on some
+        // paths, and an empty path must read as "no image", not as a load
+        // failure.
+        let imageUri: String? = {
+            guard let s = dict["imageUri"] as? String, !s.isEmpty else { return nil }
+            return s
+        }()
+
+        // Absent key → default.  A present-but-nonsense value (NaN, 3, -1, a
+        // string, a BOOLEAN — see `numeric`, where a bridged `true`/`false`
+        // would otherwise slip through the NSNumber cast as 1.0/0.0) also →
+        // default: `numeric` rejects non-numbers and the init sanitises the
+        // range.  JS is never trusted to be in-range OR in-type.
+        let fillAlpha = numeric(dict["fillAlpha"]) ?? defaultFillAlpha
+        let strokeAlpha = numeric(dict["strokeAlpha"]) ?? defaultStrokeAlpha
+        // `orient: 'camera'` ⇒ billboard.  Any other / absent value ⇒ 'plane'
+        // (false) ⇒ byte-identical to pre-`orient` builds.
+        let billboard = (dict["orient"] as? String) == "camera"
+        // `depthOcclusion` — genuine-boolean gate (fallback-not-clip, the
+        // mirror of `numeric`'s boolean REJECTION): only a real bridged
+        // boolean opts in.  A number, string, or any other nonsense falls
+        // back to false — the legacy rendering — rather than being coerced,
+        // so a malformed value can never silently change how a pre-existing
+        // consumer's boxes draw.  Android gates on ReadableType.Boolean for
+        // the same result.
+        let depthOcclusion: Bool = {
+            guard let n = dict["depthOcclusion"] as? NSNumber,
+                  CFGetTypeID(n) == CFBooleanGetTypeID() else { return false }
+            return n.boolValue
+        }()
+
         return RNISAROverlay(
             id: id,
             worldPosition: worldPosition,
@@ -181,14 +303,42 @@ public struct RNISAROverlay: Equatable {
             shape: shape,
             label: label,
             color: color,
-            mode: mode
+            mode: mode,
+            fillAlpha: fillAlpha,
+            strokeAlpha: strokeAlpha,
+            imageUri: imageUri,
+            billboard: billboard,
+            depthOcclusion: depthOcclusion
         )
     }
 
     // MARK: Dictionary parsing helpers
 
+    /// Parse one bridged JS value as a number.  The single numeric funnel for
+    /// EVERY field (`fillAlpha`, `strokeAlpha`, `sizeMeters`, `worldPosition`,
+    /// `worldQuad`), so a `nil` here means "JS sent a non-number" for all of
+    /// them alike.
     private static func numeric(_ v: Any?) -> CGFloat? {
-        if let n = v as? NSNumber { return CGFloat(n.doubleValue) }
+        if let n = v as? NSNumber {
+            // A JS boolean bridges to `__NSCFBoolean`, which IS an NSNumber —
+            // so the cast above accepts it and `doubleValue` yields 1.0/0.0.
+            // That is NOT harmless: both land INSIDE 0...1, so
+            // `sanitizedFillAlpha` passes them through untouched and
+            // `fillAlpha: true` renders an OPAQUE fill that hides the camera
+            // feed, `fillAlpha: false` (the `fillAlpha: cond && 0.5`
+            // short-circuit idiom) the invisible fill this field exists to
+            // prevent.  Android's `readAlpha` gates on `ReadableType.Number`
+            // and rejects booleans → default; reject them here so both
+            // platforms land on the same default.
+            //
+            // Applies to every caller, not just the alphas: a boolean in a
+            // `sizeMeters` / `worldPosition` / `worldQuad` slot is equally
+            // meaningless, and dropping it (→ a defaulted size, or a
+            // geometryless overlay `from(dictionary:)` discards) beats
+            // silently treating `true` as 1 metre.
+            guard CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
+            return CGFloat(n.doubleValue)
+        }
         if let d = v as? Double { return CGFloat(d) }
         if let i = v as? Int { return CGFloat(i) }
         return nil

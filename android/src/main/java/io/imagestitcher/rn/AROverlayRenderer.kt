@@ -237,8 +237,6 @@ internal class AROverlayRenderer(
         // skip (cheap, and avoids drawing labels for unseen overlays).
         if (isFullyOffscreen(screen)) return
 
-        strokePaint.color = overlay.colorArgb
-
         // Build the closed polygon path.
         path.reset()
         path.moveTo(screen[0], screen[1])
@@ -248,15 +246,140 @@ internal class AROverlayRenderer(
         path.close()
 
         if (overlay.shape == "box") {
-            // Translucent fill (overlay colour @ ~22% alpha) + opaque stroke.
-            fillPaint.color = (overlay.colorArgb and 0x00FFFFFF) or (BOX_FILL_ALPHA shl 24)
+            // Translucent fill (overlay colour @ the overlay's fillAlpha,
+            // default ~22%) + stroke.  The colour's own alpha is masked out
+            // on purpose — fillAlpha is the single source of fill opacity,
+            // matching iOS's `color.withAlphaComponent(fillAlpha)`.
+            fillPaint.color = (overlay.colorArgb and 0x00FFFFFF) or
+                (alphaByte(overlay.fillAlpha, AROverlayData.DEFAULT_FILL_ALPHA) shl 24)
             canvas.drawPath(path, fillPaint)
         }
-        canvas.drawPath(path, strokePaint)
+        // strokeAlpha == 0 ⇒ FILL-ONLY: skip the outline entirely so a tiled
+        // set of adjacent quads reads as ONE continuous region (no internal
+        // seams).
+        //
+        // Unlike the fill (which ALWAYS replaces the colour's alpha, exactly
+        // as the hardcoded BOX_FILL_ALPHA did), the stroke only overrides the
+        // colour's own alpha when strokeAlpha is BELOW 1.  At the default the
+        // colour passes through untouched, so a caller that encoded stroke
+        // opacity in an #AARRGGBB colour — the only way to do it before this
+        // field existed — stays pixel-identical.  iOS applies the same three
+        // cases (skip / colour as-is / withAlphaComponent).
+        if (overlay.strokeAlpha > 0f) {
+            strokePaint.color = if (overlay.strokeAlpha >= 1f) {
+                overlay.colorArgb
+            } else {
+                (overlay.colorArgb and 0x00FFFFFF) or
+                    (alphaByte(overlay.strokeAlpha, AROverlayData.DEFAULT_STROKE_ALPHA) shl 24)
+            }
+            canvas.drawPath(path, strokePaint)
+        }
 
-        // Label at the polygon centroid (screen space).
-        overlay.label?.let { drawLabel(canvas, it, screen, overlay.colorArgb) }
+        // A badge image REPLACES the centroid label: a chip over the MIDDLE
+        // of the box would cover exactly what the box marks.  Falls back to
+        // the label when the image is missing, so the overlay still
+        // annotates.
+        val badge = overlay.imageUri?.let { badgeBitmap(it) }
+        if (badge != null) {
+            drawBadge(canvas, badge, screen)
+        } else {
+            overlay.label?.let { drawLabel(canvas, it, screen, overlay.colorArgb) }
+        }
     }
+
+    /**
+     * Decoded badge-image cache.  A tracked overlay re-sends the SAME
+     * `imageUri` on EVERY frame, so decoding per frame would burn CPU and
+     * heat the device for no pixel change.  [badgeMisses] additionally
+     * remembers paths that failed to decode, so a stale path is not retried
+     * on every single frame either.
+     */
+    private val badgeCache =
+        object : android.util.LruCache<String, android.graphics.Bitmap>(32) {
+            override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = 1
+        }
+    private val badgeMisses = HashSet<String>()
+    private val badgeDst = android.graphics.RectF()
+    private val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        isFilterBitmap = true
+    }
+
+    /// Decode (and cache) an overlay's badge image; null when missing /
+    /// undecodable — the box then draws WITHOUT one rather than the overlay
+    /// failing.
+    private fun badgeBitmap(uri: String): android.graphics.Bitmap? {
+        badgeCache.get(uri)?.let { return it }
+        if (badgeMisses.contains(uri)) return null
+        val path = if (uri.startsWith("file://")) uri.removePrefix("file://") else uri
+        val bmp = try {
+            android.graphics.BitmapFactory.decodeFile(path)
+        } catch (t: Throwable) {
+            null
+        }
+        if (bmp == null) {
+            badgeMisses.add(uri)
+            return null
+        }
+        badgeCache.put(uri, bmp)
+        return bmp
+    }
+
+    /// Draw the badge image INSIDE the projected polygon at its BOTTOM-LEFT,
+    /// inset and aspect-preserving.  Screen y grows DOWN, so "bottom" is maxY.
+    private fun drawBadge(
+        canvas: Canvas,
+        bmp: android.graphics.Bitmap,
+        screen: FloatArray,
+    ) {
+        var minX = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE
+        var minY = Float.MAX_VALUE
+        var maxY = -Float.MAX_VALUE
+        var i = 0
+        while (i + 1 < screen.size) {
+            val x = screen[i]
+            val y = screen[i + 1]
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+            i += 2
+        }
+        val bw = maxX - minX
+        val bh = maxY - minY
+        // Skip only a DEGENERATE box; a small box still gets a small badge.
+        if (bw < 20f || bh < 20f) return
+        // Proportional badge (iOS parity): ~26% of the shorter side,
+        // bottom-left, clamped so a huge box's badge never dwarfs the feed.
+        val extent = (minOf(bw, bh) * 0.26f).coerceIn(10f, 110f)
+        val ar = if (bmp.height > 0) bmp.width.toFloat() / bmp.height.toFloat() else 1f
+        val w = if (ar >= 1f) extent else extent * ar
+        val h = if (ar >= 1f) extent / ar else extent
+        val pad = extent * 0.15f
+        val left = minX + pad
+        val top = maxY - h - pad
+        badgeDst.set(left, top, left + w, top + h)
+        canvas.drawBitmap(bmp, null, badgeDst, badgePaint)
+    }
+
+    /**
+     * An overlay's alpha (0..1) → the 0..255 alpha byte a paint needs.
+     * [AROverlayData.sanitizeAlpha] runs FIRST against [fallback] and is not
+     * optional: a NaN would round to 0 (an invisible fill / erased outline —
+     * the exact bugs these fields exist to control) and an out-of-range value
+     * would overflow the byte and wrap.  `coerceIn` is then belt-and-braces
+     * on the rounded int.
+     *
+     * Re-sanitising here (rather than trusting the parse) covers the
+     * native-plugin path, which can construct an [AROverlayData] directly and
+     * bypass [AROverlayData.fromReadableMap].
+     *
+     * The fill default (0.22f) rounds to 56 == 0x38 — bit-for-bit the alpha
+     * this renderer hardcoded before `fillAlpha` existed, so overlays that
+     * omit the key (every pre-existing caller) produce an identical pixel.
+     */
+    private fun alphaByte(raw: Float, fallback: Float): Int =
+        Math.round(AROverlayData.sanitizeAlpha(raw, fallback) * 255f).coerceIn(0, 255)
 
     /**
      * Project a world point [x,y,z] through viewProj → screen pixels inside
@@ -400,7 +523,10 @@ internal class AROverlayRenderer(
         private const val LABEL_CORNER_PX = 8f
         /// Label background: ~70% black.
         private const val LABEL_BG_ARGB = 0xB3000000.toInt()
-        /// Box-shape fill alpha (0..255) applied to the overlay colour.
-        private const val BOX_FILL_ALPHA = 0x38   // ~22%
+        // NOTE: the box fill alpha is no longer a constant here — it is
+        // per-overlay (`AROverlayData.fillAlpha`), converted to a byte by
+        // [alphaByte].  The old hardcoded 0x38 now lives as
+        // `AROverlayData.DEFAULT_FILL_ALPHA` (0.22f), which rounds back to
+        // exactly 0x38 for any overlay that omits the key.
     }
 }

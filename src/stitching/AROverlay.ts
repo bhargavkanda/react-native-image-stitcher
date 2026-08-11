@@ -89,26 +89,35 @@ export interface AROverlay {
   label?: string;
 
   /**
+   * Optional IMAGE drawn INSIDE a `'box'` overlay, anchored bottom-left and
+   * inset, so it annotates without covering what the box marks.  A local
+   * `file://` path (or plain filesystem path); the native renderers decode
+   * and CACHE it by URI and silently ignore an undecodable file (the box
+   * then draws without it).  When present it REPLACES the centroid `label`.
+   */
+  imageUri?: string;
+
+  /**
    * Stroke / fill colour as a hex string (e.g. `'#00E5FF'`).  Defaults to a
    * theme colour on the native side when omitted.
    */
   color?: string;
 
   /**
-   * Fill opacity `0..1` for a `'box'` overlay (0 = no fill, 1 = opaque).
-   * Optional; when omitted the native renderer uses its default fill opacity.
-   * SCAFFOLD this release: the field is part of the overlay data model so
-   * consumers can express per-overlay fill/stroke opacity (e.g. a tiled
-   * coverage region that must fill without per-strip outlines), but the native
-   * overlay layers do not yet read it — they draw at their default opacity.
-   * Document-only forward compatibility, matching `mode: '3d'` above.
+   * Fill opacity `0..1` for a `'box'` overlay (0 = no fill).  Omitted = the
+   * native default (~22%, identical on both platforms), so pre-existing
+   * overlays render pixel-identically.  A non-finite or out-of-range value
+   * falls back to the default rather than being clipped — nonsense never
+   * silently produces an invisible or opaque fill.
    */
   fillAlpha?: number;
 
   /**
-   * Stroke (outline) opacity `0..1` for the overlay edges (0 = no outline).
-   * Same optional / scaffold semantics as {@link fillAlpha}: honoured by the
-   * native renderer where supported, otherwise the default outline is drawn.
+   * Stroke (outline) opacity `0..1` for the overlay edges.  Omitted = 1
+   * (the historical fully-opaque outline).  `0` yields a FILL-ONLY quad —
+   * what lets a tiled set of adjacent quads read as one continuous region
+   * with no internal seams.  Same fallback-not-clip rule as
+   * {@link fillAlpha}.
    */
   strokeAlpha?: number;
 
@@ -120,4 +129,36 @@ export interface AROverlay {
    * warning).  Document-only forward compatibility.
    */
   mode?: '2d' | '3d';
+
+  /**
+   * Orientation of a `worldQuad` `'box'` overlay (iOS renderer).  Default
+   * `'plane'` — the box is drawn in the plane of its world corners (tilts
+   * and foreshortens with the surface it marks), matching every pre-`orient`
+   * build byte-for-byte.  `'camera'` re-orients the box to FACE THE CAMERA
+   * and stay gravity-upright on screen regardless of the quad's orientation
+   * (a billboard sized by the quad's own edge lengths at its centroid) —
+   * for a live detection box that must stay readable when the fitted plane
+   * is oblique or edge-on (where a plane-oriented box foreshortens to a
+   * sliver).  Ignored for `'outline'` shapes and for overlays without a
+   * `worldQuad`; Android's screen-space renderer projects corners directly
+   * and ignores it too.
+   */
+  orient?: 'plane' | 'camera';
+
+  /**
+   * Opt-in for the iOS renderer's box-vs-box DEPTH-OCCLUSION scheme on a
+   * `'box'` overlay.  Default `false` — the box renders with the legacy
+   * pipeline exactly as it did before this field existed: no depth writer,
+   * no depth reads, fill under stroke in the historical overlay order, and
+   * overlapping boxes draw over each other regardless of world depth.
+   * `true` — the box participates in depth occlusion: an invisible depth
+   * writer 3 cm behind the box culls other opted-in boxes genuinely behind
+   * it, while coplanar neighbours still draw.  Occlusion is strictly
+   * between opted-in boxes; non-opted-in boxes, `'outline'` overlays,
+   * labels, and badges neither occlude nor are occluded.  Same
+   * fallback-not-clip rule as the other new fields: a non-boolean value
+   * reads as `false` (legacy) rather than being coerced.  Android's
+   * screen-space renderer has no depth scheme and ignores the flag.
+   */
+  depthOcclusion?: boolean;
 }

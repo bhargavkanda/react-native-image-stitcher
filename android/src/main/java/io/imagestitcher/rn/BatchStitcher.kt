@@ -191,6 +191,11 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         // translation-heavy input).
         val stitchMode = (options.getString("stitchMode") ?: "scans")
             .let { if (it in setOf("panorama", "scans")) it else "scans" }
+        // Pipeline passthrough.  Absent = this path's historical MANUAL
+        // pipeline (the memory-safe default; mirrors iOS' batch capture).
+        // An explicit false selects the stock high-level cv::Stitcher.
+        val useManualPipeline = if (options.hasKey("useManualPipeline"))
+            options.getBoolean("useManualPipeline") else true
 
         CoroutineScope(Dispatchers.Default).launch {
             val start = System.currentTimeMillis()
@@ -209,19 +214,17 @@ class BatchStitcher(reactContext: ReactApplicationContext)
                     seamEstimationResolMP,
                     compositingResolMP,
                     stitchMode,
-                    // Direct @ReactMethod batch stitch → MANUAL pipeline
-                    // (the memory-safe default; mirrors iOS).
-                    true,
+                    // main parameterised useManualPipeline from options
+                    // (defaults to true = MANUAL, the memory-safe default that
+                    // mirrors iOS); honour it instead of hardcoding true.
+                    useManualPipeline,
                     // perf-3b range matcher is PANORAMA-high-level only; this
-                    // manual path never uses it → 0 (off).
+                    // direct @ReactMethod path never uses it → 0 (off).
                     0,
                     // perf-3b item 1 — this direct @ReactMethod path runs on
                     // the migrating Dispatchers.Default (below), so keep it
                     // single-threaded (1): no TBB worker pool → no per-worker-
-                    // TLS creep on repeated CLI/test calls.  Behaviour-identical
-                    // to the pre-item-1 global setNumThreads(1).  The fleet
-                    // finalize path (IncrementalStitcher, pinned thread) gets
-                    // auto-multi via stitchSync's default.
+                    // TLS creep on repeated CLI/test calls.
                     1,
                 )
                 val duration = System.currentTimeMillis() - start

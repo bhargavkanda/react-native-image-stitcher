@@ -35,6 +35,34 @@ export interface StitchFramesOptions {
   outputPath: string;
   /** JPEG quality [0-100].  Default 85. */
   quality?: number;
+  /**
+   * cv::Stitcher registration model.  `'scans'` = the affine SCANS model
+   * (suited to translational captures with a bounded canvas); `'panorama'` =
+   * the rotational Panorama model.  ABSENT = each platform's historical
+   * default (iOS: Panorama; Android: scans) — passing nothing changes
+   * nothing.
+   */
+  stitchMode?: 'panorama' | 'scans';
+  /**
+   * Per-frame compose budget in MEGAPIXELS.  > 0 overrides the platform's
+   * compose pin (1.0 MP); the native canvas-budget guard still downscales
+   * when the total canvas exceeds the RAM budget, so a large value stays
+   * memory-safe.  Absent / <= 0 = historical behaviour.
+   */
+  compositingResolMP?: number;
+  /**
+   * Feature-registration budget in MEGAPIXELS.  > 0 overrides the platform's
+   * registration resolution (cv::Stitcher default 0.6 MP).  Absent / <= 0 =
+   * historical behaviour.
+   */
+  registrationResolMP?: number;
+  /**
+   * Pipeline selector.  `true` = the manual cv::detail pipeline (graphcut
+   * seams + multiband blend, with the full memory-guard machinery); `false` =
+   * the stock high-level cv::Stitcher.  ABSENT = each platform's historical
+   * default for this entry point (iOS: high-level; Android: manual).
+   */
+  useManualPipeline?: boolean;
 }
 
 

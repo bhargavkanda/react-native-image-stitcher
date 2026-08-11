@@ -427,11 +427,28 @@ public class StitcherBridge: NSObject {
       return
     }
     let jpegQuality = (options["quality"] as? Int) ?? 85
+    // Optional passthroughs — absent = historical behaviour on every path:
+    //   'stitchMode' ('scans' | 'panorama'; absent = historical Panorama),
+    //   'compositingResolMP' (> 0 overrides the 1.0 MP high-level compose
+    //    pin; the shared-C++ canvas guard bounds memory),
+    //   'registrationResolMP' (> 0 overrides the 0.6 MP registration pin),
+    //   'useManualPipeline' (absent = this API's historical high-level
+    //    cv::Stitcher pipeline).
+    let stitchMode = options["stitchMode"] as? String
+    let compositingResolMP =
+      (options["compositingResolMP"] as? NSNumber)?.doubleValue
+    let registrationResolMP =
+      (options["registrationResolMP"] as? NSNumber)?.doubleValue
+    let useManualPipeline = options["useManualPipeline"] as? Bool
 
     let stitchOpts = StitchOptions(
       framePaths: framePaths,
       outputPath: outputPath,
-      jpegQuality: jpegQuality
+      jpegQuality: jpegQuality,
+      stitchMode: stitchMode,
+      compositingResolMP: compositingResolMP,
+      registrationResolMP: registrationResolMP,
+      useManualPipeline: useManualPipeline
     )
 
     DispatchQueue.global(qos: .userInitiated).async {

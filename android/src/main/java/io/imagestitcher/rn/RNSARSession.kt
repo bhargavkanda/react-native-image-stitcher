@@ -640,6 +640,28 @@ class RNSARSession(reactContext: ReactApplicationContext)
         promise.resolve(out)
     }
 
+    /**
+     * Pose-ledger accessor with a watermark: resolves every pose whose frame
+     * timestamp is STRICTLY AFTER `sinceNs` (nanoseconds on the AR clock —
+     * the same clock [RNSARFramePose.timestampMs] is expressed in, ×10⁶),
+     * in capture order.  `0` (or any negative value) = the full log, same as
+     * [snapshotPoseLog].  A caller polling incrementally passes the last
+     * pose's `timestampMs * 1e6` as the next watermark.  iOS twin:
+     * `RNSARSession.getFramePoses(sinceNs:)`.
+     */
+    @ReactMethod
+    fun getFramePoses(sinceNs: Double, promise: Promise) {
+        val out = Arguments.createArray()
+        poseLogLock.read {
+            for (pose in poseLog) {
+                if (pose.timestampMs * 1_000_000.0 > sinceNs) {
+                    out.pushMap(pose.toWritableMap())
+                }
+            }
+        }
+        promise.resolve(out)
+    }
+
     @ReactMethod
     fun clearPoseLog(promise: Promise) {
         clearPoseLogInternal()
@@ -691,7 +713,10 @@ class RNSARSession(reactContext: ReactApplicationContext)
                 "RNImageStitcher-ar-${java.util.UUID.randomUUID()}.jpg",
             ).absolutePath
         }
-        view.requestTakePhoto(resolvedPath, quality, orientation, promise)
+        // The FULL options map rides along so registered photo-capture
+        // plugins ([RNSPhotoCapturePlugin]) receive it verbatim.  With no
+        // plugin registered the extra keys are never read.
+        view.requestTakePhoto(resolvedPath, quality, orientation, promise, options)
     }
 
     @ReactMethod
