@@ -110,12 +110,27 @@ Common to both platforms:
 2. **`react-native-worklets-core` installed** — and present *before* the
    native build ran (see the install-order warning above). This is the
    most common failure.
+3. **`react-native-worklets-core/plugin` in `babel.config.js`** — LAST in
+   the `plugins` array. The SDK's ingest worklet (and any frame
+   processor) is a `'worklet'` function; without the babel transform it
+   fails at runtime even when the native build is perfect:
 
-**iOS** (then `pod install` + rebuild):
+   ```js
+   module.exports = {
+     presets: ['module:@react-native/babel-preset'],
+     plugins: ['react-native-worklets-core/plugin'],
+   };
+   ```
 
-3. **No `$VCEnableFrameProcessors = false`** in your `Podfile` — some
+   Restart Metro with `--reset-cache` after adding it.
+
+**iOS** (then `rm -rf ios/Pods ios/Podfile.lock && pod install` + a clean
+rebuild — an ordinary `pod install` keeps build settings frozen from the
+first install):
+
+4. **No `$VCEnableFrameProcessors = false`** in your `Podfile` — some
    templates disable frame processors to cut build time.
-4. **With `use_frameworks!`**: `<VisionCamera/FrameProcessorPlugin.h>`
+5. **With `use_frameworks!`**: `<VisionCamera/FrameProcessorPlugin.h>`
    must be visible to the `RNImageStitcher` pod at compile time. The
    SDK's plugin file is guarded by `__has_include` — if the header isn't
    visible, the plugin **compiles to nothing** (deliberately, so your
@@ -124,7 +139,7 @@ Common to both platforms:
 
 **Android** (then a clean rebuild — `cd android && ./gradlew clean`):
 
-5. vision-camera compiles its frame-processor subsystem only when Gradle
+6. vision-camera compiles its frame-processor subsystem only when Gradle
    can resolve `react-native-worklets-core` at build time. Adding
    worklets-core without a clean rebuild leaves the old AAR (frame
    processors compiled out) in place.
