@@ -56,11 +56,20 @@ the SDK doesn't require a specific patch version of any of them.
 {
   "dependencies": {
     "react-native-sensors": "^7.3.4",
-    "react-native-vision-camera": "^4.0.0",
+    "react-native-vision-camera": "^4.7.0",
+    "react-native-worklets-core": "^1.3.0",
     "react-native-safe-area-context": "^5.5.2"
   }
 }
 ```
+
+:::warning Install order matters
+`react-native-worklets-core` must be in `node_modules` **before** you run
+`pod install`. vision-camera compiles its frame-processor subsystem only
+when it can see worklets-core at pod-install time — and the SDK's non-AR
+panorama capture depends on that subsystem (next section). If you added
+worklets-core later, re-run `pod install` and rebuild.
+:::
 
 After updating `package.json`, run:
 
@@ -68,6 +77,89 @@ After updating `package.json`, run:
 npm install
 cd ios && pod install && cd ..
 ```
+
+## Frame processors — the non-AR capture prerequisite
+
+Panorama capture has two frame sources:
+
+- **AR mode** (opt in with `defaultCaptureSource="ar"`): frames flow
+  natively from the ARKit / ARCore session into the stitching engine.
+  **No frame-processor dependency** — this whole failure class disappears.
+  Caveats today: an Android device without "Google Play Services for AR"
+  is prompted to install it and a declined install leaves the AR preview
+  blank with no automatic downgrade; AR tap-photos come from the AR video
+  stream (lower resolution, no flash, no iOS depth sidecar). Weigh these
+  against the robustness win for your fleet.
+- **Non-AR mode** (the default): frames flow through a vision-camera
+  **frame-processor worklet** (the SDK's `cv_flow_gate_process_frame` plugin). This chain
+  only exists if the native build enabled it.
+
+Non-AR mode is the default AND is reachable on every install — devices
+without ARKit/ARCore fall back to it automatically, selecting the 0.5×
+lens forces it, and the runtime AR toggle can switch to it — so treat the
+checklist below as required even if you plan to run AR-only. (To *lock* captures to
+one source and hide the AR toggle entirely, set `captureSources="ar"` —
+see the [`<Camera>` API](./camera-api.md).)
+
+### Checklist
+
+Common to both platforms:
+
+1. **`react-native-vision-camera` ≥ 4.7** — older 4.x has different
+   frame-processor APIs; npm only warns on peer-dep violations.
+2. **`react-native-worklets-core` installed** — and present *before* the
+   native build ran (see the install-order warning above). This is the
+   most common failure.
+
+**iOS** (then `pod install` + rebuild):
+
+3. **No `$VCEnableFrameProcessors = false`** in your `Podfile` — some
+   templates disable frame processors to cut build time.
+4. **With `use_frameworks!`**: `<VisionCamera/FrameProcessorPlugin.h>`
+   must be visible to the `RNImageStitcher` pod at compile time. The
+   SDK's plugin file is guarded by `__has_include` — if the header isn't
+   visible, the plugin **compiles to nothing** (deliberately, so your
+   build doesn't break) and non-AR capture silently loses its frame
+   source.
+
+**Android** (then a clean rebuild — `cd android && ./gradlew clean`):
+
+5. vision-camera compiles its frame-processor subsystem only when Gradle
+   can resolve `react-native-worklets-core` at build time. Adding
+   worklets-core without a clean rebuild leaves the old AAR (frame
+   processors compiled out) in place.
+
+### How the SDK tells you it's broken (v0.24.3+)
+
+You do **not** need to instrument anything — the SDK self-diagnoses:
+
+- **Immediately**, if vision-camera reports frame processors are disabled
+  (its proxy throws), or **~3 s after mount** if nothing ever registers,
+  the SDK logs a `console.error` from `[react-native-image-stitcher]`
+  with the platform-specific remediation from the checklist above.
+- **At capture start**, a non-AR hold in such a build fails fast with
+  `PANORAMA_START_FAILED` ("the frame-processor worklet is unavailable…")
+  instead of running a doomed capture that ends in the misleading
+  `0 keyframes saved`. Captures started during the normal ~1-frame
+  acquisition window at mount are unaffected.
+- Hosts can read `acquisitionFailed` from `useStitcherWorklet()` /
+  `useFrameProcessorDriver()` to gate their own UI.
+
+To check manually (any SDK version):
+
+```ts
+import { VisionCameraProxy } from 'react-native-vision-camera';
+console.log(
+  'cv_flow_gate plugin:',
+  VisionCameraProxy.initFrameProcessorPlugin('cv_flow_gate_process_frame', {}),
+); // null/undefined = the chain is dead in this build
+```
+
+One more integration trap: if you pass your **own `frameProcessor` prop**
+to `<Camera>`, it *replaces* the SDK's internal ingest worklet — you must
+call `stitcher.call(frame)` (from `useStitcherWorklet`) inside your
+worklet body, or non-AR panoramas will capture zero frames with the same
+symptom. See the `frameProcessor` prop JSDoc for the composition pattern.
 
 ## iOS
 

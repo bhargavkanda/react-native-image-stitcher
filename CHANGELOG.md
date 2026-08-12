@@ -14,6 +14,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.24.3] - 2026-08-12
+
+Hardening release from a field RCA: an integrator's non-AR panorama
+captures ran their whole UI lifecycle with ZERO frames (band thumbnail
+never filled) and died with `PANORAMA_FINALIZE_FAILED: 0 keyframes
+saved`, because the `cv_flow_gate_process_frame` vision-camera plugin was
+compiled out of their build (frame processors disabled at pod-install
+time) — and the SDK failed **silently**: the plugin-acquisition loop
+retried forever without a word. Photos worked throughout, which made the
+failure look like a stitcher bug instead of a build defect.
+
+No behaviour changes for working integrations; this release only makes
+the broken-build case diagnosable.
+
+### Added
+
+- **Loud frame-processor diagnostics.** The SDK now detects that the
+  `cv_flow_gate_process_frame` plugin can never be acquired — either
+  because vision-camera reports frame processors disabled (its proxy
+  throws) or because nothing registered within ~3 s — and logs a
+  `console.error` with **platform-correct** remediation (iOS: pod-install
+  order, `$VCEnableFrameProcessors`, `use_frameworks!` header visibility;
+  Android: worklets-core resolvable at Gradle build time + clean
+  rebuild). Previously it retried silently forever.
+- **Fail-fast at capture start.** A non-AR hold in a build where the
+  plugin is permanently unavailable now fails immediately with an
+  actionable `PANORAMA_START_FAILED` BEFORE the recording UI mounts,
+  instead of running a doomed capture that ends in the misleading
+  `0 keyframes saved`. Keyed on the plugin's *permanent* acquisition
+  failure (not "not resolved yet"), so programmatic `startPanorama()`
+  during the normal ~1-frame mount window still works; and keyed on the
+  driver's state rather than the composed `frameProcessor` prop, so hosts
+  running their own worklet are covered too.
+- **`acquisitionFailed`** on `useStitcherWorklet()` /
+  `useFrameProcessorDriver()` — distinguishes "plugin missing from this
+  build" (permanent) from the normal acquisition window, for hosts that
+  want to gate their own UI.
+
+### Fixed
+
+- **Hold during AR-support probe no longer starts a frameless capture.**
+  A shutter hold (or `startPanorama()`) while the AR-capability probe is
+  still resolving — when no camera is mounted yet — is now DEFERRED and
+  resumes once the probe settles, the same way the rotate-to-landscape
+  gate works. Previously it started a capture with no frame source and
+  finalized with `0 keyframes saved`.
+
+### Docs
+
+- New **"Frame processors — the non-AR capture prerequisite"** section in
+  Host integration: install-order warning, the 4-point checklist, a
+  manual diagnostic snippet, and the host-`frameProcessor` composition
+  trap. New troubleshooting entry for the `0 keyframes saved` symptom.
+  Peer-deps corrected to `react-native-vision-camera ^4.7.0` +
+  `react-native-worklets-core ^1.3.0` (the omission of worklets-core from
+  the documented deps is itself a cause of this failure class).
+- `defaultCaptureSource` JSDoc now explains **when to opt into AR**
+  (`defaultCaptureSource="ar"`, or `captureSources="ar"` to lock it and
+  hide the runtime AR pill): AR ingests frames natively and is immune to
+  this whole failure class. Making `'ar'` the DEFAULT was evaluated for
+  this release and deferred to 0.25.0 — it needs an AR-session-failure →
+  auto-downgrade path first (an Android device without Google Play
+  Services for AR currently shows a blank AR preview with no fallback),
+  plus AR-mode photo-capture parity (resolution / flash / depth sidecar).
+
 ## [0.24.2] - 2026-08-11
 
 ### Fixed

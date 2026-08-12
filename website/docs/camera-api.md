@@ -25,9 +25,9 @@ Uncontrolled — read once at mount.
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `defaultCaptureSource` | `CaptureSource` (`'ar' \| 'non-ar'`) | `'non-ar'` | Initial capture source, read once at mount (uncontrolled). Clamped by `captureSources`: `'ar'` forces it on, `'non-ar'` forces it off, `'both'` uses this value. |
+| `defaultCaptureSource` | `CaptureSource` (`'ar' \| 'non-ar'`) | `'non-ar'` | Initial capture source, read once at mount (uncontrolled). **Consider `'ar'`**: AR feeds the engine natively, so it is immune to the frame-processor build failure described in [Host integration](./host-integration.md#frame-processors--the-non-ar-capture-prerequisite) (caveats: on Android a device without Google Play Services for AR shows a blank AR preview with no automatic downgrade today; AR tap-photos use the AR video stream, no flash, no iOS depth sidecar). Clamped by `captureSources`. |
 | `defaultLens` | `CameraLens` (`'1x' \| '0.5x'`) | `'1x'` | Initial physical lens. When `captureSources='ar'` the lens is forced to `'1x'` — the ultra-wide isn't usable in AR. |
-| `captureSources` | `CaptureSourcesMode` (`'ar' \| 'non-ar' \| 'both'`) | `'both'` | Which capture sources the host allows. `'both'` shows the AR toggle; `'ar'` is AR-only (toggle **and** 0.5× chooser hidden); `'non-ar'` hides the toggle. A single source overrides a conflicting `defaultCaptureSource`. |
+| `captureSources` | `CaptureSourcesMode` (`'ar' \| 'non-ar' \| 'both'`) | `'both'` | Which capture sources the host allows. `'both'` shows the AR toggle; `'ar'` is AR-only (toggle **and** 0.5× chooser hidden); `'non-ar'` hides the toggle. A single source overrides a conflicting `defaultCaptureSource`. **Use `'ar'` to lock captures to AR and hide the AR pill so users can't flip modes.** |
 | `engine` | `'batch-keyframe'` | `'batch-keyframe'` | Which stitcher engine to drive. Only `'batch-keyframe'` is supported and is the default. |
 
 See [Flash & lenses](./flash-and-lenses.md) for how lens selection, device
@@ -379,7 +379,7 @@ the settings tree these fields sit under.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `captureSource` | `'ar' \| 'non-ar'` | `'ar'` | Which camera + tracking source feeds the engine. `'ar'` = ARKit/ARCore pose (real translation); `'non-ar'` = vision-camera gyro yaw+pitch only, with the JS IMU gate filling translation. (Settings-tree default; the component prop default for `defaultCaptureSource` is `'non-ar'`.) |
+| `captureSource` | `'ar' \| 'non-ar'` | `'ar'` | Which camera + tracking source feeds the engine. `'ar'` = ARKit/ARCore pose (real translation); `'non-ar'` = vision-camera gyro yaw+pitch only, with the JS IMU gate filling translation. (Settings-tree default; the component prop default for `defaultCaptureSource` is `'non-ar'` — the component's runtime-derived source always wins.) |
 | `debug` | `boolean` | `false` | Show the lib's built-in diagnostic overlay (memory / keyframe / orientation pills, stitch-stats toast, metrics block). |
 | `stitchMode` | `'auto' \| 'panorama' \| 'scans'` | `'auto'` | `cv::Stitcher` pipeline mode. `'auto'` picks panorama/scans at finalize from the translation/rotation ratio; `'panorama'` = rotation-only (ORB + BA-Ray + Spherical); `'scans'` = affine (Affine + BA-Affine + Plane). Both platforms retry with the opposite mode on degenerate params. |
 | `warperType` | `'plane' \| 'cylindrical' \| 'spherical'` | `'plane'` | Output projection. PANORAMA mode uses it directly; SCANS hard-wires `PlaneWarper` and ignores it. v0.16 reverted from `'spherical'` to `'plane'`. |

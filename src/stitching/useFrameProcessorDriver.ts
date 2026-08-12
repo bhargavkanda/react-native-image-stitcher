@@ -122,6 +122,14 @@ export interface FrameProcessorDriverHandle {
    * processor in that window.
    */
   frameProcessor: ReadonlyFrameProcessor | null;
+
+  /**
+   * v0.24.3 — mirrors `useStitcherWorklet().acquisitionFailed`: `true`
+   * when the frame-processor plugin can never be acquired in this build
+   * (permanent), as opposed to `frameProcessor` merely being null during
+   * the normal ~1-frame acquisition window.
+   */
+  acquisitionFailed: boolean;
   /** Whether `start()` has been called and `stop()` hasn't. */
   isRunning: boolean;
 }
@@ -187,6 +195,8 @@ export function useFrameProcessorDriver(
     stop,
     resetCadence,
     frameProcessor: stitcher.isReady ? frameProcessor : null,
+    acquisitionFailed: stitcher.acquisitionFailed,
     get isRunning() { return isRunningRef.current; },
-  }), [start, stop, resetCadence, frameProcessor, stitcher.isReady]);
+  }), [start, stop, resetCadence, frameProcessor, stitcher.isReady,
+    stitcher.acquisitionFailed]);
 }

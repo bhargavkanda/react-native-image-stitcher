@@ -371,6 +371,27 @@ export interface FramesDroppedInfo {
  */
 export interface CameraProps {
   // ── Initial values (uncontrolled — read once at mount) ────────────
+  /**
+   * Initial capture source.  Default `'non-ar'`.
+   *
+   * `'ar'` feeds the engine natively from the ARKit/ARCore session, so
+   * it does NOT depend on the vision-camera frame-processor chain that
+   * non-AR capture requires (see the "Frame processors" section of the
+   * host-integration docs).  If your fleet is AR-capable, opting in with
+   * `defaultCaptureSource="ar"` — or locking it with `captureSources="ar"`,
+   * which also hides the runtime AR toggle — avoids that whole class of
+   * build-time integration failure.
+   *
+   * Caveats when choosing AR: on Android, devices without "Google Play
+   * Services for AR" installed are prompted to install it, and a declined
+   * install currently leaves the AR preview blank (no automatic downgrade
+   * — fixed in a later release); AR tap-photos also come from the AR video
+   * stream rather than the full-resolution still pipeline, the flash is
+   * unavailable, and the iOS depth sidecar is not produced.
+   *
+   * Devices without AR support (and the 0.5× lens) always resolve to
+   * non-AR regardless of this value.
+   */
   defaultCaptureSource?: CaptureSource;
   defaultLens?: CameraLens;
   defaultStitchMode?: StitchMode;
@@ -2371,6 +2392,42 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // line is the item-5 auto-finalize timer scheduled right after
   // `setRecordingStartedAt`.
   const startCapture = useCallback(async () => {
+    // v0.24.3 guard — a NON-AR capture ingests frames ONLY through the
+    // vision-camera frame-processor worklet.  When the
+    // `cv_flow_gate_process_frame` plugin can never be acquired in this
+    // build, the capture would run its whole UI lifecycle with ZERO
+    // frames and die at finalize with a misleading "0 keyframes saved".
+    // Fail fast BEFORE the recording UI mounts, naming the real problem.
+    //
+    // Two deliberate details:
+    //   - keyed on the DRIVER's acquisition state, not on
+    //     `effectiveFrameProcessor`: a host that supplies its own
+    //     `frameProcessor` prop still depends on the same plugin (its
+    //     `stitcher.call()` is a no-op without it), so checking the
+    //     composed prop would let exactly the broken build through;
+    //   - gated on `acquisitionFailed` (PERMANENT) rather than "plugin
+    //     not resolved yet": the plugin resolves ~1 frame after mount in
+    //     healthy apps, and a capture started in that window succeeds —
+    //     erroring there would regress programmatic `startPanorama()`
+    //     calls fired from a host mount effect.
+    // AR captures are unaffected (the AR session feeds the engine natively).
+    if (isNonAR && fpDriver.acquisitionFailed) {
+      onError?.(
+        new CameraError(
+          'PANORAMA_START_FAILED',
+          'Non-AR panorama capture cannot start: the frame-processor '
+          + 'worklet is unavailable — the "cv_flow_gate_process_frame" '
+          + 'vision-camera plugin is not present in this build, so no '
+          + 'camera frames can reach the stitching engine.  Check '
+          + 'vision-camera >= 4.7 with frame processors enabled '
+          + '(react-native-worklets-core installed before the native '
+          + 'build), then rebuild.  See the console error from '
+          + '[react-native-image-stitcher] and the docs: Host '
+          + 'integration -> "Frame processors".',
+        ),
+      );
+      return;
+    }
     try {
       // perf-3a change 4 — thumbnails + engine state are cleared inside the
       // hook's start() (resetCoalescer + setState(null)) BEFORE its native
@@ -2539,6 +2596,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       setPendingPanStart(true);
       return;
     }
+    // v0.24.3 — no camera is mounted while the AR-support probe is still
+    // resolving (the v0.14.2 handoff guard renders the "Switching camera…"
+    // placeholder instead).  Starting here would run a capture against no
+    // frame source and finalize with "0 keyframes saved".  DEFER like the
+    // rotate gate: `pendingPanStart` resumes the start the moment the
+    // probe settles (the resume effect below re-evaluates both gates).
+    if (arSupportPending) {
+      setPendingPanStart(true);
+      return;
+    }
     void startCapture();
   }, [
     enablePanoramaMode,
@@ -2546,6 +2613,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     statusPhase,
     onError,
     panMode,
+    arSupportPending,
     deviceOrientation,
     startCapture,
   ]);
@@ -2556,11 +2624,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Invoked through `startCaptureRef` (kept current above) so this
   // effect's deps don't churn on every recording re-render.
   useEffect(() => {
-    if (pendingPanStart && !shouldGateForPanMode(panMode, deviceOrientation)) {
+    if (
+      pendingPanStart
+      && !shouldGateForPanMode(panMode, deviceOrientation)
+      // v0.24.3 — also the "camera still initialising" defer (above).
+      && !arSupportPending
+    ) {
       setPendingPanStart(false);
       startCaptureRef.current?.();
     }
-  }, [pendingPanStart, deviceOrientation, panMode]);
+  }, [pendingPanStart, deviceOrientation, panMode, arSupportPending]);
 
   const handleHoldEnd = useCallback(async () => {
     // Item 5 exit path #1 — always kill the auto-finalize timer on

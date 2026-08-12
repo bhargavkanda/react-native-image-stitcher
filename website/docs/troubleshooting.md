@@ -20,6 +20,34 @@ fuller table mapping crashes to missing config.
 | **0.5× shows the same FOV as 1×** | The device has no usable ultra-wide, or (pre-0.14) the single-lens picker mis-selected. v0.14's capability-aware selection fixes this; the chooser hides when no ultra-wide exists. |
 | **AR photo is sideways in landscape** | Pre-0.14 Android bug (window-rotation vs device-orientation). Fixed in 0.14. |
 
+## "0 keyframes saved" — panorama captures zero frames, photos work
+
+**Symptom:** the hold-to-pan capture UI runs normally, but the band
+overlay's first thumbnail never fills; on release every attempt fails
+with `PANORAMA_FINALIZE_FAILED — Batch-keyframe finalize: 0 keyframes
+saved`. Single-photo capture works. 100 % reproducible.
+
+**Cause:** the capture ran in **non-AR mode** and the vision-camera
+frame-processor chain that feeds it is dead in your build — the SDK's
+`cv_flow_gate_process_frame` plugin was compiled out (frame processors
+disabled when the native build ran, vision-camera < 4.7, or on iOS a
+`use_frameworks!` header-visibility issue), so zero frames ever reached
+the stitching engine. Photos are unaffected because `takePhoto()`
+doesn't use frame processors.
+
+**Fix:** work through the
+[frame-processor checklist](./host-integration.md#frame-processors--the-non-ar-capture-prerequisite),
+then rebuild (iOS: re-run `pod install`; Android: clean Gradle build).
+On v0.24.3+ the SDK diagnoses
+this itself: a `console.error` (immediately if vision-camera reports
+frame processors disabled, else ~3 s after mount) with platform-specific
+remediation, plus a fail-fast `PANORAMA_START_FAILED` at capture start
+instead of the misleading 0-keyframes error at the end.  Opting into AR
+capture (`defaultCaptureSource="ar"`) sidesteps this failure class
+entirely — see the caveats in the [`<Camera>` API](./camera-api.md). Also check you're not passing a custom
+`frameProcessor` prop without composing `stitcher.call(frame)` — same
+symptom, different cause.
+
 ## Stitching
 
 | `err.code` | Meaning / fix |
