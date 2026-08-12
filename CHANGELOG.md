@@ -14,6 +14,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.24.2] - 2026-08-11
+
+### Fixed
+
+- **Android: 16 KB page-size compliance (Android 15+).** `libimage_stitcher.so`
+  and the vendored custom OpenCV `libopencv_java4.so` now link with 16 KB
+  ELF LOAD alignment (`-Wl,-z,max-page-size=16384` on the shim;
+  `ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON` through the OpenCV SDK build,
+  which moved to NDK r27b).  The binaries release now hard-fails if a
+  produced 64-bit `.so` regresses to 4 KB alignment.
+
+### Added
+
+- **Android: `compositingResolMP` on `IncrementalRefineOptions`** — the
+  deterministic compose-resolution knob for a standalone re-stitch (the same
+  lever `adaptiveStitchMode` drives at finalize).  Omit ⇒ `1.0` = previous
+  behaviour, byte-identical.  The example app's ablation lever (shipped in
+  0.24.1) is now actually honoured — it was a no-op there because this
+  library-side plumbing had stayed behind on the `integration/0.23.0` line.
+
 ## [0.24.1] - 2026-08-11
 
 ### Changed (breaking — prop regroup; see `docs/migrations/v0.24.0-to-v0.24.1.md`)
