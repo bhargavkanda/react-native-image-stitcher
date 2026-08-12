@@ -14,6 +14,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.24.1] - 2026-08-11
+
+### Changed (breaking — prop regroup; see `docs/migrations/v0.24.0-to-v0.24.1.md`)
+
+- **`<Camera>` anti-blur controls grouped into a new `blur` prop.** Every
+  motion-blur defense now lives in one object — `sharpnessWindow` (was
+  `frameSelection.sharpnessWindow`) plus the exposure cap / motion gate /
+  sharpness floor / `maxConsecutiveHolds` / `preferHighFpsFormat` (were
+  `frameSelection.antiBlur.*`). Deep-merged over the SDK defaults.
+- **Stitch-speed levers grouped into a new `perf` prop.** `seamFinderType` /
+  `rangeMatcherWidth` / `numThreads` / `adaptiveStitchMode` /
+  `adaptiveMinOutputMP` / `adaptiveSlowStitchMsPerFrame` moved out of
+  `stitcher` (now the recipe only) into `perf`. The flat `defaultSeamFinder`
+  prop was removed (use `perf.seamFinderType`).
+
+### Changed (defaults — on-device A/B, A35 + iPhone, 5 and 8-10 keyframes)
+
+- **`seamFinderType` default flipped `graphcut` → `voronoi`** — 1.6-1.9× faster
+  with no visible quality loss (same frames re-stitched, both devices).
+  `perf={{ seamFinderType: 'graphcut' }}` restores the old default.
+- **`numThreads` default flipped `1` (single) → `0` (auto multi-core)** —
+  single-threading measured consistently slower at 8-10 keyframes; also matches
+  iOS. `perf={{ numThreads: 1 }}` restores the single-thread memory kill-switch.
+
 ## [0.24.0] - 2026-08-11
 
 ### Fixed

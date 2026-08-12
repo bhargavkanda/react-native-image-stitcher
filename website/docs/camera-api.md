@@ -72,7 +72,7 @@ seed props at capture time.
 v0.24 groups the anti-blur and stitch-speed knobs into two dedicated prop
 objects. Both are partial + deep-merged over the SDK defaults, so set only what
 you want. Upgrading from v0.23? See the
-[migration guide](https://github.com/bhargavkanda/react-native-image-stitcher/blob/main/docs/migrations/v0.23-to-v0.24.md).
+[migration guide](https://github.com/bhargavkanda/react-native-image-stitcher/blob/main/docs/migrations/v0.24.0-to-v0.24.1.md).
 
 ### `blur` — motion-blur defenses
 
