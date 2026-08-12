@@ -7,8 +7,13 @@
 #
 # build_sdk.py is OpenCV's own scripted Android build:
 #   - Reads `--ndk_path` for the toolchain.
-#   - Builds all 4 ABIs (arm64-v8a, armeabi-v7a, x86, x86_64) in one
-#     invocation.
+#   - Builds the ABIs listed in the --config file.  We build arm64-v8a
+#     ONLY (see the generated config below): the release zip has never
+#     shipped any other ABI (the v0.7.1 strip step deleted them), and
+#     the 32-bit x86 build actively BREAKS under NDK r27+ — Intel's
+#     prebuilt ia32 libippicv.a carries a malformed .note.gnu.property
+#     section that r27's stricter lld rejects ("data is too short").
+#     Building only what we ship sidesteps that and is ~4x faster.
 #   - Output: <work_dir>/OpenCV-android-sdk/ with
 #     `sdk/native/{libs,staticlibs,jni/include}/` layout that our JNI
 #     shim's CMakeLists expects.
@@ -99,11 +104,14 @@ mkdir -p "${SDK_BUILD_OUT}"
 # was tried first and does NOT survive build_sdk.py's cmake setup
 # (verified: the output stayed 4096-aligned), hence the config route.
 #
-# build_sdk.py exec()s the config file as Python, so appending a patch
-# loop to the stock ABI list is safe and immune to ABI-signature drift.
+# build_sdk.py exec()s the config file as Python.  The arm64-v8a ABI
+# line is grepped out of the stock config so the ABI() signature always
+# matches this OpenCV revision; the flag loop is appended after it.
 PAGE_CFG="${BUILD_DIR}/ndk-16kb.config.py"
 {
-    cat "${OPENCV_SRC}/platforms/android/ndk-18.config.py"
+    echo "ABIs = ["
+    grep "arm64-v8a" "${OPENCV_SRC}/platforms/android/ndk-18.config.py"
+    echo "]"
     echo ""
     echo "# 16 KB page-size (Android 15+): NDK r27+ toolchain flag, per ABI."
     echo "for abi in ABIs:"
@@ -139,7 +147,7 @@ fi
 rm -rf "${BUILD_DIR}"
 
 # ── 4. Verify expected layout (fail loud, no `|| true`) ──────────────
-for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
+for ABI in arm64-v8a; do
     SO_PATH="${SDK_OUT}/sdk/native/libs/${ABI}/libopencv_java4.so"
     STITCHING_A="${SDK_OUT}/sdk/native/staticlibs/${ABI}/libopencv_stitching.a"
     if [ ! -f "${SO_PATH}" ]; then
@@ -155,14 +163,12 @@ for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
 done
 echo "[build-opencv-android] All ABIs produced libopencv_java4.so + libopencv_stitching.a."
 
-# 16 KB page-size gate: every LOAD segment of the produced 64-bit .so
-# must be >= 16384-aligned (see the ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES
-# injection above).  64-bit ABIs ONLY: Google's 16 KB requirement covers
-# arm64-v8a/x86_64, and the NDK applies the flag to just those two —
-# armeabi-v7a/x86 legitimately stay 4096.  Pure-python ELF parse so the
-# check works on both Linux CI and macOS dev machines (no readelf
-# dependency).
-for ABI in arm64-v8a x86_64; do
+# 16 KB page-size gate: every LOAD segment of the produced .so must be
+# >= 16384-aligned (see the ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES
+# injection above; the requirement covers 64-bit ABIs, and arm64-v8a is
+# the only ABI we build).  Pure-python ELF parse so the check works on
+# both Linux CI and macOS dev machines (no readelf dependency).
+for ABI in arm64-v8a; do
     SO_PATH="${SDK_OUT}/sdk/native/libs/${ABI}/libopencv_java4.so"
     python3 - "$SO_PATH" <<'PYEOF'
 import struct, sys
@@ -188,25 +194,13 @@ print(f"[build-opencv-android] 16 KB alignment OK: {p} (min LOAD align {min(alig
 PYEOF
 done
 
-# ── 4.5. Strip non-arm64 binaries + unused subdirs (v0.7.1 fix) ──────
+# ── 4.5. Strip unused subdirs (v0.7.1, updated for arm64-only) ───────
 #
-# The lib's android/build.gradle sets `ndk.abiFilters arm64-v8a` so
-# only arm64-v8a binaries ship in any consumer's final APK.  But the
-# OpenCV-android-sdk we just built (build_sdk.py runs --abi for ALL
-# four ABIs to produce a fat .so) carries armeabi-v7a / x86 / x86_64
-# binaries in three sibling dirs.  Those add ~120 MB of dead weight
-# to the npm-install download — every consumer pays the bandwidth +
-# disk tax even though their APK never uses these libs.
-#
-# Plus samples/ (demo apps, ~10 MB) and apk/ (Java Manager APK,
-# ~5 MB) which the lib never needs.
-#
-# Strip all of the above; keep only arm64-v8a libs / staticlibs /
-# 3rdparty/libs + sdk/native/jni/include/ (headers required for the
-# JNI build).  See `feedback_binary_release_packaging.md` for the
-# full rationale + the manual recipe this automates.
-#
-# Pre-strip size: ~165 MB.  Post-strip: ~42 MB.
+# The build is arm64-v8a-only now (see the generated config above), so
+# the non-arm64 rm -rf lines below are defensive no-ops kept as a
+# safety net against a future config regression.  samples/ and apk/
+# removal still applies.  See `feedback_binary_release_packaging.md`
+# for the original 4-ABI rationale (pre-strip ~165 MB → ~42 MB).
 echo "[build-opencv-android] Stripping non-arm64 ABIs + samples + apk..."
 echo "[build-opencv-android] Pre-strip size: $(du -sh "${SDK_OUT}" | cut -f1)"
 for abi in armeabi-v7a x86 x86_64; do
