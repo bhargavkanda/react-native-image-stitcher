@@ -86,7 +86,32 @@ mkdir -p "${SDK_BUILD_OUT}"
 #
 # Positional args: <work_dir> <opencv_dir>
 
+# ── 16 KB page-size alignment (Android 15+) ──────────────────────────
+# Devices with 16 KB kernel pages refuse ELF libs whose LOAD segments
+# are only 4096-aligned, and Android 15+ shows a compatibility warning
+# for the whole APK if ANY bundled 64-bit .so is misaligned.
+#
+# Mechanism: the NDK toolchain variable ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES
+# (r27+; older toolchains silently IGNORE it — the alignment gate below
+# exists precisely to catch that).  This is the same switch upstream
+# OpenCV turned on by default in 4.11.0 (opencv/opencv#26680); we inject
+# it into 4.10.0 via a generated build config.  An env-LDFLAGS approach
+# was tried first and does NOT survive build_sdk.py's cmake setup
+# (verified: the output stayed 4096-aligned), hence the config route.
+#
+# build_sdk.py exec()s the config file as Python, so appending a patch
+# loop to the stock ABI list is safe and immune to ABI-signature drift.
+PAGE_CFG="${BUILD_DIR}/ndk-16kb.config.py"
+{
+    cat "${OPENCV_SRC}/platforms/android/ndk-18.config.py"
+    echo ""
+    echo "# 16 KB page-size (Android 15+): NDK r27+ toolchain flag, per ABI."
+    echo "for abi in ABIs:"
+    echo "    abi.cmake_vars['ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES'] = 'ON'"
+} > "${PAGE_CFG}"
+
 python3 build_sdk.py \
+    --config "${PAGE_CFG}" \
     --ndk_path "${ANDROID_NDK_HOME}" \
     --sdk_path "${ANDROID_SDK_PATH}" \
     --no_samples_build \
@@ -129,6 +154,39 @@ for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
     fi
 done
 echo "[build-opencv-android] All ABIs produced libopencv_java4.so + libopencv_stitching.a."
+
+# 16 KB page-size gate: every LOAD segment of the produced 64-bit .so
+# must be >= 16384-aligned (see the ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES
+# injection above).  64-bit ABIs ONLY: Google's 16 KB requirement covers
+# arm64-v8a/x86_64, and the NDK applies the flag to just those two —
+# armeabi-v7a/x86 legitimately stay 4096.  Pure-python ELF parse so the
+# check works on both Linux CI and macOS dev machines (no readelf
+# dependency).
+for ABI in arm64-v8a x86_64; do
+    SO_PATH="${SDK_OUT}/sdk/native/libs/${ABI}/libopencv_java4.so"
+    python3 - "$SO_PATH" <<'PYEOF'
+import struct, sys
+p = sys.argv[1]
+d = open(p, "rb").read()
+assert d[:4] == b"\x7fELF", f"{p}: not an ELF"
+is64 = d[4] == 2
+phoff, phentsize, phnum = (
+    (struct.unpack("<Q", d[0x20:0x28])[0], struct.unpack("<H", d[0x36:0x38])[0], struct.unpack("<H", d[0x38:0x3A])[0])
+    if is64 else
+    (struct.unpack("<I", d[0x1C:0x20])[0], struct.unpack("<H", d[0x2A:0x2C])[0], struct.unpack("<H", d[0x2C:0x2E])[0]))
+aligns = []
+for i in range(phnum):
+    ph = d[phoff + i * phentsize: phoff + (i + 1) * phentsize]
+    if struct.unpack("<I", ph[0:4])[0] == 1:  # PT_LOAD
+        aligns.append(struct.unpack("<Q", ph[48:56])[0] if is64 else struct.unpack("<I", ph[28:32])[0])
+bad = [a for a in aligns if a < 16384]
+if bad:
+    print(f"[build-opencv-android] FATAL: {p} has LOAD align {min(bad)} < 16384 "
+          "(16 KB page-size flag did not reach the link).", file=sys.stderr)
+    sys.exit(1)
+print(f"[build-opencv-android] 16 KB alignment OK: {p} (min LOAD align {min(aligns)})")
+PYEOF
+done
 
 # ── 4.5. Strip non-arm64 binaries + unused subdirs (v0.7.1 fix) ──────
 #

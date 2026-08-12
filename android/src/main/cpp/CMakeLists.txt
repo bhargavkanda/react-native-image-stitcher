@@ -197,3 +197,12 @@ target_link_libraries(image_stitcher
 target_compile_options(image_stitcher PRIVATE
     -fvisibility=hidden
     -Wno-deprecated-declarations)
+
+# 16 KB page-size compatibility (Android 15+ flags misaligned ELF LOAD
+# segments; 16 KB-kernel devices won't load them).  NDK r27 (the default
+# pin) still defaults p_align to 4096 — r28+ makes 16384 the default, at
+# which point this line becomes a no-op and can stay.  The vendored
+# libopencv_java4.so needs the same treatment at its own build time
+# (scripts/build-opencv-android.sh) — a link flag here cannot fix an
+# already-linked prebuilt.
+target_link_options(image_stitcher PRIVATE "-Wl,-z,max-page-size=16384")

@@ -78,7 +78,12 @@ jobs:
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: 'r25c'
+          # r27b (was r25c): ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES — the
+          # 16 KB page-size switch build-opencv-android.sh injects — only
+          # exists in the r27+ toolchain (older NDKs silently ignore it
+          # and the script's alignment gate fails the build).  r27b =
+          # 27.1.12297006, the exact revision the fix was verified with.
+          ndk-version: 'r27b'
 
       - name: Install cmake + ninja
         run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
