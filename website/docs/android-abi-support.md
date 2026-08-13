@@ -99,8 +99,10 @@ match what your OpenCV provides.
 ## iOS, for contrast
 
 The iOS framework ships **both** the device (`arm64`) and simulator
-(`arm64` + `x86_64`) slices as of v0.24.4, so host apps build and run in
-the iOS Simulator normally. (v0.7.1–v0.24.3 stripped the simulator slice
+(`arm64`) slices as of v0.24.4, so host apps build and run in the iOS
+Simulator normally on Apple Silicon. The x86_64 simulator slice (Intel
+Macs) is not built — OpenCV's builder cannot configure it on an arm64
+machine, and an Intel Mac cannot run an arm64 iOS simulator anyway. (v0.7.1–v0.24.3 stripped the simulator slice
 to save ~17 MB, which broke simulator builds of the entire host app with
 `building for iOS Simulator, but linking in object file built for iOS`.
 That trade has been reversed.)

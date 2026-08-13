@@ -120,7 +120,10 @@ integration.
   built for iOS`) — on every screen, for every developer on the team,
   for v0.7.1 through v0.24.3. The strip is still available opt-in via
   `RNIS_STRIP_SIM_SLICE=1`, and the default path now *asserts* the slice
-  is present rather than silently shipping without it.
+  is present rather than silently shipping without it. The simulator
+  slice is **arm64-only**: OpenCV's builder cannot configure an x86_64
+  simulator slice on an arm64 machine, and an Intel Mac cannot run an
+  arm64 iOS simulator regardless.
 - **worklets-core headers are found via a resolved path, not a guessed
   one.** `HEADER_SEARCH_PATHS` contained
   `${PODS_ROOT}/../node_modules/react-native-worklets-core/cpp` — one

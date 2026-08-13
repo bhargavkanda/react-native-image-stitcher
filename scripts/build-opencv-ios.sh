@@ -13,10 +13,10 @@
 # Modules SKIPPED (saves ~50 % of the binary size):
 #   dnn ml objdetect gapi videoio_ffmpeg
 #
-# Output: dist/opencv2.xcframework — BOTH the arm64 device slice and
-#   the arm64+x86_64 simulator slice.  Host apps link this framework,
-#   so shipping device-only breaks their simulator builds entirely
-#   (see the v0.24.4 note at step 3.5).  Zip ≈ 43 MB.
+# Output: dist/opencv2.xcframework — the arm64 device slice AND the
+#   arm64 simulator slice.  Host apps link this framework, so shipping
+#   device-only breaks their simulator builds entirely (see the v0.24.4
+#   note at step 3.5).  Simulator is arm64-only; see step 2 for why.
 #
 # Inputs (env):
 #   OPENCV_VERSION  — pinned in scripts/opencv-version.txt; allow
@@ -60,10 +60,29 @@ fi
 # are the standard set for shipping to App Store (iOS 13+, arm64
 # device + simulator).
 PY_CMD="python3 ${OPENCV_SRC}/platforms/apple/build_xcframework.py"
+# Simulator: arm64 ONLY.
+#
+# `--iphonesimulator_archs arm64,x86_64` fails on the arm64 macOS CI
+# runners: OpenCV's build_framework.py configures each arch separately,
+# and the x86_64 pass dies in CMake's compiler probe —
+#
+#   CMake Error: Generator: build tool execution failed, command was:
+#   /usr/bin/xcodebuild -project CMAKE_TRY_COMPILE.xcodeproj ...
+#
+# while the arm64 simulator pass completes normally.  (Verified in the
+# first v0.24.4 release run: build-arm64-iphonesimulator got all the way
+# to libopencv_merged.a; build-x86_64-iphonesimulator never configured.)
+#
+# Dropping x86_64 costs nothing real.  It exists for Intel Macs, which
+# cannot run arm64 iOS simulators at all, and every Apple Silicon Mac
+# runs the arm64 simulator — so an arm64-only simulator slice fully
+# solves the problem this slice was restored for (host apps being unable
+# to build for the simulator).  If Intel-Mac support is ever needed
+# again, it has to be built on an Intel runner.
 ${PY_CMD} \
     --out "${OUTPUT_DIR}/xcframework-build" \
     --iphoneos_archs arm64 \
-    --iphonesimulator_archs arm64,x86_64 \
+    --iphonesimulator_archs arm64 \
     --build_only_specified_archs \
     --without dnn \
     --without ml \
@@ -111,7 +130,13 @@ rm -rf "${BUILD_DIR}"
 # "simulator" platform variant.  Manual `AvailableLibraries.1`
 # hardcoding would have shipped the wrong slice if the order changed
 # (which happened between v0.5.0 and v0.6.0 — burned a session pre-CI).
-SIM_DIR="${OUTPUT_DIR}/opencv2.xcframework/ios-arm64_x86_64-simulator"
+# Resolve the simulator slice by GLOB, never by a hardcoded name: the
+# directory is named after the arch set it contains, so it changed from
+# `ios-arm64_x86_64-simulator` to `ios-arm64-simulator` the moment we
+# dropped x86_64 above.  A hardcoded name silently matches nothing,
+# which would make the strip a no-op and the presence check fire on a
+# slice that is actually there.
+SIM_DIR="$(find "${OUTPUT_DIR}/opencv2.xcframework" -maxdepth 1 -type d -name '*simulator*' 2>/dev/null | head -1)"
 INFO_PLIST="${OUTPUT_DIR}/opencv2.xcframework/Info.plist"
 if [ "${RNIS_STRIP_SIM_SLICE:-0}" = "1" ]; then
     if [ -d "${SIM_DIR}" ]; then
@@ -134,13 +159,15 @@ else
     # (shipping) configuration.  If OpenCV's builder ever stops
     # emitting it, fail the release build LOUDLY rather than
     # publishing an asset that breaks every consumer's simulator.
-    if [ ! -d "${SIM_DIR}" ]; then
-        echo "[build-opencv-ios] FATAL: simulator slice missing at ${SIM_DIR}." >&2
-        echo "[build-opencv-ios]   Expected build_xcframework.py to emit it (--iphonesimulator_archs arm64,x86_64)." >&2
-        echo "[build-opencv-ios]   Set RNIS_STRIP_SIM_SLICE=1 only if you deliberately want a device-only build." >&2
+    if [ -z "${SIM_DIR}" ] || [ ! -d "${SIM_DIR}" ]; then
+        echo "[build-opencv-ios] FATAL: no simulator slice under ${OUTPUT_DIR}/opencv2.xcframework." >&2
+        echo "[build-opencv-ios]   Expected build_xcframework.py to emit one (--iphonesimulator_archs arm64)." >&2
+        echo "[build-opencv-ios]   Shipping without it breaks EVERY consumer's simulator build," >&2
+        echo "[build-opencv-ios]   so this fails the release rather than publishing a device-only asset." >&2
+        echo "[build-opencv-ios]   Set RNIS_STRIP_SIM_SLICE=1 only if you deliberately want device-only." >&2
         exit 1
     fi
-    echo "[build-opencv-ios] Simulator slice retained (host apps need it to build for the simulator)."
+    echo "[build-opencv-ios] Simulator slice retained: $(basename "${SIM_DIR}")"
 fi
 
 # Sentinel: the device slice MUST be intact either way.
