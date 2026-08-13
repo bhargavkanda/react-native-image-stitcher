@@ -1669,6 +1669,18 @@ class IncrementalStitcher(
             // this fell back to Pose strategy because the JS-bridge
             // path supplied no pixel data — same bug as the iOS
             // non-AR path; both fixed in v0.3).
+            // v0.25 — pose trust (iOS parity: IncrementalStitcher.swift's
+            // `keyframeGate.poseTrusted` assignment).  ARCore reports
+            // non-TRACKING while initialising and during relocalisation,
+            // when the world transform slides/snaps by metres between
+            // consecutive frames.  The gate's two POSE-DRIVEN
+            // force-accepts (translation budget + angular fallback)
+            // accept regardless of image content, so on those frames they
+            // fire on a camera that never moved and burst-accept to the
+            // keyframe cap — auto-finalising the operator's hold.
+            // `trackingPoor` is already threaded in from the AR camera
+            // view, so this costs nothing extra.
+            keyframeGate.poseTrusted = !trackingPoor
             val decision = keyframeGate.evaluateWithFrame(
                 pose, planeMatrix,
                 grayData, grayWidth, grayHeight, grayStride,

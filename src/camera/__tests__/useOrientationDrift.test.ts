@@ -47,19 +47,19 @@ const INITIAL = { captureOrientation: undefined, drifted: false };
 describe('_computeDriftStateForTests (useOrientationDrift core logic)', () => {
   describe('(a) no change → not drifted', () => {
     it('stays in initial state when active is false from the start', () => {
-      const next = _computeDriftStateForTests(INITIAL, false, 'portrait');
+      const next = _computeDriftStateForTests(INITIAL, false, 'portrait', true);
       expect(next).toEqual({ captureOrientation: undefined, drifted: false });
     });
 
     it('snapshots orientation when active flips true, drifted starts false', () => {
-      const next = _computeDriftStateForTests(INITIAL, true, 'portrait');
+      const next = _computeDriftStateForTests(INITIAL, true, 'portrait', true);
       expect(next).toEqual({ captureOrientation: 'portrait', drifted: false });
     });
 
     it('stays clean when active=true and orientation does not change', () => {
-      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait');
-      const after2 = _computeDriftStateForTests(after1, true, 'portrait');
-      const after3 = _computeDriftStateForTests(after2, true, 'portrait');
+      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait', true);
+      const after2 = _computeDriftStateForTests(after1, true, 'portrait', true);
+      const after3 = _computeDriftStateForTests(after2, true, 'portrait', true);
       expect(after3).toEqual({ captureOrientation: 'portrait', drifted: false });
       // Reference equality: once steady, returns the prev ref so
       // React's setState becomes a no-op (no re-render).
@@ -70,14 +70,14 @@ describe('_computeDriftStateForTests (useOrientationDrift core logic)', () => {
 
   describe('(b) orientation changes during active=true → drifted', () => {
     it('latches drifted=true when orientation changes mid-active', () => {
-      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait');
-      const after2 = _computeDriftStateForTests(after1, true, 'landscape-left');
+      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait', true);
+      const after2 = _computeDriftStateForTests(after1, true, 'landscape-left', true);
       expect(after2).toEqual({ captureOrientation: 'portrait', drifted: true });
     });
 
     it('captures the ORIGINAL orientation in captureOrientation, not the new one', () => {
-      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait');
-      const after2 = _computeDriftStateForTests(after1, true, 'landscape-right');
+      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait', true);
+      const after2 = _computeDriftStateForTests(after1, true, 'landscape-right', true);
       // captureOrientation MUST remain the snapshot (portrait), not
       // the current rotation — that's how the drift modal copy
       // ("captured in PORTRAIT, now LANDSCAPE-RIGHT") works.
@@ -91,8 +91,8 @@ describe('_computeDriftStateForTests (useOrientationDrift core logic)', () => {
         ['portrait', 'landscape-right'],
       ];
       for (const [captured, drifted] of cases) {
-        const after1 = _computeDriftStateForTests(INITIAL, true, captured);
-        const after2 = _computeDriftStateForTests(after1, true, drifted);
+        const after1 = _computeDriftStateForTests(INITIAL, true, captured, true);
+        const after2 = _computeDriftStateForTests(after1, true, drifted, true);
         expect(after2.drifted).toBe(true);
       }
     });
@@ -106,17 +106,17 @@ describe('_computeDriftStateForTests (useOrientationDrift core logic)', () => {
       // not supported" — a brief rotation pollutes the buffer even
       // if the user rotates back, so the safe action is decisive
       // abandonment regardless of post-detection orientation.
-      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait');
-      const after2 = _computeDriftStateForTests(after1, true, 'landscape-left');
-      const after3 = _computeDriftStateForTests(after2, true, 'portrait');
+      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait', true);
+      const after2 = _computeDriftStateForTests(after1, true, 'landscape-left', true);
+      const after3 = _computeDriftStateForTests(after2, true, 'portrait', true);
       expect(after3).toEqual({ captureOrientation: 'portrait', drifted: true });
     });
 
     it('stays drifted across multiple subsequent orientation changes', () => {
-      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait');
-      const after2 = _computeDriftStateForTests(after1, true, 'landscape-left');
-      const after3 = _computeDriftStateForTests(after2, true, 'landscape-right');
-      const after4 = _computeDriftStateForTests(after3, true, 'portrait-upside-down');
+      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait', true);
+      const after2 = _computeDriftStateForTests(after1, true, 'landscape-left', true);
+      const after3 = _computeDriftStateForTests(after2, true, 'landscape-right', true);
+      const after4 = _computeDriftStateForTests(after3, true, 'portrait-upside-down', true);
       expect(after4.drifted).toBe(true);
       expect(after4.captureOrientation).toBe('portrait');
     });
@@ -124,22 +124,22 @@ describe('_computeDriftStateForTests (useOrientationDrift core logic)', () => {
 
   describe('(d) inactive → captureOrientation undefined', () => {
     it('clears the snapshot when active flips back to false', () => {
-      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait');
-      const after2 = _computeDriftStateForTests(after1, false, 'portrait');
+      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait', true);
+      const after2 = _computeDriftStateForTests(after1, false, 'portrait', true);
       expect(after2).toEqual({ captureOrientation: undefined, drifted: false });
     });
 
     it('clears the drift flag when active flips back to false', () => {
-      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait');
-      const after2 = _computeDriftStateForTests(after1, true, 'landscape-left');
+      const after1 = _computeDriftStateForTests(INITIAL, true, 'portrait', true);
+      const after2 = _computeDriftStateForTests(after1, true, 'landscape-left', true);
       expect(after2.drifted).toBe(true);
-      const after3 = _computeDriftStateForTests(after2, false, 'landscape-left');
+      const after3 = _computeDriftStateForTests(after2, false, 'landscape-left', true);
       expect(after3).toEqual({ captureOrientation: undefined, drifted: false });
     });
 
     it('is idempotent — no state change when inactive and already clear', () => {
-      const after1 = _computeDriftStateForTests(INITIAL, false, 'portrait');
-      const after2 = _computeDriftStateForTests(after1, false, 'landscape-left');
+      const after1 = _computeDriftStateForTests(INITIAL, false, 'portrait', true);
+      const after2 = _computeDriftStateForTests(after1, false, 'landscape-left', true);
       // Same ref → setState becomes a no-op.
       expect(after2).toBe(after1);
     });
@@ -148,22 +148,85 @@ describe('_computeDriftStateForTests (useOrientationDrift core logic)', () => {
   describe('(e) active resets snapshot', () => {
     it('re-snapshots on a fresh active cycle (false → true → false → true)', () => {
       // Cycle 1: capture in portrait, drift.
-      const c1a = _computeDriftStateForTests(INITIAL, true, 'portrait');
-      const c1b = _computeDriftStateForTests(c1a, true, 'landscape-left');
+      const c1a = _computeDriftStateForTests(INITIAL, true, 'portrait', true);
+      const c1b = _computeDriftStateForTests(c1a, true, 'landscape-left', true);
       expect(c1b).toEqual({ captureOrientation: 'portrait', drifted: true });
 
       // Stop the capture.
-      const cleared = _computeDriftStateForTests(c1b, false, 'landscape-left');
+      const cleared = _computeDriftStateForTests(c1b, false, 'landscape-left', true);
       expect(cleared).toEqual({ captureOrientation: undefined, drifted: false });
 
       // Cycle 2: re-capture, now in landscape-left.  Snapshot
       // should be landscape-left, NOT carry over the old portrait.
-      const c2a = _computeDriftStateForTests(cleared, true, 'landscape-left');
+      const c2a = _computeDriftStateForTests(cleared, true, 'landscape-left', true);
       expect(c2a).toEqual({ captureOrientation: 'landscape-left', drifted: false });
 
       // And staying in landscape-left should not drift.
-      const c2b = _computeDriftStateForTests(c2a, true, 'landscape-left');
+      const c2b = _computeDriftStateForTests(c2a, true, 'landscape-left', true);
       expect(c2b.drifted).toBe(false);
+    });
+  });
+
+  // v0.25 — sensor trust: the fabricated pre-first-sample 'portrait'
+  // default must never seed a snapshot or count as a rotation.  Field
+  // RCA: on a host with broken/laggy react-native-sensors delivery, a
+  // LANDSCAPE capture started while the hook still reported the
+  // fabricated default; the first real sample then flipped the reading
+  // mid-capture and the drift guard abandoned the capture after its
+  // first frame — every time, landscape only (a portrait hold can
+  // never disagree with a portrait default).
+  describe('unsettled orientation (v0.25 sensor trust)', () => {
+    const INITIAL = { captureOrientation: undefined, drifted: false };
+
+    it('does NOT snapshot while unsettled — even with active true', () => {
+      const next = _computeDriftStateForTests(INITIAL, true, 'portrait', false);
+      expect(next.captureOrientation).toBeUndefined();
+      expect(next.drifted).toBe(false);
+    });
+
+    it('THE FIELD BUG: landscape hold, late first sample — no phantom drift', () => {
+      // Capture starts while the sensor has not delivered: no snapshot.
+      const s1 = _computeDriftStateForTests(INITIAL, true, 'portrait', false);
+      expect(s1.captureOrientation).toBeUndefined();
+      // First REAL sample lands mid-capture and reads landscape-left
+      // (the user was holding landscape all along).  Pre-v0.25 the
+      // fabricated 'portrait' had been snapshotted and this flip
+      // latched drifted=true → auto-abandon.  Now it becomes the
+      // snapshot instead.
+      const s2 = _computeDriftStateForTests(s1, true, 'landscape-left', true);
+      expect(s2).toEqual({ captureOrientation: 'landscape-left', drifted: false });
+      // Steady landscape thereafter: still no drift.
+      const s3 = _computeDriftStateForTests(s2, true, 'landscape-left', true);
+      expect(s3.drifted).toBe(false);
+    });
+
+    it('sensor NEVER delivers: drift protection is inert, capture unharmed', () => {
+      let st = INITIAL as ReturnType<typeof _computeDriftStateForTests>;
+      for (let i = 0; i < 5; i++) {
+        st = _computeDriftStateForTests(st, true, 'portrait', false);
+      }
+      expect(st.captureOrientation).toBeUndefined();
+      expect(st.drifted).toBe(false);
+    });
+
+    it('a REAL rotation after a settled snapshot still latches', () => {
+      const s1 = _computeDriftStateForTests(INITIAL, true, 'landscape-left', true);
+      const s2 = _computeDriftStateForTests(s1, true, 'portrait', true);
+      expect(s2.drifted).toBe(true);
+    });
+
+    it('an unsettled blip cannot un-latch or re-latch drift', () => {
+      const s1 = _computeDriftStateForTests(INITIAL, true, 'landscape-left', true);
+      const s2 = _computeDriftStateForTests(s1, true, 'portrait', true);
+      const s3 = _computeDriftStateForTests(s2, true, 'portrait', false);
+      expect(s3.drifted).toBe(true);
+      expect(s3.captureOrientation).toBe('landscape-left');
+    });
+
+    it('active-false clears state regardless of settled', () => {
+      const s1 = _computeDriftStateForTests(INITIAL, true, 'landscape-left', true);
+      const s2 = _computeDriftStateForTests(s1, false, 'landscape-left', false);
+      expect(s2).toEqual(INITIAL);
     });
   });
 });

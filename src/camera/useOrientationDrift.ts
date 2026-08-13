@@ -62,7 +62,7 @@
 import { useEffect, useState } from 'react';
 
 import {
-  useDeviceOrientation,
+  useDeviceOrientationStatus,
   type DeviceOrientation,
 } from './useDeviceOrientation';
 
@@ -123,6 +123,7 @@ export function _computeDriftStateForTests(
   prev: DriftState,
   active: boolean,
   currentOrientation: DeviceOrientation,
+  settled: boolean,
 ): DriftState {
   if (!active) {
     // active is false (or just transitioned to false).  Clear the
@@ -133,11 +134,33 @@ export function _computeDriftStateForTests(
     return INITIAL_STATE;
   }
 
+  // v0.25 — SENSOR TRUST.  Until the accelerometer has delivered at
+  // least one real classified sample, `currentOrientation` is the
+  // hook's fabricated `'portrait'` default, not a measurement.
+  // Snapshotting it — or comparing against it — would manufacture a
+  // "rotation" out of thin air the moment the first real sample lands:
+  // exactly the field failure where a landscape capture on a host with
+  // broken/laggy sensor delivery was auto-abandoned right after its
+  // first frame, every time (portrait captures can never disagree with
+  // a portrait default, which is why only landscape died).  Fail OPEN:
+  // no snapshot, no drift, until the reading is real.  If the sensor
+  // never delivers, drift protection is simply inert — an un-detected
+  // mid-capture rotation produces a recoverable bad stitch, whereas a
+  // false positive irreversibly destroys a good capture.
+  if (!settled) {
+    return prev.captureOrientation === undefined && !prev.drifted
+      ? prev
+      : { captureOrientation: prev.captureOrientation, drifted: prev.drifted };
+  }
+
   // active is true.
   if (prev.captureOrientation === undefined) {
-    // false → true transition.  Snapshot the current orientation.
-    // drifted starts false because, by definition, the current
-    // orientation matches itself.
+    // First SETTLED evaluation while active.  Snapshot the current
+    // orientation.  drifted starts false because, by definition, the
+    // current orientation matches itself.  (Pre-v0.25 this ran on the
+    // false → true `active` transition regardless of sensor state; the
+    // snapshot may now be deferred until the first real sample of an
+    // active capture — strictly later, never earlier.)
     return { captureOrientation: currentOrientation, drifted: false };
   }
 
@@ -157,12 +180,14 @@ export function _computeDriftStateForTests(
 export function useOrientationDrift(
   active: boolean,
 ): UseOrientationDriftReturn {
-  const currentOrientation = useDeviceOrientation();
+  const { orientation: currentOrientation, settled } =
+    useDeviceOrientationStatus();
   const [state, setState] = useState<DriftState>(INITIAL_STATE);
 
   useEffect(() => {
-    setState((prev) => _computeDriftStateForTests(prev, active, currentOrientation));
-  }, [active, currentOrientation]);
+    setState((prev) =>
+      _computeDriftStateForTests(prev, active, currentOrientation, settled));
+  }, [active, currentOrientation, settled]);
 
   return {
     drifted: state.drifted,

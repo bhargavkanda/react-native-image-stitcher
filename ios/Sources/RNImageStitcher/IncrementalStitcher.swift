@@ -2584,6 +2584,23 @@ public final class IncrementalStitcher: NSObject {
         // keyframes, which would defeat the gate entirely.
         let throttledThisFrame = gateActive && !cadenceFires
         if shouldEvaluateGate {
+            // v0.25 — pose trust.  The gate's two POSE-DRIVEN
+            // force-accepts (translation budget + angular fallback)
+            // accept a frame regardless of what the IMAGE shows, so they
+            // are only sound while the pose they difference is sound.
+            // ARKit reports `.limited` while initialising and during
+            // relocalisation, when the world transform slides/snaps by
+            // metres between consecutive frames — which those two paths
+            // read as real camera motion and burst-accept to the
+            // keyframe cap, auto-finalising the operator's hold in as
+            // little as ~415 ms (v0.24.x field RCA).  Every AR capture
+            // starts next to a session (re)start — finalize stops and
+            // restarts the session — so this is the NORM at hold start,
+            // not an edge case.  Non-AR poses are gyro-synthesised and
+            // carry `.tracking` verbatim from the JS driver, so this is
+            // a no-op there (they already opt out via
+            // disableAngularFallback).
+            self.keyframeGate.poseTrusted = (pose.trackingState == .tracking)
             let plane = RNSARSession.shared.latchedPlaneTransform()
             // V16 A2 — call the pixel-buffer-aware overload so Flow
             // strategy gets the image content.  Pose strategy is

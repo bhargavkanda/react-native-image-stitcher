@@ -193,6 +193,23 @@ final class KeyframeGate {
         didSet { bridge.setDisableAngularFallback(disableAngularFallback) }
     }
 
+    /// v0.25 — per-frame AR tracking trust; see `KeyframeGateBridge.h`.
+    /// `false` suppresses the gate's two POSE-DRIVEN force-accepts
+    /// (translation budget + angular fallback) for the frames it covers,
+    /// so an initialising / relocalising ARKit pose can no longer
+    /// burst-accept a stationary capture to the keyframe cap.  Set from
+    /// `ARCamera.trackingState` on every consumed AR frame.  Default
+    /// `true` (back-compat).  Write-only; no read accessor on C++.
+    ///
+    /// Guarded against redundant bridge hops: tracking state changes a
+    /// handful of times per capture, not per frame.
+    var poseTrusted: Bool = true {
+        didSet {
+            guard poseTrusted != oldValue else { return }
+            bridge.setPoseTrusted(poseTrusted)
+        }
+    }
+
 
     /// One-shot flag: when set to `true`, the very next evaluate()
     /// accepts unconditionally and the flag self-resets.  Set by JS

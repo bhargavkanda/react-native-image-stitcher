@@ -137,6 +137,11 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
     _gate.setDisableAngularFallback(disabled ? true : false);
 }
 
+- (void)setPoseTrusted:(BOOL)trusted {
+    // v0.25 — see header doc.  Cheap enough to set on every frame.
+    _gate.setPoseTrusted(trusted ? true : false);
+}
+
 - (KGBDecision *)evaluateWithTx:(float)tx ty:(float)ty tz:(float)tz
                               qx:(float)qx qy:(float)qy qz:(float)qz qw:(float)qw
                               fx:(float)fx fy:(float)fy cx:(float)cx cy:(float)cy

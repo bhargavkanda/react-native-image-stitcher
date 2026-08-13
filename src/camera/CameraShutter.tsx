@@ -267,6 +267,36 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
         disabled={disabled || isProcessing}
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}
+        // v0.25 diagnostics — name HOW each hold ends.  `onTouchCancel`
+        // fires on NATIVE cancellation (UIKit interface rotation, an
+        // ancestor scrollable claiming the drag via responder
+        // termination, a Modal window mounting) — cases the Pressable
+        // otherwise folds into `onPressOut` indistinguishably from the
+        // user lifting their finger.  A hold that ends via CANCEL was
+        // NOT a user release; the v0.24.x field failures ("capture
+        // self-ends after ~1 frame, landscape only") hinge on exactly
+        // this distinction, so the log names the killer directly
+        // instead of leaving it to inference.  Warn-level (not __DEV__
+        // -gated): integrators hit this in release-ish builds and this
+        // line is the difference between a one-log diagnosis and days
+        // of guessing.  The behavioural fix (cancel ⇒ capture
+        // CONTINUES, tap-to-finish) ships separately, flag-gated.
+        onTouchCancel={() => {
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[react-native-image-stitcher] shutter touch CANCELLED by '
+            + `the system (phase=${phaseRef.current}). If a recording `
+            + 'just ended, the user did NOT release — something stole '
+            + 'the touch (interface rotation, a parent ScrollView '
+            + 'claiming the pan drag, or a Modal mount).',
+          );
+        }}
+        onTouchEnd={() => {
+          if (phaseRef.current === 'holding') {
+            // eslint-disable-next-line no-console
+            console.log('[react-native-image-stitcher] shutter released by user (holding → end)');
+          }
+        }}
         style={[styles.outer, disabled && styles.disabled, style]}
       >
         <View style={styles.ring} />

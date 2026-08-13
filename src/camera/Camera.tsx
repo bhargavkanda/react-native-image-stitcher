@@ -1091,6 +1091,23 @@ export interface CameraProps {
   lateralBudgetCm?: number;
 
   /**
+   * v0.25 — whether a mid-capture device rotation auto-ABANDONS the
+   * in-flight panorama (the OrientationDriftModal explains it to the
+   * user).  Default `true` (the behaviour since v0.12).  Set `false`
+   * to disable the guard entirely: the capture then continues across a
+   * rotation and the output is best-effort (cross-mode captures can
+   * stitch malformed — see `incremental.ts` stitch-mode notes).
+   *
+   * The detector itself is sensor-trust hardened as of v0.25: it never
+   * snapshots or compares orientation until the accelerometer has
+   * delivered a real sample, so hosts with broken/laggy
+   * react-native-sensors delivery no longer see phantom "rotation"
+   * abandons (field RCA: landscape captures auto-abandoning after one
+   * frame while portrait worked).
+   */
+  orientationDriftAbandon?: boolean;
+
+  /**
    * Show the draggable-quad crop editor after a panorama finalizes, BEFORE
    * emitting it via `onCapture`.  Default `false`.  When `true`, the user
    * drags 4 corners over the stitched result; confirming crops in place
@@ -1577,6 +1594,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     maxPanDurationMs = 0,
     panTooFastThreshold,
     lateralBudgetCm = 4,
+    orientationDriftAbandon = true,
     rectCrop = false,
     showPreview = false,
     guidanceCopy,
@@ -2122,6 +2140,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   }, [statusPhase]);
 
   useEffect(() => {
+    // v0.25 — host opt-out (`orientationDriftAbandon={false}`): skip the
+    // auto-abandon entirely; the capture continues best-effort across a
+    // rotation.  The detector itself is separately sensor-trust hardened
+    // (no snapshot/compare before the first real accelerometer sample).
+    if (!orientationDriftAbandon) return;
     if (!drift.drifted || statusPhase !== 'recording') return;
     // Auto-abandon the in-flight capture.  Order matches handleHoldEnd's
     // "stitch" path but skips finalize:
@@ -2158,7 +2181,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // Deps: re-run whenever drift latches OR recording state changes.
     // Other deps are stable refs / setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drift.drifted, statusPhase]);
+  }, [drift.drifted, statusPhase, orientationDriftAbandon]);
 
   // v0.8.0 Phase 5 / v0.11.0 — frameProcessor prop semantics:
   //

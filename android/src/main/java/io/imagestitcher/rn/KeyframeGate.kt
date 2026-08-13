@@ -123,6 +123,23 @@ internal class KeyframeGate : AutoCloseable {
             nativeSetDisableAngularFallback(nativeHandle, value)
         }
 
+    /// v0.25 — per-frame AR tracking trust; see C++ `setPoseTrusted`.
+    /// `false` suppresses the gate's two POSE-DRIVEN force-accepts (the
+    /// translation budget and the angular fallback) so an initialising /
+    /// relocalising ARCore pose can't burst-accept a stationary capture
+    /// to the keyframe cap and auto-finalise the operator's hold.  Set
+    /// from `Frame.camera.trackingState == TRACKING` on every consumed
+    /// AR frame.  Default `true` (back-compat).  Write-only.
+    ///
+    /// Only hops the JNI boundary on an actual change — tracking state
+    /// flips a handful of times per capture, not per frame.
+    var poseTrusted: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            nativeSetPoseTrusted(nativeHandle, value)
+        }
+
     /// 2026-05-14 — Flow strategy: novelty aggregation percentile
     /// (same knob iOS exposes via setFlowNoveltyPercentile).  C++
     /// clamps to [0.5, 0.99].  Stored locally for diagnostic
@@ -326,6 +343,7 @@ internal class KeyframeGate : AutoCloseable {
     // setFlowNoveltyPercentile / setFlowMaxTranslationM iOS-parity
     // setters (Android JNI was a P3-followup until 2026-05-14).
     private external fun nativeSetDisableAngularFallback(handle: Long, disabled: Boolean)
+    private external fun nativeSetPoseTrusted(handle: Long, trusted: Boolean)
     private external fun nativeSetFlowNoveltyPercentile(handle: Long, percentile: Double)
     private external fun nativeSetFlowMaxTranslationM(handle: Long, metres: Double)
     // Wall-clock keyframe-interval budget (ms).  iOS parity:

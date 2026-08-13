@@ -200,6 +200,34 @@ public:
     /// Default `false` (back-compat — AR mode uses the fallback).
     void setDisableAngularFallback(bool disabled);
 
+    /// v0.25 — POSE TRUST, set per frame from the platform's AR tracking
+    /// state (`ARCamera.trackingState == .normal` on iOS /
+    /// `TrackingState.TRACKING` on Android).
+    ///
+    /// Why this exists: the two POSE-DRIVEN force-accepts —
+    /// {@link setFlowMaxTranslationM}'s translation budget and the
+    /// angular-delta fallback — accept a frame REGARDLESS of image
+    /// novelty.  Both are sound only while the pose they difference is
+    /// sound.  While ARKit / ARCore is initialising or relocalising, the
+    /// world transform slides and snaps by metres/radians between
+    /// consecutive frames, so both paths fire on a camera that has not
+    /// actually moved: measured on-device, a capture starting next to a
+    /// session (re)start burst-accepted to the keyframe cap in ~415 ms
+    /// and auto-finalised the user's hold (v0.24.x field RCA).
+    ///
+    /// When `false`, this gate suppresses BOTH pose-driven force-accepts
+    /// for that frame, leaving the strategy's own image-derived novelty
+    /// and the wall-clock time budget as the only accept paths — exactly
+    /// the configuration non-AR captures have always run.  It never
+    /// suppresses an accept the IMAGE justified, so a genuinely moving
+    /// capture is unaffected.
+    ///
+    /// Default `true` (back-compat: callers that never set it behave
+    /// exactly as before).  Non-AR callers leave it `true` and rely on
+    /// {@link setDisableAngularFallback} as before; their poses carry no
+    /// translation, so the translation budget cannot fire anyway.
+    void setPoseTrusted(bool trusted);
+
     // ── Per-frame evaluation ──────────────────────────────────────
     //
     // Two overloads:

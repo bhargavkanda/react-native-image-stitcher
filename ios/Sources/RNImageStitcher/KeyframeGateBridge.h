@@ -96,6 +96,18 @@ NS_SWIFT_NAME(KeyframeGateBridge)
 /// (back-compat — AR mode uses the fallback).
 - (void)setDisableAngularFallback:(BOOL)disabled;
 
+/// v0.25 — per-frame AR tracking trust.  Pass `NO` while ARKit reports
+/// anything other than `.normal` tracking: an initialising /
+/// relocalising world transform slides and snaps by metres/radians
+/// between consecutive frames, and the gate's two POSE-DRIVEN
+/// force-accepts (translation budget + angular fallback) would fire on
+/// a camera that never moved — burst-accepting to the keyframe cap and
+/// auto-finalising the operator's hold (measured at ~415 ms in the
+/// v0.24.x field RCA).  With `NO` the gate falls back to exactly the
+/// non-AR configuration: image novelty + the wall-clock time budget.
+/// Default `YES` (back-compat).
+- (void)setPoseTrusted:(BOOL)trusted;
+
 // ── Read-only state ─────────────────────────────────────────────
 - (BOOL)isEnabled;
 - (NSInteger)acceptedCount;

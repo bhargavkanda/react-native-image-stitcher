@@ -96,6 +96,17 @@ Java_io_imagestitcher_rn_KeyframeGate_nativeSetDisableAngularFallback(
     gate(handle)->setDisableAngularFallback(static_cast<bool>(disabled));
 }
 
+// v0.25 — per-frame AR tracking trust.  See `setPoseTrusted` in
+// keyframe_gate.hpp: an initialising / relocalising ARCore pose slides
+// by metres between frames, and the gate's two pose-driven
+// force-accepts would burst-accept a stationary capture to the cap.
+JNIEXPORT void JNICALL
+Java_io_imagestitcher_rn_KeyframeGate_nativeSetPoseTrusted(
+    JNIEnv*, jclass, jlong handle, jboolean trusted)
+{
+    gate(handle)->setPoseTrusted(static_cast<bool>(trusted));
+}
+
 // 2026-05-14 — JS-driven IMU translation budget for non-AR mode.
 // In non-AR captures, the gate has no ARKit/ARCore pose; the JS
 // host computes translation via react-native-sensors accelerometer

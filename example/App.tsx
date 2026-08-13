@@ -144,6 +144,11 @@ function App(): React.JSX.Element {
   // to pre-anti-blur behaviour).  The exposure cap is a capture-FORMAT change,
   // so the <Camera> key includes this to force a clean format re-pick on flip.
   const [antiBlurOn, setAntiBlurOn] = useState(true);
+  // Modal-host repro scaffold (see the render tail): host <Camera>
+  // inside a PORTRAIT-LOCKED Modal while the app supports landscape —
+  // the integrator's exact configuration for the reported rotation bug.
+  const [modalHost, setModalHost] = useState(false);
+  const [modalCameraOpen, setModalCameraOpen] = useState(false);
 
   // v0.13.0 — controlled flash state demo.  The host owns the
   // `'on' | 'off'` value; the built-in flash button drives the
@@ -620,9 +625,10 @@ function App(): React.JSX.Element {
     );
   }
 
-  return (
-    <SafeAreaProvider>
-      <StatusBar barStyle="light-content" />
+  // ── The camera surface, extracted so it can be hosted EITHER directly
+  // (the normal example) or inside a portrait-locked <Modal> (the
+  // repro scaffold for the modal-host orientation bug below).
+  const cameraSurface = (
       <SafeAreaView style={styles.safe}>
         <Camera
           // Re-pick the capture format when the KF-quality toggle OR the
@@ -747,6 +753,17 @@ function App(): React.JSX.Element {
           </Text>
         </Pressable>
 
+        {/* Modal-host repro entry point — see the scaffold at the render
+            tail.  Hosts <Camera> in a PORTRAIT-LOCKED Modal to reproduce
+            the reported landscape→portrait rotation bug. */}
+        <Pressable
+          style={[styles.devToggle, { top: 230 }]}
+          onPress={() => setModalHost(true)}
+          accessibilityRole="button"
+        >
+          <Text style={styles.devToggleText}>📱 Modal host (portrait-locked)</Text>
+        </Pressable>
+
         {/* ⚙️ Dev settings — the set-once knobs, kept off the camera view. */}
         <Modal
           visible={settingsOpen}
@@ -796,6 +813,78 @@ function App(): React.JSX.Element {
           </Pressable>
         </Modal>
       </SafeAreaView>
+  );
+
+  // ── Modal-host repro scaffold ────────────────────────────────────
+  // Reproduces the integrator's configuration EXACTLY: a landscape-
+  // capable app (Info.plist now lists both landscape orientations)
+  // presenting <Camera> inside a Modal that is LOCKED TO PORTRAIT
+  // (`supportedOrientations={['portrait']}`).
+  //
+  // Why this shape matters: `useWindowDimensions()` freezes at its
+  // open-time value inside an iOS Modal, which is why <Camera>
+  // measures its own root via onLayout (v0.22.1).  But in a
+  // portrait-LOCKED modal the root layout never changes, so no further
+  // onLayout ever fires — while the accelerometer keeps reporting the
+  // device rotating.  Opening the modal while the device is already
+  // LANDSCAPE and then rotating to portrait is the reported break;
+  // opening it in portrait is reported fine.
+  //
+  // REPRO: tap "Modal host" → rotate the device to LANDSCAPE → tap
+  // "Open camera in portrait-locked modal" → rotate back to PORTRAIT.
+  if (modalHost) {
+    return (
+      <SafeAreaProvider>
+        <StatusBar barStyle="light-content" />
+        <SafeAreaView style={[styles.safe, styles.launcher]}>
+          <Text style={styles.launcherTitle}>Modal-host repro</Text>
+          <Text style={styles.launcherBody}>
+            1. Rotate this device to LANDSCAPE{'\n'}
+            2. Tap “Open camera” below{'\n'}
+            3. Rotate back to PORTRAIT — the modal stays portrait-locked
+          </Text>
+          <Pressable
+            style={styles.launcherBtn}
+            onPress={() => setModalCameraOpen(true)}
+            accessibilityRole="button"
+          >
+            <Text style={styles.launcherBtnText}>Open camera in portrait-locked modal</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.launcherBtn, styles.launcherBtnSecondary]}
+            onPress={() => setModalHost(false)}
+            accessibilityRole="button"
+          >
+            <Text style={styles.launcherBtnText}>← Back to direct camera</Text>
+          </Pressable>
+          <Modal
+            visible={modalCameraOpen}
+            // THE POINT OF THIS SCAFFOLD: the modal is locked to
+            // portrait while the app itself supports landscape.
+            supportedOrientations={['portrait']}
+            animationType="slide"
+            onRequestClose={() => setModalCameraOpen(false)}
+          >
+            <View style={styles.modalCameraRoot}>
+              {cameraSurface}
+              <Pressable
+                style={styles.modalCloseChip}
+                onPress={() => setModalCameraOpen(false)}
+                accessibilityRole="button"
+              >
+                <Text style={styles.devToggleText}>✕ Close modal</Text>
+              </Pressable>
+            </View>
+          </Modal>
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+
+  return (
+    <SafeAreaProvider>
+      <StatusBar barStyle="light-content" />
+      {cameraSurface}
     </SafeAreaProvider>
   );
 }
@@ -815,6 +904,54 @@ const styles = StyleSheet.create({
     color: '#00E5FF',
     fontSize: 13,
     fontWeight: '600',
+  },
+  // ── Modal-host repro scaffold ──────────────────────────────────
+  launcher: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  launcherTitle: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  launcherBody: {
+    color: '#9BA1A6',
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: 'center',
+    marginBottom: 28,
+  },
+  launcherBtn: {
+    backgroundColor: '#00E5FF',
+    paddingVertical: 14,
+    paddingHorizontal: 22,
+    borderRadius: 10,
+    marginBottom: 12,
+  },
+  launcherBtnSecondary: {
+    backgroundColor: '#333',
+  },
+  launcherBtnText: {
+    color: '#000',
+    fontSize: 15,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  modalCameraRoot: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  modalCloseChip: {
+    position: 'absolute',
+    top: 60,
+    right: 16,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
   },
   // ⚙️ Dev settings modal.
   modalBackdrop: {
