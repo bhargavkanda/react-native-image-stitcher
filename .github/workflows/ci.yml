@@ -103,3 +103,92 @@ jobs:
           npm ci --ignore-scripts
           npx patch-package
           npx tsc --noEmit
+
+  # ── Podspec evaluation (v0.24.4) ───────────────────────────────────
+  #
+  # RNImageStitcher.podspec is no longer a flat attribute list: it walks
+  # node_modules to decide whether to depend on VisionCamera, branches on
+  # $RNISHostOpenCV, and raises a preflight error when the xcframework is
+  # missing.  A syntax error or a bad conditional in any of that is
+  # invisible to every other job here and surfaces only at a CONSUMER's
+  # `pod install` — after publish.  (That is not hypothetical: an earlier
+  # draft of this same file used `Pod::Executable`, which is undefined in
+  # the spec-evaluation context, and a `def`, which CocoaPods evaluates
+  # against `Pod:Module` and rejects.)
+  #
+  # cocoapods-core is pure Ruby — no Xcode, no macOS runner needed.
+  podspec:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.1'
+
+      - name: Install cocoapods-core
+        run: gem install cocoapods-core --no-document
+
+      - name: Evaluate podspec — vendored OpenCV (default)
+        run: |
+          # The preflight raises when ios/Frameworks/opencv2.xcframework
+          # is absent, which it always is on a fresh checkout (the
+          # binaries are release assets, not repo content).  Stage a stub
+          # so we exercise the REAL default path rather than the error.
+          mkdir -p ios/Frameworks/opencv2.xcframework
+          ruby -e '
+            require "cocoapods-core"
+            s = Pod::Spec.from_file("RNImageStitcher.podspec")
+            core = s.subspecs.find { |x| x.name =~ /Core/ }
+            cv   = s.subspecs.find { |x| x.name =~ /OpenCV/ }
+            abort "no Core subspec"   unless core
+            abort "no OpenCV subspec" unless cv
+            vendored = cv.attributes_hash["vendored_frameworks"]
+            abort "expected vendored_frameworks in default mode" unless vendored
+            ldflags = core.attributes_hash.fetch("user_target_xcconfig", {})["OTHER_LDFLAGS"].to_s
+            abort "-ObjC missing: the +load frame-processor registrar can be dead-stripped" unless ldflags.include?("-ObjC")
+            hsp = core.attributes_hash["pod_target_xcconfig"]["HEADER_SEARCH_PATHS"].to_s
+            abort "worklets-core path reverted to the one-level-short form" if hsp =~ %r{\$\{PODS_ROOT\}/\.\./node_modules}
+            puts "version:  #{s.version}"
+            puts "core deps: #{core.dependencies.map(&:name).join(", ")}"
+            puts "OK (vendored)"
+          '
+
+      - name: Assert podspec version tracks package.json
+        run: |
+          ruby -e '
+            require "cocoapods-core"
+            require "json"
+            spec = Pod::Spec.from_file("RNImageStitcher.podspec").version.to_s
+            pkg  = JSON.parse(File.read("package.json"))["version"]
+            abort "podspec version #{spec} != package.json #{pkg}" unless spec == pkg
+            puts "version match: #{spec}"
+          '
+
+      - name: Evaluate podspec — host-supplied OpenCV
+        env:
+          RNIS_HOST_OPENCV: '1'
+        run: |
+          # No stub framework here: host mode must not require one, and
+          # must not raise.
+          rm -rf ios/Frameworks/opencv2.xcframework
+          ruby -e '
+            require "cocoapods-core"
+            s  = Pod::Spec.from_file("RNImageStitcher.podspec")
+            cv = s.subspecs.find { |x| x.name =~ /OpenCV/ }
+            abort "host mode still vendors a framework" if cv.attributes_hash["vendored_frameworks"]
+            deps = cv.dependencies.map(&:name)
+            abort "host mode did not depend on the host pod (got #{deps.inspect})" unless deps.include?("opencv2")
+            puts "OK (host OpenCV): deps #{deps.join(", ")}"
+          '
+
+      - name: Evaluate podspec — missing framework must RAISE
+        run: |
+          rm -rf ios/Frameworks/opencv2.xcframework
+          if ruby -e 'require "cocoapods-core"; Pod::Spec.from_file("RNImageStitcher.podspec")' 2>/dev/null; then
+            echo "::error::podspec did NOT raise with the xcframework absent — consumers would get '\''opencv2/core.hpp'\'' file not found hundreds of lines into the Xcode build instead." >&2
+            exit 1
+          fi
+          echo "OK: preflight raised as expected"

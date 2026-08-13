@@ -13,14 +13,19 @@
 # Modules SKIPPED (saves ~50 % of the binary size):
 #   dnn ml objdetect gapi videoio_ffmpeg
 #
-# Output: dist/opencv2.xcframework (arm64 device +
-#   arm64+x86_64 simulator slices).  Approx. 55-75 MB stripped.
+# Output: dist/opencv2.xcframework — BOTH the arm64 device slice and
+#   the arm64+x86_64 simulator slice.  Host apps link this framework,
+#   so shipping device-only breaks their simulator builds entirely
+#   (see the v0.24.4 note at step 3.5).  Zip ≈ 43 MB.
 #
 # Inputs (env):
 #   OPENCV_VERSION  — pinned in scripts/opencv-version.txt; allow
 #                     override for one-off builds against a newer
 #                     OpenCV release.
 #   OUTPUT_DIR      — defaults to ./dist
+#   RNIS_STRIP_SIM_SLICE — set to 1 to drop the simulator slice
+#                     (~17 MB smaller, device-only).  NOT the default;
+#                     see step 3.5.
 #
 # Pre-reqs:
 #   Xcode (any current version), python3, git.  No CocoaPods needed
@@ -138,9 +143,9 @@ else
     echo "[build-opencv-ios] Simulator slice retained (host apps need it to build for the simulator)."
 fi
 
-# Sentinel: the device slice MUST still be intact after the strip.
+# Sentinel: the device slice MUST be intact either way.
 if [ ! -d "${OUTPUT_DIR}/opencv2.xcframework/ios-arm64" ]; then
-    echo "[build-opencv-ios] FATAL: device slice missing after simulator strip: ${OUTPUT_DIR}/opencv2.xcframework/ios-arm64" >&2
+    echo "[build-opencv-ios] FATAL: device slice missing: ${OUTPUT_DIR}/opencv2.xcframework/ios-arm64" >&2
     exit 1
 fi
 
