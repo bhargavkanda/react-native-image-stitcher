@@ -1,3 +1,66 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-          package="io.imagestitcher.rn" />
+<!--
+  No `package=` attribute: AGP 8 ignores it ("Setting the namespace via
+  the package attribute in the source AndroidManifest.xml is no longer
+  supported") and prints a removal recommendation on every build.  The
+  namespace is declared once, in android/build.gradle.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      ── ARCore meta-data (v0.24.4) ──────────────────────────────────
+
+      This AAR has an unconditional `implementation
+      "com.google.ar:core"` dependency, and ARCore refuses to start
+      without this entry:
+
+          FatalException: Application manifest must contain meta-data
+          com.google.ar.core
+
+      It throws on the FIRST ARCore call — before any availability
+      check, so a host cannot defend against it by testing for AR
+      support.  Until now the entry lived only in this repo's
+      `example/android/app/src/main/AndroidManifest.xml`, i.e. every
+      integrator had to discover the requirement from a doc page or
+      from the crash.  Since we are the ones who pull ARCore into
+      their build, we are the ones who should declare it — manifest
+      merging propagates it into the host app automatically.
+
+      `optional` (not `required`) is deliberate:
+        - Play Store does NOT filter the host app to AR-capable
+          devices.  `required` would silently shrink an integrator's
+          addressable device list, which is not a decision an SDK
+          should make for them.
+        - The SDK already degrades at runtime: when ARCore is absent
+          or the device is unsupported, capture falls back to the
+          vision-camera + gyroscope non-AR path.
+
+      A host that genuinely wants an AR-only app overrides it:
+
+          <meta-data android:name="com.google.ar.core"
+                     android:value="required"
+                     tools:replace="android:value" />
+    -->
+    <application>
+        <meta-data android:name="com.google.ar.core" android:value="optional" />
+    </application>
+
+    <!--
+      Hardware this SDK uses, all `required="false"` so nothing here
+      restricts which devices can install the host app.  Declaring
+      them documents the SDK's needs in the merged manifest without
+      making distribution decisions on the host's behalf.
+
+      Deliberately NOT declared here: `android.permission.CAMERA` and
+      the other runtime permissions.  A library that merges a
+      permission into its host changes what that app asks for and
+      what its store listing shows — including for consumers that
+      only use the offline `BatchStitcher` path and never open a
+      camera.  Permissions stay the host's call; see
+      docs/host-app-integration.md for the list to add.
+    -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false" />
+</manifest>

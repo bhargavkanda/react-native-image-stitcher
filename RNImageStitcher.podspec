@@ -67,6 +67,30 @@ end
 rnis_has_vision_camera =
   !rnis_find_node_module.call('react-native-vision-camera', __dir__).nil?
 
+# ── v0.24.4 — worklets-core header path, resolved not guessed ─────────
+#
+# StitcherJsiInstaller.mm / RNSARWorkletRuntime.mm use the bare form
+# `#include "WKTJsiWorklet.h"`, which only resolves if the worklets-core
+# `cpp/` directory is on HEADER_SEARCH_PATHS.  This used to be spelled
+# `"${PODS_ROOT}/../node_modules/react-native-worklets-core/cpp"` — one
+# `..` short.  PODS_ROOT is `<host>/ios/Pods`, so a single `..` lands on
+# `<host>/ios`, and the entry pointed at `<host>/ios/node_modules/...`,
+# a directory that does not exist in any layout.  (The comment beside it
+# asserted the same wrong arithmetic, which is how it survived review.)
+#
+# Rather than fix the count and stay brittle, resolve the real directory
+# here — the same upward walk autolinking itself does — so hoisted,
+# pnpm and monorepo layouts all work.  Falls back to the corrected
+# two-level relative form if the walk finds nothing (e.g. a consumer
+# vendoring this package outside node_modules entirely).
+rnis_worklets_dir = rnis_find_node_module.call('react-native-worklets-core', __dir__)
+rnis_worklets_cpp =
+  if rnis_worklets_dir
+    File.join(rnis_worklets_dir, 'cpp')
+  else
+    '${PODS_ROOT}/../../node_modules/react-native-worklets-core/cpp'
+  end
+
 rnis_host_opencv =
   (defined?($RNISHostOpenCV) && $RNISHostOpenCV) ||
   ENV['RNIS_HOST_OPENCV'] == '1'
@@ -302,14 +326,20 @@ Pod::Spec.new do |s|
       #   - the worklets-core cpp/ dir — so the bare `#include
       #     "WKTJsiWorklet.h"` / "WKTJsiWorkletContext.h" lines in
       #     StitcherJsiInstaller.mm + RNSARWorkletRuntime.mm resolve.
-      #     PODS_ROOT is `<host>/ios/Pods`; the package's worklets-core
-      #     copy lives at `<host>/node_modules/react-native-worklets-core/
-      #     cpp`, i.e. `${PODS_ROOT}/../node_modules/...`.  (The shared
-      #     cpp/*.cpp files instead use the namespace-prefixed
+      #     v0.24.4: resolved above by walking up for node_modules
+      #     (`rnis_worklets_cpp`) rather than counting `..` segments —
+      #     the previous `${PODS_ROOT}/../node_modules/...` was one level
+      #     short (PODS_ROOT is `<host>/ios/Pods`, so one `..` is
+      #     `<host>/ios`) and named a directory that exists in no layout.
+      #     The corrected relative form is emitted alongside it as a
+      #     belt-and-braces fallback for standard app layouts.
+      #     (The shared cpp/*.cpp files instead use the namespace-prefixed
       #     `<react-native-worklets-core/WKTJsiWorklet.h>` form, which
       #     resolves against `${PODS_ROOT}/Headers/Public` — already on
       #     the inherited path — and works on Android's prefab too.)
-      'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_TARGET_SRCROOT}/cpp" "${PODS_ROOT}/../node_modules/react-native-worklets-core/cpp"',
+      'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_TARGET_SRCROOT}/cpp" ' \
+        "\"#{rnis_worklets_cpp}\" " \
+        '"${PODS_ROOT}/../../node_modules/react-native-worklets-core/cpp"',
     }
   end
 end

@@ -97,7 +97,15 @@ class StitcherJsiInstallerModule(
             // it once is enough — Android's loader deduplicates,
             // so even if `IncrementalStitcher.kt`'s init block
             // already loaded the lib, calling again is a cheap no-op.
-            System.loadLibrary("image_stitcher")
+            //
+            // v0.24.4 — via NativeLibraryLoader.tryLoad(), which never
+            // throws.  This class is constructed eagerly by
+            // RNImageStitcherPackage.createNativeModules() during bridge
+            // startup, so a throwing static initialiser here crashed the
+            // whole app before any JS ran (see NativeLibraryLoader's
+            // header).  install() already returns false on any failure,
+            // which is exactly the right degradation.
+            NativeLibraryLoader.tryLoad()
         }
     }
 }

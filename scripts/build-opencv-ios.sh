@@ -74,39 +74,68 @@ mv "${OUTPUT_DIR}/xcframework-build/opencv2.xcframework" \
 rm -rf "${OUTPUT_DIR}/xcframework-build"
 rm -rf "${BUILD_DIR}"
 
-# ── 3.5. Strip the simulator slice (v0.7.1 fix) ──────────────────────
+# ── 3.5. Simulator slice: SHIPPED by default (v0.24.4) ───────────────
 #
-# OpenCV's build_xcframework.py emits both the device slice (arm64)
-# and the simulator slice (arm64 + x86_64).  Consumers never run
-# the lib in the simulator (vision-camera + ARKit don't work there;
-# the lib's example app explicitly targets device), so the simulator
-# slice is ~17 MB of dead weight in the npm-install download.
+# v0.7.1 stripped the simulator slice unconditionally to save ~17 MB,
+# reasoning that "consumers never run the lib in the simulator
+# (vision-camera + ARKit don't work there)."  That reasoning was about
+# the CAMERA — and it's wrong about the BUILD.  A host app links this
+# framework into its binary, so a missing simulator slice doesn't
+# degrade the panorama feature in the simulator: it makes the ENTIRE
+# HOST APP fail to build for the simulator, with
 #
-# Strip both (a) the slice directory and (b) the corresponding
-# AvailableLibraries entry in the xcframework's Info.plist.  The
-# entry's array index isn't fixed (OpenCV's build orders entries
-# arbitrarily), so we auto-detect by scanning for the "simulator"
-# platform variant.  Manual `AvailableLibraries.1` hardcoding would
-# have shipped the wrong slice if the order changed (which happened
-# between v0.5.0 and v0.6.0 — burned a session pre-CI).
+#     building for iOS Simulator, but linking in object file built for
+#     iOS ... in opencv2.framework/opencv2
 #
-# Pre-strip iOS zip: ~43 MB.  Post-strip: ~26 MB.
+# Every developer on an integrating team runs the app in a simulator
+# constantly, on screens that have nothing to do with panoramas.  The
+# 17 MB was being paid for with "nobody on the team can use a
+# simulator any more" — a bad trade we made silently, and one that our
+# own `example/ios` inherited (its simulator builds have been broken
+# since v0.7.1).
+#
+# So: KEEP the simulator slice.  The strip is still available for
+# size-constrained distributions, opt-in via
+# `RNIS_STRIP_SIM_SLICE=1`.  Zip size: ~26 MB stripped, ~43 MB with
+# the slice.
+#
+# When stripping, remove both (a) the slice directory and (b) the
+# corresponding AvailableLibraries entry in the xcframework's
+# Info.plist.  The entry's array index isn't fixed (OpenCV's build
+# orders entries arbitrarily), so we auto-detect by scanning for the
+# "simulator" platform variant.  Manual `AvailableLibraries.1`
+# hardcoding would have shipped the wrong slice if the order changed
+# (which happened between v0.5.0 and v0.6.0 — burned a session pre-CI).
 SIM_DIR="${OUTPUT_DIR}/opencv2.xcframework/ios-arm64_x86_64-simulator"
 INFO_PLIST="${OUTPUT_DIR}/opencv2.xcframework/Info.plist"
-if [ -d "${SIM_DIR}" ]; then
-    echo "[build-opencv-ios] Stripping simulator slice..."
-    rm -rf "${SIM_DIR}"
-fi
-if [ -f "${INFO_PLIST}" ]; then
-    # Auto-detect the simulator entry's index in AvailableLibraries.
-    SIM_IDX=$(plutil -convert json -o - "${INFO_PLIST}" \
-        | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((i for i,e in enumerate(d.get('AvailableLibraries', [])) if 'simulator' in e.get('LibraryIdentifier', '')), -1))")
-    if [ "${SIM_IDX}" = "-1" ] || [ -z "${SIM_IDX}" ]; then
-        echo "[build-opencv-ios] No simulator entry found in Info.plist (already stripped or unexpected layout); continuing."
-    else
-        echo "[build-opencv-ios] Removing Info.plist AvailableLibraries.${SIM_IDX} (the simulator entry)..."
-        plutil -remove "AvailableLibraries.${SIM_IDX}" "${INFO_PLIST}"
+if [ "${RNIS_STRIP_SIM_SLICE:-0}" = "1" ]; then
+    if [ -d "${SIM_DIR}" ]; then
+        echo "[build-opencv-ios] RNIS_STRIP_SIM_SLICE=1 — stripping simulator slice..."
+        rm -rf "${SIM_DIR}"
     fi
+    if [ -f "${INFO_PLIST}" ]; then
+        # Auto-detect the simulator entry's index in AvailableLibraries.
+        SIM_IDX=$(plutil -convert json -o - "${INFO_PLIST}" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((i for i,e in enumerate(d.get('AvailableLibraries', [])) if 'simulator' in e.get('LibraryIdentifier', '')), -1))")
+        if [ "${SIM_IDX}" = "-1" ] || [ -z "${SIM_IDX}" ]; then
+            echo "[build-opencv-ios] No simulator entry found in Info.plist (already stripped or unexpected layout); continuing."
+        else
+            echo "[build-opencv-ios] Removing Info.plist AvailableLibraries.${SIM_IDX} (the simulator entry)..."
+            plutil -remove "AvailableLibraries.${SIM_IDX}" "${INFO_PLIST}"
+        fi
+    fi
+else
+    # Sentinel: the simulator slice MUST be present in the default
+    # (shipping) configuration.  If OpenCV's builder ever stops
+    # emitting it, fail the release build LOUDLY rather than
+    # publishing an asset that breaks every consumer's simulator.
+    if [ ! -d "${SIM_DIR}" ]; then
+        echo "[build-opencv-ios] FATAL: simulator slice missing at ${SIM_DIR}." >&2
+        echo "[build-opencv-ios]   Expected build_xcframework.py to emit it (--iphonesimulator_archs arm64,x86_64)." >&2
+        echo "[build-opencv-ios]   Set RNIS_STRIP_SIM_SLICE=1 only if you deliberately want a device-only build." >&2
+        exit 1
+    fi
+    echo "[build-opencv-ios] Simulator slice retained (host apps need it to build for the simulator)."
 fi
 
 # Sentinel: the device slice MUST still be intact after the strip.

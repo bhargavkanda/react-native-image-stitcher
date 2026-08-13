@@ -36,6 +36,12 @@ package io.imagestitcher.rn
  */
 internal class KeyframeGate : AutoCloseable {
 
+    // v0.24.4 — fail here, legibly, rather than letting nativeCreate()
+    // throw a bare UnsatisfiedLinkError from inside JNI.  Declared
+    // before `nativeHandle` so it runs first (Kotlin initialises
+    // properties and init blocks in declaration order).
+    init { NativeLibraryLoader.require() }
+
     private val nativeHandle: Long = nativeCreate()
 
     @Volatile private var closed: Boolean = false
@@ -358,7 +364,12 @@ internal class KeyframeGate : AutoCloseable {
             // libimage_stitcher.so contains both the OpenCV stitcher
             // shim AND the C++ KeyframeGate + JNI bindings (single .so
             // keeps APK lean and avoids a second System.loadLibrary).
-            System.loadLibrary("image_stitcher")
+            //
+            // v0.24.4 — via NativeLibraryLoader.tryLoad(), which never
+            // throws, so class init always succeeds.  The instance
+            // `init` block below calls require() to fail legibly at
+            // construction instead.
+            NativeLibraryLoader.tryLoad()
         }
 
         /**

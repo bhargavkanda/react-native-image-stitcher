@@ -14,6 +14,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.24.4] - 2026-08-13
+
+Build-integration release. Every item here is a defect that produced a
+**silent or misleading failure** — a build that succeeded and then broke
+at runtime, an app that wouldn't launch with no clue why, or an error
+message pointing hundreds of lines away from its cause. Several had
+integrators shipping hand-written `sed` patch scripts against this
+package; those patches are no longer needed and should be removed.
+
+No API changes. No behaviour changes for a correctly-building
+integration.
+
+> [!IMPORTANT]
+> **One possible build-time conflict on upgrade (Android).** This
+> release declares the ARCore `<meta-data>` in the SDK's own manifest.
+> If your app already declares `com.google.ar.core` with a value other
+> than `optional`, the manifest merger will stop with a conflict; add
+> `tools:replace="android:value"` to your `<meta-data>` element. If you
+> declare `optional`, or don't declare it at all, nothing changes. See
+> [Troubleshooting → ARCore meta-data conflict](https://bhargavkanda.github.io/react-native-image-stitcher/docs/troubleshooting).
+
+### Added
+
+- **Bring-your-own-OpenCV, on both platforms.** Documented as "not
+  currently supported" through 0.24.3; now implemented. An app must
+  contain exactly one OpenCV, and a host that already ships one had no
+  supported way to say so.
+  - **iOS** — `$RNISHostOpenCV = true` in the Podfile (or
+    `RNIS_HOST_OPENCV=1` in the environment). The `OpenCV` subspec then
+    depends on the host's pod — `$RNISHostOpenCVPod`, default `opencv2`
+    — instead of vendoring ours, and the npm postinstall skips the
+    ~27 MB download entirely. Opt-in **only**: a missing framework is
+    never inferred as host mode, because that is precisely the signature
+    of a *failed download*.
+  - **Android** — `rnisHostOpenCVSdkDir` points the Gradle module at the
+    host's OpenCV Android SDK. Add `rnisHostOpenCVPackagedByHost = true`
+    (plus `rnisHostOpenCVDependency`) when the host's own AAR already
+    packages OpenCV, in which case this AAR contributes no Java sources,
+    no jniLibs and no resources — avoiding the `Duplicate class
+    org.opencv.core.Mat` and duplicate-`.so` merge failures that made
+    such an integration impossible before.
+  - Both platforms validate at **configure time**, naming the cause: a
+    path that doesn't exist, or an OpenCV built without
+    `BUILD_opencv_stitching=ON` (which stock releases are — the single
+    most common way a BYO attempt fails).
+- **New docs**: [Android ABI support](https://bhargavkanda.github.io/react-native-image-stitcher/docs/android-abi-support),
+  and a rewritten [Bring your own OpenCV](https://bhargavkanda.github.io/react-native-image-stitcher/docs/bring-your-own-opencv).
+  Troubleshooting gained the `'opencv2/core.hpp' file not found` cause
+  list, offline/air-gapped install, the ARCore merge conflict, and the
+  `jcenter()` failure from `react-native-sensors@7.3.6`.
+
+### Fixed
+
+- **The host app no longer fails to launch when the native library is
+  missing for the running ABI (Android).** Seven classes called
+  `System.loadLibrary` from a **static initialiser**, and four of those
+  are constructed eagerly by `RNImageStitcherPackage.createNativeModules()`
+  during bridge startup. A throwing static initialiser becomes an
+  `ExceptionInInitializerError` that propagates out of
+  `createNativeModules()`, so the **entire app** died at launch — every
+  screen, not just the camera — before any JS ran, with a stack trace
+  naming neither ABIs nor OpenCV. This AAR ships **arm64-v8a only**, so
+  every x86_64 emulator hit exactly this path; running a new dependency
+  on an emulator is the first thing most integrators do. Loading now
+  goes through `NativeLibraryLoader`, whose `tryLoad()` never throws and
+  logs one actionable message naming the device's ABIs; features that
+  need the library fail at their own call sites via `require()`.
+- **The `cv_flow_gate_process_frame` frame-processor plugin now
+  registers under `use_frameworks!` (iOS).** The plugin's entire body is
+  guarded by `#if __has_include(<VisionCamera/FrameProcessorPlugin.h>)`,
+  and the podspec declared no VisionCamera dependency — so the header
+  was visible only in the default CocoaPods layout, where public headers
+  are flattened into `Pods/Headers/Public`. Under `use_frameworks!`
+  module visibility requires the declared dependency; the guard
+  evaluated **false**, the plugin compiled to an **empty translation
+  unit**, and non-AR capture ingested **zero frames**, failing at
+  finalize with the misleading `0 keyframes saved` — no build error, no
+  warning. Now declared conditionally (detected by walking up for
+  `node_modules/react-native-vision-camera`, so hoisted/pnpm/monorepo
+  layouts work), preserving the AR-only-without-vision-camera
+  configuration. Autolinking already installs the pod when the package
+  is present, so this pulls in nothing new.
+- **…and now survives dead-stripping.** Same symptom, second cause: the
+  plugin registers from `+ (void)load` and nothing references its class
+  by symbol, so a static link may drop the object file — it compiles
+  correctly and *still* never registers. The podspec now sets
+  `OTHER_LDFLAGS = $(inherited) -ObjC` on the consuming target.
+- **`pod install` fails loudly when the OpenCV xcframework is absent**,
+  naming the likely causes (`--ignore-scripts`, a stale CI cache, a
+  blocked download, a leftover `SKIP_OPENCV_FETCH`) and both remedies.
+  Previously it succeeded and the build died hundreds of lines later
+  with `'opencv2/core.hpp' file not found`, which points nowhere near
+  the actual problem. (The postinstall script exits 0 on failure by
+  design, so nothing upstream of the Xcode build ever complained.)
+- **The iOS simulator slice is back in the shipped xcframework.**
+  v0.7.1 stripped it unconditionally to save ~17 MB, reasoning that
+  "consumers never run the lib in the simulator." That was true of the
+  *camera* and false of the *build*: a host app links this framework, so
+  a device-only slice made the **entire host app** fail to build for the
+  simulator (`building for iOS Simulator, but linking in object file
+  built for iOS`) — on every screen, for every developer on the team,
+  for v0.7.1 through v0.24.3. The strip is still available opt-in via
+  `RNIS_STRIP_SIM_SLICE=1`, and the default path now *asserts* the slice
+  is present rather than silently shipping without it.
+- **ARCore's required `<meta-data>` is declared by the SDK.** This AAR
+  pulls in `com.google.ar:core` unconditionally, and ARCore throws
+  `FatalException: Application manifest must contain meta-data
+  com.google.ar.core` on its **first call** — before any availability
+  check, so a host cannot defend against it. The entry previously lived
+  only in this repo's example app, leaving every integrator to discover
+  it from the crash. Declared as `optional`, deliberately: `required`
+  would make Play Store filter the host app to AR-capable devices, which
+  is not a decision an SDK should make for its consumer.
+- **worklets-core headers are found via a resolved path, not a guessed
+  one.** `HEADER_SEARCH_PATHS` contained
+  `${PODS_ROOT}/../node_modules/react-native-worklets-core/cpp` — one
+  `..` short, since `PODS_ROOT` is `<host>/ios/Pods`. The entry named a
+  directory that exists in no layout. Now resolved by walking up for
+  `node_modules` (with the corrected relative form kept as a fallback),
+  so monorepo and pnpm layouts work too.
+- **The release workflow refuses to publish a version/tag mismatch.**
+  The postinstall derives its binary download URL from
+  `package.json.version` while CI attaches the binaries under the pushed
+  **tag**; when the two disagreed everything went green and the failure
+  landed entirely on consumers as a permanent 404. A new `verify-version`
+  job asserts tag == `v${package.json.version}` (and that
+  `package-lock.json` agrees — 0.24.2 shipped with its lock still reading
+  0.24.0) before the 60/90-minute binary builds start.
+- Removed the ignored `package=` attribute from the library manifest,
+  silencing AGP 8's removal recommendation on every build.
+
 ## [0.24.3] - 2026-08-12
 
 Hardening release from a field RCA: an integrator's non-AR panorama

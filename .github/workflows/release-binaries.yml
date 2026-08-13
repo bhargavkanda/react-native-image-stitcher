@@ -27,8 +27,64 @@ on:
         required: true
 
 jobs:
+  # ── Preflight: the tag MUST match package.json (v0.24.4) ───────────
+  #
+  # The postinstall script derives the binary download URL from
+  # `package.json.version` — it fetches
+  # `RNImageStitcher-v<package.json version>-ios.zip`.  The binaries,
+  # however, are uploaded under the pushed TAG.  When the two disagree,
+  # everything here goes green and the failure lands entirely on
+  # consumers: `npm install` succeeds, postinstall 404s, and the build
+  # dies later with `'opencv2/core.hpp' file not found` — a message
+  # that points nowhere near the actual cause.  A published version
+  # can't be unpublished after 72h, so this is effectively permanent
+  # damage from a one-character typo.
+  #
+  # Runs before the 60/90-minute binary builds so a mismatch costs
+  # seconds, not an hour.
+  verify-version:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Assert tag matches package.json version
+        id: check
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [ -z "$TAG" ] || [[ "$TAG" == "main" ]]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "::error::Could not determine the release tag." >&2
+            exit 1
+          fi
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Tag:             ${TAG}"
+          echo "package.json:    ${PKG_VERSION}"
+          if [ "${TAG}" != "v${PKG_VERSION}" ]; then
+            echo "::error::Tag '${TAG}' does not match package.json version '${PKG_VERSION}' (expected tag 'v${PKG_VERSION}')." >&2
+            echo "::error::Publishing this would attach the binaries to '${TAG}' while every consumer's postinstall looks for 'v${PKG_VERSION}' — a permanent 404 for that npm version." >&2
+            echo "::error::Fix: bump package.json (and package-lock.json) to match the tag, or retag." >&2
+            exit 1
+          fi
+          # package-lock must agree too — a stale lock is how 0.24.2
+          # shipped with its version fields still reading 0.24.0.
+          LOCK_VERSION="$(node -p "require('./package-lock.json').version")"
+          LOCK_PKG_VERSION="$(node -p "require('./package-lock.json').packages[''].version")"
+          if [ "${LOCK_VERSION}" != "${PKG_VERSION}" ] || [ "${LOCK_PKG_VERSION}" != "${PKG_VERSION}" ]; then
+            echo "::error::package-lock.json version fields (${LOCK_VERSION} / ${LOCK_PKG_VERSION}) disagree with package.json (${PKG_VERSION}). Run 'npm install --package-lock-only' and commit." >&2
+            exit 1
+          fi
+          echo "Version check passed."
+
   # ── iOS xcframework ───────────────────────────────────────────────
   build-ios:
+    needs: verify-version
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -62,6 +118,7 @@ jobs:
 
   # ── Android per-ABI binaries ──────────────────────────────────────
   build-android:
+    needs: verify-version
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:

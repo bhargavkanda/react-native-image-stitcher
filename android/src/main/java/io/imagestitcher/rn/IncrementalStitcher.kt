@@ -3456,7 +3456,13 @@ class IncrementalStitcher(
             // (the same JNI shim KeyframeGate and QualityChecker load).
             // System.loadLibrary is idempotent; loading here removes any
             // dependence on KeyframeGate's class-initialisation order.
-            System.loadLibrary("image_stitcher")
+            //
+            // v0.24.4 — via NativeLibraryLoader.tryLoad(), which never
+            // throws.  This module is constructed eagerly during bridge
+            // startup by RNImageStitcherPackage.createNativeModules(),
+            // so a throwing static initialiser crashed the host app at
+            // launch on any ABI this AAR doesn't ship.
+            NativeLibraryLoader.tryLoad()
         }
 
         @JvmStatic

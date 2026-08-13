@@ -43,6 +43,10 @@ package io.imagestitcher.rn
  */
 internal class BlurPolicy : AutoCloseable {
 
+    // v0.24.4 — see KeyframeGate: fail legibly at construction rather
+    // than with a bare UnsatisfiedLinkError from nativeMedianCreate().
+    init { NativeLibraryLoader.require() }
+
     private val nativeHandle: Long = nativeMedianCreate(MEDIAN_CAPACITY)
 
     @Volatile private var closed: Boolean = false
@@ -176,7 +180,8 @@ internal class BlurPolicy : AutoCloseable {
             // Same shim KeyframeGate / SharpnessWindow load;
             // System.loadLibrary is idempotent so class-init order
             // doesn't matter.
-            System.loadLibrary("image_stitcher")
+            // v0.24.4 — non-throwing; the instance init requires it.
+            NativeLibraryLoader.tryLoad()
         }
     }
 }

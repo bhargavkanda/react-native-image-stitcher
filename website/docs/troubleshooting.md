@@ -29,11 +29,34 @@ saved`. Single-photo capture works. 100 % reproducible.
 
 **Cause:** the capture ran in **non-AR mode** and the vision-camera
 frame-processor chain that feeds it is dead in your build — the SDK's
-`cv_flow_gate_process_frame` plugin was compiled out (frame processors
-disabled when the native build ran, vision-camera < 4.7, or on iOS a
-`use_frameworks!` header-visibility issue), so zero frames ever reached
-the stitching engine. Photos are unaffected because `takePhoto()`
-doesn't use frame processors.
+`cv_flow_gate_process_frame` plugin never registered, so zero frames
+ever reached the stitching engine. Photos are unaffected because
+`takePhoto()` doesn't use frame processors.
+
+There are **three** distinct ways the plugin fails to register, all with
+this identical symptom and none of which produce a build error:
+
+1. **Frame processors compiled out of vision-camera itself** — disabled
+   at the time the native build ran, or vision-camera < 4.7.
+2. **Header invisible on iOS under `use_frameworks!`** — the plugin's
+   body is wrapped in
+   `#if __has_include(<VisionCamera/FrameProcessorPlugin.h>)`. Without a
+   declared pod dependency that header is visible only in the default
+   CocoaPods layout, where public headers are flattened into
+   `Pods/Headers/Public`. Under `use_frameworks!` (static *or* dynamic)
+   the guard evaluates false and the plugin compiles to an **empty
+   translation unit**. **Fixed in v0.24.4** — the podspec now declares
+   `VisionCamera` conditionally.
+3. **Dead-stripped on iOS** — the plugin registers from `+ (void)load`
+   and nothing references its class by symbol, so a static link is free
+   to drop the object file: it compiles correctly and *still* never
+   registers. **Fixed in v0.24.4** — the podspec now sets `-ObjC` on the
+   consuming target. If you carry a custom xcconfig that overrides
+   `OTHER_LDFLAGS` without `$(inherited)`, you will reintroduce this.
+
+On **v0.24.3 and earlier** the usual workaround was a hand-written `sed`
+patch on the podspec. Upgrade instead — the patch is no longer needed and
+will conflict.
 
 **Fix:** work through the
 [frame-processor checklist](./host-integration.md#frame-processors--the-non-ar-capture-prerequisite),
@@ -80,6 +103,80 @@ usually complete (v0.15).
 |---|---|
 | **OpenCV binaries missing** | The `postinstall` fetch failed. Re-run `npm install`, or stage binaries and set `SKIP_OPENCV_FETCH=1`. |
 | **RN 0.84 build errors** | Apply the required `patch-package` patches — see [Host integration](./host-integration.md). |
+| **`'opencv2/core.hpp' file not found`** | The xcframework was never downloaded. See below. |
+| **`building for iOS Simulator, but linking in object file built for iOS`** | You're on v0.7.1–v0.24.3, which shipped a device-only framework. Upgrade to v0.24.4+ (both slices are back), or build for a device. |
+| **App won't launch at all on an emulator (Android)** | The AAR is `arm64-v8a` only. Use an arm64 AVD or a physical device — see [Android ABI support](./android-abi-support.md). v0.24.4+ degrades gracefully instead of crashing. |
+| **`Attribute meta-data#com.google.ar.core@value value=(required) … is also present at [library] … value=(optional)`** | v0.24.4 declares the ARCore meta-data so you don't have to. If you declare it as `required`, add `tools:replace="android:value"` to your own `<meta-data>` — see below. |
+| **`Could not find method jcenter()`** (via `react-native-sensors`) | `react-native-sensors@7.3.6`'s `build.gradle` still calls the removed `jcenter()`. Patch it to `mavenCentral()` with `patch-package`, or pin a newer version. |
+
+### `'opencv2/core.hpp' file not found`
+
+The OpenCV xcframework is **not** in the npm tarball — `postinstall`
+downloads it from the matching GitHub Release. When that download is
+skipped or blocked, `pod install` used to succeed and the failure landed
+hundreds of lines into the Xcode build with this message, which points
+nowhere near the cause.
+
+**v0.24.4+** fails fast: `pod install` itself raises, names the likely
+cause, and gives you the fix. The causes are:
+
+- `npm install --ignore-scripts` (common in locked-down CI, and the
+  default for some monorepo tooling)
+- a restored CI cache that predates the dependency
+- a proxy or firewall blocking `objects.githubusercontent.com`
+- `SKIP_OPENCV_FETCH=1` left set from an earlier experiment
+
+Recover with any of:
+
+```bash
+# Re-run the fetch
+npm rebuild react-native-image-stitcher   # or: npm install --force
+
+# Point at an internal mirror
+OPENCV_BINARY_BASE_URL=https://mirror.internal/rnis npm install
+
+# Or: your app already ships OpenCV — don't download ours at all
+RNIS_HOST_OPENCV=1 npm install
+```
+
+The last one is **[Bring your own OpenCV](./bring-your-own-opencv.md)**.
+
+### Installing offline / in an air-gapped CI
+
+Stage the binaries yourself and tell `postinstall` to stand down:
+
+```bash
+# On a machine with network access, from the matching release:
+#   RNImageStitcher-v<version>-ios.zip     → node_modules/react-native-image-stitcher/ios/Frameworks/
+#   RNImageStitcher-v<version>-android.zip → node_modules/react-native-image-stitcher/android/vendor/
+SKIP_OPENCV_FETCH=1 npm ci
+```
+
+The version in the asset name **must** match the installed package
+version exactly — the postinstall URL is derived from
+`package.json.version`.
+
+### ARCore meta-data conflict on upgrade
+
+v0.24.4 declares `<meta-data android:name="com.google.ar.core"
+android:value="optional" />` in the SDK's own manifest, because this AAR
+pulls in ARCore and ARCore throws `FatalException: Application manifest
+must contain meta-data com.google.ar.core` on its first call — before
+any availability check, so a host can't defend against it.
+
+If your app already declares the same key with a **different** value, the
+manifest merger stops with a conflict. One line fixes it:
+
+```xml
+<meta-data
+    android:name="com.google.ar.core"
+    android:value="required"
+    tools:replace="android:value" />
+```
+
+(and `xmlns:tools="http://schemas.android.com/tools"` on `<manifest>` if
+it isn't there already). Declaring the same value — `optional` — merges
+silently and needs no change.
 
 Still stuck? Open an issue:
 [github.com/bhargavkanda/react-native-image-stitcher/issues](https://github.com/bhargavkanda/react-native-image-stitcher/issues).
