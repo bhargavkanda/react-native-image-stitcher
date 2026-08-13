@@ -14,6 +14,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [Unreleased] — 0.25.0 (AR hardening)
+
+Work in progress on `release/0.25.0`. Everything below is landed and
+tested; the remaining planned items are listed at the end.
+
+The theme is the field failure where a panorama hold **ends itself in
+under a second and finalizes a single keyframe as the "panorama."**
+Three independent mechanisms were found that can each produce exactly
+that symptom, which is why it survived several rounds of diagnosis —
+fixing one left the others.
+
+> [!IMPORTANT]
+> Every behavioural change here is behind a flag whose **default
+> reproduces today's behaviour exactly**. Nothing in this release
+> changes what a working integration does until you opt in. The
+> defaults will be revisited once each fix has been validated on a
+> device that actually reproduces the failure.
+
+### Added
+
+- **`setPoseTrusted(bool)` on the C++ keyframe gate** (iOS + Android
+  bridges). While AR tracking is not `normal`/`TRACKING` — initialising,
+  relocalising — ARKit/ARCore emit pose deltas that are pure drift. The
+  gate's two POSE-DRIVEN force-accepts (the translation budget and the
+  angular fallback) read those as real motion and burst-accept frames
+  from a stationary device, racing to the keyframe cap in a few hundred
+  milliseconds; hitting the cap auto-finalizes and ends the operator's
+  hold. Pose-driven accepts are now suppressed while pose is untrusted.
+  Flow (KLT) accepts are unaffected — optical flow does not lie when the
+  tracker is confused.
+- **Per-evaluation speed plausibility guard** (`3.0 m/s`) on the
+  translation budget. A VIO slide shows up as an implausible jump
+  between consecutive evaluations; a real pan does not. Replaces an
+  earlier distance-since-accept clamp that was too loose to catch the
+  measured 0.5 m slides.
+- **`useDeviceOrientationStatus()`** — returns `{ orientation, settled }`
+  instead of a bare orientation. `useDeviceOrientation()` is unchanged
+  and still returns the scalar.
+- **`orientationDriftAbandon`** on `<Camera>` (default `true`) — set
+  `false` to disable mid-capture rotation abandonment entirely.
+- **`shutterCancelGraceMs`** on `<Camera>` / **`cancelGraceMs`** on
+  `<CameraShutter>` (default `0` = today's behaviour). See below.
+- **Shutter diagnostics** — `onTouchCancel` / `onTouchEnd` now log how
+  each hold ended. Warn-level and not `__DEV__`-gated, because
+  integrators hit this in release-ish builds and this one line is the
+  difference between a one-log diagnosis and days of guessing.
+
+### Fixed
+
+- **Phantom rotation abandons from an unsettled sensor.**
+  `useDeviceOrientation()` fabricates `'portrait'` before the
+  accelerometer's first sample. The drift detector snapshotted that
+  fabricated value at capture start, so a capture begun in landscape
+  compared `landscape-left` against a `'portrait'` that was never
+  observed — and abandoned on the first real sample. The detector now
+  takes no snapshot and makes no comparison until the sensor has
+  delivered something real. This is why the failure was **landscape-only
+  and disappeared when the device was locked to portrait**: in portrait,
+  the fabricated value happened to be correct.
+- **A stolen touch no longer finalizes a one-frame panorama.** React
+  Native's `Pressable` folds "the user lifted their finger" and "the
+  system terminated the touch" into a single `onPressOut`. A termination
+  — interface rotation, an ancestor scrollable claiming the drag, a
+  Modal mounting, or the Pressable being remounted by a re-render (and
+  this button's own visuals change the instant a hold begins) — ended
+  the capture and finalized whatever it had. With a positive
+  `cancelGraceMs`, a cancelled press-out waits for the gesture to be
+  re-granted before committing; a genuine release is never delayed, and
+  the window can never hang a capture.
+- **A cancelled sub-threshold press is no longer a tap.** Firing a photo
+  because something stole the gesture is worse than doing nothing.
+- **The angular fallback no longer degrades permanently.** An angular
+  ACCEPT now refreshes the KLT feature set, instead of leaving flow
+  tracking against a stale reference for the rest of the capture.
+
+### Still planned for 0.25.0
+
+- Exclude time-interval force-accepts from the keyframe cap, so a
+  stationary hold cannot auto-finalize.
+- AR session lifecycle: defer holds until the session is tracking,
+  verify the session survived a previous finalize (finalize restarts it,
+  so *every* capture currently starts unstable), and a
+  `CAPTURE_TOO_SHORT` error rather than a one-frame "panorama".
+- Auto-downgrade to non-AR capture when the AR session fails.
+- Flip AR to the default capture source, with the photo-quality work
+  that depends on it.
+- Lateral cadence-trust.
+- C++ gate unit tests built on OpenCV-free predicates.
+
 ## [0.24.4] - 2026-08-13
 
 Build-integration release. Every item here is a defect that produced a
