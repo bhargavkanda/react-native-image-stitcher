@@ -13,6 +13,109 @@ require 'json'
 
 package = JSON.parse(File.read(File.join(__dir__, 'package.json')))
 
+# ── v0.24.4 — bring-your-own-OpenCV (host-supplied) ───────────────────
+#
+# By DEFAULT this pod vendors its own `opencv2.xcframework` (fetched by
+# postinstall).  That is wrong for a host that ALREADY ships OpenCV —
+# an app must contain exactly ONE OpenCV (see
+# website/docs/sharing-opencv.md); two means duplicate symbols and ~54 MB
+# of dead weight.  Such hosts previously had to hand-patch this podspec
+# with `sed` (deleting `vendored_frameworks`, injecting their own pod
+# dependency, deleting the downloaded framework).  That patch broke
+# silently whenever this file's layout changed.
+#
+# Opt in EXPLICITLY, either from the host Podfile:
+#
+#     $RNISHostOpenCV    = true
+#     $RNISHostOpenCVPod = 'opencv2'   # optional; defaults to 'opencv2'
+#
+# or via the environment (also honoured by the npm postinstall, so the
+# ~27 MB download is skipped entirely):
+#
+#     RNIS_HOST_OPENCV=1 npm install && cd ios && RNIS_HOST_OPENCV=1 pod install
+#
+# The host's OpenCV MUST include the modules this SDK links against —
+# core, imgproc, features2d, calib3d and **stitching** (the usual
+# omission; a trimmed build surfaces as cryptic link errors).
+#
+# Detection is opt-in ONLY.  A missing framework is deliberately NOT
+# treated as host mode: that is the signature of a failed download, and
+# silently reinterpreting it as "the host will provide one" is exactly
+# the silent failure this release exists to remove.
+# Locate a sibling package by walking up from this podspec, so the check
+# works for a flat `node_modules`, a hoisted monorepo, and pnpm/Yarn
+# layouts alike.  Plain Ruby on purpose: `Pod::Executable` is not defined
+# in every podspec-evaluation context (cocoapods-core alone raises
+# `uninitialized constant`), and shelling out to node would fail the same
+# way in a sandboxed evaluation.
+rnis_find_node_module = lambda do |name, from_dir|
+  dir = from_dir
+  found = nil
+  loop do
+    candidate = File.join(dir, 'node_modules', name, 'package.json')
+    if File.file?(candidate)
+      found = File.dirname(candidate)
+      break
+    end
+    parent = File.dirname(dir)
+    break if parent == dir
+    dir = parent
+  end
+  found
+end
+
+rnis_has_vision_camera =
+  !rnis_find_node_module.call('react-native-vision-camera', __dir__).nil?
+
+rnis_host_opencv =
+  (defined?($RNISHostOpenCV) && $RNISHostOpenCV) ||
+  ENV['RNIS_HOST_OPENCV'] == '1'
+rnis_host_opencv_pod =
+  (defined?($RNISHostOpenCVPod) && $RNISHostOpenCVPod) ||
+  ENV['RNIS_HOST_OPENCV_POD'] ||
+  'opencv2'
+
+# ── Preflight: fail LOUDLY at `pod install`, not cryptically at compile ─
+#
+# In vendored mode the xcframework must be on disk.  When it is absent
+# (postinstall never ran — `--ignore-scripts`, a CI cache that restored
+# node_modules without running scripts, an offline/proxied install, or a
+# failed download, which exits 0 by design) CocoaPods silently drops the
+# `vendored_frameworks` glob and the build dies hundreds of lines later
+# with `'opencv2/core.hpp' file not found`.  Name the real cause here.
+unless rnis_host_opencv
+  rnis_xcframework = File.join(__dir__, 'ios', 'Frameworks', 'opencv2.xcframework')
+  unless File.directory?(rnis_xcframework)
+    raise <<~MSG
+      [RNImageStitcher] opencv2.xcframework is missing.
+
+        expected: #{rnis_xcframework}
+
+      It is downloaded at npm-install time by
+      scripts/postinstall-fetch-binaries.js, and is NOT in the npm
+      tarball (it is ~27 MB).  Most likely one of:
+
+        * install ran with --ignore-scripts (or a CI cache restored
+          node_modules without running postinstall)
+        * the download was blocked (offline / proxy / firewall)
+        * SKIP_OPENCV_FETCH=1 was set without staging the binaries
+
+      Fix — re-run the fetch, then `pod install` again:
+
+        node node_modules/react-native-image-stitcher/scripts/postinstall-fetch-binaries.js
+
+      Or, if this app ALREADY ships its own OpenCV, use the supported
+      host-supplied mode instead of patching this podspec:
+
+        # ios/Podfile
+        $RNISHostOpenCV = true
+
+      See website/docs/sharing-opencv.md and
+      website/docs/bring-your-own-opencv.md.
+    MSG
+  end
+end
+
 Pod::Spec.new do |s|
   s.name         = 'RNImageStitcher'
   s.version      = package['version']
@@ -79,7 +182,16 @@ Pod::Spec.new do |s|
   # will fail with "framework not found" — the JS postinstall script
   # emits a clear error message in that case pointing users to re-run.
   s.subspec 'OpenCV' do |cv|
-    cv.vendored_frameworks = 'ios/Frameworks/opencv2.xcframework'
+    if rnis_host_opencv
+      # HOST-SUPPLIED (v0.24.4).  Depend on the host's OpenCV pod instead
+      # of vendoring ours; the host owns the single copy in the app.  The
+      # subspec still exists so `Core`'s dependency edge (and any pod that
+      # depends on `RNImageStitcher/OpenCV` to share our OpenCV) keeps
+      # resolving — it simply forwards to the host's pod now.
+      cv.dependency rnis_host_opencv_pod
+    else
+      cv.vendored_frameworks = 'ios/Frameworks/opencv2.xcframework'
+    end
   end
 
   # ── Core — the library itself ───────────────────────────────────────
@@ -126,9 +238,59 @@ Pod::Spec.new do |s|
     # node_modules copy of the worklets-core cpp/ dir).
     core.dependency 'react-native-worklets-core'
 
+    # v0.24.4 — react-native-vision-camera, when the host has it.
+    #
+    # KeyframeGateFrameProcessor.mm — which registers the
+    # `cv_flow_gate_process_frame` frame-processor plugin that NON-AR
+    # panorama capture ingests every frame through — wraps its entire
+    # body (including its `+load` registrar) in
+    # `#if __has_include(<VisionCamera/FrameProcessorPlugin.h>)`.
+    #
+    # Without an explicit dependency that header is visible ONLY in the
+    # default CocoaPods layout, where every pod's public headers are
+    # flattened into `Pods/Headers/Public` and land on every pod's
+    # inherited HEADER_SEARCH_PATHS.  Under `use_frameworks!` (static or
+    # dynamic) module visibility requires a declared dependency — so the
+    # guard evaluated FALSE, the plugin compiled to an EMPTY translation
+    # unit, the plugin never registered, and non-AR capture ingested ZERO
+    # frames, failing at finalize with the misleading "0 keyframes saved".
+    # No build error, no warning.  A field integrator lost days to this
+    # and shipped a `sed` patch for it; this dependency is that fix.
+    #
+    # Declared CONDITIONALLY so the "AR-only host without vision-camera"
+    # configuration keeps working: RN autolinking already installs the
+    # VisionCamera pod whenever the package is present, so when it IS
+    # present this pulls in nothing new — it only makes the header
+    # visibility explicit so `__has_include` tells the truth.  Depend on
+    # the umbrella `VisionCamera` (not `VisionCamera/FrameProcessors`,
+    # which only exists when frame processors are enabled).
+    core.dependency 'VisionCamera' if rnis_has_vision_camera
+
     # The vendored OpenCV rides in via the sibling subspec, exactly as it
     # did when `vendored_frameworks` sat on the root spec.
     core.dependency 'RNImageStitcher/OpenCV'
+
+    # v0.24.4 — keep the frame-processor registrar out of the linker's
+    # dead-strip path.
+    #
+    # `KeyframeGateFrameProcessor` registers `cv_flow_gate_process_frame`
+    # from `+ (void)load`.  Nothing in the app REFERENCES that class by
+    # symbol — the registry discovers it at load time — so when this pod
+    # is linked as a static archive (the default, and `use_frameworks!
+    # :linkage => :static`), the linker is free to drop the whole object
+    # file and the plugin silently never registers.  Same observable
+    # failure as the missing-header case: non-AR capture ingests ZERO
+    # frames and dies with "0 keyframes saved", with nothing in the build
+    # log to suggest why.
+    #
+    # `-ObjC` forces every Obj-C class + category from our static archive
+    # to be loaded.  It is set on the CONSUMING target (`user_target_
+    # xcconfig`) because that is where the link happens; RN app templates
+    # already ship it, so for most hosts this is a no-op that simply
+    # guarantees the invariant instead of relying on it.
+    core.user_target_xcconfig = {
+      'OTHER_LDFLAGS' => '$(inherited) -ObjC',
+    }
 
     core.pod_target_xcconfig = {
       'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
