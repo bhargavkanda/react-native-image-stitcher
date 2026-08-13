@@ -106,7 +106,7 @@ usually complete (v0.15).
 | **`'opencv2/core.hpp' file not found`** | The xcframework was never downloaded. See below. |
 | **`building for iOS Simulator, but linking in object file built for iOS`** | You're on v0.7.1–v0.24.3, which shipped a device-only framework. Upgrade to v0.24.4+ (both slices are back), or build for a device. |
 | **App won't launch at all on an emulator (Android)** | The AAR is `arm64-v8a` only. Use an arm64 AVD or a physical device — see [Android ABI support](./android-abi-support.md). v0.24.4+ degrades gracefully instead of crashing. |
-| **`Attribute meta-data#com.google.ar.core@value value=(required) … is also present at [library] … value=(optional)`** | v0.24.4 declares the ARCore meta-data so you don't have to. If you declare it as `required`, add `tools:replace="android:value"` to your own `<meta-data>` — see below. |
+| **`FatalException: Application manifest must contain meta-data com.google.ar.core`** | Add the ARCore `<meta-data>` to your app's manifest — see below. |
 | **`Could not find method jcenter()`** (via `react-native-sensors`) | `react-native-sensors@7.3.6`'s `build.gradle` still calls the removed `jcenter()`. Patch it to `mavenCentral()` with `patch-package`, or pin a newer version. |
 
 ### `'opencv2/core.hpp' file not found`
@@ -156,27 +156,32 @@ The version in the asset name **must** match the installed package
 version exactly — the postinstall URL is derived from
 `package.json.version`.
 
-### ARCore meta-data conflict on upgrade
+### ARCore meta-data (you must declare it)
 
-v0.24.4 declares `<meta-data android:name="com.google.ar.core"
-android:value="optional" />` in the SDK's own manifest, because this AAR
-pulls in ARCore and ARCore throws `FatalException: Application manifest
-must contain meta-data com.google.ar.core` on its first call — before
-any availability check, so a host can't defend against it.
-
-If your app already declares the same key with a **different** value, the
-manifest merger stops with a conflict. One line fixes it:
+This AAR pulls in `com.google.ar:core`, and ARCore throws
+`FatalException: Application manifest must contain meta-data
+com.google.ar.core` on its **first call** — before any availability
+check, so there is nothing the SDK can do to defend against it at
+runtime. Add it inside `<application>` in your app's manifest:
 
 ```xml
-<meta-data
-    android:name="com.google.ar.core"
-    android:value="required"
-    tools:replace="android:value" />
+<application …>
+    <meta-data android:name="com.google.ar.core" android:value="optional" />
+</application>
 ```
 
-(and `xmlns:tools="http://schemas.android.com/tools"` on `<manifest>` if
-it isn't there already). Declaring the same value — `optional` — merges
-silently and needs no change.
+Use `optional` unless your product is AR-only: `required` makes the Play
+Store filter your app to AR-capable devices. The SDK degrades on its own
+when ARCore is unavailable, falling back to the vision-camera +
+gyroscope non-AR capture path.
+
+:::note Why the SDK doesn't declare this for you
+It could — manifest merging would propagate it automatically — but an
+app that already declares the key with a *different* value would then
+have its build stopped by the merger, needing a `tools:replace`. Shipping
+a build break to integrators who already did the right thing is worse
+than the one manifest line.
+:::
 
 Still stuck? Open an issue:
 [github.com/bhargavkanda/react-native-image-stitcher/issues](https://github.com/bhargavkanda/react-native-image-stitcher/issues).

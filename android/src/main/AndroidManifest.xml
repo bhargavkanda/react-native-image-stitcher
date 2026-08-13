@@ -8,42 +8,31 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      ── ARCore meta-data (v0.24.4) ──────────────────────────────────
+      ── ARCore meta-data: deliberately NOT declared here ────────────
 
       This AAR has an unconditional `implementation
       "com.google.ar:core"` dependency, and ARCore refuses to start
-      without this entry:
-
-          FatalException: Application manifest must contain meta-data
-          com.google.ar.core
-
-      It throws on the FIRST ARCore call — before any availability
-      check, so a host cannot defend against it by testing for AR
-      support.  Until now the entry lived only in this repo's
-      `example/android/app/src/main/AndroidManifest.xml`, i.e. every
-      integrator had to discover the requirement from a doc page or
-      from the crash.  Since we are the ones who pull ARCore into
-      their build, we are the ones who should declare it — manifest
-      merging propagates it into the host app automatically.
-
-      `optional` (not `required`) is deliberate:
-        - Play Store does NOT filter the host app to AR-capable
-          devices.  `required` would silently shrink an integrator's
-          addressable device list, which is not a decision an SDK
-          should make for them.
-        - The SDK already degrades at runtime: when ARCore is absent
-          or the device is unsupported, capture falls back to the
-          vision-camera + gyroscope non-AR path.
-
-      A host that genuinely wants an AR-only app overrides it:
+      without
 
           <meta-data android:name="com.google.ar.core"
-                     android:value="required"
-                     tools:replace="android:value" />
+                     android:value="optional" />
+
+      throwing `FatalException: Application manifest must contain
+      meta-data com.google.ar.core` on its FIRST call — before any
+      availability check, so a host cannot defend against it.
+
+      v0.24.4 briefly declared it here so manifest merging would
+      propagate it automatically.  That was reverted: an app that
+      already declares the same key with a DIFFERENT value (e.g.
+      `required`, for an AR-only product) would have its build stopped
+      by the manifest merger, needing a `tools:replace` — a build
+      break shipped in a patch release, for integrators who had
+      already done the right thing.
+
+      So it stays the HOST's declaration.  It is called out in
+      docs/host-app-integration.md, in the website's host-integration
+      page, and in the example app's manifest.
     -->
-    <application>
-        <meta-data android:name="com.google.ar.core" android:value="optional" />
-    </application>
 
     <!--
       Hardware this SDK uses, all `required="false"` so nothing here

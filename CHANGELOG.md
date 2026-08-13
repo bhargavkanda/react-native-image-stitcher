@@ -26,14 +26,16 @@ package; those patches are no longer needed and should be removed.
 No API changes. No behaviour changes for a correctly-building
 integration.
 
-> [!IMPORTANT]
-> **One possible build-time conflict on upgrade (Android).** This
-> release declares the ARCore `<meta-data>` in the SDK's own manifest.
-> If your app already declares `com.google.ar.core` with a value other
-> than `optional`, the manifest merger will stop with a conflict; add
-> `tools:replace="android:value"` to your `<meta-data>` element. If you
-> declare `optional`, or don't declare it at all, nothing changes. See
-> [Troubleshooting → ARCore meta-data conflict](https://bhargavkanda.github.io/react-native-image-stitcher/docs/troubleshooting).
+> [!NOTE]
+> **Drop-in upgrade.** Nothing in this release can break a build that
+> works today. Declaring ARCore's `<meta-data>` from the SDK's own
+> manifest was considered and **deliberately rejected**: an app already
+> declaring `com.google.ar.core` with a different value (e.g.
+> `required`) would have had its build stopped by the manifest merger,
+> and shipping a build break to integrators who already did the right
+> thing is worse than the one manifest line they add today. It stays a
+> host declaration — see
+> [Troubleshooting → ARCore meta-data](https://bhargavkanda.github.io/react-native-image-stitcher/docs/troubleshooting).
 
 ### Added
 
@@ -62,7 +64,8 @@ integration.
 - **New docs**: [Android ABI support](https://bhargavkanda.github.io/react-native-image-stitcher/docs/android-abi-support),
   and a rewritten [Bring your own OpenCV](https://bhargavkanda.github.io/react-native-image-stitcher/docs/bring-your-own-opencv).
   Troubleshooting gained the `'opencv2/core.hpp' file not found` cause
-  list, offline/air-gapped install, the ARCore merge conflict, and the
+  list, offline/air-gapped install, the ARCore `<meta-data>` your app
+  must declare, and the
   `jcenter()` failure from `react-native-sensors@7.3.6`.
 
 ### Fixed
@@ -118,15 +121,6 @@ integration.
   for v0.7.1 through v0.24.3. The strip is still available opt-in via
   `RNIS_STRIP_SIM_SLICE=1`, and the default path now *asserts* the slice
   is present rather than silently shipping without it.
-- **ARCore's required `<meta-data>` is declared by the SDK.** This AAR
-  pulls in `com.google.ar:core` unconditionally, and ARCore throws
-  `FatalException: Application manifest must contain meta-data
-  com.google.ar.core` on its **first call** — before any availability
-  check, so a host cannot defend against it. The entry previously lived
-  only in this repo's example app, leaving every integrator to discover
-  it from the crash. Declared as `optional`, deliberately: `required`
-  would make Play Store filter the host app to AR-capable devices, which
-  is not a decision an SDK should make for its consumer.
 - **worklets-core headers are found via a resolved path, not a guessed
   one.** `HEADER_SEARCH_PATHS` contained
   `${PODS_ROOT}/../node_modules/react-native-worklets-core/cpp` — one
