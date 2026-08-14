@@ -522,6 +522,32 @@ class IncrementalStitcher(
             // AR-mode behaviour (the production <Camera> always sets
             // 'arSession' explicitly for AR captures anyway).
             val frameSourceMode = options.getString("frameSourceMode") ?: "arSession"
+            // v0.25 — PARITY: iOS has always refused to start an AR capture
+            // with no live AR session (IncrementalStitcherBridge.swift rejects
+            // "ar-session-not-running").  Android had no such check, so the
+            // identical JS call succeeded here and rejected there — and a
+            // capture started against a dead session records nothing and
+            // finalizes as "0 keyframes saved", which is the failure this
+            // release exists to remove.
+            //
+            // Deliberately checks session LIVENESS only, not tracking state:
+            // on Android `currentTrackingState()` is updated from the AR
+            // view's frame loop, so it is meaningless before the view has
+            // drawn and would reject legitimate captures.  The JS-side hold
+            // gate is what waits for tracking.
+            //
+            // `isRunning` was already claimed by getAndSet(true) above, so it
+            // MUST be released before returning or every later start() fails
+            // with "incremental-already-running" (the catch block does the
+            // same at the end of this method).
+            if (frameSourceMode == "arSession" && RNSARSession.instance?.hasLiveSession() != true) {
+                isRunning.set(false)
+                promise.reject(
+                    "ar-session-not-running",
+                    "RNSARSession.start() must be called before the incremental stitcher.",
+                )
+                return
+            }
             frameProcessorIngestEnabled.set(frameSourceMode == "frameProcessor")
             val rotation = options.getIntOrDefault("frameRotationDegrees", 90)
             val composeW = options.getIntOrDefault("composeWidth",  960)
