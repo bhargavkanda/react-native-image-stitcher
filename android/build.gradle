@@ -383,8 +383,23 @@ if (usingHostOpenCV && hostOpenCVProducerTask) {
         "react-native-image-stitcher: host OpenCV is produced by ${producer}; " +
         "wiring task dependencies"
     )
+    // Matched by BOTH task type and name.  The name prefixes alone were
+    // not enough: the CMake tasks are named `configureCMakeDebug[arm64-v8a]`
+    // / `buildCMakeDebug[...]` / `externalNativeBuildDebug`, none of which
+    // start with any of them — and those are the tasks that consume the SDK
+    // FIRST, via -DOPENCV_ANDROID_SDK, and are UPSTREAM of the merge tasks
+    // that did get the edge.  Gradle was therefore still free to run the
+    // native build before the host's download, configuring CMake against a
+    // missing or half-extracted SDK.
+    //
+    // Type matching covers the native tasks robustly (they are renamed per
+    // ABI and per variant); the name prefixes cover the source-set
+    // consumers (resources, Kotlin/Java compile, jniLibs packaging).
     tasks.configureEach { t ->
-        if (t.name ==~ /^(generate|merge|package|compile|bundle|extract|map|process).*/) {
+        def isNative = t.class.name.contains('ExternalNativeBuild')
+        def isConsumer = t.name ==~ /^(generate|merge|package|compile|bundle|extract|map|process).*/
+        def isCMake = t.name.toLowerCase().contains('cmake')
+        if (isNative || isCMake || isConsumer) {
             t.dependsOn producer
         }
     }

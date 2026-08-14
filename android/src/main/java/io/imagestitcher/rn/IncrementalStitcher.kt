@@ -522,31 +522,45 @@ class IncrementalStitcher(
             // AR-mode behaviour (the production <Camera> always sets
             // 'arSession' explicitly for AR captures anyway).
             val frameSourceMode = options.getString("frameSourceMode") ?: "arSession"
-            // v0.25 — PARITY: iOS has always refused to start an AR capture
-            // with no live AR session (IncrementalStitcherBridge.swift rejects
-            // "ar-session-not-running").  Android had no such check, so the
-            // identical JS call succeeded here and rejected there — and a
-            // capture started against a dead session records nothing and
-            // finalizes as "0 keyframes saved", which is the failure this
-            // release exists to remove.
+            // v0.25 — DIAGNOSTIC ONLY on Android.  Deliberately NOT a
+            // rejection, and deliberately NOT iOS parity.
             //
-            // Deliberately checks session LIVENESS only, not tracking state:
-            // on Android `currentTrackingState()` is updated from the AR
-            // view's frame loop, so it is meaningless before the view has
-            // drawn and would reject legitimate captures.  The JS-side hold
-            // gate is what waits for tracking.
+            // iOS refuses to start an AR capture with no live session
+            // (IncrementalStitcherBridge.swift rejects
+            // "ar-session-not-running"), and an earlier draft of this
+            // release copied that here for parity.  Adversarial review
+            // showed the platforms' session LIFETIMES are not equivalent,
+            // so the same guard does not mean the same thing:
             //
-            // `isRunning` was already claimed by getAndSet(true) above, so it
-            // MUST be released before returning or every later start() fails
-            // with "incremental-already-running" (the catch block does the
-            // same at the end of this method).
+            //   On Android the AR view owns the session.  Every capture
+            //   ends with statusPhase 'stitching', which unmounts
+            //   <ARCameraView>; onDetachedFromWindow calls stopForView(),
+            //   which nulls sessionRef.  On remount the session is
+            //   RECONSTRUCTED — several hundred ms on a mid-tier device,
+            //   and legitimately deferred entirely when currentActivity
+            //   is null.  So "no live session" is a NORMAL transient
+            //   after every single capture here.
+            //
+            // Rejecting would have turned that ordinary timing into a
+            // hard user-facing failure for an operator who holds the
+            // shutter straight after a stitch — a new regression, and a
+            // worse one than the silence it was meant to fix.  The
+            // dead-session capture is already surfaced: it accepts no
+            // frames, so it hits the 0-keyframe error or the v0.25
+            // CAPTURE_TOO_SHORT warning.
+            //
+            // Closing this properly needs the JS hold gate to WAIT for
+            // session readiness (poll RNSARSession.getState()) rather
+            // than native refusing after the fact — that is device-
+            // validation work, deliberately not shipped unvalidated.
             if (frameSourceMode == "arSession" && RNSARSession.instance?.hasLiveSession() != true) {
-                isRunning.set(false)
-                promise.reject(
-                    "ar-session-not-running",
-                    "RNSARSession.start() must be called before the incremental stitcher.",
+                android.util.Log.w(
+                    "IncrementalStitcher",
+                    "start(): AR capture starting with no live ARCore session "
+                        + "(view remounting after a stitch, or activity not ready). "
+                        + "Frames will be ingested once the session comes up; if "
+                        + "none arrive this capture will report too few keyframes.",
                 )
-                return
             }
             frameProcessorIngestEnabled.set(frameSourceMode == "frameProcessor")
             val rotation = options.getIntOrDefault("frameRotationDegrees", 90)
