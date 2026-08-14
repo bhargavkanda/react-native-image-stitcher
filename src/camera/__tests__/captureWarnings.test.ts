@@ -164,3 +164,54 @@ describe('buildCaptureWarnings', () => {
     });
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// v0.25 — CAPTURE_TOO_SHORT.
+//
+// Judged from the FINALIZE result, never from the live accepted-keyframe
+// count.  An earlier draft gated on the live count and would have
+// destroyed valid captures: that count omits any keyframe whose anti-blur
+// sharpness window is still open at release — the trailing keyframe of
+// nearly every capture — and it means different things on iOS and
+// Android.  These tests pin the threshold semantics so that mistake
+// cannot come back silently.
+// ─────────────────────────────────────────────────────────────────────
+describe('CAPTURE_TOO_SHORT', () => {
+  const codes = (w: ReturnType<typeof buildCaptureWarnings>) => w.map((x) => x.code);
+
+  it('does NOT warn at the default threshold, whatever the frame count', () => {
+    for (const n of [0, 1, 2, 6]) {
+      expect(codes(buildCaptureWarnings({ framesRequested: n, framesIncluded: n })))
+        .not.toContain('CAPTURE_TOO_SHORT');
+    }
+  });
+
+  it('warns when the finalized capture is below an opted-in threshold', () => {
+    const w = buildCaptureWarnings({
+      framesRequested: 1, framesIncluded: 1, minPanoramaKeyframes: 2,
+    });
+    expect(codes(w)).toContain('CAPTURE_TOO_SHORT');
+    expect(w.find((x) => x.code === 'CAPTURE_TOO_SHORT')?.message).toContain('1');
+  });
+
+  it('does not warn once the threshold is met', () => {
+    expect(codes(buildCaptureWarnings({
+      framesRequested: 2, framesIncluded: 2, minPanoramaKeyframes: 2,
+    }))).not.toContain('CAPTURE_TOO_SHORT');
+  });
+
+  it('is a WARNING on a successful capture — it never fails the capture', () => {
+    // The whole point: a one-frame capture is still a valid result that is
+    // returned to the host.  This is a label on success, not an error.
+    const w = buildCaptureWarnings({
+      framesRequested: 1, framesIncluded: 1, minPanoramaKeyframes: 2,
+    });
+    expect(w.length).toBeGreaterThan(0);
+    expect(w.every((x) => typeof x.message === 'string' && x.message.length > 0)).toBe(true);
+  });
+
+  it('stays silent when the native count is unknown', () => {
+    expect(codes(buildCaptureWarnings({ minPanoramaKeyframes: 2 })))
+      .not.toContain('CAPTURE_TOO_SHORT');
+  });
+});

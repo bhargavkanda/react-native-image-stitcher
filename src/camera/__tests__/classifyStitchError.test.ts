@@ -126,19 +126,4 @@ describe('classifyStitchError', () => {
       );
     });
   });
-
-  // v0.25 — capture abandoned for having too few keyframes.  Matched on
-  // the message so the classification survives the check later moving
-  // into native with the same wording.
-  it('classifies a too-short capture', () => {
-    expect(classifyStitchError('Capture too short: 1 keyframe(s) captured, 2 required.'))
-      .toBe('CAPTURE_TOO_SHORT');
-    expect(classifyStitchError('finalize failed: too few keyframes'))
-      .toBe('CAPTURE_TOO_SHORT');
-  });
-
-  it('does NOT swallow other finalize failures into CAPTURE_TOO_SHORT', () => {
-    expect(classifyStitchError('Batch-keyframe finalize: 0 keyframes saved'))
-      .toBe('PANORAMA_FINALIZE_FAILED');
-  });
 });

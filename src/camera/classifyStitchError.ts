@@ -64,12 +64,5 @@ export function classifyStitchError(message: string): CameraErrorCode {
   if (/out of memory|oom|memory abort/i.test(message)) {
     return 'STITCH_OOM';
   }
-  // v0.25 — a capture abandoned for having too few keyframes.  Matched on
-  // the message rather than raised as a bespoke JS code path so that this
-  // classification keeps working if the check later moves into native
-  // (Swift/Kotlin rejecting with the same wording) with no JS change.
-  if (/capture too short|too few keyframes/i.test(message)) {
-    return 'CAPTURE_TOO_SHORT';
-  }
   return 'PANORAMA_FINALIZE_FAILED';
 }

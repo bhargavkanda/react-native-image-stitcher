@@ -87,15 +87,6 @@ export const RECOVERABLE_STITCH_GUIDANCE: Partial<
       'This panorama needs more memory than the device can spare to finish '
       + '— a shorter, narrower sweep (or 1x for wide scenes) will fit.',
   },
-  // v0.25 — the hold ended before enough of the scene was captured.  The
-  // copy deliberately says what to DO differently rather than naming
-  // keyframes, which means nothing to an operator.
-  CAPTURE_TOO_SHORT: {
-    title: 'Hold and pan a little longer',
-    message:
-      'The capture ended before enough of the scene was covered. Keep '
-      + 'holding the shutter and pan steadily across the shelf.',
-  },
 };
 
 /**
