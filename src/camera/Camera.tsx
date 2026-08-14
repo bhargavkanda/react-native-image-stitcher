@@ -329,6 +329,19 @@ export type CameraErrorCode =
    */
   | 'STITCH_LOW_QUALITY'
   | 'STITCH_OOM'
+  /**
+   * v0.25 — the capture ended with fewer keyframes than
+   * `minPanoramaKeyframes` requires, so it was ABANDONED rather than
+   * finalized.  Nothing was written: the capture is cancelled before
+   * the stitch, so no output file is produced and no `onCapture` fires.
+   *
+   * Default `minPanoramaKeyframes` is 1, which reproduces the old
+   * behaviour exactly (a lone keyframe is returned as a valid one-shot
+   * panorama).  Hosts that consider a single frame a failed pan set it
+   * to 2 and get this code instead of a "panorama" that is one photo.
+   * Recoverable by re-capturing, so it carries "try again" copy.
+   */
+  | 'CAPTURE_TOO_SHORT'
   | 'OUTPUT_WRITE_FAILED'
   /**
    * Vision-camera surfaced a runtime error that isn't a known
@@ -1129,6 +1142,29 @@ export interface CameraProps {
   shutterCancelGraceMs?: number;
 
   /**
+   * v0.25 — the minimum number of keyframes a capture must have
+   * accepted for it to be finalized as a panorama.  **Default `1`,
+   * which reproduces the previous behaviour exactly**: a lone keyframe
+   * is returned as a valid one-shot panorama.
+   *
+   * Set `2` (or more) when a single frame should be treated as a failed
+   * pan rather than a panorama.  The capture is then ABANDONED —
+   * `incremental.cancel()` instead of `finalize()` — and `onError`
+   * fires with `CAPTURE_TOO_SHORT`.
+   *
+   * Deliberately checked BEFORE finalizing rather than after: native
+   * `finalize()` writes the stitched JPEG straight to `outputDir`, so
+   * rejecting afterwards would leave an orphaned file in the host's
+   * directory on every too-short capture.  Cancelling writes nothing.
+   *
+   * Why this matters for AR: the v0.24.x AR failures ended holds after
+   * a single keyframe and delivered that frame as a "panorama" with no
+   * warning at all, which is why they were reported as stitching bugs
+   * rather than capture bugs.
+   */
+  minPanoramaKeyframes?: number;
+
+  /**
    * Show the draggable-quad crop editor after a panorama finalizes, BEFORE
    * emitting it via `onCapture`.  Default `false`.  When `true`, the user
    * drags 4 corners over the stitched result; confirming crops in place
@@ -1617,6 +1653,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     lateralBudgetCm = 4,
     orientationDriftAbandon = true,
     shutterCancelGraceMs = 0,
+    minPanoramaKeyframes = 1,
     rectCrop = false,
     showPreview = false,
     guidanceCopy,
@@ -2132,6 +2169,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // auto-stop and can attach the LATERAL_DRIFT_FINALIZE warning.  Consumed
   // (reset) at the start of handleHoldEnd so it never leaks to the next pan.
   const lateralFinalizeRef = useRef(false);
+  // v0.25 — live accepted-keyframe count, readable from `handleHoldEnd`
+  // without putting it in that callback's dependency array.  It changes
+  // on EVERY accepted keyframe, so depending on it directly would
+  // re-memoize the release handler (and re-render the shutter) several
+  // times per capture; the file already avoids exactly that churn for
+  // the deferred-start path.  A ref keeps the read current and the
+  // identity stable.
+  const acceptedKeyframeCountRef = useRef(0);
   // Item 4 — latched true if the pan ever exceeded the recommended pace (the
   // live "too fast" cue fired) during the capture, so the finalize attaches a
   // HIGH_PAN_SPEED warning.  Reset at capture start; consumed at finalize.
@@ -2729,6 +2774,37 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         + `wasLateralFinalize=${wasLateralFinalize}`,
       );
     }
+    // v0.25 — abandon a capture that is too short to be a panorama.
+    //
+    // Checked HERE, before `setStatusPhase('stitching')` and before
+    // finalize, for a concrete reason: native finalize writes the
+    // stitched JPEG straight to `outputDir`, so rejecting afterwards
+    // would leave an orphaned file in the host's directory every time.
+    // Cancelling instead writes nothing.
+    //
+    // Default `minPanoramaKeyframes` is 1, so this is inert unless a
+    // host opts in; a 0-keyframe capture still takes the existing
+    // finalize path and its 9003 error.
+    const acceptedAtRelease = acceptedKeyframeCountRef.current;
+    if (minPanoramaKeyframes > 1 && acceptedAtRelease < minPanoramaKeyframes) {
+      try {
+        await incremental.cancel();
+      } catch {
+        // Cancel is best-effort — the capture is being abandoned either
+        // way, and swallowing here keeps the error the host sees as the
+        // ACTUAL reason (too short) rather than a teardown detail.
+      }
+      setStatusPhase('idle');
+      finalizingRef.current = false;
+      onError?.(
+        new CameraError(
+          'CAPTURE_TOO_SHORT',
+          `Capture too short: ${acceptedAtRelease} keyframe(s) captured, `
+          + `${minPanoramaKeyframes} required. Hold and pan a little longer.`,
+        ),
+      );
+      return;
+    }
     setStatusPhase('stitching');
     // perf-3a change 1 — `fpDriver.stop()` moved from HERE to the finally
     // below (close-late), so the ingest gate stays open through the 50 ms
@@ -2934,6 +3010,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     pendingPanStart,
     rectCrop,
     showPreview,
+    // v0.25 — read by the too-short guard.  The accepted-keyframe count
+    // it compares against is read from a ref, deliberately, so this
+    // callback is not re-created on every accepted keyframe.
+    minPanoramaKeyframes,
   ]);
 
   // Keep `handleHoldEndRef` current so the auto-finalize timer + the
@@ -3004,6 +3084,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // same tick.  This is the PRIMARY auto-stop (the time cap is opt-in).
   const keyframeMaxCount = settings.frameSelection.maxKeyframes;
   const acceptedKeyframeCount = incremental.state?.acceptedCount ?? 0;
+  acceptedKeyframeCountRef.current = acceptedKeyframeCount;
   // Item 4 — speed cue routed into the REC banner/border colour (green→red).
   // Gated on panGuidance so opting out keeps the banner calm/green.
   const recordingTooFast =
