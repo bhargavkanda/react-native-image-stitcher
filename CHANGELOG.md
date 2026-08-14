@@ -14,10 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
-## [Unreleased] — 0.25.0 (AR hardening)
-
-Work in progress on `release/0.25.0`. Everything below is landed and
-tested; the remaining planned items are listed at the end.
+## [0.25.0] - 2026-08-14 (AR hardening)
 
 The theme is the field failure where a panorama hold **ends itself in
 under a second and finalizes a single keyframe as the "panorama."**
@@ -26,11 +23,34 @@ that symptom, which is why it survived several rounds of diagnosis —
 fixing one left the others.
 
 > [!IMPORTANT]
-> Every behavioural change here is behind a flag whose **default
-> reproduces today's behaviour exactly**. Nothing in this release
-> changes what a working integration does until you opt in. The
-> defaults will be revisited once each fix has been validated on a
-> device that actually reproduces the failure.
+> **Some AR capture behaviour changes on upgrade, with no flag to turn
+> it off.** An earlier draft of this entry claimed everything was
+> flag-gated at today's default; that was wrong, and adversarial review
+> caught it. The honest split:
+>
+> **Live by default — no opt-in, no opt-out:**
+> - AR pose-driven force-accepts (translation budget + angular fallback)
+>   are suppressed whenever ARKit/ARCore is not fully tracking.
+> - The translation force-accept is additionally suppressed when
+>   per-evaluation step speed exceeds 3.0 m/s.
+> - An angular ACCEPT now re-detects KLT features, which changes which
+>   subsequent frames are accepted.
+> - A hold now DEFERS while a camera transition is in flight, instead of
+>   starting a capture against a camera the renderer has unmounted.
+> - The orientation-drift detector no longer acts before the
+>   accelerometer has delivered a real sample.
+>
+> These are the fixes. Gating them off by default would have shipped a
+> release that changes nothing, and each one is a case where the old
+> behaviour is simply wrong.
+>
+> **Opt-in, default reproduces today's behaviour exactly:**
+> - `frameSelection.timeIntervalCanFinalize` (default `true`)
+> - `minPanoramaKeyframes` (default `1` — never warns)
+>
+> None of this has yet been validated on a device that reproduces the
+> original failure. That validation is the remaining gate on flipping
+> the default capture source to AR.
 
 ### Added
 
@@ -54,8 +74,15 @@ fixing one left the others.
   and still returns the scalar.
 - **`orientationDriftAbandon`** on `<Camera>` (default `true`) — set
   `false` to disable mid-capture rotation abandonment entirely.
-- **`shutterCancelGraceMs`** on `<Camera>` / **`cancelGraceMs`** on
-  `<CameraShutter>` (default `0` = today's behaviour). See below.
+- **`frameSelection.timeIntervalCanFinalize`** (default `true`) — set
+  `false` so a keep-alive keyframe can never be the accept that reaches
+  `maxKeyframes` and auto-finalizes a stationary hold.
+- **`minPanoramaKeyframes`** on `<Camera>` (default `1`) — set `2` to get
+  the new `CAPTURE_TOO_SHORT` capture WARNING when a capture finishes
+  with fewer keyframes than that. The capture still succeeds and still
+  returns its frame; it is simply no longer silent.
+- **`CAPTURE_TOO_SHORT`** capture warning + the `warnCaptureTooShort`
+  guidance-copy key for i18n.
 - **Shutter diagnostics** — `onTouchCancel` / `onTouchEnd` now log how
   each hold ended. Warn-level and not `__DEV__`-gated, because
   integrators hit this in release-ish builds and this one line is the
@@ -73,35 +100,68 @@ fixing one left the others.
   delivered something real. This is why the failure was **landscape-only
   and disappeared when the device was locked to portrait**: in portrait,
   the fabricated value happened to be correct.
-- **A stolen touch no longer finalizes a one-frame panorama.** React
-  Native's `Pressable` folds "the user lifted their finger" and "the
-  system terminated the touch" into a single `onPressOut`. A termination
-  — interface rotation, an ancestor scrollable claiming the drag, a
-  Modal mounting, or the Pressable being remounted by a re-render (and
-  this button's own visuals change the instant a hold begins) — ended
-  the capture and finalized whatever it had. With a positive
-  `cancelGraceMs`, a cancelled press-out waits for the gesture to be
-  re-granted before committing; a genuine release is never delayed, and
-  the window can never hang a capture.
-- **A cancelled sub-threshold press is no longer a tap.** Firing a photo
-  because something stole the gesture is worse than doing nothing.
+- **A hold no longer starts a capture against an unmounted camera.** The
+  RENDER gate unmounted the camera for `inFlightTransition`, but the HOLD
+  gate checked only `arSupportPending` — and those clear in the SAME
+  render, because resolving the AR probe is what flips `isAR` and starts
+  the transition. So v0.24.3's defer resumed at exactly the moment the
+  camera unmounted and the AR session stopped, starting a capture against
+  no frame source. Both gates now read one shared predicate.
+- **Keep-alive keyframes can no longer end a capture.** Time-budget
+  accepts counted toward `maxKeyframes` exactly like novelty accepts, so
+  a perfectly stationary hold marched to the cap on the clock alone —
+  ~7.5 s at the defaults, having captured nothing new. They still count,
+  but can no longer be the accept that REACHES the cap, so the capture
+  cannot end itself without new content.
+- **A one-keyframe capture is no longer silent.** It was returned as an
+  ordinary successful panorama carrying a `singleKeyframe: true` flag
+  that no consumer read — which is precisely why these AR failures were
+  reported as stitching bugs rather than capture bugs. Opt in with
+  `minPanoramaKeyframes`.
 - **The angular fallback no longer degrades permanently.** An angular
   ACCEPT now refreshes the KLT feature set, instead of leaving flow
   tracking against a stale reference for the rest of the capture.
 
-### Still planned for 0.25.0
+### Also in this release
 
-- Exclude time-interval force-accepts from the keyframe cap, so a
-  stationary hold cannot auto-finalize.
-- AR session lifecycle: defer holds until the session is tracking,
-  verify the session survived a previous finalize (finalize restarts it,
-  so *every* capture currently starts unstable), and a
-  `CAPTURE_TOO_SHORT` error rather than a one-frame "panorama".
-- Auto-downgrade to non-AR capture when the AR session fails.
-- Flip AR to the default capture source, with the photo-quality work
-  that depends on it.
-- Lateral cadence-trust.
-- C++ gate unit tests built on OpenCV-free predicates.
+- **v0.24.5 merged** — the SCANS affine rescue for translation captures,
+  and pan guidance restored under AR (`usePanMotion` was gated
+  `&& isNonAR`, so hosts defaulting to AR silently lost both the "keep
+  the pan straight" and "moving too fast" warnings).
+- **Android bring-your-own-OpenCV: producer-task support.** A host whose
+  OpenCV SDK is DOWNLOADED by a Gradle task — the normal arrangement for
+  an SDK from a private artifact repository — hit a hard Gradle 8
+  undeclared-dependency failure. `rnisHostOpenCVProducerTask` names the
+  producing task so the edge can be wired. Covers the CMake/native tasks,
+  which consume the SDK first.
+- **Android no longer rejects an AR capture when no ARCore session is
+  live** — it logs instead. Unlike iOS, the Android AR view OWNS the
+  session: every stitch unmounts the view, which stops the session, and
+  remount reconstructs it over several hundred ms. "No live session" is
+  a normal transient there, and refusing turned it into a hard failure
+  for anyone holding the shutter right after a stitch.
+- **`KeyframeGate` unit tests** for the OpenCV-free gate predicates
+  (121 C++ tests), including that the keep-alive guard's default is
+  bit-identical to the old behaviour across the whole counts matrix.
+
+### Deliberately NOT in this release
+
+- **AR failure auto-downgrade.** Not part of the verified RCA fix plan,
+  and it carries the highest false-positive risk of anything considered:
+  iOS `finalize` stops the AR session for the whole 2–5 s stitch, and
+  Android's `isRunning` is `sessionRef != null`, which stays true through
+  a dead session. Get the grace-timer re-arm wrong and it downgrades
+  after every SUCCESSFUL panorama. Unverifiable without a device, and it
+  buys resilience rather than correctness.
+- **Flipping the default capture source to AR.** v0.24.5 cleared one
+  prerequisite (pan guidance); the rest, plus device validation of
+  everything above, remain.
+- **A JS-side wait for AR session readiness.** The correct fix for the
+  post-stitch remount window, and device-validation work.
+- **`shutterCancelGraceMs`.** Drafted, then removed: React Native
+  dispatches `onPressOut` BEFORE `onTouchCancel`, so it could never fire
+  — and the RCA had already refuted gesture/touch-steal as a cause. The
+  `onTouchCancel`/`onTouchEnd` diagnostics are kept.
 
 ## [0.24.4] - 2026-08-13
 
