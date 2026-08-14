@@ -95,79 +95,8 @@ export interface CameraShutterProps {
    * its own mode. Default `true` keeps every existing consumer byte-identical.
    */
   holdEnabled?: boolean;
-  /**
-   * v0.25 — grace window, in milliseconds, before a hold that ended
-   * WITHOUT a genuine finger-lift is committed as a release.
-   * **Default `0` — disabled, byte-identical to previous behaviour.**
-   *
-   * ## The failure this exists for
-   *
-   * React Native's `Pressable` folds two very different events into one
-   * `onPressOut`: the user lifting their finger, and the system
-   * TERMINATING the touch (an interface rotation, an ancestor
-   * scrollable claiming the drag, a Modal mounting, or simply the
-   * Pressable being remounted by a re-render — note this button's own
-   * visuals change the instant the hold begins).  A termination is not
-   * a release, but the shutter treats it as one: `onHoldComplete`
-   * fires, and a panorama that captured a single keyframe is finalized
-   * into a "panorama" that is just that one frame.  That is the shape
-   * of the v0.24.x field reports — capture self-ends in under a second,
-   * landscape only, and the user gets frame #1 as the result.
-   *
-   * ## What a non-zero value does
-   *
-   * A press-out that arrives with a native touch CANCEL is not
-   * committed immediately; it waits this long for the gesture to be
-   * re-granted (a remounted Pressable re-acquires a finger that is
-   * still down).  If it is, the hold continues uninterrupted.  If it is
-   * not, the hold ends normally when the window expires — so this can
-   * never hang a capture, which matters because `<Camera>` does not set
-   * `maxHoldMs`, leaving no other upper bound.
-   *
-   * A genuine finger-lift is never delayed, whatever this is set to.
-   *
-   * Suggested value if you are chasing this: `400`.  Left at `0` until
-   * it has been validated on a device that actually reproduces the
-   * failure — the diagnostics on `onTouchCancel` / `onTouchEnd` tell
-   * you whether your captures are ending by cancel or by release, and
-   * this flag is only worth turning on if they say cancel.
-   */
-  cancelGraceMs?: number;
   /** Optional style applied to the outer touch target. */
   style?: ViewStyle;
-}
-
-
-/**
- * Pure decision for "a press-out just arrived — commit it now, or wait
- * to see whether the gesture comes back?"
- *
- * Extracted so jest can exercise the matrix without a React renderer
- * (this package's jest config is `testEnvironment: 'node'` with no RN
- * preset — same reason `_computeDriftStateForTests` exists).
- *
- * @param wasHolding      the phase at press-out time was 'holding'
- * @param sawTouchCancel  a native touch CANCEL was observed for this
- *                        gesture (i.e. the touch was terminated rather
- *                        than lifted)
- * @param cancelGraceMs   the `cancelGraceMs` prop
- */
-export function _decidePressOutForTests(
-  wasHolding: boolean,
-  sawTouchCancel: boolean,
-  cancelGraceMs: number,
-): { action: 'commit-hold-end' | 'defer-hold-end' | 'tap' | 'none'; deferMs: number } {
-  if (!wasHolding) {
-    // Ended before the hold threshold.  A clean lift is a TAP; a
-    // cancelled touch is nothing at all — the user never completed a
-    // press, and firing a photo because the system stole the gesture
-    // would be worse than doing nothing.
-    return { action: sawTouchCancel ? 'none' : 'tap', deferMs: 0 };
-  }
-  const shouldDefer = sawTouchCancel && cancelGraceMs > 0;
-  return shouldDefer
-    ? { action: 'defer-hold-end', deferMs: cancelGraceMs }
-    : { action: 'commit-hold-end', deferMs: 0 };
 }
 
 
@@ -191,7 +120,6 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
       isProcessing = false,
       disabled = false,
       holdEnabled = true,
-      cancelGraceMs = 0,
       style,
     },
     ref,
@@ -228,29 +156,11 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
       }
     }, []);
 
-    // v0.25 — cancel-grace bookkeeping.  `sawTouchCancelRef` records
-    // that THIS gesture was terminated rather than lifted; the raw
-    // touch handlers set it, and press-out reads it.  Both orderings
-    // are handled: `onTouchCancel` before `onPressOut` sets the flag in
-    // time, and `onTouchCancel` after `onPressOut` still lands inside
-    // the deferred window and vetoes the commit.
-    const sawTouchCancelRef = useRef(false);
-    const deferredEndRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-    const clearDeferredEnd = useCallback(() => {
-      if (deferredEndRef.current !== null) {
-        clearTimeout(deferredEndRef.current);
-        deferredEndRef.current = null;
-      }
-    }, []);
-
     const cancelHold = useCallback(() => {
       clearHoldTimer();
       clearMaxHoldTimer();
-      clearDeferredEnd();
-      sawTouchCancelRef.current = false;
       setPhaseBoth('idle');
-    }, [clearHoldTimer, clearMaxHoldTimer, clearDeferredEnd, setPhaseBoth]);
+    }, [clearHoldTimer, clearMaxHoldTimer, setPhaseBoth]);
 
     useImperativeHandle(ref, () => ({ cancelHold }), [cancelHold]);
 
@@ -260,8 +170,7 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
     useEffect(() => () => {
       clearHoldTimer();
       clearMaxHoldTimer();
-      clearDeferredEnd();
-    }, [clearHoldTimer, clearMaxHoldTimer, clearDeferredEnd]);
+    }, [clearHoldTimer, clearMaxHoldTimer]);
 
     // If hold is disabled mid-press (e.g. a Pano→Photo switch while the finger
     // is down), disarm the pending hold timer so it can't still enter the
@@ -273,18 +182,6 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
 
     const handlePressIn = useCallback(() => {
       if (disabled || isProcessing) return;
-      // A press-in means the gesture is (re)granted.  If a deferred
-      // hold-end is pending, this is the re-grant it was waiting for:
-      // veto the commit and let the hold continue.  This is the whole
-      // point of `cancelGraceMs` — a Pressable that gets remounted
-      // mid-hold terminates the touch and immediately re-acquires it.
-      if (deferredEndRef.current !== null) {
-        clearDeferredEnd();
-        sawTouchCancelRef.current = false;
-        setPhaseBoth('holding');
-        return;
-      }
-      sawTouchCancelRef.current = false;
       setPhaseBoth('pressing');
       // Tap-only: never arm the hold transition, so the button stays in
       // 'pressing' until release (→ a tap) and can never paint the recording
@@ -334,43 +231,16 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
       const wasHolding = phaseRef.current === 'holding';
       clearHoldTimer();
       clearMaxHoldTimer();
-
-      const { action, deferMs } = _decidePressOutForTests(
-        wasHolding,
-        sawTouchCancelRef.current,
-        cancelGraceMs,
-      );
-
-      if (action === 'defer-hold-end') {
-        // v0.25 — the touch was TERMINATED, not lifted, and the host
-        // opted into a grace window.  Hold the phase (so the recording
-        // ring stays lit and the engine keeps ingesting) and wait to
-        // see whether the gesture is re-granted.  `handlePressIn`
-        // vetoes if it is; otherwise this timer ends the hold exactly
-        // as a release would, so a capture can never hang here.
-        deferredEndRef.current = setTimeout(() => {
-          deferredEndRef.current = null;
-          sawTouchCancelRef.current = false;
-          setPhaseBoth('idle');
-          onHoldComplete();
-        }, deferMs);
-        return;
-      }
-
-      sawTouchCancelRef.current = false;
       setPhaseBoth('idle');
-      if (action === 'commit-hold-end') {
+      if (wasHolding) {
         onHoldComplete();
-      } else if (action === 'tap' && !disabled && !isProcessing) {
+      } else if (!disabled && !isProcessing) {
         // It was a tap (released before the threshold).  Suppress
         // the tap when the camera is busy — taps trigger photos and
         // we don't want to fire-and-forget into a busy pipeline.
         onTap();
       }
-      // action === 'none' → a sub-threshold press that the system
-      // cancelled.  Deliberately does nothing: firing a photo because
-      // something stole the gesture is worse than ignoring it.
-    }, [disabled, isProcessing, onTap, onHoldComplete, clearHoldTimer, clearMaxHoldTimer, setPhaseBoth, cancelGraceMs]);
+    }, [disabled, isProcessing, onTap, onHoldComplete, clearHoldTimer, clearMaxHoldTimer, setPhaseBoth]);
 
     // Visuals.  Three layered circles so the inner colour can swap
     // without animating the outer ring (smoother on lower-end phones).
@@ -397,26 +267,29 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
         disabled={disabled || isProcessing}
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}
-        // v0.25 diagnostics — name HOW each hold ends.  `onTouchCancel`
-        // fires on NATIVE cancellation (UIKit interface rotation, an
-        // ancestor scrollable claiming the drag via responder
-        // termination, a Modal window mounting) — cases the Pressable
-        // otherwise folds into `onPressOut` indistinguishably from the
-        // user lifting their finger.  A hold that ends via CANCEL was
-        // NOT a user release; the v0.24.x field failures ("capture
-        // self-ends after ~1 frame, landscape only") hinge on exactly
-        // this distinction, so the log names the killer directly
-        // instead of leaving it to inference.  Warn-level (not __DEV__
-        // -gated): integrators hit this in release-ish builds and this
-        // line is the difference between a one-log diagnosis and days
-        // of guessing.  The behavioural fix (cancel ⇒ capture
-        // CONTINUES, tap-to-finish) ships separately, flag-gated.
+        // v0.25 diagnostics — name HOW each hold ended.  `onTouchCancel`
+        // fires on NATIVE cancellation (interface rotation, an ancestor
+        // scrollable claiming the drag via responder termination, a Modal
+        // mounting, a remount) — cases React Native's `Pressable` otherwise
+        // folds into `onPressOut` indistinguishably from the user lifting
+        // their finger.
+        //
+        // Diagnostics ONLY.  An earlier v0.25 draft also added a
+        // `cancelGraceMs` that tried to keep a capture alive across a
+        // cancelled touch.  It was removed: the RCA for the self-ending
+        // hold explicitly REFUTED gesture/touch-steal as a cause ("the
+        // shutter is provably mode-independent"), and adversarial review
+        // then showed the guard could never fire anyway — RN dispatches
+        // `onPressOut` BEFORE `onTouchCancel`, so the flag it consulted
+        // was always still false.  It also risked hanging a capture if the
+        // component unmounted mid-grace.  If a future device log DOES show
+        // holds ending by CANCEL, these two lines are what will prove it,
+        // and any fix must account for that dispatch order.
+        //
+        // Warn-level and not __DEV__-gated: integrators hit this in
+        // release-ish builds, and this line is the difference between a
+        // one-log diagnosis and days of guessing.
         onTouchCancel={() => {
-          // Record it for `handlePressOut`.  Ordering-safe: if the
-          // cancel lands FIRST, press-out reads the flag; if it lands
-          // second, press-out has already committed (grace off) or is
-          // sitting in the deferred window (grace on).
-          sawTouchCancelRef.current = true;
           // eslint-disable-next-line no-console
           console.warn(
             '[react-native-image-stitcher] shutter touch CANCELLED by '
@@ -427,10 +300,6 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
           );
         }}
         onTouchEnd={() => {
-          // A real finger-lift.  Clear any cancel seen earlier in this
-          // gesture so the lift is committed immediately — a genuine
-          // release is NEVER delayed by `cancelGraceMs`.
-          sawTouchCancelRef.current = false;
           if (phaseRef.current === 'holding') {
             // eslint-disable-next-line no-console
             console.log('[react-native-image-stitcher] shutter released by user (holding → end)');

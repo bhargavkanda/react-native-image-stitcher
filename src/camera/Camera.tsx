@@ -1121,27 +1121,6 @@ export interface CameraProps {
   orientationDriftAbandon?: boolean;
 
   /**
-   * v0.25 — grace window, in milliseconds, before a hold that ended
-   * without a genuine finger-lift is committed as a release.
-   * **Default `0` — disabled; behaviour is unchanged.**
-   *
-   * React Native's `Pressable` cannot tell "the user let go" from "the
-   * system took the touch away" — both surface as `onPressOut`. A
-   * terminated touch therefore ends the panorama and finalizes whatever
-   * was captured, which for a capture that had just started is a single
-   * keyframe. Set this to a few hundred ms (400 is a reasonable first
-   * try) and a cancelled gesture gets that long to be re-granted before
-   * the hold is committed; a genuine release is never delayed.
-   *
-   * Turn it on only if the shutter's `onTouchCancel` diagnostic
-   * actually fires on your device — see `cancelGraceMs` on
-   * `<CameraShutter>` for the full rationale. It can never hang a
-   * capture: when the window expires the hold ends exactly as a release
-   * would.
-   */
-  shutterCancelGraceMs?: number;
-
-  /**
    * v0.25 — the minimum number of keyframes a capture must have
    * accepted for it to be finalized as a panorama.  **Default `1`,
    * which reproduces the previous behaviour exactly**: a lone keyframe
@@ -1652,7 +1631,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     panTooFastThreshold,
     lateralBudgetCm = 4,
     orientationDriftAbandon = true,
-    shutterCancelGraceMs = 0,
     minPanoramaKeyframes = 1,
     rectCrop = false,
     showPreview = false,
@@ -3576,7 +3554,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                 // Tap-only when panorama is off — no dead "recording" ring on a
                 // hold that does nothing (the split-Photo-mode case).
                 holdEnabled={enablePanoramaMode}
-                cancelGraceMs={shutterCancelGraceMs}
                 isProcessing={statusPhase === 'stitching'}
                 disabled={statusPhase === 'stitching' || shutterDisabled}
               />

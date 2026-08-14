@@ -131,11 +131,22 @@ internal class KeyframeGate : AutoCloseable {
     /// from `Frame.camera.trackingState == TRACKING` on every consumed
     /// AR frame.  Default `true` (back-compat).  Write-only.
     ///
-    /// Only hops the JNI boundary on an actual change — tracking state
-    /// flips a handful of times per capture, not per frame.
+    /// DELIBERATELY UNGUARDED — writes through on every assignment, like
+    /// `disableAngularFallback` above.  An earlier v0.25 draft skipped
+    /// redundant JNI hops with `if (field == value) return`, which
+    /// silently broke the fix from the SECOND capture onward:
+    /// `KeyframeGate::reset()` sets the C++ flag back to `true` at
+    /// capture start, but this Kotlin mirror belongs to a
+    /// process-lifetime gate and kept whatever the previous capture left.
+    /// If capture A ended while tracking was degraded the mirror held
+    /// `false`, so capture B's per-frame `= false` matched `field` and
+    /// never reached C++ — leaving pose-driven accepts live through
+    /// exactly the initialising window this exists to protect.
+    ///
+    /// A boolean across JNI is trivial next to the evaluate() that
+    /// follows it, so there is nothing to optimise here.
     var poseTrusted: Boolean = true
         set(value) {
-            if (field == value) return
             field = value
             nativeSetPoseTrusted(nativeHandle, value)
         }

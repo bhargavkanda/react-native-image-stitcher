@@ -201,13 +201,24 @@ final class KeyframeGate {
     /// `ARCamera.trackingState` on every consumed AR frame.  Default
     /// `true` (back-compat).  Write-only; no read accessor on C++.
     ///
-    /// Guarded against redundant bridge hops: tracking state changes a
-    /// handful of times per capture, not per frame.
+    /// DELIBERATELY UNGUARDED — writes through on every assignment, like
+    /// `disableAngularFallback` above.  An earlier v0.25 draft skipped
+    /// redundant bridge hops with `guard poseTrusted != oldValue`, which
+    /// silently broke the fix from the SECOND capture onward:
+    /// `KeyframeGate::reset()` sets the C++ flag back to `true` at
+    /// capture start, but this Swift mirror is a member of a
+    /// process-lifetime gate and kept whatever value the previous
+    /// capture left.  If capture A ended while tracking was degraded the
+    /// mirror held `false`, so capture B's per-frame `= false` matched
+    /// `oldValue` and never reached C++ — leaving pose-driven accepts
+    /// live through exactly the initialising window this exists to
+    /// protect.  Self-perpetuating, because that burst then finalizes
+    /// while tracking is still degraded.
+    ///
+    /// A bool across the bridge is trivial next to the evaluate() that
+    /// follows it, so there is nothing to optimise here.
     var poseTrusted: Bool = true {
-        didSet {
-            guard poseTrusted != oldValue else { return }
-            bridge.setPoseTrusted(poseTrusted)
-        }
+        didSet { bridge.setPoseTrusted(poseTrusted) }
     }
 
     /// v0.25 — may a keep-alive (time-budget) accept be the accept that
