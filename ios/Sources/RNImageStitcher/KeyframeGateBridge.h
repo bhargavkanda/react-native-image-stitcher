@@ -108,6 +108,12 @@ NS_SWIFT_NAME(KeyframeGateBridge)
 /// Default `YES` (back-compat).
 - (void)setPoseTrusted:(BOOL)trusted;
 
+/// v0.25 — may a keep-alive (time-budget) accept be the accept that
+/// REACHES maxCount and therefore ends the capture via the host's
+/// count-based auto-finalize?  Default YES = pre-0.25 behaviour.
+/// Set NO so a stationary hold cannot self-finalize on the clock.
+- (void)setTimeIntervalCanFinalize:(BOOL)canFinalize;
+
 // ── Read-only state ─────────────────────────────────────────────
 - (BOOL)isEnabled;
 - (NSInteger)acceptedCount;

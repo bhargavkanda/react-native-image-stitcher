@@ -210,6 +210,20 @@ final class KeyframeGate {
         }
     }
 
+    /// v0.25 — may a keep-alive (time-budget) accept be the accept that
+    /// REACHES `maxCount`, and so end the capture via the host's
+    /// count-based auto-finalize?  Default `true` = pre-0.25 behaviour.
+    ///
+    /// `false` stops a stationary hold self-finalizing on the clock: the
+    /// gate stalls at maxCount - 1 instead of tripping the auto-stop.
+    /// Set once per capture from settings, not per frame.
+    var timeIntervalCanFinalize: Bool = true {
+        didSet {
+            guard timeIntervalCanFinalize != oldValue else { return }
+            bridge.setTimeIntervalCanFinalize(timeIntervalCanFinalize)
+        }
+    }
+
 
     /// One-shot flag: when set to `true`, the very next evaluate()
     /// accepts unconditionally and the flag self-resets.  Set by JS

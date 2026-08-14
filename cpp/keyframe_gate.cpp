@@ -290,6 +290,11 @@ struct KeyframeGate::Impl {
     /// keyframe when this much wall-clock time has elapsed since the last
     /// accept, even if novelty < threshold.  0.0 = disabled.  See hpp.
     double maxKeyframeIntervalMs = 0.0;
+    // v0.25 — may a keep-alive (time-budget) accept be the one that
+    // reaches maxCount?  Default true = pre-0.25 behaviour.  See
+    // timeBudgetMayForceAccept() in the header for why this is a
+    // reserve-the-last-slot knob rather than an exemption.
+    bool timeIntervalCanFinalize = true;
 
     // V16 A2 — strategy + flow tunables.  Default is Pose to keep
     // pre-A2 behaviour for any caller that hasn't switched.  The
@@ -417,6 +422,7 @@ void KeyframeGate::setPoseTrusted(bool trusted)         { pImpl_->poseTrusted = 
 // Time-budget force-accept (both strategies).  Clamp to non-negative;
 // 0.0 disables it (callers opt out by passing 0).
 void KeyframeGate::setMaxKeyframeIntervalMs(double ms)  { pImpl_->maxKeyframeIntervalMs = (ms < 0.0 ? 0.0 : ms); }
+void KeyframeGate::setTimeIntervalCanFinalize(bool v) { pImpl_->timeIntervalCanFinalize = v; }
 // V16 — novelty percentile.  Clamp to [0.5, 0.99].  Below 0.5 the
 // estimate becomes too sensitive to the BEST-tracked-features (under-
 // reports user-perceived novelty); above 0.99 it's effectively max-
@@ -499,7 +505,9 @@ KeyframeGateDecision KeyframeGate::evaluateAngularFallback(
     // Time-budget force-accept — overrides BOTH the disable-angular hard
     // reject and the novelty reject below.  The angular path keeps no image
     // baseline (only lastAcceptedPose), so this is a complete accept.
-    if (timeBudgetCrossed(s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs)) {
+    if (timeBudgetMayForceAccept(s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs,
+                                s.currentNowMs, s.acceptedCount, s.maxCount,
+                                s.timeIntervalCanFinalize)) {
         s.lastAcceptedPose   = pose;
         s.lastAcceptSteadyMs = s.currentNowMs;
         s.acceptedCount     += 1;
@@ -669,8 +677,9 @@ KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
     if (overlapRatio > 1.0f) overlapRatio = 1.0f;
     double newContentFraction = 1.0 - static_cast<double>(overlapRatio);
 
-    const bool poseTimeCrossed = timeBudgetCrossed(
-        s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs);
+    const bool poseTimeCrossed = timeBudgetMayForceAccept(
+        s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs,
+        s.acceptedCount, s.maxCount, s.timeIntervalCanFinalize);
     if (newContentFraction < s.overlapThreshold && !poseTimeCrossed) {
         return { false, KeyframeGateDecisionReason::RejectOverlapTooHigh,
                  newContentFraction, s.acceptedCount, s.maxCount };
@@ -1091,8 +1100,9 @@ KeyframeGateDecision KeyframeGate::evaluateWithWorkingMat(
         (translationSinceLastAccept >= s.flowMaxTranslationM);
     // Time-budget force-accept (both strategies; see hpp).  Same shape as
     // the translation budget, but measured on elapsed wall-clock time.
-    const bool flowTimeCrossed = timeBudgetCrossed(
-        s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs);
+    const bool flowTimeCrossed = timeBudgetMayForceAccept(
+        s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs,
+        s.acceptedCount, s.maxCount, s.timeIntervalCanFinalize);
 
     // §7 — accept-or-reject combined check.  Accept if the novelty crossed
     // `overlapThreshold` (the original rule) OR the translation budget OR

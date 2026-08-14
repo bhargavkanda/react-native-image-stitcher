@@ -142,6 +142,13 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
     _gate.setPoseTrusted(trusted ? true : false);
 }
 
+- (void)setTimeIntervalCanFinalize:(BOOL)canFinalize {
+    // v0.25 — see header doc.  Set once per capture at start(), like
+    // every other gate knob; `_gate` is a value member so there is
+    // nothing to null-check (same shape as -setPoseTrusted: above).
+    _gate.setTimeIntervalCanFinalize(canFinalize ? true : false);
+}
+
 - (KGBDecision *)evaluateWithTx:(float)tx ty:(float)ty tz:(float)tz
                               qx:(float)qx qy:(float)qy qz:(float)qz qw:(float)qw
                               fx:(float)fx fy:(float)fy cx:(float)cx cy:(float)cy

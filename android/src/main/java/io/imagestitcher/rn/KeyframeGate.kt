@@ -140,6 +140,20 @@ internal class KeyframeGate : AutoCloseable {
             nativeSetPoseTrusted(nativeHandle, value)
         }
 
+    /// v0.25 — may a keep-alive (time-budget) accept be the accept that
+    /// REACHES `maxCount`, and so end the capture via the host's
+    /// count-based auto-finalize?  Default `true` = pre-0.25 behaviour.
+    ///
+    /// `false` stops a stationary hold self-finalizing on the clock: the
+    /// gate stalls at maxCount - 1 instead of tripping the auto-stop.
+    /// Set once per capture from settings, not per frame.
+    var timeIntervalCanFinalize: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            nativeSetTimeIntervalCanFinalize(nativeHandle, value)
+        }
+
     /// 2026-05-14 — Flow strategy: novelty aggregation percentile
     /// (same knob iOS exposes via setFlowNoveltyPercentile).  C++
     /// clamps to [0.5, 0.99].  Stored locally for diagnostic
@@ -344,6 +358,7 @@ internal class KeyframeGate : AutoCloseable {
     // setters (Android JNI was a P3-followup until 2026-05-14).
     private external fun nativeSetDisableAngularFallback(handle: Long, disabled: Boolean)
     private external fun nativeSetPoseTrusted(handle: Long, trusted: Boolean)
+    private external fun nativeSetTimeIntervalCanFinalize(handle: Long, canFinalize: Boolean)
     private external fun nativeSetFlowNoveltyPercentile(handle: Long, percentile: Double)
     private external fun nativeSetFlowMaxTranslationM(handle: Long, metres: Double)
     // Wall-clock keyframe-interval budget (ms).  iOS parity:
