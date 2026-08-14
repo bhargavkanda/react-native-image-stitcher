@@ -1736,13 +1736,21 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const deviceOrientation = useDeviceOrientation();
 
   // ── Panorama GUIDANCE — shared motion signals (item 3/4/6) ──────
-  // One gyro + one accelerometer subscription, live only while a non-AR
-  // capture is recording.  Feeds the too-fast pill (`panSpeedBucket`)
-  // and the lateral-drift FINALIZE (`lateralExceeded`).  `panTooFast-
-  // Threshold` (if set) tunes the 'warn'→'bad' boundary; `lateralBudget-
-  // Cm` tunes the drift latch (0 disables the latch in the hook).
+  // One gyro + one accelerometer subscription, live while a capture is
+  // recording.  Feeds the too-fast pill (`panSpeedBucket`) and the lateral-
+  // drift FINALIZE (`lateralExceeded`).  `panTooFastThreshold` (if set) tunes
+  // the 'warn'→'bad' boundary; `lateralBudgetCm` tunes the drift latch (0
+  // disables the latch in the hook).
+  //
+  // v0.24.5 — was gated `&& isNonAR`, which silently dropped BOTH pan warnings
+  // ("keep the pan straight" + "moving too fast") for AR captures.  Hosts that
+  // default to AR (captureSources="ar") therefore lost all pan guidance.  The
+  // gyro/accel are hardware sensors independent of the frame source (AR frames
+  // come from ARKit/ARCore, but device rotation is measured the same way), so
+  // the guidance is now active for AR captures too — the axis mapping already
+  // keys off deviceOrientation, not the capture source.
   const panMotion = usePanMotion({
-    active: statusPhase === 'recording' && isNonAR,
+    active: statusPhase === 'recording',
     warnMaxRadPerSec: panTooFastThreshold,
     lateralBudgetCm,
   });
