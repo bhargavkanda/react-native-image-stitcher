@@ -675,11 +675,14 @@ StitchResult stitchFramePaths(
         || firstAttempt.errorCode == StitchErrorCode::WarpFailed
         || firstAttempt.errorCode == StitchErrorCode::EmptyPanorama
         || firstAttempt.errorCode == StitchErrorCode::LowQualityStitch;
-    if (!worthRetrying) {
-        return finish(firstAttempt);
-    }
-    // HIGH-LEVEL: spherical warper rescue.
-    if (!config.useManualPipeline
+    // HIGH-LEVEL: spherical warper rescue — runs FIRST (before the SCANS rescue
+    // below) so a wide ROTATION capture that failed the plane warper still gets
+    // the correct SPHERICAL panorama, not a lower-quality affine one.  On
+    // failure it FALLS THROUGH to the SCANS rescue instead of returning, so a
+    // translation capture that surfaced as a worthRetrying code (Homography /
+    // camera-params) still reaches the affine model.
+    if (worthRetrying
+        && !config.useManualPipeline
         && config.stitchMode == StitchMode::Panorama
         && config.warperType != "spherical") {
         log_info(logFn, "[stitch-fallback]",
@@ -694,12 +697,13 @@ StitchResult stitchFramePaths(
             return finish(sph);
         }
         log_info(logFn, "[stitch-fallback]",
-                 "spherical rescue also failed code=%d — returning primary error",
+                 "spherical rescue also failed code=%d — falling through to SCANS",
                  static_cast<int>(sph.errorCode));
-        return finish(firstAttempt);
+        // fall through
     }
-    // MANUAL: preserved opposite-mode fallback (iOS no-regression).
-    if (config.useManualPipeline) {
+    // MANUAL: preserved opposite-mode fallback (iOS no-regression).  Only the
+    // manual pipeline; the high-level SCANS rescue below is gated !useManual.
+    if (worthRetrying && config.useManualPipeline) {
         const StitchMode fallbackMode =
             (config.stitchMode == StitchMode::Panorama) ? StitchMode::Scans
                                                         : StitchMode::Panorama;
@@ -712,6 +716,47 @@ StitchResult stitchFramePaths(
         if (secondAttempt.errorCode == StitchErrorCode::Ok) {
             secondAttempt.stitchModeUsed = fallbackMode;
             return finish(secondAttempt);
+        }
+    }
+    // ── High-level SCANS (affine) rescue for TRANSLATION-dominant captures ──
+    // LAST resort on the high-level PANORAMA path.  Android/high-level finalize
+    // always runs PANORAMA (rotation model: homography + BundleAdjusterRay,
+    // which assume pure rotation about the optical centre).  A translation sweep
+    // with parallax either FRAGMENTS the match graph — leaveBiggestComponent
+    // drops frames → NeedMoreImages (intentionally NOT in worthRetrying, so it
+    // reaches here without a hard early-return) — or fails bundle-adjust
+    // (Homography / camera-params).  cv::Stitcher::SCANS uses the AFFINE
+    // matcher/estimator, the correct model for a translating / scanning capture.
+    // Runs AFTER the spherical rescue so rotation captures keep priority; a PURE
+    // last-resort rescue — only after every rotation-model attempt already
+    // failed, so it can only ADD successes (on SCANS failure we return the
+    // primary error, never worse).  UnknownCvException is EXCLUDED: high-level
+    // OOM (std::bad_alloc / StsNoMem) lands in that bucket, and SCANS re-runs a
+    // full stitch that would re-peak memory on a device that just ran out.
+    {
+        const StitchErrorCode ec = firstAttempt.errorCode;
+        const bool translationLike =
+            ec == StitchErrorCode::NeedMoreImages
+            || ec == StitchErrorCode::HomographyEstimationFailed
+            || ec == StitchErrorCode::CameraParamsAdjustFailed
+            || ec == StitchErrorCode::EmptyPanorama
+            || ec == StitchErrorCode::LowQualityStitch;
+        if (!config.useManualPipeline
+            && config.stitchMode == StitchMode::Panorama
+            && translationLike) {
+            log_info(logFn, "[stitch-fallback]",
+                     "high-level PANORAMA failed code=%d (%s) — retrying SCANS "
+                     "(affine) for translation",
+                     static_cast<int>(ec), firstAttempt.errorMessage.c_str());
+            StitchResult scans = runOnce(StitchMode::Scans, std::string());
+            scans.stitchModeUsed = StitchMode::Scans;
+            if (scans.errorCode == StitchErrorCode::Ok) {
+                log_info(logFn, "[stitch-fallback]", "SCANS rescue succeeded");
+                return finish(scans);
+            }
+            log_info(logFn, "[stitch-fallback]",
+                     "SCANS rescue also failed code=%d — returning primary error",
+                     static_cast<int>(scans.errorCode));
         }
     }
     return finish(firstAttempt);
