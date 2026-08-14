@@ -1164,6 +1164,17 @@ public final class IncrementalStitcher: NSObject {
         } else {
             self.keyframeGate.maxKeyframeIntervalMs = 1500.0
         }
+        // v0.25 — may a keep-alive accept be the one that REACHES the cap
+        // and so auto-finalize the capture?  Defaults to true (pre-0.25
+        // behaviour) when the key is absent.  See
+        // `timeBudgetMayForceAccept` in cpp/keyframe_gate.hpp.
+        if let v = configOverrides["keyframeTimeIntervalCanFinalize"] as? Bool {
+            self.keyframeGate.timeIntervalCanFinalize = v
+        } else if let v = configOverrides["keyframeTimeIntervalCanFinalize"] as? NSNumber {
+            self.keyframeGate.timeIntervalCanFinalize = v.boolValue
+        } else {
+            self.keyframeGate.timeIntervalCanFinalize = true
+        }
         // V16 — novelty aggregation percentile.  Clamp at start to
         // [0.5, 0.99]; the bridge re-clamps but matching it here
         // means our state stays in-range for logging.  Default 0.85

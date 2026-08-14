@@ -633,6 +633,13 @@ class IncrementalStitcher(
             val maxKfIntervalMs = configOverrides
                 ?.getDoubleOrDefault("maxKeyframeIntervalMs", 1500.0) ?: 1500.0
             keyframeGate.maxKeyframeIntervalMs = maxKfIntervalMs.coerceAtLeast(0.0)
+            // v0.25 — may a keep-alive accept be the one that REACHES the
+            // cap and so auto-finalize the capture?  Defaults to true
+            // (pre-0.25 behaviour) when the key is absent.  iOS parity:
+            // IncrementalStitcher.swift keyframeTimeIntervalCanFinalize.
+            keyframeGate.timeIntervalCanFinalize = configOverrides
+                ?.takeIf { it.hasKey("keyframeTimeIntervalCanFinalize") }
+                ?.getBoolean("keyframeTimeIntervalCanFinalize") ?: true
             // 2026-05-22 (audit F5) — flow-strategy Shi-Tomasi
             // tunables.  Pre-audit, Android had no JNI for these
             // (iOS-only via KeyframeGateBridge); JS Settings sliders

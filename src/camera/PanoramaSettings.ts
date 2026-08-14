@@ -307,13 +307,44 @@ export interface FrameSelectionSettings {
    * the gate accepts a keyframe whenever this many milliseconds have
    * elapsed since the last accepted keyframe — even if the novelty /
    * overlap threshold wasn't met — so a slow or static pan never goes
-   * longer than this without a keyframe.  Counts toward `maxKeyframes`
-   * (the cap still finalises the capture).  `0` disables it.  Default
-   * `1500` (1.5 s) — with `maxKeyframes` 8 this bounds a static/slow
-   * capture to ~8×1.5 ≈ 12 s before the keyframe-count auto-finalize.
-   * Maps to the native gate's `setMaxKeyframeIntervalMs`.
+   * longer than this without a keyframe.  `0` disables it.  Default
+   * `1500` (1.5 s).  Maps to the native gate's
+   * `setMaxKeyframeIntervalMs`.
+   *
+   * These accepts count toward `maxKeyframes`.  Whether one may be the
+   * accept that REACHES the cap — and so end the capture, since the cap
+   * is the primary auto-stop — is controlled by
+   * `timeIntervalCanFinalize` below.  Before v0.25 they always could,
+   * which meant a perfectly stationary hold self-finalised on the clock
+   * alone: at these defaults, ~7.5 s having captured nothing new.
    */
   maxKeyframeIntervalMs: number;
+
+  /**
+   * v0.25 — may a keep-alive accept (one made by
+   * `maxKeyframeIntervalMs` rather than by novelty) be the accept that
+   * REACHES `maxKeyframes` and therefore auto-finalises the capture?
+   *
+   * `true` (default) is the pre-v0.25 behaviour, bit-for-bit.
+   *
+   * `false` stops a stationary hold ending itself on the clock:
+   * keep-alive accepts still happen and still count, but the gate
+   * stalls at `maxKeyframes - 1` rather than tripping the auto-stop, so
+   * only genuinely NEW content can finish a capture.
+   *
+   * Deliberately not implemented as "don't count them".  The host
+   * auto-finalises on the number of keyframes SAVED, which no gate
+   * counter can influence on Android; and exempting them would leave a
+   * stationary capture with no bound at all (`maxPanDurationMs`
+   * defaults to `0`, and the drift finalisers are motion-triggered), so
+   * it would fill the disk and then fail in `cv::Stitcher`.
+   *
+   * CAUTION: with this `false` — and especially alongside the v0.25 AR
+   * pose-trust gating — a capture that never pans has no count-based
+   * auto-stop left, only shutter release.  Set `maxPanDurationMs > 0`
+   * as a wall-clock backstop unless that is genuinely intended.
+   */
+  timeIntervalCanFinalize: boolean;
 
   /**
    * v0.21 — pick-sharpest-in-window anti-blur keyframe selection.
@@ -683,6 +714,7 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     maxKeyframes: 6,
     overlapThreshold: 0.20,
     maxKeyframeIntervalMs: 1500,
+    timeIntervalCanFinalize: true,
     // v0.21 — anti-blur keyframe selection ON by default (K=4).
     sharpnessWindow: DEFAULT_SHARPNESS_WINDOW,
     flow: DEFAULT_FLOW_GATE_SETTINGS,
