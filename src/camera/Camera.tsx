@@ -2647,7 +2647,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // frame source and finalize with "0 keyframes saved".  DEFER like the
     // rotate gate: `pendingPanStart` resumes the start the moment the
     // probe settles (the resume effect below re-evaluates both gates).
-    if (arSupportPending) {
+    // v0.25 — ALSO defer while a camera transition is in flight.  The
+    // render gate already unmounts the camera for `inFlightTransition`;
+    // starting a capture here anyway is what produced the resumed-into-
+    // a-dead-window failure described on `holdShouldDeferForCamera`.
+    if (holdShouldDeferForCamera(inFlightTransition, arSupportPending)) {
       setPendingPanStart(true);
       return;
     }
@@ -2659,6 +2663,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     onError,
     panMode,
     arSupportPending,
+    // v0.25 — read by holdShouldDeferForCamera above; without it this
+    // callback closes over a stale `false` and the new gate never fires.
+    inFlightTransition,
     deviceOrientation,
     startCapture,
   ]);
@@ -2673,12 +2680,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       pendingPanStart
       && !shouldGateForPanMode(panMode, deviceOrientation)
       // v0.24.3 — also the "camera still initialising" defer (above).
-      && !arSupportPending
+      // v0.25 — and the in-flight transition, without which this effect
+      // resumed the capture at the exact moment the camera unmounted.
+      && !holdShouldDeferForCamera(inFlightTransition, arSupportPending)
     ) {
       setPendingPanStart(false);
       startCaptureRef.current?.();
     }
-  }, [pendingPanStart, deviceOrientation, panMode, arSupportPending]);
+  }, [
+    pendingPanStart,
+    deviceOrientation,
+    panMode,
+    arSupportPending,
+    inFlightTransition,
+  ]);
 
   const handleHoldEnd = useCallback(async () => {
     // Item 5 exit path #1 — always kill the auto-finalize timer on
@@ -3813,6 +3828,37 @@ function cameraShouldUnmount(
 
 /** @internal test-only — see `cameraShouldUnmount`. */
 export const _cameraShouldUnmountForTests = cameraShouldUnmount;
+
+
+/**
+ * v0.25 — must a hold DEFER because there is no camera to capture from?
+ *
+ * This is deliberately the first two terms of `cameraShouldUnmount`
+ * above, and that is the whole point: the render gate and the hold gate
+ * were reading different conditions, so a hold could start a capture
+ * against a camera the renderer had just deliberately unmounted.
+ *
+ * The hole this closes: `arSupportPending` clears in the SAME render
+ * that flips `isAR` false→true, which makes `inFlightTransition` true,
+ * unmounts the camera and (on iOS) stops the AR session with a 250 ms
+ * grace before the AR view may mount again.  The v0.24.3 defer resumed
+ * on `!arSupportPending` alone — i.e. at exactly the moment the
+ * transition BEGAN — so the resumed capture ran against no frame source
+ * and finalized with "0 keyframes saved".
+ *
+ * `statusPhase === 'stitching'` is intentionally NOT included:
+ * `handleHoldStart` already rejects that phase outright rather than
+ * queueing a deferred start.
+ */
+function holdShouldDeferForCamera(
+  inFlightTransition: boolean,
+  arSupportPending: boolean,
+): boolean {
+  return inFlightTransition || arSupportPending;
+}
+
+/** @internal test-only — see `holdShouldDeferForCamera`. */
+export const _holdShouldDeferForCameraForTests = holdShouldDeferForCamera;
 
 
 /**
