@@ -57,6 +57,14 @@ import { type DeviceOrientation } from './useDeviceOrientation';
 
 export interface OrientationDriftModalProps {
   /**
+   * v0.25 — counter-rotation (degrees) so the popup reads upright at the
+   * PHYSICAL device orientation even though the camera window is
+   * portrait-locked.  Pass `contentRotationDeg(jsLandscape,
+   * deviceOrientation)` (what <Camera> uses for its control content);
+   * 0/undefined = no rotation (legacy).
+   */
+  contentRotationDeg?: number;
+  /**
    * Show / hide.  In the `<Camera>` integration this is driven by
    * the latched `drifted` flag from `useOrientationDrift`.
    */
@@ -113,7 +121,10 @@ function formatOrientation(o: DeviceOrientation): string {
 export function OrientationDriftModal(
   props: OrientationDriftModalProps,
 ): React.JSX.Element {
-  const { visible, captureOrientation, currentOrientation, onAcknowledge } = props;
+  const {
+    visible, captureOrientation, currentOrientation, onAcknowledge,
+    contentRotationDeg = 0,
+  } = props;
 
   return (
     <Modal
@@ -135,7 +146,13 @@ export function OrientationDriftModal(
       ]}
     >
       <View style={styles.backdrop}>
-        <View style={styles.card}>
+        <View
+          style={[
+            styles.card,
+            contentRotationDeg !== 0
+              && { transform: [{ rotate: `${contentRotationDeg}deg` }] },
+          ]}
+        >
           <Text style={styles.title} accessibilityRole="header">
             Capture cancelled
           </Text>

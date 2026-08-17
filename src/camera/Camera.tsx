@@ -3601,6 +3601,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           spec on cross-mode capture being best-effort, not supported. */}
       <OrientationDriftModal
         visible={drift.drifted && !driftModalDismissed}
+        contentRotationDeg={contentRotationDegree}
         captureOrientation={drift.captureOrientation}
         currentOrientation={drift.currentOrientation}
         onAcknowledge={() => setDriftModalDismissed(true)}
@@ -3612,6 +3613,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           fresh. */}
       <LateralMotionModal
         visible={lateralStopVisible}
+        contentRotationDeg={contentRotationDegree}
         title={
           lateralWrongDirection
             ? guidanceCopyResolved.lateralWrongDirectionTitle
