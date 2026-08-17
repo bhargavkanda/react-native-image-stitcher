@@ -2295,6 +2295,16 @@ export function Camera(props: CameraProps): React.JSX.Element {
       !panMotion.lateralExceeded
       || statusPhase !== 'recording'
       || lateralBudgetCm <= 0
+      // v0.16.9 — orientation-drift auto-cancel (the effect above) wins.  A
+      // physical ~90° turn trips BOTH latches from the same accelerometer
+      // excursion; if this lateral FINALIZE also fired, it would drive a
+      // spurious statusPhase recording→stitching→idle within ~100 ms, which
+      // unmounts+remounts the live camera session (cameraShouldUnmount is true
+      // for 'stitching') faster than the native camera can hand off — wedging
+      // the pipeline into an ANR.  A turn is a cross-orientation capture the
+      // engine calls malformed, so the correct outcome is to ABANDON, never
+      // finalize.  See the mid-capture-freeze RCA.
+      || drift.drifted
     ) {
       return;
     }
@@ -2333,7 +2343,7 @@ export function Camera(props: CameraProps): React.JSX.Element {
     // Deps mirror the drift effect: re-run when the latch trips or the
     // recording state changes.  Other reads are stable setters / refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panMotion.lateralExceeded, statusPhase, lateralBudgetCm]);
+  }, [panMotion.lateralExceeded, statusPhase, lateralBudgetCm, drift.drifted]);
 
   // ── Item 7 — auto-finalize when the configured keyframe count is hit ─
   // The engine caps accepted keyframes at `keyframeMaxCount`; once it
