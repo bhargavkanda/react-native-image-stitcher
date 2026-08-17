@@ -14,6 +14,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.24.8] - 2026-08-17
+
+### Changed
+- Docs-only release: restores the release-notes trail for 0.24.5-0.24.7 and
+  the 0.16.x maintenance line below. No code changes vs 0.24.7.
+
+## [0.24.7] - 2026-08-17
+
+### Fixed
+- **Jetsam/OOM mitigation for the stitch rescue ladder.** Every rescue launch
+  (spherical / SCANS / manual fallback) is now headroom-gated against the
+  measured process footprint; the pre-stitch memory abort is two-stage (before
+  AND after frame decode); a caught native OOM no longer triggers a full
+  re-stitch; caught `bad_alloc` / OpenCV `StsNoMem` failures now surface the
+  "Try a shorter sweep" guidance instead of a generic error. A capture that
+  previously could kill the app mid-"Stitching panorama" now returns an
+  actionable error dialog.
+- Ships the field-user capture SOP (`docs/panorama-capture-sop.md`).
+
+## [0.24.6] - 2026-08-17
+
+### Fixed
+- **Mid-capture phone-turn freeze.** A physical ~90° rotation tripped both the
+  orientation-drift auto-cancel AND the lateral-drift auto-finalize from one
+  accelerometer excursion; the racing recording→stitching→idle churn unmounted
+  and remounted the live camera faster than it could hand off, wedging the app
+  (ANR). Orientation-drift now deterministically preempts the lateral finalize.
+
+## [0.24.5] - 2026-08-14
+
+### Fixed
+- **Translation captures: high-level SCANS (affine) rescue.** A translating
+  sweep that fails the rotation-model PANORAMA estimate is retried with
+  `cv::Stitcher::SCANS` — the correct model for translation — instead of
+  returning a hard "need more images" error. Pure last-resort rescue: runs only
+  after PANORAMA (and the spherical rescue) already failed.
+- **Pan guidance in AR capture.** The "keep the pan straight" and "moving too
+  fast" warnings were gyro-driven but gated non-AR-only; hosts defaulting to AR
+  capture had no pan guidance. The gate is removed — warnings fire in both
+  modes.
+
+## Maintenance line 0.16.x (`maintenance-016` dist-tag)
+
+- **[0.16.10] - 2026-08-17** — the 0.24.7 jetsam mitigation, backported.
+- **[0.16.9] - 2026-08-17** — the 0.24.6 phone-turn freeze fix, backported.
+- **[0.16.8] - 2026-08-14** — the 0.24.5 SCANS translation rescue, backported.
+
 ## [0.24.4] - 2026-08-13
 
 Build-integration release. Every item here is a defect that produced a
