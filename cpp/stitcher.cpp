@@ -668,13 +668,59 @@ StitchResult stitchFramePaths(
     if (firstAttempt.errorCode == StitchErrorCode::Ok) {
         return finish(firstAttempt);
     }
+    // 2026-08-17 (jetsam RCA) — UnknownCvException REMOVED from worthRetrying:
+    // it is the bucket a CAUGHT native OOM (std::bad_alloc / StsNoMem) lands
+    // in on the high-level path, and retrying it launched a full second stitch
+    // on a process that had just run out of memory — the observed iPad jetsam
+    // kill.  A genuine transient cv failure loses its (rarely useful) retry;
+    // an OOM now surfaces immediately as a classified error instead of a
+    // second memory peak.
     const bool worthRetrying =
-        firstAttempt.errorCode == StitchErrorCode::UnknownCvException
-        || firstAttempt.errorCode == StitchErrorCode::HomographyEstimationFailed
+        firstAttempt.errorCode == StitchErrorCode::HomographyEstimationFailed
         || firstAttempt.errorCode == StitchErrorCode::CameraParamsAdjustFailed
         || firstAttempt.errorCode == StitchErrorCode::WarpFailed
         || firstAttempt.errorCode == StitchErrorCode::EmptyPanorama
         || firstAttempt.errorCode == StitchErrorCode::LowQualityStitch;
+    // 2026-08-17 (jetsam RCA) — headroom gate for EVERY rescue launch.  A
+    // rescue is a full independent stitch (re-imread + registration + a
+    // possible full-budget compose); launching one on a process already near
+    // its jetsam/lmkd ceiling converts a recoverable error into a process
+    // kill.  Gate on measured footprint + the WORST-CASE compose estimate for
+    // this device (the canvas budget × blend bytes/px — deliberately
+    // conservative: the rescue's actual canvas is unknowable before its
+    // registration runs, and a skipped rescue surfaces the primary error
+    // while a launched one can kill the app).  Skipped (legacy behaviour)
+    // when RAM or rss is unmeasurable.
+    // batchDemand=true → gate on the device's WORST-CASE batch compose
+    // (canvas budget × blend bytes/px; deliberately conservative — the
+    // rescue's actual canvas is unknowable before its registration runs, and
+    // the high-level canvas downscale caps at exactly the budget, so this is
+    // the true ceiling, not a guess).  batchDemand=false → the MANUAL
+    // pipeline's demand: it self-routes to STREAM+feather under memory
+    // pressure and carries its own canvas downscale + pre-abort, so gating it
+    // on the batch worst case would skip rescues that provably degrade to a
+    // small STREAM peak (review finding) — the minimal streaming demand is
+    // the honest requirement there.
+    auto rescueHeadroomOK = [&](const char* which, bool batchDemand) -> bool {
+        double ram = (config.availableRamMB > 0.0)
+            ? config.availableRamMB : device_total_ram_mb();
+        if (ram <= 0.0) return true;
+        const double rss = rss_mb();
+        if (rss < 0.0) return true;
+        const double demandMB = batchDemand
+            ? retailens::composeCanvasBudgetMP(ram) * retailens::kBlendBytesPerUnionPx
+            : retailens::kMinStreamStitchMB;
+        const double budgetMB = retailens::perProcessMemoryBudgetMB(ram);
+        if (rss + demandMB > budgetMB) {
+            log_info(logFn, "[stitch-fallback]",
+                     "%s rescue SKIPPED for headroom: rss %.0f MB + demand "
+                     "estimate %.0f MB > process budget %.0f MB — returning "
+                     "primary error",
+                     which, rss, demandMB, budgetMB);
+            return false;
+        }
+        return true;
+    };
     // HIGH-LEVEL: spherical warper rescue — runs FIRST (before the SCANS rescue
     // below) so a wide ROTATION capture that failed the plane warper still gets
     // the correct SPHERICAL panorama, not a lower-quality affine one.  On
@@ -684,7 +730,8 @@ StitchResult stitchFramePaths(
     if (worthRetrying
         && !config.useManualPipeline
         && config.stitchMode == StitchMode::Panorama
-        && config.warperType != "spherical") {
+        && config.warperType != "spherical"
+        && rescueHeadroomOK("spherical", /*batchDemand=*/true)) {
         log_info(logFn, "[stitch-fallback]",
                  "high-level warper (%s) failed code=%d (%s) — retrying spherical",
                  config.warperType.c_str(),
@@ -707,15 +754,26 @@ StitchResult stitchFramePaths(
         const StitchMode fallbackMode =
             (config.stitchMode == StitchMode::Panorama) ? StitchMode::Scans
                                                         : StitchMode::Panorama;
-        log_info(logFn, "[stitch-fallback]",
-                 "manual primary mode (%s) failed code=%d — retrying %s",
-                 config.stitchMode == StitchMode::Scans ? "scans" : "panorama",
-                 static_cast<int>(firstAttempt.errorCode),
-                 fallbackMode == StitchMode::Scans ? "scans" : "panorama");
-        StitchResult secondAttempt = runOnce(fallbackMode, std::string());
-        if (secondAttempt.errorCode == StitchErrorCode::Ok) {
-            secondAttempt.stitchModeUsed = fallbackMode;
-            return finish(secondAttempt);
+        // Headroom demand follows what the FALLBACK actually runs (review
+        // finding): a Scans fallback is dispatched to the HIGH-LEVEL BATCH
+        // pipeline (Scans never runs manual — see the routing in
+        // stitchFramePathsImpl_), so it must be gated at the batch worst
+        // case; only a Panorama fallback runs the true manual pipeline,
+        // which self-routes STREAM under pressure and earns the minimal
+        // streaming demand.
+        if (rescueHeadroomOK(
+                "manual opposite-mode",
+                /*batchDemand=*/fallbackMode == StitchMode::Scans)) {
+            log_info(logFn, "[stitch-fallback]",
+                     "manual primary mode (%s) failed code=%d — retrying %s",
+                     config.stitchMode == StitchMode::Scans ? "scans" : "panorama",
+                     static_cast<int>(firstAttempt.errorCode),
+                     fallbackMode == StitchMode::Scans ? "scans" : "panorama");
+            StitchResult secondAttempt = runOnce(fallbackMode, std::string());
+            if (secondAttempt.errorCode == StitchErrorCode::Ok) {
+                secondAttempt.stitchModeUsed = fallbackMode;
+                return finish(secondAttempt);
+            }
         }
     }
     // ── High-level SCANS (affine) rescue for TRANSLATION-dominant captures ──
@@ -743,7 +801,8 @@ StitchResult stitchFramePaths(
             || ec == StitchErrorCode::LowQualityStitch;
         if (!config.useManualPipeline
             && config.stitchMode == StitchMode::Panorama
-            && translationLike) {
+            && translationLike
+            && rescueHeadroomOK("SCANS", /*batchDemand=*/true)) {
             log_info(logFn, "[stitch-fallback]",
                      "high-level PANORAMA failed code=%d (%s) — retrying SCANS "
                      "(affine) for translation",
@@ -852,6 +911,36 @@ static StitchResult stitchFramePathsImpl_(
     const bool memstat = kMemProfilingCompiled && config.enableMemoryProfiling;
     log_memstat(logFn, memstat, "entry");
 
+    // 2026-08-17 (jetsam RCA) — pre-stitch headroom abort, now TWO-STAGE.
+    // Stage 1 (here, BEFORE the imread loop): fail fast before the first
+    // allocation when the process is already hopeless — a doomed stitch no
+    // longer pays the decode cost.  Stage 2 (after the imread loop, below)
+    // re-checks with the decoded keyframes IN the measured footprint —
+    // review finding: a pre-imread-only check is strictly MORE permissive
+    // than the old post-imread check (the frames vector is 150-400 MB with
+    // large captures), which would have re-opened the exact near-ceiling
+    // band this patch closes.  Same RAM resolution as before (incl. the
+    // 4 GB unknown-RAM fallback); both stages skipped when rss is unknown.
+    double earlyRamMBResolved = -1.0;
+    {
+        double earlyRamMB = (config.availableRamMB > 0.0)
+            ? config.availableRamMB : device_total_ram_mb();
+        if (earlyRamMB <= 0.0) earlyRamMB = 4.0 * 1024.0;
+        earlyRamMBResolved = earlyRamMB;
+        const double startRssMB = rss_mb();
+        if (startRssMB >= 0.0
+            && retailens::stitchExceedsMinimalHeadroom(startRssMB, earlyRamMB)) {
+            result.errorCode = StitchErrorCode::PreStitchMemoryAbort;
+            result.errorMessage =
+                "Pre-stitch abort: insufficient memory headroom for high-level "
+                "stitch (rss=" + std::to_string(static_cast<int>(startRssMB)) +
+                "MB, budget=" + std::to_string(static_cast<int>(
+                    retailens::perProcessMemoryBudgetMB(earlyRamMB))) + "MB)";
+            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+            return result;
+        }
+    }
+
     // ── 1.  Load input frames ───────────────────────────────────────
     std::vector<cv::Mat> images;
     images.reserve(framePaths.size());
@@ -874,6 +963,27 @@ static StitchResult stitchFramePathsImpl_(
     log_info(logFn, "[dimstat]", "loaded %zu frames total_input_data=%.2f MB",
              images.size(), totalInputMB);
     log_memstat(logFn, memstat, "after_imread");
+    // Stage 2 of the pre-stitch headroom abort (see stage 1 above the imread
+    // loop): re-check with the decoded frames now IN the measured footprint —
+    // this restores the exact protection level of the pre-2026-08-17 check,
+    // which ran here and therefore counted the frames vector.  One rss read;
+    // the images vector is RAII-freed on the early return.
+    {
+        const double loadedRssMB = rss_mb();
+        if (loadedRssMB >= 0.0 && earlyRamMBResolved > 0.0
+            && retailens::stitchExceedsMinimalHeadroom(loadedRssMB,
+                                                       earlyRamMBResolved)) {
+            result.errorCode = StitchErrorCode::PreStitchMemoryAbort;
+            result.errorMessage =
+                "Pre-stitch abort: insufficient memory headroom after loading "
+                "frames (rss=" + std::to_string(static_cast<int>(loadedRssMB)) +
+                "MB, budget=" + std::to_string(static_cast<int>(
+                    retailens::perProcessMemoryBudgetMB(earlyRamMBResolved))) +
+                "MB)";
+            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
+            return result;
+        }
+    }
 
     // ── 2.  Configure cv::Stitcher ──────────────────────────────────
     const cv::Stitcher::Mode cvMode = (config.stitchMode == StitchMode::Scans)
@@ -946,27 +1056,8 @@ static StitchResult stitchFramePathsImpl_(
     // with progressively lower thresholds [1.0 → 0.5 → 0.3] until
     // every frame is retained or we hit the floor.  SCANS skips the
     // higher thresholds (its default is already 0.3).
-    // 2026-06-16 (high-level safety) — pre-stitch headroom abort.  The
-    // high-level path has no STREAM fallback or canvas downscale, so if the
-    // process is ALREADY so close to its per-process kill ceiling that even a
-    // minimal stitch won't fit on top, abort cleanly (surfaced via onError)
-    // rather than letting cv::Stitcher march into an lmkd/jetsam kill.  Reuses
-    // the manual path's headroom guard; rss_mb() is memProbeFn-backed so this
-    // works on iOS too (where /proc is absent).  Skipped when rss is unknown.
-    {
-        const double startRssMB = rss_mb();
-        if (startRssMB >= 0.0
-            && retailens::stitchExceedsMinimalHeadroom(startRssMB, totalRamMB)) {
-            result.errorCode = StitchErrorCode::PreStitchMemoryAbort;
-            result.errorMessage =
-                "Pre-stitch abort: insufficient memory headroom for high-level "
-                "stitch (rss=" + std::to_string(static_cast<int>(startRssMB)) +
-                "MB, budget=" + std::to_string(static_cast<int>(
-                    retailens::perProcessMemoryBudgetMB(totalRamMB))) + "MB)";
-            log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
-            return result;
-        }
-    }
+    // (pre-stitch headroom abort moved BEFORE the imread loop — 2026-08-17
+    // jetsam RCA; see the block above frame loading.)
     log_memstat(logFn, memstat, "before_stitch");
     const double kRetryThresholds[] = {1.0, 0.5, 0.3};
     const int kNumAttempts = sizeof(kRetryThresholds) / sizeof(double);
