@@ -180,6 +180,12 @@ struct StitchConfig {
     // captures are handled at capture time (perf-5), not by a full-matcher
     // rescue.  PANORAMA only (SCANS uses the affine matcher family).
     int         rangeMatcherWidth    = 0;
+    // v0.25 — RESCUE reservation enforcement (review: an admitted rescue must
+    // not be able to spend more than the headroom gate reserved for it).  When
+    // > 0, the high-level canvas budget is capped at min(device budget, this)
+    // so the existing downscale/reroute machinery ENFORCES the reservation.
+    // Set only by the wrapper's rescue launches; -1 = no override.
+    double      rescueCanvasBudgetMPOverride = -1.0;
     // OpenCV intra-stitch parallelism (perf-3b item 1, ANDROID only).
     //   0 = AUTO (default): cv::setNumThreads(min(4, max(2, cores/2))) —
     //       restores the multi-core warp/blend/feature parallelism the

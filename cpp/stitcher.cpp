@@ -675,10 +675,15 @@ StitchResult stitchFramePaths(
     // PreStitchMemoryAbort is excluded from worthRetrying (a headroom abort is
     // independent of warper/mode — retrying won't help).
     auto runOnce = [&](StitchMode modeOverride,
-                       const std::string& warperOverride) -> StitchResult {
+                       const std::string& warperOverride,
+                       double rescueBudgetMPOverride = -1.0) -> StitchResult {
         StitchConfig cfg = config;
         cfg.stitchMode = modeOverride;
         if (!warperOverride.empty()) cfg.warperType = warperOverride;
+        // v0.25 — a rescue launch carries the headroom gate's RESERVATION as a
+        // canvas-budget cap, so the impl's downscale enforces that the rescue
+        // cannot spend more than the gate measured to fit.
+        cfg.rescueCanvasBudgetMPOverride = rescueBudgetMPOverride;
         return stitchFramePathsImpl_(framePaths, outputPath, cfg, logFn);
     };
     StitchResult firstAttempt = runOnce(config.stitchMode, std::string());
@@ -719,25 +724,51 @@ StitchResult stitchFramePaths(
     // on the batch worst case would skip rescues that provably degrade to a
     // small STREAM peak (review finding) — the minimal streaming demand is
     // the honest requirement there.
-    auto rescueHeadroomOK = [&](const char* which, bool batchDemand) -> bool {
+    // v0.25 — RESERVATION-based rescue gate (review: soundness by ENFORCEMENT,
+    // not estimation).  A rescue's true compose cost is unknowable before its
+    // own registration, and per-capture "bounds" proved unsound (the blender
+    // allocates the bbox UNION of the warped ROIs, which a 2-D pan can blow
+    // far past Σ frame areas).  So instead of estimating demand, the gate
+    // RESERVES the headroom that is actually measured free (capped at the
+    // device worst case) and the launch carries that reservation as a
+    // canvas-budget cap the impl's downscale ENFORCES.  Consequences:
+    //   - a rescue launches whenever even a minimal stitch fits (max
+    //     admission — the field directive: never abandon a good capture on an
+    //     over-estimate);
+    //   - an admitted rescue CANNOT spend more than was free (no jetsam —
+    //     an under-reservation degrades output resolution, never stability);
+    //   - unknown RAM/rss keeps legacy behaviour (no gate, no cap).
+    // Returns: reservation MB (> 0), 0 = skip (headroom below even the
+    // minimal stitch), -1 = no measurement available (legacy, uncapped).
+    auto rescueReservationMB = [&](const char* which) -> double {
         double ram = (config.availableRamMB > 0.0)
             ? config.availableRamMB : device_total_ram_mb();
-        if (ram <= 0.0) return true;
+        if (ram <= 0.0) return -1.0;
         const double rss = rss_mb();
-        if (rss < 0.0) return true;
-        const double demandMB = batchDemand
-            ? retailens::composeCanvasBudgetMP(ram) * retailens::kBlendBytesPerUnionPx
-            : retailens::kMinStreamStitchMB;
+        if (rss < 0.0) return -1.0;
         const double budgetMB = retailens::perProcessMemoryBudgetMB(ram);
-        if (rss + demandMB > budgetMB) {
+        const double worstCaseMB =
+            retailens::composeCanvasBudgetMP(ram)
+            * retailens::kBlendBytesPerUnionPx;
+        const double reservationMB = std::min(worstCaseMB, budgetMB - rss);
+        if (reservationMB < retailens::kMinStreamStitchMB) {
             log_info(logFn, "[stitch-fallback]",
-                     "%s rescue SKIPPED for headroom: rss %.0f MB + demand "
-                     "estimate %.0f MB > process budget %.0f MB — returning "
-                     "primary error",
-                     which, rss, demandMB, budgetMB);
-            return false;
+                     "%s rescue SKIPPED for headroom: rss %.0f MB leaves "
+                     "%.0f MB under the %.0f MB process budget — below the "
+                     "%.0f MB minimal stitch — returning primary error",
+                     which, rss, budgetMB - rss, budgetMB,
+                     retailens::kMinStreamStitchMB);
+            return 0.0;
         }
-        return true;
+        log_info(logFn, "[stitch-fallback]",
+                 "%s rescue RESERVED %.0f MB (rss %.0f / budget %.0f MB)",
+                 which, reservationMB, rss, budgetMB);
+        return reservationMB;
+    };
+    // MB → canvas-MP cap for the runOnce override (-1 passes through).
+    auto reservationToBudgetMP = [](double reservationMB) -> double {
+        return (reservationMB > 0.0)
+            ? reservationMB / retailens::kBlendBytesPerUnionPx : -1.0;
     };
     // HIGH-LEVEL: spherical warper rescue — runs FIRST (before the SCANS rescue
     // below) so a wide ROTATION capture that failed the plane warper still gets
@@ -745,17 +776,19 @@ StitchResult stitchFramePaths(
     // failure it FALLS THROUGH to the SCANS rescue instead of returning, so a
     // translation capture that surfaced as a worthRetrying code (Homography /
     // camera-params) still reaches the affine model.
-    if (worthRetrying
-        && !config.useManualPipeline
-        && config.stitchMode == StitchMode::Panorama
-        && config.warperType != "spherical"
-        && rescueHeadroomOK("spherical", /*batchDemand=*/true)) {
+    const double sphReservationMB =
+        (worthRetrying && !config.useManualPipeline
+         && config.stitchMode == StitchMode::Panorama
+         && config.warperType != "spherical")
+            ? rescueReservationMB("spherical") : 0.0;
+    if (sphReservationMB != 0.0) {
         log_info(logFn, "[stitch-fallback]",
                  "high-level warper (%s) failed code=%d (%s) — retrying spherical",
                  config.warperType.c_str(),
                  static_cast<int>(firstAttempt.errorCode),
                  firstAttempt.errorMessage.c_str());
-        StitchResult sph = runOnce(config.stitchMode, "spherical");
+        StitchResult sph = runOnce(config.stitchMode, "spherical",
+                                   reservationToBudgetMP(sphReservationMB));
         sph.stitchModeUsed = config.stitchMode;
         if (sph.errorCode == StitchErrorCode::Ok) {
             log_info(logFn, "[stitch-fallback]", "spherical rescue succeeded");
@@ -779,15 +812,21 @@ StitchResult stitchFramePaths(
         // case; only a Panorama fallback runs the true manual pipeline,
         // which self-routes STREAM under pressure and earns the minimal
         // streaming demand.
-        if (rescueHeadroomOK(
-                "manual opposite-mode",
-                /*batchDemand=*/fallbackMode == StitchMode::Scans)) {
+        const double manReservationMB = rescueReservationMB("manual opposite-mode");
+        if (manReservationMB != 0.0) {
             log_info(logFn, "[stitch-fallback]",
                      "manual primary mode (%s) failed code=%d — retrying %s",
                      config.stitchMode == StitchMode::Scans ? "scans" : "panorama",
                      static_cast<int>(firstAttempt.errorCode),
                      fallbackMode == StitchMode::Scans ? "scans" : "panorama");
-            StitchResult secondAttempt = runOnce(fallbackMode, std::string());
+            // The cap only matters when the fallback is Scans (which the
+            // dispatcher routes to the HIGH-LEVEL batch pipeline); a Panorama
+            // fallback runs the true manual pipeline, which ignores the
+            // override and has its own STREAM routing + guards.
+            StitchResult secondAttempt = runOnce(
+                fallbackMode, std::string(),
+                fallbackMode == StitchMode::Scans
+                    ? reservationToBudgetMP(manReservationMB) : -1.0);
             if (secondAttempt.errorCode == StitchErrorCode::Ok) {
                 secondAttempt.stitchModeUsed = fallbackMode;
                 return finish(secondAttempt);
@@ -817,15 +856,18 @@ StitchResult stitchFramePaths(
             || ec == StitchErrorCode::CameraParamsAdjustFailed
             || ec == StitchErrorCode::EmptyPanorama
             || ec == StitchErrorCode::LowQualityStitch;
-        if (!config.useManualPipeline
-            && config.stitchMode == StitchMode::Panorama
-            && translationLike
-            && rescueHeadroomOK("SCANS", /*batchDemand=*/true)) {
+        const double scansReservationMB =
+            (!config.useManualPipeline
+             && config.stitchMode == StitchMode::Panorama
+             && translationLike)
+                ? rescueReservationMB("SCANS") : 0.0;
+        if (scansReservationMB != 0.0) {
             log_info(logFn, "[stitch-fallback]",
                      "high-level PANORAMA failed code=%d (%s) — retrying SCANS "
                      "(affine) for translation",
                      static_cast<int>(ec), firstAttempt.errorMessage.c_str());
-            StitchResult scans = runOnce(StitchMode::Scans, std::string());
+            StitchResult scans = runOnce(StitchMode::Scans, std::string(),
+                                         reservationToBudgetMP(scansReservationMB));
             scans.stitchModeUsed = StitchMode::Scans;
             if (scans.errorCode == StitchErrorCode::Ok) {
                 log_info(logFn, "[stitch-fallback]", "SCANS rescue succeeded");
@@ -834,6 +876,52 @@ StitchResult stitchFramePaths(
             log_info(logFn, "[stitch-fallback]",
                      "SCANS rescue also failed code=%d — returning primary error",
                      static_cast<int>(scans.errorCode));
+        }
+    }
+    // v0.25 — REVERSE rescue: with the resolver's verdict now honored, a
+    // SCANS-primary capture (auto-classified translation) that the affine
+    // model could not solve gets ONE PANORAMA (rotation-model) retry — the
+    // symmetric counterpart of the SCANS rescue above, for captures the
+    // resolver misclassified (rotation-dominant after all, or mixed motion).
+    // Same trigger codes, same headroom gate, same monotonic property: runs
+    // only after the primary failed, returns the primary error if it also
+    // fails.
+    {
+        const StitchErrorCode ec = firstAttempt.errorCode;
+        const bool rescuable =
+            ec == StitchErrorCode::NeedMoreImages
+            || ec == StitchErrorCode::HomographyEstimationFailed
+            || ec == StitchErrorCode::CameraParamsAdjustFailed
+            || ec == StitchErrorCode::EmptyPanorama
+            || ec == StitchErrorCode::LowQualityStitch
+            // v0.25 review — WarpFailed included HERE (unlike the forward
+            // SCANS-rescue set): a divergent AFFINE estimate is exactly what a
+            // MISCLASSIFIED rotation capture produces under SCANS, and unlike
+            // the Panorama-primary direction there is no spherical rescue on
+            // this leg — without this, such captures hard-failed with zero
+            // retries.  The retried PANORAMA run is reservation-capped.
+            || ec == StitchErrorCode::WarpFailed;
+        const double revReservationMB =
+            (!config.useManualPipeline
+             && config.stitchMode == StitchMode::Scans
+             && rescuable)
+                ? rescueReservationMB("PANORAMA (reverse)") : 0.0;
+        if (revReservationMB != 0.0) {
+            log_info(logFn, "[stitch-fallback]",
+                     "high-level SCANS failed code=%d (%s) — retrying PANORAMA "
+                     "(rotation) for a misclassified capture",
+                     static_cast<int>(ec), firstAttempt.errorMessage.c_str());
+            StitchResult pano = runOnce(StitchMode::Panorama, std::string(),
+                                        reservationToBudgetMP(revReservationMB));
+            pano.stitchModeUsed = StitchMode::Panorama;
+            if (pano.errorCode == StitchErrorCode::Ok) {
+                log_info(logFn, "[stitch-fallback]", "PANORAMA reverse rescue succeeded");
+                return finish(pano);
+            }
+            log_info(logFn, "[stitch-fallback]",
+                     "PANORAMA reverse rescue also failed code=%d — returning "
+                     "primary error",
+                     static_cast<int>(pano.errorCode));
         }
     }
     return finish(firstAttempt);
@@ -1443,13 +1531,28 @@ static StitchResult stitchFramePathsImpl_(
             for (const auto& c : cams) focals.push_back(c.focal);
             std::sort(focals.begin(), focals.end());
             const double warpScale = focals[focals.size() / 2];  // median focal
-            cv::Ptr<cv::WarperCreator> wc = make_warper(config.warperType);
+            // v0.25 — project with the model the compose ACTUALLY uses (jetsam
+            // RCA durable fix): SCANS hard-wires cv::AffineWarper internally,
+            // so projecting its canvas with a rotation warper (the old
+            // make_warper(config.warperType)) was geometrically invalid and
+            // could under-estimate the real canvas — an effectively unguarded
+            // compose on the SCANS leg.
+            cv::Ptr<cv::WarperCreator> wc =
+                (cvMode == cv::Stitcher::SCANS)
+                    ? cv::Ptr<cv::WarperCreator>(cv::makePtr<cv::AffineWarper>())
+                    : make_warper(config.warperType);
+            // v0.25 review — an unknown warperType returned null here, which
+            // skipped the WHOLE guard (incl. reservation enforcement).  Project
+            // with spherical instead: that is what cv::Stitcher actually
+            // composes with when setWarper was skipped for the unknown name.
+            if (!wc) wc = cv::makePtr<cv::SphericalWarper>();
             if (wc) {
                 cv::Ptr<cv::detail::RotationWarper> w =
                     wc->create(static_cast<float>(warpScale));
                 const double workScale = stitcher->workScale();
                 int64_t minX = 0, minY = 0, maxX = 0, maxY = 0;
                 bool seeded = false;
+                double coveredAreaPx = 0.0;  // Σ per-frame ROI areas (v0.25 predictive check)
                 for (size_t i = 0; i < cams.size() && i < images.size(); ++i) {
                     cv::Mat K;
                     cams[i].K().convertTo(K, CV_32F);
@@ -1457,6 +1560,7 @@ static StitchResult stitchFramePathsImpl_(
                         std::max(1, (int)std::lround(images[i].cols * workScale)),
                         std::max(1, (int)std::lround(images[i].rows * workScale)));
                     const cv::Rect roi = w->warpRoi(workSz, K, cams[i].R);
+                    coveredAreaPx += static_cast<double>(roi.width) * roi.height;
                     if (!seeded) {
                         minX = roi.x; minY = roi.y;
                         maxX = (int64_t)roi.x + roi.width;
@@ -1480,6 +1584,35 @@ static StitchResult stitchFramePathsImpl_(
                     log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
                     return result;  // → outer wrapper's spherical rescue (bounded)
                 }
+                // v0.25 — PREDICTIVE utilization check (jetsam RCA durable fix):
+                // the post-compose validator caught a divergent canvas only
+                // AFTER ~1 GB of blend had been spent.  Run the same
+                // utilization test on the PROJECTED geometry: Σ per-frame ROI
+                // areas vs the union.  Σ areas double-counts overlap, so the
+                // predicted utilization is an OVER-estimate — this check is
+                // strictly LENIENT vs the post validator and only rejects
+                // clearly-divergent canvases (union ≫ what the frames can
+                // cover), never a legitimately-wide pan.  Rejection reuses the
+                // LowQualityStitch code + "stitch validation" phrasing so the
+                // JS classifier maps it to the same user guidance.
+                if (seeded) {
+                    const double unionAreaPx =
+                        static_cast<double>(maxX - minX) * (maxY - minY);
+                    if (retailens::stitchOutputUnderutilized(
+                            coveredAreaPx, unionAreaPx,
+                            static_cast<int>(cams.size()))) {
+                        result.errorCode = StitchErrorCode::LowQualityStitch;
+                        result.errorMessage =
+                            "stitch validation (predictive): projected frame "
+                            "coverage " + std::to_string(coveredAreaPx / 1e6) +
+                            " MP over a " + std::to_string(unionAreaPx / 1e6) +
+                            " MP canvas union — divergent warp rejected before "
+                            "composePanorama";
+                        log_error(logFn, "[stitch]", "%s",
+                                  result.errorMessage.c_str());
+                        return result;  // → wrapper rescues (headroom-gated)
+                    }
+                }
 
                 // 2026-06-16 (review #2 + on-device data) — VALID-but-large canvas
                 // budget.  A wide PLANE pan peaked ~2520 MB on the 6 GB A35 (above
@@ -1502,12 +1635,37 @@ static StitchResult stitchFramePathsImpl_(
                     const double workCanvasMP =
                         static_cast<double>(maxX - minX) * (maxY - minY) / 1e6;
                     const double composeCanvasMP = workCanvasMP * ratioCS * ratioCS;
-                    const double canvasBudgetMP =
+                    // v0.25 — the wrapper's rescue reservation (if any) CAPS the
+                    // canvas budget, so an admitted rescue can never compose
+                    // more than the headroom gate reserved for it (soundness by
+                    // enforcement — the downscale below realises the cap).
+                    const double deviceBudgetMP =
                         retailens::composeCanvasBudgetMP(totalRamMB);
+                    const double canvasBudgetMP =
+                        (config.rescueCanvasBudgetMPOverride > 0.0)
+                            ? std::min(deviceBudgetMP,
+                                       config.rescueCanvasBudgetMPOverride)
+                            : deviceBudgetMP;
                     if (composeCanvasMP > canvasBudgetMP) {
                         const double over = composeCanvasMP / canvasBudgetMP;
-                        if (over <= 2.0 || config.warperType == "spherical") {
-                            const double targetMP = composeMP / over;
+                        // v0.25 — under SCANS the route-to-spherical branch is
+                        // meaningless (SCANS hard-wires its affine warper;
+                        // setWarper is skipped), so ALWAYS take the downscale
+                        // branch there.  A rescue reservation also always
+                        // downscales — the reservation is the ceiling the gate
+                        // measured to fit, whatever the overage.
+                        if (over <= 2.0 || config.warperType == "spherical"
+                            || cvMode == cv::Stitcher::SCANS
+                            || config.rescueCanvasBudgetMPOverride > 0.0) {
+                            // v0.25 review — invert with the EFFECTIVE compose
+                            // MP: cv::Stitcher clamps composeScale at 1.0, so
+                            // when keyframes are SMALLER than composeMP (640 px
+                            // captures) a composeMP-based inversion is a no-op
+                            // and the canvas would exceed the cap/reservation.
+                            // effMP/over is exact in both regimes.
+                            const double effMP =
+                                std::min(composeMP, fullArea / 1e6);
+                            const double targetMP = effMP / over;
                             stitcher->setCompositingResol(targetMP);
                             log_info(logFn, "[stitch]",
                                      "canvas %.1f MP > budget %.1f MP (warp=%s) — "

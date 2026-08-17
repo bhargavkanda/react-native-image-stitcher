@@ -1280,7 +1280,13 @@ class IncrementalStitcher(
                         captureOrientationSnapshot,
                         useInscribedRectCropSnapshot,
                         compositingResolMP = adaptiveComposeMP,  // perf-4a (1.0 unless adapted)
-                        stitchMode = "panorama",         // always high-level PANORAMA
+                        // v0.25 — honor the resolved mode (jetsam RCA durable
+                        // fix): translation-classified captures run the affine
+                        // SCANS model FIRST instead of failing PANORAMA and
+                        // walking the rescue ladder.  stitcher.stitchMode=
+                        // 'panorama' forces the old behaviour (this only
+                        // changes what 'auto' resolves to).  Mirrors iOS.
+                        stitchMode = stitchModeResolved,
                         useManualPipeline = false,       // high level across the board
                         rangeMatcherWidth = stitchRangeMatcherWidth,  // perf-3b (0 = off)
                         numThreads = stitchNumThreads,   // perf-3b item 1 (0 = auto-multi)

@@ -1759,14 +1759,21 @@ public final class IncrementalStitcher: NSObject {
                             seamFinderType: payload.batchSeamFinderType,
                             captureOrientation: payload.captureOrientation,
                             useInscribedRectCrop: payload.batchEnableInscribedRectCrop,
-                            // 2026-06-16 — HIGH-LEVEL ACROSS THE BOARD (mirrors
-                            // Android): always cv::Stitcher PANORAMA with the
-                            // tree-chosen warper (payload.batchWarperType is now
-                            // highLevelWarper).  The manual path's OOM hardening
-                            // was ported to high-level (catch ladder + two-phase
-                            // canvas guard + RAM-aware compositingResol + spherical
-                            // rescue), so this is now memory-safe.
-                            stitchMode: "panorama",
+                            // v0.25 — HONOR THE RESOLVED MODE (jetsam RCA
+                            // durable fix): the auto-resolver classifies
+                            // translation-dominant captures as "scans" from
+                            // real pose/IMU data, and this dispatch used to
+                            // compute that verdict and then hardcode
+                            // "panorama" anyway — sending shelf translations
+                            // through the rotation model, whose failure walked
+                            // the multi-stitch rescue ladder (the memory-peak
+                            // path).  SCANS-classified captures now run the
+                            // affine model FIRST; the ladder (incl. the
+                            // reverse PANORAMA rescue) remains for
+                            // misclassified captures.  Hosts can force the old
+                            // behaviour with stitcher.stitchMode='panorama'
+                            // (this only changes what 'auto' does).
+                            stitchMode: payload.batchStitchModeResolved,
                             useManualPipeline: false
                         )
                         // V16 fix-attempt 9 (verified on device,
