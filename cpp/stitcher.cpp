@@ -717,7 +717,7 @@ StitchResult stitchFramePaths(
             log_info(logFn, "[stitch-fallback]",
                      "%s SKIPPED for headroom: rss %.0f MB leaves "
                      "%.0f MB under the %.0f MB process budget — below the "
-                     "%.0f MB minimal stitch — returning primary error",
+                     "%.0f MB minimal stitch — caller handles the skip",
                      which, rss, budgetMB - rss, budgetMB,
                      retailens::kMinStreamStitchMB);
             return 0.0;
@@ -1665,7 +1665,14 @@ static StitchResult stitchFramePathsImpl_(
                         // measured to fit, whatever the overage.
                         if (over <= 2.0 || config.warperType == "spherical"
                             || cvMode == cv::Stitcher::SCANS
-                            || config.rescueCanvasBudgetMPOverride > 0.0) {
+                            // review: force the downscale only when the
+                            // reservation actually TIGHTENS the budget — a
+                            // healthy-process primary (cap == device budget)
+                            // keeps the route-to-spherical arm, byte-identical
+                            // to pre-reservation behaviour.
+                            || (config.rescueCanvasBudgetMPOverride > 0.0
+                                && config.rescueCanvasBudgetMPOverride
+                                       < deviceBudgetMP)) {
                             // v0.25 review — invert with the EFFECTIVE compose
                             // MP: cv::Stitcher clamps composeScale at 1.0, so
                             // when keyframes are SMALLER than composeMP (640 px
@@ -3020,7 +3027,15 @@ StitchResult stitchFramePathsManual(
                 int64_t cw = 0, ch = 0;
                 blendCanvasUnion(capCorners, capSizes, cw, ch);
                 const double canvasMP = (double)cw * (double)ch / 1e6;
-                const double budgetMP = composeCanvasBudgetMP(totalRamMB);
+                const double manualDeviceBudgetMP = composeCanvasBudgetMP(totalRamMB);
+        // v0.25 review — the manual pipeline honours the reservation cap too
+        // (it was high-level-only; the manual path otherwise relied on its
+        // STREAM routing + pre-abort alone).
+        const double budgetMP =
+            (config.rescueCanvasBudgetMPOverride > 0.0)
+                ? std::min(manualDeviceBudgetMP,
+                           config.rescueCanvasBudgetMPOverride)
+                : manualDeviceBudgetMP;
                 const double downscale =
                     canvasDownscaleForBudget(canvasMP, budgetMP);
                 composeCanvasMpFinal = canvasMP * downscale * downscale;
