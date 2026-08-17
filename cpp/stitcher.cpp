@@ -686,7 +686,62 @@ StitchResult stitchFramePaths(
         cfg.rescueCanvasBudgetMPOverride = rescueBudgetMPOverride;
         return stitchFramePathsImpl_(framePaths, outputPath, cfg, logFn);
     };
-    StitchResult firstAttempt = runOnce(config.stitchMode, std::string());
+    // v0.25 — RESERVATION-based rescue gate (review: soundness by ENFORCEMENT,
+    // not estimation).  A rescue's true compose cost is unknowable before its
+    // own registration, and per-capture "bounds" proved unsound (the blender
+    // allocates the bbox UNION of the warped ROIs, which a 2-D pan can blow
+    // far past Σ frame areas).  So instead of estimating demand, the gate
+    // RESERVES the headroom that is actually measured free (capped at the
+    // device worst case) and the launch carries that reservation as a
+    // canvas-budget cap the impl's downscale ENFORCES.  Consequences:
+    //   - a rescue launches whenever even a minimal stitch fits (max
+    //     admission — the field directive: never abandon a good capture on an
+    //     over-estimate);
+    //   - an admitted rescue CANNOT spend more than was free (no jetsam —
+    //     an under-reservation degrades output resolution, never stability);
+    //   - unknown RAM/rss keeps legacy behaviour (no gate, no cap).
+    // Returns: reservation MB (> 0), 0 = skip (headroom below even the
+    // minimal stitch), -1 = no measurement available (legacy, uncapped).
+    auto rescueReservationMB = [&](const char* which) -> double {
+        double ram = (config.availableRamMB > 0.0)
+            ? config.availableRamMB : device_total_ram_mb();
+        if (ram <= 0.0) return -1.0;
+        const double rss = rss_mb();
+        if (rss < 0.0) return -1.0;
+        const double budgetMB = retailens::perProcessMemoryBudgetMB(ram);
+        const double worstCaseMB =
+            retailens::composeCanvasBudgetMP(ram)
+            * retailens::kBlendBytesPerUnionPx;
+        const double reservationMB = std::min(worstCaseMB, budgetMB - rss);
+        if (reservationMB < retailens::kMinStreamStitchMB) {
+            log_info(logFn, "[stitch-fallback]",
+                     "%s SKIPPED for headroom: rss %.0f MB leaves "
+                     "%.0f MB under the %.0f MB process budget — below the "
+                     "%.0f MB minimal stitch — returning primary error",
+                     which, rss, budgetMB - rss, budgetMB,
+                     retailens::kMinStreamStitchMB);
+            return 0.0;
+        }
+        log_info(logFn, "[stitch-fallback]",
+                 "%s RESERVED %.0f MB (rss %.0f / budget %.0f MB)",
+                 which, reservationMB, rss, budgetMB);
+        return reservationMB;
+    };
+    // MB → canvas-MP cap for the runOnce override (-1 passes through).
+    auto reservationToBudgetMP = [](double reservationMB) -> double {
+        return (reservationMB > 0.0)
+            ? reservationMB / retailens::kBlendBytesPerUnionPx : -1.0;
+    };
+    // v0.25 — the PRIMARY attempt gets the SAME dynamic headroom cap as the
+    // rescues (field review: the static device canvas budget could admit a
+    // compose larger than the memory actually free on a loaded process — the
+    // first-stitch variant of the jetsam class).  reservation==0 (<350 MB
+    // free) passes -1: the impl's own two-stage pre-stitch abort fires in
+    // exactly that case and returns a clean PreStitchMemoryAbort.
+    const double primaryReservationMB = rescueReservationMB("primary stitch");
+    StitchResult firstAttempt =
+        runOnce(config.stitchMode, std::string(),
+                reservationToBudgetMP(primaryReservationMB));
     firstAttempt.stitchModeUsed = config.stitchMode;
     if (firstAttempt.errorCode == StitchErrorCode::Ok) {
         return finish(firstAttempt);
@@ -724,52 +779,6 @@ StitchResult stitchFramePaths(
     // on the batch worst case would skip rescues that provably degrade to a
     // small STREAM peak (review finding) — the minimal streaming demand is
     // the honest requirement there.
-    // v0.25 — RESERVATION-based rescue gate (review: soundness by ENFORCEMENT,
-    // not estimation).  A rescue's true compose cost is unknowable before its
-    // own registration, and per-capture "bounds" proved unsound (the blender
-    // allocates the bbox UNION of the warped ROIs, which a 2-D pan can blow
-    // far past Σ frame areas).  So instead of estimating demand, the gate
-    // RESERVES the headroom that is actually measured free (capped at the
-    // device worst case) and the launch carries that reservation as a
-    // canvas-budget cap the impl's downscale ENFORCES.  Consequences:
-    //   - a rescue launches whenever even a minimal stitch fits (max
-    //     admission — the field directive: never abandon a good capture on an
-    //     over-estimate);
-    //   - an admitted rescue CANNOT spend more than was free (no jetsam —
-    //     an under-reservation degrades output resolution, never stability);
-    //   - unknown RAM/rss keeps legacy behaviour (no gate, no cap).
-    // Returns: reservation MB (> 0), 0 = skip (headroom below even the
-    // minimal stitch), -1 = no measurement available (legacy, uncapped).
-    auto rescueReservationMB = [&](const char* which) -> double {
-        double ram = (config.availableRamMB > 0.0)
-            ? config.availableRamMB : device_total_ram_mb();
-        if (ram <= 0.0) return -1.0;
-        const double rss = rss_mb();
-        if (rss < 0.0) return -1.0;
-        const double budgetMB = retailens::perProcessMemoryBudgetMB(ram);
-        const double worstCaseMB =
-            retailens::composeCanvasBudgetMP(ram)
-            * retailens::kBlendBytesPerUnionPx;
-        const double reservationMB = std::min(worstCaseMB, budgetMB - rss);
-        if (reservationMB < retailens::kMinStreamStitchMB) {
-            log_info(logFn, "[stitch-fallback]",
-                     "%s rescue SKIPPED for headroom: rss %.0f MB leaves "
-                     "%.0f MB under the %.0f MB process budget — below the "
-                     "%.0f MB minimal stitch — returning primary error",
-                     which, rss, budgetMB - rss, budgetMB,
-                     retailens::kMinStreamStitchMB);
-            return 0.0;
-        }
-        log_info(logFn, "[stitch-fallback]",
-                 "%s rescue RESERVED %.0f MB (rss %.0f / budget %.0f MB)",
-                 which, reservationMB, rss, budgetMB);
-        return reservationMB;
-    };
-    // MB → canvas-MP cap for the runOnce override (-1 passes through).
-    auto reservationToBudgetMP = [](double reservationMB) -> double {
-        return (reservationMB > 0.0)
-            ? reservationMB / retailens::kBlendBytesPerUnionPx : -1.0;
-    };
     // HIGH-LEVEL: spherical warper rescue — runs FIRST (before the SCANS rescue
     // below) so a wide ROTATION capture that failed the plane warper still gets
     // the correct SPHERICAL panorama, not a lower-quality affine one.  On
@@ -780,7 +789,7 @@ StitchResult stitchFramePaths(
         (worthRetrying && !config.useManualPipeline
          && config.stitchMode == StitchMode::Panorama
          && config.warperType != "spherical")
-            ? rescueReservationMB("spherical") : 0.0;
+            ? rescueReservationMB("spherical rescue") : 0.0;
     if (sphReservationMB != 0.0) {
         log_info(logFn, "[stitch-fallback]",
                  "high-level warper (%s) failed code=%d (%s) — retrying spherical",
@@ -812,7 +821,7 @@ StitchResult stitchFramePaths(
         // case; only a Panorama fallback runs the true manual pipeline,
         // which self-routes STREAM under pressure and earns the minimal
         // streaming demand.
-        const double manReservationMB = rescueReservationMB("manual opposite-mode");
+        const double manReservationMB = rescueReservationMB("manual opposite-mode rescue");
         if (manReservationMB != 0.0) {
             log_info(logFn, "[stitch-fallback]",
                      "manual primary mode (%s) failed code=%d — retrying %s",
@@ -860,7 +869,7 @@ StitchResult stitchFramePaths(
             (!config.useManualPipeline
              && config.stitchMode == StitchMode::Panorama
              && translationLike)
-                ? rescueReservationMB("SCANS") : 0.0;
+                ? rescueReservationMB("SCANS rescue") : 0.0;
         if (scansReservationMB != 0.0) {
             log_info(logFn, "[stitch-fallback]",
                      "high-level PANORAMA failed code=%d (%s) — retrying SCANS "
@@ -905,7 +914,7 @@ StitchResult stitchFramePaths(
             (!config.useManualPipeline
              && config.stitchMode == StitchMode::Scans
              && rescuable)
-                ? rescueReservationMB("PANORAMA (reverse)") : 0.0;
+                ? rescueReservationMB("PANORAMA reverse rescue") : 0.0;
         if (revReservationMB != 0.0) {
             log_info(logFn, "[stitch-fallback]",
                      "high-level SCANS failed code=%d (%s) — retrying PANORAMA "
