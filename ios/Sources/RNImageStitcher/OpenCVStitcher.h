@@ -42,7 +42,10 @@ extern NSString *const RNImageStitcherErrorDomain;
 ///   framesIncluded:         number retained after leaveBiggestComponent
 ///   finalConfidenceThresh:  threshold the winning rung/attempt used
 ///                            (pan 1.0/0.3, scans 1.0/0.5); -1.0 when
-///                            no retry data exists (rare error paths)
+///                            no retry data exists (rare error paths).
+///                            NOT an escalation/attempt-count signal:
+///                            a 1.0 can be a later rung's win after
+///                            earlier rungs failed (flattened ladder)
 @property (nonatomic, assign, readonly) NSInteger framesRequested;
 @property (nonatomic, assign, readonly) NSInteger framesIncluded;
 @property (nonatomic, assign, readonly) double finalConfidenceThresh;

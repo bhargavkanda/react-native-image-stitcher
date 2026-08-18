@@ -23,10 +23,17 @@
 #include <gtest/gtest.h>
 
 using retailens::LadderRung;
+using retailens::StitchErrorCode;
 using retailens::StitchMode;
+using retailens::collapsedCheckArmed;
+using retailens::kMaxLadderRungs;
 using retailens::kStitchLadderRungs;
+using retailens::ladderErrorIsTerminal;
+using retailens::ladderRungAcceptable;
 using retailens::ladderRungBeatsBest;
 using retailens::planStitchLadder;
+using retailens::rungCannotImproveBest;
+using retailens::sphericalExtraRungWarranted;
 using retailens::stitchOutputCollapsed;
 
 TEST(StitchLadder, PanoramaPrimaryRungOrder) {
@@ -114,4 +121,113 @@ TEST(CollapsedPlacement, BoundaryIsExclusive) {
   // 10 × 307 200 px frames.
   EXPECT_FALSE(stitchOutputCollapsed(583680.0, 307200.0, 10));
   EXPECT_TRUE(stitchOutputCollapsed(583679.0, 307200.0, 10));
+}
+
+// 2026-08-17 review — the collapsed check is armed ONLY on flattened-ladder
+// SCANS rungs.  Ladder-only preserves the manual opt-in's byte-identical
+// contract (its high-level SCANS dispatch still runs the legacy schedule);
+// SCANS-only avoids false-rejecting PANORAMA pan-back / stationary-hold
+// captures whose coverage grows with span, not frame count.
+TEST(CollapsedPlacement, ArmedOnlyOnLadderScansRungs) {
+  EXPECT_TRUE(collapsedCheckArmed(true, StitchMode::Scans));
+  EXPECT_FALSE(collapsedCheckArmed(true, StitchMode::Panorama));
+  EXPECT_FALSE(collapsedCheckArmed(false, StitchMode::Scans));      // legacy path
+  EXPECT_FALSE(collapsedCheckArmed(false, StitchMode::Panorama));
+}
+
+// 2026-08-17 review — terminal rung failures stop the ladder outright.
+// UnknownCvException is load-bearing: it is the caught-native-OOM bucket,
+// and the jetsam RCA's whole point was that relaunching a full stitch
+// after an OOM re-peaks the process (the per-rung headroom re-gate reads a
+// post-RAII-free rss and admits the relaunch, or runs uncapped when rss is
+// unmeasurable).
+TEST(LadderTerminal, OomBucketAndInputInvariantCodesAreTerminal) {
+  EXPECT_TRUE(ladderErrorIsTerminal(StitchErrorCode::UnknownCvException));
+  EXPECT_TRUE(ladderErrorIsTerminal(StitchErrorCode::InvalidArgument));
+  EXPECT_TRUE(ladderErrorIsTerminal(StitchErrorCode::ImageReadFailed));
+  EXPECT_TRUE(ladderErrorIsTerminal(StitchErrorCode::ImageWriteFailed));
+  EXPECT_TRUE(ladderErrorIsTerminal(StitchErrorCode::PreStitchMemoryAbort));
+}
+
+TEST(LadderTerminal, RetryableCodesAreNotTerminal) {
+  // These are the codes the ladder exists to rescue — a different
+  // mode/threshold/warper can legitimately fix them.
+  EXPECT_FALSE(ladderErrorIsTerminal(StitchErrorCode::NeedMoreImages));
+  EXPECT_FALSE(ladderErrorIsTerminal(StitchErrorCode::HomographyEstimationFailed));
+  EXPECT_FALSE(ladderErrorIsTerminal(StitchErrorCode::CameraParamsAdjustFailed));
+  EXPECT_FALSE(ladderErrorIsTerminal(StitchErrorCode::WarpFailed));
+  EXPECT_FALSE(ladderErrorIsTerminal(StitchErrorCode::EmptyPanorama));
+  EXPECT_FALSE(ladderErrorIsTerminal(StitchErrorCode::LowQualityStitch));
+  EXPECT_FALSE(ladderErrorIsTerminal(
+      StitchErrorCode::AllFramesDroppedByConfidence));  // cannot-improve code
+  EXPECT_FALSE(ladderErrorIsTerminal(StitchErrorCode::Ok));
+}
+
+// 2026-08-17 review — the dynamic spherical extra rung: at most one per
+// ladder, PANORAMA rungs only, only for the two warper-fixable failure
+// shapes, and never when the rung already composed with spherical.
+TEST(SphericalExtraRung, WarrantedOnlyForFixablePanoramaFailures) {
+  // The two trigger codes on a non-spherical PANORAMA rung.
+  EXPECT_TRUE(sphericalExtraRungWarranted(
+      StitchMode::Panorama, StitchErrorCode::LowQualityStitch, false, false));
+  EXPECT_TRUE(sphericalExtraRungWarranted(
+      StitchMode::Panorama, StitchErrorCode::WarpFailed, false, false));
+  // Other failure codes never warrant it.
+  EXPECT_FALSE(sphericalExtraRungWarranted(
+      StitchMode::Panorama, StitchErrorCode::NeedMoreImages, false, false));
+  EXPECT_FALSE(sphericalExtraRungWarranted(
+      StitchMode::Panorama, StitchErrorCode::HomographyEstimationFailed,
+      false, false));
+  EXPECT_FALSE(sphericalExtraRungWarranted(
+      StitchMode::Panorama, StitchErrorCode::UnknownCvException, false,
+      false));
+  EXPECT_FALSE(sphericalExtraRungWarranted(
+      StitchMode::Panorama, StitchErrorCode::Ok, false, false));
+}
+
+TEST(SphericalExtraRung, NeverForScansAlreadySphericalOrSecondTime) {
+  // SCANS hard-wires its affine warper — a spherical override is
+  // meaningless there.
+  EXPECT_FALSE(sphericalExtraRungWarranted(
+      StitchMode::Scans, StitchErrorCode::LowQualityStitch, false, false));
+  EXPECT_FALSE(sphericalExtraRungWarranted(
+      StitchMode::Scans, StitchErrorCode::WarpFailed, false, false));
+  // A rung that already ran spherical (extra rung, or caller-pinned
+  // spherical warper) gains nothing from a spherical relaunch.
+  EXPECT_FALSE(sphericalExtraRungWarranted(
+      StitchMode::Panorama, StitchErrorCode::LowQualityStitch, true, false));
+  // Hard cap: one spherical extra rung per ladder.
+  EXPECT_FALSE(sphericalExtraRungWarranted(
+      StitchMode::Panorama, StitchErrorCode::LowQualityStitch, false, true));
+}
+
+TEST(SphericalExtraRung, PlanGrowthIsBoundedByMaxRungs) {
+  // The plan holds 4 planned rungs and at most ONE dynamic insertion.
+  EXPECT_EQ(kMaxLadderRungs, kStitchLadderRungs + 1);
+}
+
+// 2026-08-17 review — N-1 short-circuit: an all-but-one partial promotes
+// immediately (the dominant blur-tail shape); anything less keeps walking
+// the ladder.
+TEST(LadderShortCircuit, AllButOneFramePromotes) {
+  EXPECT_TRUE(ladderRungAcceptable(10, 10));   // complete
+  EXPECT_TRUE(ladderRungAcceptable(9, 10));    // N-1 — promote, stop ladder
+  EXPECT_FALSE(ladderRungAcceptable(8, 10));   // 2+ dropped — keep trying
+  EXPECT_TRUE(ladderRungAcceptable(1, 1));     // single-frame capture
+  EXPECT_TRUE(ladderRungAcceptable(2, 3));
+  // Degenerate zero-frame "success" never promotes, whatever N is.
+  EXPECT_FALSE(ladderRungAcceptable(0, 1));
+  EXPECT_FALSE(ladderRungAcceptable(0, 0));
+}
+
+// 2026-08-17 review — cannot-improve early-out feeds the impl's
+// compose-skip: with a best of M frames banked, a rung retaining <= M can
+// never win the strict-> tie rule, so its compose is pure waste.
+TEST(LadderShortCircuit, CannotImproveBestSkipsCompose) {
+  EXPECT_TRUE(rungCannotImproveBest(9, 9));    // tie — compose skipped
+  EXPECT_TRUE(rungCannotImproveBest(8, 9));    // worse — compose skipped
+  EXPECT_FALSE(rungCannotImproveBest(10, 9));  // improvement — compose runs
+  // -1 sentinel = no best yet: never skip (rung 1 always composes).
+  EXPECT_FALSE(rungCannotImproveBest(2, -1));
+  EXPECT_FALSE(rungCannotImproveBest(0, -1));
 }

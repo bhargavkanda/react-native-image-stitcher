@@ -700,9 +700,11 @@ StitchResult stitchFramePaths(
     //     escalation (field RCA: the escalation was both the 30-min bundle-
     //     adjust wedge and the collapsed-garbage source; scans@0.3 is banned),
     //     per-rung output isolation + best-rung promotion, 120 s wall budget.
-    //     The old spherical FULL re-run is gone: the warper plays no role in
-    //     estimateTransform, so its value survives as a compose-stage-only
-    //     warper swap inside stitchFramePathsImpl_.
+    //     The old spherical FULL re-run is gone: its surviving value is (a)
+    //     the pre-compose in-place warper reroute inside the impl and (b) the
+    //     DYNAMIC spherical extra rung — a fresh reservation-gated launch the
+    //     ladder enqueues after a PANORAMA rung fails on a warper-fixable
+    //     shape (sphericalExtraRungWarranted; at most one per ladder).
     //   MANUAL caller (useManualPipeline=true — legacy opt-in only; since
     //     2026-06-16 no production caller passes it): the OLD PANORAMA↔SCANS
     //     mode-fallback is PRESERVED for that opt-in path, exactly as before —
@@ -711,15 +713,21 @@ StitchResult stitchFramePaths(
     //     SCANS→high-level affine; PANORAMA→manual (+ its own plane→spherical
     //     self-rescue).
     //
-    // PreStitchMemoryAbort never re-launches (a headroom abort is independent
-    // of mode/threshold — retrying won't help).
+    // PreStitchMemoryAbort and UnknownCvException never re-launch (headroom
+    // aborts are mode-independent; UnknownCvException is the caught-OOM
+    // bucket — 2026-08-17 jetsam RCA, see ladderErrorIsTerminal).
     auto runOnce = [&](StitchMode modeOverride,
+                       const std::string& warperOverride,
                        double rescueBudgetMPOverride = -1.0,
                        double ladderThreshOverride = -1.0,
-                       const std::string& outputPathOverride =
-                           std::string()) -> StitchResult {
+                       const std::string& outputPathOverride = std::string(),
+                       int bestFramesSoFar = -1) -> StitchResult {
         StitchConfig cfg = config;
         cfg.stitchMode = modeOverride;
+        // 2026-08-17 review — the DYNAMIC spherical extra rung launches with
+        // the warper pinned to spherical; every other launch keeps the
+        // caller's warper.
+        if (!warperOverride.empty()) cfg.warperType = warperOverride;
         // v0.25 — a launch carries the headroom gate's RESERVATION as a
         // canvas-budget cap, so the impl's downscale enforces that the launch
         // cannot spend more than the gate measured to fit.
@@ -728,6 +736,10 @@ StitchResult stitchFramePaths(
         // estimateTransform at this threshold, attempt-1 semantics); < 0 keeps
         // the legacy multi-attempt ladder for the manual opt-in path.
         cfg.ladderThreshOverride = ladderThreshOverride;
+        // 2026-08-17 review — cannot-improve early-out: the impl skips the
+        // compose when this rung's estimate cannot beat the ladder's best so
+        // far (rungCannotImproveBest).
+        cfg.ladderBestFramesSoFar = bestFramesSoFar;
         // Per-rung output isolation: each rung writes its own .tmp so a worse
         // later rung can never clobber a better earlier write; the ladder
         // promotes exactly one tmp to outputPath via std::rename.
@@ -782,6 +794,15 @@ StitchResult stitchFramePaths(
         return (reservationMB > 0.0)
             ? reservationMB / retailens::kBlendBytesPerUnionPx : -1.0;
     };
+    // 2026-08-17 review — orchestration-level exception backstop, mirroring
+    // the impl's own crash-catch ladder.  The wrapper allocates on its
+    // FAILURE paths (rung tmp-path strings, the growing rung trace, promote
+    // and aggregate error messages) — i.e. exactly under memory pressure —
+    // and a std::bad_alloc escaping here would cross the ObjC++/Swift
+    // boundary uncaught (iOS has no JNI-style backstop) and std::terminate
+    // the app.  Everything below runs inside this try; any throw becomes a
+    // clean classified StitchResult.
+    try {
     // ── MANUAL opt-in branch — exactly the legacy behaviour ─────────────
     // useManualPipeline=true callers (nothing ships with it since 2026-06-16)
     // keep primary + at-most-one opposite-mode fallback, with the legacy
@@ -797,7 +818,7 @@ StitchResult stitchFramePaths(
         const double primaryReservationMB =
             rescueReservationMB("primary stitch");
         StitchResult firstAttempt =
-            runOnce(config.stitchMode,
+            runOnce(config.stitchMode, std::string(),
                     reservationToBudgetMP(primaryReservationMB));
         firstAttempt.stitchModeUsed = config.stitchMode;
         if (firstAttempt.errorCode == StitchErrorCode::Ok) {
@@ -838,7 +859,7 @@ StitchResult stitchFramePaths(
                          fallbackMode == StitchMode::Scans ? "scans"
                                                            : "panorama");
                 StitchResult secondAttempt = runOnce(
-                    fallbackMode,
+                    fallbackMode, std::string(),
                     fallbackMode == StitchMode::Scans
                         ? reservationToBudgetMP(manReservationMB) : -1.0);
                 if (secondAttempt.errorCode == StitchErrorCode::Ok) {
@@ -871,7 +892,20 @@ StitchResult stitchFramePaths(
         log_error(logFn, "[stitch]", "%s", r.errorMessage.c_str());
         return finish(r);
     }
-    const auto ladder = planStitchLadder(config.stitchMode);
+    // Mutable plan: the 4 planned rungs, plus room for the ONE dynamic
+    // spherical extra rung (sphericalExtraRungWarranted) inserted right
+    // after a failing PANORAMA rung.  Entries are COPIED out per iteration
+    // — plan.insert can reallocate mid-loop.
+    struct PlanEntry {
+        LadderRung rung;
+        bool       sphericalWarper;  // extra rung: warper pinned to spherical
+    };
+    std::vector<PlanEntry> plan;
+    plan.reserve(static_cast<size_t>(kMaxLadderRungs));
+    for (const LadderRung& r : planStitchLadder(config.stitchMode)) {
+        plan.push_back({ r, false });
+    }
+    bool sphericalExtraEnqueued = false;
     const auto ladderT0 = std::chrono::steady_clock::now();
     // Wall-clock backstop.  The old orchestration wedged 30 minutes in one
     // loosened bundle-adjust; the wedge levers are gone (no matcher/range
@@ -889,17 +923,26 @@ StitchResult stitchFramePaths(
     auto tmpPathForRung = [&](size_t idx) {
         return outputPath + ".rung" + std::to_string(idx + 1) + ".tmp.jpg";
     };
-    // Remove every rung tmp (+ its debug coverage sidecar) except `keep`
-    // (SIZE_MAX = remove all).  std::remove on a never-written path is a
-    // harmless ENOENT.
+    // Remove every possible rung tmp (+ its debug coverage sidecar) except
+    // `keep` (SIZE_MAX = remove all).  Bounded by kMaxLadderRungs, not the
+    // current plan size, so the dynamic extra rung's tmp is always covered.
+    // std::remove on a never-written path is a harmless ENOENT.
     auto unlinkRungTmps = [&](size_t keep) {
-        for (size_t i = 0; i < ladder.size(); ++i) {
+        for (size_t i = 0; i < static_cast<size_t>(kMaxLadderRungs); ++i) {
             if (i == keep) continue;
             const std::string tmp = tmpPathForRung(i);
             std::remove(tmp.c_str());
             std::remove((tmp + ".coverage.png").c_str());
         }
     };
+    // 2026-08-17 review — orphan sweep BEFORE rung 1.  In-band cleanup only
+    // runs on structured exits; a ladder killed mid-run (jetsam/lmkd/force-
+    // quit during a compose peak) strands already-written multi-MB rung
+    // JPEGs forever, since nothing else knows the naming scheme.  Sweeping
+    // this outputPath's full candidate set here self-heals a prior crashed
+    // ladder for the same path at the cost of kMaxLadderRungs ENOENT
+    // unlinks in the common case.
+    unlinkRungTmps(SIZE_MAX);
     // Promote rung `idx`'s tmp to outputPath (same-directory rename, atomic
     // on POSIX) and carry the debug coverage sidecar along.  A failed rename
     // MUST downgrade the result — success must never claim a file that isn't
@@ -932,14 +975,18 @@ StitchResult stitchFramePaths(
         rungTrace += entry;
     };
 
-    for (size_t i = 0; i < ladder.size(); ++i) {
-        const LadderRung& rung = ladder[i];
-        char label[64];
+    for (size_t i = 0; i < plan.size(); ++i) {
+        // COPY, not reference — the spherical-extra insert below can
+        // reallocate `plan` while this iteration still reads the entry.
+        const PlanEntry entry = plan[i];
+        const LadderRung& rung = entry.rung;
+        const char* sphTag = entry.sphericalWarper ? " spherical" : "";
+        char label[72];
         if (i == 0) {
             std::snprintf(label, sizeof(label), "primary stitch");
         } else {
-            std::snprintf(label, sizeof(label), "rung %zu (%s@%.2f)", i + 1,
-                          modeName(rung.mode), rung.confidenceThresh);
+            std::snprintf(label, sizeof(label), "rung %zu (%s@%.2f%s)", i + 1,
+                          modeName(rung.mode), rung.confidenceThresh, sphTag);
         }
         if (i > 0) {
             const int64_t elapsedMs =
@@ -962,31 +1009,40 @@ StitchResult stitchFramePaths(
             // produces the clean PreStitchMemoryAbort that IS the primary
             // error (legacy primary behaviour).
             log_info(logFn, "[stitch-retry]",
-                     "rung %zu (%s@%.2f) skipped for headroom", i + 1,
-                     modeName(rung.mode), rung.confidenceThresh);
+                     "rung %zu (%s@%.2f%s) skipped for headroom", i + 1,
+                     modeName(rung.mode), rung.confidenceThresh, sphTag);
             traceAppend("rung" + std::to_string(i + 1) + " "
                         + modeName(rung.mode) + " skipped(headroom)");
             continue;
         }
         StitchResult r = runOnce(rung.mode,
+                                 entry.sphericalWarper ? "spherical"
+                                                       : std::string(),
                                  reservationToBudgetMP(reservationMB),
                                  rung.confidenceThresh,
-                                 tmpPathForRung(i));
+                                 tmpPathForRung(i),
+                                 bestRung == SIZE_MAX ? -1
+                                                      : best.framesIncluded);
         r.stitchModeUsed = rung.mode;
         {
-            char tbuf[80];
-            std::snprintf(tbuf, sizeof(tbuf), "rung%zu %s@%.2f code=%d",
+            char tbuf[88];
+            std::snprintf(tbuf, sizeof(tbuf), "rung%zu %s@%.2f%s code=%d",
                           i + 1, modeName(rung.mode), rung.confidenceThresh,
+                          entry.sphericalWarper ? "+sph" : "",
                           static_cast<int>(r.errorCode));
             traceAppend(tbuf);
         }
         if (r.errorCode == StitchErrorCode::Ok) {
-            if (r.framesIncluded >= static_cast<int>(framePaths.size())) {
-                // Complete result — promote immediately.  Later rungs are
-                // strictly lower-preference (lower threshold or opposite
-                // model) and can at best tie on frames.
+            if (retailens::ladderRungAcceptable(
+                    r.framesIncluded,
+                    static_cast<int>(framePaths.size()))) {
+                // Complete OR all-but-one — promote immediately.  The
+                // single-dropped-frame partial is the dominant field shape
+                // (blurred boundary keyframe); chasing that one frame
+                // through the remaining rungs costs full stitches that the
+                // tie rule would discard anyway (see ladderRungAcceptable).
                 log_info(logFn, "[stitch-retry]",
-                         "%s complete (%d/%zu frames) — promoting", label,
+                         "%s acceptable (%d/%zu frames) — promoting", label,
                          r.framesIncluded, framePaths.size());
                 return promoteRung(i, r);
             }
@@ -1007,22 +1063,44 @@ StitchResult stitchFramePaths(
             firstError = r;
             haveFirstError = true;
         }
-        // Input/environment-invariant failures repeat identically on every
-        // rung — a mode/threshold change cannot fix a missing input file, an
-        // unwritable output dir, or a process past its memory budget (whose
-        // per-rung headroom re-gate would skip the rest anyway).  Stop the
-        // ladder instead of paying up to 3 more decode passes.
-        const bool terminal =
-            r.errorCode == StitchErrorCode::InvalidArgument
-            || r.errorCode == StitchErrorCode::ImageReadFailed
-            || r.errorCode == StitchErrorCode::ImageWriteFailed
-            || r.errorCode == StitchErrorCode::PreStitchMemoryAbort;
-        if (terminal) {
+        // Terminal failures stop the ladder outright: input/filesystem-
+        // invariant codes repeat identically on every rung, and
+        // UnknownCvException is the caught-native-OOM bucket — relaunching a
+        // full stitch after an OOM re-peaks the process and reproduces the
+        // documented iPad jetsam kill (2026-08-17 RCA; the per-rung headroom
+        // re-gate is NOT sufficient because the failed rung's memory is
+        // RAII-freed before the gate re-reads rss).  Full rationale on
+        // retailens::ladderErrorIsTerminal.
+        if (retailens::ladderErrorIsTerminal(r.errorCode)) {
             log_info(logFn, "[stitch-retry]",
-                     "%s failed code=%d (input/environment-invariant) — "
-                     "stopping ladder", label,
+                     "%s failed code=%d (terminal — see ladderErrorIsTerminal)"
+                     " — stopping ladder", label,
                      static_cast<int>(r.errorCode));
             break;
+        }
+        // 2026-08-17 review — DYNAMIC spherical extra rung.  A PANORAMA rung
+        // launched with a non-spherical warper that failed on a shape
+        // spherical compose geometry can fix (LowQualityStitch: marooned /
+        // disjoint / predictive-utilization reject; WarpFailed: degenerate
+        // or oversized plane canvas) earns ONE fresh spherical launch,
+        // inserted immediately after it — reservation-gated and budget-
+        // checked like any rung.  This replaces the deleted in-place
+        // re-compose (UB: OpenCV clears seam_est_imgs_ after the first
+        // compose) AND restores the old full spherical rescue's coverage
+        // for wide-rotation captures.  Capped at one per ladder.
+        if (retailens::sphericalExtraRungWarranted(
+                rung.mode, r.errorCode,
+                entry.sphericalWarper || config.warperType == "spherical",
+                sphericalExtraEnqueued)
+            && plan.size() < static_cast<size_t>(kMaxLadderRungs)) {
+            sphericalExtraEnqueued = true;
+            plan.insert(plan.begin() + static_cast<std::ptrdiff_t>(i) + 1,
+                        PlanEntry{ rung, true });
+            log_info(logFn, "[stitch-fallback]",
+                     "%s failed code=%d (%s) — enqueueing spherical extra "
+                     "rung (fresh run, no in-place re-compose)", label,
+                     static_cast<int>(r.errorCode), r.errorMessage.c_str());
+            continue;
         }
         log_info(logFn, "[stitch-retry]",
                  "%s failed code=%d (%s) — continuing ladder", label,
@@ -1053,6 +1131,27 @@ StitchResult stitchFramePaths(
         "ladder produced no result [ladder: " + rungTrace + "]";
     noResult.framesRequested = static_cast<int32_t>(framePaths.size());
     return finish(noResult);
+    } catch (const std::exception& e) {
+        // cv::Exception derives from std::exception, so this also covers cv
+        // throws from wrapper-level code; std::bad_alloc from the wrapper's
+        // own failure-path string work lands here instead of crossing the
+        // ObjC++/JNI boundary.  The handler allocates one small message —
+        // the same accepted residual as the impl's catch ladder.
+        StitchResult r;
+        r.errorCode = StitchErrorCode::UnknownCvException;
+        r.errorMessage = std::string("stitch orchestration exception: ")
+                         + (e.what() ? e.what() : "(no message)");
+        r.framesRequested = static_cast<int32_t>(framePaths.size());
+        log_error(logFn, "[stitch]", "%s", r.errorMessage.c_str());
+        return finish(r);
+    } catch (...) {
+        StitchResult r;
+        r.errorCode = StitchErrorCode::UnknownCvException;
+        r.errorMessage = "stitch orchestration unknown exception";
+        r.framesRequested = static_cast<int32_t>(framePaths.size());
+        log_error(logFn, "[stitch]", "%s", r.errorMessage.c_str());
+        return finish(r);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1685,6 +1784,25 @@ static StitchResult stitchFramePathsImpl_(
         return result;
     }
 
+    // 2026-08-17 review — cannot-improve early-out (ladder rungs only).  The
+    // outer ladder's tie rule is strict-greater (ladderRungBeatsBest), so an
+    // estimate that retained no more frames than the ladder's best so far can
+    // NEVER be promoted — composing it would spend the expensive, jetsam-
+    // relevant stage (warp + seam + multiband blend + JPEG encode) on output
+    // that is discarded by construction.  Registration already ran (cheap
+    // relative to compose); skip everything downstream.
+    if (singleRung
+        && retailens::rungCannotImproveBest(framesIncluded,
+                                            config.ladderBestFramesSoFar)) {
+        result.errorCode = StitchErrorCode::AllFramesDroppedByConfidence;
+        result.errorMessage =
+            "rung cannot improve best (" + std::to_string(framesIncluded) +
+            " <= " + std::to_string(config.ladderBestFramesSoFar) +
+            ") — compose skipped";
+        log_info(logFn, "[stitch-retry]", "%s", result.errorMessage.c_str());
+        return result;
+    }
+
     // 2026-06-16 (review #2) — degenerate-canvas guard BEFORE composePanorama.
     // estimateTransform succeeded; composePanorama will now warp+blend a canvas
     // whose size is set by the estimated focals/rotations.  A divergent BA
@@ -1698,9 +1816,16 @@ static StitchResult stitchFramePathsImpl_(
     // estimate — the rung fails cleanly and the outer ladder moves on.
     //
     // 2026-08-17 — `effectiveWarperType` tracks the warper the compose will
-    // ACTUALLY run with: the oversize reroute below and the compose-stage
-    // spherical retry both swap it IN PLACE (setWarper before compose — the
-    // estimate is warper-independent, so a swap never needs re-estimation).
+    // ACTUALLY run with: the PRE-compose oversize reroute below swaps it in
+    // place (setWarper before the FIRST compose — the estimate is warper-
+    // independent, so that swap needs no re-estimation).  There is
+    // deliberately NO post-compose in-place retry: cv::Stitcher clears
+    // seam_est_imgs_ during its first composePanorama (OpenCV 4.10
+    // stitcher.cpp:215 "Release unused memory"), so a second parameterless
+    // compose on the same instance indexes a destroyed vector — UB.  A
+    // validation failure that spherical geometry could fix is instead
+    // retried by the OUTER ladder as a fresh reservation-gated spherical
+    // extra rung (sphericalExtraRungWarranted).
     // `appliedComposeMP` tracks the compositing resolution after any budget
     // downscale: the collapsed-placement validator compares coverage against
     // a frame's area at the compose scale that actually ran.
@@ -1992,87 +2117,66 @@ static StitchResult stitchFramePathsImpl_(
     // ── 4.  Crop (coverage-aware inscribed rect, or bbox) ───────────
     // Pull cv::Stitcher's coverage mask (0xFF filled / 0 unfilled). It is
     // computed during stitch(), so this is free and exact — dark content
-    // a frame painted is kept; only never-covered wedges drop.  Lambda so
-    // the compose-stage spherical retry below can refresh it after a
-    // re-compose (resultMask is per-compose state).
+    // a frame painted is kept; only never-covered wedges drop.
     cv::Mat coverage;
-    auto fetchCoverage = [&]() {
-        coverage.release();
+    {
         const cv::UMat rm = stitcher->resultMask();
         if (!rm.empty()) {
             rm.copyTo(coverage);  // download UMat → Mat
         }
-    };
-    fetchCoverage();
+    }
 
-    // Compose-scale area of ONE input frame — the collapsed-placement
-    // validator's yardstick.  cv::Stitcher clamps its compose scale at 1.0,
-    // so a frame contributes min(appliedComposeMP, its own full area) pixels
-    // to the canvas; using the raw input area here would over-demand coverage
-    // and false-reject valid panoramas composed below sensor resolution.
-    const double composedFrameAreaPx = images.empty()
-        ? 0.0
-        : std::min(appliedComposeMP * 1e6,
-                   static_cast<double>(images[0].cols) * images[0].rows);
+    // Compose-scale MEAN frame area — the collapsed-placement yardstick.
+    // Scale proof (verified against the pinned OpenCV 4.10.0,
+    // modules/stitching/src/stitcher.cpp:247-251): composePanorama computes
+    //   compose_scale = min(1.0, sqrt(compose_resol_ * 1e6 / full_img.area()))
+    // ONCE, from the FIRST composed image, then warps every frame at that
+    // scale — and the panorama canvas + resultMask() (the source of
+    // validateStitchOutput's totalArea) are allocated at that same compose
+    // scale.  So frame i contributes ~area_i * compose_scale^2 canvas px,
+    // and the MEAN over frames is the right per-frame yardstick for
+    // heterogeneous input sizes (a single frame's area would over- or
+    // under-demand coverage).  appliedComposeMP reflects any budget
+    // downscale applied above (setCompositingResol → compose_resol_), so
+    // the yardstick tracks the scale that actually composed.
+    double composedFrameAreaPx = 0.0;
+    if (!images.empty()) {
+        const double area0 =
+            static_cast<double>(images[0].cols) * images[0].rows;
+        double meanFullArea = 0.0;
+        for (const cv::Mat& im : images) {
+            meanFullArea += static_cast<double>(im.cols) * im.rows;
+        }
+        meanFullArea /= static_cast<double>(images.size());
+        const double composeScaleSq =
+            (area0 > 0.0) ? std::min(1.0, appliedComposeMP * 1e6 / area0)
+                          : 0.0;
+        composedFrameAreaPx = meanFullArea * composeScaleSq;
+    }
 
     // 2026-06-16 (high-level safety) — validate the output BEFORE cropping/
     // writing.  The manual path has had this since v0.16; the high-level path
     // shipped whatever cv::Stitcher produced.  Rejects the black-canvas /
     // fragmented-output / collapsed-placement failures as LowQualityStitch so
     // the host can surface a "retry" instead of a broken image.  Fails open
-    // on an empty coverage mask.
+    // on an empty coverage mask.  The collapsed-placement leg is armed ONLY
+    // for flattened-ladder SCANS rungs (retailens::collapsedCheckArmed): the
+    // legacy multi-attempt path — including the manual opt-in's high-level
+    // SCANS dispatch, which is promised byte-identical — must not gain a new
+    // rejection, and PANORAMA captures legitimately re-cover the same area
+    // (pan-back / stationary-hold force-accepts), where a frame-count-linear
+    // coverage floor would deterministically false-reject valid output.  A
+    // reject here simply fails THIS rung; any spherical salvage is the OUTER
+    // ladder's job as a fresh extra rung — never a second compose on this
+    // stitcher instance (UB; see the effectiveWarperType note above).
     {
         std::string validateMessage;
-        StitchErrorCode validateCode = validateStitchOutput(
-            panorama, coverage, framesIncluded, composedFrameAreaPx, logFn,
+        const double collapsedYardstickPx =
+            retailens::collapsedCheckArmed(singleRung, config.stitchMode)
+                ? composedFrameAreaPx : 0.0;
+        const StitchErrorCode validateCode = validateStitchOutput(
+            panorama, coverage, framesIncluded, collapsedYardstickPx, logFn,
             validateMessage);
-        // 2026-08-17 — COMPOSE-STAGE spherical retry.  Replaces the deleted
-        // full spherical re-ladder: the warper plays no role in
-        // estimateTransform, so everything that re-run could ever fix is
-        // fixable by swapping the compose warper and re-composing — at a
-        // fraction of the cost (no registration, no BA).  A plane/cylindrical
-        // warp that marooned content (utilization), split it (disjoint), or
-        // stacked it (collapsed) gets ONE bounded-geometry re-compose.
-        // PANORAMA only (SCANS hard-wires its affine warper) and only when
-        // the compose isn't already spherical (incl. via the pre-compose
-        // reroute above).
-        if (validateCode != StitchErrorCode::Ok
-            && cvMode == cv::Stitcher::PANORAMA
-            && effectiveWarperType != "spherical") {
-            log_info(logFn, "[stitch-fallback]",
-                     "compose-stage spherical retry (no re-estimation) — %s",
-                     validateMessage.c_str());
-            effectiveWarperType = "spherical";
-            stitcher->setWarper(make_warper("spherical"));
-            bool retryComposed = false;
-            try {
-                const cv::Stitcher::Status rs =
-                    stitcher->composePanorama(panorama);
-                retryComposed = (rs == cv::Stitcher::OK);
-                if (!retryComposed) {
-                    log_error(logFn, "[stitch-fallback]",
-                              "spherical re-compose failed status=%d — keeping "
-                              "the original validation failure",
-                              static_cast<int>(rs));
-                }
-            } catch (const cv::Exception& e) {
-                log_error(logFn, "[stitch-fallback]",
-                          "spherical re-compose threw: %s — keeping the "
-                          "original validation failure", e.what());
-            }
-            if (retryComposed) {
-                fetchCoverage();
-                validateMessage.clear();
-                validateCode = validateStitchOutput(
-                    panorama, coverage, framesIncluded, composedFrameAreaPx,
-                    logFn, validateMessage);
-                if (validateCode == StitchErrorCode::Ok) {
-                    log_info(logFn, "[stitch-fallback]",
-                             "compose-stage spherical retry validated OK "
-                             "(%dx%d)", panorama.cols, panorama.rows);
-                }
-            }
-        }
         if (validateCode != StitchErrorCode::Ok) {
             result.errorCode = validateCode;
             result.errorMessage = validateMessage;
@@ -2154,8 +2258,9 @@ static StitchResult stitchFramePathsImpl_(
     // DEV overlay — cv::Stitcher owns its own compositing; for PANORAMA mode it
     // uses GraphCut seams + MultiBand blend by default.  `warp=` reports the
     // warper that ACTUALLY composed (effectiveWarperType — may be spherical
-    // after the pre-compose reroute / compose-stage retry, not what the config
-    // asked for).  Surfaced on the preview in __DEV__.
+    // after the pre-compose oversize reroute, or because the outer ladder's
+    // spherical extra rung launched this run with warperType=spherical).
+    // Surfaced on the preview in __DEV__.
     result.debugSummary =
         std::string("pipe=highlevel;warp=") + effectiveWarperType +
         ";route=batch;seam=graphcut;blend=multiband";

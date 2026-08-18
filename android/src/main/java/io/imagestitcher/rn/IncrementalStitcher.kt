@@ -1304,6 +1304,16 @@ class IncrementalStitcher(
                     // safe 1.0 default forever. Intended: its cost is scene-driven
                     // registration retries, which a compositing cut does not
                     // reduce — the fallback is conservative, never a wrong result.
+                    // KNOWN LIMITATION (2026-08-17 flattened ladder): dims[4] now
+                    // reports the WINNING RUNG's threshold and no longer encodes
+                    // attempt count — a capture that failed its pan rungs and won
+                    // at scans@1.00 reports 1000 here even though stitchWallMs
+                    // covers the whole multi-rung ladder, so such runs are
+                    // over-counted as "default speed" samples. A ladder-aware
+                    // escalation signal (rung index / mode-switch flag surfaced
+                    // from native) is the follow-up; until then the samples skew
+                    // slower-than-device only on misclassified captures, and the
+                    // PROBE_EVERY/0.8x hysteresis keeps the cut recoverable.
                     if (adaptiveStitchMode == "measured" && adaptiveComposeMP >= 1.0) {
                         val threshMilli = if (dims.size > 4) dims[4] else 1000
                         val escalated = threshMilli < 1000

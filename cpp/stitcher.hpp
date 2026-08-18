@@ -192,6 +192,15 @@ struct StitchConfig {
     // any direct legacy caller.  Set only by stitchFramePaths' rung
     // launches; bridges never populate it.
     double      ladderThreshOverride = -1.0;
+    // INTERNAL — best framesIncluded across the ladder's earlier rungs
+    // (2026-08-17 review).  When >= 0 and the single-rung impl's
+    // estimateTransform retains <= this many frames, the rung returns
+    // AllFramesDroppedByConfidence BEFORE composePanorama: the tie rule
+    // (ladderRungBeatsBest, strict >) could never promote it, so the
+    // compose — the expensive, jetsam-relevant stage — would be pure
+    // waste.  -1 (default) = no best yet / legacy path; bridges never
+    // populate it.
+    int         ladderBestFramesSoFar = -1;
     // v0.25 — reservation enforcement (review: an admitted launch must not
     // be able to spend more than the headroom gate reserved for it).  When
     // > 0, the high-level canvas budget is capped at min(device budget, this)
