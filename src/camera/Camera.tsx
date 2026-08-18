@@ -130,6 +130,10 @@ import {
   lateralStopOutcome as classifyLateralStop,
   type LateralStopOutcome,
 } from './lateralStopPolicy';
+import {
+  lateralPopupShouldShow,
+  reviewSurfaceShouldShow,
+} from './modalPresentation';
 import { RotateToLandscapePrompt } from './RotateToLandscapePrompt';
 import { PanHowToOverlay } from './PanHowToOverlay';
 import { CaptureCountdownOverlay } from './CaptureCountdownOverlay';
@@ -2218,6 +2222,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // the engine spec.
   const drift = useOrientationDrift(statusPhase === 'recording');
   const [driftModalDismissed, setDriftModalDismissed] = useState(false);
+
+  // 2026-08-18 field RCA — these three surfaces are RN <Modal>s, and on iOS
+  // only ONE view-controller presentation can be in flight at a time.  A
+  // second overlapping present is REFUSED and leaves an invisible host window
+  // that eats every touch (the dead-shutter bug: the review surface mounted
+  // ~550 ms after the lateral popup latched).  modalPresentation.ts owns the
+  // arbitration; these are the only three `visible` inputs, so the invariant
+  // is enforced in one place rather than at each call site.
+  const reviewSurfaceEnabled = rectCrop || showPreview;
+  const lateralPopupVisible =
+    lateralPopupShouldShow(lateralStop, reviewSurfaceEnabled);
+  const driftPopupVisible = drift.drifted && !driftModalDismissed;
+  const guidanceModalVisible = lateralPopupVisible || driftPopupVisible;
+
   // Reset the modal flags when a new capture STARTS (statusPhase →
   // 'recording'), NOT when one stops.  v0.16 fix: the old "any non-recording
   // state" condition cleared the lateral-stop latch the instant a lateral
@@ -3684,7 +3702,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           cancelled.  Single OK button (no Continue) per the engine
           spec on cross-mode capture being best-effort, not supported. */}
       <OrientationDriftModal
-        visible={drift.drifted && !driftModalDismissed}
+        visible={driftPopupVisible}
         contentRotationDeg={contentRotationDegree}
         captureOrientation={drift.captureOrientation}
         currentOrientation={drift.currentOrientation}
@@ -3698,7 +3716,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           `lateralStopCopyFor`, which exists so the "we stitched what you
           captured" body can never be paired with a discarded capture. */}
       <LateralMotionModal
-        visible={lateralStop !== null}
+        visible={lateralPopupVisible}
         contentRotationDeg={contentRotationDegree}
         title={lateralStopCopy.title}
         body={lateralStopCopy.body}
@@ -3737,7 +3755,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // Remount per capture so the dragged-quad + layout state re-seed to
         // the new image (RectCropPreview seeds its quad once via useState).
         key={cropPending?.uri ?? 'crop'}
-        visible={cropPending != null}
+        visible={reviewSurfaceShouldShow(
+          cropPending != null,
+          guidanceModalVisible,
+        )}
         imageUri={cropPending?.uri ?? ''}
         imageWidth={cropPending?.width ?? 0}
         imageHeight={cropPending?.height ?? 0}
