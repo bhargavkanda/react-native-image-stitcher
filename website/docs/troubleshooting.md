@@ -86,8 +86,9 @@ friendly, action-guiding copy ("pan more slowly", "pivot in place") instead of
 the raw `cv::Stitcher` diagnostic, pass `err.code` to the SDK's
 [`userFacingStitchError`](./capture-result.md#friendly-copy-for-recoverable-failures--userfacingstitcherror)
 helper in your `onError` handler. Wide / 0.5× ultra-wide panoramas that used to
-fail with `STITCH_CAMERA_PARAMS_FAIL` now auto-retry with a cylindrical warp and
-usually complete (v0.15).
+fail with `STITCH_CAMERA_PARAMS_FAIL` are retried down the flat stitch ladder —
+lower-threshold and SCANS rungs, plus one capped spherical extra rung for warp
+failures — and usually complete (v0.25).
 
 ## Orientation
 

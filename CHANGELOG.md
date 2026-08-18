@@ -14,9 +14,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
-## [0.25.0] - 2026-08-14 (AR hardening)
+## [0.25.0] - 2026-08-18 (flattened stitch ladder + AR hardening)
 
-The theme is the field failure where a panorama hold **ends itself in
+Two field failures drive this release.
+
+The first is the stitch-retry wedge: a failed finalize could chain
+rescues — mode flips, threshold drops to `scans@0.3`, a wrapper-level
+full re-run, a second in-place compose — each of which could itself
+fail and rescue again. Measured in the field on an A35: a 4 m 41 s
+capture followed by roughly half an hour wedged in the rescue chain.
+The chain is replaced outright by a **flattened four-rung ladder** (see
+*Changed*); the same inputs now stitch in under a second, verified on
+the A35 and an iPhone.
+
+The second is the field failure where a panorama hold **ends itself in
 under a second and finalizes a single keyframe as the "panorama."**
 Three independent mechanisms were found that can each produce exactly
 that symptom, which is why it survived several rounds of diagnosis —
@@ -51,6 +62,49 @@ fixing one left the others.
 > None of this has yet been validated on a device that reproduces the
 > original failure. That validation is the remaining gate on flipping
 > the default capture source to AR.
+
+### Changed — the stitch retry ladder (production high-level path)
+
+- **The recursive rescue chain is gone.** Finalize now runs a flat,
+  fixed ladder of four rungs — `pan@1.0 → pan@0.3 → scans@1.0 →
+  scans@0.5` — reordered so the motion resolver's verdict mode runs
+  first. Rungs vary the confidence threshold only; no rung re-enters
+  the pipeline, flips modes mid-rung, or schedules further rescues.
+- **`scans@0.3` is eliminated** — the rung behind the collapsed
+  outputs (10 frames stacked into a 722×718 footprint). SCANS rungs
+  additionally gained a collapsed-placement guard that rejects a
+  degenerate affine placement instead of returning it as a result.
+- **OOM is terminal.** A caught native OOM (`std::bad_alloc` /
+  `StsNoMem`) stops the ladder instead of relaunching a full stitch
+  into a just-OOM'd process — the relaunch is what re-peaked memory
+  and produced the observed jetsam kill. An exception backstop
+  guarantees no native throw can escape the ladder unclassified.
+- **One capped spherical extra rung** replaces both deleted spherical
+  rescues (the wrapper-level full re-run and the in-place re-compose,
+  which was UB — OpenCV 4.10 clears `seam_est_imgs_` after the first
+  compose). PANORAMA rungs only, on `LowQualityStitch`/`WarpFailed`
+  only, at most one per ladder, same reservation gate and budget as
+  every other rung.
+- **Fast paths.** A validated rung that retained all but one frame is
+  accepted immediately (the dominant field partial — one blurred
+  boundary keyframe — no longer costs up to three more full stitches),
+  and a rung whose estimate cannot beat the best partial so far skips
+  its compose stage entirely.
+- **120 s wall-clock budget** across the whole ladder; on expiry the
+  best partial already composed is returned instead of starting
+  another rung.
+- **Per-rung tmp isolation + orphan sweep.** Each rung writes to its
+  own `.tmp` output; only the promoted rung's file is moved into
+  place, and stale rung temporaries are swept — an aborted rung can
+  never poison a later one's output.
+- **The manual opt-in path (`useManualPipeline: true`) is
+  byte-identical**, including its high-level SCANS dispatch (which
+  keeps the legacy multi-attempt schedule). The ladder governs the
+  production high-level path only.
+- **Example app:** the post-capture A/B re-stitch suite (`legacy` /
+  `singlethread` / `voronoi` / `lowres` / `rc-all` full re-runs after
+  every panorama) no longer auto-runs; the live capture result
+  display is unchanged.
 
 ### Added
 
@@ -121,6 +175,18 @@ fixing one left the others.
 - **The angular fallback no longer degrades permanently.** An angular
   ACCEPT now refreshes the KLT feature set, instead of leaving flow
   tracking against a stale reference for the rest of the capture.
+
+### Docs
+
+- **Six stale pipeline-routing comment sites corrected** (Android JNI,
+  shared C++ `stitcher.{cpp,hpp}`, iOS `OpenCVStitcher.{h,mm}`,
+  `src/stitching/incremental.ts`). They still claimed production
+  finalize runs the manual `cv::detail` pipeline, or that Android
+  always runs PANORAMA — both false since the 2026-06-16
+  high-level-across-the-board switch, and both repeat offenders in
+  misdiagnosis. Comments now match the code: every production caller
+  on both platforms passes `useManualPipeline=false`; manual is an
+  explicit opt-in; `'auto'` can resolve SCANS-first.
 
 ### Also in this release
 

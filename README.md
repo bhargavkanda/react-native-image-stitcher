@@ -536,7 +536,7 @@ component owns this runtime state; persist across launches via the
 | **OpenCV** | Custom build (modules: `core`, `imgproc`, `features2d`, `calib3d`, `flann`, `stitching`, `video`, `photo`).  Hosted as GitHub Release assets; fetched at install time.  ~75 MB iOS, ~40 MB Android. |
 | **iOS framework** | `opencv2.xcframework` (arm64 device + arm64+x86_64 simulator). |
 | **Android namespace** | `io.imagestitcher.rn`. |
-| **Stitching pipeline** | Shared C++ under `cpp/stitcher.cpp` invoked from both iOS Obj-C++ and Android JNI.  PANORAMA + SCANS modes; C+D progressive-confidence retry over keyframes. |
+| **Stitching pipeline** | Shared C++ under `cpp/stitcher.cpp` invoked from both iOS Obj-C++ and Android JNI.  PANORAMA + SCANS modes; a flat four-rung retry ladder (`pan@1.0 → pan@0.3 → scans@1.0 → scans@0.5`, resolver-verdict mode first, threshold-only rungs, 120 s budget) replaces the old progressive-confidence rescue chain (v0.25). |
 | **Two capture-source paths** | AR uses ARKit (iOS) / ARCore (Android) pose stream.  Non-AR uses vision-camera + IMU integration via `useIMUTranslationGate`. |
 | **Frame Processor driver (v0.5+)** | Non-AR captures evaluate the keyframe gate on the camera producer thread at native frame rate via a vision-camera Frame Processor (`cv_flow_gate_process_frame`).  iOS passes `CVPixelBuffer` end-to-end; Android writes a Y-plane-derived JPEG on accept.  Opt-out via `<Camera legacyDriver />` for one minor cycle.  See `docs/f8-frame-processor-plan.md` for the design. |
 | **Two supported pan modes** | Landscape phone + vertical pan; portrait phone + horizontal pan.  Any other combination is a user deviation, not a supported mode. |
