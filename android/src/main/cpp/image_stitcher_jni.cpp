@@ -181,14 +181,15 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
         ? retailens::StitchMode::Panorama
         : retailens::StitchMode::Scans;
 
-    // 2026-06-15 — pipeline is caller-selectable (mirrors iOS).  The batch
-    // finalize passes useManualPipeline=true: ALL the memory/OOM hardening
-    // lives on the manual path (PreStitchMemoryAbort, RAM-aware canvas-budget
-    // downscale, STREAM/BATCH held-set routing, the black-canvas utilization
-    // guard); the high-level cv::Stitcher path calls NONE of it — so manual is
-    // both the preferred output AND the memory-safe one.  The on-demand
-    // HIGH-LEVEL preview tab calls refinePanorama with useManualPipeline=false
-    // to re-stitch the captured keyframes via stock cv::Stitcher.
+    // Pipeline is caller-selectable (mirrors iOS), but since 2026-06-16 EVERY
+    // production caller passes useManualPipeline=false — "high level across
+    // the board" (IncrementalStitcher.kt finalize, refine, and the iOS
+    // counterparts).  The manual cv::detail pipeline runs ONLY when a caller
+    // explicitly opts in; nothing ships that does.  The high-level path has
+    // since grown its own memory hardening (rescue reservations /
+    // reservationToBudgetMP, the outer crash-catch ladder); the manual-only
+    // hardening list that used to live in this comment described the
+    // pre-2026-06-16 world.
     //
     // WARPER: NOT hardcoded — cfg.warperType carries the caller's choice (set
     // above from the JS `warperType`, which defaults to "spherical" and is

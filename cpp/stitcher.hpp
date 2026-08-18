@@ -240,10 +240,12 @@ struct StitchConfig {
     //     internally but with parameters we can't override (iter cap,
     //     wave-correct kind, confidence threshold).
     //
-    // Android currently leaves this false (the high-level pipeline
-    // works fine on Android's pre-V16 keyframe budgets).  iOS will
-    // flip it to true once the manual port is verified — separate
-    // commit from this V2 introduction.
+    // Since 2026-06-16 EVERY production caller on BOTH platforms leaves
+    // this false — "high level across the board" (batch finalize, refine,
+    // Android and iOS alike).  true selects the legacy manual pipeline and
+    // is an explicit opt-in that nothing ships with.  (The original V2 plan
+    // to default iOS to the manual pipeline was reversed; this comment is
+    // the record of that reversal.)
     bool        useManualPipeline    = false;
 
     // ── 2026-06-16 — memory profiling hooks (DEV deploy gate) ───────────

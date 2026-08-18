@@ -465,9 +465,11 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // correct → median-focal warper-scale → seam find → multi-band
   // blend → max-inscribed-rect crop → bake-rotate → JPEG write) was
   // ported verbatim to `retailens::stitchFramePathsManual()` in
-  // cpp/stitcher.cpp during Phase 1 (commit 02534ac).  Android already
-  // routes through the same file via the high-level pipeline; iOS
-  // now routes through it via `useManualPipeline=true`.
+  // cpp/stitcher.cpp during Phase 1 (commit 02534ac).  Both platforms
+  // route through that same file; since 2026-06-16 every production
+  // caller uses the HIGH-LEVEL pipeline (useManualPipeline=false —
+  // "high level across the board"), so the manual port below is a
+  // legacy opt-in reachable only by explicitly passing true.
   //
   // Git blame on commit 02534ac (and its parent) captures the full
   // algorithm history with the original step-by-step comments.  The

@@ -666,11 +666,11 @@ StitchResult stitchFramePaths(
     //   HIGH-LEVEL caller (Android default, useManualPipeline=false): retry once
     //     with the SPHERICAL warper — bounds the canvas on both axes (lower peak
     //     ~16% measured + rescues a marooned plane/cylindrical warp).
-    //   MANUAL caller (iOS pre-Phase-2, useManualPipeline=true): the OLD
-    //     PANORAMA↔SCANS mode-fallback is PRESERVED so iOS does not regress until
-    //     its bridge is flipped to high-level (review #3/#4).  The dispatcher
-    //     guard routes SCANS→high-level affine; PANORAMA→manual (+ its own
-    //     plane→spherical self-rescue).
+    //   MANUAL caller (useManualPipeline=true — legacy opt-in only; since
+    //     2026-06-16 no production caller passes it, both platforms run
+    //     high-level): the OLD PANORAMA↔SCANS mode-fallback is PRESERVED for
+    //     that opt-in path.  The dispatcher guard routes SCANS→high-level
+    //     affine; PANORAMA→manual (+ its own plane→spherical self-rescue).
     //
     // PreStitchMemoryAbort is excluded from worthRetrying (a headroom abort is
     // independent of warper/mode — retrying won't help).
@@ -843,9 +843,13 @@ StitchResult stitchFramePaths(
         }
     }
     // ── High-level SCANS (affine) rescue for TRANSLATION-dominant captures ──
-    // LAST resort on the high-level PANORAMA path.  Android/high-level finalize
-    // always runs PANORAMA (rotation model: homography + BundleAdjusterRay,
-    // which assume pure rotation about the optical centre).  A translation sweep
+    // LAST resort on the high-level PANORAMA path.  Since v0.25 the motion
+    // resolver's verdict is honored, so finalize runs PANORAMA only when the
+    // capture was classified rotation-dominant (or the caller pinned
+    // stitchMode='panorama'); this rescue is the safety net for translation
+    // captures that reached PANORAMA anyway (misclassification / pinned mode —
+    // rotation model: homography + BundleAdjusterRay, which assume pure
+    // rotation about the optical centre).  A translation sweep
     // with parallax either FRAGMENTS the match graph — leaveBiggestComponent
     // drops frames → NeedMoreImages (intentionally NOT in worthRetrying, so it
     // reaches here without a hard early-return) — or fails bundle-adjust
