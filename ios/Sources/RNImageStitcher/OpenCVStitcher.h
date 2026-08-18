@@ -112,10 +112,10 @@ extern NSString *const RNImageStitcherErrorDomain;
 ///     them.  With `useInscribedRectCrop:YES` we find the largest
 ///     axis-aligned rectangle entirely inside the non-zero region
 ///     and crop to that — clean output with no black corners.
-/// `useManualPipeline`: YES → the manual cv::detail pipeline (graphcut +
-///   multiband, with the full memory-guard machinery); NO → stock high-level
-///   cv::Stitcher.  The batch capture passes YES (the default output); the
-///   on-demand high-level tab re-stitches the same keyframes with NO.
+/// `useManualPipeline`: YES → the legacy manual cv::detail pipeline;
+///   NO → stock high-level cv::Stitcher.  Since 2026-06-16 every production
+///   caller passes NO ("high level across the board" — batch finalize,
+///   refine, both platforms); YES is an explicit opt-in nothing ships with.
 + (nullable RNStitchResult *)stitchFramePaths:(NSArray<NSString *> *)framePaths
                                           outputPath:(NSString *)outputPath
                                          jpegQuality:(NSInteger)quality
