@@ -117,6 +117,7 @@ import {
   gateTargetOrientation,
   type PanMode,
 } from './panModeGate';
+import { cameraTransitionAction } from './cameraTransitionGate';
 import { countdownSecondsFrom } from './captureCountdown';
 import { usePanMotion } from './usePanMotion';
 import type { Quad } from './cropGeometry';
@@ -2083,8 +2084,58 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   //      time to fully release the handle).
   //   4. Update settled refs + clear cameraTransitioning together so
   //      the gate opens on the same commit.
+  //
+  // v0.25.1 — LATCH FIX.  The settled/stuck/start decision is now the
+  // pure `cameraTransitionAction` (see cameraTransitionGate.ts); this
+  // effect only executes it.  What it fixes: the old code early-returned
+  // whenever the refs already matched, which a flip-BACK inside the
+  // 250 ms grace turns into a permanent wedge —
+  //   1. Lens 1x -> 0.5x: refs still say 1x, so the gate closes
+  //      (cameraTransitioning = true) and finishTransition is scheduled
+  //      for +250 ms.  The refs are NOT updated until that callback.
+  //   2. Inside that window the lens goes BACK 0.5x -> 1x.  The cleanup
+  //      sets cancelled = true, so the pending finishTransition no-ops
+  //      and never reaches its setCameraTransitioning(false).
+  //   3. The effect re-runs, the (never-updated) refs now MATCH the
+  //      current lens, and the old code early-returned.
+  // `setCameraTransitioning(false)` exists at exactly ONE site — inside
+  // the callback step 2 just cancelled — so nothing recovers the flag.
+  // It latches true forever: cameraShouldUnmount() stays true (the live
+  // camera never remounts; stuck on "Switching camera…") and
+  // holdShouldDeferForCamera() stays true (every hold defers into
+  // pendingPanStart, which handleHoldEnd cancels on release) — i.e. a
+  // permanently dead shutter.
+  //
+  // FOUND BY INSPECTION, NOT FIELD-REPRODUCED: the operator tried to
+  // wedge it by hand and could not — the flip-back must land inside the
+  // ~250 ms window, which is hard to hit deliberately on a lens chip.
+  // The failure sequence is a code-reading result, sound as an argument
+  // but unconfirmed on-device; the tests are what pin it.
+  //
+  // DEPS STAY [isAR, lens] — deliberately, even though the body now
+  // reads `cameraTransitioning`.  The stuck state is only ever REACHED
+  // by an isAR/lens change that flips back to the settled value, so the
+  // effect is guaranteed to re-run at the exact moment recovery is
+  // needed, with the flag still true in that render's closure.  Adding
+  // `cameraTransitioning` would be a REGRESSION, not a safety net: the
+  // start path sets it true, which would re-run this effect, cancel the
+  // settle it just scheduled, re-issue RNSARSession.stop() and restart
+  // the 250 ms grace on every transition.  Clearing the flag re-renders
+  // but does NOT re-run the effect (neither dep changed), so recovery
+  // converges in exactly one extra commit and stops.
   useEffect(() => {
-    if (settledIsARRef.current === isAR && settledLensRef.current === lens) {
+    const action = cameraTransitionAction(
+      settledIsARRef.current,
+      settledLensRef.current,
+      isAR,
+      lens,
+      cameraTransitioning,
+    );
+    if (action !== 'start-transition') {
+      // 'clear-stuck-flag' — a cancelled settle left the gate latched
+      // closed; this is the only exit.  'noop' writes NOTHING: an
+      // unconditional clear here would set state on every settled run.
+      if (action === 'clear-stuck-flag') setCameraTransitioning(false);
       return undefined;
     }
     setCameraTransitioning(true);
