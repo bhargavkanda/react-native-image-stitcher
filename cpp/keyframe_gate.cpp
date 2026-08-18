@@ -290,6 +290,11 @@ struct KeyframeGate::Impl {
     /// keyframe when this much wall-clock time has elapsed since the last
     /// accept, even if novelty < threshold.  0.0 = disabled.  See hpp.
     double maxKeyframeIntervalMs = 0.0;
+    // v0.25 — may a keep-alive (time-budget) accept be the one that
+    // reaches maxCount?  Default true = pre-0.25 behaviour.  See
+    // timeBudgetMayForceAccept() in the header for why this is a
+    // reserve-the-last-slot knob rather than an exemption.
+    bool timeIntervalCanFinalize = true;
 
     // V16 A2 — strategy + flow tunables.  Default is Pose to keep
     // pre-A2 behaviour for any caller that hasn't switched.  The
@@ -304,6 +309,20 @@ struct KeyframeGate::Impl {
     /// callers that don't opt in).  Metres.  See hpp for full
     /// rationale.
     double       flowMaxTranslationM   = 0.0;
+    /// v0.25 — per-frame AR tracking trust; see setPoseTrusted() in the
+    /// hpp.  `true` = back-compat (every pre-0.25 caller behaves as
+    /// before).  `false` suppresses the two POSE-DRIVEN force-accepts
+    /// (translation budget + angular fallback) for that frame.
+    bool         poseTrusted           = true;
+    /// v0.25 — previous EVALUATION's pose + timestamp, used for the
+    /// translation plausibility guard.  Distinct from
+    /// `lastAcceptedPose`: a genuine walk accumulates the translation
+    /// budget across many evaluations, whereas a VIO relocalisation snap
+    /// covers the same distance in ONE evaluation step — so the per-step
+    /// SPEED is what separates them, not the distance since the last
+    /// accept.  Updated on every evaluation that reaches the flow path.
+    std::optional<Pose> lastEvalPose;
+    int64_t      lastEvalMs            = -1;
     /// V16 — percentile used to aggregate per-feature absolute
     /// displacements into the novelty estimate.  0.85 default →
     /// 85th-percentile-of-|Δx|, 85th-percentile-of-|Δy|, divided by
@@ -397,9 +416,13 @@ void KeyframeGate::setFlowMinDistance(double d)         { pImpl_->flowMinDistanc
 // V16 — translation budget.  Clamp to non-negative; 0.0 disables the
 // force-accept entirely (callers can opt-out by passing 0).
 void KeyframeGate::setFlowMaxTranslationM(double m)     { pImpl_->flowMaxTranslationM = (m < 0.0 ? 0.0 : m); }
+// v0.25 — per-frame AR tracking trust.  See the hpp for the rationale
+// (unstable init/relocalisation poses burst-accepting to the cap).
+void KeyframeGate::setPoseTrusted(bool trusted)         { pImpl_->poseTrusted = trusted; }
 // Time-budget force-accept (both strategies).  Clamp to non-negative;
 // 0.0 disables it (callers opt out by passing 0).
 void KeyframeGate::setMaxKeyframeIntervalMs(double ms)  { pImpl_->maxKeyframeIntervalMs = (ms < 0.0 ? 0.0 : ms); }
+void KeyframeGate::setTimeIntervalCanFinalize(bool v) { pImpl_->timeIntervalCanFinalize = v; }
 // V16 — novelty percentile.  Clamp to [0.5, 0.99].  Below 0.5 the
 // estimate becomes too sensitive to the BEST-tracked-features (under-
 // reports user-perceived novelty); above 0.99 it's effectively max-
@@ -417,6 +440,14 @@ void KeyframeGate::reset() {
     pImpl_->lastAcceptedPose.reset();
     pImpl_->lastAcceptSteadyMs = -1;
     pImpl_->currentNowMs       = -1;
+    // v0.25 — drop the per-evaluation motion snapshot AND re-trust the
+    // pose.  `poseTrusted` is a per-frame datum pushed by the caller, so
+    // a capture that ended while tracking was degraded must not leave a
+    // stale `false` behind to suppress the next capture's pose-driven
+    // accepts (reset() runs at every capture start).
+    pImpl_->lastEvalPose.reset();
+    pImpl_->lastEvalMs         = -1;
+    pImpl_->poseTrusted        = true;
     // V16 A2 — drop flow state.  release() returns the cv::Mat to
     // empty (refcount-managed); std::vector::clear() is the
     // canonical empty.  Mandatory: leftover state from a prior
@@ -474,7 +505,9 @@ KeyframeGateDecision KeyframeGate::evaluateAngularFallback(
     // Time-budget force-accept — overrides BOTH the disable-angular hard
     // reject and the novelty reject below.  The angular path keeps no image
     // baseline (only lastAcceptedPose), so this is a complete accept.
-    if (timeBudgetCrossed(s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs)) {
+    if (timeBudgetMayForceAccept(s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs,
+                                s.currentNowMs, s.acceptedCount, s.maxCount,
+                                s.timeIntervalCanFinalize)) {
         s.lastAcceptedPose   = pose;
         s.lastAcceptSteadyMs = s.currentNowMs;
         s.acceptedCount     += 1;
@@ -486,7 +519,16 @@ KeyframeGateDecision KeyframeGate::evaluateAngularFallback(
     // The caller's flow strategy is then the only path that can
     // accept frames.  See `disableAngularFallback` field doc for
     // the rationale (no usable pose data in non-AR captures).
-    if (s.disableAngularFallback) {
+    // v0.25 — pose-trust opt-out.  Identical hard-reject, but driven per
+    // frame by the platform's AR tracking state instead of the capture
+    // source.  An initialising / relocalising ARKit-ARCore pose snaps by
+    // radians between consecutive frames, which reads as "the camera
+    // rotated a lot" and burst-accepts to the keyframe cap on a camera
+    // that never moved.  The image-derived strategy signal (and the
+    // wall-clock time budget above, which is deliberately evaluated
+    // BEFORE both opt-outs) remain the accept paths — the same
+    // configuration non-AR has always run.  See setPoseTrusted().
+    if (s.disableAngularFallback || !s.poseTrusted) {
         return { false,
                  KeyframeGateDecisionReason::RejectOverlapTooHighAngular,
                  -1.0, s.acceptedCount, s.maxCount };
@@ -635,8 +677,9 @@ KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
     if (overlapRatio > 1.0f) overlapRatio = 1.0f;
     double newContentFraction = 1.0 - static_cast<double>(overlapRatio);
 
-    const bool poseTimeCrossed = timeBudgetCrossed(
-        s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs);
+    const bool poseTimeCrossed = timeBudgetMayForceAccept(
+        s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs,
+        s.acceptedCount, s.maxCount, s.timeIntervalCanFinalize);
     if (newContentFraction < s.overlapThreshold && !poseTimeCrossed) {
         return { false, KeyframeGateDecisionReason::RejectOverlapTooHigh,
                  newContentFraction, s.acceptedCount, s.maxCount };
@@ -693,6 +736,20 @@ namespace {
 
 constexpr int   kFlowWorkingMaxSide              = 720;
 constexpr double kFlowMinTrackedFeatureFraction  = 0.30;
+// v0.25 — upper bound on a CREDIBLE camera SPEED (metres/second),
+// measured between CONSECUTIVE EVALUATIONS.
+//
+// Why speed, and why per-evaluation: a real operator walking a shelf
+// accumulates the translation budget (default 0.5 m) gradually across
+// many evaluations, so no single step is large.  A VIO relocalisation
+// snap covers that same 0.5 m in ONE step (~165 ms at the default
+// 5-frame cadence ⇒ ~3 m/s).  Distance-since-last-accept cannot tell
+// those apart — only the step rate can.  3.0 m/s is a brisk run and
+// comfortably above any shelf-scanning pan, so exceeding it means the
+// world transform moved, not the camera.  Such a step must never
+// FORCE-accept a frame the image itself never justified; the frame can
+// still be accepted on its own flow novelty.
+constexpr double kMaxPlausibleSpeedMPS           = 3.0;
 constexpr int   kFlowKLTMaxLevel                 = 3;
 
 // V16 — percentile of absolute values in `values` — O(n) via
@@ -838,6 +895,29 @@ KeyframeGateDecision KeyframeGate::evaluateWithWorkingMat(
         return evaluate(pose, latchedPlane, s.currentNowMs);
     }
 
+    // v0.25 — per-evaluation motion snapshot, taken BEFORE any accept /
+    // reject branch so every path through the flow evaluator keeps the
+    // baseline fresh (a stale baseline would inflate dt, deflate the
+    // computed speed and silently fail the guard OPEN).  `stepSpeedMps`
+    // stays -1 when there is no usable previous sample or no elapsed
+    // time — the guard treats unknown as plausible, matching the
+    // fail-open contract the rest of this gate follows.
+    double stepSpeedMps = -1.0;
+    if (s.lastEvalPose.has_value() && s.lastEvalMs >= 0
+        && s.currentNowMs > s.lastEvalMs) {
+        const Pose& pe = s.lastEvalPose.value();
+        const double sdx = static_cast<double>(pose.tx) - pe.tx;
+        const double sdy = static_cast<double>(pose.ty) - pe.ty;
+        const double sdz = static_cast<double>(pose.tz) - pe.tz;
+        const double stepM =
+            std::sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
+        const double dtSec =
+            static_cast<double>(s.currentNowMs - s.lastEvalMs) / 1000.0;
+        if (dtSec > 0.0) stepSpeedMps = stepM / dtSec;
+    }
+    s.lastEvalPose = pose;
+    s.lastEvalMs   = s.currentNowMs;
+
     // §4 — first-frame accept under Flow.  No prev to track against;
     // we anchor here and detect features so subsequent frames have
     // a target.  Mirrors §3 of the Pose path semantically.
@@ -867,12 +947,41 @@ KeyframeGateDecision KeyframeGate::evaluateWithWorkingMat(
                  -1.0, s.acceptedCount, s.maxCount };
     }
 
+    // v0.25 — angular fallback FROM THE FLOW PATH.  Pre-0.25 the Flow
+    // path returned `evaluateAngularFallback(...)` directly, which is
+    // pose-only and therefore never refreshed `prevFrameGrayWork` /
+    // `prevFeatures`.  Once a capture fell back even once (e.g. the
+    // first frame was too dark for goodFeaturesToTrack), every later
+    // frame re-entered §6's empty-features branch and the capture stayed
+    // angular-gated for its whole life — permanently blind to the image
+    // it was supposed to be gating on.  Refreshing the flow baseline on
+    // an angular ACCEPT lets KLT resume from the newly-accepted frame.
+    // Rejects leave the state untouched (there is no new keyframe to
+    // track against).
+    const auto angularFallbackRefreshingFlow =
+        [&]() -> KeyframeGateDecision {
+            KeyframeGateDecision d = evaluateAngularFallback(s, pose);
+            if (d.accept) {
+                std::vector<cv::Point2f> features;
+                cv::goodFeaturesToTrack(
+                    currGrayWork, features,
+                    s.flowMaxCorners,
+                    s.flowQualityLevel,
+                    s.flowMinDistance);
+                s.prevFrameGrayWork   = currGrayWork;
+                s.prevFeatures        = std::move(features);
+                s.prevFrameOrigWidth  = origWidth;
+                s.prevFrameOrigHeight = origHeight;
+            }
+            return d;
+        };
+
     // §6 — KLT tracking.  Falls back to angular when too few features
     // survive (texture-poor scene, motion exceeds pyramid window).
     if (s.prevFeatures.empty() || s.prevFrameGrayWork.empty()) {
         // Defensive: reset() was called but acceptedCount wasn't 0.
         // Shouldn't happen.  Fall back to angular.
-        return evaluateAngularFallback(s, pose);
+        return angularFallbackRefreshingFlow();
     }
     std::vector<cv::Point2f> trackedFeatures;
     std::vector<uint8_t>     status;
@@ -906,7 +1015,7 @@ KeyframeGateDecision KeyframeGate::evaluateWithWorkingMat(
         s.prevFeatures.empty() ? 0.0
         : static_cast<double>(dxs.size()) / static_cast<double>(s.prevFeatures.size());
     if (trackedFraction < kFlowMinTrackedFeatureFraction) {
-        return evaluateAngularFallback(s, pose);
+        return angularFallbackRefreshingFlow();
     }
 
     // §6b — percentile absolute displacement on each axis.  V16
@@ -969,13 +1078,31 @@ KeyframeGateDecision KeyframeGate::evaluateWithWorkingMat(
                       static_cast<double>(dty) * dty +
                       static_cast<double>(dtz) * dtz);
     }
+    // v0.25 — two guards on the translation force-accept, which accepts
+    // REGARDLESS of image novelty and so must only fire on a translation
+    // the device actually made:
+    //
+    //   (1) pose trust — while AR tracking is initialising/relocalising
+    //       the world transform slides by metres between frames on a
+    //       stationary camera (see setPoseTrusted()).
+    //   (2) plausibility guard — even while nominally tracking, a
+    //       relocalisation snap teleports the origin.  Judged on the
+    //       PER-EVALUATION step SPEED (see kMaxPlausibleSpeedMPS): a
+    //       real walk accrues the budget over many small steps, a snap
+    //       covers it in one.  Unknown speed (first evaluation, no
+    //       elapsed time) counts as plausible — fail-open.
+    const bool translationPlausible =
+        (stepSpeedMps < 0.0) || (stepSpeedMps <= kMaxPlausibleSpeedMPS);
     const bool translationBudgetCrossed =
         (s.flowMaxTranslationM > 0.0) &&
+        s.poseTrusted &&
+        translationPlausible &&
         (translationSinceLastAccept >= s.flowMaxTranslationM);
     // Time-budget force-accept (both strategies; see hpp).  Same shape as
     // the translation budget, but measured on elapsed wall-clock time.
-    const bool flowTimeCrossed = timeBudgetCrossed(
-        s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs);
+    const bool flowTimeCrossed = timeBudgetMayForceAccept(
+        s.maxKeyframeIntervalMs, s.lastAcceptSteadyMs, s.currentNowMs,
+        s.acceptedCount, s.maxCount, s.timeIntervalCanFinalize);
 
     // §7 — accept-or-reject combined check.  Accept if the novelty crossed
     // `overlapThreshold` (the original rule) OR the translation budget OR

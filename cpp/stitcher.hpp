@@ -168,18 +168,45 @@ struct StitchConfig {
     double      seamEstimationResolMP = -1.0;          // < 0 = cv default (0.1 MP)
     double      compositingResolMP   = -1.0;           // < 0 = entry-specific default (high-level: 1.0 MP, manual: 0.6 MP)
     // PANORAMA feature-matcher range (perf-3b).  0 = OFF (default full-
-    // pairwise BestOf2NearestMatcher ladder — byte-identical to before this
-    // knob).  > 0 = enable the RANGE-MATCHER ladder on EVERY attempt: match
-    // only keyframes within |i-j| < width (keyframes are capture-ordered, so
-    // non-adjacent pairs share ~no overlap on a linear pan and their O(N^2)
-    // matching is waste).  The window widens across the retry ladder —
-    // consecutive-only (width 2) on attempts 1-2, then out to THIS value on
-    // the final, minimum-threshold attempt (so 3 => 2/2/3) — bridging a
-    // chain broken at a weak link only as a last resort.  This REPLACES the
-    // full-pairwise matcher on all attempts; distant-overlap (pan-back)
-    // captures are handled at capture time (perf-5), not by a full-matcher
-    // rescue.  PANORAMA only (SCANS uses the affine matcher family).
+    // pairwise BestOf2NearestMatcher — byte-identical to before this
+    // knob).  > 0 = use BestOf2NearestRangeMatcher: match only keyframes
+    // within |i-j| < width (keyframes are capture-ordered, so non-adjacent
+    // pairs share ~no overlap on a linear pan and their O(N^2) matching is
+    // waste).  Since the 2026-08-17 flattened ladder, every high-level rung
+    // runs the CONSECUTIVE-ONLY window (2) — the wide-window escalation was
+    // one of the two levers behind the 30-minute bundle-adjust wedge.  The
+    // widening-to-THIS-value schedule (2/2/width) survives only on the
+    // legacy multi-attempt path (manual opt-in fallback's Scans dispatch).
+    // Distant-overlap (pan-back) captures are handled at capture time
+    // (perf-5), not by a full-matcher rescue.  PANORAMA only (SCANS uses
+    // the affine matcher family).
     int         rangeMatcherWidth    = 0;
+    // INTERNAL — flattened-ladder rung threshold (2026-08-17).  >= 0 puts
+    // stitchFramePathsImpl_ in SINGLE-ATTEMPT mode: exactly one
+    // estimateTransform at this panoConfidenceThresh with attempt-1
+    // semantics (default matcher matchConf, consecutive-only range window,
+    // registration resolution untouched) — no retry loop, no matcher
+    // loosening, no best-attempt re-estimation.  The OUTER 4-rung ladder in
+    // stitchFramePaths owns escalation instead.  < 0 (default) = legacy
+    // multi-attempt ladder, kept for the manual opt-in fallback path and
+    // any direct legacy caller.  Set only by stitchFramePaths' rung
+    // launches; bridges never populate it.
+    double      ladderThreshOverride = -1.0;
+    // INTERNAL — best framesIncluded across the ladder's earlier rungs
+    // (2026-08-17 review).  When >= 0 and the single-rung impl's
+    // estimateTransform retains <= this many frames, the rung returns
+    // AllFramesDroppedByConfidence BEFORE composePanorama: the tie rule
+    // (ladderRungBeatsBest, strict >) could never promote it, so the
+    // compose — the expensive, jetsam-relevant stage — would be pure
+    // waste.  -1 (default) = no best yet / legacy path; bridges never
+    // populate it.
+    int         ladderBestFramesSoFar = -1;
+    // v0.25 — reservation enforcement (review: an admitted launch must not
+    // be able to spend more than the headroom gate reserved for it).  When
+    // > 0, the high-level canvas budget is capped at min(device budget, this)
+    // so the existing downscale/reroute machinery ENFORCES the reservation.
+    // Set only by the wrapper's per-rung/fallback launches; -1 = no override.
+    double      rescueCanvasBudgetMPOverride = -1.0;
     // OpenCV intra-stitch parallelism (perf-3b item 1, ANDROID only).
     //   0 = AUTO (default): cv::setNumThreads(min(4, max(2, cores/2))) —
     //       restores the multi-core warp/blend/feature parallelism the
@@ -234,10 +261,12 @@ struct StitchConfig {
     //     internally but with parameters we can't override (iter cap,
     //     wave-correct kind, confidence threshold).
     //
-    // Android currently leaves this false (the high-level pipeline
-    // works fine on Android's pre-V16 keyframe budgets).  iOS will
-    // flip it to true once the manual port is verified — separate
-    // commit from this V2 introduction.
+    // Since 2026-06-16 EVERY production caller on BOTH platforms leaves
+    // this false — "high level across the board" (batch finalize, refine,
+    // Android and iOS alike).  true selects the legacy manual pipeline and
+    // is an explicit opt-in that nothing ships with.  (The original V2 plan
+    // to default iOS to the manual pipeline was reversed; this comment is
+    // the record of that reversal.)
     bool        useManualPipeline    = false;
 
     // ── 2026-06-16 — memory profiling hooks (DEV deploy gate) ───────────
@@ -326,8 +355,10 @@ using LogFn = std::function<void(int level, const char* tag, const char* msg)>;
 
 
 // Primary entry point.  Loads input JPEGs, configures cv::Stitcher
-// per the config, runs the C+D progressive-confidence retry loop,
-// crops, bake-rotates, writes the output JPEG.
+// per the config, runs the flattened 4-rung mode/threshold ladder
+// (see cpp/stitcher_ladder.hpp; single-attempt rungs, per-rung output
+// isolation, wall-clock budget), crops, bake-rotates, writes the
+// output JPEG.
 //
 // When `config.useManualPipeline` is true the call is routed to
 // `stitchFramePathsManual()` instead — see below for the manual

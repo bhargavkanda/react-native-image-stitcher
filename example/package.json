@@ -15,7 +15,7 @@
     "react": "19.2.3",
     "react-native": "0.84.1",
     "react-native-image-stitcher": "file:..",
-    "react-native-safe-area-context": "^5.5.2",
+    "react-native-safe-area-context": "5.9.0",
     "react-native-sensors": "^7.3.4",
     "react-native-vision-camera": "^4.0.0",
     "react-native-worklets-core": "^1.6.3"

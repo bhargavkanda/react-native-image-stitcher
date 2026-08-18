@@ -691,10 +691,15 @@ export interface IncrementalFinalizeResult {
    *                            > 0 means the stitcher silently
    *                            dropped boundary frames; surface a
    *                            "Stitched N of M frames" toast.
-   *   finalConfidenceThresh:  panoConfidenceThresh value used on
-   *                            the successful attempt (1.0 / 0.5 /
-   *                            0.3 — see image_stitcher_jni.cpp
-   *                            retry loop).  Useful for debugging
+   *   finalConfidenceThresh:  panoConfidenceThresh of the WINNING
+   *                            rung (2026-08-17 flattened ladder:
+   *                            pan 1.0/0.3, scans 1.0/0.5; the
+   *                            legacy manual opt-in path still
+   *                            reports 1.0/0.5/0.3).  It no longer
+   *                            encodes an attempt count or
+   *                            escalation — a 1.0 can be a rung-3
+   *                            opposite-mode win after earlier
+   *                            rungs failed.  Useful for debugging
    *                            scenes that consistently need a
    *                            lower threshold. */
   framesRequested?: number;
@@ -837,12 +842,13 @@ export interface IncrementalRefineOptions {
   /** JPEG quality 1..100, default 90. */
   jpegQuality?: number;
   /**
-   * 2026-06-15 (iOS) — which stitch pipeline to run.  `true` = the manual
-   * `cv::detail` pipeline (the default batch-capture output); `false` = stock
-   * high-level `cv::Stitcher`.  Default `false` on the refine path.  This is
-   * how the on-demand "high-level" preview tab re-stitches the captured
-   * keyframes via cv::Stitcher without re-running the whole capture.  iOS only
-   * (Android refine is always cv::Stitcher).
+   * Which stitch pipeline to run.  `true` = the legacy manual `cv::detail`
+   * pipeline; `false` = stock high-level `cv::Stitcher`.  Since 2026-06-16
+   * the high-level pipeline is used ACROSS THE BOARD — batch finalize and
+   * refine, both platforms, all pass `false` — so `true` is an explicit
+   * opt-in that no production path uses.  (The pre-2026-06-16 iOS batch
+   * finalize defaulted to the manual pipeline; that is history, not the
+   * current default.)  Default `false`.
    */
   useManualPipeline?: boolean;
   /**
@@ -1029,12 +1035,12 @@ interface NativeIncrementalModule {
    *   - Each path must exist on disk (the native side will read it
    *     via cv::imread); rejected otherwise.
    *
-   * Per-platform routing:
+   * Per-platform routing (both end in the same shared C++, and since
+   * 2026-06-16 both run the HIGH-LEVEL cv::Stitcher pipeline —
+   * useManualPipeline=false everywhere in production):
    *   - iOS:     `OpenCVStitcher.stitchFramePaths(...)`
-   *              (manual cv::detail::* pipeline, useManualPipeline=true).
    *   - Android: `BatchStitcher.stitchSync(...)` →
-   *              `image_stitcher_jni.cpp` (high-level
-   *              cv::Stitcher::create() pipeline).
+   *              `image_stitcher_jni.cpp`
    *
    * Reuses the same C++ stitcher both platforms use for the
    * batch-keyframe `finalize()` path — so refinement quality on

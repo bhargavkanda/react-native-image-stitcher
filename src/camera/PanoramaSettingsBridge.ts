@@ -114,6 +114,10 @@ export function panoramaSettingsToNativeConfig(
     // Time-budget force-accept (both strategies).  Native reads
     // configOverrides["maxKeyframeIntervalMs"] → setMaxKeyframeIntervalMs.
     maxKeyframeIntervalMs: s.frameSelection.maxKeyframeIntervalMs,
+    // v0.25 — gate's setTimeIntervalCanFinalize.  Always serialised so a
+    // host flipping it to false takes effect without any native default
+    // having to agree with the JS one.
+    keyframeTimeIntervalCanFinalize: s.frameSelection.timeIntervalCanFinalize,
     // v0.21 — pick-sharpest-in-window anti-blur selection.  The field
     // is optional on the type (pre-v0.21 settings literals must keep
     // compiling) but ALWAYS emitted on the wire with the JS default

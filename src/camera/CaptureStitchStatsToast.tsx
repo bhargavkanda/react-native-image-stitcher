@@ -165,9 +165,14 @@ export function useStitchStatsToast(): UseStitchStatsToastReturn {
       const included = result.framesIncluded;
       const thresh = result.finalConfidenceThresh;
       const mode = result.stitchModeResolved;
-      // The retry-attempt count is derived deterministically from
-      // the threshold used on the successful attempt (1.0→1, 0.5→2,
-      // 0.3→3) per cpp/stitcher.cpp's retry loop.
+      // LEGACY-ONLY derivation (debug toast): the threshold→attempts
+      // mapping (1.0→1, 0.5→2, 0.3→3) matched the old multi-attempt
+      // retry loop.  Since the 2026-08-17 flattened ladder,
+      // finalConfidenceThresh reports the WINNING RUNG's threshold
+      // (pan 1.0/0.3, scans 1.0/0.5) and no longer encodes attempt
+      // count — e.g. a scans@1.00 rung-3 win displays "1 attempt".
+      // Kept as a rough hint; a rung-index field from native is the
+      // proper fix.
       const attempts =
         typeof thresh === 'number'
           ? thresh >= 0.99 ? 1

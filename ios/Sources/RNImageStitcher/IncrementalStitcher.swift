@@ -1164,6 +1164,17 @@ public final class IncrementalStitcher: NSObject {
         } else {
             self.keyframeGate.maxKeyframeIntervalMs = 1500.0
         }
+        // v0.25 — may a keep-alive accept be the one that REACHES the cap
+        // and so auto-finalize the capture?  Defaults to true (pre-0.25
+        // behaviour) when the key is absent.  See
+        // `timeBudgetMayForceAccept` in cpp/keyframe_gate.hpp.
+        if let v = configOverrides["keyframeTimeIntervalCanFinalize"] as? Bool {
+            self.keyframeGate.timeIntervalCanFinalize = v
+        } else if let v = configOverrides["keyframeTimeIntervalCanFinalize"] as? NSNumber {
+            self.keyframeGate.timeIntervalCanFinalize = v.boolValue
+        } else {
+            self.keyframeGate.timeIntervalCanFinalize = true
+        }
         // V16 — novelty aggregation percentile.  Clamp at start to
         // [0.5, 0.99]; the bridge re-clamps but matching it here
         // means our state stays in-range for logging.  Default 0.85
@@ -1748,14 +1759,21 @@ public final class IncrementalStitcher: NSObject {
                             seamFinderType: payload.batchSeamFinderType,
                             captureOrientation: payload.captureOrientation,
                             useInscribedRectCrop: payload.batchEnableInscribedRectCrop,
-                            // 2026-06-16 — HIGH-LEVEL ACROSS THE BOARD (mirrors
-                            // Android): always cv::Stitcher PANORAMA with the
-                            // tree-chosen warper (payload.batchWarperType is now
-                            // highLevelWarper).  The manual path's OOM hardening
-                            // was ported to high-level (catch ladder + two-phase
-                            // canvas guard + RAM-aware compositingResol + spherical
-                            // rescue), so this is now memory-safe.
-                            stitchMode: "panorama",
+                            // v0.25 — HONOR THE RESOLVED MODE (jetsam RCA
+                            // durable fix): the auto-resolver classifies
+                            // translation-dominant captures as "scans" from
+                            // real pose/IMU data, and this dispatch used to
+                            // compute that verdict and then hardcode
+                            // "panorama" anyway — sending shelf translations
+                            // through the rotation model, whose failure walked
+                            // the multi-stitch rescue ladder (the memory-peak
+                            // path).  SCANS-classified captures now run the
+                            // affine model FIRST; the ladder (incl. the
+                            // reverse PANORAMA rescue) remains for
+                            // misclassified captures.  Hosts can force the old
+                            // behaviour with stitcher.stitchMode='panorama'
+                            // (this only changes what 'auto' does).
+                            stitchMode: payload.batchStitchModeResolved,
                             useManualPipeline: false
                         )
                         // V16 fix-attempt 9 (verified on device,
@@ -1805,11 +1823,12 @@ public final class IncrementalStitcher: NSObject {
                         // Keep saved keyframes on disk for post-hoc
                         // re-processing (Ram's request).  Cleanup is
                         // a follow-up debug-menu task.
-                        // 2026-05-16 (Issue 5) — surface C+D
-                        // progressive-confidence retry telemetry to JS
-                        // so the host can render a debug toast.  -1
-                        // sentinels = "no retry data" (early-return
-                        // success paths bypass the retry loop).
+                        // 2026-05-16 (Issue 5) — surface stitch-retry
+                        // telemetry (the flattened ladder's winning
+                        // rung since 2026-08-17) to JS so the host can
+                        // render a debug toast.  -1 sentinels = "no
+                        // retry data" (early-return success paths
+                        // bypass the ladder).
                         var batchDict: [String: Any] = [
                             "panoramaPath": r.outputPath,
                             "width": Int(r.width),
@@ -2584,6 +2603,23 @@ public final class IncrementalStitcher: NSObject {
         // keyframes, which would defeat the gate entirely.
         let throttledThisFrame = gateActive && !cadenceFires
         if shouldEvaluateGate {
+            // v0.25 — pose trust.  The gate's two POSE-DRIVEN
+            // force-accepts (translation budget + angular fallback)
+            // accept a frame regardless of what the IMAGE shows, so they
+            // are only sound while the pose they difference is sound.
+            // ARKit reports `.limited` while initialising and during
+            // relocalisation, when the world transform slides/snaps by
+            // metres between consecutive frames — which those two paths
+            // read as real camera motion and burst-accept to the
+            // keyframe cap, auto-finalising the operator's hold in as
+            // little as ~415 ms (v0.24.x field RCA).  Every AR capture
+            // starts next to a session (re)start — finalize stops and
+            // restarts the session — so this is the NORM at hold start,
+            // not an edge case.  Non-AR poses are gyro-synthesised and
+            // carry `.tracking` verbatim from the JS driver, so this is
+            // a no-op there (they already opt out via
+            // disableAngularFallback).
+            self.keyframeGate.poseTrusted = (pose.trackingState == .tracking)
             let plane = RNSARSession.shared.latchedPlaneTransform()
             // V16 A2 — call the pixel-buffer-aware overload so Flow
             // strategy gets the image content.  Pose strategy is

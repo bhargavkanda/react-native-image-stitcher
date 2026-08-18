@@ -82,6 +82,8 @@ export interface GuidanceCopy {
   warnLateralDriftFinalize: string;
   /** HIGH_PAN_SPEED warning. */
   warnHighPanSpeed: string;
+  /** v0.25 — CAPTURE_TOO_SHORT; `{included}` is the keyframe count. */
+  warnCaptureTooShort: string;
 }
 
 export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
@@ -108,6 +110,7 @@ export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
   warnLowFrameUtilization: DEFAULT_CAPTURE_WARNING_COPY.lowFrameUtilization,
   warnLateralDriftFinalize: DEFAULT_CAPTURE_WARNING_COPY.lateralDriftFinalize,
   warnHighPanSpeed: DEFAULT_CAPTURE_WARNING_COPY.highPanSpeed,
+  warnCaptureTooShort: DEFAULT_CAPTURE_WARNING_COPY.captureTooShort,
 };
 
 /**
@@ -120,6 +123,7 @@ export function captureWarningCopyFrom(g: GuidanceCopy): CaptureWarningCopy {
     lowFrameUtilization: g.warnLowFrameUtilization,
     lateralDriftFinalize: g.warnLateralDriftFinalize,
     highPanSpeed: g.warnHighPanSpeed,
+    captureTooShort: g.warnCaptureTooShort,
   };
 }
 

@@ -99,8 +99,8 @@ import type { PanoramaCaptureResult } from 'react-native-image-stitcher';
   candidate frames the engine took in, how many survived the confidence
   filter, and how many it dropped. A large gap usually pairs with a
   [`LOW_FRAME_UTILIZATION`](#capturewarning) warning.
-- `finalConfidenceThresh` — the confidence threshold the C+D
-  progressive-retry loop settled on.
+- `finalConfidenceThresh` — the confidence threshold the winning rung
+  of the flat retry ladder (v0.25) ran at.
 - `durationMs` — wall-clock time from start to finalize.
 - `stitchModeResolved` — present once `defaultStitchMode` was `'auto'`
   and the engine picked `'panorama'` vs `'scans'` at finalize.

@@ -356,8 +356,9 @@ export class CameraError extends Error {
 
 /**
  * Frames-dropped info delivered via `onFramesDropped`.  Fires once
- * per panorama capture if the C+D progressive-confidence retry loop
- * inside cv::Stitcher dropped one or more input frames.
+ * per panorama capture if the native stitch retry (the flattened
+ * 4-rung mode/threshold ladder since 2026-08-17) promoted a result
+ * that dropped one or more input frames.
  */
 export interface FramesDroppedInfo {
   requested: number;
@@ -1091,6 +1092,45 @@ export interface CameraProps {
   lateralBudgetCm?: number;
 
   /**
+   * v0.25 — whether a mid-capture device rotation auto-ABANDONS the
+   * in-flight panorama (the OrientationDriftModal explains it to the
+   * user).  Default `true` (the behaviour since v0.12).  Set `false`
+   * to disable the guard entirely: the capture then continues across a
+   * rotation and the output is best-effort (cross-mode captures can
+   * stitch malformed — see `incremental.ts` stitch-mode notes).
+   *
+   * The detector itself is sensor-trust hardened as of v0.25: it never
+   * snapshots or compares orientation until the accelerometer has
+   * delivered a real sample, so hosts with broken/laggy
+   * react-native-sensors delivery no longer see phantom "rotation"
+   * abandons (field RCA: landscape captures auto-abandoning after one
+   * frame while portrait worked).
+   */
+  orientationDriftAbandon?: boolean;
+
+  /**
+   * v0.25 — the keyframe count below which a finished capture is flagged
+   * with the `CAPTURE_TOO_SHORT` capture WARNING.  **Default `1`, which
+   * never warns** and reproduces the previous behaviour exactly.
+   *
+   * Set `2` to be told when a capture produced a single frame.  The
+   * capture still SUCCEEDS and still returns that frame — a one-shot
+   * capture is a legitimate result — but it is no longer silent.  That
+   * silence is why the AR self-ending-hold failures were reported as
+   * stitching bugs: the SDK returned the lone frame as an ordinary
+   * panorama with `singleKeyframe: true` that nothing read.
+   *
+   * Evaluated from the FINALIZE RESULT, not from the live accepted count.
+   * The live count omits any keyframe whose anti-blur sharpness window is
+   * still open at release — the trailing keyframe of nearly every capture
+   * — and it means different things on iOS and Android, so judging
+   * "too short" from it would misfire constantly.  An earlier draft of
+   * this feature did exactly that and would have destroyed valid
+   * captures; adversarial review caught it.
+   */
+  minPanoramaKeyframes?: number;
+
+  /**
    * Show the draggable-quad crop editor after a panorama finalizes, BEFORE
    * emitting it via `onCapture`.  Default `false`.  When `true`, the user
    * drags 4 corners over the stitched result; confirming crops in place
@@ -1577,6 +1617,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     maxPanDurationMs = 0,
     panTooFastThreshold,
     lateralBudgetCm = 4,
+    orientationDriftAbandon = true,
+    minPanoramaKeyframes = 1,
     rectCrop = false,
     showPreview = false,
     guidanceCopy,
@@ -2130,6 +2172,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   }, [statusPhase]);
 
   useEffect(() => {
+    // v0.25 — host opt-out (`orientationDriftAbandon={false}`): skip the
+    // auto-abandon entirely; the capture continues best-effort across a
+    // rotation.  The detector itself is separately sensor-trust hardened
+    // (no snapshot/compare before the first real accelerometer sample).
+    if (!orientationDriftAbandon) return;
     if (!drift.drifted || statusPhase !== 'recording') return;
     // Auto-abandon the in-flight capture.  Order matches handleHoldEnd's
     // "stitch" path but skips finalize:
@@ -2166,7 +2213,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // Deps: re-run whenever drift latches OR recording state changes.
     // Other deps are stable refs / setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drift.drifted, statusPhase]);
+  }, [drift.drifted, statusPhase, orientationDriftAbandon]);
 
   // v0.8.0 Phase 5 / v0.11.0 — frameProcessor prop semantics:
   //
@@ -2610,7 +2657,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // frame source and finalize with "0 keyframes saved".  DEFER like the
     // rotate gate: `pendingPanStart` resumes the start the moment the
     // probe settles (the resume effect below re-evaluates both gates).
-    if (arSupportPending) {
+    // v0.25 — ALSO defer while a camera transition is in flight.  The
+    // render gate already unmounts the camera for `inFlightTransition`;
+    // starting a capture here anyway is what produced the resumed-into-
+    // a-dead-window failure described on `holdShouldDeferForCamera`.
+    if (holdShouldDeferForCamera(inFlightTransition, arSupportPending)) {
       setPendingPanStart(true);
       return;
     }
@@ -2622,6 +2673,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     onError,
     panMode,
     arSupportPending,
+    // v0.25 — read by holdShouldDeferForCamera above; without it this
+    // callback closes over a stale `false` and the new gate never fires.
+    inFlightTransition,
     deviceOrientation,
     startCapture,
   ]);
@@ -2636,12 +2690,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       pendingPanStart
       && !shouldGateForPanMode(panMode, deviceOrientation)
       // v0.24.3 — also the "camera still initialising" defer (above).
-      && !arSupportPending
+      // v0.25 — and the in-flight transition, without which this effect
+      // resumed the capture at the exact moment the camera unmounted.
+      && !holdShouldDeferForCamera(inFlightTransition, arSupportPending)
     ) {
       setPendingPanStart(false);
       startCaptureRef.current?.();
     }
-  }, [pendingPanStart, deviceOrientation, panMode, arSupportPending]);
+  }, [
+    pendingPanStart,
+    deviceOrientation,
+    panMode,
+    arSupportPending,
+    inFlightTransition,
+  ]);
 
   const handleHoldEnd = useCallback(async () => {
     // Item 5 exit path #1 — always kill the auto-finalize timer on
@@ -2727,6 +2789,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       const warnings = buildCaptureWarnings({
         framesRequested: result.framesRequested,
         framesIncluded: result.framesIncluded,
+        // v0.25 — judged from the FINALIZE result, not the live accepted
+        // count: the live count omits any keyframe whose sharpness window
+        // is still open at release (the trailing keyframe of nearly every
+        // capture) and differs between iOS and Android.
+        minPanoramaKeyframes,
         lateralFinalize: wasLateralFinalize,
         highPanSpeed: wasFastPan,
         copy: captureWarningCopyFrom(guidanceCopyResolved),
@@ -2896,16 +2963,18 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       !panMotion.lateralExceeded
       || statusPhase !== 'recording'
       || lateralBudgetCm <= 0
-      // v0.24.6 — orientation-drift auto-cancel (the effect above) wins.  A
-      // physical ~90° turn trips BOTH latches from the same accelerometer
-      // excursion; if this lateral FINALIZE also fired, it would drive a
-      // spurious statusPhase recording→stitching→idle within ~100 ms, which
-      // unmounts+remounts the live camera session (cameraShouldUnmount is true
-      // for 'stitching') faster than the native camera can hand off — wedging
-      // the pipeline into an ANR.  A turn is a cross-orientation capture the
-      // engine calls malformed, so the correct outcome is to ABANDON (the drift
-      // effect's cancel), never finalize.  See the mid-capture-freeze RCA.
-      || drift.drifted
+      // v0.24.6 port — orientation-drift auto-cancel wins.  A physical ~90°
+      // turn trips BOTH latches from the same accelerometer excursion; if this
+      // lateral FINALIZE also fired, the racing statusPhase
+      // recording→stitching→idle churn unmounts+remounts the live camera
+      // (cameraShouldUnmount is true for 'stitching') faster than the native
+      // camera can hand off — wedging the pipeline into an ANR (the field
+      // "freezes, nothing works" bug).  Deferred ONLY when the drift-abandon
+      // effect will actually run (host hasn't opted out via
+      // orientationDriftAbandon={false}); with the opt-out active the drift
+      // latch must not suppress the lateral stop, or a turned capture would
+      // have no stop at all.  See the mid-capture-freeze RCA.
+      || (orientationDriftAbandon && drift.drifted)
     ) {
       return;
     }
@@ -2944,7 +3013,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // Deps mirror the drift effect: re-run when the latch trips or the
     // recording state changes.  Other reads are stable setters / refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panMotion.lateralExceeded, statusPhase, lateralBudgetCm, drift.drifted]);
+  }, [panMotion.lateralExceeded, statusPhase, lateralBudgetCm,
+      drift.drifted, orientationDriftAbandon]);
 
   // ── Item 7 — auto-finalize when the configured keyframe count is hit ─
   // The engine caps accepted keyframes at `keyframeMaxCount`; once it
@@ -3532,6 +3602,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           spec on cross-mode capture being best-effort, not supported. */}
       <OrientationDriftModal
         visible={drift.drifted && !driftModalDismissed}
+        contentRotationDeg={contentRotationDegree}
         captureOrientation={drift.captureOrientation}
         currentOrientation={drift.currentOrientation}
         onAcknowledge={() => setDriftModalDismissed(true)}
@@ -3543,6 +3614,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           fresh. */}
       <LateralMotionModal
         visible={lateralStopVisible}
+        contentRotationDeg={contentRotationDegree}
         title={
           lateralWrongDirection
             ? guidanceCopyResolved.lateralWrongDirectionTitle
@@ -3785,6 +3857,37 @@ function cameraShouldUnmount(
 
 /** @internal test-only — see `cameraShouldUnmount`. */
 export const _cameraShouldUnmountForTests = cameraShouldUnmount;
+
+
+/**
+ * v0.25 — must a hold DEFER because there is no camera to capture from?
+ *
+ * This is deliberately the first two terms of `cameraShouldUnmount`
+ * above, and that is the whole point: the render gate and the hold gate
+ * were reading different conditions, so a hold could start a capture
+ * against a camera the renderer had just deliberately unmounted.
+ *
+ * The hole this closes: `arSupportPending` clears in the SAME render
+ * that flips `isAR` false→true, which makes `inFlightTransition` true,
+ * unmounts the camera and (on iOS) stops the AR session with a 250 ms
+ * grace before the AR view may mount again.  The v0.24.3 defer resumed
+ * on `!arSupportPending` alone — i.e. at exactly the moment the
+ * transition BEGAN — so the resumed capture ran against no frame source
+ * and finalized with "0 keyframes saved".
+ *
+ * `statusPhase === 'stitching'` is intentionally NOT included:
+ * `handleHoldStart` already rejects that phase outright rather than
+ * queueing a deferred start.
+ */
+function holdShouldDeferForCamera(
+  inFlightTransition: boolean,
+  arSupportPending: boolean,
+): boolean {
+  return inFlightTransition || arSupportPending;
+}
+
+/** @internal test-only — see `holdShouldDeferForCamera`. */
+export const _holdShouldDeferForCameraForTests = holdShouldDeferForCamera;
 
 
 /**

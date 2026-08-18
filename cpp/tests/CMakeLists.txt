@@ -94,6 +94,12 @@ add_executable(stitcher_cpp_tests
   ${CMAKE_CURRENT_SOURCE_DIR}/camera_frame_data_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/keyframe_timebudget_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/warp_guard_test.cpp
+  # stitcher_ladder_test.cpp — the flattened 4-rung retry plan + best-rung
+  # preference (cpp/stitcher_ladder.hpp) and the collapsed-placement
+  # validator predicate (warp_guard.hpp).  All OpenCV-free by design so the
+  # 2026-08-17 ladder invariants (rung order, no scans@0.3, tie-keeps-
+  # earlier) are host-testable.
+  ${CMAKE_CURRENT_SOURCE_DIR}/stitcher_ladder_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/crop_quad_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sharpness_window_test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../sharpness_window.cpp

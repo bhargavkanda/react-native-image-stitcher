@@ -522,6 +522,46 @@ class IncrementalStitcher(
             // AR-mode behaviour (the production <Camera> always sets
             // 'arSession' explicitly for AR captures anyway).
             val frameSourceMode = options.getString("frameSourceMode") ?: "arSession"
+            // v0.25 — DIAGNOSTIC ONLY on Android.  Deliberately NOT a
+            // rejection, and deliberately NOT iOS parity.
+            //
+            // iOS refuses to start an AR capture with no live session
+            // (IncrementalStitcherBridge.swift rejects
+            // "ar-session-not-running"), and an earlier draft of this
+            // release copied that here for parity.  Adversarial review
+            // showed the platforms' session LIFETIMES are not equivalent,
+            // so the same guard does not mean the same thing:
+            //
+            //   On Android the AR view owns the session.  Every capture
+            //   ends with statusPhase 'stitching', which unmounts
+            //   <ARCameraView>; onDetachedFromWindow calls stopForView(),
+            //   which nulls sessionRef.  On remount the session is
+            //   RECONSTRUCTED — several hundred ms on a mid-tier device,
+            //   and legitimately deferred entirely when currentActivity
+            //   is null.  So "no live session" is a NORMAL transient
+            //   after every single capture here.
+            //
+            // Rejecting would have turned that ordinary timing into a
+            // hard user-facing failure for an operator who holds the
+            // shutter straight after a stitch — a new regression, and a
+            // worse one than the silence it was meant to fix.  The
+            // dead-session capture is already surfaced: it accepts no
+            // frames, so it hits the 0-keyframe error or the v0.25
+            // CAPTURE_TOO_SHORT warning.
+            //
+            // Closing this properly needs the JS hold gate to WAIT for
+            // session readiness (poll RNSARSession.getState()) rather
+            // than native refusing after the fact — that is device-
+            // validation work, deliberately not shipped unvalidated.
+            if (frameSourceMode == "arSession" && RNSARSession.instance?.hasLiveSession() != true) {
+                android.util.Log.w(
+                    "IncrementalStitcher",
+                    "start(): AR capture starting with no live ARCore session "
+                        + "(view remounting after a stitch, or activity not ready). "
+                        + "Frames will be ingested once the session comes up; if "
+                        + "none arrive this capture will report too few keyframes.",
+                )
+            }
             frameProcessorIngestEnabled.set(frameSourceMode == "frameProcessor")
             val rotation = options.getIntOrDefault("frameRotationDegrees", 90)
             val composeW = options.getIntOrDefault("composeWidth",  960)
@@ -633,6 +673,13 @@ class IncrementalStitcher(
             val maxKfIntervalMs = configOverrides
                 ?.getDoubleOrDefault("maxKeyframeIntervalMs", 1500.0) ?: 1500.0
             keyframeGate.maxKeyframeIntervalMs = maxKfIntervalMs.coerceAtLeast(0.0)
+            // v0.25 — may a keep-alive accept be the one that REACHES the
+            // cap and so auto-finalize the capture?  Defaults to true
+            // (pre-0.25 behaviour) when the key is absent.  iOS parity:
+            // IncrementalStitcher.swift keyframeTimeIntervalCanFinalize.
+            keyframeGate.timeIntervalCanFinalize = configOverrides
+                ?.takeIf { it.hasKey("keyframeTimeIntervalCanFinalize") }
+                ?.getBoolean("keyframeTimeIntervalCanFinalize") ?: true
             // 2026-05-22 (audit F5) — flow-strategy Shi-Tomasi
             // tunables.  Pre-audit, Android had no JNI for these
             // (iOS-only via KeyframeGateBridge); JS Settings sliders
@@ -1233,7 +1280,13 @@ class IncrementalStitcher(
                         captureOrientationSnapshot,
                         useInscribedRectCropSnapshot,
                         compositingResolMP = adaptiveComposeMP,  // perf-4a (1.0 unless adapted)
-                        stitchMode = "panorama",         // always high-level PANORAMA
+                        // v0.25 — honor the resolved mode (jetsam RCA durable
+                        // fix): translation-classified captures run the affine
+                        // SCANS model FIRST instead of failing PANORAMA and
+                        // walking the rescue ladder.  stitcher.stitchMode=
+                        // 'panorama' forces the old behaviour (this only
+                        // changes what 'auto' resolves to).  Mirrors iOS.
+                        stitchMode = stitchModeResolved,
                         useManualPipeline = false,       // high level across the board
                         rangeMatcherWidth = stitchRangeMatcherWidth,  // perf-3b (0 = off)
                         numThreads = stitchNumThreads,   // perf-3b item 1 (0 = auto-multi)
@@ -1251,6 +1304,16 @@ class IncrementalStitcher(
                     // safe 1.0 default forever. Intended: its cost is scene-driven
                     // registration retries, which a compositing cut does not
                     // reduce — the fallback is conservative, never a wrong result.
+                    // KNOWN LIMITATION (2026-08-17 flattened ladder): dims[4] now
+                    // reports the WINNING RUNG's threshold and no longer encodes
+                    // attempt count — a capture that failed its pan rungs and won
+                    // at scans@1.00 reports 1000 here even though stitchWallMs
+                    // covers the whole multi-rung ladder, so such runs are
+                    // over-counted as "default speed" samples. A ladder-aware
+                    // escalation signal (rung index / mode-switch flag surfaced
+                    // from native) is the follow-up; until then the samples skew
+                    // slower-than-device only on misclassified captures, and the
+                    // PROBE_EVERY/0.8x hysteresis keeps the cut recoverable.
                     if (adaptiveStitchMode == "measured" && adaptiveComposeMP >= 1.0) {
                         val threshMilli = if (dims.size > 4) dims[4] else 1000
                         val escalated = threshMilli < 1000
@@ -1669,6 +1732,18 @@ class IncrementalStitcher(
             // this fell back to Pose strategy because the JS-bridge
             // path supplied no pixel data — same bug as the iOS
             // non-AR path; both fixed in v0.3).
+            // v0.25 — pose trust (iOS parity: IncrementalStitcher.swift's
+            // `keyframeGate.poseTrusted` assignment).  ARCore reports
+            // non-TRACKING while initialising and during relocalisation,
+            // when the world transform slides/snaps by metres between
+            // consecutive frames.  The gate's two POSE-DRIVEN
+            // force-accepts (translation budget + angular fallback)
+            // accept regardless of image content, so on those frames they
+            // fire on a camera that never moved and burst-accept to the
+            // keyframe cap — auto-finalising the operator's hold.
+            // `trackingPoor` is already threaded in from the AR camera
+            // view, so this costs nothing extra.
+            keyframeGate.poseTrusted = !trackingPoor
             val decision = keyframeGate.evaluateWithFrame(
                 pose, planeMatrix,
                 grayData, grayWidth, grayHeight, grayStride,

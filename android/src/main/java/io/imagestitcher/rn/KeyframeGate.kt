@@ -123,6 +123,48 @@ internal class KeyframeGate : AutoCloseable {
             nativeSetDisableAngularFallback(nativeHandle, value)
         }
 
+    /// v0.25 — per-frame AR tracking trust; see C++ `setPoseTrusted`.
+    /// `false` suppresses the gate's two POSE-DRIVEN force-accepts (the
+    /// translation budget and the angular fallback) so an initialising /
+    /// relocalising ARCore pose can't burst-accept a stationary capture
+    /// to the keyframe cap and auto-finalise the operator's hold.  Set
+    /// from `Frame.camera.trackingState == TRACKING` on every consumed
+    /// AR frame.  Default `true` (back-compat).  Write-only.
+    ///
+    /// DELIBERATELY UNGUARDED — writes through on every assignment, like
+    /// `disableAngularFallback` above.  An earlier v0.25 draft skipped
+    /// redundant JNI hops with `if (field == value) return`, which
+    /// silently broke the fix from the SECOND capture onward:
+    /// `KeyframeGate::reset()` sets the C++ flag back to `true` at
+    /// capture start, but this Kotlin mirror belongs to a
+    /// process-lifetime gate and kept whatever the previous capture left.
+    /// If capture A ended while tracking was degraded the mirror held
+    /// `false`, so capture B's per-frame `= false` matched `field` and
+    /// never reached C++ — leaving pose-driven accepts live through
+    /// exactly the initialising window this exists to protect.
+    ///
+    /// A boolean across JNI is trivial next to the evaluate() that
+    /// follows it, so there is nothing to optimise here.
+    var poseTrusted: Boolean = true
+        set(value) {
+            field = value
+            nativeSetPoseTrusted(nativeHandle, value)
+        }
+
+    /// v0.25 — may a keep-alive (time-budget) accept be the accept that
+    /// REACHES `maxCount`, and so end the capture via the host's
+    /// count-based auto-finalize?  Default `true` = pre-0.25 behaviour.
+    ///
+    /// `false` stops a stationary hold self-finalizing on the clock: the
+    /// gate stalls at maxCount - 1 instead of tripping the auto-stop.
+    /// Set once per capture from settings, not per frame.
+    var timeIntervalCanFinalize: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            nativeSetTimeIntervalCanFinalize(nativeHandle, value)
+        }
+
     /// 2026-05-14 — Flow strategy: novelty aggregation percentile
     /// (same knob iOS exposes via setFlowNoveltyPercentile).  C++
     /// clamps to [0.5, 0.99].  Stored locally for diagnostic
@@ -326,6 +368,8 @@ internal class KeyframeGate : AutoCloseable {
     // setFlowNoveltyPercentile / setFlowMaxTranslationM iOS-parity
     // setters (Android JNI was a P3-followup until 2026-05-14).
     private external fun nativeSetDisableAngularFallback(handle: Long, disabled: Boolean)
+    private external fun nativeSetPoseTrusted(handle: Long, trusted: Boolean)
+    private external fun nativeSetTimeIntervalCanFinalize(handle: Long, canFinalize: Boolean)
     private external fun nativeSetFlowNoveltyPercentile(handle: Long, percentile: Double)
     private external fun nativeSetFlowMaxTranslationM(handle: Long, metres: Double)
     // Wall-clock keyframe-interval budget (ms).  iOS parity:

@@ -173,18 +173,19 @@ export interface BatchStitcherSettings {
 
   /**
    * perf-3b — PANORAMA feature-matcher range.  `0`/undefined (default)
-   * = OFF: the stock full-pairwise `BestOf2NearestMatcher` ladder
+   * = OFF: the stock full-pairwise `BestOf2NearestMatcher`
    * (byte-identical to before this knob existed).  `> 0` enables the
-   * `BestOf2NearestRangeMatcher` ladder, which matches only keyframes
+   * `BestOf2NearestRangeMatcher`, which matches only keyframes
    * within `|i − j| < width` — keyframes are strictly capture-ordered,
    * so on a linear shelf pan the skipped non-adjacent pairs share ~no
-   * overlap and their O(N²) matching is wasted work.  The window widens
-   * across the finalize retry ladder: **consecutive-only (width 2) on
-   * attempts 1–2, then out to THIS value on the final, lowest-threshold
-   * attempt** — so `3` gives a 2/2/3 schedule, bridging a chain broken
-   * at a weak consecutive link only as a last resort.  This replaces the
-   * full-pairwise matcher on every attempt; pan-back captures (distant
-   * overlap) are handled at capture time (perf-5), not by a rescue here.
+   * overlap and their O(N²) matching is wasted work.  Since the
+   * 2026-08-17 flattened stitch ladder, every high-level rung runs the
+   * **consecutive-only window (2)** — the wider-window escalation was
+   * one of the levers behind a 30-minute bundle-adjust wedge and was
+   * removed; the widening 2/2/width schedule survives only on the
+   * legacy manual-opt-in fallback path.  This replaces the
+   * full-pairwise matcher; pan-back captures (distant overlap) are
+   * handled at capture time (perf-5), not by a rescue here.
    * Recommended `3`.  PANORAMA/high-level only; ignored by SCANS and the
    * manual pipeline.
    */
@@ -307,13 +308,44 @@ export interface FrameSelectionSettings {
    * the gate accepts a keyframe whenever this many milliseconds have
    * elapsed since the last accepted keyframe — even if the novelty /
    * overlap threshold wasn't met — so a slow or static pan never goes
-   * longer than this without a keyframe.  Counts toward `maxKeyframes`
-   * (the cap still finalises the capture).  `0` disables it.  Default
-   * `1500` (1.5 s) — with `maxKeyframes` 8 this bounds a static/slow
-   * capture to ~8×1.5 ≈ 12 s before the keyframe-count auto-finalize.
-   * Maps to the native gate's `setMaxKeyframeIntervalMs`.
+   * longer than this without a keyframe.  `0` disables it.  Default
+   * `1500` (1.5 s).  Maps to the native gate's
+   * `setMaxKeyframeIntervalMs`.
+   *
+   * These accepts count toward `maxKeyframes`.  Whether one may be the
+   * accept that REACHES the cap — and so end the capture, since the cap
+   * is the primary auto-stop — is controlled by
+   * `timeIntervalCanFinalize` below.  Before v0.25 they always could,
+   * which meant a perfectly stationary hold self-finalised on the clock
+   * alone: at these defaults, ~7.5 s having captured nothing new.
    */
   maxKeyframeIntervalMs: number;
+
+  /**
+   * v0.25 — may a keep-alive accept (one made by
+   * `maxKeyframeIntervalMs` rather than by novelty) be the accept that
+   * REACHES `maxKeyframes` and therefore auto-finalises the capture?
+   *
+   * `true` (default) is the pre-v0.25 behaviour, bit-for-bit.
+   *
+   * `false` stops a stationary hold ending itself on the clock:
+   * keep-alive accepts still happen and still count, but the gate
+   * stalls at `maxKeyframes - 1` rather than tripping the auto-stop, so
+   * only genuinely NEW content can finish a capture.
+   *
+   * Deliberately not implemented as "don't count them".  The host
+   * auto-finalises on the number of keyframes SAVED, which no gate
+   * counter can influence on Android; and exempting them would leave a
+   * stationary capture with no bound at all (`maxPanDurationMs`
+   * defaults to `0`, and the drift finalisers are motion-triggered), so
+   * it would fill the disk and then fail in `cv::Stitcher`.
+   *
+   * CAUTION: with this `false` — and especially alongside the v0.25 AR
+   * pose-trust gating — a capture that never pans has no count-based
+   * auto-stop left, only shutter release.  Set `maxPanDurationMs > 0`
+   * as a wall-clock backstop unless that is genuinely intended.
+   */
+  timeIntervalCanFinalize: boolean;
 
   /**
    * v0.21 — pick-sharpest-in-window anti-blur keyframe selection.
@@ -683,6 +715,7 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     maxKeyframes: 6,
     overlapThreshold: 0.20,
     maxKeyframeIntervalMs: 1500,
+    timeIntervalCanFinalize: true,
     // v0.21 — anti-blur keyframe selection ON by default (K=4).
     sharpnessWindow: DEFAULT_SHARPNESS_WINDOW,
     flow: DEFAULT_FLOW_GATE_SETTINGS,

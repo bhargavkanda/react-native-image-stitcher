@@ -14,6 +14,220 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.25.0] - 2026-08-18 (flattened stitch ladder + AR hardening)
+
+Two field failures drive this release.
+
+The first is the stitch-retry wedge: a failed finalize could chain
+rescues — mode flips, threshold drops to `scans@0.3`, a wrapper-level
+full re-run, a second in-place compose — each of which could itself
+fail and rescue again. Measured in the field on an A35: a 4 m 41 s
+capture followed by roughly half an hour wedged in the rescue chain.
+The chain is replaced outright by a **flattened four-rung ladder** (see
+*Changed*); the same inputs now stitch in under a second, verified on
+the A35 and an iPhone.
+
+The second is the field failure where a panorama hold **ends itself in
+under a second and finalizes a single keyframe as the "panorama."**
+Three independent mechanisms were found that can each produce exactly
+that symptom, which is why it survived several rounds of diagnosis —
+fixing one left the others.
+
+> [!IMPORTANT]
+> **Some AR capture behaviour changes on upgrade, with no flag to turn
+> it off.** An earlier draft of this entry claimed everything was
+> flag-gated at today's default; that was wrong, and adversarial review
+> caught it. The honest split:
+>
+> **Live by default — no opt-in, no opt-out:**
+> - AR pose-driven force-accepts (translation budget + angular fallback)
+>   are suppressed whenever ARKit/ARCore is not fully tracking.
+> - The translation force-accept is additionally suppressed when
+>   per-evaluation step speed exceeds 3.0 m/s.
+> - An angular ACCEPT now re-detects KLT features, which changes which
+>   subsequent frames are accepted.
+> - A hold now DEFERS while a camera transition is in flight, instead of
+>   starting a capture against a camera the renderer has unmounted.
+> - The orientation-drift detector no longer acts before the
+>   accelerometer has delivered a real sample.
+>
+> These are the fixes. Gating them off by default would have shipped a
+> release that changes nothing, and each one is a case where the old
+> behaviour is simply wrong.
+>
+> **Opt-in, default reproduces today's behaviour exactly:**
+> - `frameSelection.timeIntervalCanFinalize` (default `true`)
+> - `minPanoramaKeyframes` (default `1` — never warns)
+>
+> None of this has yet been validated on a device that reproduces the
+> original failure. That validation is the remaining gate on flipping
+> the default capture source to AR.
+
+### Changed — the stitch retry ladder (production high-level path)
+
+- **The recursive rescue chain is gone.** Finalize now runs a flat,
+  fixed ladder of four rungs — `pan@1.0 → pan@0.3 → scans@1.0 →
+  scans@0.5` — reordered so the motion resolver's verdict mode runs
+  first. Rungs vary the confidence threshold only; no rung re-enters
+  the pipeline, flips modes mid-rung, or schedules further rescues.
+- **`scans@0.3` is eliminated** — the rung behind the collapsed
+  outputs (10 frames stacked into a 722×718 footprint). SCANS rungs
+  additionally gained a collapsed-placement guard that rejects a
+  degenerate affine placement instead of returning it as a result.
+- **OOM is terminal.** A caught native OOM (`std::bad_alloc` /
+  `StsNoMem`) stops the ladder instead of relaunching a full stitch
+  into a just-OOM'd process — the relaunch is what re-peaked memory
+  and produced the observed jetsam kill. An exception backstop
+  guarantees no native throw can escape the ladder unclassified.
+- **One capped spherical extra rung** replaces both deleted spherical
+  rescues (the wrapper-level full re-run and the in-place re-compose,
+  which was UB — OpenCV 4.10 clears `seam_est_imgs_` after the first
+  compose). PANORAMA rungs only, on `LowQualityStitch`/`WarpFailed`
+  only, at most one per ladder, same reservation gate and budget as
+  every other rung.
+- **Fast paths.** A validated rung that retained all but one frame is
+  accepted immediately (the dominant field partial — one blurred
+  boundary keyframe — no longer costs up to three more full stitches),
+  and a rung whose estimate cannot beat the best partial so far skips
+  its compose stage entirely.
+- **120 s wall-clock budget** across the whole ladder; on expiry the
+  best partial already composed is returned instead of starting
+  another rung.
+- **Per-rung tmp isolation + orphan sweep.** Each rung writes to its
+  own `.tmp` output; only the promoted rung's file is moved into
+  place, and stale rung temporaries are swept — an aborted rung can
+  never poison a later one's output.
+- **The manual opt-in path (`useManualPipeline: true`) is
+  byte-identical**, including its high-level SCANS dispatch (which
+  keeps the legacy multi-attempt schedule). The ladder governs the
+  production high-level path only.
+- **Example app:** the post-capture A/B re-stitch suite (`legacy` /
+  `singlethread` / `voronoi` / `lowres` / `rc-all` full re-runs after
+  every panorama) no longer auto-runs; the live capture result
+  display is unchanged.
+
+### Added
+
+- **`setPoseTrusted(bool)` on the C++ keyframe gate** (iOS + Android
+  bridges). While AR tracking is not `normal`/`TRACKING` — initialising,
+  relocalising — ARKit/ARCore emit pose deltas that are pure drift. The
+  gate's two POSE-DRIVEN force-accepts (the translation budget and the
+  angular fallback) read those as real motion and burst-accept frames
+  from a stationary device, racing to the keyframe cap in a few hundred
+  milliseconds; hitting the cap auto-finalizes and ends the operator's
+  hold. Pose-driven accepts are now suppressed while pose is untrusted.
+  Flow (KLT) accepts are unaffected — optical flow does not lie when the
+  tracker is confused.
+- **Per-evaluation speed plausibility guard** (`3.0 m/s`) on the
+  translation budget. A VIO slide shows up as an implausible jump
+  between consecutive evaluations; a real pan does not. Replaces an
+  earlier distance-since-accept clamp that was too loose to catch the
+  measured 0.5 m slides.
+- **`useDeviceOrientationStatus()`** — returns `{ orientation, settled }`
+  instead of a bare orientation. `useDeviceOrientation()` is unchanged
+  and still returns the scalar.
+- **`orientationDriftAbandon`** on `<Camera>` (default `true`) — set
+  `false` to disable mid-capture rotation abandonment entirely.
+- **`frameSelection.timeIntervalCanFinalize`** (default `true`) — set
+  `false` so a keep-alive keyframe can never be the accept that reaches
+  `maxKeyframes` and auto-finalizes a stationary hold.
+- **`minPanoramaKeyframes`** on `<Camera>` (default `1`) — set `2` to get
+  the new `CAPTURE_TOO_SHORT` capture WARNING when a capture finishes
+  with fewer keyframes than that. The capture still succeeds and still
+  returns its frame; it is simply no longer silent.
+- **`CAPTURE_TOO_SHORT`** capture warning + the `warnCaptureTooShort`
+  guidance-copy key for i18n.
+- **Shutter diagnostics** — `onTouchCancel` / `onTouchEnd` now log how
+  each hold ended. Warn-level and not `__DEV__`-gated, because
+  integrators hit this in release-ish builds and this one line is the
+  difference between a one-log diagnosis and days of guessing.
+
+### Fixed
+
+- **Phantom rotation abandons from an unsettled sensor.**
+  `useDeviceOrientation()` fabricates `'portrait'` before the
+  accelerometer's first sample. The drift detector snapshotted that
+  fabricated value at capture start, so a capture begun in landscape
+  compared `landscape-left` against a `'portrait'` that was never
+  observed — and abandoned on the first real sample. The detector now
+  takes no snapshot and makes no comparison until the sensor has
+  delivered something real. This is why the failure was **landscape-only
+  and disappeared when the device was locked to portrait**: in portrait,
+  the fabricated value happened to be correct.
+- **A hold no longer starts a capture against an unmounted camera.** The
+  RENDER gate unmounted the camera for `inFlightTransition`, but the HOLD
+  gate checked only `arSupportPending` — and those clear in the SAME
+  render, because resolving the AR probe is what flips `isAR` and starts
+  the transition. So v0.24.3's defer resumed at exactly the moment the
+  camera unmounted and the AR session stopped, starting a capture against
+  no frame source. Both gates now read one shared predicate.
+- **Keep-alive keyframes can no longer end a capture.** Time-budget
+  accepts counted toward `maxKeyframes` exactly like novelty accepts, so
+  a perfectly stationary hold marched to the cap on the clock alone —
+  ~7.5 s at the defaults, having captured nothing new. They still count,
+  but can no longer be the accept that REACHES the cap, so the capture
+  cannot end itself without new content.
+- **A one-keyframe capture is no longer silent.** It was returned as an
+  ordinary successful panorama carrying a `singleKeyframe: true` flag
+  that no consumer read — which is precisely why these AR failures were
+  reported as stitching bugs rather than capture bugs. Opt in with
+  `minPanoramaKeyframes`.
+- **The angular fallback no longer degrades permanently.** An angular
+  ACCEPT now refreshes the KLT feature set, instead of leaving flow
+  tracking against a stale reference for the rest of the capture.
+
+### Docs
+
+- **Six stale pipeline-routing comment sites corrected** (Android JNI,
+  shared C++ `stitcher.{cpp,hpp}`, iOS `OpenCVStitcher.{h,mm}`,
+  `src/stitching/incremental.ts`). They still claimed production
+  finalize runs the manual `cv::detail` pipeline, or that Android
+  always runs PANORAMA — both false since the 2026-06-16
+  high-level-across-the-board switch, and both repeat offenders in
+  misdiagnosis. Comments now match the code: every production caller
+  on both platforms passes `useManualPipeline=false`; manual is an
+  explicit opt-in; `'auto'` can resolve SCANS-first.
+
+### Also in this release
+
+- **v0.24.5 merged** — the SCANS affine rescue for translation captures,
+  and pan guidance restored under AR (`usePanMotion` was gated
+  `&& isNonAR`, so hosts defaulting to AR silently lost both the "keep
+  the pan straight" and "moving too fast" warnings).
+- **Android bring-your-own-OpenCV: producer-task support.** A host whose
+  OpenCV SDK is DOWNLOADED by a Gradle task — the normal arrangement for
+  an SDK from a private artifact repository — hit a hard Gradle 8
+  undeclared-dependency failure. `rnisHostOpenCVProducerTask` names the
+  producing task so the edge can be wired. Covers the CMake/native tasks,
+  which consume the SDK first.
+- **Android no longer rejects an AR capture when no ARCore session is
+  live** — it logs instead. Unlike iOS, the Android AR view OWNS the
+  session: every stitch unmounts the view, which stops the session, and
+  remount reconstructs it over several hundred ms. "No live session" is
+  a normal transient there, and refusing turned it into a hard failure
+  for anyone holding the shutter right after a stitch.
+- **`KeyframeGate` unit tests** for the OpenCV-free gate predicates
+  (121 C++ tests), including that the keep-alive guard's default is
+  bit-identical to the old behaviour across the whole counts matrix.
+
+### Deliberately NOT in this release
+
+- **AR failure auto-downgrade.** Not part of the verified RCA fix plan,
+  and it carries the highest false-positive risk of anything considered:
+  iOS `finalize` stops the AR session for the whole 2–5 s stitch, and
+  Android's `isRunning` is `sessionRef != null`, which stays true through
+  a dead session. Get the grace-timer re-arm wrong and it downgrades
+  after every SUCCESSFUL panorama. Unverifiable without a device, and it
+  buys resilience rather than correctness.
+- **Flipping the default capture source to AR.** v0.24.5 cleared one
+  prerequisite (pan guidance); the rest, plus device validation of
+  everything above, remain.
+- **A JS-side wait for AR session readiness.** The correct fix for the
+  post-stitch remount window, and device-validation work.
+- **`shutterCancelGraceMs`.** Drafted, then removed: React Native
+  dispatches `onPressOut` BEFORE `onTouchCancel`, so it could never fire
+  — and the RCA had already refuted gesture/touch-steal as a cause. The
+  `onTouchCancel`/`onTouchEnd` diagnostics are kept.
 ## [0.24.8] - 2026-08-17
 
 ### Changed

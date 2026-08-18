@@ -1101,6 +1101,29 @@ class RNSARSession(reactContext: ReactApplicationContext)
     /// retry on the next render frame).
     internal fun getSessionForView(): Session? = sessionRef.get()
 
+    /// v0.25 — is an ARCore session currently alive?
+    ///
+    /// iOS has exposed `RNSARSession.shared.isRunning` since the start
+    /// and `IncrementalStitcherBridge` refuses to start an AR capture
+    /// without it.  Android had no equivalent accessor at all, so the
+    /// identical JS call succeeded here and rejected on iOS — a live
+    /// parity bug independent of any 0.25 feature.  This is the
+    /// Android side of that guard.
+    ///
+    /// `sessionRef` is the authority: it is set when the session is
+    /// created and cleared on stop/pause teardown.
+    internal fun hasLiveSession(): Boolean = sessionRef.get() != null
+
+    /// v0.25 — last observed ARCore tracking state (TRACKING_* above).
+    ///
+    /// CAVEAT, and it is why callers must not treat this as a liveness
+    /// check: on Android this is updated from `RNSARCameraView`'s frame
+    /// loop, so it is only meaningful while the AR view is actually
+    /// drawing.  With no view mounted it holds a stale or
+    /// NOT_AVAILABLE value.  iOS updates its equivalent from the
+    /// ARSession delegate regardless of any view.
+    internal fun currentTrackingState(): Int = trackingStateRef.get()
+
     /// Camera view registers + unregisters itself so the bridge can
     /// keep track of who's actively rendering.  Currently used only
     /// for diagnostics (the view feeds frames into the engine via

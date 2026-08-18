@@ -290,7 +290,7 @@ section. `capturePreviewActions` adds buttons along the bottom of that modal.
 when `ok` is `false`. `onError` still fires on failure as an unchanged
 mirror. The rest are notifications: `onCaptureSourceChange` /
 `onLensChange` for the AR-toggle and lens-chip; `onFramesDropped` when
-cv::Stitcher's confidence-retry loop dropped input frames; and
+cv::Stitcher's confidence filtering dropped input frames; and
 `onCaptureAbandoned` when the SDK auto-cancels an in-flight capture
 without producing output (`'orientation-drift'` or `'lateral-drift'` — no
 `onCapture` fires for an abandoned capture). The full result union and
