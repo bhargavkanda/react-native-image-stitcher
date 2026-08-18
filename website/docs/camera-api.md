@@ -164,9 +164,13 @@ wrong — it is a live prop and defaults to `true`.
 Master switch for the in-capture pan-guidance surfaces: the rotate prompt,
 the pan how-to animation/hint, the "too fast" pill, and the blinking
 countdown. Set `false` to suppress **all** of them. Note that the lateral-drift
-finalize ([`lateralBudgetCm`](#lateralbudgetcm)) and the post-stitch crop
-preview ([`rectCrop`](#rectcrop) / [`showPreview`](#showpreview)) have their
-own independent props and are **not** governed by `panGuidance`.
+stop ([`lateralBudgetCm`](#lateralbudgetcm) /
+[`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes)) and the
+post-stitch review surface ([`rectCrop`](#rectcrop) /
+[`showPreview`](#showpreview)) have their own props and are **not** governed
+by `panGuidance`. They are not independent of each other, though: a review
+surface **suppresses** the popup a finalized lateral stop would otherwise
+show — see [what shows after a lateral-drift stop](#what-shows-after-a-lateral-drift-stop).
 
 ### `maxPanDurationMs`
 
@@ -259,11 +263,17 @@ feeding a downstream vision pipeline treats any laterally-drifted sweep as
 garbage, and keeping it only costs a stitch, a file, and an operator's
 attention on output they will bin.
 
-The discard path shows a **third** popup state whose copy does not promise a
+The discard path shows its own popup state, whose copy does not promise a
 stitch — [`lateralStopDiscardedTitle` / `lateralStopDiscardedBody`](#guidancecopy-keys).
 Below 2 accepted keyframes nothing stitchable existed in the first place, so
 the popup keeps the pre-existing "follow the arrow" wrong-direction copy
 regardless of this threshold.
+
+A discarded capture **always** shows its popup: nothing was kept, no review
+surface follows, and the popup is the only feedback there is. A *finalized*
+stop is the asymmetric case — it shows no popup at all when a review surface
+follows. See [what shows after a lateral-drift
+stop](#what-shows-after-a-lateral-drift-stop).
 
 ```tsx
 // Never keep a drifted sweep — the pipeline downstream would reject it anyway.
@@ -296,11 +306,47 @@ Both props control the post-finalize UI, and **`rectCrop` takes precedence**:
 | `true` | `false` | Draggable-quad crop editor (drag 4 corners, confirm rectifies). |
 | `true` | `true` | Crop editor wins — `showPreview` is ignored. |
 
+These two props are also what decides whether a **finalized** lateral-drift
+stop shows its popup: the first row is the only configuration in which it
+does, because it is the only one where no review surface follows. See [what
+shows after a lateral-drift stop](#what-shows-after-a-lateral-drift-stop).
+
 When `rectCrop` is on, the native auto-crop (`maxInscribedRectCrop`) is forced
 off so the manual crop is the single source of truth. The crop editor's button
 labels and the preview's confirm label are all overridable via
 [`guidanceCopy`](#guidancecopy-keys) (`cropConfirm`, `cropReset`,
 `cropUseOriginal`, `cropRetake`, `previewConfirm`).
+
+### What shows after a lateral-drift stop
+
+Only **one** of `<Camera>`'s capture-flow modals is ever on screen at a time.
+On iOS each one is a real `UIViewController` presentation, and a controller can
+present only one child: a second present is refused and leaves an invisible
+window in the hierarchy that swallows every touch. That was the 0.25.1
+dead-shutter bug, and the rule below is what prevents it.
+
+So a host can predict exactly what the operator sees:
+
+| Stop outcome | `rectCrop` / `showPreview` | What appears |
+|---|---|---|
+| **Finalized** | either is on | **Review surface only.** No popup — the surface's own banner already carries the same `LATERAL_DRIFT_FINALIZE` warning. |
+| **Finalized** | both off | **Popup only** — [`lateralStopTitle` / `lateralStopBody`](#guidancecopy-keys). No review surface follows, so the popup is the only feedback. |
+| **Discarded** by [`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes) | any | **Popup only** — [`lateralStopDiscardedTitle` / `lateralStopDiscardedBody`](#guidancecopy-keys). Nothing was kept, so there is nothing to review. |
+| **Too few frames** to stitch anything | any | **Popup only** — [`lateralWrongDirectionTitle` / `lateralWrongDirectionBody`](#guidancecopy-keys). |
+
+The review surface additionally **waits** while any guidance popup is up
+(including the orientation-drift popup) and mounts when that popup is
+dismissed. The pending result is held in state meanwhile, so nothing is lost —
+it costs a beat, not a capture.
+
+:::note Changed in 0.25.1
+Before 0.25.1 a finalized stop showed the popup **and** then tried to open the
+review surface over it, which is the clash described above. If your host
+relied on the popup appearing after a *finalized* lateral stop, it is now
+suppressed whenever a review surface follows — the warning is in that
+surface's banner instead. Discard outcomes are unaffected and still show
+their popup.
+:::
 
 ### `guidanceCopy`
 
@@ -485,9 +531,9 @@ fall back to `DEFAULT_GUIDANCE_COPY` (the defaults shown here).
 | `rotateToPortrait` | `Rotate to portrait` | Caption pill while waiting for the user to rotate to portrait (`panMode: 'horizontal'`). |
 | `panHint` | `Pan slowly top to bottom` | Short hint shown with the how-to-pan animation. |
 | `tooFast` | `Moving too fast — slow down` | Transient warning when the pan is too fast. |
-| `lateralStopTitle` | `Keep the pan straight` | Popup title for a lateral stop that was **finalized** (capture kept + stitched). |
-| `lateralStopBody` | `You moved sideways. Pan in one direction only — we stitched what you captured.` | Popup body for the **finalized** lateral stop. Only shown when output actually exists — see the discarded pair below. |
-| `lateralStopDismiss` | `Got it` | Popup dismiss button label (all three states). |
+| `lateralStopTitle` | `Keep the pan straight` | Popup title for a lateral stop that was **finalized** (capture kept + stitched). Reachable only when **no** review surface follows — with `rectCrop` or `showPreview` on, no popup is shown and the warning appears in that surface's banner instead. See [what shows after a lateral-drift stop](#what-shows-after-a-lateral-drift-stop). |
+| `lateralStopBody` | `You moved sideways. Pan in one direction only — we stitched what you captured.` | Popup body for the **finalized** lateral stop. Shown only when output actually exists **and** no review surface follows — see the discarded pair below, and See [what shows after a lateral-drift stop](#what-shows-after-a-lateral-drift-stop). |
+| `lateralStopDismiss` | `Got it` | Popup dismiss button label — used by whichever popup state is showing. |
 | `lateralWrongDirectionTitle` | `Follow the arrow` | Popup title when lateral drift stopped the capture before enough frames to stitch anything (nothing produced). |
 | `lateralWrongDirectionBody` | `You moved the phone the wrong way. Pan slowly in the direction the arrow shows, in one straight line.` | Popup body for the too-few-frames wrong-direction stop. |
 | `lateralStopDiscardedTitle` | `Capture discarded` | Popup title for the third state: enough frames to stitch, but [`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes) discarded the capture. At the default threshold this is the 2-to-4-keyframe band, so it is reachable out of the box. |

@@ -74,6 +74,16 @@ the user rotates **mid-capture**, `<Camera>`:
 
 There is no "continue past drift" — continuing produces malformed output.
 
+:::note One modal at a time (0.25.1)
+While that explanatory modal is up, a post-capture review surface
+(`rectCrop` / `showPreview`) from an **earlier** capture will not mount over
+it — it waits and mounts when the modal is dismissed. Two React Native
+`<Modal>`s cannot be presented at once on iOS; attempting it leaves an
+invisible window that swallows touches. The pending result is held in state
+meanwhile, so nothing is lost. See [what shows after a lateral-drift
+stop](./camera-api.md#what-shows-after-a-lateral-drift-stop).
+:::
+
 ## Summary
 
 | Platform | Control | Result |

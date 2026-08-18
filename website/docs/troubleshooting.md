@@ -19,6 +19,8 @@ fuller table mapping crashes to missing config.
 | **`flash-not-available` error** | You forced flash on a device with no torch on the active lens. `<Camera>` normally hides the flash pill in this case — only happens if you drive `flash` controlled. See [Flash & lenses](./flash-and-lenses.md). |
 | **0.5× shows the same FOV as 1×** | The device has no usable ultra-wide, or (pre-0.14) the single-lens picker mis-selected. v0.14's capability-aware selection fixes this; the chooser hides when no ultra-wide exists. |
 | **AR photo is sideways in landscape** | Pre-0.14 Android bug (window-rotation vs device-orientation). Fixed in 0.14. |
+| **Shutter goes dead after a lateral-drift stop (iOS); no review screen, no thumbnail** | Pre-0.25.1 bug. The guidance popup and the post-stitch review surface were presented at once; iOS refuses the second presentation and leaves an invisible window that swallows every touch (device logs show **zero** `pressIn` events). Fixed in 0.25.1 — a finalized stop now shows no popup when a review surface follows. **Upgrade to 0.25.1+.** See [what shows after a lateral-drift stop](./camera-api.md#what-shows-after-a-lateral-drift-stop). |
+| **Shutter dead + stuck on "Switching camera…" after toggling the lens** | Pre-0.25.1 latch: flipping the lens back within ~250 ms of flipping it could leave the camera-transition gate closed forever, so the camera never remounted and every hold was deferred then cancelled. Fixed in 0.25.1. **Upgrade to 0.25.1+.** |
 
 ## "0 keyframes saved" — panorama captures zero frames, photos work
 

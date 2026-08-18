@@ -14,9 +14,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
-## [Unreleased]
+## [0.25.1] - 2026-08-18 (dead-shutter fix + lateral-stop policy)
 
-### Changed
+The headline is a **dead shutter**, reported from the field and fixed
+here: after a lateral-drift stop that finalized, the shutter stopped
+responding entirely and the capture flow could not be restarted.
+
+Device instrumentation showed **zero `pressIn` events** reaching the
+button while every gate in the capture state machine sat open and idle
+— the touches were never arriving at all, which is what ruled out the
+gates and pointed at the view hierarchy.
+
+The cause is an **iOS two-modal presentation clash**.
+`LateralMotionModal` latched visible at the stop, and roughly 550 ms
+later the finished stitch mounted the review surface
+(`RectCropPreview`) on top of it. Both are React Native `<Modal>`s,
+i.e. real `UIViewController` presentations on iOS — and **a view
+controller can present only one child at a time**. The second present
+is REFUSED, leaving a host window in the hierarchy that was never
+presented: invisible, and swallowing every touch. Dismissing the popup
+underneath left the orphan window in place, so the shutter stayed dead.
+
+The same clash explains the two quieter symptoms reported alongside it:
+**no review surface and no thumbnail**. The review surface holds the
+capture result until the operator confirms it, so when it failed to
+present, `onCapture` never fired and nothing downstream ever saw the
+capture.
+
+Also in this release: the lateral-stop finalize/discard threshold
+becomes a host-controlled policy (a **breaking behaviour change** — see
+*Changed*), and a latch in the camera-transition gate that could wedge
+the shutter permanently is closed.
+
+### Fixed — the dead shutter (iOS two-modal presentation clash)
+
+- **A capture guidance popup and the review surface can no longer be
+  presented at the same time.** On iOS the second presentation was
+  refused and left an invisible, touch-swallowing window over the whole
+  capture UI; the observable result was a shutter that received no
+  `pressIn` events at all, no review surface, and no thumbnail.
+
+- The invariant now lives in one place,
+  `src/camera/modalPresentation.ts`, rather than being re-derived at
+  each call site. Three rules:
+
+  - **A finalized stop shows NO popup.** The review surface it opens
+    already renders the same `LATERAL_DRIFT_FINALIZE` warning in its
+    own banner, so the popup was duplicate information as well as a
+    presentation conflict. It is suppressed up front rather than
+    dismissed on arrival, because present-then-dismiss-then-present is
+    the same clash by a slower route.
+  - **The review surface DEFERS while any guidance modal is up** and
+    mounts when that modal is dismissed. Deferring the newcomer avoids
+    asking iOS to dismiss and present within one commit.
+  - **Discard outcomes KEEP their popup.** Nothing was kept and no
+    review surface follows, so the popup is the only feedback there is.
+
+- Note for hosts that drive their own UI from these events: after a
+  lateral-drift stop that finalizes, the popup no longer appears — the
+  review surface with its warning banner is what the operator sees.
+
+### Changed — lateral-stop finalize/discard policy (BREAKING)
 
 - **BREAKING (behaviour): a lateral-drift stop now DISCARDS a capture that
   accepted fewer than 5 keyframes, where it previously kept anything with
@@ -76,6 +134,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one straight line instead.  Localisable like every other guidance string
   via `guidanceCopy`.  Below 2 accepted keyframes the popup still shows the
   pre-existing "follow the arrow" wrong-direction copy.
+
+### Fixed — camera-transition latch (found by inspection, NOT field-reproduced)
+
+> [!NOTE]
+> **This one was found by reading the code, not by hitting it on a
+> device.** The operator tried to wedge it by hand and could not: the
+> flip-back has to land inside a ~250 ms window, which is hard to hit
+> deliberately on a lens chip. The failure sequence below is a
+> code-reading result — sound as an argument, unconfirmed as a field
+> observation. It is shipped on the strength of the reasoning and the
+> tests, and is called out here so it is not mistaken for a
+> reproduced-and-verified fix like the dead shutter above.
+
+- **The camera-handoff gate could latch closed forever, permanently
+  killing the shutter.** The AR↔non-AR / 1x↔0.5x handoff holds its gate
+  closed with refs carrying the last SETTLED identity plus a
+  `cameraTransitioning` flag covering the async settle. The effect
+  early-returned whenever the refs already matched — and a flip-BACK
+  inside the 250 ms grace breaks that assumption:
+
+  1. Lens 1x → 0.5x. The refs still say 1x, so the gate closes and the
+     settle is scheduled for +250 ms. The refs are not updated until
+     that callback runs.
+  2. Inside that window the lens goes BACK 0.5x → 1x. The cleanup marks
+     the pending settle cancelled, so it no-ops and never reaches its
+     `setCameraTransitioning(false)`.
+  3. The effect re-runs, the never-updated refs now MATCH the current
+     lens, and the old code early-returned.
+
+  `setCameraTransitioning(false)` existed at exactly ONE site — inside
+  the callback step 2 had just cancelled — so nothing could recover the
+  flag. The consequences were total: the live camera never remounted
+  (stuck on the "Switching camera…" placeholder) and every shutter hold
+  deferred and was then cancelled on release, i.e. a dead shutter with
+  no recovery short of remounting `<Camera>`.
+
+- The settled/stuck/start decision moved into a pure, dependency-free
+  `src/camera/cameraTransitionGate.ts` as a **total** function, so there
+  is no longer an early-return path that can silently skip the flag. On
+  the already-settled path a still-set flag is cleared; a clear flag
+  writes nothing, so the recovery converges in one extra commit and
+  cannot re-trigger itself. Tests execute the real state machine and
+  reproduce the pre-fix wedge before asserting the fix clears it.
 
 ## [0.25.0] - 2026-08-18 (flattened stitch ladder + AR hardening)
 
