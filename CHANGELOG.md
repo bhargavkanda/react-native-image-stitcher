@@ -14,6 +14,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING (behaviour): a lateral-drift stop now DISCARDS a capture that
+  accepted fewer than 5 keyframes, where it previously kept anything with
+  2 or more.**  Captures that accepted 2, 3 or 4 keyframes used to finalize
+  and be delivered through `onCapture` with a `LATERAL_DRIFT_FINALIZE`
+  warning; they now abandon, firing
+  `onCaptureAbandoned('lateral-drift')` and producing no output at all.
+
+  Why: for shelf capture — the primary use case — a two-to-four-frame
+  remnant of a sweep the operator drifted out of is not a usable panorama.
+  It is waste that still costs a stitch, a file, and an operator's
+  attention on output that has to be detected and rejected downstream.
+  Asking for a clean re-shoot is the better trade.
+
+  **Hosts that want the previous behaviour pass
+  `lateralStopFinalizeMinFrames={2}`** — the old rule is fully reachable,
+  it is just no longer the default.  Hosts that already handle
+  `onCaptureAbandoned('lateral-drift')` need no change beyond expecting it
+  more often.
+
+- The lateral-stop decision moved out of `<Camera>` into a pure,
+  OpenCV-free `src/camera/lateralStopPolicy.ts`
+  (`shouldFinalizeLateralStop` / `lateralStopOutcome`), unit-tested in the
+  node jest env the same way `panModeGate.ts` is.
+
+### Added
+
+- **`lateralStopFinalizeMinFrames`** on `<Camera>` (default `5`) — the
+  accepted-keyframe count at or above which a lateral-drift stop
+  FINALIZES the capture (stitches the partial sweep and delivers it via
+  `onCapture` with the `LATERAL_DRIFT_FINALIZE` warning).  Below the
+  threshold the capture is DISCARDED instead: the engine is cancelled,
+  nothing is stitched, and `onCaptureAbandoned('lateral-drift')` fires.
+
+  Until now that threshold was a hardcoded `MIN_STITCHABLE_KEYFRAMES = 2`
+  inside `<Camera>` — a product judgement the SDK is not entitled to make
+  on a host's behalf, and one that made the wrong call for shelf capture
+  (see the behaviour change above).
+
+  - **`0` means ALWAYS DISCARD**, however many keyframes were accepted.
+    It is special-cased on purpose: the natural `count >= minFrames`
+    comparison is unconditionally TRUE at `0`, which would silently mean
+    the exact opposite ("always finalize").
+  - `N >= 1` finalizes iff `acceptedKeyframeCount >= N`.
+  - `2` restores the pre-policy behaviour exactly.
+  - Negative, `NaN` and infinite values normalise to the default, so a
+    broken host config degrades to the standard threshold rather than to
+    "throw every capture away".  Fractional values round up.
+
+- **`lateralStopDiscardedTitle` / `lateralStopDiscardedBody`** guidance-copy
+  keys, for the third lateral-stop popup state: enough frames to stitch,
+  but policy discarded the capture.  At the default threshold this is the
+  2-to-4-keyframe band, so it is reachable out of the box.  The existing
+  `lateralStopBody` promises a stitch ("we stitched what you captured"),
+  which is a lie for a discarded capture and sends the operator hunting
+  for a file that was never written; the new copy asks for a re-shoot in
+  one straight line instead.  Localisable like every other guidance string
+  via `guidanceCopy`.  Below 2 accepted keyframes the popup still shows the
+  pre-existing "follow the arrow" wrong-direction copy.
+
 ## [0.25.0] - 2026-08-18 (flattened stitch ladder + AR hardening)
 
 Two field failures drive this release.

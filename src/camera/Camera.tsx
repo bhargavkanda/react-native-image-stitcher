@@ -123,8 +123,13 @@ import type { Quad } from './cropGeometry';
 import {
   mergeGuidanceCopy,
   captureWarningCopyFrom,
+  lateralStopCopyFor,
   type GuidanceCopy,
 } from './cameraGuidanceCopy';
+import {
+  lateralStopOutcome as classifyLateralStop,
+  type LateralStopOutcome,
+} from './lateralStopPolicy';
 import { RotateToLandscapePrompt } from './RotateToLandscapePrompt';
 import { PanHowToOverlay } from './PanHowToOverlay';
 import { CaptureCountdownOverlay } from './CaptureCountdownOverlay';
@@ -1092,6 +1097,44 @@ export interface CameraProps {
   lateralBudgetCm?: number;
 
   /**
+   * The accepted-keyframe count at or above which a lateral-drift stop
+   * (item 6) FINALIZES the capture: the partial sweep is stitched and handed
+   * to `onCapture` with a `LATERAL_DRIFT_FINALIZE` warning.  BELOW it the
+   * capture is DISCARDED instead — the engine is cancelled, nothing is
+   * stitched, and `onCaptureAbandoned('lateral-drift')` fires.
+   *
+   * **Default `5`.  This is a BEHAVIOUR CHANGE, not a no-op** — the SDK used
+   * to hardcode `2`, so captures that accepted 2-4 keyframes previously
+   * finalized and now DISCARD.  That is intentional: a 2-to-4-frame remnant
+   * of a sweep the operator drifted out of is not a usable shelf panorama,
+   * and asking for a clean re-shoot beats handing a host output it has to
+   * detect and reject downstream.  **Pass `2` to restore the old
+   * behaviour exactly.**
+   *
+   *   - `0` — **ALWAYS DISCARD**, however many keyframes were accepted.  This
+   *     is a genuine special case and NOT the `count >= 0` the arithmetic
+   *     would otherwise give you (that is unconditionally true, i.e. the
+   *     opposite).  For hosts whose downstream pipeline treats any drifted
+   *     sweep as garbage, discarding costs nothing and saves the stitch, the
+   *     file, and the operator's attention on output they will bin anyway.
+   *   - `N >= 1` — finalize iff `acceptedKeyframeCount >= N`.
+   *   - `2` — the pre-policy behaviour: keep anything stitchable.
+   *
+   * Negative, `NaN` and infinite values normalise to the default, so a broken
+   * host config degrades to the standard threshold rather than to "throw
+   * every capture away"; fractional values round UP, as the prop counts whole
+   * frames.
+   *
+   * The discard path shows a THIRD popup state whose copy does not promise a
+   * stitch — `lateralStopDiscardedTitle` / `lateralStopDiscardedBody` in
+   * {@link guidanceCopy}.  At the default that state covers the 2-to-4
+   * keyframe band.  Below 2 accepted keyframes nothing stitchable was
+   * captured at all, so the popup keeps the existing "follow the arrow"
+   * wrong-direction copy regardless of this threshold.
+   */
+  lateralStopFinalizeMinFrames?: number;
+
+  /**
    * v0.25 — whether a mid-capture device rotation auto-ABANDONS the
    * in-flight panorama (the OrientationDriftModal explains it to the
    * user).  Default `true` (the behaviour since v0.12).  Set `false`
@@ -1617,6 +1660,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     maxPanDurationMs = 0,
     panTooFastThreshold,
     lateralBudgetCm = 4,
+    // No destructuring default on purpose: `undefined` → default is owned by
+    // `normaliseLateralStopFinalizeMinFrames`, alongside the negative/NaN
+    // normalisation, so the default lives in exactly one place.
+    lateralStopFinalizeMinFrames,
     orientationDriftAbandon = true,
     minPanoramaKeyframes = 1,
     rectCrop = false,
@@ -1700,13 +1747,29 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Latches when the user holds the shutter in portrait under Mode A;
   // an effect below resumes the capture the instant they rotate.
   const [pendingPanStart, setPendingPanStart] = useState(false);
-  // Item 6 — the latched lateral-drift popup (capture already finalized
-  // by the time it shows).
-  const [lateralStopVisible, setLateralStopVisible] = useState(false);
-  // Item 6 — true when the lateral stop happened with too few frames to
-  // stitch (the user veered off almost immediately): the popup then shows
-  // the "follow the arrow" copy and the capture is abandoned, not finalized.
-  const [lateralWrongDirection, setLateralWrongDirection] = useState(false);
+  // Item 6 — the latched lateral-drift popup.  `null` = hidden; a non-null
+  // value both SHOWS the popup and says which of the three outcomes fired,
+  // so the visibility latch and the copy selection can never disagree:
+  //
+  //   'finalized'       capture kept + stitched (the historical default path)
+  //   'discarded'       stitchable, but `lateralStopFinalizeMinFrames` binned
+  //                     it — capture abandoned, no output.  At the default
+  //                     threshold of 5 this is the 2-to-4-keyframe band.
+  //   'wrong-direction' too few frames to stitch anything — capture abandoned
+  //
+  // Replaces the previous `lateralStopVisible` + `lateralWrongDirection`
+  // boolean pair (a third state would have needed a third boolean, and three
+  // booleans encode five combinations that cannot happen).
+  const [lateralStop, setLateralStop] =
+    useState<LateralStopOutcome | null>(null);
+  // Title/body for whichever outcome latched.  Resolved once here rather
+  // than twice in the modal's JSX; the `?? 'finalized'` is inert (the modal
+  // is hidden while `lateralStop` is null) and only keeps the copy helper
+  // total.
+  const lateralStopCopy = lateralStopCopyFor(
+    lateralStop ?? 'finalized',
+    guidanceCopyResolved,
+  );
   // Item 3 — the brief pan how-to overlay shown at the start of a
   // recording, auto-dismissed after a timeout.
   const [howToVisible, setHowToVisible] = useState(false);
@@ -2157,17 +2220,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const [driftModalDismissed, setDriftModalDismissed] = useState(false);
   // Reset the modal flags when a new capture STARTS (statusPhase →
   // 'recording'), NOT when one stops.  v0.16 fix: the old "any non-recording
-  // state" condition cleared `lateralStopVisible` the instant a lateral stop
-  // moved statusPhase out of 'recording' — so the popup was hidden before it
-  // could ever show (the user only saw the downstream error).  Clearing on
-  // capture START instead lets the lateral / drift popups persist after the
-  // stop until the user dismisses them, while still giving the next capture
-  // a clean slate.
+  // state" condition cleared the lateral-stop latch the instant a lateral
+  // stop moved statusPhase out of 'recording' — so the popup was hidden
+  // before it could ever show (the user only saw the downstream error).
+  // Clearing on capture START instead lets the lateral / drift popups persist
+  // after the stop until the user dismisses them, while still giving the next
+  // capture a clean slate.
   useEffect(() => {
     if (statusPhase === 'recording') {
       setDriftModalDismissed(false);
-      setLateralStopVisible(false);
-      setLateralWrongDirection(false);
+      setLateralStop(null);
     }
   }, [statusPhase]);
 
@@ -2980,15 +3042,33 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     }
     clearPanTimer();
 
-    // #3 — if the user veered off before enough frames were captured to
-    // stitch, finalizing would fail with a misleading "need more images"
-    // error.  Instead ABANDON the capture (no stitch → no error) and show
-    // the "follow the arrow" popup.  Otherwise FINALIZE what was captured
-    // (a usable partial pano) and show the "keep it straight" popup.
-    const MIN_STITCHABLE_KEYFRAMES = 2;
-    if (acceptedKeyframeCount < MIN_STITCHABLE_KEYFRAMES) {
-      setLateralWrongDirection(true);
-      setLateralStopVisible(true);
+    // Whether a lateral stop KEEPS what was captured is the HOST's call, via
+    // `lateralStopFinalizeMinFrames`.  Its default is 5, NOT the 2 this
+    // branch used to hardcode as MIN_STITCHABLE_KEYFRAMES: a 2-to-4-frame
+    // remnant of a drifted sweep is waste for shelf capture, so it now
+    // discards.  The arithmetic lives in lateralStopPolicy.ts — including
+    // the `0` = ALWAYS-DISCARD special case, which is emphatically NOT the
+    // `count >= 0` a naive comparison would give — so it is unit-testable
+    // without mounting a render.  Three outcomes:
+    //
+    //   'finalized'       keep + stitch the partial sweep; handleHoldEnd
+    //                     attaches the LATERAL_DRIFT_FINALIZE warning.
+    //   'discarded'       stitchable, but policy binned it (at the default
+    //                     threshold of 5: the 2-to-4-keyframe band).
+    //   'wrong-direction' #3 — the user veered off before enough frames were
+    //                     captured to stitch anything.  Finalizing that would
+    //                     fail with a misleading "need more images" error,
+    //                     which is why this branch predates the policy.
+    //
+    // BOTH discard outcomes take the identical ABANDON path (no stitch → no
+    // error) and must NOT set `lateralFinalizeRef`: there is no result to
+    // hang a warning on, and a leaked flag would mislabel the NEXT capture.
+    const outcome = classifyLateralStop(
+      acceptedKeyframeCount,
+      lateralStopFinalizeMinFrames,
+    );
+    setLateralStop(outcome);
+    if (outcome !== 'finalized') {
       void (async () => {
         fpDriver.stop();
         try {
@@ -3004,14 +3084,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       return;
     }
 
-    setLateralWrongDirection(false);
-    setLateralStopVisible(true);
     // Mark this finalize as lateral-drift-triggered so handleHoldEnd attaches
     // the LATERAL_DRIFT_FINALIZE warning to the result.
     lateralFinalizeRef.current = true;
     handleHoldEndRef.current?.();
     // Deps mirror the drift effect: re-run when the latch trips or the
-    // recording state changes.  Other reads are stable setters / refs.
+    // recording state changes.  Other reads are stable setters / refs, plus
+    // two deliberate non-deps — `acceptedKeyframeCount` and
+    // `lateralStopFinalizeMinFrames`.  The effect BODY is rebuilt every
+    // render, so the run that the latch triggers already closes over the
+    // current values of both; listing them would instead let a mid-capture
+    // prop/count change re-enter this stop and abandon twice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panMotion.lateralExceeded, statusPhase, lateralBudgetCm,
       drift.drifted, orientationDriftAbandon]);
@@ -3608,28 +3691,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         onAcknowledge={() => setDriftModalDismissed(true)}
       />
 
-      {/* Item 6 — lateral-drift popup.  Latched true by the lateral
-          effect AFTER it finalizes the capture; informational only,
-          dismiss just clears the latch so the next capture starts
-          fresh. */}
+      {/* Item 6 — lateral-drift popup.  Latched by the lateral effect AFTER
+          it has already finalized OR abandoned the capture; informational
+          only, and dismiss just clears the latch so the next capture starts
+          fresh.  Which of the three outcomes fired picks the copy — see
+          `lateralStopCopyFor`, which exists so the "we stitched what you
+          captured" body can never be paired with a discarded capture. */}
       <LateralMotionModal
-        visible={lateralStopVisible}
+        visible={lateralStop !== null}
         contentRotationDeg={contentRotationDegree}
-        title={
-          lateralWrongDirection
-            ? guidanceCopyResolved.lateralWrongDirectionTitle
-            : guidanceCopyResolved.lateralStopTitle
-        }
-        body={
-          lateralWrongDirection
-            ? guidanceCopyResolved.lateralWrongDirectionBody
-            : guidanceCopyResolved.lateralStopBody
-        }
+        title={lateralStopCopy.title}
+        body={lateralStopCopy.body}
         dismissLabel={guidanceCopyResolved.lateralStopDismiss}
-        onDismiss={() => {
-          setLateralStopVisible(false);
-          setLateralWrongDirection(false);
-        }}
+        onDismiss={() => setLateralStop(null)}
       />
 
       {/* v0.13.0 — built-in post-stitch / tap-to-preview modal.
