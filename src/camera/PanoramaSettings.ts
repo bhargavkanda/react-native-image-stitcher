@@ -173,18 +173,19 @@ export interface BatchStitcherSettings {
 
   /**
    * perf-3b — PANORAMA feature-matcher range.  `0`/undefined (default)
-   * = OFF: the stock full-pairwise `BestOf2NearestMatcher` ladder
+   * = OFF: the stock full-pairwise `BestOf2NearestMatcher`
    * (byte-identical to before this knob existed).  `> 0` enables the
-   * `BestOf2NearestRangeMatcher` ladder, which matches only keyframes
+   * `BestOf2NearestRangeMatcher`, which matches only keyframes
    * within `|i − j| < width` — keyframes are strictly capture-ordered,
    * so on a linear shelf pan the skipped non-adjacent pairs share ~no
-   * overlap and their O(N²) matching is wasted work.  The window widens
-   * across the finalize retry ladder: **consecutive-only (width 2) on
-   * attempts 1–2, then out to THIS value on the final, lowest-threshold
-   * attempt** — so `3` gives a 2/2/3 schedule, bridging a chain broken
-   * at a weak consecutive link only as a last resort.  This replaces the
-   * full-pairwise matcher on every attempt; pan-back captures (distant
-   * overlap) are handled at capture time (perf-5), not by a rescue here.
+   * overlap and their O(N²) matching is wasted work.  Since the
+   * 2026-08-17 flattened stitch ladder, every high-level rung runs the
+   * **consecutive-only window (2)** — the wider-window escalation was
+   * one of the levers behind a 30-minute bundle-adjust wedge and was
+   * removed; the widening 2/2/width schedule survives only on the
+   * legacy manual-opt-in fallback path.  This replaces the
+   * full-pairwise matcher; pan-back captures (distant overlap) are
+   * handled at capture time (perf-5), not by a rescue here.
    * Recommended `3`.  PANORAMA/high-level only; ignored by SCANS and the
    * manual pipeline.
    */

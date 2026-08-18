@@ -32,15 +32,20 @@ extern NSString *const RNImageStitcherErrorDomain;
 @property (nonatomic, assign, readonly) NSInteger width;
 @property (nonatomic, assign, readonly) NSInteger height;
 @property (nonatomic, assign, readonly) double durationMs;
-/// 2026-05-16 (Issue 5) — C+D progressive-confidence retry telemetry
-/// sourced from `retailens::StitchResult`.  Surface in the JS finalize
-/// dict so the host can render a debug toast on retry.
+/// 2026-05-16 (Issue 5) — stitch-retry telemetry sourced from
+/// `retailens::StitchResult`.  Surface in the JS finalize dict so the
+/// host can render a debug toast on retry.  Since 2026-08-17 the values
+/// come from the flattened 4-rung ladder's WINNING rung (the legacy
+/// multi-attempt C+D loop survives only on the manual opt-in path).
 ///
 ///   framesRequested:        number of keyframes handed to the stitcher
 ///   framesIncluded:         number retained after leaveBiggestComponent
-///   finalConfidenceThresh:  threshold the successful attempt used
-///                            (1.0 / 0.5 / 0.3); -1.0 when the
-///                            retry path didn't run (rare error paths)
+///   finalConfidenceThresh:  threshold the winning rung/attempt used
+///                            (pan 1.0/0.3, scans 1.0/0.5); -1.0 when
+///                            no retry data exists (rare error paths).
+///                            NOT an escalation/attempt-count signal:
+///                            a 1.0 can be a later rung's win after
+///                            earlier rungs failed (flattened ladder)
 @property (nonatomic, assign, readonly) NSInteger framesRequested;
 @property (nonatomic, assign, readonly) NSInteger framesIncluded;
 @property (nonatomic, assign, readonly) double finalConfidenceThresh;

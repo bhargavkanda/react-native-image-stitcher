@@ -24,7 +24,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Modal,
-  Platform,
   Pressable,
   SafeAreaView,
   StatusBar,
@@ -46,9 +45,6 @@ import {
 import { Worklets } from 'react-native-worklets-core';
 import {
   Camera,
-  copyFile,
-  moveFile,
-  getDefaultCaptureDir,
   getIncrementalNativeModule,
   subscribeIncrementalState,
   useKeyframeStream,
@@ -178,26 +174,17 @@ function App(): React.JSX.Element {
   // `src/stitching/useKeyframeStream.ts` for the AcceptedKeyframe
   // contract + an OCR-plugin example.
   // v0.10.0 — also collect each keyframe path into a ref so the
-  // Re-refine button below (and the auto A/B pack) can pass them straight
-  // to `module.refinePanorama(...)`.  RESET at the start of each panorama:
+  // Re-refine button below can pass them straight to
+  // `module.refinePanorama(...)`.  RESET at the start of each panorama:
   // `kf.index === 0` is the first keyframe of a fresh capture (zero-based
   // per panorama), so we clear then — this is robust to abandoned captures
   // AND back-to-back captures (the pano flow never opens the photo-only
   // preview, so we must NOT rely on closePreview to clear it).
   const collectedKeyframesRef = useRef<string[]>([]);
-  // Serialise the auto A/B packs: each pack runs 2 (iOS) or 6 (Android) heavy
-  // re-stitches, and the native stitcher serialises stitches on a global
-  // mutex/queue — so if two packs overlapped, one's `await` would block on the
-  // other's stitch and the JS wall-times (the whole point) would be inflated.
-  // Chaining guarantees at most one pack runs at a time, contention-free.
-  const packChainRef = useRef<Promise<void>>(Promise.resolve());
-  // Monotonic counter → collision-proof packIds even if two captures land in
-  // the same millisecond (Date.now alone is not unique enough).
-  const packSeqRef = useRef(0);
   useKeyframeStream(
     useCallback((kf: AcceptedKeyframe) => {
-      // Fresh capture → drop the previous capture's keyframes so a pack never
-      // re-stitches a mix of two unrelated panoramas.
+      // Fresh capture → drop the previous capture's keyframes so a re-refine
+      // never mixes keyframes from two unrelated panoramas.
       if (kf.index === 0) collectedKeyframesRef.current = [];
       collectedKeyframesRef.current.push(kf.jpegPath);
       // eslint-disable-next-line no-console
@@ -322,131 +309,6 @@ function App(): React.JSX.Element {
     return () => clearTimeout(id);
   }, [refine]);
 
-  // ── Auto A/B debug pack ──────────────────────────────────────────────
-  // On every PANORAMA capture, drop a self-contained pack into the default
-  // capture dir so it can be pulled off-device and analysed:
-  //
-  //   pack-<ts>__ab-<on|off>__kf-NN.jpg               the input keyframes
-  //   pack-<ts>__ab-<on|off>__live.jpg                the live output
-  //   pack-<ts>__ab-<on|off>__out-<v>__<cfg>__<ms>ms.jpg   per-variant re-stitch
-  //
-  // The ab-on / ab-off tag comes from the anti-blur toggle — a capture-
-  // MECHANISM change (different frames), so its A/B is the paired capture
-  // (flip, shoot, flip, shoot).  The per-variant re-stitches are the PERF
-  // ablation: SAME frames, the high-level PANORAMA path (identical to live),
-  // varying only the perf levers so each one's contribution is attributable.
-  //
-  //   iOS  — only the seam finder is plumbed on the iOS refine path, so we
-  //          ablate graphcut (live baseline) vs voronoi (the speed variant).
-  //   Android — all FOUR refine-ablatable levers are one-at-a-time'd from an
-  //          all-off "legacy" baseline: +range-matcher, +single-thread,
-  //          +voronoi, +lowres (compose-downscale = the adaptive-resolution
-  //          floor), then an `rc-all` everything-on endpoint.  Each OAT delta
-  //          vs `legacy` is that lever's contribution; `rc-all` vs `legacy` is
-  //          the combined gain.  The levers matter most at 8-10 keyframes (the
-  //          example raises maxKeyframes to 10) — they're ~flat at 5.
-  //
-  // Wall-time per variant is JS (Date.now) — the same fixed bridge overhead on
-  // every variant, so the between-variant DELTA is the native cost difference.
-  const writeDebugPack = useCallback(
-    // `frames` is a SNAPSHOT taken at capture time by the caller (not read
-    // from the ref here) so a serialised/queued pack can't pick up a later
-    // capture's keyframes.  `liveUri` may carry a `?t=<ms>` cache-buster on
-    // some capture paths (rect-crop / alt-pipeline); we strip it below.
-    async (frames: string[], liveUri: string, abOn: boolean): Promise<void> => {
-      try {
-        const native = getIncrementalNativeModule();
-        if (!native?.refinePanorama || frames.length < 2) {
-          // eslint-disable-next-line no-console
-          console.log(`[pack] skipped (need ≥2 keyframes; had ${frames.length})`);
-          return;
-        }
-        const dir = await getDefaultCaptureDir();
-        // Collision-proof id: Date.now can repeat within a millisecond, so we
-        // also append a monotonic sequence number.
-        packSeqRef.current += 1;
-        const packId = `pack-${Date.now()}-${packSeqRef.current}__ab-${abOn ? 'on' : 'off'}`;
-        // 1) + 2) copy the inputs (keyframes) and the live output into the
-        // pack.  These are NOT the payload (the ablation below is), so a copy
-        // failure — e.g. a stale/GC'd keyframe path — must only warn, never
-        // abort the re-stitches.  Native copyFile strips `file://` but not a
-        // `?t=…` query string, so strip that off the live uri first.
-        try {
-          for (let i = 0; i < frames.length; i++) {
-            await copyFile(frames[i], `${dir}/${packId}__kf-${String(i).padStart(2, '0')}.jpg`);
-          }
-          await copyFile(liveUri.split('?')[0], `${dir}/${packId}__live.jpg`);
-        } catch (e) {
-          // eslint-disable-next-line no-console
-          console.warn('[pack] input/live copy failed (continuing to ablation)', e);
-        }
-        // 3) perf ablation — same frames, high-level PANORAMA path.  Four
-        //    levers, one-at-a-time from an all-off `legacy` baseline so each
-        //    delta attributes ONE lever, plus an `rc-all` everything-on endpoint:
-        //    seam = seam finder; rw = stitchRangeMatcherWidth (0 = full-pairwise);
-        //    nt = stitchNumThreads (0 = auto-multi, 1 = single); cm =
-        //    compositingResolMP (1.0 = full, 0.6 = the adaptive-resolution floor).
-        //    All four are Android-only refine levers; iOS ignores rw/nt/cm, so
-        //    its two variants differ only in the seam finder.
-        type Variant = {
-          name: string;
-          seam: 'graphcut' | 'voronoi';
-          rw: number;
-          nt: number;
-          cm: number;
-        };
-        const androidVariants: Variant[] = [
-          { name: 'legacy', seam: 'graphcut', rw: 0, nt: 0, cm: 1.0 }, // all-off baseline
-          { name: 'rangematch', seam: 'graphcut', rw: 3, nt: 0, cm: 1.0 }, // +range-matcher
-          { name: 'singlethread', seam: 'graphcut', rw: 0, nt: 1, cm: 1.0 }, // +single-thread
-          { name: 'voronoi', seam: 'voronoi', rw: 0, nt: 0, cm: 1.0 }, // +voronoi
-          { name: 'lowres', seam: 'graphcut', rw: 0, nt: 0, cm: 0.6 }, // +compose-downscale (adaptive floor)
-          { name: 'rc-all', seam: 'voronoi', rw: 3, nt: 1, cm: 0.6 }, // everything on
-        ];
-        const iosVariants: Variant[] = [
-          { name: 'graphcut', seam: 'graphcut', rw: 0, nt: 0, cm: 1.0 },
-          { name: 'voronoi', seam: 'voronoi', rw: 0, nt: 0, cm: 1.0 },
-        ];
-        const variants = Platform.OS === 'android' ? androidVariants : iosVariants;
-        for (const v of variants) {
-          const cfg = `seam-${v.seam}_rw${v.rw}_nt${v.nt}_cm${v.cm}`;
-          const tmp = `${dir}/${packId}__out-${v.name}.jpg`;
-          const t0 = Date.now();
-          try {
-            const r = await native.refinePanorama({
-              framePaths: frames,
-              outputPath: tmp,
-              config: {
-                warperType: 'spherical',
-                blenderType: 'multiband',
-                stitchMode: 'panorama',
-                useManualPipeline: false,
-                seamFinderType: v.seam,
-                stitchRangeMatcherWidth: v.rw,
-                stitchNumThreads: v.nt,
-                compositingResolMP: v.cm,
-                jpegQuality: 90,
-              },
-            });
-            const ms = Date.now() - t0;
-            await moveFile(tmp, `${dir}/${packId}__out-${v.name}__${cfg}__${ms}ms.jpg`);
-            // eslint-disable-next-line no-console
-            console.log(`[pack] ${v.name} (${cfg}): ${ms}ms  ${r?.debugSummary ?? ''}`);
-          } catch (e) {
-            // eslint-disable-next-line no-console
-            console.warn(`[pack] variant ${v.name} FAILED`, e);
-          }
-        }
-        // eslint-disable-next-line no-console
-        console.log(`[pack] wrote ${packId} (${frames.length} frames, ${variants.length} variants) → ${dir}`);
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn('[pack] failed', e);
-      }
-    },
-    [],
-  );
-
   const handleCapture = (result: CameraCaptureResult): void => {
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
@@ -464,19 +326,6 @@ function App(): React.JSX.Element {
     // showPreview) — that screen IS the preview, so don't pop a second
     // preview modal for them.  Photos (no review step) still get the modal.
     if (result.type === 'photo') setPreview(result);
-    // Every panorama auto-writes an A/B debug pack (fire-and-forget so it
-    // doesn't block the UI); tagged with the current anti-blur state.  Snapshot
-    // the keyframes NOW (the ref is reset on the next capture's first frame)
-    // and run packs through a chain so they never overlap + contend on the
-    // native stitch queue.  `.catch` keeps a failed pack from breaking the chain.
-    if (result.type === 'panorama') {
-      const frames = [...collectedKeyframesRef.current];
-      const liveUri = result.uri;
-      const abOn = antiBlurOn;
-      packChainRef.current = packChainRef.current
-        .catch(() => undefined)
-        .then(() => writeDebugPack(frames, liveUri, abOn));
-    }
     // Dedup by uri — a capture-history strip should never show the same
     // capture twice, and a duplicate `id` (uri) throws React's "two children
     // with the same key".  Robust against any double onCapture delivery.
@@ -739,10 +588,9 @@ function App(): React.JSX.Element {
           </Text>
         </Pressable>
 
-        {/* v0.23 anti-blur — ONE high-level toggle.  Flip OFF, capture a pano,
-            flip ON, capture again: each capture auto-writes a debug pack (see
-            writeDebugPack) tagged ab-on / ab-off, so the two can be compared
-            for blur + a same-frames perf-lever ablation. */}
+        {/* v0.23 anti-blur — ONE high-level toggle for the capture-side
+            anti-blur mechanism.  Flip OFF, capture a pano, flip ON, capture
+            again to compare the two captures for blur. */}
         <Pressable
           style={[styles.devToggle, { top: 190 }]}
           onPress={() => setAntiBlurOn((v) => !v)}

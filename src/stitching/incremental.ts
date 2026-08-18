@@ -691,10 +691,15 @@ export interface IncrementalFinalizeResult {
    *                            > 0 means the stitcher silently
    *                            dropped boundary frames; surface a
    *                            "Stitched N of M frames" toast.
-   *   finalConfidenceThresh:  panoConfidenceThresh value used on
-   *                            the successful attempt (1.0 / 0.5 /
-   *                            0.3 — see image_stitcher_jni.cpp
-   *                            retry loop).  Useful for debugging
+   *   finalConfidenceThresh:  panoConfidenceThresh of the WINNING
+   *                            rung (2026-08-17 flattened ladder:
+   *                            pan 1.0/0.3, scans 1.0/0.5; the
+   *                            legacy manual opt-in path still
+   *                            reports 1.0/0.5/0.3).  It no longer
+   *                            encodes an attempt count or
+   *                            escalation — a 1.0 can be a rung-3
+   *                            opposite-mode win after earlier
+   *                            rungs failed.  Useful for debugging
    *                            scenes that consistently need a
    *                            lower threshold. */
   framesRequested?: number;
