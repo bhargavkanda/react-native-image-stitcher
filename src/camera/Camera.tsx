@@ -356,8 +356,9 @@ export class CameraError extends Error {
 
 /**
  * Frames-dropped info delivered via `onFramesDropped`.  Fires once
- * per panorama capture if the C+D progressive-confidence retry loop
- * inside cv::Stitcher dropped one or more input frames.
+ * per panorama capture if the native stitch retry (the flattened
+ * 4-rung mode/threshold ladder since 2026-08-17) promoted a result
+ * that dropped one or more input frames.
  */
 export interface FramesDroppedInfo {
   requested: number;

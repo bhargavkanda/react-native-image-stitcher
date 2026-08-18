@@ -1823,11 +1823,12 @@ public final class IncrementalStitcher: NSObject {
                         // Keep saved keyframes on disk for post-hoc
                         // re-processing (Ram's request).  Cleanup is
                         // a follow-up debug-menu task.
-                        // 2026-05-16 (Issue 5) — surface C+D
-                        // progressive-confidence retry telemetry to JS
-                        // so the host can render a debug toast.  -1
-                        // sentinels = "no retry data" (early-return
-                        // success paths bypass the retry loop).
+                        // 2026-05-16 (Issue 5) — surface stitch-retry
+                        // telemetry (the flattened ladder's winning
+                        // rung since 2026-08-17) to JS so the host can
+                        // render a debug toast.  -1 sentinels = "no
+                        // retry data" (early-return success paths
+                        // bypass the ladder).
                         var batchDict: [String: Any] = [
                             "panoramaPath": r.outputPath,
                             "width": Int(r.width),
