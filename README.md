@@ -179,7 +179,7 @@ const styles = StyleSheet.create({ fill: { flex: 1, backgroundColor: '#000' } })
 ## `<Camera>` props (full reference)
 
 Every prop is optional. `<Camera>` works with no props at all (it just
-captures and you wire `onCapture`). Props fall into seven groups.
+captures and you wire `onCapture`). Props fall into eight groups.
 
 > A deeper companion reference with composition recipes lives in
 > [`docs/camera-component.md`](docs/camera-component.md). The tables
@@ -243,6 +243,28 @@ keyframe's recorded pose is the chosen frame's pose.
   raising K or the eval cadence only widens the selection pool on slow
   pans.
 
+### Panorama guidance & auto-stop
+
+The full guidance surface (`panMode`, `panGuidance`, `maxPanDurationMs`,
+`panTooFastThreshold`, `rectCrop`, `showPreview`) is documented on the
+docs site under [`<Camera>` API](https://bhargavkanda.github.io/react-native-image-stitcher/docs/camera-api).
+The two lateral-drift props are listed here because they decide whether a
+capture produces output at all.
+
+| Prop | Type | Default | Notes |
+|---|---|---|---|
+| `lateralBudgetCm` | `number` | `4` | Cross-pan (sideways) drift budget in cm. Once integrated lateral translation exceeds it for the grace window, the capture is stopped. `0` disables the lateral-drift stop entirely. |
+| `lateralStopFinalizeMinFrames` | `number` | `5` | Accepted-keyframe count at or above which that stop **finalizes** (stitches the partial sweep, delivered with a `LATERAL_DRIFT_FINALIZE` warning). Below it the capture is **discarded** — nothing is stitched and `onCaptureAbandoned('lateral-drift')` fires. **The default of `5` is a behaviour change** from the previously hardcoded `2`: a 2-to-4-keyframe remnant of a drifted sweep is waste for shelf capture, so it now discards — **pass `2` for the old behaviour**. **`0` = ALWAYS DISCARD** (special-cased; it is not `count >= 0`). Negative/`NaN`/infinite normalise back to the default; fractions round up. |
+
+**What the operator sees after a lateral stop (changed in 0.25.1):** only one
+capture modal is ever on screen at a time. A stop that **finalizes** shows
+**no popup** when `rectCrop` or `showPreview` is on — the review surface it
+opens already carries the same `LATERAL_DRIFT_FINALIZE` warning in its banner.
+A stop that **discards** always shows its popup, since nothing was kept and no
+review surface follows. The review surface also waits behind any guidance
+popup and mounts when that popup is dismissed. Full table: [what shows after a
+lateral-drift stop](https://bhargavkanda.github.io/react-native-image-stitcher/docs/camera-api#what-shows-after-a-lateral-drift-stop).
+
 ### UI toggles
 
 | Prop | Type | Default | Notes |
@@ -291,7 +313,7 @@ Setting `headerTitle` renders a built-in top header; the settings gear is absorb
 | `onCaptureSourceChange` | `(source: CaptureSource) => void` | Effective source changes (AR toggle, or 0.5× forcing non-AR). |
 | `onLensChange` | `(lens: CameraLens) => void` | User taps the 1×/0.5× chip. |
 | `onFramesDropped` | `(info: FramesDroppedInfo) => void` | cv::Stitcher's confidence retry dropped input frame(s). |
-| `onCaptureAbandoned` | `(reason: 'orientation-drift') => void` | SDK auto-cancelled an in-flight capture (currently only mid-capture rotation). |
+| `onCaptureAbandoned` | `(reason: 'orientation-drift' \| 'lateral-drift') => void` | SDK auto-cancelled an in-flight capture, producing **no** output (no `onCapture` fires). `'orientation-drift'` = mid-capture rotation; `'lateral-drift'` = a sideways drift the [`lateralStopFinalizeMinFrames`](#panorama-guidance--auto-stop) policy declined to finalize. |
 | `onError` | `(err: CameraError) => void` | Classified error — fires on failure as an unchanged mirror of the `ok:false` `onCapture` result. See codes below. |
 | `outputDir` | `string` | Directory for saved JPEGs. The lib creates it if missing. |
 | `engine` | `'batch-keyframe' \| …` | Stitching engine. Default `'batch-keyframe'`; most apps leave it. |
@@ -364,7 +386,10 @@ together they cover **100 %** of what a user reads:
 A single `Partial<GuidanceCopy>` prop. Pass the keys you want to translate;
 omitted keys fall back to the English default. This covers the rotate prompt,
 the pan hint, the live "too fast" cue, the lateral-drift popups, the crop-editor
-buttons, the **capture-status banner**, and the **crop-editor warning banners**:
+buttons, the **capture-status banner**, and the **crop-editor warning banners**.
+Note that for a *finalized* lateral stop the popup and the crop warning banner
+are alternatives rather than both: with a review surface configured, the banner
+is what the operator sees.
 
 Each default is the **exact, complete** source string — translate it verbatim
 (keep the `{included}` / `{requested}` / `{percent}` placeholders in
@@ -377,11 +402,13 @@ catalogue programmatically.
 | `rotateToPortrait` | rotate prompt | `Rotate to portrait` |
 | `panHint` | pan how-to overlay | `Pan slowly top to bottom` |
 | `tooFast` | speed-cue pill | `Moving too fast — slow down` |
-| `lateralStopTitle` | lateral-drift popup (stitched) | `Keep the pan straight` |
-| `lateralStopBody` | lateral-drift popup (stitched) | `You moved sideways. Pan in one direction only — we stitched what you captured.` |
-| `lateralStopDismiss` | lateral-drift popup button | `Got it` |
-| `lateralWrongDirectionTitle` | lateral-drift popup (too few frames) | `Follow the arrow` |
-| `lateralWrongDirectionBody` | lateral-drift popup (too few frames) | `You moved the phone the wrong way. Pan slowly in the direction the arrow shows, in one straight line.` |
+| `lateralStopTitle` | lateral-drift popup (capture kept + stitched) — only when no review surface follows | `Keep the pan straight` |
+| `lateralStopBody` | lateral-drift popup (capture kept + stitched) — only when no review surface follows | `You moved sideways. Pan in one direction only — we stitched what you captured.` |
+| `lateralStopDismiss` | lateral-drift popup button (whichever state is showing) | `Got it` |
+| `lateralWrongDirectionTitle` | lateral-drift popup (too few frames to stitch anything) | `Follow the arrow` |
+| `lateralWrongDirectionBody` | lateral-drift popup (too few frames to stitch anything) | `You moved the phone the wrong way. Pan slowly in the direction the arrow shows, in one straight line.` |
+| `lateralStopDiscardedTitle` | lateral-drift popup (stitchable, but discarded by `lateralStopFinalizeMinFrames`) | `Capture discarded` |
+| `lateralStopDiscardedBody` | lateral-drift popup (stitchable, but discarded by `lateralStopFinalizeMinFrames`) | `You moved sideways, so this capture was discarded. Shoot it again, panning in one straight line.` |
 | `cropConfirm` | crop-editor button | `Crop` |
 | `cropReset` | crop-editor button | `Reset` |
 | `cropUseOriginal` | crop-editor button | `Use original` |

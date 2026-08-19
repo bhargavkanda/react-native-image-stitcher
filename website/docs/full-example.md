@@ -86,6 +86,7 @@ export function FullyLoadedCamera() {
       maxPanDurationMs={0}
       panTooFastThreshold={0.6}
       lateralBudgetCm={4}
+      lateralStopFinalizeMinFrames={5}
       rectCrop={false}
       showPreview={false}
       guidanceCopy={{
@@ -219,8 +220,12 @@ pan how-to, too-fast pill, blinking countdown).
 
 The auto-stop levers are worth understanding: `maxPanDurationMs` defaults
 to `0` (disabled) — the keyframe-count cap is the primary auto-stop, and
-the time ceiling is opt-in. `lateralBudgetCm` (default `4`) finalizes the
-capture once sideways drift exceeds the budget; `0` disables it.
+the time ceiling is opt-in. `lateralBudgetCm` (default `4`) stops the
+capture once sideways drift exceeds the budget; `0` disables it, and
+`lateralStopFinalizeMinFrames` (default `5`) decides whether that stop keeps
+and stitches the partial sweep or discards it outright. The default discards
+anything under 5 keyframes — a behaviour change from the previously hardcoded
+2 — so pass `2` for the old rule, or `0` so a drifted capture is never kept.
 `panTooFastThreshold` (resolves to `0.6` rad/s) flags an over-fast pan.
 `rectCrop` shows the draggable-quad perspective-crop editor after finalize
 and takes precedence over `showPreview` (a plain Retake/Confirm screen);

@@ -21,6 +21,7 @@ import {
   DEFAULT_CAPTURE_WARNING_COPY,
   type CaptureWarningCopy,
 } from './captureWarnings';
+import type { LateralStopOutcome } from './lateralStopPolicy';
 
 export interface GuidanceCopy {
   /** Item 2 — caption pill while waiting for the user to rotate to landscape
@@ -48,6 +49,20 @@ export interface GuidanceCopy {
   lateralWrongDirectionTitle: string;
   /** Item 6 — popup BODY for the too-few-frames wrong-direction stop. */
   lateralWrongDirectionBody: string;
+  /**
+   * Item 6 — popup TITLE for the THIRD lateral-stop state: enough frames
+   * landed to stitch, but the host's `lateralStopFinalizeMinFrames` policy
+   * discarded the capture anyway.  Distinct from `lateralStopTitle` because
+   * that copy PROMISES a stitch ("we stitched what you captured") and this
+   * state produced no output at all — saying it here would send the operator
+   * looking for a panorama that does not exist.  At the default threshold of
+   * 5 this is the state a 2-to-4-keyframe drifted capture lands in, so it is
+   * very much reachable out of the box.
+   */
+  lateralStopDiscardedTitle: string;
+  /** Item 6 — popup BODY for the discarded-by-policy stop.  Must NOT promise
+   *  a stitch; it asks for a re-shoot in one straight line. */
+  lateralStopDiscardedBody: string;
   /** Item 7 — confirm button on the crop editor. */
   cropConfirm: string;
   /** Item 7 — reset-corners button on the crop editor. */
@@ -99,6 +114,10 @@ export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
   lateralWrongDirectionBody:
     'You moved the phone the wrong way. Pan slowly in the direction the '
     + 'arrow shows, in one straight line.',
+  lateralStopDiscardedTitle: 'Capture discarded',
+  lateralStopDiscardedBody:
+    'You moved sideways, so this capture was discarded. Shoot it again, '
+    + 'panning in one straight line.',
   cropConfirm: 'Crop',
   cropReset: 'Reset',
   cropUseOriginal: 'Use original',
@@ -125,6 +144,33 @@ export function captureWarningCopyFrom(g: GuidanceCopy): CaptureWarningCopy {
     highPanSpeed: g.warnHighPanSpeed,
     captureTooShort: g.warnCaptureTooShort,
   };
+}
+
+/**
+ * Pick the `LateralMotionModal` title + body for a lateral-stop outcome.
+ *
+ * Kept as a pure function (rather than a ternary stack in `<Camera>`'s JSX)
+ * because the three states are easy to mis-pair — and pairing them wrongly
+ * shows an operator "we stitched what you captured" for a capture that was
+ * thrown away.  Unit-tested in `lateralStopPolicy.test.ts`.
+ */
+export function lateralStopCopyFor(
+  outcome: LateralStopOutcome,
+  copy: GuidanceCopy,
+): { title: string; body: string } {
+  if (outcome === 'wrong-direction') {
+    return {
+      title: copy.lateralWrongDirectionTitle,
+      body: copy.lateralWrongDirectionBody,
+    };
+  }
+  if (outcome === 'discarded') {
+    return {
+      title: copy.lateralStopDiscardedTitle,
+      body: copy.lateralStopDiscardedBody,
+    };
+  }
+  return { title: copy.lateralStopTitle, body: copy.lateralStopBody };
 }
 
 /**

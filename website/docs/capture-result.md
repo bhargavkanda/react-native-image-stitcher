@@ -177,7 +177,7 @@ interface CaptureWarning {
 | `code` | When it fires |
 |---|---|
 | `LOW_FRAME_UTILIZATION` | Fewer than the threshold (default **70%**) of captured frames survived the confidence filter — the panorama may be incomplete. Carries `framesRequested` / `framesIncluded` / `utilization`; the `message` is a filled-in template. |
-| `LATERAL_DRIFT_FINALIZE` | The capture was auto-finalized early because the phone drifted sideways — only the pre-drift portion was stitched. |
+| `LATERAL_DRIFT_FINALIZE` | The capture was auto-finalized early because the phone drifted sideways — only the pre-drift portion was stitched. Only fires when the [`lateralStopFinalizeMinFrames`](./camera-api.md#lateralstopfinalizeminframes) policy kept the capture; a discarded lateral stop produces no result to carry a warning. |
 | `HIGH_PAN_SPEED` | The pan exceeded the recommended pace at some point (the live "too fast" cue fired); motion blur / thin overlap may have hurt the result. |
 
 :::tip Customising warning copy
@@ -238,7 +238,8 @@ onCaptureAbandoned={(reason) => {
       // The device rotated across the accepted hold mid-capture.
       return toast('Keep the phone in one orientation while panning.');
     case 'lateral-drift':
-      // v0.16 — the phone moved sideways before enough frames to stitch.
+      // v0.16 — the phone moved sideways and the capture was not kept
+      // (see lateralStopFinalizeMinFrames).
       return toast('Pan in one straight line — try again.');
   }
 }}
@@ -247,15 +248,25 @@ onCaptureAbandoned={(reason) => {
 | Reason | Meaning |
 |---|---|
 | `'orientation-drift'` | A cross-mode rotation happened mid-capture (the device left the accepted hold). |
-| `'lateral-drift'` | **v0.16** — the phone moved sideways before enough frames were captured to stitch. |
+| `'lateral-drift'` | **v0.16** — the phone moved sideways and the [`lateralStopFinalizeMinFrames`](./camera-api.md#lateralstopfinalizeminframes) policy declined to keep the capture (by default: fewer than 5 accepted keyframes). |
 
 :::note Abandon vs lateral-drift *finalize*
-There are two distinct lateral-drift outcomes. If the drift happens
-**after** enough frames exist, the capture is *finalized early* — you get
-a normal `ok: true` result with a [`LATERAL_DRIFT_FINALIZE`](#capturewarning)
-warning. If the drift happens **before** enough frames, the capture is
-*abandoned* — you get `onCaptureAbandoned('lateral-drift')` and no
-`onCapture`.
+A lateral-drift stop has two possible outcomes, and
+[`lateralStopFinalizeMinFrames`](./camera-api.md#lateralstopfinalizeminframes)
+(default `5`) decides which:
+
+- **At or above the threshold** the capture is *finalized early* — you get a
+  normal `ok: true` result with a [`LATERAL_DRIFT_FINALIZE`](#capturewarning)
+  warning.
+- **Below it** the capture is *abandoned* — you get
+  `onCaptureAbandoned('lateral-drift')` and no `onCapture`.
+
+At the default the split is "did at least 5 keyframes land?". That is a
+**behaviour change**: the SDK used to keep anything with 2 or more, so
+2-to-4-keyframe captures that previously arrived via `onCapture` now arrive
+here instead. Pass `lateralStopFinalizeMinFrames={2}` to restore the old
+split, or `0` to make **every** laterally drifted capture abandon so a drifted
+sweep never reaches your pipeline at all.
 :::
 
 ## Friendly copy for recoverable failures — `userFacingStitchError`
