@@ -4157,6 +4157,19 @@ const styles = StyleSheet.create({
   bottomBarCenter: {
     flex: 1,
     alignItems: 'center',
+    // v0.25.2 — CROSS-AXIS vs MAIN-AXIS.  `alignItems` centres on the cross
+    // axis, which is horizontal while this slot lays out as a column — so on
+    // its own it left-right centres the cluster and leaves the vertical
+    // (main) axis at the default `flex-start`.  In the SIDE-EDGE layout
+    // (bottomBarStyleForEdge -> flexDirection 'column' for a left/right home
+    // indicator) the three flex:1 slots split the height into thirds and the
+    // cluster pinned to the TOP of the middle third, i.e. from 33% rather
+    // than centred on 50%.  The displacement scales with height, so it read
+    // as centred on an iPhone (~390-430pt landscape) and visibly high on an
+    // iPad (~834-1024pt) — the field report.  A no-op in the row layout:
+    // there the parent's `alignItems: 'center'` sizes this slot to its
+    // content height, leaving no free space to distribute.
+    justifyContent: 'center',
   },
   bottomBarRight: {
     flex: 1,
