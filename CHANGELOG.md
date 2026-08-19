@@ -14,6 +14,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.25.2] - 2026-08-18 (shutter centring in the side-edge layout)
+
+A one-property layout fix, reported from the field on an iPad: in a
+landscape capture the lens chip + shutter sat visibly HIGH instead of
+centred. It only appears on a device whose interface **actually
+rotates** — an iPad, or any non-portrait-locked iOS host. No API
+change, no new props, no behaviour change outside that layout, and
+nothing to migrate.
+
+### Fixed
+
+- **The shutter cluster now centres vertically in the side-edge
+  (landscape) control layout.** When the home indicator lands on a LEFT
+  or RIGHT edge, `bottomBarStyleForEdge` lays the control cluster out as
+  a **column** so the three slots stack along the narrow side strip. The
+  centre slot set only `alignItems: 'center'` — and `alignItems` centres
+  on the **cross** axis, which is HORIZONTAL once the parent is a
+  column, leaving the **main** (vertical) axis at its default
+  `flex-start`. The three slots are each `flex: 1`, so they split the
+  strip's height into thirds and the lens chip + shutter pinned to the
+  TOP of the middle third: starting at **33%** of the height instead of
+  centred on **50%**. Adding `justifyContent: 'center'` centres the
+  cluster on the main axis of its third.
+
+- **Why one device showed it and the other did not.** The displacement
+  is a fraction of screen height, not a fixed offset, so it scales with
+  the device: ~390-430pt of landscape height on an iPhone hides it,
+  ~834-1024pt on an iPad makes it obvious. A portrait-locked iPhone host
+  never reaches the column branch at all — the framebuffer rotates under
+  the UI and the home indicator stays on the JS bottom edge — which is
+  why the bug survived on the device most captures are shot on.
+
+- **A no-op in the row layout.** With the home indicator on the top or
+  bottom edge (every portrait capture, and landscape capture on a
+  portrait-locked host), the parent's `alignItems: 'center'` sizes the
+  centre slot to its content height, so there is no free space for
+  `justifyContent` to distribute and those hosts render identically to
+  0.25.1. Which edge the controls anchor to is unchanged — only where
+  the cluster sits along that edge.
+
 ## [0.25.1] - 2026-08-18 (dead-shutter fix + lateral-stop policy)
 
 The headline is a **dead shutter**, reported from the field and fixed
