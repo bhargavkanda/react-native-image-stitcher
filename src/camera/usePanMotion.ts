@@ -1329,7 +1329,22 @@ export function usePanMotion({
       ACCEL_SAMPLE_INTERVAL_MS,
     );
     const scale = Platform.OS === 'ios' ? G_TO_MPS2 : 1;
-    const budgetM = lateralBudgetCm / M_TO_CM;
+    // `0` (or negative) DISABLES the lateral-drift stop — the contract
+    // the README, the `<Camera>` prop and `lateralBudgetDefault.test.ts`
+    // all state.  The accel path never implemented it: with `budgetM`
+    // literally 0 the latch predicate `Math.abs(s.pos) > budgetM` is
+    // satisfied by ANY non-zero position, so sensor noise alone latched
+    // ~540 ms into every capture on a MOTIONLESS phone (measured:
+    // 0.0025 cm of drift trips it).  `<Camera>` masked this because its
+    // finalize effect has its own `lateralBudgetCm <= 0` guard, but the
+    // hook is exported, and `lateralExceeded` still flipped for anyone
+    // driving it directly or rendering guidance off it.
+    //
+    // `Infinity` rather than an early return: consumers who disable the
+    // STOP may still want the live `lateralCm` readout, and an early
+    // return would also change the sensor-subscription lifecycle.
+    // Verified to reproduce the enabled path's integration bit-for-bit.
+    const budgetM = lateralBudgetCm > 0 ? lateralBudgetCm / M_TO_CM : Infinity;
 
     // Fused-gravity feed, paired hold-last against the accel stream.
     // Requested at the ACCELEROMETER's interval so neither CoreMotion

@@ -403,3 +403,42 @@ describe('3-D replay of the field motion (landscape vertical sweep)', () => {
     }
   });
 });
+
+describe('lateralBudgetCm = 0 disables the displacement stop', () => {
+  /** Deterministic pseudo-noise: a motionless phone's accelerometer. */
+  const stillPhone = (i: number) => ((i * 2654435761) % 1000 / 1000 - 0.5) * 0.02;
+
+  function runStill(budgetM: number) {
+    const s = _freshLateralState();
+    let latchMs: number | null = null;
+    let now = 0;
+    for (let i = 0; i < 400; i++) { // 8 s
+      _integrateLateralSample(
+        s, stillPhone(i), SCALE, DT, budgetM, GRACE_MS, now,
+        { gravityMps2: 0 },
+      );
+      if (s.exceeded && latchMs === null) latchMs = now;
+      now += DT * 1000;
+    }
+    return { latchMs, pos: s.pos };
+  }
+
+  it('a literal 0 budget would latch on sensor noise alone', () => {
+    // Documents WHY the hook maps `0` to Infinity rather than passing it
+    // through: `Math.abs(pos) > 0` is satisfied by any noise at all, so a
+    // motionless phone latched ~540 ms into EVERY capture.  This asserts
+    // the raw hazard the mapping exists to prevent.
+    const r = runStill(0);
+    expect(r.latchMs).not.toBeNull();
+    expect(Math.abs(r.pos) * 100).toBeLessThan(0.05); // ...on 0.0025 cm
+  });
+
+  it('the disabled sentinel never latches, and integrates identically', () => {
+    const disabled = runStill(Infinity);
+    const enabled = runStill(0.08);
+    expect(disabled.latchMs).toBeNull();
+    // Disabling the STOP must not disturb the integrator — consumers may
+    // still read `lateralCm` with the stop off.
+    expect(disabled.pos).toBe(enabled.pos);
+  });
+});

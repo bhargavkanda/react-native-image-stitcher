@@ -1123,6 +1123,19 @@ export interface CameraProps {
   lateralBudgetCm?: number;
 
   /**
+   * Cross-pan ROTATION rate, rad/s, above which the capture is stopped
+   * for lateral drift.  Defaults to `DEFAULT_LATERAL_TURN_RAD_PER_SEC`
+   * (0.15 rad/s ≈ 8.6 °/s) — unset reproduces today's behaviour.
+   *
+   * `lateralBudgetCm` is NOT the only lateral trigger.  This gyro EMA
+   * is a second, independent one, and historically the primary.  A stop
+   * you attribute to "drifting sideways" may be this rotation trigger
+   * instead — check `latch=gyro|accel` in the `[panMotion]` telemetry
+   * (see `panMotionDebug`) before tuning either number.
+   */
+  lateralTurnRateRadPerSec?: number;
+
+  /**
    * Which lateral-drift physics to run.  Default `'fused'`.
    *
    * `'fused'` subtracts the device's FUSED GRAVITY SENSOR from each
@@ -1144,19 +1157,6 @@ export interface CameraProps {
    * it stops delivering mid-capture, the hook falls back to the legacy
    * estimator automatically for exactly as long as it needs to.
    */
-  /**
-   * Cross-pan ROTATION rate, rad/s, above which the capture is stopped
-   * for lateral drift.  Defaults to `DEFAULT_LATERAL_TURN_RAD_PER_SEC`
-   * (0.15 rad/s ≈ 8.6 °/s) — unset reproduces today's behaviour.
-   *
-   * `lateralBudgetCm` is NOT the only lateral trigger.  This gyro EMA
-   * is a second, independent one, and historically the primary.  A stop
-   * you attribute to "drifting sideways" may be this rotation trigger
-   * instead — check `latch=gyro|accel` in the `[panMotion]` telemetry
-   * (see `panMotionDebug`) before tuning either number.
-   */
-  lateralTurnRateRadPerSec?: number;
-
   lateralMotionModel?: LateralMotionModel;
 
   /**

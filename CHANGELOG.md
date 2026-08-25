@@ -103,6 +103,19 @@ This class of bug previously left **no trace in a release build**. Now:
 > **it cannot increase the stop rate**. Pass `'legacy'` to reproduce an
 > old capture or back out a device-specific regression.
 
+### Also fixed
+
+- **`lateralBudgetCm={0}` now genuinely disables the displacement stop.**
+  It only ever disabled the *gyro* trigger. The accelerometer path passed
+  the literal `0` into the latch predicate `Math.abs(pos) > budgetM`,
+  which any non-zero value satisfies — so on a **motionless phone**
+  sensor noise alone latched ~540 ms into every capture (measured:
+  0.0025 cm of drift). `<Camera>` masked this because its finalize effect
+  carries its own `lateralBudgetCm <= 0` guard, but `usePanMotion` is
+  exported and `lateralExceeded` still flipped for anyone driving the
+  hook directly or rendering guidance from it. Found by adversarial
+  review of this release.
+
 ### Known limitation — read this before tuning
 
 At the current 8 cm budget the accelerometer path is deliberately
