@@ -217,12 +217,18 @@ export {
 export type { GuidanceCopy } from './camera/cameraGuidanceCopy';
 // Shared motion hook — one gyro + one accelerometer subscription feeding
 // the pan-speed bucket (item 4) and the lateral-drift latch (item 6).
-export { usePanMotion } from './camera/usePanMotion';
+export {
+  usePanMotion,
+  DEFAULT_LATERAL_BUDGET_CM,
+  DEFAULT_LATERAL_TURN_RAD_PER_SEC,
+  DEFAULT_LATERAL_MOTION_MODEL,
+} from './camera/usePanMotion';
 export type {
   UsePanMotionOptions,
   UsePanMotionReturn,
   PanSpeedBucket,
   PanAxis,
+  LateralMotionModel,
 } from './camera/usePanMotion';
 // Presentational guidance surfaces (each renders null when not visible).
 export { RotateToLandscapePrompt } from './camera/RotateToLandscapePrompt';

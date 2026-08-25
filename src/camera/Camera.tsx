@@ -119,7 +119,12 @@ import {
 } from './panModeGate';
 import { cameraTransitionAction } from './cameraTransitionGate';
 import { countdownSecondsFrom } from './captureCountdown';
-import { usePanMotion, DEFAULT_LATERAL_BUDGET_CM } from './usePanMotion';
+import {
+  usePanMotion,
+  DEFAULT_LATERAL_BUDGET_CM,
+  DEFAULT_LATERAL_MOTION_MODEL,
+} from './usePanMotion';
+import type { LateralMotionModel } from './usePanMotion';
 import type { Quad } from './cropGeometry';
 import {
   mergeGuidanceCopy,
@@ -1118,6 +1123,52 @@ export interface CameraProps {
   lateralBudgetCm?: number;
 
   /**
+   * Which lateral-drift physics to run.  Default `'fused'`.
+   *
+   * `'fused'` subtracts the device's FUSED GRAVITY SENSOR from each
+   * accelerometer sample and derives the integration step from the
+   * sample's own timestamp.  `'legacy'` restores the pre-0.25.4
+   * behaviour bit-for-bit: an IIR gravity estimate and a hardcoded
+   * 20 ms step.
+   *
+   * You almost certainly want the default.  The legacy estimator cannot
+   * distinguish a wrist TILT from a sideways SLIDE — a change in how
+   * gravity projects onto the cross-pan axis is arithmetically
+   * identical to real lateral acceleration — so it fabricates ~1.1 cm
+   * of drift per degree of net tilt and latches the stop on ordinary
+   * hand movement.  This prop exists as an ESCAPE HATCH so a host that
+   * hits an unexpected device-specific regression can back out without
+   * pinning an old version of the library, not as an opt-in gate.
+   *
+   * Degrades on its own: if the device has no fused gravity sensor, or
+   * it stops delivering mid-capture, the hook falls back to the legacy
+   * estimator automatically for exactly as long as it needs to.
+   */
+  /**
+   * Cross-pan ROTATION rate, rad/s, above which the capture is stopped
+   * for lateral drift.  Defaults to `DEFAULT_LATERAL_TURN_RAD_PER_SEC`
+   * (0.15 rad/s ≈ 8.6 °/s) — unset reproduces today's behaviour.
+   *
+   * `lateralBudgetCm` is NOT the only lateral trigger.  This gyro EMA
+   * is a second, independent one, and historically the primary.  A stop
+   * you attribute to "drifting sideways" may be this rotation trigger
+   * instead — check `latch=gyro|accel` in the `[panMotion]` telemetry
+   * (see `panMotionDebug`) before tuning either number.
+   */
+  lateralTurnRateRadPerSec?: number;
+
+  lateralMotionModel?: LateralMotionModel;
+
+  /**
+   * Emit the throttled `[panMotion.*]` diagnostic logs.  Default
+   * `__DEV__`, i.e. unset behaves exactly as before.  Set `true` to keep
+   * them in a release build while diagnosing a field report — they are
+   * the intended instrument for tuning `lateralBudgetCm` against real
+   * captures.
+   */
+  panMotionDebug?: boolean;
+
+  /**
    * The accepted-keyframe count at or above which a lateral-drift stop
    * (item 6) FINALIZES the capture: the partial sweep is stitched and handed
    * to `onCapture` with a `LATERAL_DRIFT_FINALIZE` warning.  BELOW it the
@@ -1681,6 +1732,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     maxPanDurationMs = 0,
     panTooFastThreshold,
     lateralBudgetCm = DEFAULT_LATERAL_BUDGET_CM,
+    lateralTurnRateRadPerSec,
+    lateralMotionModel = DEFAULT_LATERAL_MOTION_MODEL,
+    panMotionDebug,
     // No destructuring default on purpose: `undefined` → default is owned by
     // `normaliseLateralStopFinalizeMinFrames`, alongside the negative/NaN
     // normalisation, so the default lives in exactly one place.
@@ -1879,6 +1933,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     active: statusPhase === 'recording',
     warnMaxRadPerSec: panTooFastThreshold,
     lateralBudgetCm,
+    lateralTurnRateRadPerSec,
+    lateralMotionModel,
+    panMotionDebug,
   });
 
   // v0.13.1 — counter-rotation for control CONTENT (AR toggle, lens
