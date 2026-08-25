@@ -85,7 +85,7 @@ export function FullyLoadedCamera() {
       panGuidance={true}
       maxPanDurationMs={0}
       panTooFastThreshold={0.6}
-      lateralBudgetCm={4}
+      lateralBudgetCm={8}
       lateralStopFinalizeMinFrames={5}
       rectCrop={false}
       showPreview={false}
@@ -220,7 +220,7 @@ pan how-to, too-fast pill, blinking countdown).
 
 The auto-stop levers are worth understanding: `maxPanDurationMs` defaults
 to `0` (disabled) — the keyframe-count cap is the primary auto-stop, and
-the time ceiling is opt-in. `lateralBudgetCm` (default `4`) stops the
+the time ceiling is opt-in. `lateralBudgetCm` (default `8`) stops the
 capture once sideways drift exceeds the budget; `0` disables it, and
 `lateralStopFinalizeMinFrames` (default `5`) decides whether that stop keeps
 and stitches the partial sweep or discards it outright. The default discards

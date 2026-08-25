@@ -119,7 +119,7 @@ import {
 } from './panModeGate';
 import { cameraTransitionAction } from './cameraTransitionGate';
 import { countdownSecondsFrom } from './captureCountdown';
-import { usePanMotion } from './usePanMotion';
+import { usePanMotion, DEFAULT_LATERAL_BUDGET_CM } from './usePanMotion';
 import type { Quad } from './cropGeometry';
 import {
   mergeGuidanceCopy,
@@ -1095,9 +1095,25 @@ export interface CameraProps {
   /**
    * Cross-pan (lateral) drift budget in CENTIMETRES (item 6).  Once the
    * operator's integrated sideways translation exceeds this for the
-   * hook's grace window, the capture FINALIZES what was captured and a
-   * one-button popup explains why.  Default `5`.  `0` disables the
-   * lateral-drift stop entirely.
+   * hook's grace window, the capture is STOPPED.
+   *
+   * **Default `8`** (v0.25.3 — was `4`).  `0` disables the lateral-drift
+   * stop entirely.
+   *
+   * This is the SENSITIVITY knob: it decides how much sideways drift is
+   * tolerated before a capture is stopped at all.  What HAPPENS at that
+   * stop — finalize the partial sweep, or discard it — is a separate
+   * decision controlled by `lateralStopFinalizeMinFrames`.  The two are
+   * easy to confuse when tuning: if operators complain the stop fires
+   * too eagerly, raise this; if they complain that stopped captures are
+   * thrown away, lower that one.
+   *
+   * v0.25.3 raised the default from `4` after field reports of the stop
+   * firing on minor drift.  4 cm of integrated sideways translation is
+   * a small movement to hold to over a hand-held sweep — comfortably
+   * inside the natural arc of pivoting on the spot — so it tripped on
+   * captures the operator considered fine.  The detector itself is
+   * unchanged; only the budget it is measured against moved.
    */
   lateralBudgetCm?: number;
 
@@ -1664,7 +1680,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     panGuidance = true,
     maxPanDurationMs = 0,
     panTooFastThreshold,
-    lateralBudgetCm = 4,
+    lateralBudgetCm = DEFAULT_LATERAL_BUDGET_CM,
     // No destructuring default on purpose: `undefined` → default is owned by
     // `normaliseLateralStopFinalizeMinFrames`, alongside the negative/NaN
     // normalisation, so the default lives in exactly one place.

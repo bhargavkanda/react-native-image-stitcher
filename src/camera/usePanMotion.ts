@@ -170,7 +170,17 @@ const DEFAULT_WARN_RAD_PER_SEC = 0.6;
 // v0.16: lowered 5 → 4 cm so a deliberate sideways slide trips sooner.
 // NOTE: the cm budget now only feeds the (secondary) accel readout; the
 // PRIMARY lateral trigger is the gyro cross-axis below.
-const DEFAULT_LATERAL_BUDGET_CM = 4;
+/**
+ * Cross-pan drift budget, in centimetres, used when the caller does not
+ * supply one.  SINGLE SOURCE OF TRUTH — `<Camera>`'s `lateralBudgetCm`
+ * prop default imports this rather than repeating the literal, because
+ * two independent copies of a tuning value silently diverge the moment
+ * one is changed (and this one HAS been changed, in v0.25.3).
+ *
+ * v0.25.3: `4` -> `8`, after field reports of the lateral stop firing on
+ * minor drift.  Only the budget moved; the detector is unchanged.
+ */
+export const DEFAULT_LATERAL_BUDGET_CM = 8;
 
 /**
  * Lateral-drift trip point on the SMOOTHED cross-pan gyro rate (EMA of

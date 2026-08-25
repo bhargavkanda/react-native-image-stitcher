@@ -198,11 +198,23 @@ The prop JSDoc claims a default of `1.0 rad/s`. The real fallback literal is
 
 ### `lateralBudgetCm`
 
-`number`, default **`4`**.
+`number`, default **`8`** (v0.25.3 — was `4`).
 
 Cross-pan (lateral / sideways) drift budget in cm. Once integrated sideways
 translation exceeds this for the grace window, the capture is **stopped**. Set
 `0` to disable the lateral-drift stop entirely.
+
+This is the **sensitivity** knob — how much drift is tolerated before a stop
+happens at all. What happens *at* that stop (finalize the partial sweep, or
+discard it) is a separate decision, controlled by
+[`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes). If operators
+report the stop firing too eagerly, raise this; if they report stopped captures
+being thrown away, lower that one.
+
+v0.25.3 raised the default after field reports of the stop firing on minor
+drift: 4 cm of integrated sideways translation is comfortably inside the
+natural arc of a hand-held sweep. The detector is unchanged — only the budget
+it is measured against.
 
 Whether that stop KEEPS what was captured (finalize + stitch, carrying the
 `LATERAL_DRIFT_FINALIZE` warning) or throws it away is a separate decision —
@@ -362,7 +374,7 @@ for the full key list and defaults.
 <Camera
   panMode="vertical"
   panGuidance
-  lateralBudgetCm={4}
+  lateralBudgetCm={8}
   rectCrop
   guidanceCopy={{
     rotateToLandscape: 'Turn your phone sideways',

@@ -14,6 +14,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.25.3] - 2026-08-19 (lateral-drift budget raised to 8 cm)
+
+A tuning change, from a field report that the lateral-drift stop fires
+on minor sideways movement.
+
+**The detector did not change.** `usePanMotion.ts` — which owns the
+drift integration and the `lateralExceeded` latch — is byte-identical
+from v0.24.3 through v0.25.2, and the budget it measures against had
+been `4` cm that whole time. What changed for operators in v0.25.1 was
+the CONSEQUENCE of a stop, not its sensitivity: the discard band widened
+from "fewer than 2 keyframes" to "fewer than 5", and discards keep their
+popup while finalized stops no longer show one. A drift early in a sweep
+that previously delivered a panorama with a warning now discards the
+capture and shows a popup — which reads as the guard having become
+trigger-happy.
+
+Raising the budget addresses the underlying complaint anyway: 4 cm of
+integrated sideways translation is comfortably inside the natural arc of
+a hand-held sweep, so the stop was reachable on captures the operator
+considered fine.
+
+### Changed
+
+- **`lateralBudgetCm` default `4` -> `8`.** Twice the sideways drift is
+  tolerated before a capture is stopped. Hosts pinning the old value
+  pass `lateralBudgetCm={4}`; `0` still disables the stop entirely.
+
+  The prop itself is not new — it has been public and host-settable
+  since the guidance work landed. Only its default moved.
+
+- **The default now lives in one place.** It was written twice, as a
+  literal in `usePanMotion` and again as the `<Camera>` prop default;
+  `<Camera>` now imports the exported `DEFAULT_LATERAL_BUDGET_CM`. Two
+  independent copies of a tuning value diverge the moment one is
+  edited, and this one has now been edited.
+
+### Fixed (documentation)
+
+- **`lateralBudgetCm`'s docblock said "Default `5`"** — a value the SDK
+  has never shipped. The internal pano-UX QA checklist said `5` too.
+  Both now say `8`, and the QA line notes that its own "does a normal
+  straight pan false-trigger?" check is the gate this field report went
+  through.
+- **It also claimed a stop "FINALIZES what was captured"**, which
+  v0.25.1 made untrue for captures below the finalize threshold — those
+  discard. The docs now separate the two knobs explicitly: this one is
+  SENSITIVITY (does a stop happen), `lateralStopFinalizeMinFrames` is
+  POLICY (what happens at one). Confusing them sends a host tuning the
+  wrong value.
+
+### Added
+
+- A test pinning `DEFAULT_LATERAL_BUDGET_CM`. Nothing pinned it before,
+  so a product-tuning value that had already caused a field issue could
+  move in either direction without CI noticing.
+
 ## [0.25.2] - 2026-08-18 (shutter centring in the side-edge layout)
 
 A one-property layout fix, reported from the field on an iPad: in a
