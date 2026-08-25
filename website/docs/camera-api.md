@@ -249,6 +249,8 @@ stopped while panning normally; lower it to catch gentler veering.
 Because both triggers set the same flag, a stop you attribute to "drifting
 sideways" may in fact be this one. Check `latch=` in the telemetry first.
 
+`0` disables **this** trigger only. `lateralBudgetCm={0}` disables **both**.
+
 ### `lateralMotionModel`
 
 `'fused' | 'legacy'`, default **`'fused'`** (v0.26.0).

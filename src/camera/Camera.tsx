@@ -1132,6 +1132,9 @@ export interface CameraProps {
    * you attribute to "drifting sideways" may be this rotation trigger
    * instead — check `latch=gyro|accel` in the `[panMotion]` telemetry
    * (see `panMotionDebug`) before tuning either number.
+   *
+   * `0` (or negative) disables THIS trigger only; `lateralBudgetCm={0}`
+   * disables both.
    */
   lateralTurnRateRadPerSec?: number;
 

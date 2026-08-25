@@ -155,6 +155,9 @@ export interface UsePanMotionOptions {
    * until now there was no way to tune it or tell the two apart — read
    * `latch=gyro|accel` in the `[panMotion]` telemetry to find out which
    * one is firing before changing either number.
+   *
+   * `0` (or negative) disables THIS trigger only; `lateralBudgetCm: 0`
+   * disables both.
    */
   lateralTurnRateRadPerSec?: number;
 
@@ -1249,10 +1252,18 @@ export function usePanMotion({
         // reset the trigger; latch once the SMOOTHED rate stays over the
         // threshold (the EMA's time constant IS the dwell).
         let crossEma = crossEmaRef.current;
+        // `<= 0` DISABLES the rotation trigger, mirroring `lateralBudgetCm`.
+        // Without this, `crossEma > 0` is satisfied by the first non-zero
+        // gyro sample, so the value a reader most naturally interprets as
+        // "turn this off" would instead stop EVERY capture immediately —
+        // the same inversion `lateralBudgetCm: 0` had.  `lateralBudgetCm: 0`
+        // still disables BOTH triggers (via `lateralEnabled`); this
+        // disables only the rotation one.
+        const turnLatchEnabled = lateralTurnRateRadPerSec > 0;
         if (lateralEnabled) {
           crossEma = crossEma * (1 - crossAlpha) + Math.abs(x) * crossAlpha;
           crossEmaRef.current = crossEma;
-          if (crossEma > lateralTurnRateRadPerSec) {
+          if (turnLatchEnabled && crossEma > lateralTurnRateRadPerSec) {
             if (latchSourceRef.current === null) {
               latchSourceRef.current = 'gyro';
               if (debugEnabled) {
@@ -1481,6 +1492,7 @@ export function usePanMotion({
             + `m/s2 gIir=${s.gravity.toFixed(3)}m/s2 `
             + `linUsed=${linUsed.toFixed(4)}m/s2 `
             + `linIir=${linIir.toFixed(4)}m/s2 `
+            + `bias=${Number.isNaN(s.bias) ? 'n/a' : s.bias.toFixed(4)}m/s2 `
             + `vel=${s.vel.toFixed(4)}m/s `
             + `lat=${(s.pos * M_TO_CM).toFixed(2)}cm `
             + `budget=${lateralBudgetCm}cm exceeded=${s.exceeded} `
