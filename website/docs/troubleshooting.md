@@ -22,6 +22,36 @@ fuller table mapping crashes to missing config.
 | **Shutter goes dead after a lateral-drift stop (iOS); no review screen, no thumbnail** | Pre-0.25.1 bug. The guidance popup and the post-stitch review surface were presented at once; iOS refuses the second presentation and leaves an invisible window that swallows every touch (device logs show **zero** `pressIn` events). Fixed in 0.25.1 — a finalized stop now shows no popup when a review surface follows. **Upgrade to 0.25.1+.** See [what shows after a lateral-drift stop](./camera-api.md#what-shows-after-a-lateral-drift-stop). |
 | **Shutter dead + stuck on "Switching camera…" after toggling the lens** | Pre-0.25.1 latch: flipping the lens back within ~250 ms of flipping it could leave the camera-transition gate closed forever, so the camera never remounted and every hold was deferred then cancelled. Fixed in 0.25.1. **Upgrade to 0.25.1+.** |
 
+## Lateral-drift stop fires on tiny movement
+
+**Symptom:** the "you drifted sideways" stop fires during an ordinary sweep,
+often repeatedly, and (at the default `lateralStopFinalizeMinFrames = 5`)
+discards a short capture outright.
+
+**Cause, pre-0.26.0:** the cross-pan estimator integrated the **raw**
+accelerometer with an IIR gravity estimate and no gyro input, so it could not
+distinguish a **wrist tilt** from a **sideways slide** — a re-projection of
+gravity onto the cross-pan axis is arithmetically identical to real lateral
+acceleration. On an 8 s landscape sweep with *zero* real translation, 6° of
+wrist roll read 5.18 cm (enough to trip a 4 cm budget), while a real **1 metre**
+slide read 2.00 cm and never tripped. The discrimination was inverted.
+
+**Fix:** upgrade to **0.26.0+**, which subtracts the device's fused gravity
+vector per sample and high-passes the residual. Wrist roll now reads < 0.05 cm
+at any angle.
+
+**If it still fires on 0.26.0+,** it is probably the *other* trigger. There are
+two, both setting the same flag:
+
+| trigger | prop | what it measures |
+|---|---|---|
+| rotation | `lateralTurnRateRadPerSec` (default `0.15` rad/s ≈ 8.6 °/s) | sustained cross-pan **rotation** |
+| displacement | `lateralBudgetCm` (default `8`) | integrated sideways **translation** |
+
+Turn on `panMotionDebug` and read **`latch=gyro|accel`** in the `[panMotion]`
+lines to see which one fired before tuning either. `lateralBudgetCm={0}`
+disables both.
+
 ## "0 keyframes saved" — panorama captures zero frames, photos work
 
 **Symptom:** the hold-to-pan capture UI runs normally, but the band

@@ -212,9 +212,18 @@ report the stop firing too eagerly, raise this; if they report stopped captures
 being thrown away, lower that one.
 
 v0.25.3 raised the default after field reports of the stop firing on minor
-drift: 4 cm of integrated sideways translation is comfortably inside the
-natural arc of a hand-held sweep. The detector is unchanged — only the budget
-it is measured against.
+drift. **v0.26.0 fixed the underlying detector** — see
+[`lateralMotionModel`](#lateralmotionmodel). The budget stays at 8 so the
+detector change and the threshold do not move in the same release.
+
+:::warning `lateralBudgetCm` is not the only lateral trigger
+The capture is also stopped by an independent **cross-pan rotation** trigger,
+[`lateralTurnRateRadPerSec`](#lateralturnrateradpersec) — historically the
+primary one. `lateralBudgetCm` does not affect it. If operators report eager
+stops, read `latch=gyro|accel` in the `[panMotion]` telemetry
+([`panMotionDebug`](#panmotiondebug)) to find out which trigger is firing
+before tuning either. Setting `lateralBudgetCm={0}` disables **both**.
+:::
 
 Whether that stop KEEPS what was captured (finalize + stitch, carrying the
 `LATERAL_DRIFT_FINALIZE` warning) or throws it away is a separate decision —
@@ -222,10 +231,59 @@ see [`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes) below. At
 its default the capture is kept only when at least 5 keyframes were accepted
 — a change from the 2 this budget used to imply.
 
-:::caution Stale JSDoc
-The prop JSDoc claims a default of `5`. The real component default is **`4`**
-(`usePanMotion`'s own `DEFAULT_LATERAL_BUDGET_CM` is also `4`).
-:::
+
+### `lateralTurnRateRadPerSec`
+
+`number`, default **`0.15`** (rad/s ≈ 8.6 °/s) — unchanged from earlier
+versions; exposed as a prop in v0.26.0.
+
+The **second, independent** lateral trigger: an EMA (τ ≈ 0.4 s) of the
+cross-pan gyroscope rate. Historically this has been the *primary* trigger in
+practice — it fires on sustained cross-axis rotation regardless of
+`lateralBudgetCm`.
+
+It was tuned against a single field trace (a straight pan smoothed to ~0.04
+rad/s; two deliberate cross-turns to ~0.3 and ~0.7). Raise it if operators are
+stopped while panning normally; lower it to catch gentler veering.
+
+Because both triggers set the same flag, a stop you attribute to "drifting
+sideways" may in fact be this one. Check `latch=` in the telemetry first.
+
+### `lateralMotionModel`
+
+`'fused' | 'legacy'`, default **`'fused'`** (v0.26.0).
+
+Which physics the **displacement** (accelerometer) trigger runs.
+
+- **`'fused'`** — subtract the device's *fused gravity vector* per sample, then
+  high-pass the residual; derive `dt` from each sample's own sensor timestamp;
+  time-normalise every filter coefficient so the detector behaves the same at
+  any sensor cadence.
+- **`'legacy'`** — the ≤0.25.3 behaviour bit-for-bit: a per-sample IIR gravity
+  estimate and a hardcoded 20 ms `dt`.
+
+`'legacy'` **cannot tell a wrist tilt from a sideways slide** — a re-projection
+of gravity onto the cross-pan axis is arithmetically identical to real
+acceleration. Measured on an 8 s sweep with *zero* real translation, 6° of
+wrist roll read 5.18 cm, while a real 100 cm slide read 2.00 cm. It is an
+escape hatch for reproducing an old capture, not a rollout gate.
+
+Falls back to `'legacy'` **automatically and per sample** whenever the gravity
+sensor is absent, errored, warming up, stale, or reporting an implausible
+magnitude — so a device without a usable gravity sensor is never worse off.
+
+### `panMotionDebug`
+
+`boolean`, default **`__DEV__`**.
+
+Emit the throttled `[panMotion]` diagnostics (~2.5 Hz). Pass `true` to keep
+them in a **release** build while diagnosing a field report without shipping a
+new version; pass `false` to silence them in development.
+
+The lines carry `latch=gyro|accel`, `gSrc=`, `lat=…cm`, `budget=`, `crossEma=`,
+`thresh=`, per-sample `dt` statistics, and both the fused and IIR estimates of
+the same quantity — enough to attribute a stop to a trigger and a cause from a
+Metro log.
 
 ### `lateralStopFinalizeMinFrames`
 

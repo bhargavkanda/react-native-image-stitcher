@@ -14,6 +14,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [0.26.0] - 2026-08-25 (lateral-drift guard: tilt is no longer mistaken for translation)
+
+**The root cause behind the 0.25.3 tuning change.** 0.25.3 raised
+`lateralBudgetCm` 4 → 8 to suppress a field report of the lateral-drift
+stop firing on minor movement. That treated the symptom. This release
+fixes the detector.
+
+### The defect
+
+The cross-pan estimator double-integrated the **raw** accelerometer
+device-Y axis and removed gravity with a per-sample IIR (α = 0.9,
+τ ≈ 190 ms). There was **no gyroscope or attitude input anywhere in that
+path**, so a change in how the gravity vector *projects* onto device-Y is
+arithmetically identical to real lateral acceleration.
+
+Replayed through the shipped integrator — an 8 s landscape vertical sweep
+(`panMode: 'vertical'`), **zero real translation**, only wrist roll about
+the camera axis:
+
+| wrist roll | reported |
+|---|---|
+| 3° | 2.59 cm |
+| 6° | **5.18 cm** — trips a 4 cm budget |
+| 12° | 10.31 cm |
+
+And in the same harness, real translation was nearly invisible, because a
+190 ms IIR absorbs any *sustained* acceleration as "gravity":
+
+| real sideways slide | reported |
+|---|---|
+| 20 cm | 0.40 cm |
+| **100 cm** | **2.00 cm** — never trips even 4 cm |
+
+The discrimination was not merely noisy, it was **inverted**: the guard
+fired on ordinary wrist movement and ignored the failure it exists to
+catch.
+
+### The fix
+
+1. **Stage 1 — true gravity subtraction.** Subtract the *fused* gravity
+   vector per sample (iOS `CMDeviceMotion.gravity`, Android
+   `TYPE_GRAVITY`). A tilt changes `a` and `g` by the same amount and
+   they cancel exactly. Wrist roll now reads **< 0.05 cm at any angle**.
+2. **Stage 2 — residual high-pass (τ = 0.5 s).** Stage 1 has *no* DC
+   rejection, so a persistent accel-vs-gravity residual would ramp
+   position without bound (0.02 m/s² reaches 14.9 cm in 20 s of doing
+   nothing). τ = 0.5 s is the largest value for which an Android OEM
+   whose `TYPE_GRAVITY` is a low-passed accelerometer still reads *below*
+   the old behaviour.
+3. **Real per-sample `dt`.** Both platforms already sent a per-sample
+   `timestamp`; it was discarded for a hardcoded 20 ms. Every filter
+   coefficient is now re-expressed as `k ** (dt / nominal)` so the
+   **time constant** is held fixed rather than the per-sample
+   coefficient — otherwise a real `dt` would make sensitivity linear in
+   the device's delivery cadence, which is worse than the bug. Measured
+   spread across a 20× cadence range: **1.07×**. Bit-exact at 20 ms.
+
+Absent, errored, warming-up, stale, or implausible gravity falls back
+**per sample** to the legacy IIR, which is kept warm as a shadow estimate
+so failover is stepless.
+
+### Diagnosability
+
+This class of bug previously left **no trace in a release build**. Now:
+
+- **`latch=gyro|accel`** in the `[panMotion]` telemetry.
+  `lateralExceeded` has **two independent triggers** — the cross-pan gyro
+  EMA and the displacement integrator — and no log said which fired, so a
+  field report could not be attributed to either.
+- **`panMotionDebug`** keeps the diagnostics in a release build without a
+  version bump.
+
+### New props
+
+| prop | default | effect |
+|---|---|---|
+| `lateralMotionModel` | `'fused'` | `'legacy'` restores the ≤0.25.3 physics bit-for-bit |
+| `lateralTurnRateRadPerSec` | `0.15` (unchanged) | exposes the **gyro** trigger's threshold, previously hardcoded and untunable despite being the historically primary trigger |
+| `panMotionDebug` | `__DEV__` | force diagnostics on/off |
+
+> [!IMPORTANT]
+> **`lateralMotionModel` defaults to `'fused'`** — a deliberate exception
+> to the "new behaviour is opt-in" rule. This is a defect fix: the old
+> model's discrimination is inverted, so no consumer can prefer it; and
+> at the shipped 8 cm budget the fused model's peak reading is at or
+> below the legacy model's for every profile except a genuine slide, so
+> **it cannot increase the stop rate**. Pass `'legacy'` to reproduce an
+> old capture or back out a device-specific regression.
+
+### Known limitation — read this before tuning
+
+At the current 8 cm budget the accelerometer path is deliberately
+**near-inert for real slides** (a brisk 20 cm/1 s slide reads ~5.5 cm),
+and the **gyro cross-EMA at 0.15 rad/s remains the operative trigger** in
+practice. Absolute centimetre accuracy from IMU dead-reckoning over a
+multi-second capture is not physically achievable — attitude error of
+0.25° alone fabricates ~32 cm over 20 s, which is why stage 2's
+high-pass is mandatory and why the reading is a *drift-rate proxy*, not a
+displacement measurement. Collect `latch=` and peak `lat=` from real
+captures before retuning either threshold.
+
 ## [0.25.3] - 2026-08-19 (lateral-drift budget raised to 8 cm)
 
 A tuning change, from a field report that the lateral-drift stop fires
