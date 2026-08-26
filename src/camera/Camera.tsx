@@ -1361,6 +1361,26 @@ export interface CameraHandle extends AROverlayMethods {
    * no-op when nothing is recording). Resolves once the stop is dispatched.
    */
   stopPanorama(): Promise<void>;
+  /**
+   * Set the preferred capture source — for hosts that render their own chrome.
+   *
+   * `hideBuiltInShutter` hides the built-in shutter AND the AR toggle, on the
+   * documented premise that the host draws its own capture controls.  But
+   * before v0.26.0 the host had no way to DRIVE the AR toggle: `arPreference`
+   * was internal state with no prop and no handle method.  So such a host
+   * could replace the shutter (this handle covers capture) and could NOT
+   * replace the AR control — leaving it locked to whatever
+   * `defaultCaptureSource` resolved to at mount, with no indicator and no
+   * switch.  That is exactly what shipped in a field build.
+   *
+   * Sets the same PREFERENCE the built-in pill flips, so host chrome and the
+   * built-in control are interchangeable rather than competing sources of
+   * truth.  The EFFECTIVE source is still clamped by `captureSources`, by
+   * device AR support, and by the 0.5x lens (ARKit/ARCore cannot drive the
+   * ultra-wide) — so requesting `'ar'` on an unsupported device stays non-AR.
+   * Subscribe to `onCaptureSourceChange` for what actually took effect.
+   */
+  setCaptureSource(source: CaptureSource): void;
 }
 
 
@@ -2244,6 +2264,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       handleHoldEndRef.current?.();
       return Promise.resolve();
     },
+    // Same state the built-in AR pill flips — see the interface docs.
+    setCaptureSource: (source) => setArPreference(source === 'ar'),
   }), []);
 
   // Effect that does the async transition work whenever the settled

@@ -509,3 +509,32 @@ describe('rotation trigger grace window', () => {
     expect(latchAt([...calm(5), 0.151, 0.151], 0)).not.toBeNull(); // two
   });
 });
+
+/**
+ * `CameraHandle.setCaptureSource` — the API gap that left a unified-chrome
+ * host with no AR control.
+ *
+ * `hideBuiltInShutter` hides the shutter AND the AR pill, documented as "the
+ * host renders its own capture controls".  The host could always replace the
+ * shutter (takePhoto / startPanorama / stopPanorama), but there was NO way to
+ * replace the AR toggle — `arPreference` was internal state with no prop and
+ * no handle method.  A field build shipped locked to its mount-time source
+ * with no indicator and no switch.
+ *
+ * This pins the handle's SHAPE.  The clamping behaviour (captureSources,
+ * device AR support, 0.5x lens) lives in `deriveEffectiveCaptureSource` and is
+ * unchanged by this addition.
+ */
+describe('CameraHandle exposes capture-source control', () => {
+  it('declares setCaptureSource alongside the capture methods', () => {
+    // Type-level assertion: this file fails to COMPILE under `tsc --noEmit`
+    // if the method is missing or its signature drifts.  ts-jest runs
+    // transpile-only, so the compile gate is what enforces this — the runtime
+    // assertion below just keeps the test honest about having executed.
+    type Handle = import('../Camera').CameraHandle;
+    type HasSetter = Handle extends { setCaptureSource(s: 'ar' | 'non-ar'): void }
+      ? true : false;
+    const ok: HasSetter = true;
+    expect(ok).toBe(true);
+  });
+});
