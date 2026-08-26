@@ -554,14 +554,19 @@ function App(): React.JSX.Element {
                 }
           }
           panMode={panMode}
-          // Lateral-guard experiment knobs.  `0` disables each trigger
-          // independently; disabling the budget disables both.
+          // Lateral-guard experiment knobs.  There are FOUR independent
+          // triggers and each is gated by its OWN prop -- `lateralBudgetCm`
+          // does NOT disable the turn channels -- so an honest OFF run has
+          // to zero all four.  Non-AR: distance (IMU) + turn RATE + turn
+          // ANGLE (gyro-integrated).  AR: distance + rotation (ARKit pose).
           lateralBudgetCm={lateralGuard === 'off' ? 0 : undefined}
           lateralTurnRateRadPerSec={lateralGuard === 'off' ? 0 : undefined}
-          // AR absolute drift guard — measured from ARKit pose, so it sees
-          // SLOW drift the IMU guard structurally cannot.  Follows the same
-          // OFF switch so a no-guard run really has no guard.
+          lateralTurnAngleDeg={lateralGuard === 'off' ? 0 : undefined}
+          // AR absolute guards -- measured from ARKit pose, so they see the
+          // SLOW drift and the slow PIVOT the IMU guard structurally cannot.
+          // Same OFF switch, so a no-guard run really has no guard.
           arLateralBudgetCm={lateralGuard === 'off' ? 0 : undefined}
+          arLateralRotDeg={lateralGuard === 'off' ? 0 : undefined}
           // Force the [panMotion] telemetry on regardless of build config, so
           // a Release build can be traced without another version bump.
           panMotionDebug
