@@ -3406,6 +3406,18 @@ public final class IncrementalStitcher: NSObject {
     /// inputs (nil poses, no motion either source) default to
     /// "panorama" (safer for pure-rotation captures; SCANS on a
     /// translation-free input produces unbounded canvas growth).
+    /// Minimum ABSOLUTE translation before the auto-resolver may choose SCANS.
+    ///
+    /// `ratio` is scale-free and therefore cannot tell a 30 cm shelf scan from
+    /// a 5 cm wrist pivot — see `resolveStitchModeAuto` for the derivation
+    /// showing the pan angle cancels out of it entirely.  This floor supplies
+    /// the absolute scale the ratio lacks.
+    ///
+    /// 0.25 m sits below the 30 cm shelf scan the resolver is designed to catch
+    /// and comfortably above every hand-held pan measured on device (2-10 cm),
+    /// including deliberate sideways drift.
+    private static let kScansMinTranslationMetres = 0.25
+
     private func resolveStitchModeAuto(
         first: [Double]?,
         last:  [Double]?,
@@ -3413,10 +3425,19 @@ public final class IncrementalStitcher: NSObject {
     ) -> (mode: String, rRadians: Double, tMeters: Double, ratio: Double) {
         guard let firstPose = first, firstPose.count == 7,
               let lastPose  = last,  lastPose.count == 7  else {
-            // No pose data at all — fall back on whichever signal we
-            // do have.  imuTranslationMetres > 0 hints "scans"; 0
-            // hints "panorama".  rRadians 0.0 — no gyro signal.
-            return (imuTranslationMetres > 0.05 ? "scans" : "panorama", 0.0, 0.0, 0.0)
+            // No pose data at all — the only signal left is the
+            // double-integrated accelerometer, measured on 2026-08-26 at
+            // r = -0.28 against this stitcher's own image-derived translation
+            // (15x spread in the error; the capture with the LEAST real
+            // translation produced the HIGHEST reading).  The old 0.05 m trip
+            // sat INSIDE that channel's noise floor — ordinary captures in the
+            // session read 0.02-0.05 m while translating far less — so this
+            // path routed routine pans to SCANS on noise alone.  Hold it to the
+            // same absolute floor as the pose path: on an unusable signal, fail
+            // to PANORAMA (the safer default per this function's docstring;
+            // SCANS on a rotation-only capture grows the canvas unboundedly).
+            return (imuTranslationMetres >= Self.kScansMinTranslationMetres
+                    ? "scans" : "panorama", 0.0, 0.0, 0.0)
         }
         // Translation magnitude (Euclidean, in metres).
         let dtx = lastPose[0] - firstPose[0]
@@ -3451,11 +3472,55 @@ public final class IncrementalStitcher: NSObject {
         // scans (low rotation, large real translation) skip this and still
         // reach SCANS via the ratio.
         let lowRotationGuard = rRadians > 0.35 && tMeters < 0.25
-        let mode = (!lowRotationGuard && ratio >= 0.55) ? "scans" : "panorama"
+
+        // 2026-08-26 — ABSOLUTE TRANSLATION FLOOR.  `ratio` alone cannot
+        // discriminate a shelf scan from an ordinary hand-held pan, because it
+        // is not measuring what it appears to.  Substituting the arc a pan
+        // traces when it pivots `r` behind the lens, `tMeters = r * rRadians`:
+        //
+        //     ratio = (r*rRad/0.10) / (r*rRad/0.10 + rRad) = r / (r + 0.10)
+        //
+        // THE PAN ANGLE CANCELS.  `ratio >= 0.55` reduces to `r >= 0.122 m`,
+        // i.e. the verdict depends only on how far behind the lens the operator
+        // pivots — wrist ~15 cm, forearm ~25 cm, elbow ~35 cm, shoulder ~60 cm.
+        // Every hand-held pan clears it; only rotating the phone about its own
+        // body does not.  Verified against a 2026-08-26 device session: the
+        // closed form reproduced all six observed ratios to three decimals.
+        //
+        // `lowRotationGuard` was therefore doing all the real work, and only
+        // above 0.35 rad — so pans SHORTER than ~20 deg fell through to SCANS
+        // regardless of how little they translated.  Two such captures (16.9
+        // and 15.7 deg, 4.4 and 4.9 cm) shipped as SCANS; re-running them
+        // through `cv::detail::BestOf2NearestMatcher` — the finalize matcher
+        // itself — scored the HOMOGRAPHY model 40-53 % higher than affine
+        // (mean pair confidence 1.27 vs 0.83 / 0.91), and more than halved the
+        // count of pairs above the `leaveBiggestComponent` threshold under
+        // affine.  Both stitched cleanly as panoramas from the same keyframes.
+        //
+        // A genuine shelf scan is characterised by LARGE ABSOLUTE translation —
+        // this function's own worked example uses 30 cm — not by a ratio any
+        // arm movement satisfies.  Requiring the absolute floor admits that
+        // case and excludes hand-held pans (measured 2-10 cm).
+        //
+        // It also fixes NON-AR, where `tPose` is 0 so `tMeters` is 100 % the
+        // double-integrated accelerometer — measured at r = -0.28 against this
+        // stitcher's own image-derived estimate, i.e. ANTI-correlated with the
+        // quantity it stands in for.  That signal cannot support any threshold;
+        // the floor makes non-AR fail to PANORAMA, which this function's
+        // docstring already calls the safer default.  A host that genuinely
+        // wants SCANS pins it via `stitchMode`.
+        let translationFloorMet = tMeters >= Self.kScansMinTranslationMetres
+        let mode = (!lowRotationGuard && translationFloorMet && ratio >= 0.55)
+            ? "scans" : "panorama"
         os_log(.fault, log: Self.diagLog,
-               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f rotGuard=%d → %{public}@",
+               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f rotGuard=%d tFloor=%d rEff=%.3fm → %{public}@",
                tPose, imuTranslationMetres, rRadians, ratio,
-               lowRotationGuard ? 1 : 0, mode)
+               lowRotationGuard ? 1 : 0, translationFloorMet ? 1 : 0,
+               // Effective pivot radius = tMeters / rRadians.  The ratio is
+               // exactly rEff/(rEff+0.10), so logging rEff makes the verdict
+               // readable at a glance: >0.122 m means the ratio alone would
+               // have said SCANS, whatever the pan angle was.
+               rRadians > 1e-6 ? tMeters / rRadians : 0.0, mode)
         return (mode, rRadians, tMeters, ratio)
     }
 

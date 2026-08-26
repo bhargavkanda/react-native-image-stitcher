@@ -103,6 +103,70 @@ This class of bug previously left **no trace in a release build**. Now:
 > **it cannot increase the stop rate**. Pass `'legacy'` to reproduce an
 > old capture or back out a device-specific regression.
 
+### Fixed — panorama/SCANS routing sent ordinary pans to SCANS
+
+**This is the output-quality regression**, and it is independent of the
+lateral-guard work above. It affects **AR and non-AR alike**.
+
+`resolveStitchModeAuto` chose SCANS when
+`ratio = tScore/(tScore+rScore) >= 0.55`, with `tScore = tMeters/0.10` and
+`rScore = rRadians`. Substituting the arc a pan traces when it pivots `r`
+behind the lens (`tMeters = r * rRadians`):
+
+```
+ratio = (r*rRad/0.10) / (r*rRad/0.10 + rRad)  =  r / (r + 0.10)
+```
+
+**The pan angle cancels.** `ratio >= 0.55` reduces to `r >= 0.122 m` — so
+the verdict depended only on how far behind the lens the operator pivoted.
+Wrist ~15 cm, forearm ~25 cm, elbow ~35 cm, shoulder ~60 cm: **every
+hand-held pan clears it.** Only rotating the phone about its own body did
+not. Verified against a 2026-08-26 device session — the closed form
+reproduced all six observed ratios to three decimals.
+
+`lowRotationGuard` (`rRadians > 0.35 && tMeters < 0.25`) was therefore
+doing all the real work, and only above 0.35 rad — leaving pans **shorter
+than ~20°** with no protection at all. Two captures at 16.9° and 15.7°
+(translating just 4.4 and 4.9 cm) shipped as SCANS.
+
+Re-running those keyframes through `cv::detail::BestOf2NearestMatcher` —
+the finalize matcher itself — scored the **homography model 40–53 % higher
+than affine** (mean pair confidence 1.27 vs 0.83 / 0.91) and showed affine
+more than halving the pairs above the `leaveBiggestComponent` threshold
+(7 → 3). Both stitched cleanly as panoramas from the same frames. The
+shipped SCANS outputs came back at `finalConfidenceThresh = 0.500` where
+every correctly-routed capture scored `1.000`.
+
+**Fix:** SCANS now additionally requires an **absolute translation floor**
+of `0.25 m` (`kScansMinTranslationMetres`). A genuine shelf scan is
+defined by large absolute translation — this function's own worked example
+uses 30 cm — not by a ratio any arm movement satisfies. Replayed over
+every logged capture: **2 wrongly-SCANS captures flip to panorama, 0
+regressions**, and synthetic shelf scans (26–40 cm) still route to SCANS.
+
+The same floor also repairs the **non-AR** path, where `tPose` is 0 and
+`tMeters` is 100 % the double-integrated accelerometer — measured at
+**r = −0.28** against this stitcher's own image-derived estimate, i.e.
+anti-correlated with the quantity it stands in for. No threshold can work
+on that signal, so the floor makes non-AR fail to PANORAMA, which the
+resolver's own docstring already calls the safer default. Hosts wanting
+SCANS pin it explicitly via `stitchMode`.
+
+The degenerate no-pose branch had the same defect at an even lower trip
+(`imuTranslationMetres > 0.05`, inside the noise floor) and now uses the
+same constant.
+
+### Fixed — stale translation-budget documentation
+
+`useIMUTranslationGate.ts` claimed `flowMaxTranslationCm` defaults to `8`
+and, in the same comment, "0.40 m / 40 cm". Both were wrong and they
+contradicted each other: the real default is **50 cm**
+(`PanoramaSettings.ts`). `8` is `lateralBudgetCm` — a **different knob on
+the orthogonal axis** (cross-pan drift, which stops the capture, versus
+along-pan translation, which forces a keyframe). At the real default this
+gate effectively never fires on hand-held capture: the device session
+peaked at 2.39 cm of cross-pan drift, ~20× below the budget.
+
 ### Also fixed
 
 - **`lateralBudgetCm={0}` now genuinely disables the displacement stop.**

@@ -3365,11 +3365,11 @@ class IncrementalStitcher(
             // No pose data at all — fall back on the IMU signal.  IMU
             // > 5 cm hints SCANS; everything else hints PANORAMA.
             return StitchModeResolution(
-                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0, 0.0, 0.0)
+                if (imuTranslationMetres >= kScansMinTranslationMetres) "scans" else "panorama", 0.0, 0.0, 0.0)
         }
         if (firstPose.size != 7 || lastPose.size != 7) {
             return StitchModeResolution(
-                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0, 0.0, 0.0)
+                if (imuTranslationMetres >= kScansMinTranslationMetres) "scans" else "panorama", 0.0, 0.0, 0.0)
         }
 
         // Translation magnitude (Euclidean, in metres) — pose-derived.
@@ -3414,14 +3414,33 @@ class IncrementalStitcher(
         // reach SCANS via the ratio.  (Conservative: keeps the tMeters cap so a
         // genuine large-translation capture isn't forced to PANORAMA.)
         val lowRotationGuard = rRadians > 0.35 && tMeters < 0.25
-        val mode = if (!lowRotationGuard && ratio >= 0.55) "scans" else "panorama"
+        // 2026-08-26 — ABSOLUTE TRANSLATION FLOOR.  See the iOS twin
+        // (IncrementalStitcher.swift resolveStitchModeAuto) for the full
+        // derivation.  In short: substituting the arc a pan traces when it
+        // pivots `r` behind the lens, tMeters = r * rRadians, gives
+        //     ratio = (r*rRad/0.10) / (r*rRad/0.10 + rRad) = r / (r + 0.10)
+        // so THE PAN ANGLE CANCELS and `ratio >= 0.55` reduces to r >= 0.122 m.
+        // Every hand-held pan pivots further back than that (wrist ~15 cm,
+        // elbow ~35 cm, shoulder ~60 cm), so the ratio cannot discriminate a
+        // shelf scan from an ordinary pan; `lowRotationGuard` was doing all the
+        // work, and only above 0.35 rad, leaving sub-20-degree pans exposed.
+        // A genuine shelf scan is defined by LARGE ABSOLUTE translation (~30 cm
+        // per the worked example above), which the floor captures directly.
+        val translationFloorMet = tMeters >= kScansMinTranslationMetres
+        val mode = if (!lowRotationGuard && translationFloorMet && ratio >= 0.55)
+            "scans" else "panorama"
         android.util.Log.i(
             "IncrementalStitcher",
             "stitch-mode auto: tPose=${"%.3f".format(tPose)}m " +
                 "tImu=${"%.3f".format(imuTranslationMetres)}m " +
                 "r=${"%.3f".format(rRadians)}rad " +
                 "ratio=${"%.3f".format(ratio)} " +
-                "rotGuard=$lowRotationGuard → $mode",
+                "rotGuard=$lowRotationGuard tFloor=$translationFloorMet " +
+                // Effective pivot radius = tMeters/rRadians; the ratio is
+                // exactly rEff/(rEff+0.10), so this makes the verdict
+                // readable directly (>0.122 m => ratio alone says SCANS).
+                "rEff=${"%.3f".format(if (rRadians > 1e-6) tMeters / rRadians else 0.0)}m " +
+                "→ $mode",
         )
         return StitchModeResolution(mode, rRadians, tMeters, ratio)
     }
@@ -3526,6 +3545,18 @@ class IncrementalStitcher(
     }
 
     companion object {
+        /**
+         * Minimum ABSOLUTE translation (metres) before the auto-resolver may
+         * choose SCANS.
+         *
+         * `ratio` is scale-free and so cannot tell a 30 cm shelf scan from a
+         * 5 cm wrist pivot — the pan angle cancels out of it entirely (see
+         * [resolveStitchModeAuto]).  This floor supplies the absolute scale
+         * the ratio lacks: below the 30 cm shelf scan the resolver targets,
+         * and well above every hand-held pan measured on device (2-10 cm).
+         */
+        private const val kScansMinTranslationMetres = 0.25
+
         init {
             // v0.21 — nativeSharpnessScore lives in libimage_stitcher.so
             // (the same JNI shim KeyframeGate and QualityChecker load).
