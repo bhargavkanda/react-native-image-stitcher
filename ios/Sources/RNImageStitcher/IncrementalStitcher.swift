@@ -3413,10 +3413,21 @@ public final class IncrementalStitcher: NSObject {
     /// showing the pan angle cancels out of it entirely.  This floor supplies
     /// the absolute scale the ratio lacks.
     ///
-    /// 0.25 m sits below the 30 cm shelf scan the resolver is designed to catch
-    /// and comfortably above every hand-held pan measured on device (2-10 cm),
-    /// including deliberate sideways drift.
+    /// 0.25 m sits below the 30 cm shelf scan the resolver targets.  Used ONLY
+    /// on the degenerate no-pose branch, where `rRadians` is unavailable so no
+    /// ratio can be formed and absolute distance is the only signal left.
     private static let kScansMinTranslationMetres = 0.25
+
+    /// Minimum motion-shape ratio before the auto-resolver may choose SCANS.
+    ///
+    /// `ratio` == r/(r+0.10) with r the PIVOT RADIUS, so this is really a
+    /// statement about anatomy: 0.93 => r >= 1.33 m, further back than any
+    /// person can pivot (wrist ~15, elbow ~35, extended shoulder ~60-80 cm),
+    /// and far nearer than the metres genuine translation yields.
+    ///
+    /// The old 0.55 meant r >= 12.2 cm — shorter than a wrist — so every
+    /// hand-held pan was classified as a scan.
+    private static let kScansMinRatio = 0.93
 
     private func resolveStitchModeAuto(
         first: [Double]?,
@@ -3509,8 +3520,30 @@ public final class IncrementalStitcher: NSObject {
         // the floor makes non-AR fail to PANORAMA, which this function's
         // docstring already calls the safer default.  A host that genuinely
         // wants SCANS pins it via `stitchMode`.
-        let translationFloorMet = tMeters >= Self.kScansMinTranslationMetres
-        let mode = (!lowRotationGuard && translationFloorMet && ratio >= 0.55)
+        // The threshold is the whole fix.  `ratio` is exactly r/(r+0.10) where
+        // r = tMeters/rRadians is the PIVOT RADIUS — how far behind the lens
+        // the operator turned.  It already accounts for rotation correctly: the
+        // SAME 49.5 cm of travel reads r = inf (SCANS) with no rotation and
+        // r = 59 cm (panorama) through a 47.7 deg arc.  What was wrong was
+        // 0.55, which corresponds to r >= 12.2 cm — SHORTER THAN A HUMAN WRIST,
+        // so every hand-held pan cleared it.
+        //
+        // 0.93 corresponds to r >= 1.33 m: clear air above anything a person
+        // can pivot about, and far below the metres genuine bodily translation
+        // produces.  Measured on 2026-08-26, a real arm sweep reached
+        // r = 80 cm (ratio 0.889) — which is why 0.90 is too tight — while the
+        // shelf scan this resolver targets (30 cm / 10 deg) sits at 0.967.
+        //
+        // Erring toward PANORAMA is deliberate: a missed scan still reaches
+        // the affine model via the ladder's scans rungs, whereas a wrongly
+        // affine-warped rotation capture is the visible quality regression
+        // that was actually reported.
+        //
+        // This supersedes the absolute translation floor tried first, which
+        // could not work: it never looks at rotation, so it cannot separate a
+        // 49.5 cm straight slide from a 49.5 cm arm sweep — and the arm sweep
+        // is exactly what slipped through it at conf=0.500.
+        let mode = (!lowRotationGuard && ratio >= Self.kScansMinRatio)
             ? "scans" : "panorama"
         os_log(.fault, log: Self.diagLog,
                "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f rotGuard=%d tFloor=%d rEff=%.3fm → %{public}@",

@@ -3426,8 +3426,14 @@ class IncrementalStitcher(
         // work, and only above 0.35 rad, leaving sub-20-degree pans exposed.
         // A genuine shelf scan is defined by LARGE ABSOLUTE translation (~30 cm
         // per the worked example above), which the floor captures directly.
-        val translationFloorMet = tMeters >= kScansMinTranslationMetres
-        val mode = if (!lowRotationGuard && translationFloorMet && ratio >= 0.55)
+        // The THRESHOLD is the fix.  `ratio` is exactly r/(r+0.10) where
+        // r = tMeters/rRadians is the PIVOT RADIUS — how far behind the lens
+        // the operator turned — so rotation is already accounted for: the SAME
+        // 49.5 cm of travel reads r = infinity (SCANS) with no rotation and
+        // r = 59 cm (panorama) through a 47.7 deg arc.  What was wrong was
+        // 0.55, i.e. r >= 12.2 cm, SHORTER THAN A HUMAN WRIST, so every
+        // hand-held pan cleared it.  See the iOS twin for the full derivation.
+        val mode = if (!lowRotationGuard && ratio >= kScansMinRatio)
             "scans" else "panorama"
         android.util.Log.i(
             "IncrementalStitcher",
@@ -3556,6 +3562,21 @@ class IncrementalStitcher(
          * and well above every hand-held pan measured on device (2-10 cm).
          */
         private const val kScansMinTranslationMetres = 0.25
+
+        /**
+         * Minimum motion-shape ratio before the auto-resolver may choose SCANS.
+         *
+         * `ratio` == r/(r+0.10) with r the PIVOT RADIUS, so this is really a
+         * statement about anatomy: 0.93 => r >= 1.33 m, further back than any
+         * person can pivot (wrist ~15, elbow ~35, extended shoulder ~60-80 cm),
+         * and far nearer than the metres genuine translation yields.  A real
+         * arm sweep measured on 2026-08-26 reached r = 80 cm (ratio 0.889),
+         * which is why 0.90 would be too tight; the 30 cm / 10 deg shelf scan
+         * this resolver targets sits at 0.967.
+         *
+         * The old 0.55 meant r >= 12.2 cm — shorter than a wrist.
+         */
+        private const val kScansMinRatio = 0.93
 
         init {
             // v0.21 — nativeSharpnessScore lives in libimage_stitcher.so

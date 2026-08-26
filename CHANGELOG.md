@@ -137,7 +137,7 @@ more than halving the pairs above the `leaveBiggestComponent` threshold
 shipped SCANS outputs came back at `finalConfidenceThresh = 0.500` where
 every correctly-routed capture scored `1.000`.
 
-**Fix:** SCANS now additionally requires an **absolute translation floor**
+**Fix (superseded — see below):** an absolute translation floor
 of `0.25 m` (`kScansMinTranslationMetres`). A genuine shelf scan is
 defined by large absolute translation — this function's own worked example
 uses 30 cm — not by a ratio any arm movement satisfies. Replayed over
@@ -155,6 +155,51 @@ SCANS pin it explicitly via `stitchMode`.
 The degenerate no-pose branch had the same defect at an even lower trip
 (`imuTranslationMetres > 0.05`, inside the noise floor) and now uses the
 same constant.
+
+### Fixed — the SCANS threshold was shorter than a human wrist
+
+The absolute-translation floor above was the wrong fix, and device data
+showed why. It never looks at ROTATION, so it cannot distinguish a 49.5 cm
+straight slide from a 49.5 cm arm sweep — and the arm sweep is exactly what
+slipped through it, arriving at `conf=0.500`.
+
+`ratio` never had that blind spot. It is algebraically `r/(r+0.10)` where
+`r = tMeters/rRadians` is the **pivot radius** — how far behind the lens the
+operator turned — so rotation is fully accounted for. The same 49.5 cm reads
+`r = ∞` (SCANS) with no rotation and `r = 59 cm` (panorama) through a 47.7°
+arc.
+
+**Its only defect was the threshold.** `ratio >= 0.55` means `r >= 12.2 cm`
+— *shorter than a human wrist* — so every hand-held pan cleared it, and
+`lowRotationGuard` was accidentally the only thing keeping captures on the
+panorama path.
+
+Six AR captures measured on 2026-08-26, every one an ordinary sweep and
+every one wrongly routed to SCANS:
+
+| r_eff | ratio | old | new |
+|---|---|---|---|
+| 41 cm | 0.803 | scans | panorama |
+| 59 cm | 0.856 | scans | panorama |
+| 60 cm | 0.857 | scans | panorama |
+| 67 cm | 0.870 | scans | panorama |
+| **80 cm** | **0.889** | scans | panorama |
+
+**The threshold is now 0.93** (`r >= 1.33 m`) — clear air above anything a
+person can pivot about (wrist ~15, elbow ~35, extended shoulder ~60–80 cm),
+and far below the metres genuine bodily translation produces. The 80 cm
+sweep at 0.889 is why 0.90 would have been too tight.
+
+Genuine scans still route correctly: 30 cm / 10° → 0.967; 50 cm / 5° →
+0.983; a pure slide → 1.000. Across every capture measured: **0 of 6 real
+pans wrongly SCANS, 0 of 3 genuine scans missed.**
+
+Erring toward PANORAMA is deliberate — a missed scan still reaches the
+affine model through the ladder's `scans` rungs, whereas a wrongly
+affine-warped rotation capture is the visible regression that was reported.
+
+The absolute floor survives only on the degenerate no-pose branch, where
+`rRadians` is unavailable so no ratio can be formed.
 
 ### Fixed — stale translation-budget documentation
 
