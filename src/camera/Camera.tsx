@@ -125,6 +125,13 @@ import {
   DEFAULT_LATERAL_MOTION_MODEL,
 } from './usePanMotion';
 import type { LateralMotionModel } from './usePanMotion';
+/** Dwell before the AR drift stop latches, ms — matches the IMU triggers. */
+const AR_LATERAL_GRACE_MS = 500;
+
+import {
+  _freshArDriftState, _advanceArDrift, _resetArDriftState,
+  DEFAULT_AR_LATERAL_BUDGET_CM,
+} from './arLateralDrift';
 import type { Quad } from './cropGeometry';
 import {
   mergeGuidanceCopy,
@@ -1152,6 +1159,27 @@ export interface CameraProps {
   lateralTurnGraceMs?: number;
 
   /**
+   * ABSOLUTE cross-pan drift budget in CENTIMETRES, measured from the AR
+   * camera POSE.  AR captures only.  Default 15 cm; `0` disables the stop
+   * while still measuring and logging the distance.
+   *
+   * A genuine displacement, unlike `lateralBudgetCm`, which gates a
+   * high-passed rate proxy.  Recovering distance from an accelerometer needs
+   * double integration, whose bias growth must be high-passed away — and that
+   * same high-pass removes slow real motion, so the IMU guard structurally
+   * cannot see slow sideways drift however it is tuned.  ARKit's VIO position
+   * needs no integration, so it can; and tilt cannot masquerade as
+   * translation, because a position is not an acceleration.
+   *
+   * The axis is chosen so the sweep's own ARC never projects onto it — a
+   * vertical pan measures the horizontal cross-view direction, a horizontal
+   * pan measures world up — so an operator pivoting cleanly in place reads ~0
+   * regardless of sweep angle or arm length (measured < 5 mm over an 0.8 rad
+   * sweep at pivot radii of 15-60 cm).
+   */
+  arLateralBudgetCm?: number;
+
+  /**
    * Which lateral-drift physics to run.  Default `'fused'`.
    *
    * `'fused'` subtracts the device's FUSED GRAVITY SENSOR from each
@@ -1750,6 +1778,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     lateralBudgetCm = DEFAULT_LATERAL_BUDGET_CM,
     lateralTurnRateRadPerSec,
     lateralTurnGraceMs,
+    arLateralBudgetCm = DEFAULT_AR_LATERAL_BUDGET_CM,
     lateralMotionModel = DEFAULT_LATERAL_MOTION_MODEL,
     panMotionDebug,
     // No destructuring default on purpose: `undefined` → default is owned by
@@ -1955,6 +1984,62 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     lateralMotionModel,
     panMotionDebug,
   });
+
+  // ── AR ABSOLUTE cross-pan drift ────────────────────────────────────
+  // Measured from ARKit's VIO POSE, not the accelerometer.  The IMU guard
+  // above cannot see slow drift by construction (its bias high-pass removes
+  // exactly the slow band real drift lives in), and on a 2026-08-26 device
+  // session its readings correlated with the stitcher's own image-derived
+  // translation at r = -0.28 — anti-correlated.  A position needs no
+  // integration, so this one sees arbitrarily slow movement.
+  const arDriftRef = useRef(_freshArDriftState());
+  const [arDriftExceeded, setArDriftExceeded] = useState(false);
+  const arDriftArmed = isAR && statusPhase === 'recording';
+
+  useEffect(() => {
+    if (!arDriftArmed) return;
+    // New capture: drop the origin so it re-seeds from the first TRUSTED
+    // pose.  Finalize restarts the AR session, so a capture opens with the
+    // tracker relocalising; anchoring to one of those poses would inject a
+    // phantom metre-scale drift at t=0.
+    _resetArDriftState(arDriftRef.current);
+    setArDriftExceeded(false);
+  }, [arDriftArmed]);
+
+  const arLastEmitRef = useRef(0);
+  const handleArFrame = useCallback((meta: ARFrameMeta) => {
+    if (arDriftArmed && meta.pose) {
+      const s = _advanceArDrift(
+        arDriftRef.current,
+        meta.pose.rotation as unknown as readonly [number, number, number, number],
+        meta.pose.translation as unknown as readonly [number, number, number],
+        meta.trackingState,
+        panMode === 'horizontal' ? 'horizontal' : 'vertical',
+        arLateralBudgetCm / 100.0,
+        // Same dwell as both IMU triggers, so a momentary pose glitch or a
+        // brief lean does not end a capture.
+        AR_LATERAL_GRACE_MS,
+        Date.now(),
+      );
+      if (s.exceeded) setArDriftExceeded((p) => (p ? p : true));
+      const now = Date.now();
+      if (now - arLastEmitRef.current >= 250) {
+        arLastEmitRef.current = now;
+        if (panMotionDebug ?? __DEV__) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[panMotion.ar] drift=${(s.driftM * 100).toFixed(1)}cm `
+            + `peak=${(s.peakM * 100).toFixed(1)}cm `
+            + `budget=${arLateralBudgetCm}cm `
+            + `mode=${panMode} track=${meta.trackingState} `
+            + `untracked=${s.untrackedCount} degenerate=${s.degenerateCount} `
+            + `exceeded=${s.exceeded}`,
+          );
+        }
+      }
+    }
+    onArFrame?.(meta);
+  }, [arDriftArmed, panMode, arLateralBudgetCm, onArFrame, panMotionDebug]);
 
   // v0.13.1 — counter-rotation for control CONTENT (AR toggle, lens
   // pill, flash icon, thumbnails) so their labels read upright relative
@@ -3182,7 +3267,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // its ref.  Gated off when the budget is disabled (`<= 0`).
   useEffect(() => {
     if (
-      !panMotion.lateralExceeded
+      !(panMotion.lateralExceeded || arDriftExceeded)
       || statusPhase !== 'recording'
       || lateralBudgetCm <= 0
       // v0.24.6 port — orientation-drift auto-cancel wins.  A physical ~90°
@@ -3256,7 +3341,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // current values of both; listing them would instead let a mid-capture
     // prop/count change re-enter this stop and abandon twice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panMotion.lateralExceeded, statusPhase, lateralBudgetCm,
+  }, [panMotion.lateralExceeded, arDriftExceeded, statusPhase, lateralBudgetCm,
       drift.drifted, orientationDriftAbandon]);
 
   // ── Item 7 — auto-finalize when the configured keyframe count is hit ─
@@ -3442,7 +3527,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           enableMesh={enableMesh}
           enableFeaturePoints={enableFeaturePoints}
           planeDetection={planeDetection}
-          onArFrame={onArFrame}
+          // Composed: drives the internal AR drift guard AND forwards to the
+          // host.  Native emission is gated on this prop being set, so the
+          // guard would never receive a frame if we only passed the host's
+          // callback through.
+          onArFrame={isAR ? handleArFrame : onArFrame}
           arFrameMetaInterval={arFrameMetaInterval}
           onArPluginResult={onArPluginResult}
           overlays={overlays}

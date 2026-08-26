@@ -558,6 +558,10 @@ function App(): React.JSX.Element {
           // independently; disabling the budget disables both.
           lateralBudgetCm={lateralGuard === 'off' ? 0 : undefined}
           lateralTurnRateRadPerSec={lateralGuard === 'off' ? 0 : undefined}
+          // AR absolute drift guard — measured from ARKit pose, so it sees
+          // SLOW drift the IMU guard structurally cannot.  Follows the same
+          // OFF switch so a no-guard run really has no guard.
+          arLateralBudgetCm={lateralGuard === 'off' ? 0 : undefined}
           // Force the [panMotion] telemetry on regardless of build config, so
           // a Release build can be traced without another version bump.
           panMotionDebug
