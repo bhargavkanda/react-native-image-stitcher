@@ -65,21 +65,25 @@ export type ArPanMode = 'vertical' | 'horizontal';
 /**
  * Default absolute cross-pan drift budget, CENTIMETRES.
  *
- * 8 cm matches `DEFAULT_LATERAL_BUDGET_CM` so the two guards state the same
+ * 4 cm matches `DEFAULT_LATERAL_BUDGET_CM` so the two guards state the same
  * intent — but they are NOT the same measurement.  That one gates a
  * high-passed rate proxy whose readings bear no fixed relation to distance
- * (it peaked at 1.6 cm across an entire device session); this one is real
- * centimetres, so 8 cm will actually be reached.  On 2026-08-26 a
- * deliberate sideways drift passed 8 cm about 1.5 s before it passed 15 cm,
- * and ordinary sweeps in that session peaked at 4.8 cm — leaving roughly 3 cm
- * of headroom rather than 10.
+ * (it peaked at 1.6 cm across an entire device session, so its number is
+ * barely load-bearing); this one is REAL centimetres and will be reached.
+ *
+ * BE AWARE 4 cm is tight against measured behaviour.  Ordinary AR sweeps in
+ * the 2026-08-26 session peaked at 4.8 cm of true cross-pan displacement —
+ * i.e. ABOVE this budget — so clean captures can be expected to trip it until
+ * the number is tuned from field traces.  It was set deliberately LOW to start
+ * strict and relax on evidence; `peak=` in the `[panMotion.ar]` line is the
+ * number to relax it from.  On 2026-08-26 a
  *
  * A STARTING POINT from one operator, one device and one scene, not a tuned
  * default.  Collect `[panMotion.ar]` peaks from real captures before trusting
  * it; if operators are stopped on sweeps that felt clean, this is the number
  * to raise.
  */
-export const DEFAULT_AR_LATERAL_BUDGET_CM = 8;
+export const DEFAULT_AR_LATERAL_BUDGET_CM = 4;
 
 /** Rotate `v` by unit quaternion `q`. */
 export function _rotateByQuat(q: Quat, v: Vec3): Vec3 {
