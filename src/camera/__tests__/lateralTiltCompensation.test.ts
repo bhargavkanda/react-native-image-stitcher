@@ -24,6 +24,7 @@ jest.mock('react-native-sensors', () => ({
 
 // eslint-disable-next-line import/first
 import {
+  _evalGraceLatch,
   _integrateLateralSample,
   _sanitizeDt,
   _freshLateralState,
@@ -440,5 +441,71 @@ describe('lateralBudgetCm = 0 disables the displacement stop', () => {
     // Disabling the STOP must not disturb the integrator — consumers may
     // still read `lateralCm` with the stop off.
     expect(disabled.pos).toBe(enabled.pos);
+  });
+});
+
+/**
+ * The ROTATION trigger's grace window (v0.26.0).
+ *
+ * Vectors are the real 2026-08-26 device session: every one of the five stops
+ * came from a SINGLE ~400 ms excursion over 0.15 rad/s, one on a 0.7 %
+ * overshoot — while every capture in the session stitched at
+ * `finalConfidenceThresh = 1.000`.
+ */
+describe('rotation trigger grace window', () => {
+  const THRESH = 0.15;
+  const GRACE = 500;
+
+  /** Replay an EMA series at 33 ms (the gyro cadence) through the latch. */
+  function latchAt(series: number[], graceMs: number): number | null {
+    let since: number | null = null;
+    let exceeded = false;
+    let t = 0;
+    for (const ema of series) {
+      const r = _evalGraceLatch(ema > THRESH, t, since, exceeded, graceMs);
+      since = r.overBudgetSinceMs;
+      if (r.exceeded && !exceeded) return t;
+      exceeded = r.exceeded;
+      t += 33;
+    }
+    return null;
+  }
+  const calm = (n: number) => Array(n).fill(0.028);
+
+  it('a single ~400 ms excursion no longer ends the capture', () => {
+    // Capture 10: median crossEma 0.028 — LOWER than eight captures that
+    // finished fine — killed by one brief spike to 0.164.
+    const series = [...calm(20), ...Array(12).fill(0.164), ...calm(40)];
+    expect(latchAt(series, 0)).not.toBeNull();      // old behaviour: stopped
+    expect(latchAt(series, GRACE)).toBeNull();      // with grace: survives
+  });
+
+  it('a 0.7% overshoot for one window is likewise ignored', () => {
+    const series = [...calm(15), ...Array(10).fill(0.151), ...calm(30)];
+    expect(latchAt(series, GRACE)).toBeNull();
+  });
+
+  it('but a SUSTAINED cross-turn still stops the capture', () => {
+    // A genuine veer: continuously over threshold well past the window.
+    const series = [...calm(10), ...Array(40).fill(0.30)];
+    const t = latchAt(series, GRACE);
+    expect(t).not.toBeNull();
+    expect(t!).toBeGreaterThanOrEqual(GRACE);       // only after the dwell
+  });
+
+  it('a wobble that crosses and re-crosses never latches', () => {
+    const series: number[] = [];
+    for (let i = 0; i < 12; i++) series.push(...Array(6).fill(0.17), ...Array(6).fill(0.05));
+    expect(latchAt(series, GRACE)).toBeNull();
+  });
+
+  it('graceMs=0 latches on the SECOND consecutive sample, not the first', () => {
+    // `_evalGraceLatch` starts the dwell clock on the first over-threshold
+    // sample and can only latch on a later one, so `0` is "as close to the
+    // pre-0.26.0 latch-immediately behaviour as this helper allows" — one
+    // gyro sample (~33 ms) later, not zero.  Pinned so the distinction
+    // cannot be quietly lost.
+    expect(latchAt([...calm(5), 0.151], 0)).toBeNull();          // one sample
+    expect(latchAt([...calm(5), 0.151, 0.151], 0)).not.toBeNull(); // two
   });
 });

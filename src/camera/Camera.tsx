@@ -1139,6 +1139,19 @@ export interface CameraProps {
   lateralTurnRateRadPerSec?: number;
 
   /**
+   * Continuous over-threshold dwell, ms, before the ROTATION trigger stops the
+   * capture.  Default 500 ms — matching the displacement trigger, which has
+   * always had one.
+   *
+   * Before v0.26.0 the rotation trigger latched on the FIRST sample over
+   * threshold, so one brief wobble ended a capture permanently.  `0` comes as
+   * close to restoring that as the shared latch helper allows — it still costs
+   * one gyro sample (~33 ms), because the dwell clock starts on the first
+   * over-threshold sample and latches only on a later one.
+   */
+  lateralTurnGraceMs?: number;
+
+  /**
    * Which lateral-drift physics to run.  Default `'fused'`.
    *
    * `'fused'` subtracts the device's FUSED GRAVITY SENSOR from each
@@ -1736,6 +1749,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     panTooFastThreshold,
     lateralBudgetCm = DEFAULT_LATERAL_BUDGET_CM,
     lateralTurnRateRadPerSec,
+    lateralTurnGraceMs,
     lateralMotionModel = DEFAULT_LATERAL_MOTION_MODEL,
     panMotionDebug,
     // No destructuring default on purpose: `undefined` → default is owned by
@@ -1937,6 +1951,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     warnMaxRadPerSec: panTooFastThreshold,
     lateralBudgetCm,
     lateralTurnRateRadPerSec,
+    lateralTurnGraceMs,
     lateralMotionModel,
     panMotionDebug,
   });

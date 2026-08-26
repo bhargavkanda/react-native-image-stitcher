@@ -162,6 +162,25 @@ export interface UsePanMotionOptions {
   lateralTurnRateRadPerSec?: number;
 
   /**
+   * Continuous over-threshold dwell, ms, before the ROTATION trigger latches.
+   * Defaults to {@link LATERAL_GRACE_MS} (500 ms) — the same window the
+   * displacement trigger has always used.
+   *
+   * Before v0.26.0 this trigger had NO dwell requirement: it latched on the
+   * first sample over threshold, so a single brief wobble ended the capture
+   * permanently.  On a 2026-08-26 device session all five stops came from one
+   * ~400 ms excursion (one on a 0.7 % overshoot), including a capture whose
+   * MEDIAN rotation was lower than eight captures that completed fine — while
+   * every capture stitched at full confidence.
+   *
+   * `0` is the closest this helper gets to the old latch-immediately
+   * behaviour: the dwell clock starts on the first over-threshold sample and
+   * can only latch on a later one, so `0` still costs ONE gyro sample
+   * (~33 ms) rather than zero.
+   */
+  lateralTurnGraceMs?: number;
+
+  /**
    * Which lateral-drift physics to run.  Default `'fused'`.
    *
    *   'fused'  — subtract the FUSED GRAVITY SENSOR per sample
@@ -1138,6 +1157,7 @@ export function usePanMotion({
   warnMaxRadPerSec = DEFAULT_WARN_RAD_PER_SEC,
   lateralBudgetCm = DEFAULT_LATERAL_BUDGET_CM,
   lateralTurnRateRadPerSec = DEFAULT_LATERAL_TURN_RAD_PER_SEC,
+  lateralTurnGraceMs = LATERAL_GRACE_MS,
   lateralMotionModel = DEFAULT_LATERAL_MOTION_MODEL,
   panMotionDebug,
 }: UsePanMotionOptions): UsePanMotionReturn {
@@ -1184,6 +1204,12 @@ export function usePanMotion({
    * The 2026-08-25 RCA needed exactly this field and did not have it.
    */
   const latchSourceRef = useRef<'gyro' | 'accel' | null>(null);
+
+  /** Start of the current continuous over-threshold run on the ROTATION
+   *  trigger (`Date.now()`), or null when under threshold. */
+  const turnOverSinceRef = useRef<number | null>(null);
+  /** Whether the rotation trigger has latched this capture (one-shot). */
+  const turnExceededRef = useRef(false);
 
   // ── Gyroscope → pan-speed bucket + lateral-drift latch ─────────
   // One gyro subscription drives BOTH item-4 (too fast) and item-6
@@ -1271,7 +1297,31 @@ export function usePanMotion({
         crossEma = crossEma * (1 - crossAlpha) + Math.abs(x) * crossAlpha;
         crossEmaRef.current = crossEma;
         if (lateralEnabled) {
-          if (turnLatchEnabled && crossEma > lateralTurnRateRadPerSec) {
+          // GRACE WINDOW — the rotation trigger had none, while the
+          // displacement trigger has always required `LATERAL_GRACE_MS` of
+          // CONTINUOUS over-budget (see `_evalGraceLatch`, whose own docblock
+          // says the window exists to filter "single wobbles that cross and
+          // recross the threshold").  That asymmetry was not deliberate, and
+          // a 2026-08-26 device session showed what it costs: ALL FIVE stops
+          // came from a SINGLE ~400 ms excursion, one on a 0.7 % threshold
+          // overshoot, and the capture that died had a MEDIAN crossEma of
+          // 0.028 — lower than eight captures that completed fine.  Every
+          // capture in that session stitched at conf=1.000, so by the
+          // "allow whatever still stitches" criterion every stop was spurious.
+          //
+          // Reuses the same pure helper as the displacement trigger, so both
+          // debounce identically and the behaviour is unit-tested in one place.
+          const turnLatch = _evalGraceLatch(
+            turnLatchEnabled && crossEma > lateralTurnRateRadPerSec,
+            now,
+            turnOverSinceRef.current,
+            turnExceededRef.current,
+            lateralTurnGraceMs,
+          );
+          turnOverSinceRef.current = turnLatch.overBudgetSinceMs;
+          const turnJustLatched = turnLatch.exceeded && !turnExceededRef.current;
+          turnExceededRef.current = turnLatch.exceeded;
+          if (turnJustLatched) {
             if (latchSourceRef.current === null) {
               latchSourceRef.current = 'gyro';
               if (debugEnabled) {
@@ -1330,7 +1380,8 @@ export function usePanMotion({
     // (hypot), so an orientation flip must not needlessly re-subscribe the
     // gyro mid-capture.
   }, [active, goodMaxRadPerSec, warnMaxRadPerSec, lateralEnabled,
-    lateralTurnRateRadPerSec, lateralMotionModel, debugEnabled]);
+    lateralTurnRateRadPerSec, lateralTurnGraceMs, lateralMotionModel,
+    debugEnabled]);
 
   // ── Accelerometer → lateral-drift integrator ───────────────────
   // NOTE: this effect intentionally does NOT depend on `resolvedAxis`.
@@ -1345,6 +1396,8 @@ export function usePanMotion({
       setLateralCm(0);
       setLateralExceeded(false);
       latchSourceRef.current = null;
+      turnOverSinceRef.current = null;
+      turnExceededRef.current = false;
       return;
     }
 
@@ -1354,6 +1407,8 @@ export function usePanMotion({
     setLateralCm(0);
     setLateralExceeded(false);
     latchSourceRef.current = null;
+    turnOverSinceRef.current = null;
+    turnExceededRef.current = false;
 
     setUpdateIntervalForType(
       SensorTypes.accelerometer,
