@@ -223,7 +223,7 @@ export {
   DEFAULT_LATERAL_TURN_RAD_PER_SEC,
   DEFAULT_LATERAL_MOTION_MODEL,
 } from './camera/usePanMotion';
-export { DEFAULT_AR_LATERAL_BUDGET_CM } from './camera/arLateralDrift';
+export { DEFAULT_AR_LATERAL_BUDGET_CM, DEFAULT_AR_LATERAL_ROT_DEG } from './camera/arLateralDrift';
 export type {
   UsePanMotionOptions,
   UsePanMotionReturn,

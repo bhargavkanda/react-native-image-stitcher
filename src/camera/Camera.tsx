@@ -130,7 +130,7 @@ const AR_LATERAL_GRACE_MS = 500;
 
 import {
   _freshArDriftState, _advanceArDrift, _resetArDriftState,
-  DEFAULT_AR_LATERAL_BUDGET_CM,
+  DEFAULT_AR_LATERAL_BUDGET_CM, DEFAULT_AR_LATERAL_ROT_DEG,
 } from './arLateralDrift';
 import type { Quad } from './cropGeometry';
 import {
@@ -1180,6 +1180,25 @@ export interface CameraProps {
   arLateralBudgetCm?: number;
 
   /**
+   * ABSOLUTE cross-pan ROTATION budget in DEGREES, from the AR camera pose.
+   * AR captures only.  Default 25 deg; `0` disables the stop while still
+   * measuring.
+   *
+   * Closes the slow-pivot hole.  `lateralTurnRateRadPerSec` is a RATE gate
+   * (0.15 rad/s = 8.6 deg/s), so it cannot see a slow turn however far it
+   * goes: 6 deg/s accumulates 90 DEGREES of yaw over 15 s and never trips it.
+   * That is the rotation twin of the slow-translation blind spot — a rate gate
+   * measures how FAST you turn, never how FAR you have turned.
+   *
+   * Measured on the camera's forward VECTOR, so the intended sweep contributes
+   * nothing (a vertical pan measures azimuth, a horizontal pan elevation) and
+   * ROLL about the view axis contributes nothing either — roll does not change
+   * where the camera points, and it is already the motion that corrupted the
+   * accelerometer channel.
+   */
+  arLateralRotDeg?: number;
+
+  /**
    * Which lateral-drift physics to run.  Default `'fused'`.
    *
    * `'fused'` subtracts the device's FUSED GRAVITY SENSOR from each
@@ -1799,6 +1818,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     lateralTurnRateRadPerSec,
     lateralTurnGraceMs,
     arLateralBudgetCm = DEFAULT_AR_LATERAL_BUDGET_CM,
+    arLateralRotDeg = DEFAULT_AR_LATERAL_ROT_DEG,
     lateralMotionModel = DEFAULT_LATERAL_MOTION_MODEL,
     panMotionDebug,
     // No destructuring default on purpose: `undefined` → default is owned by
@@ -2040,6 +2060,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // brief lean does not end a capture.
         AR_LATERAL_GRACE_MS,
         Date.now(),
+        (arLateralRotDeg * Math.PI) / 180,
       );
       if (s.exceeded) setArDriftExceeded((p) => (p ? p : true));
       const now = Date.now();
@@ -2051,6 +2072,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             `[panMotion.ar] drift=${(s.driftM * 100).toFixed(1)}cm `
             + `peak=${(s.peakM * 100).toFixed(1)}cm `
             + `budget=${arLateralBudgetCm}cm `
+            + `rot=${(s.rotRad * 180 / Math.PI).toFixed(1)}deg `
+            + `peakRot=${(s.peakRotRad * 180 / Math.PI).toFixed(1)}deg `
+            + `rotBudget=${arLateralRotDeg}deg by=${s.latchedBy} `
             + `mode=${panMode} track=${meta.trackingState} `
             + `untracked=${s.untrackedCount} degenerate=${s.degenerateCount} `
             + `exceeded=${s.exceeded}`,
@@ -2059,7 +2083,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       }
     }
     onArFrame?.(meta);
-  }, [arDriftArmed, panMode, arLateralBudgetCm, onArFrame, panMotionDebug]);
+  }, [arDriftArmed, panMode, arLateralBudgetCm, arLateralRotDeg,
+    onArFrame, panMotionDebug]);
 
   // v0.13.1 — counter-rotation for control CONTENT (AR toggle, lens
   // pill, flash icon, thumbnails) so their labels read upright relative

@@ -121,6 +121,69 @@ export function _lateralAxis(q: Quat, mode: ArPanMode): Vec3 | null {
   return [flat[0] / len, 0, flat[2] / len];
 }
 
+/**
+ * Default absolute cross-pan ROTATION budget, DEGREES.
+ *
+ * The gyro trigger (`lateralTurnRateRadPerSec`) is a RATE gate at 0.15 rad/s
+ * = 8.6 deg/s, so it cannot see a slow pivot at all: 6 deg/s accumulates 90
+ * DEGREES of yaw over 15 s and never trips it.  That is the same blind spot
+ * slow translation had, in the other channel — a rate gate measures how FAST
+ * you are turning, never how FAR you have turned.
+ *
+ * 25 deg is a deliberate starting point, not a tuned default: it is well past
+ * the few degrees of wander a straight sweep involves, and well short of the
+ * 90 deg a genuine wrong-way pivot reaches.  Collect `arRotDeg` peaks from
+ * real captures before trusting it.
+ */
+export const DEFAULT_AR_LATERAL_ROT_DEG = 25;
+
+/** Camera forward (view) direction in world space. */
+export function _forwardOf(q: Quat): Vec3 {
+  // The camera looks along -Z in its own frame (ARKit convention).
+  return _rotateByQuat(q, [0, 0, -1]);
+}
+
+/**
+ * Signed cross-pan ROTATION between two poses, RADIANS.
+ *
+ * Measured on the forward VECTOR rather than by decomposing the quaternion,
+ * so a roll about the view axis — which does not change where the camera
+ * points — contributes nothing.  That matters: roll is the motion that
+ * corrupted the accelerometer guard, and it must not be double-counted here.
+ *
+ *   - `'vertical'`   — the sweep pitches within a vertical plane, so lateral
+ *     rotation is the AZIMUTH change (turning left/right off the plane).
+ *   - `'horizontal'` — the sweep yaws within a horizontal plane, so lateral
+ *     rotation is the ELEVATION change (tilting up/down off the plane).
+ *
+ * Both are orthogonal to the intended sweep by construction, so panning
+ * further never accumulates lateral rotation.
+ */
+export function _lateralRotationRad(startQ: Quat, curQ: Quat, mode: ArPanMode): number {
+  const f0 = _forwardOf(startQ);
+  const f1 = _forwardOf(curQ);
+  if (mode === 'horizontal') {
+    // Elevation off the horizontal sweep plane.
+    const e0 = Math.asin(Math.max(-1, Math.min(1, f0[1])));
+    const e1 = Math.asin(Math.max(-1, Math.min(1, f1[1])));
+    return e1 - e0;
+  }
+  // Azimuth in the horizontal plane.  Degenerate when the camera points
+  // near-vertically (azimuth undefined); the caller treats NaN as unmeasurable.
+  const h0 = Math.hypot(f0[0], f0[2]);
+  const h1 = Math.hypot(f1[0], f1[2]);
+  if (h0 < 0.087 || h1 < 0.087) return NaN;   // within ~5 deg of straight up/down
+  const a0 = Math.atan2(f0[0], f0[2]);
+  const a1 = Math.atan2(f1[0], f1[2]);
+  let d = a1 - a0;
+  // Shortest signed arc, so a sweep across the +/-pi seam does not read as a
+  // full turn.
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+
 /** Signed cross-pan displacement in METRES between two poses. */
 export function _lateralDriftMetres(
   startQ: Quat,
@@ -153,6 +216,16 @@ export interface ArDriftState {
   untrackedCount: number;
   /** Frames skipped because the lateral axis was degenerate. */
   degenerateCount: number;
+
+  // ── absolute cross-pan ROTATION (the slow-pivot hole) ────────────
+  /** Signed cross-pan rotation from the seeded pose, RADIANS. */
+  rotRad: number;
+  /** Largest |rotRad| this capture — the number worth logging. */
+  peakRotRad: number;
+  /** Which channel latched: displacement, rotation, or neither. */
+  latchedBy: 'none' | 'drift' | 'rotation';
+  /** Start of the current continuous over-budget ROTATION run. */
+  rotOverSinceMs: number | null;
 }
 
 export function _freshArDriftState(): ArDriftState {
@@ -165,6 +238,10 @@ export function _freshArDriftState(): ArDriftState {
     overBudgetSinceMs: null,
     untrackedCount: 0,
     degenerateCount: 0,
+    rotRad: 0,
+    peakRotRad: 0,
+    latchedBy: 'none',
+    rotOverSinceMs: null,
   };
 }
 
@@ -177,6 +254,10 @@ export function _resetArDriftState(s: ArDriftState): ArDriftState {
   s.overBudgetSinceMs = null;
   s.untrackedCount = 0;
   s.degenerateCount = 0;
+  s.rotRad = 0;
+  s.peakRotRad = 0;
+  s.latchedBy = 'none';
+  s.rotOverSinceMs = null;
   return s;
 }
 
@@ -201,6 +282,9 @@ export function _advanceArDrift(
   budgetM: number,
   graceMs: number,
   nowMs: number,
+  /** Absolute cross-pan ROTATION budget, RADIANS.  `<= 0` disables that
+   *  channel while still measuring it. */
+  rotBudgetRad = 0,
 ): ArDriftState {
   if (trackingState !== 'normal') {
     s.untrackedCount += 1;
@@ -219,6 +303,20 @@ export function _advanceArDrift(
   s.driftM = d;
   s.peakM = Math.max(s.peakM, Math.abs(d));
 
+  // ── ABSOLUTE cross-pan ROTATION.  The gyro trigger is a RATE gate, so a
+  // slow pivot is invisible to it however far it turns — 6 deg/s reaches 90
+  // deg of yaw in 15 s without ever crossing 0.15 rad/s.  Pose-derived angle
+  // has no such blind spot: it is a measurement, not a rate.
+  const rot = _lateralRotationRad(s.startQ, q, mode);
+  if (Number.isFinite(rot)) {
+    s.rotRad = rot;
+    s.peakRotRad = Math.max(s.peakRotRad, Math.abs(rot));
+  } else {
+    // Camera pointing near-vertically: azimuth is undefined.  Counted, not
+    // silently read as zero rotation.
+    s.degenerateCount += 1;
+  }
+
   const latch = _evalGraceLatch(
     budgetM > 0 && Math.abs(d) > budgetM,
     nowMs,
@@ -226,7 +324,23 @@ export function _advanceArDrift(
     s.exceeded,
     graceMs,
   );
-  s.exceeded = latch.exceeded;
+  const rotLatch = _evalGraceLatch(
+    rotBudgetRad > 0 && Number.isFinite(rot) && Math.abs(rot) > rotBudgetRad,
+    nowMs,
+    s.rotOverSinceMs,
+    s.exceeded,
+    graceMs,
+  );
+  s.rotOverSinceMs = rotLatch.overBudgetSinceMs;
+
+  // Record WHICH channel tripped first — the two have different remedies
+  // ("stop sliding sideways" vs "stop turning"), and the guidance copy and
+  // any future tuning both need to tell them apart.
+  if (!s.exceeded) {
+    if (latch.exceeded) s.latchedBy = 'drift';
+    else if (rotLatch.exceeded) s.latchedBy = 'rotation';
+  }
+  s.exceeded = latch.exceeded || rotLatch.exceeded;
   s.overBudgetSinceMs = latch.overBudgetSinceMs;
   return s;
 }

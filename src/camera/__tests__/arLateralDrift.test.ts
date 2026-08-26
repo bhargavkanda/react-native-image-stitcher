@@ -23,6 +23,7 @@ jest.mock('react-native-sensors', () => ({
 // eslint-disable-next-line import/first
 import {
   _rotateByQuat, _lateralAxis, _lateralDriftMetres,
+  _lateralRotationRad, _forwardOf,
   _freshArDriftState, _advanceArDrift,
   type Quat, type Vec3,
 } from '../arLateralDrift';
@@ -181,6 +182,92 @@ describe('tracking-state and seeding discipline', () => {
     _advanceArDrift(s, rolled, [0, 0, 0], 'normal', 'vertical', 0.15, 500, 0);
     _advanceArDrift(s, rolled, [9, 0, 0], 'normal', 'vertical', 0.15, 500, 100);
     expect(s.degenerateCount).toBe(1);
+    expect(s.exceeded).toBe(false);
+  });
+});
+
+/**
+ * ABSOLUTE cross-pan ROTATION — the slow-pivot hole.
+ *
+ * The gyro trigger is a RATE gate (0.15 rad/s = 8.6 deg/s), so a slow pivot
+ * never trips it however far it turns: 6 deg/s reaches 90 DEGREES of yaw in
+ * 15 s and stays under threshold the whole time.  Pose-derived angle has no
+ * such blind spot — it measures how far you HAVE turned, not how fast.
+ */
+describe('absolute cross-pan rotation', () => {
+  function quat2(axis: Vec3, rad: number): Quat {
+    const h = rad / 2; const s = Math.sin(h);
+    return [axis[0] * s, axis[1] * s, axis[2] * s, Math.cos(h)];
+  }
+  const I: Quat = [0, 0, 0, 1];
+
+  it('the intended SWEEP contributes no lateral rotation, at any extent', () => {
+    // Vertical mode: pitching is the sweep.  Pitch far and lateral stays ~0.
+    for (const deg of [10, 30, 60, 80]) {
+      const q = quat2([1, 0, 0], (deg * Math.PI) / 180);
+      expect(Math.abs(_lateralRotationRad(I, q, 'vertical'))).toBeLessThan(0.02);
+    }
+    // Horizontal mode: yawing is the sweep.
+    for (const deg of [10, 45, 90, 150]) {
+      const q = quat2([0, 1, 0], (deg * Math.PI) / 180);
+      expect(Math.abs(_lateralRotationRad(I, q, 'horizontal'))).toBeLessThan(0.02);
+    }
+  });
+
+  it('a sideways PIVOT is measured, in the mode where it is lateral', () => {
+    const yaw30 = quat2([0, 1, 0], Math.PI / 6);
+    const r = _lateralRotationRad(I, yaw30, 'vertical');
+    expect(Math.abs(r * 180 / Math.PI)).toBeCloseTo(30, 0);
+  });
+
+  it('ROLL about the view axis contributes nothing', () => {
+    // Roll is what corrupted the accelerometer guard; it must not be
+    // double-counted here.  It does not change where the camera POINTS.
+    for (const deg of [10, 30, 60]) {
+      const q = quat2([0, 0, 1], (deg * Math.PI) / 180);
+      expect(Math.abs(_lateralRotationRad(I, q, 'vertical'))).toBeLessThan(0.02);
+    }
+  });
+
+  it('catches a SLOW pivot the rate gate cannot see', () => {
+    // 6 deg/s for 15 s = 90 deg of yaw.  crossEma peaks at 0.105 rad/s,
+    // permanently under the 0.15 threshold, so the gyro trigger never fires.
+    const s = _freshArDriftState();
+    let now = 0; let latchedAt: number | null = null;
+    const budgetRad = (25 * Math.PI) / 180;
+    for (let i = 0; i <= 150; i++) {
+      const deg = 6 * (i / 10);               // 10 Hz
+      const q = quat2([0, 1, 0], (deg * Math.PI) / 180);
+      _advanceArDrift(s, q, [0, 0, 0], 'normal', 'vertical', 0.08, 500, now, budgetRad);
+      if (s.exceeded && latchedAt === null) latchedAt = now;
+      now += 100;
+    }
+    expect(s.peakRotRad * 180 / Math.PI).toBeCloseTo(90, 0);
+    expect(latchedAt).not.toBeNull();
+    expect(s.latchedBy).toBe('rotation');     // and it says WHICH channel
+  });
+
+  it('reports drift vs rotation separately — they have different remedies', () => {
+    const s = _freshArDriftState();
+    let now = 0;
+    for (let i = 0; i <= 60; i++) {
+      _advanceArDrift(s, I, [0.006 * i, 0, 0], 'normal', 'vertical',
+                      0.08, 500, now, (25 * Math.PI) / 180);
+      now += 100;
+    }
+    expect(s.exceeded).toBe(true);
+    expect(s.latchedBy).toBe('drift');
+  });
+
+  it('rotBudget <= 0 keeps measuring but never latches on rotation', () => {
+    const s = _freshArDriftState();
+    let now = 0;
+    for (let i = 0; i <= 100; i++) {
+      const q = quat2([0, 1, 0], (i * Math.PI) / 180);   // up to 100 deg
+      _advanceArDrift(s, q, [0, 0, 0], 'normal', 'vertical', 0.08, 500, now, 0);
+      now += 100;
+    }
+    expect(s.peakRotRad * 180 / Math.PI).toBeGreaterThan(80);
     expect(s.exceeded).toBe(false);
   });
 });
