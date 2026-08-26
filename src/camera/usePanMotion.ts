@@ -1268,10 +1268,22 @@ export function usePanMotion({
               latchSourceRef.current = 'gyro';
               if (debugEnabled) {
                 // eslint-disable-next-line no-console
+                // Record the DISPLACEMENT channel alongside the rotation
+                // one.  Both triggers set the same flag, and in practice the
+                // accel budget is far above anything a real capture reaches,
+                // so EVERY stop is labelled `gyro` regardless of whether the
+                // operator rotated or translated.  Without `lat`/`lin` here
+                // the label names the code path that fired and says nothing
+                // about the physical motion that caused it — which is exactly
+                // how the 2026-08-26 device session was first misread.
+                const ls = lateralRef.current;
                 console.log(
                   `[panMotion] LATCH source=gyro `
                   + `crossEma=${crossEma.toFixed(3)}rad/s `
-                  + `thresh=${lateralTurnRateRadPerSec}rad/s`,
+                  + `thresh=${lateralTurnRateRadPerSec}rad/s `
+                  + `lat=${(ls.pos * M_TO_CM).toFixed(2)}cm `
+                  + `lin=${ls.lastLin.toFixed(4)}m/s2 `
+                  + `vel=${ls.vel.toFixed(4)}m/s`,
                 );
               }
             }
