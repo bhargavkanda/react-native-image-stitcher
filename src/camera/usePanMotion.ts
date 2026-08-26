@@ -1251,6 +1251,14 @@ export function usePanMotion({
         // Smooth |gyro.x| with an EMA so the noisy raw rate's dips don't
         // reset the trigger; latch once the SMOOTHED rate stays over the
         // threshold (the EMA's time constant IS the dwell).
+        // MEASUREMENT is not ENFORCEMENT.  The EMA is computed on every
+        // sample regardless of whether either trigger is armed, so the
+        // rotation channel stays observable in the telemetry with the guard
+        // switched OFF.  That is exactly the configuration you need to TUNE a
+        // threshold — run captures to completion with enforcement disabled and
+        // correlate the recorded motion against whether the stitch succeeded.
+        // Gating the computation behind `lateralEnabled` made the signal
+        // vanish precisely when you most need to see it.
         let crossEma = crossEmaRef.current;
         // `<= 0` DISABLES the rotation trigger, mirroring `lateralBudgetCm`.
         // Without this, `crossEma > 0` is satisfied by the first non-zero
@@ -1260,9 +1268,9 @@ export function usePanMotion({
         // still disables BOTH triggers (via `lateralEnabled`); this
         // disables only the rotation one.
         const turnLatchEnabled = lateralTurnRateRadPerSec > 0;
+        crossEma = crossEma * (1 - crossAlpha) + Math.abs(x) * crossAlpha;
+        crossEmaRef.current = crossEma;
         if (lateralEnabled) {
-          crossEma = crossEma * (1 - crossAlpha) + Math.abs(x) * crossAlpha;
-          crossEmaRef.current = crossEma;
           if (turnLatchEnabled && crossEma > lateralTurnRateRadPerSec) {
             if (latchSourceRef.current === null) {
               latchSourceRef.current = 'gyro';

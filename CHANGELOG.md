@@ -116,17 +116,56 @@ This class of bug previously left **no trace in a release build**. Now:
   hook directly or rendering guidance from it. Found by adversarial
   review of this release.
 
-### Known limitation — read this before tuning
+### Known limitation — DEVICE-VERIFIED, read this before tuning
 
-At the current 8 cm budget the accelerometer path is deliberately
-**near-inert for real slides** (a brisk 20 cm/1 s slide reads ~5.5 cm),
-and the **gyro cross-EMA at 0.15 rad/s remains the operative trigger** in
-practice. Absolute centimetre accuracy from IMU dead-reckoning over a
-multi-second capture is not physically achievable — attitude error of
-0.25° alone fabricates ~32 cm over 20 s, which is why stage 2's
-high-pass is mandatory and why the reading is a *drift-rate proxy*, not a
-displacement measurement. Collect `latch=` and peak `lat=` from real
-captures before retuning either threshold.
+**This release does not stop the false lateral trips reported from the
+field, and is not intended to.** A device session on 2026-08-26 (iPhone
+16 Pro, 24 captures across two runs, telemetry preserved) established
+why, using the stitcher's own image-derived translation estimate
+(`tMeters`) as ground truth:
+
+| capture | real translation (`tM`) | what the IMU reported | outcome |
+|---|---|---|---|
+| 8 | 4.3 cm | 1.55 cm | passed |
+| 9 | **10.4 cm** | **1.55 cm** | passed |
+| 10 | 9.9 cm | 1.61 cm | passed |
+
+**A 2.4× difference in real translation produced an identical IMU
+reading.** The accelerometer channel is not merely attenuated — over a
+multi-second capture it is uncorrelated with the quantity it claims to
+measure, so *no* value of `lateralBudgetCm` can separate drifted captures
+from clean ones. An earlier draft of this entry claimed a brisk
+20 cm/1 s slide reads ~5.5 cm; that figure came from a synthetic profile
+and the device data does not support it.
+
+Meanwhile the **gyro cross-EMA at 0.15 rad/s is the operative trigger**,
+and it fires on rotation with almost no translation — measured stops at
+`lat=0.12 cm`, `0.62 cm` and `1.48 cm`, one of them on a **0.7 %**
+threshold overshoot — while the 10.4 cm capture above went untouched. It
+also has **no dwell requirement**, unlike the displacement trigger's
+500 ms grace window, so a single ~400 ms excursion ends a capture
+permanently.
+
+Every capture in the session stitched at `finalConfidenceThresh = 1.000`
+with zero dropped frames, including both ~10 cm ones — i.e. **the
+stitcher tolerated far more drift than the guard is configured to
+allow.**
+
+Why this cannot be fixed by tuning: absolute centimetre accuracy from IMU
+dead-reckoning is not physically achievable over a multi-second capture —
+0.25° of attitude error alone fabricates ~32 cm over 20 s. Stage 2's
+high-pass is mandatory to bound that, and it necessarily also removes
+slow real motion. Sensitivity to slow drift and immunity to slow sensor
+error are the same knob. The reading is a *drift-rate proxy*, never a
+displacement measurement.
+
+**The real fix is a camera-derived signal**, which is tracked separately.
+`tMeters` demonstrates the pipeline already computes a usable
+image-derived translation estimate at finalize.
+
+If you must tune today, use `latch=gyro|accel` to find out which trigger
+is actually firing for your users first — the answer is very likely
+`gyro`, which `lateralBudgetCm` does not affect.
 
 ## [0.25.3] - 2026-08-19 (lateral-drift budget raised to 8 cm)
 

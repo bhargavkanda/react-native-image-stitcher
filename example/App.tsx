@@ -140,6 +140,13 @@ function App(): React.JSX.Element {
   // to pre-anti-blur behaviour).  The exposure cap is a capture-FORMAT change,
   // so the <Camera> key includes this to force a clean format re-pick on flip.
   const [antiBlurOn, setAntiBlurOn] = useState(true);
+  // Lateral-guard A/B for the 2026-08-26 threshold experiment.
+  //   'on'  — shipped defaults (8 cm displacement budget, 0.15 rad/s rotation)
+  //   'off' — BOTH triggers disabled, so every capture runs to completion and
+  //           we can correlate the motion actually recorded against whether the
+  //           stitch succeeded.  That is the only way to set a threshold from
+  //           OUTPUT rather than from an assumed motion budget.
+  const [lateralGuard, setLateralGuard] = useState<'on' | 'off'>('on');
   // Modal-host repro scaffold (see the render tail): host <Camera>
   // inside a PORTRAIT-LOCKED Modal while the app supports landscape —
   // the integrator's exact configuration for the reported rotation bug.
@@ -310,6 +317,40 @@ function App(): React.JSX.Element {
   }, [refine]);
 
   const handleCapture = (result: CameraCaptureResult): void => {
+    // Single-line, greppable OUTCOME marker for the lateral-threshold
+    // experiment.  Correlating this against the [panMotion] motion trace is
+    // the whole point: it lets a threshold be derived from whether the stitch
+    // actually SUCCEEDED, instead of from an assumed motion budget.
+    // eslint-disable-next-line no-console
+    const pano = result as unknown as {
+      framesRequested?: number; framesIncluded?: number; framesDropped?: number;
+      finalConfidenceThresh?: number; durationMs?: number;
+      stitchModeResolved?: string; rRadians?: number; tMeters?: number;
+      decisionRatio?: number; debugSummary?: string;
+      error?: { code?: string };
+    };
+    const n = (v: number | undefined, d = 3) =>
+      typeof v === 'number' ? v.toFixed(d) : '?';
+    console.log(
+      `[example] RESULT guard=${lateralGuard} type=${result.type} `
+      + `ok=${result.ok} `
+      + (result.ok
+        ? `frames=${pano.framesIncluded ?? '?'}/${pano.framesRequested ?? '?'} `
+          + `dropped=${pano.framesDropped ?? '?'} `
+          // finalConfidenceThresh: how far DOWN the stitch ladder the engine
+          // had to go.  A capture that only stitched at a lowered threshold is
+          // objectively a worse capture even when ok=true — this is the
+          // quality proxy the ok/fail flag alone cannot give us.
+          + `conf=${n(pano.finalConfidenceThresh)} `
+          + `mode=${pano.stitchModeResolved ?? '?'} `
+          // rRadians / tMeters are the STITCHER's own rotation and translation
+          // estimates -- image/pose derived, not IMU.  Correlating these against
+          // the IMU trace is the whole experiment.
+          + `rRad=${n(pano.rRadians)} tM=${n(pano.tMeters)} `
+          + `ratio=${n(pano.decisionRatio)} ms=${pano.durationMs ?? '?'} `
+          + `warnings=${result.warnings.map((w) => w.code).join('|') || 'none'}`
+        : `code=${pano.error?.code ?? '?'}`),
+    );
     // eslint-disable-next-line no-console
     console.log('[example] onCapture', result);
     // v0.16 — onCapture now fires on failure too (ok:false), mirroring
@@ -513,6 +554,13 @@ function App(): React.JSX.Element {
                 }
           }
           panMode={panMode}
+          // Lateral-guard experiment knobs.  `0` disables each trigger
+          // independently; disabling the budget disables both.
+          lateralBudgetCm={lateralGuard === 'off' ? 0 : undefined}
+          lateralTurnRateRadPerSec={lateralGuard === 'off' ? 0 : undefined}
+          // Force the [panMotion] telemetry on regardless of build config, so
+          // a Release build can be traced without another version bump.
+          panMotionDebug
           rectCrop={rectCrop}
           showPreview={showPreview}
           // Time-budget force-accept ON at 1.5 s — a keyframe is accepted on
@@ -598,6 +646,19 @@ function App(): React.JSX.Element {
         >
           <Text style={styles.devToggleText}>
             🌀 anti-blur: {antiBlurOn ? 'ON' : 'OFF'}
+          </Text>
+        </Pressable>
+
+        {/* Lateral-guard A/B.  OFF disables BOTH lateral triggers so a
+            capture always runs to completion — required for deriving a
+            threshold from stitch OUTCOME rather than an assumed budget. */}
+        <Pressable
+          style={[styles.devToggle, { top: 270 }]}
+          onPress={() => setLateralGuard((v) => (v === 'on' ? 'off' : 'on'))}
+          accessibilityRole="button"
+        >
+          <Text style={styles.devToggleText}>
+            ↔️ lateral guard: {lateralGuard === 'on' ? 'ON' : 'OFF'}
           </Text>
         </Pressable>
 
