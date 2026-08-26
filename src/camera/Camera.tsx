@@ -1159,6 +1159,16 @@ export interface CameraProps {
   lateralTurnGraceMs?: number;
 
   /**
+   * Absolute cross-pan ANGLE, DEGREES, at which the capture is stopped.
+   * Default 25; `0` disables while still measuring.  Works in BOTH AR and
+   * non-AR (gyro-integrated), unlike `arLateralRotDeg` which needs the pose.
+   *
+   * Catches the slow pivot `lateralTurnRateRadPerSec` cannot: that is a rate
+   * gate, so 6 deg/s turns 90 degrees over 15 s without tripping it.
+   */
+  lateralTurnAngleDeg?: number;
+
+  /**
    * ABSOLUTE cross-pan drift budget in CENTIMETRES, measured from the AR
    * camera POSE.  AR captures only.  Default 8 cm; `0` disables the stop
    * while still measuring and logging the distance.
@@ -1817,6 +1827,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     lateralBudgetCm = DEFAULT_LATERAL_BUDGET_CM,
     lateralTurnRateRadPerSec,
     lateralTurnGraceMs,
+    lateralTurnAngleDeg,
     arLateralBudgetCm = DEFAULT_AR_LATERAL_BUDGET_CM,
     arLateralRotDeg = DEFAULT_AR_LATERAL_ROT_DEG,
     lateralMotionModel = DEFAULT_LATERAL_MOTION_MODEL,
@@ -2021,6 +2032,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     lateralBudgetCm,
     lateralTurnRateRadPerSec,
     lateralTurnGraceMs,
+    lateralTurnAngleDeg,
     lateralMotionModel,
     panMotionDebug,
   });

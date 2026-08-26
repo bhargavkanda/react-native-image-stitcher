@@ -538,3 +538,67 @@ describe('CameraHandle exposes capture-source control', () => {
     expect(ok).toBe(true);
   });
 });
+
+/**
+ * Non-AR absolute cross-pan ANGLE (gyro-integrated).
+ *
+ * The rate gate (`lateralTurnRateRadPerSec`, 0.15 rad/s = 8.6 deg/s) cannot
+ * see a slow pivot however far it turns.  Angle can, and unlike the
+ * displacement channel it can be BELIEVED: one integration, so a gyro bias
+ * grows the error linearly (~0.5 deg over 10 s) instead of quadratically
+ * (~100 cm for a comparable accel bias).
+ */
+describe('non-AR cross-pan angle', () => {
+  const D2R = Math.PI / 180;
+  /** Integrate a rate profile the way the gyro effect does. */
+  function integrate(rateDegPerS: (t: number) => number, secs: number, hz = 30) {
+    let angle = 0; let peak = 0; let emaPeak = 0; let ema = 0;
+    const dt = 1 / hz;
+    for (let i = 0; i < secs * hz; i++) {
+      const r = rateDegPerS(i * dt) * D2R;
+      angle += r * dt;
+      peak = Math.max(peak, Math.abs(angle));
+      ema = ema * (1 - 0.08) + Math.abs(r) * 0.08;
+      emaPeak = Math.max(emaPeak, ema);
+    }
+    return { deg: peak / D2R, emaPeak };
+  }
+
+  it('a 6 deg/s pivot turns 90 deg and the RATE gate never sees it', () => {
+    const r = integrate(() => 6, 15);
+    expect(r.deg).toBeCloseTo(90, 0);
+    expect(r.emaPeak).toBeLessThan(0.15);      // rate gate: silent
+    expect(r.deg).toBeGreaterThan(25);         // angle gate: caught
+  });
+
+  it('scales with how far you turned, not how fast', () => {
+    // Same 60 degrees, delivered slow and fast — both must read 60.
+    expect(integrate(() => 4, 15).deg).toBeCloseTo(60, 0);
+    expect(integrate(() => 20, 3).deg).toBeCloseTo(60, 0);
+  });
+
+  it('is SIGNED — correcting back onto course unwinds it', () => {
+    // Wander 20 deg off, then come back.  A capture that self-corrects is not
+    // an error, so |angle| must return toward zero rather than banking 40.
+    const r = integrate((t) => (t < 5 ? 4 : -4), 10);
+    expect(r.deg).toBeCloseTo(20, 0);          // peak excursion
+    const final = integrate((t) => (t < 5 ? 4 : -4), 10);
+    expect(final.deg).toBeLessThan(25);        // never latches
+  });
+
+  it('gyro bias drift stays negligible over a capture', () => {
+    // 0.05 deg/s of bias — a realistic post-calibration MEMS figure.
+    // Single integration => linear growth, unlike the accel channel's t^2.
+    for (const secs of [10, 20, 30]) {
+      const r = integrate(() => 0.05, secs);
+      expect(r.deg).toBeLessThan(2);           // vs a 25 deg budget
+    }
+  });
+
+  it('a straight sweep with hand tremor does not accumulate', () => {
+    // Tremor is zero-mean, so a signed integrator cancels it; an ABSOLUTE
+    // accumulator would have banked it into a false latch.
+    const r = integrate((t) => 8 * Math.sin(2 * Math.PI * 1.5 * t), 15);
+    expect(r.deg).toBeLessThan(2);
+  });
+});

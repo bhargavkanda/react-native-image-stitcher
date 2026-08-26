@@ -181,6 +181,20 @@ export interface UsePanMotionOptions {
   lateralTurnGraceMs?: number;
 
   /**
+   * Absolute cross-pan ANGLE, DEGREES, at which `lateralExceeded` latches.
+   * Defaults to {@link DEFAULT_LATERAL_TURN_ANGLE_DEG} (25).  `0` disables
+   * this trigger while still measuring the angle for telemetry.
+   *
+   * Closes the slow-pivot hole that `lateralTurnRateRadPerSec` structurally
+   * cannot: that one is a rate gate, so 6 deg/s of drift accumulates 90
+   * degrees over 15 s without ever tripping it.  Unlike `lateralBudgetCm`
+   * (double-integrated accel — measured ANTI-correlated with ground truth),
+   * a gyro-integrated angle is a single integration and is trustworthy over a
+   * capture: ~0.5 deg of drift after 10 s.
+   */
+  lateralTurnAngleDeg?: number;
+
+  /**
    * Which lateral-drift physics to run.  Default `'fused'`.
    *
    *   'fused'  — subtract the FUSED GRAVITY SENSOR per sample
@@ -298,6 +312,29 @@ export const DEFAULT_LATERAL_MOTION_MODEL: LateralMotionModel = 'fused';
  * separates them with a comfortable margin.
  */
 export const DEFAULT_LATERAL_TURN_RAD_PER_SEC = 0.15;
+
+/**
+ * Default absolute cross-pan ANGLE budget, DEGREES — the non-AR twin of
+ * `arLateralRotDeg`.
+ *
+ * {@link DEFAULT_LATERAL_TURN_RAD_PER_SEC} is a RATE gate (0.15 rad/s =
+ * 8.6 deg/s), so it cannot see a slow pivot however far it turns: 6 deg/s
+ * reaches 90 DEGREES of yaw over 15 s and never crosses it.  A rate gate
+ * measures how FAST you turn, never how FAR you have turned.
+ *
+ * WHY THIS IS TRUSTWORTHY WHERE THE DISPLACEMENT CHANNEL IS NOT.  Angle from
+ * a gyro is a SINGLE integration, so a bias `b` grows the error linearly:
+ * 0.05 deg/s of bias is 0.5 deg after 10 s, negligible against a 25 deg
+ * budget.  Distance from an accelerometer is a DOUBLE integration, where the
+ * same class of bias grows as t^2 — 0.02 m/s^2 reaches ~100 cm in the same
+ * 10 s.  That is ~1000x worse conditioning, and it is why `lateralBudgetCm`
+ * measured r = -0.28 against ground truth while this can simply be believed.
+ *
+ * The accumulator is SIGNED, so a pan that wanders left then corrects back to
+ * course returns toward zero rather than banking the excursion — correcting
+ * is not an error.
+ */
+export const DEFAULT_LATERAL_TURN_ANGLE_DEG = 25;
 
 /**
  * EMA smoothing factor for the cross-pan gyro rate (per ~33 ms gyro sample).
@@ -1158,6 +1195,7 @@ export function usePanMotion({
   lateralBudgetCm = DEFAULT_LATERAL_BUDGET_CM,
   lateralTurnRateRadPerSec = DEFAULT_LATERAL_TURN_RAD_PER_SEC,
   lateralTurnGraceMs = LATERAL_GRACE_MS,
+  lateralTurnAngleDeg = DEFAULT_LATERAL_TURN_ANGLE_DEG,
   lateralMotionModel = DEFAULT_LATERAL_MOTION_MODEL,
   panMotionDebug,
 }: UsePanMotionOptions): UsePanMotionReturn {
@@ -1210,6 +1248,14 @@ export function usePanMotion({
   const turnOverSinceRef = useRef<number | null>(null);
   /** Whether the rotation trigger has latched this capture (one-shot). */
   const turnExceededRef = useRef(false);
+
+  /** SIGNED accumulated cross-pan angle since capture start, RADIANS.
+   *  Signed so correcting back onto course unwinds it. */
+  const crossAngleRef = useRef(0);
+  /** Largest |crossAngle| this capture — the number worth logging. */
+  const crossAnglePeakRef = useRef(0);
+  /** Dwell timer for the ANGLE trigger. */
+  const angleOverSinceRef = useRef<number | null>(null);
 
   // ── Gyroscope → pan-speed bucket + lateral-drift latch ─────────
   // One gyro subscription drives BOTH item-4 (too fast) and item-6
@@ -1296,6 +1342,18 @@ export function usePanMotion({
         const turnLatchEnabled = lateralTurnRateRadPerSec > 0;
         crossEma = crossEma * (1 - crossAlpha) + Math.abs(x) * crossAlpha;
         crossEmaRef.current = crossEma;
+
+        // ── ABSOLUTE cross-pan ANGLE.  A single integration of the gyro,
+        // which is why it can be believed where the double-integrated accel
+        // cannot: a 0.05 deg/s bias is 0.5 deg after 10 s, against ~100 cm of
+        // position error from a comparable accel bias over the same window.
+        // SIGNED, so wandering off course and correcting back unwinds rather
+        // than banking the excursion.
+        crossAngleRef.current += x * gdt.dtSec;
+        crossAnglePeakRef.current = Math.max(
+          crossAnglePeakRef.current, Math.abs(crossAngleRef.current),
+        );
+
         if (lateralEnabled) {
           // GRACE WINDOW — the rotation trigger had none, while the
           // displacement trigger has always required `LATERAL_GRACE_MS` of
@@ -1319,8 +1377,25 @@ export function usePanMotion({
             lateralTurnGraceMs,
           );
           turnOverSinceRef.current = turnLatch.overBudgetSinceMs;
-          const turnJustLatched = turnLatch.exceeded && !turnExceededRef.current;
-          turnExceededRef.current = turnLatch.exceeded;
+
+          // The ANGLE trigger runs alongside the RATE one and catches what it
+          // structurally cannot: a slow pivot that never reaches the rate
+          // threshold but turns 90 degrees anyway.
+          const angleBudgetRad = (lateralTurnAngleDeg * Math.PI) / 180;
+          const angleLatch = _evalGraceLatch(
+            lateralTurnAngleDeg > 0
+              && Math.abs(crossAngleRef.current) > angleBudgetRad,
+            now,
+            angleOverSinceRef.current,
+            turnExceededRef.current,
+            lateralTurnGraceMs,
+          );
+          angleOverSinceRef.current = angleLatch.overBudgetSinceMs;
+
+          const anyTurn = turnLatch.exceeded || angleLatch.exceeded;
+          const turnJustLatched = anyTurn && !turnExceededRef.current;
+          const viaAngle = angleLatch.exceeded && !turnLatch.exceeded;
+          turnExceededRef.current = anyTurn;
           if (turnJustLatched) {
             if (latchSourceRef.current === null) {
               latchSourceRef.current = 'gyro';
@@ -1337,8 +1412,11 @@ export function usePanMotion({
                 const ls = lateralRef.current;
                 console.log(
                   `[panMotion] LATCH source=gyro `
+                  + `by=${viaAngle ? 'angle' : 'rate'} `
                   + `crossEma=${crossEma.toFixed(3)}rad/s `
                   + `thresh=${lateralTurnRateRadPerSec}rad/s `
+                  + `angle=${(crossAngleRef.current * 180 / Math.PI).toFixed(1)}deg `
+                  + `angleBudget=${lateralTurnAngleDeg}deg `
                   + `lat=${(ls.pos * M_TO_CM).toFixed(2)}cm `
                   + `lin=${ls.lastLin.toFixed(4)}m/s2 `
                   + `vel=${ls.vel.toFixed(4)}m/s`,
@@ -1362,6 +1440,9 @@ export function usePanMotion({
             + `thresh=${lateralTurnRateRadPerSec}rad/s `
             + `dtMean=${meanDt.toFixed(1)}ms dtSrc=${gdt.source} `
             + `alpha=${crossAlpha.toFixed(4)} model=${lateralMotionModel} `
+            + `angle=${(crossAngleRef.current * 180 / Math.PI).toFixed(1)}deg `
+            + `peakAngle=${(crossAnglePeakRef.current * 180 / Math.PI).toFixed(1)}deg `
+            + `angleBudget=${lateralTurnAngleDeg}deg `
             + `latch=${latchSourceRef.current ?? 'none'}`,
           );
         }
@@ -1380,8 +1461,8 @@ export function usePanMotion({
     // (hypot), so an orientation flip must not needlessly re-subscribe the
     // gyro mid-capture.
   }, [active, goodMaxRadPerSec, warnMaxRadPerSec, lateralEnabled,
-    lateralTurnRateRadPerSec, lateralTurnGraceMs, lateralMotionModel,
-    debugEnabled]);
+    lateralTurnRateRadPerSec, lateralTurnGraceMs, lateralTurnAngleDeg,
+    lateralMotionModel, debugEnabled]);
 
   // ── Accelerometer → lateral-drift integrator ───────────────────
   // NOTE: this effect intentionally does NOT depend on `resolvedAxis`.
@@ -1398,6 +1479,9 @@ export function usePanMotion({
       latchSourceRef.current = null;
       turnOverSinceRef.current = null;
       turnExceededRef.current = false;
+      crossAngleRef.current = 0;
+      crossAnglePeakRef.current = 0;
+      angleOverSinceRef.current = null;
       return;
     }
 
@@ -1409,6 +1493,9 @@ export function usePanMotion({
     latchSourceRef.current = null;
     turnOverSinceRef.current = null;
     turnExceededRef.current = false;
+    crossAngleRef.current = 0;
+    crossAnglePeakRef.current = 0;
+    angleOverSinceRef.current = null;
 
     setUpdateIntervalForType(
       SensorTypes.accelerometer,
