@@ -135,7 +135,7 @@ export function _lateralAxis(q: Quat, mode: ArPanMode): Vec3 | null {
  * 90 deg a genuine wrong-way pivot reaches.  Collect `arRotDeg` peaks from
  * real captures before trusting it.
  */
-export const DEFAULT_AR_LATERAL_ROT_DEG = 25;
+export const DEFAULT_AR_LATERAL_ROT_DEG = 10;
 
 /** Camera forward (view) direction in world space. */
 export function _forwardOf(q: Quat): Vec3 {

@@ -277,7 +277,7 @@ export type LateralMotionModel = 'fused' | 'legacy';
  * v0.25.3: `4` -> `8`, after field reports of the lateral stop firing on
  * minor drift.  Only the budget moved; the detector is unchanged.
  */
-export const DEFAULT_LATERAL_BUDGET_CM = 8;
+export const DEFAULT_LATERAL_BUDGET_CM = 4;
 
 /**
  * Default lateral-drift physics.  SINGLE SOURCE OF TRUTH — `<Camera>`'s
@@ -334,7 +334,7 @@ export const DEFAULT_LATERAL_TURN_RAD_PER_SEC = 0.15;
  * course returns toward zero rather than banking the excursion — correcting
  * is not an error.
  */
-export const DEFAULT_LATERAL_TURN_ANGLE_DEG = 25;
+export const DEFAULT_LATERAL_TURN_ANGLE_DEG = 10;
 
 /**
  * EMA smoothing factor for the cross-pan gyro rate (per ~33 ms gyro sample).

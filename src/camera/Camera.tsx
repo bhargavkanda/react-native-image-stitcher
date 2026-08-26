@@ -2037,66 +2037,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     panMotionDebug,
   });
 
-  // ── AR ABSOLUTE cross-pan drift ────────────────────────────────────
-  // Measured from ARKit's VIO POSE, not the accelerometer.  The IMU guard
-  // above cannot see slow drift by construction (its bias high-pass removes
-  // exactly the slow band real drift lives in), and on a 2026-08-26 device
-  // session its readings correlated with the stitcher's own image-derived
-  // translation at r = -0.28 — anti-correlated.  A position needs no
-  // integration, so this one sees arbitrarily slow movement.
-  const arDriftRef = useRef(_freshArDriftState());
-  const [arDriftExceeded, setArDriftExceeded] = useState(false);
-  const arDriftArmed = isAR && statusPhase === 'recording';
-
-  useEffect(() => {
-    if (!arDriftArmed) return;
-    // New capture: drop the origin so it re-seeds from the first TRUSTED
-    // pose.  Finalize restarts the AR session, so a capture opens with the
-    // tracker relocalising; anchoring to one of those poses would inject a
-    // phantom metre-scale drift at t=0.
-    _resetArDriftState(arDriftRef.current);
-    setArDriftExceeded(false);
-  }, [arDriftArmed]);
-
-  const arLastEmitRef = useRef(0);
-  const handleArFrame = useCallback((meta: ARFrameMeta) => {
-    if (arDriftArmed && meta.pose) {
-      const s = _advanceArDrift(
-        arDriftRef.current,
-        meta.pose.rotation as unknown as readonly [number, number, number, number],
-        meta.pose.translation as unknown as readonly [number, number, number],
-        meta.trackingState,
-        panMode === 'horizontal' ? 'horizontal' : 'vertical',
-        arLateralBudgetCm / 100.0,
-        // Same dwell as both IMU triggers, so a momentary pose glitch or a
-        // brief lean does not end a capture.
-        AR_LATERAL_GRACE_MS,
-        Date.now(),
-        (arLateralRotDeg * Math.PI) / 180,
-      );
-      if (s.exceeded) setArDriftExceeded((p) => (p ? p : true));
-      const now = Date.now();
-      if (now - arLastEmitRef.current >= 250) {
-        arLastEmitRef.current = now;
-        if (panMotionDebug ?? __DEV__) {
-          // eslint-disable-next-line no-console
-          console.log(
-            `[panMotion.ar] drift=${(s.driftM * 100).toFixed(1)}cm `
-            + `peak=${(s.peakM * 100).toFixed(1)}cm `
-            + `budget=${arLateralBudgetCm}cm `
-            + `rot=${(s.rotRad * 180 / Math.PI).toFixed(1)}deg `
-            + `peakRot=${(s.peakRotRad * 180 / Math.PI).toFixed(1)}deg `
-            + `rotBudget=${arLateralRotDeg}deg by=${s.latchedBy} `
-            + `mode=${panMode} track=${meta.trackingState} `
-            + `untracked=${s.untrackedCount} degenerate=${s.degenerateCount} `
-            + `exceeded=${s.exceeded}`,
-          );
-        }
-      }
-    }
-    onArFrame?.(meta);
-  }, [arDriftArmed, panMode, arLateralBudgetCm, arLateralRotDeg,
-    onArFrame, panMotionDebug]);
 
   // v0.13.1 — counter-rotation for control CONTENT (AR toggle, lens
   // pill, flash icon, thumbnails) so their labels read upright relative
@@ -2269,6 +2209,94 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     return () => sub.remove();
   }, []);
   const incremental = useIncrementalStitcher();
+
+  // ── AR ABSOLUTE cross-pan drift ────────────────────────────────────
+  // Measured from ARKit's VIO POSE, not the accelerometer.  The IMU guard
+  // above cannot see slow drift by construction (its bias high-pass removes
+  // exactly the slow band real drift lives in), and on a 2026-08-26 device
+  // session its readings correlated with the stitcher's own image-derived
+  // translation at r = -0.28 — anti-correlated.  A position needs no
+  // integration, so this one sees arbitrarily slow movement.
+  const arDriftRef = useRef(_freshArDriftState());
+  const [arDriftExceeded, setArDriftExceeded] = useState(false);
+  // ARM ON THE FIRST KEYFRAME, NOT ON THE HOLD.
+  //
+  // Field report: in AR, a minute lateral movement BEFORE the first frame
+  // lands immediately shows the "follow the arrow" copy, and feels far more
+  // sensitive than the same movement mid-capture.
+  //
+  // It is more consequential, not more sensitive.  The detection threshold is
+  // identical; what differs is the OUTCOME, because `lateralStopOutcome` keys
+  // on keyframe count: 0-1 keyframes => 'wrong-direction' (the arrow copy),
+  // 2-4 => 'discarded', 5+ => 'finalized'.  Any trip before the first frame
+  // therefore lands in the harshest bucket.
+  //
+  // And that window is not short in AR.  Finalize restarts the AR session, so
+  // every capture opens with ARKit relocalising; the native gate sets
+  // `poseTrusted = (trackingState == .tracking)` per frame, and while it is
+  // false the translation-budget accept is gated off entirely
+  // (`keyframe_gate.cpp`: `translationBudgetCrossed` requires
+  // `s.poseTrusted`).  So the first AR keyframe waits for tracking to settle —
+  // exactly the interval the operator is holding still and being judged in.
+  //
+  // Stopping a capture for drift before it has captured ANYTHING is also
+  // pointless: there is no sweep to protect.  Arming on the first accepted
+  // keyframe seeds the origin where the pan actually begins, and has the side
+  // effect that a stop can no longer land in the 0-keyframe bucket from the
+  // warm-up alone.
+  const arDriftArmed = isAR
+    && statusPhase === 'recording'
+    && (incremental.state?.acceptedCount ?? 0) > 0;
+
+  useEffect(() => {
+    if (!arDriftArmed) return;
+    // New capture: drop the origin so it re-seeds from the first TRUSTED
+    // pose.  Finalize restarts the AR session, so a capture opens with the
+    // tracker relocalising; anchoring to one of those poses would inject a
+    // phantom metre-scale drift at t=0.
+    _resetArDriftState(arDriftRef.current);
+    setArDriftExceeded(false);
+  }, [arDriftArmed]);
+
+  const arLastEmitRef = useRef(0);
+  const handleArFrame = useCallback((meta: ARFrameMeta) => {
+    if (arDriftArmed && meta.pose) {
+      const s = _advanceArDrift(
+        arDriftRef.current,
+        meta.pose.rotation as unknown as readonly [number, number, number, number],
+        meta.pose.translation as unknown as readonly [number, number, number],
+        meta.trackingState,
+        panMode === 'horizontal' ? 'horizontal' : 'vertical',
+        arLateralBudgetCm / 100.0,
+        // Same dwell as both IMU triggers, so a momentary pose glitch or a
+        // brief lean does not end a capture.
+        AR_LATERAL_GRACE_MS,
+        Date.now(),
+        (arLateralRotDeg * Math.PI) / 180,
+      );
+      if (s.exceeded) setArDriftExceeded((p) => (p ? p : true));
+      const now = Date.now();
+      if (now - arLastEmitRef.current >= 250) {
+        arLastEmitRef.current = now;
+        if (panMotionDebug ?? __DEV__) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[panMotion.ar] drift=${(s.driftM * 100).toFixed(1)}cm `
+            + `peak=${(s.peakM * 100).toFixed(1)}cm `
+            + `budget=${arLateralBudgetCm}cm `
+            + `rot=${(s.rotRad * 180 / Math.PI).toFixed(1)}deg `
+            + `peakRot=${(s.peakRotRad * 180 / Math.PI).toFixed(1)}deg `
+            + `rotBudget=${arLateralRotDeg}deg by=${s.latchedBy} `
+            + `mode=${panMode} track=${meta.trackingState} `
+            + `untracked=${s.untrackedCount} degenerate=${s.degenerateCount} `
+            + `exceeded=${s.exceeded}`,
+          );
+        }
+      }
+    }
+    onArFrame?.(meta);
+  }, [arDriftArmed, panMode, arLateralBudgetCm, arLateralRotDeg,
+    onArFrame, panMotionDebug]);
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);
   // Latest `handleTap` (the shutter handler), kept in a ref so the imperative

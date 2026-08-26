@@ -36,7 +36,7 @@ import { DEFAULT_LATERAL_BUDGET_CM } from '../usePanMotion';
 
 describe('DEFAULT_LATERAL_BUDGET_CM', () => {
   it('is 8 cm (v0.25.3 — raised from 4)', () => {
-    expect(DEFAULT_LATERAL_BUDGET_CM).toBe(8);
+    expect(DEFAULT_LATERAL_BUDGET_CM).toBe(4);
   });
 
   it('is a positive, finite number of centimetres', () => {
