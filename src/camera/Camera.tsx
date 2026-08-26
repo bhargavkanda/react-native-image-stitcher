@@ -141,6 +141,7 @@ import {
 } from './cameraGuidanceCopy';
 import {
   lateralStopOutcome as classifyLateralStop,
+  MIN_STITCHABLE_KEYFRAMES,
   type LateralStopOutcome,
 } from './lateralStopPolicy';
 import {
@@ -2026,16 +2027,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // come from ARKit/ARCore, but device rotation is measured the same way), so
   // the guidance is now active for AR captures too — the axis mapping already
   // keys off deviceOrientation, not the capture source.
-  const panMotion = usePanMotion({
-    active: statusPhase === 'recording',
-    warnMaxRadPerSec: panTooFastThreshold,
-    lateralBudgetCm,
-    lateralTurnRateRadPerSec,
-    lateralTurnGraceMs,
-    lateralTurnAngleDeg,
-    lateralMotionModel,
-    panMotionDebug,
-  });
 
 
   // v0.13.1 — counter-rotation for control CONTENT (AR toggle, lens
@@ -2209,6 +2200,45 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     return () => sub.remove();
   }, []);
   const incremental = useIncrementalStitcher();
+
+  // The IMU guard's cm readout is a DOUBLE integration of the accelerometer,
+  // which cannot separate a tilt from a translation: re-projected gravity is
+  // arithmetically identical to real acceleration on the cross axis.  Measured
+  // 2026-08-26: a 6 deg wrist roll reads 5.18 cm while STATIONARY, and a real
+  // 100 cm slide reads 2.00 cm -- anti-correlated with the truth (r = -0.28).
+  //
+  // Two consequences, both fixed here:
+  //
+  //  1. In AR, ARKit's VIO pose measures the same quantity directly, and the
+  //     AR guard below enforces it.  Running the IMU guard as well lets the
+  //     WORSE sensor veto the better one -- and because it has no warm-up
+  //     gate it fired within the first second, at 0-1 keyframes, which is
+  //     exactly the `wrong-direction` ("follow the arrow") bucket.  So the
+  //     IMU distance guard is OFF in AR; pose-based guards do that job.
+  //
+  //  2. In non-AR there is no pose to fall back on, so the guard stays -- but
+  //     only once the capture HAS something to protect.  Stopping at 0-1
+  //     keyframes cannot save a sweep that does not exist yet, and it is the
+  //     one path that produces the misleading "follow the arrow" popup.
+  //     Arming at MIN_STITCHABLE_KEYFRAMES also re-seeds the accumulator (the
+  //     hook resets on a budget change), so the phantom drift banked during
+  //     warm-up is discarded rather than counted against the operator.
+  //
+  // `0` is the hook's existing "disabled" value for ALL THREE IMU/gyro
+  // triggers (distance, turn rate, turn angle), so no new prop is needed.
+  const imuGuardArmed =
+    (incremental.state?.acceptedCount ?? 0) >= MIN_STITCHABLE_KEYFRAMES;
+  const effectiveLateralBudgetCm = isAR || !imuGuardArmed ? 0 : lateralBudgetCm;
+  const panMotion = usePanMotion({
+    active: statusPhase === 'recording',
+    warnMaxRadPerSec: panTooFastThreshold,
+    lateralBudgetCm: effectiveLateralBudgetCm,
+    lateralTurnRateRadPerSec,
+    lateralTurnGraceMs,
+    lateralTurnAngleDeg,
+    lateralMotionModel,
+    panMotionDebug,
+  });
 
   // ── AR ABSOLUTE cross-pan drift ────────────────────────────────────
   // Measured from ARKit's VIO POSE, not the accelerometer.  The IMU guard

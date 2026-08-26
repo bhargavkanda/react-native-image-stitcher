@@ -83,7 +83,7 @@ export type ArPanMode = 'vertical' | 'horizontal';
  * it; if operators are stopped on sweeps that felt clean, this is the number
  * to raise.
  */
-export const DEFAULT_AR_LATERAL_BUDGET_CM = 4;
+export const DEFAULT_AR_LATERAL_BUDGET_CM = 12;
 
 /** Rotate `v` by unit quaternion `q`. */
 export function _rotateByQuat(q: Quat, v: Vec3): Vec3 {
