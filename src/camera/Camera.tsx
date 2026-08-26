@@ -2302,7 +2302,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // brief lean does not end a capture.
         AR_LATERAL_GRACE_MS,
         Date.now(),
-        (arLateralRotDeg * Math.PI) / 180,
+        // ROTATION budget, but only when the pan axis is KNOWN.  The guard
+        // measures azimuth for a vertical sweep and elevation for a
+        // horizontal one -- whichever axis the pan is NOT meant to move
+        // along.  Under `panMode: 'both'` there is no such axis, and the
+        // ternary above silently resolves 'both' to 'vertical', so a
+        // deliberate left-to-right sweep reads as pure off-course rotation
+        // and gets stopped for doing exactly what it was told to do.
+        // Measured 2026-08-26: a real horizontal sweep ramps azimuth
+        // smoothly to 28.5 deg while a vertical sweep holds it under 2 deg
+        // -- indistinguishable from the rotation alone without knowing
+        // which the operator intended.  So 'both' disables the rotation
+        // trigger (0 = off) and leaves the axis-agnostic DISTANCE guard.
+        panMode === 'both' ? 0 : (arLateralRotDeg * Math.PI) / 180,
       );
       if (s.exceeded) setArDriftExceeded((p) => (p ? p : true));
       const now = Date.now();
