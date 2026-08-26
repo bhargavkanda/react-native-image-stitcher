@@ -3423,7 +3423,23 @@ public final class IncrementalStitcher: NSObject {
     /// `ratio` == r/(r+0.10) with r the PIVOT RADIUS, so this is really a
     /// statement about anatomy: 0.93 => r >= 1.33 m, further back than any
     /// person can pivot (wrist ~15, elbow ~35, extended shoulder ~60-80 cm),
-    /// and far nearer than the metres genuine translation yields.
+    /// and well below the metres genuine translation yields.
+    ///
+    /// The usable corridor is NARROW and both walls are measured: the worst
+    /// real hand-held sweep observed sits at 0.889 (r = 80 cm), and the 30 cm
+    /// / 10 deg shelf scan this resolver targets sits at 0.946.  0.93 is very
+    /// nearly the midpoint.  0.95 was tried and rejected — it excludes that
+    /// 0.946 scan outright.
+    ///
+    /// WHY ERR HIGH.  The two failure directions are not symmetric.  Too LOW
+    /// affine-warps an ordinary rotation capture, and that is terminal — the
+    /// ladder short-circuits on the scans rung and never tries panorama.  Too
+    /// HIGH merely starts a genuine scan panorama-primary; it registers poorly
+    /// and the ladder's own scans@1.00 / scans@0.50 rungs recover it, costing
+    /// rungs rather than correctness.  So overshoot, within reason.
+    ///
+    /// The ceiling is ~0.97, above which the 30 cm / 10 deg shelf scan this
+    /// resolver exists to catch (0.967) would start being excluded.
     ///
     /// The old 0.55 meant r >= 12.2 cm — shorter than a wrist — so every
     /// hand-held pan was classified as a scan.
@@ -3546,13 +3562,13 @@ public final class IncrementalStitcher: NSObject {
         let mode = (!lowRotationGuard && ratio >= Self.kScansMinRatio)
             ? "scans" : "panorama"
         os_log(.fault, log: Self.diagLog,
-               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f rotGuard=%d tFloor=%d rEff=%.3fm → %{public}@",
-               tPose, imuTranslationMetres, rRadians, ratio,
-               lowRotationGuard ? 1 : 0, translationFloorMet ? 1 : 0,
-               // Effective pivot radius = tMeters / rRadians.  The ratio is
-               // exactly rEff/(rEff+0.10), so logging rEff makes the verdict
-               // readable at a glance: >0.122 m means the ratio alone would
-               // have said SCANS, whatever the pan angle was.
+               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f thresh=%.2f rotGuard=%d rEff=%.3fm → %{public}@",
+               tPose, imuTranslationMetres, rRadians, ratio, Self.kScansMinRatio,
+               lowRotationGuard ? 1 : 0,
+               // Effective PIVOT RADIUS = tMeters / rRadians.  ratio is exactly
+               // rEff/(rEff+0.10), so logging rEff makes the verdict physically
+               // readable: wrist ~0.15 m, elbow ~0.35 m, extended shoulder
+               // ~0.60-0.80 m, genuine bodily translation metres.
                rRadians > 1e-6 ? tMeters / rRadians : 0.0, mode)
         return (mode, rRadians, tMeters, ratio)
     }

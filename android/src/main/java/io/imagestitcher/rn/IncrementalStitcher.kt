@@ -3441,7 +3441,7 @@ class IncrementalStitcher(
                 "tImu=${"%.3f".format(imuTranslationMetres)}m " +
                 "r=${"%.3f".format(rRadians)}rad " +
                 "ratio=${"%.3f".format(ratio)} " +
-                "rotGuard=$lowRotationGuard tFloor=$translationFloorMet " +
+                "rotGuard=$lowRotationGuard thresh=$kScansMinRatio " +
                 // Effective pivot radius = tMeters/rRadians; the ratio is
                 // exactly rEff/(rEff+0.10), so this makes the verdict
                 // readable directly (>0.122 m => ratio alone says SCANS).
@@ -3568,8 +3568,19 @@ class IncrementalStitcher(
          *
          * `ratio` == r/(r+0.10) with r the PIVOT RADIUS, so this is really a
          * statement about anatomy: 0.93 => r >= 1.33 m, further back than any
-         * person can pivot (wrist ~15, elbow ~35, extended shoulder ~60-80 cm),
-         * and far nearer than the metres genuine translation yields.  A real
+         * person can pivot (wrist ~15, elbow ~35, shoulder ~60-80 cm).
+         *
+         * The corridor is NARROW and both walls are measured: the worst real
+         * hand-held sweep observed is 0.889 (r = 80 cm); the 30 cm / 10 deg
+         * shelf scan this resolver targets is 0.946.  0.93 is ~the midpoint.
+         * 0.95 was tried and rejected — it excludes that 0.946 scan.
+         *
+         * WHY ERR HIGH: the failure directions are not symmetric.  Too LOW
+         * affine-warps an ordinary rotation capture and is TERMINAL (the
+         * ladder short-circuits on the scans rung, never trying panorama);
+         * too HIGH merely starts a genuine scan panorama-primary and the
+         * ladder's own scans rungs recover it.  Ceiling is ~0.97, above which
+         * the 30 cm / 10 deg scan this resolver targets (0.967) is excluded.  A real
          * arm sweep measured on 2026-08-26 reached r = 80 cm (ratio 0.889),
          * which is why 0.90 would be too tight; the 30 cm / 10 deg shelf scan
          * this resolver targets sits at 0.967.

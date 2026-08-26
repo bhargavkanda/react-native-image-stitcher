@@ -1160,7 +1160,7 @@ export interface CameraProps {
 
   /**
    * ABSOLUTE cross-pan drift budget in CENTIMETRES, measured from the AR
-   * camera POSE.  AR captures only.  Default 15 cm; `0` disables the stop
+   * camera POSE.  AR captures only.  Default 8 cm; `0` disables the stop
    * while still measuring and logging the distance.
    *
    * A genuine displacement, unlike `lateralBudgetCm`, which gates a
