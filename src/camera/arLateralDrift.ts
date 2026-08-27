@@ -241,10 +241,10 @@ export function _longitudinalMetres(
  * cannot tell those apart, so it either stops the good long sweep or permits
  * the bad short one.
  *
- * 0.20 allows 12 cm across a 60 cm sweep and 4 cm across a 20 cm one.  Tunable
+ * 0.40 allows 24 cm across a 60 cm sweep and 8 cm across a 20 cm one.  Tunable
  * per host via `arLateralRatio`; `<= 0` restores pure absolute behaviour.
  */
-export const DEFAULT_AR_LATERAL_RATIO = 0.20;
+export const DEFAULT_AR_LATERAL_RATIO = 0.40;
 
 /**
  * Ceiling on the ratio allowance, CENTIMETRES.
