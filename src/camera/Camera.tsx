@@ -2278,15 +2278,29 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     && statusPhase === 'recording'
     && (incremental.state?.acceptedCount ?? 0) > 0;
 
+  // Reset on CAPTURE START, not on arming.  `arDriftExceeded` is a latch that
+  // stops the capture, and it used to be cleared only here, gated on
+  // `arDriftArmed` -- which requires `acceptedCount > 0`.  That is a deadlock:
+  // once the latch is set, the NEXT capture is stopped before it can accept a
+  // keyframe, so `arDriftArmed` never goes true, so the latch is never
+  // cleared, so the next capture is stopped... Device trace 2026-08-26:
+  //
+  //   01:28:15  rot 30.8deg > 25deg budget      -> latched
+  //   01:28:18  ONE gyro sample, no keyframes   -> dead on arrival
+  //   01:28:21  ONE gyro sample, no keyframes   -> dead on arrival
+  //   (only a JS reload cleared it)
+  //
+  // Keying the reset to `statusPhase === 'recording'` means every new capture
+  // starts from a clean latch whether or not the previous one produced
+  // frames.  The ORIGIN still re-seeds lazily from the first TRUSTED pose
+  // inside `_advanceArDrift` (finalize restarts the AR session, so a capture
+  // opens with the tracker relocalising and those poses must not be anchored
+  // to) -- that part was never the problem, only the latch was.
   useEffect(() => {
-    if (!arDriftArmed) return;
-    // New capture: drop the origin so it re-seeds from the first TRUSTED
-    // pose.  Finalize restarts the AR session, so a capture opens with the
-    // tracker relocalising; anchoring to one of those poses would inject a
-    // phantom metre-scale drift at t=0.
+    if (!isAR || statusPhase !== 'recording') return;
     _resetArDriftState(arDriftRef.current);
     setArDriftExceeded(false);
-  }, [arDriftArmed]);
+  }, [isAR, statusPhase]);
 
   const arLastEmitRef = useRef(0);
   const handleArFrame = useCallback((meta: ARFrameMeta) => {
