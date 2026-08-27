@@ -83,7 +83,7 @@ export type ArPanMode = 'vertical' | 'horizontal';
  * it; if operators are stopped on sweeps that felt clean, this is the number
  * to raise.
  */
-export const DEFAULT_AR_LATERAL_BUDGET_CM = 12;
+export const DEFAULT_AR_LATERAL_BUDGET_CM = 6;
 
 /** Rotate `v` by unit quaternion `q`. */
 export function _rotateByQuat(q: Quat, v: Vec3): Vec3 {
@@ -139,7 +139,7 @@ export function _lateralAxis(q: Quat, mode: ArPanMode): Vec3 | null {
  * 90 deg a genuine wrong-way pivot reaches.  Collect `arRotDeg` peaks from
  * real captures before trusting it.
  */
-export const DEFAULT_AR_LATERAL_ROT_DEG = 25;
+export const DEFAULT_AR_LATERAL_ROT_DEG = 12;
 
 /** Camera forward (view) direction in world space. */
 export function _forwardOf(q: Quat): Vec3 {

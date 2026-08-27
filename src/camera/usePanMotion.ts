@@ -334,7 +334,7 @@ export const DEFAULT_LATERAL_TURN_RAD_PER_SEC = 0.15;
  * course returns toward zero rather than banking the excursion — correcting
  * is not an error.
  */
-export const DEFAULT_LATERAL_TURN_ANGLE_DEG = 25;
+export const DEFAULT_LATERAL_TURN_ANGLE_DEG = 12;
 
 /**
  * EMA smoothing factor for the cross-pan gyro rate (per ~33 ms gyro sample).
