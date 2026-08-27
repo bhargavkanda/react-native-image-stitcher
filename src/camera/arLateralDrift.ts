@@ -63,27 +63,33 @@ export type Quat = readonly [number, number, number, number];
 export type ArPanMode = 'vertical' | 'horizontal';
 
 /**
- * Default absolute cross-pan drift budget, CENTIMETRES.
+ * FLOOR of the cross-pan drift allowance, CENTIMETRES.
  *
- * 4 cm matches `DEFAULT_LATERAL_BUDGET_CM` so the two guards state the same
- * intent — but they are NOT the same measurement.  That one gates a
- * high-passed rate proxy whose readings bear no fixed relation to distance
- * (it peaked at 1.6 cm across an entire device session, so its number is
- * barely load-bearing); this one is REAL centimetres and will be reached.
+ * Since the allowance became proportional (see `DEFAULT_AR_LATERAL_RATIO`) this
+ * is no longer a ceiling: the effective budget is
+ * `clamp(ratio * alongPanTravel, THIS, DEFAULT_AR_LATERAL_MAX_CM)`.  It governs
+ * two cases the ratio cannot — the opening of every capture, where along-pan
+ * travel is ~0 and a ratio would evaluate to 0, and genuinely short sweeps.
  *
- * BE AWARE 4 cm is tight against measured behaviour.  Ordinary AR sweeps in
- * the 2026-08-26 session peaked at 4.8 cm of true cross-pan displacement —
- * i.e. ABOVE this budget — so clean captures can be expected to trip it until
- * the number is tuned from field traces.  It was set deliberately LOW to start
- * strict and relax on evidence; `peak=` in the `[panMotion.ar]` line is the
- * number to relax it from.  On 2026-08-26 a
+ * This is REAL centimetres from ARKit's pose, unlike `DEFAULT_LATERAL_BUDGET_CM`
+ * in the non-AR path, which gates a high-passed rate proxy whose readings bear
+ * no fixed relation to distance (it peaked at 1.6 cm across an entire device
+ * session).  The two numbers state a similar intent; they do not measure the
+ * same thing, and they should not be assumed to track each other.
  *
- * A STARTING POINT from one operator, one device and one scene, not a tuned
- * default.  Collect `[panMotion.ar]` peaks from real captures before trusting
- * it; if operators are stopped on sweeps that felt clean, this is the number
- * to raise.
+ * 10 cm comes from device traces on 2026-08-26.  Cross-pan excursion measured
+ * ~8-11 cm largely INDEPENDENT of sweep length, so a short sweep would be
+ * judged before the ratio could apply: at 14.5 cm of travel the ratio offered
+ * 5.8 cm and a 9.4 cm excursion was stopped, while the same operator's 52 cm
+ * sweep carried 11.3 cm of drift to conf=1.000 untouched.  A floor below the
+ * hand's natural excursion therefore stops captures for being SHORT rather
+ * than for being crooked, and because the stop truncates the sweep, along-pan
+ * travel never accumulates enough for the ratio to rescue it.
+ *
+ * Still one operator, one device, one scene.  `drift=` / `long=` / `allow=` in
+ * the `[panMotion.ar]` line are the numbers to retune from.
  */
-export const DEFAULT_AR_LATERAL_BUDGET_CM = 6;
+export const DEFAULT_AR_LATERAL_BUDGET_CM = 10;
 
 /** Rotate `v` by unit quaternion `q`. */
 export function _rotateByQuat(q: Quat, v: Vec3): Vec3 {
