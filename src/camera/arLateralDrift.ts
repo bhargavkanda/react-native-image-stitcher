@@ -256,10 +256,15 @@ export const DEFAULT_AR_LATERAL_RATIO = 0.40;
  * Ceiling on the ratio allowance, CENTIMETRES.
  *
  * The allowance grows with the sweep, so without a cap a long enough pan would
- * permit unbounded sideways travel.  25 cm is roughly the point where the
- * result stops being a pan of one surface.
+ * permit unbounded sideways travel.
+ *
+ * 40 cm, not 25: at ratio 0.40 a 25 cm cap binds from 62.5 cm of along-pan
+ * travel, which is SHORTER than a normal shelf sweep -- so the cap, not the
+ * ratio, governed every real capture.  Measured 2026-08-26: a 70.2 cm sweep
+ * carrying 27.3 cm of drift was stopped by the cap even though the ratio
+ * itself allowed 28.1 cm.  At 40 cm the ratio stays in charge out to a metre.
  */
-export const DEFAULT_AR_LATERAL_MAX_CM = 25;
+export const DEFAULT_AR_LATERAL_MAX_CM = 40;
 
 /**
  * Cross-pan allowance for the CURRENT along-pan distance, METRES.

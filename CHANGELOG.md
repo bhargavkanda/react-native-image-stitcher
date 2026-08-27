@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
-## [0.26.0] - 2026-08-25 (lateral-drift guard: tilt is no longer mistaken for translation)
+## [0.26.0] - 2026-08-26 (lateral-drift guard: a pose-derived signal, and a budget that scales)
 
 **The root cause behind the 0.25.3 tuning change.** 0.25.3 raised
 `lateralBudgetCm` 4 → 8 to suppress a field report of the lateral-drift
@@ -275,6 +275,86 @@ image-derived translation estimate at finalize.
 If you must tune today, use `latch=gyro|accel` to find out which trigger
 is actually firing for your users first — the answer is very likely
 `gyro`, which `lateralBudgetCm` does not affect.
+
+### The camera-derived signal, delivered
+
+The section above ends by saying the real fix is a camera-derived signal
+"tracked separately". It is now here. In **AR** captures the guard no longer
+uses the accelerometer at all: cross-pan displacement and cross-pan rotation
+are both read from ARKit's VIO **pose**, which measures metres and radians
+rather than a high-passed rate proxy.
+
+Consequently the IMU distance guard is **disabled entirely in AR**. Running
+both let the worse sensor veto the better one, and because the IMU channel had
+no warm-up gate it latched within the first second — at 0-1 keyframes, which
+is exactly the `wrong-direction` ("follow the arrow") bucket. That is what
+made the popup appear before a capture had really begun.
+
+### The budget scales with the sweep
+
+A fixed centimetre cap asks the wrong question. Sideways travel only means
+something *relative* to how far the sweep has gone: 6 cm across a 60 cm
+top-to-bottom pan is 10 % — still overwhelmingly a pan, and about as straight
+as a hand gets over half a metre. The same 6 cm across a 10 cm pan is 60 %,
+which is a slide. The effective budget is now
+
+    clamp(arLateralRatio * alongPanTravel, arLateralBudgetCm, arLateralMaxCm)
+
+so `arLateralBudgetCm` is a **floor**, not a ceiling. The floor also covers the
+opening of every capture, where along-pan travel is ~0 and a pure ratio would
+evaluate to 0 and stop everything.
+
+Defaults: ratio **0.40**, floor **10 cm**, cap **40 cm**. Device traces showed
+cross-pan excursion of ~8-11 cm largely *independent* of sweep length, so a
+lower floor stopped captures for being SHORT rather than crooked — and since a
+stop truncates the sweep, along-pan travel never accumulated enough for the
+ratio to rescue it. `arLateralRatio: 0` restores pure absolute behaviour.
+
+### Slow pivots
+
+Both modes gained an **absolute cross-pan angle** trigger. The pre-existing
+`lateralTurnRateRadPerSec` is a *rate* gate at 0.15 rad/s, so it cannot see a
+slow pivot at all: 6°/s reaches 90° of yaw in 15 s without ever crossing it. A
+rate gate measures how fast you are turning, never how far you have turned.
+AR reads the angle from the pose; non-AR integrates the gyro once (single
+integration, so a 0.05°/s bias is 0.5° after 10 s — unlike the double
+integration that made the distance channel unusable).
+
+### Two latch defects
+
+- **The AR latch could never clear itself.** Its only reset required a capture
+  to accept a keyframe — but the latch stopped the next capture *before* it
+  could accept one. Once set, every subsequent capture died on arrival and only
+  a reload recovered it. Reported as "after the error happens once, it happens
+  for every capture".
+- **And then cleared one render too late.** Moving the reset into an effect
+  keyed on the recording phase fixed the deadlock but left a stale read: the
+  stop-check runs during the render that flips the phase, effects run after it.
+  Exactly one capture per stop still died. Now cleared synchronously at hold
+  start, batched with the phase change.
+
+### Also
+
+- `panMode: 'both'` silently resolved to `'vertical'` in the AR guard, so a
+  deliberate left-to-right sweep read as pure off-course rotation and was
+  stopped for doing what it was told. `'both'` now disables the rotation
+  trigger — with no known pan axis, rotation cannot be separated from drift —
+  and leaves the axis-agnostic distance guard to work.
+- **`CameraHandle.setCaptureSource(source)`** — hosts that render their own
+  chrome (`hideBuiltInShutter`) had no way to drive the AR toggle.
+- Ordinary hand-held pans were routed to SCANS: the resolver's ratio reduces
+  to `r/(r+0.10)`, so the pan angle cancels and every hand-held pan looks like
+  translation. The threshold was shorter than a human wrist.
+
+### New props
+
+`arLateralRatio`, `arLateralMaxCm`, `arLateralBudgetCm`, `arLateralRotDeg`,
+`lateralTurnAngleDeg`, `lateralTurnGraceMs`, `lateralMotionModel`,
+`panMotionDebug`. All default to the behaviour described above; each guard
+channel is disabled independently by setting its own prop to `0`.
+
+`[panMotion.ar]` telemetry now carries `drift=`, `long=`, `allow=`, `rot=` and
+`by=`, so the thresholds can be tuned from captures rather than guessed.
 
 ## [0.25.3] - 2026-08-19 (lateral-drift budget raised to 8 cm)
 
