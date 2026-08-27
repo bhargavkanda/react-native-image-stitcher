@@ -2942,6 +2942,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // post-await reset. So no synchronous clear is needed here.
       // Item 4 — fresh capture: clear the latched too-fast flag.
       fastPanRef.current = false;
+      // Item 6 — and the AR drift latch, SYNCHRONOUSLY, batched with the
+      // phase change below.  Clearing it from an effect keyed on
+      // `statusPhase === 'recording'` is one render too late: the lateral-stop
+      // effect reads `arDriftExceeded` on the very render that turns
+      // `statusPhase` to 'recording', sees the PREVIOUS capture's latch, and
+      // ends this one before the reset effect has run.  Device trace
+      // 2026-08-26 -- after each stop, exactly one capture died on arrival
+      // (a single sensor sample, no keyframes, no AR frames) and the one
+      // after it succeeded, which is the signature of a one-render stale read
+      // rather than a stuck latch.  Batching it here means the render that
+      // first sees 'recording' also sees a cleared latch.
+      _resetArDriftState(arDriftRef.current);
+      setArDriftExceeded(false);
       setStatusPhase('recording');
       setRecordingStartedAt(Date.now());
       // Item 5 — schedule the hard-ceiling auto-finalize.  Fires
