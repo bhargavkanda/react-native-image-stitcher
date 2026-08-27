@@ -131,6 +131,7 @@ const AR_LATERAL_GRACE_MS = 500;
 import {
   _freshArDriftState, _advanceArDrift, _resetArDriftState,
   DEFAULT_AR_LATERAL_BUDGET_CM, DEFAULT_AR_LATERAL_ROT_DEG,
+  DEFAULT_AR_LATERAL_RATIO, DEFAULT_AR_LATERAL_MAX_CM,
 } from './arLateralDrift';
 import type { Quad } from './cropGeometry';
 import {
@@ -1208,6 +1209,22 @@ export interface CameraProps {
    * accelerometer channel.
    */
   arLateralRotDeg?: number;
+  /**
+   * Cross-pan allowance as a RATIO of along-pan travel (AR only).
+   *
+   * A fixed centimetre budget cannot distinguish 6 cm of drift across a 60 cm
+   * sweep (10 % — still overwhelmingly a pan, and about as straight as a hand
+   * gets over half a metre) from the same 6 cm across a 10 cm one (60 % — not
+   * a pan at all).  The effective budget is therefore
+   * `clamp(ratio * alongPanDistance, arLateralBudgetCm, arLateralMaxCm)`.
+   *
+   * `arLateralBudgetCm` becomes the FLOOR: short sweeps, and the opening of
+   * every capture where along-pan travel is still ~0, keep exactly the old
+   * absolute behaviour.  `<= 0` disables the proportional term entirely.
+   */
+  arLateralRatio?: number;
+  /** Ceiling on the ratio allowance, CENTIMETRES.  `<= 0` = uncapped. */
+  arLateralMaxCm?: number;
 
   /**
    * Which lateral-drift physics to run.  Default `'fused'`.
@@ -1831,6 +1848,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     lateralTurnAngleDeg,
     arLateralBudgetCm = DEFAULT_AR_LATERAL_BUDGET_CM,
     arLateralRotDeg = DEFAULT_AR_LATERAL_ROT_DEG,
+    arLateralRatio = DEFAULT_AR_LATERAL_RATIO,
+    arLateralMaxCm = DEFAULT_AR_LATERAL_MAX_CM,
     lateralMotionModel = DEFAULT_LATERAL_MOTION_MODEL,
     panMotionDebug,
     // No destructuring default on purpose: `undefined` → default is owned by
@@ -2329,6 +2348,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // which the operator intended.  So 'both' disables the rotation
         // trigger (0 = off) and leaves the axis-agnostic DISTANCE guard.
         panMode === 'both' ? 0 : (arLateralRotDeg * Math.PI) / 180,
+        arLateralRatio,
+        arLateralMaxCm / 100.0,
       );
       if (s.exceeded) setArDriftExceeded((p) => (p ? p : true));
       const now = Date.now();
@@ -2339,7 +2360,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           console.log(
             `[panMotion.ar] drift=${(s.driftM * 100).toFixed(1)}cm `
             + `peak=${(s.peakM * 100).toFixed(1)}cm `
-            + `budget=${arLateralBudgetCm}cm `
+            + `long=${(s.longM * 100).toFixed(1)}cm `
+            + `allow=${(s.allowanceM * 100).toFixed(1)}cm `
+            + `floor=${arLateralBudgetCm}cm ratio=${arLateralRatio} `
             + `rot=${(s.rotRad * 180 / Math.PI).toFixed(1)}deg `
             + `peakRot=${(s.peakRotRad * 180 / Math.PI).toFixed(1)}deg `
             + `rotBudget=${arLateralRotDeg}deg by=${s.latchedBy} `
@@ -2352,6 +2375,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     }
     onArFrame?.(meta);
   }, [arDriftArmed, panMode, arLateralBudgetCm, arLateralRotDeg,
+    arLateralRatio, arLateralMaxCm,
     onArFrame, panMotionDebug]);
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);

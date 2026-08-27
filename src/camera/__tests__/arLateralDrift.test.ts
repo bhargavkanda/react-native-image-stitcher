@@ -25,6 +25,7 @@ import {
   _rotateByQuat, _lateralAxis, _lateralDriftMetres,
   _lateralRotationRad, _forwardOf,
   _freshArDriftState, _advanceArDrift,
+  _longitudinalMetres, _lateralAllowanceM,
   type Quat, type Vec3,
 } from '../arLateralDrift';
 
@@ -269,5 +270,75 @@ describe('absolute cross-pan rotation', () => {
     }
     expect(s.peakRotRad * 180 / Math.PI).toBeGreaterThan(80);
     expect(s.exceeded).toBe(false);
+  });
+});
+
+describe('lateral:longitudinal ratio allowance', () => {
+  const FLOOR = 0.06;   // 6 cm
+  const RATIO = 0.20;
+  const CAP = 0.25;     // 25 cm
+
+  it('is the FLOOR while the sweep is short — including at t=0', () => {
+    // Opening of a capture: no along-pan travel yet, so a ratio would be
+    // meaningless (0 * anything = 0 would stop every capture instantly).
+    expect(_lateralAllowanceM(0, FLOOR, RATIO, CAP)).toBeCloseTo(FLOOR, 6);
+    // 10 cm travelled: 0.2 * 0.10 = 2 cm, still under the floor.
+    expect(_lateralAllowanceM(0.10, FLOOR, RATIO, CAP)).toBeCloseTo(FLOOR, 6);
+  });
+
+  it('grows with along-pan travel once the ratio beats the floor', () => {
+    // The operator's own example: 60 cm top-to-bottom.
+    expect(_lateralAllowanceM(0.60, FLOOR, RATIO, CAP)).toBeCloseTo(0.12, 6);
+    expect(_lateralAllowanceM(0.40, FLOOR, RATIO, CAP)).toBeCloseTo(0.08, 6);
+  });
+
+  it('is capped so a long sweep cannot license unbounded sideways travel', () => {
+    expect(_lateralAllowanceM(5.0, FLOOR, RATIO, CAP)).toBeCloseTo(CAP, 6);
+  });
+
+  it('uses |longM| — a downward sweep is not negative progress', () => {
+    expect(_lateralAllowanceM(-0.60, FLOOR, RATIO, CAP))
+      .toBeCloseTo(_lateralAllowanceM(0.60, FLOOR, RATIO, CAP), 6);
+  });
+
+  it('ratio <= 0 restores the plain absolute budget', () => {
+    expect(_lateralAllowanceM(5.0, FLOOR, 0, CAP)).toBeCloseTo(FLOOR, 6);
+    expect(_lateralAllowanceM(0.60, FLOOR, -1, CAP)).toBeCloseTo(FLOOR, 6);
+  });
+
+  it('cap <= 0 means uncapped', () => {
+    expect(_lateralAllowanceM(5.0, FLOOR, RATIO, 0)).toBeCloseTo(1.0, 6);
+  });
+});
+
+describe('_advanceArDrift with the ratio', () => {
+  const IDENT: Quat = [0, 0, 0, 1];
+  const step = (s: ReturnType<typeof _freshArDriftState>, t: Vec3, ms: number) =>
+    _advanceArDrift(s, IDENT, t, 'normal', 'vertical',
+      0.06, 0, ms, 0, 0.20, 0.25);
+
+  it('permits 6 cm of drift across a 60 cm vertical sweep', () => {
+    // Identity pose: lateral axis is world X, longitudinal is world Y.
+    const s = _freshArDriftState();
+    step(s, [0, 0, 0], 0);              // seeds the origin
+    for (let i = 1; i <= 60; i++) {
+      step(s, [0.001 * i, -0.01 * i, 0], i * 50);
+    }
+    expect(Math.abs(s.longM)).toBeCloseTo(0.60, 2);
+    expect(Math.abs(s.driftM)).toBeCloseTo(0.06, 2);
+    // 6 cm over 60 cm is 10 % — the motion is still a pan.
+    expect(s.exceeded).toBe(false);
+  });
+
+  it('stops the SAME 6 cm when the sweep has barely moved', () => {
+    const s = _freshArDriftState();
+    step(s, [0, 0, 0], 0);
+    // 8 cm sideways against 5 cm of along-pan travel: a slide, not a pan.
+    for (let i = 1; i <= 20; i++) {
+      step(s, [0.004 * i, -0.0025 * i, 0], i * 50);
+    }
+    expect(Math.abs(s.driftM)).toBeGreaterThan(0.06);
+    expect(s.exceeded).toBe(true);
+    expect(s.latchedBy).toBe('drift');
   });
 });

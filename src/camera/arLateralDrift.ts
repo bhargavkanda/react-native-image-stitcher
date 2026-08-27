@@ -203,6 +203,79 @@ export function _lateralDriftMetres(
   return dx * axis[0] + dy * axis[1] + dz * axis[2];
 }
 
+/**
+ * The ALONG-pan axis — the direction the sweep is supposed to travel.
+ *
+ * It is exactly `_lateralAxis` with the mode flipped: a vertical sweep drifts
+ * horizontally and travels up/down, a horizontal sweep drifts up/down and
+ * travels horizontally.  Sharing the helper keeps the two axes orthogonal by
+ * construction instead of by two separate derivations that can disagree.
+ */
+export function _longitudinalAxis(q: Quat, mode: ArPanMode): Vec3 | null {
+  return _lateralAxis(q, mode === 'vertical' ? 'horizontal' : 'vertical');
+}
+
+/** Signed displacement along the pan direction, METRES. */
+export function _longitudinalMetres(
+  startQ: Quat,
+  startT: Vec3,
+  curT: Vec3,
+  mode: ArPanMode,
+): number | null {
+  const axis = _longitudinalAxis(startQ, mode);
+  if (axis === null) return null;
+  const dx = curT[0] - startT[0];
+  const dy = curT[1] - startT[1];
+  const dz = curT[2] - startT[2];
+  return dx * axis[0] + dy * axis[1] + dz * axis[2];
+}
+
+/**
+ * Default lateral:longitudinal RATIO.
+ *
+ * A fixed centimetre budget asks the wrong question.  Sideways travel only
+ * matters RELATIVE to how far the sweep has gone: 6 cm of drift across a 60 cm
+ * top-to-bottom pan is 10 % — the motion is still overwhelmingly vertical, and
+ * a hand cannot do better than that over half a metre.  The same 6 cm across a
+ * 10 cm pan is 60 %, which is not a pan at all, it is a slide.  An absolute cap
+ * cannot tell those apart, so it either stops the good long sweep or permits
+ * the bad short one.
+ *
+ * 0.20 allows 12 cm across a 60 cm sweep and 4 cm across a 20 cm one.  Tunable
+ * per host via `arLateralRatio`; `<= 0` restores pure absolute behaviour.
+ */
+export const DEFAULT_AR_LATERAL_RATIO = 0.20;
+
+/**
+ * Ceiling on the ratio allowance, CENTIMETRES.
+ *
+ * The allowance grows with the sweep, so without a cap a long enough pan would
+ * permit unbounded sideways travel.  25 cm is roughly the point where the
+ * result stops being a pan of one surface.
+ */
+export const DEFAULT_AR_LATERAL_MAX_CM = 25;
+
+/**
+ * Cross-pan allowance for the CURRENT along-pan distance, METRES.
+ *
+ * `floorM` is the short-sweep budget (nothing is stopped below it, which also
+ * covers the capture opening where `longM` is ~0 and a ratio would be
+ * meaningless).  `capM` bounds the other end.  `ratio <= 0` disables the
+ * proportional term entirely and the floor becomes a plain absolute budget —
+ * the pre-ratio behaviour, bit for bit.
+ */
+export function _lateralAllowanceM(
+  longM: number,
+  floorM: number,
+  ratio: number,
+  capM: number,
+): number {
+  if (ratio <= 0) return floorM;
+  const scaled = ratio * Math.abs(longM);
+  const withFloor = Math.max(floorM, scaled);
+  return capM > 0 ? Math.min(withFloor, capM) : withFloor;
+}
+
 /** Running state for the AR drift guard.  Mutated in place, like `LateralState`. */
 export interface ArDriftState {
   /** Pose the drift is measured FROM, or null before a trusted frame arrives. */
@@ -212,6 +285,12 @@ export interface ArDriftState {
   driftM: number;
   /** Largest |driftM| seen this capture — the number worth logging. */
   peakM: number;
+  /** Signed ALONG-pan displacement, metres — the ratio's denominator. */
+  longM: number;
+  /** Largest |longM| this capture. */
+  peakLongM: number;
+  /** The allowance in force at the last sample, metres (for telemetry). */
+  allowanceM: number;
   /** Latched once the budget was exceeded for the grace window. */
   exceeded: boolean;
   /** Start of the current continuous over-budget run, or null. */
@@ -238,6 +317,9 @@ export function _freshArDriftState(): ArDriftState {
     startT: null,
     driftM: 0,
     peakM: 0,
+    longM: 0,
+    peakLongM: 0,
+    allowanceM: 0,
     exceeded: false,
     overBudgetSinceMs: null,
     untrackedCount: 0,
@@ -254,6 +336,9 @@ export function _resetArDriftState(s: ArDriftState): ArDriftState {
   s.startT = null;
   s.driftM = 0;
   s.peakM = 0;
+  s.longM = 0;
+  s.peakLongM = 0;
+  s.allowanceM = 0;
   s.exceeded = false;
   s.overBudgetSinceMs = null;
   s.untrackedCount = 0;
@@ -289,6 +374,10 @@ export function _advanceArDrift(
   /** Absolute cross-pan ROTATION budget, RADIANS.  `<= 0` disables that
    *  channel while still measuring it. */
   rotBudgetRad = 0,
+  /** lateral:longitudinal ratio.  `<= 0` = pure absolute (`budgetM` alone). */
+  ratio = 0,
+  /** Ceiling on the ratio allowance, METRES.  `<= 0` = uncapped. */
+  capM = 0,
 ): ArDriftState {
   if (trackingState !== 'normal') {
     s.untrackedCount += 1;
@@ -307,6 +396,14 @@ export function _advanceArDrift(
   s.driftM = d;
   s.peakM = Math.max(s.peakM, Math.abs(d));
 
+  // ALONG-pan distance: the ratio's denominator.  A degenerate longitudinal
+  // axis is treated as "no progress yet" (0) rather than skipping the frame —
+  // that only makes the allowance smaller (the floor), never larger, so a
+  // measurement failure can never widen the guard.
+  const lng = _longitudinalMetres(s.startQ, s.startT, t, mode);
+  s.longM = lng === null ? 0 : lng;
+  s.peakLongM = Math.max(s.peakLongM, Math.abs(s.longM));
+
   // ── ABSOLUTE cross-pan ROTATION.  The gyro trigger is a RATE gate, so a
   // slow pivot is invisible to it however far it turns — 6 deg/s reaches 90
   // deg of yaw in 15 s without ever crossing 0.15 rad/s.  Pose-derived angle
@@ -321,8 +418,13 @@ export function _advanceArDrift(
     s.degenerateCount += 1;
   }
 
+  // The budget is no longer a constant: it grows with how far the sweep has
+  // actually travelled, floored at `budgetM` for the short/opening case and
+  // capped at `capM`.  See `_lateralAllowanceM`.
+  const allowance = _lateralAllowanceM(s.longM, budgetM, ratio, capM);
+  s.allowanceM = allowance;
   const latch = _evalGraceLatch(
-    budgetM > 0 && Math.abs(d) > budgetM,
+    budgetM > 0 && Math.abs(d) > allowance,
     nowMs,
     s.overBudgetSinceMs,
     s.exceeded,
