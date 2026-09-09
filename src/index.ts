@@ -13,12 +13,12 @@
  *
  * Layer 1 (`<Camera>`) is the recommended starting point.  Reach for
  * layer 2 when the high-level component doesn't give you enough
- * control — e.g., the private `retailens-camera-sdk` adds
+ * control — e.g., the private `host-camera-sdk` adds
  * measurement + packet detection on top of these building blocks.
  *
  * Public/private split: this lib is the open-source foundation.  The
- * `retailens-camera-sdk` package depends on this lib (peer dep) and
- * adds RetaiLens-specific features on top.
+ * `host-camera-sdk` package depends on this lib (peer dep) and
+ * adds host-specific features on top.
  */
 
 // ─────────────────────────────────────────────────────────────────────

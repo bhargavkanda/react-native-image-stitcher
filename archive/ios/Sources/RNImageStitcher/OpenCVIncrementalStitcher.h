@@ -37,29 +37,29 @@ extern NSString *const RNImageStitcherIncrementalErrorDomain;
 
 /// Per-frame outcome — drives the JS-side UX (silent accept, subtle
 /// flag, explicit hint).
-typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
+typedef NS_ENUM(NSInteger, RNISFrameOutcome) {
     /// Frame accepted with high confidence.  Silent UX update.
-    RLISFrameOutcomeAcceptedHigh = 0,
+    RNISFrameOutcomeAcceptedHigh = 0,
     /// Frame accepted but match quality was middling.  Show subtle
     /// confidence flag (yellow ring) — not an error, just informational.
-    RLISFrameOutcomeAcceptedMedium = 1,
+    RNISFrameOutcomeAcceptedMedium = 1,
     /// Frame skipped because pose hasn't moved enough since last accept.
     /// Normal — operator hasn't panned past the overlap window yet.
-    RLISFrameOutcomeSkippedTooClose = 2,
+    RNISFrameOutcomeSkippedTooClose = 2,
     /// Frame skipped because pose moved too far since last accept —
     /// operator panned past the overlap window before another accept.
     /// JS shows a "slow down" hint.
-    RLISFrameOutcomeRejectedTooFar = 3,
+    RNISFrameOutcomeRejectedTooFar = 3,
     /// Feature matching produced too few correspondences.  Scene is
     /// likely uniform/textureless or the frame is motion-blurred.
     /// JS shows a "scene too uniform" hint.
-    RLISFrameOutcomeRejectedSceneUniform = 4,
+    RNISFrameOutcomeRejectedSceneUniform = 4,
     /// RANSAC homography failed or produced a degenerate transform.
     /// JS shows an "alignment lost — slow down" hint.
-    RLISFrameOutcomeRejectedAlignmentLost = 5,
+    RNISFrameOutcomeRejectedAlignmentLost = 5,
     /// Tracking state from the AR session was poor at the time of
     /// this frame — no point trying to incorporate it.
-    RLISFrameOutcomeSkippedTrackingPoor = 6,
+    RNISFrameOutcomeSkippedTrackingPoor = 6,
     /// V12.11 Step D — operator has panned BACKWARDS past the
     /// running max along the pan axis by more than
     /// `kReverseStopPx`.  Engine has SKIPPED the paste; host should
@@ -67,13 +67,13 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
     /// stood at the running-max position.  Emitted by the
     /// rectilinear engine only — cylindrical engines tolerate
     /// reverse motion via their warp pipeline.
-    RLISFrameOutcomeRejectedReverseDirection = 7,
+    RNISFrameOutcomeRejectedReverseDirection = 7,
 };
 
 /// Telemetry returned alongside each addFrame call — host can log
 /// these to refine threshold tuning during field testing.
-@interface RLISFrameTelemetry : NSObject
-@property (nonatomic, readonly) RLISFrameOutcome outcome;
+@interface RNISFrameTelemetry : NSObject
+@property (nonatomic, readonly) RNISFrameOutcome outcome;
 /// Estimated FoV-overlap with the previously accepted frame, in
 /// percent.  Computed from pose-delta + intrinsics, NOT from
 /// matched features (which would require running the matcher
@@ -124,14 +124,14 @@ typedef NS_ENUM(NSInteger, RLISFrameOutcome) {
 
 
 /// V15 — paint-mode toggle for the slit-scan engine.
-/// `RLISPaintModeFirstPaintedWins` preserves the first frame's content
-/// (V13.0e+ default).  `RLISPaintModeFeatherBlend` alpha-blends new
+/// `RNISPaintModeFirstPaintedWins` preserves the first frame's content
+/// (V13.0e+ default).  `RNISPaintModeFeatherBlend` alpha-blends new
 /// content into already-painted pixels at slit boundaries (V13.0d-style
 /// row alpha ramp), aiming to smooth visible seams when many slits
 /// stack with small per-accept advance.
-typedef NS_ENUM(NSInteger, RLISPaintMode) {
-    RLISPaintModeFirstPaintedWins = 0,
-    RLISPaintModeFeatherBlend = 1,
+typedef NS_ENUM(NSInteger, RNISPaintMode) {
+    RNISPaintModeFirstPaintedWins = 0,
+    RNISPaintModeFeatherBlend = 1,
 };
 
 /// V15.0c — where on the camera frame the per-accept sliver is taken
@@ -140,18 +140,18 @@ typedef NS_ENUM(NSInteger, RLISPaintMode) {
 /// the camera sensor frame; for upward tilt, the leading edge is at
 /// the TOP.  `Center` is the V13.x default (sliver from the centred
 /// 70% / 30% of pan-axis).
-typedef NS_ENUM(NSInteger, RLISSliverPosition) {
-    RLISSliverPositionCenter = 0,
-    RLISSliverPositionBottom = 1,
-    RLISSliverPositionTop    = 2,
+typedef NS_ENUM(NSInteger, RNISSliverPosition) {
+    RNISSliverPositionCenter = 0,
+    RNISSliverPositionBottom = 1,
+    RNISSliverPositionTop    = 2,
 };
 
 /// V15 — projection toggle for the hybrid engine.
-/// `RLISHybridProjectionCylindrical` is the V12.x baseline; `Planar`
+/// `RNISHybridProjectionCylindrical` is the V12.x baseline; `Planar`
 /// uses cv::detail::PlaneWarper, well-behaved for pans under ~60°.
-typedef NS_ENUM(NSInteger, RLISHybridProjection) {
-    RLISHybridProjectionCylindrical = 0,
-    RLISHybridProjectionPlanar = 1,
+typedef NS_ENUM(NSInteger, RNISHybridProjection) {
+    RNISHybridProjectionCylindrical = 0,
+    RNISHybridProjectionPlanar = 1,
 };
 
 /// V15.0d — source of the plane used by the slit-scan engine's V15.0b
@@ -184,10 +184,10 @@ typedef NS_ENUM(NSInteger, RLISHybridProjection) {
 /// with a synthetic plane perpendicular to the camera at first frame.
 /// Operators can A/B between the two and pick whichever wins for
 /// their typical scene.
-typedef NS_ENUM(NSInteger, RLISPlaneSource) {
-    RLISPlaneSourceDisabled       = 0,
-    RLISPlaneSourceARKitDetected  = 1,
-    RLISPlaneSourceVirtual        = 2,
+typedef NS_ENUM(NSInteger, RNISPlaneSource) {
+    RNISPlaneSourceDisabled       = 0,
+    RNISPlaneSourceARKitDetected  = 1,
+    RNISPlaneSourceVirtual        = 2,
 };
 
 /// V15.0g — how the plane-projection helper renders each frame onto
@@ -199,7 +199,7 @@ typedef NS_ENUM(NSInteger, RLISPlaneSource) {
 ///       raycast onto the plane and pasted at the resulting plane-
 ///       local canvas position.  When the camera tilts off-
 ///       perpendicular, the projected camera frame becomes a
-///       TRAPEZOID — visually distorted (Ram observed cooler bottom
+///       TRAPEZOID — visually distorted (the maintainer observed cooler bottom
 ///       2.3× wider than top at 30° tilt, 2026-05-08).
 ///   • `Rectified` (V15.0g default):
 ///       Camera frame is pasted as a CLEAN RECTANGLE around its
@@ -214,9 +214,9 @@ typedef NS_ENUM(NSInteger, RLISPlaneSource) {
 ///
 /// Field-validate Rectified vs Trapezoidal; the right choice depends
 /// on the operator's typical pan range and tolerance for distortion.
-typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
-    RLISPlaneProjectionStyleTrapezoidal = 0,
-    RLISPlaneProjectionStyleRectified   = 1,
+typedef NS_ENUM(NSInteger, RNISPlaneProjectionStyle) {
+    RNISPlaneProjectionStyleTrapezoidal = 0,
+    RNISPlaneProjectionStyleRectified   = 1,
 };
 
 /// V15 stitcher config — single source of truth for which correction
@@ -228,7 +228,7 @@ typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
 /// V13.0e+/V13.0g/V14.0a correction stages are preserved in the source;
 /// each is gated on the corresponding `enableX` flag.  Field iteration
 /// happens by toggling settings, not by recompiling.
-@interface RLISStitcherConfig : NSObject
+@interface RNISStitcherConfig : NSObject
 
 // ── Slit shaping (slit-scan engine only) ────────────────────────────
 
@@ -293,12 +293,12 @@ typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
 
 /// V15 new: paint mode for the slit-scan engine.  Default
 /// FirstPaintedWins for slitscan-rotate, FeatherBlend for slitscan-both.
-@property (nonatomic) RLISPaintMode paintMode;
+@property (nonatomic) RNISPaintMode paintMode;
 
 /// V15.0c new: where on the camera frame the per-accept sliver is
 /// taken.  Default Center (V13.x behaviour).  Bottom = leading edge for
 /// typical top-to-bottom landscape pan.
-@property (nonatomic) RLISSliverPosition sliverPosition;
+@property (nonatomic) RNISSliverPosition sliverPosition;
 
 /// V15.0c new: when YES, the FIRST accepted frame paints the entire
 /// camera frame at canvas (0, 0) instead of just the sliver.  Subsequent
@@ -323,10 +323,10 @@ typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
 @property (nonatomic) BOOL useDetectedPlane;
 
 /// V15.0d new: source of the plane used by the V15.0b path.  See
-/// `RLISPlaneSource` enum docs above for tradeoffs.  Default
+/// `RNISPlaneSource` enum docs above for tradeoffs.  Default
 /// Disabled for all engine modes; settings UI / capture overrides
 /// promote to ARKitDetected or Virtual.
-@property (nonatomic) RLISPlaneSource planeSource;
+@property (nonatomic) RNISPlaneSource planeSource;
 
 /// V15.0d new: depth (metres) at which the synthetic plane is placed
 /// in front of the camera when `planeSource = Virtual`.  Set the
@@ -348,13 +348,13 @@ typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
 /// for tradeoffs (Trapezoidal = 3D-correct + distorted; Rectified =
 /// clean-rectangle + slight 3D approximation).  Ignored when
 /// planeSource = Disabled.  Default Rectified for slit-scan modes.
-@property (nonatomic) RLISPlaneProjectionStyle planeProjectionStyle;
+@property (nonatomic) RNISPlaneProjectionStyle planeProjectionStyle;
 
 // ── Hybrid-specific ─────────────────────────────────────────────────
 
 /// V15 new: projection for hybrid engine.  Default Planar in V15
 /// (was Cylindrical in V12.x – V14.0a).
-@property (nonatomic) RLISHybridProjection hybridProjection;
+@property (nonatomic) RNISHybridProjection hybridProjection;
 
 /// Build a default config for the named engine mode.
 /// Recognised modes: `@"hybrid"`, `@"slitscan-rotate"`,
@@ -368,7 +368,7 @@ typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
 
 
 /// Snapshot of the current panorama canvas.  Returned by `snapshot`.
-@interface RLISSnapshot : NSObject
+@interface RNISSnapshot : NSObject
 /// Path to the JPEG written for this snapshot.  Lives in
 /// `NSTemporaryDirectory()` and is overwritten on each snapshot —
 /// the host is expected to consume it before requesting the next.
@@ -404,8 +404,8 @@ typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
 /// V15 — set the per-stage correction config.  Should be called once
 /// after init, before any `ingestPixelBuffer:` call.  If never called,
 /// the engine uses a default equivalent to
-/// `+[RLISStitcherConfig configForMode:@"hybrid"]`.
-- (void)setConfig:(RLISStitcherConfig *)config;
+/// `+[RNISStitcherConfig configForMode:@"hybrid"]`.
+- (void)setConfig:(RNISStitcherConfig *)config;
 
 /// Try to incorporate `pixelBuffer` into the running panorama.
 ///
@@ -423,8 +423,8 @@ typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
 ///
 /// `trackingPoor` should be YES when the AR session reports
 /// non-tracking state at the time of this frame; the engine then
-/// skips immediately with `RLISFrameOutcomeSkippedTrackingPoor`.
-- (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
+/// skips immediately with `RNISFrameOutcomeSkippedTrackingPoor`.
+- (RNISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                        qx:(double)qx
                                        qy:(double)qy
                                        qz:(double)qz
@@ -449,7 +449,7 @@ typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
 /// snapshot file).  Cheap enough to call after each accepted frame
 /// for live-preview UX.  Returns nil with `error` populated if the
 /// snapshot failed (disk full, permission, etc.).
-- (nullable RLISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
+- (nullable RNISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
                                               error:(NSError **)error;
 
 /// Final write at end of capture — same shape as `snapshot` but
@@ -457,7 +457,7 @@ typedef NS_ENUM(NSInteger, RLISPlaneProjectionStyle) {
 /// a tight crop to the actual panorama bounds (no trailing canvas
 /// black).  After this call, the canvas is reset; the engine is
 /// ready for a fresh capture without re-init.
-- (nullable RLISSnapshot *)finalizeAtPath:(NSString *)outputPath
+- (nullable RNISSnapshot *)finalizeAtPath:(NSString *)outputPath
                               jpegQuality:(NSInteger)quality
                                     error:(NSError **)error;
 

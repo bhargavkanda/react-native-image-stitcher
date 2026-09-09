@@ -28,7 +28,7 @@
 #define DISPATCH_LOG_ERROR(...) std::fprintf(stderr, __VA_ARGS__)
 #endif
 
-namespace retailens {
+namespace rnis {
 
 void dispatchToHostWorklets(RNWorklet::JsiWorkletContext* context,
                              StitcherFrameData data) {
@@ -100,4 +100,4 @@ void dispatchToHostWorklets(RNWorklet::JsiWorkletContext* context,
       });
 }
 
-}  // namespace retailens
+}  // namespace rnis

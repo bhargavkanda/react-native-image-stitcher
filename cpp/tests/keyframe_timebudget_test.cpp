@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // keyframe_timebudget_test.cpp — host unit tests for the pure
-// `retailens::timeBudgetCrossed` predicate (the keyframe gate's
+// `rnis::timeBudgetCrossed` predicate (the keyframe gate's
 // time-budget force-accept decision).
 //
 // The full KeyframeGate depends on OpenCV and cannot run in this
@@ -14,7 +14,7 @@
 
 #include "keyframe_gate.hpp"
 
-using retailens::timeBudgetCrossed;
+using rnis::timeBudgetCrossed;
 
 // intervalMs <= 0 disables the budget entirely (opt-out path).
 TEST(TimeBudgetCrossed, DisabledWhenIntervalNonPositive) {

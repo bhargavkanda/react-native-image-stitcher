@@ -63,7 +63,7 @@ internal class KeyframeGate : AutoCloseable {
         set(value) = nativeSetEnabled(nativeHandle, value)
 
     /// 2026-05-22 (audit F6) — Gate strategy.  Matches the C++ enum
-    /// retailens::GateStrategy (0 = Pose, 1 = Flow).  Pose strategy
+    /// rnis::GateStrategy (0 = Pose, 1 = Flow).  Pose strategy
     /// uses plane-projection / angular novelty; Flow strategy uses
     /// sparse optical-flow KLT.  iOS parity: Swift facade's
     /// `keyframeGate.strategy = .flow / .pose`.  Default `Pose`
@@ -332,7 +332,7 @@ internal class KeyframeGate : AutoCloseable {
     private external fun nativeSetFlowQualityLevel(handle: Long, quality: Double)
     private external fun nativeSetFlowMinDistance(handle: Long, minDistance: Double)
     // 2026-05-22 (audit F6) — gate-strategy selector.  Maps to C++
-    // retailens::GateStrategy (Pose=0, Flow=1).
+    // rnis::GateStrategy (Pose=0, Flow=1).
     private external fun nativeSetStrategy(handle: Long, strategy: Int)
     private external fun nativeEvaluate(
         handle: Long,

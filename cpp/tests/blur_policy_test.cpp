@@ -15,11 +15,11 @@
 
 #include "blur_policy.hpp"
 
-using retailens::admitKeyframe;
-using retailens::BlurAdmission;
-using retailens::BlurAdmissionInput;
-using retailens::BlurPolicyConfig;
-using retailens::RunningScoreMedian;
+using rnis::admitKeyframe;
+using rnis::BlurAdmission;
+using rnis::BlurAdmissionInput;
+using rnis::BlurPolicyConfig;
+using rnis::RunningScoreMedian;
 
 namespace {
 

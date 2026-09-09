@@ -63,7 +63,7 @@
     }
 
     // V1: default ROI (central-box fallback) — pass no roi.
-    return retailens::computeGlareScore(img);
+    return rnis::computeGlareScore(img);
 }
 
 @end

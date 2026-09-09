@@ -32,7 +32,7 @@ static os_log_t SlitDiagLog(void) {
     static os_log_t log = NULL;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        log = os_log_create("com.tiger.retailens.sdk", "slitscan");
+        log = os_log_create("io.imagestitcher.rn", "slitscan");
     });
     return log;
 }
@@ -53,7 +53,7 @@ static os_log_t SlitDiagLog(void) {
                              tx:(double)tx
                              ty:(double)ty
                              tz:(double)tz
-                          tele:(RLISFrameTelemetry *)tele
+                          tele:(RNISFrameTelemetry *)tele
                              t0:(std::chrono::steady_clock::time_point)t0;
 @end
 
@@ -89,7 +89,7 @@ static os_log_t SlitDiagLog(void) {
     /// capture.  If a subsequent frame's homography-corrected
     /// dst position drops below `max - kReverseStopPx` the
     /// engine treats it as a reverse-direction event and emits
-    /// RLISFrameOutcomeRejectedReverseDirection without pasting.
+    /// RNISFrameOutcomeRejectedReverseDirection without pasting.
     /// Reset by `[reset]` to firstFrameDstX/Y at first frame.
     int _maxDstX;
     int _maxDstY;
@@ -125,7 +125,7 @@ static os_log_t SlitDiagLog(void) {
     // captures show ~30–40 cm of camera translation per pan, which at
     // typical 1–3 m scene depth produces ~30–100 px of perpendicular
     // jitter and missing scene content between adjacent slits (the
-    // "translation gaps" Ram observed in V13.0d).  Triangulating
+    // "translation gaps" the maintainer observed in V13.0d).  Triangulating
     // matched features between adjacent accepts gives a per-frame
     // depth estimate; the parallax correction Δpixel = focal × Δt_cam / Z
     // closes that gap.
@@ -173,10 +173,10 @@ static os_log_t SlitDiagLog(void) {
     int _prevAcceptDstY;
 
     // V15 — runtime config controlling which correction stages run.
-    // See RLISStitcherConfig in OpenCVIncrementalStitcher.h.  Set via
+    // See RNISStitcherConfig in OpenCVIncrementalStitcher.h.  Set via
     // -setConfig: after init; defaults to slitscan-both factory config
     // if never set.
-    RLISStitcherConfig *_config;
+    RNISStitcherConfig *_config;
 
     // V15.0b — latched plane transform for plane-projected stitch
     // mode.  4×4 column-major in CV_64F, world coords.  Empty until
@@ -217,7 +217,7 @@ static os_log_t SlitDiagLog(void) {
     // frame to `focal / t_int_center` so the rendered rectangle
     // matches sensor dimensions 1:1 (scale = 1.0).  Without this,
     // a hardcoded ppm=1000 produced narrow output at typical retail
-    // scan distances (~1m → rectangle 63% of sensor width — Ram
+    // scan distances (~1m → rectangle 63% of sensor width — the maintainer
     // reported 2026-05-08 that the panorama looked much narrower
     // than the live camera preview).  Persists for the rest of the
     // capture; reset on -reset.  Zero = not yet set (use 1000.0
@@ -233,7 +233,7 @@ static os_log_t SlitDiagLog(void) {
     // Without this offset, the rectangle's canvas position depended
     // on ARKit's arbitrary anchor placement and could land far from
     // canvas center → frames clipped at canvas bounds → narrow
-    // output (Ram observed 2026-05-08 with cooler scan).  Subsequent
+    // output (the maintainer observed 2026-05-08 with cooler scan).  Subsequent
     // frames' canvas position = cCenter + (current_UV − first_UV)
     // × ppm, giving a panorama anchored on the user's first-frame
     // aim.  `_haveFirstPlaneAnchor` flag tracks whether they're set.
@@ -288,32 +288,32 @@ static os_log_t SlitDiagLog(void) {
         // via -setConfig: after init.  Default chosen so engines work
         // correctly with the legacy `useRectilinear=YES` path even if
         // setConfig is never called.
-        _config = [RLISStitcherConfig configForMode:@"slitscan-both"];
+        _config = [RNISStitcherConfig configForMode:@"slitscan-both"];
 
         [self reset];
     }
     return self;
 }
 
-- (void)setConfig:(RLISStitcherConfig *)config {
+- (void)setConfig:(RNISStitcherConfig *)config {
     if (config == nil) return;
     // V15.0d backward-compat: legacy callers set the boolean
     // useDetectedPlane=YES.  New planeSource enum subsumes that flag.
     // If planeSource is at its default (Disabled) but the legacy
     // boolean is YES, upgrade to ARKitDetected — preserving V15.0b
     // semantics for callers that haven't migrated to planeSource yet.
-    if (config.planeSource == RLISPlaneSourceDisabled && config.useDetectedPlane) {
-        config.planeSource = RLISPlaneSourceARKitDetected;
+    if (config.planeSource == RNISPlaneSourceDisabled && config.useDetectedPlane) {
+        config.planeSource = RNISPlaneSourceARKitDetected;
     }
     _config = config;
     // V15.0c.4 — converted to fault log so it isn't rate-limited.
     // V15.0d — added planeSource + new NCC knobs to the snapshot.
     const char *planeSrc =
-        _config.planeSource == RLISPlaneSourceVirtual ? "Virtual"
-        : (_config.planeSource == RLISPlaneSourceARKitDetected ? "ARKitDetected"
+        _config.planeSource == RNISPlaneSourceVirtual ? "Virtual"
+        : (_config.planeSource == RNISPlaneSourceARKitDetected ? "ARKitDetected"
            : "Disabled");
     const char *planeStyle =
-        _config.planeProjectionStyle == RLISPlaneProjectionStyleRectified
+        _config.planeProjectionStyle == RNISPlaneProjectionStyleRectified
             ? "Rectified" : "Trapezoidal";
     os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
         "[V15-config] slit-scan config applied: panAxisFrac=%.2f "
@@ -326,7 +326,7 @@ static os_log_t SlitDiagLog(void) {
         (int)_config.enableTriangulation, (int)_config.enableTriAccumulator,
         (int)_config.enable1dNcc, (int)_config.enable2dNcc,
         (int)_config.enableRansacHomography,
-        _config.paintMode == RLISPaintModeFeatherBlend
+        _config.paintMode == RNISPaintModeFeatherBlend
             ? "FeatherBlend" : "FirstPaintedWins",
         planeSrc, planeStyle,
         _config.virtualPlaneDepthMeters,
@@ -345,7 +345,7 @@ static os_log_t SlitDiagLog(void) {
     // the camera pose.  Ignore bridge propagations in Virtual mode
     // so the bridge's ARKit-detected plane (if any) doesn't clobber
     // the synthesized plane.
-    if (_config.planeSource == RLISPlaneSourceVirtual) {
+    if (_config.planeSource == RNISPlaneSourceVirtual) {
         os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
             "[V15.0d-plane] setPlaneTransformFlat ignored "
             "(planeSource=Virtual; engine synthesizes its own plane)");
@@ -392,7 +392,7 @@ static os_log_t SlitDiagLog(void) {
 // steady-state branch only.  Field testing showed the first frame
 // painted at canvas (0, 0) in pixel coords while subsequent slivers
 // painted at plane-derived canvas positions — TWO disjoint coord
-// systems → two disjoint patches on the canvas (Ram screenshot
+// systems → two disjoint patches on the canvas (the maintainer screenshot
 // 2026-05-08).  The fix is to paint the FIRST frame via plane
 // projection too, so first-frame and slivers share a coord system.
 // Sharing the helper avoids duplicating ~150 lines of warp logic.
@@ -401,13 +401,13 @@ static os_log_t SlitDiagLog(void) {
                              tx:(double)tx
                              ty:(double)ty
                              tz:(double)tz
-                          tele:(RLISFrameTelemetry *)tele
+                          tele:(RNISFrameTelemetry *)tele
                              t0:(std::chrono::steady_clock::time_point)t0 {
-    if (_config.planeSource == RLISPlaneSourceDisabled) return NO;
+    if (_config.planeSource == RNISPlaneSourceDisabled) return NO;
 
     // V15.0d Virtual mode — synthesize plane from current pose if
     // one isn't already set.
-    if (_config.planeSource == RLISPlaneSourceVirtual && _planeTransform.empty()) {
+    if (_config.planeSource == RNISPlaneSourceVirtual && _planeTransform.empty()) {
         cv::Mat camForwardWorld = R_new *
             (cv::Mat_<double>(3, 1) << 0.0, 0.0, -1.0);
         cv::Mat normalWorld = -camForwardWorld;
@@ -486,7 +486,7 @@ static os_log_t SlitDiagLog(void) {
     // ppm = focal / t_int_center → scale = 1.0 → rectangle matches
     // sensor dimensions on canvas.  Without this hoist, the corner
     // loop ran at the default ppm=1000 on the first frame (only),
-    // producing a narrow output (Ram observed 2026-05-08).
+    // producing a narrow output (the maintainer observed 2026-05-08).
     const double focalForPPM = std::sqrt(
         _K_compose.at<double>(0, 0) * _K_compose.at<double>(1, 1));
     cv::Mat centerPixHomo =
@@ -531,7 +531,7 @@ static os_log_t SlitDiagLog(void) {
     // per capture so the FIRST plane-projected frame lands at canvas
     // (cCenterX, cCenterY).  Subsequent frames' canvas positions are
     // RELATIVE to this anchor.  Without this, ARKit's arbitrary
-    // plane-anchor origin caused frames to land off-canvas (Ram
+    // plane-anchor origin caused frames to land off-canvas (the maintainer
     // observed 2026-05-08 — cooler clipped at canvas left edge
     // because ARKit anchored the cooler plane 0.3m to the left of
     // where the camera was aimed).
@@ -585,7 +585,7 @@ static os_log_t SlitDiagLog(void) {
         // is U (horizontal translate on portrait phone) → lock V.
         // Without this, ~20° of unintentional yaw over a 4-second
         // tilt-down pan caused 400 px of horizontal staircase drift
-        // in the panorama (Ram observed 2026-05-08).
+        // in the panorama (the maintainer observed 2026-05-08).
         double dU = Up - _firstPlaneAnchorUp;
         double dV = Vp - _firstPlaneAnchorVp;
         if (_isLandscape) {
@@ -657,7 +657,7 @@ static os_log_t SlitDiagLog(void) {
     // V15.0g.2 — scale now uses the PERPENDICULAR camera-to-plane
     // distance, not the center ray's t_int.  Why: t_int_center is
     // |perp_dist / cos(tilt)| which GROWS as the user tilts off-
-    // perpendicular (Ram observed scale going 1.0→1.55 over a 50°
+    // perpendicular (the maintainer observed scale going 1.0→1.55 over a 50°
     // top-to-bottom pan, distorting the panorama by 55%).  The
     // perpendicular distance is INVARIANT to tilt — only changes if
     // the camera physically translates closer/farther from the wall.
@@ -669,7 +669,7 @@ static os_log_t SlitDiagLog(void) {
     // intersection on the plane), which is correct: anchor tracks
     // where the camera is AIMED, scale tracks how BIG the camera's
     // view is.  These are independent — V15.0g had them tangled.
-    if (_config.planeProjectionStyle == RLISPlaneProjectionStyleRectified) {
+    if (_config.planeProjectionStyle == RNISPlaneProjectionStyleRectified) {
         if (t_int_center <= 0.0) return NO;
         cv::Mat P_center_world = t_arkit + t_int_center * centerRayWorld;
         cv::Mat diffCenterWorld = P_center_world - planeOrigin;
@@ -738,7 +738,7 @@ static os_log_t SlitDiagLog(void) {
                         cv::Scalar(0));
 
     // ── V15.0h — 2D NCC alignment refinement for plane projection ──
-    // Ram observation 2026-05-08: 2D NCC was bypassed entirely in
+    // the maintainer observation 2026-05-08: 2D NCC was bypassed entirely in
     // plane mode (V15.0b assumed 3D-correct alignment made it
     // unnecessary).  In practice ARKit pose noise + plane fit error +
     // handheld jitter cause sub-pixel-to-few-pixel alignment errors
@@ -887,7 +887,7 @@ static os_log_t SlitDiagLog(void) {
     warpedCanvas.copyTo(_canvas, paintMaskFresh);
     cv::bitwise_or(_canvasMask, paintMaskFresh, _canvasMask);
 
-    if (_config.paintMode == RLISPaintModeFeatherBlend) {
+    if (_config.paintMode == RNISPaintModeFeatherBlend) {
         cv::Mat canvasMaskNonZero;
         cv::compare(_canvasMask, 0, canvasMaskNonZero, cv::CMP_NE);
         cv::Mat overlapMask;
@@ -920,7 +920,7 @@ static os_log_t SlitDiagLog(void) {
             canvasCorners[3].x, canvasCorners[3].y,
             (long)_accepted);
     }
-    [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+    [tele setValue:@(RNISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
     auto t1 = std::chrono::steady_clock::now();
     double ms = std::chrono::duration_cast<std::chrono::microseconds>(
         t1 - t0).count() / 1000.0;
@@ -1058,7 +1058,7 @@ static const double kPanAxisFractionRect = 0.30;
 // apps (iOS Camera Pano, Samsung native pano) ship.  Until that
 // lands, perpendicular drift is bounded only by ARKit pose accuracy.
 
-- (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
+- (RNISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                        qx:(double)qx
                                        qy:(double)qy
                                        qz:(double)qz
@@ -1079,7 +1079,7 @@ static const double kPanAxisFractionRect = 0.30;
                              trackingPoor:(BOOL)trackingPoor
 {
     auto t0 = std::chrono::steady_clock::now();
-    RLISFrameTelemetry *tele = [[RLISFrameTelemetry alloc] init];
+    RNISFrameTelemetry *tele = [[RNISFrameTelemetry alloc] init];
     // V12.12 — set isLandscape on every telemetry up-front so every
     // return path (early-out trackingPoor, alignment-lost, accept,
     // skip, reverse, etc.) carries the orientation.  Stays at the
@@ -1096,7 +1096,7 @@ static const double kPanAxisFractionRect = 0.30;
     [tele setValue:@(_maxDstY) forKey:@"paintedExtent"];
     [tele setValue:@(_canvasPanExtent) forKey:@"panExtent"];
 
-    // V13.0a.2 — call counter + per-call state log.  Ram's V13.0a.1
+    // V13.0a.2 — call counter + per-call state log.  the maintainer's V13.0a.1
     // trace showed only [V13.0a-focal] firing (1 per capture), no
     // [V13.0a-pose] / [V13.0a-paint] — meaning subsequent frames are
     // returning early before reaching the pose projection.  Most
@@ -1126,13 +1126,13 @@ static const double kPanAxisFractionRect = 0.30;
     }
 
     if (trackingPoor) {
-        [tele setValue:@(RLISFrameOutcomeSkippedTrackingPoor) forKey:@"outcome"];
+        [tele setValue:@(RNISFrameOutcomeSkippedTrackingPoor) forKey:@"outcome"];
         return tele;
     }
 
     cv::Mat frameBGR;
     if (![self convertPixelBuffer:pixelBuffer to:frameBGR]) {
-        [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
+        [tele setValue:@(RNISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
         return tele;
     }
 
@@ -1176,7 +1176,7 @@ static const double kPanAxisFractionRect = 0.30;
         // horizontal forward to anchor the panorama frame).  See
         // OpenCVIncrementalStitcher.mm for full annotation.
         if (horiz < 0.1) {
-            [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
+            [tele setValue:@(RNISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
             return tele;
         }
         double pzx = fwx / horiz, pzz = fwz / horiz;
@@ -1236,13 +1236,13 @@ static const double kPanAxisFractionRect = 0.30;
                 clipH = std::max(1, (int)(frameBGR.rows * _config.kPanAxisFractionRect));
                 // V15.0c — srcClipY position from sliverPosition.
                 switch (_config.sliverPosition) {
-                    case RLISSliverPositionTop:
+                    case RNISSliverPositionTop:
                         srcClipY = 0;
                         break;
-                    case RLISSliverPositionBottom:
+                    case RNISSliverPositionBottom:
                         srcClipY = frameBGR.rows - clipH;
                         break;
-                    case RLISSliverPositionCenter:
+                    case RNISSliverPositionCenter:
                     default:
                         srcClipY = (frameBGR.rows - clipH) / 2;
                         break;
@@ -1290,7 +1290,7 @@ static const double kPanAxisFractionRect = 0.30;
                     (int)_config.enable1dNcc,
                     (int)_config.enable2dNcc,
                     (int)_config.enableRansacHomography,
-                    _config.paintMode == RLISPaintModeFeatherBlend
+                    _config.paintMode == RNISPaintModeFeatherBlend
                         ? "FeatherBlend" : "FirstPaintedWins",
                     (int)_config.useDetectedPlane,
                     (int)_planeTransform.empty());
@@ -1303,15 +1303,15 @@ static const double kPanAxisFractionRect = 0.30;
             // keeps the first frame and all subsequent slivers in
             // the SAME coord system — without it, the first frame
             // and slivers were two disjoint patches on the canvas
-            // (Ram observed 2026-05-08 with planeSource=ARKitDetected).
+            // (the maintainer observed 2026-05-08 with planeSource=ARKitDetected).
             //
             // If the helper returns NO (plane unavailable / degenerate),
-            // we REFUSE the first frame (per Ram's UX choice) — the
+            // we REFUSE the first frame (per the maintainer's UX choice) — the
             // capture screen shows "waiting for plane" and the user
             // tries again once the plane locks.  Subsequent attempts
             // re-enter the first-frame branch since _hasFirstFrame
             // stays NO.
-            if (_config.planeSource != RLISPlaneSourceDisabled) {
+            if (_config.planeSource != RNISPlaneSourceDisabled) {
                 if ([self tryPaintPlaneProjected:frameBGR
                                            R_new:R_new
                                               tx:tx
@@ -1342,13 +1342,13 @@ static const double kPanAxisFractionRect = 0.30;
                         "[V15.0e-first-plane] first frame painted via "
                         "plane projection (planeSource=%s); slit-scan "
                         "fallback state initialised",
-                        _config.planeSource == RLISPlaneSourceVirtual ? "Virtual" : "ARKitDetected");
+                        _config.planeSource == RNISPlaneSourceVirtual ? "Virtual" : "ARKitDetected");
                     return tele;
                 } else {
                     // Plane not ready — refuse first frame.  User
                     // retries on next.  _hasFirstFrame stays NO so
                     // the next ingestPixelBuffer re-enters this branch.
-                    [tele setValue:@(RLISFrameOutcomeSkippedTrackingPoor) forKey:@"outcome"];
+                    [tele setValue:@(RNISFrameOutcomeSkippedTrackingPoor) forKey:@"outcome"];
                     if (_captureFrameCounter <= 5 || _captureFrameCounter % 30 == 0) {
                         os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
                             "[V15.0e-first-frame-refused] capFr=%ld plane "
@@ -1356,7 +1356,7 @@ static const double kPanAxisFractionRect = 0.30;
                             "first frame skipped — UI should show 'waiting "
                             "for plane' until lock",
                             (long)_captureFrameCounter,
-                            _config.planeSource == RLISPlaneSourceVirtual ? "Virtual" : "ARKitDetected",
+                            _config.planeSource == RNISPlaneSourceVirtual ? "Virtual" : "ARKitDetected",
                             (int)_planeTransform.empty());
                     }
                     return tele;
@@ -1388,7 +1388,7 @@ static const double kPanAxisFractionRect = 0.30;
             // and therefore INSIDE the first frame's full-frame
             // painted region (0, 0)–(rows, cols) — first-painted-wins
             // masks them all out → "first frame paints, nothing else
-            // gets added" (Ram observed this in V15.0b).
+            // gets added" (the maintainer observed this in V15.0b).
             //
             // The anchor must be set so that subsequent slivers'
             // canvas Y matches their physical position relative to
@@ -1402,13 +1402,13 @@ static const double kPanAxisFractionRect = 0.30;
                     (int)(frameBGR.rows * _config.kPanAxisFractionRect));
                 int anchorY = 0;
                 switch (_config.sliverPosition) {
-                    case RLISSliverPositionTop:
+                    case RNISSliverPositionTop:
                         anchorY = 0;
                         break;
-                    case RLISSliverPositionBottom:
+                    case RNISSliverPositionBottom:
                         anchorY = frameBGR.rows - subsequentClipH;
                         break;
-                    case RLISSliverPositionCenter:
+                    case RNISSliverPositionCenter:
                     default:
                         anchorY = (frameBGR.rows - subsequentClipH) / 2;
                         break;
@@ -1418,8 +1418,8 @@ static const double kPanAxisFractionRect = 0.30;
                 // %s instead of NSString %@ since os_log doesn't accept
                 // %@ formatters.
                 const char *posStr =
-                    _config.sliverPosition == RLISSliverPositionTop ? "Top"
-                    : (_config.sliverPosition == RLISSliverPositionBottom ? "Bottom" : "Center");
+                    _config.sliverPosition == RNISSliverPositionTop ? "Top"
+                    : (_config.sliverPosition == RNISSliverPositionBottom ? "Bottom" : "Center");
                 os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
                     "[V15.0c-anchor] firstFrameFullFrame=on, "
                     "sliverPosition=%s, frameRows=%d, "
@@ -1438,7 +1438,7 @@ static const double kPanAxisFractionRect = 0.30;
             _maxDstY = _firstFrameDstY;
             _hasFirstFrame = true;
             _accepted = 1;
-            [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+            [tele setValue:@(RNISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
             [tele setValue:@(1.0) forKey:@"confidence"];
             // V12.14.9 — first-frame paintedExtent on the RECTILINEAR
             // path (this is the actively-used engine; the cylindrical
@@ -1486,7 +1486,7 @@ static const double kPanAxisFractionRect = 0.30;
             [self cylindricalWarp:frameBGR rArkit:R_new
                             outImage:warpedFirst outMask:warpedFirstMask];
         if (warpedFirst.empty()) {
-            [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
+            [tele setValue:@(RNISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
             return tele;
         }
         int dstX = (int)(_canvas.cols - warpedFirst.cols) / 2;
@@ -1502,7 +1502,7 @@ static const double kPanAxisFractionRect = 0.30;
 
         _hasFirstFrame = true;
         _accepted = 1;
-        [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+        [tele setValue:@(RNISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
         [tele setValue:@(1.0) forKey:@"confidence"];
         // V12.14.9 — paintedExtent was set at line ~445 to _maxDstY (= 0
         // before first frame).  In the cylindrical first-frame branch
@@ -1535,8 +1535,8 @@ static const double kPanAxisFractionRect = 0.30;
         // returns tele); NO if plane is unavailable / degenerate /
         // off-plane (caller falls through to slit-scan path).
         const char *planeSrcStr =
-            _config.planeSource == RLISPlaneSourceVirtual ? "Virtual"
-            : (_config.planeSource == RLISPlaneSourceARKitDetected ? "ARKitDetected"
+            _config.planeSource == RNISPlaneSourceVirtual ? "Virtual"
+            : (_config.planeSource == RNISPlaneSourceARKitDetected ? "ARKitDetected"
                : "Disabled");
         if (_captureFrameCounter <= 5 || _captureFrameCounter % 60 == 0) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
@@ -1563,7 +1563,7 @@ static const double kPanAxisFractionRect = 0.30;
         // selected planeSource != Disabled but we got here, the
         // existing slit-scan code paints this frame as a fallback —
         // less ambitious but always works.
-        if (_config.planeSource != RLISPlaneSourceDisabled
+        if (_config.planeSource != RNISPlaneSourceDisabled
             && (_captureFrameCounter <= 3 || _captureFrameCounter % 60 == 0)) {
             os_log_with_type(SlitDiagLog(), OS_LOG_TYPE_FAULT,
                 "[V15.0c.3-noplane] capFr=%ld helper returned NO "
@@ -1583,9 +1583,9 @@ static const double kPanAxisFractionRect = 0.30;
         // boolean useDetectedPlane was YES, setConfig already
         // upgraded planeSource → ARKitDetected (see -setConfig:).
         bool runPlaneProjection = false;
-        if (_config.planeSource == RLISPlaneSourceARKitDetected) {
+        if (_config.planeSource == RNISPlaneSourceARKitDetected) {
             runPlaneProjection = !_planeTransform.empty();
-        } else if (_config.planeSource == RLISPlaneSourceVirtual) {
+        } else if (_config.planeSource == RNISPlaneSourceVirtual) {
             // Synthesize on first frame in Virtual mode.  Plane:
             //   origin = camera_pos + depth × camera_forward_world
             //   normal = -camera_forward_world  (pointing AT camera)
@@ -1638,7 +1638,7 @@ static const double kPanAxisFractionRect = 0.30;
             // parallel to gravity, and the orientation depends on how
             // the plane was detected — there's no documented contract.
             //
-            // Symptom of the V15.0c bug (Ram observed on top-to-bottom
+            // Symptom of the V15.0c bug (the maintainer observed on top-to-bottom
             // pan): the second-pass content rendered as a tilted/
             // rotated quadrilateral below the first frame because the
             // sign of the V axis flipped relative to expected.
@@ -1846,7 +1846,7 @@ static const double kPanAxisFractionRect = 0.30;
                 warpedCanvas.copyTo(_canvas, paintMaskFresh);
                 cv::bitwise_or(_canvasMask, paintMaskFresh, _canvasMask);
 
-                if (_config.paintMode == RLISPaintModeFeatherBlend) {
+                if (_config.paintMode == RNISPaintModeFeatherBlend) {
                     cv::Mat canvasMaskNonZero;
                     cv::compare(_canvasMask, 0, canvasMaskNonZero, cv::CMP_NE);
                     cv::Mat overlapMask;
@@ -1879,7 +1879,7 @@ static const double kPanAxisFractionRect = 0.30;
                         canvasCorners[3].x, canvasCorners[3].y,
                         (long)_accepted);
                 }
-                [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+                [tele setValue:@(RNISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
                 auto t1 = std::chrono::steady_clock::now();
                 double ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
                 [tele setValue:@(ms) forKey:@"processingMs"];
@@ -1934,13 +1934,13 @@ static const double kPanAxisFractionRect = 0.30;
         clipH = std::max(1, (int)(frameBGR.rows * _config.kPanAxisFractionRect));
         srcClipX = 0;
         switch (_config.sliverPosition) {
-            case RLISSliverPositionTop:
+            case RNISSliverPositionTop:
                 srcClipY = 0;
                 break;
-            case RLISSliverPositionBottom:
+            case RNISSliverPositionBottom:
                 srcClipY = frameBGR.rows - clipH;
                 break;
-            case RLISSliverPositionCenter:
+            case RNISSliverPositionCenter:
             default:
                 srcClipY = (frameBGR.rows - clipH) / 2;
                 break;
@@ -2023,12 +2023,12 @@ static const double kPanAxisFractionRect = 0.30;
             NSLog(@"[V12.11-reverse] %s stop: dstY=%d max=%d (regressed %d px)",
                   _isLandscape ? "landscape" : "portrait",
                   dstY, _maxDstY, _maxDstY - dstY);
-            [tele setValue:@(RLISFrameOutcomeRejectedReverseDirection) forKey:@"outcome"];
+            [tele setValue:@(RNISFrameOutcomeRejectedReverseDirection) forKey:@"outcome"];
             return tele;
         }
 
         // V13.0b — minimum-Δ accept gate.  Slow handheld pans
-        // currently produce 1–6 px slivers per accept (Ram's
+        // currently produce 1–6 px slivers per accept (the maintainer's
         // V13.0a.4 trace showed ~2–3 px typical), creating ~270
         // zig-zag boundaries in 663 px of pan growth — the high-
         // frequency wobble pattern the eye reads as "compressed
@@ -2063,7 +2063,7 @@ static const double kPanAxisFractionRect = 0.30;
                     (long)_engineCallCounter, dstY, _maxDstY, panDelta,
                     kMinAcceptDeltaPx);
             }
-            [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
+            [tele setValue:@(RNISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
             auto t1 = std::chrono::steady_clock::now();
             double ms = std::chrono::duration_cast<std::chrono::microseconds>(
                 t1 - t0).count() / 1000.0;
@@ -2768,7 +2768,7 @@ static const double kPanAxisFractionRect = 0.30;
             cv::Rect canvasBoundsRect(0, 0, _canvas.cols, _canvas.rows);
             cv::Rect dstClipped = dstRoi & canvasBoundsRect;
             if (dstClipped.width <= 0 || dstClipped.height <= 0) {
-                [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost)
+                [tele setValue:@(RNISFrameOutcomeRejectedAlignmentLost)
                         forKey:@"outcome"];
                 return tele;
             }
@@ -2814,7 +2814,7 @@ static const double kPanAxisFractionRect = 0.30;
         //   Already-painted overlap pixels (mask==255) get an alpha
         //   blend with the new content, preserving the first slit's
         //   structural signal while smoothing slit boundaries.
-        //   Hypothesis (Ram): with no accept gate (kMinAcceptDeltaPx
+        //   Hypothesis (the maintainer): with no accept gate (kMinAcceptDeltaPx
         //   = 0 in slitscan-both default), per-accept advance is small
         //   (~5–10 px) → per-accept misalignment is small → blending
         //   small misalignment over large overlap looks smooth, not
@@ -2831,7 +2831,7 @@ static const double kPanAxisFractionRect = 0.30;
         warpedCanvas.copyTo(_canvas, paintMaskFresh);
         cv::bitwise_or(_canvasMask, paintMaskFresh, _canvasMask);
 
-        if (_config.paintMode == RLISPaintModeFeatherBlend) {
+        if (_config.paintMode == RNISPaintModeFeatherBlend) {
             // For overlap pixels (already painted AND warpedCanvasMask
             // has new content): alpha-blend at 0.3 weight on new
             // content (= 70% prev / 30% new).  Choice of 0.3 keeps
@@ -2882,7 +2882,7 @@ static const double kPanAxisFractionRect = 0.30;
                 (long)_engineCallCounter, dstX, dstY,
                 (int)homographyApplied, (long)_accepted);
         }
-        [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+        [tele setValue:@(RNISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
         auto t1 = std::chrono::steady_clock::now();
         double ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
         [tele setValue:@(ms) forKey:@"processingMs"];
@@ -2904,7 +2904,7 @@ static const double kPanAxisFractionRect = 0.30;
         [self cylindricalWarp:frameBGR rArkit:R_new
                         outImage:warpedNew outMask:warpedNewMask];
     if (warpedNew.empty()) {
-        [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
+        [tele setValue:@(RNISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
         return tele;
     }
 
@@ -2915,7 +2915,7 @@ static const double kPanAxisFractionRect = 0.30;
     cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
     cv::Rect dstClipped = dstRoi & canvasBounds;
     if (dstClipped.width <= 0 || dstClipped.height <= 0) {
-        [tele setValue:@(RLISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
+        [tele setValue:@(RNISFrameOutcomeRejectedAlignmentLost) forKey:@"outcome"];
         return tele;
     }
     cv::Rect srcRoi(dstClipped.x - dstRoi.x, dstClipped.y - dstRoi.y,
@@ -2935,12 +2935,12 @@ static const double kPanAxisFractionRect = 0.30;
         warpedNewClipped.copyTo(canvasRoi, paintMask);
         cv::bitwise_or(canvasMaskRoi, paintMask, canvasMaskRoi);
         _accepted += 1;
-        [tele setValue:@(RLISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
+        [tele setValue:@(RNISFrameOutcomeAcceptedHigh) forKey:@"outcome"];
         [tele setValue:@(1.0) forKey:@"confidence"];
     } else {
         // No new content to paint — the new frame's coverage is
         // entirely inside the existing canvas.  Skip silently.
-        [tele setValue:@(RLISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
+        [tele setValue:@(RNISFrameOutcomeSkippedTooClose) forKey:@"outcome"];
     }
 
     auto t1 = std::chrono::steady_clock::now();
@@ -3177,7 +3177,7 @@ static const double kPanAxisFractionRect = 0.30;
     return YES;
 }
 
-- (nullable RLISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
+- (nullable RNISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
                                               error:(NSError **)error
 {
     _snapshotSeq += 1;
@@ -3188,11 +3188,11 @@ static const double kPanAxisFractionRect = 0.30;
     return [self writeOutToPath:path quality:quality applyExposureComp:NO error:error];
 }
 
-- (nullable RLISSnapshot *)finalizeAtPath:(NSString *)outputPath
+- (nullable RNISSnapshot *)finalizeAtPath:(NSString *)outputPath
                               jpegQuality:(NSInteger)quality
                                     error:(NSError **)error
 {
-    RLISSnapshot *snap = [self writeOutToPath:outputPath
+    RNISSnapshot *snap = [self writeOutToPath:outputPath
                                        quality:quality
                               applyExposureComp:YES
                                          error:error];
@@ -3200,7 +3200,7 @@ static const double kPanAxisFractionRect = 0.30;
     return snap;
 }
 
-- (nullable RLISSnapshot *)writeOutToPath:(NSString *)outputPath
+- (nullable RNISSnapshot *)writeOutToPath:(NSString *)outputPath
                                    quality:(NSInteger)quality
                           applyExposureComp:(BOOL)applyExposureComp
                                      error:(NSError **)error
@@ -3237,7 +3237,7 @@ static const double kPanAxisFractionRect = 0.30;
     // portrait UI.
     //
     // V13.0a — ROTATE_90_CLOCKWISE (was COUNTERCLOCKWISE in V12.14.10).
-    // Ram's V12.14.10 device test showed the saved JPEG appearing
+    // the maintainer's V12.14.10 device test showed the saved JPEG appearing
     // upside-down in the portrait UI; CCW was the wrong direction.
     // CW maps the canvas's pan-axis growth direction to the user-
     // perspective rightward direction, which matches the UI's
@@ -3274,7 +3274,7 @@ static const double kPanAxisFractionRect = 0.30;
         return nil;
     }
 
-    RLISSnapshot *snap = [[RLISSnapshot alloc] init];
+    RNISSnapshot *snap = [[RNISSnapshot alloc] init];
     [snap setValue:cleanPath forKey:@"panoramaPath"];
     [snap setValue:@(out.cols) forKey:@"width"];
     [snap setValue:@(out.rows) forKey:@"height"];

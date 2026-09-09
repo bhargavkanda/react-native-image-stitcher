@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-namespace retailens {
+namespace rnis {
 
 namespace {
 
@@ -106,4 +106,4 @@ void installStitcherProxy(facebook::jsi::Runtime& runtime) {
       facebook::jsi::Object::createFromHostObject(runtime, proxy));
 }
 
-}  // namespace retailens
+}  // namespace rnis

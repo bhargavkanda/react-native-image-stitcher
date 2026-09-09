@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace retailens {
+namespace rnis {
 
 namespace {
 
@@ -137,4 +137,4 @@ ExtractionConfig getExtractionConfig() {
                           g_extractMesh.load(std::memory_order_relaxed)};
 }
 
-}  // namespace retailens
+}  // namespace rnis

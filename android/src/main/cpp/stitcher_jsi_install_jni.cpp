@@ -6,7 +6,7 @@
 // Kotlin's `StitcherJsiInstallerModule.nativeInstall(jsiRuntimeRef)`
 // calls into this file.  We unbox the `jsi::Runtime*` from the
 // Java `long` and hand it to the shared
-// `retailens::installStitcherProxy(runtime)` function which sets
+// `rnis::installStitcherProxy(runtime)` function which sets
 // `globalThis.__stitcherProxy`.  Same destination as iOS — the
 // host object class lives in `cpp/stitcher_proxy_jsi.{hpp,cpp}`.
 //
@@ -66,7 +66,7 @@ Java_io_imagestitcher_rn_StitcherJsiInstallerModule_nativeInstall(
     return JNI_FALSE;
   }
   auto* runtime = reinterpret_cast<facebook::jsi::Runtime*>(jsiRuntimeRef);
-  retailens::installStitcherProxy(*runtime);
+  rnis::installStitcherProxy(*runtime);
   LOGI("installed globalThis.__stitcherProxy on main JS runtime.");
   return JNI_TRUE;
 }
@@ -81,7 +81,7 @@ Java_io_imagestitcher_rn_StitcherJsiInstallerModule_nativeInstall(
 
 namespace {
 
-class AndroidNV21BufferReader : public retailens::PixelBufferReader {
+class AndroidNV21BufferReader : public rnis::PixelBufferReader {
  public:
   explicit AndroidNV21BufferReader(std::vector<uint8_t>&& bytes)
       : _bytes(std::move(bytes)) {}
@@ -114,12 +114,12 @@ extern "C" JNIEXPORT jint JNICALL
 Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeRegistryCount(
     JNIEnv* /*env*/, jobject /*thiz*/) {
   return static_cast<jint>(
-      retailens::StitcherWorkletRegistry::shared().count());
+      rnis::StitcherWorkletRegistry::shared().count());
 }
 
 // ─── per-frame extraction-config gate ──────────────────────────────
 //
-// Returns the current `retailens::getExtractionConfig()` packed into a
+// Returns the current `rnis::getExtractionConfig()` packed into a
 // `jint` bitmask so Kotlin can cheaply read the JS-driven
 // enableDepth/enableAnchors/enableMesh toggles once per frame and skip
 // the costly ARCore depth-acquire / anchor-collect / mesh-build work
@@ -132,7 +132,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeRegistryCount(
 extern "C" JNIEXPORT jint JNICALL
 Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeExtractionFlags(
     JNIEnv* /*env*/, jobject /*thiz*/) {
-  const retailens::ExtractionConfig cfg = retailens::getExtractionConfig();
+  const rnis::ExtractionConfig cfg = rnis::getExtractionConfig();
   jint flags = 0;
   if (cfg.depth) flags |= 0x1;
   if (cfg.anchors) flags |= 0x2;
@@ -181,7 +181,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
   // Fast-path early-exit BEFORE the JNI byte-array copy.  Saves the
   // ~3MB memcpy + JSI host object alloc on every frame in the
   // common first-party-only case.
-  if (retailens::StitcherWorkletRegistry::shared().count() == 0) {
+  if (rnis::StitcherWorkletRegistry::shared().count() == 0) {
     return;
   }
 
@@ -220,7 +220,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
   // Build CameraFrameData.  Field semantics match the iOS
   // `CameraFrameHostObject::fromARFrame:pose:` factory; this is
   // the Android equivalent path.
-  retailens::CameraFrameData data;
+  rnis::CameraFrameData data;
   data.source = "ar";
   data.width = static_cast<int32_t>(width);
   data.height = static_cast<int32_t>(height);
@@ -260,7 +260,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
   if (depthBytes != nullptr && depthWidth > 0 && depthHeight > 0) {
     const jsize depthLen = env->GetArrayLength(depthBytes);
     if (depthLen > 0) {
-      retailens::ArDepth depth;
+      rnis::ArDepth depth;
       depth.width = static_cast<int32_t>(depthWidth);
       depth.height = static_cast<int32_t>(depthHeight);
       depth.format = "u16packed";
@@ -297,7 +297,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
   // transforms (double[16][]), and the per-anchor mesh byte arrays
   // meshVertices (byte[][], Float32 xyz triplets) + meshFaces (byte[][],
   // Uint32 triangle indices) — both NULL for non-mesh anchors.  Build one
-  // `retailens::ArAnchor` per entry; the transform is already ROW-MAJOR
+  // `rnis::ArAnchor` per entry; the transform is already ROW-MAJOR
   // (anchor->world) — Kotlin transposed ARCore's column-major OpenGL
   // matrix before marshaling (mesh anchors emit identity: the vertices
   // are camera-local).  Empty arrays (the common case — no host opted
@@ -308,7 +308,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
     const jsize anchorCount = env->GetArrayLength(anchorIds);
     data.arAnchors.reserve(static_cast<std::size_t>(anchorCount));
     for (jsize i = 0; i < anchorCount; ++i) {
-      retailens::ArAnchor anchor;
+      rnis::ArAnchor anchor;
 
       auto idObj = reinterpret_cast<jstring>(
           env->GetObjectArrayElement(anchorIds, i));
@@ -430,7 +430,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
   // The shared dispatch helper handles the registry snapshot,
   // host-object construction (inside the worklet thread), per-
   // worklet failure isolation, and invalidation.
-  retailens::dispatchToHostWorklets(
+  rnis::dispatchToHostWorklets(
       RNWorklet::JsiWorkletContext::getDefaultInstance(),
       std::move(data));
 }

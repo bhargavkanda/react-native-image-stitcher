@@ -56,7 +56,7 @@ public struct QualityScores: Equatable {
   public let brightnessScore: Double
 
   /// Veiling-glare score in [0, 255] from the shared C++ dark-channel
-  /// detector (`retailens::computeGlareScore`, via GlareBridge).
+  /// detector (`rnis::computeGlareScore`, via GlareBridge).
   /// Higher = more specular-veiling reflection (e.g. a glass cooler
   /// door reflecting the bright outdoor scene over the products).
   /// The pass/fail `maxGlare` cutoff (≈33) lives on the JS side so

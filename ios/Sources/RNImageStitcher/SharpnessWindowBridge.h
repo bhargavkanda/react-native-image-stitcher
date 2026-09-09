@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // SharpnessWindowBridge.h — Obj-C facade over the shared C++
-// retailens::SharpnessWindowMachine (cpp/sharpness_window.{hpp,cpp}),
+// rnis::SharpnessWindowMachine (cpp/sharpness_window.{hpp,cpp}),
 // the pick-sharpest-in-window DECISION machine.
 //
 // Same bridge pattern as KeyframeGateBridge: Swift can't touch the
@@ -18,7 +18,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// 1:1 with retailens::SharpnessWindowAction — static_asserts in the
+/// 1:1 with rnis::SharpnessWindowAction — static_asserts in the
 /// .mm pin the raw values against the C++ enum.
 typedef NS_ENUM(NSInteger, RNISSharpnessWindowAction) {
     RNISSharpnessWindowActionNone            = 0,

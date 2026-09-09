@@ -41,7 +41,7 @@
 #include <cstdint>
 #include "ar_frame_pose.h"
 
-namespace retailens {
+namespace rnis {
 
 /// Strategy selector — chooses how the gate measures "new content" for
 /// the accept decision.  Set via `setStrategy(...)` between captures;
@@ -54,7 +54,7 @@ namespace retailens {
 ///          Cheap but oversensitive when the latched plane covers a
 ///          small fraction of the visible frame: 6 cm of physical
 ///          motion at 2.7 m perpDist on a 0.4×1.6 m plane produced 6
-///          accepts in 1 s (Ram report 2026-05-13).
+///          accepts in 1 s (the maintainer report 2026-05-13).
 ///
 ///   Flow — V16 fix-attempt-8/A2: sparse Lucas-Kanade optical flow.
 ///          Detect Shi-Tomasi corners once per accepted keyframe;
@@ -168,7 +168,7 @@ public:
     /// even if novelty < `overlapThreshold`.  Purpose: prevent the
     /// upstream stitcher's matcher from being fed two views with so
     /// much parallax that even an affine match-confidence collapses
-    /// (Ram report 2026-05-13: captures with 25-60 cm of camera
+    /// (the maintainer report 2026-05-13: captures with 25-60 cm of camera
     /// translation between keyframes produced validPairs=0 even after
     /// the matcher swap to AffineBestOf2NearestMatcher).  Default
     /// 0.0 = disabled (back-compat).  Sensible production setting:
@@ -299,4 +299,4 @@ private:
         Impl& s, const Pose& pose);
 };
 
-} // namespace retailens
+} // namespace rnis

@@ -34,7 +34,7 @@
 
 #import <Foundation/Foundation.h>
 #import <CoreVideo/CoreVideo.h>
-#import "OpenCVIncrementalStitcher.h"  // RLISFrameOutcome, RLISFrameTelemetry, RLISSnapshot
+#import "OpenCVIncrementalStitcher.h"  // RNISFrameOutcome, RNISFrameTelemetry, RNISSnapshot
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -56,8 +56,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// state (prev features tracked under different settings).  Best
 /// practice: reset the engine when config changes.  If never called,
 /// the engine uses a default equivalent to
-/// `+[RLISStitcherConfig configForMode:@"slitscan-both"]`.
-- (void)setConfig:(RLISStitcherConfig *)config;
+/// `+[RNISStitcherConfig configForMode:@"slitscan-both"]`.
+- (void)setConfig:(RNISStitcherConfig *)config;
 
 /// V15.0b — set the world-frame plane transform (4×4, column-major,
 /// 16 floats).  Should be called once a vertical plane has been
@@ -66,7 +66,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// back to pose-driven projection.
 - (void)setPlaneTransformFlat:(NSArray<NSNumber *> *)transform16;
 
-- (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
+- (RNISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                        qx:(double)qx
                                        qy:(double)qy
                                        qz:(double)qz
@@ -87,10 +87,10 @@ NS_ASSUME_NONNULL_BEGIN
                              trackingPoor:(BOOL)trackingPoor
     NS_SWIFT_NAME(ingest(pixelBuffer:qx:qy:qz:qw:tx:ty:tz:fx:fy:cx:cy:imageWidth:imageHeight:yaw:pitch:fovHorizDegrees:fovVertDegrees:trackingPoor:));
 
-- (nullable RLISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
+- (nullable RNISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
                                               error:(NSError **)error;
 
-- (nullable RLISSnapshot *)finalizeAtPath:(NSString *)outputPath
+- (nullable RNISSnapshot *)finalizeAtPath:(NSString *)outputPath
                               jpegQuality:(NSInteger)quality
                                     error:(NSError **)error;
 

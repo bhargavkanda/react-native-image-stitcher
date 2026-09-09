@@ -77,7 +77,7 @@ namespace RNWorklet {
 class WorkletInvoker;
 }
 
-namespace retailens {
+namespace rnis {
 
 /// One registered host worklet.  Public so callers iterating via
 /// `snapshot` can read both the ID and the invoker.
@@ -143,4 +143,4 @@ class StitcherWorkletRegistry {
   int _nextId = 0;
 };
 
-}  // namespace retailens
+}  // namespace rnis

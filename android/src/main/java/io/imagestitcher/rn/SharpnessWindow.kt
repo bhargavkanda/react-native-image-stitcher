@@ -45,7 +45,7 @@ internal class SharpnessWindow : AutoCloseable {
         close()
     }
 
-    /** 1:1 with retailens::SharpnessWindowAction (pinned by the JNI). */
+    /** 1:1 with rnis::SharpnessWindowAction (pinned by the JNI). */
     enum class Action {
         NONE,
         SAVE_IMMEDIATELY,

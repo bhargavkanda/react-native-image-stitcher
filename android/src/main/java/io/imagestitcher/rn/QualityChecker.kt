@@ -246,7 +246,7 @@ class QualityChecker(reactContext: ReactApplicationContext)
 
     // ── JNI thunk ───────────────────────────────────────────────
     //
-    // Bridges to the shared C++ retailens::computeGlareScore (see
+    // Bridges to the shared C++ rnis::computeGlareScore (see
     // cpp/glare.{hpp,cpp}) via glare_jni.cpp.  matAddr is the
     // OpenCV-Java Mat.nativeObjAddr of a COLOUR (BGR, CV_8UC3) Mat;
     // returns the mean dark-channel veiling-glare score on a 0..255

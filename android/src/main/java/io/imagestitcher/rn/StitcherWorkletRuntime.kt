@@ -296,7 +296,7 @@ object StitcherWorkletRuntime {
 
     /// JNI binding: `nativeExtractionFlags` in
     /// `android/src/main/cpp/stitcher_jsi_install_jni.cpp`.  Packs
-    /// `retailens::getExtractionConfig()` into a bitmask
+    /// `rnis::getExtractionConfig()` into a bitmask
     /// (bit0=depth, bit1=anchors, bit2=mesh).
     @JvmStatic
     private external fun nativeExtractionFlags(): Int

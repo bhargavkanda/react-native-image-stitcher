@@ -26,7 +26,7 @@
  *   • `SlitscanSettings`  — for Layer 2 hosts using the slit-scan
  *                            engine (incremental.start({ engine:
  *                            'slitscan-*', ... })).
- *   • `HybridSettings`    — for the RetaiLens-specific hybrid live
+ *   • `HybridSettings`    — for the host-specific hybrid live
  *                            engine.  Exported for completeness;
  *                            most consumers won't touch it.
  *
@@ -41,7 +41,7 @@
  *
  * No automated migration helper.  v0.4 is a clean break; the
  * v0.3 `PanoramaSettings` type is deleted.  Consumers (notably
- * `retailens-camera-sdk`) update their settings literals to match
+ * `host-camera-sdk`) update their settings literals to match
  * the new shape.  See the v0.4.0 CHANGELOG entry for the field-
  * by-field mapping.
  */

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // glare_jni.cpp — JNI binding exposing the shared C++
-// retailens::computeGlareScore (in ../../../../cpp/glare.{hpp,cpp}) to
+// rnis::computeGlareScore (in ../../../../cpp/glare.{hpp,cpp}) to
 // the Kotlin side (io.imagestitcher.rn.QualityChecker).
 //
 // Architecture parity with iOS:
@@ -55,7 +55,7 @@ Java_io_imagestitcher_rn_QualityChecker_nativeComputeGlareScore(
         return 0.0;
     }
     const cv::Mat* mat = reinterpret_cast<const cv::Mat*>(matAddr);
-    return static_cast<jdouble>(retailens::computeGlareScore(*mat));
+    return static_cast<jdouble>(rnis::computeGlareScore(*mat));
 }
 
 } // extern "C"

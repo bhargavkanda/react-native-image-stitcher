@@ -33,7 +33,7 @@ extern NSString *const RNImageStitcherErrorDomain;
 @property (nonatomic, assign, readonly) NSInteger height;
 @property (nonatomic, assign, readonly) double durationMs;
 /// 2026-05-16 (Issue 5) — C+D progressive-confidence retry telemetry
-/// sourced from `retailens::StitchResult`.  Surface in the JS finalize
+/// sourced from `rnis::StitchResult`.  Surface in the JS finalize
 /// dict so the host can render a debug toast on retry.
 ///
 ///   framesRequested:        number of keyframes handed to the stitcher

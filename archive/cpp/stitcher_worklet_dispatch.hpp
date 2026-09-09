@@ -2,7 +2,7 @@
 //
 // stitcher_worklet_dispatch.hpp — shared C++ helper that fans out a
 // `StitcherFrameData` to every host worklet registered in the
-// process-scope `retailens::StitcherWorkletRegistry`.
+// process-scope `rnis::StitcherWorkletRegistry`.
 //
 // v0.8.0 Phase 4b.iii — used by Android's per-frame fan-out path
 // (`StitcherWorkletRuntime.dispatchToHostWorklets` → JNI binding →
@@ -34,7 +34,7 @@ namespace RNWorklet {
 class JsiWorkletContext;
 }
 
-namespace retailens {
+namespace rnis {
 
 /// Fan out a `StitcherFrameData` to every registered host worklet.
 ///
@@ -68,4 +68,4 @@ namespace retailens {
 void dispatchToHostWorklets(RNWorklet::JsiWorkletContext* context,
                              StitcherFrameData data);
 
-}  // namespace retailens
+}  // namespace rnis

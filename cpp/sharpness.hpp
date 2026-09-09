@@ -44,7 +44,7 @@
 // lives only in sharpness.cpp's translation unit.
 namespace cv { class Mat; }
 
-namespace retailens {
+namespace rnis {
 
 // Canonical working size for `sharpnessScore`: inputs whose longest
 // edge exceeds this are INTER_AREA-downscaled (never upscaled) before
@@ -81,4 +81,4 @@ double varianceOfLaplacian(const cv::Mat& gray);
 // working edge is a fixed constant and not a parameter.
 double sharpnessScore(const cv::Mat& image);
 
-}  // namespace retailens
+}  // namespace rnis

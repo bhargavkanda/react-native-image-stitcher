@@ -75,7 +75,7 @@ FetchContent_MakeAvailable(googletest)
 # Order matters: stubs/ comes FIRST so `#include <jsi/jsi.h>` and
 # `#include <react-native-worklets-core/WKTJsiWorklet.h>` resolve to
 # the test-only stubs before any system header.  The production cpp/
-# directory comes after so retailens:: headers (e.g. ar_frame_pose.h,
+# directory comes after so rnis:: headers (e.g. ar_frame_pose.h,
 # camera_frame_data.hpp) are found as the production code expects.
 include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs

@@ -12,7 +12,7 @@
 //
 // Platform-specific code (Obj-C++ on iOS, JNI on Android) only
 // owns the bootstrap: get a handle to the main JS runtime, then
-// call `retailens::installStitcherProxy(runtime)`.
+// call `rnis::installStitcherProxy(runtime)`.
 //
 // ## Surface
 //
@@ -22,7 +22,7 @@
 //
 // `install` wraps the worklet into a `RNWorklet::WorkletInvoker`
 // and stores it in the process-scope C++
-// `retailens::StitcherWorkletRegistry`.  The AR worklet runtime
+// `rnis::StitcherWorkletRegistry`.  The AR worklet runtime
 // (iOS' `RNSARWorkletRuntime`, Android's `StitcherWorkletRuntime`)
 // reads from that registry to fan out per-frame invocations.
 
@@ -30,7 +30,7 @@
 
 #include <jsi/jsi.h>
 
-namespace retailens {
+namespace rnis {
 
 /// Install `globalThis.__stitcherProxy` on the supplied runtime.
 /// Idempotent — re-installing overwrites the existing global with
@@ -43,4 +43,4 @@ namespace retailens {
 /// Android: `@ReactMethod(isBlockingSynchronousMethod = true)`).
 void installStitcherProxy(facebook::jsi::Runtime& runtime);
 
-}  // namespace retailens
+}  // namespace rnis

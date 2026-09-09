@@ -11,15 +11,15 @@
 // Pin the Obj-C enum raw values to the C++ enum so a re-ordering on
 // either side is a compile error, not a silent behaviour change.
 static_assert((NSInteger)RNISBlurAdmissionCommit ==
-              (NSInteger)retailens::BlurAdmission::Commit, "");
+              (NSInteger)rnis::BlurAdmission::Commit, "");
 static_assert((NSInteger)RNISBlurAdmissionHoldForMotion ==
-              (NSInteger)retailens::BlurAdmission::HoldForMotion, "");
+              (NSInteger)rnis::BlurAdmission::HoldForMotion, "");
 static_assert((NSInteger)RNISBlurAdmissionHoldForSoftness ==
-              (NSInteger)retailens::BlurAdmission::HoldForSoftness, "");
+              (NSInteger)rnis::BlurAdmission::HoldForSoftness, "");
 
 @implementation RNISBlurPolicyBridge {
-    retailens::BlurPolicyConfig _config;
-    std::unique_ptr<retailens::RunningScoreMedian> _median;
+    rnis::BlurPolicyConfig _config;
+    std::unique_ptr<rnis::RunningScoreMedian> _median;
 }
 
 - (instancetype)init {
@@ -28,8 +28,8 @@ static_assert((NSInteger)RNISBlurAdmissionHoldForSoftness ==
         // forward-progress cap, so an engine that never calls
         // `configure…` behaves exactly as it did before this policy
         // existed.
-        _config = retailens::BlurPolicyConfig();
-        _median = std::make_unique<retailens::RunningScoreMedian>();
+        _config = rnis::BlurPolicyConfig();
+        _median = std::make_unique<rnis::RunningScoreMedian>();
     }
     return self;
 }
@@ -54,13 +54,13 @@ static_assert((NSInteger)RNISBlurAdmissionHoldForSoftness ==
                             panRateRadPerSec:(double)panRateRadPerSec
                             consecutiveHolds:(NSInteger)consecutiveHolds
 {
-    retailens::BlurAdmissionInput in;
+    rnis::BlurAdmissionInput in;
     in.candidateScore     = candidateScore;
     in.sessionMedianScore = _median->median();
     in.panRateRadPerSec   = panRateRadPerSec;
     in.consecutiveHolds   = static_cast<int32_t>(consecutiveHolds);
     return static_cast<RNISBlurAdmission>(
-        retailens::admitKeyframe(_config, in));
+        rnis::admitKeyframe(_config, in));
 }
 
 - (void)recordAcceptedScore:(double)score {

@@ -13,7 +13,7 @@
 //
 // `install` wraps the worklet function into a
 // `RNWorklet::WorkletInvoker` and stores it in the C++
-// `retailens::StitcherWorkletRegistry` singleton (in
+// `rnis::StitcherWorkletRegistry` singleton (in
 // `cpp/stitcher_worklet_registry.{hpp,cpp}`).  The AR worklet
 // runtime's per-frame dispatch reads from that registry to fan
 // out invocations.

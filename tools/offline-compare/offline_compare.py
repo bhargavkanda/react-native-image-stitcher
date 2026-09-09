@@ -6,20 +6,20 @@ sweep for root-cause analysis).  No eyeballing: same input keyframes, both
 budgets, measured SSIM + wall time.
 
 A debug pack is the directory the app writes when `debugPack` is on:
-    rlis-capture-<uuid>/
+    rnis-capture-<uuid>/
         keyframe-0.jpg ... keyframe-N.jpg
         pack.json          (device, recipe, result, timings)
 
 Pull one from the device with:
     adb -s <serial> exec-out run-as com.rnimagestitcherexample \
-        tar c cache/rlis-capture-<uuid> | tar x -C <dest>
+        tar c cache/rnis-capture-<uuid> | tar x -C <dest>
 (or `adb pull` if the app exposes it).  Then:
 
     venv/bin/python offline_compare.py <pack_dir> [--serial S] [--floor 0.6]
                                        [--ablate] [--out report/]
 
 What it does per run: pushes the keyframes + stitch_probe + libc++ to the
-device, runs retailens::stitchFramePaths, pulls the stitched JPEG, and records
+device, runs rnis::stitchFramePaths, pulls the stitched JPEG, and records
 wallMs/dims.  It runs at least:
     field   — the pack's EXACT recipe (reproduces the field stitch time)
     off     — compose 1.0 MP

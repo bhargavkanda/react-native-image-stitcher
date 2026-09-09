@@ -164,7 +164,7 @@ public final class IncrementalStateObject: NSObject {
 /// React Native device events.  Keeping the engine framework-free
 /// keeps Swift unit tests viable.
 public extension Notification.Name {
-    static let retailensIncrementalStateUpdate =
+    static let rnisIncrementalStateUpdate =
         Notification.Name("IncrementalStateUpdate")
 }
 
@@ -258,7 +258,7 @@ public final class IncrementalStitcher: NSObject {
     /// under one filter.  FAULT-level survives NSLog's burst rate-limit
     /// (~10/sec) — diagnostic logs at 50fps would otherwise be dropped.
     fileprivate static let diagLog = OSLog(
-        subsystem: "com.tiger.retailens.sdk",
+        subsystem: "io.imagestitcher.rn",
         category: "slitscan"
     )
 
@@ -770,12 +770,12 @@ public final class IncrementalStitcher: NSObject {
         let rollRadians = Double(frame.camera.eulerAngles.z)
         let rollDegrees = rollRadians * 180.0 / .pi
         let classified: String
-        // Empirically calibrated against Ram's 2026-05-11 3-capture
+        // Empirically calibrated against the maintainer's 2026-05-11 3-capture
         // test (1st=L-left, 2nd=portrait, 3rd=L-right):
-        //   Ram's "landscape-left"  →  roll ≈ 0°    (NOT -90° as I assumed)
-        //   Ram's "portrait"        →  roll ≈ -90°
-        //   Ram's "landscape-right" →  roll ≈ ±180°
-        //   Ram's "portrait-upside-down" →  roll ≈ +90° (by symmetry, untested)
+        //   the maintainer's "landscape-left"  →  roll ≈ 0°    (NOT -90° as I assumed)
+        //   the maintainer's "portrait"        →  roll ≈ -90°
+        //   the maintainer's "landscape-right" →  roll ≈ ±180°
+        //   the maintainer's "portrait-upside-down" →  roll ≈ +90° (by symmetry, untested)
         //
         // Why this differs from the device-orientation intuition:
         // ARKit's `camera.eulerAngles.z` is the camera's roll around
@@ -1559,7 +1559,7 @@ public final class IncrementalStitcher: NSObject {
         // limit.  Restart on the main thread after the stitch
         // completes so the next capture has AR ready (next plane
         // detection + tracking re-initialise will take 2-3 s, which
-        // matches Ram's chosen "Option C" trade-off).
+        // matches the maintainer's chosen "Option C" trade-off).
         //
         // `arWasRunning` was computed above into FinalizePayload — read
         // from `payload.arWasRunning` here so we have one source of
@@ -1803,7 +1803,7 @@ public final class IncrementalStitcher: NSObject {
                             return
                         }
                         // Keep saved keyframes on disk for post-hoc
-                        // re-processing (Ram's request).  Cleanup is
+                        // re-processing (the maintainer's request).  Cleanup is
                         // a follow-up debug-menu task.
                         // 2026-05-16 (Issue 5) — surface C+D
                         // progressive-confidence retry telemetry to JS
@@ -2156,7 +2156,7 @@ public final class IncrementalStitcher: NSObject {
             dict["refineError"] = e
         }
         NotificationCenter.default.post(
-            name: .retailensIncrementalStateUpdate,
+            name: .rnisIncrementalStateUpdate,
             object: nil,
             userInfo: dict
         )
@@ -2286,7 +2286,7 @@ public final class IncrementalStitcher: NSObject {
         ] as [String: Any]
         dict["batchKeyframeAcceptedAtMs"] = acceptedAtMs
         NotificationCenter.default.post(
-            name: .retailensIncrementalStateUpdate,
+            name: .rnisIncrementalStateUpdate,
             object: nil,
             userInfo: dict
         )
@@ -2449,7 +2449,7 @@ public final class IncrementalStitcher: NSObject {
         self.lastState = state
         stateLock.unlock()
         NotificationCenter.default.post(
-            name: .retailensIncrementalStateUpdate,
+            name: .rnisIncrementalStateUpdate,
             object: nil,
             userInfo: state.asDictionary()
         )
@@ -3319,12 +3319,12 @@ public final class IncrementalStitcher: NSObject {
     // iOS Console rate-limits Swift NSLog at 60 Hz, dropping most
     // output silently.  File-based log captures everything, and we
     // can pull it from Xcode's device-container browser.  Path:
-    // <Documents>/rlis-debug.log
-    private static let debugLogQueue = DispatchQueue(label: "rlis.debuglog")
+    // <Documents>/rnis-debug.log
+    private static let debugLogQueue = DispatchQueue(label: "rnis.debuglog")
     private static var debugLogPath: String = {
         let docs = NSSearchPathForDirectoriesInDomains(
             .documentDirectory, .userDomainMask, true).first ?? NSTemporaryDirectory()
-        return (docs as NSString).appendingPathComponent("rlis-debug.log")
+        return (docs as NSString).appendingPathComponent("rnis-debug.log")
     }()
     static func fileLog(_ msg: String) {
         let line = "\(Date().timeIntervalSince1970): \(msg)\n"
@@ -3340,7 +3340,7 @@ public final class IncrementalStitcher: NSObject {
             }
         }
         // Also try NSLog in case it does work occasionally
-        NSLog("[RLIS-PIP] %@", msg)
+        NSLog("[RNIS-PIP] %@", msg)
     }
 
     // ── Helpers ─────────────────────────────────────────────────────

@@ -165,7 +165,7 @@ package io.imagestitcher.rn
 
 // --- FrameOutcome / FrameTelemetry / StitcherSnapshot + class IncrementalEngine (hybrid live engine)  (was IncrementalStitcher.kt:2381-2934) ---
 
-// ── Frame outcome — mirrors iOS RLISFrameOutcome ────────────────────
+// ── Frame outcome — mirrors iOS RNISFrameOutcome ────────────────────
 
 internal enum class FrameOutcome {
     AcceptedHigh,
@@ -190,7 +190,7 @@ internal data class FrameTelemetry(
     val confidence: Double,
     val processingMs: Double,
     /** V12.12 — engine-detected orientation.  Mirrors iOS'
-     *  `RLISFrameTelemetry.isLandscape`.  TRUE for landscape capture
+     *  `RNISFrameTelemetry.isLandscape`.  TRUE for landscape capture
      *  (vertical pan), FALSE for portrait (horizontal pan).  Stays
      *  at the FIRST-FRAME determination thereafter. */
     val isLandscape: Boolean = false,
@@ -490,7 +490,7 @@ internal class IncrementalEngine(
                 snapshotSeq++
                 val slot = snapshotSeq % 4
                 val tmpPath = "${System.getProperty("java.io.tmpdir") ?: "/data/local/tmp"}" +
-                              "/rlis-live-$slot.jpg"
+                              "/rnis-live-$slot.jpg"
                 // tightCrop = true for live snapshots: the canvas is
                 // 4800x2200, but most of it is empty until the pan
                 // covers it.  Without a tight crop, every snapshot

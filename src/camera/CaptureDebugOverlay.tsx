@@ -21,7 +21,7 @@
  *   its own styling/layout that would distract from the main capture
  *   UX.  Splitting it out keeps Camera.tsx focused and the debug
  *   surface easy to evolve independently (future F9 work — port the
- *   richer memory bubble + stitch toast from the RetaiLens host).
+ *   richer memory bubble + stitch toast from the the host app host).
  *
  *   This component is intentionally PRESENTATIONAL — all data is
  *   pushed in as props.  The host (Camera.tsx) owns the

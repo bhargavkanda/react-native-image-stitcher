@@ -5,7 +5,7 @@
 //
 // Why this exists (same posture as KeyframeGateBridge.h):
 //   The glare score is computed by the cross-platform C++
-//   `retailens::computeGlareScore` so iOS and Android measure
+//   `rnis::computeGlareScore` so iOS and Android measure
 //   veiling-reflection glare identically.  Swift cannot `#import`
 //   the C++ header (`glare.hpp` forward-declares `cv::Mat`, and the
 //   pod's umbrella module is compiled in a pure-Obj-C context under
@@ -21,7 +21,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Thin Obj-C wrapper around `retailens::computeGlareScore`.
+/// Thin Obj-C wrapper around `rnis::computeGlareScore`.
 ///
 /// V1 measures glare over the C++ central-box ROI fallback (no ROI is
 /// passed), matching the QualityChecker blur/brightness path which
@@ -36,7 +36,7 @@ NS_SWIFT_NAME(GlareBridge)
 /// @return mean dark-channel over the central product region, on a
 ///         0..255 scale (higher = more glare).  Returns 0.0 if the
 ///         file is missing or cannot be decoded (same "unusable input
-///         → 0.0" contract as `retailens::computeGlareScore`).
+///         → 0.0" contract as `rnis::computeGlareScore`).
 + (double)glareScoreForImageAtPath:(NSString *)path
     NS_SWIFT_NAME(glareScore(forImageAtPath:));
 

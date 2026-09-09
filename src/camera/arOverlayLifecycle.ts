@@ -7,7 +7,7 @@
  * PROCESS-WIDE singleton: it outlives any single `ARCameraView` instance AND
  * AR-session restarts. So a component that drives it declaratively must clean
  * up after itself, or its last set of shapes leaks into whatever AR view
- * mounts next (observed: digital-twin detection quads persisting into an
+ * mounts next (observed: scene-model detection quads persisting into an
  * unrelated photo-mode view after a mode swap).
  *
  * Two decisions govern that cleanup; both are pure so they unit-test in the

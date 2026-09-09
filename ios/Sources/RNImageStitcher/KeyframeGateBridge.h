@@ -24,7 +24,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Mirror of `retailens::GateStrategy` (keyframe_gate.hpp).  Bridged as
+/// Mirror of `rnis::GateStrategy` (keyframe_gate.hpp).  Bridged as
 /// raw NSInteger across Obj-C; the Swift facade lifts it to an enum.
 /// MUST stay 1:1 with the C++ enum integer values.
 typedef NS_ENUM(NSInteger, KGBStrategy) {
@@ -32,7 +32,7 @@ typedef NS_ENUM(NSInteger, KGBStrategy) {
     KGBStrategyFlow = 1,   ///< Sparse-optical-flow novelty (V16 A2)
 };
 
-/// Mirror of `retailens::KeyframeGateDecision` in keyframe_gate.hpp.
+/// Mirror of `rnis::KeyframeGateDecision` in keyframe_gate.hpp.
 /// `reasonCode` is the raw int32 of the C++ enum; `reasonString` is
 /// the human-readable label matching the original Swift telemetry
 /// strings (so JS telemetry stays bit-identical).
@@ -46,7 +46,7 @@ NS_SWIFT_NAME(KeyframeGateBridgeDecision)
 @property (nonatomic, readonly) NSInteger maxCount;
 @end
 
-/// Thin Obj-C++ wrapper around `retailens::KeyframeGate`.  All
+/// Thin Obj-C++ wrapper around `rnis::KeyframeGate`.  All
 /// methods are 1:1 with the C++ API except `evaluate…`, which
 /// flattens the Swift call shape (pose struct + optional plane
 /// matrix) into primitive C-callable args.

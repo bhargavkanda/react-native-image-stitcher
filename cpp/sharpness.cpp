@@ -25,7 +25,7 @@
 
 #include "sharpness.hpp"
 
-namespace retailens {
+namespace rnis {
 
 double varianceOfLaplacian(const cv::Mat& gray) {
   if (gray.empty()) {
@@ -80,4 +80,4 @@ double sharpnessScore(const cv::Mat& image) {
   return varianceOfLaplacian(work);
 }
 
-}  // namespace retailens
+}  // namespace rnis

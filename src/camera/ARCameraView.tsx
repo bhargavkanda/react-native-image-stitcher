@@ -608,7 +608,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
     // Declarative overlays are cleared on UNMOUNT (effect below): the native
     // JS-overlay collection is a process-wide singleton that outlives this
     // component AND session restarts, so without the clear the NEXT mounted
-    // AR view renders this instance's stale shapes (observed: digital-twin
+    // AR view renders this instance's stale shapes (observed: scene-model
     // detection quads persisting into an unrelated photo-mode AR view). The
     // clear is gated on this instance having actually driven declaratively —
     // an imperative-only host keeps full ownership across remounts.

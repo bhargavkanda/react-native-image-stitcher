@@ -6,7 +6,7 @@
 // Kotlin's `StitcherJsiInstallerModule.nativeInstall(jsiRuntimeRef)`
 // calls into this file.  We unbox the `jsi::Runtime*` from the
 // Java `long` and hand it to the shared
-// `retailens::installStitcherProxy(runtime)` function which sets
+// `rnis::installStitcherProxy(runtime)` function which sets
 // `globalThis.__stitcherProxy`.  Same destination as iOS — the
 // host object class lives in `cpp/stitcher_proxy_jsi.{hpp,cpp}`.
 //
@@ -66,7 +66,7 @@ Java_io_imagestitcher_rn_StitcherJsiInstallerModule_nativeInstall(
     return JNI_FALSE;
   }
   auto* runtime = reinterpret_cast<facebook::jsi::Runtime*>(jsiRuntimeRef);
-  retailens::installStitcherProxy(*runtime);
+  rnis::installStitcherProxy(*runtime);
   LOGI("installed globalThis.__stitcherProxy on main JS runtime.");
   return JNI_TRUE;
 }
@@ -81,7 +81,7 @@ Java_io_imagestitcher_rn_StitcherJsiInstallerModule_nativeInstall(
 
 namespace {
 
-class AndroidNV21BufferReader : public retailens::PixelBufferReader {
+class AndroidNV21BufferReader : public rnis::PixelBufferReader {
  public:
   explicit AndroidNV21BufferReader(std::vector<uint8_t>&& bytes)
       : _bytes(std::move(bytes)) {}
@@ -114,7 +114,7 @@ extern "C" JNIEXPORT jint JNICALL
 Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeRegistryCount(
     JNIEnv* /*env*/, jobject /*thiz*/) {
   return static_cast<jint>(
-      retailens::StitcherWorkletRegistry::shared().count());
+      rnis::StitcherWorkletRegistry::shared().count());
 }
 
 // ─── v0.8.0 Phase 4b.iii — per-frame dispatch JNI binding ──────────
@@ -147,7 +147,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
   // Fast-path early-exit BEFORE the JNI byte-array copy.  Saves the
   // ~3MB memcpy + JSI host object alloc on every frame in the
   // common first-party-only case.
-  if (retailens::StitcherWorkletRegistry::shared().count() == 0) {
+  if (rnis::StitcherWorkletRegistry::shared().count() == 0) {
     return;
   }
 
@@ -186,7 +186,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
   // Build StitcherFrameData.  Field semantics match the iOS
   // `StitcherFrameHostObject::fromARFrame:pose:` factory; this is
   // the Android equivalent path.
-  retailens::StitcherFrameData data;
+  rnis::StitcherFrameData data;
   data.source = "ar";
   data.width = static_cast<int32_t>(width);
   data.height = static_cast<int32_t>(height);
@@ -221,7 +221,7 @@ Java_io_imagestitcher_rn_StitcherWorkletRuntime_nativeDispatchToHostWorklets(
   // The shared dispatch helper handles the registry snapshot,
   // host-object construction (inside the worklet thread), per-
   // worklet failure isolation, and invalidation.
-  retailens::dispatchToHostWorklets(
+  rnis::dispatchToHostWorklets(
       RNWorklet::JsiWorkletContext::getDefaultInstance(),
       std::move(data));
 }

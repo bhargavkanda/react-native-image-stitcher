@@ -66,18 +66,18 @@ cv::Mat blurred(const cv::Mat& src) {
 
 TEST(SharpnessTest, ConstantImageScoresNearZero) {
   cv::Mat flat(480, 640, CV_8UC1, cv::Scalar(128));
-  EXPECT_NEAR(retailens::varianceOfLaplacian(flat), 0.0, 1e-9);
+  EXPECT_NEAR(rnis::varianceOfLaplacian(flat), 0.0, 1e-9);
 }
 
 TEST(SharpnessTest, EmptyMatScoresZero) {
-  EXPECT_EQ(retailens::varianceOfLaplacian(cv::Mat()), 0.0);
-  EXPECT_EQ(retailens::sharpnessScore(cv::Mat()), 0.0);
+  EXPECT_EQ(rnis::varianceOfLaplacian(cv::Mat()), 0.0);
+  EXPECT_EQ(rnis::sharpnessScore(cv::Mat()), 0.0);
 }
 
 TEST(SharpnessTest, CheckerboardSharperThanItsBlurredCopy) {
   const cv::Mat sharp = makeCheckerboard(480, 640, 8);
-  const double sharpScore = retailens::varianceOfLaplacian(sharp);
-  const double blurScore = retailens::varianceOfLaplacian(blurred(sharp));
+  const double sharpScore = rnis::varianceOfLaplacian(sharp);
+  const double blurScore = rnis::varianceOfLaplacian(blurred(sharp));
   EXPECT_GT(sharpScore, 0.0);
   // Strictly greater is the contract; in practice the gap is huge
   // (square-wave edges lose most of their second derivative under a
@@ -89,8 +89,8 @@ TEST(SharpnessTest, CheckerboardSharperThanItsBlurredCopy) {
 
 TEST(SharpnessTest, NoiseTextureSharperThanItsBlurredCopy) {
   const cv::Mat sharp = makeNoise(480, 640);
-  const double sharpScore = retailens::varianceOfLaplacian(sharp);
-  const double blurScore = retailens::varianceOfLaplacian(blurred(sharp));
+  const double sharpScore = rnis::varianceOfLaplacian(sharp);
+  const double blurScore = rnis::varianceOfLaplacian(blurred(sharp));
   EXPECT_GT(sharpScore, 0.0);
   EXPECT_GT(sharpScore, 2.0 * blurScore);
 }
@@ -103,9 +103,9 @@ TEST(SharpnessTest, MonotoneUnderIncreasingBlur) {
   cv::Mat blur1, blur2;
   cv::GaussianBlur(sharp, blur1, cv::Size(5, 5), 1.0);
   cv::GaussianBlur(sharp, blur2, cv::Size(13, 13), 3.0);
-  const double s0 = retailens::varianceOfLaplacian(sharp);
-  const double s1 = retailens::varianceOfLaplacian(blur1);
-  const double s2 = retailens::varianceOfLaplacian(blur2);
+  const double s0 = rnis::varianceOfLaplacian(sharp);
+  const double s1 = rnis::varianceOfLaplacian(blur1);
+  const double s2 = rnis::varianceOfLaplacian(blur2);
   EXPECT_GT(s0, s1);
   EXPECT_GT(s1, s2);
 }
@@ -117,8 +117,8 @@ TEST(SharpnessTest, ColorInputIsConvertedToGray) {
   const cv::Mat gray = makeCheckerboard(240, 320, 8);
   cv::Mat bgr;
   cv::merge(std::vector<cv::Mat>{gray, gray, gray}, bgr);
-  const double grayScore = retailens::varianceOfLaplacian(gray);
-  const double bgrScore = retailens::varianceOfLaplacian(bgr);
+  const double grayScore = rnis::varianceOfLaplacian(gray);
+  const double bgrScore = rnis::varianceOfLaplacian(bgr);
   EXPECT_GT(bgrScore, 0.0);
   EXPECT_NEAR(bgrScore, grayScore, grayScore * 0.05);
 }
@@ -129,9 +129,9 @@ TEST(SharpnessTest, SmallInputIsNotResized) {
   // Long edge already ≤ kSharpnessWorkingLongEdge → the wrapper must
   // be EXACTLY the raw metric (no resample, no drift).
   const cv::Mat img =
-      makeCheckerboard(360, retailens::kSharpnessWorkingLongEdge, 8);
-  EXPECT_EQ(retailens::sharpnessScore(img),
-            retailens::varianceOfLaplacian(img));
+      makeCheckerboard(360, rnis::kSharpnessWorkingLongEdge, 8);
+  EXPECT_EQ(rnis::sharpnessScore(img),
+            rnis::varianceOfLaplacian(img));
 }
 
 TEST(SharpnessTest, LargeInputIsScoredAtWorkingScale) {
@@ -140,11 +140,11 @@ TEST(SharpnessTest, LargeInputIsScoredAtWorkingScale) {
   // manually INTER_AREA-downscaled image, not the full-res one.
   const cv::Mat big = makeNoise(1440, 1920);
   const double scale =
-      static_cast<double>(retailens::kSharpnessWorkingLongEdge) / 1920.0;
+      static_cast<double>(rnis::kSharpnessWorkingLongEdge) / 1920.0;
   cv::Mat manual;
   cv::resize(big, manual, cv::Size(), scale, scale, cv::INTER_AREA);
-  EXPECT_DOUBLE_EQ(retailens::sharpnessScore(big),
-                   retailens::varianceOfLaplacian(manual));
+  EXPECT_DOUBLE_EQ(rnis::sharpnessScore(big),
+                   rnis::varianceOfLaplacian(manual));
 }
 
 TEST(SharpnessTest, LargeSharpBeatsLargeBlurredThroughTheWrapper) {
@@ -152,6 +152,6 @@ TEST(SharpnessTest, LargeSharpBeatsLargeBlurredThroughTheWrapper) {
   // plane): the wrapper must still rank sharp above blurred after
   // its own downscale.
   const cv::Mat sharp = makeCheckerboard(1440, 1920, 16);
-  EXPECT_GT(retailens::sharpnessScore(sharp),
-            retailens::sharpnessScore(blurred(sharp)));
+  EXPECT_GT(rnis::sharpnessScore(sharp),
+            rnis::sharpnessScore(blurred(sharp)));
 }

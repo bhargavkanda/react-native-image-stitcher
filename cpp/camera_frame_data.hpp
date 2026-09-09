@@ -35,7 +35,7 @@
 #include <string>
 #include <vector>
 
-namespace retailens {
+namespace rnis {
 
 /// Opaque interface for reading the underlying camera pixel data.
 /// Platform code provides an implementation:
@@ -221,4 +221,4 @@ struct CameraFrameData {
     int32_t intrinsicsImageHeight = 0;
 };
 
-}  // namespace retailens
+}  // namespace rnis

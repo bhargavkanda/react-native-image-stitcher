@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // CameraFrameHostObject.mm — iOS-specific wrapper for the shared
-// `retailens::CameraFrameJsiHostObject` (defined in
+// `rnis::CameraFrameJsiHostObject` (defined in
 // `cpp/camera_frame_jsi.{hpp,cpp}`).
 //
 // Owns:
@@ -10,7 +10,7 @@
 //     `CVPixelBufferRef` from `ARFrame.capturedImage`; lock / memcpy
 //     / unlock pattern).
 //   - The Obj-C → C++ extraction logic that builds a
-//     `retailens::CameraFrameData` from an `ARFrame` + the lib's
+//     `rnis::CameraFrameData` from an `ARFrame` + the lib's
 //     `RNSARFramePose`.
 //
 // Does NOT own:
@@ -38,7 +38,7 @@
 
 #include "camera_frame_data.hpp"
 #include "camera_frame_jsi.hpp"
-#include "stitcher_proxy_jsi.hpp"   // retailens::getExtractionConfig()
+#include "stitcher_proxy_jsi.hpp"   // rnis::getExtractionConfig()
 
 using namespace facebook;
 
@@ -72,14 +72,14 @@ using namespace facebook;
 
 namespace {
 
-/// iOS-specific `retailens::PixelBufferReader` impl.  See the base
+/// iOS-specific `rnis::PixelBufferReader` impl.  See the base
 /// class docstring for the general contract (thread-affinity,
 /// invalidation semantics, Y-plane-only constraint).  This subclass
 /// adds:
 ///   - `CVPixelBuffer` lock/memcpy/unlock per copyTo
 ///   - `CFBridgingRetain` of the parent `ARFrame` so ARKit's
 ///     pool can't reclaim the underlying buffer mid-read
-class IOSPixelBufferReader : public retailens::PixelBufferReader {
+class IOSPixelBufferReader : public rnis::PixelBufferReader {
  public:
   explicit IOSPixelBufferReader(ARFrame* arFrame) {
     // Retain the ARFrame for our lifetime.  CFBridgingRetain hands
@@ -181,7 +181,7 @@ bool PackSingleChannelPixelBuffer(CVPixelBufferRef buffer,
 /// these to validate the byte counts.  Leaves `data.arDepth` as
 /// `nullopt` when the device/session provides no depth (non-LiDAR
 /// devices, or before the first depth frame arrives).
-void ExtractARDepth(ARFrame* arFrame, retailens::CameraFrameData& data) {
+void ExtractARDepth(ARFrame* arFrame, rnis::CameraFrameData& data) {
   ARDepthData* dd = arFrame.sceneDepth;
   if (dd == nil) dd = arFrame.smoothedSceneDepth;
   if (dd == nil) return;
@@ -210,7 +210,7 @@ void ExtractARDepth(ARFrame* arFrame, retailens::CameraFrameData& data) {
     }
   }
 
-  retailens::ArDepth out;
+  rnis::ArDepth out;
   out.width = w;
   out.height = h;
   out.format = "f32m";
@@ -248,11 +248,11 @@ static std::string PlaneClassificationString(ARPlaneClassification c) {
 /// Plane anchors additionally carry `alignment` (horizontal/vertical),
 /// `extent` ([x, z] metres), and — on classification-capable devices —
 /// a semantic `classification` (wall/floor/…).
-void ExtractARAnchors(ARFrame* arFrame, retailens::CameraFrameData& data) {
+void ExtractARAnchors(ARFrame* arFrame, rnis::CameraFrameData& data) {
   NSArray<ARAnchor*>* anchors = arFrame.anchors;
   data.arAnchors.reserve(anchors.count);
   for (ARAnchor* a in anchors) {
-    retailens::ArAnchor out;
+    rnis::ArAnchor out;
     out.id = std::string(a.identifier.UUIDString.UTF8String);
     if ([a isKindOfClass:[ARPlaneAnchor class]]) {
       out.type = "plane";
@@ -426,7 +426,7 @@ bool PackMeshClassifications(ARGeometrySource* src, std::vector<uint8_t>& out) {
 /// on the ARFrame's lifetime.  A mesh anchor whose vertices/faces fail
 /// to marshal is SKIPPED (we never emit a `hasMesh=true` anchor with
 /// empty geometry).
-void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
+void ExtractARMesh(ARFrame* arFrame, rnis::CameraFrameData& data) {
   NSArray<ARAnchor*>* anchors = arFrame.anchors;
   for (ARAnchor* a in anchors) {
     if (![a isKindOfClass:[ARMeshAnchor class]]) continue;
@@ -447,7 +447,7 @@ void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
       }
     }
 
-    retailens::ArAnchor out;
+    rnis::ArAnchor out;
     out.id = std::string(a.identifier.UUIDString.UTF8String);
     out.type = "mesh";
     const simd_float4x4 m = a.transform;
@@ -469,13 +469,13 @@ void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
 #pragma mark - Obj-C facade
 
 @implementation CameraFrameHostObject {
-  std::shared_ptr<retailens::CameraFrameJsiHostObject> _hostObject;
+  std::shared_ptr<rnis::CameraFrameJsiHostObject> _hostObject;
 }
 
 + (instancetype)fromARFrame:(ARFrame*)arFrame pose:(RNSARFramePose*)pose {
   CameraFrameHostObject* obj = [[self alloc] init];
 
-  retailens::CameraFrameData data;
+  rnis::CameraFrameData data;
   data.source = "ar";
   data.width = static_cast<int32_t>(pose.imageWidth);
   data.height = static_cast<int32_t>(pose.imageHeight);
@@ -559,8 +559,8 @@ void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
   // pays ZERO arDepth/arAnchors/mesh extraction cost — only the
   // always-cheap pose/tracking/pixels are populated.  Read the snapshot
   // once so all three extractors see a consistent config for this frame.
-  const retailens::ExtractionConfig extractionConfig =
-      retailens::getExtractionConfig();
+  const rnis::ExtractionConfig extractionConfig =
+      rnis::getExtractionConfig();
   if (extractionConfig.depth) {
     ExtractARDepth(arFrame, data);
   }
@@ -575,7 +575,7 @@ void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
   // ownership — required for `shared_from_this()` inside the JSI
   // `toArrayBuffer` lambda).
   obj->_hostObject =
-      retailens::CameraFrameJsiHostObject::create(std::move(data));
+      rnis::CameraFrameJsiHostObject::create(std::move(data));
   return obj;
 }
 
@@ -626,7 +626,7 @@ void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
   // (set from JS via __stitcherProxy.setExtractionConfig, driven by the
   // <Camera> enableDepth/enableAnchors/enableMesh props).  Snapshot once
   // so all three see a consistent config for this frame.
-  const retailens::ExtractionConfig cfg = retailens::getExtractionConfig();
+  const rnis::ExtractionConfig cfg = rnis::getExtractionConfig();
 
   // depth: dimensions + whether a confidence channel exists.  NO pixel
   // copy — just the depth map's own w/h and a confidenceMap != NULL probe.
@@ -701,7 +701,7 @@ void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
   // <Camera enableAnchors> prop is off, return an empty array (JSON-
   // stable, matches the TS `Array<...>` contract; never null).
   NSMutableArray<NSDictionary *> *anchorsOut = [NSMutableArray array];
-  const retailens::ExtractionConfig cfg = retailens::getExtractionConfig();
+  const rnis::ExtractionConfig cfg = rnis::getExtractionConfig();
   if (!cfg.anchors || arFrame == nil) return anchorsOut;
 
   for (ARAnchor *a in arFrame.anchors) {
@@ -750,7 +750,7 @@ void ExtractARMesh(ARFrame* arFrame, retailens::CameraFrameData& data) {
 }
 
 + (BOOL)arExtractionDepthEnabled {
-  return retailens::getExtractionConfig().depth ? YES : NO;
+  return rnis::getExtractionConfig().depth ? YES : NO;
 }
 
 - (void)invalidate {

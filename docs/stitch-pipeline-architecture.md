@@ -36,12 +36,12 @@ tell which pipeline each platform runs.
 
 ## 1. The fork
 
-Both platforms call the shared entry point `retailens::stitchFramePaths`
+Both platforms call the shared entry point `rnis::stitchFramePaths`
 (`cpp/stitcher.cpp:299`). Inside, everything routes through a single branch:
 
 | | iOS | Android |
 |---|---|---|
-| Calls | `OpenCVStitcher.stitchFramePaths` → `retailens::stitchFramePaths` | `BatchStitcher.stitchSync` → JNI `nativeStitchFramePaths` → `retailens::stitchFramePaths` |
+| Calls | `OpenCVStitcher.stitchFramePaths` → `rnis::stitchFramePaths` | `BatchStitcher.stitchSync` → JNI `nativeStitchFramePaths` → `rnis::stitchFramePaths` |
 | Sets `useManualPipeline`? | **`true`** (`ios/Sources/RNImageStitcher/OpenCVStitcher.mm:481`) | **never set** — the JNI has no such parameter (`android/src/main/cpp/image_stitcher_jni.cpp:80-83`, `:105-113`) |
 | Effective value | `true` | `false` (struct default, `cpp/stitcher.hpp:198`) |
 | Branch taken (`cpp/stitcher.cpp:386 if (config.useManualPipeline)`) | **manual** `cv::detail::*` | **else** → high-level `cv::Stitcher::create` (`:445-449`) |

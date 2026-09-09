@@ -118,7 +118,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(install) {
   }
 
   jsi::Runtime& runtime = *(jsi::Runtime*)cxxBridge.runtime;
-  retailens::installStitcherProxy(runtime);
+  rnis::installStitcherProxy(runtime);
 
   // v0.11.1 — initialize the singleton default JsiWorkletContext so
   // that downstream 2-arg ctors (RNSARWorkletRuntime) inherit a

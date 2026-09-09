@@ -12,20 +12,20 @@
 
 #include <gtest/gtest.h>
 
-using retailens::warpRoiExceedsGuard;
-using retailens::canvasExceedsGuard;
-using retailens::composeCanvasBudgetMP;
-using retailens::canvasDownscaleForBudget;
-using retailens::cappedSeamAspect;
-using retailens::kBudgetFloorMP;
-using retailens::kBudgetCeilMP;
-using retailens::stitchOutputIsDisjoint;
-using retailens::stitchOutputUnderutilized;
-using retailens::perProcessMemoryBudgetMB;
-using retailens::stitchExceedsMinimalHeadroom;
-using retailens::lowBatchHeadroom;
-using retailens::kProcessBudgetFloorMB;
-using retailens::kMinStreamStitchMB;
+using rnis::warpRoiExceedsGuard;
+using rnis::canvasExceedsGuard;
+using rnis::composeCanvasBudgetMP;
+using rnis::canvasDownscaleForBudget;
+using rnis::cappedSeamAspect;
+using rnis::kBudgetFloorMP;
+using rnis::kBudgetCeilMP;
+using rnis::stitchOutputIsDisjoint;
+using rnis::stitchOutputUnderutilized;
+using rnis::perProcessMemoryBudgetMB;
+using rnis::stitchExceedsMinimalHeadroom;
+using rnis::lowBatchHeadroom;
+using rnis::kProcessBudgetFloorMB;
+using rnis::kMinStreamStitchMB;
 
 TEST(WarpGuard, AcceptsNormalRoi) {
   EXPECT_FALSE(warpRoiExceedsGuard(4000, 2000));  // 8 MP

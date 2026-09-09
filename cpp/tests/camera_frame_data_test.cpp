@@ -23,8 +23,8 @@
 #include <memory>
 #include <vector>
 
-using retailens::PixelBufferReader;
-using retailens::CameraFrameData;
+using rnis::PixelBufferReader;
+using rnis::CameraFrameData;
 
 namespace {
 

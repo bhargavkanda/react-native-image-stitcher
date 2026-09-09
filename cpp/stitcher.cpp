@@ -50,7 +50,7 @@
 // translation units).  kMemProfilingCompiled exposes it as a constexpr below.
 
 
-namespace retailens {
+namespace rnis {
 
 namespace {
 
@@ -347,7 +347,7 @@ cv::Rect maxInscribedRectFromMask(const cv::Mat& mask) {
 //
 // Conservative by design: a coherent panorama is ONE connected blob, so a
 // good capture never trips; the threshold lives in the pure, unit-tested
-// retailens::stitchOutputIsDisjoint.  A small morphological close first
+// rnis::stitchOutputIsDisjoint.  A small morphological close first
 // bridges sub-pixel seam gaps so a single panorama isn't mis-split, while
 // being far too small to merge a genuinely-detached floating frame.
 //
@@ -397,7 +397,7 @@ StitchErrorCode validateStitchOutput(const cv::Mat& panorama,
              "step11d: validate output components=%d largest=%.0f total=%.0f "
              "fragment=%.3f frames=%d",
              n - 1, largestArea, totalArea, fragmentFraction, numFrames);
-    if (retailens::stitchOutputIsDisjoint(largestArea, totalArea, numFrames)) {
+    if (rnis::stitchOutputIsDisjoint(largestArea, totalArea, numFrames)) {
         char buf[176];
         std::snprintf(buf, sizeof(buf),
                       "stitch validation failed: disjoint output (%d "
@@ -411,7 +411,7 @@ StitchErrorCode validateStitchOutput(const cv::Mat& panorama,
     // the coverage-to-canvas ratio too (mask is the full panorama size).
     {
         const double canvasArea = (double)mask.cols * (double)mask.rows;
-        if (retailens::stitchOutputUnderutilized(totalArea, canvasArea,
+        if (rnis::stitchOutputUnderutilized(totalArea, canvasArea,
                                                  numFrames)) {
             const double util = canvasArea > 0.0 ? totalArea / canvasArea : 0.0;
             log_info(logFn, "[stitch-bc]",
@@ -974,13 +974,13 @@ static StitchResult stitchFramePathsImpl_(
     {
         const double startRssMB = rss_mb();
         if (startRssMB >= 0.0
-            && retailens::stitchExceedsMinimalHeadroom(startRssMB, totalRamMB)) {
+            && rnis::stitchExceedsMinimalHeadroom(startRssMB, totalRamMB)) {
             result.errorCode = StitchErrorCode::PreStitchMemoryAbort;
             result.errorMessage =
                 "Pre-stitch abort: insufficient memory headroom for high-level "
                 "stitch (rss=" + std::to_string(static_cast<int>(startRssMB)) +
                 "MB, budget=" + std::to_string(static_cast<int>(
-                    retailens::perProcessMemoryBudgetMB(totalRamMB))) + "MB)";
+                    rnis::perProcessMemoryBudgetMB(totalRamMB))) + "MB)";
             log_error(logFn, "[stitch]", "%s", result.errorMessage.c_str());
             return result;
         }
@@ -1367,7 +1367,7 @@ static StitchResult stitchFramePathsImpl_(
                         static_cast<double>(maxX - minX) * (maxY - minY) / 1e6;
                     const double composeCanvasMP = workCanvasMP * ratioCS * ratioCS;
                     const double canvasBudgetMP =
-                        retailens::composeCanvasBudgetMP(totalRamMB);
+                        rnis::composeCanvasBudgetMP(totalRamMB);
                     if (composeCanvasMP > canvasBudgetMP) {
                         const double over = composeCanvasMP / canvasBudgetMP;
                         if (over <= 2.0 || config.warperType == "spherical") {
@@ -1586,7 +1586,7 @@ static StitchResult stitchFramePathsImpl_(
 //
 // The 9-step structure is preserved with the original Step N: comments
 // so iOS↔shared traceability stays intact.  Many of the comments
-// reference iOS-specific incidents (V12.x / V16 phases, Ram's traces,
+// reference iOS-specific incidents (V12.x / V16 phases, the maintainer's traces,
 // Console.app rate-limit behaviour) — those references are KEPT so
 // the institutional memory survives the port.  The behaviours they
 // describe still apply on Android too: cv::resize allocator state,
@@ -1721,13 +1721,13 @@ StitchResult stitchFramePathsManual(
     // step-7.7 canvas-budget downscale, which size to what the stitch needs
     // rather than aborting.
     const double perProcessBudgetMB =
-        retailens::perProcessMemoryBudgetMB(totalRamMB);
-    if (retailens::stitchExceedsMinimalHeadroom(kStartResidentMB, totalRamMB)) {
+        rnis::perProcessMemoryBudgetMB(totalRamMB);
+    if (rnis::stitchExceedsMinimalHeadroom(kStartResidentMB, totalRamMB)) {
         log_error(logFn, "[stitch-bc]",
                   "PRE-STITCH ABORT: rss=%.1fMB + minStitch=%.0fMB > "
                   "perProcessBudget=%.1fMB (totalRamMB=%.0f) — no headroom for "
                   "even a minimal streaming stitch",
-                  kStartResidentMB, retailens::kMinStreamStitchMB,
+                  kStartResidentMB, rnis::kMinStreamStitchMB,
                   perProcessBudgetMB, totalRamMB);
         // Sentinel return: success=false + stable code so both bridges see a
         // clean failure.  Classified to STITCH_OOM in JS (classifyStitchError
@@ -1758,7 +1758,7 @@ StitchResult stitchFramePathsManual(
         return result;
     }
 
-    // V12.14.2 — defensive frame cap.  Ram's V12.14 traces showed a
+    // V12.14.2 — defensive frame cap.  the maintainer's V12.14 traces showed a
     // landscape capture with 12 frames (144 pairwise) crash inside
     // BundleAdjusterRay.  A 7-frame capture (49 pairwise) succeeded.
     // Above ~10 frames the BA solver becomes unstable on landscape
@@ -1938,7 +1938,7 @@ StitchResult stitchFramePathsManual(
                  workFrames.empty() ? 0 : workFrames[0].rows);
         // V12.14 Commit B — paired fprintf(stderr) breadcrumb.  iOS'
         // Console.app rate-limits NSLog under high-frequency emission
-        // (Ram's V12.13 trace had loadFrames 4-7 + step1 missing while
+        // (the maintainer's V12.13 trace had loadFrames 4-7 + step1 missing while
         // loadFrames 0-3 + step2 made it through).  Stderr is not rate-
         // limited and flushes promptly, so the LAST stderr line before
         // the crash reliably pinpoints the failing stage.
@@ -2450,7 +2450,7 @@ StitchResult stitchFramePathsManual(
             warperCreator = cv::makePtr<cv::PlaneWarper>();
         }
         // V12.14.3 — FAULT breadcrumbs around each sub-step within
-        // step7 → step7.5.  Ram's V12.14.2 trace had the crash here
+        // step7 → step7.5.  the maintainer's V12.14.2 trace had the crash here
         // (last visible log was step7 enter; step7.5 never fired).
         // These pinpoint which sub-step actually crashes.
         cv::Ptr<cv::detail::RotationWarper> warper =
@@ -2507,7 +2507,7 @@ StitchResult stitchFramePathsManual(
                 if (std::abs(compose_scale - 1.0) > 1e-3) {
                     // V12.14.4 — pre-allocate `scaled` with explicit dims
                     // BEFORE cv::resize so the internal `dst.create()` is a
-                    // no-op.  Skips the allocator state corruption Ram's
+                    // no-op.  Skips the allocator state corruption the maintainer's
                     // V12.14.3 trace pointed at: cv::resize crashed on the
                     // 5th consecutive resize when iOS recycled mmap regions
                     // from a prior capture, suggesting cv::resize's internal
@@ -2852,7 +2852,7 @@ StitchResult stitchFramePathsManual(
         // conservative, so it can't cause an OOM the fixed thresholds avoided.
         const double rssAtRouteMB = rss_mb();
         const bool lowHeadroom =
-            retailens::lowBatchHeadroom(rssAtRouteMB, totalRamMB);
+            rnis::lowBatchHeadroom(rssAtRouteMB, totalRamMB);
         const bool lowMemCanvas =
             composeCanvasMpFinal > kLowMemCanvasMP
             || composeHeldSetMpFinal > kMaxBatchHeldSetMP
@@ -2941,7 +2941,7 @@ StitchResult stitchFramePathsManual(
                      "step8a: BATCH warp loop (N=%zu)", N);
             // V12.14.6 — defensive measures around the warp loop.  Same
             // recycled-mmap pattern that hit cv::resize in V12.14.3
-            // logs (Ram's 4th-capture crash).  cv::PlaneWarper::warp
+            // logs (the maintainer's 4th-capture crash).  cv::PlaneWarper::warp
             // uses cv::remap internally which has its own cached state
             // keyed on input addresses.
             try {
@@ -3461,7 +3461,7 @@ StitchResult stitchFramePathsManual(
     // clean output with no black corners.  Falls back to bbox
     // (and ultimately the un-cropped panorama) on any OpenCV failure.
     //
-    // V16 Phase 1b.fix5 — RCA from Ram's first fix3 capture: the
+    // V16 Phase 1b.fix5 — RCA from the maintainer's first fix3 capture: the
     // raw inscribed-rect collapsed to a thin sliver in the
     // landscape output.  Cause: cv::Stitcher's compose produces
     // small scattered zero-pixels INSIDE the content region (graph-
@@ -3660,7 +3660,7 @@ StitchResult stitchFramePathsManual(
     //   - fix5d's earlier attempt to key off the same orientation used
     //     `exifOrientation:NSInteger` (an EXIF tag 1/3/6/8), inferred
     //     from frameRotationDegrees, which collapsed landscape-left
-    //     and landscape-right to the same value.  Ram's reports made
+    //     and landscape-right to the same value.  the maintainer's reports made
     //     it clear the two landscape variants need OPPOSITE rotations
     //     (they're mirror images of each other w.r.t. the sensor's
     //     world-up direction), so the EXIF-tag intermediary was lossy.
@@ -3709,14 +3709,14 @@ StitchResult stitchFramePathsManual(
     //     they still carry EXIF=6 so LiveFrameStrip thumbnails show
     //     portrait-correct during capture.
     //
-    // Empirically calibrated (Ram's 2026-05-11 test, iteration 2):
+    // Empirically calibrated (the maintainer's 2026-05-11 test, iteration 2):
     // Iteration 1 swapped both the labels AND the directions — net
     // visual rotation per roll-value was unchanged (output still
-    // looked "landscape-left oriented" to Ram).  Iteration 2 flips
+    // looked "landscape-left oriented" to the maintainer).  Iteration 2 flips
     // ONLY the directions; labels stay where they landed.
-    //   landscape-left  (roll ≈ -90°, Ram's L-left hold)  → 90° CCW
-    //   landscape-right (roll ≈ +90°, Ram's L-right hold) → 90° CW
-    // For a roll=-90° capture (what Ram tested), this rotates the
+    //   landscape-left  (roll ≈ -90°, the maintainer's L-left hold)  → 90° CCW
+    //   landscape-right (roll ≈ +90°, the maintainer's L-right hold) → 90° CW
+    // For a roll=-90° capture (what the maintainer tested), this rotates the
     // OPPOSITE direction from iteration 1.  If iteration 1 put
     // scene-up on the LEFT of the tall image, iteration 2 will put
     // scene-up on the RIGHT.
@@ -3789,4 +3789,4 @@ StitchResult stitchFramePathsManual(
     return result;
 }
 
-}  // namespace retailens
+}  // namespace rnis

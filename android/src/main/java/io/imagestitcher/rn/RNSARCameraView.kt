@@ -1094,7 +1094,7 @@ class RNSARCameraView @JvmOverloads constructor(
         //
         // depth/anchors/mesh are all OFF by default (the JS-driven
         // enableDepth/enableAnchors/enableMesh `<Camera>` props, read via
-        // the shared `retailens::getExtractionConfig()` snapshot).  Skip
+        // the shared `rnis::getExtractionConfig()` snapshot).  Skip
         // the costly ARCore depth-acquire / anchor-collect / mesh-build
         // work for every toggle a host hasn't opted into.  A mesh anchor
         // is reconstructed FROM the depth map, so mesh implies acquiring

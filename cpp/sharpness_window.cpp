@@ -4,7 +4,7 @@
 
 #include "sharpness_window.hpp"
 
-namespace retailens {
+namespace rnis {
 
 namespace {
 inline int32_t clampK(int32_t k) { return k < 1 ? 1 : k; }
@@ -115,4 +115,4 @@ SharpnessWindowDecision SharpnessWindowMachine::ingest(
     return decision;
 }
 
-} // namespace retailens
+} // namespace rnis

@@ -11,27 +11,27 @@
 // Pin the Obj-C enum raw values to the C++ enum so a re-ordering on
 // either side is a compile error, not a silent behaviour change.
 static_assert((NSInteger)RNISSharpnessWindowActionNone ==
-              (NSInteger)retailens::SharpnessWindowAction::None, "");
+              (NSInteger)rnis::SharpnessWindowAction::None, "");
 static_assert((NSInteger)RNISSharpnessWindowActionSaveImmediately ==
-              (NSInteger)retailens::SharpnessWindowAction::SaveImmediately, "");
+              (NSInteger)rnis::SharpnessWindowAction::SaveImmediately, "");
 static_assert((NSInteger)RNISSharpnessWindowActionOpenWindow ==
-              (NSInteger)retailens::SharpnessWindowAction::OpenWindow, "");
+              (NSInteger)rnis::SharpnessWindowAction::OpenWindow, "");
 static_assert((NSInteger)RNISSharpnessWindowActionFlushThenOpen ==
-              (NSInteger)retailens::SharpnessWindowAction::FlushThenOpen, "");
+              (NSInteger)rnis::SharpnessWindowAction::FlushThenOpen, "");
 static_assert((NSInteger)RNISSharpnessWindowActionReplaceBest ==
-              (NSInteger)retailens::SharpnessWindowAction::ReplaceBest, "");
+              (NSInteger)rnis::SharpnessWindowAction::ReplaceBest, "");
 static_assert((NSInteger)RNISSharpnessWindowActionKeepBest ==
-              (NSInteger)retailens::SharpnessWindowAction::KeepBest, "");
+              (NSInteger)rnis::SharpnessWindowAction::KeepBest, "");
 static_assert((NSInteger)RNISSharpnessWindowActionCloseAndSave ==
-              (NSInteger)retailens::SharpnessWindowAction::CloseAndSave, "");
+              (NSInteger)rnis::SharpnessWindowAction::CloseAndSave, "");
 
 @implementation RNISSharpnessWindowBridge {
-    std::unique_ptr<retailens::SharpnessWindowMachine> _machine;
+    std::unique_ptr<rnis::SharpnessWindowMachine> _machine;
 }
 
 - (instancetype)init {
     if (self = [super init]) {
-        _machine = std::make_unique<retailens::SharpnessWindowMachine>();
+        _machine = std::make_unique<rnis::SharpnessWindowMachine>();
     }
     return self;
 }
@@ -51,7 +51,7 @@ static_assert((NSInteger)RNISSharpnessWindowActionCloseAndSave ==
                                   replaceBest:(BOOL *)replaceBestOut
                                   driftClosed:(BOOL *)driftClosedOut
 {
-    const retailens::SharpnessWindowDecision d =
+    const rnis::SharpnessWindowDecision d =
         _machine->ingest(isAccept, score, noveltyFraction, overlapThreshold);
     if (replaceBestOut) {
         *replaceBestOut = d.replaceBest ? YES : NO;
@@ -59,7 +59,7 @@ static_assert((NSInteger)RNISSharpnessWindowActionCloseAndSave ==
     if (driftClosedOut) {
         *driftClosedOut =
             (d.closeReason ==
-             retailens::SharpnessWindowCloseReason::NoveltyDrift) ? YES : NO;
+             rnis::SharpnessWindowCloseReason::NoveltyDrift) ? YES : NO;
     }
     return static_cast<RNISSharpnessWindowAction>(d.action);
 }
@@ -83,9 +83,9 @@ static_assert((NSInteger)RNISSharpnessWindowActionCloseAndSave ==
     // held candidate still has to be beaten on merit.  novelty = -1 /
     // threshold = 0 keep the drift guard out of a seed event (it only
     // inspects candidates anyway).
-    const retailens::SharpnessWindowDecision d =
+    const rnis::SharpnessWindowDecision d =
         _machine->ingest(true, best, -1.0, 0.0);
-    return d.action == retailens::SharpnessWindowAction::OpenWindow ? YES : NO;
+    return d.action == rnis::SharpnessWindowAction::OpenWindow ? YES : NO;
 }
 
 - (void)reset {

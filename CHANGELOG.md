@@ -1279,7 +1279,7 @@ worklet body.  AR stitching continues to run natively via
 the architectural contract for AR-mode stitching since v0.8.0.
 
 This bug was latent in v0.11.0 — surfaced by Test 2 of
-`docs/v0.11.0-manual-verification-checklist.md` on Ram's iPhone.
+`docs/v0.11.0-manual-verification-checklist.md` on the test iPhone.
 
 Also added: `StitcherJsiInstaller::install` now eagerly initializes
 the worklets-core default `JsiWorkletContext` singleton during JSI
@@ -1717,7 +1717,7 @@ StitcherFrame.ts`):
 bridgeless mode; Android: `StitcherJsiInstallerModule` via
 `ReactApplicationContext.getJavaScriptContextHolder()`).  Exposes
 `install` / `uninstall` / `count` host functions backed by a
-shared C++ `retailens::StitcherWorkletRegistry` (process-scope,
+shared C++ `rnis::StitcherWorkletRegistry` (process-scope,
 mutex-serialised, snapshot-isolated).
 
 ### Changed — AR-mode dispatch architecture
@@ -2422,7 +2422,7 @@ const settings = { ...DEFAULT_PANORAMA_SETTINGS, captureSource: 'non-ar' };
 > exhaustive PanoramaSettings ground-truth audit and shipped the
 > v0.3-pixel-data work alongside ~15 follow-up correctness fixes,
 > two crash fixes, a stitcher mode-fallback retry, and the
-> RetaiLens-parity debug UI port.  Detailed entries below.
+> host-parity debug UI port.  Detailed entries below.
 >
 > **Behaviour changes**
 >   - Android AR mode + both platforms' non-AR mode now actually run
@@ -2601,10 +2601,10 @@ The full audit traced every `PanoramaSettings` field through Camera.tsx,
 the iOS bridge (`IncrementalStitcher.swift::applyConfigOverrides` and
 the cv::Stitcher path), the Android bridge
 (`IncrementalStitcher.kt::start`), the C++ gate (`cpp/keyframe_gate.cpp`),
-and the live-engine config type (`RLISStitcherConfig`).  Conclusions:
+and the live-engine config type (`RNISStitcherConfig`).  Conclusions:
 
 - Batch-keyframe and the live engines (hybrid + slit-scan) share
-  **zero settings**.  All RLISStitcherConfig fields (NCC, plane
+  **zero settings**.  All RNISStitcherConfig fields (NCC, plane
   projection, paint mode, slit-scan painting) flow only through
   Layer 2 entry points (`incremental.start({ engine: 'slitscan-…' })`),
   never through `<Camera>` (which hardcodes `engine: 'batch-keyframe'`).
@@ -2850,18 +2850,18 @@ follow-up commit.
 ### Changed
 
 - **Docs / source-comment cleanup.** Removed the leftover
-  pre-extraction RetaiLens-monorepo framing from the README — this repo
+  pre-extraction host-monorepo framing from the README — this repo
   is now the canonical, self-contained source of `react-native-image-
   stitcher`, not a downstream subtree of anything.  Source-file path
   comments and iOS GCD queue labels now use the canonical
   `io.imagestitcher.*` namespace and `react-native-image-stitcher/`
-  repo path instead of the leftover `com.retailens.*` /
-  `retailens-capture-sdk/` references that survived the 0.1.0 rename.
+  repo path instead of the leftover `com.rnis.*` /
+  `capture-sdk/` references that survived the 0.1.0 rename.
   GCD label change affects: `RNSARSession.poseLogQueue`,
   `IncrementalStitcher.workQueue`, `IncrementalStitcher.refineQueue` —
   labels are diagnostic-only (Instruments / crash-report symbolication),
   no public-API or behaviour impact.  The CHANGELOG.md migration table
-  for [0.1.0] retains the historical `com.retailens.capturesdk` name
+  for [0.1.0] retains the historical `the pre-0.1.0 Java package` name
   intentionally — it documents the rename that shipped, not the
   current state.
 - **CHANGELOG.** Added compare-links for [0.1.1] and [0.1.2] and fixed
@@ -2929,7 +2929,7 @@ follow-up commit.
   on hosts that were already passing bare paths.
 - **iOS modular-header build under `use_frameworks!`** — host apps
   that opt into modular framework linkage (Expo + `use_frameworks!`,
-  RetaiLens-mobile is the immediate example) hit
+  host-app is the immediate example) hit
   ``'cstdint' file not found / could not build Objective-C module
   'RNImageStitcher'`` because CocoaPods defaulted EVERY header in
   `source_files` (including the shared `cpp/*.hpp` C++ headers) to
@@ -2970,7 +2970,7 @@ follow-up commit.
   - Batch stitching: `stitchVideo`.
 - The 0.1.0 → 1.0 stability gate still applies — the goal of
   surfacing layer 2 is to support advanced consumers (e.g.,
-  `retailens-camera-sdk`) without forcing them to deep-import
+  `host-camera-sdk`) without forcing them to deep-import
   package internals.  These are likely to keep their shape through
   1.0, but the contract is not formally stable until then.
 
@@ -3054,20 +3054,20 @@ issue describing it.
 
 ### Migration from pre-publication ad-hoc usage
 
-If you imported from `@retailens/capture-sdk` or directly from a
+If you imported from `the pre-0.1.0 package` or directly from a
 subtree-checkout of the monorepo, the migration to the published
 `react-native-image-stitcher` package is:
 
-| Old import (`@retailens/capture-sdk`) | New import (`react-native-image-stitcher`) |
+| Old import (`the pre-0.1.0 package`) | New import (`react-native-image-stitcher`) |
 |---|---|
 | `Camera`, `CameraError`, … | unchanged |
 | `useARSession`, `useIMUTranslationGate` | unchanged |
-| Any other deep export (e.g. `stitchFrames`, `measureRegion`) | retired or moved — see "Deliberately NOT exported" above; retail-specific features are now in `retailens-camera-sdk` (private) |
+| Any other deep export (e.g. `stitchFrames`, `measureRegion`) | retired or moved — see "Deliberately NOT exported" above; retail-specific features are now in `host-camera-sdk` (private) |
 
 Native module names also changed:
-- `NativeModules.RetaiLensQualityChecker` → `NativeModules.RNImageStitcherQualityChecker`
-- Java package: `com.retailens.capturesdk` → `io.imagestitcher.rn`
-- iOS pod: `RetaiLensCaptureSDK` → `RNImageStitcher`
+- `NativeModules.HostQualityChecker` → `NativeModules.RNImageStitcherQualityChecker`
+- Java package: `the pre-0.1.0 Java package` → `io.imagestitcher.rn`
+- iOS pod: `HostCaptureSDK` → `RNImageStitcher`
 - iOS xcframework: shipped as `opencv2.xcframework` (linked from `RNImageStitcher.podspec`)
 
 [Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.7.1...HEAD

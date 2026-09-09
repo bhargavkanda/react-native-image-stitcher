@@ -11,7 +11,7 @@
 //
 // Registered once at startup in `AppDelegate` via
 // `RNISARPluginRegistry.shared.register(...)`.  A real host plugin (e.g.
-// RetaiLens's OCR) would offload heavy work to its own queue and use the
+// the host app's OCR) would offload heavy work to its own queue and use the
 // ASYNC channel (`RNISARPluginRegistry.shared.emit(...)`) instead.
 
 import Foundation

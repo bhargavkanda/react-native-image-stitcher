@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-namespace retailens {
+namespace rnis {
 
 using facebook::jsi::Array;
 using facebook::jsi::Function;
@@ -354,4 +354,4 @@ Value CameraFrameJsiHostObject::get(Runtime& rt,
   return Value::undefined();
 }
 
-}  // namespace retailens
+}  // namespace rnis

@@ -48,7 +48,7 @@
 #include <opencv2/imgproc.hpp>           // resize, INTER_AREA, goodFeaturesToTrack
 #include <opencv2/video/tracking.hpp>    // calcOpticalFlowPyrLK
 
-namespace retailens {
+namespace rnis {
 namespace {
 
 // ── Vec3 helpers ──────────────────────────────────────────────────
@@ -658,7 +658,7 @@ KeyframeGateDecision KeyframeGate::evaluate(const Pose& pose,
 // V16 A2 — sparse-flow novelty path
 // ═══════════════════════════════════════════════════════════════════
 //
-// Algorithm (1:1 with Ram's design 2026-05-13):
+// Algorithm (1:1 with the maintainer's design 2026-05-13):
 //
 //   1. Detect Shi-Tomasi corners in the LAST ACCEPTED keyframe once
 //      per accept.  Persist them on Impl.prevFeatures.
@@ -922,7 +922,7 @@ KeyframeGateDecision KeyframeGate::evaluateWithWorkingMat(
 
     // §6c — pan-axis detection + novelty computation.  Whichever axis
     // has the larger percentile displacement IS the pan axis (per
-    // Ram's design — read pan direction off the flow itself, NOT off
+    // the maintainer's design — read pan direction off the flow itself, NOT off
     // the captureOrientation hold setting, which describes the device
     // hold, not the user's pan direction).
     //
@@ -946,7 +946,7 @@ KeyframeGateDecision KeyframeGate::evaluateWithWorkingMat(
     // it, we force-accept this frame even when novelty < threshold.
     //
     // Why: even with the affine matcher swap in OpenCVStitcher.mm,
-    // very large parallax (Ram repro 2026-05-13: 25-60 cm between
+    // very large parallax (the maintainer repro 2026-05-13: 25-60 cm between
     // adjacent keyframes) starves the downstream BundleAdjusterRay of
     // consistent inliers and ghosts the panorama.  Bounding the
     // physical translation between keyframes keeps the matcher's
@@ -1022,4 +1022,4 @@ KeyframeGateDecision KeyframeGate::evaluateWithWorkingMat(
              novelty, s.acceptedCount, s.maxCount };
 }
 
-} // namespace retailens
+} // namespace rnis

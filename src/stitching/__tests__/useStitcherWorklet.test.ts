@@ -19,7 +19,7 @@
  *     post-`stitcher.call` lines (`fireFrameProcessorLog`,
  *     `runOnJS` callbacks) silently never execute in AR mode.  Test
  *     2 of `docs/v0.11.0-manual-verification-checklist.md`
- *     reproduced this on Ram's iPhone.  This test pins the fix.
+ *     reproduced this on the test iPhone.  This test pins the fix.
  *
  *   - **vc-source happy path.**  vc-source frames (and frames whose
  *     `source` is `undefined` — which is what vc's raw `Frame`

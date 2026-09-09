@@ -4,7 +4,7 @@
 // Unit tests for the pure-Swift `QualityChecker` algorithm layer.
 // Run from the command line:
 //
-//   cd retailens-capture-sdk/ios
+//   cd capture-sdk/ios
 //   swift test --filter RNImageStitcherTests
 //
 // Why synthesised fixtures instead of checked-in JPEGs?

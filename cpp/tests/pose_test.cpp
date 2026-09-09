@@ -20,8 +20,8 @@
 #include <cstddef>
 #include <type_traits>
 
-using retailens::Pose;
-using retailens::PlaneTransform;
+using rnis::Pose;
+using rnis::PlaneTransform;
 
 TEST(PoseLayoutTest, IsStandardLayoutPod) {
   // Required for `memcpy` marshalling and for the iOS Obj-C++ /

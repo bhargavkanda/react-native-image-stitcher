@@ -158,7 +158,7 @@ export function useStitchStatsToast(): UseStitchStatsToastReturn {
 
   const showResult = useCallback(
     (result: IncrementalFinalizeResult, ms = DEFAULT_DISMISS_MS) => {
-      // Format mirrors the RetaiLens debug toast that operators
+      // Format mirrors the the host app debug toast that operators
       // already recognise.  Includes the new (audit F2g) resolved
       // stitchMode as a fourth segment when present.
       const requested = result.framesRequested;

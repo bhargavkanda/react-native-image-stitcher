@@ -50,7 +50,7 @@
 
 #include <cstdint>
 
-namespace retailens {
+namespace rnis {
 
 /// What the platform must do with the current frame / the buffered
 /// best.  One action per ingest() event.
@@ -118,7 +118,7 @@ public:
     ///                          re-seeds a window).  false = the frame
     ///                          is a window candidate (gate-rejected).
     /// @param score             the frame's sharpness score
-    ///                          (retailens::sharpnessScore).  Only
+    ///                          (rnis::sharpnessScore).  Only
     ///                          compared within one capture.
     /// @param noveltyFraction   the gate's newContentFraction for this
     ///                          frame; pass -1.0 when the gate didn't
@@ -155,4 +155,4 @@ private:
     double  bestScore_ = -1.0;
 };
 
-} // namespace retailens
+} // namespace rnis

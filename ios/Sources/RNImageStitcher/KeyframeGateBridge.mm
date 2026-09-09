@@ -20,8 +20,8 @@
 // KeyframeGate.swift (and read by the JS telemetry layer in
 // react-native-image-stitcher/src/stitching/incremental.ts).  Drift will
 // silently break the JS UI's pill text.
-static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
-    using R = retailens::KeyframeGateDecisionReason;
+static NSString *kReasonStringFor(rnis::KeyframeGateDecisionReason r) {
+    using R = rnis::KeyframeGateDecisionReason;
     switch (r) {
         case R::AcceptDisabled:              return @"gate-disabled";
         case R::AcceptForceLast:             return @"force-last";
@@ -64,7 +64,7 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
 // ── KeyframeGateBridge impl ──────────────────────────────────────
 
 @implementation KeyframeGateBridge {
-    retailens::KeyframeGate _gate;
+    rnis::KeyframeGate _gate;
 }
 
 - (instancetype)init {
@@ -101,7 +101,7 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
 // ── V16 A2 — strategy + flow tunables ───────────────────────────
 
 - (void)setStrategy:(KGBStrategy)strategy {
-    _gate.setStrategy(static_cast<retailens::GateStrategy>(strategy));
+    _gate.setStrategy(static_cast<rnis::GateStrategy>(strategy));
 }
 
 - (KGBStrategy)strategy {
@@ -144,15 +144,15 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
                       imageHeight:(int32_t)imageHeight
                           plane16:(nullable NSArray<NSNumber *> *)plane16
 {
-    retailens::Pose pose;
+    rnis::Pose pose;
     pose.tx = tx; pose.ty = ty; pose.tz = tz;
     pose.qx = qx; pose.qy = qy; pose.qz = qz; pose.qw = qw;
     pose.fx = fx; pose.fy = fy; pose.cx = cx; pose.cy = cy;
     pose.imageWidth = imageWidth;
     pose.imageHeight = imageHeight;
 
-    retailens::PlaneTransform planeStorage;
-    const retailens::PlaneTransform *planePtr = nullptr;
+    rnis::PlaneTransform planeStorage;
+    const rnis::PlaneTransform *planePtr = nullptr;
     if (plane16 != nil && plane16.count == 16) {
         for (NSUInteger i = 0; i < 16; ++i) {
             planeStorage.m[i] = static_cast<float>(plane16[i].doubleValue);
@@ -160,7 +160,7 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
         planePtr = &planeStorage;
     }
 
-    retailens::KeyframeGateDecision d = _gate.evaluate(pose, planePtr);
+    rnis::KeyframeGateDecision d = _gate.evaluate(pose, planePtr);
 
     KGBDecision *out = [[KGBDecision alloc] init];
     out.accept             = static_cast<BOOL>(d.accept);
@@ -176,7 +176,7 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
 // pixel buffer.  See header for format support + cost notes.
 //
 // Internal flow:
-//   1. Build the retailens::Pose + optional plane (same as
+//   1. Build the rnis::Pose + optional plane (same as
 //      evaluateWith…plane16:).
 //   2. Lock the pixel buffer (read-only — we never write back).
 //   3. Get a grayscale view of the frame: Y-plane direct read for
@@ -203,7 +203,7 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
     // straight to the pose-only evaluate so we don't pay the
     // CVPixelBuffer lock/unlock cost (~10 µs but at 60 fps = 600 µs/s
     // wasted) for every Pose-strategy frame.
-    if (_gate.getStrategy() == retailens::GateStrategy::Pose) {
+    if (_gate.getStrategy() == rnis::GateStrategy::Pose) {
         return [self evaluateWithTx:tx ty:ty tz:tz
                                  qx:qx qy:qy qz:qz qw:qw
                                  fx:fx fy:fy cx:cx cy:cy
@@ -212,15 +212,15 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
                              plane16:plane16];
     }
 
-    retailens::Pose pose;
+    rnis::Pose pose;
     pose.tx = tx; pose.ty = ty; pose.tz = tz;
     pose.qx = qx; pose.qy = qy; pose.qz = qz; pose.qw = qw;
     pose.fx = fx; pose.fy = fy; pose.cx = cx; pose.cy = cy;
     pose.imageWidth = imageWidth;
     pose.imageHeight = imageHeight;
 
-    retailens::PlaneTransform planeStorage;
-    const retailens::PlaneTransform *planePtr = nullptr;
+    rnis::PlaneTransform planeStorage;
+    const rnis::PlaneTransform *planePtr = nullptr;
     if (plane16 != nil && plane16.count == 16) {
         for (NSUInteger i = 0; i < 16; ++i) {
             planeStorage.m[i] = static_cast<float>(plane16[i].doubleValue);
@@ -280,7 +280,7 @@ static NSString *kReasonStringFor(retailens::KeyframeGateDecisionReason r) {
     // falls back to the pose-only path inside evaluateWithFrame —
     // graceful degradation for unsupported pixel formats.
 
-    retailens::KeyframeGateDecision d = _gate.evaluateWithFrame(
+    rnis::KeyframeGateDecision d = _gate.evaluateWithFrame(
         pose, planePtr,
         grayData, grayWidth, grayHeight, grayStride);
 

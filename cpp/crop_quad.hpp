@@ -29,7 +29,7 @@
 // edge-length / convexity math is meaningless.
 // ─────────────────────────────────────────────────────────────────────
 
-namespace retailens {
+namespace rnis {
 
 // A single corner in image-pixel space (origin = image top-left).
 struct QuadPoint {
@@ -160,4 +160,4 @@ inline bool isQuadAcceptable(const CropQuad& q,
   return true;
 }
 
-}  // namespace retailens
+}  // namespace rnis

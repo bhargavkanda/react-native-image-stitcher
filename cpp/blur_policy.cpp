@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace retailens {
+namespace rnis {
 
 namespace {
 
@@ -94,4 +94,4 @@ void RunningScoreMedian::reset() {
     next_  = 0;
 }
 
-}  // namespace retailens
+}  // namespace rnis

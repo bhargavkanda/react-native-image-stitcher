@@ -51,13 +51,13 @@ public final class RNSARSessionBridge: RCTEventEmitter {
         // observer fires at most once per post regardless.
         NotificationCenter.default.removeObserver(
             self,
-            name: .retailensARFrameMeta,
+            name: .rnisARFrameMeta,
             object: nil
         )
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleArFrameMeta(_:)),
-            name: .retailensARFrameMeta,
+            name: .rnisARFrameMeta,
             object: nil
         )
         // v0.19.0 — observe the async AR-plugin result channel (posted by
@@ -65,13 +65,13 @@ public final class RNSARSessionBridge: RCTEventEmitter {
         // Same de-dupe rationale as the onArFrame observer above.
         NotificationCenter.default.removeObserver(
             self,
-            name: .retailensARPluginResult,
+            name: .rnisARPluginResult,
             object: nil
         )
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleArPluginResult(_:)),
-            name: .retailensARPluginResult,
+            name: .rnisARPluginResult,
             object: nil
         )
     }

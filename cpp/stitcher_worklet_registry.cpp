@@ -22,7 +22,7 @@
 #include <algorithm>
 #include <sstream>
 
-namespace retailens {
+namespace rnis {
 
 StitcherWorkletRegistry& StitcherWorkletRegistry::shared() {
   static StitcherWorkletRegistry s_instance;
@@ -88,4 +88,4 @@ std::string StitcherWorkletRegistry::_installEntryForTests(
   return id;
 }
 
-}  // namespace retailens
+}  // namespace rnis

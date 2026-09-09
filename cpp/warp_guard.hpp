@@ -14,7 +14,7 @@
 // OpenCV-aware.  Keep this file free of any cv:: dependency.
 // ─────────────────────────────────────────────────────────────────────
 
-namespace retailens {
+namespace rnis {
 
 // A single warped frame requiring more than this many pixels of
 // intermediate storage is from a broken estimator (degenerate camera
@@ -250,4 +250,4 @@ inline bool lowBatchHeadroom(double currentRssMB, double totalRamMB) {
          < kBatchHeadroomMB;
 }
 
-}  // namespace retailens
+}  // namespace rnis

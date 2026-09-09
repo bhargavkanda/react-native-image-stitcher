@@ -61,7 +61,7 @@ internal class BlurPolicy : AutoCloseable {
         close()
     }
 
-    /** 1:1 with retailens::BlurAdmission (ordinals pinned by the JNI). */
+    /** 1:1 with rnis::BlurAdmission (ordinals pinned by the JNI). */
     enum class Admission {
         /** Commit the pending keyframe (also the fail-open answer). */
         COMMIT,
@@ -71,7 +71,7 @@ internal class BlurPolicy : AutoCloseable {
         HOLD_FOR_SOFTNESS,
     }
 
-    // ── Per-capture tunables (mirror retailens::BlurPolicyConfig) ──
+    // ── Per-capture tunables (mirror rnis::BlurPolicyConfig) ──
     //
     // Kept Kotlin-side rather than behind JNI setters: they are three
     // scalars passed by value on each (rare) admission call, so a

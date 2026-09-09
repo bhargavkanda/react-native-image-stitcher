@@ -197,7 +197,7 @@
     // host worklets are registered — saves the host-object alloc
     // + dispatch_async hop on every frame (the common case in
     // first-party-only deployments).
-    auto invokers = retailens::StitcherWorkletRegistry::shared().snapshot();
+    auto invokers = rnis::StitcherWorkletRegistry::shared().snapshot();
     if (invokers.empty()) {
         return;
     }

@@ -21,7 +21,7 @@ import com.facebook.react.bridge.ReactMethod
  *
  * The native `nativeInstall(jsiRuntimeRef)` JNI then casts the long
  * back to a `jsi::Runtime*` and calls into the shared C++
- * `retailens::installStitcherProxy(runtime)` (in
+ * `rnis::installStitcherProxy(runtime)` (in
  * `cpp/stitcher_proxy_jsi.{hpp,cpp}`).  Identical destination on
  * both platforms — `globalThis.__stitcherProxy` exposes the same
  * `install` / `uninstall` / `count` host functions.
@@ -37,7 +37,7 @@ import com.facebook.react.bridge.ReactMethod
  *
  * Phase 4b.ii's MVP installs the proxy ONLY.  Host worklets that
  * register through `__stitcherProxy.install` land in the native
- * `retailens::StitcherWorkletRegistry`.  Per-frame fan-out from
+ * `rnis::StitcherWorkletRegistry`.  Per-frame fan-out from
  * Android's `StitcherWorkletRuntime` is a separate piece of work
  * (Phase 4b.ii follow-up) — needs the Kotlin↔JNI bridge that
  * constructs a `CameraFrameJsiHostObject` from an `ArImage` +

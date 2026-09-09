@@ -50,7 +50,7 @@ struct KeyframeGateDecision {
 
 final class KeyframeGate {
 
-    // The Obj-C++ bridge owns the C++ `retailens::KeyframeGate`
+    // The Obj-C++ bridge owns the C++ `rnis::KeyframeGate`
     // instance.  We keep a single instance per KeyframeGate Swift
     // object — lifetimes are tied (ARC dealloc → bridge dealloc → C++
     // destructor).
@@ -90,7 +90,7 @@ final class KeyframeGate {
 
     // MARK: - V16 A2 — strategy + flow tunables
 
-    /// Mirror of `retailens::GateStrategy`.  Pose = the V16 Phase-0
+    /// Mirror of `rnis::GateStrategy`.  Pose = the V16 Phase-0
     /// plane-overlap path.  Flow = V16 A2 sparse-optical-flow novelty
     /// (needs per-frame image data via the `evaluate(pose:plane:pixelBuffer:)`
     /// overload below; the older pixel-buffer-free `evaluate(pose:plane:)`

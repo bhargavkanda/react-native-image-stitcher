@@ -66,8 +66,8 @@ NSString *const RNImageStitcherIncrementalErrorDomain =
 
 // ── Private telemetry result class ──────────────────────────────────
 
-@interface RLISFrameTelemetry ()
-@property (nonatomic, readwrite) RLISFrameOutcome outcome;
+@interface RNISFrameTelemetry ()
+@property (nonatomic, readwrite) RNISFrameOutcome outcome;
 @property (nonatomic, readwrite) double overlapPercent;
 @property (nonatomic, readwrite) NSInteger matchCount;
 @property (nonatomic, readwrite) double inlierRatio;
@@ -79,26 +79,26 @@ NSString *const RNImageStitcherIncrementalErrorDomain =
 @property (nonatomic, readwrite) NSInteger panExtent;
 @end
 
-@implementation RLISFrameTelemetry
+@implementation RNISFrameTelemetry
 @end
 
-@interface RLISSnapshot ()
+@interface RNISSnapshot ()
 @property (nonatomic, copy, readwrite) NSString *panoramaPath;
 @property (nonatomic, readwrite) NSInteger width;
 @property (nonatomic, readwrite) NSInteger height;
 @property (nonatomic, readwrite) NSInteger acceptedCount;
 @end
 
-@implementation RLISSnapshot
+@implementation RNISSnapshot
 @end
 
 
-// ── V15 — RLISStitcherConfig ────────────────────────────────────────
+// ── V15 — RNISStitcherConfig ────────────────────────────────────────
 
-@implementation RLISStitcherConfig
+@implementation RNISStitcherConfig
 
 + (instancetype)configForMode:(NSString *)mode {
-    RLISStitcherConfig *c = [[RLISStitcherConfig alloc] init];
+    RNISStitcherConfig *c = [[RNISStitcherConfig alloc] init];
 
     NSString *m = mode ?: @"slitscan-both";
     // Backward-compat translation.
@@ -116,7 +116,7 @@ NSString *const RNImageStitcherIncrementalErrorDomain =
     // the fields that genuinely differ from this baseline.
     c.nccSearchMargin2d              = 12;     // was hardcoded V15.0c.4
     // V15.0i.1 — default raised to 0.99.  At 0.75 the NCC was applying
-    // corrections on weak matches in plane-projected mode (Ram observed
+    // corrections on weak matches in plane-projected mode (the maintainer observed
     // mid-capture wobble).  0.99 means we only apply corrections on
     // near-perfect overlap matches; ambiguous matches are skipped.
     c.nccConfidenceThreshold2d       = 0.99;
@@ -124,13 +124,13 @@ NSString *const RNImageStitcherIncrementalErrorDomain =
     c.ncc2dEmaAlpha                  = 0.4;    // 60% prev / 40% current
     c.enableNcc2dPanAxisLock         = NO;     // 1C opt-in
     c.ncc2dCrossAxisLockPx           = 5;
-    c.planeSource                    = RLISPlaneSourceDisabled;
+    c.planeSource                    = RNISPlaneSourceDisabled;
     c.virtualPlaneDepthMeters        = 1.5;
     c.arkitPlaneAlignmentThreshold   = 0.6;    // ~53° max off-camera
     // V15.0g — Rectified is the default since Trapezoidal's
     // tilt-induced distortion was the field-blocker on V15.0e/f.
     // Operators can flip back to Trapezoidal for A/B comparison.
-    c.planeProjectionStyle           = RLISPlaneProjectionStyleRectified;
+    c.planeProjectionStyle           = RNISPlaneProjectionStyleRectified;
 
     if ([m isEqualToString:@"hybrid"]) {
         // n/a slit-shaping; hybrid uses whole-frame projection.
@@ -142,10 +142,10 @@ NSString *const RNImageStitcherIncrementalErrorDomain =
         c.nccSearchRadius1d          = 15;
         c.enable2dNcc                = NO;
         c.enableRansacHomography     = NO;
-        c.paintMode                  = RLISPaintModeFeatherBlend;  // V12.x feather
-        c.hybridProjection           = RLISHybridProjectionPlanar;  // V15: planar default
+        c.paintMode                  = RNISPaintModeFeatherBlend;  // V12.x feather
+        c.hybridProjection           = RNISHybridProjectionPlanar;  // V15: planar default
         c.useDetectedPlane           = NO;
-        c.sliverPosition             = RLISSliverPositionCenter;
+        c.sliverPosition             = RNISSliverPositionCenter;
         c.firstFrameFullFrame        = NO;
     } else if ([m isEqualToString:@"slitscan-rotate"]) {
         // V13.0a baseline + 1D NCC.  No tri, no 2D NCC, no homography.
@@ -157,14 +157,14 @@ NSString *const RNImageStitcherIncrementalErrorDomain =
         c.nccSearchRadius1d          = 15;
         c.enable2dNcc                = NO;
         c.enableRansacHomography     = NO;
-        c.paintMode                  = RLISPaintModeFirstPaintedWins;
-        c.hybridProjection           = RLISHybridProjectionPlanar;  // unused
+        c.paintMode                  = RNISPaintModeFirstPaintedWins;
+        c.hybridProjection           = RNISHybridProjectionPlanar;  // unused
         c.useDetectedPlane           = NO;
-        c.sliverPosition             = RLISSliverPositionCenter;
+        c.sliverPosition             = RNISSliverPositionCenter;
         c.firstFrameFullFrame        = NO;
     } else {
         // slitscan-both (V15.0c default).  V13.0a baseline + no gate +
-        // first-painted-wins (Ram observation: feather often introduces
+        // first-painted-wins (the maintainer observation: feather often introduces
         // ghosting; first-painted-wins is consistently the best for our
         // typical retail fixture pans).  Iterate via settings UI:
         // enable tri / 2D NCC / RANSAC as needed.
@@ -176,10 +176,10 @@ NSString *const RNImageStitcherIncrementalErrorDomain =
         c.nccSearchRadius1d          = 15;
         c.enable2dNcc                = NO;
         c.enableRansacHomography     = NO;
-        c.paintMode                  = RLISPaintModeFirstPaintedWins;  // V15.0c default
-        c.hybridProjection           = RLISHybridProjectionPlanar;  // unused
+        c.paintMode                  = RNISPaintModeFirstPaintedWins;  // V15.0c default
+        c.hybridProjection           = RNISHybridProjectionPlanar;  // unused
         c.useDetectedPlane           = NO;
-        c.sliverPosition             = RLISSliverPositionCenter;
+        c.sliverPosition             = RNISSliverPositionCenter;
         c.firstFrameFullFrame        = NO;
     }
 
@@ -287,7 +287,7 @@ constexpr double kRansacReprojThresh = 5.0;
     /// planar) and other hybrid-specific knobs.  Set via -setConfig:
     /// after init; defaults to hybrid factory config (planar) if
     /// never set.
-    RLISStitcherConfig *_config;
+    RNISStitcherConfig *_config;
 }
 
 - (instancetype)initWithComposeWidth:(NSInteger)composeWidth
@@ -350,18 +350,18 @@ constexpr double kRansacReprojThresh = 5.0;
 
         // V15 — default config (hybrid mode → planar projection).
         // Caller should override via -setConfig: after init.
-        _config = [RLISStitcherConfig configForMode:@"hybrid"];
+        _config = [RNISStitcherConfig configForMode:@"hybrid"];
 
         [self reset];
     }
     return self;
 }
 
-- (void)setConfig:(RLISStitcherConfig *)config {
+- (void)setConfig:(RNISStitcherConfig *)config {
     if (config == nil) return;
     _config = config;
     NSLog(@"[V15-config] hybrid config applied: hybridProjection=%@",
-          _config.hybridProjection == RLISHybridProjectionPlanar
+          _config.hybridProjection == RNISHybridProjectionPlanar
               ? @"Planar" : @"Cylindrical");
 }
 
@@ -383,7 +383,7 @@ constexpr double kRansacReprojThresh = 5.0;
 
 // ── Public: ingestPixelBuffer (V6 pose-driven) ─────────────────────
 
-- (RLISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
+- (RNISFrameTelemetry *)ingestPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                        qx:(double)qx
                                        qy:(double)qy
                                        qz:(double)qz
@@ -413,18 +413,18 @@ constexpr double kRansacReprojThresh = 5.0;
 
     auto t0 = std::chrono::steady_clock::now();
 
-    RLISFrameTelemetry *tele = [[RLISFrameTelemetry alloc] init];
+    RNISFrameTelemetry *tele = [[RNISFrameTelemetry alloc] init];
     tele.overlapPercent = -1;
 
     if (trackingPoor) {
-        tele.outcome = RLISFrameOutcomeSkippedTrackingPoor;
+        tele.outcome = RNISFrameOutcomeSkippedTrackingPoor;
         tele.processingMs = msSince(t0);
         return tele;
     }
 
     cv::Mat frameBGR;
     if (![self convertPixelBuffer:pixelBuffer toMat:frameBGR]) {
-        tele.outcome = RLISFrameOutcomeSkippedTrackingPoor;
+        tele.outcome = RNISFrameOutcomeSkippedTrackingPoor;
         tele.processingMs = msSince(t0);
         return tele;
     }
@@ -473,7 +473,7 @@ constexpr double kRansacReprojThresh = 5.0;
         // forward is gravity-aligned, the horizontal projection is
         // degenerate.
         if (horiz < 0.1) {
-            tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
+            tele.outcome = RNISFrameOutcomeRejectedAlignmentLost;
             tele.processingMs = msSince(t0);
             return tele;
         }
@@ -590,7 +590,7 @@ constexpr double kRansacReprojThresh = 5.0;
         _lastAcceptedR = R_new.clone();
         _hasFirstFrame = true;
         _accepted = 1;
-        tele.outcome = RLISFrameOutcomeAcceptedHigh;
+        tele.outcome = RNISFrameOutcomeAcceptedHigh;
         tele.confidence = 1.0;
         tele.overlapPercent = 0;
         tele.processingMs = msSince(t0);
@@ -629,12 +629,12 @@ constexpr double kRansacReprojThresh = 5.0;
     tele.overlapPercent = overlap;
 
     if (overlap > kMaxOverlapPct) {
-        tele.outcome = RLISFrameOutcomeSkippedTooClose;
+        tele.outcome = RNISFrameOutcomeSkippedTooClose;
         tele.processingMs = msSince(t0);
         return tele;
     }
     if (overlap < kMinOverlapPct) {
-        tele.outcome = RLISFrameOutcomeRejectedTooFar;
+        tele.outcome = RNISFrameOutcomeRejectedTooFar;
         tele.processingMs = msSince(t0);
         return tele;
     }
@@ -645,7 +645,7 @@ constexpr double kRansacReprojThresh = 5.0;
         [self cylindricalWarp:frameBGR rArkit:R_new
                        outImage:warpedNew outMask:warpedNewMask];
     if (warpedNew.empty()) {
-        tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
+        tele.outcome = RNISFrameOutcomeRejectedAlignmentLost;
         tele.processingMs = msSince(t0);
         return tele;
     }
@@ -671,7 +671,7 @@ constexpr double kRansacReprojThresh = 5.0;
     cv::Rect canvasBounds(0, 0, _canvas.cols, _canvas.rows);
     cv::Rect dstClipped = dstRoi & canvasBounds;
     if (dstClipped.width <= 0 || dstClipped.height <= 0) {
-        tele.outcome = RLISFrameOutcomeRejectedAlignmentLost;
+        tele.outcome = RNISFrameOutcomeRejectedAlignmentLost;
         tele.processingMs = msSince(t0);
         return tele;
     }
@@ -700,15 +700,15 @@ constexpr double kRansacReprojThresh = 5.0;
     tele.matchCount = -1;       // not applicable in pose-driven path
     tele.inlierRatio = -1;
     tele.outcome = (confidence >= 0.6)
-                    ? RLISFrameOutcomeAcceptedHigh
-                    : RLISFrameOutcomeAcceptedMedium;
+                    ? RNISFrameOutcomeAcceptedHigh
+                    : RNISFrameOutcomeAcceptedMedium;
     tele.processingMs = msSince(t0);
     return tele;
 }
 
 // ── Snapshot / finalize ─────────────────────────────────────────────
 
-- (nullable RLISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
+- (nullable RNISSnapshot *)snapshotWithJpegQuality:(NSInteger)quality
                                               error:(NSError **)error
 {
     _snapshotSeq += 1;
@@ -719,7 +719,7 @@ constexpr double kRansacReprojThresh = 5.0;
                                 error:error];
 }
 
-- (nullable RLISSnapshot *)finalizeAtPath:(NSString *)outputPath
+- (nullable RNISSnapshot *)finalizeAtPath:(NSString *)outputPath
                               jpegQuality:(NSInteger)quality
                                     error:(NSError **)error
 {
@@ -729,7 +729,7 @@ constexpr double kRansacReprojThresh = 5.0;
     // search — it produced a far thinner output than the actual
     // painted region for any non-rectangular pan footprint, and the
     // mask edges are clean (no per-pixel artefacts to crop away).
-    RLISSnapshot *snap = [self writeSnapshotToPath:outputPath
+    RNISSnapshot *snap = [self writeSnapshotToPath:outputPath
                                        jpegQuality:quality
                                          tightCrop:YES
                                  applyExposureComp:YES
@@ -746,11 +746,11 @@ constexpr double kRansacReprojThresh = 5.0;
     // anyway.
     NSString *tmpDir = NSTemporaryDirectory();
     NSInteger slot = _snapshotSeq % 4;
-    NSString *filename = [NSString stringWithFormat:@"rlis-live-%ld.jpg", (long)slot];
+    NSString *filename = [NSString stringWithFormat:@"rnis-live-%ld.jpg", (long)slot];
     return [tmpDir stringByAppendingPathComponent:filename];
 }
 
-- (nullable RLISSnapshot *)writeSnapshotToPath:(NSString *)outputPath
+- (nullable RNISSnapshot *)writeSnapshotToPath:(NSString *)outputPath
                                    jpegQuality:(NSInteger)quality
                                      tightCrop:(BOOL)tightCrop
                              applyExposureComp:(BOOL)applyExposureComp
@@ -809,7 +809,7 @@ constexpr double kRansacReprojThresh = 5.0;
         ? [outputPath substringFromIndex:7]
         : outputPath;
     bool ok = cv::imwrite(std::string([cleanPath UTF8String]), out, params);
-    NSLog(@"[RLIS-PIP] imwrite path=%@ size=%dx%d quality=%d ok=%d",
+    NSLog(@"[RNIS-PIP] imwrite path=%@ size=%dx%d quality=%d ok=%d",
           cleanPath, out.cols, out.rows, q, (int)ok);
     if (!ok) {
         if (error) {
@@ -822,7 +822,7 @@ constexpr double kRansacReprojThresh = 5.0;
         return nil;
     }
 
-    RLISSnapshot *snap = [[RLISSnapshot alloc] init];
+    RNISSnapshot *snap = [[RNISSnapshot alloc] init];
     snap.panoramaPath = cleanPath;
     snap.width = out.cols;
     snap.height = out.rows;
@@ -1038,7 +1038,7 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     cv::Point corner;
     cv::Mat whiteFrame(src.size(), CV_8UC1, cv::Scalar(255));
 
-    if (_config.hybridProjection == RLISHybridProjectionPlanar) {
+    if (_config.hybridProjection == RNISHybridProjectionPlanar) {
         cv::detail::PlaneWarper warper((float)_focalCompose);
         corner = warper.warp(src, K32, R32,
                              cv::INTER_LINEAR,
@@ -1064,7 +1064,7 @@ static double computeOverlapPctSensor(double sensorRotXRad,
     if (!_v14LoggedFirstWarp) {
         _v14LoggedFirstWarp = true;
         NSLog(@"[V15-warp] hybrid projection=%@ corner=(%d,%d) outSize=%dx%d focal=%.1f",
-              _config.hybridProjection == RLISHybridProjectionPlanar
+              _config.hybridProjection == RNISHybridProjectionPlanar
                   ? @"Planar" : @"Cylindrical",
               corner.x, corner.y, outImage.cols, outImage.rows, _focalCompose);
         NSLog(@"[V14.0pre-warp] OpenCV CylindricalWarper "

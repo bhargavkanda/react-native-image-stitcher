@@ -3,7 +3,7 @@
 //
 // Container-codec tests for the `<photo>.depth.bin` sidecar
 // (PhotoDepthSidecar.swift).  The container is a CROSS-REPO CONTRACT —
-// downstream consumers (e.g. the RetaiLens camera-sdk planarity bridge)
+// downstream consumers (e.g. the the host app camera-sdk planarity bridge)
 // parse these exact bytes — so the framing is pinned here byte-by-byte,
 // not just via encode→decode symmetry.
 //

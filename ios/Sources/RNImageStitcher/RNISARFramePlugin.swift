@@ -44,10 +44,10 @@ import simd
 /// `RNSARSessionBridge` (an RCTEventEmitter) observes it and re-emits as
 /// the JS `RNImageStitcherARPluginResult` device event.  We route via
 /// NotificationCenter — rather than the registry holding a bridge
-/// reference — mirroring the `.retailensARFrameMeta` (`onArFrame`)
+/// reference — mirroring the `.rnisARFrameMeta` (`onArFrame`)
 /// channel, so the framework-free engine pattern is preserved.
 public extension Notification.Name {
-    static let retailensARPluginResult =
+    static let rnisARPluginResult =
         Notification.Name("RNImageStitcherARPluginResult")
 }
 
@@ -253,7 +253,7 @@ public final class RNISARPluginRegistry: NSObject {
     /// the result with its source.
     @objc public func emit(_ pluginName: String, _ result: [String: Any]) {
         NotificationCenter.default.post(
-            name: .retailensARPluginResult,
+            name: .rnisARPluginResult,
             object: nil,
             userInfo: [
                 "plugin": pluginName,

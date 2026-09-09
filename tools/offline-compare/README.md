@@ -2,7 +2,7 @@
 
 Turns a field capture into a **decomposable measurement** instead of an
 eyeballed preview. Given a *debug pack* (the keyframes + `pack.json` the app
-writes when `debugPack` is on), it runs the **real** `retailens::stitchFramePaths`
+writes when `debugPack` is on), it runs the **real** `rnis::stitchFramePaths`
 on-device at several budgets and reports wall time, output dims, and SSIM.
 
 Primary uses:
@@ -34,7 +34,7 @@ bash tools/offline-compare/build_stitch_probe.sh
 
 # 2. get a pack off the device (debugPack must have been ON for the capture)
 adb -s <serial> exec-out run-as <app.id> \
-  tar c cache/rlis-capture-<uuid> | tar x -C ./pack
+  tar c cache/rnis-capture-<uuid> | tar x -C ./pack
 
 # 3. compare / ablate
 python tools/offline-compare/offline_compare.py ./pack --ablate

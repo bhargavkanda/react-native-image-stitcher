@@ -24,7 +24,7 @@
 #pragma once
 #include <cstdint>
 
-namespace retailens {
+namespace rnis {
 
 struct Pose {
     // Translation in metres (world frame).
@@ -60,4 +60,4 @@ struct PlaneTransform {
     float m[16];
 };
 
-} // namespace retailens
+} // namespace rnis

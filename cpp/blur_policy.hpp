@@ -49,7 +49,7 @@
 
 #include <cstdint>
 
-namespace retailens {
+namespace rnis {
 
 /// What the engine should do with a keyframe that is ready to commit.
 enum class BlurAdmission : int32_t {
@@ -163,4 +163,4 @@ private:
     int32_t next_     = 0;   // ring write cursor
 };
 
-} // namespace retailens
+} // namespace rnis

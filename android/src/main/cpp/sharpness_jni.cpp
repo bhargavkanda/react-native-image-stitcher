@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // sharpness_jni.cpp — JNI binding exposing the shared C++
-// retailens::sharpnessScore (in ../../../../cpp/sharpness.{hpp,cpp})
+// rnis::sharpnessScore (in ../../../../cpp/sharpness.{hpp,cpp})
 // to the Kotlin side (io.imagestitcher.rn.IncrementalStitcher), for
 // the pick-sharpest-in-window anti-blur keyframe selection.
 //
@@ -83,7 +83,7 @@ Java_io_imagestitcher_rn_IncrementalStitcher_nativeSharpnessScore(
         cv::Mat gray(height, width, CV_8UC1,
                      reinterpret_cast<unsigned char*>(bytes),
                      static_cast<size_t>(stride));
-        score = retailens::sharpnessScore(gray);
+        score = rnis::sharpnessScore(gray);
     }
     // JNI_ABORT: read-only access — don't copy back, just release.
     env->ReleaseByteArrayElements(grayData, bytes, JNI_ABORT);

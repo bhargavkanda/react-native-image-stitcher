@@ -746,7 +746,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     // VERT_PAN means rotation about world X (pitch): use WAVE_CORRECT_VERT.
     //
     // Earlier hardcoded HORIZ produced misaligned panoramas for
-    // Ram's top-to-bottom landscape pan (no yaw spread; pitch
+    // the maintainer's top-to-bottom landscape pan (no yaw spread; pitch
     // spread).  Picking the right axis lets waveCorrect actually
     // help instead of being a no-op (or flipping the panorama).
     cv::detail::WaveCorrectKind waveKind = cv::detail::WAVE_CORRECT_HORIZ;

@@ -30,7 +30,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// 1:1 with retailens::BlurAdmission — static_asserts in the .mm pin
+/// 1:1 with rnis::BlurAdmission — static_asserts in the .mm pin
 /// the raw values against the C++ enum.
 typedef NS_ENUM(NSInteger, RNISBlurAdmission) {
     /// Commit the candidate (the default and the fail-open answer).
@@ -44,7 +44,7 @@ typedef NS_ENUM(NSInteger, RNISBlurAdmission) {
 
 @interface RNISBlurPolicyBridge : NSObject
 
-/// Install this capture's tunables (mirrors retailens::BlurPolicyConfig).
+/// Install this capture's tunables (mirrors rnis::BlurPolicyConfig).
 /// Any value <= 0 DISABLES its check.  Called once per start(); the
 /// score history is independent (see `resetHistory`).
 - (void)configureWithMaxCommitPanRate:(double)radPerSec

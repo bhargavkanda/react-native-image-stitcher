@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // StitcherFrameHostObject.mm — iOS-specific wrapper for the shared
-// `retailens::StitcherFrameJsiHostObject` (defined in
+// `rnis::StitcherFrameJsiHostObject` (defined in
 // `cpp/stitcher_frame_jsi.{hpp,cpp}`).
 //
 // Owns:
@@ -10,7 +10,7 @@
 //     `CVPixelBufferRef` from `ARFrame.capturedImage`; lock / memcpy
 //     / unlock pattern).
 //   - The Obj-C → C++ extraction logic that builds a
-//     `retailens::StitcherFrameData` from an `ARFrame` + the lib's
+//     `rnis::StitcherFrameData` from an `ARFrame` + the lib's
 //     `RNSARFramePose`.
 //
 // Does NOT own:
@@ -64,14 +64,14 @@ using namespace facebook;
 
 namespace {
 
-/// iOS-specific `retailens::PixelBufferReader` impl.  See the base
+/// iOS-specific `rnis::PixelBufferReader` impl.  See the base
 /// class docstring for the general contract (thread-affinity,
 /// invalidation semantics, Y-plane-only constraint).  This subclass
 /// adds:
 ///   - `CVPixelBuffer` lock/memcpy/unlock per copyTo
 ///   - `CFBridgingRetain` of the parent `ARFrame` so ARKit's
 ///     pool can't reclaim the underlying buffer mid-read
-class IOSPixelBufferReader : public retailens::PixelBufferReader {
+class IOSPixelBufferReader : public rnis::PixelBufferReader {
  public:
   explicit IOSPixelBufferReader(ARFrame* arFrame) {
     // Retain the ARFrame for our lifetime.  CFBridgingRetain hands
@@ -126,13 +126,13 @@ class IOSPixelBufferReader : public retailens::PixelBufferReader {
 #pragma mark - Obj-C facade
 
 @implementation StitcherFrameHostObject {
-  std::shared_ptr<retailens::StitcherFrameJsiHostObject> _hostObject;
+  std::shared_ptr<rnis::StitcherFrameJsiHostObject> _hostObject;
 }
 
 + (instancetype)fromARFrame:(ARFrame*)arFrame pose:(RNSARFramePose*)pose {
   StitcherFrameHostObject* obj = [[self alloc] init];
 
-  retailens::StitcherFrameData data;
+  rnis::StitcherFrameData data;
   data.source = "ar";
   data.width = static_cast<int32_t>(pose.imageWidth);
   data.height = static_cast<int32_t>(pose.imageHeight);
@@ -191,7 +191,7 @@ class IOSPixelBufferReader : public retailens::PixelBufferReader {
   // ownership — required for `shared_from_this()` inside the JSI
   // `toArrayBuffer` lambda).
   obj->_hostObject =
-      retailens::StitcherFrameJsiHostObject::create(std::move(data));
+      rnis::StitcherFrameJsiHostObject::create(std::move(data));
   return obj;
 }
 

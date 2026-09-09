@@ -1,6 +1,6 @@
 // Generalized on-device stitch probe for the offline debug-pack compare tool.
 //
-// Runs the REAL retailens::stitchFramePaths (the exact high-level PANORAMA path
+// Runs the REAL rnis::stitchFramePaths (the exact high-level PANORAMA path
 // finalize() uses) with a config supplied on argv, so the offline tool can:
 //   - replay a field pack's EXACT config (reproduce the field stitch time), and
 //   - sweep ONE factor (compose MP, threads, seam, ...) for ablation RCA.
@@ -27,11 +27,11 @@ static void logcb(int level, const char* tag, const char* msg) {
     std::fprintf(stderr, "[L%d]%s %s\n", level, tag ? tag : "", msg ? msg : "");
 }
 
-static retailens::StitchMode parseMode(const std::string& m) {
+static rnis::StitchMode parseMode(const std::string& m) {
     // stitchModeResolved from a pack is already resolved (panorama|scans);
     // anything else (incl. "auto") falls back to the fleet default Panorama.
-    if (m == "scans") return retailens::StitchMode::Scans;
-    return retailens::StitchMode::Panorama;
+    if (m == "scans") return rnis::StitchMode::Scans;
+    return rnis::StitchMode::Panorama;
 }
 
 int main(int argc, char** argv) {
@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> paths;
     for (int i = 10; i < argc; ++i) paths.emplace_back(argv[i]);
 
-    retailens::StitchConfig cfg;
+    rnis::StitchConfig cfg;
     cfg.stitchMode           = parseMode(mode);
     cfg.useManualPipeline    = false;            // fleet path: high-level PANORAMA
     cfg.warperType           = warper;
@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
     cfg.numThreads           = numThreads;
 
     const auto t0 = std::chrono::steady_clock::now();
-    const retailens::StitchResult r = retailens::stitchFramePaths(paths, out, cfg, logcb);
+    const rnis::StitchResult r = rnis::stitchFramePaths(paths, out, cfg, logcb);
     const auto t1 = std::chrono::steady_clock::now();
     const long long wallMs =
         std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();

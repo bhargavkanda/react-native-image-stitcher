@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // image_stitcher_jni.cpp — JNI shim that marshals Java/Kotlin args
-// into the shared C++ `retailens::stitchFramePaths` function in
+// into the shared C++ `rnis::stitchFramePaths` function in
 // cpp/stitcher.{hpp,cpp}.
 //
 // As of 2026-05-15, the algorithm itself lives in shared C++ (used by
@@ -10,7 +10,7 @@
 //   1. Unmarshal jobjectArray → std::vector<std::string>
 //   2. Unmarshal jstring args → StitchConfig
 //   3. Plug Android's __android_log_print into the shared LogFn
-//   4. Call retailens::stitchFramePaths(...)
+//   4. Call rnis::stitchFramePaths(...)
 //   5. Marshal StitchResult → jintArray for Kotlin
 //
 // History
@@ -166,7 +166,7 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
     }
 
     // Build the shared StitchConfig.
-    retailens::StitchConfig cfg;
+    rnis::StitchConfig cfg;
     cfg.warperType           = jstring_to_string(env, warperType);
     cfg.blenderType          = jstring_to_string(env, blenderType);
     cfg.seamFinderType       = jstring_to_string(env, seamFinderType);
@@ -178,8 +178,8 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
     cfg.jpegQuality          = jpegQuality;
     const std::string modeStr = jstring_to_string(env, stitchModeStr);
     cfg.stitchMode = (modeStr == "panorama")
-        ? retailens::StitchMode::Panorama
-        : retailens::StitchMode::Scans;
+        ? rnis::StitchMode::Panorama
+        : rnis::StitchMode::Scans;
 
     // 2026-06-15 — pipeline is caller-selectable (mirrors iOS).  The batch
     // finalize passes useManualPipeline=true: ALL the memory/OOM hardening
@@ -230,9 +230,9 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
     // this should never fire — but a C++ exception crossing into JNI is UB
     // (std::terminate/SIGABRT), so we NEVER let one through: convert any escape
     // into a Java exception the Kotlin layer can catch.
-    retailens::StitchResult result;
+    rnis::StitchResult result;
     try {
-        result = retailens::stitchFramePaths(
+        result = rnis::stitchFramePaths(
             paths, outPath, cfg, &androidLogBridge);
     } catch (const std::exception& e) {
         throw_runtime(env, std::string("native stitch crashed: ") + e.what());
@@ -262,7 +262,7 @@ Java_io_imagestitcher_rn_BatchStitcher_nativeStitchFramePaths(
              "after=%.1f floor=%.1f src=%s frames=%d/%d",
              cfg.useManualPipeline ? "manual" : "highlevel",
              cfg.warperType.c_str(),
-             (result.stitchModeUsed == retailens::StitchMode::Scans)
+             (result.stitchModeUsed == rnis::StitchMode::Scans)
                  ? "scans" : "panorama",
              result.memBeforeMB, result.memPeakMB, result.memAfterMB, memFloor,
              result.memSource.c_str(),

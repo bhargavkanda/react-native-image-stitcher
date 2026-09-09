@@ -115,7 +115,7 @@ to stock `cv::Stitcher`:
   (same "HIGH-LEVEL ACROSS THE BOARD (mirrors Android)" comment,
   `useManualPipeline: false`), routed through
   `OpenCVStitcher.mm:426-510` into the same shared
-  `retailens::stitchFramePaths`.
+  `rnis::stitchFramePaths`.
 
 So "iOS has a separate stitch implementation" is true only of the *bridge*
 (`OpenCVStitcher.mm`) and the archived manual path — the high-level config site
@@ -258,7 +258,7 @@ matcher.**  This is the precondition that makes a range matcher sound.
   stands it **cannot host the parity runner**: its documented host OpenCV is a
   minimal core+imgproc static build (`scripts/run-cpp-tests.sh:26-40` — "a
   static core+imgproc build is enough"), which cannot link
-  `retailens::stitchFramePaths` (needs `stitching, features2d, calib3d, flann,
+  `rnis::stitchFramePaths` (needs `stitching, features2d, calib3d, flann,
   imgcodecs` as well), and the host OpenCV version is unpinned.  §7.2 specs
   the expanded, version-pinned host build the parity runner requires.
 
@@ -739,7 +739,7 @@ existing minimal harness cannot do this job — §2.7):
   a stray system OpenCV (4.9/4.11/…) does not transfer to the shipped
   Android/iOS 4.10.0 binaries — the guard makes a bogus verdict impossible
   rather than merely discouraged.
-- The target invokes `retailens::stitchFramePaths` twice per set
+- The target invokes `rnis::stitchFramePaths` twice per set
   (rangeMatcherWidth 0 vs 3, all else identical) — no device in the loop.
 - Honest transfer statement: a same-version host run transfers *matcher/BA
   semantics* (what this gate judges), not device timing or memory — those come

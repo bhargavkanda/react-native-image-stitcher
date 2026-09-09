@@ -280,7 +280,7 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
     if (pf == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
         pf == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
       // NV12 — the Y plane IS the gray frame; wrap without copying.
-      // retailens::sharpnessScore reads (its first step is an
+      // rnis::sharpnessScore reads (its first step is an
       // INTER_AREA downscale into its own buffer) and never mutates,
       // so aliasing the read-locked plane is safe for the lock's
       // duration.
@@ -290,7 +290,7 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
       size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
       if (base != NULL && w > 0 && h > 0) {
         cv::Mat yPlane((int)h, (int)w, CV_8UC1, base, stride);
-        score = retailens::sharpnessScore(yPlane);
+        score = rnis::sharpnessScore(yPlane);
       }
     } else if (pf == kCVPixelFormatType_32BGRA) {
       void *base = CVPixelBufferGetBaseAddress(pixelBuffer);
@@ -299,7 +299,7 @@ static BOOL WriteJPEGWithEXIF(const cv::Mat &bgr,
       size_t stride = CVPixelBufferGetBytesPerRow(pixelBuffer);
       if (base != NULL && w > 0 && h > 0) {
         cv::Mat bgra((int)h, (int)w, CV_8UC4, base, stride);
-        score = retailens::sharpnessScore(bgra);  // converted to gray inside
+        score = rnis::sharpnessScore(bgra);  // converted to gray inside
       }
     }
     // Any other format scores 0.0 — saveKeyframe rejects those buffers

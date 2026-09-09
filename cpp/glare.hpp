@@ -80,7 +80,7 @@
 // that include this header construct their own cv::Mat and pass it in.
 namespace cv { class Mat; }
 
-namespace retailens {
+namespace rnis {
 
 // ── Tunable constants (calibration knobs) ─────────────────────────────
 
@@ -140,4 +140,4 @@ double computeGlareScore(const cv::Mat& image,
                          const GlareRoi& roi = GlareRoi{},
                          std::string* debugOut = nullptr);
 
-}  // namespace retailens
+}  // namespace rnis

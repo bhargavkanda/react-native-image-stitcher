@@ -22,10 +22,10 @@
 
 #include "sharpness_window.hpp"
 
-using retailens::SharpnessWindowAction;
-using retailens::SharpnessWindowCloseReason;
-using retailens::SharpnessWindowDecision;
-using retailens::SharpnessWindowMachine;
+using rnis::SharpnessWindowAction;
+using rnis::SharpnessWindowCloseReason;
+using rnis::SharpnessWindowDecision;
+using rnis::SharpnessWindowMachine;
 
 namespace {
 

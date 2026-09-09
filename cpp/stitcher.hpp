@@ -64,7 +64,7 @@
 #endif
 
 
-namespace retailens {
+namespace rnis {
 
 // Stable error codes.  Mirror the JS-side `StitchErrorCode` enum so
 // the bridge layers can map these to NSError.code / Java throwable
@@ -367,4 +367,4 @@ StitchResult stitchFramePathsManual(
     const StitchConfig&             config,
     LogFn                           logFn = nullptr);
 
-}  // namespace retailens
+}  // namespace rnis

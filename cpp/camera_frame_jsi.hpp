@@ -20,7 +20,7 @@
 
 #include "camera_frame_data.hpp"
 
-namespace retailens {
+namespace rnis {
 
 /// Owning byte buffer that satisfies the `jsi::MutableBuffer`
 /// contract.  Backs the `ArrayBuffer` returned by
@@ -105,4 +105,4 @@ class CameraFrameJsiHostObject
   bool _isValid;
 };
 
-}  // namespace retailens
+}  // namespace rnis

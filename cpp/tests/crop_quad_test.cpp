@@ -19,12 +19,12 @@
 
 #include <gtest/gtest.h>
 
-using retailens::CropQuad;
-using retailens::QuadDstSize;
-using retailens::isQuadAcceptable;
-using retailens::quadDstRect;
-using retailens::quadIsConvex;
-using retailens::quadSignedArea2;
+using rnis::CropQuad;
+using rnis::QuadDstSize;
+using rnis::isQuadAcceptable;
+using rnis::quadDstRect;
+using rnis::quadIsConvex;
+using rnis::quadSignedArea2;
 
 namespace {
 

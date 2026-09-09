@@ -78,7 +78,7 @@ work, instead of degrading resolution or starving other threads.
 
 ### 3.1 Pipelines and routing
 
-- Both platforms call the shared `retailens::stitchFramePaths`
+- Both platforms call the shared `rnis::stitchFramePaths`
   (`cpp/stitcher.cpp:579`), which dispatches on
   `StitchConfig::useManualPipeline` (`cpp/stitcher.hpp:216`, default `false`) in
   `stitchFramePathsImpl_` (`cpp/stitcher.cpp:741`).

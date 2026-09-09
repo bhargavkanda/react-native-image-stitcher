@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // keyframe_gate_jni.cpp — JNI bindings exposing the shared C++
-// retailens::KeyframeGate (in ../../../../cpp/) to the Kotlin side
+// rnis::KeyframeGate (in ../../../../cpp/) to the Kotlin side
 // (io.imagestitcher.rn.KeyframeGate).
 //
 // Architecture parity with iOS:
@@ -35,8 +35,8 @@
 #include "ar_frame_pose.h"
 
 namespace {
-inline retailens::KeyframeGate* gate(jlong h) {
-    return reinterpret_cast<retailens::KeyframeGate*>(h);
+inline rnis::KeyframeGate* gate(jlong h) {
+    return reinterpret_cast<rnis::KeyframeGate*>(h);
 }
 } // anonymous namespace
 
@@ -46,7 +46,7 @@ extern "C" {
 
 JNIEXPORT jlong JNICALL
 Java_io_imagestitcher_rn_KeyframeGate_nativeCreate(JNIEnv*, jclass) {
-    return reinterpret_cast<jlong>(new retailens::KeyframeGate());
+    return reinterpret_cast<jlong>(new rnis::KeyframeGate());
 }
 
 JNIEXPORT void JNICALL
@@ -169,7 +169,7 @@ JNIEXPORT void JNICALL
 Java_io_imagestitcher_rn_KeyframeGate_nativeSetStrategy(
     JNIEnv*, jclass, jlong handle, jint strategyInt)
 {
-    auto strategy = static_cast<retailens::GateStrategy>(strategyInt);
+    auto strategy = static_cast<rnis::GateStrategy>(strategyInt);
     gate(handle)->setStrategy(strategy);
 }
 
@@ -218,15 +218,15 @@ Java_io_imagestitcher_rn_KeyframeGate_nativeEvaluate(
     jint imageWidth, jint imageHeight,
     jfloatArray plane16OrNull)
 {
-    retailens::Pose pose;
+    rnis::Pose pose;
     pose.tx = tx; pose.ty = ty; pose.tz = tz;
     pose.qx = qx; pose.qy = qy; pose.qz = qz; pose.qw = qw;
     pose.fx = fx; pose.fy = fy; pose.cx = cx; pose.cy = cy;
     pose.imageWidth  = static_cast<int32_t>(imageWidth);
     pose.imageHeight = static_cast<int32_t>(imageHeight);
 
-    retailens::PlaneTransform planeStorage;
-    const retailens::PlaneTransform* planePtr = nullptr;
+    rnis::PlaneTransform planeStorage;
+    const rnis::PlaneTransform* planePtr = nullptr;
     if (plane16OrNull) {
         jsize len = env->GetArrayLength(plane16OrNull);
         if (len == 16) {
@@ -241,7 +241,7 @@ Java_io_imagestitcher_rn_KeyframeGate_nativeEvaluate(
         // Kotlin caller is responsible for passing exactly 16 floats.
     }
 
-    retailens::KeyframeGateDecision d = gate(handle)->evaluate(pose, planePtr);
+    rnis::KeyframeGateDecision d = gate(handle)->evaluate(pose, planePtr);
 
     jdoubleArray out = env->NewDoubleArray(5);
     jdouble values[5];
@@ -290,15 +290,15 @@ Java_io_imagestitcher_rn_KeyframeGate_nativeEvaluateWithFrame(
     jbyteArray grayBytes,
     jint grayWidth, jint grayHeight, jint grayStride)
 {
-    retailens::Pose pose;
+    rnis::Pose pose;
     pose.tx = tx; pose.ty = ty; pose.tz = tz;
     pose.qx = qx; pose.qy = qy; pose.qz = qz; pose.qw = qw;
     pose.fx = fx; pose.fy = fy; pose.cx = cx; pose.cy = cy;
     pose.imageWidth  = static_cast<int32_t>(imageWidth);
     pose.imageHeight = static_cast<int32_t>(imageHeight);
 
-    retailens::PlaneTransform planeStorage;
-    const retailens::PlaneTransform* planePtr = nullptr;
+    rnis::PlaneTransform planeStorage;
+    const rnis::PlaneTransform* planePtr = nullptr;
     if (plane16OrNull) {
         jsize len = env->GetArrayLength(plane16OrNull);
         if (len == 16) {
@@ -320,7 +320,7 @@ Java_io_imagestitcher_rn_KeyframeGate_nativeEvaluateWithFrame(
     // runs the heavy OpenCV (goodFeaturesToTrack / optical flow) with the pin
     // already gone — no longer stalling the GC or the frame-rate producer
     // thread.  Always paired with ReleasePrimitiveArrayCritical, even on errors.
-    retailens::KeyframeGateDecision d;
+    rnis::KeyframeGateDecision d;
     if (grayBytes && grayWidth > 0 && grayHeight > 0 && grayStride >= grayWidth) {
         void* raw = env->GetPrimitiveArrayCritical(grayBytes, nullptr);
         if (raw) {

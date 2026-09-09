@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // sharpness_window_jni.cpp — JNI bindings exposing the shared C++
-// retailens::SharpnessWindowMachine (../../../../cpp/sharpness_window.*)
+// rnis::SharpnessWindowMachine (../../../../cpp/sharpness_window.*)
 // to the Kotlin side (io.imagestitcher.rn.SharpnessWindow).
 //
 // Architecture parity with iOS:
@@ -27,8 +27,8 @@
 #include "sharpness_window.hpp"
 
 namespace {
-inline retailens::SharpnessWindowMachine* machine(jlong h) {
-    return reinterpret_cast<retailens::SharpnessWindowMachine*>(h);
+inline rnis::SharpnessWindowMachine* machine(jlong h) {
+    return reinterpret_cast<rnis::SharpnessWindowMachine*>(h);
 }
 } // anonymous namespace
 
@@ -36,7 +36,7 @@ extern "C" {
 
 JNIEXPORT jlong JNICALL
 Java_io_imagestitcher_rn_SharpnessWindow_nativeCreate(JNIEnv*, jobject) {
-    return reinterpret_cast<jlong>(new retailens::SharpnessWindowMachine());
+    return reinterpret_cast<jlong>(new rnis::SharpnessWindowMachine());
 }
 
 JNIEXPORT void JNICALL
@@ -59,13 +59,13 @@ Java_io_imagestitcher_rn_SharpnessWindow_nativeIngest(
     jboolean isAccept, jdouble score,
     jdouble noveltyFraction, jdouble overlapThreshold)
 {
-    const retailens::SharpnessWindowDecision d = machine(handle)->ingest(
+    const rnis::SharpnessWindowDecision d = machine(handle)->ingest(
         isAccept == JNI_TRUE, score, noveltyFraction, overlapThreshold);
     jint packed = static_cast<jint>(d.action) & 0xFF;
     if (d.replaceBest) {
         packed |= 0x100;
     }
-    if (d.closeReason == retailens::SharpnessWindowCloseReason::NoveltyDrift) {
+    if (d.closeReason == rnis::SharpnessWindowCloseReason::NoveltyDrift) {
         packed |= 0x200;
     }
     return packed;

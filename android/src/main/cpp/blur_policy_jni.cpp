@@ -5,8 +5,8 @@
 // Kotlin side (io.imagestitcher.rn.BlurPolicy).
 //
 // Architecture parity with iOS:
-//   iOS wraps the same `retailens::admitKeyframe` +
-//   `retailens::RunningScoreMedian` through its Obj-C++ bridge; these
+//   iOS wraps the same `rnis::admitKeyframe` +
+//   `rnis::RunningScoreMedian` through its Obj-C++ bridge; these
 //   are the Android thunks.  Both platforms consult ONE verdict
 //   function, which is the point — the v0.21 window logic was
 //   re-derived per platform and drifted (2026-07 adversarial review).
@@ -34,8 +34,8 @@
 #include "blur_policy.hpp"
 
 namespace {
-inline retailens::RunningScoreMedian* median(jlong h) {
-    return reinterpret_cast<retailens::RunningScoreMedian*>(h);
+inline rnis::RunningScoreMedian* median(jlong h) {
+    return reinterpret_cast<rnis::RunningScoreMedian*>(h);
 }
 } // anonymous namespace
 
@@ -46,7 +46,7 @@ Java_io_imagestitcher_rn_BlurPolicy_nativeMedianCreate(
     JNIEnv*, jobject, jint capacity)
 {
     return reinterpret_cast<jlong>(
-        new retailens::RunningScoreMedian(static_cast<int32_t>(capacity)));
+        new rnis::RunningScoreMedian(static_cast<int32_t>(capacity)));
 }
 
 JNIEXPORT void JNICALL
@@ -99,18 +99,18 @@ Java_io_imagestitcher_rn_BlurPolicy_nativeAdmitKeyframe(
     // is interpreted by the shared C++, not here — duplicating the
     // fail-open rules in the thunk is exactly how the two platforms
     // would drift apart again.
-    retailens::BlurPolicyConfig cfg;
+    rnis::BlurPolicyConfig cfg;
     cfg.maxCommitPanRateRadPerSec = maxCommitPanRateRadPerSec;
     cfg.minScoreFractionOfMedian  = minScoreFractionOfMedian;
     cfg.maxConsecutiveHolds       = static_cast<int32_t>(maxConsecutiveHolds);
 
-    retailens::BlurAdmissionInput in;
+    rnis::BlurAdmissionInput in;
     in.candidateScore     = candidateScore;
     in.sessionMedianScore = sessionMedianScore;
     in.panRateRadPerSec   = panRateRadPerSec;
     in.consecutiveHolds   = static_cast<int32_t>(consecutiveHolds);
 
-    return static_cast<jint>(retailens::admitKeyframe(cfg, in));
+    return static_cast<jint>(rnis::admitKeyframe(cfg, in));
 }
 
 } // extern "C"

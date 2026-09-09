@@ -17,7 +17,7 @@ import type { IncrementalTimings } from './perfTrace';
 
 /**
  * Per-frame outcome returned by the engine.  Mirrors the iOS
- * `RLISFrameOutcome` enum and the Android equivalent — numeric
+ * `RNISFrameOutcome` enum and the Android equivalent — numeric
  * values are kept identical so the JS layer doesn't branch on
  * platform.
  */
@@ -429,7 +429,7 @@ export interface IncrementalStartOptions {
   engine?: 'batch-keyframe';
   /**
    * V15 — per-stage correction config overrides.  Mode-driven defaults
-   * are applied first (see RLISStitcherConfig +configForMode:); fields
+   * are applied first (see RNISStitcherConfig +configForMode:); fields
    * present here override those defaults.  Any field may be omitted to
    * accept the default.
    */
@@ -1052,7 +1052,7 @@ interface NativeIncrementalModule {
     config?: IncrementalRefineOptions;
   }): Promise<IncrementalRefineResult>;
   /** PiP investigation only — write a JS-side message into the
-   *  Swift-side rlis-debug.log so we get a single timeline. */
+   *  Swift-side rnis-debug.log so we get a single timeline. */
   appendDebugLog?(message: string): Promise<{ ok: true }>;
   /**
    * 2026-05-18 (Iss 3) — delete keyframe JPEGs older than the cutoff

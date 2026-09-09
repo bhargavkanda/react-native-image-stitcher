@@ -37,7 +37,7 @@ import QuartzCore  // CACurrentMediaTime (monotonic clock for onArFrame throttle
 // FAULT survives os_log's default-level rate limiting; NSLog is
 // "default" level and gets coalesced/dropped under burst.
 fileprivate let arSessionDiagLog = OSLog(
-    subsystem: "com.tiger.retailens.sdk",
+    subsystem: "io.imagestitcher.rn",
     category: "slitscan"
 )
 
@@ -50,7 +50,7 @@ fileprivate let arSessionDiagLog = OSLog(
 // the session singleton — so the framework-free engine pattern (used by
 // IncrementalStitcher) is preserved.
 public extension Notification.Name {
-    static let retailensARFrameMeta =
+    static let rnisARFrameMeta =
         Notification.Name("RNImageStitcherARFrame")
 }
 
@@ -309,7 +309,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     ///      perpendicular distance from camera).
     ///
     /// Why closest, not largest:
-    /// Field testing on a Pepsi cooler (2026-05-08) showed the area-
+    /// Field testing on a beverage cooler (2026-05-08) showed the area-
     /// weighted heuristic picking the WALL behind the cooler (3.5 m²,
     /// 1.5m away) over the cooler face itself (0.85 m², 0.85m away).
     /// Wall normal isn't perpendicular to the camera view → projecting
@@ -527,7 +527,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
     // ARFrame's per-frame path builds the LIGHT `ARFrameMeta` dictionary
     // (no pixel / vertex / face bytes — see
     // `CameraFrameHostObject.lightArFrameMetaFromARFrame:pose:`) and
-    // posts it on `.retailensARFrameMeta` for the bridge to re-emit.
+    // posts it on `.rnisARFrameMeta` for the bridge to re-emit.
     //
     // Throttle: emit at most one meta per `arFrameMetaIntervalSec`
     // (default 0.1s ≈ 10Hz) using `CACurrentMediaTime()` (monotonic,
@@ -1745,7 +1745,7 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         }
 
         NotificationCenter.default.post(
-            name: .retailensARFrameMeta,
+            name: .rnisARFrameMeta,
             object: nil,
             userInfo: userInfo
         )

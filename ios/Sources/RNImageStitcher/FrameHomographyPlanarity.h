@@ -9,7 +9,7 @@
 //   The planarity score is computed with OpenCV (ORB feature matching
 //   + RANSAC homography inlier fraction).  Swift cannot import any C++
 //   token, and the pod's umbrella module is compiled in a pure-Obj-C
-//   context under `use_frameworks!` (as RetaiLens does) — it chokes on
+//   context under `use_frameworks!` (as the host app does) — it chokes on
 //   any C++ token.  This thin Obj-C class confines ALL OpenCV (the Mat,
 //   ORB, BFMatcher and findHomography machinery) to its `.mm`
 //   translation unit and exposes ONLY plain Obj-C types here, so the

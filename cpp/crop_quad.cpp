@@ -42,7 +42,7 @@
 #include "crop_quad.hpp"
 #include "warp_guard.hpp"
 
-namespace retailens {
+namespace rnis {
 
 // Result of a cropToQuad call.  `ok == false` carries a human-readable
 // `error` (the bridge maps it to NSError / Promise.reject); on success
@@ -159,4 +159,4 @@ CropQuadResult cropQuadToFile(const std::string& inPath,
   return result;
 }
 
-}  // namespace retailens
+}  // namespace rnis

@@ -102,20 +102,20 @@ add_library(image_stitcher SHARED
     "${SHARED_CPP_DIR}/keyframe_gate.cpp"
     # Veiling-glare detector (dark-channel prior) shared with iOS.
     # glare_jni.cpp bridges QualityChecker.nativeComputeGlareScore to
-    # the shared retailens::computeGlareScore free function in
+    # the shared rnis::computeGlareScore free function in
     # cpp/glare.cpp.  See cpp/glare.hpp for the algorithm rationale.
     glare_jni.cpp
     "${SHARED_CPP_DIR}/glare.cpp"
     # v0.21 — variance-of-Laplacian sharpness metric shared with iOS.
     # sharpness_jni.cpp bridges IncrementalStitcher.nativeSharpnessScore
-    # to the shared retailens::sharpnessScore free function in
+    # to the shared rnis::sharpnessScore free function in
     # cpp/sharpness.cpp (the pick-sharpest-in-window anti-blur keyframe
     # selection).  See cpp/sharpness.hpp for the algorithm rationale.
     sharpness_jni.cpp
     "${SHARED_CPP_DIR}/sharpness.cpp"
     # v0.21.1 — shared pick-sharpest-in-window DECISION machine.
     # sharpness_window_jni.cpp bridges the Kotlin SharpnessWindow
-    # facade to retailens::SharpnessWindowMachine — the SAME class the
+    # facade to rnis::SharpnessWindowMachine — the SAME class the
     # iOS engine consults (SharpnessWindowBridge.mm), so window
     # open/replace/close decisions (incl. the overlap-drift guard)
     # cannot drift across platforms.  OpenCV-free; gtest-covered in
@@ -123,8 +123,8 @@ add_library(image_stitcher SHARED
     sharpness_window_jni.cpp
     "${SHARED_CPP_DIR}/sharpness_window.cpp"
     # v0.23 — shared anti-blur ADMISSION policy.  blur_policy_jni.cpp
-    # bridges the Kotlin BlurPolicy facade to retailens::admitKeyframe
-    # + retailens::RunningScoreMedian — the motion gate and relative
+    # bridges the Kotlin BlurPolicy facade to rnis::admitKeyframe
+    # + rnis::RunningScoreMedian — the motion gate and relative
     # sharpness floor the window machine structurally cannot apply
     # (it only ranks candidates against each other).  Same C++ the iOS
     # bridge consults, so the verdicts cannot drift.  OpenCV-free;

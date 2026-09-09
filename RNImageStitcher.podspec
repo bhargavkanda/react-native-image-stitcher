@@ -20,7 +20,7 @@ Pod::Spec.new do |s|
   s.description  = package['description']
   s.homepage     = 'https://github.com/bhargavkanda/react-native-image-stitcher'
   s.license      = { :type => 'Apache-2.0', :file => 'LICENSE' }
-  s.authors      = { 'Tiger Analytics' => 'opensource@tigeranalytics.com' }
+  s.authors      = 'Bhargava Ram Kanda'
   s.source       = {
     :git => 'https://github.com/bhargavkanda/react-native-image-stitcher.git',
     :tag => "v#{s.version}"

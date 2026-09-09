@@ -8,7 +8,7 @@
 #include <string>
 #include <utility>
 
-namespace retailens {
+namespace rnis {
 
 using facebook::jsi::Array;
 using facebook::jsi::Function;
@@ -211,4 +211,4 @@ Value StitcherFrameJsiHostObject::get(Runtime& rt,
   return Value::undefined();
 }
 
-}  // namespace retailens
+}  // namespace rnis

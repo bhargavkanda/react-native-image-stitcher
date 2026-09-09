@@ -131,13 +131,13 @@ class IncrementalStitcher(
     ///
     /// Why:
     ///   The V16 Phase-1 MVP wrote every accepted keyframe to
-    ///   `cacheDir/rlis-keyframe-{N}.jpg` where N restarted at 0 on
+    ///   `cacheDir/rnis-keyframe-{N}.jpg` where N restarted at 0 on
     ///   each capture.  Two captures in a row → second capture's
-    ///   `rlis-keyframe-0.jpg` overwrites the first's.  Worse, RN's
+    ///   `rnis-keyframe-0.jpg` overwrites the first's.  Worse, RN's
     ///   `<Image>` component on Android caches decoded bitmaps keyed
     ///   by URI string; the file:// URI was byte-identical across
     ///   captures, so the previous capture's bitmap got served for
-    ///   the new capture's first thumbnail — Ram's "thumbnails come
+    ///   the new capture's first thumbnail — the maintainer's "thumbnails come
     ///   from the previous capture" symptom (2026-05-12).  Also a
     ///   data-integrity hazard if a new capture starts while the
     ///   previous one's stitcher is still reading the JPEGs from
@@ -147,7 +147,7 @@ class IncrementalStitcher(
     ///   - Each capture's keyframes live at a unique path → no URI
     ///     collision → no bitmap-cache reuse across captures.
     ///   - Files survive past finalize for post-hoc reprocessing
-    ///     (Ram's request — same behaviour as iOS' OpenCVKeyframeCollector).
+    ///     (the maintainer's request — same behaviour as iOS' OpenCVKeyframeCollector).
     ///
     /// Lifetime:
     ///   • Created in `start()` batch-keyframe branch.
@@ -346,7 +346,7 @@ class IncrementalStitcher(
     ///     side of the boundary, so CONTROL_AE_MODE_OFF +
     ///     SENSOR_EXPOSURE_TIME is simply not reachable.  The HOST must
     ///     apply it through vision-camera's Camera2 interop
-    ///     (Camera2CameraControl — the same interop retailens-camera-sdk
+    ///     (Camera2CameraControl — the same interop host-camera-sdk
     ///     already uses for manual exposure), or the softer
     ///     CONTROL_AE_TARGET_FPS_RANGE floor.
     ///   • AR — ARCore owns the camera and exposes NO exposure API at
@@ -367,7 +367,7 @@ class IncrementalStitcher(
     /// V16-Phase-1 frame-counter MVP placeholder
     /// (handleBatchKeyframeFrame above) with the same pose-driven
     /// 40%-new-content algorithm iOS has used since the V16 ship.
-    /// Both platforms call into retailens::KeyframeGate (in
+    /// Both platforms call into rnis::KeyframeGate (in
     /// react-native-image-stitcher/cpp/keyframe_gate.cpp) — see that file
     /// for the algorithm.
     ///
@@ -562,14 +562,14 @@ class IncrementalStitcher(
             batchKeyframePaths.clear()
             // V16 Phase 2 (Android Fix-1) — fresh per-session subdir
             // for this capture's keyframe JPEGs.  Replaces the
-            // V16-Phase-1 "rlis-keyframe-{N}.jpg in cacheDir"
+            // V16-Phase-1 "rnis-keyframe-{N}.jpg in cacheDir"
             // scheme that caused thumbnails from a previous capture
             // to leak into the next one via RN's bitmap cache (see
             // `captureSessionDir` declaration above for the full
             // RCA).  Matches iOS' OpenCVKeyframeCollector behaviour.
             captureSessionDir = java.io.File(
                 reactContext.cacheDir,
-                "rlis-capture-${java.util.UUID.randomUUID()}",
+                "rnis-capture-${java.util.UUID.randomUUID()}",
             ).also { it.mkdirs() }
             batchKeyframeMaxCount = configOverrides
                 ?.getIntOrDefault("keyframeMaxCount", 6) ?: 6
@@ -860,7 +860,7 @@ class IncrementalStitcher(
      * Copy a (non-persistent) source JPEG to a persistent per-keyframe
      * path under the React context's cache dir.  The ARCameraView's
      * forwardToIncremental writes every frame to a SINGLE reused tmp
-     * file (rlis-arframe.jpg) — adequate for the live engines that
+     * file (rnis-arframe.jpg) — adequate for the live engines that
      * decode synchronously, but the batch-keyframe collector
      * accumulates paths for stitching at finalize time, so each
      * keyframe needs its own stable file.
@@ -869,7 +869,7 @@ class IncrementalStitcher(
      * null if the copy failed.  Cost ≈ 3-5 ms for a 1080p JPEG on
      * iPhone 16 / Galaxy A35 class hardware.
      *
-     * Naming: `rlis-keyframe-{N}.jpg` where N is the next slot index
+     * Naming: `rnis-keyframe-{N}.jpg` where N is the next slot index
      * (= batchKeyframePaths.size).  Survives until either the next
      * batch-keyframe capture overwrites the same slot or the OS
      * cleans the cache dir.  iOS counterpart writes per-session
@@ -882,7 +882,7 @@ class IncrementalStitcher(
         // subdir created by start().  If start() didn't run (defensive
         // — should never happen on the live ingest path), the
         // captureSessionDir is null and we drop the frame; the older
-        // "rlis-keyframe-{N}.jpg in cacheDir" fallback is GONE because
+        // "rnis-keyframe-{N}.jpg in cacheDir" fallback is GONE because
         // it was the source of the cross-capture cache bug.
         val dir = captureSessionDir
         if (dir == null) {
@@ -1331,7 +1331,7 @@ class IncrementalStitcher(
                         captureSessionDirSnapshot?.let { dir ->
                             try {
                                 val pack = org.json.JSONObject().apply {
-                                    put("schema", "rlis-debug-pack/v1")
+                                    put("schema", "rnis-debug-pack/v1")
                                     put("timestampMs", System.currentTimeMillis())
                                     put("device", org.json.JSONObject().apply {
                                         put("model", android.os.Build.MODEL)
@@ -1606,7 +1606,7 @@ class IncrementalStitcher(
         // here previously (handleBatchKeyframeFrame) is GONE.
         //
         // The ARCameraView's JPEG-encode pipeline writes to a single
-        // REUSED tmp file (rlis-arframe.jpg in cacheDir) — fine for
+        // REUSED tmp file (rnis-arframe.jpg in cacheDir) — fine for
         // live engines (decoded into cv::Mat synchronously inside
         // addFrameAtPath, before next frame arrives), but FATAL for
         // batch-keyframe (all accepted keyframe paths would point to
@@ -2532,7 +2532,7 @@ class IncrementalStitcher(
 
     /**
      * 2026-05-18 (Iss 3) — GC stale keyframe-session directories under
-     * the SDK's cacheDir.  Scans `cacheDir` for `rlis-capture-*`
+     * the SDK's cacheDir.  Scans `cacheDir` for `rnis-capture-*`
      * subdirectories (created by start() above) and removes those whose
      * newest file mtime is older than `olderThanMs` (default 24h).
      *
@@ -2557,7 +2557,7 @@ class IncrementalStitcher(
         var bytesFreed = 0L
         try {
             val cache = reactContext.cacheDir ?: throw IllegalStateException("no cacheDir")
-            val sessions = cache.listFiles { f -> f.isDirectory && f.name.startsWith("rlis-capture-") }
+            val sessions = cache.listFiles { f -> f.isDirectory && f.name.startsWith("rnis-capture-") }
                 ?: emptyArray()
             for (sessionDir in sessions) {
                 // Newest mtime across the session's files (flat tree today,
@@ -3114,7 +3114,7 @@ class IncrementalStitcher(
      * was frozen between accepts — operator could see "5 / 6
      * frames" but not "currently 92% overlap, need to pan more".
      *
-     * Outcome enum: 5 = RejectedOverlap (matches iOS' RLISFrameOutcomeRejectedOverlap).
+     * Outcome enum: 5 = RejectedOverlap (matches iOS' RNISFrameOutcomeRejectedOverlap).
      *
      * Emit throttle is OFF by default (rejectEmitMinIntervalNanos = 0),
      * matching iOS, which never throttles reject emits.  A host that
@@ -3422,7 +3422,7 @@ class IncrementalStitcher(
 
     /// v0.21 — variance-of-Laplacian sharpness score for the
     /// pick-sharpest-in-window selection.  Bridges to the shared
-    /// retailens::sharpnessScore (cpp/sharpness.{hpp,cpp}) via
+    /// rnis::sharpnessScore (cpp/sharpness.{hpp,cpp}) via
     /// android/src/main/cpp/sharpness_jni.cpp — identical math to
     /// iOS.  `gray` is the frame's Y-plane bytes (same buffer the
     /// keyframe gate evaluates); the metric downscales internally so

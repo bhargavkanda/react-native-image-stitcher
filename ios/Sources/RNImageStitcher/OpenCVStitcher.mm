@@ -75,7 +75,7 @@
 
 // V12.14.2 — dedicated os_log subsystem for the stitcher.  os_log
 // with OS_LOG_TYPE_FAULT survives Console.app's rate-limit cap that
-// drops bursts of NSLog calls — Ram's V12.14 trace had Run 2's
+// drops bursts of NSLog calls — the maintainer's V12.14 trace had Run 2's
 // extractFrames + loadFrames + step1 entirely missing, only the
 // step2-5 enter cluster surviving.  We use FAULT level for SENTINEL
 // breadcrumbs that MUST be visible (start of stitch, BA call site,
@@ -84,7 +84,7 @@ static os_log_t StitcherDiagLog(void) {
     static os_log_t log = NULL;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        log = os_log_create("com.tiger.retailens.sdk", "stitch");
+        log = os_log_create("io.imagestitcher.rn", "stitch");
     });
     return log;
 }
@@ -464,7 +464,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // Component → HomographyBasedEstimator → BundleAdjusterRay → wave
   // correct → median-focal warper-scale → seam find → multi-band
   // blend → max-inscribed-rect crop → bake-rotate → JPEG write) was
-  // ported verbatim to `retailens::stitchFramePathsManual()` in
+  // ported verbatim to `rnis::stitchFramePathsManual()` in
   // cpp/stitcher.cpp during Phase 1 (commit 02534ac).  Android already
   // routes through the same file via the high-level pipeline; iOS
   // now routes through it via `useManualPipeline=true`.
@@ -494,7 +494,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // leaving the sentinel -1.0, which made the manual entry point fall back
   // to its LOW defaults (registration 0.3 MP / compose 0.6 MP — half /
   // 0.6x Android's 0.6 / 1.0 MP, a major reason iOS output looked softer).
-  retailens::StitchConfig cfg;
+  rnis::StitchConfig cfg;
   cfg.registrationResolMP  = 0.6;   // cv::Stitcher default
   cfg.compositingResolMP   = 1.0;   // high-level default (manual was 0.6)
   cfg.warperType           = warperType.UTF8String;
@@ -518,9 +518,9 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // hardcoded default — preserves behaviour for callers that haven't
   // updated yet).
   if ([stitchMode isEqualToString:@"scans"]) {
-    cfg.stitchMode         = retailens::StitchMode::Scans;
+    cfg.stitchMode         = rnis::StitchMode::Scans;
   } else {
-    cfg.stitchMode         = retailens::StitchMode::Panorama;
+    cfg.stitchMode         = rnis::StitchMode::Panorama;
   }
   // Pre-stitch memory-abort threshold inside the manual pipeline keys
   // off this value.  Plumb the device's physical RAM through so the
@@ -578,7 +578,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   // subsystem the rest of this file uses, so Console.app shows them
   // alongside the existing breadcrumbs.  Level mapping mirrors what
   // the shared C++ already documents (0=info, 1=warn, 2=error).
-  retailens::LogFn logFn = [](int level, const char *tag, const char *msg) {
+  rnis::LogFn logFn = [](int level, const char *tag, const char *msg) {
     os_log_type_t logType;
     switch (level) {
       case 0:  logType = OS_LOG_TYPE_INFO;    break;
@@ -614,7 +614,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   RNStitchResult *result = nil;
   NSError *capturedError = nil;
   @autoreleasepool {
-    retailens::StitchResult r = retailens::stitchFramePaths(
+    rnis::StitchResult r = rnis::stitchFramePaths(
         paths,
         cleanedOutputPath.UTF8String,
         cfg,
@@ -666,38 +666,38 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
       // 9007 / generic crashes.
       NSInteger nsCode = 9999;
       switch (r.errorCode) {
-        case retailens::StitchErrorCode::NeedMoreImages:
+        case rnis::StitchErrorCode::NeedMoreImages:
           nsCode = 9001;
           break;
-        case retailens::StitchErrorCode::HomographyEstimationFailed:
+        case rnis::StitchErrorCode::HomographyEstimationFailed:
           nsCode = 9002;
           break;
-        case retailens::StitchErrorCode::CameraParamsAdjustFailed:
+        case rnis::StitchErrorCode::CameraParamsAdjustFailed:
           nsCode = 9003;
           break;
-        case retailens::StitchErrorCode::ImageReadFailed:
+        case rnis::StitchErrorCode::ImageReadFailed:
           nsCode = 1001;
           break;
-        case retailens::StitchErrorCode::AllFramesDroppedByConfidence:
+        case rnis::StitchErrorCode::AllFramesDroppedByConfidence:
           // 9007 preserves the existing sentinel the JS-side surfaces
           // as "could not stitch — try recapturing with more overlap";
           // changing this would silently flip the operator-facing
           // copy across the app.
           nsCode = 9007;
           break;
-        case retailens::StitchErrorCode::PreStitchMemoryAbort:
+        case rnis::StitchErrorCode::PreStitchMemoryAbort:
           nsCode = 9100;
           break;
-        case retailens::StitchErrorCode::ComposeResizeFailed:
+        case rnis::StitchErrorCode::ComposeResizeFailed:
           nsCode = 9101;
           break;
-        case retailens::StitchErrorCode::WarpFailed:
+        case rnis::StitchErrorCode::WarpFailed:
           nsCode = 9102;
           break;
-        case retailens::StitchErrorCode::EmptyPanorama:
+        case rnis::StitchErrorCode::EmptyPanorama:
           nsCode = 9103;
           break;
-        case retailens::StitchErrorCode::InvalidArgument:
+        case rnis::StitchErrorCode::InvalidArgument:
           nsCode = 9000;
           break;
         default:
@@ -805,7 +805,7 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   NSString *cleanedOutputDir = normalizeImagePath(outputDir);
 
   // V12.13 — diagnostic for the landscape-only `EXC_BAD_ACCESS` crash
-  // Ram caught.  Track per-frame extract progress + dimensions so the
+  // the maintainer caught.  Track per-frame extract progress + dimensions so the
   // log breadcrumb pinpoints which stage and frame triggers the
   // memory error if it recurs.  Also log the asset's video track size
   // + preferred transform up front so we know what AVFoundation is
@@ -1203,14 +1203,14 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   }
 
-  retailens::CropQuad quad;
+  rnis::CropQuad quad;
   quad.tl = {tlX, tlY};
   quad.tr = {trX, trY};
   quad.br = {brX, brY};
   quad.bl = {blX, blY};
 
   // Geometry gate — convex, non-degenerate, inside the decoded image.
-  if (!retailens::isQuadAcceptable(quad, (double)img.cols, (double)img.rows)) {
+  if (!rnis::isQuadAcceptable(quad, (double)img.cols, (double)img.rows)) {
     if (error) {
       *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1023
@@ -1222,10 +1222,10 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
     return nil;
   }
 
-  const retailens::QuadDstSize dst = retailens::quadDstRect(quad);
+  const rnis::QuadDstSize dst = rnis::quadDstRect(quad);
   // Output-canvas OOM net — the same guard the stitch pipeline uses.
   if (dst.width <= 0 || dst.height <= 0 ||
-      retailens::canvasExceedsGuard(dst.width, dst.height)) {
+      rnis::canvasExceedsGuard(dst.width, dst.height)) {
     if (error) {
       *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1024

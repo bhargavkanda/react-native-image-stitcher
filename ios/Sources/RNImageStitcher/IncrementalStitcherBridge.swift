@@ -42,7 +42,7 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
         // many times init runs.
         NotificationCenter.default.removeObserver(
             self,
-            name: .retailensIncrementalStateUpdate,
+            name: .rnisIncrementalStateUpdate,
             object: nil
         )
         // Subscribe once at construction.  The handler self-checks
@@ -51,7 +51,7 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleStateUpdate(_:)),
-            name: .retailensIncrementalStateUpdate,
+            name: .rnisIncrementalStateUpdate,
             object: nil
         )
     }
@@ -139,7 +139,7 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
         // so we can spot a mismatch — frameRotationDegrees=0 with
         // captureOrientation="portrait" means JS is passing stale
         // accelerometer state.
-        os_log(.fault, log: OSLog(subsystem: "com.tiger.retailens",
+        os_log(.fault, log: OSLog(subsystem: "io.imagestitcher.rn",
                                   category: "stitcher.diag"),
                "[V16-bridge] start: captureOrientation=%{public}@ frameRotationDegrees=%d (raw_options_value=%{public}@)",
                captureOrientation,
@@ -403,7 +403,7 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
     }
 
     /// PiP investigation: write a JS-supplied message into the same
-    /// rlis-debug.log file the Swift side uses, so we get a single
+    /// rnis-debug.log file the Swift side uses, so we get a single
     /// timeline across native and JS.  Remove once PiP is fixed.
     @objc(appendDebugLog:resolver:rejecter:)
     public func appendDebugLog(

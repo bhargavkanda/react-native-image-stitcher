@@ -316,7 +316,7 @@ export function RectCropPreview(
           onMoveShouldSetPanResponder: () => true,
           // Corner drags must never be stolen mid-gesture by an ancestor
           // responder (e.g. the host's screen-wide swipe-to-switch-mode
-          // PanResponder, RetaiLensCaptureCamera.tsx's modeSwipeResponder).
+          // PanResponder, HostCaptureCamera.tsx's modeSwipeResponder).
           // RN's default (no handler = grant) let an ancestor take over the
           // instant a drag went horizontal-dominant -- exactly the shape of
           // dragging a corner to fix the TOP edge -- firing a mode switch

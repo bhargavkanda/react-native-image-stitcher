@@ -996,7 +996,7 @@ internal class IncrementalFirstwinsEngine(
         // Critic #27 fix: use the bridge-provided cache dir
         // (reactContext.cacheDir.absolutePath), NOT java.io.tmpdir
         // which on Android is /data/local/tmp (rooted-only).
-        return "$snapshotCacheDir/rlis-live-$slot.jpg"
+        return "$snapshotCacheDir/rnis-live-$slot.jpg"
     }
 
     private fun writeOut(path: String, quality: Int, applyExposureComp: Boolean): Boolean {

@@ -35,7 +35,7 @@
 
 #include "glare.hpp"
 
-namespace retailens {
+namespace rnis {
 
 namespace {
 
@@ -134,4 +134,4 @@ double computeGlareScore(const cv::Mat& image, const GlareRoi& roi,
   return meanDark;
 }
 
-}  // namespace retailens
+}  // namespace rnis

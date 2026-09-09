@@ -84,7 +84,7 @@ to confirm.
 3. Pull the pack:
    ```bash
    adb -s <A34> exec-out run-as <fleet.app.id> \
-     tar c cache/rlis-capture-<uuid> | tar x -C ./a34-pack
+     tar c cache/rnis-capture-<uuid> | tar x -C ./a34-pack
    ```
 4. **Read `pack.json` → `result.finalConfidenceThresh` first.**
    - `0.3` → **H1 confirmed** (attempt 3, the 1.3 MP cliff). Done.
