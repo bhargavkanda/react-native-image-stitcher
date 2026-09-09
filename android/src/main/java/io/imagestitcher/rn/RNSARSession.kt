@@ -10,6 +10,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.UiThreadUtil
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.CameraConfig
 import com.google.ar.core.CameraConfigFilter
@@ -58,6 +59,96 @@ class RNSARSession(reactContext: ReactApplicationContext)
     /// JS code does not need conditional branching across platforms.
     private val trackingStateRef = AtomicReference(TRACKING_NOT_AVAILABLE)
     private val sessionRef = AtomicReference<Session?>(null)
+
+    /**
+     * Sessions that have been PAUSED for teardown but NOT yet closed, because
+     * an [RNSARCameraView] is still bound and its GL thread may be inside
+     * `Session.update()`.
+     *
+     * ⚠ THE CRASH THIS EXISTS TO END, measured on a Galaxy A35 2026-09-03,
+     * reproduced 3/3. Selecting the 0.5x ultra-wide lens flips the camera to
+     * non-AR, and `Camera.tsx`'s transition effect calls this module's
+     * `stop()` to release Camera2 before vision-camera opens it. That effect
+     * runs on the JS thread; the AR view's UNMOUNT is a mount-item queued to
+     * the UI thread, so `stop()` routinely wins the race and `close()` frees
+     * the native session while the view is still attached and its GL thread is
+     * mid-frame. The next `Session.update()` then dereferences freed state:
+     *
+     *     Fatal signal 11 (SIGSEGV) ... in tid (GLThread), fault addr 0x0
+     *       #02 libarcore_c.so (ArSession_update+208)
+     *       #06 io.imagestitcher.rn.RNSARCameraView.onDrawFrame+576
+     *
+     * `pause()` is safe against that interleaving and `close()` is not:
+     * `update()` on a PAUSED session raises `SessionPausedException`, which
+     * `onDrawFrame` already catches and returns on — which is precisely why
+     * the split below is the fix rather than a delay. So teardown pauses
+     * immediately (the camera is released, which is what the caller wanted)
+     * and defers only the `close()` to [unbindCameraView], which the view
+     * calls from `onDetachedFromWindow` AFTER `super.onDetachedFromWindow()`
+     * has already exited its GL thread.
+     *
+     * A list rather than a single slot because a host that stops and restarts
+     * AR without ever unmounting the view can strand more than one; each is
+     * closed exactly once, on unbind.
+     */
+    private val pendingCloses =
+        java.util.Collections.synchronizedList(java.util.ArrayList<Session>())
+
+    /**
+     * Pause [prev], then close it — or hand it to [pendingCloses] when a
+     * camera view is still bound and could be dereferencing it. Never throws.
+     *
+     * MUST be called on the main thread: every caller already is (`onArThread`
+     * for the @ReactMethods, `onDetachedFromWindow`/`onAttachedToWindow` for
+     * the view-driven twins), and ARCore requires it.
+     */
+    private fun teardownSession(prev: Session?, whence: String) {
+        if (prev == null) return
+        try {
+            prev.pause()
+        } catch (t: Throwable) {
+            Log.w(TAG, "$whence: pause failed (ignoring): ${t.message}")
+        }
+        if (attachedView != null) {
+            // Deferred — see [pendingCloses]. The camera is already released by
+            // the pause above, so the caller's actual goal (let vision-camera
+            // open Camera2) is met here and not delayed by the deferral.
+            if (!pendingCloses.contains(prev)) pendingCloses.add(prev)
+            Log.i(
+                TAG,
+                "$whence: session PAUSED; close deferred until the bound camera " +
+                    "view detaches (its GL thread may be inside update())",
+            )
+            return
+        }
+        // Nothing is bound, so this is also the moment anything stranded by an
+        // earlier deferral becomes safe: a host that toggles AR off and on
+        // without ever unmounting the view would otherwise hold every paused
+        // session until it finally detached.
+        drainPendingCloses(whence)
+        closeNow(prev, whence)
+    }
+
+    /** Close one session, swallowing anything it throws. */
+    private fun closeNow(prev: Session, whence: String) {
+        try {
+            prev.close()
+        } catch (t: Throwable) {
+            Log.w(TAG, "$whence: close failed (ignoring): ${t.message}")
+        }
+    }
+
+    /** Close everything [teardownSession] deferred. Safe to call repeatedly;
+     *  callers must already be past the point where a GL thread can touch
+     *  these sessions. */
+    private fun drainPendingCloses(whence: String) {
+        while (true) {
+            val next = synchronized(pendingCloses) {
+                if (pendingCloses.isEmpty()) null else pendingCloses.removeAt(0)
+            } ?: return
+            closeNow(next, whence)
+        }
+    }
     /// When set (document scanning), [selectMatchingCameraConfig] picks the
     /// LARGEST 4:3 CPU image instead of the smallest, so AR `takePhoto`
     /// captures at the device's highest ARCore CPU resolution.  Gated so
@@ -349,7 +440,9 @@ class RNSARSession(reactContext: ReactApplicationContext)
     }
 
     @ReactMethod
-    fun start(promise: Promise) {
+    fun start(promise: Promise) = onArThread {
+        // Whole body on the main thread (see onArThread): this creates a
+        // Session and calls `resume()`, both of which ARCore requires there.
         // ReactContextBaseJavaModule.getCurrentActivity() — Java
         // getter, no Kotlin property syntax.  ARCore's installer
         // path needs an Activity to attach the consent dialog to.
@@ -359,7 +452,7 @@ class RNSARSession(reactContext: ReactApplicationContext)
                 "no-activity",
                 "AR session requires an active Activity; was none attached when start() was called.",
             )
-            return
+            return@onArThread
         }
         try {
             // ArCoreApk install path — kicks off Play Services for
@@ -375,7 +468,7 @@ class RNSARSession(reactContext: ReactApplicationContext)
                     // start() again from onResume().
                     trackingStateRef.set(TRACKING_NOT_AVAILABLE)
                     promise.resolve(null)
-                    return
+                    return@onArThread
                 }
                 ArCoreApk.InstallStatus.INSTALLED -> { /* fall through */ }
             }
@@ -425,7 +518,9 @@ class RNSARSession(reactContext: ReactApplicationContext)
     }
 
     @ReactMethod
-    fun stop(promise: Promise) {
+    fun stop(promise: Promise) = onArThread {
+        // Main thread (see onArThread): pause()/close() must never interleave
+        // with a reconfig or a view-driven start/stop on another thread.
         try {
             // 2026-05-23 (crash fix) — Session.pause() stops frame
             // production but keeps the native session ALIVE: its
@@ -444,23 +539,61 @@ class RNSARSession(reactContext: ReactApplicationContext)
             // ARCore's documented full-teardown sequence.  The next
             // start() recreates the Session from scratch (see
             // line 105's `sessionRef.get() ?: Session(...)` path).
-            val prev = sessionRef.getAndSet(null)
-            try {
-                prev?.pause()
-            } catch (t: Throwable) {
-                Log.w(TAG, "stop: pause failed (ignoring): ${t.message}")
-            }
-            try {
-                prev?.close()
-            } catch (t: Throwable) {
-                Log.w(TAG, "stop: close failed (ignoring): ${t.message}")
-            }
+            // 2026-09-03 — pause now, close when it is SAFE to close. The
+            // straight pause+close here was a use-after-free whenever an
+            // ARCameraView was still attached (the lens-switch race); see
+            // [pendingCloses] for the tombstone and the reasoning.
+            teardownSession(sessionRef.getAndSet(null), "stop")
             trackingStateRef.set(TRACKING_NOT_AVAILABLE)
             clearPoseLogInternal()
             promise.resolve(null)
         } catch (t: Throwable) {
             promise.reject("ar-stop-failed", t.message, t)
         }
+    }
+
+    /**
+     * Run one ARCore SESSION-LIFECYCLE transition (create / configure / pause /
+     * resume / close) on the MAIN thread, which is where ARCore requires them —
+     * a contract [startForView]'s KDoc below already states.
+     *
+     * WHY THIS EXISTS (2026-09-02 field hang, Galaxy A35 / SM-A356U1). The three
+     * reconfig helpers further down are `@ReactMethod`s, so they ran on RN's
+     * NativeModules queue thread (`mqt_v_native`), NOT the main thread. During a
+     * Mosaic finalize the `<ARCameraView>` unmounts, which fires two teardown
+     * paths CONCURRENTLY on two threads:
+     *
+     *   main thread   `onDetachedFromWindow` -> [stopForView] -> sessionRef
+     *                 cleared, then `pause()` + `close()`
+     *   mqt_v_native  React effect cleanup -> `setKeyframeQualityCaptureEnabled(
+     *                 false)` -> holders 1->0 -> `sessionRef.get()` (still
+     *                 non-null: it won the race) -> `pause()` /
+     *                 `selectMatchingCameraConfig` / `resume()`
+     *
+     * The second path called `resume()` off the main thread, on a Session the
+     * first was closing, with the view's surface already destroyed. ARCore's
+     * `Session.nativeResume()` NEVER RETURNED (confirmed by a live jdb thread
+     * dump off the wedged process: `mqt_v_native` parked in
+     * `com.google.ar.core.Session.nativeResume`). Because ONE NativeModules
+     * queue serves EVERY legacy module in the host app, every later
+     * `@ReactMethod` queued behind it forever -- including the debug pack's
+     * `exportSessionZip`, whose Promise then never settled and left the
+     * operator's capture stuck at "saving" with no error, indefinitely.
+     *
+     * Hopping every lifecycle transition onto the main looper removes the race
+     * by construction rather than narrowing it: [startForView] / [stopForView]
+     * are already on that thread, so a reconfig is now strictly ORDERED against
+     * teardown instead of racing it, and one that lands after teardown finds
+     * `sessionRef` null and returns. No ARCore-blocking call is left on the
+     * bridge thread, so even a genuinely stuck ARCore can no longer take the
+     * host's whole native-module queue down with it.
+     *
+     * Runs INLINE when already on the main thread: [startForView] returns a
+     * Boolean its caller acts on, and `onDetachedFromWindow` must have finished
+     * tearing down before it returns.
+     */
+    private fun onArThread(block: () -> Unit) {
+        if (UiThreadUtil.isOnUiThread()) block() else UiThreadUtil.runOnUiThread(block)
     }
 
     // ── Internal lifecycle hooks for the AR camera view ──────────────────
@@ -604,18 +737,13 @@ class RNSARSession(reactContext: ReactApplicationContext)
             // internal worker threads alive but orphaned; close()
             // tears them down.  Required for the AR-off toggle path
             // (ARCameraView unmount → onDetachedFromWindow → here).
-            try {
-                prev.pause()
-            } catch (t: Throwable) {
-                Log.w(TAG, "stopForView: pause failed (ignoring): ${t.message}")
-            }
-            try {
-                prev.close()
-            } catch (t: Throwable) {
-                Log.w(TAG, "stopForView: close failed (ignoring): ${t.message}")
-            }
+            // Same split as `stop()` — see [pendingCloses]. On the ordinary
+            // path this view has already unbound itself (onDetachedFromWindow
+            // calls unbindCameraView BEFORE stopForView), so `attachedView` is
+            // null and the close happens right here, unchanged.
+            teardownSession(prev, "stopForView")
             trackingStateRef.set(TRACKING_NOT_AVAILABLE)
-            Log.i(TAG, "stopForView: AR session paused + closed")
+            Log.i(TAG, "stopForView: AR session paused (+ closed unless deferred)")
         } catch (t: Throwable) {
             Log.w(TAG, "stopForView: teardown failed: ${t.message}", t)
         }
@@ -1122,6 +1250,15 @@ class RNSARSession(reactContext: ReactApplicationContext)
 
     internal fun unbindCameraView(view: RNSARCameraView) {
         if (attachedView === view) attachedView = null
+        // THE OTHER HALF OF THE DEFERRED CLOSE. This runs from the view's
+        // `onDetachedFromWindow`, which has already returned from
+        // `super.onDetachedFromWindow()` — and GLSurfaceView exits its render
+        // thread in there (`requestExitAndWait`). So no GL thread can be inside
+        // `Session.update()` from this point on, and anything `teardownSession`
+        // left paused-but-open can finally be closed. Closing matters: a paused
+        // ARCore session keeps its native worker threads alive (the 2026-05-23
+        // orphaned-tango_pool_lp4 crash), so deferring is a delay, never a skip.
+        if (attachedView == null) drainPendingCloses("unbindCameraView")
     }
 
     /// 0.20.0 — the bound AR camera view's overlay store, or null when no
@@ -1210,14 +1347,23 @@ class RNSARSession(reactContext: ReactApplicationContext)
     fun setHighResCaptureEnabled(on: Boolean) {
         if (prefersHighResCapture == on) return
         prefersHighResCapture = on
-        val session = sessionRef.get() ?: return
-        try {
-            session.pause()
-            selectMatchingCameraConfig(session)
-            session.resume()
-            Log.i(TAG, "setHighResCaptureEnabled=$on; re-applied config to live session")
-        } catch (t: Throwable) {
-            Log.w(TAG, "setHighResCaptureEnabled reconfig failed (ignoring): ${t.message}")
+        // ARCore half on the main thread, and the session RE-READ there — see
+        // [onArThread]. Reading it here would reproduce the 2026-09-02 wedge:
+        // the view can detach between this call and the hop, and reconfiguring
+        // a Session another thread is closing never returns.
+        onArThread {
+            val session = sessionRef.get() ?: run {
+                Log.i(TAG, "setHighResCaptureEnabled=$on; no live session — nothing to re-apply")
+                return@onArThread
+            }
+            try {
+                session.pause()
+                selectMatchingCameraConfig(session)
+                session.resume()
+                Log.i(TAG, "setHighResCaptureEnabled=$on; re-applied config to live session")
+            } catch (t: Throwable) {
+                Log.w(TAG, "setHighResCaptureEnabled reconfig failed (ignoring): ${t.message}")
+            }
         }
     }
 
@@ -1253,14 +1399,26 @@ class RNSARSession(reactContext: ReactApplicationContext)
         )
         if (wasOn == isOn) return
         io.imagestitcher.rn.ar.YuvImageConverter.setKeyframeQuality(isOn)
-        val session = sessionRef.get() ?: return
-        try {
-            session.pause()
-            selectMatchingCameraConfig(session)
-            session.resume()
-            Log.i(TAG, "keyframeQuality effective=$isOn; re-applied config to live session")
-        } catch (t: Throwable) {
-            Log.w(TAG, "setKeyframeQualityCaptureEnabled reconfig failed (ignoring): ${t.message}")
+        // THIS IS THE 2026-09-02 WEDGE SITE. The release call (`on=false`) is
+        // the React effect cleanup that runs as `<ARCameraView>` unmounts, i.e.
+        // exactly when the main thread is in `stopForView()` closing the very
+        // Session this used to reconfigure. Hopping to the main thread and
+        // re-reading `sessionRef` THERE turns that race into an ordering: after
+        // teardown the session is gone and this is a logged no-op. See
+        // [onArThread] for the full incident.
+        onArThread {
+            val session = sessionRef.get() ?: run {
+                Log.i(TAG, "keyframeQuality effective=$isOn; no live session — nothing to re-apply")
+                return@onArThread
+            }
+            try {
+                session.pause()
+                selectMatchingCameraConfig(session)
+                session.resume()
+                Log.i(TAG, "keyframeQuality effective=$isOn; re-applied config to live session")
+            } catch (t: Throwable) {
+                Log.w(TAG, "setKeyframeQualityCaptureEnabled reconfig failed (ignoring): ${t.message}")
+            }
         }
     }
 
@@ -1281,14 +1439,21 @@ class RNSARSession(reactContext: ReactApplicationContext)
     internal fun setHighFpsFormatEnabled(on: Boolean) {
         if (prefersHighFpsFormat == on) return
         prefersHighFpsFormat = on
-        val session = sessionRef.get() ?: return
-        try {
-            session.pause()
-            selectMatchingCameraConfig(session)
-            session.resume()
-            Log.i(TAG, "setHighFpsFormatEnabled=$on; re-applied config to live session")
-        } catch (t: Throwable) {
-            Log.w(TAG, "setHighFpsFormatEnabled reconfig failed (ignoring): ${t.message}")
+        // Main thread + session re-read there — see [onArThread]. Same shape,
+        // same hazard as the two helpers above.
+        onArThread {
+            val session = sessionRef.get() ?: run {
+                Log.i(TAG, "setHighFpsFormatEnabled=$on; no live session — nothing to re-apply")
+                return@onArThread
+            }
+            try {
+                session.pause()
+                selectMatchingCameraConfig(session)
+                session.resume()
+                Log.i(TAG, "setHighFpsFormatEnabled=$on; re-applied config to live session")
+            } catch (t: Throwable) {
+                Log.w(TAG, "setHighFpsFormatEnabled reconfig failed (ignoring): ${t.message}")
+            }
         }
     }
 
