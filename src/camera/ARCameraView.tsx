@@ -140,6 +140,16 @@ export interface ARCameraViewProps {
    */
   keyframeQualityCapture?: boolean;
   /**
+   * Long-edge budget (px) the `keyframeQualityCapture` image pick is made
+   * against. Omit for the 1920 default — today's behaviour exactly.
+   *
+   * Exists because the CPU image is repacked to NV21 on the GL RENDER THREAD
+   * every tick, before any plugin is asked whether it wants the frame, so a
+   * bigger image costs the DRAW loop and not just memory. On a Galaxy A35 the
+   * rungs are 640x480 / 1280x720 / 1920x1080; 1280 is the middle one.
+   */
+  keyframeQualitySourceMaxLongEdge?: number;
+  /**
    * Opt in to per-frame AR anchor extraction (`CameraFrame.arAnchors` —
    * detected planes / augmented images).  Default `false`.
    */
@@ -356,6 +366,7 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
       enableDepth,
       highResCapture,
       keyframeQualityCapture,
+      keyframeQualitySourceMaxLongEdge,
       enableAnchors,
       enableMesh,
       enableFeaturePoints,
@@ -490,6 +501,19 @@ export const ARCameraView = forwardRef<ARCameraViewHandle, ARCameraViewProps>(
         session?.setKeyframeQualityCaptureEnabled?.(false);
       };
     }, [keyframeQualityCapture]);
+
+    // Push the source budget. SEPARATE from the acquire above, deliberately:
+    // the budget is a session-wide setting with its own default, while the
+    // acquire is refcounted across overlapping mounts. Folding them together
+    // would make an unmount's release reset a budget another mount still wants.
+    useEffect(() => {
+      if (keyframeQualitySourceMaxLongEdge == null) return;
+      const session = (NativeModules as Record<string, unknown>)
+        .RNSARSession as
+        | { setKeyframeQualitySourceMaxLongEdge?(px: number): void }
+        | undefined;
+      session?.setKeyframeQualitySourceMaxLongEdge?.(keyframeQualitySourceMaxLongEdge);
+    }, [keyframeQualitySourceMaxLongEdge]);
 
     // Push the plane-detection mode to native.  Unlike the extraction
     // config above this is a SESSION setting, so it routes through the

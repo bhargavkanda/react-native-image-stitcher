@@ -166,6 +166,29 @@ class RNSARSession(reactContext: ReactApplicationContext)
     @Volatile private var keyframeQualityHolders = 0
     private val prefersKeyframeQuality: Boolean
         get() = keyframeQualityHolders > 0
+
+    /**
+     * The long-edge budget [selectMatchingCameraConfig] picks the keyframe-
+     * quality image against. Defaults to [KEYFRAME_QUALITY_SOURCE_MAX_LONG_EDGE]
+     * (1920), so a caller that never sets it gets today's pick byte-for-byte.
+     *
+     * ⚠ IT IS A KNOB BECAUSE THE BIGGEST IMAGE IS NOT FREE, and the cost lands
+     * somewhere non-obvious. The CPU image is repacked to NV21 on the GL RENDER
+     * THREAD for every frame, once per tick, BEFORE any plugin is asked whether
+     * it wants the frame (forwardToIncremental -> packNV21). Measured on a
+     * Galaxy A35 on 2026-09-16: 358 GL ticks in 6.2 s, of which a consumer used
+     * 127 — so the full-resolution repack was paid 358 times and discarded 226
+     * times, and the loop managed 57 ticks/sec on a 120 Hz panel.
+     *
+     * Raising the image from 640x480 to 1920x1080 is 6.75x the pixels through
+     * that repack. On the A35 the config list is
+     * [640x480@30, 1280x720@30, 1920x1080@30], so 1280 selects the middle rung:
+     * 2.25x cheaper than 1080p and still 2.25x better than the 640x480 default
+     * that made panos "very blurry". Whether that trade is worth it is a
+     * QUESTION FOR MEASUREMENT, which is why this is settable rather than
+     * re-tuned in place.
+     */
+    @Volatile private var keyframeQualitySourceMaxLongEdge = KEYFRAME_QUALITY_SOURCE_MAX_LONG_EDGE
     /// v0.23 anti-blur (`frameSelection.antiBlur.preferHighFpsFormat`) —
     /// when set, [selectMatchingCameraConfig] restricts its pick to
     /// ARCore configs that stream at >= 60 fps.  This is the ONLY
@@ -1377,6 +1400,44 @@ class RNSARSession(reactContext: ReactApplicationContext)
      * resets it to false on unmount (single-camera app: no concurrent
      * session can observe the global encoder budget mid-flip).
      */
+    /**
+     * Set the long-edge budget the keyframe-quality pick is made against, and
+     * re-apply it to a live session. 0 or negative restores the 1920 default.
+     *
+     * Re-picks ONLY on an effective change, and hops to the AR thread to do it,
+     * for the same reason [setKeyframeQualityCaptureEnabled] does — see the
+     * 2026-09-02 wedge note there. A pause/resume on the wrong thread while the
+     * view is tearing down is the incident that note exists for.
+     */
+    @ReactMethod
+    fun setKeyframeQualitySourceMaxLongEdge(px: Int) {
+        val next = if (px > 0) px else KEYFRAME_QUALITY_SOURCE_MAX_LONG_EDGE
+        val prev = keyframeQualitySourceMaxLongEdge
+        keyframeQualitySourceMaxLongEdge = next
+        Log.i(TAG, "setKeyframeQualitySourceMaxLongEdge($px): $prev -> $next")
+        if (prev == next) return
+        // Only meaningful while the keyframe-quality pick is the one in force;
+        // otherwise the budget is recorded and applies at the next acquire.
+        if (!prefersKeyframeQuality) {
+            Log.i(TAG, "budget recorded; keyframeQuality is not held, so no re-pick now")
+            return
+        }
+        onArThread {
+            val session = sessionRef.get() ?: run {
+                Log.i(TAG, "budget $next; no live session — nothing to re-apply")
+                return@onArThread
+            }
+            try {
+                session.pause()
+                selectMatchingCameraConfig(session)
+                session.resume()
+                Log.i(TAG, "budget $next; re-applied config to live session")
+            } catch (t: Throwable) {
+                Log.w(TAG, "setKeyframeQualitySourceMaxLongEdge reconfig failed (ignoring): ${t.message}")
+            }
+        }
+    }
+
     @ReactMethod
     fun setKeyframeQualityCaptureEnabled(on: Boolean) {
         // ACQUIRE/RELEASE semantics (see keyframeQualityHolders): each
@@ -1532,7 +1593,7 @@ class RNSARSession(reactContext: ReactApplicationContext)
                 configs
                     .filter {
                         kotlin.math.max(it.imageSize.width, it.imageSize.height) <=
-                            KEYFRAME_QUALITY_SOURCE_MAX_LONG_EDGE
+                            keyframeQualitySourceMaxLongEdge
                     }
                     .sortedWith(
                         compareByDescending<CameraConfig> {
