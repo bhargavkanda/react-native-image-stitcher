@@ -807,6 +807,63 @@ public final class IncrementalStitcher: NSObject {
     /// Begin a new incremental capture.  Hooks the ARSession's
     /// per-frame stream into the engine.  Caller must already have
     /// the AR session running (start/stop is the host app's job).
+    /// Why `start` refused an `engine` value.
+    ///
+    /// Carries the JS-facing reject CODE rather than an enum case name, because
+    /// the bridge passes it straight to `RCTPromiseRejectBlock` and JS matches
+    /// on it. Bridging a Swift error to NSError would give the domain/code pair
+    /// instead, which JS cannot read without a second mapping table.
+    public struct EngineStartRefusal: Error {
+        public let code: String
+        public let message: String
+    }
+
+    /// THE ONE PLACE that decides which engine a requested string resolves to.
+    ///
+    /// ⚠ IT RETURNS THE RESOLVED NAME, AND THAT IS THE WHOLE POINT. Before this
+    /// existed the bridge echoed back the string it had just parsed, so a
+    /// caller asking for an engine that does not exist was told it got it while
+    /// the batch-keyframe pipeline ran — requested, reported as resolved. Every
+    /// caller now takes the engine it will ACTUALLY run from this function, and
+    /// `start` returns that same value rather than re-deriving one.
+    ///
+    /// Three outcomes, never a silent fallback:
+    ///   · runnable                  -> the resolved name
+    ///   · known, no provider here   -> `engine-unavailable`
+    ///   · not a name we know at all -> `engine-unknown`
+    ///
+    /// `'sweep'` is deliberately in the KNOWN set while refusing: it is the
+    /// pano+ slit-scan engine, which does not live in this package yet. A
+    /// caller that asks for it should learn that it is unavailable, not that it
+    /// was never a thing — those are different bugs on the caller's side.
+    ///
+    /// The archived live engines ('hybrid', 'slitscan-*', 'firstwins*') are NOT
+    /// in the known set. They were removed in the 2026-06 batch-keyframe
+    /// cleanup and nothing can run them, so `engine-unknown` is the honest
+    /// answer; a caller still passing one is reading documentation that no
+    /// longer describes this package.
+    public static func resolveEngineMode(_ requested: String) throws -> String {
+        switch requested {
+        case "batch-keyframe":
+            return "batch-keyframe"
+        case "sweep":
+            throw EngineStartRefusal(
+                code: "engine-unavailable",
+                message: "engine 'sweep' is known but has no provider in this "
+                    + "build. The slit-scan sweep engine is not part of this "
+                    + "package yet."
+            )
+        default:
+            throw EngineStartRefusal(
+                code: "engine-unknown",
+                message: "engine '\(requested)' is not a known engine. This "
+                    + "package ships 'batch-keyframe'. The live engines "
+                    + "('hybrid', 'slitscan-*', 'firstwins*') were archived in "
+                    + "the 2026-06 batch-keyframe cleanup and cannot be run."
+            )
+        }
+    }
+
     @objc public func start(
         composeWidth: Int,
         composeHeight: Int,
@@ -827,11 +884,20 @@ public final class IncrementalStitcher: NSObject {
         // "jsDriver" mode (push frames in from JS via
         // processFrameAtPath) has been removed.
         frameSourceMode: String = "arSession"
-    ) {
+    ) throws -> String {
+        // Resolved BEFORE any state is touched, so a refused engine leaves the
+        // stitcher exactly as it was — no half-started capture to clean up.
+        let resolvedEngine = try Self.resolveEngineMode(engineMode)
         stateLock.lock()
         if isRunning {
             stateLock.unlock()
-            return
+            // ⚠ UNCHANGED BEHAVIOUR, STATED EXPLICITLY: a second start() while
+            // one is running has always been a silent no-op that still reports
+            // success, and this step does not change that. The value returned
+            // is the engine the RUNNING capture is using, which is what
+            // `engineResolved` should report — it is not a claim that this call
+            // started anything.
+            return resolvedEngine
         }
         // AR-STITCHING-TWO-MODES — see memory/ar-stitching-two-modes.md
         // Override the JS-supplied captureOrientation with a native
@@ -858,9 +924,8 @@ public final class IncrementalStitcher: NSObject {
         // legacy 'firstwins*' aliases) were archived — any non-batch
         // `engineMode` now falls back to batch-keyframe so existing JS
         // callers keep working.
-        if engineMode != "batch-keyframe" {
-            NSLog("[bridge] DEPRECATED engine '\(engineMode)' — live engines archived, using batch-keyframe")
-        }
+        // (The engine decision was made by resolveEngineMode above. There is no
+        // fallback here any more: an unrunnable engine never reaches this line.)
 
         do {
             // V16 Phase 1 — no live engine; spin up a keyframe
@@ -1251,6 +1316,10 @@ public final class IncrementalStitcher: NSObject {
         if frameSourceMode == "arSession" {
             RNSARSession.shared.incrementalConsumer = self
         }
+
+        // The engine this capture is actually running. The bridge echoes THIS
+        // to JS as `engineResolved` — it never re-derives one from the request.
+        return resolvedEngine
     }
 
     /// Stop ingestion + write the final panorama to `outputPath`.

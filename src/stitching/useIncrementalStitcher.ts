@@ -66,8 +66,19 @@ export interface UseIncrementalStitcherReturn {
    * Drives confidence-ring rendering in the live preview.
    */
   confidenceLevel: 'high' | 'medium' | null;
-  /** Begin a new capture.  Throws if the AR session isn't running. */
-  start: (options?: IncrementalStartOptions) => Promise<void>;
+  /**
+   * Begin a new capture.  Throws if the AR session isn't running.
+   *
+   * ⚠ RETURNS NATIVE'S START RESOLVE RATHER THAN SWALLOWING IT. It used to be
+   * `Promise<void>`, which meant `engineResolved` — native's statement of which
+   * engine it ACTUALLY resolved — died here and the caller could only assume.
+   * `engineResolved` stays OPTIONAL because an old binary does not send it, and
+   * that absence is itself the signal (see the check in `<Camera>`'s
+   * `startCapture`).
+   */
+  start: (
+    options?: IncrementalStartOptions,
+  ) => Promise<{ ok: true; engineResolved?: string }>;
   /**
    * End the capture and write the final panorama.  When `outputPath`
    * is omitted or empty, the native side picks a path under the
@@ -319,8 +330,12 @@ export function useIncrementalStitcher(): UseIncrementalStitcherReturn {
       resetCoalescer();
       setState(null);
       lastHintRef.current = null;
-      await native.start(options);
+      const result = await native.start(options);
       setIsRunning(true);
+      // Handed straight back, unexamined: this hook has no business deciding
+      // what an engine resolution means. The caller owns that, because only the
+      // caller knows what it asked for.
+      return result;
     },
     [native, resetCoalescer],
   );

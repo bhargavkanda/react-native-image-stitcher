@@ -145,33 +145,46 @@ public final class IncrementalStitcherBridge: RCTEventEmitter {
                captureOrientation,
                Int32(rotation),
                String(describing: options["captureOrientation"]))
-        // Engine selection.  The live incremental engines (hybrid,
-        // slitscan-*, and the legacy firstwins* aliases) were archived
-        // in the 2026-06 batch-keyframe cleanup — the SDK now ships
-        // only 'batch-keyframe'.  Any other value is still accepted for
-        // backward compatibility but falls back to batch-keyframe with
-        // a deprecation log inside IncrementalStitcher.start().
+        // Engine selection. Parsed here, DECIDED in the engine: this bridge
+        // deliberately does not interpret the value, because it used to and
+        // that was the bug. It parsed the string, handed it down, and then
+        // echoed the string it had parsed — so a caller asking for an engine
+        // that cannot run was told it got it while batch-keyframe ran instead.
+        // `IncrementalStitcher.resolveEngineMode` is the only decider now, and
+        // what it returns is what gets echoed.
         let engineMode = (options["engine"] as? String) ?? "batch-keyframe"
 
         // Per-stage config overrides.  All optional; keys not consumed
         // by the batch-keyframe pipeline are ignored.
         let configOverrides = options["config"] as? [String: Any] ?? [:]
 
-        IncrementalStitcher.shared.start(
-            composeWidth: composeW,
-            composeHeight: composeH,
-            canvasWidth: canvasW,
-            canvasHeight: canvasH,
-            featherPx: feather,
-            snapshotJpegQuality: snapQ,
-            snapshotEveryNAccepts: snapN,
-            frameRotationDegrees: rotation,
-            engineMode: engineMode,
-            captureOrientation: captureOrientation,
-            configOverrides: configOverrides,
-            frameSourceMode: frameSourceMode
-        )
-        resolver(["ok": true])
+        do {
+            let engineResolved = try IncrementalStitcher.shared.start(
+                composeWidth: composeW,
+                composeHeight: composeH,
+                canvasWidth: canvasW,
+                canvasHeight: canvasH,
+                featherPx: feather,
+                snapshotJpegQuality: snapQ,
+                snapshotEveryNAccepts: snapN,
+                frameRotationDegrees: rotation,
+                engineMode: engineMode,
+                captureOrientation: captureOrientation,
+                configOverrides: configOverrides,
+                frameSourceMode: frameSourceMode
+            )
+            // ⚠ ON EVERY SUCCESS BRANCH, NOT JUST THE INTERESTING ONE. JS is
+            // written to fail closed when this key is ABSENT, because absence
+            // is the only thing an old binary can express — a version constant
+            // can be right while the branch that sets this is missing. Emitting
+            // it on one branch and not another would read to JS as "old
+            // binary" exactly when the engine had in fact resolved.
+            resolver(["ok": true, "engineResolved": engineResolved])
+        } catch let refusal as IncrementalStitcher.EngineStartRefusal {
+            rejecter(refusal.code, refusal.message, nil)
+        } catch {
+            rejecter("engine-start-failed", error.localizedDescription, error)
+        }
     }
 
     /// `options` keys: `outputPath` (optional — when empty/missing

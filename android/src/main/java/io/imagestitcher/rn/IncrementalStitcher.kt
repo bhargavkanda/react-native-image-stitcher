@@ -499,7 +499,62 @@ class IncrementalStitcher(
     }
 
     @ReactMethod
+    /** Why [start] refused an `engine` value. [code] is the JS-facing reject code. */
+    private class EngineStartRefusal(val code: String, message: String) : Exception(message)
+
+    /**
+     * THE ONE PLACE that decides which engine a requested string resolves to.
+     * Byte-for-byte the same contract as iOS' `IncrementalStitcher.resolveEngineMode`.
+     *
+     * ⚠ IT RETURNS THE RESOLVED NAME, AND THAT IS THE WHOLE POINT. What this
+     * returns is what `start` echoes back as `engineResolved`; nothing
+     * downstream re-derives an engine from the REQUEST. Before this, an unknown
+     * engine was logged as DEPRECATED and the batch-keyframe pipeline ran
+     * anyway, while the promise resolved `ok:true` — so the log was the only
+     * signal, and a log is not an outcome.
+     *
+     * Three outcomes, never a silent fallback:
+     *  - runnable                -> the resolved name
+     *  - known, no provider here -> `engine-unavailable`
+     *  - not a name we know      -> `engine-unknown`
+     *
+     * `"sweep"` is KNOWN but refused: it is the pano+ slit-scan engine and does
+     * not live in this package yet. "Unavailable here" and "never existed" are
+     * different bugs on the caller's side and should not share a code.
+     *
+     * The archived live engines ("hybrid", "slitscan-*", "firstwins*") are NOT
+     * known: nothing can run them since the 2026-06 cleanup, so
+     * `engine-unknown` is the honest answer.
+     */
+    @Throws(EngineStartRefusal::class)
+    private fun resolveEngineMode(requested: String): String = when (requested) {
+        "batch-keyframe" -> "batch-keyframe"
+        "sweep" -> throw EngineStartRefusal(
+            "engine-unavailable",
+            "engine 'sweep' is known but has no provider in this build. The " +
+                "slit-scan sweep engine is not part of this package yet.",
+        )
+        else -> throw EngineStartRefusal(
+            "engine-unknown",
+            "engine '$requested' is not a known engine. This package ships " +
+                "'batch-keyframe'. The live engines ('hybrid', 'slitscan-*', " +
+                "'firstwins*') were archived in the 2026-06 batch-keyframe " +
+                "cleanup and cannot be run.",
+        )
+    }
+
     fun start(options: ReadableMap, promise: Promise) {
+        // ⚠ RESOLVED BEFORE THE isRunning LATCH, DELIBERATELY. `getAndSet(true)`
+        // below claims the stitcher; refusing after that point would reject the
+        // call AND leave isRunning stuck true, so every later start would come
+        // back "incremental-already-running" until the process restarted. A
+        // refused engine must leave this object exactly as it found it.
+        val engineResolved = try {
+            resolveEngineMode(options.getString("engine") ?: "batch-keyframe")
+        } catch (refusal: EngineStartRefusal) {
+            promise.reject(refusal.code, refusal.message)
+            return
+        }
         if (isRunning.getAndSet(true)) {
             promise.reject(
                 "incremental-already-running",
@@ -544,14 +599,9 @@ class IncrementalStitcher(
             // engineMode is still accepted for backward compatibility but falls
             // back to batch-keyframe with a deprecation log (mirrors iOS'
             // IncrementalStitcher.start()).
-            val engineMode = options.getString("engine") ?: "batch-keyframe"
-            if (engineMode != "batch-keyframe") {
-                android.util.Log.w(
-                    "IncrementalStitcher",
-                    "[bridge] DEPRECATED engine '$engineMode' -- live engines " +
-                        "archived, using batch-keyframe",
-                )
-            }
+            // (The engine decision was made by resolveEngineMode at the top of
+            // this function. There is no fallback here any more: an unrunnable
+            // engine never reaches this line.)
 
             val configOverrides: ReadableMap? =
                 if (options.hasKey("config")) options.getMap("config") else null
@@ -829,7 +879,7 @@ class IncrementalStitcher(
             // point for the "0 keyframes captured" symptom.
             android.util.Log.i(
                 "IncrementalStitcher",
-                "start() ENTRY: engineMode=$engineMode " +
+                "start() ENTRY: engineResolved=$engineResolved " +
                     "batchKeyframeMode=$batchKeyframeMode " +
                     "gate.enabled=${keyframeGate.enabled} " +
                     "gate.maxCount=${keyframeGate.maxCount} " +
@@ -848,6 +898,12 @@ class IncrementalStitcher(
 
             val map = Arguments.createMap()
             map.putBoolean("ok", true)
+            // ⚠ ON EVERY SUCCESS BRANCH. JS fails closed when this key is
+            // ABSENT, because absence is the only thing an OLD binary can
+            // express — a version constant can be right while the branch that
+            // sets this is missing. Omitting it on some branch would read to JS
+            // as "old binary" exactly when the engine had in fact resolved.
+            map.putString("engineResolved", engineResolved)
             promise.resolve(map)
         } catch (t: Throwable) {
             isRunning.set(false)

@@ -68,6 +68,10 @@ describe('userFacingStitchError', () => {
     'PANORAMA_FINALIZE_FAILED',
     'OUTPUT_WRITE_FAILED',
     'VISION_CAMERA_RUNTIME',
+    // A refused `engine` prop is a HOST configuration error — there is no
+    // corrective action to suggest to an end user, so it maps to null like
+    // the other non-recoverable codes rather than growing copy.
+    'ENGINE_UNAVAILABLE',
     'UNKNOWN',
   ];
 

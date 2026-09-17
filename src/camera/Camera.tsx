@@ -317,6 +317,23 @@ export type CameraErrorCode =
   | 'CAMERA_DEVICE_UNAVAILABLE'
   | 'PHOTO_CAPTURE_FAILED'
   | 'PANORAMA_START_FAILED'
+  /**
+   * The `engine` prop named something this binary will not run, and native
+   * REFUSED rather than quietly substituting one. Two native codes arrive
+   * under this one: `engine-unavailable` (a known engine with no provider in
+   * this build) and `engine-unknown` (not an engine name at all). The exact one
+   * is on the cause, because they are different bugs on the caller's side.
+   *
+   * Also raised when native resolves a start WITHOUT saying which engine it
+   * resolved — see the `engineResolved` check at the start call site. That
+   * means an OLD binary that predates the refusal, and an old binary cannot be
+   * trusted with a non-default engine: it would paint a keyframe panorama and
+   * report success.
+   *
+   * Not user-recoverable — this is a host configuration error, so
+   * `userFacingStitchError` returns null for it.
+   */
+  | 'ENGINE_UNAVAILABLE'
   | 'PANORAMA_FINALIZE_FAILED'
   | 'STITCH_NEED_MORE_IMGS'
   | 'STITCH_HOMOGRAPHY_FAIL'
@@ -496,13 +513,27 @@ export interface CameraProps {
   style?: StyleProp<ViewStyle>;
 
   /**
-   * Which stitcher engine to drive.  Only `'batch-keyframe'` is
-   * supported (and the default): it collects accepted keyframe JPEGs
-   * during the hold-pan-release capture and runs the stitch once at
-   * finalize.  The live engines (hybrid / slit-scan / firstwins) were
-   * archived in the batch-keyframe cleanup — see `archive/`.
+   * Which stitcher engine the HOLD gesture drives.
+   *
+   *  - `'keyframe'` (default) — collects accepted keyframe JPEGs during the
+   *    hold-pan-release capture and runs the stitch once at finalize.
+   *  - `'sweep'` — the slit-scan engine. NOT in this package yet: native
+   *    refuses it with `engine-unavailable`, surfaced as `ENGINE_UNAVAILABLE`.
+   *    It is a named value rather than an omission so that asking for it gets
+   *    you a clear refusal instead of "no such engine".
+   *  - `'batch-keyframe'` — DEPRECATED synonym for `'keyframe'`, kept because
+   *    it is what shipped. Identical behaviour; prefer `'keyframe'`.
+   *
+   * ⚠ `'keyframe'` IS SENT ON THE WIRE AS `'batch-keyframe'` (see the single
+   * bag-build site in `startCapture`). That is deliberate: every binary ever
+   * shipped understands `'batch-keyframe'`, so the default path stays
+   * byte-identical against all of them and `'sweep'` is the ONLY new string an
+   * older parser can ever see.
+   *
+   * The archived live engines (hybrid / slit-scan / firstwins — see `archive/`)
+   * are not accepted: native answers `engine-unknown`.
    */
-  engine?: 'batch-keyframe';
+  engine?: 'keyframe' | 'sweep' | 'batch-keyframe';
 
   /**
    * Optional destination directory for captures.  When set, the lib
@@ -1549,7 +1580,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     arFrameMetaInterval,
     onArPluginResult,
     overlays,
-    engine = 'batch-keyframe',
+    engine = 'keyframe',
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'vertical',
     panGuidance = true,
@@ -2429,7 +2460,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       if (isNonAR) {
         fpDriver.start();
       }
-      await incremental.start({
+      // THE SINGLE PLACE `engine` BECOMES A WIRE VALUE. `'keyframe'` is sent as
+      // `'batch-keyframe'` so every binary ever shipped sees exactly the string
+      // it already understands, which keeps the default path byte-identical
+      // against all of them; `'sweep'` is therefore the only NEW string an
+      // older parser can encounter, and an older parser is precisely the thing
+      // that cannot refuse it.
+      const engineWire = engine === 'keyframe' ? 'batch-keyframe' : engine;
+      const startResult = await incremental.start({
         snapshotJpegQuality: 75,
         snapshotEveryNAccepts: 1,
         frameRotationDegrees: orientationRotation,
@@ -2443,7 +2481,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         composeHeight: 1080,
         canvasWidth: 5000,
         canvasHeight: 5000,
-        engine,
+        engine: engineWire,
         // perf-3a change 2 — pass the frame-source mode so the bridge emits
         // flowEvalEveryNFrames=1 for the frameProcessor path: the worklet now
         // does the decimation (before the ~3-4 MB packNV21 copy) and native's
@@ -2454,6 +2492,26 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           { frameSourceMode: isNonAR ? 'frameProcessor' : 'arSession' },
         ),
       });
+      // ⚠ FAIL CLOSED WHEN NATIVE DID NOT SAY WHAT IT RESOLVED.
+      //
+      // Absence is the only thing an OLD binary can express: one that predates
+      // the three-way resolve accepts ANY engine string, logs a deprecation and
+      // paints a keyframe panorama, then resolves ok:true. So a missing
+      // `engineResolved` means "this binary cannot refuse", and on such a
+      // binary a non-default engine would silently produce the wrong output and
+      // report success — the exact failure this step exists to prevent.
+      //
+      // ⚠ AND IT IS SCOPED TO THE NON-DEFAULT CASE ON PURPOSE. For the keyframe
+      // path an old binary does precisely what it has always done, so refusing
+      // there would break every existing host to guard against nothing.
+      if (engineWire !== 'batch-keyframe' && startResult?.engineResolved == null) {
+        throw new Error(
+          `native did not report engineResolved for engine '${engine}'. This ` +
+            'binary predates engine refusal and cannot be trusted with a ' +
+            'non-default engine — it would paint a keyframe panorama and ' +
+            'report success. Rebuild the native side.',
+        );
+      }
       // F8.3 review-of-review (M3 revert): `imuGate.resetAnchor()`
       // is load-bearing for the stitchMode auto-resolver (see the
       // matching comment on the per-accept reset useEffect above).
@@ -2477,9 +2535,21 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       }
       setStatusPhase('idle');
       clearPanTimer();
+      // An engine refusal is a HOST CONFIGURATION error, not a capture failure,
+      // and conflating the two costs the host the one thing it needs: which of
+      // its own props was wrong. Native's reject code is carried on the error
+      // (`engine-unavailable` — known engine, no provider in this build; or
+      // `engine-unknown` — not an engine name), and the fail-closed throw above
+      // is the third case. All three surface as ENGINE_UNAVAILABLE with the
+      // precise cause attached.
+      const nativeCode = (err as { code?: unknown } | null)?.code;
+      const isEngineRefusal =
+        nativeCode === 'engine-unavailable' ||
+        nativeCode === 'engine-unknown' ||
+        (err instanceof Error && err.message.includes('engineResolved'));
       onError?.(
         new CameraError(
-          'PANORAMA_START_FAILED',
+          isEngineRefusal ? 'ENGINE_UNAVAILABLE' : 'PANORAMA_START_FAILED',
           err instanceof Error ? err.message : String(err),
           err,
         ),

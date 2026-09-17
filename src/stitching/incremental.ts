@@ -424,9 +424,17 @@ export interface IncrementalStartOptions {
    * 'slitscan' fall back to 'slitscan-both' with a deprecation warning
    * in the native log.
    */
-  // Only 'batch-keyframe' remains; the live engines were archived in the
-  // batch-keyframe cleanup (see archive/).
-  engine?: 'batch-keyframe';
+  /**
+   * THE WIRE VALUE, not the public prop. `<Camera>` maps its `'keyframe'` to
+   * `'batch-keyframe'` before it gets here, so every binary ever shipped sees
+   * the string it already understands.
+   *
+   * Native resolves this THREE ways and never falls back silently: runnable ->
+   * runs; known with no provider in this build -> rejects `engine-unavailable`;
+   * not an engine name -> rejects `engine-unknown`. The archived live engines
+   * ('hybrid', 'slitscan-*', 'firstwins*') are in the last group.
+   */
+  engine?: 'batch-keyframe' | 'sweep';
   /**
    * V15 — per-stage correction config overrides.  Mode-driven defaults
    * are applied first (see RNISStitcherConfig +configForMode:); fields
@@ -930,7 +938,21 @@ export interface ARPlaneStatus {
 
 
 interface NativeIncrementalModule {
-  start(options: IncrementalStartOptions): Promise<{ ok: true }>;
+  /**
+   * ⚠ `engineResolved` IS OPTIONAL IN THE TYPE AND MUST STAY THAT WAY. An old
+   * binary genuinely does not send it, and typing it as required would let a
+   * caller write `result.engineResolved` and get a value TypeScript promised
+   * but the runtime never supplied. Optional forces the caller to handle the
+   * absent case — which is the whole signal, because absence means "this binary
+   * predates engine refusal and accepts anything".
+   *
+   * It reports what native RESOLVED, never what was requested: the value comes
+   * back from the engine itself rather than being echoed by the bridge that
+   * parsed the request.
+   */
+  start(
+    options: IncrementalStartOptions,
+  ): Promise<{ ok: true; engineResolved?: string }>;
   /**
    * Finalize the running capture and write the final panorama JPEG.
    *
