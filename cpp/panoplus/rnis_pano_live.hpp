@@ -260,6 +260,21 @@ public:
 
     bool running() const noexcept;
 
+    /// Correct `meta.json`'s `poseSource` when the arm CHANGES mid-sweep.
+    ///
+    /// ⚠ THIS EXISTS BECAUSE `meta.json` IS READ ALONE. `poseSource.kind` is
+    /// the field an offline harness consults to know which series painted the
+    /// pixels, and it is fixed at `start()` — which is correct only while the
+    /// arm cannot change after `start()`. The Android recorder can now give
+    /// the ARCore arm up mid-sweep and finish on the IMU ring, so without
+    /// this the pack would say `ar` for a sweep the IMU painted, and a
+    /// `device.json` cross-reference is not a fix: the two files are consumed
+    /// separately.
+    ///
+    /// Takes the status mutex, is safe to call from the recorder's writer
+    /// thread while ingest is running, and is a no-op on an empty string.
+    void setPoseSource(const std::string& kind) noexcept;
+
     /// One frame.  `nv21` is `width × height × 3 / 2` bytes, NV21 (Y plane
     /// then interleaved VU) — the layout `Yuv420ToNv21` already produces.
     /// Never throws.

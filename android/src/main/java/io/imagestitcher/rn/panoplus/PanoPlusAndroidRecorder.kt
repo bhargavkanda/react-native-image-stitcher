@@ -854,6 +854,18 @@ class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext)
             // a pose that is never coming, on the thread that also drives the
             // engine, and the sweep would look hung rather than slow.
             arPoseWaitMs = optDbl(options, "arPoseWaitMs", 33.0).coerceIn(0.0, 200.0),
+            // Coerced, not trusted: a 1 here would degrade a healthy arm on
+            // the first frame that raced its pose, which is the one thing
+            // this must never do.
+            arImuFallbackAfterFrames =
+                optInt(options, "arImuFallbackAfterFrames", DEFAULT_AR_IMU_FALLBACK_FRAMES)
+                    .coerceIn(0, 600),
+            // Coerced well above ARCore's measured ~2 s bootstrap window at
+            // the bottom end: a caller that sent 200 here would degrade
+            // healthy arms, which is the one thing this must never do.
+            arImuFallbackGraceMs =
+                optDbl(options, "arImuFallbackGraceMs", DEFAULT_AR_IMU_FALLBACK_GRACE_MS)
+                    .coerceIn(2_500.0, 60_000.0),
         )
 
         // A second start() tears the first one down FIRST — a leaked
@@ -1729,6 +1741,31 @@ private class Config(
      * would have cost).
      */
     val arPoseWaitMs: Double,
+    /**
+     * Frames the AR arm may go WITHOUT A SINGLE ACCEPTED POSE before the
+     * recorder gives it up and finishes the sweep on the IMU ring. `0`
+     * disables the degrade and restores the pre-2026-09-18 behaviour.
+     *
+     * ⚠ WHY IT IS ON BY DEFAULT, when the house rule is that new behaviour
+     * ships off. A default-off knob here would be a knob that protects
+     * nobody: the state it guards against is a TOTAL LOSS of the sweep, it is
+     * reached by an ordinary condition (a dim room), and the arm it degrades
+     * from produced nothing at all in that state — 23 packs since 2026-08-24
+     * and one more on 2026-09-18, zero strips between them. There is no
+     * working behaviour for this to regress, because the branch only runs
+     * when the AR arm has delivered literally zero poses.
+     *
+     * 30 is ~1.5 s at the measured 20 fps live cadence, and it is chosen
+     * against ARCore's own timing rather than picked round: on the failing
+     * pack ARCore first reported INSUFFICIENT_LIGHT 2.00 s in and had emitted
+     * 174 poses by then, every one dropped as not-TRACKING. A healthy arm
+     * delivers ~30 Hz, so thirty consecutive frames with ZERO accepted poses
+     * is not a slow start — it is an arm that is not going to produce one.
+     */
+    val arImuFallbackAfterFrames: Int,
+    /** The backstop for an ARCore that never reports a failure reason and
+     *  never tracks. See `shouldDegradeArToImu`. */
+    val arImuFallbackGraceMs: Double,
 )
 
 /**
@@ -2338,6 +2375,35 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
     @Volatile private var arArmReason = "not requested (poseSource was not 'ar')"
     /** Poses the sink accepted into the ring (TRACKING only). */
     private val arPoseAccepted = AtomicLong(0)
+    /**
+     * Consecutive-from-the-start frames that found the AR ring still empty.
+     * Only counted while [arPoseAccepted] is 0, so it stops the instant the
+     * arm produces anything and can never trip a working sweep.
+     */
+    private val arFramesWithNoPose = AtomicLong(0)
+    /** Set once if the AR arm was given up mid-sweep for the IMU ring. Read by
+     *  the pack so `ran: "imu"` can never be mistaken for "AR was never
+     *  requested" — the camera ARCore forced is still the camera that shot it. */
+    @Volatile private var arArmDegraded = false
+    /** The `seq` of the row the degrade happened on — the SAME index
+     *  track.jsonl carries, so a reader can join the two without guessing.
+     *  -1 while it has not happened. */
+    @Volatile private var arArmDegradedAtSeq = -1L
+    /** The two counts as they stood AT THE DECISION. Frozen deliberately: the
+     *  sibling fields in `arm` are sweep totals, and quoting a running total
+     *  inside a sentence about a past moment is how a pack contradicts
+     *  itself. */
+    @Volatile private var arArmDegradeCounters = ""
+    /** Set when the AR arm went stale AFTER producing a usable pose, which the
+     *  degrade cannot rescue. Carries the reason so a second total-loss pack
+     *  is not diagnosed from scratch. */
+    @Volatile private var arArmDegradeDeclined = ""
+    /** Whether the native `meta.json` correction landed. Recorded rather than
+     *  assumed: the JNI entry binds at its first call. */
+    @Volatile private var arArmMetaCorrected = false
+    private var arArmDeclinedSaid = false
+    private var arArmLastSolvedSeen = 0L
+    private val arFramesSinceSolve = AtomicLong(0)
     /** Poses the sink DROPPED because ARCore was not TRACKING. Separate from
      *  the channel's own count: this one is the number the ring never saw. */
     private val arPoseDroppedNotTracking = AtomicLong(0)
@@ -4210,6 +4276,139 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
             // the controlled A/B the operator asked for ("the same capture done
             // both via imu and ar and see the comparison"), on one hand motion
             // instead of two.
+            // ── THE ONE-WAY DEGRADE: AR -> IMU, BEFORE THE FIRST AR POSE ──
+            //
+            // WHY IT EXISTS. `arArmActive` had exactly one assignment and no
+            // clear, and the fork below tests it FIRST — so once the ARCore
+            // channel opened, a full IMU ring beside it was structurally
+            // unreachable for the rest of the sweep. Measured on a Galaxy A35
+            // on 2026-09-18: ARCore never tracked, the sink admits TRACKING
+            // poses only so it dropped all 174, and all 120 frames refused
+            // `buffer-empty`. Beside them the IMU ring held 858
+            // rotation-vector samples at 121.6 Hz, accuracy 3 on every one,
+            // with a derived basis and a passing clock gate; re-joining that
+            // pack offline solves all 120 at a ~8.2 ms bracket against a
+            // 25 ms bound. A tracker that cannot bootstrap should cost a
+            // sweep its pose ACCURACY, not the entire sweep.
+            //
+            // ⚠ NOT "a dark room". ARCore's INSUFFICIENT_LIGHT is not a
+            // photometer reading — the repo measured ISO p50 spanning a 64x
+            // range across the packs that carry it, and a capture 3.3 stops
+            // DARKER tracked cleanly. It is the label ARCore latches when its
+            // one-shot motion-tracking bootstrap fails to converge. Saying it
+            // was about light is a mistake this codebase has already made
+            // once and written down; do not reintroduce it here.
+            //
+            // The trigger and the one-way terms are in `shouldDegradeArToImu`
+            // with their evidence. Everything below is the state it reads and
+            // the record it leaves.
+            if (arArmActive
+                && cfg.arImuFallbackAfterFrames > 0
+                && arPoseAccepted.get() == 0L
+            ) {
+                val n = arFramesWithNoPose.incrementAndGet()
+                // ARCore's own verdict: "" while TRACKING, else the reason
+                // name. `NONE` is the reason it reports while still starting,
+                // so it is explicitly NOT a failure.
+                val failure = arcore?.latestTrackingFailure ?: ""
+                if (shouldDegradeArToImu(
+                        minFramesFloor = cfg.arImuFallbackAfterFrames,
+                        arPosesAccepted = arPoseAccepted.get(),
+                        arFramesSolved = arPoseSolved.get(),
+                        framesWithNoPose = n,
+                        arcoreVerdictLatched = failure.isNotEmpty() && failure != "NONE",
+                        nsSinceStart = acceptElapsedNs - startElapsedNs,
+                        graceNs = (cfg.arImuFallbackGraceMs * 1_000_000.0).toLong(),
+                        attitudeMapping = attitudeMapping,
+                        haveBasis = basis != null,
+                        imuRingSamples = attitudeRing.sampleCount(),
+                    )
+                ) {
+                    // ⚠ THE SINK COMES OFF FIRST, AND IT IS NOT TIDINESS.
+                    // Left installed, ARCore can start tracking later and
+                    // keep growing `arPoseAccepted` — so a degraded pack
+                    // could report `degradedFromAr:true` beside
+                    // `posesAcceptedIntoRing: 40`, and the one number that
+                    // EVIDENCES the one-way invariant would contradict it.
+                    // Clearing it freezes that counter at the value the
+                    // decision was made on.
+                    try { arcore?.setPoseSink(null) } catch (t: Throwable) {
+                        Log.w(TAG, "clearing the ARCore pose sink at degrade threw", t)
+                    }
+                    // A `seq` a reader can JOIN ON. The previous version
+                    // recorded the private no-pose counter, which is off by
+                    // one from the row boundary in track.jsonl and means
+                    // nothing outside this function.
+                    arArmDegradedAtSeq = seq
+                    arArmDegradeCounters =
+                        "at the decision: ${arPoseDroppedNotTracking.get()} poses had arrived " +
+                            "and every one was dropped as not-TRACKING; the IMU ring held " +
+                            "${attitudeRing.sampleCount()} samples"
+                    arArmReason =
+                        "the AR arm was REQUESTED, ARCore opened in SHARED mode, and then " +
+                            "delivered NO usable pose. Given up at seq $seq, after $n frames " +
+                            "with an empty AR ring and " +
+                            (if (failure.isNotEmpty() && failure != "NONE")
+                                "ARCore's own verdict '$failure'"
+                            else
+                                "${(acceptElapsedNs - startElapsedNs) / 1_000_000L}ms without " +
+                                    "ARCore ever reporting a failure reason") +
+                            ". $arArmDegradeCounters. The sweep finished on the IMU arm, on " +
+                            "TYPE_ROTATION_VECTOR through the derived basis C. NOTHING WAS " +
+                            "PAINTED FROM AN ARCore POSE — the degrade can only fire while " +
+                            "zero poses have been accepted AND zero frames have solved, so " +
+                            "this series is entirely IMU-derived and is comparable with " +
+                            "itself. ⚠ THE CAMERA IS STILL ARCore'S CHOICE: it forced the " +
+                            "sensor, the size and the fps before this happened, and the " +
+                            "AE/AWB lock was its to keep. This pack is NOT equivalent to one " +
+                            "from a sweep that asked for the IMU arm up front."
+                    arArmDegraded = true
+                    arArmActive = false
+                    // ⚠ CORRECT meta.json TOO, AND RECORD WHETHER IT LANDED.
+                    // `meta.json`'s `poseSource.kind` is fixed at start() and
+                    // is what every offline harness reads ON ITS OWN — a
+                    // device.json cross-reference does not reach it. Without
+                    // this the pack says `ar` for a sweep the IMU painted.
+                    // The boolean is kept because the native entry binds
+                    // lazily at first call, so "it failed" and "it worked"
+                    // are otherwise indistinguishable here.
+                    arArmMetaCorrected = PanoPlusLiveNative.setPoseSource("imu")
+                    if (!arArmMetaCorrected) {
+                        Log.w(TAG, "meta.json poseSource was NOT corrected after the degrade")
+                    }
+                    advise("pose arm DEGRADED: $arArmReason")
+                }
+            } else if (arArmActive && arPoseAccepted.get() > 0L) {
+                // ── THE DEGRADE DECLINED, SAID OUT LOUD ────────────────────
+                // ARCore tracking for a moment and then losing it for good is
+                // the SAME total loss, and the degrade deliberately cannot
+                // rescue it: a frame has already solved against an AR pose,
+                // so switching now would splice two pose conventions into one
+                // series — the thing the arm decision forbids.
+                //
+                // What must not happen is for that pack to look identical to
+                // the pre-degrade failure. Silence here is how a second total
+                // loss gets diagnosed twice.
+                if (arPoseSolved.get() == arArmLastSolvedSeen) {
+                    val stale = arFramesSinceSolve.incrementAndGet()
+                    if (stale == cfg.arImuFallbackAfterFrames.toLong() && !arArmDeclinedSaid) {
+                        arArmDeclinedSaid = true
+                        arArmDegradeDeclined =
+                            "the AR arm produced ${arPoseAccepted.get()} pose(s) and then went " +
+                                "stale for $stale consecutive frames from seq $seq. The IMU " +
+                                "fallback was CONSIDERED AND DECLINED: a frame has already " +
+                                "solved against an ARCore pose, and switching arms now would " +
+                                "produce a quaternion series that is not comparable with " +
+                                "itself. If this pack is empty or short, that is why — the " +
+                                "fix is the tracker, not the fallback."
+                        advise("pose arm: $arArmDegradeDeclined")
+                    }
+                } else {
+                    arArmLastSolvedSeen = arPoseSolved.get()
+                    arFramesSinceSolve.set(0)
+                }
+            }
+
             val basisC: DoubleArray? = if (attitudeMapping) basis?.matrix else null
             val sol: PanoAttitudeSolution? = when {
                 arArmActive -> solveArPose(tsNs)
@@ -5954,6 +6153,18 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
                             if (arArmActive) PANO_Q_SOURCE_ARCORE
                             else basis?.authority?.qSource ?: PANO_Q_SOURCE_NONE,
                         )
+                        .b("degradedFromAr", arArmDegraded)
+                        // The SAME index track.jsonl carries, so the two join.
+                        .i("degradedAtSeq", arArmDegradedAtSeq)
+                        .s("degradedCountersAtDecision", arArmDegradeCounters)
+                        // Empty unless the arm went stale AFTER a usable pose,
+                        // which the degrade cannot rescue — said out loud so a
+                        // second total-loss pack is not diagnosed from scratch.
+                        .s("degradeDeclined", arArmDegradeDeclined)
+                        // If this is false on a degraded pack, meta.json's
+                        // poseSource still says "ar" and device.json is the
+                        // only file carrying the truth.
+                        .b("metaPoseSourceCorrected", arArmMetaCorrected)
                         .i("posesAcceptedIntoRing", arPoseAccepted.get())
                         .i("posesDroppedNotTracking", arPoseDroppedNotTracking.get())
                         .i("ringNonMonotonicRejects", arPoseRing.nonMonotonicCount())
@@ -5969,7 +6180,21 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
                         )
                         .s(
                             "costs",
-                            if (!arArmActive)
+                            if (arArmDegraded)
+                                // ⚠ NOT "not applicable". The poses are the IMU
+                                // arm's, but ARCore had ALREADY forced the
+                                // camera before the arm was given up, so the
+                                // sentence below would credit this recorder
+                                // with a selection it never made.
+                                "⚠ MIXED — the POSES are the IMU arm's, the CAMERA is not. " +
+                                    "ARCore opened in SHARED mode first and forced the sensor, " +
+                                    "the image size and the fps from its own CameraConfig, and " +
+                                    "the AE/AWB lock was its repeating request's to keep. All " +
+                                    "of that had already happened when the arm was given up at " +
+                                    "seq $arArmDegradedAtSeq. Do NOT compare this pack with " +
+                                    "one from a sweep that asked for the IMU arm up front: the " +
+                                    "pose series is comparable, the pixels are not."
+                            else if (!arArmActive)
                                 "not applicable — this sweep ran on the IMU arm, on the camera " +
                                     "this recorder selected, at the fps it requested, with the " +
                                     "AE/AWB lock it asserted."

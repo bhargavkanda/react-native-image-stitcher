@@ -1144,6 +1144,32 @@ Java_io_imagestitcher_rn_panoplus_PanoPlusLiveNative_nativeLiveCancel(
 }
 
 
+// Correct `meta.json`'s `poseSource` after a mid-sweep arm change.
+//
+// ⚠ RETURNS A BOOLEAN, AND THE CALLER MUST READ IT. There is no JNI_OnLoad in
+// this library, so every entry here binds LAZILY at its first call — a
+// mis-declared signature is an UnsatisfiedLinkError on the first invocation,
+// at runtime, on a device, and the Kotlin call sites catch Throwable. A void
+// setter would make that failure indistinguishable from success and the pack
+// would quietly keep the wrong arm. `false` means the correction did not
+// land, and the recorder records that rather than assuming.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_imagestitcher_rn_panoplus_PanoPlusLiveNative_nativeLiveSetPoseSource(
+        JNIEnv* env, jobject /*thiz*/, jstring kind) {
+    try {
+        std::shared_lock<std::shared_mutex> lock(g_panoLiveMu);
+        std::shared_ptr<rnis::pano::live::Session> sess = panoLiveSession();
+        if (sess == nullptr) return JNI_FALSE;
+        const std::string k = jstring_to_string(env, kind);
+        if (k.empty()) return JNI_FALSE;
+        sess->setPoseSource(k);
+        return JNI_TRUE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_io_imagestitcher_rn_panoplus_PanoPlusLiveNative_nativeLiveRunning(
         JNIEnv* /*env*/, jobject /*thiz*/) {

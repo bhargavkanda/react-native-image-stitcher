@@ -115,6 +115,101 @@ internal const val DEFAULT_ATTITUDE_MAX_BRACKET_MS = 25.0
  */
 internal const val DEFAULT_AR_ATTITUDE_MAX_BRACKET_MS = 50.0
 
+/**
+ * The FLOOR, not the trigger — see `shouldDegradeArToImu`. Never give the AR
+ * arm up inside the first 30 frames however loudly ARCore complains, because
+ * the earliest rows of a session are exactly where a transient reason can
+ * appear before the bootstrap has finished.
+ */
+internal const val DEFAULT_AR_IMU_FALLBACK_FRAMES = 30
+
+/**
+ * The backstop for the shape where ARCore never reports a failure reason at
+ * all and simply never tracks — measured on this phone as 32 consecutive rows
+ * of PAUSED/NONE. 4 s is comfortably past the ~2 s one-shot bootstrap window
+ * the repo measured across 17 sidecars, so an arm that was going to converge
+ * has already done so and accepted a pose, which closes the degrade anyway.
+ */
+internal const val DEFAULT_AR_IMU_FALLBACK_GRACE_MS = 4_000.0
+
+/**
+ * Whether a live AR sweep should give its arm up and finish on the IMU ring.
+ *
+ * Pure, and separate from the recorder, because every term is a SAFETY
+ * property and a safety property that cannot be tested is a comment.
+ *
+ * ── THE TRIGGER IS ARCore'S OWN VERDICT, NOT A FRAME COUNT ──────────────
+ * The first version of this counted camera frames and fired at 30. That was
+ * wrong, and the repo had already measured why. From all 17 ARCore sidecars
+ * on disk (`src/sweep/panoPlusModel.ts`): INSUFFICIENT_LIGHT first appears at
+ * ARCore row 60 in 12 of 13 failing packs, 2001-2062 ms after ARCore's first
+ * row, and it is "the label ARCore latches when its one-shot motion-tracking
+ * bootstrap fails to converge inside a fixed ~2 s window." Before that the
+ * rows read PAUSED with reason NONE — ARCore is not failing, it is still
+ * starting.
+ *
+ * A frame count cannot see that window. It starts at seq 0, before ARCore is
+ * even resumed, and the live cadence measured across four packs on one phone
+ * spans 9.3 to 23.3 fps — so 30 frames is anywhere from 1.3 s to 3.2 s. On
+ * the verification run it fired after ~950 ms of ARCore output, at pose ~28
+ * of the first 60, every one of which was PAUSED/NONE. A 25-frame run on the
+ * same phone was 32 rows of pure NONE: five frames longer and it would have
+ * discarded an arm that had never been given a chance to fail. The degrade is
+ * one-way, so that discard is permanent.
+ *
+ * So [arcoreVerdictLatched] is the trigger — ARCore saying it failed, which
+ * the same study shows is contiguous to the last row in 13 of 13 packs and
+ * never returns to NONE. [nsSinceStart] >= [graceNs] is the backstop for the
+ * shape where the reason never leaves NONE at all, set well past the ~2 s
+ * window. [minFramesFloor] is now only a FLOOR: never degrade before it,
+ * never degrade because of it.
+ *
+ * ⚠ [arPosesAccepted] AND [arFramesSolved] ARE THE ONE-WAY TERMS. The arm
+ * decision is made once, before the camera opens, precisely so a sweep cannot
+ * produce "a quaternion series that is not comparable with itself". This does
+ * not breach that rule, it depends on it: with nothing accepted and nothing
+ * solved, NO frame can have used an AR pose, so what comes out is entirely
+ * IMU-derived rather than a splice.
+ *
+ * Both are checked, and the second is not redundant. `arPoseAccepted` is
+ * written by the ARCore PUMP thread after the ring insert, so a reader on the
+ * writer thread can see a ring that is one sample ahead of the counter. That
+ * window provably cannot produce a mixed series — a one-sample ring can only
+ * solve on a bit-exact timestamp match, measured 0 times in 738 on this
+ * device — but the argument takes four steps and rests on a measurement.
+ * `arFramesSolved` is incremented only inside `solveArPose`, on the writer
+ * thread that evaluates this, so it states the property directly: "no frame
+ * has solved against the AR ring." One term to read instead of four to trust.
+ */
+internal fun shouldDegradeArToImu(
+    minFramesFloor: Int,
+    arPosesAccepted: Long,
+    arFramesSolved: Long,
+    framesWithNoPose: Long,
+    arcoreVerdictLatched: Boolean,
+    nsSinceStart: Long,
+    graceNs: Long,
+    attitudeMapping: Boolean,
+    haveBasis: Boolean,
+    imuRingSamples: Long,
+): Boolean =
+    // `0` disables the degrade outright — the pre-2026-09-18 behaviour.
+    minFramesFloor > 0 &&
+        // ONE-WAY, both spellings. See the note above.
+        arPosesAccepted == 0L &&
+        arFramesSolved == 0L &&
+        // A floor, not the trigger.
+        framesWithNoPose >= minFramesFloor &&
+        // Never degrade INTO an arm that cannot answer either: that would
+        // swap one silent refusal for another and make the pack blame the
+        // map instead of the tracker.
+        attitudeMapping &&
+        haveBasis &&
+        imuRingSamples > 0L &&
+        // ARCore has DECIDED it failed, or it has had its whole window and
+        // said nothing at all.
+        (arcoreVerdictLatched || nsSinceStart >= graceNs)
+
 /** How many rotation-vector samples the ring keeps. ~122 Hz measured on
  *  SM-A356U1, so 512 is a little over four seconds — far more than any join
  *  needs, and bounded so a ten-minute sweep cannot grow it. */

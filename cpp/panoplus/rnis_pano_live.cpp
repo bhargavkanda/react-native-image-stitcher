@@ -699,6 +699,22 @@ void Session::appendStatus(std::string& s, const FrameOutcome* row) const {
     s += "}";
 }
 
+void Session::setPoseSource(const std::string& kind) noexcept {
+    // Empty is the "not supplied" sentinel `writeMeta` already tests
+    // (`if (!S.opt.poseSource.empty())`), so accepting one here would DELETE
+    // the block rather than correct it.
+    if (kind.empty()) return;
+    try {
+        Impl& S = *impl_;
+        std::lock_guard<std::mutex> g(S.statusMu);
+        S.opt.poseSource = kind;
+    } catch (...) {
+        // Nothing to report to, and a failed correction must not take the
+        // sweep down: the pack still carries the truth in device.json.
+    }
+}
+
+
 std::string Session::statusJson() const {
     const Impl& S = *impl_;
     // ⚠ `running` IS CHECKED BEFORE THE CACHE, and the order is the fix.  The

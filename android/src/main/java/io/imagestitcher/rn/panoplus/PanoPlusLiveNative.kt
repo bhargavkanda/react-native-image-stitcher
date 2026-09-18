@@ -34,6 +34,7 @@
 
 package io.imagestitcher.rn.panoplus
 
+import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -125,6 +126,31 @@ internal object PanoPlusLiveNative {
     private external fun nativeLiveFinalize(): String
     private external fun nativeLiveCancel()
     private external fun nativeLiveRunning(): Boolean
+    private external fun nativeLiveSetPoseSource(kind: String): Boolean
+
+    /**
+     * Correct `meta.json`'s `poseSource` when the pose arm CHANGES mid-sweep.
+     *
+     * `meta.json` is read on its own by every offline harness, and its
+     * `poseSource.kind` is fixed at `start()` — correct only while the arm
+     * cannot change afterwards. The Android recorder can now give the ARCore
+     * arm up and finish on the IMU ring, so without this the pack would
+     * report `ar` for a sweep the IMU painted.
+     *
+     * ⚠ RETURNS WHETHER IT LANDED, AND THE CALLER MUST NOT DISCARD IT. With
+     * no `JNI_OnLoad` in this library every native entry binds at its FIRST
+     * CALL, so a signature mismatch surfaces as an UnsatisfiedLinkError on a
+     * device rather than at build time. Swallowing that here would leave the
+     * pack wrong and silent — the exact shape of the defect this method
+     * exists to remove.
+     */
+    fun setPoseSource(kind: String): Boolean =
+        try {
+            nativeLiveSetPoseSource(kind)
+        } catch (t: Throwable) {
+            Log.w("RNSSweep.live", "nativeLiveSetPoseSource failed", t)
+            false
+        }
 
     // ── Public, refusal-shaped ──────────────────────────────────────────
 
