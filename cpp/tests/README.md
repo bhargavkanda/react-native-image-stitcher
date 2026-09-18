@@ -76,11 +76,47 @@ The stubs live exclusively under `cpp/tests/stubs/`; production
 builds never see them.  See `stubs/jsi/jsi.h`'s docstring for the
 guard-rails.
 
+## Two projects, no aggregator
+
+There are TWO independent CMake projects under `cpp/tests/`, and that is
+deliberate:
+
+| project | source dir | what it covers | cases |
+|---|---|---|---|
+| `stitcher_cpp_tests` | `cpp/tests/` | the shared C++ port — keyframe gate, glare, sharpness, blur policy, the JSI helpers | 124 |
+| pano+ | `cpp/tests/panoplus/` | the sweep engine that arrived with the `PanoPlus` subspec | 523 |
+
+There is no `add_subdirectory` parent joining them. A parent would make them
+one CMake project again and hide exactly the coupling the package split
+exists to expose — and they must not share a `FETCHCONTENT_BASE_DIR` either:
+with a shared one both configures exit 0 and then the FIRST-configured
+project dies at link time on a missing `lib/libgtest_main.a`.
+
+Drive both with `scripts/run-cpp-tests.sh`, which gives each its own build
+directory and asserts a minimum discovered-case count per project.
+
+### Both need a host OpenCV, and one of them lies about it
+
+`cpp/tests` declares its OpenCV cases inside `if(OpenCV_FOUND)`: with no host
+OpenCV it configures them out, ctest prints `0 tests failed out of 115` and
+exits 0, and nine cases have vanished behind a green run. `cpp/tests/panoplus`
+uses `find_package(OpenCV REQUIRED)` and fails to configure instead, which is
+the louder and better behaviour. `scripts/run-cpp-tests.sh` refuses to run
+without one unless `--allow-no-opencv` is passed.
+
+Build one locally with `cmake -DBUILD_LIST=core,imgproc,imgcodecs
+-DBUILD_SHARED_LIBS=OFF` against an OpenCV 4.10 source tree, installed to
+`build/opencv-host/install` — the path the script auto-detects. Pin 4.10 to
+match the vendored device build; a newer host OpenCV is API-compatible for
+the surface used here but is not byte-parity evidence.
+
 ## When NOT to add a test here
 
-- If the test needs a real JSI runtime, real OpenCV operations, or
-  real-device sensor data, it belongs in `android/src/androidTest/`
-  (instrumented), the iOS Swift test target, or the v0.11.0 parity
-  harness — NOT here.
+- If the test needs a real JSI runtime or real-device sensor data, it belongs
+  in `android/src/androidTest/` (instrumented), the iOS Swift test target, or
+  the parity harness — NOT here.
+- Real OpenCV operations ARE in scope now, in both projects: four pano+
+  runners call `imread`/`imwrite` and the sharpness suite needs `imgproc`.
+  That is what the host-OpenCV requirement above is for.
 - If the test verifies TypeScript/JS-side behaviour, it belongs under
   `src/**/__tests__/` (Jest).

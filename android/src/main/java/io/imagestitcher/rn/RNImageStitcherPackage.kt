@@ -6,6 +6,7 @@ import com.facebook.react.bridge.NativeModule
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.uimanager.ViewManager
 import com.mrousavy.camera.frameprocessors.FrameProcessorPluginRegistry
+import io.imagestitcher.rn.panoplus.PanoPlusPackage
 
 /**
  * ReactPackage that registers the SDK's two native modules with
@@ -88,6 +89,20 @@ class RNImageStitcherPackage : ReactPackage {
         }
     }
 
+    // ⚠ pano+ IS NOT AUTOLINKED ON ITS OWN, AND CANNOT BE. React Native's
+    // Gradle generator constructs exactly ONE ReactPackage per npm
+    // dependency, named by react-native.config.js. A second top-level
+    // registrar in this package would compile, ship inside the .aar, and
+    // never be instantiated — every pano+ id simply absent from
+    // NativeModules, on a green build and a successful install, with nothing
+    // failing anywhere.
+    //
+    // Constructed ONCE, as a field, because PanoPlusPackage builds its probe
+    // and its recorder exactly once inside its own createNativeModules: two
+    // recorder instances would mean two Camera2 owners of the one back
+    // camera.
+    private val panoPlus = PanoPlusPackage()
+
     override fun createNativeModules(
         reactContext: ReactApplicationContext,
     ): List<NativeModule> {
@@ -107,12 +122,16 @@ class RNImageStitcherPackage : ReactPackage {
             // on the main JS runtime (AR frame-processor host-worklet
             // registration).  Mirror of iOS' StitcherJsiInstaller.
             StitcherJsiInstallerModule(reactContext),
-        )
+            // ⚠ BOTH OVERRIDES MUST DELEGATE. Forgetting one does not fail to
+            // build and does not fail to install: it removes that half's
+            // modules (or the pano+ viewfinder) at runtime, which reaches the
+            // operator as "the feature is not available in this build".
+        ) + panoPlus.createNativeModules(reactContext)
     }
 
     override fun createViewManagers(
         reactContext: ReactApplicationContext,
     ): List<ViewManager<*, *>> = listOf(
         RNSARCameraViewManager(),
-    )
+    ) + panoPlus.createViewManagers(reactContext)
 }

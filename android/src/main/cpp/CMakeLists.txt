@@ -206,3 +206,91 @@ target_compile_options(image_stitcher PRIVATE
 # (scripts/build-opencv-android.sh) — a link flag here cannot fix an
 # already-linked prebuilt.
 target_link_options(image_stitcher PRIVATE "-Wl,-z,max-page-size=16384")
+
+# ══════════════════════════════════════════════════════════════════════════
+# image_stitcher_panoplus — the pano+ sweep engine
+# ══════════════════════════════════════════════════════════════════════════
+#
+# A SECOND shared library in this same CMake project, deliberately: pano+ is
+# an optional engine, and keeping it out of libimage_stitcher.so means a host
+# that never sweeps does not pay for it at load time, and a pano+ link break
+# can never be confused with a break in the stitcher.
+#
+# ⚠ A SECOND `add_library` INHERITS NOTHING. Every per-target setting on
+# image_stitcher above — visibility, page size, warning flags — is scoped to
+# that target and has to be repeated here. The ones below are not copied for
+# symmetry; each is load-bearing and says why.
+set(PANOPLUS_CPP_DIR "${SHARED_CPP_DIR}/panoplus")
+if(NOT EXISTS "${PANOPLUS_CPP_DIR}/rnis_pano.hpp")
+    message(FATAL_ERROR
+        "pano+ engine sources missing at:\n  ${PANOPLUS_CPP_DIR}\n"
+        "Expected react-native-image-stitcher/cpp/panoplus/ — was the package "
+        "layout broken?")
+endif()
+
+add_library(image_stitcher_panoplus SHARED
+    panoplus_jni.cpp
+    # The JNI modified-UTF-8 guard. It lives under cpp/panoplus/jni/ rather
+    # than beside the engine so the iOS podspec's non-recursive
+    # cpp/panoplus/* glob cannot reach it — it needs <jni.h> and would be a
+    # dead translation unit in the pod.
+    "${PANOPLUS_CPP_DIR}/jni/rnis_jni_utf8.cpp"
+    "${PANOPLUS_CPP_DIR}/rnis_pano.cpp"
+    "${PANOPLUS_CPP_DIR}/rnis_pano_replay.cpp"
+    "${PANOPLUS_CPP_DIR}/rnis_pano_live.cpp"
+    "${PANOPLUS_CPP_DIR}/rnis_pano_attitude.cpp"
+    "${PANOPLUS_CPP_DIR}/rnis_pano_calib.cpp"
+    "${PANOPLUS_CPP_DIR}/rnis_pano_android_basis.cpp"
+    "${PANOPLUS_CPP_DIR}/rnis_pano_android_report.cpp"
+    "${PANOPLUS_CPP_DIR}/rnis_pano_android_s1.cpp"
+    "${PANOPLUS_CPP_DIR}/rnis_pano_android_preview.cpp")
+
+target_include_directories(image_stitcher_panoplus PRIVATE
+    "${OPENCV_INCLUDE_DIR}"
+    # SHARED_CPP_DIR for warp_guard.hpp, which rnis_pano.cpp includes by bare
+    # name and which lives at the package's cpp/ root, one level ABOVE the
+    # engine.
+    "${SHARED_CPP_DIR}"
+    "${PANOPLUS_CPP_DIR}"
+    "${PANOPLUS_CPP_DIR}/jni")
+
+# opencv_java and log ONLY.
+#   · NOT opencv_stitching: image_stitcher wraps it in --whole-archive to stop
+#     the linker dead-stripping cv::Stitcher, and pano+ must not inherit a
+#     whole-archive of a library it does not call.
+#   · NOT the RN prefabs (jsi / reactnative / fbjni / rnworklets): pano+'s JNI
+#     is plain JNI with no JSI surface, and linking them would make this .so
+#     fail to load on any host whose RN version ships different prefabs.
+target_link_libraries(image_stitcher_panoplus
+    opencv_java
+    log)
+
+# ⚠ -O2 GOES HERE, PER TARGET — NOT IN android/build.gradle's `cppFlags`.
+# `cppFlags` maps to CMAKE_CXX_FLAGS, which is project-wide: putting -O2
+# there would silently re-optimise libimage_stitcher.so for every existing
+# consumer's Debug build. `target_compile_options` is emitted AFTER
+# CMAKE_CXX_FLAGS_DEBUG and the last -O wins in clang, so this is also the
+# only placement that actually beats the Debug default.
+#
+# And it is not a tuning preference. Measured on a Galaxy A35 with the NDK
+# Debug default (-O0): the engine cost 44.9 ms/frame and dropped 49% of
+# frames. The pack's own backpressure note blamed the encoder and was wrong.
+# A Debug build of this library is a FIELD build — do not remove this.
+#
+# -fvisibility=hidden keeps every rnis:: symbol out of the dynamic table; the
+# 15 JNI entries are JNIEXPORT and unaffected. ⚠ It also means `nm -D` on the
+# shipped .so reports ZERO rnis symbols, which is the intent and not a
+# defect — verify against the pre-strip object under intermediates/cxx/.
+target_compile_options(image_stitcher_panoplus PRIVATE
+    -O2
+    -fvisibility=hidden
+    -Wall
+    -Wno-deprecated-declarations)
+
+# 16 KB page-size compatibility, same reason as image_stitcher above.
+# --exclude-libs,ALL additionally stops the static archives this target links
+# from re-exporting their own symbols through it.
+target_link_options(image_stitcher_panoplus PRIVATE
+    "-Wl,-z,max-page-size=16384"
+    "-Wl,--exclude-libs,ALL")
+

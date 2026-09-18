@@ -11,6 +11,7 @@
     "!src/**/__tests__",
     "!src/**/__tests__/**",
     "ios/Sources",
+    "ios/PanoPlus",
     "ios/Package.swift",
     "android/build.gradle",
     "android/src/main/java",

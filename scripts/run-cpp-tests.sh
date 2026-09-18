@@ -50,8 +50,14 @@ done
 
 # ── The projects, and the case count each must reach ─────────────────────
 # name|source dir|minimum cases with a host OpenCV|minimum cases without
+#
+# ⚠ `panoplus` uses `find_package(OpenCV REQUIRED)` with no COMPONENTS list,
+# so with no host OpenCV it FAILS TO CONFIGURE rather than quietly dropping
+# 328 of its 523 cases. Its two floors are therefore equal: there is no
+# reduced-coverage mode to have a lower number for.
 PROJECTS=(
   "core|cpp/tests|124|115"
+  "panoplus|cpp/tests/panoplus|523|523"
 )
 
 # ── Host OpenCV ──────────────────────────────────────────────────────────

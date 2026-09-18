@@ -60,7 +60,16 @@ Pod::Spec.new do |s|
   # Core depends on OpenCV, so the same single `RNImageStitcher` pod
   # target builds the same file set with the same settings.
 
-  s.default_subspecs = 'Core'
+  # ⚠ PanoPlus IS ON BY DEFAULT, AND THE ASYMMETRY IS THE REASON.
+  # React Native autolinking emits a bare `pod 'RNImageStitcher'` with no
+  # subspec, and a host that wants pano+ has no place to say so. Default-OFF
+  # therefore fails SILENTLY: the app builds, installs, launches, and reports
+  # that pano+ is not in this build. Default-ON fails VISIBLY and
+  # measurably — every consumer compiles ~20k lines of C++ and ~10k lines of
+  # iOS source it may not want, and links four more system frameworks.
+  # A consumer who wants Core alone disables autolinking for this package and
+  # writes `pod 'RNImageStitcher/Core'`.
+  s.default_subspecs = ['Core', 'PanoPlus']
 
   # ── OpenCV — pre-built custom xcframework fetched by postinstall ────
   #
@@ -148,6 +157,70 @@ Pod::Spec.new do |s|
       #     resolves against `${PODS_ROOT}/Headers/Public` — already on
       #     the inherited path — and works on Android's prefab too.)
       'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_TARGET_SRCROOT}/cpp" "${PODS_ROOT}/../node_modules/react-native-worklets-core/cpp"',
+    }
+  end
+
+  # ── pano+ — the sweep engine ─────────────────────────────────────────────
+  #
+  # A slit-scan panorama engine with per-frame attitude rectification, driven
+  # by an AR session's pose rather than by image registration alone. It is a
+  # SUBSPEC rather than part of Core because it is large and not every
+  # consumer wants it: ~20k lines of C++ and ~10k lines of iOS source.
+  s.subspec 'PanoPlus' do |pp|
+    # ⚠ AN EXPLICIT LIST, NOT A GLOB. A glob over ios/PanoPlus would silently
+    # pick up anything dropped in that directory later, including a file
+    # meant for a test target or a private overlay. Each of the 20 appears
+    # exactly once.
+    #
+    # `cpp/panoplus/*` is NON-RECURSIVE on purpose, exactly as Core's `cpp/*`
+    # is: it must not reach cpp/panoplus/jni/, which holds an Android-only
+    # translation unit the pod would otherwise compile as dead weight.
+    pp.source_files = [
+                          'ios/PanoPlus/PanoPlusBridge.m',
+                          'ios/PanoPlus/PanoPlusBridge.swift',
+                          'ios/PanoPlus/PanoPlusCalibBridge.m',
+                          'ios/PanoPlus/PanoPlusCalibBridge.swift',
+                          'ios/PanoPlus/RNISArExposureProbe.swift',
+                          'ios/PanoPlus/RNISPanoAttitude.h',
+                          'ios/PanoPlus/RNISPanoAttitude.mm',
+                          'ios/PanoPlus/RNISPanoAvfSource.swift',
+                          'ios/PanoPlus/RNISPanoBasisCalibration.swift',
+                          'ios/PanoPlus/RNISPanoCalibCore.h',
+                          'ios/PanoPlus/RNISPanoCalibCore.mm',
+                          'ios/PanoPlus/RNISPanoCalibStore.swift',
+                          'ios/PanoPlus/RNISPanoCameraLock.swift',
+                          'ios/PanoPlus/RNISPanoCore.h',
+                          'ios/PanoPlus/RNISPanoCore.mm',
+                          'ios/PanoPlus/RNISPanoImuSidecar.swift',
+                          'ios/PanoPlus/RNISPanoLensRequest.swift',
+                          'ios/PanoPlus/RNISPanoPlusPlugin.swift',
+                          'ios/PanoPlus/RNISPanoSourceView.swift',
+                          'ios/PanoPlus/RNISPanoSourceViewManager.m',
+                          'cpp/panoplus/*.{hpp,cpp}']
+
+    # Only the three Obj-C headers, and only because each imports nothing but
+    # Foundation/CoreVideo. The C++ headers must stay OUT of the umbrella:
+    # it is compiled in Obj-C context, and a `use_frameworks!` host chokes on
+    # the first `#include <cstdint>` reached through it. The .mm files find
+    # them via HEADER_SEARCH_PATHS instead.
+    pp.public_header_files = ['ios/PanoPlus/RNISPanoAttitude.h',
+                              'ios/PanoPlus/RNISPanoCalibCore.h',
+                              'ios/PanoPlus/RNISPanoCore.h']
+
+    # AVFoundation, ARKit and UIKit already arrive from Core.
+    pp.frameworks = 'CoreMedia', 'CoreMotion', 'CoreVideo', 'QuartzCore'
+
+    # ⚠ A REAL SYMBOL DEPENDENCY, not an ordering hint. The pano+ Swift
+    # conforms to `RNISARFramePlugin` and calls `RNISARPluginRegistry`, both
+    # declared in Core.
+    pp.dependency 'RNImageStitcher/Core'
+
+    # Core already puts ${PODS_TARGET_SRCROOT}/cpp on the search path, which
+    # is what resolves the engine's `#include "warp_guard.hpp"`. This adds
+    # the engine's own directory so the iOS sources can `#include
+    # "rnis_pano.hpp"` without relative-path spelunking.
+    pp.pod_target_xcconfig = {
+      'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_TARGET_SRCROOT}/cpp/panoplus"',
     }
   end
 end

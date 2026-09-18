@@ -6,6 +6,14 @@ dist/
 # SwiftPM build artefacts (ios/Package.swift produces these under
 # ios/.build/ when running `swift test` or `swift build`).
 ios/.build/
+
+# swift-tests/ is a SEPARATE SwiftPM package (the Mac-only XCTest harness for
+# the pure-Swift pano+ lens rules). These rules arrived with it; without them
+# `swift build` leaves ~2,200 artefacts staged, which is how a build directory
+# ends up in a public repository.
+swift-tests/.build/
+swift-tests/.swiftpm/
+swift-tests/Package.resolved
 ios/.swiftpm/
 ios/Package.resolved
 
