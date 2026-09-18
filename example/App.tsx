@@ -144,6 +144,20 @@ function App(): React.JSX.Element {
   // to pre-anti-blur behaviour).  The exposure cap is a capture-FORMAT change,
   // so the <Camera> key includes this to force a clean format re-pick on flip.
   const [antiBlurOn, setAntiBlurOn] = useState(true);
+  /**
+   * Which engine the HOLD runs.
+   *
+   * `'keyframe'` is the shipped path: vision-camera frames, a keyframe gate,
+   * cv::Stitcher at the end. `'sweep'` is the slit-scan engine — it paints
+   * strips continuously off an AR session's pose and writes a pack rather
+   * than a single JPEG, so it has its own on-screen surface and its own
+   * result shape (`type: 'panoplus'`).
+   *
+   * ⚠ A REMOUNT, not a prop flip, hence the `key` on <Camera>. The two
+   * engines own different camera sessions; swapping them in place would have
+   * both alive for a commit.
+   */
+  const [engine, setEngine] = useState<'keyframe' | 'sweep'>('keyframe');
 
   // v0.13.0 — controlled flash state demo.  The host owns the
   // `'on' | 'off'` value; the built-in flash button drives the
@@ -448,6 +462,18 @@ function App(): React.JSX.Element {
     // v0.16 — onCapture now fires on failure too (ok:false), mirroring
     // onError.  The error handler already surfaces it, so just bail here.
     if (!result.ok) return;
+    // A SWEEP is the third result kind and it carries none of the panorama's
+    // frame bookkeeping — no `warnings`, no frame counts, because nothing in
+    // its path produces them. It writes a PACK; `sessionDir` is where the
+    // strips, the poses and the meta live, and that is what a host wants.
+    if (result.type === 'panoplus') {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[example] sweep complete · ${result.width}×${result.height} · `
+        + `pack ${result.sessionDir}`,
+      );
+      return;
+    }
     if (result.warnings.length > 0) {
       // eslint-disable-next-line no-console
       console.warn(
@@ -556,10 +582,16 @@ function App(): React.JSX.Element {
       title:
         preview.type === 'photo'
           ? `Photo · ${preview.width}×${preview.height}`
-          : `Panorama · ${preview.framesIncluded}/${preview.framesRequested} frames`
-            + (preview.stitchModeResolved
-              ? ` · ${preview.stitchModeResolved}`
-              : ''),
+          : preview.type === 'panoplus'
+            // Unreachable today — a sweep is reviewed in its own surface and
+            // never parks here — but the discriminant has three members now
+            // and narrowing that ignores one is how a third kind reaches a
+            // branch written for two.
+            ? `Sweep · ${preview.width}×${preview.height}`
+            : `Panorama · ${preview.framesIncluded}/${preview.framesRequested} frames`
+              + (preview.stitchModeResolved
+                ? ` · ${preview.stitchModeResolved}`
+                : ''),
     };
   }, [preview]);
 
@@ -628,7 +660,8 @@ function App(): React.JSX.Element {
           // Re-pick the capture format when the KF-quality toggle OR the
           // anti-blur exposure cap flips (both change which format
           // vision-camera picks).
-          key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-ab${antiBlurOn ? 1 : 0}`}
+          key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-ab${antiBlurOn ? 1 : 0}-eng-${engine}`}
+          engine={engine}
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
@@ -744,6 +777,21 @@ function App(): React.JSX.Element {
         >
           <Text style={styles.devToggleText}>
             🌀 anti-blur: {antiBlurOn ? 'ON' : 'OFF'}
+          </Text>
+        </Pressable>
+
+        {/* The ENGINE the hold runs. `sweep` replaces the whole preview with
+            the slit-scan surface — that is expected: the two engines own
+            different camera sessions and only one can be mounted. A sweep
+            completes on the same `onCapture` as a panorama, discriminated by
+            `type: 'panoplus'`. */}
+        <Pressable
+          style={[styles.devToggle, { top: 232 }]}
+          onPress={() => setEngine((e) => (e === 'sweep' ? 'keyframe' : 'sweep'))}
+          accessibilityRole="button"
+        >
+          <Text style={styles.devToggleText}>
+            🧭 engine: {engine}
           </Text>
         </Pressable>
 
