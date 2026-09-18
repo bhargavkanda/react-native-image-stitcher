@@ -89,6 +89,10 @@ import type {
   PanoPlusFailure,
   SweepSurfaceHandle,
 } from '../sweep/panoPlusTypes';
+import {
+  SWEEP_ENGINE_DEFAULTS,
+  defaultSweepPoseSource,
+} from '../sweep/sweepDefaults';
 
 /**
  * Everything `engine="sweep"` accepts, which is everything the sweep surface
@@ -3189,7 +3193,21 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         <View style={[styles.container, style]}>
           <PanoPlusCaptureSurface
             ref={sweepRef}
+            // ⚠ DEFAULTS BEFORE THE SPREAD, SO THE HOST ALWAYS WINS.
+            // The surface's own prop defaults were never a configuration
+            // anyone ran — its one host passed everything off a flag store,
+            // so `{...sweep}` with `sweep` undefined fired every bare default
+            // at once, on a device, for the first time. On the A35 that chose
+            // the ARCore pose arm in a dim room and the sweep painted nothing
+            // (see `sweepDefaults.ts` for the measurement).
+            poseSource={defaultSweepPoseSource(Platform.OS)}
             {...sweep}
+            // ⚠ MERGED KEY-BY-KEY, NOT SPREAD. `engineOptions` is an object,
+            // so letting the host's copy through the spread above would
+            // REPLACE the defaults wholesale — a host that set one option
+            // would silently lose the other six, including the trajectory
+            // continuation that removes the elbow. Host keys still win.
+            engineOptions={{ ...SWEEP_ENGINE_DEFAULTS, ...sweep?.engineOptions }}
             onComplete={(result: PanoPlusCaptureResult) => {
               onCapture?.({ ...result, ok: true });
             }}

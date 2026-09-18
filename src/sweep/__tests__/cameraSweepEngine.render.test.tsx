@@ -23,10 +23,13 @@
  *    channel to use one engine.
  */
 import React from 'react';
+import { Platform } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import { Camera } from '../../camera/Camera';
 import type { CameraCaptureResult } from '../../camera/Camera';
+import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { SWEEP_ENGINE_DEFAULTS } from '../sweepDefaults';
 
 /** Every host component the renderer produced, by display name. */
 function names(tree: ReactTestRenderer): string[] {
@@ -76,6 +79,104 @@ describe('<Camera engine="sweep">', () => {
     // keyframe render with no `sweep` is unaffected by its existence.
     const tree = render({ engine: 'sweep', sweep: { rectify: false, gainMatch: false } });
     expect(names(tree).length).toBeGreaterThan(0);
+    act(() => { tree.unmount(); });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  //  WHAT REACHES THE SURFACE — the assertions that were missing
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // ⚠ EVERY CASE ABOVE THIS POINT PASSES WHEN THE SWEEP IS COMPLETELY
+  // MISCONFIGURED, AND THAT IS NOT HYPOTHETICAL — IT HAPPENED.
+  // `expect(names(tree).length).toBeGreaterThan(0)` asserts "the renderer
+  // produced at least one host node", which is true of any render at all.
+  // So this suite was green on a build where `<Camera engine="sweep">`
+  // handed the surface NO options, the surface's bare `poseSource = 'ar'`
+  // default fired, the recorder latched the ARCore pose arm, ARCore could
+  // not track in a dim room, and all 120 frames of a real sweep on a Galaxy
+  // A35 refused `buffer-empty` and painted nothing.
+  //
+  // A delegation is a set of VALUES crossing a boundary. Counting nodes on
+  // the far side cannot see them. These read the props off the real surface
+  // element — no mock, so the delegation under test is the one that ships.
+
+  /** The props `<Camera>` actually handed `PanoPlusCaptureSurface`. */
+  function surfaceProps(tree: ReactTestRenderer): Record<string, unknown> {
+    return tree.root.findByType(PanoPlusCaptureSurface).props as Record<
+      string,
+      unknown
+    >;
+  }
+
+  it('asks for the pose arm that does not need ARCore, on ANDROID, when the host says nothing', () => {
+    // THE REGRESSION THIS FILE EXISTS FOR NOW. The Android AR arm needs
+    // ARCore to be TRACKING; when it is not, the recorder latches
+    // `arArmActive` and can never reach the IMU ring again, so a lighting
+    // condition becomes a total loss instead of a degradation. A library
+    // default must degrade.
+    //
+    // ⚠ THE PLATFORM IS PART OF THE ASSERTION, NOT TEST PLUMBING. The render
+    // mock is `Platform.OS === 'ios'`, so a test that just rendered and
+    // checked `poseSource` would be asserting the iOS branch while calling
+    // itself a test of the Android fix — green, and about the wrong arm.
+    const platform = Platform as unknown as { OS: string };
+    const saved = platform.OS;
+    platform.OS = 'android';
+    try {
+      const tree = render({ engine: 'sweep' });
+      expect(surfaceProps(tree).poseSource).toBe('imu');
+      act(() => { tree.unmount(); });
+    } finally {
+      platform.OS = saved;
+    }
+  });
+
+  it('leaves the surface to pick its own arm on iOS', () => {
+    // iOS is not the same question. There the AR arm is ARKit through the
+    // frame plugin, it is the arm iOS has always used, and it works in 278
+    // of 278 packs. `undefined` means "no second opinion" — it must NOT be
+    // 'imu', which would take a working platform off its working arm.
+    expect((Platform as unknown as { OS: string }).OS).toBe('ios');
+    const tree = render({ engine: 'sweep' });
+    expect(surfaceProps(tree).poseSource).toBeUndefined();
+    act(() => { tree.unmount(); });
+  });
+
+  it('supplies the tuned engine options rather than the native defaults', () => {
+    // `crossTraj: 0` is the pre-2026-09 engine and elbows at every
+    // block/strip join. Shipping the native defaults from a new public API
+    // would ship a fixed bug back to every consumer that says nothing.
+    const tree = render({ engine: 'sweep' });
+    expect(surfaceProps(tree).engineOptions).toMatchObject({
+      ...SWEEP_ENGINE_DEFAULTS,
+    });
+    act(() => { tree.unmount(); });
+  });
+
+  it('lets the host override a default rather than being overridden by it', () => {
+    const tree = render({ engine: 'sweep', sweep: { poseSource: 'ar' } });
+    expect(surfaceProps(tree).poseSource).toBe('ar');
+    act(() => { tree.unmount(); });
+  });
+
+  it('MERGES engineOptions key-by-key so one host key cannot drop the rest', () => {
+    // ⚠ THE BUG A PLAIN SPREAD WOULD REINTRODUCE, PINNED. `engineOptions` is
+    // an object: `{...defaults}` then `{...sweep}` makes the host's copy
+    // REPLACE it, so a host setting one option silently loses the other six
+    // — including the trajectory continuation. Every default must survive
+    // alongside the override.
+    const tree = render({
+      engine: 'sweep',
+      sweep: { engineOptions: { crossTraj: 0 } },
+    });
+    const opts = surfaceProps(tree).engineOptions as Record<string, unknown>;
+    expect(opts.crossTraj).toBe(0);                                  // host wins
+    expect(opts.crossTrajRelaxPx).toBe(SWEEP_ENGINE_DEFAULTS.crossTrajRelaxPx);
+    expect(opts.leadOutFromFrontier).toBe(SWEEP_ENGINE_DEFAULTS.leadOutFromFrontier);
+    expect(opts.crossFitMode).toBe(SWEEP_ENGINE_DEFAULTS.crossFitMode);
+    expect(opts.crossFitDcRemove).toBe(SWEEP_ENGINE_DEFAULTS.crossFitDcRemove);
+    expect(opts.crossScaleLeak).toBe(SWEEP_ENGINE_DEFAULTS.crossScaleLeak);
+    expect(opts.leadOutTraj).toBe(SWEEP_ENGINE_DEFAULTS.leadOutTraj);
     act(() => { tree.unmount(); });
   });
 
