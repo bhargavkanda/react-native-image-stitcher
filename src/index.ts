@@ -276,6 +276,7 @@ export { copyFile, moveFile, getDefaultCaptureDir } from './utils/files';
 // reading the engine's running state to drive a custom UI).
 export {
   IncrementalOutcome,
+  incrementalMissingMethods,
   incrementalStitcherIsAvailable,
   subscribeIncrementalState,
   subscribeStitchingPhase,

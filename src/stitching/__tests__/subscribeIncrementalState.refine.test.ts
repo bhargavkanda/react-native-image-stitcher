@@ -83,6 +83,17 @@ jest.mock('react-native', () => ({
       // side can track listener count.  We just stub them.
       addListener: jest.fn(),
       removeListeners: jest.fn(),
+      // ⚠ THESE THREE ARE NOT USED BY THIS SUITE AND MUST STILL BE HERE.
+      // `getIncrementalNativeModule()` reports a module as available only
+      // when the methods a caller may then call are actually functions —
+      // because "registered" and "usable" came apart in the field once
+      // (a displaced `@ReactMethod` left `start` off the bridge) and
+      // nothing noticed. A mock that omits them is not a registered
+      // module; it is the broken one, and this suite would be asserting
+      // against a state no working binary is ever in.
+      start: jest.fn(),
+      finalize: jest.fn(),
+      cancel: jest.fn(),
     },
   },
   NativeEventEmitter: jest.fn().mockImplementation((nativeModule: unknown) => {

@@ -55,6 +55,16 @@ jobs:
         # for CI, revisit this flag.
         run: npm ci --ignore-scripts
 
+      - name: Every @ReactMethod still touches its function
+        # Kotlin binds an annotation to the next declaration. Insert anything
+        # between `@ReactMethod` and its `fun` and the method silently leaves
+        # the React Native bridge: kotlinc is happy, the JUnit suite is happy
+        # (it calls the Kotlin method directly), and JS gets `undefined is not
+        # a function` on a device. That shipped once, as PANORAMA_START_FAILED
+        # on every Android panorama. It runs in this job, not `android`,
+        # because it needs no toolchain and should fail in seconds.
+        run: scripts/check-reactmethod-binding.sh
+
       - name: TypeScript type check — src + tests
         # Root `tsconfig.json` includes `src/**`, which covers the
         # test files under `src/camera/__tests__/` transitively.

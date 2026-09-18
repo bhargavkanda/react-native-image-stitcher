@@ -1121,18 +1121,61 @@ interface NativeIncrementalModule {
 
 
 /**
+ * The methods a caller is entitled to assume exist once this module reports
+ * itself available. Deliberately the SMALL set the capture path actually
+ * drives — not every optional method on the interface, several of which are
+ * genuinely absent on older binaries and are probed individually at their
+ * call sites.
+ */
+const REQUIRED_METHODS = ['start', 'finalize', 'cancel'] as const;
+
+/**
+ * Which of {@link REQUIRED_METHODS} the registered module is missing.
+ * Returns `null` when the module itself is not registered at all, and an
+ * empty array when everything required is present.
+ *
+ * Exported for the diagnostic in {@link getIncrementalNativeModule}'s
+ * callers, which can then say WHICH method is missing instead of failing
+ * later with an anonymous `undefined is not a function`.
+ */
+export function incrementalMissingMethods(): string[] | null {
+  const m = (NativeModules as Record<string, unknown>)['IncrementalStitcher'];
+  if (!m || typeof m !== 'object') return null;
+  const rec = m as Record<string, unknown>;
+  return REQUIRED_METHODS.filter((k) => typeof rec[k] !== 'function');
+}
+
+/**
  * Lazy-resolve the native module.  Returns null on platforms that
  * don't have it registered yet (e.g. older builds without the new
  * native code).  Callers fall back to the batch stitcher in that
  * case.
+ *
+ * ⚠ THE METHOD CHECK IS NOT DEFENSIVE PADDING — IT IS THE POINT.
+ * This used to accept anything that was an object, so "the module is
+ * registered" and "the module can be used" were different facts and only the
+ * first one was ever checked. They came apart for real: a displaced
+ * `@ReactMethod` annotation left `IncrementalStitcher` registered with
+ * `start` missing, this returned the object, `incrementalStitcherIsAvailable()`
+ * said `true`, the Camera started a capture, and `native.start(...)` threw
+ * `undefined is not a function` from inside a `catch` that relabelled it
+ * PANORAMA_START_FAILED. Every layer reported something true and the
+ * combination was useless.
+ *
+ * A module missing a required method is NOT available. Reporting it as
+ * absent routes the caller down the same path it already has for an old
+ * binary — and `incrementalMissingMethods()` is there for anyone who needs
+ * to say which method it was.
  */
 export function getIncrementalNativeModule(): NativeIncrementalModule | null {
-  const m = (NativeModules as Record<string, unknown>)['IncrementalStitcher'];
-  if (!m || typeof m !== 'object') return null;
+  const missing = incrementalMissingMethods();
+  if (missing === null || missing.length > 0) return null;
   // The cast is safe — RN runtime sees only `Function` for each
   // method but TypeScript's structural type system is happy with
   // a record of any-callable.
-  return m as NativeIncrementalModule;
+  return (NativeModules as Record<string, unknown>)[
+    'IncrementalStitcher'
+  ] as NativeIncrementalModule;
 }
 
 

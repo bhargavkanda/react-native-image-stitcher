@@ -166,6 +166,7 @@ import {
 } from './captureWarnings';
 import {
   getIncrementalNativeModule,
+  incrementalMissingMethods,
   incrementalStitcherIsAvailable,
 } from '../stitching/incremental';
 import { useFrameProcessorDriver } from '../stitching/useFrameProcessorDriver';
@@ -2612,6 +2613,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // `engine-unknown` — not an engine name), and the fail-closed throw above
       // is the third case. All three surface as ENGINE_UNAVAILABLE with the
       // precise cause attached.
+      // ⚠ LOG THE STACK. A start failure reaches the host as a CODE and a
+      // MESSAGE, and for a JS-side throw the message alone is useless — a
+      // bare "undefined is not a function" names neither the call nor the
+      // file, and the host has no way to get at it. The stack is the one
+      // thing that turns that into a fix, and it is free in a dev build.
+      if (__DEV__) {
+        // eslint-disable-next-line no-console
+        console.error(
+          '[Camera] startCapture threw',
+          { engine, isNonAR, engineWire: engine === 'keyframe' ? 'batch-keyframe' : engine },
+          err instanceof Error ? (err.stack ?? err.message) : String(err),
+        );
+      }
       const nativeCode = (err as { code?: unknown } | null)?.code;
       const isEngineRefusal =
         nativeCode === 'engine-unavailable' ||
@@ -2665,10 +2679,23 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     if (!enablePanoramaMode || shutterDisabled) return;
     if (statusPhase === 'recording' || statusPhase === 'stitching') return;
     if (!incrementalStitcherIsAvailable()) {
+      // Say WHICH of the two it is. "Not available" covered both "the module
+      // is not registered at all" (a linking problem) and "it is registered
+      // but a method is missing" (a native-export problem), and those send
+      // the reader to completely different places. The second one is not
+      // hypothetical: a displaced `@ReactMethod` once left `start` off the
+      // bridge, and the only symptom was PANORAMA_START_FAILED with no clue.
+      const missing = incrementalMissingMethods();
       onError?.(
         new CameraError(
           'PANORAMA_START_FAILED',
-          'Native incremental stitcher module not available',
+          missing === null
+            ? 'Native incremental stitcher module is not registered. The '
+              + 'native side is not linked into this build.'
+            : `Native incremental stitcher is registered but does not export `
+              + `${missing.join(', ')}. The native method exists but is not `
+              + `bridged — on Android check that @ReactMethod still touches `
+              + `the function (scripts/check-reactmethod-binding.sh).`,
         ),
       );
       return;

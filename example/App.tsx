@@ -45,6 +45,8 @@ import {
 } from 'react-native-vision-camera';
 import { Worklets } from 'react-native-worklets-core';
 import {
+  panoPlusIsAvailable,
+  incrementalStitcherIsAvailable,
   Camera,
   copyFile,
   moveFile,
@@ -158,6 +160,29 @@ function App(): React.JSX.Element {
    * both alive for a commit.
    */
   const [engine, setEngine] = useState<'keyframe' | 'sweep'>('keyframe');
+
+  // ── STARTUP PROBE ────────────────────────────────────────────────────
+  // What the RUNTIME sees, printed once. A module compiled into the APK and
+  // a module the JS side can actually USE are different things, and every
+  // "not available" message is a claim about the second one. Both of this
+  // demo's engines have failed on a device while every build artefact was
+  // correct, so the two lines that distinguish those cases are worth the
+  // three lines of code.
+  //
+  // ⚠ DO NOT "IMPROVE" THIS BY LISTING `Object.keys(NativeModules)`, OR THE
+  // KEYS OF A MODULE. Both were tried here. Under bridgeless the registry is
+  // a lazy proxy: the first printed `[]` on a perfectly working app, and the
+  // second printed only the three properties earlier code happened to have
+  // touched. An empty list reads exactly like "nothing is registered". Ask
+  // about what you care about BY NAME.
+  useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.log(
+      '[example] engines —',
+      'sweep:', panoPlusIsAvailable() ? 'available' : 'UNAVAILABLE',
+      '· keyframe:', incrementalStitcherIsAvailable() ? 'available' : 'UNAVAILABLE',
+    );
+  }, []);
 
   // v0.13.0 — controlled flash state demo.  The host owns the
   // `'on' | 'off'` value; the built-in flash button drives the

@@ -498,7 +498,6 @@ class IncrementalStitcher(
         }
     }
 
-    @ReactMethod
     /** Why [start] refused an `engine` value. [code] is the JS-facing reject code. */
     private class EngineStartRefusal(val code: String, message: String) : Exception(message)
 
@@ -543,6 +542,18 @@ class IncrementalStitcher(
         )
     }
 
+    // ⚠ THE ANNOTATION BELONGS TO THIS FUNCTION AND MUST STAY TOUCHING IT.
+    // It was once written directly above `fun start`, and the engine-refusal
+    // code (EngineStartRefusal + resolveEngineMode) was later inserted BETWEEN
+    // the two. Kotlin binds an annotation to the next declaration, so it moved
+    // onto `private class EngineStartRefusal`, `start` stopped being exported,
+    // and `NativeModules.IncrementalStitcher.start` became `undefined` — a
+    // runtime `undefined is not a function` inside a `catch` that reported it
+    // as PANORAMA_START_FAILED. Nothing failed to compile and no test noticed,
+    // because every test that calls start() calls the KOTLIN method directly;
+    // only a real bridge call can see the difference.
+    // `scripts/check-reactmethod-binding.sh` now fails the build on this.
+    @ReactMethod
     fun start(options: ReadableMap, promise: Promise) {
         // ⚠ RESOLVED BEFORE THE isRunning LATCH, DELIBERATELY. `getAndSet(true)`
         // below claims the stitcher; refusing after that point would reject the
