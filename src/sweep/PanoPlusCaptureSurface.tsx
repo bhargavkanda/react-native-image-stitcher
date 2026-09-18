@@ -92,7 +92,7 @@ import type {
   SweepSurfaceHandle as SurfaceControlHandle,
   SweepSurfaceState as SurfaceControlState,
 } from './panoPlusTypes';
-import { loadVideoFileSystem } from './fileSystem';
+import { loadVideoFileSystem, nativeDocumentDirectory } from './fileSystem';
 import { getPanoPlusSourceView } from './panoPlusSourceView';
 import { getPanoPlusAndroidPreviewView } from './panoPlusAndroidPreviewView';
 import {
@@ -1017,7 +1017,13 @@ export const PanoPlusCaptureSurface = forwardRef<
   // asking the iOS calibration module on a platform that does not carry it.
   const fs = useMemo(() => loadVideoFileSystem(), []);
   const nativeReady = useMemo(() => panoPlusIsAvailable(), []);
-  const documentDirectory = fs?.documentDirectory ?? null;
+  // ⚠ THE HOST'S FILESYSTEM FIRST, THIS PACKAGE'S OWN DIRECTORY SECOND.
+  // The order is load-bearing: a host that HAS expo-file-system keeps writing
+  // to exactly the directory it always wrote to, so this change moves no
+  // existing host's data. The fallback exists for hosts that have no Expo at
+  // all, which used to be told "pano+ is not available" — a sentence about
+  // the build, for a missing peer dependency. See `fileSystem.ts`.
+  const documentDirectory = fs?.documentDirectory ?? nativeDocumentDirectory();
   const available = nativeReady && documentDirectory != null;
 
   /**
@@ -3201,9 +3207,13 @@ export const PanoPlusCaptureSurface = forwardRef<
               whenever the module is genuinely absent. */}
           {!nativeReady
             ? panoPlusUnavailableDetail(Platform.OS)
-            : 'No writable document directory on this platform, so there is '
-              + 'nowhere to put the pack. The sweep is refused rather than run '
-              + 'without its evidence.'}
+            : 'The sweep session module is registered but reports no '
+              + 'document directory, and this host has no expo-file-system '
+              + 'either — so there is nowhere to put the pack. That pairing '
+              + 'means a native binary older than the built-in directory '
+              + 'constant: rebuild the app against this version of '
+              + 'react-native-image-stitcher. The sweep is refused rather '
+              + 'than run without its evidence.'}
         </Text>
         {/* No Close button (2026-09-03): Pano has none, and the way out of
             every capture mode is the shell's mode bar, which renders over this

@@ -78,6 +78,45 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
     /// queues (the StitchPluginsBridge precedent).
     @objc public static func requiresMainQueueSetup() -> Bool { return false }
 
+    /// ── WHY THIS PACKAGE SHIPS ITS OWN DOCUMENT DIRECTORY ───────────────
+    /// A sweep needs one thing from the filesystem before it can start: a
+    /// writable base directory to put the session under.  Native creates the
+    /// session directory itself, so that single path is the whole
+    /// requirement.
+    ///
+    /// pano+ got that path from `expo-file-system`, because the host it grew
+    /// up in is an Expo app.  That dependency came along when pano+ moved
+    /// into this package and became a hidden, unstated requirement: a plain
+    /// React Native app installing `react-native-image-stitcher` — including
+    /// this repo's own example app — got "pano+ is not available", a message
+    /// whose wording sends the reader to the build when the truth was a
+    /// missing peer dependency nobody had told them about.
+    ///
+    /// An Apache-2.0 package must not require Expo to run its own feature, so
+    /// the base path comes from here and the host's `expo-file-system` is now
+    /// a PREFERENCE rather than a requirement — see `fileSystem.ts`, which
+    /// still uses the host's copy when there is one so existing hosts keep
+    /// writing to exactly the directory they always did.
+    ///
+    /// CONSTANTS, not a promise method: the surface reads this during render
+    /// to decide whether it can offer a capture at all, and a promise cannot
+    /// answer a synchronous question without a frame in which the feature
+    /// falsely appears unavailable.
+    ///
+    /// `.documentDirectory` is the deliberate choice — it is what
+    /// `expo-file-system` reports for `documentDirectory` on iOS, it is
+    /// backed up and not subject to the eviction that could delete a
+    /// half-finished sweep out from under the engine.  `.absoluteString`
+    /// gives the `file://…/Documents/` form, trailing slash included, so both
+    /// paths through `loadVideoFileSystem()` hand the surface the same shape
+    /// of string.
+    @objc public func constantsToExport() -> [AnyHashable: Any] {
+        let docs = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask
+        ).first
+        return ["documentDirectory": docs?.absoluteString as Any]
+    }
+
     /// Set while pano+ owns the high-fps override, so stop restores exactly
     /// what it found.  Written on the bridge's work queue only.
     /// v12 REVIEW FIX (minor) — guarded by `armLock` like the arm claim: it

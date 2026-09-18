@@ -130,6 +130,63 @@ class PanoPlusLiveModule(
 
     override fun getName(): String = "RNSSweepSession"
 
+    /**
+     * ── WHY THIS PACKAGE SHIPS ITS OWN DOCUMENT DIRECTORY ────────────────
+     * A sweep needs one thing from the filesystem before it can start: a
+     * writable base directory to put the session under. Native creates the
+     * session directory itself, so that single path is the whole requirement.
+     *
+     * pano+ got that path from `expo-file-system`, because the host it grew up
+     * in is an Expo app. That dependency came along when pano+ moved into this
+     * package and turned into a hidden, unstated requirement: a plain React
+     * Native app installing `react-native-image-stitcher` — including THIS
+     * repo's own example app — got "pano+ is not available", a message whose
+     * wording sends the reader to the build when the truth was a missing peer
+     * dependency they were never told about.
+     *
+     * An Apache-2.0 package must not require Expo to run its own feature. So
+     * the base path comes from here, and the host's `expo-file-system` is now
+     * a PREFERENCE rather than a requirement — see `fileSystem.ts`, which
+     * still uses the host's copy when there is one so existing hosts keep
+     * writing to exactly the directory they always did.
+     *
+     * A CONSTANT, not a `@ReactMethod`: the surface reads this during render
+     * to decide whether it can offer a capture at all, and a promise cannot
+     * answer a synchronous question without adding a frame in which the
+     * feature falsely appears unavailable.
+     *
+     * `filesDir` is the deliberate choice — it is app-private, survives the
+     * cache eviction that would delete a half-finished sweep out from under
+     * the engine, and matches what `expo-file-system` reports for
+     * `documentDirectory` on Android. The trailing slash and the `file://`
+     * scheme match Expo's format exactly so both paths through
+     * `loadVideoFileSystem()` hand the surface the same shape of string.
+     */
+    override fun getConstants(): MutableMap<String, Any> = hashMapOf(
+        "documentDirectory" to
+            documentDirectoryUri(reactApplicationContext.filesDir.absolutePath) as Any,
+    )
+
+    companion object {
+        /**
+         * The `filesDir` path in the exact shape `expo-file-system` reports
+         * for `documentDirectory`: a `file://` URI with a TRAILING SLASH.
+         *
+         * Pure, and separate from [getConstants], because the format is the
+         * only part that can be wrong and it is the part with a contract.
+         * JS concatenates a session name straight onto this string, so a
+         * missing trailing slash does not fail — it silently writes a
+         * SIBLING of the app's files directory named `filessession-1`. And a
+         * missing scheme would reach `barePath()`, which strips `file://`
+         * and would then have nothing to strip, so both spellings have to
+         * agree for a host to be able to swap between Expo's copy and this
+         * one without moving its data.
+         */
+        @JvmStatic
+        internal fun documentDirectoryUri(absolutePath: String): String =
+            "file://" + absolutePath.trimEnd('/') + "/"
+    }
+
     // ── Engine knobs the SDK may send at the TOP LEVEL of the option bag ──
     // iOS reads them off the same flat dictionary
     // (`RNISPanoCore.startWithOptions`), so the SDK sends them flat and this

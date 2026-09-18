@@ -179,7 +179,7 @@ jobs:
     # behind with the plane solve). Raise this when more land, never lower it
     # to make a run go green.
     env:
-      MIN_JUNIT_TESTS: 201
+      MIN_JUNIT_TESTS: 205
 
     steps:
       - name: Checkout
