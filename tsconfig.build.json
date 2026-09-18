@@ -1,4 +1,12 @@
 {
   "extends": "./tsconfig.json",
+  // The shipping build sees NEITHER "jest" NOR "node". The root config widens
+  // `types` so the test tree (and the publication guard, which walks the
+  // filesystem) type-checks; letting that widening reach library source would
+  // make `process`, `Buffer` and `describe` compile in code that runs on a
+  // phone, where none of them exist.
+  "compilerOptions": {
+    "types": ["react"]
+  },
   "exclude": ["node_modules", "dist", "src/**/__tests__"]
 }

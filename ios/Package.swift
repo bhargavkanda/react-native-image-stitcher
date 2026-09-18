@@ -1,4 +1,5 @@
 // swift-tools-version:5.10
+// SPDX-License-Identifier: Apache-2.0
 //
 // Package.swift — SwiftPM manifest used **only for command-line testing**
 // of the algorithm layer (QualityChecker.swift).  Production builds

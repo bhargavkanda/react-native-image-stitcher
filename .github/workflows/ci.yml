@@ -103,3 +103,126 @@ jobs:
           npm ci --ignore-scripts
           npx patch-package
           npx tsc --noEmit
+
+  # ────────────────────────────────────────────────────────────────────
+  # native-cpp — the shared C++ Google Test suite.
+  #
+  # A SEPARATE job, not a step appended to typecheck-and-test: that job
+  # finishes in ~0.5 s and this one installs OpenCV and compiles C++.
+  # Bolting them together makes the fast feedback loop slow for everyone.
+  #
+  # ⚠ libopencv-dev is NOT optional here, and the job must never be
+  # "fixed" by dropping it.  Every OpenCV-dependent case lives inside an
+  # `if(OpenCV_FOUND)` branch; with no host OpenCV the build succeeds,
+  # ctest prints "0 tests failed out of 115" and exits 0, and nine cases
+  # have silently vanished.  scripts/run-cpp-tests.sh now refuses to run
+  # in that state — that refusal is the point of this job.
+  # ────────────────────────────────────────────────────────────────────
+  native-cpp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install a host OpenCV
+        # Ubuntu's libopencv-dev ships the full module set, including
+        # imgcodecs — the OpenCV-dependent runners call imread/imwrite,
+        # which a core+imgproc-only build cannot satisfy.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopencv-dev cmake ninja-build
+          pkg-config --modversion opencv4
+
+      - name: Build + run the C++ tests
+        # The script configures each project into its own build dir,
+        # asserts a minimum discovered-case count per project, and only
+        # then runs ctest.  A project that discovers fewer cases than its
+        # floor fails the job even if every case it did discover passed.
+        run: scripts/run-cpp-tests.sh
+
+  # ────────────────────────────────────────────────────────────────────
+  # android — the JNI shim compiles, and the JUnit suite runs.
+  #
+  # There is no root settings.gradle: the library module is reachable
+  # only through the example app's Gradle build, which autolinks it as
+  # `:react-native-image-stitcher`.  So this job installs the ROOT
+  # node_modules (React Native's own Gradle plugin and prefabs come from
+  # there) and the example's, then drives gradlew from example/android.
+  #
+  # ⚠ `npm ci` runs WITHOUT --ignore-scripts at the root, unlike every
+  # other job here.  The postinstall fetches the vendored OpenCV Android
+  # SDK (~70 MB) into android/src/main/jniLibs/, which is gitignored and
+  # which android/src/main/cpp/CMakeLists.txt requires.  Adding
+  # --ignore-scripts here makes the native build fail on a missing
+  # OpenCV include dir.
+  # ────────────────────────────────────────────────────────────────────
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # The JUnit floor. A `testDebugUnitTest` task with no test sources is
+    # BUILD SUCCESSFUL and runs zero tests — indistinguishable from a
+    # passing suite in the job summary. Raise this the moment test
+    # sources land under android/src/test; never lower it to go green.
+    env:
+      MIN_JUNIT_TESTS: 0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup JDK 17
+        # AGP 8.x hard-requires JDK 17.
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies (root, WITH postinstall)
+        run: npm ci
+
+      - name: Install dependencies (example)
+        working-directory: example
+        run: |
+          npm ci --ignore-scripts
+          npx patch-package
+
+      - name: Compile the JNI shim
+        # externalNativeBuildDebug, NOT assembleDebug: assemble reports
+        # SUCCESS without relinking when it judges the .so up to date,
+        # which is how a stale library ships.
+        working-directory: example/android
+        run: ./gradlew :react-native-image-stitcher:externalNativeBuildDebug
+
+      - name: Show the built libraries
+        run: find android/build -name '*.so' -print
+
+      - name: Run the JUnit suite
+        working-directory: example/android
+        run: ./gradlew :react-native-image-stitcher:testDebugUnitTest
+
+      - name: Assert the JUnit suite actually ran
+        run: |
+          set -euo pipefail
+          DIR=android/build/test-results/testDebugUnitTest
+          if [ ! -d "$DIR" ]; then
+            COUNT=0
+          else
+            COUNT=$(grep -ho 'tests="[0-9]*"' "$DIR"/*.xml 2>/dev/null \
+                    | sed 's/[^0-9]//g' | paste -sd+ - | bc || echo 0)
+            COUNT=${COUNT:-0}
+          fi
+          echo "JUnit cases run: $COUNT (floor $MIN_JUNIT_TESTS)"
+          if [ "$COUNT" -lt "$MIN_JUNIT_TESTS" ]; then
+            echo "::error::JUnit suite ran $COUNT cases, expected >= $MIN_JUNIT_TESTS." \
+                 "Cases went missing silently — find out which before touching the floor."
+            exit 1
+          fi

@@ -20,7 +20,11 @@
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "moduleResolution": "node",
-    "types": ["jest", "react"]
+    // "node" is here for src/__tests__/ipBoundary.test.ts, the publication
+    // guard, which walks the source tree with fs/path. tsconfig.build.json
+    // narrows this back to ["react"] so neither "node" nor "jest" is in
+    // scope for the code that actually ships.
+    "types": ["jest", "react", "node"]
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]

@@ -4,7 +4,7 @@
     "rootDir": ".",
     "outDir": "dist-test",
     "noEmit": true,
-    "types": ["jest", "react"]
+    "types": ["jest", "react", "node"]
   },
   "include": ["src", "jest.config.js", "jest.mocks"],
   "exclude": ["node_modules", "dist"]
