@@ -36,8 +36,17 @@ import * as path from 'path';
 /** Repo root: this file is at <root>/src/__tests__/. */
 const ROOT = path.resolve(__dirname, '../..');
 
-/** Source roots the boundary applies to. */
-const ROOTS = ['cpp', 'ios', 'android/src', 'src'];
+/**
+ * Source roots the boundary applies to.
+ *
+ * `swift-tests` is a standalone SwiftPM package (a Mac-only XCTest harness for
+ * the pure-Swift rules) that arrives with pano+.  It is listed here BEFORE it
+ * exists — `walk()` returns quietly for a missing root — because a tree that
+ * is not walked is never checked, and this file is the only licence and
+ * leakage check the repository has.  Its sources are symlinks back into
+ * `ios/`, which `walk()` does not follow, so only its own files are read.
+ */
+const ROOTS = ['cpp', 'ios', 'android/src', 'src', 'swift-tests'];
 
 /**
  * Directories never descended into.
@@ -56,6 +65,22 @@ const SKIP_DIRS = new Set([
   'Frameworks', // ios/Frameworks — vendored opencv2.xcframework
   'jniLibs', // android/src/main/jniLibs — vendored OpenCV Android SDK
 ]);
+
+/**
+ * Build files that must carry a licence header despite not being source.
+ *
+ * `SOURCE_EXT` is keyed on extension and cannot express "CMakeLists.txt but
+ * not every .txt".  This is a RULE rather than a list, so a CMake project
+ * added under `cpp/` later is covered the day it lands — a hand-maintained
+ * list is the thing that gets forgotten in exactly the commit that adds one.
+ *
+ * Scoped to `cpp/` on purpose: `android/src/main/cpp/CMakeLists.txt` predates
+ * this and carries no SPDX line.  Retrofitting it is its own change, not
+ * something to smuggle in behind a guard.
+ */
+function isHeaderedBuildFile(rel: string): boolean {
+  return rel.startsWith(`cpp${path.sep}`) && path.basename(rel) === 'CMakeLists.txt';
+}
 
 /** Extensions that carry a source licence header. */
 const SOURCE_EXT = new Set([
@@ -270,7 +295,8 @@ describe('IP boundary: nothing from the private overlay is in this package', () 
       // manifest must open with `// swift-tools-version:`, and a script may
       // open with a shebang. Three lines is enough for those and tight enough
       // that the identifier is still in the file's header comment.
-      const missing = SOURCES.filter((e) => {
+      const pool = [...SOURCES, ...ALL.filter((e) => isHeaderedBuildFile(e.rel))];
+      const missing = pool.filter((e) => {
         let head: string;
         try {
           head = fs.readFileSync(e.abs, 'utf8').split('\n').slice(0, 3).join('\n');
@@ -282,6 +308,9 @@ describe('IP boundary: nothing from the private overlay is in this package', () 
       expect(report('source file with no Apache-2.0 SPDX header:', missing)).toBe(
         'source file with no Apache-2.0 SPDX header:\n  ',
       );
+      // The rule must be matching something. If a refactor moves the C++
+      // test projects, this catches the exemption before it is silent.
+      expect(ALL.filter((e) => isHeaderedBuildFile(e.rel)).length).toBeGreaterThan(0);
     });
   });
 
