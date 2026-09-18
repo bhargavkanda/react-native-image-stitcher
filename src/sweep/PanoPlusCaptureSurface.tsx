@@ -1418,6 +1418,28 @@ export const PanoPlusCaptureSurface = forwardRef<
   // mid-sweep — and a pill that named the newly requested arm would be
   // describing a sweep that is not happening. The pack says what `armsRef`
   // latched; this says the same thing, so the two cannot disagree.
+  // ── THE ARM THE PILL SHOWS MUST BE THE ARM THAT IS RUNNING ──────────
+  //
+  // `runningArm` is latched from the REQUEST at start, which was the whole
+  // truth while the arm could not change. It can now: the Android recorder
+  // gives the ARCore arm up mid-sweep when ARCore reports it cannot track,
+  // and finishes on the IMU ring. Native says so on every status poll via
+  // `poseSourceRan`; without reading it the AR pill keeps claiming "AR" for
+  // the rest of a sweep ARCore is no longer feeding.
+  //
+  // ⚠ ONE DIRECTION ONLY, MIRRORING THE RECORDER. The degrade is one-way
+  // there, so this only ever moves 'ar' -> 'imu'. Accepting a move back
+  // would let a stale poll un-report a downgrade that has already happened.
+  useEffect(() => {
+    const ran = status?.poseSourceRan;
+    if (ran !== 'imu') return;
+    setRunningArm((prev) => (
+      prev == null || prev.poseSource === 'imu'
+        ? prev
+        : { ...prev, poseSource: 'imu' }
+    ));
+  }, [status?.poseSourceRan]);
+
   const reportedArm = runningArm ?? {
     poseSource: armNotice.effectivePoseSource,
     fallbackToAr: armNotice.fallbackToAr,

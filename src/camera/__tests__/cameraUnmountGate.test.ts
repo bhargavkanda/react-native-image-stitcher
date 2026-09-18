@@ -60,37 +60,66 @@ const STITCHING: CaptureStatusPhase = 'stitching';
 
 describe('cameraShouldUnmount', () => {
   it('UNMOUNTS during the stitch (the V12.14.8 OOM fix)', () => {
-    expect(cameraShouldUnmount(false, false, STITCHING)).toBe(true);
+    expect(cameraShouldUnmount(false, false, STITCHING, false)).toBe(true);
   });
 
   it('keeps the camera MOUNTED while recording (live hold-pan)', () => {
     // Unmounting here would kill the capture in progress.
-    expect(cameraShouldUnmount(false, false, RECORDING)).toBe(false);
+    expect(cameraShouldUnmount(false, false, RECORDING, false)).toBe(false);
   });
 
   it('keeps the camera MOUNTED when idle', () => {
-    expect(cameraShouldUnmount(false, false, IDLE)).toBe(false);
+    expect(cameraShouldUnmount(false, false, IDLE, false)).toBe(false);
   });
 
   it('unmounts during a camera-switch transition (any phase)', () => {
-    expect(cameraShouldUnmount(true, false, IDLE)).toBe(true);
-    expect(cameraShouldUnmount(true, false, RECORDING)).toBe(true);
+    expect(cameraShouldUnmount(true, false, IDLE, false)).toBe(true);
+    expect(cameraShouldUnmount(true, false, RECORDING, false)).toBe(true);
   });
 
   it('unmounts while the AR-support probe is pending (any phase)', () => {
-    expect(cameraShouldUnmount(false, true, IDLE)).toBe(true);
-    expect(cameraShouldUnmount(false, true, RECORDING)).toBe(true);
+    expect(cameraShouldUnmount(false, true, IDLE, false)).toBe(true);
+    expect(cameraShouldUnmount(false, true, RECORDING, false)).toBe(true);
   });
 
-  it('is the OR of all three conditions', () => {
-    // Exhaustive truth table over (transition, arPending) × phase.
+  // ── THE SWEEP HANDOFF ───────────────────────────────────────────────
+  //
+  // The sweep does not share vision-camera's session: its recorder OWNS the
+  // Camera2 device. The release is ASYNC — the recorder's own retry measured
+  // "attempt 2 after 479ms" on a Galaxy A35 — and vision-camera does not
+  // retry, it reports `system/max-cameras-in-use` and the preview is dead.
+  // An operator hit exactly that switching sweep → keyframe.
+
+  it('unmounts while the sweep is still releasing the camera (any phase)', () => {
+    expect(cameraShouldUnmount(false, false, IDLE, true)).toBe(true);
+    expect(cameraShouldUnmount(false, false, RECORDING, true)).toBe(true);
+  });
+
+  it('remounts once the handoff window has elapsed', () => {
+    // The whole point: this is a WINDOW, not a latch. If it never cleared,
+    // the keyframe engine would have no preview at all after one sweep.
+    expect(cameraShouldUnmount(false, false, IDLE, false)).toBe(false);
+  });
+
+  it('is the OR of all four conditions', () => {
+    // Exhaustive truth table over (transition, arPending, handoff) × phase.
+    // 24 combinations, all asserted — a gate that grows a term and keeps a
+    // table written for the old arity is how a term stops being checked.
+    let checked = 0;
     for (const transition of [false, true]) {
       for (const arPending of [false, true]) {
-        for (const phase of [IDLE, RECORDING, STITCHING]) {
-          const expected = transition || arPending || phase === 'stitching';
-          expect(cameraShouldUnmount(transition, arPending, phase)).toBe(expected);
+        for (const handoff of [false, true]) {
+          for (const phase of [IDLE, RECORDING, STITCHING]) {
+            const expected =
+              transition || arPending || phase === 'stitching' || handoff;
+            expect(
+              cameraShouldUnmount(transition, arPending, phase, handoff),
+            ).toBe(expected);
+            checked += 1;
+          }
         }
       }
     }
+    expect(checked).toBe(2 * 2 * 2 * 3);
   });
 });

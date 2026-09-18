@@ -31,15 +31,17 @@
  *   * every engine tuning option defaulted to its native value, which is the
  *     PRE-2026-09 engine: `crossTraj: 0` puts the elbow back.
  *
- * So the defaults here are not taste. They are the configuration that has
- * evidence behind it, and each one names that evidence.
+ * The first of those is now handled by `<Camera>` wiring `poseSource` to its
+ * own `arPreference` (see the note below the table); what remains here is the
+ * engine tuning, and it is not taste — it is the configuration that has
+ * evidence behind it, and each entry names that evidence.
  *
  * ⚠ HOST OVERRIDES ALWAYS WIN. These are a floor, not a policy: the
  * delegation spreads the host's `sweep` prop AFTER them, and merges
  * `engineOptions` key-by-key rather than replacing the object (a whole-object
  * spread would silently drop every default the moment a host set one option).
  */
-import type { PanoPlusEngineOptions, PanoPlusPoseSource } from './panoPlusTypes';
+import type { PanoPlusEngineOptions } from './panoPlusTypes';
 
 /**
  * The engine tuning the only configuration ever observed to paint well was
@@ -79,31 +81,19 @@ export const SWEEP_ENGINE_DEFAULTS: Readonly<PanoPlusEngineOptions> = Object.fre
 });
 
 /**
- * The pose arm `<Camera engine="sweep">` asks for when the host says nothing.
+ * ── WHY THERE IS NO `poseSource` DEFAULT HERE ANY MORE ──────────────────
+ * There was one, and it returned `'imu'` on Android unconditionally, because
+ * the AR arm could not degrade: ARCore failing to bootstrap cost the entire
+ * sweep. That is fixed in the recorder now (a one-way degrade to the IMU
+ * ring, triggered by ARCore's own verdict), so the arm no longer has to be
+ * avoided — it has to be CHOSEN, by whoever is choosing AR for everything
+ * else on the screen.
  *
- * ── ANDROID: `'imu'`, AND THIS IS THE WHOLE FIX ─────────────────────────
- * The IMU arm needs a rotation-vector sensor. The AR arm needs ARCore to be
- * TRACKING, and when it is not — a dim room, a blank wall, a fast start —
- * the recorder latches `arArmActive` and can never reach the IMU ring again
- * (PanoPlusAndroidRecorder.kt: set once at :2527, the per-frame fork at
- * :4214 tests it before the IMU branch, and nothing clears it). So on that
- * arm a lighting condition is a TOTAL LOSS rather than a degradation.
+ * `<Camera>` already owns that choice as `arPreference`, and the sweep
+ * surface's AR pill writes back to it. A second, hidden default here would
+ * mean the operator could toggle AR on and watch the sweep ignore it — the
+ * same class of defect as the missing pills, one layer down.
  *
- * A library default must be the arm that degrades. A host that wants ARCore
- * poses asks for them, on a screen where it can also tell the operator why
- * the sweep stopped.
- *
- * Note this is what NATIVE already defaults to — `PanoPlusLiveModule.kt:317`
- * reads `optStr(options, "poseSource", "imu")`. The `'ar'` was purely a JS
- * prop default that nothing had ever exercised.
- *
- * ── iOS: leave the surface's own default ────────────────────────────────
- * There the AR arm is ARKit through the frame plugin, it is the arm iOS has
- * always used, and it works in 278 of 278 packs. Returning `undefined` lets
- * the surface's own default stand rather than asserting a second opinion.
+ * The engine tuning above stays, because nothing else in the system has an
+ * opinion about `crossTraj`.
  */
-export function defaultSweepPoseSource(
-  os: string,
-): PanoPlusPoseSource | undefined {
-  return os === 'android' ? 'imu' : undefined;
-}

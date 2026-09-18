@@ -325,6 +325,9 @@ export function coercePanoPlusStatus(raw: unknown): PanoPlusStatus | null {
   if (typeof s.running !== 'boolean') return null;
   return {
     running: s.running,
+    // `''` on a binary older than the field — the surface treats an empty
+    // string as "native did not say", never as a third arm.
+    poseSourceRan: str(s.poseSourceRan),
     sessionDir: str(s.sessionDir),
     seq: num(s.seq),
     framesSeen: num(s.framesSeen),

@@ -959,6 +959,18 @@ export interface PanoPlusEnvelope {
  */
 export interface PanoPlusStatus {
   running: boolean;
+  /**
+   * The arm the sweep is ACTUALLY running on, as native reports it each poll
+   * — `'ar'`, `'imu'`, or `''` on a binary that predates the field.
+   *
+   * ⚠ NOT THE ARM THAT WAS REQUESTED. Since the recorder can give the ARCore
+   * arm up mid-sweep and finish on the IMU ring, the requested arm stops
+   * being the truth the moment that happens. Without this the surface's AR
+   * pill keeps reading "AR" for the rest of a sweep that ARCore is no longer
+   * feeding — the operator reads one arm and gets the other, which is the
+   * defect the pill was added to prevent.
+   */
+  poseSourceRan: string;
   sessionDir: string;
   seq: number;
   framesSeen: number;

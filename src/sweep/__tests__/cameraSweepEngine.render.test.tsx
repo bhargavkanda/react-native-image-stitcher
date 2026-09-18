@@ -23,7 +23,6 @@
  *    channel to use one engine.
  */
 import React from 'react';
-import { Platform } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import { Camera } from '../../camera/Camera';
@@ -108,37 +107,37 @@ describe('<Camera engine="sweep">', () => {
     >;
   }
 
-  it('asks for the pose arm that does not need ARCore, on ANDROID, when the host says nothing', () => {
-    // THE REGRESSION THIS FILE EXISTS FOR NOW. The Android AR arm needs
-    // ARCore to be TRACKING; when it is not, the recorder latches
-    // `arArmActive` and can never reach the IMU ring again, so a lighting
-    // condition becomes a total loss instead of a degradation. A library
-    // default must degrade.
-    //
-    // ⚠ THE PLATFORM IS PART OF THE ASSERTION, NOT TEST PLUMBING. The render
-    // mock is `Platform.OS === 'ios'`, so a test that just rendered and
-    // checked `poseSource` would be asserting the iOS branch while calling
-    // itself a test of the Android fix — green, and about the wrong arm.
-    const platform = Platform as unknown as { OS: string };
-    const saved = platform.OS;
-    platform.OS = 'android';
-    try {
-      const tree = render({ engine: 'sweep' });
-      expect(surfaceProps(tree).poseSource).toBe('imu');
-      act(() => { tree.unmount(); });
-    } finally {
-      platform.OS = saved;
-    }
+  it('asks for the arm the HOST chose, not a second hidden opinion', () => {
+    // ⚠ THE CONTROLS BELONG TO `<Camera>`. The sweep surface draws its own
+    // AR pill, but the value behind it is `arPreference` — the same state
+    // the keyframe path's AR toggle writes. A separate default here would
+    // let an operator toggle AR on and watch the sweep ignore it.
+    const off = render({ engine: 'sweep' });
+    expect(surfaceProps(off).poseSource).toBe('imu');   // defaultCaptureSource is non-AR
+    act(() => { off.unmount(); });
+
+    const on = render({ engine: 'sweep', defaultCaptureSource: 'ar' });
+    expect(surfaceProps(on).poseSource).toBe('ar');
+    act(() => { on.unmount(); });
   });
 
-  it('leaves the surface to pick its own arm on iOS', () => {
-    // iOS is not the same question. There the AR arm is ARKit through the
-    // frame plugin, it is the arm iOS has always used, and it works in 278
-    // of 278 packs. `undefined` means "no second opinion" — it must NOT be
-    // 'imu', which would take a working platform off its working arm.
-    expect((Platform as unknown as { OS: string }).OS).toBe('ios');
+  it('gives the sweep somewhere to write BOTH pills', () => {
+    // THE REGRESSION AN OPERATOR REPORTED: "I do not see AR pill and lens
+    // pill". The surface gates each control on being handed a writer —
+    // `onPoseSourceChange != null` and `onLensChange != null` are the
+    // literal conditions — so a host that passes neither gets NO pills, and
+    // the UI silently loses two controls the other engine has.
     const tree = render({ engine: 'sweep' });
-    expect(surfaceProps(tree).poseSource).toBeUndefined();
+    const props = surfaceProps(tree);
+    expect(typeof props.onPoseSourceChange).toBe('function');
+    expect(typeof props.onLensChange).toBe('function');
+    act(() => { tree.unmount(); });
+  });
+
+  it('starts the lens pill at the lens the other engine was using', () => {
+    // Same state, so the control reads the same before and after a switch.
+    const tree = render({ engine: 'sweep', defaultLens: '0.5x' });
+    expect(surfaceProps(tree).lens).toBe('ultraWide');
     act(() => { tree.unmount(); });
   });
 

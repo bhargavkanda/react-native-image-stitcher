@@ -685,7 +685,16 @@ function App(): React.JSX.Element {
           // Re-pick the capture format when the KF-quality toggle OR the
           // anti-blur exposure cap flips (both change which format
           // vision-camera picks).
-          key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-ab${antiBlurOn ? 1 : 0}-eng-${engine}`}
+          // ⚠ `engine` IS DELIBERATELY NOT IN THIS KEY. It was, and that
+          // forced a full remount of <Camera> on every engine switch —
+          // which threw away the component's own state (AR preference,
+          // lens) and, worse, took the camera-handoff gate with it: the
+          // sweep's Camera2 release is async, so vision-camera opened into
+          // a device that was still being let go and reported
+          // `system/max-cameras-in-use`. The engine is a prop; <Camera>
+          // sequences the handoff internally. The two flags below stay in
+          // the key because they are mount-time native props.
+          key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-ab${antiBlurOn ? 1 : 0}`}
           engine={engine}
           defaultLens="1x"
           enablePhotoMode

@@ -85,6 +85,7 @@ import type { PanoPlusStatus } from '../panoPlusTypes';
 function statusFixture(over: Partial<PanoPlusStatus> = {}): PanoPlusStatus {
   const base: PanoPlusStatus = {
     running: true,
+    poseSourceRan: '',
     sessionDir: '/var/mobile/Documents/panoplus/pp_1',
     seq: 120,
     framesSeen: 120,

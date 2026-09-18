@@ -5576,6 +5576,17 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
                     "wider than maxBracketMs, is REFUSED and counted below — never " +
                     "extrapolated — and its row carries the identity with tracking forced to 0.",
             )
+            // ⚠ SCOPE, NOT A TOTAL, WHEN THE ARM CHANGED MID-SWEEP. This
+            // block reads as the whole sweep's attitude policy, and it is —
+            // unless the AR arm was given up partway, in which case the map
+            // only ran from that seq onward and every counter below counts
+            // the tail, not the sweep. Without this a reader divides
+            // `framesMapped` by the sweep's frame count and concludes the
+            // map refused the difference; the frames before the degrade
+            // were never OFFERED to it (the merge at the fork is guarded by
+            // `else if (!arArmActive)`).
+            .i("activeFromSeq", if (arArmDegraded) arArmDegradedAtSeq else 0L)
+            .b("scopedToPartOfSweep", arArmDegraded)
             .i("framesMapped", attitudeMapped.get())
             .i("framesRefused", refusedTotal)
             .raw("refusals", refusals.end())

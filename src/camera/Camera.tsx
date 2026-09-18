@@ -89,10 +89,8 @@ import type {
   PanoPlusFailure,
   SweepSurfaceHandle,
 } from '../sweep/panoPlusTypes';
-import {
-  SWEEP_ENGINE_DEFAULTS,
-  defaultSweepPoseSource,
-} from '../sweep/sweepDefaults';
+import { PanoPlusResultView } from '../sweep/PanoPlusResultView';
+import { SWEEP_ENGINE_DEFAULTS } from '../sweep/sweepDefaults';
 
 /**
  * Everything `engine="sweep"` accepts, which is everything the sweep surface
@@ -1693,6 +1691,57 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // v0.13.2 — initial AR preference honours `defaultCaptureSource` but
   // is clamped to the `captureSources` constraint: 'ar' forces on,
   // 'non-ar' forces off, 'both' uses the default.
+  // ── THE SWEEP'S RESULT SCREEN ───────────────────────────────────
+  //
+  // ⚠ THE SURFACE DOES NOT SHOW ITS OWN RESULT, AND THAT IS ITS CONTRACT.
+  // `onComplete` fires and the HOST is expected to unmount the surface and
+  // put the viewer up — `PanoPlusResultView` is a separate component for
+  // exactly that reason. This delegation forwarded the result to `onCapture`
+  // and left the surface mounted, so a finished sweep went straight back to
+  // a live viewfinder with nothing to look at. An operator reported it as
+  // "after sweep capture, image is not shown in preview".
+  //
+  // The other engines review in `<CapturePreview>`; the sweep reviews here,
+  // because the thing to review is a pack (canvas + strips + poses), not a
+  // single JPEG. Both arrive at the host the same way, on `onCapture`.
+  const [sweepReview, setSweepReview] = useState<PanoPlusCaptureResult | null>(
+    null,
+  );
+
+  // ── THE SWEEP → VISION-CAMERA HANDOFF ───────────────────────────
+  //
+  // ⚠ TWO CAMERA STACKS, ONE BACK CAMERA, AND THE RELEASE IS ASYNC.
+  // The sweep does not ingest vision-camera frames: its recorder OWNS a
+  // Camera2 session (it forces the size and fps and asserts the AE/AWB lock)
+  // or rides an ARCore shared session. So switching engines is a handoff
+  // between two owners of one device, not a change of stitcher.
+  //
+  // The release does not complete on unmount. Measured on a Galaxy A35, the
+  // recorder's own retry says so out loud: "the idle viewfinder opened on
+  // attempt 2 after 479ms — the previous camera owner was still letting go."
+  // vision-camera does NOT retry: it opens once and reports
+  // `system/max-cameras-in-use`, which is exactly what an operator saw after
+  // switching sweep → keyframe.
+  //
+  // So the gate below holds BOTH cameras unmounted for a settle window after
+  // the sweep goes away — the same placeholder the AR/non-AR swap already
+  // uses for the same Camera2-in-use reason. The other direction needs
+  // nothing: the recorder already retries into a camera vision-camera is
+  // still releasing.
+  const [sweepHandoffPending, setSweepHandoffPending] = useState(false);
+  const prevEngineRef = useRef(engine);
+  useEffect(() => {
+    const was = prevEngineRef.current;
+    prevEngineRef.current = engine;
+    if (was !== 'sweep' || engine === 'sweep') return undefined;
+    setSweepHandoffPending(true);
+    const t = setTimeout(
+      () => { setSweepHandoffPending(false); },
+      SWEEP_CAMERA_RELEASE_SETTLE_MS,
+    );
+    return () => { clearTimeout(t); };
+  }, [engine]);
+
   const [arPreference, setArPreference] = useState(
     !arAllowed ? false : !nonArAllowed ? true : defaultCaptureSource === 'ar',
   );
@@ -3191,8 +3240,38 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     return (
       <HostJsLandscapeContext.Provider value={jsLandscape}>
         <View style={[styles.container, style]}>
+          {sweepReview != null ? (
+            // The viewer REPLACES the surface rather than covering it: the
+            // surface owns a camera, and leaving it mounted behind a review
+            // screen holds the device for as long as the operator reads.
+            <PanoPlusResultView
+              result={sweepReview}
+              onDismiss={() => { setSweepReview(null); }}
+            />
+          ) : (
           <PanoPlusCaptureSurface
             ref={sweepRef}
+            // ── THE CONTROLS ARE `<Camera>`'S, NOT A SECOND SET ──────────
+            //
+            // The sweep surface draws its OWN AR and lens pills, and it
+            // gates each one on being given somewhere to write:
+            // `onPoseSourceChange != null` and `onLensChange != null` are
+            // the literal conditions. A host that does not pass them gets NO
+            // pill rather than a dead one — which is the right default, and
+            // is exactly what happened here: switching to the sweep made
+            // both controls vanish, because this delegation passed neither.
+            //
+            // They are wired to `<Camera>`'s OWN `arPreference` and `lens`,
+            // the same state the keyframe path's controls use. So the pills
+            // are in the same place before and after an engine switch, they
+            // start at the value the operator last chose, and a change made
+            // on one engine is still in force on the other. Two surfaces
+            // with two independent copies of "AR on" is how an operator ends
+            // up reading one and getting the other.
+            poseSource={arPreference ? 'ar' : 'imu'}
+            onPoseSourceChange={(next) => { setArPreference(next === 'ar'); }}
+            lens={lens === '0.5x' ? 'ultraWide' : 'wide'}
+            onLensChange={(next) => { setLens(next === 'ultraWide' ? '0.5x' : '1x'); }}
             // ⚠ DEFAULTS BEFORE THE SPREAD, SO THE HOST ALWAYS WINS.
             // The surface's own prop defaults were never a configuration
             // anyone ran — its one host passed everything off a flag store,
@@ -3200,7 +3279,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // at once, on a device, for the first time. On the A35 that chose
             // the ARCore pose arm in a dim room and the sweep painted nothing
             // (see `sweepDefaults.ts` for the measurement).
-            poseSource={defaultSweepPoseSource(Platform.OS)}
             {...sweep}
             // ⚠ MERGED KEY-BY-KEY, NOT SPREAD. `engineOptions` is an object,
             // so letting the host's copy through the spread above would
@@ -3209,7 +3287,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // continuation that removes the elbow. Host keys still win.
             engineOptions={{ ...SWEEP_ENGINE_DEFAULTS, ...sweep?.engineOptions }}
             onComplete={(result: PanoPlusCaptureResult) => {
+              // BOTH, and in this order. The host hears about every capture
+              // on `onCapture` exactly as it does for a photo or a panorama;
+              // the viewer is what the OPERATOR gets, and a host that wants
+              // to skip it can unmount us from its own handler.
               onCapture?.({ ...result, ok: true });
+              setSweepReview(result);
             }}
             onFailure={(failure: PanoPlusFailure) => {
               onError?.(
@@ -3229,6 +3312,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               );
             }}
           />
+          )}
         </View>
       </HostJsLandscapeContext.Provider>
     );
@@ -3253,7 +3337,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           only ONE camera component is alive at a time; matches the
           monorepo's working pattern and avoids the Camera2-in-use
           conflict that "always mount both" caused on Android. */}
-      {cameraShouldUnmount(inFlightTransition, arSupportPending, statusPhase) ? (
+      {cameraShouldUnmount(
+        inFlightTransition,
+        arSupportPending,
+        statusPhase,
+        sweepHandoffPending,
+      ) ? (
         // statusPhase==='stitching' UNMOUNTS the camera so vision-camera
         // frees the AVCaptureSession + preview buffers during the stitch
         // (V12.14.8 OOM fix).  The CaptureStatusOverlay renders the
@@ -3926,12 +4015,31 @@ function cameraShouldUnmount(
   inFlightTransition: boolean,
   arSupportPending: boolean,
   statusPhase: CaptureStatusPhase,
+  sweepHandoffPending: boolean,
 ): boolean {
-  return inFlightTransition || arSupportPending || statusPhase === 'stitching';
+  return (
+    inFlightTransition
+    || arSupportPending
+    || statusPhase === 'stitching'
+    || sweepHandoffPending
+  );
 }
 
 /** @internal test-only — see `cameraShouldUnmount`. */
 export const _cameraShouldUnmountForTests = cameraShouldUnmount;
+
+
+/**
+ * How long to keep BOTH cameras unmounted after the sweep surface goes away,
+ * before vision-camera is allowed to open.
+ *
+ * 600 ms, from the measurement rather than a guess: the recorder's own
+ * retry reported reclaiming the camera on "attempt 2 after 479ms" on a
+ * Galaxy A35. This is the other side of that same release. Too short and
+ * vision-camera reports `system/max-cameras-in-use`; too long and the
+ * operator watches a placeholder for no reason.
+ */
+const SWEEP_CAMERA_RELEASE_SETTLE_MS = 600;
 
 
 /**
