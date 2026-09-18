@@ -382,3 +382,35 @@ export type {
   QualityReport,
   QualityIssue,
 } from './types';
+
+// ════════════════════════════════════════════════════════════════════════
+//  THE SWEEP ENGINE (pano+)
+// ════════════════════════════════════════════════════════════════════════
+//
+// A slit-scan panorama engine with per-frame attitude rectification, driven
+// by an AR session's pose rather than by image registration alone. The native
+// half arrived as the `PanoPlus` subspec / `libimage_stitcher_panoplus.so`; this is its
+// JS surface.
+//
+// ⚠ IT IS A PEER OF `<Camera>` TODAY, NOT A MODE INSIDE IT.
+// `PanoPlusCaptureSurface` owns a full screen: its own `<ARCameraView>`, its
+// own HUD, its own result viewer. `<Camera engine="sweep">` is the intended
+// end state and is NOT wired yet — both natives still answer
+// `engine-unavailable`. Until it is, a host drives the sweep by mounting the
+// surface directly.
+export { PanoPlusCaptureSurface } from './sweep/PanoPlusCaptureSurface';
+export type { PanoPlusCaptureSurfaceProps } from './sweep/PanoPlusCaptureSurface';
+export { PanoPlusResultView } from './sweep/PanoPlusResultView';
+export type { PanoPlusResultViewProps } from './sweep/PanoPlusResultView';
+export { PanoPlusBasisOverlay } from './sweep/PanoPlusBasisOverlay';
+export type { PanoPlusBasisOverlayProps } from './sweep/PanoPlusBasisOverlay';
+export * from './sweep/panoPlusTypes';
+export * from './sweep/panoPlusModel';
+export * from './sweep/panoPlusNative';
+export * from './sweep/panoPlusAndroid';
+export * from './sweep/panoPlusAndroidArm';
+export * from './sweep/panoPlusCalibration';
+export * from './sweep/panoPlusBasisAcquisition';
+export * from './sweep/panoPlusCameraOffNotice';
+export { getPanoPlusSourceView } from './sweep/panoPlusSourceView';
+export { getPanoPlusAndroidPreviewView } from './sweep/panoPlusAndroidPreviewView';

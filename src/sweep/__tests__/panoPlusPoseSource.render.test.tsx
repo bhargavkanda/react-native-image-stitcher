@@ -1,0 +1,1285 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// THE POSE-SOURCE WIRING, MOUNTED FOR REAL.
+//
+// ── The gap this closes ───────────────────────────────────────────────────
+//
+// `panoPlusArmNotice` is unit-tested to death next door, and none of that
+// proves the SURFACE asks the store, feeds the notice the answer, labels the
+// button from it, or — the one that actually costs a field trip — puts the
+// right `poseSource` in the bag that crosses the bridge. That is exactly the
+// class of bug this project exists for: on 2026-07-22 the maths under two HUD
+// failures was correct and the WIRING was not, and the suite that could have
+// caught it said "the surface glue is exercised on-device". On-device meant in
+// a store, by the operator.
+//
+// The property under test throughout is: WHAT CROSSES THE BRIDGE MATCHES WHAT
+// THE BUTTON SAID. A silent downgrade here would hand back an ordinary-looking
+// pack the operator believes came off the decoupled arm, and nothing in the
+// pixels would contradict him.
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+import * as React from 'react';
+import TestRenderer, {
+  act,
+  type ReactTestInstance,
+  type ReactTestRenderer,
+} from 'react-test-renderer';
+import { NativeModules } from 'react-native';
+
+// The sidecars this surface writes are OBSERVABLE here, because since
+// 2026-09-07 the τ = 0 banner is written to the pack and NOT drawn on screen —
+// and a test that only asserted its absence from the tree would pass just as
+// well if the fact had been deleted outright.
+const written: Array<{ uri: string; body: string }> = [];
+jest.mock(
+  'expo-file-system/legacy',
+  () => ({
+    documentDirectory: 'file:///var/mobile/Documents/',
+    makeDirectoryAsync: () => Promise.resolve(),
+    readAsStringAsync: () => Promise.resolve(''),
+    writeAsStringAsync: (uri: string, body: string) => {
+      (globalThis as unknown as { __ppPoseWritten: Array<unknown> })
+        .__ppPoseWritten.push({ uri, body });
+      return Promise.resolve();
+    },
+    deleteAsync: () => Promise.resolve(),
+    getInfoAsync: () => Promise.resolve({ exists: false }),
+    readDirectoryAsync: () => Promise.resolve([]),
+  }),
+  { virtual: true },
+);
+(globalThis as unknown as { __ppPoseWritten: unknown[] }).__ppPoseWritten = written;
+
+import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { holdShutter, releaseShutter, shutterState } from './shutterGestures';
+import { PANO_PLUS_SWAP_GRACE_MS } from '../panoPlusModel';
+import type {
+  PanoPlusEngineOptions,
+  PanoPlusPoseSource,
+} from '../panoPlusTypes';
+
+const NM = NativeModules as Record<string, unknown>;
+
+/** The options bag the last `start()` received — the thing that matters. */
+let startedWith: Record<string, unknown> | null = null;
+/** What the fake bridge answers for `poseSource`, so the "native disagrees with
+ *  the request" case is reachable. */
+let startAnswers: Record<string, unknown> = {};
+/** Calls to the CALIBRATION module, so "the ARKit arm asks nothing" is a
+ *  checked fact and not an inspection of the source. */
+let calibCalls: string[] = [];
+/** The DEFAULTS, restored in `beforeEach`. They were module-level `let`s that
+ *  nothing reset, so a test that reassigned one leaked it into every test that
+ *  ran after it — order-dependence in a suite whose whole subject is which arm
+ *  a sweep ends up on. */
+const DEFAULT_PLANNED: () => Promise<unknown> = () => Promise.resolve({
+  ok: true,
+  lens: 'AVCaptureDeviceTypeBuiltInUltraWideCamera',
+  width: 1920,
+  height: 1440,
+  fps: 60,
+  tauKey: 'iPhone17,1|AVCaptureDeviceTypeBuiltInUltraWideCamera|1920x1440|60',
+  basisKey: 'iPhone17,1',
+});
+const DEFAULT_SNAPSHOT: () => Promise<unknown> = () => Promise.resolve({
+  resolved: { haveTau: false, haveBasis: false, complete: false, missing: 'tau+basis' },
+});
+let plannedImpl: () => Promise<unknown> = DEFAULT_PLANNED;
+let snapshotImpl: () => Promise<unknown> = DEFAULT_SNAPSHOT;
+
+function installNative(): void {
+  startedWith = null;
+  calibCalls = [];
+  startAnswers = {};
+  NM.RNISPanoPlus = {
+    start: (o: Record<string, unknown>) => {
+      startedWith = o;
+      return Promise.resolve({
+        sessionDir: '/d/pp_1', startedAtMs: 1, pluginAvailable: true, ...startAnswers,
+      });
+    },
+    stop: () => Promise.resolve({}),
+    cancel: () => Promise.resolve({ cancelled: true }),
+    getStatus: () => Promise.resolve({ running: false }),
+  };
+  NM.RNISPanoCalib = {
+    startBasisCalibration: () => Promise.resolve({}),
+    basisCalibrationStatus: () => Promise.resolve({}),
+    stopBasisCalibration: () => Promise.resolve({}),
+    resolveBasisCalibration: () => Promise.resolve({}),
+    discardBasisCalibration: () => Promise.resolve({}),
+    combineTauRuns: () => Promise.resolve({}),
+    calibrationPolicy: () => Promise.resolve({}),
+    saveTauCalibration: () => Promise.resolve({}),
+    saveBasisCalibration: () => Promise.resolve({}),
+    clearCalibration: () => Promise.resolve({}),
+    plannedCaptureFormat: () => {
+      calibCalls.push('plannedCaptureFormat');
+      return plannedImpl();
+    },
+    getCalibration: (o: Record<string, unknown>) => {
+      calibCalls.push(`getCalibration:${JSON.stringify(o)}`);
+      return snapshotImpl();
+    },
+  };
+}
+
+interface Rig {
+  texts: () => string[];
+  shows: (needle: string) => boolean;
+  tap: (testID: string) => void;
+  /** Pano's shutter held past the threshold — the sweep starts (2026-09-03). */
+  hold: () => void;
+  /** …and released — the sweep finishes, pack kept. */
+  release: () => void;
+  /** What Pano's shutter would paint. */
+  shutter: () => { disabled: boolean; busy: boolean };
+  has: (testID: string) => boolean;
+  unmount: () => void;
+}
+
+function mount(poseSource?: PanoPlusPoseSource): Rig {
+  let renderer!: ReactTestRenderer;
+  act(() => {
+    renderer = TestRenderer.create(
+      <PanoPlusCaptureSurface
+        onComplete={() => undefined}
+        onCancel={() => undefined}
+        poseSource={poseSource}
+      />,
+    );
+  });
+  act(() => {
+    jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1);
+  });
+  const collect = (): string[] => {
+    const out: string[] = [];
+    const walk = (n: ReactTestInstance | string | null): void => {
+      if (n == null) return;
+      if (typeof n === 'string') { out.push(n); return; }
+      for (const c of n.children ?? []) walk(c as ReactTestInstance | string);
+    };
+    walk(renderer.root as unknown as ReactTestInstance);
+    return out;
+  };
+  return {
+    texts: collect,
+    shows: (needle) => collect().some((t) => t.includes(needle)),
+    has: (testID) => renderer.root.findAllByProps({ testID }).length > 0,
+    tap: (testID) => {
+      const node = renderer.root.findAllByProps({ testID })[0];
+      const onPress = node?.props?.onPress as (() => void) | undefined;
+      if (onPress == null) throw new Error(`no onPress on ${testID}`);
+      act(() => { onPress(); });
+    },
+    hold: () => holdShutter(renderer.root),
+    release: () => releaseShutter(renderer.root),
+    shutter: () => shutterState(renderer.root),
+    unmount: () => { act(() => { renderer.unmount(); }); },
+  };
+}
+
+async function settle(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+beforeEach(() => {
+  jest.useFakeTimers();
+  installNative();
+  plannedImpl = DEFAULT_PLANNED;
+  snapshotImpl = DEFAULT_SNAPSHOT;
+  written.length = 0;
+});
+afterEach(() => {
+  jest.useRealTimers();
+  delete NM.RNISPanoPlus;
+  delete NM.RNISPanoCalib;
+});
+
+describe('the ARKit arm is the default and is UNTOUCHED', () => {
+  it('makes NO calibration call at all', async () => {
+    const r = mount();
+    await settle();
+    // The strongest form of "the default path is unchanged": not "it renders
+    // the same", but "it does not even ask". A native call on the default arm
+    // is a per-mount cost and a new failure mode for the path that carries the
+    // entire programme.
+    expect(calibCalls).toEqual([]);
+    expect(r.has('panoplus-arm-headline')).toBe(false);
+    // Pano's shutter, live — there is no Start button since 2026-09-03.
+    expect(r.shutter()).toEqual({ disabled: false, busy: false });
+    r.unmount();
+  });
+
+  it('sends poseSource: "ar" and never blocks on a precondition read', async () => {
+    const r = mount('ar');
+    await settle();
+    // No spinner: the ARKit arm has nothing to wait for.
+    expect(r.has('panoplus-arm-checking')).toBe(false);
+    r.hold();
+    await settle();
+    expect(startedWith?.poseSource).toBe('ar');
+    r.unmount();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  THE HANDOFF — the P0 the adversarial review found (2026-08-31)
+//
+//  Mounting `<ARCameraView>` IS what starts ARKit
+//  (`RNSARCameraView.didMoveToWindow` → `RNSARSession.shared.start()`), and it
+//  was rendered in the single main return on EVERY phase and on BOTH arms:
+//  `arReady` was a bare swap-grace timer with no dependency on `poseSource`.
+//  So a decoupled sweep mounted ARKit, waited 250 ms for it to take the camera,
+//  and then asked AVFoundation for the same body — which ARKit and an
+//  AVCaptureSession cannot share.
+//
+//  This is asserted on the MOUNT, not on the source, because the mount is the
+//  side effect. `ar-camera` is the mock's testID: present ⇒ ARKit is being
+//  started.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('ARKit and the decoupled arm never hold the camera at once', () => {
+  it('mounts the AR view on the DEFAULT arm, exactly as it shipped', async () => {
+    const r = mount();
+    await settle();
+    expect(r.has('ar-camera')).toBe(true);
+    expect(r.has('panoplus-camera-off')).toBe(false);
+    r.unmount();
+  });
+
+  it('does NOT mount the AR view once the IMU arm is confirmed usable', async () => {
+    plannedImpl = () => Promise.resolve({
+      ok: true,
+      lens: 'AVCaptureDeviceTypeBuiltInUltraWideCamera',
+      width: 1920, height: 1440, fps: 60,
+      tauKey: 'iPhone17,1|AVCaptureDeviceTypeBuiltInUltraWideCamera|1920x1440|60',
+      basisKey: 'iPhone17,1',
+    });
+    snapshotImpl = () => Promise.resolve({
+      resolved: {
+        haveTau: true, haveBasis: true, complete: true, missing: null,
+        tauS: -0.0042, tauStdErrMs: 0.31, basisIndex: 5, basisLabel: '+y+z+x',
+      },
+    });
+    const r = mount('imu');
+    await settle();
+    expect(r.has('ar-camera')).toBe(false);
+    // …and it SAYS why, rather than leaving a black screen that reads as a
+    // broken camera. The operator aims by the panorama band on this arm.
+    expect(r.has('panoplus-camera-off')).toBe(true);
+    // ⚠ THIS ASSERTED `'ARKit is DOWN by design'` UNTIL 2026-09-03, AND THE
+    // SENTENCE IT PINNED IS THE ONE THAT LATER SHIPPED A LIE ON ANDROID.
+    // The old copy explained a black screen by asserting what an AR SESSION
+    // was doing, chosen from the ARM the surface believed it was on. Its
+    // Android sibling said "ARCore is UP, inside the sweep's own camera
+    // session" — at idle, on a phone where ARCore was down and nothing held
+    // the camera at all. An arm is not a state.
+    //
+    // The notice is now derived from who owns the camera in THIS phase and
+    // prefers native's own reason (`panoPlusCameraOffNotice`). Under Jest
+    // neither platform's viewfinder component resolves, so the true answer
+    // here is that this build has none — and the reassurance the operator
+    // actually needs, that the sweep still records, survives.
+    expect(r.shows('No viewfinder in this build')).toBe(true);
+    expect(r.shows('still records')).toBe(true);
+    // No claim about ARKit's state, in either direction.
+    expect(r.texts().some((t) => t.includes('ARKit'))).toBe(false);
+    r.unmount();
+  });
+
+  it('does not start ARKit while the precondition read is still in flight', () => {
+    // A read that resolves to "calibrated" would have to tear ARKit straight
+    // back down; a read that resolves to a fallback mounts it the moment the
+    // answer lands. Starting it speculatively costs an `arSession.run`
+    // teardown for nothing.
+    plannedImpl = () => new Promise(() => undefined);   // never settles
+    snapshotImpl = () => new Promise(() => undefined);
+    const r = mount('imu');
+    expect(r.has('ar-camera')).toBe(false);
+    r.unmount();
+  });
+
+  it('DOES mount the AR view when the IMU arm falls back to ARKit', async () => {
+    // The fallback sweep really does run on ARKit, so it really does need the
+    // AR view. Gating the mount on the REQUEST rather than on the effective arm
+    // would have produced a fallback that could never see a frame.
+    plannedImpl = () => Promise.resolve({
+      ok: false, reason: 'panoplus-no-ultrawide',
+      detail: 'This device publishes no builtInUltraWideCamera.',
+    });
+    snapshotImpl = () => Promise.resolve({
+      resolved: { haveTau: false, haveBasis: false, complete: false, missing: 'tau+basis' },
+    });
+    const r = mount('imu');
+    await settle();
+    // ⚠ THE GRACE IS ADVANCED AFTER THE ARM RESOLVES, NOT BEFORE (2026-09-03).
+    // `arReady` used to be a one-shot timer keyed on the SURFACE's mount, so it
+    // had always elapsed by the time the fallback turned `arArmed` true and the
+    // view appeared on that same commit. It is keyed on `arArmed` now — because
+    // that flag moves under a mounted surface (the 0.5× door, the AR pill), and
+    // remounting `<ARCameraView>` IS `RNSARSession.shared.start()`, so a restart
+    // with the grace already spent raced this surface's own `stop()`. The view
+    // still mounts on the fallback, which is what this test is about; it mounts
+    // one grace later.
+    await act(async () => {
+      jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1);
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    });
+    expect(r.has('ar-camera')).toBe(true);
+    r.hold();
+    await settle();
+    expect(startedWith?.poseSource).toBe('ar');
+    r.unmount();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  THE ACCELERATION CAGE IS REACHABLE, AND UNCAGED IS THE DEFAULT
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('the lurch cage knob', () => {
+  const calibrated = (): void => {
+    plannedImpl = () => Promise.resolve({
+      ok: true,
+      lens: 'AVCaptureDeviceTypeBuiltInUltraWideCamera',
+      width: 1920, height: 1440, fps: 60,
+      tauKey: 'iPhone17,1|AVCaptureDeviceTypeBuiltInUltraWideCamera|1920x1440|60',
+      basisKey: 'iPhone17,1',
+    });
+    snapshotImpl = () => Promise.resolve({
+      resolved: {
+        haveTau: true, haveBasis: true, complete: true, missing: null,
+        tauS: -0.0042, tauStdErrMs: 0.31, basisIndex: 5, basisLabel: '+y+z+x',
+      },
+    });
+  };
+
+  it('sends NO threshold by default, so the pack records an UNCAGED sweep', async () => {
+    calibrated();
+    const r = mount('imu');
+    await settle();
+    r.hold();
+    await settle();
+    expect(startedWith?.poseSource).toBe('imu');
+    // Absent, not zero. Native reads a missing key and a 0 identically, but the
+    // absence is what says "no host asked for a cage" rather than "a host asked
+    // for a cage of zero".
+    expect('lurchAccelMps2' in (startedWith ?? {})).toBe(false);
+    r.unmount();
+  });
+
+  it('crosses the bridge when a host asks for one', async () => {
+    calibrated();
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(
+        <PanoPlusCaptureSurface
+          onComplete={() => undefined}
+          onCancel={() => undefined}
+          poseSource="imu"
+          lurchAccelMps2={25}
+        />,
+      );
+    });
+    act(() => { jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1); });
+    await settle();
+    holdShutter(renderer.root);
+    await settle();
+    expect(startedWith?.lurchAccelMps2).toBe(25);
+    act(() => { renderer.unmount(); });
+  });
+
+  it('is NOT sent on a sweep that fell back to ARKit', async () => {
+    // The cage only exists on the arm whose pose-side cage is inert. Sending it
+    // on the ARKit arm would put a knob in the pack that describes nothing.
+    plannedImpl = () => Promise.resolve({
+      ok: false, reason: 'panoplus-no-ultrawide', detail: 'no ultra-wide',
+    });
+    snapshotImpl = () => Promise.resolve({
+      resolved: { haveTau: false, haveBasis: false, complete: false, missing: 'tau+basis' },
+    });
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(
+        <PanoPlusCaptureSurface
+          onComplete={() => undefined}
+          onCancel={() => undefined}
+          poseSource="imu"
+          lurchAccelMps2={25}
+        />,
+      );
+    });
+    act(() => { jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1); });
+    await settle();
+    holdShutter(renderer.root);
+    await settle();
+    expect(startedWith?.poseSource).toBe('ar');
+    expect('lurchAccelMps2' in (startedWith ?? {})).toBe(false);
+    act(() => { renderer.unmount(); });
+  });
+});
+
+describe('the IMU arm reads the store BEFORE offering a button', () => {
+  it('looks the calibration up under the PLANNED FORMAT, not a default key', async () => {
+    // THE DEFECT THIS PINS. tau is keyed `model|lens|WxH|fps` because the
+    // rolling-shutter constant is part of it, and the format is chosen by the
+    // AVF source — not by the host. A lookup at the host's own `0x0` default
+    // finds nothing while the store holds the record, and the arm then refuses
+    // for a calibration that is sitting on disk.
+    const r = mount('imu');
+    await settle();
+    expect(calibCalls[0]).toBe('plannedCaptureFormat');
+    expect(calibCalls[1]).toContain('1920');
+    expect(calibCalls[1]).toContain('1440');
+    expect(calibCalls[1]).toContain('AVCaptureDeviceTypeBuiltInUltraWideCamera');
+    r.unmount();
+  });
+
+  it('greys the shutter out, rather than arming it for an arm it may take back', () => {
+    // The Start button used to show a spinner here. Pano's shutter has no
+    // spinner; what it has is `disabled`, and that is what the surface reports
+    // while the precondition read is in flight — a hold that started a sweep
+    // now would start it on whichever arm the read happened to land on. No
+    // `settle()` here on purpose — this is the in-flight frame.
+    const r = mount('imu');
+    expect(r.shutter().disabled).toBe(true);
+    expect(r.has('panoplus-arm-checking')).toBe(false);
+    r.unmount();
+  });
+});
+
+describe('an UNCALIBRATED IMU selection is self-explaining, never opaque', () => {
+  it('states the precondition on screen and MEASURES the basis there', async () => {
+    // ⚠ THIS ASSERTION CHANGED ON 2026-09-01 AND THE CHANGE IS THE FEATURE.
+    // It used to read `NEEDS CALIBRATION` + `IMU cal`, i.e. "close this, open
+    // the gear and find a panel". The operator's consolidation replaced that:
+    // the basis is measured HERE, by an overlay that comes up on its own and
+    // disappears the moment the number exists. Sending him away from a live
+    // measurement to look for a second one is exactly what was removed.
+    const r = mount('imu');
+    await settle();
+    expect(r.has('panoplus-basis-overlay')).toBe(true);
+    expect(r.shows('MEASURING THE BASIS')).toBe(true);
+    // τ is the OTHER half and it genuinely cannot be measured here: it needs an
+    // AVCaptureSession, which cannot coexist with the ARKit reference the basis
+    // is fitted against. So the gear is still named — for τ, and only for τ.
+    //
+    // ⚠ THE SENTENCE MOVED BEHIND A TAP ON 2026-09-02 and that is the change
+    // under test here. On the A35 this paragraph was 685 px of prose over the
+    // live camera; it is now one tap from the headline, which is what the two
+    // assertions below pin — collapsed, then reachable. It is ALSO written
+    // into the pack in full on every sweep (`panoPlusNoticeSidecar`), so the
+    // collapse cannot lose it even for an operator who never taps.
+    expect(r.shows('IMU cal stage 1')).toBe(false);
+    r.tap('panoplus-arm-notice');
+    expect(r.shows('IMU cal stage 1')).toBe(true);
+    r.unmount();
+  });
+
+  it('the button SAYS ARKit and the bridge RECEIVES ar — no silent downgrade', async () => {
+    const r = mount('imu');
+    await settle();
+    // SKIP FIRST (2026-09-01). On an uncalibrated phone the first-run basis
+    // overlay now owns the screen, and the Start control is deliberately not
+    // rendered beneath it — a tap through the scrim would run a sweep while
+    // the basis recorder still held an AR-thread plugin. Declining is the
+    // deliberate way onto the ARKit arm, and it is what gives the button back.
+    r.tap('panoplus-basis-skip');
+    await settle();
+    // The button that said "Sweep on ARKit instead" is gone; what says it now
+    // is the arm notice's headline (kept, collapsed) and the AR pill, which
+    // draws the arm that will RUN — see the pill suite below.
+    expect(r.shows('IMU ARM — NEEDS CALIBRATION')).toBe(true);
+    expect(r.shutter()).toEqual({ disabled: false, busy: false });
+    r.hold();
+    await settle();
+    // The half that makes the chrome honest. If this ever sent 'imu', the
+    // sweep would reject `panoplus-alignment-unconfigured` and the operator
+    // would be looking at a pill that had just said ARKit.
+    expect(startedWith?.poseSource).toBe('ar');
+    r.unmount();
+  });
+});
+
+describe('a CALIBRATED IMU selection actually reaches the decoupled arm', () => {
+  beforeEach(() => {
+    snapshotImpl = () => Promise.resolve({
+      resolved: {
+        haveTau: true, haveBasis: true, complete: true, missing: null,
+        tauS: -0.01142, tauStdErrMs: 0.61, basisIndex: 9, basisLabel: '+y+z+x',
+      },
+    });
+  });
+  afterEach(() => {
+    snapshotImpl = () => Promise.resolve({
+      resolved: { haveTau: false, haveBasis: false, complete: false, missing: 'tau+basis' },
+    });
+  });
+
+  it('offers the lens switcher (AR is off) and sends poseSource: "imu"', async () => {
+    const r = mount('imu');
+    await settle();
+    expect(r.shows('IMU ARM — CALIBRATED')).toBe(true);
+    // Pano's rule as the owner stated it: AR off ⇒ the lens switcher shows.
+    expect(r.has('panoplus-lens-chip')).toBe(false);   // this rig wires no onLensChange
+    expect(r.shutter()).toEqual({ disabled: false, busy: false });
+    r.hold();
+    await settle();
+    expect(startedWith?.poseSource).toBe('imu');
+    r.unmount();
+  });
+
+  it('quotes the numbers the first field pack has to be read against', async () => {
+    const r = mount('imu');
+    await settle();
+    // The numbers live in the notice DETAIL, collapsed since 2026-09-02 — so
+    // this is now also the test that one tap on the headline still produces
+    // them. The headline itself never moved.
+    expect(r.shows('IMU ARM — CALIBRATED')).toBe(true);
+    expect(r.shows('-11.42 ms')).toBe(false);
+    r.tap('panoplus-arm-notice');
+    expect(r.shows('-11.42 ms')).toBe(true);
+    expect(r.shows('#9')).toBe(true);
+    r.unmount();
+  });
+});
+
+describe('the HARDWARE refusal is not the calibration refusal', () => {
+  it('a body with no ultra-wide is told so, and is NOT sent to calibrate', async () => {
+    plannedImpl = () => Promise.resolve({
+      ok: false,
+      reason: 'panoplus-no-ultrawide',
+      detail: 'This device publishes no builtInUltraWideCamera.',
+    });
+    const r = mount('imu');
+    await settle();
+    expect(r.shows('NO PHYSICAL ULTRA-WIDE')).toBe(true);
+    expect(r.shows('NEEDS CALIBRATION')).toBe(false);
+    // And the store is never even read: there is no format for a tau to be
+    // keyed by, so a lookup would be asking a meaningless question.
+    expect(calibCalls.filter((c) => c.startsWith('getCalibration'))).toEqual([]);
+    plannedImpl = () => Promise.resolve({
+      ok: true,
+      lens: 'AVCaptureDeviceTypeBuiltInUltraWideCamera',
+      width: 1920, height: 1440, fps: 60,
+    });
+    r.unmount();
+  });
+});
+
+describe('a build with no calibration module blames the BUILD', () => {
+  it('does not present as a phone problem, and still sweeps on ARKit', async () => {
+    delete NM.RNISPanoCalib;
+    const r = mount('imu');
+    await settle();
+    expect(r.shows('THIS BUILD CANNOT ANSWER')).toBe(true);
+    // Behind the tap since 2026-09-02 — and it must STILL be one tap away,
+    // because "which pod is missing" is the only actionable half of this
+    // refusal and it is not a thing the headline can carry.
+    r.tap('panoplus-arm-notice');
+    expect(r.shows('pod install')).toBe(true);
+    r.hold();
+    await settle();
+    expect(startedWith?.poseSource).toBe('ar');
+    r.unmount();
+  });
+});
+
+describe('the RESULT records the arm NATIVE reported, not the one requested', () => {
+  it('takes native\'s answer over the request', async () => {
+    // The only failure mode here that would leave no trace in the pixels: a
+    // sweep believed to be decoupled that ran on ARKit. Native answers
+    // `poseSource` on both branches; the surface must prefer it.
+    snapshotImpl = () => Promise.resolve({
+      resolved: { complete: true, missing: null, haveTau: true, haveBasis: true, basisIndex: 3 },
+    });
+    startAnswers = { poseSource: 'ar' }; // native says it took the ARKit branch
+    let seen: string | null = null;
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(
+        <PanoPlusCaptureSurface
+          onComplete={(res) => { seen = res.arms.poseSource; }}
+          onCancel={() => undefined}
+          poseSource="imu"
+        />,
+      );
+    });
+    act(() => { jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1); });
+    await settle();
+    holdShutter(renderer.root);
+    await settle();
+    releaseShutter(renderer.root);
+    await settle();
+    expect(seen).toBe('ar');
+    act(() => { renderer.unmount(); });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE τ = 0 EXPERIMENT — the bag that crosses, and the screen that says so
+//
+// The device calibrated its BASIS (C #8, 0.234° over 777 pairs, stable under
+// ±10 ms) and NOT its τ (8 of 12 runs resolved, 5.03 ms spread against a
+// 3.08 ms budget, so the persist gate wrote nothing — correctly). This arm is
+// how the operator sweeps anyway, and the two things that must be true are:
+// the right key crosses the bridge, and the screen cannot be mistaken for a
+// calibrated run.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('the τ = 0 experiment', () => {
+  /** The operator's phone as of 2026-08-31: a basis, and no τ. */
+  const basisOnly = (): void => {
+    plannedImpl = () => Promise.resolve({
+      ok: true,
+      lens: 'AVCaptureDeviceTypeBuiltInUltraWideCamera',
+      width: 1920, height: 1440, fps: 60,
+      tauKey: 'iPhone17,1|AVCaptureDeviceTypeBuiltInUltraWideCamera|1920x1440|60',
+      basisKey: 'iPhone17,1',
+    });
+    snapshotImpl = () => Promise.resolve({
+      resolved: {
+        haveTau: false, haveBasis: true, complete: false, missing: 'tau',
+        tauS: null, tauStdErrMs: null, basisIndex: 8, basisLabel: '-y+x+z',
+      },
+    });
+  };
+
+  function mountUncorrected(uncorrected: boolean, pose: PanoPlusPoseSource = 'imu') {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(
+        <PanoPlusCaptureSurface
+          onComplete={() => undefined}
+          onCancel={() => undefined}
+          poseSource={pose}
+          tauUncorrected={uncorrected}
+        />,
+      );
+    });
+    act(() => { jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1); });
+    return renderer;
+  }
+
+  it('WITHOUT the flag this phone cannot run the arm at all', async () => {
+    // The state the deliverable exists for: the surface honestly falls back to
+    // ARKit because the sweep would otherwise claim a τ nobody measured.
+    basisOnly();
+    const r = mountUncorrected(false);
+    await settle();
+    holdShutter(r.root);
+    await settle();
+    expect(startedWith?.poseSource).toBe('ar');
+    act(() => { r.unmount(); });
+  });
+
+  it('WITH the flag it starts, and sends tauUncorrected — never a fake τ', async () => {
+    basisOnly();
+    const r = mountUncorrected(true);
+    await settle();
+    holdShutter(r.root);
+    await settle();
+    expect(startedWith?.poseSource).toBe('imu');
+    expect(startedWith?.tauUncorrected).toBe(true);
+    // ⚠ THE FORBIDDEN SHAPE, ASSERTED ABSENT. `{tauS: 0, tauMeasured: true}`
+    // would have run this experiment today and would have written a
+    // measurement claim into a pack that measured nothing. The surface must
+    // never send either key.
+    expect('tauMeasured' in (startedWith ?? {})).toBe(false);
+    expect('tauS' in (startedWith ?? {})).toBe(false);
+    act(() => { r.unmount(); });
+  });
+
+  // ⚠ THIS TEST INVERTED ON 2026-09-07, AND THE INVERSION IS THE CHANGE.
+  // It used to require the word EXPERIMENT on screen at idle. The operator:
+  // "what do you mean by tau=0 experiment? Why should the user know this and
+  // what do they have to do about it?" — nothing; he declared it himself in
+  // the gear. So the SCREEN keeps only the four-character FACT (`⚗︎ τ=0`, in
+  // the same loud non-palette colour, in every phase) and the PACK keeps the
+  // whole sentence. Both halves are asserted below; asserting only the first
+  // would pass equally if the fact had simply been deleted.
+  it('the SCREEN carries only ⚗︎ τ=0 — and the PACK carries the sentence', async () => {
+    basisOnly();
+    const r = mountUncorrected(true);
+    await settle();
+    const texts = (): string[] => {
+      const out: string[] = [];
+      const walk = (n: ReactTestInstance | string | null): void => {
+        if (n == null) return;
+        if (typeof n === 'string') { out.push(n); return; }
+        for (const c of n.children ?? []) walk(c as ReactTestInstance | string);
+      };
+      walk(r.root as unknown as ReactTestInstance);
+      return out;
+    };
+    const chip = (): string[] => r.root
+      .findAllByProps({ testID: 'panoplus-tau-uncorrected' })
+      .map((n) => String((n.props as { children?: unknown }).children));
+
+    // IDLE: no banner, no prose — the chip and nothing else.
+    expect(texts().some((t) => t.includes('EXPERIMENT'))).toBe(false);
+    expect(texts().some((t) => t.includes('UNCORRECTED — EXPERIMENT'))).toBe(false);
+    expect(r.root.findAllByProps({ testID: 'panoplus-arm-headline' }).length).toBe(0);
+    expect(chip()).toContain('⚗︎ τ=0');
+
+    // MID-SWEEP: unchanged — the chip stays up for the whole sweep, which is
+    // what stops an uncorrected pack being remembered as a calibrated one.
+    holdShutter(r.root);
+    await settle();
+    expect(r.root.findAllByProps({ testID: 'panoplus-arm-headline' }).length).toBe(0);
+    expect(chip()).toContain('⚗︎ τ=0');
+    expect(texts().some((t) => t.includes('EXPERIMENT'))).toBe(false);
+
+    // THE PACK. `host_notice.json` is written when start resolves, and it is
+    // the only place the arm, the τ provenance and the calibration state are
+    // now stated in words.
+    const notice = written.find((w) => w.uri.endsWith('host_notice.json'));
+    expect(notice).toBeDefined();
+    const body = JSON.parse(notice!.body) as Record<string, unknown>;
+    expect(body.schema).toBe('panoplus-host-notice/1');
+    expect(body.poseSourceEffective).toBe('imu');
+    expect(body.startLabel).toBe('Start τ=0 EXPERIMENT');
+    expect(body.headline)
+      .toBe('IMU ARM — EXPERIMENT: τ = 0, NO TIMING CORRECTION');
+    expect(String(body.detail)).toContain('tauProvenance: uncorrected');
+    expect(String(body.detail)).toContain('C #8');
+    // …and that the operator was never shown it, so `shownExpanded: false`
+    // cannot be misread as "he chose not to open it".
+    expect(body.packOnly).toBe(true);
+    act(() => { r.unmount(); });
+  });
+
+  // ⚠ THE PACK'S PROSE MUST SURVIVE A HOST THAT WALKS AWAY MID-START.
+  //
+  // Native's `start()` does not resolve until the camera is open and
+  // ingesting, and the host unmounts this surface on a mode-bar switch
+  // (the host camera gates the mount on `captureMode === 'panoplus'`).
+  // So a sweep can be started, finalized into a REAL pack on disk, and never
+  // once have a mounted surface to draw on — the branch the surface itself
+  // models at `started after unmount — finalized`.
+  //
+  // Since 2026-09-07 that costs something it did not cost before: the τ = 0
+  // arm notice is `packOnly`, so `host_notice.json` is the ONLY place the arm,
+  // `tauProvenance` and the basis history are stated in words. The sibling
+  // sweep-HUD sidecar is deliberately written ABOVE its own `mountedRef`
+  // check for exactly this reason; this one must be too.
+  it('writes the pack notice even when the host unmounts mid-start', async () => {
+    basisOnly();
+    let resolveStart: ((v: Record<string, unknown>) => void) | null = null;
+    let stopCalls = 0;
+    NM.RNISPanoPlus = {
+      start: (o: Record<string, unknown>) => {
+        startedWith = o;
+        return new Promise<Record<string, unknown>>((res) => { resolveStart = res; });
+      },
+      stop: () => { stopCalls += 1; return Promise.resolve({ sessionDir: '/d/pp_1' }); },
+      cancel: () => Promise.resolve({ cancelled: true }),
+      getStatus: () => Promise.resolve({ running: false }),
+    };
+    const r = mountUncorrected(true);
+    await settle();
+    holdShutter(r.root);          // start dispatched; native is still opening
+    await settle();
+    act(() => { r.unmount(); });  // the host switched modes
+    expect(resolveStart).not.toBeNull();
+    act(() => {
+      resolveStart?.({ sessionDir: '/d/pp_1', startedAtMs: 1, pluginAvailable: true });
+    });
+    await settle();
+    // The session IS live and this handler owns finalizing it — that part
+    // already worked.
+    expect(stopCalls).toBe(1);
+    // …and the pack it finalized carries the sentence.
+    const notice = written.find((w) => w.uri.endsWith('host_notice.json'));
+    expect(notice).toBeDefined();
+    const body = JSON.parse(notice!.body) as Record<string, unknown>;
+    expect(body.poseSourceEffective).toBe('imu');
+    expect(body.headline)
+      .toBe('IMU ARM — EXPERIMENT: τ = 0, NO TIMING CORRECTION');
+    expect(body.packOnly).toBe(true);
+  });
+
+  it('a REAL refusal still reaches the screen', async () => {
+    // The half that must NOT be hidden: no basis ⇒ the arm cannot run, the
+    // operator has something to do about it, and an unexplained fallback is
+    // how UNCONFIGURED gets reported as BROKEN.
+    const r = mountUncorrected(true);
+    await settle();
+    expect(r.root.findAllByProps({ testID: 'panoplus-arm-headline' }).length)
+      .toBeGreaterThan(0);
+    act(() => { r.unmount(); });
+  });
+
+  it('is NEVER sent, and never shown, on a sweep that runs on ARKit', async () => {
+    // Two ways to reach ARKit: the flag on the ARKit arm, and an IMU selection
+    // that fell back. Both must leave the bag and the screen alone — a chip
+    // claiming an uncorrected sweep on a corrected one is the same lie
+    // pointing the other way.
+    const r1 = mountUncorrected(true, 'ar');
+    await settle();
+    expect(r1.root.findAllByProps({ testID: 'panoplus-tau-uncorrected' }).length).toBe(0);
+    holdShutter(r1.root);
+    await settle();
+    expect(startedWith?.poseSource).toBe('ar');
+    expect('tauUncorrected' in (startedWith ?? {})).toBe(false);
+    act(() => { r1.unmount(); });
+
+    plannedImpl = () => Promise.resolve({
+      ok: false, reason: 'panoplus-no-ultrawide', detail: 'no ultra-wide',
+    });
+    const r2 = mountUncorrected(true);
+    await settle();
+    expect(r2.root.findAllByProps({ testID: 'panoplus-tau-uncorrected' }).length).toBe(0);
+    holdShutter(r2.root);
+    await settle();
+    expect(startedWith?.poseSource).toBe('ar');
+    expect('tauUncorrected' in (startedWith ?? {})).toBe(false);
+    act(() => { r2.unmount(); });
+  });
+
+  it('CANNOT be turned on behind the chrome by an escape hatch', async () => {
+    // ── THE SCREEN AND THE PACK MUST AGREE, AND ONE OF THEM WAS SPREADABLE ──
+    //
+    // `engineOptions` / `packOptions` are spread into the start bag BEFORE the
+    // three arms are assigned, and a conditional spread can only ever ADD a
+    // key — it cannot delete one an escape hatch already put there. So a host
+    // that pushed `tauUncorrected` through `engineOptions` while the prop was
+    // false would have run an UNCORRECTED sweep behind chrome that says
+    // CALIBRATED: no purple chip, no amber headline, an ordinary
+    // `Start sweep`. The pack would have been honest and the screen a lie,
+    // which is the half of this deliverable the operator reads first.
+    //
+    // Cast because TypeScript already refuses it (`tauUncorrected` is on
+    // `PanoPlusStartOptions`, not `PanoPlusEngineOptions`) — this is the
+    // untyped host, which is the only one that could have reached it.
+    basisOnly();
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(
+        <PanoPlusCaptureSurface
+          onComplete={() => undefined}
+          onCancel={() => undefined}
+          poseSource="imu"
+          tauUncorrected={false}
+          engineOptions={{ tauUncorrected: true } as PanoPlusEngineOptions}
+        />,
+      );
+    });
+    act(() => { jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1); });
+    await settle();
+    // The chrome says calibrated — so the bag must not say otherwise.
+    expect(renderer.root.findAllByProps({ testID: 'panoplus-tau-uncorrected' })
+      .length).toBe(0);
+    holdShutter(renderer.root);
+    await settle();
+    expect('tauUncorrected' in (startedWith ?? {})).toBe(false);
+    // And this phone has no τ, so with the declaration correctly refused the
+    // honest outcome is the ARKit fallback — never a silent uncorrected sweep.
+    expect(startedWith?.poseSource).toBe('ar');
+    act(() => { renderer.unmount(); });
+  });
+
+  it('is not DISABLED by an escape hatch either — the prop owns the key', async () => {
+    // The mirror image: the prop declares the experiment, and a stale
+    // `tauUncorrected: false` in a host's `engineOptions` must not quietly
+    // demote it to an ordinary sweep whose chrome still says EXPERIMENT.
+    basisOnly();
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(
+        <PanoPlusCaptureSurface
+          onComplete={() => undefined}
+          onCancel={() => undefined}
+          poseSource="imu"
+          tauUncorrected
+          engineOptions={{ tauUncorrected: false } as PanoPlusEngineOptions}
+        />,
+      );
+    });
+    act(() => { jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1); });
+    await settle();
+    expect(renderer.root.findAllByProps({ testID: 'panoplus-tau-uncorrected' })
+      .length).toBeGreaterThan(0);
+    holdShutter(renderer.root);
+    await settle();
+    expect(startedWith?.poseSource).toBe('imu');
+    expect(startedWith?.tauUncorrected).toBe(true);
+    act(() => { renderer.unmount(); });
+  });
+
+  it('OUTRANKS a stored τ — a calibrated phone still runs the experiment', async () => {
+    // The store-override rule, at the layer that decides what crosses the
+    // bridge. Native enforces it again below (an explicit request wins over
+    // `RNISPanoCalibStore`), and this is the half that makes the request in
+    // the first place: if the surface treated a calibrated phone as an
+    // ordinary sweep, no `tauUncorrected` would be sent and the store would
+    // fill τ in — the experiment silently never running.
+    plannedImpl = () => Promise.resolve({
+      ok: true,
+      lens: 'AVCaptureDeviceTypeBuiltInUltraWideCamera',
+      width: 1920, height: 1440, fps: 60,
+      tauKey: 'iPhone17,1|AVCaptureDeviceTypeBuiltInUltraWideCamera|1920x1440|60',
+      basisKey: 'iPhone17,1',
+    });
+    snapshotImpl = () => Promise.resolve({
+      resolved: {
+        haveTau: true, haveBasis: true, complete: true, missing: null,
+        tauS: 0.00289, tauStdErrMs: 0.57, basisIndex: 8, basisLabel: '-y+x+z',
+      },
+    });
+    const r = mountUncorrected(true);
+    await settle();
+    holdShutter(r.root);
+    await settle();
+    expect(startedWith?.poseSource).toBe('imu');
+    expect(startedWith?.tauUncorrected).toBe(true);
+    expect('tauS' in (startedWith ?? {})).toBe(false);
+    act(() => { r.unmount(); });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE SECOND ATTITUDE CHANNEL (2026-09-01) — the same-pixels pose-arm A/B
+//
+// The whole instrument is worthless if the key lands on the wrong arm, and
+// "the wrong arm" here has TWO shapes that a source reading would not tell
+// apart:
+//
+//  · Sent on the DECOUPLED arm, where ARKit has been torn down before the
+//    camera opens. `track.jsonl` and `attitude_imu.jsonl` would then carry
+//    the SAME CoreMotion channel — a pack that looks like an A/B and is not,
+//    which is worse than no pack at all.
+//  · NOT sent on a sweep the operator selected as `'imu'` and that the
+//    surface honestly DOWNGRADED to ARKit. That downgraded sweep runs on
+//    ARKit, so it is precisely a sweep this instrument can record — and a gate
+//    written against the raw prop rather than `armNotice.effectivePoseSource`
+//    would silently refuse it. On the operator's phone (a basis, no τ) that
+//    downgrade is the COMMON case, so the wrong gate would have produced zero
+//    recordings and no error.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('the IMU sidecar rides the ARKit arm and only the ARKit arm', () => {
+  function mountSidecar(
+    pose: PanoPlusPoseSource,
+    sidecar: boolean,
+    extra: Partial<React.ComponentProps<typeof PanoPlusCaptureSurface>> = {},
+  ): ReactTestRenderer {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(
+        <PanoPlusCaptureSurface
+          onComplete={() => undefined}
+          onCancel={() => undefined}
+          poseSource={pose}
+          imuSidecar={sidecar}
+          {...extra}
+        />,
+      );
+    });
+    act(() => { jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1); });
+    return renderer;
+  }
+
+  const press = async (r: ReactTestRenderer): Promise<void> => {
+    await settle();
+    holdShutter(r.root);
+    await settle();
+  };
+
+  it('sends it on the ARKit arm', async () => {
+    const r = mountSidecar('ar', true);
+    await press(r);
+    expect(startedWith?.poseSource).toBe('ar');
+    expect(startedWith?.imuSidecar).toBe(true);
+    act(() => { r.unmount(); });
+  });
+
+  it('OMITS the key entirely when off — never sends a false', async () => {
+    // ABSENT, not `false`. Native reads absence as "the sweep that shipped"
+    // and emits no `meta.json` key at all; a `false` would be a declaration
+    // nobody made, in the pack of a sweep that recorded nothing.
+    const r = mountSidecar('ar', false);
+    await press(r);
+    expect('imuSidecar' in (startedWith ?? {})).toBe(false);
+    act(() => { r.unmount(); });
+  });
+
+  it('DELETES it on a decoupled sweep — the comparison cannot exist there', async () => {
+    plannedImpl = () => Promise.resolve({
+      ok: true,
+      lens: 'AVCaptureDeviceTypeBuiltInUltraWideCamera',
+      width: 1920, height: 1440, fps: 60,
+      tauKey: 'iPhone17,1|AVCaptureDeviceTypeBuiltInUltraWideCamera|1920x1440|60',
+      basisKey: 'iPhone17,1',
+    });
+    snapshotImpl = () => Promise.resolve({
+      resolved: {
+        haveTau: true, haveBasis: true, complete: true, missing: null,
+        tauS: -0.0042, tauStdErrMs: 0.31, basisIndex: 8, basisLabel: '-y+x+z',
+      },
+    });
+    const r = mountSidecar('imu', true);
+    await press(r);
+    expect(startedWith?.poseSource).toBe('imu');
+    expect('imuSidecar' in (startedWith ?? {})).toBe(false);
+    act(() => { r.unmount(); });
+  });
+
+  it('SENDS it on a sweep DOWNGRADED from imu to ARKit', async () => {
+    // The operator's phone as of 2026-08-31: a basis, no τ. The button says
+    // "Sweep on ARKit instead", the sweep runs on ARKit — and ARKit is the arm
+    // this instrument records. A gate on the raw `poseSource` prop would have
+    // refused every sweep this phone can actually take.
+    plannedImpl = () => Promise.resolve({
+      ok: true,
+      lens: 'AVCaptureDeviceTypeBuiltInUltraWideCamera',
+      width: 1920, height: 1440, fps: 60,
+      tauKey: 'iPhone17,1|AVCaptureDeviceTypeBuiltInUltraWideCamera|1920x1440|60',
+      basisKey: 'iPhone17,1',
+    });
+    snapshotImpl = () => Promise.resolve({
+      resolved: {
+        haveTau: false, haveBasis: true, complete: false, missing: 'tau',
+        tauS: null, tauStdErrMs: null, basisIndex: 8, basisLabel: '-y+x+z',
+      },
+    });
+    const r = mountSidecar('imu', true);
+    await press(r);
+    expect(startedWith?.poseSource).toBe('ar');
+    expect(startedWith?.imuSidecar).toBe(true);
+    act(() => { r.unmount(); });
+  });
+
+  it('the PROP owns it over engineOptions, in BOTH directions', async () => {
+    // The `tauUncorrected` lesson, applied before it can bite: a conditional
+    // spread can only ever ADD, so a host that pushed `imuSidecar` through the
+    // escape hatch would have armed a channel the prop said was off — and on
+    // the decoupled arm would have armed one native refuses, putting a refusal
+    // nobody asked for into the pack. Cast because TypeScript already refuses
+    // the shape; the runtime rule is what is under test.
+    const r1 = mountSidecar('ar', false, {
+      engineOptions: { imuSidecar: true } as PanoPlusEngineOptions,
+    });
+    await press(r1);
+    expect('imuSidecar' in (startedWith ?? {})).toBe(false);
+    act(() => { r1.unmount(); });
+
+    const r2 = mountSidecar('ar', true, {
+      engineOptions: { imuSidecar: false } as PanoPlusEngineOptions,
+    });
+    await press(r2);
+    expect(startedWith?.imuSidecar).toBe(true);
+    act(() => { r2.unmount(); });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PANO'S AR PILL (2026-09-03) — one pill, drawn by the surface, owned by the
+// host's flag. ON = the AR arm, OFF = the decoupled arm. It shows the arm that
+// will RUN, follows the REQUEST while the read is in flight, and a tap moves
+// the request — never the latched arm of a live sweep.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('Pano\'s AR pill', () => {
+  let poseChanges: string[] = [];
+  let lensChanges: string[] = [];
+  beforeEach(() => { poseChanges = []; lensChanges = []; });
+
+  // ⚠ THE `lens` ARGUMENT IS LOAD-BEARING SINCE 2026-09-03, and defaulting it
+  // to `'wide'` here is not the surface's default — it is `'ultraWide'`. The AR
+  // pill is now gated on the lens that will RUN being 1× (Pano's own gate,
+  // `Camera.tsx:3382`), so a rig that left the lens at the flag default would
+  // mount the decoupled arm at 0.5×, where there IS no pill, and every
+  // assertion about the pill's label and state would fail on its absence
+  // rather than on its behaviour. The 0.5× half is covered on purpose below.
+  function mountWithPill(
+    poseSource: PanoPlusPoseSource,
+    lens: 'ultraWide' | 'wide' = 'wide',
+  ): ReactTestRenderer {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(
+        <PanoPlusCaptureSurface
+          onComplete={() => undefined}
+          poseSource={poseSource}
+          lens={lens}
+          onPoseSourceChange={(p) => { poseChanges.push(p); }}
+          onLensChange={(l) => { lensChanges.push(l); }}
+        />,
+      );
+    });
+    act(() => { jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1); });
+    return renderer;
+  }
+  const pill = (r: ReactTestRenderer): Record<string, unknown> => {
+    // The HOST `Pressable` (it carries the a11y props), not the `PanoArToggle`
+    // composite that also matches the testID.
+    const node = r.root
+      .findAllByProps({ testID: 'panoplus-ar-pill' })
+      .find((n) => n.props.accessibilityRole != null);
+    if (node == null) throw new Error('no AR pill');
+    return node.props as Record<string, unknown>;
+  };
+  const checked = (r: ReactTestRenderer): boolean =>
+    (pill(r).accessibilityState as { checked: boolean }).checked;
+  const tapPill = (r: ReactTestRenderer): void => {
+    act(() => { (pill(r).onPress as () => void)(); });
+  };
+  const has = (r: ReactTestRenderer, testID: string): boolean =>
+    r.root.findAllByProps({ testID }).length > 0;
+
+  it('is Pano\'s switch, verbatim: role, label, checked state', async () => {
+    const r = mountWithPill('ar');
+    await settle();
+    expect(pill(r).accessibilityRole).toBe('switch');
+    expect(pill(r).accessibilityLabel).toBe('AR mode on');
+    expect(checked(r)).toBe(true);
+    // AR on and the chip STILL on screen — Pano's rule, adopted 2026-09-03.
+    // (This line read `false` until then, under "show the switcher if AR is
+    // off". Pano does the mirror: the chip is unconditional and the AR TOGGLE
+    // is what hides, at 0.5×.)
+    expect(has(r, 'panoplus-lens-chip')).toBe(true);
+    tapPill(r);
+    expect(poseChanges).toEqual(['imu']);
+    act(() => { r.unmount(); });
+  });
+
+  it('is OFF on a calibrated decoupled arm at 1×', async () => {
+    snapshotImpl = () => Promise.resolve({
+      resolved: {
+        haveTau: true, haveBasis: true, complete: true, missing: null,
+        tauS: -0.01142, tauStdErrMs: 0.61, basisIndex: 9, basisLabel: '+y+z+x',
+      },
+    });
+    const r = mountWithPill('imu', 'wide');
+    await settle();
+    expect(checked(r)).toBe(false);
+    expect(pill(r).accessibilityLabel).toBe('AR mode off');
+    expect(has(r, 'panoplus-lens-chip')).toBe(true);
+    tapPill(r);
+    expect(poseChanges).toEqual(['ar']);
+    act(() => { r.unmount(); });
+  });
+
+  it('is ABSENT on the calibrated decoupled arm at 0.5× — Pano’s own gate', async () => {
+    // `Camera.tsx:3382` carries `lens === '1x'` in the AR toggle's condition,
+    // so in Pano there is no AR control at 0.5× either. The chip is what is
+    // left, and tapping `1×` is how the pill comes back.
+    snapshotImpl = () => Promise.resolve({
+      resolved: {
+        haveTau: true, haveBasis: true, complete: true, missing: null,
+        tauS: -0.01142, tauStdErrMs: 0.61, basisIndex: 9, basisLabel: '+y+z+x',
+      },
+    });
+    const r = mountWithPill('imu', 'ultraWide');
+    await settle();
+    expect(has(r, 'panoplus-ar-pill')).toBe(false);
+    expect(has(r, 'panoplus-pill-stack')).toBe(false);
+    expect(has(r, 'panoplus-lens-chip')).toBe(true);
+    act(() => { r.unmount(); });
+  });
+
+  it('follows the REQUEST while the read is in flight — no flash back to ON', () => {
+    // No settle: the precondition read has not landed. `panoPlusArmNotice`
+    // resolves an unread IMU arm to ARKit (a fallback), and a pill drawing
+    // THAT would flash ON at the exact moment the operator tapped it off.
+    const r = mountWithPill('imu', 'wide');
+    expect(checked(r)).toBe(false);
+    act(() => { r.unmount(); });
+  });
+
+  it('draws the arm that will RUN under a fallback, and the tap never inverts the switch', async () => {
+    // Uncalibrated phone, IMU requested: the sweep will run on ARKit. The pill
+    // says so (ON) and the notice says why.
+    //
+    // ⚠ THIS TEST USED TO EXPECT `['ar']` — the tap "accepting the downgrade",
+    // turning an announced fallback into an explicit choice so the banner had
+    // nothing left to announce. That was deliberate, and it was wrong, for two
+    // reasons that outrank the banner it silenced:
+    //
+    //  · IT INVERTS A SWITCH. The pill is `accessibilityRole="switch"` with
+    //    `checked: true` and the label "AR mode on". Tapping an ON switch means
+    //    OFF, to every operator and every screen reader. Writing `'ar'` there
+    //    is the opposite of the gesture, and nothing on screen moves to say so.
+    //  · IT SILENTLY DISCARDS A PERSISTED REQUEST. `panoPlusPoseSource` is a
+    //    stored flag. The operator asked for IMU; one tap on a pill he pressed
+    //    to turn AR OFF rewrites that to `'ar'` for good, so even after he runs
+    //    the calibration the banner told him to run, the arm still comes up
+    //    ARKit and he has to go find the flag to undo it.
+    //
+    // The contract now: the write is derived from what the pill PAINTS, so a
+    // tap can only ever request the opposite of the glyph under the finger.
+    // In this state that makes it a no-op — the request is already `'imu'` —
+    // which is honest: the IMU arm genuinely cannot run on an uncalibrated
+    // phone, and the notice under `▸ tap for why` is what says so and what
+    // says how to fix it. If "accept the downgrade" is wanted back it belongs
+    // on the NOTICE, which is a button, not on a switch whose meaning it flips.
+    const r = mountWithPill('imu');
+    await settle();
+    act(() => {
+      (r.root.findAllByProps({ testID: 'panoplus-basis-skip' })[0]!.props.onPress as () => void)();
+    });
+    await settle();
+    expect(checked(r)).toBe(true);
+    expect(has(r, 'panoplus-arm-headline')).toBe(true);
+    expect(has(r, 'panoplus-lens-chip')).toBe(true);
+    tapPill(r);
+    expect(poseChanges).toEqual(['imu']);
+    act(() => { r.unmount(); });
+  });
+
+  // THE INVARIANT — "a tap requests the OPPOSITE of the pill it landed on" —
+  // is pinned by the two tests above between them, one per state the pill can
+  // be in with a settled arm: `is OFF on a calibrated decoupled arm` (pill OFF
+  // → asks for `'ar'`) and the fallback test (pill ON → asks for `'imu'`).
+  // A third test looping over both was tried and dropped: it has to rebuild
+  // this suite's `snapshotImpl` fixture per rung, which is the harness's job
+  // and not a thing worth duplicating for coverage that already exists.
+
+  it('is inert mid-sweep — the arm is latched and the pill draws the latch', async () => {
+    const r = mountWithPill('ar');
+    await settle();
+    holdShutter(r.root);
+    await settle();
+    tapPill(r);
+    expect(poseChanges).toEqual([]);
+    expect(checked(r)).toBe(true);
+    releaseShutter(r.root);
+    await settle();
+    tapPill(r);
+    expect(poseChanges).toEqual(['imu']);
+    act(() => { r.unmount(); });
+  });
+
+  it('has no pointerEvents="none" ancestor — a finger can actually reach it', async () => {
+    // `tapPill` calls `onPress` directly and so cannot see this defect: the
+    // lens chip shipped inside a `pointerEvents="none"` HUD block and was dead
+    // on both platforms until 2026-09-02 while every tap-by-props test passed.
+    // The pill lives in its own `box-none` stack, outside the HUD, and this
+    // walks the rendered ancestor chain to keep it there.
+    const r = mountWithPill('ar');
+    await settle();
+    const node = r.root
+      .findAllByProps({ testID: 'panoplus-ar-pill' })
+      .find((n) => n.props.accessibilityRole != null);
+    if (node == null) throw new Error('no AR pill');
+    interface Walkable { props: { pointerEvents?: string }; parent: Walkable | null }
+    const chain: string[] = [];
+    let cur = (node as unknown as Walkable).parent;
+    while (cur != null) {
+      const pe = cur.props?.pointerEvents;
+      if (typeof pe === 'string') chain.unshift(pe);
+      cur = cur.parent;
+    }
+    expect(chain).not.toContain('none');
+    // And it is NOT inside the HUD block, whose read-only runs are fenced.
+    const hud = r.root.findAllByProps({ testID: 'panoplus-hud-block' })[0];
+    expect(hud?.findAllByProps({ testID: 'panoplus-ar-pill' }) ?? []).toHaveLength(0);
+    act(() => { r.unmount(); });
+  });
+});
