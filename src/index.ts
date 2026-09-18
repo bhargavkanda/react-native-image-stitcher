@@ -44,6 +44,21 @@ export type {
 // that hides the built-in shutter (`hideBuiltInShutter`) can render it itself in
 // a custom bottom bar and drive capture through the CameraHandle.
 export { CameraShutter } from './camera/CameraShutter';
+// The two chrome pills the camera renders over the preview: the 1×/0.5×
+// lens selector and the AR-mode switch.
+//
+// ⚠ EXPORTED BECAUSE NOT EXPORTING THEM COST A 345-LINE CLONE. A consumer
+// that needed the same two controls beside a different capture surface had
+// no way to reach them and reimplemented both, style for style, with a
+// parity test to keep the copy honest. That is the wrong trade: a pill is
+// not an API worth protecting, and a silent visual divergence between two
+// copies is worse than a widened surface.
+export { LensChip, ARToggle } from './camera/Camera';
+export type { LensChipProps, ARToggleProps } from './camera/Camera';
+// Aspect-fit geometry, shared with any host drawing over a letterboxed
+// preview: `containFit` is the scale-and-offset form, which a caller can
+// turn into a rect.
+export { containFit } from './camera/cropGeometry';
 export type {
   CameraShutterProps,
   CameraShutterHandle,

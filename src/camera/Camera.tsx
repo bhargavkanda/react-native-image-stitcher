@@ -1184,7 +1184,7 @@ export interface CameraHandle extends AROverlayMethods {
  * button.  Standard iOS-camera-app convention so users know where to
  * look.  Two pills side-by-side, the active one filled.
  */
-interface LensChipProps {
+export interface LensChipProps {
   lens: CameraLens;
   onChange: (lens: CameraLens) => void;
   has0_5x: boolean;
@@ -1215,7 +1215,7 @@ interface LensChipProps {
    */
   ultraWideFactor?: number | null;
 }
-function LensChip({
+export function LensChip({
   lens,
   onChange,
   has0_5x,
@@ -1346,7 +1346,7 @@ const lensChipStyles = StyleSheet.create({
  * Conditional on `lens === '1x'`; hidden when the user is on 0.5×
  * (which forces non-AR).
  */
-interface ARToggleProps {
+export interface ARToggleProps {
   arEnabled: boolean;
   onToggle: () => void;
   /**
@@ -1357,7 +1357,7 @@ interface ARToggleProps {
    */
   contentRotation?: { transform?: ViewStyle['transform'] };
 }
-function ARToggle({ arEnabled, onToggle, contentRotation }: ARToggleProps): React.JSX.Element {
+export function ARToggle({ arEnabled, onToggle, contentRotation }: ARToggleProps): React.JSX.Element {
   return (
     <Pressable
       onPress={onToggle}
