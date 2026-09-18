@@ -16,3 +16,12 @@ console.error = (...args) => {
 
 // react-test-renderer keys "is this an act() environment" off this global.
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+// `__DEV__` is a React Native global that the metro bundler defines and node
+// does not. Components read it to gate development-only logging; without it
+// the first such read throws inside a passive effect and the renderer reports
+// a stack in its own internals rather than a missing global.
+//
+// FALSE, not true: dev-only branches are noise in a test run, and a test that
+// depended on one would be asserting on logging rather than on behaviour.
+globalThis.__DEV__ = false;

@@ -54,6 +54,8 @@ export { CameraShutter } from './camera/CameraShutter';
 // not an API worth protecting, and a silent visual divergence between two
 // copies is worse than a widened surface.
 export { LensChip, ARToggle } from './camera/Camera';
+// Everything `engine="sweep"` accepts, as one prop bag.
+export type { SweepOptions } from './camera/Camera';
 export type { LensChipProps, ARToggleProps } from './camera/Camera';
 // Aspect-fit geometry, shared with any host drawing over a letterboxed
 // preview: `containFit` is the scale-and-offset form, which a caller can

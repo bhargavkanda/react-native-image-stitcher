@@ -97,8 +97,24 @@ module.exports = {
   // test), so provide the minimal shape the probe checks. The imperative
   // photo-taking still goes through ARCameraView's ref handle, not this — this
   // only has to satisfy the availability gate.
+  //
+  // ⚠ `isSupported` ADDED 2026-09-18 with `<Camera engine="sweep">`. Mounting
+  // <Camera> at all runs `useARSession`, which PROBES support once on mount —
+  // and a missing method there throws inside a passive effect, which
+  // react-test-renderer reports as a stack ending in `commitHookEffectListMount`
+  // rather than as "your mock is incomplete".
+  //
+  // It resolves TRUE because AR-capable is the state under test. The probe is
+  // all the hook does on mount; `start()` is behind an explicit call that only
+  // <ARCameraView> makes, which is what lets <Camera> run this hook in sweep
+  // mode without opening a second session.
   NativeModules: {
-    RNSARSession: { takePhoto: () => Promise.resolve({ path: '/tmp/rnsar.jpg' }) },
+    RNSARSession: {
+      takePhoto: () => Promise.resolve({ path: '/tmp/rnsar.jpg' }),
+      isSupported: () => Promise.resolve(true),
+      start: () => Promise.resolve(),
+      stop: () => Promise.resolve(),
+    },
   },
   // ── Animated ──────────────────────────────────────────────────────────────
   // ADDED 2026-08-27 with the T2 HUD's three-state border, whose overshoot

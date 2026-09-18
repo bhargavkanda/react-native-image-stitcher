@@ -74,6 +74,32 @@ import type { ARFrameMeta, ARPluginResult } from '../stitching/ARFrameMeta';
 import type { AROverlay } from '../stitching/AROverlay';
 import type { AROverlayMethods } from './arOverlayController';
 import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
+// ⚠ A STATIC IMPORT, NOT A LAZY ONE. `engine="sweep"` must be able to fail at
+// COMPILE time when the sweep surface is absent, not at the first hold. The
+// cost is that every consumer of <Camera> pulls the sweep tree into its
+// bundle; that is the same trade `default_subspecs` makes on the native side,
+// and for the same reason — a silently-missing engine is worse than a larger
+// bundle.
+import {
+  PanoPlusCaptureSurface,
+  type PanoPlusCaptureSurfaceProps,
+} from '../sweep/PanoPlusCaptureSurface';
+import type {
+  PanoPlusCaptureResult,
+  PanoPlusFailure,
+  SweepSurfaceHandle,
+} from '../sweep/panoPlusTypes';
+
+/**
+ * Everything `engine="sweep"` accepts, which is everything the sweep surface
+ * accepts EXCEPT the three callbacks `<Camera>` owns: completion and failure
+ * arrive through `onCapture`/`onError` like every other engine's, so a host
+ * does not learn a second result channel to use one engine.
+ */
+export type SweepOptions = Omit<
+  PanoPlusCaptureSurfaceProps,
+  'onComplete' | 'onCancel' | 'onFailure'
+>;
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
 import { CaptureHeader, type CaptureHeaderProps } from './CaptureHeader';
@@ -285,10 +311,22 @@ export type CameraCaptureResult =
       /** Non-fatal quality signals (empty when none). */
       warnings: CaptureWarning[];
     }
+  /**
+   * A finished SWEEP (`engine="sweep"`).
+   *
+   * ⚠ A THIRD SHAPE, NOT A WIDENED PANORAMA. A sweep is not a keyframe
+   * panorama with different settings: it produces a pack directory, per-strip
+   * integrity counters and a residual verdict, and it has no `warnings`
+   * because nothing in its path emits one. Folding it into the `'panorama'`
+   * member would give every existing consumer a set of fields that are
+   * absent on every capture they have ever seen. `type: 'panoplus'` keeps the
+   * discriminant honest and leaves existing narrowing untouched.
+   */
+  | (PanoPlusCaptureResult & { ok: true })
   | {
       ok: false;
       /** Which capture path failed. */
-      type: 'photo' | 'panorama';
+      type: 'photo' | 'panorama' | 'panoplus';
       /** The classified failure (same object handed to `onError`). */
       error: CameraError;
       /** Any warnings gathered before the failure (usually empty). */
@@ -575,6 +613,18 @@ export interface CameraProps {
   shutterDisabled?: boolean;
 
   // ── Callbacks ─────────────────────────────────────────────────────
+  /**
+   * Configuration for `engine="sweep"`, ignored by every other engine.
+   *
+   * ⚠ ONE BAG RATHER THAN ~20 LOOSE PROPS, and the reason is that they are
+   * not camera props. `rectify`, `gainMatch`, `attitudeMagFree`,
+   * `poseSource`, `jogGuard` and the rest configure a slit-scan ENGINE; they
+   * have no meaning for a keyframe panorama or a photo, and putting them on
+   * `CameraProps` would grow the component's public surface by a third with
+   * fields that are undefined in every other mode.
+   */
+  sweep?: SweepOptions;
+
   onCapture?: (result: CameraCaptureResult) => void;
   onCaptureSourceChange?: (source: CaptureSource) => void;
   onLensChange?: (lens: CameraLens) => void;
@@ -1581,6 +1631,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     onArPluginResult,
     overlays,
     engine = 'keyframe',
+    sweep,
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'vertical',
     panGuidance = true,
@@ -1939,6 +1990,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // can reach it (handleHoldStart is defined below the handle). Mirrors
   // handleTapRef; handleHoldEndRef (the stop side) already exists further down.
   const handleHoldStartRef = useRef<(() => void) | null>(null);
+  /** The sweep surface's shutter handle, when `engine="sweep"`. */
+  const sweepRef = useRef<SweepSurfaceHandle | null>(null);
+  /** `engine` read from inside the imperative handle, whose deps are `[]` so
+   *  it is built once and must not close over a stale prop. */
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
 
   // v0.20.0 — AR overlay imperative handle.  `<Camera>` itself renders no
   // overlay layer; the overlay methods forward to the mounted
@@ -1955,8 +2012,21 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     clearOverlays: () => arViewRef.current?.clearOverlays(),
     raycast: () => arViewRef.current?.raycast() ?? Promise.resolve(null),
     takePhoto: () => handleTapRef.current?.() ?? Promise.resolve(),
-    startPanorama: () => handleHoldStartRef.current?.(),
+    // ⚠ THE HANDLE IS ENGINE-AWARE. A host that hides the built-in shutter
+    // and drives capture itself must reach the SWEEP when that engine is
+    // selected; routing to `handleHoldStartRef` would start the keyframe
+    // engine's hold against a surface that is not mounted, and nothing would
+    // report it — `handleHoldStartRef.current` is simply null in sweep mode,
+    // so the press would be silently inert.
+    startPanorama: () => {
+      if (engineRef.current === 'sweep') { sweepRef.current?.holdStart?.(); return; }
+      handleHoldStartRef.current?.();
+    },
     stopPanorama: () => {
+      if (engineRef.current === 'sweep') {
+        sweepRef.current?.holdEnd?.();
+        return Promise.resolve();
+      }
       handleHoldEndRef.current?.();
       return Promise.resolve();
     },
@@ -3065,6 +3135,59 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         : insets.top + 8;
 
   // ── JSX ─────────────────────────────────────────────────────────
+
+  // ══════════════════════════════════════════════════════════════════
+  //  engine="sweep" — the sweep surface OWNS the screen
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // ⚠ A DELEGATION, NOT A BRANCH INSIDE THE NORMAL RENDER, AND THE REASON IS
+  // THE AR SESSION. `<Camera>` mounts an `<ARCameraView>` and so does the
+  // sweep surface; two mounts mean two `RNSARSession.shared.start()` calls
+  // against one camera, which produces no compile error, no link error, and
+  // a black preview or a frozen session on a phone. Returning early is the
+  // only shape in which exactly one of them is alive.
+  //
+  // ⚠ AND THE SWEEP DOES NOT GO THROUGH `incremental.start()` AT ALL. It is
+  // not a mode of the keyframe engine: it is its own native module family
+  // (`RNSSweepSession` and siblings) with its own start/stop/cancel
+  // lifecycle. Both natives still answer `engine-unavailable` for the string
+  // 'sweep' — deliberately, because nothing should reach them with it. The
+  // engine selector is resolved HERE, in JS, before any bridge call.
+  //
+  // What the host sees is unchanged: completion arrives on `onCapture` and
+  // failure on `onError`, exactly as for a photo or a panorama.
+  if (engine === 'sweep') {
+    return (
+      <HostJsLandscapeContext.Provider value={jsLandscape}>
+        <View style={[styles.container, style]}>
+          <PanoPlusCaptureSurface
+            ref={sweepRef}
+            {...sweep}
+            onComplete={(result: PanoPlusCaptureResult) => {
+              onCapture?.({ ...result, ok: true });
+            }}
+            onFailure={(failure: PanoPlusFailure) => {
+              onError?.(
+                // A sweep refusal is a capture failure, not an engine one:
+                // the engine IS available here — this is the engine saying no
+                // to this attempt. `ENGINE_UNAVAILABLE` would send a reader
+                // to the build, which is the wrong place.
+                //
+                // The original failure rides on `cause`, so the sweep's own
+                // code (`panoplus-busy`, `panoplus-io`, …) and its counters
+                // survive the hop instead of being flattened to a string.
+                new CameraError(
+                  'PANORAMA_START_FAILED',
+                  failure.message ?? String(failure.code ?? 'sweep failed'),
+                  failure,
+                ),
+              );
+            }}
+          />
+        </View>
+      </HostJsLandscapeContext.Provider>
+    );
+  }
 
   return (
     <HostJsLandscapeContext.Provider value={jsLandscape}>
