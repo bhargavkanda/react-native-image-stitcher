@@ -5,7 +5,6 @@ import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.NativeModule
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.uimanager.ViewManager
-import com.mrousavy.camera.frameprocessors.FrameProcessorPluginRegistry
 import io.imagestitcher.rn.panoplus.PanoPlusPackage
 
 /**
@@ -51,38 +50,45 @@ class RNImageStitcherPackage : ReactPackage {
         fun ensureFrameProcessorPluginRegistered() {
             if (fpPluginRegistered) return
             try {
-                FrameProcessorPluginRegistry.addFrameProcessorPlugin(
-                    "cv_flow_gate_process_frame",
-                ) { proxy, options ->
-                    CvFlowGateFrameProcessor(proxy, options)
-                }
-                // v0.9.0 Layer 1 — register `save_frame_as_jpeg`
-                // alongside the cv_flow_gate plugin.  Same lifecycle,
-                // same defensive error handling (the outer try/catch
-                // covers both registrations).  Either both register
-                // or neither does — if vc isn't on the classpath,
-                // both calls are skipped together.
-                FrameProcessorPluginRegistry.addFrameProcessorPlugin(
-                    SaveFrameAsJpegPlugin.PLUGIN_NAME,
-                ) { proxy, options ->
-                    SaveFrameAsJpegPlugin(proxy, options)
-                }
+                // ⚠ BY NAME, NOT BY REFERENCE, AND THAT IS THE FIX.
+                // `VisionCameraPluginRegistrations` imports vision-camera and
+                // is EXCLUDED from the source set on a build that does not
+                // have it. A direct call would be a static reference to a
+                // class that is not compiled — the same unresolved-symbol
+                // failure this indirection exists to remove, one layer along.
+                //
+                // `ClassNotFoundException` is therefore the EXPECTED answer on
+                // a consumer without vision-camera, not an error: it means the
+                // registrar was correctly excluded. `NoSuchMethodException`
+                // is not — it means the registrar is present and its
+                // reflective contract was renamed, which would silently
+                // disable every plugin, so it is logged as a warning.
+                Class.forName("io.imagestitcher.rn.VisionCameraPluginRegistrations")
+                    .getMethod("registerAll")
+                    .invoke(null)
                 fpPluginRegistered = true
-            } catch (e: NoClassDefFoundError) {
+            } catch (e: ClassNotFoundException) {
                 android.util.Log.i(
                     "RNImageStitcherPackage",
-                    "vision-camera FrameProcessorPluginRegistry not on classpath — "
-                    + "skipping cv_flow_gate_process_frame + save_frame_as_jpeg "
-                    + "plugin registration (host app doesn't appear to use "
-                    + "Frame Processors).",
+                    "vision-camera is not on this build — skipping Frame "
+                    + "Processor plugin registration. This is the supported "
+                    + "configuration for a consumer that does not use "
+                    + "<Camera>; nothing is broken.",
                 )
-                fpPluginRegistered = true  // don't retry every package init
+                fpPluginRegistered = true
+            } catch (e: NoSuchMethodException) {
+                android.util.Log.w(
+                    "RNImageStitcherPackage",
+                    "VisionCameraPluginRegistrations is present but "
+                    + "registerAll() was not found — its reflective contract "
+                    + "has been renamed and EVERY Frame Processor plugin is "
+                    + "now unregistered: " + e.message,
+                )
+                fpPluginRegistered = true
             } catch (e: Throwable) {
                 android.util.Log.w(
                     "RNImageStitcherPackage",
-                    "Failed to register Frame Processor plugins "
-                    + "(cv_flow_gate_process_frame / save_frame_as_jpeg): "
-                    + e.message,
+                    "Failed to register Frame Processor plugins: " + e.message,
                 )
                 fpPluginRegistered = true
             }

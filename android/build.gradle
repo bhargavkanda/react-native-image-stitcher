@@ -294,11 +294,46 @@ dependencies {
         // vision-camera's transitive runtime dep.
         compileOnly "androidx.camera:camera-core:1.5.0-alpha03"
     } else {
-        // Without vision-camera on the classpath the Frame
-        // Processor plugin source can't compile (imports unresolved).
-        // Exclude it from the source set so the rest of the SDK
-        // still builds for non-camera consumers.
-        android.sourceSets.main.java.exclude '**/CvFlowGateFrameProcessor.kt'
+        // Without vision-camera on the classpath these sources can't
+        // compile (imports unresolved). Exclude them so the rest of the
+        // SDK still builds for non-camera consumers.
+        //
+        // ⚠ EVERY FILE THAT IMPORTS `com.mrousavy.camera` MUST BE LISTED,
+        // AND THE LIST WAS SHORT BY TWO. It covered only
+        // CvFlowGateFrameProcessor.kt while SaveFrameAsJpegPlugin.kt and
+        // RNImageStitcherPackage.kt imported vc as well — and the entry
+        // point CANNOT be excluded, so a consumer without vision-camera
+        // could not build this package at all. The runtime
+        // `catch (NoClassDefFoundError)` around the registrations reads
+        // like it covers that and cannot: an unresolved Kotlin import is a
+        // COMPILE error. The registrations now live in
+        // VisionCameraPluginRegistrations.kt, which IS excludable, and the
+        // entry point reaches it by name.
+        //
+        // Keep this list and the grep in sync:
+        //   grep -rl "com.mrousavy.camera" android/src/main/java
+        //
+        // ⚠ AND IT MUST BE EXCLUDED FROM THE **KOTLIN COMPILE TASK**, NOT
+        // FROM `sourceSets.main.java`. That was the original spelling and it
+        // has never done anything: these are `.kt` files, the Kotlin Gradle
+        // plugin compiles them from its own source set, and an exclude on the
+        // Android `java` source set does not reach it. Proven by building
+        // with the vision-camera project forced absent — CvFlowGateFrameProcessor.kt
+        // was already "excluded" and still failed with eleven
+        // `Unresolved reference 'mrousavy'` errors. So the package has never
+        // been buildable without vision-camera, and the comment promising it
+        // was aspirational.
+        //
+        // `KotlinCompile` is a `SourceTask`, so `exclude` on the task is the
+        // spelling that works.
+        def vcOnlySources = [
+            '**/CvFlowGateFrameProcessor.kt',
+            '**/SaveFrameAsJpegPlugin.kt',
+            '**/VisionCameraPluginRegistrations.kt',
+        ]
+        tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+            vcOnlySources.each { pattern -> exclude pattern }
+        }
     }
 
     // v0.8.0 Phase 4b.ii/iii — react-native-worklets-core, consumed

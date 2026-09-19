@@ -83,5 +83,19 @@
     "react-native-sensors": ">=7.0.0",
     "react-native-vision-camera": ">=4.7.0",
     "react-native-worklets-core": ">=1.3.0"
+  },
+  "peerDependenciesMeta": {
+    "react-native-safe-area-context": {
+      "optional": true
+    },
+    "react-native-sensors": {
+      "optional": true
+    },
+    "react-native-vision-camera": {
+      "optional": true
+    },
+    "react-native-worklets-core": {
+      "optional": true
+    }
   }
 }
