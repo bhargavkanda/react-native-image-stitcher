@@ -101,10 +101,15 @@ describe('<Camera engine="sweep">', () => {
    *
    * What is actually invariant is narrower and stated per platform, because
    * the answer genuinely differs: on iOS nothing reads `vcPluginArm`, so the
-   * sweep must NOT mount a second session there. The render mock pins
-   * `Platform.OS === 'ios'`, which makes that the case this suite can check;
-   * the Android rows live in `sweepHostOwnsCamera.test.ts`, where the
-   * platform is an argument rather than a global.
+   * sweep must NOT mount a second session there. The shared mocks pin
+   * `Platform.OS === 'ios'`, which makes that the case this suite checks.
+   *
+   * ⚠ AND THAT PINNING IS NOT A LIMIT OF THE PROJECT, which five review
+   * rounds treated it as. `cameraSweepHostArm.render.test.tsx` overrides
+   * `Platform.OS` and the device hooks locally and drives the ANDROID host
+   * arm end to end — preview lifecycle, review cycle, ownership handoff. If
+   * you are about to write "this cannot fail here", check there first: it is
+   * where six mutations that survived every earlier round now die.
    */
   it('⚑ renders NO second camera on the sweep path', () => {
     const tree = render({ engine: 'sweep' });
@@ -136,11 +141,11 @@ describe('<Camera engine="sweep">', () => {
     //     existed — the exact family the header of this file already warns
     //     about twice.
     //  2. The real question — WHICH platform and WHICH state may mount a
-    //     second camera — cannot be asked here at all, because the render
-    //     mock also pins `Platform.OS = 'ios'`. It is asked instead in
-    //     `src/camera/__tests__/sweepHostOwnsCamera.test.ts`, where the
-    //     platform is an argument and every term has a red-first mutation
-    //     row.
+    //     second camera — is not asked here, because the shared mocks pin
+    //     `Platform.OS = 'ios'`. It is asked in
+    //     `src/camera/__tests__/sweepHostOwnsCamera.test.ts` (every term, a
+    //     red-first mutation row) and, end to end on a real Android host
+    //     arm, in `cameraSweepHostArm.render.test.tsx`.
     // The mock's own answer, asserted rather than described:
     expect((require('react-native-vision-camera') as {
       useCameraDevice: () => unknown;
@@ -355,8 +360,11 @@ describe('<Camera engine="sweep">', () => {
     // cases green, because the only tests were of the pure decision it
     // feeds.
     //
-    // The harness cannot make ownership true, so the value here is always
-    // false; what it CAN see is that the prop is not a constant. Both
+    // The SHARED mocks cannot make ownership true, so the value here is
+    // always false, and what this case checks is that the prop is not a
+    // constant. The behaviour itself — false while the session opens, true
+    // on the first preview frame, false again after a remount — is driven
+    // for real in `cameraSweepHostArm.render.test.tsx`. Both
     // `hostPreviewLive` and `vcPluginArm` descend from `mountHostPreview`,
     // so the identity holds for every state and breaks the moment either is
     // pinned — which is precisely the regression that went unnoticed.

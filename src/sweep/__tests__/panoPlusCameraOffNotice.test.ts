@@ -26,6 +26,7 @@ function androidIdle(
     hasViewfinderView: true,
     frameSource: 'own',
     hostPreviewLive: true,
+    hostPreviewError: '',
     idleFeedLive: true,
     idleReason: '',
     phase: 'idle',
@@ -150,6 +151,7 @@ describe('panoPlusCameraOffNotice — iOS keeps the behaviour it shipped', () =>
     hasViewfinderView: false,
     frameSource: 'own',
     hostPreviewLive: true,
+    hostPreviewError: '',
     idleFeedLive: false,
     idleReason: '',
     phase: 'idle',
@@ -448,5 +450,40 @@ describe('panoPlusCameraOffNotice — the camera is being handed over', () => {
     for (const verb of ['Turn', 'switch', 'Try again', 'restart']) {
       expect(text).not.toContain(verb);
     }
+  });
+});
+
+describe('panoPlusCameraOffNotice — a host preview that will never come up', () => {
+  const failed = (over: Partial<PanoPlusCameraOffInput> = {}) =>
+    panoPlusCameraOffNotice(androidIdle({
+      frameSource: 'host',
+      hostPreviewLive: false,
+      idleFeedLive: false,
+      idleReason: '',
+      ...over,
+    }));
+
+  it('⚑ prints vision-camera\'s OWN reason instead of the handoff caption', () => {
+    // `hostPreviewLive` is gated on a first-frame event, so a permission
+    // denial or another app holding the camera sits in the same branch as
+    // the ~600 ms handoff. "Handing the camera over…" over a permanent
+    // failure is a lie that never resolves, with the real cause swallowed.
+    const text = failed({
+      hostPreviewError: 'device/camera-already-in-use: another app has it',
+    }) ?? '';
+    expect(text).toContain('already-in-use');
+    expect(text).not.toContain('Handing the camera over');
+  });
+
+  it('⚑ NEGATIVE CONTROL: with no error it IS the handoff caption', () => {
+    expect(failed({ hostPreviewError: '' })).toBe('Handing the camera over…');
+  });
+
+  it('a whitespace-only error is not an error', () => {
+    expect(failed({ hostPreviewError: '   ' })).toBe('Handing the camera over…');
+  });
+
+  it('…and a live preview still says nothing, error or not', () => {
+    expect(failed({ hostPreviewLive: true, hostPreviewError: 'x' })).toBeNull();
   });
 });

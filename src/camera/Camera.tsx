@@ -2381,9 +2381,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       + 'ENTIRELY: the sweep is fed by the first-party worklet, and a host '
       + 'processor replaces it, so `<Camera>` declines host camera ownership '
       + 'and the sweep falls back to opening its own camera session. Your '
-      + 'worklet then does not run on the sweep screen at all. To keep both, '
-      + 'call `useSweepWorklet()` and invoke `sweep.call(frame)` from your '
-      + 'worklet body.',
+      + 'worklet then does not run on the sweep screen at all. \u26a0 AND '
+      + 'COMPOSITION DOES NOT HELP HERE: the term is PRESENCE, not whether '
+      + 'you call us, so `useSweepWorklet()` inside your own worklet still '
+      + 'turns the arm off. A host frameProcessor and engine="sweep" are '
+      + 'mutually exclusive today; use one or the other on that screen.',
     );
   }
   // The Frame Processor worklet bound to vision-camera's Camera.
@@ -3380,10 +3382,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           ...(effectiveFrameProcessor != null
             ? { frameProcessor: effectiveFrameProcessor }
             : {}),
-          // The one signal that means PIXELS rather than "we rendered the
-          // element". Read by `hostPreviewLive` on the sweep arm; inert on
-          // every other path, which never reads the state.
-          onStarted: () => { setHostPreviewStarted(true); },
+          // ⚠ `onPreviewStarted`, NOT `onStarted`. vision-camera documents
+          // `onStarted` as the SESSION-start event — "outputs can start
+          // receiving frames … but might not have received any yet" — so
+          // gating on it narrows the transparent-over-black window instead
+          // of closing it, which is the same mistake as gating on the
+          // render decision, one step later. `onPreviewStarted` is the
+          // first-frame event and is what "drawing" means. `onStopped` is
+          // kept as a belt for the `isActive={false}` teardown, which
+          // `onPreviewStopped` alone would not cover.
+          onPreviewStarted: () => {
+            setHostPreviewStarted(true);
+            setHostPreviewError('');
+          },
+          onPreviewStopped: () => { setHostPreviewStarted(false); },
           onStopped: () => { setHostPreviewStarted(false); },
         }}
         onError={(err) => {
@@ -3396,6 +3408,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           const e = err as { code?: string; message?: string };
           const codeStr = e?.code ?? 'unknown';
           const msg = e?.message ?? String(err);
+          // The sweep surface has no session of its own on the host arm, so
+          // this is the ONLY place its "why is the screen dark" answer can
+          // come from. Without it the handoff caption sits over a permission
+          // denial for ever.
+          setHostPreviewError(`${codeStr}: ${msg}`);
           onError?.(new CameraError(
             'VISION_CAMERA_RUNTIME',
             `${codeStr}: ${msg}`,
@@ -3414,6 +3431,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // vision-camera answers this itself with `onStarted`, which `cameraProps`
   // passes straight through.
   const [hostPreviewStarted, setHostPreviewStarted] = useState(false);
+  /** vision-camera's own reason the host preview is not up, or `''`. Shown
+   *  by the sweep surface instead of the transient handoff caption, which
+   *  would otherwise sit over a permanent failure for ever. */
+  const [hostPreviewError, setHostPreviewError] = useState('');
 
   // ── AN OWNERSHIP FLIP IS A CAMERA HANDOFF, AND NEEDS A SETTLE ────────
   // Two idle affordances move the answer with the surface still mounted (the
@@ -3483,13 +3504,22 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     settling: ownershipSettling,
   });
 
-  // `onStopped` does not fire when the element is UNMOUNTED, so clear the
-  // flag from the render decision too — otherwise a settle beginning right
-  // after a start would carry a stale `true` through its whole window, which
-  // is exactly the state this flag exists to report.
+  // ⚠ ONE EXPRESSION FOR "IS THE HOST'S PREVIEW IN THE TREE", used by the
+  // mount, by `hostPreviewLive` and by the clearing effect below.
+  //
+  // It was `mountHostPreview` in all three places while the element's real
+  // condition carried `&& sweepReview == null` — so the ONE unmount that
+  // happens on the dominant repeat path (sweep → review → dismiss → sweep)
+  // was invisible to the effect. `onPreviewStopped`/`onStopped` do not fire
+  // for an unmount either, so the flag stayed true, and the remounted
+  // `<CameraView>` — a brand-new instance with no session yet — was reported
+  // as LIVE. Transparent root, explainer suppressed, black underneath: the
+  // defect this rung is named after, on every capture after the first.
+  const hostPreviewMounted =
+    engine === 'sweep' && mountHostPreview && sweepReview == null;
   useEffect(() => {
-    if (!mountHostPreview) setHostPreviewStarted(false);
-  }, [mountHostPreview]);
+    if (!hostPreviewMounted) setHostPreviewStarted(false);
+  }, [hostPreviewMounted]);
 
   // ⚠ THE EARLY RETURN IS THE **AR** CELL ONLY (S7).
   //
@@ -3528,7 +3558,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               main tree would bring the settings modal, the thumbnail strip
               and the band overlay with it — keyframe furniture over a
               sweep. The sweep's own HUD is the surface's. */}
-          {mountHostPreview && sweepReview == null && hostPreviewElement}
+          {hostPreviewMounted && hostPreviewElement}
           {sweepReview != null ? (
             // The viewer REPLACES the surface rather than covering it: the
             // surface owns a camera, and leaving it mounted behind a review
@@ -3602,15 +3632,27 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // reachable: `frameSource: 'host'` with no preview mounted is a
             // black screen with the explainer suppressed.
             //
-            // `poseSource` and `lens` ARE host-settable, and are placed here
-            // holding the MERGED value the predicate above already saw, so
-            // the two cannot drift apart between this line and that one.
+            // `poseSource` is the MERGED value the predicate ALSO judged,
+            // so the arm cannot drift between this line and that one.
+            //
+            // ⚠ `lens` IS MERGED HERE AND **NOT** IN THE PREDICATE, and that
+            // asymmetry is deliberate rather than an oversight. This prop
+            // says which lens the SURFACE should show; the predicate's term
+            // asks which PHYSICAL DEVICE is mounted, and only `<Camera>`'s
+            // own `lens` moves that (`useCapture({ lens })`). Feeding the
+            // merged value to the predicate let a bag `lens` disarm the
+            // multicam guard while the device stayed where it was. See
+            // `sweepOwnershipInput`.
             frameSource={surfaceFrameSource}
             // The handoff's other half: `'host'` says who owns the camera,
             // this says whether it is on screen yet. See
             // `sweepCameraHandoff` — for ~600 ms the answers differ, and
             // the surface must not go transparent over nothing.
-            hostPreviewLive={mountHostPreview && hostPreviewStarted}
+            hostPreviewLive={sweepPreviewLive({
+              mounted: hostPreviewMounted,
+              started: hostPreviewStarted,
+            })}
+            hostPreviewError={hostPreviewError}
             vcPluginArm={mountHostPreview}
             vcCameraId={mountHostPreview ? (capture.device?.id ?? '') : ''}
             poseSource={sweepPoseSource}
@@ -4591,6 +4633,36 @@ function sweepShouldSettle(input: {
   if (input.latch !== null) return false;
   return input.previous !== input.live;
 }
+
+/**
+ * sweepPreviewLive — is the host's preview actually DRAWING?
+ *
+ * Two facts, and the history of this rung is a history of confusing them:
+ *
+ *   * `mounted` — the element is in the tree. This is a render decision and
+ *     says nothing about pixels; a session takes real time to open.
+ *   * `started` — vision-camera has delivered a first preview frame
+ *     (`onPreviewStarted`), cleared on stop AND on unmount, because neither
+ *     `onPreviewStopped` nor `onStopped` fires for an unmount.
+ *
+ * Only both together mean there is something behind the sweep surface. Get
+ * it wrong in either direction and the surface goes transparent over black
+ * with its explainer suppressed — which is the defect this whole rung is
+ * named after, and which two successive "fixes" recreated.
+ *
+ * Pure and exported because the state is only reachable through
+ * vision-camera's own callback: a render test can assert the prop is not a
+ * constant, but only a table can assert the mapping.
+ */
+function sweepPreviewLive(input: {
+  mounted: boolean;
+  started: boolean;
+}): boolean {
+  return input.mounted && input.started;
+}
+
+/** @internal test-only — see `sweepPreviewLive`. */
+export const _sweepPreviewLiveForTests = sweepPreviewLive;
 
 /** @internal test-only — see `sweepCameraHandoff`. */
 export const _sweepCameraHandoffForTests = sweepCameraHandoff;

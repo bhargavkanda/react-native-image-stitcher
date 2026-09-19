@@ -428,10 +428,19 @@ describe('sweepOwnershipInput — every term takes the value it is about', () =>
   });
 
   it('⚑ …and a bag lens does not sneak in through any other term either', () => {
-    // Belt to the braces above: the assembler takes no bag lens at all, so
-    // there is no path for one. Asserted rather than left to inspection,
-    // because "there is no path" is exactly what was believed before.
-    expect(Object.keys(SRC)).not.toContain('bagLens');
+    // ⚠ "THERE IS NO BAG-LENS PATH" IS A TYPE FACT, SO IT IS ASSERTED AS
+    // ONE. The first version read `expect(Object.keys(SRC)).not.toContain(
+    // 'bagLens')` — `SRC` being a literal declared in this same file, so it
+    // compared two literals and no change to `Camera.tsx` could move it.
+    // That is the third instance of this exact shape in this file's history,
+    // which is why it now fails the BUILD instead: adding a bag lens to the
+    // assembler's parameter makes the next line a type error.
+    type _NoBagLens =
+      'bagLens' extends keyof Parameters<typeof sweepOwnershipInput>[0]
+        ? ['sweepOwnershipInput must not take a bag lens'] : true;
+    const noBagLens: _NoBagLens = true;
+    expect(noBagLens).toBe(true);
+
     const a = sweepOwnershipInput({ ...SRC, captureMode: 'multicam', lens: '0.5x' });
     const b = sweepOwnershipInput({ ...SRC, captureMode: 'multicam', lens: '1x' });
     expect(hostOwns(a)).toBe(false);

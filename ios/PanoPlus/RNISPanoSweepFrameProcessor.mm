@@ -194,10 +194,11 @@ static NSString *const kArmNotification = @"RNISPanoSweepVcArmDidChange";
 /// Atomics because the callback runs on vc's frame-processor queue while
 /// arming happens on whatever thread the start path uses.
 static atomic_bool  g_armed              = ATOMIC_VAR_INIT(false);
-/// Every frame that got past the arm gate. Without it the buckets below
-/// cannot be checked against anything, and "vision-camera delivered nothing"
-/// reads identically to "vision-camera delivered N and the core refused all
-/// of them" — which is the single most common question to ask of this arm.
+/// Every frame vision-camera OFFERED — counted before the arm gate, so it is
+/// a true denominator. Without it the buckets below cannot be checked
+/// against anything, and "vision-camera delivered nothing" reads identically
+/// to "vision-camera delivered N and the core refused all of them", which is
+/// the single most common question to ask of this arm.
 static atomic_ullong g_seen               = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedNotArmed    = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedNotRunning  = ATOMIC_VAR_INIT(0);
@@ -254,16 +255,20 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
   // `isRunning` answers "is a sweep in progress", which is true on the AVF
   // and ARKit arms too. Feeding the engine there is a second producer
   // interleaving into one session. Only a vc-arm start path arms this.
+  // ⚠ COUNTED BEFORE THE ARM GATE, NOT AFTER IT. `seen` is documented as
+  // the denominator that `ingested` plus every refusal must sum to — and
+  // `refusedNotArmed` is one of them. Booking `seen` after this gate put
+  // that refusal structurally outside the total, which makes the identity
+  // false on the ONLY state this arm can currently be in.
+  atomic_fetch_add(&g_seen, 1);
   if (!atomic_load(&g_armed)) {
     atomic_fetch_add(&g_refusedNotArmed, 1);
     return @{@"ingested": @NO, @"why": @"not armed — no iOS vc-arm start path"};
   }
-  // Counted from here on: every refusal below books a bucket, and `g_seen`
-  // is what they are checked against. Two of these returns used to book
-  // nothing, so `ingested + the buckets` did not account for the frames
-  // vision-camera actually delivered — and this arm's counters are its ONLY
+  // Every refusal from here books a bucket too. Two of these returns used
+  // to book nothing, so `ingested + the buckets` did not account for the
+  // frames vision-camera delivered — and this arm's counters are its ONLY
   // evidence channel.
-  atomic_fetch_add(&g_seen, 1);
   if (![RNISPanoCore isRunning]) {
     atomic_fetch_add(&g_refusedNotRunning, 1);
     return @{@"ingested": @NO, @"why": @"not running"};

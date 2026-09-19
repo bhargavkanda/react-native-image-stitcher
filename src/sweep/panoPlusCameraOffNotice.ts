@@ -90,6 +90,17 @@ export interface PanoPlusCameraOffInput {
    * `false` is the safe default: say something rather than nothing.
    */
   hostPreviewLive: boolean;
+  /**
+   * vision-camera's own words for why the host preview is not up, or `''`.
+   *
+   * ⚠ WITHOUT THIS THE HANDOFF CAPTION IS A LIE THAT NEVER RESOLVES.
+   * `hostPreviewLive` is gated on a first-frame event, so a permission
+   * denial, another app holding the camera, or a hardware fault all sit in
+   * the same branch as the ~600 ms handoff — and that branch says "Handing
+   * the camera over…", which is transient copy over a permanent failure
+   * whose real cause has been swallowed.
+   */
+  hostPreviewError: string;
   /** The idle viewfinder answered `on: true`. */
   idleFeedLive: boolean;
   /** Native's own words for why there is no idle feed, or `''`. */
@@ -116,7 +127,7 @@ export function panoPlusCameraOffNotice(
   const {
     armContract, arArmed, arReady, androidArArm,
     hasViewfinderView, idleFeedLive, idleReason, phase, frameSource,
-    hostPreviewLive,
+    hostPreviewLive, hostPreviewError,
   } = input;
 
   // ── THE HOST OWNS THE CAMERA: THERE ARE PIXELS, AND THEY ARE NOT OURS ────
@@ -131,9 +142,18 @@ export function panoPlusCameraOffNotice(
   if (frameSource === 'host') {
     // Pixels we do not own, and they are up: nothing to explain.
     if (hostPreviewLive) return null;
-    // Told the host owns it, but the host is not drawing — the handoff
-    // window. Brief, and self-clearing, so the copy says so rather than
-    // offering the operator an action.
+    // ⚠ NATIVE'S OWN REASON FIRST, IF THERE IS ONE. Gating on a first-frame
+    // event means any state where vision-camera never delivers one holds
+    // this branch forever — a permission denial, a camera in use by another
+    // app, a hardware error. "Handing the camera over…" is then a lie that
+    // never resolves, and the real cause is swallowed. The host arm has no
+    // native reason of its own — `idleReason` is the SURFACE's answer from
+    // its own idle session, which never runs here — so this is a separate
+    // channel, filled by `<Camera>` from vision-camera's `onError`.
+    const hostFault = hostPreviewError.trim();
+    if (hostFault !== '') return `No live camera feed — ${hostFault}`;
+    // Otherwise it IS the handoff window: brief and self-clearing, so the
+    // copy says so rather than offering the operator an action.
     return 'Handing the camera over…';
   }
 

@@ -128,15 +128,23 @@ describe('useSweepWorklet — a build without the plugin gives up', () => {
   it('⚑ …but a switch back INTO the sweep re-opens the question once', () => {
     // Giving up must not be permanent for the life of the screen: the
     // registry can come up between one engine and the next.
+    // ⚠ ASSERTED ON THE FIRST RENDER AFTER THE SWITCH, not on the settled
+    // state. The settled state is reached by the EFFECT's own `tryAcquire`,
+    // which runs on the `enabled` edge whether or not the give-up flag was
+    // reset — so `acquireCalls > exhausted` and a trailing `isReady === true`
+    // were both satisfied with the reset deleted. What the reset actually
+    // buys is readiness on the render the sweep surface is already mounted
+    // for, which is the render ownership is decided on.
     pluginAvailable = false;
     const h = renderHook(true);
     act(() => { jest.advanceTimersByTime(5000); });
     const exhausted = acquireCalls;
     h.setEnabled(false);
     pluginAvailable = true;
+    const before = h.seen.length;
     h.setEnabled(true);
+    expect(h.seen[before]).toBe(true);        // THAT render, not a later one
     expect(acquireCalls).toBeGreaterThan(exhausted);
-    expect(h.seen[h.seen.length - 1]).toBe(true);
     h.unmount();
   });
 

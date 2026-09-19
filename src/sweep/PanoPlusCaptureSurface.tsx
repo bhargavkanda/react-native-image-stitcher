@@ -328,6 +328,9 @@ export interface PanoPlusCaptureSurfaceProps {
    * that says `'host'` and means it.
    */
   hostPreviewLive?: boolean;
+  /** S7 — vision-camera's own reason the host preview is not up, or `''`.
+   *  Only meaningful with `frameSource="host"`. */
+  hostPreviewError?: string;
   /** The camera id vision-camera opened. The recorder derives intrinsics
    *  from its characteristics; without it the arm refuses rather than
    *  guessing a focal length. */
@@ -720,6 +723,7 @@ export const PanoPlusCaptureSurface = forwardRef<
   vcCameraId,
   frameSource = 'own',
   hostPreviewLive = true,
+  hostPreviewError = '',
   arSourceMaxLongEdge,
   lockCamera = true,
   pinPreviewFps = true,
@@ -3075,6 +3079,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     hasViewfinderView: AvfViewfinder != null,
     frameSource,
     hostPreviewLive,
+    hostPreviewError,
     idleFeedLive,
     idleReason,
     phase,
