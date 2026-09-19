@@ -3411,6 +3411,18 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // with two independent copies of "AR on" is how an operator ends
             // up reading one and getting the other.
             frameSource={isAR ? 'own' : 'host'}
+            // ── S5: ASK FOR THE VISION-CAMERA ARM, AND ONLY WHEN IT CAN
+            //    ACTUALLY BE SERVED ──────────────────────────────────────
+            // Three conditions, all of them load-bearing. Non-AR, because
+            // the AR arm has its own feeder. A plugin that has ACQUIRED,
+            // because the registry resolves asynchronously and an arm
+            // armed before that waits for frames from a plugin handle that
+            // is still null — the exact "armed with no feeder" failure the
+            // AR arm shipped. And a camera id, because the recorder
+            // derives intrinsics from its characteristics and refuses
+            // rather than guess a focal length.
+            vcPluginArm={!isAR && sweepDriver.isReady}
+            vcCameraId={capture.device?.id ?? ''}
             poseSource={arPreference ? 'ar' : 'imu'}
             onPoseSourceChange={(next) => { setArPreference(next === 'ar'); }}
             lens={lens === '0.5x' ? 'ultraWide' : 'wide'}
@@ -3429,6 +3441,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // would silently lose the other six, including the trajectory
             // continuation that removes the elbow. Host keys still win.
             engineOptions={{ ...SWEEP_ENGINE_DEFAULTS, ...sweep?.engineOptions }}
+            // ⚠ AFTER THE SPREAD, LIKE `engineOptions`, AND FOR THE SAME
+            // REASON. This gates the frame-processor worklet: a host copy
+            // landing on top would leave the gate shut for the whole sweep
+            // and the engine would receive nothing, silently. The host's
+            // own handler is still called — it is composed, not replaced.
+            onSweepingChange={(sweeping: boolean) => {
+              sweepDriver.setActive(sweeping);
+              sweep?.onSweepingChange?.(sweeping);
+            }}
             onComplete={(result: PanoPlusCaptureResult) => {
               // BOTH, and in this order. The host hears about every capture
               // on `onCapture` exactly as it does for a photo or a panorama;

@@ -236,6 +236,29 @@ describe('<Camera engine="sweep">', () => {
     expect(names).not.toContain('PanoramaSettingsModal');
   });
 
+  it('keeps the worklet gate even when the host supplies onSweepingChange', () => {
+    // ⚠ THE SPREAD ORDER IS THE ASSERTION. `onSweepingChange` gates the
+    // frame-processor worklet; a host copy landing on top of it would
+    // leave the gate SHUT for the whole sweep and the engine would receive
+    // nothing, with no error anywhere. Composed, not replaced — the host's
+    // handler still fires.
+    const seen: boolean[] = [];
+    const tree = render({
+      engine: 'sweep',
+      sweep: { onSweepingChange: (s: boolean) => { seen.push(s); } },
+    });
+    const handler = surfaceProps(tree).onSweepingChange as (s: boolean) => void;
+    expect(typeof handler).toBe('function');
+    // The surface emits its initial `false` on mount, so assert the
+    // DELTA rather than the whole log — pinning the exact sequence would
+    // make this test fail the next time the surface reports its own idle
+    // state, which is not what it is testing.
+    const before = seen.length;
+    act(() => { handler(true); });
+    expect(seen.slice(before)).toEqual([true]);   // the host's still ran
+    act(() => { tree.unmount(); });
+  });
+
   it('routes completion to onCapture as a discriminated result', () => {
     // The type is the assertion here: a sweep result must narrow on
     // `type: 'panoplus'` alongside 'photo' and 'panorama', so an existing
