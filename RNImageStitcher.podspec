@@ -196,6 +196,7 @@ Pod::Spec.new do |s|
                           'ios/PanoPlus/RNISPanoPlusPlugin.swift',
                           'ios/PanoPlus/RNISPanoSourceView.swift',
                           'ios/PanoPlus/RNISPanoSourceViewManager.m',
+    'ios/PanoPlus/RNISPanoSweepFrameProcessor.mm',
                           'cpp/panoplus/*.{hpp,cpp}']
 
     # Only the three Obj-C headers, and only because each imports nothing but
