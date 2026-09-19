@@ -77,7 +77,20 @@ class PanoPlusSweepFrameProcessor(
      */
     private var dst: ByteArray? = null
     private var scratch: ByteArray? = null
-    private var pooledFor: Int = -1
+    private var pooledW = -1
+    private var pooledH = -1
+
+    /**
+     * The size the FIRST frame of this sweep had.
+     *
+     * ⚠ THE ENGINE ABORTS THE WHOLE SESSION ON A SIZE CHANGE, so a stream
+     * that switches resolution mid-sweep does not degrade — it ends the
+     * capture with "format-change". Refusing the odd frame here costs one
+     * frame; passing it costs the sweep.
+     */
+    private var latchedW = -1
+    private var latchedH = -1
+
 
     override fun callback(frame: Frame, params: Map<String, Any>?): Any? {
         // Cheapest exit first: no sweep wants frames. Checked BEFORE
@@ -90,11 +103,15 @@ class PanoPlusSweepFrameProcessor(
         } catch (t: Throwable) {
             // FrameInvalidError — vc already released it. Not an error we can
             // act on, and not one worth counting against the sweep.
-            return mapOf("ingested" to false, "why" to "frame invalid")
+            PanoPlusVcFrameSink.notePreOfferRefusal()
+            PanoPlusVcFrameSink.notePreOfferRefusal()
+        return mapOf("ingested" to false, "why" to "frame invalid")
         }
 
         if (image.format != ImageFormat.YUV_420_888) {
-            return mapOf("ingested" to false, "why" to "format ${image.format}")
+            PanoPlusVcFrameSink.notePreOfferRefusal()
+            PanoPlusVcFrameSink.notePreOfferRefusal()
+        return mapOf("ingested" to false, "why" to "format ${image.format}")
         }
         val w = image.width
         val h = image.height
@@ -102,45 +119,84 @@ class PanoPlusSweepFrameProcessor(
         // half-resolution) and the engine ABORTS the session on a mid-sweep
         // size change, so a refusal here is better than a resize.
         if (w <= 0 || h <= 0 || w % 2 != 0 || h % 2 != 0) {
-            return mapOf("ingested" to false, "why" to "odd size ${w}x$h")
+            PanoPlusVcFrameSink.notePreOfferRefusal()
+            PanoPlusVcFrameSink.notePreOfferRefusal()
+        return mapOf("ingested" to false, "why" to "odd size ${w}x$h")
         }
         val planes = image.planes
         if (planes.size < 3) return mapOf("ingested" to false, "why" to "planes ${planes.size}")
 
-        val need = w * h * 3 / 2
-        if (pooledFor != need) {
-            dst = ByteArray(need)
-            scratch = ByteArray(w)
-            pooledFor = need
+        // ⚠ THE GATE BEFORE THE COPY, NOT AFTER IT. `dst` is pooled and the
+        // sink's worker is still reading it for the previous frame; gating
+        // after the de-stride lets this callback overwrite a buffer inside
+        // someone else's `nativeLiveIngest`, and then records the tear as a
+        // clean "busy" drop. At ~30 ms of ingest against a 33 ms frame
+        // interval that is the steady state.
+        if (!PanoPlusVcFrameSink.tryAcquire()) {
+            return mapOf("ingested" to false, "why" to "busy")
         }
-        val out = dst ?: return mapOf("ingested" to false, "why" to "no buffer")
-        val scr = scratch ?: return mapOf("ingested" to false, "why" to "no scratch")
-
+        var acquired = true
         try {
-            Yuv420ToNv21.convert(
-                planes[0].buffer, planes[0].rowStride, planes[0].pixelStride,
-                planes[1].buffer, planes[1].rowStride, planes[1].pixelStride,
-                planes[2].buffer, planes[2].rowStride, planes[2].pixelStride,
-                w, h, out, scr,
+            // First-frame size latch. Checked INSIDE the gate so the latch
+            // and the buffers move together.
+            if (latchedW < 0) { latchedW = w; latchedH = h }
+            if (w != latchedW || h != latchedH) {
+                PanoPlusVcFrameSink.notePreOfferRefusal()
+                return mapOf("ingested" to false, "why" to "size changed ${w}x$h")
+            }
+
+            if (pooledW != w || pooledH != h) {
+                dst = ByteArray(w * h * 3 / 2)
+                pooledW = w
+                pooledH = h
+                scratch = null
+            }
+            // ⚠ SIZED BY THE CONVERTER'S OWN HELPER, NOT BY `w`. It reads a
+            // V row AND a U row into the two HALVES of scratch before
+            // consuming either, so a semi-planar stream (uPixelStride == 2,
+            // the common Android layout) needs ~2w, not w. `ByteArray(w)`
+            // threw on EVERY frame of every such device — and because the
+            // throw landed before `offer`, the pack reported
+            // `vcFramesOffered == 0`, which reads as "the plugin never
+            // mounted". The Camera2 arm has always called this helper.
+            val needScr = Yuv420ToNv21.scratchBytes(
+                w, planes[0].pixelStride, planes[1].pixelStride, planes[2].pixelStride,
             )
-        } catch (t: Throwable) {
-            return mapOf("ingested" to false, "why" to "convert: ${t.javaClass.simpleName}")
-        }
+            var scr = scratch
+            if (scr == null || scr.size < needScr) { scr = ByteArray(needScr); scratch = scr }
+            val out = dst ?: return mapOf("ingested" to false, "why" to "no buffer")
 
-        // ⚠ THE IMAGE'S OWN TIMESTAMP, NOT `Frame.getTimestamp()`. The
-        // attitude ring is keyed on the Camera2 SENSOR_TIMESTAMP domain, and
-        // vc's Frame timestamp is a different clock. Joining the two would
-        // bracket every frame against samples from the wrong era and refuse
-        // them all — the same shape as the `buffer-empty` failure the AR arm
-        // produced, and just as silent.
-        val tsNs = try { image.timestamp } catch (t: Throwable) {
-            return mapOf("ingested" to false, "why" to "no timestamp")
-        }
+            try {
+                Yuv420ToNv21.convert(
+                    planes[0].buffer, planes[0].rowStride, planes[0].pixelStride,
+                    planes[1].buffer, planes[1].rowStride, planes[1].pixelStride,
+                    planes[2].buffer, planes[2].rowStride, planes[2].pixelStride,
+                    w, h, out, scr,
+                )
+            } catch (t: Throwable) {
+                PanoPlusVcFrameSink.notePreOfferRefusal()
+                return mapOf("ingested" to false, "why" to "convert: ${t.javaClass.simpleName}")
+            }
 
-        // `out.size` — never a recomputed w*h*3/2. The JNI does not validate
-        // `length` against the array, so a confident wrong value is a
-        // SIGSEGV inside cvtColor rather than a refusal.
-        val taken = PanoPlusVcFrameSink.offer(out, out.size, w, h, tsNs)
-        return mapOf("ingested" to taken)
+            // The image's own timestamp. The attitude ring is keyed on the
+            // Camera2 SENSOR_TIMESTAMP domain; joining a different clock
+            // would bracket every frame against samples from the wrong era
+            // and refuse them all, silently.
+            val tsNs = try { image.timestamp } catch (t: Throwable) {
+                return mapOf("ingested" to false, "why" to "no timestamp")
+            }
+
+            // `out.size` — never a recomputed w*h*3/2. The JNI does not
+            // validate `length` against the array, so a confident wrong
+            // value is a SIGSEGV inside cvtColor rather than a refusal.
+            val taken = PanoPlusVcFrameSink.offerAcquired(out, out.size, w, h, tsNs)
+            acquired = false   // ownership handed to the sink's worker
+            return mapOf("ingested" to taken)
+        } finally {
+            // Every early return above still holds the slot. Releasing it
+            // here is what stops one bad frame wedging the arm shut for the
+            // rest of the sweep.
+            if (acquired) PanoPlusVcFrameSink.release()
+        }
     }
 }

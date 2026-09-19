@@ -3366,6 +3366,18 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             else -> 0
         }
         if (tracking in 0..2) trackingHist[tracking]++
+        // ⚠ THE RUN, NOT JUST THE HISTOGRAM. `trackingRunMax` is the one
+        // number that separates "the engine never latched because fx was 0"
+        // from "because tracking never held for five frames" — the two most
+        // likely bring-up failures on this arm, which are otherwise
+        // identical in the pack (ran 100%, painted 0%). Without this every
+        // vc pack reports referenceLatchReachable:false regardless.
+        if (tracking == 2) {
+            trackingRun++
+            if (trackingRun > trackingRunMax) trackingRunMax = trackingRun
+        } else {
+            trackingRun = 0
+        }
         return PanoPlusVcFrameSink.PanoPlusVcAttitude(
             q = qMapped ?: doubleArrayOf(0.0, 0.0, 0.0, 1.0),
             tracking = tracking,
@@ -3375,12 +3387,22 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
     override fun intrinsicsFor(width: Int, height: Int): DoubleArray {
         val c = vcChars
         if (c != null && (constFx <= 0.0 || vcConstW != width || vcConstH != height)) {
+            // ⚠ AND PUT THE LABEL BACK. `computeConstantIntrinsics` stamps
+            // `intrinsicsSource` itself ("LENS_INTRINSIC_CALIBRATION" /
+            // "derived" / "unavailable") — correct for the Camera2 arm,
+            // where those numbers are then crop-mapped per frame. Here they
+            // are NOT: there is no CaptureResult and no crop region. Left
+            // alone, the first frame erases the one marker that stops a vc
+            // pack being read as a crop-mapped Camera2 pack.
             // Derived once per SIZE, not per frame: the characteristics are
             // static and the only thing that varies is the stream we are
             // being handed.
             computeConstantIntrinsics(c, Size(width, height))
             vcConstW = width
             vcConstH = height
+            intrinsicsSource =
+                "characteristics-nocrop (vision-camera owns the camera; " +
+                    "derivation: $intrinsicsSource)"
         }
         // No crop region exists on this arm, so the constant intrinsics ARE
         // the answer — `intrinsicsFor(meta, size)`'s per-frame mapping has
@@ -3394,7 +3416,11 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         outcome: Int,
         droppedBusy: Boolean,
     ) {
-        if (droppedBusy) { this.droppedBusy.incrementAndGet(); return }
+        // ⚠ NOT `droppedBusy`. That counter is the Camera2 arm's ENCODER
+        // backpressure, and the pack's own advisory tells the reader to
+        // "read timings.encodeMs / counts.droppedBusy" — advice that points
+        // at an encoder this arm does not run. vc drops are their own fact.
+        if (droppedBusy) return
         if (ran) vcFramesRan.incrementAndGet()
         if (painted) vcFramesPainted.incrementAndGet()
         if (outcome in 0..255) vcOutcomeHist[outcome] = (vcOutcomeHist[outcome] ?: 0L) + 1L
@@ -3466,7 +3492,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         vcPluginArmActive = true
         arArmReason =
             "VISION-CAMERA PLUGIN ARM: the sweep runs on frames from the camera <Camera> " +
-                "already owns (FrameProcessor '${PanoPlusSweepFrameProcessor.PLUGIN_NAME}'), " +
+                "already owns (FrameProcessor '${PanoPlusVcFrameSink.PLUGIN_NAME}'), " +
                 "and this recorder opens no Camera2 client. COSTS, all measured and none " +
                 "hidden: vision-camera 4.7.3 surfaces no SENSOR_EXPOSURE_TIME and no " +
                 "SENSOR_SENSITIVITY, so the engine's exposure normalisation runs on zeros; " +
@@ -6382,6 +6408,15 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                         .i("vcFramesDroppedBusy", PanoPlusVcFrameSink.framesDroppedBusy)
                         .i("vcFramesRan", vcFramesRan.get())
                         .i("vcFramesPainted", vcFramesPainted.get())
+                        // The engine's own verdict per frame. `ran` and
+                        // `painted` alone cannot separate the two likeliest
+                        // bring-up failures; the Outcome ordinal can.
+                        .raw(
+                            "vcOutcomes",
+                            vcOutcomeHist.entries.sortedBy { it.key }
+                                .joinToString(",", "{", "}") { "\"${it.key}\":${it.value}" },
+                        )
+                        .i("vcFramesRefusedPreOffer", PanoPlusVcFrameSink.framesRefusedPreOffer)
                         .b("degradedFromAr", arArmDegraded)
                         // The SAME index track.jsonl carries, so the two join.
                         .i("degradedAtSeq", arArmDegradedAtSeq)
@@ -6732,7 +6767,16 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             // arriving during teardown would offer a frame to a session that
             // is being finalized — and `PanoPlusLiveNative.ingest`'s own
             // guard would answer 0 silently rather than say so.
-            if (vcPluginArmActive) PanoPlusVcFrameSink.disarm()
+            if (vcPluginArmActive) {
+                // ⚠ DISARM **AND WAIT**. Disarming stops NEW frames; it does
+                // not stop the one already inside `nativeLiveIngest`. The
+                // finalize below assumes no ingest is running — an ingest
+                // racing it is a frame written into a session being closed,
+                // and the engine's own guard would answer 0 silently rather
+                // than say so.
+                PanoPlusVcFrameSink.disarm(this)
+                PanoPlusVcFrameSink.awaitIdle(budget.remainingMs().coerceAtMost(1000L))
+            }
             // ⚠ `arArmActive` IS DELIBERATELY NOT CLEARED HERE. The writer
             // thread is joined BELOW, so a frame is very likely mid-row right
             // now; flipping the arm under it would produce a row whose `q` came
