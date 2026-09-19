@@ -3405,10 +3405,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // see the value the surface will actually get — not `<Camera>`'s own state,
   // which the bag may be about to replace. Merging after the fact is how
   // `frameSource` and `vcPluginArm` came to disagree in the first place.
-  const sweepPoseSource: 'ar' | 'imu' =
-    sweep?.poseSource ?? (arPreference ? 'ar' : 'imu');
-  const sweepLens: 'wide' | 'ultraWide' =
-    sweep?.lens ?? (lens === '0.5x' ? 'ultraWide' : 'wide');
+  const sweepPoseSource = sweepMergedPoseSource(sweep?.poseSource, arPreference);
+  const sweepLens = sweepMergedLens(sweep?.lens, lens);
   const hostOwnsSweepCameraLive = sweepHostOwnsCamera({
     isAR,
     platformOS: Platform.OS,
@@ -3423,6 +3421,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     deviceId: capture.device?.id ?? '',
     captureMode: capture.captureMode,
     lens: sweepLens === 'ultraWide' ? '0.5x' : '1x',
+    hostFrameProcessorPresent: hostFrameProcessor != null,
   });
   // ── AN OWNERSHIP FLIP IS A CAMERA HANDOFF, AND NEEDS THE SAME SETTLE ──
   //
@@ -3447,7 +3446,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const [ownershipSettling, setOwnershipSettling] = useState(false);
   const prevOwnsRef = useRef(hostOwnsSweepCameraLive);
   useEffect(() => {
-    if (prevOwnsRef.current === hostOwnsSweepCameraLive) return undefined;
+    // ⚠ NEVER WHILE A SWEEP IS RUNNING, AND THE `return` MUST NOT RECORD.
+    // The latch exists so ownership cannot move mid-capture; a settle
+    // started under it would do precisely what the latch forbids, because
+    // `mountHostPreview` ANDs the two — the preview would unmount while the
+    // engine is being fed from it, which is worse than the flip the settle
+    // was added to smooth. Leaving `prevOwnsRef` untouched means the
+    // transition is still pending when the sweep ends, so the handoff
+    // happens then, which is when it is actually safe.
+    if (!sweepShouldSettle({
+      latch: sweepOwnershipLatch,
+      previous: prevOwnsRef.current,
+      live: hostOwnsSweepCameraLive,
+    })) return undefined;
     prevOwnsRef.current = hostOwnsSweepCameraLive;
     setOwnershipSettling(true);
     const timer = setTimeout(
@@ -3455,14 +3466,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       SWEEP_CAMERA_RELEASE_SETTLE_MS,
     );
     return () => { clearTimeout(timer); };
-  }, [hostOwnsSweepCameraLive]);
+  }, [hostOwnsSweepCameraLive, sweepOwnershipLatch]);
 
   // Who may MOUNT a camera, and who is TOLD the host owns one. They differ
-  // only inside the settle window, and that difference is the handoff.
-  const hostOwnsSweepCamera = sweepOwnershipLatch ?? hostOwnsSweepCameraLive;
-  const mountHostPreview = hostOwnsSweepCamera && !ownershipSettling;
-  const surfaceFrameSource: 'own' | 'host' =
-    (hostOwnsSweepCamera || ownershipSettling) ? 'host' : 'own';
+  // only inside the settle window, and that difference IS the handoff —
+  // see `sweepCameraHandoff`, which is pure and table-tested because this
+  // harness cannot move the inputs.
+  const { mountHostPreview, surfaceFrameSource } = sweepCameraHandoff({
+    live: hostOwnsSweepCameraLive,
+    latch: sweepOwnershipLatch,
+    settling: ownershipSettling,
+  });
 
   // ⚠ THE EARLY RETURN IS THE **AR** CELL ONLY (S7).
   //
@@ -3490,7 +3504,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               keyframe engine uses — one definition, so the two cannot
               drift.
 
-              ⚠ GATED ON `hostOwnsSweepCamera`, NOT ON `!isAR`. The two are
+              ⚠ GATED ON THE OWNERSHIP ANSWER, NOT ON `!isAR`. The two are
               not the same question: `!isAR` is "the sweep is not using
               ARKit", and this needs "the sweep's native recorder will open
               NOTHING". On iOS today the second is false however the first
@@ -3558,6 +3572,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // holding the MERGED value the predicate above already saw, so
             // the two cannot drift apart between this line and that one.
             frameSource={surfaceFrameSource}
+            // The handoff's other half: `'host'` says who owns the camera,
+            // this says whether it is on screen yet. See
+            // `sweepCameraHandoff` — for ~600 ms the answers differ, and
+            // the surface must not go transparent over nothing.
+            hostPreviewLive={mountHostPreview}
             vcPluginArm={mountHostPreview}
             vcCameraId={mountHostPreview ? (capture.device?.id ?? '') : ''}
             poseSource={sweepPoseSource}
@@ -4316,7 +4335,7 @@ export const _cameraShouldUnmountForTests = cameraShouldUnmount;
  * render test cannot reach most of these states. A truth table can reach all
  * of them.
  */
-function sweepHostOwnsCamera(input: {
+export interface SweepHostOwnsCameraInput {
   /** The sweep resolved to the ARKit/ARCore arm, which feeds itself. */
   isAR: boolean;
   /**
@@ -4338,7 +4357,54 @@ function sweepHostOwnsCamera(input: {
   captureMode: CaptureDeviceMode;
   /** The lens the operator chose. */
   lens: '1x' | '0.5x';
-}): boolean {
+  /**
+   * The host supplied its own `frameProcessor` prop.
+   *
+   * ⚠ IT SILENTLY REPLACES OURS. `effectiveFrameProcessor` is
+   * `hostFrameProcessor ?? (engine === 'sweep' ? sweepFrameProcessor : …)`,
+   * so a host that sets both `frameProcessor` and `engine="sweep"` gets its
+   * own worklet bound to `<CameraView>` and the sweep's ingest worklet
+   * bound to nothing. Without this term the predicate still said "the host
+   * owns the camera", so the recorder was told to open NOTHING and wait to
+   * be fed — by a plugin no frame will ever reach. That is the
+   * armed-with-no-feeder failure the AR arm already shipped once, and it
+   * presents as `vcFramesOffered == 0`, i.e. as a plugin that never mounted.
+   */
+  hostFrameProcessorPresent: boolean;
+}
+
+/**
+ * The same keys at RUNTIME, because a TypeScript parameter type is erased
+ * and a table test cannot enumerate it.
+ *
+ * ⚠ AND EXHAUSTIVENESS IS ENFORCED BY `tsc`, NOT BY EYE — see the check
+ * below. The truth table reads this list, so a term added to the interface
+ * without a falsifying value fails the build and then the table, rather
+ * than sitting in the predicate unexercised. An earlier version of that
+ * table compared two literals in the same test file and claimed to be
+ * derived from the predicate; it was not, and could not have been.
+ */
+export const SWEEP_HOST_OWNS_INPUT_KEYS = [
+  'isAR',
+  'sweepPoseSource',
+  'platformOS',
+  'cameraUnmounting',
+  'pluginReady',
+  'deviceId',
+  'captureMode',
+  'lens',
+  'hostFrameProcessorPresent',
+] as const;
+
+// A key missing from the list above makes this line a type error.
+type _SweepOwnsKeysAreExhaustive =
+  Exclude<keyof SweepHostOwnsCameraInput,
+          typeof SWEEP_HOST_OWNS_INPUT_KEYS[number]> extends never
+    ? true : ['missing keys in SWEEP_HOST_OWNS_INPUT_KEYS'];
+const _sweepOwnsKeysAreExhaustive: _SweepOwnsKeysAreExhaustive = true;
+void _sweepOwnsKeysAreExhaustive;
+
+function sweepHostOwnsCamera(input: SweepHostOwnsCameraInput): boolean {
   return (
     !input.isAR
     && input.sweepPoseSource === 'imu'
@@ -4347,11 +4413,102 @@ function sweepHostOwnsCamera(input: {
     && input.pluginReady
     && input.deviceId !== ''
     && !(input.captureMode === 'multicam' && input.lens !== '1x')
+    && !input.hostFrameProcessorPresent
   );
+}
+
+/**
+ * What the surface will actually be given for `poseSource` / `lens`, host
+ * override included.
+ *
+ * ⚠ PURE AND EXPORTED BECAUSE THE RENDER HARNESS CANNOT SEE THE FIX. The
+ * merge exists so `sweepHostOwnsCamera` judges the value the SURFACE
+ * receives rather than `<Camera>`'s own state — but the harness pins three
+ * of that predicate's other terms false, so reverting the merge leaves
+ * every mounted assertion green. Measured: the whole suite passed with it
+ * reverted. A two-line derivation with no falsifiable test is how the first
+ * version of this collapse shipped a claim it could not support.
+ */
+export function sweepMergedPoseSource(
+  bagPoseSource: 'ar' | 'imu' | undefined,
+  arPreference: boolean,
+): 'ar' | 'imu' {
+  return bagPoseSource ?? (arPreference ? 'ar' : 'imu');
+}
+
+/** Twin of `sweepMergedPoseSource` for the lens. */
+export function sweepMergedLens(
+  bagLens: 'wide' | 'ultraWide' | undefined,
+  lens: CameraLens,
+): 'wide' | 'ultraWide' {
+  return bagLens ?? (lens === '0.5x' ? 'ultraWide' : 'wide');
 }
 
 /** @internal test-only — see `sweepHostOwnsCamera`. */
 export const _sweepHostOwnsCameraForTests = sweepHostOwnsCamera;
+
+/**
+ * sweepCameraHandoff — resolve the live ownership answer, the in-flight sweep
+ * latch and the settle window into the two things that actually act on them:
+ * whether `<Camera>` may MOUNT its preview, and what the surface is TOLD.
+ *
+ * ── WHY THEY ARE NOT THE SAME BOOLEAN ───────────────────────────────────
+ *
+ * An ownership flip is a camera HANDOFF, and a handoff has a loser and a
+ * winner. Done in one commit, `<CameraView>` unmounts and the surface's idle
+ * effect opens its own AVF client in the same frame — while Camera2 is still
+ * releasing the first, a release this file measures at ~479 ms. That is
+ * ERROR_CAMERA_IN_USE on a phone where nothing is wrong but the ordering.
+ *
+ * So for the width of the window the surface is told `'host'` (whoever held
+ * a camera lets go, and nobody opens one) while `mountHostPreview` stays
+ * false (the winner waits). Neither side has a camera for 600 ms. That is
+ * the correct state during a handoff, and the surface's own fail-closed
+ * guard refuses a hold taken inside it rather than starting half-armed.
+ *
+ * ⚠ AND THE LATCH OUTRANKS THE WINDOW. `latch` is non-null exactly while a
+ * sweep is running, and `sweepShouldSettle` will not open a window under it —
+ * because `mountHostPreview` ANDs the two, so a settle begun mid-sweep would
+ * unmount the preview the engine is being fed from. That is strictly worse
+ * than the flip the window exists to smooth: it is the failure the latch was
+ * added to prevent, arriving through the fix for a different one.
+ *
+ * Pure and exported because the render harness cannot move any of these
+ * inputs — `Platform.OS` and the device are pinned in the mocks — so a
+ * mounted test of this logic cannot fail. The table can.
+ */
+function sweepCameraHandoff(input: {
+  /** What the predicate says right now. */
+  live: boolean;
+  /** The value latched at the start of a running sweep; null while idle. */
+  latch: boolean | null;
+  /** A handoff is in flight. */
+  settling: boolean;
+}): { mountHostPreview: boolean; surfaceFrameSource: 'own' | 'host' } {
+  const owns = input.latch ?? input.live;
+  return {
+    mountHostPreview: owns && !input.settling,
+    surfaceFrameSource: (owns || input.settling) ? 'host' : 'own',
+  };
+}
+
+/** Should a handoff window open this render? See `sweepCameraHandoff`. */
+function sweepShouldSettle(input: {
+  latch: boolean | null;
+  previous: boolean;
+  live: boolean;
+}): boolean {
+  // Never under a running sweep, and the caller must NOT record `live` when
+  // this returns false — the transition stays pending so the handoff happens
+  // when the sweep ends, which is when it is safe.
+  if (input.latch !== null) return false;
+  return input.previous !== input.live;
+}
+
+/** @internal test-only — see `sweepCameraHandoff`. */
+export const _sweepCameraHandoffForTests = sweepCameraHandoff;
+/** @internal test-only — see `sweepShouldSettle`. */
+export const _sweepShouldSettleForTests = sweepShouldSettle;
 
 
 /**

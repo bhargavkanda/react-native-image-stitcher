@@ -88,8 +88,31 @@ function mount(
   return { tree, handle };
 }
 
-/** The resolved `backgroundColor` of the surface's outermost View. */
+/** True when the surface fell back to the "pano+ is not available" card —
+ *  the state that silently invalidated the previous version of this test. */
+function isUnavailableCard(tree: ReactTestRenderer): boolean {
+  return tree.root.findAll(
+    (n) => n.props?.testID === 'panoplus-unavailable', { deep: true },
+  ).length > 0;
+}
+
+/**
+ * The resolved `backgroundColor` of the surface's outermost View.
+ *
+ * ⚠ THE UNAVAILABLE-CARD CHECK IS INSIDE THIS HELPER, not in a separate
+ * precondition case. That card's style is `{flex: 1, backgroundColor:
+ * '#000'}` — byte-identical in the property read here to `styles.fill` — so
+ * a probe that lands on it silently reports the own-arm answer whatever the
+ * surface actually did. A precondition case guarding only ONE of the two
+ * mounts is how this file's predecessor passed on the pre-fix code.
+ */
 function rootBackground(tree: ReactTestRenderer): unknown {
+  if (isUnavailableCard(tree)) {
+    throw new Error(
+      'the surface fell back to the "pano+ is not available" card, so this '
+      + 'probe is reading that card\'s #000 and not the sweep root',
+    );
+  }
   const root = tree.root.findAll(
     (n) => (n.type as unknown) === 'View', { deep: true },
   )[0];
@@ -100,14 +123,6 @@ function rootBackground(tree: ReactTestRenderer): unknown {
     (acc, s) => (s.backgroundColor !== undefined ? s.backgroundColor : acc),
     undefined,
   );
-}
-
-/** True when the surface fell back to the "pano+ is not available" card —
- *  the state that silently invalidated the previous version of this test. */
-function isUnavailableCard(tree: ReactTestRenderer): boolean {
-  return tree.root.findAll(
-    (n) => n.props?.testID === 'panoplus-unavailable', { deep: true },
-  ).length > 0;
 }
 
 describe('the surface root does not paint over the host preview', () => {

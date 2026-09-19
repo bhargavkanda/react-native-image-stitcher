@@ -23,7 +23,7 @@
  * (`vcFramesDroppedBusy`); a JS-side skip would hide that in a place the
  * pack cannot see.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { VisionCameraProxy } from 'react-native-vision-camera';
 import { useSharedValue } from 'react-native-worklets-core';
 import type { FrameProcessorPlugin } from 'react-native-vision-camera';
@@ -104,9 +104,30 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
   // go" state the recorder already reports having hit. The registry is
   // normally up by first render, so this settles the question before anyone
   // acts on it; the effect below remains for the case where it is not.
-  const [plugin, setPlugin] = useState<FrameProcessorPlugin | null>(
-    () => (enabled ? acquire() : null),
-  );
+  //
+  // ⚠ AND A `useState` INITIALIZER IS NOT ENOUGH, because it runs only on
+  // the hook's FIRST render. `enabled` is `engine === 'sweep'`, and
+  // `<Camera>` is NOT remounted when `engine` changes — the whole
+  // `prevEngineRef` / `sweepHandoffPending` machinery exists because it is
+  // not. So on any runtime switch INTO the sweep (photo→sweep,
+  // keyframe→sweep) the initializer had already run with `enabled` false,
+  // and `isReady` was false for the first render the sweep surface is
+  // mounted on: exactly the one-render flap this was added to remove, moved
+  // from mount time to switch time. Resolving through a ref during render
+  // covers both, and the bounded effect below stays for the case the
+  // initializer exists for — a registry that is not up yet.
+  const [plugin, setPlugin] = useState<FrameProcessorPlugin | null>(null);
+  const pluginRef = useRef<FrameProcessorPlugin | null>(null);
+  if (enabled && pluginRef.current == null) {
+    const p = acquire();
+    if (p != null) {
+      pluginRef.current = p;
+      // Safe during render: `setState` on the CURRENT component before it
+      // commits is React's own render-phase-update path, and the condition
+      // above makes it converge in one extra pass.
+      setPlugin(p);
+    }
+  }
   useEffect(() => {
     if (!enabled || plugin != null) return undefined;
     let cancelled = false;
@@ -115,7 +136,7 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
     const tryAcquire = (): void => {
       if (cancelled) return;
       const p = acquire();
-      if (p != null) { setPlugin(p); return; }
+      if (p != null) { pluginRef.current = p; setPlugin(p); return; }
       waitedMs += ACQUIRE_RETRY_MS;
       // GIVE UP RATHER THAN POLL FOREVER. A plugin that has not registered
       // in 1.5 s is not in this build, and `isReady` stays false — which is
@@ -142,5 +163,16 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
     plugin.call(frame as unknown as Parameters<typeof plugin.call>[0]);
   }, [plugin, active]);
 
-  return { call, setActive, isReady: plugin != null };
+  // ⚠ `isReady` READS THE REF, `call` READS THE STATE, and the difference
+  // is deliberate. A render-phase `setPlugin` does not change `plugin` for
+  // the render it happens on, so reporting readiness from the state would
+  // still hand `<Camera>` a false on the first render the sweep is enabled
+  // — which is the whole flap this is here to remove, since `isReady` is a
+  // TERM of the ownership predicate.
+  //
+  // `call` staying one render behind is harmless and cannot be avoided: the
+  // worklet is rebuilt by identity (that is why `plugin` is in its deps at
+  // all), and native reads the arm at `start()`, which is a deliberate
+  // operator hold many renders later — not during this one.
+  return { call, setActive, isReady: pluginRef.current != null };
 }

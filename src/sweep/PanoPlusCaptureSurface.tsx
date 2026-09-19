@@ -319,6 +319,15 @@ export interface PanoPlusCaptureSurfaceProps {
    * viewfinder question is settled at mount, the arm question at start.
    */
   frameSource?: 'own' | 'host';
+  /**
+   * S7 — is the host's preview actually mounted right now? Only meaningful
+   * with `frameSource="host"`, where it distinguishes "vision-camera is
+   * drawing behind this surface" from the ~600 ms handoff window in which
+   * the host has told us it owns the camera but is deliberately mounting
+   * nothing. Defaults TRUE, which is the historical behaviour for a host
+   * that says `'host'` and means it.
+   */
+  hostPreviewLive?: boolean;
   /** The camera id vision-camera opened. The recorder derives intrinsics
    *  from its characteristics; without it the arm refuses rather than
    *  guessing a focal length. */
@@ -710,6 +719,7 @@ export const PanoPlusCaptureSurface = forwardRef<
   vcPluginArm,
   vcCameraId,
   frameSource = 'own',
+  hostPreviewLive = true,
   arSourceMaxLongEdge,
   lockCamera = true,
   pinPreviewFps = true,
@@ -2156,8 +2166,16 @@ export const PanoPlusCaptureSurface = forwardRef<
       && wantPoseSource === 'imu';
     if (frameSource === 'host' && !willSendArm) {
       busyRef.current = false;
+      // ⚠ THE COPY IS SELECTED BY THE SAME SHAPE THE CONDITION USES. The
+      // guard was widened to `!willSendArm` while the message stayed keyed
+      // on `wantPoseSource !== 'imu'` alone — two independent questions, so
+      // a handoff refusal on the AR arm told the operator to turn off the
+      // AR they had just turned on, for a state that clears itself in
+      // 600 ms. Only a host that HAS armed us and still resolved to AR is
+      // the genuine "wrong arm" case; everything else is transient.
+      const wrongArm = vcPluginArm === true && wantPoseSource !== 'imu';
       setError(
-        wantPoseSource !== 'imu'
+        wrongArm
           ? 'This sweep cannot start: the camera belongs to the host preview '
             + 'on this screen, and the sweep resolved to the AR arm, which '
             + 'needs a camera of its own. Turn AR off for the sweep, or '
@@ -3056,6 +3074,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     androidArArm,
     hasViewfinderView: AvfViewfinder != null,
     frameSource,
+    hostPreviewLive,
     idleFeedLive,
     idleReason,
     phase,
@@ -3400,7 +3419,14 @@ export const PanoPlusCaptureSurface = forwardRef<
     //
     // The black stays on the OWN arm, where it is the backdrop behind this
     // surface's own viewfinder and there is nothing underneath to reveal.
-    <View style={[styles.fill, frameSource === 'host' && styles.fillOverHost]}>
+    <View style={[
+      styles.fill,
+      // Transparent only when something is ACTUALLY drawing behind us. In
+      // the handoff window the host says 'host' while mounting nothing, and
+      // a transparent root there is a window onto whatever the platform
+      // leaves behind rather than a viewfinder.
+      frameSource === 'host' && hostPreviewLive && styles.fillOverHost,
+    ]}>
       {/* Mounting this view IS what starts ARKit (didMoveToWindow →
           RNSARSession.shared.start()). `planeDetection="vertical"` costs
           nothing here — pano+ never reads a plane — but it keeps ARKit's

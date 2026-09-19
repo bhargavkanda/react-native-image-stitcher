@@ -2411,10 +2411,12 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
      * already states about `arArmActive`: "resolved by here ... precisely so
      * this line can be honest."
      *
-     * It is also the RIGHT question, rather than "is this the vc arm". The AR
-     * PLUGIN arm builds no request either — it never reaches `lockAndRecord`,
-     * which is the only place `CONTROL_AE_LOCK` is ever set — so keying on one
-     * arm's name would have left that arm claiming a lock it never asked for.
+     * It is also the RIGHT question, rather than "is this the vc arm". THREE
+     * start modes build no request — the vc plugin arm, the AR plugin arm and
+     * `startStandalone` — and none of them reaches `lockAndRecord`, the only
+     * place `CONTROL_AE_LOCK` is ever set. Keying on one arm's name left the
+     * other two claiming a lock they never asked for; keying on the question
+     * itself means a fourth such arm is a one-line change at its own top.
      * `true` by default: the Camera2 arms are the ones that do build one.
      */
     @Volatile private var camera2RequestIntended = true
@@ -3539,6 +3541,15 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
     }
 
     private fun startStandalone(promise: Promise) {
+        // THE THIRD ARM THAT OPENS NO CAMERA2 CLIENT, and the one the first
+        // version of this flag missed. It calls no `CameraManager`, never
+        // reaches `lockAndRecord` — the only setter of `CONTROL_AE_LOCK` —
+        // and says so itself two lines below (`intrinsicsSource =
+        // "not-applicable (no Camera2 stream in standalone mode)"`). Without
+        // this line the pack claimed an AE lock on a sweep that asked for
+        // none, which is the exact defect the flag was added to fix, left
+        // standing on a third arm. See [camera2RequestIntended].
+        camera2RequestIntended = false
         try { openPack() } catch (t: Throwable) {
             return fail(
                 promise, "pack-open-failed",
@@ -5629,11 +5640,13 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             .n("attitudeTauS", 0.0)
             .b("attitudeTauCorrected", false)
             .s("intrinsicsSource", intrinsicsSource)
-            // ⚠ WAS HARDCODED `true`, AND WAS WRONG ON THREE ARMS.
-            // Neither plugin arm builds a CaptureRequest at all — neither
-            // opens a Camera2 client, and neither reaches `lockAndRecord`,
+            // ⚠ WAS HARDCODED `true`, AND WAS WRONG ON FOUR ARMS.
+            // Three start modes build no CaptureRequest at all — both plugin
+            // arms and `startStandalone`: none opens a Camera2 client, and
+            // none reaches `lockAndRecord`,
             // which is the only place `CONTROL_AE_LOCK` is ever set — so
-            // nothing was ever requested on either; and on the Camera2 arm
+            // so nothing was ever requested on any of them; and on the
+            // Camera2 arm
             // the request is `cfg.lockCamera`, not `true`, so a sweep taken
             // with the lock deliberately OFF reported that it had asked.
             //

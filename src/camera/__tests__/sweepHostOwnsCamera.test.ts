@@ -65,10 +65,18 @@ jest.mock('react-native-vision-camera', () => ({
   useCameraPermission: jest.fn(),
 }));
 
-import { _sweepHostOwnsCameraForTests as hostOwns } from '../Camera';
+import {
+  SWEEP_HOST_OWNS_INPUT_KEYS,
+  sweepMergedLens,
+  sweepMergedPoseSource,
+  type SweepHostOwnsCameraInput,
+  _sweepHostOwnsCameraForTests as hostOwns,
+  _sweepCameraHandoffForTests as handoff,
+  _sweepShouldSettleForTests as shouldSettle,
+} from '../Camera';
 
 /** The state in which the host genuinely does own the camera. */
-const OK = {
+const OK: SweepHostOwnsCameraInput = {
   isAR: false,
   sweepPoseSource: 'imu' as const,
   platformOS: 'android',
@@ -77,6 +85,7 @@ const OK = {
   deviceId: 'back-0',
   captureMode: 'wide-only' as const,
   lens: '1x' as const,
+  hostFrameProcessorPresent: false,
 };
 
 describe('sweepHostOwnsCamera — the one state that is true', () => {
@@ -150,6 +159,16 @@ describe('sweepHostOwnsCamera — each false row is a collision it prevents', ()
     })).toBe(false);
   });
 
+  it('⚑ a HOST frameProcessor: false — ours would be silently unbound', () => {
+    // `effectiveFrameProcessor = hostFrameProcessor ?? (engine === 'sweep'
+    // ? sweepFrameProcessor : …)`, so a host that sets both gets its own
+    // worklet bound and the sweep's ingest worklet bound to NOTHING. Saying
+    // the host owns the camera there tells the recorder to open nothing and
+    // wait to be fed by a plugin no frame reaches — armed with no feeder,
+    // which presents as `vcFramesOffered == 0`.
+    expect(hostOwns({ ...OK, hostFrameProcessorPresent: true })).toBe(false);
+  });
+
   it('⚑ multicam at 0.5×: false — the virtual-container hazard, both ways', () => {
     // S6 refuses an iOS frame precisely because a virtual multi-camera
     // switches its active constituent under zoom with no notification.
@@ -163,15 +182,21 @@ describe('sweepHostOwnsCamera — each false row is a collision it prevents', ()
 
 describe('sweepHostOwnsCamera — no term is decorative', () => {
   /**
-   * ⚠ THE ROW LIST IS DERIVED FROM THE PREDICATE'S INPUT KEYS, NOT WRITTEN
-   * OUT. The first version asserted `expect(mutations).toHaveLength(6)` — a
-   * literal array checked against its own length, which is true of every
-   * tree in which nobody edits this file. It could not see the thing it was
-   * named for: an input added to the predicate that no row exercises.
+   * ⚠ THE ROW LIST COMES FROM THE IMPLEMENTATION, NOT FROM THIS FILE, AND
+   * THAT TOOK TWO TRIES TO GET RIGHT.
    *
-   * Keying off `Object.keys(OK)` makes that a hard failure — a new field
-   * with no falsifying value here fails this case rather than passing
-   * quietly, which is what "no term is decorative" has to mean.
+   * v1 asserted `expect(mutations).toHaveLength(6)` — a literal array
+   * checked against its own length, true of any tree in which nobody edits
+   * this file. v2 keyed off `Object.keys(OK)` and CLAIMED to be derived
+   * from the predicate's inputs; `OK` is a literal in this file too, so
+   * that was two adjacent literals compared with each other — the same
+   * vacuity in a better disguise, and a reviewer caught it.
+   *
+   * A TypeScript parameter type is erased, so nothing at runtime can
+   * enumerate it. `SWEEP_HOST_OWNS_INPUT_KEYS` is exported BESIDE the
+   * predicate with a `tsc` exhaustiveness check against its interface, so
+   * a new term fails the BUILD if it is missing from the list and fails
+   * THIS CASE if it is missing a falsifying value.
    */
   const FALSIFY: Record<string, unknown> = {
     isAR: true,
@@ -184,18 +209,23 @@ describe('sweepHostOwnsCamera — no term is decorative', () => {
     // baseline, so one key alone cannot falsify it.
     captureMode: 'multicam',
     lens: '0.5x',
+    hostFrameProcessorPresent: true,
   };
 
   it('⚑ every input key has a value that flips the answer', () => {
-    const missing = Object.keys(OK).filter((k) => !(k in FALSIFY));
+    expect(SWEEP_HOST_OWNS_INPUT_KEYS.length).toBeGreaterThan(0);
+    const missing = SWEEP_HOST_OWNS_INPUT_KEYS.filter((k) => !(k in FALSIFY));
     expect(missing).toEqual([]);   // a new term with no row fails HERE
+    // …and the baseline must carry every one of them too, or `OK` and the
+    // predicate have drifted apart in the other direction.
+    expect(SWEEP_HOST_OWNS_INPUT_KEYS.filter((k) => !(k in OK))).toEqual([]);
   });
 
   it('⚑ and each one actually flips it, on its own', () => {
     // `captureMode`/`lens` are applied together for the reason above; every
     // other key is mutated alone, so a clause that never affects the result
     // shows up as a name in this list.
-    const dead = Object.keys(OK).filter((k) => {
+    const dead = SWEEP_HOST_OWNS_INPUT_KEYS.filter((k) => {
       const over = (k === 'captureMode' || k === 'lens')
         ? { captureMode: FALSIFY.captureMode, lens: FALSIFY.lens }
         : { [k]: FALSIFY[k] };
@@ -209,5 +239,134 @@ describe('sweepHostOwnsCamera — no term is decorative', () => {
     // Otherwise every row above is satisfied by a predicate that returns
     // false unconditionally.
     expect(hostOwns(OK)).toBe(true);
+  });
+});
+
+/**
+ * ── THE HANDOFF ─────────────────────────────────────────────────────────
+ *
+ * `sweepHostOwnsCamera` answers who SHOULD hold the camera. Getting there
+ * from where we are is a separate problem, and the reason is physical: the
+ * Camera2 release is asynchronous (~479 ms, measured in this file's own
+ * constant), so a flip done in one commit has the winner opening while the
+ * loser is still closing.
+ *
+ * These rows are the states in between. None of them is reachable from the
+ * render harness — `Platform.OS` and the device are pinned in the mocks, so
+ * the live value cannot be moved at all — which is why this is a table.
+ */
+describe('sweepCameraHandoff — the loser releases first, the winner waits', () => {
+  it('steady state, host owns: mounts the preview and says so', () => {
+    expect(handoff({ live: true, latch: null, settling: false }))
+      .toEqual({ mountHostPreview: true, surfaceFrameSource: 'host' });
+  });
+
+  it('steady state, surface owns: no preview, and the surface is told', () => {
+    expect(handoff({ live: false, latch: null, settling: false }))
+      .toEqual({ mountHostPreview: false, surfaceFrameSource: 'own' });
+  });
+
+  it('⚑ own → host, mid-handoff: the surface lets go BEFORE we mount', () => {
+    // It is told 'host' immediately (so it closes its idle preview) while
+    // the preview waits. The reverse order is two clients on one device.
+    expect(handoff({ live: true, latch: null, settling: true }))
+      .toEqual({ mountHostPreview: false, surfaceFrameSource: 'host' });
+  });
+
+  it('⚑ host → own, mid-handoff: we unmount BEFORE the surface opens', () => {
+    // Still told 'host', which is what keeps it from opening anything while
+    // vision-camera's session is still going down.
+    expect(handoff({ live: false, latch: null, settling: true }))
+      .toEqual({ mountHostPreview: false, surfaceFrameSource: 'host' });
+  });
+
+  it('⚑ NOBODY holds a camera mid-handoff, whichever way it is going', () => {
+    // The property that makes the window safe, asserted as a property
+    // rather than inferred from the two rows above.
+    for (const live of [true, false]) {
+      expect(handoff({ live, latch: null, settling: true }).mountHostPreview)
+        .toBe(false);
+    }
+  });
+
+  it('⚑ the LATCH outranks the live value while a sweep runs', () => {
+    // Native latched the arm at start and never re-reads it.
+    expect(handoff({ live: false, latch: true, settling: false }))
+      .toEqual({ mountHostPreview: true, surfaceFrameSource: 'host' });
+    expect(handoff({ live: true, latch: false, settling: false }))
+      .toEqual({ mountHostPreview: false, surfaceFrameSource: 'own' });
+  });
+});
+
+describe('sweepShouldSettle — and never under a running sweep', () => {
+  it('opens a window when the answer changed at idle', () => {
+    expect(shouldSettle({ latch: null, previous: false, live: true })).toBe(true);
+    expect(shouldSettle({ latch: null, previous: true, live: false })).toBe(true);
+  });
+
+  it('does nothing when the answer did not change', () => {
+    expect(shouldSettle({ latch: null, previous: true, live: true })).toBe(false);
+  });
+
+  it('⚑ REFUSES under the sweep latch — this is the regression guard', () => {
+    // `mountHostPreview` ANDs the latch with `!settling`, so a window opened
+    // mid-sweep would UNMOUNT the preview the engine is being fed from. That
+    // is the exact failure the latch was added to prevent, arriving through
+    // the fix for a different one. It was in the first version of the settle.
+    for (const latch of [true, false]) {
+      expect(shouldSettle({ latch, previous: false, live: true })).toBe(false);
+      expect(shouldSettle({ latch, previous: true, live: false })).toBe(false);
+    }
+  });
+
+  it('⚑ …and the state it refuses really would drop the preview', () => {
+    // Pins WHY the guard above matters, so deleting it cannot be argued as
+    // harmless: with a sweep latched to `host`, a settle turns the mount off.
+    expect(handoff({ live: false, latch: true, settling: true }).mountHostPreview)
+      .toBe(false);
+    expect(handoff({ live: false, latch: true, settling: false }).mountHostPreview)
+      .toBe(true);
+  });
+});
+
+/**
+ * ── THE MERGE ───────────────────────────────────────────────────────────
+ *
+ * `poseSource` and `lens` are host-settable through the `sweep` bag, and
+ * the bag is spread OVER `<Camera>`'s own props — so the ownership
+ * predicate has to judge the MERGED value, not `<Camera>`'s state.
+ *
+ * ⚠ THIS LIVES HERE BECAUSE THE RENDER SUITE CANNOT SEE IT. Measured: the
+ * whole 1154-case suite stayed green with the merge reverted, because the
+ * harness pins three of the predicate's OTHER terms false, so the props it
+ * can observe do not move either way.
+ */
+describe('sweepMergedPoseSource / sweepMergedLens — the bag wins, upstream', () => {
+  it('falls back to <Camera>\'s own state when the bag says nothing', () => {
+    expect(sweepMergedPoseSource(undefined, true)).toBe('ar');
+    expect(sweepMergedPoseSource(undefined, false)).toBe('imu');
+    expect(sweepMergedLens(undefined, '0.5x')).toBe('ultraWide');
+    expect(sweepMergedLens(undefined, '1x')).toBe('wide');
+  });
+
+  it('⚑ the bag OVERRIDES it — which is why ownership must read the merge', () => {
+    expect(sweepMergedPoseSource('ar', false)).toBe('ar');
+    expect(sweepMergedPoseSource('imu', true)).toBe('imu');
+    expect(sweepMergedLens('ultraWide', '1x')).toBe('ultraWide');
+    expect(sweepMergedLens('wide', '0.5x')).toBe('wide');
+  });
+
+  it('⚑ …and that override really does flip ownership', () => {
+    // The end-to-end statement, on the pure layer: a host asking for the AR
+    // arm through the bag must take the camera back from the host preview,
+    // because the surface forwards the vc arm only on the IMU arm.
+    expect(hostOwns({
+      ...OK,
+      sweepPoseSource: sweepMergedPoseSource('ar', /* arPreference */ false),
+    })).toBe(false);
+    expect(hostOwns({
+      ...OK,
+      sweepPoseSource: sweepMergedPoseSource(undefined, false),
+    })).toBe(true);
   });
 });

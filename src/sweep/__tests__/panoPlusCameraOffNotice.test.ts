@@ -25,6 +25,7 @@ function androidIdle(
     androidArArm: false,
     hasViewfinderView: true,
     frameSource: 'own',
+    hostPreviewLive: true,
     idleFeedLive: true,
     idleReason: '',
     phase: 'idle',
@@ -148,6 +149,7 @@ describe('panoPlusCameraOffNotice — iOS keeps the behaviour it shipped', () =>
     androidArArm: false,
     hasViewfinderView: false,
     frameSource: 'own',
+    hostPreviewLive: true,
     idleFeedLive: false,
     idleReason: '',
     phase: 'idle',
@@ -353,6 +355,7 @@ describe('panoPlusCameraOffNotice — the host owns the camera', () => {
   const host = (over: Partial<PanoPlusCameraOffInput> = {}) =>
     panoPlusCameraOffNotice(androidIdle({
       frameSource: 'host',
+      hostPreviewLive: true,
       // What the host arm actually reports: the idle effect never runs, so
       // the feed reads dead and native never gives a reason.
       idleFeedLive: false,
@@ -399,5 +402,51 @@ describe('panoPlusCameraOffNotice — the host owns the camera', () => {
       })) == null)
       .map(([name]) => name);
     expect(silent).toEqual([]);
+  });
+});
+
+/**
+ * ── THE HANDOFF WINDOW ──────────────────────────────────────────────────
+ *
+ * `frameSource: 'host'` answers who OWNS the camera. For the ~600 ms of an
+ * ownership flip the host says `'host'` — so whoever held a camera lets go
+ * — while mounting NOTHING, so the loser's release finishes before the
+ * winner opens. Reading ownership as "there are pixels" put this module
+ * straight back into the state it exists to prevent: a black screen with
+ * the one component that would have described it deliberately silenced.
+ */
+describe('panoPlusCameraOffNotice — the camera is being handed over', () => {
+  const handoff = (over: Partial<PanoPlusCameraOffInput> = {}) =>
+    panoPlusCameraOffNotice(androidIdle({
+      frameSource: 'host',
+      hostPreviewLive: false,          // told 'host', nothing drawn yet
+      idleFeedLive: false,
+      idleReason: '',
+      ...over,
+    }));
+
+  it('⚑ SAYS SOMETHING when the host owns the camera but is not drawing', () => {
+    expect(handoff()).toBe('Handing the camera over…');
+  });
+
+  it('says it while sweeping too — the window does not care about phase', () => {
+    expect(handoff({ phase: 'sweeping', hasViewfinderView: false }))
+      .toBe('Handing the camera over…');
+  });
+
+  it('⚑ and goes quiet the moment the preview is actually up', () => {
+    // The pair that makes the row above meaningful: the ONLY difference is
+    // `hostPreviewLive`, so this is the flag being read, not some other
+    // branch happening to fire.
+    expect(handoff({ hostPreviewLive: true })).toBeNull();
+  });
+
+  it('⚑ never offers an ACTION — the window clears itself', () => {
+    // The other captions name something the operator can do. This one must
+    // not, because there is nothing to do and it is gone in 600 ms.
+    const text = handoff() ?? '';
+    for (const verb of ['Turn', 'switch', 'Try again', 'restart']) {
+      expect(text).not.toContain(verb);
+    }
   });
 });

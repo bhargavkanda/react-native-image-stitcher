@@ -105,19 +105,26 @@
 // distinguishable in the pack from 'it ran and painted nothing'". That was
 // FALSE and is removed. What is true now:
 //
-//   * ATTITUDE work lands in the pack through the existing channel, because
-//     this arm now calls `align` (the COUNTED overload) rather than `probe`.
+//   * ATTITUDE work is now COUNTED, because this arm calls `align` (the
+//     counted overload) rather than `probe`.
 //     One counted alignment per delivered frame is the documented contract
 //     (`RNISPanoAttitude.h:115-129`); `probe` exists for a HOLD LOOP, which
 //     this plugin does not have. The old comment justified `probe` by saying
 //     it "does not consume the sample" — neither call consumes anything, the
 //     ring is written only by `push`, and the real difference is counting.
+//
+//     ⚠ COUNTED IS NOT PUBLISHED, and an earlier version of this list said
+//     it was. `RNISPanoAttitude.report()` has exactly ONE caller in the
+//     package — inside `RNISPanoAvfSource`'s teardown — and this arm exists
+//     so that source never runs. The counters are written every frame and
+//     read by nobody, the same as `+report` below.
 //   * THIS PLUGIN'S OWN counters are reachable only via `+report`. Nothing
 //     calls it yet, because the thing that would — the iOS start path —
-//     does not exist. When it lands it must publish `+report` into the pack
-//     at teardown, the way `RNISPanoAvfSource` publishes
-//     `RNISPanoAttitude.report()` (:1431). Until then, say "unobservable",
-//     not "distinguishable".
+//     does not exist. When it lands it must publish BOTH `+report` AND
+//     `RNISPanoAttitude.report()` at teardown, the way `RNISPanoAvfSource`
+//     publishes the latter (:1431) — shipping only the first leaves the pack
+//     with no `alignment` block at all. Until then, say "unobservable", not
+//     "distinguishable".
 
 #import <Foundation/Foundation.h>
 
@@ -134,6 +141,7 @@
 // file does not name and an upstream package could stop including.
 #import <simd/simd.h>
 
+#import <math.h>
 #import <stdatomic.h>
 
 #import "RNISPanoAttitude.h"
@@ -182,6 +190,7 @@ static NSString *const kArmNotification = @"RNISPanoSweepVcArmDidChange";
 static atomic_bool  g_armed              = ATOMIC_VAR_INIT(false);
 static atomic_ullong g_refusedNotArmed    = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedFrameInvalid = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_refusedBadPts      = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedNoIntrinsics = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedBadMatrix    = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedShortMatrix  = ATOMIC_VAR_INIT(0);
@@ -197,8 +206,10 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
 - (instancetype)initWithProxy:(VisionCameraProxyHolder*)proxy
                   withOptions:(NSDictionary* _Nullable)options {
   // Stateless: everything the sweep needs is configured on `RNISPanoCore` /
-  // `RNISPanoAttitude` at start() time, and the counters are class-level so
-  // they survive the registry reusing this object across sweeps.
+  // `RNISPanoAttitude` at start() time. WHY the counters are class-level is
+  // at their declaration — and it is NOT "the registry reuses this object",
+  // which this file disproves forty lines up and used to repeat here in the
+  // same breath.
   return [super initWithProxy:proxy withOptions:options];
 }
 
@@ -209,6 +220,7 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
     @"armed":                @(atomic_load(&g_armed)),
     @"refusedNotArmed":      @(atomic_load(&g_refusedNotArmed)),
     @"refusedFrameInvalid":  @(atomic_load(&g_refusedFrameInvalid)),
+    @"refusedBadPts":        @(atomic_load(&g_refusedBadPts)),
     @"refusedNoIntrinsics":  @(atomic_load(&g_refusedNoIntrinsics)),
     @"refusedBadMatrix":     @(atomic_load(&g_refusedBadMatrix)),
     @"refusedShortMatrix":   @(atomic_load(&g_refusedShortMatrix)),
@@ -238,9 +250,14 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
   // that can never be taken, sitting exactly where the real failure mode is.
   // Unchecked, an already-released frame raises an NSException that vc turns
   // into a JS error thrown inside the worklet: no counter, no refusal row,
-  // nothing in `+report`. The Android sibling checks validity first and books
-  // it as a counted refusal (`PanoPlusSweepFrameProcessor.kt:104-107`); this
-  // arm now does the same.
+  // nothing in `+report`.
+  //
+  // The Android sibling reaches the same OUTCOME by a different mechanism,
+  // worth stating rather than glossing: it wraps the access in try/catch and
+  // books the throw (`PanoPlusSweepFrameProcessor.kt:115-122`), where this
+  // checks first. It also books into the shared pre-offer bucket, while this
+  // has its own `g_refusedFrameInvalid` — so "the same" means counted, not
+  // the same bucket.
   if (!frame.isValid) {
     atomic_fetch_add(&g_refusedFrameInvalid, 1);
     return @{@"ingested": @NO, @"why": @"frame invalid — already released"};
@@ -261,8 +278,22 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
   // value the bracket search keys on. Reading the PTS directly is right
   // either way, but the file should not carry an argument that is false.
   const CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-  if (!CMTIME_IS_VALID(pts)) return @{@"ingested": @NO, @"why": @"invalid pts"};
   const double ptsS = CMTimeGetSeconds(pts);
+  // ⚠ `CMTIME_IS_VALID` ALONE IS NOT ENOUGH. `kCMTimePositiveInfinity`
+  // carries the Valid flag, so it passes that macro and `CMTimeGetSeconds`
+  // yields +inf. `align` then answers the NON-FATAL `NonFiniteInput`
+  // refusal — and this arm's policy is to INGEST non-fatal refusals, so the
+  // frame would reach the engine with `timestampNs: inf * 1e9`. The
+  // finiteness test is the one the AVF sibling makes, and adopting its
+  // non-fatal-ingest policy is precisely what makes skipping it unsafe.
+  if (!CMTIME_IS_VALID(pts) || !isfinite(ptsS)) {
+    atomic_fetch_add(&g_refusedBadPts, 1);
+    return @{
+      @"ingested": @NO,
+      @"why": @"presentation timestamp is not a finite number",
+      @"refusedBadPts": @(atomic_load(&g_refusedBadPts)),
+    };
+  }
 
   // ── INTRINSICS, OR REFUSE — AND SAY WHICH FAULT ────────────────────
   // Three distinct faults used to share one message that named
@@ -413,6 +444,7 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
       // `+report` must be able to read it AFTER disarming.
       atomic_store(&g_refusedNotArmed, 0);
       atomic_store(&g_refusedFrameInvalid, 0);
+      atomic_store(&g_refusedBadPts, 0);
       atomic_store(&g_refusedNoIntrinsics, 0);
       atomic_store(&g_refusedBadMatrix, 0);
       atomic_store(&g_refusedShortMatrix, 0);

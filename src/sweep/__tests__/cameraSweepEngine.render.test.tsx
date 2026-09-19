@@ -306,6 +306,32 @@ describe('<Camera engine="sweep">', () => {
     act(() => { tree.unmount(); });
   });
 
+  it('⚑ a sweep in flight never loses its preview to an ownership settle', () => {
+    // The settle window and the sweep latch interact, and the first version
+    // of the settle got it wrong: `mountHostPreview` ANDs the two, so a
+    // settle started DURING a sweep unmounted the preview the engine was
+    // being fed from — exactly what the latch exists to forbid, arriving
+    // through the fix for a different problem.
+    //
+    // What is observable here is that the props the surface holds do not
+    // change across the sweep edges. The live value cannot be moved in this
+    // harness (see the ownership case below), so this is a SHAPE guard on
+    // the interaction, and the live-flip half is the A35 device round.
+    const tree = render({ engine: 'sweep' });
+    const handler = surfaceProps(tree).onSweepingChange as (s: boolean) => void;
+    const snap = () => {
+      const p = surfaceProps(tree);
+      return [p.frameSource, p.vcPluginArm, p.vcCameraId].join('|');
+    };
+    const before = snap();
+    act(() => { handler(true); });
+    act(() => { jest.advanceTimersByTime(2000); });   // past any settle
+    expect(snap()).toBe(before);
+    act(() => { handler(false); });
+    expect(snap()).toBe(before);
+    act(() => { tree.unmount(); });
+  });
+
   it('⚑ the sweep BAG cannot move who owns the camera', () => {
     // ⚠ THIS IS A REGRESSION TEST FOR A CLAIM, NOT JUST FOR CODE. The commit
     // that collapsed ownership into one predicate asserted "a disagreement is
@@ -377,6 +403,7 @@ describe('<Camera engine="sweep">', () => {
         deviceId: '',
         captureMode: 'wide-only',
         lens: '1x',
+        hostFrameProcessorPresent: false,
       });
       expect(owns).toBe(false);
       expect(p.frameSource).toBe(owns ? 'host' : 'own');

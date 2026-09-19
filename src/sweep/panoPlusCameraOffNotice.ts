@@ -70,10 +70,26 @@ export interface PanoPlusCameraOffInput {
   /**
    * Who owns the camera on THIS arm (S7). `'host'` means the embedding
    * `<Camera>` mounts vision-camera and the sweep is fed from it — this
-   * surface owns no session, draws no viewfinder, and there are live pixels
-   * BEHIND it that none of the other inputs here can see.
+   * surface owns no session and draws no viewfinder.
    */
   frameSource: 'own' | 'host';
+  /**
+   * ⚠ AND WHETHER THE HOST'S PREVIEW IS ACTUALLY ON SCREEN. Not the same
+   * question as `frameSource`, and conflating them put this module back in
+   * the exact state it exists to prevent.
+   *
+   * An ownership flip is a camera HANDOFF, and for its ~600 ms the host
+   * tells the surface `'host'` — so that whoever held a camera lets go —
+   * while mounting NOTHING, so the loser's release can finish before the
+   * winner opens. During that window the surface goes transparent, draws no
+   * viewfinder, and, on `frameSource` alone, this module returned null: a
+   * black screen with the one component that would have described it
+   * deliberately silenced. That is the defect the host-arm branch was
+   * written to fix, recreated by the fix for a different one.
+   *
+   * `false` is the safe default: say something rather than nothing.
+   */
+  hostPreviewLive: boolean;
   /** The idle viewfinder answered `on: true`. */
   idleFeedLive: boolean;
   /** Native's own words for why there is no idle feed, or `''`. */
@@ -100,6 +116,7 @@ export function panoPlusCameraOffNotice(
   const {
     armContract, arArmed, arReady, androidArArm,
     hasViewfinderView, idleFeedLive, idleReason, phase, frameSource,
+    hostPreviewLive,
   } = input;
 
   // ── THE HOST OWNS THE CAMERA: THERE ARE PIXELS, AND THEY ARE NOT OURS ────
@@ -111,7 +128,14 @@ export function panoPlusCameraOffNotice(
   // all the way through to "The camera has not opened yet." and printed it,
   // centred, over vision-camera's live feed — the exact failure this module
   // was written to prevent, arriving through an input it did not have.
-  if (frameSource === 'host') return null;
+  if (frameSource === 'host') {
+    // Pixels we do not own, and they are up: nothing to explain.
+    if (hostPreviewLive) return null;
+    // Told the host owns it, but the host is not drawing — the handoff
+    // window. Brief, and self-clearing, so the copy says so rather than
+    // offering the operator an action.
+    return 'Handing the camera over…';
+  }
 
   // ── iOS, AR ARM: ARKit draws its own view ────────────────────────────────
   // Nothing to explain once it is up; while it warms, say only that.
