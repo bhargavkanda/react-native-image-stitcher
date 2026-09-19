@@ -365,7 +365,12 @@ describe('panoPlusCameraOffNotice — the host owns the camera', () => {
   });
 
   it('says nothing while sweeping', () => {
-    expect(host({ phase: 'sweeping' })).toBeNull();
+    // ⚠ `hasViewfinderView: false` IS LOAD-BEARING. With it left true this
+    // row reached the "there is something live" branch
+    // (`hasViewfinderView && sweepOwnsCamera(phase)`) and returned null
+    // whoever owned the camera — so it passed with the host-arm guard
+    // DELETED and exercised none of the code it is filed under. Measured.
+    expect(host({ phase: 'sweeping', hasViewfinderView: false })).toBeNull();
   });
 
   it('says nothing when this build has no native viewfinder — it needs none', () => {
@@ -376,11 +381,23 @@ describe('panoPlusCameraOffNotice — the host owns the camera', () => {
     expect(host({ idleReason: 'no camera permission' })).toBeNull();
   });
 
-  it('⚑ NEGATIVE CONTROL: the same inputs on the OWN arm do print', () => {
-    // Without this the four cases above pass for a trivial reason — a
-    // function that returned null unconditionally would satisfy them all.
-    expect(panoPlusCameraOffNotice(androidIdle({
-      frameSource: 'own', idleFeedLive: false, idleReason: '',
-    }))).toBe('The camera has not opened yet.');
+  it('⚑ NEGATIVE CONTROL: every one of those inputs DOES print on the own arm', () => {
+    // Without this the rows above pass for a trivial reason — a function
+    // that returned null unconditionally would satisfy them all. Run as a
+    // TABLE rather than one sample, because a single sample is what let the
+    // sweeping row sit here exercising nothing: each input must produce a
+    // caption on the own arm, or the matching host row proves nothing.
+    const rows: Array<[string, Partial<PanoPlusCameraOffInput>]> = [
+      ['idle', {}],
+      ['sweeping', { phase: 'sweeping', hasViewfinderView: false }],
+      ['no viewfinder in build', { hasViewfinderView: false }],
+      ['native gave a reason', { idleReason: 'no camera permission' }],
+    ];
+    const silent = rows
+      .filter(([, over]) => panoPlusCameraOffNotice(androidIdle({
+        frameSource: 'own', idleFeedLive: false, idleReason: '', ...over,
+      })) == null)
+      .map(([name]) => name);
+    expect(silent).toEqual([]);
   });
 });

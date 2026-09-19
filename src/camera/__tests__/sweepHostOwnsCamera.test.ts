@@ -70,7 +70,7 @@ import { _sweepHostOwnsCameraForTests as hostOwns } from '../Camera';
 /** The state in which the host genuinely does own the camera. */
 const OK = {
   isAR: false,
-  arPreference: false,
+  sweepPoseSource: 'imu' as const,
   platformOS: 'android',
   cameraUnmounting: false,
   pluginReady: true,
@@ -137,7 +137,7 @@ describe('sweepHostOwnsCamera — each false row is a collision it prevents', ()
     // `<Camera>` then sends `poseSource: 'ar'`, and the surface forwards
     // `vcPluginArm` only on the IMU arm — so the flag is dropped on the way
     // out and the recorder opens its own camera while <CameraView> holds it.
-    expect(hostOwns({ ...OK, isAR: false, arPreference: true })).toBe(false);
+    expect(hostOwns({ ...OK, isAR: false, sweepPoseSource: 'ar' })).toBe(false);
   });
 
   it('⚑ AR preferred at 0.5×: false — the same gap, via the lens', () => {
@@ -145,7 +145,7 @@ describe('sweepHostOwnsCamera — each false row is a collision it prevents', ()
     // forces 'non-ar' regardless of AR support, so every 0.5× sweep with the
     // AR pill on took the collision path.
     expect(hostOwns({
-      ...OK, isAR: false, arPreference: true,
+      ...OK, isAR: false, sweepPoseSource: 'ar',
       captureMode: 'standalone-uw', lens: '0.5x',
     })).toBe(false);
   });
@@ -162,24 +162,52 @@ describe('sweepHostOwnsCamera — each false row is a collision it prevents', ()
 });
 
 describe('sweepHostOwnsCamera — no term is decorative', () => {
-  it('⚑ every single term can flip the answer on its own', () => {
-    // Guards against the failure this suite exists to prevent in the first
-    // place: a predicate that LOOKS thorough while one clause is dead. Each
-    // mutation below is the only change from a true state.
-    type Row = [string, Partial<Parameters<typeof hostOwns>[0]>];
-    const mutations: Row[] = [
-      ['isAR', { isAR: true }],
-      ['arPreference', { arPreference: true }],
-      ['platformOS', { platformOS: 'ios' }],
-      ['cameraUnmounting', { cameraUnmounting: true }],
-      ['pluginReady', { pluginReady: false }],
-      ['deviceId', { deviceId: '' }],
-      ['multicam@0.5x', { captureMode: 'multicam', lens: '0.5x' }],
-    ];
-    expect(mutations).toHaveLength(7);
-    const dead = mutations
-      .filter(([, m]) => hostOwns({ ...OK, ...m }) !== false)
-      .map(([n]) => n);
+  /**
+   * ⚠ THE ROW LIST IS DERIVED FROM THE PREDICATE'S INPUT KEYS, NOT WRITTEN
+   * OUT. The first version asserted `expect(mutations).toHaveLength(6)` — a
+   * literal array checked against its own length, which is true of every
+   * tree in which nobody edits this file. It could not see the thing it was
+   * named for: an input added to the predicate that no row exercises.
+   *
+   * Keying off `Object.keys(OK)` makes that a hard failure — a new field
+   * with no falsifying value here fails this case rather than passing
+   * quietly, which is what "no term is decorative" has to mean.
+   */
+  const FALSIFY: Record<string, unknown> = {
+    isAR: true,
+    sweepPoseSource: 'ar',
+    platformOS: 'ios',
+    cameraUnmounting: true,
+    pluginReady: false,
+    deviceId: '',
+    // The pair is the term: multicam is only a hazard away from the wide
+    // baseline, so one key alone cannot falsify it.
+    captureMode: 'multicam',
+    lens: '0.5x',
+  };
+
+  it('⚑ every input key has a value that flips the answer', () => {
+    const missing = Object.keys(OK).filter((k) => !(k in FALSIFY));
+    expect(missing).toEqual([]);   // a new term with no row fails HERE
+  });
+
+  it('⚑ and each one actually flips it, on its own', () => {
+    // `captureMode`/`lens` are applied together for the reason above; every
+    // other key is mutated alone, so a clause that never affects the result
+    // shows up as a name in this list.
+    const dead = Object.keys(OK).filter((k) => {
+      const over = (k === 'captureMode' || k === 'lens')
+        ? { captureMode: FALSIFY.captureMode, lens: FALSIFY.lens }
+        : { [k]: FALSIFY[k] };
+      return hostOwns({ ...OK, ...over } as Parameters<typeof hostOwns>[0])
+        !== false;
+    });
     expect(dead).toEqual([]);
+  });
+
+  it('⚑ …and the baseline it is measured against is genuinely true', () => {
+    // Otherwise every row above is satisfied by a predicate that returns
+    // false unconditionally.
+    expect(hostOwns(OK)).toBe(true);
   });
 });

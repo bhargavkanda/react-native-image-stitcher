@@ -90,6 +90,20 @@ class PanoPlusSweepFrameProcessor(
      */
     private var latchedW = -1
     private var latchedH = -1
+    /**
+     * Which sweep the latch above belongs to.
+     *
+     * ⚠ WITHOUT THIS THE LATCH SPANS EVERY SWEEP ON ONE CAMERA SCREEN, and
+     * the second one refuses every frame. vision-camera builds a fresh
+     * plugin per `initFrameProcessorPlugin`, but `useSweepWorklet` calls that
+     * ONCE per `<Camera>` mount and holds the handle — so one instance, and
+     * one latch, outlives any single sweep. Sweep 1 at 1440x1080 latches
+     * those; if the video format changes before sweep 2 (a `standalone-uw`
+     * lens switch, a highRes/keyframe-quality toggle, a background rebind)
+     * every frame of sweep 2 takes the size-changed branch and the canvas
+     * stays empty — presenting as the arm never having run.
+     */
+    private var latchedGeneration = -1L
 
 
     override fun callback(frame: Frame, params: Map<String, Any>?): Any? {
@@ -141,11 +155,20 @@ class PanoPlusSweepFrameProcessor(
         }
         var acquired = true
         try {
-            // First-frame size latch. Checked INSIDE the gate so the latch
-            // and the buffers move together.
-            if (latchedW < 0) { latchedW = w; latchedH = h }
+            // First-frame size latch, PER SWEEP. Checked INSIDE the gate so
+            // the latch and the buffers move together, and re-taken whenever
+            // the sink reports a new arm — see [latchedGeneration].
+            val gen = PanoPlusVcFrameSink.armGeneration
+            if (gen != latchedGeneration) {
+                latchedGeneration = gen
+                latchedW = w
+                latchedH = h
+            }
             if (w != latchedW || h != latchedH) {
-                PanoPlusVcFrameSink.notePreOfferRefusal()
+                // POST-acquire: `tryAcquire()` above already counted this
+                // frame as offered, so booking it pre-offer would put it in
+                // two buckets and break the partition the pack is read with.
+                PanoPlusVcFrameSink.notePostAcquireRefusal()
                 return mapOf("ingested" to false, "why" to "size changed ${w}x$h")
             }
 
@@ -168,7 +191,10 @@ class PanoPlusSweepFrameProcessor(
             )
             var scr = scratch
             if (scr == null || scr.size < needScr) { scr = ByteArray(needScr); scratch = scr }
-            val out = dst ?: return mapOf("ingested" to false, "why" to "no buffer")
+            val out = dst ?: run {
+                PanoPlusVcFrameSink.notePostAcquireRefusal()
+                return mapOf("ingested" to false, "why" to "no buffer")
+            }
 
             try {
                 Yuv420ToNv21.convert(
@@ -178,7 +204,7 @@ class PanoPlusSweepFrameProcessor(
                     w, h, out, scr,
                 )
             } catch (t: Throwable) {
-                PanoPlusVcFrameSink.notePreOfferRefusal()
+                PanoPlusVcFrameSink.notePostAcquireRefusal()   // past the door
                 return mapOf("ingested" to false, "why" to "convert: ${t.javaClass.simpleName}")
             }
 
@@ -187,6 +213,7 @@ class PanoPlusSweepFrameProcessor(
             // would bracket every frame against samples from the wrong era
             // and refuse them all, silently.
             val tsNs = try { image.timestamp } catch (t: Throwable) {
+                PanoPlusVcFrameSink.notePostAcquireRefusal()
                 return mapOf("ingested" to false, "why" to "no timestamp")
             }
 

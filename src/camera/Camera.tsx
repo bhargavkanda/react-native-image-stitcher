@@ -95,13 +95,39 @@ import { SWEEP_ENGINE_DEFAULTS } from '../sweep/sweepDefaults';
 
 /**
  * Everything `engine="sweep"` accepts, which is everything the sweep surface
- * accepts EXCEPT the three callbacks `<Camera>` owns: completion and failure
- * arrive through `onCapture`/`onError` like every other engine's, so a host
- * does not learn a second result channel to use one engine.
+ * accepts EXCEPT what `<Camera>` owns.
+ *
+ * Two groups come out, for two different reasons.
+ *
+ * THE RESULT CHANNEL. Completion and failure arrive through
+ * `onCapture`/`onError` like every other engine's, so a host does not learn a
+ * second result channel to use one engine.
+ *
+ * ⚠ WHO OWNS THE CAMERA — AND THIS IS A FIX, NOT TIDINESS. These three used
+ * to be in the bag, and the bag is spread over the props `<Camera>` computes,
+ * so a host's copy won. That made a state the design calls impossible
+ * perfectly expressible, and reachable by a plausible host belief: passing
+ * `sweep={{ frameSource: 'host' }}` because the host does own a camera
+ * elsewhere left `hostOwnsSweepCamera` false — so `<Camera>` mounted NO
+ * preview — while the surface, told the host owns it, suppressed its own
+ * viewfinder, suppressed its idle feed AND suppressed the explainer that
+ * exists to say why a screen is dark. A black screen with the one component
+ * that would have described it deliberately silenced. Measured on the real
+ * tree, not argued: a render probe flipped all of `frameSource`,
+ * `vcPluginArm`, `vcCameraId`, `poseSource` and `lens` from the bag.
+ *
+ * They are `<Camera>`'s ANSWER to "who holds the back camera", derived from
+ * one predicate together with the preview mount. An answer is not a knob.
+ * A host that wants the other arm turns AR on, or picks a different engine.
+ *
+ * `poseSource` and `lens` STAY, because those really are the operator's — but
+ * `<Camera>` now merges them BEFORE computing ownership rather than after, so
+ * the predicate sees what the surface will see. See `hostOwnsSweepCamera`.
  */
 export type SweepOptions = Omit<
   PanoPlusCaptureSurfaceProps,
   'onComplete' | 'onCancel' | 'onFailure'
+  | 'frameSource' | 'vcPluginArm' | 'vcCameraId'
 >;
 import { CameraShutter } from './CameraShutter';
 import { CameraView } from './CameraView';
@@ -3373,6 +3399,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // the native start options cannot disagree. Pure and exported; the truth
   // table lives in `sweepHostOwnsCamera`, which documents what each term
   // prevents and which of them is a regression S7 introduced.
+  // ── THE HOST'S COPY, RESOLVED BEFORE THE PREDICATE READS IT ─────────
+  // `{...sweep}` is spread over the surface's props, so a host key WINS. Two
+  // of those keys decide which arm runs, and the ownership predicate has to
+  // see the value the surface will actually get — not `<Camera>`'s own state,
+  // which the bag may be about to replace. Merging after the fact is how
+  // `frameSource` and `vcPluginArm` came to disagree in the first place.
+  const sweepPoseSource: 'ar' | 'imu' =
+    sweep?.poseSource ?? (arPreference ? 'ar' : 'imu');
+  const sweepLens: 'wide' | 'ultraWide' =
+    sweep?.lens ?? (lens === '0.5x' ? 'ultraWide' : 'wide');
   const hostOwnsSweepCameraLive = sweepHostOwnsCamera({
     isAR,
     platformOS: Platform.OS,
@@ -3382,13 +3418,51 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       statusPhase,
       sweepHandoffPending,
     ),
-    arPreference,
+    sweepPoseSource,
     pluginReady: sweepDriver.isReady,
     deviceId: capture.device?.id ?? '',
     captureMode: capture.captureMode,
-    lens,
+    lens: sweepLens === 'ultraWide' ? '0.5x' : '1x',
   });
+  // ── AN OWNERSHIP FLIP IS A CAMERA HANDOFF, AND NEEDS THE SAME SETTLE ──
+  //
+  // Two idle affordances move `hostOwnsSweepCameraLive` with the surface
+  // still mounted: the AR pill (which changes the merged pose source) and the
+  // lens pill (0.5× on a multicam body). Without a settle, the flip is one
+  // commit — `<CameraView>` unmounts and the surface's idle effect opens its
+  // own AVF client in the SAME frame, while Camera2 is still releasing the
+  // first. That release is asynchronous and this file already measures it at
+  // ~479 ms (see `SWEEP_CAMERA_RELEASE_SETTLE_MS`); the recorder's own log
+  // line for it reads "the previous camera owner was still letting go".
+  // The result is ERROR_CAMERA_IN_USE and a "No live camera feed" explainer
+  // on a phone where nothing is wrong except the ordering.
+  //
+  // So the LOSER releases first and the WINNER waits, in both directions:
+  //   * the surface is told `'host'` for the whole window, so it never opens
+  //     anything while the flip is in flight (and if it was the one holding
+  //     the camera, that tells it to let go immediately);
+  //   * `<CameraView>` mounts only once the window closes.
+  // For 600 ms neither side has a camera. That is the correct state during a
+  // handoff, and it is 600 ms of blank rather than a failed open.
+  const [ownershipSettling, setOwnershipSettling] = useState(false);
+  const prevOwnsRef = useRef(hostOwnsSweepCameraLive);
+  useEffect(() => {
+    if (prevOwnsRef.current === hostOwnsSweepCameraLive) return undefined;
+    prevOwnsRef.current = hostOwnsSweepCameraLive;
+    setOwnershipSettling(true);
+    const timer = setTimeout(
+      () => { setOwnershipSettling(false); },
+      SWEEP_CAMERA_RELEASE_SETTLE_MS,
+    );
+    return () => { clearTimeout(timer); };
+  }, [hostOwnsSweepCameraLive]);
+
+  // Who may MOUNT a camera, and who is TOLD the host owns one. They differ
+  // only inside the settle window, and that difference is the handoff.
   const hostOwnsSweepCamera = sweepOwnershipLatch ?? hostOwnsSweepCameraLive;
+  const mountHostPreview = hostOwnsSweepCamera && !ownershipSettling;
+  const surfaceFrameSource: 'own' | 'host' =
+    (hostOwnsSweepCamera || ownershipSettling) ? 'host' : 'own';
 
   // ⚠ THE EARLY RETURN IS THE **AR** CELL ONLY (S7).
   //
@@ -3427,7 +3501,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               main tree would bring the settings modal, the thumbnail strip
               and the band overlay with it — keyframe furniture over a
               sweep. The sweep's own HUD is the surface's. */}
-          {hostOwnsSweepCamera && sweepReview == null && hostPreviewElement}
+          {mountHostPreview && sweepReview == null && hostPreviewElement}
           {sweepReview != null ? (
             // The viewer REPLACES the surface rather than covering it: the
             // surface owns a camera, and leaving it mounted behind a review
@@ -3456,18 +3530,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // on one engine is still in force on the other. Two surfaces
             // with two independent copies of "AR on" is how an operator ends
             // up reading one and getting the other.
-            frameSource={hostOwnsSweepCamera ? 'host' : 'own'}
             // ── S5: ASK FOR THE VISION-CAMERA ARM ───────────────────────
             // Same boolean that chose the preview above, deliberately: the
             // declaration "the host owns the camera" and the request "do
             // not open one" have to be the same fact, or the surface draws
             // no viewfinder while native takes the device. See
             // `hostOwnsSweepCamera` for what each of its terms prevents.
-            vcPluginArm={hostOwnsSweepCamera}
-            vcCameraId={capture.device?.id ?? ''}
-            poseSource={arPreference ? 'ar' : 'imu'}
             onPoseSourceChange={(next) => { setArPreference(next === 'ar'); }}
-            lens={lens === '0.5x' ? 'ultraWide' : 'wide'}
             onLensChange={(next) => { setLens(next === 'ultraWide' ? '0.5x' : '1x'); }}
             // ⚠ DEFAULTS BEFORE THE SPREAD, SO THE HOST ALWAYS WINS.
             // The surface's own prop defaults were never a configuration
@@ -3477,6 +3546,22 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // the ARCore pose arm in a dim room and the sweep painted nothing
             // (see `sweepDefaults.ts` for the measurement).
             {...sweep}
+            // ── AFTER THE SPREAD, AND THE TYPE ALSO FORBIDS THEM ─────────
+            // These are `<Camera>`'s ANSWER to "who holds the back camera",
+            // not a host knob — `SweepOptions` omits all three, so the bag
+            // cannot carry them and this position is the belt to that
+            // braces. A host copy winning here made the impossible state
+            // reachable: `frameSource: 'host'` with no preview mounted is a
+            // black screen with the explainer suppressed.
+            //
+            // `poseSource` and `lens` ARE host-settable, and are placed here
+            // holding the MERGED value the predicate above already saw, so
+            // the two cannot drift apart between this line and that one.
+            frameSource={surfaceFrameSource}
+            vcPluginArm={mountHostPreview}
+            vcCameraId={mountHostPreview ? (capture.device?.id ?? '') : ''}
+            poseSource={sweepPoseSource}
+            lens={sweepLens}
             // ⚠ MERGED KEY-BY-KEY, NOT SPREAD. `engineOptions` is an object,
             // so letting the host's copy through the spread above would
             // REPLACE the defaults wholesale — a host that set one option
@@ -4187,22 +4272,22 @@ export const _cameraShouldUnmountForTests = cameraShouldUnmount;
  *    preview, not an error code. iOS stays on the arm that works until
  *    `PanoPlusBridge` grows the fourth start mode Android has.
  *
- *  * **`!arPreference` — NOT implied by `!isAR`, and the gap is reachable.**
- *    `deriveEffectiveCaptureSource` returns `'non-ar'` when AR is merely
- *    UNSUPPORTED or the lens is 0.5×, so `isAR` is false on plenty of sweeps
- *    the operator has AR switched on for. Meanwhile `<Camera>` passes
- *    `poseSource={arPreference ? 'ar' : 'imu'}`, and the surface forwards
- *    `vcPluginArm` only on the IMU arm — because the recorder's own gate is
- *    `cfg.vcPluginArm && cfg.livePoseSource == "imu"`. So with AR preferred
- *    but unavailable, the old predicate declared "the host owns the camera",
- *    `<CameraView>` mounted, the surface drew no viewfinder, the arm flag was
- *    dropped on the way out — and the recorder opened its own camera anyway.
- *    Every 0.5× sweep with the AR pill on took that path.
+ *  * **`sweepPoseSource === 'imu'` — NOT implied by `!isAR`, and the gap is
+ *    reachable.** `deriveEffectiveCaptureSource` returns `'non-ar'` when AR
+ *    is merely UNSUPPORTED or the lens is 0.5×, so `isAR` is false on plenty
+ *    of sweeps the operator has AR switched on for. Meanwhile the surface
+ *    forwards `vcPluginArm` only on the IMU arm — because the recorder's own
+ *    gate is `cfg.vcPluginArm && cfg.livePoseSource == "imu"`. So with AR
+ *    preferred but unavailable, the old predicate declared "the host owns the
+ *    camera", `<CameraView>` mounted, the surface drew no viewfinder, the arm
+ *    flag was dropped on the way out — and the recorder opened its own camera
+ *    anyway. Every 0.5× sweep with the AR pill on took that path.
  *
- *    The surface now ALSO refuses this state outright at `start` rather than
- *    opening a camera the host holds (an `'imu'` request can still fall back
- *    to ARKit inside `armNotice`, which this term cannot see). This one keeps
- *    that refusal off the two paths that would otherwise hit it constantly.
+ *    ⚠ IT IS THE MERGED VALUE, not `arPreference`. `poseSource` is a host-
+ *    settable key in the `sweep` bag and the bag is spread over these props,
+ *    so reading `<Camera>`'s own state here would answer a question about a
+ *    value the surface is not going to receive — which is the same
+ *    two-places-one-fact defect one level up.
  *
  *  * **`!cameraUnmounting`** — the v0.14.2 camera-handoff race, reintroduced.
  *    `isAR` is false until the async `isSupported()` probe settles, so with
@@ -4235,10 +4320,12 @@ function sweepHostOwnsCamera(input: {
   /** The sweep resolved to the ARKit/ARCore arm, which feeds itself. */
   isAR: boolean;
   /**
-   * The operator's AR toggle. ⚠ NOT the same question as `isAR`, and the
-   * gap between them is a reachable collision — see the term's note below.
+   * The pose arm the surface will ACTUALLY be given — `<Camera>`'s
+   * `arPreference`, already merged with any host override from the `sweep`
+   * bag. ⚠ NOT the same question as `isAR`, and the gap between them is a
+   * reachable collision; see the term's note below.
    */
-  arPreference: boolean;
+  sweepPoseSource: 'ar' | 'imu';
   /** `Platform.OS`. */
   platformOS: string;
   /** `cameraShouldUnmount(...)` — a switch, probe or stitch is in flight. */
@@ -4254,7 +4341,7 @@ function sweepHostOwnsCamera(input: {
 }): boolean {
   return (
     !input.isAR
-    && !input.arPreference
+    && input.sweepPoseSource === 'imu'
     && input.platformOS === 'android'
     && !input.cameraUnmounting
     && input.pluginReady

@@ -105,6 +105,8 @@ internal object PanoPlusVcFrameSink {
     /** Frames the plugin offered. `0` on a finished sweep means the arm was
      *  armed and never fed — the failure this sink exists to make visible. */
     private val offered = AtomicLong(0)
+    private val refusedPostAcquire = AtomicLong(0)
+    private val generation = AtomicLong(0)
     private val droppedBusy = AtomicLong(0)
     private var worker = Executors.newSingleThreadExecutor { r ->
         Thread(r, "rnis-pp-vc-ingest").apply { isDaemon = true }
@@ -121,10 +123,37 @@ internal object PanoPlusVcFrameSink {
      *  `framesOffered == 0` cannot be read as "the plugin never mounted"
      *  when the truth is "every frame was refused at the door". */
     val framesRefusedPreOffer: Long get() = refusedPreOffer.get()
+    /** Refused AFTER the door — see [notePostAcquireRefusal]. */
+    val framesRefusedPostAcquire: Long get() = refusedPostAcquire.get()
     private val refusedPreOffer = AtomicLong(0)
 
     /** Called by the plugin when it refuses a frame before acquiring. */
     fun notePreOfferRefusal() { refusedPreOffer.incrementAndGet() }
+
+    /**
+     * Frames refused AFTER [tryAcquire] already counted them as offered.
+     *
+     * ⚠ A SECOND COUNTER RATHER THAN A SECOND CALLER OF THE ONE ABOVE, and
+     * the distinction is arithmetic. [refusedPreOffer]'s own contract is
+     * "refused before it ever reached `tryAcquire`", so a post-acquire
+     * refusal booked there lands in BOTH buckets and `offered +
+     * refusedPreOffer` stops being a partition of what vision-camera
+     * delivered. Three branches were doing exactly that. With the split,
+     * `offered` counts every frame that got through the door and
+     * `ingested + droppedBusy + refusedPostAcquire` accounts for all of
+     * them — an identity a reader can check, which is the only reason to
+     * carry counters at all.
+     */
+    fun notePostAcquireRefusal() { refusedPostAcquire.incrementAndGet() }
+
+    /**
+     * Bumped on every [arm]. The plugin latches it alongside the frame size
+     * so a NEW sweep re-latches rather than inheriting the last one's — see
+     * `PanoPlusSweepFrameProcessor`. It lives here because `arm()` is the
+     * only event that means "a different sweep starts now", and the plugin
+     * instance outlives any one sweep.
+     */
+    val armGeneration: Long get() = generation.get()
 
     /**
      * Block until no ingest is in flight, or the budget expires.
@@ -159,7 +188,14 @@ internal object PanoPlusVcFrameSink {
         offered.set(0)
         droppedBusy.set(0)
         refusedPreOffer.set(0)
+        refusedPostAcquire.set(0)
         seq.set(0)
+        // LAST of the zeroing, and it is what tells the plugin its own
+        // per-sweep latches are stale. Bumped with the counters for the same
+        // reason they are zeroed together: a generation that moved without
+        // the counters, or counters that moved without it, would let one
+        // sweep read the other's state.
+        generation.incrementAndGet()
         if (worker.isShutdown) {
             worker = Executors.newSingleThreadExecutor { r ->
                 Thread(r, "rnis-pp-vc-ingest").apply { isDaemon = true }

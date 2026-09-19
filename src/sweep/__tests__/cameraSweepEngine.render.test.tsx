@@ -25,7 +25,7 @@
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
-import { Camera } from '../../camera/Camera';
+import { Camera, _sweepHostOwnsCameraForTests as hostOwns } from '../../camera/Camera';
 import type { CameraCaptureResult } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
@@ -116,12 +116,17 @@ describe('<Camera engine="sweep">', () => {
     // Read this before trusting the line above.
     //
     // `toHaveLength(0)` is the shape that passes when the probe is broken,
-    // so it needs a positive control — and there ISN'T one. The keyframe
-    // engine, which mounts `<CameraView>` on every phone, mounts none here
-    // either: `jest.mocks/vision-camera.render.js` pins
-    // `useCameraDevice: () => null` DELIBERATELY ("a mock that invented a
-    // device would make every no-device path untested"), so `capture.device`
-    // is null in every render test and the mount is gated on it.
+    // so it needs a positive control — and there ISN'T one here.
+    //
+    // ⚠ AND THE REASON IS NOT THE ONE THIS COMMENT FIRST GAVE. It said the
+    // mount is gated on the device being non-null. It is not: the mount is
+    // gated on `hostOwnsSweepCamera`, and a null device only changes what
+    // `<CameraView>` renders internally. The device matters because it is
+    // one of that predicate's TERMS (`jest.mocks/vision-camera.render.js`
+    // pins `useCameraDevice: () => null` deliberately — "a mock that
+    // invented a device would make every no-device path untested"), and so
+    // is `Platform.OS`, pinned to 'ios'. Two independent terms are false in
+    // every render this suite can build.
     //
     // Two consequences, and the second is the point:
     //
@@ -143,39 +148,22 @@ describe('<Camera engine="sweep">', () => {
     // And the positive control cannot even be BUILT here: rendering the
     // keyframe path throws before it reaches a camera, because
     // `PanoramaSettingsModal` needs host components this project's
-    // react-native mock does not carry. So there is no arrangement of this
-    // suite in which a mounted `<CameraView>` is observable.
+    // react-native mock does not carry.
+    //
+    // What the case DOES still catch, and the reason it is kept rather than
+    // deleted: a predicate that becomes PERMISSIVE. Restoring the bare
+    // `!isAR` reddens it, because `isAR` is false on this default render.
     expect(() => render({})).toThrow(/Element type is invalid/);
   });
 
-  it('⚑ the surface does not paint over whatever is behind it', () => {
-    // The sweep surface's root is `{flex: 1, backgroundColor: '#000'}`, and
-    // on the host arm `<Camera>` renders the preview as an absolutely
-    // positioned sibling BEFORE it. RN paints siblings in document order, so
-    // an opaque second child covers an absolute first child: the entire
-    // point of S7 was painted over by one background colour and the screen
-    // was black. Nothing in this suite could see it — a covered preview is
-    // still a mounted component — so the assertion has to be about the
-    // resolved STYLE, not the component count.
-    const tree = render({ engine: 'sweep' });
-    const surface = tree.root.findByType(PanoPlusCaptureSurface);
-    const root = surface.findAll(
-      (n) => (n.type as unknown) === 'View', { deep: true },
-    )[0];
-    const flat = ([] as unknown[])
-      .concat(root.props.style as unknown[])
-      .filter(Boolean) as Array<Record<string, unknown>>;
-    const bg = flat.reduce<unknown>(
-      (acc, s) => (s.backgroundColor !== undefined ? s.backgroundColor : acc),
-      undefined,
-    );
-    const hostOwns = (surface.props as { frameSource?: string }).frameSource
-      === 'host';
-    // One assertion, both arms: transparent exactly when something else is
-    // drawing underneath, opaque when this surface is the only thing there.
-    expect(bg).toBe(hostOwns ? 'transparent' : '#000');
-    act(() => { tree.unmount(); });
-  });
+  // ⚠ THE SURFACE-ROOT CASE THAT WAS HERE HAS MOVED, because it was reading
+  // the wrong View. With no native module registered the surface takes its
+  // `available === false` early return and renders the "pano+ is not
+  // available" card — whose style is ALSO `{flex: 1, backgroundColor:
+  // '#000'}`. The probe matched that, and passed on the pre-fix code.
+  // `panoPlusHostArm.render.test.tsx` mounts the surface directly with
+  // native installed, asserts it got PAST the unavailable card first, and is
+  // red-first against the fix.
 
   it('accepts sweep options without them leaking onto other engines', () => {
     // A compile-level guarantee made observable: the bag is one prop, so a
@@ -318,10 +306,59 @@ describe('<Camera engine="sweep">', () => {
     act(() => { tree.unmount(); });
   });
 
+  it('⚑ the sweep BAG cannot move who owns the camera', () => {
+    // ⚠ THIS IS A REGRESSION TEST FOR A CLAIM, NOT JUST FOR CODE. The commit
+    // that collapsed ownership into one predicate asserted "a disagreement is
+    // no longer expressible". It was expressible, through the documented
+    // public `sweep` bag: `{...sweep}` is spread OVER the props `<Camera>`
+    // computes, so a host key won. Reproduced with exactly this probe.
+    //
+    // The state it produced is the worst one available: `frameSource: 'host'`
+    // with `hostOwnsSweepCamera` false means `<Camera>` mounts NO preview,
+    // the surface suppresses its own viewfinder AND its idle feed, and
+    // `panoPlusCameraOffNotice` suppresses the explainer that exists to say
+    // why a screen is dark. A black screen with its own description silenced.
+    //
+    // `SweepOptions` now omits all three, so this no longer type-checks —
+    // hence the cast, which is what an untyped JS host effectively does.
+    const hostile = {
+      frameSource: 'host',
+      vcPluginArm: true,
+      vcCameraId: 'HOST-SUPPLIED-99',
+    } as unknown as Record<string, unknown>;
+    const p = surfaceProps(render({ engine: 'sweep', sweep: hostile }));
+    expect(p.frameSource).toBe('own');        // <Camera>'s answer, not the bag's
+    expect(p.vcPluginArm).toBe(false);
+    expect(p.vcCameraId).toBe('');
+  });
+
+  it('⚑ a bag-supplied poseSource reaches the OWNERSHIP predicate, not just the surface', () => {
+    // The other half. `poseSource` IS legitimately host-settable — it is the
+    // operator's arm — but the surface forwards `vcPluginArm` only on the IMU
+    // arm, so a bag that sets `'ar'` while the predicate reads `<Camera>`'s
+    // own `arPreference` produces the collision one layer down: host owns the
+    // camera, arm flag dropped on the way out, recorder opens its own.
+    // `<Camera>` therefore MERGES first and derives ownership from the merged
+    // value, so these two can never disagree.
+    const p = surfaceProps(render({
+      engine: 'sweep', sweep: { poseSource: 'ar' as const },
+    }));
+    expect(p.poseSource).toBe('ar');          // the host's choice is honoured
+    expect(p.frameSource).toBe('own');        // …and ownership followed it
+    expect(p.vcPluginArm).toBe(false);
+  });
+
   it('⚑ never declares host ownership without also asking for the arm', () => {
-    // The two props are now derived from ONE boolean, and this is the
-    // invariant that says so: a surface told "you own nothing" while native
-    // was never asked to open nothing is the black-screen state exactly.
+    // The two props are derived from ONE boolean, and this is the invariant
+    // that says so: a surface told "you own nothing" while native was never
+    // asked to open nothing is the black-screen state exactly.
+    //
+    // ⚠ ASSERTED AGAINST THE PREDICATE, NOT AS AN iff BETWEEN THE TWO PROPS.
+    // Both are constantly false in this harness, so `false === false`
+    // satisfied the iff — and it survived RE-SPLITTING the two derivations,
+    // which is the exact "three places, three answers" defect the collapse
+    // exists to prevent. Pinning each prop to the predicate's own output
+    // catches the narrowing direction too.
     for (const props of [
       { engine: 'sweep' },
       { engine: 'sweep', defaultCaptureSource: 'ar' as const },
@@ -329,7 +366,22 @@ describe('<Camera engine="sweep">', () => {
     ]) {
       const tree = render(props);
       const p = surfaceProps(tree);
-      expect(p.frameSource === 'host').toBe(p.vcPluginArm === true);
+      // The predicate's answer for the state this harness pins: iOS, no
+      // device, no plugin — three independent falses.
+      const owns = hostOwns({
+        isAR: false,
+        sweepPoseSource: 'imu',
+        platformOS: 'ios',
+        cameraUnmounting: false,
+        pluginReady: false,
+        deviceId: '',
+        captureMode: 'wide-only',
+        lens: '1x',
+      });
+      expect(owns).toBe(false);
+      expect(p.frameSource).toBe(owns ? 'host' : 'own');
+      expect(p.vcPluginArm).toBe(owns);
+      expect(p.vcCameraId).toBe('');
       act(() => { tree.unmount(); });
     }
   });

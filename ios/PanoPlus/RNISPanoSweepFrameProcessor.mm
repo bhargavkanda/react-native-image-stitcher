@@ -150,14 +150,38 @@
 /// a string: the poster compiles and runs whether or not this plugin exists.
 static NSString *const kArmNotification = @"RNISPanoSweepVcArmDidChange";
 
-/// ⚠ CLASS-LEVEL, NOT PER-INSTANCE, AND THAT IS THE FIX FOR A REAL DEFECT.
-/// The registry builds the plugin object ONCE and reuses it, so instance
-/// counters accumulate across every sweep for the life of the process and a
-/// reader cannot tell one sweep's refusals from the last ten. These reset on
-/// each ARM. Atomics because the callback runs on vc's frame-processor queue
-/// while arming happens on whatever thread the start path uses.
+/// ⚠ CLASS-LEVEL, NOT PER-INSTANCE — and the reason is NOT the one an earlier
+/// version of this comment gave.
+///
+/// It said "the registry builds the plugin object ONCE and reuses it". It does
+/// not: `FrameProcessorPluginRegistry.getPlugin` calls `initializer(proxy,
+/// options)` on every lookup with no cache (vc 4.7.3,
+/// FrameProcessorPluginRegistry.m:46), and vc's own header documents the
+/// initializer as called every time the plugin is loaded. A FRESH object comes
+/// back from every `initFrameProcessorPlugin`.
+///
+/// Which makes per-instance counters worse, not better, for two reasons a
+/// reader needs to keep straight:
+///
+///   * they would be silently zeroed whenever `useSweepWorklet` re-acquires —
+///     a remount, a fast refresh — so a sweep's totals could be split across
+///     two objects with nothing saying so; and
+///   * a start path publishing `+report` holds no reference to the instance,
+///     so per-instance numbers are unreachable from the only place that would
+///     write them into the pack.
+///
+/// The real lifetime is one layer up: the JS hook calls
+/// `initFrameProcessorPlugin` ONCE per `<Camera>` mount and holds the handle,
+/// so one instance spans every sweep on one camera screen. That is precisely
+/// long enough to mix two sweeps' numbers, which is why these reset on ARM
+/// rather than on construction. (The Android plugin's size latch has the same
+/// lifetime and the same fix — a generation counter off `PanoPlusVcFrameSink`.)
+///
+/// Atomics because the callback runs on vc's frame-processor queue while
+/// arming happens on whatever thread the start path uses.
 static atomic_bool  g_armed              = ATOMIC_VAR_INIT(false);
 static atomic_ullong g_refusedNotArmed    = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_refusedFrameInvalid = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedNoIntrinsics = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedBadMatrix    = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedShortMatrix  = ATOMIC_VAR_INIT(0);
@@ -184,6 +208,7 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
   return @{
     @"armed":                @(atomic_load(&g_armed)),
     @"refusedNotArmed":      @(atomic_load(&g_refusedNotArmed)),
+    @"refusedFrameInvalid":  @(atomic_load(&g_refusedFrameInvalid)),
     @"refusedNoIntrinsics":  @(atomic_load(&g_refusedNoIntrinsics)),
     @"refusedBadMatrix":     @(atomic_load(&g_refusedBadMatrix)),
     @"refusedShortMatrix":   @(atomic_load(&g_refusedShortMatrix)),
@@ -206,8 +231,21 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
     return @{@"ingested": @NO, @"why": @"not running"};
   }
 
+  // ⚠ `isValid` BEFORE `.buffer`, NOT A NULL TEST AFTER IT. `-[Frame buffer]`
+  // THROWS `capture/frame-invalid` when the frame has been closed
+  // (vc 4.7.3, Frame.m:37-48) and otherwise returns a buffer `isValid` has
+  // already established is non-nil — so `sampleBuffer == NULL` is a branch
+  // that can never be taken, sitting exactly where the real failure mode is.
+  // Unchecked, an already-released frame raises an NSException that vc turns
+  // into a JS error thrown inside the worklet: no counter, no refusal row,
+  // nothing in `+report`. The Android sibling checks validity first and books
+  // it as a counted refusal (`PanoPlusSweepFrameProcessor.kt:104-107`); this
+  // arm now does the same.
+  if (!frame.isValid) {
+    atomic_fetch_add(&g_refusedFrameInvalid, 1);
+    return @{@"ingested": @NO, @"why": @"frame invalid — already released"};
+  }
   CMSampleBufferRef sampleBuffer = frame.buffer;
-  if (sampleBuffer == NULL) return @{@"ingested": @NO, @"why": @"no sample buffer"};
   CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
   if (pixelBuffer == NULL) return @{@"ingested": @NO, @"why": @"no pixel buffer"};
 
@@ -374,6 +412,7 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
       // RESET ON ARM, not on disarm: a teardown path that wants to publish
       // `+report` must be able to read it AFTER disarming.
       atomic_store(&g_refusedNotArmed, 0);
+      atomic_store(&g_refusedFrameInvalid, 0);
       atomic_store(&g_refusedNoIntrinsics, 0);
       atomic_store(&g_refusedBadMatrix, 0);
       atomic_store(&g_refusedShortMatrix, 0);

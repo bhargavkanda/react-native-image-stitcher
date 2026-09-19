@@ -2393,6 +2393,31 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
     @Volatile private var arPluginArmActive = false
     /** S5 — a vision-camera plugin is feeding this sweep. */
     @Volatile private var vcPluginArmActive = false
+    /**
+     * Will this recorder build a repeating Camera2 request at all?
+     *
+     * ⚠ A SEPARATE FIELD FROM THE TWO ARM FLAGS ABOVE, AND IT HAS TO BE. Both
+     * of those are set WITH their arm — after `startLiveEngine()` — because
+     * arming is what zeroes the counters they claim, and splitting the two
+     * would let a flag outlive the counters it describes. But
+     * `liveCaptureJson()` is built INSIDE `startLiveEngine()`, so at that
+     * moment both still read false, and a provenance line keyed on them
+     * describes the Camera2 arm no matter which arm is running. That is
+     * exactly how `aeLockRequested` came to be wrong on the vc arm a second
+     * time, in the commit that was fixing it being wrong the first time.
+     *
+     * So this one is decided at the TOP of each start mode, before the engine
+     * starts, on the same principle the sibling comment in `startLiveEngine`
+     * already states about `arArmActive`: "resolved by here ... precisely so
+     * this line can be honest."
+     *
+     * It is also the RIGHT question, rather than "is this the vc arm". The AR
+     * PLUGIN arm builds no request either — it never reaches `lockAndRecord`,
+     * which is the only place `CONTROL_AE_LOCK` is ever set — so keying on one
+     * arm's name would have left that arm claiming a lock it never asked for.
+     * `true` by default: the Camera2 arms are the ones that do build one.
+     */
+    @Volatile private var camera2RequestIntended = true
     /** The characteristics of the camera vision-camera opened, held so the
      *  intrinsics can be derived per frame size without an open session. */
     @Volatile private var vcChars: CameraCharacteristics? = null
@@ -3272,6 +3297,9 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
      * without confounding the arm with the gesture.
      */
     private fun startArPluginArm(promise: Promise) {
+        // Before anything else, and before `startLiveEngine()` builds the
+        // provenance block: this arm opens no Camera2 client. See the field.
+        camera2RequestIntended = false
         if (!cfg.live) {
             return fail(
                 promise, "ar-plugin-needs-live",
@@ -3427,6 +3455,9 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
     }
 
     private fun startVcPluginArm(promise: Promise) {
+        // Before anything else, and before `startLiveEngine()` builds the
+        // provenance block: this arm opens no Camera2 client. See the field.
+        camera2RequestIntended = false
         if (!cfg.live) {
             return fail(
                 promise, "vc-plugin-needs-live",
@@ -5598,12 +5629,20 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             .n("attitudeTauS", 0.0)
             .b("attitudeTauCorrected", false)
             .s("intrinsicsSource", intrinsicsSource)
-            // ⚠ WAS HARDCODED `true`, AND WAS WRONG ON BOTH ARMS.
-            // The vc arm (`startVcPluginArm`) builds NO CaptureRequest at
-            // all — it opens no Camera2 client — so nothing was ever
-            // requested there; and on the Camera2 arm the request is
-            // `cfg.lockCamera` (:4134), not `true`, so a sweep taken with
-            // the lock deliberately OFF reported that it had asked for it.
+            // ⚠ WAS HARDCODED `true`, AND WAS WRONG ON THREE ARMS.
+            // Neither plugin arm builds a CaptureRequest at all — neither
+            // opens a Camera2 client, and neither reaches `lockAndRecord`,
+            // which is the only place `CONTROL_AE_LOCK` is ever set — so
+            // nothing was ever requested on either; and on the Camera2 arm
+            // the request is `cfg.lockCamera`, not `true`, so a sweep taken
+            // with the lock deliberately OFF reported that it had asked.
+            //
+            // ⚠ AND THE FIRST FIX FOR THIS WAS INERT. It read
+            // `!vcPluginArmActive`, which is set AFTER `startLiveEngine()` —
+            // the call that builds this very block — so it was false here on
+            // every arm and the line did not move. Keyed now on a field
+            // resolved at the top of each start mode; see
+            // [camera2RequestIntended].
             // Both directions make the pack claim a control that never ran,
             // which is the same defect class as a cage reporting a pass it
             // never made.
@@ -5612,8 +5651,8 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             // existing readers get the truth rather than a new key they do
             // not read; `aeLockApplicable` is what distinguishes "asked and
             // was refused" from "there was nothing to ask".
-            .b("aeLockRequested", !vcPluginArmActive && cfg.lockCamera)
-            .b("aeLockApplicable", !vcPluginArmActive)
+            .b("aeLockRequested", camera2RequestIntended && cfg.lockCamera)
+            .b("aeLockApplicable", camera2RequestIntended)
             .raw("aeLockReadBack", aeLockObserved?.toString() ?: "null")
             .raw("awbLockReadBack", awbLockObserved?.toString() ?: "null")
             .end()
@@ -6054,8 +6093,18 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                 // ── What was applied, and what was READ BACK ────────────
                 .raw(
                     "applied", Jo()
-                        .b("lockRequested", cfg.lockCamera)
-            .n("aeSettleMs", aeSettleMs)
+                        // ⚠ THE SAME EXPRESSION AS `capture.aeLockRequested`,
+                        // deliberately, and it used to be the raw
+                        // `cfg.lockCamera`. A vc-arm pack shipped
+                        // `arm.vcPluginArm: true` and `applied.lockRequested:
+                        // true` in the SAME FILE as an `arm.reason` saying the
+                        // sweep is AE/AWB UNLOCKED. Two keys in one file
+                        // contradicting each other is worse than either being
+                        // absent: a reader diagnosing banding believes the one
+                        // that agrees with the symptom.
+                        .b("lockRequested", camera2RequestIntended && cfg.lockCamera)
+                        .b("lockApplicable", camera2RequestIntended)
+                        .n("aeSettleMs", aeSettleMs)
                         .i("aeSettleResults", aeSettleResults.toLong())
                         .s("aeSettleExitReason", aeSettleExitReason)
                         .s("meteringMemo", meteringMemoVerdict)
@@ -6432,6 +6481,14 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                                 .joinToString(",", "{", "}") { "\"${it.key}\":${it.value}" },
                         )
                         .i("vcFramesRefusedPreOffer", PanoPlusVcFrameSink.framesRefusedPreOffer)
+                        // Split out so `vcFramesOffered` and the
+                        // refusals PARTITION what vision-camera
+                        // delivered instead of overlapping: three
+                        // branches refuse AFTER tryAcquire has already
+                        // counted the frame as offered, and booking
+                        // those pre-offer double-counted them.
+                        .i("vcFramesRefusedPostAcquire",
+                            PanoPlusVcFrameSink.framesRefusedPostAcquire)
                         .b("degradedFromAr", arArmDegraded)
                         // The SAME index track.jsonl carries, so the two join.
                         .i("degradedAtSeq", arArmDegradedAtSeq)

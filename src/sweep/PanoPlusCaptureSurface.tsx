@@ -2117,12 +2117,20 @@ export const PanoPlusCaptureSurface = forwardRef<
     // ONLY on the IMU arm, because the recorder reads the two together.
     //
     // So a host arm whose EFFECTIVE pose source is not `'imu'` is a state
-    // with no correct action. `armNotice` really can produce one: an
-    // `'imu'` request FALLS BACK to ARKit on iOS (`fallbackToAr`), and
-    // `<Camera>`'s `poseSource` is keyed on `arPreference` while its
-    // ownership predicate is keyed on `isAR` — and those differ whenever AR
-    // is PREFERRED BUT UNAVAILABLE, which is every 0.5× sweep and every
-    // device without AR support.
+    // with no correct action.
+    //
+    // ⚠ AND `<Camera>` CANNOT REACH IT ANY MORE — which is the point, not an
+    // argument for deleting this. `sweepHostOwnsCamera` requires Android AND
+    // a MERGED pose source of `'imu'`, and on Android `panoPlusAndroidArm`
+    // answers `'ar'` only when `'ar'` was asked, with `fallbackToAr: false`
+    // in every branch. The ARKit `fallbackToAr` that an earlier version of
+    // this comment cited is iOS-only, and iOS never takes the host arm. Both
+    // of those are load-bearing terms upstream; this is what happens if
+    // either is ever relaxed.
+    //
+    // It also covers the case `<Camera>` is not: `PanoPlusCaptureSurface` is
+    // an exported component and a third-party host can set `frameSource` and
+    // `poseSource` inconsistently with no `<Camera>` in between.
     //
     // Starting anyway opens a second Camera2 / AVCapture client against a
     // device vision-camera already holds. On Android that is
@@ -2131,13 +2139,31 @@ export const PanoPlusCaptureSurface = forwardRef<
     // of the two sessions is interrupted moments later — a dead preview
     // with no error anywhere. A named refusal is strictly better than
     // either, and unlike both it is visible.
-    if (frameSource === 'host' && wantPoseSource !== 'imu') {
+    //
+    // ⚠ THE CONDITION IS "WILL THE ARM ACTUALLY BE SENT", not one named
+    // cause. It used to test `wantPoseSource !== 'imu'` alone, which is one
+    // of THREE things that drop the arm from the bag below — the others are
+    // an absent plugin handle and an empty camera id, and a fourth arrives
+    // with `<Camera>`'s ownership settle window, in which the surface is
+    // told `'host'` on purpose while neither side may open a camera yet.
+    // Every one of them lands in the same place: no viewfinder here, no
+    // instruction to native, and a recorder that opens its own client. So
+    // the guard is derived from the same expression the bag uses, and the
+    // two cannot drift.
+    const willSendArm = vcPluginArm === true
+      && typeof vcCameraId === 'string'
+      && vcCameraId.length > 0
+      && wantPoseSource === 'imu';
+    if (frameSource === 'host' && !willSendArm) {
       busyRef.current = false;
       setError(
-        'This sweep cannot start: the camera belongs to the host preview on '
-        + 'this screen, and the sweep resolved to the AR arm, which needs a '
-        + 'camera of its own. Turn AR off for the sweep, or switch back to '
-        + 'the 1× lens.',
+        wantPoseSource !== 'imu'
+          ? 'This sweep cannot start: the camera belongs to the host preview '
+            + 'on this screen, and the sweep resolved to the AR arm, which '
+            + 'needs a camera of its own. Turn AR off for the sweep, or '
+            + 'switch back to the 1× lens.'
+          : 'This sweep cannot start yet: the camera is still being handed '
+            + 'over to this screen. Try again in a moment.',
       );
       return;
     }
@@ -2275,11 +2301,13 @@ export const PanoPlusCaptureSurface = forwardRef<
       // the local statement of the recorder's actual gate
       // (`cfg.vcPluginArm && cfg.livePoseSource == "imu"`), so this line
       // reads correctly on its own.
-      ...(vcPluginArm === true
-        && frameSource === 'host'
-        && typeof vcCameraId === 'string'
-        && vcCameraId.length > 0
-        && wantPoseSource === 'imu'
+      // ⚠ THE SAME `willSendArm` THE GUARD ABOVE TESTED, not a second copy
+      // of its terms. A guard that computes "will the arm be sent" and a bag
+      // that decides it independently is the two-places-one-fact shape this
+      // whole rung exists to remove. `frameSource === 'host'` stays as a
+      // separate term because the guard only runs on the host arm, and this
+      // line must also be correct on the own arm.
+      ...(willSendArm && frameSource === 'host'
         ? { vcPluginArm: true, vcCameraId }
         : {}),
       ...(meteringSettleMs != null ? { meteringSettleMs } : {}),
