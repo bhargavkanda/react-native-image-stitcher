@@ -306,30 +306,72 @@ describe('<Camera engine="sweep">', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ a sweep in flight never loses its preview to an ownership settle', () => {
-    // The settle window and the sweep latch interact, and the first version
-    // of the settle got it wrong: `mountHostPreview` ANDs the two, so a
-    // settle started DURING a sweep unmounted the preview the engine was
-    // being fed from — exactly what the latch exists to forbid, arriving
-    // through the fix for a different problem.
+  // ⚠ A CASE ABOUT THE LATCH/SETTLE INTERACTION WAS HERE AND IS DELETED.
+  // It drove `onSweepingChange` across a sweep and asserted the surface's
+  // props were unchanged — but this harness pins `Platform.OS = 'ios'` and
+  // `useCameraDevice() => null`, so ownership is false on every render it
+  // can build and the snapshot is constant whatever the code does. Measured:
+  // it stayed green with the very latch guard it was named for deleted.
+  //
+  // A positive-sounding title over an assertion that cannot fail is worse
+  // than no test, because the next reader stops looking. The real coverage
+  // is the `sweepShouldSettle` / `sweepCameraHandoff` table in
+  // `src/camera/__tests__/sweepHostOwnsCamera.test.ts`, which kills that
+  // mutation and two others.
+
+  it('⚑ a bag-pinned pill is ABSENT, not dead', () => {
+    // The surface gates each pill on its callback being non-null. When the
+    // host pins `poseSource`/`lens` through the bag, the bag wins over the
+    // value handed back — so the handler would run, `<Camera>`'s state would
+    // move, the prop would not, and the pill would snap back under the
+    // operator's finger. Withholding the handler is what turns a visibly
+    // broken control into an absent one.
+    const pinned = surfaceProps(render({
+      engine: 'sweep',
+      sweep: { poseSource: 'ar' as const, lens: 'ultraWide' as const },
+    }));
+    expect(pinned.onPoseSourceChange).toBeUndefined();
+    expect(pinned.onLensChange).toBeUndefined();
+
+    // NEGATIVE CONTROL: unpinned, both pills are live — otherwise the two
+    // assertions above are satisfied by never passing a handler at all,
+    // which is the defect the pills were restored to fix in `97202d0`.
+    const free = surfaceProps(render({ engine: 'sweep' }));
+    expect(typeof free.onPoseSourceChange).toBe('function');
+    expect(typeof free.onLensChange).toBe('function');
+
+    // …and pinning ONE leaves the other alone.
+    const half = surfaceProps(render({
+      engine: 'sweep', sweep: { poseSource: 'ar' as const },
+    }));
+    expect(half.onPoseSourceChange).toBeUndefined();
+    expect(typeof half.onLensChange).toBe('function');
+  });
+
+  it('⚑ hostPreviewLive is DERIVED, not hard-wired', () => {
+    // A coverage hole this suite had three rounds running: the two lines
+    // that connect `hostPreviewLive` to the screen — the `<Camera>` wiring
+    // and the surface's root term — could BOTH be reverted with all 1178
+    // cases green, because the only tests were of the pure decision it
+    // feeds.
     //
-    // What is observable here is that the props the surface holds do not
-    // change across the sweep edges. The live value cannot be moved in this
-    // harness (see the ownership case below), so this is a SHAPE guard on
-    // the interaction, and the live-flip half is the A35 device round.
-    const tree = render({ engine: 'sweep' });
-    const handler = surfaceProps(tree).onSweepingChange as (s: boolean) => void;
-    const snap = () => {
-      const p = surfaceProps(tree);
-      return [p.frameSource, p.vcPluginArm, p.vcCameraId].join('|');
-    };
-    const before = snap();
-    act(() => { handler(true); });
-    act(() => { jest.advanceTimersByTime(2000); });   // past any settle
-    expect(snap()).toBe(before);
-    act(() => { handler(false); });
-    expect(snap()).toBe(before);
-    act(() => { tree.unmount(); });
+    // The harness cannot make ownership true, so the value here is always
+    // false; what it CAN see is that the prop is not a constant. Both
+    // `hostPreviewLive` and `vcPluginArm` descend from `mountHostPreview`,
+    // so the identity holds for every state and breaks the moment either is
+    // pinned — which is precisely the regression that went unnoticed.
+    for (const props of [
+      { engine: 'sweep' },
+      { engine: 'sweep', defaultCaptureSource: 'ar' as const },
+    ]) {
+      const p = surfaceProps(render(props));
+      expect(typeof p.hostPreviewLive).toBe('boolean');
+      // hostPreviewLive ⊆ vcPluginArm: it is `mountHostPreview && started`,
+      // and `vcPluginArm` IS `mountHostPreview`. A hard-wired `true` breaks
+      // this on every render the harness can build.
+      expect(p.hostPreviewLive === true && p.vcPluginArm !== true).toBe(false);
+      expect(p.hostPreviewLive).toBe(false);
+    }
   });
 
   it('⚑ the sweep BAG cannot move who owns the camera', () => {

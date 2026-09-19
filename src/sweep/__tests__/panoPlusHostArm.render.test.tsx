@@ -146,6 +146,40 @@ describe('the surface root does not paint over the host preview', () => {
     expect(rootBackground(tree)).toBe('#000');
     act(() => { tree.unmount(); });
   });
+
+  it('⚑ stays BLACK in the HANDOFF window — nothing is drawing behind us', () => {
+    // The third state, and the one the first version of this fix missed:
+    // `frameSource: 'host'` with no preview mounted. A transparent root
+    // there is not a viewfinder, it is a window onto whatever the platform
+    // leaves behind. Reverting the `hostPreviewLive` term in the root style
+    // leaves every OTHER case in the package green — measured — so this row
+    // is the only thing standing between that term and a silent deletion.
+    const { tree } = mount({ frameSource: 'host', hostPreviewLive: false });
+    expect(rootBackground(tree)).toBe('#000');
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and SAYS SO, rather than showing a black screen with no caption', () => {
+    // The other half of the same state. The explainer is suppressed on the
+    // host arm because there are normally pixels behind it; in the handoff
+    // there are none, and silence there is the exact defect this rung is
+    // named after.
+    const { tree } = mount({ frameSource: 'host', hostPreviewLive: false });
+    const caption = tree.root.findAll(
+      (n) => n.props?.testID === 'panoplus-camera-off', { deep: true },
+    );
+    expect(caption).toHaveLength(1);
+    expect(caption[0].props.children).toContain('Handing the camera over');
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ NEGATIVE CONTROL: with the preview live it says nothing at all', () => {
+    const { tree } = mount({ frameSource: 'host', hostPreviewLive: true });
+    expect(tree.root.findAll(
+      (n) => n.props?.testID === 'panoplus-camera-off', { deep: true },
+    )).toHaveLength(0);
+    act(() => { tree.unmount(); });
+  });
 });
 
 describe('start() fails closed rather than opening a camera the host holds', () => {
@@ -184,6 +218,45 @@ describe('start() fails closed rather than opening a camera the host holds', () 
     act(() => { jest.advanceTimersByTime(1500); });
     expect(startedWith).toBeNull();
     act(() => { tree.unmount(); });
+  });
+
+  it('⚑ the two refusals say DIFFERENT things, and neither misdirects', () => {
+    // The guard's condition was widened to "will the arm actually be sent"
+    // while its message selector still keyed on the single original cause —
+    // so a HANDOFF refusal told the operator to turn off the AR they had
+    // just turned on, for a state that clears itself in 600 ms. Every test
+    // of the guard asserted only that native was not called, so the selector
+    // itself was asserted by nothing.
+    const textOf = (props: Record<string, unknown>): string => {
+      const { tree, handle } = mount(props);
+      act(() => { handle.current?.holdStart(); });
+      act(() => { jest.advanceTimersByTime(1500); });
+      const node = tree.root.findAll(
+        (n) => typeof n.props?.children === 'string'
+          && String(n.props.children).includes('cannot start'),
+        { deep: true },
+      )[0];
+      const text = String(node?.props?.children ?? '');
+      act(() => { tree.unmount(); });
+      return text;
+    };
+
+    // ARMED but resolved to AR — the genuine "wrong arm", and the only case
+    // in which turning AR off is something the operator can actually do.
+    const wrongArm = textOf({
+      frameSource: 'host', poseSource: 'ar', vcPluginArm: true, vcCameraId: '2',
+    });
+    expect(wrongArm).toContain('Turn AR off');
+
+    // NOT armed — the handoff window. Transient, and there is nothing to do.
+    const handoff = textOf({ frameSource: 'host', poseSource: 'imu' });
+    expect(handoff).toContain('handed over');
+    expect(handoff).not.toContain('Turn AR off');
+
+    // And the AR copy must not be the answer to a handoff on the AR arm
+    // either — which is the exact pairing that misdirected.
+    const handoffOnAr = textOf({ frameSource: 'host', poseSource: 'ar' });
+    expect(handoffOnAr).not.toContain('Turn AR off');
   });
 
   it('⚑ NEGATIVE CONTROL: a COMPLETE host arm DOES start, and carries the arm', () => {

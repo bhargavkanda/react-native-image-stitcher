@@ -118,7 +118,15 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
   // initializer exists for — a registry that is not up yet.
   const [plugin, setPlugin] = useState<FrameProcessorPlugin | null>(null);
   const pluginRef = useRef<FrameProcessorPlugin | null>(null);
-  if (enabled && pluginRef.current == null) {
+  // ⚠ THE RENDER-PHASE ACQUIRE NEEDS THE BUDGET TOO, and the first version
+  // of it did not have one — so on a build where the plugin never registers
+  // it issued a JSI `initFrameProcessorPlugin` on EVERY render, for the life
+  // of the screen. That is the same unbounded-poll defect `ACQUIRE_BUDGET_MS`
+  // was added to fix, reintroduced beside its own fix, and the test
+  // certifying the bound could not see it because it never re-rendered.
+  // Latched in a ref so the render path can read it.
+  const acquireGaveUpRef = useRef(false);
+  if (enabled && pluginRef.current == null && !acquireGaveUpRef.current) {
     const p = acquire();
     if (p != null) {
       pluginRef.current = p;
@@ -129,7 +137,10 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
     }
   }
   useEffect(() => {
-    if (!enabled || plugin != null) return undefined;
+    // A switch back INTO the sweep is a fresh question: the registry may
+    // have come up since. Re-open the budget, once, on that edge.
+    if (!enabled) { acquireGaveUpRef.current = false; return undefined; }
+    if (plugin != null) return undefined;
     let cancelled = false;
     let timerId: ReturnType<typeof setTimeout> | null = null;
     let waitedMs = 0;
@@ -141,7 +152,7 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
       // GIVE UP RATHER THAN POLL FOREVER. A plugin that has not registered
       // in 1.5 s is not in this build, and `isReady` stays false — which is
       // the correct answer, and the one the ownership predicate needs.
-      if (waitedMs >= ACQUIRE_BUDGET_MS) return;
+      if (waitedMs >= ACQUIRE_BUDGET_MS) { acquireGaveUpRef.current = true; return; }
       timerId = setTimeout(tryAcquire, ACQUIRE_RETRY_MS);
     };
     tryAcquire();

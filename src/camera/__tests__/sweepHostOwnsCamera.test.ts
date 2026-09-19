@@ -69,6 +69,7 @@ import {
   SWEEP_HOST_OWNS_INPUT_KEYS,
   sweepMergedLens,
   sweepMergedPoseSource,
+  sweepOwnershipInput,
   type SweepHostOwnsCameraInput,
   _sweepHostOwnsCameraForTests as hostOwns,
   _sweepCameraHandoffForTests as handoff,
@@ -368,5 +369,81 @@ describe('sweepMergedPoseSource / sweepMergedLens — the bag wins, upstream', (
       ...OK,
       sweepPoseSource: sweepMergedPoseSource(undefined, false),
     })).toBe(true);
+  });
+});
+
+/**
+ * ── THE ASSEMBLY ────────────────────────────────────────────────────────
+ *
+ * The predicate has had a truth table since the first round. Both defects
+ * that actually reached a commit were one layer out, in the ARGUMENT LIST —
+ * a term pointed at the wrong source, with `tsc` clean and every case green:
+ *
+ *   * `sweepPoseSource` read `<Camera>`'s own `arPreference` instead of the
+ *     merged value, so the predicate judged one arm while the surface ran
+ *     another;
+ *   * the multicam term read the MERGED lens instead of the one that
+ *     actually selected the device, so a bag `lens` disarmed the guard.
+ *
+ * Those are the two rows below. A table over the predicate cannot see
+ * either, which is the whole reason the assembly is its own function.
+ */
+describe('sweepOwnershipInput — every term takes the value it is about', () => {
+  const SRC = {
+    isAR: false,
+    platformOS: 'android',
+    cameraUnmounting: false,
+    bagPoseSource: undefined as 'ar' | 'imu' | undefined,
+    arPreference: false,
+    pluginReady: true,
+    deviceId: 'back-0',
+    captureMode: 'wide-only' as const,
+    lens: '1x' as const,
+    hostFrameProcessorPresent: false,
+  };
+
+  it('with no bag override, it is <Camera>\'s own state throughout', () => {
+    expect(sweepOwnershipInput(SRC)).toEqual(OK);
+    expect(hostOwns(sweepOwnershipInput(SRC))).toBe(true);
+  });
+
+  it('⚑ THE ARM IS MERGED: a bag poseSource reaches the predicate', () => {
+    // `{...sweep}` is spread over the surface's props, so this IS the arm
+    // that will run. Reading `arPreference` here judged the wrong one.
+    const input = sweepOwnershipInput({ ...SRC, bagPoseSource: 'ar' });
+    expect(input.sweepPoseSource).toBe('ar');
+    expect(hostOwns(input)).toBe(false);
+  });
+
+  it('⚑ THE LENS IS NOT: a bag lens cannot disarm the multicam guard', () => {
+    // The device and its zoom come from `useCapture({ lens })`, which reads
+    // <Camera>'s own state — so `sweep={{ lens: 'wide' }}` on a multicam
+    // body at 0.5× used to turn the virtual-constituent guard off while the
+    // device stayed exactly where it was.
+    const input = sweepOwnershipInput({
+      ...SRC, captureMode: 'multicam', lens: '0.5x', bagPoseSource: undefined,
+    });
+    expect(input.lens).toBe('0.5x');          // the DEVICE's lens, not 'wide'
+    expect(hostOwns(input)).toBe(false);      // guard still armed
+  });
+
+  it('⚑ …and a bag lens does not sneak in through any other term either', () => {
+    // Belt to the braces above: the assembler takes no bag lens at all, so
+    // there is no path for one. Asserted rather than left to inspection,
+    // because "there is no path" is exactly what was believed before.
+    expect(Object.keys(SRC)).not.toContain('bagLens');
+    const a = sweepOwnershipInput({ ...SRC, captureMode: 'multicam', lens: '0.5x' });
+    const b = sweepOwnershipInput({ ...SRC, captureMode: 'multicam', lens: '1x' });
+    expect(hostOwns(a)).toBe(false);
+    expect(hostOwns(b)).toBe(true);
+  });
+
+  it('⚑ it fills EVERY key the predicate declares', () => {
+    // The assembler is the only caller in the app, so a term added to the
+    // interface and forgotten here would be `undefined` at runtime while
+    // `tsc` is satisfied by the object literal elsewhere.
+    const input = sweepOwnershipInput(SRC) as unknown as Record<string, unknown>;
+    const missing = SWEEP_HOST_OWNS_INPUT_KEYS.filter((k) => !(k in input));
+    expect(missing).toEqual([]);
   });
 });

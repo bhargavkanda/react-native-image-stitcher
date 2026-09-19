@@ -113,11 +113,17 @@
 //     it "does not consume the sample" — neither call consumes anything, the
 //     ring is written only by `push`, and the real difference is counting.
 //
-//     ⚠ COUNTED IS NOT PUBLISHED, and an earlier version of this list said
-//     it was. `RNISPanoAttitude.report()` has exactly ONE caller in the
-//     package — inside `RNISPanoAvfSource`'s teardown — and this arm exists
-//     so that source never runs. The counters are written every frame and
-//     read by nobody, the same as `+report` below.
+//     ⚠ AND ON STOCK VISION-CAMERA THEY ARE WRITTEN ON **NO** FRAME, which
+//     an earlier version of this bullet got wrong twice over — it first
+//     claimed they reach the pack, then that they are "written every frame
+//     and read by nobody". Both are false. `align` sits BELOW the intrinsics
+//     gate, and that gate returns on every frame here (vc 4.7.3 attaches no
+//     matrix), which is below the arm gate nothing sets. So the honest
+//     statement is: this arm currently produces no attitude rows at all, and
+//     `RNISPanoAttitude.report()` has exactly ONE caller in the package —
+//     inside `RNISPanoAvfSource`'s teardown — which this arm exists to keep
+//     from running. Counted becomes true when the arm is armed AND
+//     intrinsics arrive; PUBLISHED needs the start path below.
 //   * THIS PLUGIN'S OWN counters are reachable only via `+report`. Nothing
 //     calls it yet, because the thing that would — the iOS start path —
 //     does not exist. When it lands it must publish BOTH `+report` AND
@@ -188,7 +194,14 @@ static NSString *const kArmNotification = @"RNISPanoSweepVcArmDidChange";
 /// Atomics because the callback runs on vc's frame-processor queue while
 /// arming happens on whatever thread the start path uses.
 static atomic_bool  g_armed              = ATOMIC_VAR_INIT(false);
+/// Every frame that got past the arm gate. Without it the buckets below
+/// cannot be checked against anything, and "vision-camera delivered nothing"
+/// reads identically to "vision-camera delivered N and the core refused all
+/// of them" — which is the single most common question to ask of this arm.
+static atomic_ullong g_seen               = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedNotArmed    = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_refusedNotRunning  = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_refusedNoPixelBuf  = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedFrameInvalid = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedBadPts      = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedNoIntrinsics = ATOMIC_VAR_INIT(0);
@@ -218,6 +231,12 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
 + (NSDictionary<NSString *, id> *)report {
   return @{
     @"armed":                @(atomic_load(&g_armed)),
+    // ⚠ `seen` IS THE DENOMINATOR. `ingested` plus every `refused*` below
+    // must equal it; a gap means a return path that books nothing, which is
+    // how two of them shipped.
+    @"seen":                 @(atomic_load(&g_seen)),
+    @"refusedNotRunning":    @(atomic_load(&g_refusedNotRunning)),
+    @"refusedNoPixelBuffer": @(atomic_load(&g_refusedNoPixelBuf)),
     @"refusedNotArmed":      @(atomic_load(&g_refusedNotArmed)),
     @"refusedFrameInvalid":  @(atomic_load(&g_refusedFrameInvalid)),
     @"refusedBadPts":        @(atomic_load(&g_refusedBadPts)),
@@ -239,7 +258,14 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
     atomic_fetch_add(&g_refusedNotArmed, 1);
     return @{@"ingested": @NO, @"why": @"not armed — no iOS vc-arm start path"};
   }
+  // Counted from here on: every refusal below books a bucket, and `g_seen`
+  // is what they are checked against. Two of these returns used to book
+  // nothing, so `ingested + the buckets` did not account for the frames
+  // vision-camera actually delivered — and this arm's counters are its ONLY
+  // evidence channel.
+  atomic_fetch_add(&g_seen, 1);
   if (![RNISPanoCore isRunning]) {
+    atomic_fetch_add(&g_refusedNotRunning, 1);
     return @{@"ingested": @NO, @"why": @"not running"};
   }
 
@@ -264,7 +290,10 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
   }
   CMSampleBufferRef sampleBuffer = frame.buffer;
   CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-  if (pixelBuffer == NULL) return @{@"ingested": @NO, @"why": @"no pixel buffer"};
+  if (pixelBuffer == NULL) {
+    atomic_fetch_add(&g_refusedNoPixelBuf, 1);
+    return @{@"ingested": @NO, @"why": @"no pixel buffer"};
+  }
 
   // THE PRESENTATION TIMESTAMP IN SECONDS, at full CMTime precision.
   //
@@ -442,7 +471,10 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
     if (armed) {
       // RESET ON ARM, not on disarm: a teardown path that wants to publish
       // `+report` must be able to read it AFTER disarming.
+      atomic_store(&g_seen, 0);
       atomic_store(&g_refusedNotArmed, 0);
+      atomic_store(&g_refusedNotRunning, 0);
+      atomic_store(&g_refusedNoPixelBuf, 0);
       atomic_store(&g_refusedFrameInvalid, 0);
       atomic_store(&g_refusedBadPts, 0);
       atomic_store(&g_refusedNoIntrinsics, 0);

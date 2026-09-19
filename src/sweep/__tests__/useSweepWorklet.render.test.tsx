@@ -108,6 +108,38 @@ describe('useSweepWorklet — a build without the plugin gives up', () => {
     h.unmount();
   });
 
+  it('⚑ …INCLUDING across re-renders — the render-phase acquire is bounded too', () => {
+    // The bound lived in the effect only, and the render-phase acquire added
+    // to fix the engine-switch flap consulted neither it nor the effect's
+    // exhausted state. So every render of the sweep screen issued another
+    // JSI call, forever — the same unbounded poll, reintroduced beside its
+    // own fix. The original test could not see it because it never
+    // re-rendered after the budget expired.
+    pluginAvailable = false;
+    const h = renderHook(true);
+    act(() => { jest.advanceTimersByTime(5000); });
+    const settled = acquireCalls;
+    expect(settled).toBeGreaterThan(10);
+    for (let i = 0; i < 20; i += 1) h.setEnabled(true);
+    expect(acquireCalls).toBe(settled);
+    h.unmount();
+  });
+
+  it('⚑ …but a switch back INTO the sweep re-opens the question once', () => {
+    // Giving up must not be permanent for the life of the screen: the
+    // registry can come up between one engine and the next.
+    pluginAvailable = false;
+    const h = renderHook(true);
+    act(() => { jest.advanceTimersByTime(5000); });
+    const exhausted = acquireCalls;
+    h.setEnabled(false);
+    pluginAvailable = true;
+    h.setEnabled(true);
+    expect(acquireCalls).toBeGreaterThan(exhausted);
+    expect(h.seen[h.seen.length - 1]).toBe(true);
+    h.unmount();
+  });
+
   it('reports NOT ready, which is what the ownership predicate needs', () => {
     pluginAvailable = false;
     const h = renderHook(true);
