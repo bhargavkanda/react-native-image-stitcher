@@ -330,6 +330,7 @@ dependencies {
             '**/CvFlowGateFrameProcessor.kt',
             '**/SaveFrameAsJpegPlugin.kt',
             '**/VisionCameraPluginRegistrations.kt',
+            '**/PanoPlusSweepFrameProcessor.kt',
         ]
         tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
             vcOnlySources.each { pattern -> exclude pattern }

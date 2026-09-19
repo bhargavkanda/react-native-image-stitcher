@@ -60,5 +60,12 @@ internal object VisionCameraPluginRegistrations {
         FrameProcessorPluginRegistry.addFrameProcessorPlugin(
             SaveFrameAsJpegPlugin.PLUGIN_NAME,
         ) { proxy, options -> SaveFrameAsJpegPlugin(proxy, options) }
+
+        // S5 — the sweep engine, fed from the camera <Camera> already owns.
+        FrameProcessorPluginRegistry.addFrameProcessorPlugin(
+            io.imagestitcher.rn.panoplus.PanoPlusSweepFrameProcessor.PLUGIN_NAME,
+        ) { proxy, options ->
+            io.imagestitcher.rn.panoplus.PanoPlusSweepFrameProcessor(proxy, options)
+        }
     }
 }
