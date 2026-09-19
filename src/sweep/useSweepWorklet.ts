@@ -58,27 +58,77 @@ export interface SweepWorkletHandle {
 /** The registered name — must match `PanoPlusSweepFrameProcessor.PLUGIN_NAME`. */
 export const SWEEP_PLUGIN_NAME = 'panoplus_sweep_ingest';
 
-export function useSweepWorklet(): SweepWorkletHandle {
-  // Same mount-once retry as `useStitcherWorklet`:
-  // `initFrameProcessorPlugin` returns undefined when called before
-  // vision-camera's registry has finished initialising, and the race is
-  // real (F8.1.a).
-  const [plugin, setPlugin] = useState<FrameProcessorPlugin | null>(null);
+/**
+ * How long to keep retrying acquisition before concluding the plugin is not
+ * in this build.
+ *
+ * ⚠ THE OLD LOOP HAD NO BOUND. It re-armed a 16 ms timer forever, and the
+ * hook is called UNCONDITIONALLY from `<Camera>` — photo, scan, doc and
+ * keyframe pano as well as sweep. On any build without
+ * `panoplus_sweep_ingest` registered (every build without vision-camera's
+ * plugin, and every iOS build until the arm exists) that is a permanent
+ * ~62 Hz JS timer for the life of every camera screen, in four modes that
+ * will never use it. The pattern was inherited verbatim from
+ * `useStitcherWorklet`; S7 is what made it run everywhere.
+ *
+ * 1.5 s is far beyond the registry's real resolve time — the race it exists
+ * for (F8.1.a) is a handful of frames at startup, not a second and a half.
+ */
+const ACQUIRE_BUDGET_MS = 1500;
+const ACQUIRE_RETRY_MS = 16;
+
+/** Acquire once, tolerating a registry that is not up yet. */
+function acquire(): FrameProcessorPlugin | null {
+  try {
+    return VisionCameraProxy.initFrameProcessorPlugin(SWEEP_PLUGIN_NAME, {})
+      ?? null;
+  } catch {
+    // A build without the plugin, or without vision-camera's proxy at all.
+    // Not an error: this arm is optional on both platforms.
+    return null;
+  }
+}
+
+/**
+ * @param enabled — whether this screen could ever use the arm. `false` skips
+ *   acquisition entirely rather than polling for a plugin that will not be
+ *   called.
+ */
+export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
+  // ⚠ ACQUIRED DURING THE FIRST RENDER, NOT IN AN EFFECT, and that is a fix
+  // rather than a micro-optimisation. `isReady` decides who owns the camera
+  // (`sweepHostOwnsCamera`), so acquiring in an effect meant render #1 always
+  // said "the surface owns it" and render #2, ~one frame later, said "the
+  // host owns it". On Android that flap is two camera opens back to back
+  // against one device — the "the previous camera owner was still letting
+  // go" state the recorder already reports having hit. The registry is
+  // normally up by first render, so this settles the question before anyone
+  // acts on it; the effect below remains for the case where it is not.
+  const [plugin, setPlugin] = useState<FrameProcessorPlugin | null>(
+    () => (enabled ? acquire() : null),
+  );
   useEffect(() => {
+    if (!enabled || plugin != null) return undefined;
     let cancelled = false;
     let timerId: ReturnType<typeof setTimeout> | null = null;
+    let waitedMs = 0;
     const tryAcquire = (): void => {
       if (cancelled) return;
-      const p = VisionCameraProxy.initFrameProcessorPlugin(SWEEP_PLUGIN_NAME, {});
+      const p = acquire();
       if (p != null) { setPlugin(p); return; }
-      timerId = setTimeout(tryAcquire, 16);
+      waitedMs += ACQUIRE_RETRY_MS;
+      // GIVE UP RATHER THAN POLL FOREVER. A plugin that has not registered
+      // in 1.5 s is not in this build, and `isReady` stays false — which is
+      // the correct answer, and the one the ownership predicate needs.
+      if (waitedMs >= ACQUIRE_BUDGET_MS) return;
+      timerId = setTimeout(tryAcquire, ACQUIRE_RETRY_MS);
     };
     tryAcquire();
     return () => {
       cancelled = true;
       if (timerId != null) clearTimeout(timerId);
     };
-  }, []);
+  }, [enabled, plugin]);
 
   const active = useSharedValue(false);
   const setActive = useCallback((on: boolean) => { active.value = on; }, [active]);

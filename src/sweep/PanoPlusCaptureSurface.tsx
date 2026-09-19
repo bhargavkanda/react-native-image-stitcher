@@ -1440,14 +1440,26 @@ export const PanoPlusCaptureSurface = forwardRef<
   // is the same loss the sweeping guard exists to prevent and is harder to
   // see because it is brief.
   const busy = phase !== 'idle';
-  // Read by the UNMOUNT cleanup below, which must not re-run when the host
-  // passes a fresh closure — a cleanup keyed on the callback would fire a
-  // spurious `false` on every host re-render.
+  // Read by the UNMOUNT cleanup below AND by the emit effect, neither of
+  // which may re-run when the host passes a fresh closure.
+  //
+  // ⚠ THE EFFECT USED TO DEPEND ON THE CALLBACK, and the comment beside it
+  // already explained why that is wrong — it was just applied to the cleanup
+  // only. `<Camera>` composes its own gate into this prop with an INLINE
+  // arrow, so the identity changes on every parent render and the effect
+  // re-fired each time, re-emitting the phase to a host that had not asked.
+  // Harmless while the value happens to match, but it makes any host
+  // handler that sets state a re-entrancy hazard: set state → parent
+  // re-renders → new closure → effect fires → handler runs again. React's
+  // bail-on-identical-state is the only thing that kept that from looping,
+  // which is not a guarantee to rest a capture on.
+  //
+  // The phase is what changed or nothing did, so `busy` is the only dep.
   const onSweepingChangeRef = useRef(onSweepingChange);
   onSweepingChangeRef.current = onSweepingChange;
   useEffect(() => {
-    onSweepingChange?.(busy);
-  }, [busy, onSweepingChange]);
+    onSweepingChangeRef.current?.(busy);
+  }, [busy]);
   // Told on every change, INCLUDING the first resolve: the host's pill renders
   // before the precondition read lands, so without the mount-time call it would
   // show the requested arm until something else happened to change.
@@ -2095,6 +2107,40 @@ export const PanoPlusCaptureSurface = forwardRef<
     // The arm we are ASKING for. `armsRef` is corrected to what native
     // ANSWERS the moment start resolves, a few lines below.
     const wantPoseSource = armNotice.effectivePoseSource;
+
+    // ── FAIL CLOSED WHEN THE HOST OWNS THE CAMERA AND WE CANNOT USE IT ──
+    //
+    // `frameSource === 'host'` means the embedding `<Camera>` has mounted
+    // vision-camera on the back camera and this surface has NO viewfinder
+    // and NO session. The recorder must therefore open nothing, and the
+    // only thing that tells it so is `vcPluginArm` — which is sent below
+    // ONLY on the IMU arm, because the recorder reads the two together.
+    //
+    // So a host arm whose EFFECTIVE pose source is not `'imu'` is a state
+    // with no correct action. `armNotice` really can produce one: an
+    // `'imu'` request FALLS BACK to ARKit on iOS (`fallbackToAr`), and
+    // `<Camera>`'s `poseSource` is keyed on `arPreference` while its
+    // ownership predicate is keyed on `isAR` — and those differ whenever AR
+    // is PREFERRED BUT UNAVAILABLE, which is every 0.5× sweep and every
+    // device without AR support.
+    //
+    // Starting anyway opens a second Camera2 / AVCapture client against a
+    // device vision-camera already holds. On Android that is
+    // ERROR_CAMERA_IN_USE; on iOS `canAddInput` tests configuration
+    // compatibility rather than runtime exclusivity, so it SUCCEEDS and one
+    // of the two sessions is interrupted moments later — a dead preview
+    // with no error anywhere. A named refusal is strictly better than
+    // either, and unlike both it is visible.
+    if (frameSource === 'host' && wantPoseSource !== 'imu') {
+      busyRef.current = false;
+      setError(
+        'This sweep cannot start: the camera belongs to the host preview on '
+        + 'this screen, and the sweep resolved to the AR arm, which needs a '
+        + 'camera of its own. Turn AR off for the sweep, or switch back to '
+        + 'the 1× lens.',
+      );
+      return;
+    }
     armsRef.current = {
       rectify, gainMatch, packFrames, poseSource: wantPoseSource,
     };
@@ -2218,7 +2264,19 @@ export const PanoPlusCaptureSurface = forwardRef<
       // and only on the IMU arm: the recorder reads the flag together with
       // the pose arm, and a flag that reaches the other arm tells it to
       // open no camera and wait for a feeder that is not there.
+      //
+      // ⚠ `frameSource === 'host'` IS IN THE CONDITION TOO, and it is not
+      // redundant with `vcPluginArm`. They are two props and a host can set
+      // them inconsistently; when it does, the one that decides whether a
+      // VIEWFINDER is drawn must also decide whether native opens a camera,
+      // or the screen shows nothing while two stacks fight over the device.
+      // The `wantPoseSource` term cannot now be false here — the guard at
+      // the top of `start` refuses that state outright — but it stays as
+      // the local statement of the recorder's actual gate
+      // (`cfg.vcPluginArm && cfg.livePoseSource == "imu"`), so this line
+      // reads correctly on its own.
       ...(vcPluginArm === true
+        && frameSource === 'host'
         && typeof vcCameraId === 'string'
         && vcCameraId.length > 0
         && wantPoseSource === 'imu'
@@ -2969,6 +3027,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     arReady,
     androidArArm,
     hasViewfinderView: AvfViewfinder != null,
+    frameSource,
     idleFeedLive,
     idleReason,
     phase,
@@ -3299,7 +3358,21 @@ export const PanoPlusCaptureSurface = forwardRef<
   }
 
   return (
-    <View style={styles.fill}>
+    // ── THE ROOT IS TRANSPARENT WHEN THE HOST OWNS THE CAMERA (S7) ──────
+    //
+    // `styles.fill` is `{ flex: 1, backgroundColor: '#000' }`, and on the
+    // host arm `<Camera>` renders its `<CameraView>` as an ABSOLUTELY
+    // POSITIONED SIBLING *before* this surface in the same stacking context.
+    // React Native paints siblings in document order, so an opaque flex
+    // child that comes second covers an absolute child that came first: the
+    // whole point of S7 — "`<CameraView>` IS the viewfinder" — was painted
+    // over by this one background colour, and the non-AR sweep screen was
+    // black. Nothing in the suite could see it, because the render tests
+    // count components and a covered preview is still a mounted component.
+    //
+    // The black stays on the OWN arm, where it is the backdrop behind this
+    // surface's own viewfinder and there is nothing underneath to reveal.
+    <View style={[styles.fill, frameSource === 'host' && styles.fillOverHost]}>
       {/* Mounting this view IS what starts ARKit (didMoveToWindow →
           RNSARSession.shared.start()). `planeDetection="vertical"` costs
           nothing here — pano+ never reads a plane — but it keeps ARKit's
@@ -4024,6 +4097,9 @@ export const PanoPlusCaptureSurface = forwardRef<
 // ⚠ `PREVIEW_MARKER_PX` LIVED HERE UNTIL 2026-09-03, with the frontier line.
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: '#000' },
+  /** Host arm: the camera is a sibling BEHIND this surface — see the
+   *  root's comment. Opaque here means a black screen. */
+  fillOverHost: { backgroundColor: 'transparent' },
   cameraOff: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',

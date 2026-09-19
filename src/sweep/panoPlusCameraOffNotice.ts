@@ -67,6 +67,13 @@ export interface PanoPlusCameraOffInput {
   androidArArm: boolean;
   /** A native viewfinder component exists in this build and is mounted. */
   hasViewfinderView: boolean;
+  /**
+   * Who owns the camera on THIS arm (S7). `'host'` means the embedding
+   * `<Camera>` mounts vision-camera and the sweep is fed from it — this
+   * surface owns no session, draws no viewfinder, and there are live pixels
+   * BEHIND it that none of the other inputs here can see.
+   */
+  frameSource: 'own' | 'host';
   /** The idle viewfinder answered `on: true`. */
   idleFeedLive: boolean;
   /** Native's own words for why there is no idle feed, or `''`. */
@@ -92,8 +99,19 @@ export function panoPlusCameraOffNotice(
 ): string | null {
   const {
     armContract, arArmed, arReady, androidArArm,
-    hasViewfinderView, idleFeedLive, idleReason, phase,
+    hasViewfinderView, idleFeedLive, idleReason, phase, frameSource,
   } = input;
+
+  // ── THE HOST OWNS THE CAMERA: THERE ARE PIXELS, AND THEY ARE NOT OURS ────
+  // Every signal below is about a session THIS surface would have opened, and
+  // on the host arm it opens none: `idleFeedLive` is forced false (the idle
+  // effect returns early unless `frameSource === 'own'`), `hasViewfinderView`
+  // reports whether the native view is in the BUILD rather than whether
+  // anything is mounted, and `idleReason` is never set. So the function fell
+  // all the way through to "The camera has not opened yet." and printed it,
+  // centred, over vision-camera's live feed — the exact failure this module
+  // was written to prevent, arriving through an input it did not have.
+  if (frameSource === 'host') return null;
 
   // ── iOS, AR ARM: ARKit draws its own view ────────────────────────────────
   // Nothing to explain once it is up; while it warms, say only that.

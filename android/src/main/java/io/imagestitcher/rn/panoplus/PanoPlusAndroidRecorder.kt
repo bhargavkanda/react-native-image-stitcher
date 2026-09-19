@@ -5598,7 +5598,22 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             .n("attitudeTauS", 0.0)
             .b("attitudeTauCorrected", false)
             .s("intrinsicsSource", intrinsicsSource)
-            .b("aeLockRequested", true)
+            // ⚠ WAS HARDCODED `true`, AND WAS WRONG ON BOTH ARMS.
+            // The vc arm (`startVcPluginArm`) builds NO CaptureRequest at
+            // all — it opens no Camera2 client — so nothing was ever
+            // requested there; and on the Camera2 arm the request is
+            // `cfg.lockCamera` (:4134), not `true`, so a sweep taken with
+            // the lock deliberately OFF reported that it had asked for it.
+            // Both directions make the pack claim a control that never ran,
+            // which is the same defect class as a cage reporting a pass it
+            // never made.
+            //
+            // The boolean keeps its name and meaning ("did we ask?") so
+            // existing readers get the truth rather than a new key they do
+            // not read; `aeLockApplicable` is what distinguishes "asked and
+            // was refused" from "there was nothing to ask".
+            .b("aeLockRequested", !vcPluginArmActive && cfg.lockCamera)
+            .b("aeLockApplicable", !vcPluginArmActive)
             .raw("aeLockReadBack", aeLockObserved?.toString() ?: "null")
             .raw("awbLockReadBack", awbLockObserved?.toString() ?: "null")
             .end()

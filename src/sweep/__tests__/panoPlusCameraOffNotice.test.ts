@@ -24,6 +24,7 @@ function androidIdle(
     arReady: true,
     androidArArm: false,
     hasViewfinderView: true,
+    frameSource: 'own',
     idleFeedLive: true,
     idleReason: '',
     phase: 'idle',
@@ -146,6 +147,7 @@ describe('panoPlusCameraOffNotice — iOS keeps the behaviour it shipped', () =>
     arReady: false,
     androidArArm: false,
     hasViewfinderView: false,
+    frameSource: 'own',
     idleFeedLive: false,
     idleReason: '',
     phase: 'idle',
@@ -331,5 +333,54 @@ describe('the AR wait message names ARCore’s own reason', () => {
     const n = waiting('');
     expect(n?.headline).toBe('Waiting for AR tracking');
     expect(n?.detail).toContain('hold steady');
+  });
+});
+
+/**
+ * ── THE HOST ARM (S7) ────────────────────────────────────────────────────
+ *
+ * When `<Camera>` owns the camera, the sweep surface opens no session — so
+ * every input this module reads goes to its "nothing is live" value while
+ * vision-camera's feed is drawn RIGHT BEHIND the surface. Before
+ * `frameSource` existed, the function fell through all of them and printed
+ * "The camera has not opened yet." over that live feed.
+ *
+ * The rows below are the worst case on purpose: they are the exact inputs
+ * that produced each of the four captions on the own arm, so if any future
+ * branch stops honouring the host arm, one of them starts printing again.
+ */
+describe('panoPlusCameraOffNotice — the host owns the camera', () => {
+  const host = (over: Partial<PanoPlusCameraOffInput> = {}) =>
+    panoPlusCameraOffNotice(androidIdle({
+      frameSource: 'host',
+      // What the host arm actually reports: the idle effect never runs, so
+      // the feed reads dead and native never gives a reason.
+      idleFeedLive: false,
+      idleReason: '',
+      ...over,
+    }));
+
+  it('says nothing at idle — the pixels behind it are vision-camera\'s', () => {
+    expect(host()).toBeNull();
+  });
+
+  it('says nothing while sweeping', () => {
+    expect(host({ phase: 'sweeping' })).toBeNull();
+  });
+
+  it('says nothing when this build has no native viewfinder — it needs none', () => {
+    expect(host({ hasViewfinderView: false })).toBeNull();
+  });
+
+  it('says nothing even when native volunteers an idle reason', () => {
+    expect(host({ idleReason: 'no camera permission' })).toBeNull();
+  });
+
+  it('⚑ NEGATIVE CONTROL: the same inputs on the OWN arm do print', () => {
+    // Without this the four cases above pass for a trivial reason — a
+    // function that returned null unconditionally would satisfy them all.
+    expect(panoPlusCameraOffNotice(androidIdle({
+      frameSource: 'own', idleFeedLive: false, idleReason: '',
+    }))).toBe('The camera has not opened yet.');
   });
 });

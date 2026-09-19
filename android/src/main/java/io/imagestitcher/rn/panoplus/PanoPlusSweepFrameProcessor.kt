@@ -104,14 +104,12 @@ class PanoPlusSweepFrameProcessor(
             // FrameInvalidError — vc already released it. Not an error we can
             // act on, and not one worth counting against the sweep.
             PanoPlusVcFrameSink.notePreOfferRefusal()
-            PanoPlusVcFrameSink.notePreOfferRefusal()
-        return mapOf("ingested" to false, "why" to "frame invalid")
+            return mapOf("ingested" to false, "why" to "frame invalid")
         }
 
         if (image.format != ImageFormat.YUV_420_888) {
             PanoPlusVcFrameSink.notePreOfferRefusal()
-            PanoPlusVcFrameSink.notePreOfferRefusal()
-        return mapOf("ingested" to false, "why" to "format ${image.format}")
+            return mapOf("ingested" to false, "why" to "format ${image.format}")
         }
         val w = image.width
         val h = image.height
@@ -120,11 +118,17 @@ class PanoPlusSweepFrameProcessor(
         // size change, so a refusal here is better than a resize.
         if (w <= 0 || h <= 0 || w % 2 != 0 || h % 2 != 0) {
             PanoPlusVcFrameSink.notePreOfferRefusal()
-            PanoPlusVcFrameSink.notePreOfferRefusal()
-        return mapOf("ingested" to false, "why" to "odd size ${w}x$h")
+            return mapOf("ingested" to false, "why" to "odd size ${w}x$h")
         }
         val planes = image.planes
-        if (planes.size < 3) return mapOf("ingested" to false, "why" to "planes ${planes.size}")
+        if (planes.size < 3) {
+            // COUNTED, like its three neighbours. A refused frame the counter
+            // never sees makes `vcFramesOffered` and `vcFramesRefusedPreOffer`
+            // fail to account for the frames vision-camera actually delivered,
+            // and the arm's own arithmetic is the only evidence this arm ran.
+            PanoPlusVcFrameSink.notePreOfferRefusal()
+            return mapOf("ingested" to false, "why" to "planes ${planes.size}")
+        }
 
         // ⚠ THE GATE BEFORE THE COPY, NOT AFTER IT. `dst` is pooled and the
         // sink's worker is still reading it for the previous frame; gating

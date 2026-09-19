@@ -128,6 +128,7 @@ import {
 } from './buildPanoramaInitialSettings';
 import { isLowMemDevice } from './lowMemDevice';
 import { useCapture } from './useCapture';
+import type { CaptureDeviceMode } from './selectCaptureDevice';
 import { shouldOfferNativeUltraWide } from './nativeUltraWide';
 import { useDeviceOrientation, type DeviceOrientation } from './useDeviceOrientation';
 import {
@@ -1731,6 +1732,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // nothing: the recorder already retries into a camera vision-camera is
   // still releasing.
   const [sweepHandoffPending, setSweepHandoffPending] = useState(false);
+  // ── OWNERSHIP IS LATCHED FOR THE LIFE OF A SWEEP ────────────────────
+  // `hostOwnsSweepCamera` is computed from live state — the plugin handle
+  // can still resolve, AR support can still settle. Recomputing it under a
+  // RUNNING sweep would change who owns the camera mid-capture: native
+  // latches the arm from the options bag at `start` and never re-reads it,
+  // so a flip to `true` mounts `<CameraView>` against a device the
+  // recorder's own Camera2 client is already holding, and a flip to `false`
+  // unmounts the feed the engine is being fed from. Neither is recoverable
+  // mid-sweep. Null while idle; the value taken at start while sweeping.
+  const [sweepOwnershipLatch, setSweepOwnershipLatch] =
+    useState<boolean | null>(null);
   const prevEngineRef = useRef(engine);
   useEffect(() => {
     const was = prevEngineRef.current;
@@ -2179,10 +2191,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // (before packNV21), paired with the bridge forcing native cadence to 1
   // for frameProcessor mode (see the incremental.start config below). The
   // effective product cadence is unchanged from today's native-only throttle.
-  // S7 — the sweep's own worklet. Acquired unconditionally (the plugin
-  // handle resolves once, asynchronously) but gated by `setActive`, so an
-  // idle screen pays no per-frame JNI hop.
-  const sweepDriver = useSweepWorklet();
+  // S7 — the sweep's own worklet, gated by `setActive` so an idle screen
+  // pays no per-frame JNI hop.
+  //
+  // ⚠ AND GATED ON THE ENGINE, because the hook is called from every mode.
+  // It used to acquire unconditionally, and its retry loop had no bound: on
+  // any build where `panoplus_sweep_ingest` is not registered — which is
+  // every iOS build until that arm exists — photo, scan, doc and keyframe
+  // pano each carried a permanent ~62 Hz JS timer polling for a plugin they
+  // would never call.
+  const sweepDriver = useSweepWorklet(engine === 'sweep');
   const fpDriver = useFrameProcessorDriver({
     evalEveryNFrames:
       settings.frameSelection.flow?.evalEveryNFrames ??
@@ -3264,7 +3282,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // here so the two call sites cannot drift: ~25 props, several of them
   // load-bearing lifecycle (`isActive`, the background-release contract),
   // and a copy would be a second place to fix the next Samsung reclaim bug.
-    const hostPreviewElement = (
+  const hostPreviewElement = (
     <CameraView
         ref={visionCameraRef}
         device={capture.device}
@@ -3351,6 +3369,27 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       />
   );
 
+  // Who owns the camera on the sweep arm — ONE boolean, so the preview and
+  // the native start options cannot disagree. Pure and exported; the truth
+  // table lives in `sweepHostOwnsCamera`, which documents what each term
+  // prevents and which of them is a regression S7 introduced.
+  const hostOwnsSweepCameraLive = sweepHostOwnsCamera({
+    isAR,
+    platformOS: Platform.OS,
+    cameraUnmounting: cameraShouldUnmount(
+      inFlightTransition,
+      arSupportPending,
+      statusPhase,
+      sweepHandoffPending,
+    ),
+    arPreference,
+    pluginReady: sweepDriver.isReady,
+    deviceId: capture.device?.id ?? '',
+    captureMode: capture.captureMode,
+    lens,
+  });
+  const hostOwnsSweepCamera = sweepOwnershipLatch ?? hostOwnsSweepCameraLive;
+
   // ⚠ THE EARLY RETURN IS THE **AR** CELL ONLY (S7).
   //
   // On the AR arm the sweep surface mounts its own `<ARCameraView>`, and
@@ -3377,11 +3416,18 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               keyframe engine uses — one definition, so the two cannot
               drift.
 
+              ⚠ GATED ON `hostOwnsSweepCamera`, NOT ON `!isAR`. The two are
+              not the same question: `!isAR` is "the sweep is not using
+              ARKit", and this needs "the sweep's native recorder will open
+              NOTHING". On iOS today the second is false however the first
+              reads, and mounting this there puts two sessions on one
+              camera.
+
               ⚠ AND THE KEYFRAME CHROME STAYS OUT. Falling through to the
               main tree would bring the settings modal, the thumbnail strip
               and the band overlay with it — keyframe furniture over a
               sweep. The sweep's own HUD is the surface's. */}
-          {!isAR && sweepReview == null && hostPreviewElement}
+          {hostOwnsSweepCamera && sweepReview == null && hostPreviewElement}
           {sweepReview != null ? (
             // The viewer REPLACES the surface rather than covering it: the
             // surface owns a camera, and leaving it mounted behind a review
@@ -3410,18 +3456,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // on one engine is still in force on the other. Two surfaces
             // with two independent copies of "AR on" is how an operator ends
             // up reading one and getting the other.
-            frameSource={isAR ? 'own' : 'host'}
-            // ── S5: ASK FOR THE VISION-CAMERA ARM, AND ONLY WHEN IT CAN
-            //    ACTUALLY BE SERVED ──────────────────────────────────────
-            // Three conditions, all of them load-bearing. Non-AR, because
-            // the AR arm has its own feeder. A plugin that has ACQUIRED,
-            // because the registry resolves asynchronously and an arm
-            // armed before that waits for frames from a plugin handle that
-            // is still null — the exact "armed with no feeder" failure the
-            // AR arm shipped. And a camera id, because the recorder
-            // derives intrinsics from its characteristics and refuses
-            // rather than guess a focal length.
-            vcPluginArm={!isAR && sweepDriver.isReady}
+            frameSource={hostOwnsSweepCamera ? 'host' : 'own'}
+            // ── S5: ASK FOR THE VISION-CAMERA ARM ───────────────────────
+            // Same boolean that chose the preview above, deliberately: the
+            // declaration "the host owns the camera" and the request "do
+            // not open one" have to be the same fact, or the surface draws
+            // no viewfinder while native takes the device. See
+            // `hostOwnsSweepCamera` for what each of its terms prevents.
+            vcPluginArm={hostOwnsSweepCamera}
             vcCameraId={capture.device?.id ?? ''}
             poseSource={arPreference ? 'ar' : 'imu'}
             onPoseSourceChange={(next) => { setArPreference(next === 'ar'); }}
@@ -3447,6 +3489,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // and the engine would receive nothing, silently. The host's
             // own handler is still called — it is composed, not replaced.
             onSweepingChange={(sweeping: boolean) => {
+              // Latch ownership at the first edge and release it at the
+              // last — see `sweepOwnershipLatch`. Set from the LIVE value,
+              // not the latched one, or a latch could never be replaced.
+              setSweepOwnershipLatch(sweeping ? hostOwnsSweepCameraLive : null);
               sweepDriver.setActive(sweeping);
               sweep?.onSweepingChange?.(sweeping);
             }}
@@ -4108,6 +4154,117 @@ function cameraShouldUnmount(
 
 /** @internal test-only — see `cameraShouldUnmount`. */
 export const _cameraShouldUnmountForTests = cameraShouldUnmount;
+
+/**
+ * sweepHostOwnsCamera — on `engine="sweep"`, will the embedding `<Camera>`'s
+ * own `<CameraView>` be the camera, with the sweep fed from it by the
+ * `panoplus_sweep_ingest` frame processor?
+ *
+ * ── WHY THIS IS ONE FUNCTION AND NOT FOUR CONDITIONS ────────────────────
+ *
+ * S7 asked this question in three places with three different answers:
+ * `!isAR` chose whether to render the preview, `!isAR && pluginReady` chose
+ * whether to ask native for the arm, and the main tree's handoff guard
+ * applied to neither. An adversarial review found three reachable states in
+ * which they disagree, and every disagreement lands the same way — vision-
+ * camera holds the back camera while the native recorder opens its own
+ * session against it. Two stacks, one camera, on a phone.
+ *
+ * So it is one boolean now. A disagreement is no longer expressible.
+ *
+ * Each term below is a defect that was reachable, not a precaution:
+ *
+ *  * **`platformOS === 'android'` — a REGRESSION S7 INTRODUCED, and the
+ *    reason this function exists.** `vcPluginArm` / `vcCameraId` are read by
+ *    `PanoPlusAndroidRecorder` and by nothing whatsoever under `ios/`: the
+ *    iOS bridge knows two producers, `"ar"` and `"imu"`, and `"imu"`
+ *    unconditionally starts `RNISPanoAvfSource`, which opens its OWN
+ *    `AVCaptureSession` on a physical back device. Before S7 that was the
+ *    only session on the sweep screen. S7 mounted `<CameraView>` beside it.
+ *    ⚠ And it does NOT fail loudly: `canAddInput` tests configuration
+ *    compatibility, not runtime exclusivity, so the second open usually
+ *    SUCCEEDS and one of the two sessions is interrupted afterwards — a dead
+ *    preview, not an error code. iOS stays on the arm that works until
+ *    `PanoPlusBridge` grows the fourth start mode Android has.
+ *
+ *  * **`!arPreference` — NOT implied by `!isAR`, and the gap is reachable.**
+ *    `deriveEffectiveCaptureSource` returns `'non-ar'` when AR is merely
+ *    UNSUPPORTED or the lens is 0.5×, so `isAR` is false on plenty of sweeps
+ *    the operator has AR switched on for. Meanwhile `<Camera>` passes
+ *    `poseSource={arPreference ? 'ar' : 'imu'}`, and the surface forwards
+ *    `vcPluginArm` only on the IMU arm — because the recorder's own gate is
+ *    `cfg.vcPluginArm && cfg.livePoseSource == "imu"`. So with AR preferred
+ *    but unavailable, the old predicate declared "the host owns the camera",
+ *    `<CameraView>` mounted, the surface drew no viewfinder, the arm flag was
+ *    dropped on the way out — and the recorder opened its own camera anyway.
+ *    Every 0.5× sweep with the AR pill on took that path.
+ *
+ *    The surface now ALSO refuses this state outright at `start` rather than
+ *    opening a camera the host holds (an `'imu'` request can still fall back
+ *    to ARKit inside `armNotice`, which this term cannot see). This one keeps
+ *    that refusal off the two paths that would otherwise hit it constantly.
+ *
+ *  * **`!cameraUnmounting`** — the v0.14.2 camera-handoff race, reintroduced.
+ *    `isAR` is false until the async `isSupported()` probe settles, so with
+ *    AR preferred the sweep cell mounted `<CameraView>` for the width of the
+ *    probe. That is precisely the window in which vision-camera's session
+ *    grabs the camera and the switch to AR 200-500 ms later fails with ARKit
+ *    "Required sensor failed". The main tree has guarded this for a year;
+ *    the sweep cell was not using the guard.
+ *
+ *  * **`pluginReady` and a non-empty `deviceId`** — the arm cannot be served
+ *    without a plugin handle and an id to read intrinsics from, and when it
+ *    is not served the recorder opens its own camera anyway. Declaring the
+ *    host owns it in that state tells the surface to draw no viewfinder
+ *    while native takes the device: a black screen over a live sweep.
+ *
+ *  * **not multicam away from the wide baseline** — S6 refuses a frame on
+ *    iOS precisely because a VIRTUAL multi-camera container switches its
+ *    active constituent under zoom with no notification. In `'multicam'`
+ *    mode `capture.device.id` IS that logical container, and the recorder
+ *    derives intrinsics from its `CameraCharacteristics` assuming the default
+ *    crop. Refusing the hazard on one platform and handing it to the other
+ *    would be the same bug twice.
+ *
+ * Pure + exported for test, for the same reason `cameraShouldUnmount` is:
+ * the lib's jest config cannot drive `<Camera>`'s vision-camera mocks, so a
+ * render test cannot reach most of these states. A truth table can reach all
+ * of them.
+ */
+function sweepHostOwnsCamera(input: {
+  /** The sweep resolved to the ARKit/ARCore arm, which feeds itself. */
+  isAR: boolean;
+  /**
+   * The operator's AR toggle. ⚠ NOT the same question as `isAR`, and the
+   * gap between them is a reachable collision — see the term's note below.
+   */
+  arPreference: boolean;
+  /** `Platform.OS`. */
+  platformOS: string;
+  /** `cameraShouldUnmount(...)` — a switch, probe or stitch is in flight. */
+  cameraUnmounting: boolean;
+  /** The `panoplus_sweep_ingest` plugin handle has been acquired. */
+  pluginReady: boolean;
+  /** `capture.device?.id ?? ''`. */
+  deviceId: string;
+  /** How lenses are switched for the mounted device. */
+  captureMode: CaptureDeviceMode;
+  /** The lens the operator chose. */
+  lens: '1x' | '0.5x';
+}): boolean {
+  return (
+    !input.isAR
+    && !input.arPreference
+    && input.platformOS === 'android'
+    && !input.cameraUnmounting
+    && input.pluginReady
+    && input.deviceId !== ''
+    && !(input.captureMode === 'multicam' && input.lens !== '1x')
+  );
+}
+
+/** @internal test-only — see `sweepHostOwnsCamera`. */
+export const _sweepHostOwnsCameraForTests = sweepHostOwnsCamera;
 
 
 /**
