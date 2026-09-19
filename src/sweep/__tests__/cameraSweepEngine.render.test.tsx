@@ -30,6 +30,22 @@ import type { CameraCaptureResult } from '../../camera/Camera';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
 import { SWEEP_ENGINE_DEFAULTS } from '../sweepDefaults';
 
+/** Composite component names in the tree — the host-string walker below
+ *  cannot see these, and "is the keyframe chrome absent" is a question
+ *  about composites. */
+function namesOf(tree: ReactTestRenderer): string[] {
+  const out: string[] = [];
+  const walk = (n: any): void => {
+    if (n == null) return;
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    const t = n.type;
+    if (typeof t === 'function') out.push(t.displayName ?? t.name ?? '');
+    (n.children ?? []).forEach(walk);
+  };
+  walk(tree.root);
+  return out;
+}
+
 /** Every host component the renderer produced, by display name. */
 function names(tree: ReactTestRenderer): string[] {
   const out: string[] = [];
@@ -177,6 +193,47 @@ describe('<Camera engine="sweep">', () => {
     expect(opts.crossScaleLeak).toBe(SWEEP_ENGINE_DEFAULTS.crossScaleLeak);
     expect(opts.leadOutTraj).toBe(SWEEP_ENGINE_DEFAULTS.leadOutTraj);
     act(() => { tree.unmount(); });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  //  S7 — WHO OWNS THE CAMERA
+  // ══════════════════════════════════════════════════════════════════
+
+  it('tells the surface the HOST owns the camera on the non-AR arm', () => {
+    // THE FAILURE THIS PREVENTS IS AT MOUNT, NOT AT CAPTURE. The surface
+    // opens an AVF idle viewfinder of its own so the operator can frame the
+    // first shot. Android allows ONE client per back camera, and
+    // `<CameraView>` already has it — so a surface that still thinks it
+    // owns the camera takes ERROR_CAMERA_IN_USE before any hold.
+    const tree = render({ engine: 'sweep' });   // defaultCaptureSource is non-AR
+    expect(surfaceProps(tree).frameSource).toBe('host');
+    act(() => { tree.unmount(); });
+  });
+
+  it('leaves the AR arm owning its own camera', async () => {
+    // The AR arm is the opposite: the surface mounts the ONE
+    // <ARCameraView>, and <Camera> must not mount a second — two
+    // RNSARSession.shared.start() calls against one camera, no compile
+    // error, black preview on a phone.
+    // ⚠ THE AR PROBE IS ASYNCHRONOUS, so `isAR` is false for the first
+    // render however the host configured it — `RNSARSession.isSupported()`
+    // returns a Promise and `arSupportPending` is true until it settles.
+    // A synchronous assertion here would read the PENDING state and pass
+    // for the wrong reason on the non-AR arm.
+    const tree = render({ engine: 'sweep', defaultCaptureSource: 'ar' });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(surfaceProps(tree).frameSource).toBe('own');
+    act(() => { tree.unmount(); });
+  });
+
+  it('does not put the keyframe engine\'s chrome under a sweep', () => {
+    // Falling through to the main tree would bring the settings modal, the
+    // thumbnail strip and the band overlay with it — keyframe furniture
+    // over a sweep, which is the "why does the UI change?" complaint in
+    // the other direction.
+    const names = namesOf(render({ engine: 'sweep' }));
+    expect(names).not.toContain('CaptureThumbnailStrip');
+    expect(names).not.toContain('PanoramaSettingsModal');
   });
 
   it('routes completion to onCapture as a discriminated result', () => {

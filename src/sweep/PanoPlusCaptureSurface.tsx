@@ -303,6 +303,22 @@ export interface PanoPlusCaptureSurfaceProps {
    * banding defence the Camera2 arm asserts. Opt-in for that reason.
    */
   vcPluginArm?: boolean;
+  /**
+   * WHO OWNS THE CAMERA — `'own'` (default, unchanged) or `'host'`.
+   *
+   * ⚠ THIS IS NOT THE SAME QUESTION AS "is vision-camera installed", and
+   * three subsystems in this file were testing build-presence where they
+   * meant ownership. On `'host'` the surface must NOT open a camera of its
+   * own for ANY reason: no AVF idle viewfinder, no `setIdlePreview`, no
+   * re-arm heartbeat. Android allows one client per back camera, so the
+   * idle preview alone takes `ERROR_CAMERA_IN_USE` on MOUNT — before any
+   * hold, and before the arm it is supposed to be serving ever starts.
+   *
+   * It is a separate prop from {@link vcPluginArm} because ownership is a
+   * fact about the SCREEN and the arm is a fact about the SWEEP: the
+   * viewfinder question is settled at mount, the arm question at start.
+   */
+  frameSource?: 'own' | 'host';
   /** The camera id vision-camera opened. The recorder derives intrinsics
    *  from its characteristics; without it the arm refuses rather than
    *  guessing a focal length. */
@@ -693,6 +709,7 @@ export const PanoPlusCaptureSurface = forwardRef<
   arPluginArm,
   vcPluginArm,
   vcCameraId,
+  frameSource = 'own',
   arSourceMaxLongEdge,
   lockCamera = true,
   pinPreviewFps = true,
@@ -1830,7 +1847,11 @@ export const PanoPlusCaptureSurface = forwardRef<
   const armPendingForIdle =
     armContract === 'ios-coremotion' && poseSource === 'imu' && !calibRead;
   const avfIdleWanted =
-    !arArmed
+    // ⚠ NEVER ON THE HOST ARM. This opens a Camera2 client of our own; the
+    // host already has one on the same back camera, and the second open is
+    // ERROR_CAMERA_IN_USE at mount time.
+    frameSource === 'own'
+    && !arArmed
     && !armPendingForIdle
     && available
     && phase !== 'sweeping'
@@ -3322,7 +3343,7 @@ export const PanoPlusCaptureSurface = forwardRef<
           first frame anchors the whole canvas. Null on builds without the
           native view (and under Jest), where the explainer below keeps doing
           the honest fallback job. */}
-      {!arArmed && AvfViewfinder != null && (
+      {frameSource === 'own' && !arArmed && AvfViewfinder != null && (
         <AvfViewfinder
           style={StyleSheet.absoluteFill}
           testID="panoplus-avf-viewfinder"

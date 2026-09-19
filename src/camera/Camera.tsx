@@ -62,6 +62,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFrameProcessor } from 'react-native-vision-camera';
 import type {
   Camera as VisionCamera,
   DrawableFrameProcessor,
@@ -172,6 +173,7 @@ import {
   incrementalStitcherIsAvailable,
 } from '../stitching/incremental';
 import { useFrameProcessorDriver } from '../stitching/useFrameProcessorDriver';
+import { useSweepWorklet } from '../sweep/useSweepWorklet';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
 import { toBareFilePath, toFileUri } from '../utils/paths';
@@ -2177,6 +2179,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // (before packNV21), paired with the bridge forcing native cadence to 1
   // for frameProcessor mode (see the incremental.start config below). The
   // effective product cadence is unchanged from today's native-only throttle.
+  // S7 — the sweep's own worklet. Acquired unconditionally (the plugin
+  // handle resolves once, asynchronously) but gated by `setActive`, so an
+  // idle screen pays no per-frame JNI hop.
+  const sweepDriver = useSweepWorklet();
   const fpDriver = useFrameProcessorDriver({
     evalEveryNFrames:
       settings.frameSelection.flow?.evalEveryNFrames ??
@@ -2326,12 +2332,26 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       + 'from your worklet body (see `<Camera>` `frameProcessor` '
       + 'JSDoc for the composition pattern).  AR-mode capture is '
       + 'unaffected (AR-session dispatch fans out to both '
-      + 'first-party and host worklets independently).',
+      + 'first-party and host worklets independently).  '
+      + '\u26a0 AND IT REPLACES THE SWEEP TOO: with engine="sweep" on the '
+      + 'non-AR arm the sweep is fed by THIS worklet, so a host processor '
+      + 'that does not call it means the sweep receives no frames at all '
+      + 'and finishes empty.',
     );
   }
   // The Frame Processor worklet bound to vision-camera's Camera.
   // Host's wins if supplied; lib's internal driver otherwise.
-  const effectiveFrameProcessor = hostFrameProcessor ?? fpDriver.frameProcessor;
+  // S7 — a THREE-way, and the sweep is not the keyframe driver. Its worklet
+  // passes nothing but the frame: attitude and intrinsics are resolved
+  // natively, and a second pose synthesised here would silently disagree
+  // with the one the engine actually uses.
+  const sweepCall = sweepDriver.call;
+  const sweepFrameProcessor = useFrameProcessor((frame) => {
+    'worklet';
+    (sweepCall as unknown as (f: unknown) => void)(frame);
+  }, [sweepCall]);
+  const effectiveFrameProcessor = hostFrameProcessor
+    ?? (engine === 'sweep' ? sweepFrameProcessor : fpDriver.frameProcessor);
 
   // ── Keyframe thumbnails ──────────────────────────────────────────────
   // perf-3a change 4: Camera.tsx no longer keeps its OWN
@@ -3236,10 +3256,132 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   //
   // What the host sees is unchanged: completion arrives on `onCapture` and
   // failure on `onError`, exactly as for a photo or a panorama.
+  // ── ONE DEFINITION OF THE HOST PREVIEW ──────────────────────────
+  //
+  // `<CameraView>` is vision-camera's session and it is the viewfinder for
+  // BOTH the keyframe engine and the non-AR sweep — the whole point of S7
+  // is that the sweep stops opening a second camera beside it. Defined once
+  // here so the two call sites cannot drift: ~25 props, several of them
+  // load-bearing lifecycle (`isActive`, the background-release contract),
+  // and a copy would be a second place to fix the next Samsung reclaim bug.
+    const hostPreviewElement = (
+    <CameraView
+        ref={visionCameraRef}
+        device={capture.device}
+        // Release the camera whenever the app is genuinely BACKGROUNDED, and
+        // rebind on return — the standard vision-camera lifecycle contract
+        // (v4 does not observe the host activity itself; the session follows
+        // `isActive` alone). Holding a camera we cannot draw is wrong on its
+        // own terms: it blocks other apps, burns battery, and Android may
+        // revoke it anyway, surfacing as the swallowed
+        // `camera-has-been-disconnected` → silent black preview.
+        //
+        // DEVICE EVIDENCE (Galaxy A35, 2026-07-24): this was previously gated
+        // on the native-0.5× affordance being OFFERED, which meant a device
+        // with a reachable ultra-wide kept its camera + AR session fully open
+        // while the OEM camera launched over it. Samsung's `lmkd` runs a
+        // camera-open "kill boost" (`camkillboostmode`, targeting the pid
+        // that opened the camera) and KILLED the app mid-hand-off — with
+        // 2.2 GB still free, so it is Samsung's camera-specific reclaim, not
+        // generic pressure. The in-flight capture died with the process.
+        // Staying small exactly when that reclaim runs is the whole point, so
+        // the release must NOT be conditional on why we backgrounded.
+        //
+        // Only a true `'background'` releases — never iOS's transient
+        // `'inactive'` (Control Centre, the notification shade, a
+        // permission/Face-ID prompt, the app-switcher peek), which would
+        // black-flash the preview mid-capture. See the `appActive` note.
+        isActive={appActive}
+        // iOS depth sidecar for tap photos (non-AR only): turns on
+        // vision-camera depth delivery + the depth-capable format bias;
+        // useCapture (threaded above) extracts the sidecar before the
+        // orientation re-encode.
+        captureDepthData={captureDepthData}
+        // High-res still capture (document scanning): raises the photo cap so
+        // the non-AR tap photo uses the device's largest 4:3 still (e.g.
+        // 12.5 MP), while the 4:3 video/preview the frame-processor runs on is
+        // unchanged.  Stitching/keyframes unaffected (they downscale
+        // regardless); only the tap photo benefits.
+        highResCapture={highResCapture}
+        // Non-AR pano keyframe quality: floors the VIDEO stream at 1280
+        // long edge (the FP stream IS the keyframe source here).
+        keyframeQualityCapture={keyframeQualityCapture}
+        // v0.23 anti-blur EXPOSURE CAP (non-AR): translated to an fps floor
+        // on this vision-camera instance (see CameraView). 0/absent = off.
+        maxExposureMs={settings.frameSelection.antiBlur?.maxExposureMs ?? 0}
+        // `video={true}` is REQUIRED for takeSnapshot to work on iOS.
+        // vision-camera v4's iOS implementation of takeSnapshot waits
+        // for a frame on the video pipeline; with video disabled, the
+        // promise never resolves and the JS frame-driver stalls after
+        // the very first buffered preview frame.  Android takeSnapshot
+        // works either way.  Pattern matches AuditCaptureScreen.tsx
+        // which has run on `video` (true) for months without issue.
+        video
+        flash={effectiveFlash}
+        // v0.13.2 — in multi-cam mode the lens is switched via zoom
+        // on a single mounted device (0.5× → ultra-wide end, 1× →
+        // wide baseline).  undefined in standalone/wide-only modes
+        // (lens = device identity, no zoom).
+        zoom={capture.deviceZoom}
+        style={StyleSheet.absoluteFill}
+        // F8 (FrameProcessor port) — host-supplied worklet runs on
+        // the camera producer thread for every frame.  Only wired
+        // in non-AR mode; AR mode uses ARCameraView which doesn't
+        // expose a frame-processor seam.  See
+        // docs/f8-frame-processor-plan.md.
+        cameraProps={effectiveFrameProcessor != null
+          ? { frameProcessor: effectiveFrameProcessor }
+          : undefined}
+        onError={(err) => {
+          // CameraView already filters known transient lifecycle
+          // errors (screen-lock, etc.) before invoking this.  What
+          // reaches here is a real vision-camera runtime issue:
+          // pull `code`/`message` defensively (the type is
+          // `unknown` from CameraView's perspective) and wrap in
+          // a SDK-typed `CameraError` so hosts get a stable shape.
+          const e = err as { code?: string; message?: string };
+          const codeStr = e?.code ?? 'unknown';
+          const msg = e?.message ?? String(err);
+          onError?.(new CameraError(
+            'VISION_CAMERA_RUNTIME',
+            `${codeStr}: ${msg}`,
+            err,
+          ));
+        }}
+      />
+  );
+
+  // ⚠ THE EARLY RETURN IS THE **AR** CELL ONLY (S7).
+  //
+  // On the AR arm the sweep surface mounts its own `<ARCameraView>`, and
+  // `<Camera>` mounts one too — two `RNSARSession.shared.start()` calls
+  // against one camera, with no compile error and a black preview on a
+  // phone. Returning early is still the only shape in which exactly one is
+  // alive, so that cell is unchanged.
+  //
+  // The NON-AR sweep is the opposite problem: there the host's own
+  // `<CameraView>` IS the camera, and the sweep is fed from it by the
+  // `panoplus_sweep_ingest` frame processor. So it falls through to the
+  // main tree, where the viewfinder, the shutter and the chrome already
+  // exist — and the surface renders OVER it with `frameSource="host"`, as
+  // chrome with no camera of its own.
   if (engine === 'sweep') {
     return (
       <HostJsLandscapeContext.Provider value={jsLandscape}>
         <View style={[styles.container, style]}>
+          {/* ── THE NON-AR SWEEP RUNS ON THE HOST'S OWN PREVIEW (S7) ──
+              On the AR arm the surface mounts its own `<ARCameraView>` and
+              nothing else may; on the non-AR arm `<CameraView>` IS the
+              camera and the sweep is fed from it by the
+              `panoplus_sweep_ingest` frame processor. Same element the
+              keyframe engine uses — one definition, so the two cannot
+              drift.
+
+              ⚠ AND THE KEYFRAME CHROME STAYS OUT. Falling through to the
+              main tree would bring the settings modal, the thumbnail strip
+              and the band overlay with it — keyframe furniture over a
+              sweep. The sweep's own HUD is the surface's. */}
+          {!isAR && sweepReview == null && hostPreviewElement}
           {sweepReview != null ? (
             // The viewer REPLACES the surface rather than covering it: the
             // surface owns a camera, and leaving it mounted behind a review
@@ -3268,6 +3410,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // on one engine is still in force on the other. Two surfaces
             // with two independent copies of "AR on" is how an operator ends
             // up reading one and getting the other.
+            frameSource={isAR ? 'own' : 'host'}
             poseSource={arPreference ? 'ar' : 'imu'}
             onPoseSourceChange={(next) => { setArPreference(next === 'ar'); }}
             lens={lens === '0.5x' ? 'ultraWide' : 'wide'}
@@ -3371,90 +3514,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           overlays={overlays}
         />
       ) : (
-        <CameraView
-          ref={visionCameraRef}
-          device={capture.device}
-          // Release the camera whenever the app is genuinely BACKGROUNDED, and
-          // rebind on return — the standard vision-camera lifecycle contract
-          // (v4 does not observe the host activity itself; the session follows
-          // `isActive` alone). Holding a camera we cannot draw is wrong on its
-          // own terms: it blocks other apps, burns battery, and Android may
-          // revoke it anyway, surfacing as the swallowed
-          // `camera-has-been-disconnected` → silent black preview.
-          //
-          // DEVICE EVIDENCE (Galaxy A35, 2026-07-24): this was previously gated
-          // on the native-0.5× affordance being OFFERED, which meant a device
-          // with a reachable ultra-wide kept its camera + AR session fully open
-          // while the OEM camera launched over it. Samsung's `lmkd` runs a
-          // camera-open "kill boost" (`camkillboostmode`, targeting the pid
-          // that opened the camera) and KILLED the app mid-hand-off — with
-          // 2.2 GB still free, so it is Samsung's camera-specific reclaim, not
-          // generic pressure. The in-flight capture died with the process.
-          // Staying small exactly when that reclaim runs is the whole point, so
-          // the release must NOT be conditional on why we backgrounded.
-          //
-          // Only a true `'background'` releases — never iOS's transient
-          // `'inactive'` (Control Centre, the notification shade, a
-          // permission/Face-ID prompt, the app-switcher peek), which would
-          // black-flash the preview mid-capture. See the `appActive` note.
-          isActive={appActive}
-          // iOS depth sidecar for tap photos (non-AR only): turns on
-          // vision-camera depth delivery + the depth-capable format bias;
-          // useCapture (threaded above) extracts the sidecar before the
-          // orientation re-encode.
-          captureDepthData={captureDepthData}
-          // High-res still capture (document scanning): raises the photo cap so
-          // the non-AR tap photo uses the device's largest 4:3 still (e.g.
-          // 12.5 MP), while the 4:3 video/preview the frame-processor runs on is
-          // unchanged.  Stitching/keyframes unaffected (they downscale
-          // regardless); only the tap photo benefits.
-          highResCapture={highResCapture}
-          // Non-AR pano keyframe quality: floors the VIDEO stream at 1280
-          // long edge (the FP stream IS the keyframe source here).
-          keyframeQualityCapture={keyframeQualityCapture}
-          // v0.23 anti-blur EXPOSURE CAP (non-AR): translated to an fps floor
-          // on this vision-camera instance (see CameraView). 0/absent = off.
-          maxExposureMs={settings.frameSelection.antiBlur?.maxExposureMs ?? 0}
-          // `video={true}` is REQUIRED for takeSnapshot to work on iOS.
-          // vision-camera v4's iOS implementation of takeSnapshot waits
-          // for a frame on the video pipeline; with video disabled, the
-          // promise never resolves and the JS frame-driver stalls after
-          // the very first buffered preview frame.  Android takeSnapshot
-          // works either way.  Pattern matches AuditCaptureScreen.tsx
-          // which has run on `video` (true) for months without issue.
-          video
-          flash={effectiveFlash}
-          // v0.13.2 — in multi-cam mode the lens is switched via zoom
-          // on a single mounted device (0.5× → ultra-wide end, 1× →
-          // wide baseline).  undefined in standalone/wide-only modes
-          // (lens = device identity, no zoom).
-          zoom={capture.deviceZoom}
-          style={StyleSheet.absoluteFill}
-          // F8 (FrameProcessor port) — host-supplied worklet runs on
-          // the camera producer thread for every frame.  Only wired
-          // in non-AR mode; AR mode uses ARCameraView which doesn't
-          // expose a frame-processor seam.  See
-          // docs/f8-frame-processor-plan.md.
-          cameraProps={effectiveFrameProcessor != null
-            ? { frameProcessor: effectiveFrameProcessor }
-            : undefined}
-          onError={(err) => {
-            // CameraView already filters known transient lifecycle
-            // errors (screen-lock, etc.) before invoking this.  What
-            // reaches here is a real vision-camera runtime issue:
-            // pull `code`/`message` defensively (the type is
-            // `unknown` from CameraView's perspective) and wrap in
-            // a SDK-typed `CameraError` so hosts get a stable shape.
-            const e = err as { code?: string; message?: string };
-            const codeStr = e?.code ?? 'unknown';
-            const msg = e?.message ?? String(err);
-            onError?.(new CameraError(
-              'VISION_CAMERA_RUNTIME',
-              `${codeStr}: ${msg}`,
-              err,
-            ));
-          }}
-        />
+        hostPreviewElement
       )}
 
       {/* REC banner + record border (during recording / stitching).  v0.16
