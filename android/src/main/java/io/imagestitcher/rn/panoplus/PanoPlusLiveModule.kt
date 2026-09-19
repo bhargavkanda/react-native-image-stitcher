@@ -391,6 +391,13 @@ class PanoPlusLiveModule(
         // engine starts and is fed nothing — which the pack reports as
         // arPlugin.ingested = 0 rather than hiding.
         bag.putBoolean("arPluginArm", optBool(options, "arPluginArm", false))
+        // S5 — the vision-camera plugin arm, and the camera id it needs.
+        // Forwarded unconditionally like every other bag key: the RECORDER
+        // decides whether the arm applies (it reads the flag together with
+        // the pose arm), and a module that filtered here would be a second
+        // place that decision lives.
+        bag.putBoolean("vcPluginArm", optBool(options, "vcPluginArm", false))
+        bag.putString("vcCameraId", optStr(options, "vcCameraId", "") ?: "")
 
         // ── Camera ───────────────────────────────────────────────────────
         // The ultra-wide by default (`preferPhysical`), 60 fps preferred, and

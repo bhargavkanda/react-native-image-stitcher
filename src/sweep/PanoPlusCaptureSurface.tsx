@@ -288,6 +288,26 @@ export interface PanoPlusCaptureSurfaceProps {
    */
   arPluginArm?: boolean;
   /**
+   * S5 — run the sweep on frames from the camera the HOST already owns,
+   * via the `panoplus_sweep_ingest` vision-camera Frame Processor. Android,
+   * IMU arm only. The recorder opens no Camera2 client.
+   *
+   * ⚠ REQUIRES {@link vcCameraId}, AND BOTH ARE SENT ONLY TOGETHER. An arm
+   * that opens no camera and is fed by nothing is the exact shape the AR
+   * plugin arm shipped broken in — the operator sat watching a sweep that
+   * could never receive a frame.
+   *
+   * ⚠ AND IT COSTS THE EXPOSURE LOCK. vision-camera has no AE lock on
+   * Android, and surfaces no exposure metadata, so a sweep on this arm runs
+   * UNLOCKED with the engine's exposure normalisation fed zeros — the
+   * banding defence the Camera2 arm asserts. Opt-in for that reason.
+   */
+  vcPluginArm?: boolean;
+  /** The camera id vision-camera opened. The recorder derives intrinsics
+   *  from its characteristics; without it the arm refuses rather than
+   *  guessing a focal length. */
+  vcCameraId?: string;
+  /**
    * Long-edge budget (px) for the AR arm's CPU image. Omit for the library's
    * 1920 default.
    *
@@ -671,6 +691,8 @@ export const PanoPlusCaptureSurface = forwardRef<
   engineOptions,
   attitudeMagFree,
   arPluginArm,
+  vcPluginArm,
+  vcCameraId,
   arSourceMaxLongEdge,
   lockCamera = true,
   pinPreviewFps = true,
@@ -2170,6 +2192,17 @@ export const PanoPlusCaptureSurface = forwardRef<
       // wait for frames that can never arrive, which is exactly how this
       // shipped broken the first time.
       ...(arPluginArm === true && arArmed ? { arPluginArm: true } : {}),
+      // S5 — the same rule as the line above, for the same reason. Sent
+      // ONLY when the host both asked for it AND supplied the camera id,
+      // and only on the IMU arm: the recorder reads the flag together with
+      // the pose arm, and a flag that reaches the other arm tells it to
+      // open no camera and wait for a feeder that is not there.
+      ...(vcPluginArm === true
+        && typeof vcCameraId === 'string'
+        && vcCameraId.length > 0
+        && wantPoseSource === 'imu'
+        ? { vcPluginArm: true, vcCameraId }
+        : {}),
       ...(meteringSettleMs != null ? { meteringSettleMs } : {}),
       // WHICH PRODUCER. Sent last, with the other sweep-level arms, and it is
       // `armNotice.effectivePoseSource` rather than the raw prop: when the IMU

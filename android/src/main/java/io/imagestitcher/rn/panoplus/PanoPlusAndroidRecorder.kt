@@ -785,6 +785,8 @@ class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext)
             lockCamera = optBool(options, "lockCamera", true),
             attitudeMagFree = optBool(options, "attitudeMagFree", false),
             arPluginArm = optBool(options, "arPluginArm", false),
+            vcPluginArm = optBool(options, "vcPluginArm", false),
+            vcCameraId = optStr(options, "vcCameraId", "") ?: "",
             meteringMemoMaxAgeMs =
                 optDbl(options, "meteringMemoMaxAgeMs", 4000.0).coerceIn(0.0, 60000.0),
             settleStableResults = optInt(options, "settleStableResults", 3).coerceIn(0, 60),
@@ -1632,6 +1634,25 @@ private class Config(
      */
     val arPluginArm: Boolean,
     /**
+     * S5 — the sweep runs on frames from the camera `<Camera>` owns, fed by
+     * `PanoPlusSweepFrameProcessor`. The recorder opens NO Camera2 client.
+     *
+     * ⚠ READ TOGETHER WITH THE POSE ARM, NEVER ALONE. The AR plugin arm
+     * shipped once with its flag read on its own: an IMU sweep took the
+     * no-camera branch, opened nothing, and waited for frames from a plugin
+     * that was not mounted. A flag that selects an ARM must be read with the
+     * arm.
+     */
+    val vcPluginArm: Boolean,
+    /**
+     * The camera id vision-camera opened, so the recorder can derive
+     * intrinsics from its `CameraCharacteristics` — which needs no open
+     * camera. Empty means "not supplied", and the arm refuses rather than
+     * guessing: a wrong camera's focal length is a confidently wrong canvas,
+     * and the engine's `fx > 1.0` guard cannot tell the two apart.
+     */
+    val vcCameraId: String,
+    /**
      * How old the idle viewfinder's metering memo may be and still be
      * usable as a settle TARGET (see the settle callback). 0 disables the
      * memo path entirely and restores the pre-2026-09-10 settle exactly.
@@ -2090,7 +2111,7 @@ private const val ST_SETTLING = 2
 private const val ST_RECORDING = 3
 private const val ST_STOPPING = 4
 
-private class Rec(private val ctx: Context, private val cfg: Config) {
+private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusVcFrameSink.Host {
 
     // ── Threads. Four, each with one job, all quit in shutdown(). ───────
     // camThread carries the CameraDevice / session / CaptureResult callbacks
@@ -2370,6 +2391,16 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
      * start(), so it cannot leak across sweeps by construction.
      */
     @Volatile private var arPluginArmActive = false
+    /** S5 — a vision-camera plugin is feeding this sweep. */
+    @Volatile private var vcPluginArmActive = false
+    /** The characteristics of the camera vision-camera opened, held so the
+     *  intrinsics can be derived per frame size without an open session. */
+    @Volatile private var vcChars: CameraCharacteristics? = null
+    private val vcFramesRan = AtomicLong(0)
+    private val vcFramesPainted = AtomicLong(0)
+    /** The engine's Outcome ordinal histogram for this arm. `ran` is not
+     *  `painted`; this is what a device gate must read. */
+    private val vcOutcomeHist = java.util.concurrent.ConcurrentHashMap<Int, Long>()
     /** Why [arArmActive] is what it is — always populated, and the string the
      *  pack and the start payload both carry. */
     @Volatile private var arArmReason = "not requested (poseSource was not 'ar')"
@@ -2495,6 +2526,9 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
     private var constFy = 0.0
     private var constCx = 0.0
     private var constCy = 0.0
+    /** The frame size `constFx..constCy` were derived for on the vc arm. */
+    private var vcConstW = 0
+    private var vcConstH = 0
     private val advisories = ArrayList<String>()
 
     private var startWallMs = 0.0
@@ -2632,6 +2666,15 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
         // with the arm, never on its own.
         if (cfg.arPluginArm && cfg.livePoseSource == "ar") {
             return startArPluginArm(promise)
+        }
+
+        // ── S5: THE VISION-CAMERA PLUGIN ARM ────────────────────────────
+        // Same shape as the AR plugin arm and read the same way — WITH its
+        // pose arm, never on its own. The 2026-09-10 regression quoted above
+        // is what happens otherwise, and this flag can reach an IMU sweep
+        // exactly as that one did.
+        if (cfg.vcPluginArm && cfg.livePoseSource == "imu") {
+            return startVcPluginArm(promise)
         }
 
         // ── STANDALONE: no Camera2 client of ours at all ────────────────
@@ -3267,6 +3310,171 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
                 "(ARFramePlugin '${PanoPlusArFramePlugin.NAME}'). No Camera2 client and no " +
                 "ARCore session of ours exists on this arm, so there is no shared-camera " +
                 "handover, no bootstrap race and no pose ring."
+        advise(arArmReason)
+        state.set(ST_RECORDING)
+        CoroutineScope(Dispatchers.IO).launch { writeDeviceJson("recording-started") }
+        settleResolve(promise)
+    }
+
+    /**
+     * S5 — run the sweep on frames from a camera this recorder does not own.
+     *
+     * Modelled line-for-line on [startArPluginArm], because the camera-less
+     * half of a sweep already existed there: open the pack, run the IMU,
+     * start the engine, arm a feeder. What differs is everything the feeder
+     * cannot supply, and on vision-camera that is more than on ARCore.
+     *
+     * ⚠ THE INTRINSICS ARE DERIVED, AND THE ARM REFUSES WITHOUT A CAMERA ID.
+     * vision-camera surfaces no capture metadata, so there is no per-frame
+     * crop to map — the numbers come from `CameraCharacteristics` for the id
+     * the host says vc opened. Guessing an id would give a confidently wrong
+     * focal length, and the engine's `fx > 1.0` guard cannot tell a wrong
+     * focal length from a right one; it would paint a wrong canvas and
+     * report success.
+     */
+    // ── PanoPlusVcFrameSink.Host ────────────────────────────────────────
+    //
+    // Everything the vision-camera plugin cannot supply. Called on the
+    // sink's worker thread, once per frame it takes.
+
+    override fun solveAttitude(tsNs: Long): PanoPlusVcFrameSink.PanoPlusVcAttitude {
+        val basisC: DoubleArray? = if (attitudeMapping) basis?.matrix else null
+        val sol = if (basisC != null) {
+            attitudeRing.solve(tsNs, attitudeMaxBracketNs)
+        } else {
+            null
+        }
+        val qMapped: DoubleArray? =
+            if (sol != null && sol.ok && basisC != null) panoApplyBasis(sol.q, basisC) else null
+        if (sol != null) {
+            if (qMapped != null) {
+                attitudeMapped.incrementAndGet()
+                if (attitudeFirstQ == null) attitudeFirstQ = qMapped
+                attitudeLastQ = qMapped
+            } else {
+                attitudeRefusalCounts.merge(sol.refusal, 1L) { a, b -> a + b }
+            }
+        }
+        // ⚠ 2 MEANS "A POSE SOLVED FOR THIS FRAME", AND NOTHING WEAKER. The
+        // engine latches its reference attitude from the first run of five
+        // consecutive 2s, so a 2 backed by a stale sample pins the datum the
+        // whole sweep is measured against onto a rotation never observed.
+        // Same rule the AR arm states: `if (qMapped != null) 2 else 0`.
+        val tracking = when {
+            cfg.trackingOverride in 0..2 -> cfg.trackingOverride
+            qMapped != null -> 2
+            else -> 0
+        }
+        if (tracking in 0..2) trackingHist[tracking]++
+        return PanoPlusVcFrameSink.PanoPlusVcAttitude(
+            q = qMapped ?: doubleArrayOf(0.0, 0.0, 0.0, 1.0),
+            tracking = tracking,
+        )
+    }
+
+    override fun intrinsicsFor(width: Int, height: Int): DoubleArray {
+        val c = vcChars
+        if (c != null && (constFx <= 0.0 || vcConstW != width || vcConstH != height)) {
+            // Derived once per SIZE, not per frame: the characteristics are
+            // static and the only thing that varies is the stream we are
+            // being handed.
+            computeConstantIntrinsics(c, Size(width, height))
+            vcConstW = width
+            vcConstH = height
+        }
+        // No crop region exists on this arm, so the constant intrinsics ARE
+        // the answer — `intrinsicsFor(meta, size)`'s per-frame mapping has
+        // no CaptureResult to map from.
+        return doubleArrayOf(constFx, constFy, constCx, constCy)
+    }
+
+    override fun onVcFrameOutcome(
+        ran: Boolean,
+        painted: Boolean,
+        outcome: Int,
+        droppedBusy: Boolean,
+    ) {
+        if (droppedBusy) { this.droppedBusy.incrementAndGet(); return }
+        if (ran) vcFramesRan.incrementAndGet()
+        if (painted) vcFramesPainted.incrementAndGet()
+        if (outcome in 0..255) vcOutcomeHist[outcome] = (vcOutcomeHist[outcome] ?: 0L) + 1L
+    }
+
+    private fun startVcPluginArm(promise: Promise) {
+        if (!cfg.live) {
+            return fail(
+                promise, "vc-plugin-needs-live",
+                "the vision-camera plugin arm feeds the LIVE engine and nothing else: there " +
+                    "is no Camera2 stream of ours on it, so a recording-only session would " +
+                    "write an empty pack. Send live:true, or use a camera arm to record frames.",
+            )
+        }
+        if (cfg.vcCameraId.isBlank()) {
+            return fail(
+                promise, "vc-plugin-needs-camera-id",
+                "the vision-camera plugin arm needs the camera id vision-camera opened, so " +
+                    "the intrinsics can be derived from its characteristics. Without it the " +
+                    "focal length would be a guess, and a wrong focal length paints a " +
+                    "confidently wrong canvas rather than refusing.",
+            )
+        }
+        val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+            ?: return fail(promise, "no-camera-service", "CAMERA_SERVICE is unavailable.")
+        val chars = try {
+            cm.getCameraCharacteristics(cfg.vcCameraId)
+        } catch (t: Throwable) {
+            return fail(
+                promise, "vc-plugin-bad-camera-id",
+                "getCameraCharacteristics('${cfg.vcCameraId}') threw " +
+                    "${t.javaClass.simpleName}: ${t.message}. That id came from the host as " +
+                    "the camera vision-camera opened.",
+            )
+        }
+        try { openPack() } catch (t: Throwable) {
+            return fail(
+                promise, "pack-open-failed",
+                "could not create the pack under '${cfg.sessionDir ?: "(default)"}': " +
+                    "${t.javaClass.simpleName}: ${t.message}",
+            )
+        }
+        // The IMU FIRST, as on every other arm: the rotation-vector series
+        // has to be running before the first frame or the earliest samples
+        // have nothing to bracket.
+        startImu()
+        // Characteristics-only — no opened session, no CaptureResult, so no
+        // crop region and no per-frame intrinsics. `resolveAttitudeMapping`
+        // reads only SENSOR_ORIENTATION, LENS_FACING and the timestamp
+        // source, all of which are static.
+        resolveAttitudeMapping(chars)
+        vcChars = chars
+        intrinsicsSource = "characteristics-nocrop (vision-camera owns the camera)"
+        intrinsicsNote =
+            "vision-camera owns the camera on this arm and surfaces no CaptureResult, so " +
+                "there is no SCALER_CROP_REGION to map and no per-frame intrinsics. These " +
+                "are derived once from CameraCharacteristics for camera " +
+                "'${cfg.vcCameraId}' and scaled to each frame's size, which assumes the " +
+                "DEFAULT crop. A pack from this arm is NOT interchangeable with a Camera2 " +
+                "arm pack, whose numbers are crop-mapped per frame."
+        startLiveEngine()
+        if (liveStartError != null) {
+            return fail(
+                promise, "live-start-failed",
+                "the engine refused to start: $liveStartError",
+            )
+        }
+        PanoPlusVcFrameSink.arm(this)
+        vcPluginArmActive = true
+        arArmReason =
+            "VISION-CAMERA PLUGIN ARM: the sweep runs on frames from the camera <Camera> " +
+                "already owns (FrameProcessor '${PanoPlusSweepFrameProcessor.PLUGIN_NAME}'), " +
+                "and this recorder opens no Camera2 client. COSTS, all measured and none " +
+                "hidden: vision-camera 4.7.3 surfaces no SENSOR_EXPOSURE_TIME and no " +
+                "SENSOR_SENSITIVITY, so the engine's exposure normalisation runs on zeros; " +
+                "it has NO exposure lock on Android at all, so this sweep is AE/AWB " +
+                "UNLOCKED — the banding defence the Camera2 arm asserts; OIS/EIS cannot be " +
+                "turned off and the focus cannot be frozen, both of which are CaptureRequest " +
+                "keys on a repeating request we no longer own; and the intrinsics are " +
+                "derived rather than crop-mapped. The sweep is otherwise identical."
         advise(arArmReason)
         state.set(ST_RECORDING)
         CoroutineScope(Dispatchers.IO).launch { writeDeviceJson("recording-started") }
@@ -6164,6 +6372,16 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
                             if (arArmActive) PANO_Q_SOURCE_ARCORE
                             else basis?.authority?.qSource ?: PANO_Q_SOURCE_NONE,
                         )
+                        .b("vcPluginArm", vcPluginArmActive)
+                        // The feeder's own evidence. `framesOffered == 0` on
+                        // a finished vc sweep means the arm was armed and
+                        // NOTHING FED IT — the failure the AR plugin arm
+                        // shipped once and could only be diagnosed from a
+                        // black canvas.
+                        .i("vcFramesOffered", PanoPlusVcFrameSink.framesOffered)
+                        .i("vcFramesDroppedBusy", PanoPlusVcFrameSink.framesDroppedBusy)
+                        .i("vcFramesRan", vcFramesRan.get())
+                        .i("vcFramesPainted", vcFramesPainted.get())
                         .b("degradedFromAr", arArmDegraded)
                         // The SAME index track.jsonl carries, so the two join.
                         .i("degradedAtSeq", arArmDegradedAtSeq)
@@ -6510,6 +6728,11 @@ private class Rec(private val ctx: Context, private val cfg: Config) {
             try { arcore?.setPoseSink(null) } catch (t: Throwable) {
                 Log.w(TAG, "clearing the ARCore pose sink threw", t)
             }
+            // The vc feeder comes off with it. Left armed, a plugin callback
+            // arriving during teardown would offer a frame to a session that
+            // is being finalized — and `PanoPlusLiveNative.ingest`'s own
+            // guard would answer 0 silently rather than say so.
+            if (vcPluginArmActive) PanoPlusVcFrameSink.disarm()
             // ⚠ `arArmActive` IS DELIBERATELY NOT CLEARED HERE. The writer
             // thread is joined BELOW, so a frame is very likely mid-row right
             // now; flipping the arm under it would produce a row whose `q` came
