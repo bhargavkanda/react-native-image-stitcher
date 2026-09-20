@@ -27,12 +27,40 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { Platform } from 'react-native';
 import { VisionCameraProxy } from 'react-native-vision-camera';
 
-// ⚠ THE RESULT VIEWER IS STUBBED, and only it. `PanoPlusResultView` pulls
-// `containFit` through the package barrel, which does not resolve under this
-// project's module map — a harness artifact, not a behaviour. What this file
-// needs from the viewer is that it EXISTS and takes `onDismiss`, because the
-// subject is `<Camera>`'s decision to unmount the preview behind it, not the
-// viewer's own rendering (which `panoPlusResultView.render.test.tsx` owns).
+// ⚠ THE STUB THIS PARAGRAPH USED TO DESCRIBE IS GONE. `PanoPlusResultView`
+// was mocked here because it pulled `containFit` through the package barrel;
+// ef4e95a deleted that screen — a sweep is now reviewed by the SAME
+// `<CapturePreview>` every other engine uses — and removed the mock with it,
+// but left this comment explaining a `jest.mock` that is no longer above.
+// Rewritten rather than deleted, because "why is there no stub here" is a
+// real question for the next reader.
+//
+// `expo-file-system/legacy` IS mocked, below: it is a HOST dependency that
+// `loadVideoFileSystem` resolves at call time inside a try/catch, and the
+// verdict sidecar `<Camera>` writes on every sweep goes through it. `written`
+// is a module-level sink so that write is OBSERVABLE — without it the sidecar
+// silently no-ops and the cases below would pass on a deleted feature.
+const written: Array<{ uri: string; body: string }> = [];
+jest.mock(
+  'expo-file-system/legacy',
+  () => ({
+    documentDirectory: 'file:///var/mobile/Documents/',
+    makeDirectoryAsync: () => Promise.resolve(),
+    readAsStringAsync: () => Promise.resolve(''),
+    writeAsStringAsync: (uri: string, body: string) => {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      (globalThis as unknown as { __hostArmWritten: Array<unknown> })
+        .__hostArmWritten.push({ uri, body });
+      return Promise.resolve();
+    },
+    deleteAsync: () => Promise.resolve(),
+    getInfoAsync: () => Promise.resolve({ exists: false }),
+    readDirectoryAsync: () => Promise.resolve([]),
+  }),
+  { virtual: true },
+);
+(globalThis as unknown as { __hostArmWritten: unknown[] }).__hostArmWritten = written;
+
 import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
@@ -602,6 +630,60 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // …and the surface comes BACK, which is what makes a retake possible.
     expect(review(tree)).toHaveLength(0);
     expect(tree.root.findAllByType(PanoPlusCaptureSurface)).toHaveLength(1);
+    act(() => { tree.unmount(); });
+  });
+
+  // ── THE VERDICT SIDECAR ────────────────────────────────────────────────
+  //
+  // ⚠ ef4e95a NAMED THIS AS ITS #1 SILENT-REGRESSION RISK AND SHIPPED IT
+  // UNTESTED. The write used to be a mount effect on `PanoPlusResultView`;
+  // that screen no longer mounts, so the commit moved the write into
+  // `<Camera>`'s `onComplete`. Mutation-measured afterwards: DELETING THE
+  // CALL OUTRIGHT left the whole suite green. "The evidence it wrote is not
+  // optional" was asserted in a commit message and nowhere else.
+
+  it('⚑ every sweep writes host_verdict.json into its own session dir', async () => {
+    written.length = 0;
+    const tree = await render({});
+    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await act(async () => { await Promise.resolve(); });
+    const verdict = written.filter((w) => w.uri.endsWith('/host_verdict.json'));
+    expect(verdict).toHaveLength(1);
+    expect(verdict[0].uri)
+      .toBe(`file://${RESULT.sessionDir}/host_verdict.json`);
+    // …and it is the real sidecar, not an empty file.
+    expect(JSON.parse(verdict[0].body)).toEqual(expect.any(Object));
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and it SURVIVES a retake — the property the comment claims', async () => {
+    // The write happens in `onComplete`, before the result is stashed, so a
+    // discarded sweep still leaves its evidence on disk. That is the whole
+    // reason the call sits where it does.
+    written.length = 0;
+    const tree = await render({});
+    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await act(async () => { await Promise.resolve(); });
+    act(() => { (review(tree)[0].props.onRetake as () => void)(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(written.filter((w) => w.uri.endsWith('/host_verdict.json')))
+      .toHaveLength(1);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ NEGATIVE CONTROL: no sessionDir, no sidecar', async () => {
+    // Without this the two cases above pass for a write that fires
+    // unconditionally and puts `host_verdict.json` at the filesystem root.
+    written.length = 0;
+    const tree = await render({});
+    act(() => {
+      (surfaceProps(tree).onComplete as (r: unknown) => void)({
+        ...RESULT, sessionDir: '',
+      });
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(written.filter((w) => w.uri.endsWith('/host_verdict.json')))
+      .toHaveLength(0);
     act(() => { tree.unmount(); });
   });
 

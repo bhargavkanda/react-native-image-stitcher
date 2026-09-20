@@ -27,7 +27,7 @@
  */
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { NativeModules, Platform } from 'react-native';
+import { NativeModules, Platform, StyleSheet } from 'react-native';
 
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
 
@@ -329,4 +329,65 @@ describe('the live preview is laid out against the surface, not the window', () 
     expect(() => layout(tree, 390, 781)).not.toThrow();
     act(() => { tree.unmount(); });
   });
+
+  /**
+   * ⚠ THE TWO CASES ABOVE ASSERT THE SEAM, NOT THE FIX.
+   *
+   * An adversarial round measured it: keep the `onLayout`, the `surfaceBox`
+   * state and the `box` fallback exactly as shipped and revert only the
+   * three CONSUMERS back to the window — `previewWindowCrossMult`'s
+   * width/height, `panoPlusPreviewLayout`'s width/height and the effect
+   * deps. That is a complete revert of the defect fix, and the suite stayed
+   * green. The pair was wired to the prop's EXISTENCE and to nothing else,
+   * which is a test for an attribute rather than for a behaviour.
+   *
+   * These assert the OUTCOME, on both consumers.
+   */
+  it('⚑ the measured box moves what is DRAWN — by exactly the delta', () => {
+    // The real case from the field: a `<SafeAreaView>` host gives a box
+    // shorter than the window by the safe-area total, and everything laid
+    // out against the window is pushed down by that difference.
+    const { tree } = mount({ frameSource: 'own' });
+    const hud = (t: ReactTestRenderer): number => {
+      const n = t.root.findAll(
+        (x) => x.props?.testID === 'panoplus-hud-block', { deep: true },
+      )[0];
+      return (StyleSheet.flatten(n.props.style) as { height: number }).height;
+    };
+    const onWindow = hud(tree);        // mock window 390x844
+    layout(tree, 390, 781);
+    expect(onWindow - hud(tree)).toBe(63);   // 844 − 781, exactly
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and it reaches NATIVE — previewWindowCrossMult follows the box', () => {
+    // ⚠ A SHORTER BOX THAN THE CASE ABOVE, DELIBERATELY. The knee is
+    // `min(band, column)` over a usable area, and between 844 and 781 the
+    // WIDTH is what binds — the multiple is 6.346 for both, so the field
+    // geometry cannot witness this half. It moves once the box is short
+    // enough for the height to bind (split screen, or a host with heavy
+    // chrome), which is the regime this asserts.
+    const { tree, handle } = mount({
+      frameSource: 'host', poseSource: 'imu', vcPluginArm: true, vcCameraId: '2',
+    });
+    act(() => { handle.current?.holdStart(); });
+    act(() => { jest.advanceTimersByTime(1500); });
+    const onWindow = (startedWith as Record<string, unknown>)
+      .previewWindowCrossMult as number;
+    act(() => { tree.unmount(); });
+
+    startedWith = null;
+    const second = mount({
+      frameSource: 'host', poseSource: 'imu', vcPluginArm: true, vcCameraId: '2',
+    });
+    layout(second.tree, 390, 560);
+    act(() => { second.handle.current?.holdStart(); });
+    act(() => { jest.advanceTimersByTime(1500); });
+    const onBox = (startedWith as unknown as Record<string, unknown>)
+      .previewWindowCrossMult as number;
+    expect(typeof onBox).toBe('number');
+    expect(onBox).toBeLessThan(onWindow);
+    act(() => { second.tree.unmount(); });
+  });
+
 });
