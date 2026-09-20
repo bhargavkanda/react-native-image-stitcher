@@ -3328,6 +3328,61 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // them, so the keyframe cell structurally cannot write the sweep's flag.
   // One definition still, for the ~25 props and the background-release
   // contract that must not drift between the two.
+  // ── THE CHROME THAT BELONGS TO `<Camera>`, NOT TO AN ENGINE ─────────
+  //
+  // ⚠ THIS EXISTS BECAUSE `engine` WAS CHANGING THE WHOLE SCREEN. The
+  // `engine === 'sweep'` branch below returns a different tree, and every
+  // control lived AFTER it — so on a sweep the operator got the sweep
+  // surface's own CLONES of these pills instead (`src/sweep/chrome.tsx`),
+  // fed from the pano+ arm/calibration ladder rather than from the camera.
+  // Four field defects came out of that one substitution:
+  //
+  //   * the AR pill could not be deselected — the clone paints
+  //     `armNotice.effectivePoseSource` (what will RUN) rather than the
+  //     operator's setting, and on an uncalibrated phone the IMU arm falls
+  //     back to ARKit, so it was pinned ON and its handler wrote a value
+  //     the state already held;
+  //   * the lens chip showed only 1× — the clone's `has0_5x` is
+  //     `ultraWideOfferable`, which that same fallback forces false, so it
+  //     collapsed to a static `<Text>` with no `Pressable`;
+  //   * and the result screen diverged, because the review surfaces live
+  //     after the branch too.
+  //
+  // A switch must show the SETTING. What will actually run is the arm
+  // notice's job, and the surface still prints it. Conflating the two is
+  // what produced the stuck pill.
+  //
+  // So these render ONCE, from `<Camera>`'s own state, on every engine.
+  /** The AR pill, or null. The CONTAINER belongs to each tree — the
+   *  keyframe tree stacks the flash pill under it, the sweep cell does not. */
+  const renderSharedArPill = (): React.JSX.Element | null => (
+    !hideBuiltInShutter && arAllowed && nonArAllowed && lens === '1x'
+      && isARSupportedOnDevice
+      ? (
+        <ARToggle
+          arEnabled={arPreference}
+          onToggle={handleARToggle}
+          contentRotation={contentRotation}
+        />
+      )
+      : null
+  );
+
+  const renderSharedLensChip = (): React.JSX.Element | null => (
+    !arOnly ? (
+      <LensChip
+        lens={lens}
+        onChange={handleLensChange}
+        has0_5x={has0_5x}
+        contentRotation={contentRotation}
+        offerNativeUltraWide={offerNativeUW}
+        onNativeUltraWide={onRequestNativeUltraWide}
+        hideWhenSingle={hideLensChipWhenSingle}
+        ultraWideFactor={capture.ultraWideFactor}
+      />
+    ) : null
+  );
+
   const renderHostPreview = (
     /** vision-camera lifecycle callbacks, owned by the calling cell. */
     lifecycle?: NonNullable<CameraViewProps['cameraProps']>,
@@ -3463,7 +3518,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // were in the wiring: `sweepPoseSource` read `<Camera>`'s own state
   // instead of the merged value, and the multicam term read the merged lens
   // instead of the one that selected the device.
-  const sweepPoseSource = sweepMergedPoseSource(sweep?.poseSource, arPreference);
+  // ⚠ THE **EFFECTIVE** SOURCE, NOT THE RAW PREFERENCE.
+  //
+  // Pano's rule is that 0.5× implies the non-AR arm —
+  // `deriveEffectiveCaptureSource` returns 'non-ar' at 0.5× without
+  // mutating `arPreference`. Now that `<Camera>`'s lens chip drives the
+  // sweep too, reading the raw preference here would let the chip move the
+  // lens to 0.5× while the sweep still asked ARKit to open the ultra-wide.
+  // Reading the effective source reproduces the sweep's whole "0.5× ⇒
+  // decoupled arm" policy as a CONSEQUENCE of Pano's rule rather than as a
+  // second copy of it.
+  const sweepPoseSource = sweepMergedPoseSource(
+    sweep?.poseSource,
+    effectiveCaptureSource === 'ar',
+  );
   const sweepLens = sweepMergedLens(sweep?.lens, lens);
   const hostOwnsSweepCameraLive = sweepHostOwnsCamera(sweepOwnershipInput({
     isAR,
@@ -3662,12 +3730,27 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // the state moves, the prop does not, and the pill snaps back
             // under the operator's finger. A control that visibly refuses
             // its own input is worse than an absent one.
-            onPoseSourceChange={sweep?.poseSource != null
-              ? undefined
-              : (next) => { setArPreference(next === 'ar'); }}
-            onLensChange={sweep?.lens != null
-              ? undefined
-              : (next) => { setLens(next === 'ultraWide' ? '0.5x' : '1x'); }}
+            // ⚠ WITHHELD UNCONDITIONALLY — `<Camera>` DRAWS THESE NOW.
+            //
+            // The surface gates each of its own pills on the matching
+            // callback being non-null: "a host that does not pass them gets
+            // NO pill rather than a dead one" is its own doctrine
+            // (`arPillVisible`, `lensChipVisible`). Passing null is
+            // therefore the supported way to say "the host owns this
+            // control", and it deletes the clones that produced two of the
+            // four field defects.
+            //
+            // They are not merely duplicates — they answer a DIFFERENT
+            // question. The clone paints `armNotice.effectivePoseSource`
+            // (which arm will run) and its `has0_5x` is `ultraWideOfferable`
+            // (whether the pano+ ladder will allow 0.5× on that arm). On an
+            // uncalibrated phone both collapse: the pill pins ON and cannot
+            // be tapped off, and the chip becomes a static `1×` with no
+            // `Pressable`. `<Camera>`'s pills show the SETTING and always
+            // move; what will actually run stays the arm notice's job, and
+            // the surface still prints it.
+            onPoseSourceChange={undefined}
+            onLensChange={undefined}
             // ⚠ DEFAULTS BEFORE THE SPREAD, SO THE HOST ALWAYS WINS.
             // The surface's own prop defaults were never a configuration
             // anyone ran — its one host passed everything off a flag store,
@@ -3754,6 +3837,29 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               );
             }}
           />
+          )}
+
+          {/* ── `<Camera>`'S OWN CHROME, ON THE SWEEP TOO ──────────────
+              The whole point of `engine` being a prop: the operator gets
+              the same AR pill and the same lens chip whichever engine the
+              hold runs. Same elements as the keyframe tree, from the same
+              state, via the same helpers — so they cannot drift.
+
+              Rendered AFTER the surface so they sit above its HUD, and
+              `pointerEvents="box-none"` so the surface's own shutter and
+              gestures still receive touches through the container. */}
+          {sweepReview == null && (
+            <>
+              <View
+                style={[styles.pillStack, { top: pillStackTop }]}
+                pointerEvents="box-none"
+              >
+                {renderSharedArPill()}
+              </View>
+              <View style={styles.sweepLensChipDock} pointerEvents="box-none">
+                {renderSharedLensChip()}
+              </View>
+            </>
           )}
         </View>
       </HostJsLandscapeContext.Provider>
@@ -4019,18 +4125,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         <View style={styles.bottomBarCenter}>
           {/* v0.13.2 — lens chooser hidden in AR-only mode (ARKit/ARCore
               can't use the ultra-wide, so there's nothing to choose). */}
-          {!arOnly && (
-            <LensChip
-              lens={lens}
-              onChange={handleLensChange}
-              has0_5x={has0_5x}
-              contentRotation={contentRotation}
-              offerNativeUltraWide={offerNativeUW}
-              onNativeUltraWide={onRequestNativeUltraWide}
-              hideWhenSingle={hideLensChipWhenSingle}
-              ultraWideFactor={capture.ultraWideFactor}
-            />
-          )}
+          {renderSharedLensChip()}
           {!hideBuiltInShutter && (
             <View style={styles.shutterWrap}>
               <CameraShutter
@@ -4064,10 +4159,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       >
         {/* v0.13.2 — AR toggle only when BOTH sources are allowed
             (captureSources='both'); a single-source constraint has
-            nothing to toggle.  Still gated on 1× + device AR support. */}
-        {!hideBuiltInShutter && arAllowed && nonArAllowed && lens === '1x' && isARSupportedOnDevice && (
-          <ARToggle arEnabled={arPreference} onToggle={handleARToggle} contentRotation={contentRotation} />
-        )}
+            nothing to toggle.  Still gated on 1× + device AR support.
+            ⚠ The AR pill itself now comes from `renderSharedPills`, which
+            the SWEEP cell renders too — one pill, one state, both engines.
+            Only the flash pill below is keyframe-tree-specific. */}
+        {renderSharedArPill()}
         {showFlashButton && !isAR && deviceHasTorch && (
           <Pressable
             onPress={toggleFlash}
@@ -4892,6 +4988,23 @@ const styles = StyleSheet.create({
     right: 14,
     alignItems: 'flex-end',
     gap: 10,
+  },
+  /**
+   * Where `<Camera>`'s lens chip sits on the SWEEP cell.
+   *
+   * The keyframe tree centres it in `bottomBarCenter`, above the shutter.
+   * The sweep surface draws its own shutter row, so the chip is docked
+   * just above that row instead of being laid out inside it — same
+   * control, same state, placed against the chrome that is actually on
+   * screen. `bottomBarOffset` (passed to the surface) is what reserves
+   * the room, so the two agree by construction.
+   */
+  sweepLensChipDock: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 132,
+    alignItems: 'center',
   },
 });
 

@@ -38,7 +38,7 @@ jest.mock('../PanoPlusResultView', () => ({
     require('react').createElement('PanoPlusResultViewStub', props),
 }));
 
-import { Camera } from '../../camera/Camera';
+import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
 import { selectCaptureDevice } from '../../camera/selectCaptureDevice';
@@ -86,7 +86,19 @@ afterEach(() => {
   proxy.initFrameProcessorPlugin = realInit;
 });
 
-function render(props: Record<string, unknown> = {}): ReactTestRenderer {
+/**
+ * ⚠ THE AR-SUPPORT PROBE IS FLUSHED HERE, and it has to be.
+ *
+ * `useARSession` probes `isSupported()` in a passive effect, so
+ * `isARSupportedOnDevice` is FALSE on the first render however the harness
+ * is configured — and `<Camera>`'s AR pill is gated on it. Without the
+ * flush the pill simply is not in the tree and every case that drives it
+ * fails with "found 0", which reads like a wiring bug rather than a
+ * timing one.
+ */
+async function render(
+  props: Record<string, unknown> = {},
+): Promise<ReactTestRenderer> {
   let t!: ReactTestRenderer;
   act(() => {
     t = create(
@@ -97,15 +109,18 @@ function render(props: Record<string, unknown> = {}): ReactTestRenderer {
       />,
     );
   });
+  // Settle the probe's promise — two microtask turns, the same shape the
+  // sibling suite uses for its AR case.
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
   return t;
 }
 
 /** Re-render the same tree with a different `engine`. */
-function setEngine(
+async function setEngine(
   tree: ReactTestRenderer,
   engine: string,
   props: Record<string, unknown> = {},
-): void {
+): Promise<void> {
   act(() => {
     tree.update(
       <Camera
@@ -115,16 +130,47 @@ function setEngine(
       />,
     );
   });
+  await act(async () => { await Promise.resolve(); });
 }
 const surfaceProps = (t: ReactTestRenderer): Record<string, unknown> =>
   t.root.findByType(PanoPlusCaptureSurface).props as Record<string, unknown>;
 const cameraViews = (t: ReactTestRenderer) => t.root.findAllByType(CameraView);
 
+/**
+ * Flip `<Camera>`'s OWN AR pill.
+ *
+ * ⚠ THE SURFACE NO LONGER HAS ONE. It used to draw a clone fed from the
+ * pano+ arm ladder, which on an uncalibrated phone pinned itself ON and
+ * could not be tapped off; `<Camera>` withholds `onPoseSourceChange`
+ * unconditionally now, so the only AR control on any engine is this one.
+ * Driving it here is also what makes these cases exercise the control the
+ * operator actually touches.
+ */
+async function settle(ms = 1200): Promise<void> {
+  // An AR flip CHAINS two independent waits — the ~250 ms AR-support/
+  // transition grace, and then the 600 ms ownership handoff that the flip
+  // itself opens — with a render between them. Draining timers once is not
+  // enough; each wait has to be able to schedule the next.
+  for (let i = 0; i < 3; i += 1) {
+    act(() => { jest.advanceTimersByTime(ms); });
+    // eslint-disable-next-line no-await-in-loop
+    await act(async () => { await Promise.resolve(); });
+  }
+}
+
+function toggleAr(tree: ReactTestRenderer): void {
+  const pill = tree.root.findAllByType(ARToggle);
+  if (pill.length !== 1) {
+    throw new Error(`expected exactly one AR pill, found ${pill.length}`);
+  }
+  act(() => { (pill[0].props.onToggle as () => void)(); });
+}
+
 describe('⚑ THE PRECONDITION — this suite really does reach the host arm', () => {
-  it('mounts exactly ONE <CameraView> and hands the surface the host arm', () => {
+  it('mounts exactly ONE <CameraView> and hands the surface the host arm', async () => {
     // Without this every assertion below is the same vacuous pass the last
     // five rounds kept finding: "false === false" on a pinned harness.
-    const tree = render();
+    const tree = await render();
     expect(cameraViews(tree)).toHaveLength(1);
     const p = surfaceProps(tree);
     expect(p.frameSource).toBe('host');
@@ -141,24 +187,24 @@ describe('the preview is not "live" until it is DRAWING', () => {
       onPreviewStopped?: () => void;
     };
 
-  it('⚑ is FALSE while the session opens, even though the element is mounted', () => {
+  it('⚑ is FALSE while the session opens, even though the element is mounted', async () => {
     // The window this whole mechanism exists for: mounted is not drawing,
     // and reporting it as drawing makes the surface transparent over a
     // black, session-less CameraView with its explainer suppressed.
-    const tree = render();
+    const tree = await render();
     expect(surfaceProps(tree).hostPreviewLive).toBe(false);
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ turns TRUE on the first preview frame', () => {
-    const tree = render();
+  it('⚑ turns TRUE on the first preview frame', async () => {
+    const tree = await render();
     act(() => { previewProps(tree).onPreviewStarted?.(); });
     expect(surfaceProps(tree).hostPreviewLive).toBe(true);
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ …and FALSE again when the preview stops', () => {
-    const tree = render();
+  it('⚑ …and FALSE again when the preview stops', async () => {
+    const tree = await render();
     act(() => { previewProps(tree).onPreviewStarted?.(); });
     act(() => { previewProps(tree).onPreviewStopped?.(); });
     expect(surfaceProps(tree).hostPreviewLive).toBe(false);
@@ -167,7 +213,7 @@ describe('the preview is not "live" until it is DRAWING', () => {
 });
 
 describe('⚑ AN UNMOUNT CLEARS "LIVE" — no callback fires for one', () => {
-  it('a remounted <CameraView> is never reported as already drawing', () => {
+  it('a remounted <CameraView> is never reported as already drawing', async () => {
     // THE DEFECT: `hostPreviewStarted` was cleared only on an ownership
     // change, but the element also unmounts for reasons ownership does not
     // move for — the sweep result viewer being the common one. Neither
@@ -178,7 +224,7 @@ describe('⚑ AN UNMOUNT CLEARS "LIVE" — no callback fires for one', () => {
     //
     // Driven here through the ownership round trip, which unmounts and
     // remounts the same way and needs no result fixture.
-    const tree = render();
+    const tree = await render();
     const start = () => act(() => {
       (cameraViews(tree)[0].props.cameraProps as {
         onPreviewStarted?: () => void;
@@ -189,13 +235,12 @@ describe('⚑ AN UNMOUNT CLEARS "LIVE" — no callback fires for one', () => {
     expect(surfaceProps(tree).hostPreviewLive).toBe(true);
 
     // Away and back: the element leaves the tree and a NEW one returns.
-    const setArm = surfaceProps(tree).onPoseSourceChange as (s: string) => void;
-    act(() => { setArm('ar'); });
-    act(() => { jest.advanceTimersByTime(1000); });
+    toggleAr(tree);   // AR on
+    await settle();
     expect(cameraViews(tree)).toHaveLength(0);
 
-    act(() => { setArm('imu'); });
-    act(() => { jest.advanceTimersByTime(1000); });
+    toggleAr(tree);   // AR off again
+    await settle();
     expect(cameraViews(tree)).toHaveLength(1);
 
     // The new element has had no `onPreviewStarted`.
@@ -208,14 +253,14 @@ describe('⚑ AN UNMOUNT CLEARS "LIVE" — no callback fires for one', () => {
 });
 
 describe('⚑ THE ERROR CHANNEL — driven through <Camera>, not just the pure fn', () => {
-  it('carries vision-camera\'s reason to the surface, INCLUDING the swallowed codes', () => {
+  it('carries vision-camera\'s reason to the surface, INCLUDING the swallowed codes', async () => {
     // `CameraView` deliberately swallows three transient lifecycle codes so
     // routine lock/app-switch churn is not reported to the host as a crash
     // — and those three are exactly the ones that leave this preview dark
     // with nothing else to say. The channel therefore hangs off the
     // UNFILTERED seam; wiring it to the filtered `onError` would have
     // delivered nothing for the cases it exists for.
-    const tree = render();
+    const tree = await render();
     const view = cameraViews(tree)[0];
     act(() => {
       (view.props.onAnyError as (e: unknown) => void)({
@@ -229,8 +274,8 @@ describe('⚑ THE ERROR CHANNEL — driven through <Camera>, not just the pure f
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ and clears it the moment a frame actually arrives', () => {
-    const tree = render();
+  it('⚑ and clears it the moment a frame actually arrives', async () => {
+    const tree = await render();
     const view = cameraViews(tree)[0];
     act(() => {
       (view.props.onAnyError as (e: unknown) => void)({ code: 'x', message: 'y' });
@@ -244,12 +289,12 @@ describe('⚑ THE ERROR CHANNEL — driven through <Camera>, not just the pure f
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ …and does not let a resolved fault caption the NEXT session', () => {
+  it('⚑ …and does not let a resolved fault caption the NEXT session', async () => {
     // The error had exactly one reset — a first frame — which by definition
     // cannot fire while the preview is down. So after any fault, every
     // later reopen was captioned with the old one, and the notice prints
     // the error BEFORE the handoff copy.
-    const tree = render();
+    const tree = await render();
     act(() => {
       (cameraViews(tree)[0].props.onAnyError as (e: unknown) => void)(
         { code: 'device/fatal-error', message: 'gone' },
@@ -257,11 +302,10 @@ describe('⚑ THE ERROR CHANNEL — driven through <Camera>, not just the pure f
     });
     expect(surfaceProps(tree).hostPreviewError).not.toBe('');
 
-    const setArm = surfaceProps(tree).onPoseSourceChange as (s: string) => void;
-    act(() => { setArm('ar'); });
-    act(() => { jest.advanceTimersByTime(1000); });
-    act(() => { setArm('imu'); });
-    act(() => { jest.advanceTimersByTime(1000); });
+    toggleAr(tree);
+    await settle();
+    toggleAr(tree);
+    await settle();
 
     expect(cameraViews(tree)).toHaveLength(1);
     expect(surfaceProps(tree).hostPreviewError).toBe('');
@@ -270,7 +314,7 @@ describe('⚑ THE ERROR CHANNEL — driven through <Camera>, not just the pure f
 });
 
 describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element goes', () => {
-  it('a preview remounted after the result viewer is not reported as live', () => {
+  it('a preview remounted after the result viewer is not reported as live', async () => {
     // THE DISTINGUISHING PATH, and the one three drafts of this coverage
     // missed. On sweep → review → dismiss → sweep, `mountHostPreview` never
     // changes: the latch clears, no ownership term moves, `statusPhase`
@@ -284,7 +328,7 @@ describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element
     //
     // The ownership round-trip case above cannot see this: ownership DOES
     // move there, so both the right and the wrong keying clear the flag.
-    const tree = render();
+    const tree = await render();
     act(() => {
       (cameraViews(tree)[0].props.cameraProps as {
         onPreviewStarted?: () => void;
@@ -333,7 +377,7 @@ describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element
 });
 
 describe('⚑ THE ENGINE ROUND TRIP — the keyframe preview is not the sweep\'s', () => {
-  it('sweep → keyframe → sweep does not inherit the keyframe preview\'s "drawing"', () => {
+  it('sweep → keyframe → sweep does not inherit the keyframe preview\'s "drawing"', async () => {
     // THE SIXTH ROUND'S BLOCKER, and the fifth defect of this exact shape:
     // one `<Camera>`-scoped flag written by an element rendered from TWO
     // places. `hostPreviewElement` is mounted by the sweep cell AND by the
@@ -346,10 +390,10 @@ describe('⚑ THE ENGINE ROUND TRIP — the keyframe preview is not the sweep\'s
     // element the answer "live": transparent root, explainer suppressed,
     // black underneath. The callbacks are now passed in by the owning cell,
     // so the keyframe tree structurally cannot write it.
-    const tree = render();
+    const tree = await render();
     expect(cameraViews(tree)).toHaveLength(1);
 
-    setEngine(tree, 'keyframe');
+    await setEngine(tree, 'keyframe');
     act(() => { jest.advanceTimersByTime(2000); });
     const kf = cameraViews(tree);
     expect(kf.length).toBeGreaterThan(0);
@@ -359,7 +403,7 @@ describe('⚑ THE ENGINE ROUND TRIP — the keyframe preview is not the sweep\'s
         .onPreviewStarted?.();
     });
 
-    setEngine(tree, 'sweep');
+    await setEngine(tree, 'sweep');
     act(() => { jest.advanceTimersByTime(2000); });
     expect(cameraViews(tree)).toHaveLength(1);
     // No `onPreviewStarted` has fired for THIS element.
@@ -375,12 +419,12 @@ describe('⚑ THE ENGINE ROUND TRIP — the keyframe preview is not the sweep\'s
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ the keyframe cell is given NO sweep lifecycle callbacks at all', () => {
+  it('⚑ the keyframe cell is given NO sweep lifecycle callbacks at all', async () => {
     // The structural statement behind the case above, asserted directly so
     // a future edit that re-adds them to the shared element fails here
     // rather than in a capture session.
-    const tree = render();
-    setEngine(tree, 'keyframe');
+    const tree = await render();
+    await setEngine(tree, 'keyframe');
     act(() => { jest.advanceTimersByTime(2000); });
     const props = cameraViews(tree)[0].props.cameraProps as
       Record<string, unknown> | undefined;
@@ -392,15 +436,14 @@ describe('⚑ THE ENGINE ROUND TRIP — the keyframe preview is not the sweep\'s
 });
 
 describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
-  it('hands the camera over with NEITHER side holding one', () => {
+  it('hands the camera over with NEITHER side holding one', async () => {
     // The AR pill moves ownership at idle. Done in one commit, <CameraView>
     // unmounts and the surface opens its own client in the same frame while
     // Camera2 is still releasing — ERROR_CAMERA_IN_USE for an ordering bug.
-    const tree = render();
+    const tree = await render();
     expect(cameraViews(tree)).toHaveLength(1);
 
-    const toAr = surfaceProps(tree).onPoseSourceChange as (s: string) => void;
-    act(() => { toAr('ar'); });
+    toggleAr(tree);
 
     // Mid-handoff: the surface is told 'host' so it lets go, and nothing is
     // mounted so nothing contends.
@@ -415,7 +458,7 @@ describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ a bag-pinned lens cannot disarm the multicam guard', () => {
+  it('⚑ a bag-pinned lens cannot disarm the multicam guard', async () => {
     // `sweep.lens` moves what the SURFACE shows; it cannot move the device,
     // which follows `<Camera>`'s own lens through `useCapture({ lens })`.
     // Feeding the merged value to the predicate turned the
@@ -446,7 +489,7 @@ describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
     // a guard that correctly was not firing. Three drafts, three different
     // ways of not arranging the state the claim is about; the precondition
     // assertions below exist so a fourth cannot happen silently.
-    const tree = render({
+    const tree = await render({
       defaultLens: '0.5x' as const,
       sweep: { lens: 'wide' as const },
     });

@@ -25,7 +25,11 @@
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
-import { Camera, _sweepHostOwnsCameraForTests as hostOwns } from '../../camera/Camera';
+import {
+  Camera,
+  LensChip,
+  _sweepHostOwnsCameraForTests as hostOwns,
+} from '../../camera/Camera';
 import type { CameraCaptureResult } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
@@ -190,7 +194,7 @@ describe('<Camera engine="sweep">', () => {
     >;
   }
 
-  it('asks for the arm the HOST chose, not a second hidden opinion', () => {
+  it('asks for the arm the HOST chose, not a second hidden opinion', async () => {
     // ⚠ THE CONTROLS BELONG TO `<Camera>`. The sweep surface draws its own
     // AR pill, but the value behind it is `arPreference` — the same state
     // the keyframe path's AR toggle writes. A separate default here would
@@ -199,21 +203,77 @@ describe('<Camera engine="sweep">', () => {
     expect(surfaceProps(off).poseSource).toBe('imu');   // defaultCaptureSource is non-AR
     act(() => { off.unmount(); });
 
+    // ⚠ THE **EFFECTIVE** SOURCE, NOT THE RAW PREFERENCE. `poseSource` is
+    // now `sweepMergedPoseSource(bag, effectiveCaptureSource === 'ar')`, so
+    // Pano's "0.5× implies the non-AR arm" rule reaches the sweep as a
+    // consequence rather than as a second copy. `defaultCaptureSource:'ar'`
+    // with the default 1× lens still resolves to 'ar' — but only once the
+    // async support probe has settled, which is why this awaits.
     const on = render({ engine: 'sweep', defaultCaptureSource: 'ar' });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(surfaceProps(on).poseSource).toBe('ar');
     act(() => { on.unmount(); });
   });
 
-  it('gives the sweep somewhere to write BOTH pills', () => {
-    // THE REGRESSION AN OPERATOR REPORTED: "I do not see AR pill and lens
-    // pill". The surface gates each control on being handed a writer —
-    // `onPoseSourceChange != null` and `onLensChange != null` are the
-    // literal conditions — so a host that passes neither gets NO pills, and
-    // the UI silently loses two controls the other engine has.
+  it('⚑ the surface draws NEITHER pill — `<Camera>` owns both now', () => {
+    // ⚠ THIS CASE USED TO ASSERT THE OPPOSITE, and both versions trace to
+    // the same operator report. The first was "I do not see AR pill and
+    // lens pill", fixed by handing the SURFACE the writers so it drew its
+    // own. That was the wrong fix, and the second report is what it cost:
+    // "cannot deselect the AR mode" and "I see only 1x in the lens chip".
+    //
+    // The surface's clones are not `<Camera>`'s controls. Its AR pill
+    // paints `armNotice.effectivePoseSource` — which arm will RUN — and
+    // its chip's `has0_5x` is `ultraWideOfferable`, whether the pano+
+    // ladder permits 0.5× on that arm. On an uncalibrated phone the IMU
+    // arm falls back to ARKit, so the pill pinned ON with a handler that
+    // wrote a value the state already held, and the chip collapsed to a
+    // static `1×` with no `Pressable`.
+    //
+    // A switch shows the SETTING. What will run is the arm notice's job.
+    // So `<Camera>` withholds both writers — the surface's own documented
+    // way of saying "the host draws this" — and renders its own pills over
+    // the sweep instead.
     const tree = render({ engine: 'sweep' });
     const props = surfaceProps(tree);
-    expect(typeof props.onPoseSourceChange).toBe('function');
-    expect(typeof props.onLensChange).toBe('function');
+    expect(props.onPoseSourceChange).toBeUndefined();
+    expect(props.onLensChange).toBeUndefined();
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and the sweep cell renders `<Camera>`\'s OWN lens chip instead', () => {
+    // The other half: withholding alone would just delete two controls.
+    // The chip must be the SAME component the keyframe tree uses, driven
+    // by `<Camera>`'s `lens` and the camera's real `has0_5x` — not by the
+    // pano+ arm ladder.
+    const sweep = render({ engine: 'sweep' });
+    expect(sweep.root.findAllByType(LensChip).length).toBe(1);
+    act(() => { sweep.unmount(); });
+
+    // …and it is the same one, so a future edit cannot fork them.
+    const keyframe = render({});
+    expect(keyframe.root.findAllByType(LensChip).length).toBe(1);
+    act(() => { keyframe.unmount(); });
+  });
+
+  it('⚑ 0.5× puts the sweep on the DECOUPLED arm, exactly as Pano does', async () => {
+    // Pano's rule: `deriveEffectiveCaptureSource` answers 'non-ar' at 0.5×
+    // because ARKit/ARCore cannot use the ultra-wide. It does NOT mutate
+    // `arPreference` — it derives.
+    //
+    // Now that `<Camera>`'s lens chip drives the sweep too, reading the raw
+    // preference here would let the chip move the lens to 0.5× while the
+    // sweep still asked ARKit to open the ultra-wide. Reading the EFFECTIVE
+    // source makes the sweep inherit Pano's rule instead of carrying a
+    // second copy of it.
+    const tree = render({
+      engine: 'sweep',
+      defaultCaptureSource: 'ar',
+      defaultLens: '0.5x',
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    // AR is PREFERRED and supported, but the lens forces the non-AR arm.
+    expect(surfaceProps(tree).poseSource).toBe('imu');
     act(() => { tree.unmount(); });
   });
 
@@ -310,34 +370,13 @@ describe('<Camera engine="sweep">', () => {
   // `src/camera/__tests__/sweepHostOwnsCamera.test.ts`, which kills that
   // mutation and two others.
 
-  it('⚑ a bag-pinned pill is ABSENT, not dead', () => {
-    // The surface gates each pill on its callback being non-null. When the
-    // host pins `poseSource`/`lens` through the bag, the bag wins over the
-    // value handed back — so the handler would run, `<Camera>`'s state would
-    // move, the prop would not, and the pill would snap back under the
-    // operator's finger. Withholding the handler is what turns a visibly
-    // broken control into an absent one.
-    const pinned = surfaceProps(render({
-      engine: 'sweep',
-      sweep: { poseSource: 'ar' as const, lens: 'ultraWide' as const },
-    }));
-    expect(pinned.onPoseSourceChange).toBeUndefined();
-    expect(pinned.onLensChange).toBeUndefined();
-
-    // NEGATIVE CONTROL: unpinned, both pills are live — otherwise the two
-    // assertions above are satisfied by never passing a handler at all,
-    // which is the defect the pills were restored to fix in `97202d0`.
-    const free = surfaceProps(render({ engine: 'sweep' }));
-    expect(typeof free.onPoseSourceChange).toBe('function');
-    expect(typeof free.onLensChange).toBe('function');
-
-    // …and pinning ONE leaves the other alone.
-    const half = surfaceProps(render({
-      engine: 'sweep', sweep: { poseSource: 'ar' as const },
-    }));
-    expect(half.onPoseSourceChange).toBeUndefined();
-    expect(typeof half.onLensChange).toBe('function');
-  });
+  // ⚠ A CASE ABOUT BAG-PINNED PILLS WAS HERE AND IS GONE. It asserted that
+  // `sweep={{poseSource}}` withheld the surface's writer so the clone was
+  // absent rather than dead. `<Camera>` withholds both writers
+  // UNCONDITIONALLY now and draws the controls itself, so the bag can no
+  // longer produce a dead pill by any route — there is no clone to kill.
+  // The surviving property is asserted above: the surface gets neither
+  // writer, and `<Camera>`'s own chip is the one on screen.
 
   it('⚑ hostPreviewLive is DERIVED, not hard-wired', () => {
     // A coverage hole this suite had three rounds running: the two lines
