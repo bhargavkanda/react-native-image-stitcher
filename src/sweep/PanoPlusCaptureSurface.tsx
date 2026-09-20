@@ -2573,6 +2573,21 @@ export const PanoPlusCaptureSurface = forwardRef<
       },
     );
   }, [
+    // ⚠ THE FOURTH ROUND OF THIS LIST BEING SHORT, and the note below already
+    // records three. All four are READ in this callback — `hostChromeTopPt`
+    // by `withHostChromeTop` (the start bag's insets), `attitudeMagFree`,
+    // `arPluginArm` and `arArmed` by the start bag's arm keys — and all four
+    // resolve ASYNCHRONOUSLY relative to the last time it was built:
+    // `arArmed` re-derives when `<ARCameraView>` mounts, `arPluginArm` when
+    // the plugin handle lands, `hostChromeTopPt` when the host lays out. A
+    // sweep started from a stale closure would send the arm keys for the
+    // previous frame's arm, and the pack would record them as though they had
+    // been chosen — which is the same failure the S7 note describes, one
+    // release later.
+    arArmed,
+    arPluginArm,
+    attitudeMagFree,
+    hostChromeTopPt,
     armContract,
     // ⚠️ THE WHOLE NOTICE, not two of its fields. The sidecar writes
     // `headline`/`detail`/`tone`/`startLabel`, so pinning only the two fields
