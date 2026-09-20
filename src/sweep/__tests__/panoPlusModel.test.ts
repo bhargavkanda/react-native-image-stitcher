@@ -1822,6 +1822,49 @@ describe('the live preview geometry', () => {
   // only hold the aspect by THINNING the cross extent. Centred, that moves
   // every publish; and the rotation container turns pre-rotation `left` into a
   // screen-VERTICAL offset, which is why it read as downward drift.
+  it('⚑ the framebuffer turn follows the SCREEN, not the measured box', () => {
+    // One argument was answering two questions. `jsLandscape` decides the
+    // image ROTATION — a fact about whether the OS turned the framebuffer —
+    // and it was derived from `width > height` of whatever the layout was
+    // handed. When the surface moved its layout onto its own measured BOX,
+    // that derivation moved with it, so a host giving this surface a wide
+    // short area inside a portrait window would flip the bake.
+    const portraitWindowWideBox = {
+      width: 700, height: 300,            // the BOX: landscape-shaped
+      insets: { top: 59, bottom: 34, left: 0, right: 0 },
+      jsLandscape: false,                 // the SCREEN: portrait
+    };
+    const st = statusFixture({
+      axis: 1, axisLatched: true, sweepSign: 1,
+      paintedWidthPx: 3000, canvasHeightPx: 1080, previewW: 0, previewH: 0,
+    });
+    const told = panoPlusPreviewLayout(st, portraitWindowWideBox, 'landscape-left');
+    const derived = panoPlusPreviewLayout(
+      st, { ...portraitWindowWideBox, jsLandscape: undefined }, 'landscape-left',
+    );
+    // The two disagree — which is the whole point: the box says landscape,
+    // the screen says portrait, and the bake must follow the screen.
+    expect(told.imageRotateDeg).not.toBe(derived.imageRotateDeg);
+    // And the told-value matches what a genuinely portrait box produces.
+    expect(told.imageRotateDeg).toBe(panoPlusPreviewLayout(
+      st,
+      { width: 390, height: 844, insets: portraitWindowWideBox.insets },
+      'landscape-left',
+    ).imageRotateDeg);
+  });
+
+  it('⚑ …and omitting it is byte-identical to deriving it', () => {
+    // The field is optional and every existing caller omits it.
+    const st = statusFixture({
+      axis: 1, axisLatched: true, sweepSign: 1,
+      paintedWidthPx: 3000, canvasHeightPx: 1080, previewW: 0, previewH: 0,
+    });
+    const box = { width: 390, height: 781, insets: { top: 59, bottom: 34 } };
+    expect(panoPlusPreviewLayout(st, box, 'landscape-left')).toEqual(
+      panoPlusPreviewLayout(st, { ...box, jsLandscape: false }, 'landscape-left'),
+    );
+  });
+
   it('⚑ the cross anchor does not move across a whole growing sweep', () => {
     // A horizontal sweep on a portrait host: axis 1, transposed on the way
     // out, so the oriented aspect is cross ÷ along and falls as it grows.

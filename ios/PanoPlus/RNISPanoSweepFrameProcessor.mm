@@ -111,14 +111,29 @@
 // scale and reports success.
 //
 // So the rule is: DERIVE WHERE YOU KNOW WHICH DEVICE IT IS; REFUSE WHERE YOU
-// DO NOT. This arm knows — JS tells it. The genuine hazard is narrower than
+// DO NOT. This arm CAN know — JS is meant to tell it, over
+// `kCameraIdNotification`.
+//
+// ⚠ AND NOTHING POSTS THAT NOTIFICATION YET, WHICH AN EARLIER VERSION OF
+// THIS HEADER FAILED TO SAY. `RNISPanoSweepVcCameraIdDidChange` has exactly
+// ONE occurrence in either repository — its own declaration below. So the
+// derivation this file gained is REACHABLE CODE THAT CANNOT RUN: `cameraId`
+// is empty on every frame, `RNISSweepFovFxForCamera()` is never consulted,
+// and a sweep on this arm would refuse 100% of frames with
+// `intrinsicsFovDerived: 0`. The commit that added it said the start mode
+// was "precisely" what still blocked the iOS arm; that was one blocker
+// short, and the word `precisely` is what would stop the next reader
+// looking for the second.
+//
+// The genuine hazard is narrower than
 // the old header claimed: a VIRTUAL multi-camera container switches its
 // active constituent under zoom unannounced, so an fx read from the
 // container is wrong at 0.5×. That is a question about WHICH DEVICE IS
 // MOUNTED, not about a frame, and it is guarded where it belongs —
 // `sweepHostOwnsCamera` refuses the arm on a multicam body away from 1×.
 //
-// WHAT MAKES IT WORK. The arm needs BOTH halves:
+// WHAT MAKES IT WORK. The arm needs ALL THREE, and the third is the one
+// this header used to omit:
 //   * an iOS start path that arms this plugin and opens no AVCaptureSession
 //     (factor the attitude-configure + CoreMotion half out of
 //     `RNISPanoAvfSource.start`, and post `kArmNotification`); AND
@@ -126,7 +141,18 @@
 //     one-line change upstream, and vc 5.x already ships it as
 //     `enableCameraMatrixDelivery`), or a host enabling it on a session it
 //     owns, or `<Camera>` mounting a PHYSICAL device — which would remove the
-//     constituent hazard too.
+//     constituent hazard too; AND
+//   * ⚠ A PUBLISHER FOR `kCameraIdNotification`, carrying `cameraId` and a
+//     `frameWidth` that matches the delivered buffer. Without it the FOV
+//     fallback above is dead code and the second bullet becomes mandatory
+//     rather than an alternative. The natural site is wherever `vcCameraId`
+//     and `vcPluginArm` are handed to native — JS already sends both
+//     (`Camera.tsx` passes `vcCameraId` into the surface, and the surface
+//     puts it in `start`'s options bag), so this is a wire, not a design.
+//     It is deliberately NOT added here: a poster no device has ever fired
+//     is a sixth inert knob, and this subspec's rule is that a flag is wired
+//     only when an OUTCOME proves it. The counters that would prove it
+//     (`intrinsicsDelivered` / `intrinsicsFovDerived`) already exist.
 //
 // ── WHAT IS AND IS NOT OBSERVABLE ──────────────────────────────────────
 //

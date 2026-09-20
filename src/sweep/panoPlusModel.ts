@@ -2124,6 +2124,23 @@ export interface PanoPlusScreen {
    * MAX with the inset rule so an absent value is byte-identical.
    */
   bottomChromePt?: number;
+  /**
+   * Has the OS rotated the FRAMEBUFFER — a WINDOW fact, not a box fact.
+   *
+   * ⚠ THIS FIELD EXISTS BECAUSE ONE ARGUMENT WAS ANSWERING TWO QUESTIONS.
+   * `panoPlusPreviewLayout` derives `jsLandscape` from `width > height` of
+   * whatever it is handed, and uses it for the image ROTATION — which is
+   * about the framebuffer's turn and nothing else. When the surface moved
+   * its layout onto its own measured BOX (so the capsule stops being placed
+   * against a window it does not fill), that derivation moved with it. The
+   * box's shape is the HOST's business: a host that gives this surface a
+   * wide short area inside a portrait window would flip the bake.
+   *
+   * So width/height/insets/bottomChromePt describe the usable BOX, and this
+   * describes the SCREEN. Absent ⇒ derived from width/height as before, so
+   * every existing caller is byte-identical.
+   */
+  jsLandscape?: boolean;
 }
 
 /** Margins + reserved chrome, named rather than sprinkled through the maths. */
@@ -2403,7 +2420,9 @@ export function panoPlusPreviewLayout(
 ): PanoPlusPreviewLayout {
   const sw = Math.max(120, screen.width);
   const sh = Math.max(120, screen.height);
-  const jsLandscape = sw > sh;
+  // ⚠ THE SCREEN'S TURN, NOT THE BOX'S — see `PanoPlusScreen.jsLandscape`.
+  // The fallback keeps every caller that does not supply it unchanged.
+  const jsLandscape = screen.jsLandscape ?? sw > sh;
   const imageRotateDeg = panoPlusImageRotationDeg(jsLandscape, orientation);
 
   // The JPEG's own pixel aspect → what it occupies on the framebuffer once

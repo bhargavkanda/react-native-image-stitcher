@@ -2305,6 +2305,11 @@ export const PanoPlusCaptureSurface = forwardRef<
           // The same measured box the layout below uses, so the knee that
           // native sizes the preview against and the panel that displays
           // it are derived from ONE usable area.
+          //
+          // No `jsLandscape` here, deliberately: this function does not read
+          // it (it `void`s `orientation` too — the knee is a pure shape
+          // question). Passing it would be an inert field that reads as a
+          // wire, which is the failure this subspec keeps naming.
           width: box.width,
           height: box.height,
           insets: withHostChromeTop(safeAreaInsets, hostChromeTopPt),
@@ -2950,6 +2955,8 @@ export const PanoPlusCaptureSurface = forwardRef<
       // ⚠ THE SURFACE'S BOX, NOT THE WINDOW — see `surfaceBox`.
       width: box.width,
       height: box.height,
+      // The framebuffer's turn is a WINDOW fact and must not follow the box.
+      jsLandscape: window.width > window.height,
       // `hostChromeTopPt` rides on the TOP inset because that is exactly what
       // it is to this surface: pixels at the top that belong to somebody else.
       // See the prop's own note for the overprint it ends.
