@@ -1157,3 +1157,45 @@ describe('the arm term is load-bearing, and this is what breaks if it goes', () 
     r.unmount();
   });
 });
+
+// ── THE HOST MUST BE TOLD TO GET ITS CHROME OFF THIS SCREEN ────────────────
+//
+// ⚠ THE BLOCKER'S PRODUCER LINE HAD NO TEST. `<Camera>`'s shared AR pill and
+// lens chip are rendered AFTER the surface — on top of it — with `box-none`
+// ancestors, so while this overlay is up they sat LIVE over the calibration
+// card, and one tap of the AR pill moved the arm to ARKit, made
+// `armWantsBasis` false and unmounted the card. The measurement is once per
+// phone.
+//
+// 7252d78 fixed it by REPORTING `chromeSuppressed` and gating the host chrome
+// on it. The case that shipped with that fix hand-calls
+// `onEffectiveArmChange` from the `<Camera>` harness, so it pins the CONSUMER
+// and says nothing about this surface ever setting the flag: hard-coding
+// `chromeSuppressed: false` left 64 suites / 1267 cases green.
+//
+// This file is where the real ladder reaches the overlay — the `<Camera>`
+// harness installs no native fakes, so the surface early-returns its
+// `panoplus-unavailable` card there and `basisGestureVisible` is
+// structurally false. The producer belongs here.
+describe('the surface reports chromeSuppressed while it owns the screen', () => {
+  it('⚑ true while the basis card is up, false once it is gone', async () => {
+    liveStatus = PAN_ONLY;
+    const reports: boolean[] = [];
+    const r = mountWith({
+      onEffectiveArmChange: (arm) => { reports.push(arm.chromeSuppressed); },
+    });
+    await settle();
+    expect(r.has('panoplus-basis-overlay')).toBe(true);
+    expect(reports[reports.length - 1]).toBe(true);
+
+    // SKIP is the documented way out, and the host's chrome must come back
+    // with it — a flag that only ever latches ON is the mirror defect and
+    // would be just as invisible.
+    r.tap('panoplus-basis-skip');
+    await settle();
+    expect(r.has('panoplus-basis-overlay')).toBe(false);
+    expect(reports[reports.length - 1]).toBe(false);
+    r.unmount();
+  });
+});
+

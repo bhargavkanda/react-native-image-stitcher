@@ -530,15 +530,20 @@ describe('<Camera engine="sweep">', () => {
                basisRoute: 'none' as never, resolving: false });
     });
     expect(tree.root.findByType(LensChip).props.lens).toBe('1x');
-    // ⚠ AND THE AR PILL STAYS HIDDEN, which is the opposite of what this
-    // case asserted when it was written. Opening the pill's gate on the
-    // MASKED lens builds a dead control: at raw 0.5× the arm cannot leave
-    // ARKit whatever `arPreference` says, because
-    // `deriveEffectiveCaptureSource` reads the RAW lens — so the pill would
-    // light up and move nothing, which is field defect #1 rebuilt. The chip
-    // names the GLASS and is masked; the pill names a SETTING and is gated
-    // on the raw lens, exactly as Pano gates it.
-    expect(tree.root.findAllByType(ARToggle)).toHaveLength(0);
+    // ⚠ AND THE AR PILL IS THE ESCAPE HATCH HERE, not hidden — this
+    // assertion has now been wrong in BOTH directions and the reason is the
+    // fourth term.
+    //
+    // Pano's rule hides the pill at 0.5×, and gating it on the MASKED lens
+    // builds a dead control. But this harness's device publishes no
+    // ultra-wide, so `LensChip` renders no Pressable at all — and with the
+    // pill hidden too the screen would have ZERO live controls and no way
+    // back. The surface's own gate carries `|| !chipCanMoveLens` for
+    // exactly that, and it did not travel with the pill.
+    //
+    // So the pill shows, and pressing it COMMITS the 1× the chip is already
+    // painting — otherwise showing it just moves the dead control.
+    expect(tree.root.findAllByType(ARToggle)).toHaveLength(1);
     // ⚠ THE REQUEST IS UNTOUCHED. The mask is paint, not policy: if it fed
     // back into the request, 0.5× would never move the arm, the fallback
     // would never be evaluated, and this mask would have nothing to report.
@@ -561,6 +566,19 @@ describe('<Camera engine="sweep">', () => {
                basisRoute: 'none' as never, resolving: true });
     });
     expect(tree.root.findByType(LensChip).props.lens).toBe('0.5x');
+
+    // …and LAST, the escape hatch actually escapes. On this body the chip
+    // has no Pressable, so the pill is the only live control — pressing it
+    // must COMMIT the 1× the chip has been painting, or showing it there
+    // just moves the dead control from one pill to the other.
+    await act(async () => {
+      report({ poseSource: 'ar', fallbackToAr: true,
+               basisRoute: 'none' as never, resolving: false });
+    });
+    await act(async () => {
+      (tree.root.findByType(ARToggle).props.onToggle as () => void)();
+    });
+    expect(surfaceProps(tree).lens).toBe('wide');
     act(() => { tree.unmount(); });
   });
 

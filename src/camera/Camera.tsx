@@ -3287,8 +3287,23 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
 
   const handleARToggle = useCallback(() => {
     if (sweepRunning) return;
+    // ⚠ WHEN THE PILL IS THE ESCAPE HATCH IT MUST ALSO COMMIT THE LENS, or
+    // showing it there just moves the dead control from the chip to the
+    // pill. On a body with no enumerable ultra-wide the chip has no handler
+    // at all, so the pill is the only live thing on screen — and at raw
+    // 0.5× `deriveEffectiveCaptureSource` answers 'non-ar' from the RAW
+    // lens, so toggling `arPreference` alone moves nothing.
+    //
+    // Committing 1× here is the same move the surface's own `onArToggle`
+    // makes when it leaves AR: "the value already under the operator's
+    // finger being made real" — the chip is already painting `1×` in this
+    // state, because `sweepEffectiveLens` masked it.
+    if (lens !== '1x' && !has0_5x) {
+      setLens('1x');
+      onLensChange?.('1x');
+    }
     setArPreference((prev) => !prev);
-  }, [sweepRunning]);
+  }, [sweepRunning, lens, has0_5x, onLensChange]);
 
   // ── v0.13.0 — Flash control ─────────────────────────────────────
   //
@@ -3508,7 +3523,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // this term deleted the AR pill outright on the one host configuration
     // the sweep actually ships under — defect #1 rebuilt, one layer up.
     (!hideBuiltInShutter || engine === 'sweep')
-      && arAllowed && nonArAllowed && lens === '1x'
+      && arAllowed && nonArAllowed
+      // ⚠ …OR THE CHIP CANNOT MOVE THE LENS, which is the surface's own
+      // fourth term (`arPillVisible`: `effectiveLens === '1x' ||
+      // !chipCanMoveLens`) and did not travel with the pill either.
+      //
+      // `LensChip` renders a Pressable only when `has0_5x`; without it the
+      // chip collapses to a static `1×` (or the native-UW hand-off pill).
+      // So on a body whose ultra-wide `<Camera>` cannot enumerate — which is
+      // also the value during the async device resolve — a host starting at
+      // `defaultLens="0.5x"` got NO AR pill (gated on the raw lens) and a
+      // chip with no handler: zero live controls on the whole sweep screen,
+      // and no way back. One control is always left on screen.
+      && (lens === '1x' || !has0_5x)
       && isARSupportedOnDevice
       ? (
         <ARToggle

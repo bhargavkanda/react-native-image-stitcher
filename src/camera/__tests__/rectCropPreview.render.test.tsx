@@ -130,4 +130,62 @@ describe('RectCropPreview — the shared review', () => {
     press(/retake/i);
     expect(seen).toEqual(['retake']);
   });
+
+  it('⚑ the PRIMARY button accepts — and on a sweep that is the only route out', () => {
+    // ⚠ THE BUTTON EVERY SWEEP ENDS ON HAD NO TEST. `<Camera>` forces
+    // `showCropControls` false for `type: 'panoplus'` (a sweep must never be
+    // offered the crop editor — `cropQuad` rewrites the file in place and the
+    // pack references it), so the primary button takes the preview-only arm
+    // `() => onUseOriginal()`, which is what emits the capture. Rewiring it to
+    // `onRetake`, or letting it fall through to `handleConfirm` on a sweep,
+    // silently discards every capture — and both were free.
+    const seen: string[] = [];
+    const t = mount({
+      showCropControls: false,
+      onUseOriginal: () => { seen.push('use'); },
+      onRetake: () => { seen.push('retake'); },
+      onConfirm: () => { seen.push('confirm'); },
+    });
+    layout(t);
+    const primary = t.root.findAll(
+      (x) => typeof (x.props as { onPress?: unknown }).onPress === 'function'
+        && /confirm|use|accept|done|keep/i.test(String(
+          (x.props as { accessibilityLabel?: string }).accessibilityLabel ?? '',
+        ))
+        && !/retake/i.test(String(
+          (x.props as { accessibilityLabel?: string }).accessibilityLabel ?? '',
+        )),
+      { deep: true },
+    );
+    expect(primary.length).toBeGreaterThan(0);
+    act(() => { (primary[0].props as { onPress: () => void }).onPress(); });
+    // EXACTLY the accept channel — not retake, not the crop pipeline.
+    expect(seen).toEqual(['use']);
+  });
+
+  it('⚑ …and WITH crop controls it takes the crop pipeline instead', () => {
+    // NEGATIVE CONTROL. Without it the case above passes for a primary
+    // button hardwired to `onUseOriginal`, which would delete the crop
+    // editor from the keyframe engine while looking correct on the sweep.
+    const seen: string[] = [];
+    const t = mount({
+      showCropControls: true,
+      onUseOriginal: () => { seen.push('use'); },
+      onConfirm: () => { seen.push('confirm'); },
+    });
+    layout(t);
+    const primary = t.root.findAll(
+      (x) => typeof (x.props as { onPress?: unknown }).onPress === 'function'
+        && /confirm|crop|accept|done/i.test(String(
+          (x.props as { accessibilityLabel?: string }).accessibilityLabel ?? '',
+        ))
+        && !/retake/i.test(String(
+          (x.props as { accessibilityLabel?: string }).accessibilityLabel ?? '',
+        )),
+      { deep: true },
+    );
+    expect(primary.length).toBeGreaterThan(0);
+    act(() => { (primary[0].props as { onPress: () => void }).onPress(); });
+    expect(seen).not.toEqual(['use']);
+  });
 });
