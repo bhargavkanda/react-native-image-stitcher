@@ -279,6 +279,18 @@ static atomic_ullong g_intrinsicsDelivered = ATOMIC_VAR_INIT(0);
 /// notification, read on the frame-processor queue.
 static NSLock *g_fovLock = nil;
 static double  g_fovFx = 0.0;
+/// The buffer width `g_fovFx` was baked FROM. `fx` scales linearly with image
+/// width at a fixed field of view, so an fx baked at one width and applied at
+/// another is wrong by exactly that ratio — and it is not a hypothetical: the
+/// width arrives over `kCameraIdNotification` from the AVCaptureDevice format
+/// while the frame processor is handed vision-camera's VIDEO buffer, which is
+/// a different resolution on most bodies, and a rotation swaps w/h on top.
+/// Kept so the fx can be rescaled to the buffer actually delivered.
+static size_t  g_fovWidth = 0;
+/// Frames whose delivered width did not match the baked one, so the FOV fx
+/// had to be rescaled. A silent rescale is the kind of correction that hides
+/// a wiring mistake, so it is COUNTED and reported.
+static atomic_int g_fovWidthRescaled;
 static NSString *g_fovCameraId = nil;
 
 /// Derive fx from a device's published horizontal field of view.
@@ -342,6 +354,12 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
     // this cannot be compared with a Camera2-arm pack.
     @"intrinsicsDelivered":  @(atomic_load(&g_intrinsicsDelivered)),
     @"intrinsicsFovDerived": @(atomic_load(&g_fovDerived)),
+    // Non-zero means the width JS sent over `kCameraIdNotification` did not
+    // match the buffer vision-camera delivered. The fx was rescaled and the
+    // sweep is geometrically sound — but a persistently non-zero count is a
+    // WIRING report: the publisher is sending the format width where it
+    // should send the video one. Counted rather than silently corrected.
+    @"intrinsicsFovWidthRescaled": @(atomic_load(&g_fovWidthRescaled)),
   };
 }
 
@@ -467,6 +485,20 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
                 @"publishes no videoFieldOfView",
         @"refusedNoIntrinsics": @(atomic_load(&g_refusedNoIntrinsics)),
       };
+    }
+    // ⚠ RESCALED TO THE DELIVERED BUFFER, NOT USED RAW. `g_fovFx` is baked
+    // once at arm time from the width JS sent; `cx`/`cy` below come from the
+    // buffer in hand. Taking the four numbers of one intrinsics set from two
+    // different widths is a canvas that paints at the wrong scale and
+    // reports success — the exact failure this whole refuse-or-derive policy
+    // exists to prevent. fx scales linearly with width at a fixed FOV.
+    size_t bakedW = 0;
+    [g_fovLock lock];
+    bakedW = g_fovWidth;
+    [g_fovLock unlock];
+    if (bakedW > 0 && bakedW != pxW) {
+      fovFx = fovFx * ((double)pxW / (double)bakedW);
+      atomic_fetch_add(&g_fovWidthRescaled, 1);
     }
     fx = fovFx;
     fy = fovFx;
@@ -617,6 +649,7 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
       atomic_store(&g_ingestedDegraded, 0);
       atomic_store(&g_ingested, 0);
       atomic_store(&g_fovDerived, 0);
+      atomic_store(&g_fovWidthRescaled, 0);
       atomic_store(&g_intrinsicsDelivered, 0);
     }
     atomic_store(&g_armed, armed);
@@ -636,7 +669,9 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
     NSNumber *w = note.userInfo[@"frameWidth"];
     [g_fovLock lock];
     g_fovCameraId = [camId copy];
-    g_fovFx = RNISSweepFovFxForCamera(camId, (size_t)[w unsignedLongValue]);
+    g_fovWidth = (size_t)[w unsignedLongValue];
+    atomic_store(&g_fovWidthRescaled, 0);
+    g_fovFx = RNISSweepFovFxForCamera(camId, g_fovWidth);
     [g_fovLock unlock];
   }];
 }
