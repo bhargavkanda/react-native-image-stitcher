@@ -15,8 +15,22 @@
 //
 // ══════════════════════════════════════════════════════════════════════
 //  ⚠ THIS ARM HAS NO iOS START PATH YET, SO THE PLUGIN IS DISARMED.
-//    READ THIS BEFORE READING ANYTHING ELSE IN THE FILE.
+//    ONE REASON REMAINS, AND IT IS NOT THE ONE THIS FILE USED TO GIVE.
 // ══════════════════════════════════════════════════════════════════════
+//
+// INTRINSICS ARE NO LONGER THE BLOCKER — see below; this arm derives them.
+// What is still missing is a start mode: `PanoPlusBridge` must configure
+// `RNISPanoAttitude`, start CoreMotion via the existing `startMotion()` seam
+// (RNISPanoAvfSource.swift:1154) and open NO `AVCaptureSession`.
+//
+// ⚠ AND THAT NEEDS ONE DESIGN ANSWER THIS CODE CANNOT SUPPLY. τ is stored
+// under `model | lens | W×H | fps` (RNISPanoCalibStore.swift:19, :78) — the
+// rolling-shutter constant is part of the FORMAT. On this arm
+// VISION-CAMERA picks the format, so which stored τ applies, and whether a
+// τ measured under our own 60 fps 4:3 plan may be reused under vc's, is a
+// decision about measurement validity rather than a refactor. Guessing it
+// would reintroduce exactly the class of error the old intrinsics reasoning
+// was: a number that looks right and is silently for something else.
 //
 // An adversarial review of the first version of this file found that its
 // header led with the SECOND reason it is inert and never stated the first.
@@ -60,10 +74,21 @@
 //     absent on the session this plugin runs on.
 //
 //  2. AN FOV DERIVATION off `AVCaptureDevice.activeFormat.videoFieldOfView`.
-//     This is NOT refused on principle — it is UNREACHABLE. vision-camera's
-//     `Frame` and `VisionCameraProxyHolder` carry no device, no connection
-//     and no session, so there is no `videoFieldOfView` to read. There is
-//     nothing here to derive FROM.
+//     ⚠ THIS IS REACHABLE, AND AN EARLIER VERSION OF THIS HEADER SAID IT WAS
+//     NOT. It argued that vc's `Frame` carries no device, so there was
+//     "nothing here to derive FROM". True about `Frame`, and irrelevant: we
+//     do not need vision-camera to hand us the device. JS already sends the
+//     id it mounted (`vcCameraId` — on iOS that IS the
+//     `AVCaptureDevice.uniqueID`), and `+[AVCaptureDevice deviceWithUniqueID:]`
+//     resolves it. That is exactly how the ANDROID arm gets its intrinsics
+//     (`CameraCharacteristics` for `vcCameraId`), and the arithmetic is the
+//     one `RNISPanoAvfSource` already runs on its own device (:729-735),
+//     marking the pack with `fovDerivedFx`.
+//
+//     So this arm now DERIVES AND MARKS when no matrix is delivered, which
+//     is the established policy in this subspec rather than a new one. The
+//     old reasoning failed by asking only what vc hands the plugin and never
+//     asking whether the plugin could get it another way.
 //
 // ⚠ AND THE FIRST VERSION OF THIS HEADER GOT THE ARGUMENT WRONG, in a way
 // worth correcting rather than quietly deleting. It said a guessed focal
@@ -85,9 +110,13 @@
 // is not a refused frame; it is a canvas that keeps painting at the wrong
 // scale and reports success.
 //
-// So the rule is narrower than "never derive", and stating it narrowly
-// matters because someone will cite this file later: DERIVE WHERE YOU OWN THE
-// DEVICE AND KNOW WHICH ONE IT IS; REFUSE WHERE YOU DO NOT.
+// So the rule is: DERIVE WHERE YOU KNOW WHICH DEVICE IT IS; REFUSE WHERE YOU
+// DO NOT. This arm knows — JS tells it. The genuine hazard is narrower than
+// the old header claimed: a VIRTUAL multi-camera container switches its
+// active constituent under zoom unannounced, so an fx read from the
+// container is wrong at 0.5×. That is a question about WHICH DEVICE IS
+// MOUNTED, not about a frame, and it is guarded where it belongs —
+// `sweepHostOwnsCamera` refuses the arm on a multicam body away from 1×.
 //
 // WHAT MAKES IT WORK. The arm needs BOTH halves:
 //   * an iOS start path that arms this plugin and opens no AVCaptureSession
@@ -140,6 +169,7 @@
 #import <VisionCamera/FrameProcessorPlugin.h>
 #import <VisionCamera/FrameProcessorPluginRegistry.h>
 #import <VisionCamera/VisionCameraProxyHolder.h>
+#import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 // `matrix_float3x3` lives here. It resolved before only through
@@ -163,6 +193,10 @@
 /// of defect `32a4231` was written to fix on Android. A notification name is
 /// a string: the poster compiles and runs whether or not this plugin exists.
 static NSString *const kArmNotification = @"RNISPanoSweepVcArmDidChange";
+
+/// Posted with `userInfo[@"cameraId"]` — the `AVCaptureDevice.uniqueID` of
+/// the device vision-camera mounted, which JS already sends as `vcCameraId`.
+static NSString *const kCameraIdNotification = @"RNISPanoSweepVcCameraIdDidChange";
 
 /// ⚠ CLASS-LEVEL, NOT PER-INSTANCE — and the reason is NOT the one an earlier
 /// version of this comment gave.
@@ -211,6 +245,37 @@ static atomic_ullong g_refusedShortMatrix  = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_refusedFatalAttitude = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_ingestedDegraded    = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_fovDerived          = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_intrinsicsDelivered = ATOMIC_VAR_INIT(0);
+
+/// The FOV-derived focal length for the device vision-camera mounted, and
+/// the id it was derived from. Guarded by `g_fovLock` — written on the arm
+/// notification, read on the frame-processor queue.
+static NSLock *g_fovLock = nil;
+static double  g_fovFx = 0.0;
+static NSString *g_fovCameraId = nil;
+
+/// Derive fx from a device's published horizontal field of view.
+///
+/// ⚠ THIS IS THE ROUTE AN EARLIER VERSION OF THIS FILE SAID DID NOT EXIST.
+/// Its header argued that a Frame Processor "can reach neither" intrinsics
+/// source, because vision-camera's `Frame` carries no `AVCaptureDevice`.
+/// True, and irrelevant: we do not need vc to hand us the device. JS already
+/// sends the id it mounted (`vcCameraId` — on iOS that IS the
+/// `AVCaptureDevice.uniqueID`), and `AVCaptureDevice` can be looked up by it.
+/// That is the same route the Android arm has always used with
+/// `CameraCharacteristics`, and the same arithmetic `RNISPanoAvfSource`
+/// already performs on its own device (:729-735), marking the pack with
+/// `fovDerivedFx`. Derive-and-mark is the established policy in this subspec;
+/// the old header contradicted it.
+static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
+  if (cameraId.length == 0 || frameWidth == 0) return 0.0;
+  AVCaptureDevice *dev = [AVCaptureDevice deviceWithUniqueID:cameraId];
+  if (dev == nil) return 0.0;
+  const double hFovDeg = (double)dev.activeFormat.videoFieldOfView;
+  if (!(hFovDeg > 0.0)) return 0.0;
+  return (0.5 * (double)frameWidth) / tan(0.5 * hFovDeg * M_PI / 180.0);
+}
 
 @interface RNISPanoSweepFrameProcessor : FrameProcessorPlugin
 @end
@@ -247,6 +312,10 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
     @"refusedFatalAttitude": @(atomic_load(&g_refusedFatalAttitude)),
     @"ingestedDegraded":     @(atomic_load(&g_ingestedDegraded)),
     @"ingested":             @(atomic_load(&g_ingested)),
+    // WHICH intrinsics each ingested frame used. A pack that cannot say
+    // this cannot be compared with a Camera2-arm pack.
+    @"intrinsicsDelivered":  @(atomic_load(&g_intrinsicsDelivered)),
+    @"intrinsicsFovDerived": @(atomic_load(&g_fovDerived)),
   };
 }
 
@@ -337,18 +406,48 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
   double fx = 0.0, fy = 0.0, cx = 0.0, cy = 0.0;
   CFTypeRef matrixRef = CMGetAttachment(
       sampleBuffer, kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix, NULL);
+  const size_t pxW = CVPixelBufferGetWidth(pixelBuffer);
   if (matrixRef == NULL) {
-    atomic_fetch_add(&g_refusedNoIntrinsics, 1);
-    return @{
-      @"ingested": @NO,
-      @"why": @"no intrinsic-matrix attachment — the session owner has not "
-              @"set isCameraIntrinsicMatrixDeliveryEnabled (vision-camera "
-              @"4.7.3 never does), and this plugin cannot reach a device to "
-              @"derive a focal length from",
-      @"refusedNoIntrinsics": @(atomic_load(&g_refusedNoIntrinsics)),
-    };
-  }
-  if (CFGetTypeID(matrixRef) != CFDataGetTypeID()) {
+    // ── NO DELIVERED MATRIX: DERIVE FROM THE DEVICE'S FOV, AND MARK IT ──
+    //
+    // vision-camera 4.7.3 never enables intrinsic-matrix delivery (measured:
+    // zero occurrences of `IntrinsicMatrix` in its iOS tree), so this is the
+    // ordinary path, not the exceptional one. An earlier version of this file
+    // REFUSED here, on the grounds that a guessed focal length is the one
+    // error the engine's `fx > 0` guard cannot catch. The premise was wrong:
+    // this is not a guess, it is the same arithmetic on the same published
+    // measurement that `RNISPanoAvfSource` does on its own device, and it is
+    // reached the same way the Android arm reaches it — through the device id
+    // JS already sends. Refusing made the whole arm inert for a constraint
+    // that does not exist.
+    //
+    // The REAL hazard the old header named is still real and still guarded,
+    // one layer up: a VIRTUAL multi-camera container switches its active
+    // constituent under zoom with no notification, so an fx read from the
+    // container is wrong at 0.5×. `sweepHostOwnsCamera` refuses the arm on a
+    // multicam body away from the 1× baseline, which is where that belongs —
+    // it is a question about which device is mounted, not about a frame.
+    double fovFx = 0.0;
+    [g_fovLock lock];
+    fovFx = g_fovFx;
+    [g_fovLock unlock];
+    if (!(fovFx > 0.0)) {
+      atomic_fetch_add(&g_refusedNoIntrinsics, 1);
+      return @{
+        @"ingested": @NO,
+        @"why": @"no intrinsic-matrix attachment, and no FOV-derived focal "
+                @"length either — the arm was not told which camera "
+                @"vision-camera mounted (vcCameraId), or that device "
+                @"publishes no videoFieldOfView",
+        @"refusedNoIntrinsics": @(atomic_load(&g_refusedNoIntrinsics)),
+      };
+    }
+    fx = fovFx;
+    fy = fovFx;
+    cx = (double)pxW * 0.5;
+    cy = (double)CVPixelBufferGetHeight(pixelBuffer) * 0.5;
+    atomic_fetch_add(&g_fovDerived, 1);
+  } else if (CFGetTypeID(matrixRef) != CFDataGetTypeID()) {
     atomic_fetch_add(&g_refusedBadMatrix, 1);
     return @{
       @"ingested": @NO,
@@ -357,33 +456,36 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
               @"vision-camera configuration problem",
       @"refusedBadMatrix": @(atomic_load(&g_refusedBadMatrix)),
     };
-  }
-  CFDataRef data = (CFDataRef)matrixRef;
-  const CFIndex len = CFDataGetLength(data);
-  if (len < (CFIndex)sizeof(matrix_float3x3)) {
-    atomic_fetch_add(&g_refusedShortMatrix, 1);
-    return @{
-      @"ingested": @NO,
-      @"why": [NSString stringWithFormat:
-                  @"intrinsic-matrix attachment is %ld bytes, need %lu — "
-                  @"delivery IS enabled and the payload is truncated",
-                  (long)len, (unsigned long)sizeof(matrix_float3x3)],
-      @"refusedShortMatrix": @(atomic_load(&g_refusedShortMatrix)),
-    };
-  }
-  matrix_float3x3 k;
-  CFDataGetBytes(data, CFRangeMake(0, sizeof(matrix_float3x3)), (UInt8 *)&k);
-  fx = (double)k.columns[0][0];
-  fy = (double)k.columns[1][1];
-  cx = (double)k.columns[2][0];
-  cy = (double)k.columns[2][1];
-  if (!(fx > 0.0) || !(fy > 0.0)) {
-    atomic_fetch_add(&g_refusedBadMatrix, 1);
-    return @{
-      @"ingested": @NO,
-      @"why": @"intrinsic matrix decoded but fx/fy are not positive",
-      @"refusedBadMatrix": @(atomic_load(&g_refusedBadMatrix)),
-    };
+  } else {
+    // DELIVERED — always preferred over the derivation above.
+    CFDataRef data = (CFDataRef)matrixRef;
+    const CFIndex len = CFDataGetLength(data);
+    if (len < (CFIndex)sizeof(matrix_float3x3)) {
+      atomic_fetch_add(&g_refusedShortMatrix, 1);
+      return @{
+        @"ingested": @NO,
+        @"why": [NSString stringWithFormat:
+                    @"intrinsic-matrix attachment is %ld bytes, need %lu — "
+                    @"delivery IS enabled and the payload is truncated",
+                    (long)len, (unsigned long)sizeof(matrix_float3x3)],
+        @"refusedShortMatrix": @(atomic_load(&g_refusedShortMatrix)),
+      };
+    }
+    matrix_float3x3 k;
+    CFDataGetBytes(data, CFRangeMake(0, sizeof(matrix_float3x3)), (UInt8 *)&k);
+    fx = (double)k.columns[0][0];
+    fy = (double)k.columns[1][1];
+    cx = (double)k.columns[2][0];
+    cy = (double)k.columns[2][1];
+    if (!(fx > 0.0) || !(fy > 0.0)) {
+      atomic_fetch_add(&g_refusedBadMatrix, 1);
+      return @{
+        @"ingested": @NO,
+        @"why": @"intrinsic matrix decoded but fx/fy are not positive",
+        @"refusedBadMatrix": @(atomic_load(&g_refusedBadMatrix)),
+      };
+    }
+    atomic_fetch_add(&g_intrinsicsDelivered, 1);
   }
 
   // ── ATTITUDE ───────────────────────────────────────────────────────
@@ -488,8 +590,28 @@ static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
       atomic_store(&g_refusedFatalAttitude, 0);
       atomic_store(&g_ingestedDegraded, 0);
       atomic_store(&g_ingested, 0);
+      atomic_store(&g_fovDerived, 0);
+      atomic_store(&g_intrinsicsDelivered, 0);
     }
     atomic_store(&g_armed, armed);
+  }];
+
+  // The device vision-camera mounted, from the id JS already sends. Derived
+  // ONCE per arm rather than per frame: `deviceWithUniqueID:` is a lookup,
+  // and this runs on whatever thread the start path uses, not on vc's
+  // frame-processor queue.
+  if (g_fovLock == nil) g_fovLock = [[NSLock alloc] init];
+  [[NSNotificationCenter defaultCenter]
+      addObserverForName:kCameraIdNotification
+                  object:nil
+                   queue:nil
+              usingBlock:^(NSNotification *note) {
+    NSString *camId = note.userInfo[@"cameraId"];
+    NSNumber *w = note.userInfo[@"frameWidth"];
+    [g_fovLock lock];
+    g_fovCameraId = [camId copy];
+    g_fovFx = RNISSweepFovFxForCamera(camId, (size_t)[w unsignedLongValue]);
+    [g_fovLock unlock];
   }];
 }
 
