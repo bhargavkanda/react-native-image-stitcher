@@ -204,6 +204,8 @@ interface Rig {
   /** Press any control by testID — for the ones outside this file's subject,
    *  such as the basis card's SKIP. */
   tap: (testID: string) => void;
+  /** Every string the surface actually rendered, joined. */
+  text: () => string;
   /** Pano's shutter held past the threshold and released — one whole sweep. */
   sweep: () => void;
   /**
@@ -246,6 +248,18 @@ function mount(lens0: HostLens, pose0: PanoPlusPoseSource): Rig {
   };
   return {
     has: (testID) => find(testID).length > 0,
+    text: () => {
+      const out: string[] = [];
+      const walk = (n: unknown): void => {
+        if (typeof n === 'string') { out.push(n); return; }
+        if (Array.isArray(n)) { n.forEach(walk); return; }
+        if (n != null && typeof n === 'object' && 'children' in n) {
+          walk((n as { children: unknown }).children);
+        }
+      };
+      walk(renderer.toJSON());
+      return out.join(' ');
+    },
     pill: () => {
       // The host `Pressable` (it carries the a11y props), not the
       // `PanoArToggle` composite that also matches the testID.
@@ -856,5 +870,33 @@ describe('the chip yields to the one-time basis card, and only to that', () => {
     expect(r.painted()).toBe('1x');
     expect(r.pill()).not.toBeNull();
     r.unmount();
+  });
+});
+
+// ── THE DROPPED LENS REACHES THE SCREEN ────────────────────────────────────
+//
+// ⚠ THIS EXISTS BECAUSE THE WIRE HAD NO TEST AND THE MUTATION PROVED IT.
+// `panoPlusArmNotice` learned to name a lens the arm declined, and its own
+// suite covers that. But the SURFACE has to hand it the lens — one argument,
+// in one call — and with that argument deleted the entire 787-case sweep
+// suite stayed green. A pure function nobody feeds correctly is the
+// vacuous-pass family this package keeps finding in itself.
+describe('the surface tells the notice which lens was asked for', () => {
+  beforeEach(() => { Platform.OS = 'ios'; });
+  afterEach(() => { Platform.OS = 'ios'; });
+
+  it('⚑ 0.5× + a declined IMU arm says so ON SCREEN', () => {
+    // The shipped iPhone state, and the one the operator reported: he asked
+    // for the ultra-wide, the arm fell back to ARKit, and nothing said the
+    // lens had gone with it.
+    const rig = mount('ultraWide', 'imu');
+    expect(rig.text()).toContain('0.5× UNAVAILABLE');
+  });
+
+  it('⚑ NEGATIVE CONTROL: the same declined arm at 1× says nothing about lenses', () => {
+    // Without this the case above passes for a surface that shouts about the
+    // ultra-wide on every fallback, including ones nobody asked a lens for.
+    const rig = mount('wide', 'imu');
+    expect(rig.text()).not.toContain('0.5× UNAVAILABLE');
   });
 });

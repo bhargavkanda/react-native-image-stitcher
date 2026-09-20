@@ -72,6 +72,7 @@ jest.mock('react-native-vision-camera', () => ({
 
 import {
   SWEEP_HOST_OWNS_INPUT_KEYS,
+  sweepEffectiveLens,
   sweepMergedLens,
   sweepMergedPoseSource,
   sweepOwnershipInput,
@@ -491,5 +492,49 @@ describe('sweepPreviewLive — mounted is not drawing', () => {
   });
   it('neither', () => {
     expect(previewLive({ mounted: false, started: false })).toBe(false);
+  });
+});
+
+// ── THE LENS THE CHIP IS ALLOWED TO CLAIM ──────────────────────────────────
+//
+// Field report, 2026-09-19: "0.5x lens does not go to that camera — shows the
+// same view as 1x." Every layer below the chip was correct: 0.5× moves the arm
+// (Pano's rule), the iOS IMU arm has no τ for that key so it declines, and
+// ARKit is structurally wide-only. The CHIP went on claiming the lens anyway.
+describe('sweepEffectiveLens', () => {
+  type Arm = { poseSource: 'ar' | 'imu'; resolving: boolean };
+  const AR: Arm = { poseSource: 'ar', resolving: false };
+  const IMU: Arm = { poseSource: 'imu', resolving: false };
+  const PENDING_AR: Arm = { poseSource: 'ar', resolving: true };
+
+  it('⚑ THE DEFECT: the AR arm masks 0.5× back to 1×', () => {
+    // ARKit publishes no ultra-wide format and `start` deletes the lens key on
+    // that arm, so a chip painting 0.5× names a camera nothing ever opened.
+    expect(sweepEffectiveLens('0.5x', AR)).toBe('1x');
+  });
+
+  it('⚑ the decoupled arm HONOURS it — the mask is not a veto', () => {
+    // Without this the "fix" could be `always 1x`, which would delete the
+    // ultra-wide from the product on the one arm that can open it.
+    expect(sweepEffectiveLens('0.5x', IMU)).toBe('0.5x');
+  });
+
+  it('⚑ while the arm read is in flight it follows the REQUEST', () => {
+    // The courtesy the surface's start button and AR pill already give: a
+    // label that may be taken back one frame later is not offered.
+    expect(sweepEffectiveLens('0.5x', PENDING_AR)).toBe('0.5x');
+  });
+
+  it('⚑ no arm at all (keyframe engine) is untouched, on BOTH lenses', () => {
+    // `engine` selects which engine the hold runs and changes nothing else —
+    // so the mask must be invisible to the engine that has no sweep arm.
+    expect(sweepEffectiveLens('0.5x', null)).toBe('0.5x');
+    expect(sweepEffectiveLens('1x', null)).toBe('1x');
+  });
+
+  it('⚑ 1× is 1× under every arm — the mask never invents a lens', () => {
+    for (const arm of [AR, IMU, PENDING_AR, null]) {
+      expect(sweepEffectiveLens('1x', arm)).toBe('1x');
+    }
   });
 });

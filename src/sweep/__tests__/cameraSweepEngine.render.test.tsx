@@ -26,6 +26,7 @@ import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import {
+  ARToggle,
   Camera,
   LensChip,
   _sweepHostOwnsCameraForTests as hostOwns,
@@ -274,6 +275,75 @@ describe('<Camera engine="sweep">', () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     // AR is PREFERRED and supported, but the lens forces the non-AR arm.
     expect(surfaceProps(tree).poseSource).toBe('imu');
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ the chip paints the lens the ARM WILL OPEN, not the request', async () => {
+    // FIELD DEFECT, 2026-09-19: "0.5x lens does not go to that camera — shows
+    // the same view as 1x." Every layer below the chip was right. On iOS the
+    // IMU arm has no τ for `model|lens|W×H|fps`, so `panoPlusArmNotice`
+    // declines and falls back to ARKit — which publishes no ultra-wide format
+    // at all. The request survives; the glass does not change. The chip went
+    // on painting `0.5×` over an ARKit viewfinder that was on the wide.
+    //
+    // THE PURE TRUTH TABLE CANNOT CATCH THIS. `sweepEffectiveLens` is covered
+    // case-by-case in `sweepHostOwnsCamera.test.ts`, and every one of those
+    // stays green if the chip is handed the raw `lens` instead — which is
+    // precisely the mis-wire that shipped. This drives the real chip.
+    const tree = render({
+      engine: 'sweep',
+      defaultCaptureSource: 'ar',
+      defaultLens: '0.5x',
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    const report = surfaceProps(tree).onEffectiveArmChange as
+      (a: { poseSource: 'ar' | 'imu'; fallbackToAr: boolean;
+            basisRoute: string; resolving: boolean }) => void;
+    // The seam itself: an unwired callback is the defect, so name it.
+    expect(typeof report).toBe('function');
+
+    // 1. THE ARM DECLINES. This is the shipped iPhone state.
+    await act(async () => {
+      report({ poseSource: 'ar', fallbackToAr: true,
+               basisRoute: 'none' as never, resolving: false });
+    });
+    expect(tree.root.findByType(LensChip).props.lens).toBe('1x');
+    // …and the AR pill comes back with it. A chip masked to `1×` while the
+    // pill stayed hidden (its gate is the lens being 1×) would strand the
+    // operator on a wide viewfinder reading `1×` with no way to see the arm.
+    expect(tree.root.findAllByType(ARToggle).length).toBe(1);
+    // ⚠ THE REQUEST IS UNTOUCHED. The mask is paint, not policy: if it fed
+    // back into the request, 0.5× would never move the arm, the fallback
+    // would never be evaluated, and this mask would have nothing to report.
+    expect(surfaceProps(tree).lens).toBe('ultraWide');
+    expect(surfaceProps(tree).poseSource).toBe('imu');
+
+    // 2. NEGATIVE CONTROL — the arm accepts. Without this the case above
+    //    passes for a chip hardcoded to `1×`, which would delete the
+    //    ultra-wide from the product on the one arm that can open it.
+    await act(async () => {
+      report({ poseSource: 'imu', fallbackToAr: false,
+               basisRoute: 'none' as never, resolving: false });
+    });
+    expect(tree.root.findByType(LensChip).props.lens).toBe('0.5x');
+
+    // 3. IN FLIGHT — follows the request, so no label is offered that may be
+    //    taken back one frame later.
+    await act(async () => {
+      report({ poseSource: 'ar', fallbackToAr: true,
+               basisRoute: 'none' as never, resolving: true });
+    });
+    expect(tree.root.findByType(LensChip).props.lens).toBe('0.5x');
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and the keyframe engine is untouched by the mask', () => {
+    // `engine` selects which engine the hold runs and changes nothing else.
+    // No sweep surface exists here, so nothing can ever report an arm — the
+    // assertion is that the chip still shows what the operator picked.
+    const tree = render({ defaultLens: '0.5x' });
+    expect(tree.root.findByType(LensChip).props.lens).toBe('0.5x');
     act(() => { tree.unmount(); });
   });
 

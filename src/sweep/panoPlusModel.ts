@@ -3983,7 +3983,7 @@ export interface PanoPlusArmNotice {
   startLabel: string;
 }
 
-export function panoPlusArmNotice(
+function panoPlusArmNoticeForArm(
   poseSource: PanoPlusPoseSource,
   plan: { ok: boolean; reason: string | null; detail: string | null } | null,
   calib: {
@@ -4196,6 +4196,62 @@ export function panoPlusArmNotice(
     startLabel: 'Start sweep (IMU)',
   };
 }
+
+/**
+ * The arm notice, PLUS what became of the lens the operator asked for.
+ *
+ * ── WHY THIS IS A WRAPPER AND NOT A SIXTH BRANCH ────────────────────────
+ *
+ * Field report, 2026-09-19: *"0.5x lens does not go to that camera — shows
+ * the same view as 1x."* Every layer was behaving correctly. 0.5× moves the
+ * arm (Pano's rule); the iOS IMU arm has no τ for `model | lens | W×H | fps`
+ * so it declines; ARKit publishes no ultra-wide format — 0 of 22 on
+ * iPhone17,1 — so the fallback lands on the wide. `start` then DELETES the
+ * lens key rather than recording one it did not use. All correct, and all
+ * silent: the banner that fired said `IMU ARM — NEEDS CALIBRATION`, a
+ * sentence about a thing the operator had not touched. He tapped a LENS.
+ *
+ * ⚠ IT DECORATES THE RESULT INSTEAD OF EDITING THE BRANCHES, AND THAT IS THE
+ * FIX RATHER THAN TIDINESS. The first attempt put the sentence in `fellBack`
+ * — which looks like the one place a fallback is built, and is not: branch 4,
+ * the ordinary missing-calibration case and by far the commonest on a real
+ * phone, returns its own object literal. It shipped green and silent on the
+ * exact state the operator reported. Keying on `fallbackToAr` instead means a
+ * branch added later cannot drop a lens quietly: the flag IS the condition.
+ *
+ * The τ = 0 experiment is deliberately NOT decorated — it answers
+ * `fallbackToAr: false` and really does run the requested lens on the
+ * decoupled arm.
+ */
+export function panoPlusArmNotice(
+  poseSource: PanoPlusPoseSource,
+  plan: Parameters<typeof panoPlusArmNoticeForArm>[1],
+  calib: Parameters<typeof panoPlusArmNoticeForArm>[2],
+  tauUncorrected: boolean = false,
+  basisGestureOffered: boolean = false,
+  /** The lens the operator asked for. `'wide'` adds nothing, so every
+   *  existing caller renders exactly what it always did. */
+  lensRequested: 'wide' | 'ultraWide' = 'wide',
+): PanoPlusArmNotice {
+  const notice = panoPlusArmNoticeForArm(
+    poseSource, plan, calib, tauUncorrected, basisGestureOffered,
+  );
+  if (lensRequested !== 'ultraWide' || !notice.fallbackToAr) return notice;
+  return {
+    ...notice,
+    // ⚠ THE HEADLINE, NOT ONLY THE DETAIL. The banner renders the headline
+    // with `▸ tap for why` and keeps the detail COLLAPSED. A dropped 0.5×
+    // explained only inside the fold is a dropped 0.5× he never reads.
+    headline: `0.5× UNAVAILABLE — ${notice.headline}`,
+    detail:
+      'THE SWEEP AND THE VIEWFINDER ARE BOTH ON THE 1× WIDE CAMERA. The '
+      + 'ultra-wide is reachable only on the decoupled (IMU) arm — ARKit '
+      + 'publishes no ultra-wide format at all — so falling back to ARKit '
+      + 'drops the lens with it. '
+      + notice.detail,
+  };
+}
+
 
 // ── The arm notice, ON DISK ─────────────────────────────────────────────────
 //

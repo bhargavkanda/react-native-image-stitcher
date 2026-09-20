@@ -1326,11 +1326,17 @@ export const PanoPlusCaptureSurface = forwardRef<
           // surface without the overlay still reads the old sentence and is not
           // lying.
           basisResolution.needsGesture,
+          // The lens the operator asked for, so a fallback can say what
+          // happened to it. `lens` and not `effectiveLens`: the mask is
+          // DERIVED from this notice's answer, so reading it back here would
+          // be circular and would silence the very sentence it needs.
+          lens,
         )),
     [
       armContract,
       basisResolution,
       calib,
+      lens,
       nativeReady,
       plan,
       poseSource,

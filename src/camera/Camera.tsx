@@ -3370,10 +3370,70 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // what produced the stuck pill.
   //
   // So these render ONCE, from `<Camera>`'s own state, on every engine.
+  // ── THE LENS THE RUNNING ARM WILL ACTUALLY OPEN ─────────────────────────
+  //
+  // ⚠ THE PILL SHOWS THE SETTING; THE CHIP SHOWS WHAT IS LIVE. They are not
+  // the same rule, and collapsing them to one is how this control has now
+  // failed in BOTH directions:
+  //
+  //   * the sweep surface's own clone painted `effectivePoseSource` on the AR
+  //     PILL — what will RUN — so on an uncalibrated phone the pill was pinned
+  //     ON and could not be deselected. Fixed by painting the preference,
+  //     because AR *is* a preference the operator owns and the arm notice is
+  //     what says which arm will really run.
+  //
+  //   * unifying the chrome then pointed the LENS CHIP at `<Camera>`'s raw
+  //     `lens`, which reintroduced the mirror defect the surface had already
+  //     solved (`PanoPlusCaptureSurface`'s `effectiveLens`, and its stated
+  //     property: "no reachable state where the chip claims a lens the running
+  //     arm cannot deliver"). A lens is NOT a deferred preference — it is the
+  //     glass the operator is looking through. On the AR arm that glass is
+  //     structurally the wide camera (ARKit publishes no ultra-wide format —
+  //     0 of 22 on iPhone17,1; ARCore forces camera 0 on the A35), and `start`
+  //     DELETES the `lens` key there. Painting `0.5×` over an ARKit viewfinder
+  //     tells the operator he is on a camera he is not on.
+  //
+  // Reported UP from the surface, because the fallback is decided down there
+  // from the calibration plan `<Camera>` does not have. `onEffectiveArmChange`
+  // already existed on the surface and nothing consumed it.
+  //
+  // ⚠ THE REQUEST STAYS RAW. `effectiveCaptureSource` — which moves the arm —
+  // must keep reading `lens`, or a 0.5× tap would never leave AR, the fallback
+  // would never be evaluated, and this mask would have nothing to report.
+  // Request with the setting, paint with what came back.
+  const [sweepEffectiveArm, setSweepEffectiveArm] =
+    useState<{ poseSource: 'ar' | 'imu'; resolving: boolean } | null>(null);
+  const handleSweepEffectiveArm = useCallback((arm: {
+    poseSource: 'ar' | 'imu';
+    resolving: boolean;
+  }) => {
+    // Bails on an equal answer: this is called from an effect in the child
+    // whose deps include this callback, so an unconditional `setState` would
+    // re-render on every one of the surface's own renders.
+    setSweepEffectiveArm((prev) => (
+      prev != null
+        && prev.poseSource === arm.poseSource
+        && prev.resolving === arm.resolving
+        ? prev
+        : { poseSource: arm.poseSource, resolving: arm.resolving }
+    ));
+  }, []);
+  // Derived, never stored per engine: a keyframe capture has no sweep arm, so
+  // reading the state directly would let a stale answer from the last sweep
+  // mask the chip after the engine flipped back.
+  const effectiveLens = sweepEffectiveLens(
+    lens,
+    engine === 'sweep' ? sweepEffectiveArm : null,
+  );
+
   /** The AR pill, or null. The CONTAINER belongs to each tree — the
    *  keyframe tree stacks the flash pill under it, the sweep cell does not. */
   const renderSharedArPill = (): React.JSX.Element | null => (
-    !hideBuiltInShutter && arAllowed && nonArAllowed && lens === '1x'
+    // ⚠ `effectiveLens`, NOT `lens`, OR THE TWO CONTROLS CONTRADICT EACH
+    // OTHER. Pano's rule is that the pill hides at 0.5× — so a chip masked
+    // back to `1×` with the pill still hidden would leave the operator on a
+    // wide viewfinder, reading `1×`, with no way to see or change the arm.
+    !hideBuiltInShutter && arAllowed && nonArAllowed && effectiveLens === '1x'
       && isARSupportedOnDevice
       ? (
         <ARToggle
@@ -3388,7 +3448,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const renderSharedLensChip = (): React.JSX.Element | null => (
     !arOnly ? (
       <LensChip
-        lens={lens}
+        lens={effectiveLens}
         onChange={handleLensChange}
         has0_5x={has0_5x}
         contentRotation={contentRotation}
@@ -3979,6 +4039,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             vcCameraId={mountHostPreview ? (capture.device?.id ?? '') : ''}
             poseSource={sweepPoseSource}
             lens={sweepLens}
+            // ⚠ THE ARM THAT WILL REALLY RUN, COMING BACK UP. The fallback is
+            // decided inside the surface from a calibration plan `<Camera>`
+            // cannot see, and the shared lens chip has to know about it or it
+            // paints a lens ARKit cannot deliver. See `sweepEffectiveLens`.
+            onEffectiveArmChange={handleSweepEffectiveArm}
             // ⚠ MERGED KEY-BY-KEY, NOT SPREAD. `engineOptions` is an object,
             // so letting the host's copy through the spread above would
             // REPLACE the defaults wholesale — a host that set one option
@@ -4812,6 +4877,43 @@ export function sweepMergedPoseSource(
   arPreference: boolean,
 ): 'ar' | 'imu' {
   return bagPoseSource ?? (arPreference ? 'ar' : 'imu');
+}
+
+/**
+ * The lens the RUNNING arm will actually open — the value the chip paints.
+ *
+ * ── WHY A MASK AND NOT JUST THE STATE ───────────────────────────────────
+ *
+ * `lens` is the operator's REQUEST and must stay raw everywhere that acts on
+ * it: it is what moves the sweep off the AR arm in the first place (Pano's
+ * rule, `deriveEffectiveCaptureSource`). But the arm is allowed to REFUSE —
+ * on iOS the IMU arm falls back to ARKit whenever τ/basis are missing for
+ * `model | lens | W×H | fps` (`panoPlusArmNotice`) — and ARKit is
+ * structurally wide-only. The request survives; the glass does not change.
+ *
+ * Field report that named this, 2026-09-19: *"0.5x lens does not go to that
+ * camera — shows the same view as 1x."* Everything downstream was correct;
+ * the chip simply went on claiming a lens the arm had already declined.
+ *
+ *   arm                      │ lens='0.5x' │ lens='1x'
+ *   ─────────────────────────┼─────────────┼──────────
+ *   null (keyframe / no      │    0.5x     │    1x     ← untouched
+ *     answer yet)            │             │
+ *   resolving (read in       │    0.5x     │    1x     ← follows the REQUEST
+ *     flight)                │             │
+ *   imu  (decoupled arm)     │    0.5x     │    1x     ← honoured
+ *   ar   (ARKit / ARCore)    │     1x      │    1x     ← MASKED
+ *
+ * The `resolving` row is the same courtesy the surface's start button and AR
+ * pill already give: a label that may be taken back one frame later is not
+ * offered. It follows the request until the arm answers.
+ */
+export function sweepEffectiveLens(
+  lens: CameraLens,
+  arm: { poseSource: 'ar' | 'imu'; resolving: boolean } | null,
+): CameraLens {
+  if (arm == null || arm.resolving) return lens;
+  return arm.poseSource === 'ar' ? '1x' : lens;
 }
 
 /** Twin of `sweepMergedPoseSource` for the lens. */

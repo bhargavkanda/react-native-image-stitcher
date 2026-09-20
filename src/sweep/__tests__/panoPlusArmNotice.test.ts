@@ -367,3 +367,54 @@ describe('panoPlusArmNotice', () => {
     });
   });
 });
+
+// ── THE DROPPED LENS, SAID OUT LOUD ────────────────────────────────────────
+//
+// Field report, 2026-09-19: "0.5x lens does not go to that camera — shows the
+// same view as 1x." The fallback was doing the right thing and saying the
+// wrong thing: the operator tapped a LENS and the banner answered about IMU
+// calibration, a subject he had not touched.
+describe('panoPlusArmNotice — a fallback names the lens it dropped', () => {
+  /** The shipped iPhone state: IMU asked for, no τ/basis for that key. */
+  const fellBack = (lens: 'wide' | 'ultraWide') =>
+    panoPlusArmNotice('imu', OK_PLAN, calib(), false, false, lens);
+
+  it('⚑ the HEADLINE carries it — the detail is collapsed behind ▸', () => {
+    // The banner renders the headline with "tap for why"; the detail is
+    // folded. A dropped 0.5× explained only inside the fold is a dropped
+    // 0.5× the operator never reads, which is exactly how this shipped.
+    expect(fellBack('ultraWide').headline).toMatch(/^0\.5× UNAVAILABLE — /);
+  });
+
+  it('⚑ …and the detail says WHICH camera is actually running', () => {
+    const d = fellBack('ultraWide').detail;
+    expect(d).toContain('1× WIDE CAMERA');
+    // The arm's own explanation is KEPT, not replaced — the operator still
+    // needs to know how to fix it. Asserted as a suffix rather than by
+    // keyword, so rewording the arm copy cannot make this vacuous.
+    expect(d.endsWith(fellBack('wide').detail)).toBe(true);
+  });
+
+  it('⚑ NEGATIVE CONTROL: a 1× request says nothing about lenses', () => {
+    // Without this the change passes for a notice that shouts about the
+    // ultra-wide on every fallback, including ones nobody asked a lens for.
+    const n = fellBack('wide');
+    expect(n.headline).not.toContain('0.5×');
+    expect(n.detail).not.toContain('1× WIDE CAMERA');
+  });
+
+  it('⚑ the default is silent, so every existing caller is byte-identical', () => {
+    // The parameter is trailing and optional. A caller that never passes it
+    // must render exactly what it rendered before.
+    expect(panoPlusArmNotice('imu', OK_PLAN, calib(), false, false))
+      .toEqual(fellBack('wide'));
+  });
+
+  it('⚑ a lens cannot be dropped by an arm that RAN — the AR request is untouched', () => {
+    // `poseSource: 'ar'` is not a fallback, it is a choice, and it returns
+    // the empty notice. The lens parameter must not resurrect a banner there.
+    const n = panoPlusArmNotice('ar', OK_PLAN, calib(), false, false, 'ultraWide');
+    expect(n.headline).toBe('');
+    expect(n.fallbackToAr).toBe(false);
+  });
+});
