@@ -1728,16 +1728,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // ── THE SWEEP'S RESULT SCREEN ───────────────────────────────────
   //
   // ⚠ THE SURFACE DOES NOT SHOW ITS OWN RESULT, AND THAT IS ITS CONTRACT.
-  // `onComplete` fires and the HOST is expected to unmount the surface and
-  // put the viewer up — `PanoPlusResultView` is a separate component for
-  // exactly that reason. This delegation forwarded the result to `onCapture`
-  // and left the surface mounted, so a finished sweep went straight back to
-  // a live viewfinder with nothing to look at. An operator reported it as
-  // "after sweep capture, image is not shown in preview".
+  // `onComplete` fires and the HOST puts the review up. That much is
+  // unchanged, and it is why a finished sweep once went straight back to a
+  // live viewfinder ("after sweep capture, image is not shown in preview").
   //
-  // The other engines review in `<CapturePreview>`; the sweep reviews here,
-  // because the thing to review is a pack (canvas + strips + poses), not a
-  // single JPEG. Both arrive at the host the same way, on `onCapture`.
+  // ⚠ WHAT CHANGED: the review is no longer a SWEEP-ONLY screen. This file
+  // used to argue that the sweep should review in its own surface "because
+  // the thing to review is a pack, not a single JPEG" — and the operator's
+  // verdict on that was "the preview modal is not the same as the one for
+  // photo and pano; why the fuck would you diverge?". They were right: a
+  // pack is reviewed by looking at its canvas, which is an image, and the
+  // parts that genuinely needed a pack view were evidence that belongs in
+  // the pack. The sweep now defers into `cropPending` and is reviewed by
+  // the same `<RectCropPreview>` a panorama uses.
   // ⚠ `sweepReview` IS GONE. The sweep used to review in its own screen,
   // which is what made its result UI diverge from photo and pano. It now
   // defers into `cropPending` like a panorama and is reviewed by the same
