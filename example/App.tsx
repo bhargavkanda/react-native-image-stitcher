@@ -696,6 +696,31 @@ function App(): React.JSX.Element {
           // the key because they are mount-time native props.
           key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-ab${antiBlurOn ? 1 : 0}`}
           engine={engine}
+          // ⚠ THE ONLY ROUTE THAT DELIVERS 0.5× ON iOS TODAY.
+          //
+          // ARKit publishes no ultra-wide format at all (0 of 22 on
+          // iPhone17,1), so 0.5× needs the DECOUPLED arm — and that arm
+          // needs a calibration. It has two halves and only one of them is
+          // reachable from this package:
+          //
+          //   BASIS  — the device→camera rotation. Measured ONCE per phone
+          //            by the first-run acquisition overlay, which IS in
+          //            this package and comes up automatically.
+          //   τ      — the rolling-shutter constant, keyed
+          //            `model | lens | W×H | fps`. Needs the gear's IMU cal
+          //            stage 1, which lives in the private shell, not here.
+          //            It was also MEASURED and deliberately not persisted:
+          //            8 of 12 runs scattered 5.03 ms, wider than the
+          //            3.08 ms it was meant to buy back.
+          //
+          // So τ=0 is not a degradation from a known-good τ — it is the
+          // state of the art on this arm, and `tauUncorrected` is the branch
+          // that runs it on a real basis. Without this the arm declines,
+          // falls back to ARKit, and 0.5× silently does nothing.
+          //
+          // The pack records `tauProvenance: uncorrected` and never claims a
+          // τ it does not have.
+          sweep={{ tauUncorrected: true }}
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode

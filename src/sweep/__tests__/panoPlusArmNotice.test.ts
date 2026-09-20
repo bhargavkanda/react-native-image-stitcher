@@ -418,3 +418,49 @@ describe('panoPlusArmNotice — a fallback names the lens it dropped', () => {
     expect(n.fallbackToAr).toBe(false);
   });
 });
+
+// ── THE ONE PATH THAT ACTUALLY DELIVERS 0.5× ON iOS ────────────────────────
+//
+// ARKit publishes no ultra-wide format, so 0.5× needs the DECOUPLED arm, and
+// the decoupled arm needs a calibration. τ cannot be measured through this
+// package at all — the copy points at "the gear: 🧭 IMU cal stage 1", and that
+// UI lives in the private shell, not here. The BASIS can be: the first-run
+// acquisition overlay is in this package and measures it once per phone.
+//
+// Branch 3 is therefore the only reachable route to a working 0.5× on iOS
+// today, and it is reachable: `tauUncorrected` is NOT omitted from
+// `SweepOptions`, so a host can pass it. These pin that chain end to end so a
+// future edit cannot quietly close the only door that is open.
+describe('panoPlusArmNotice — the τ=0 route to a working 0.5×', () => {
+  const withBasis = () => calib({ basisIndex: 3, basisLabel: 'C#3' });
+
+  it('⚑ basis + tauUncorrected RUNS the decoupled arm at 0.5×', () => {
+    const n = panoPlusArmNotice('imu', OK_PLAN, withBasis(), true, false, 'ultraWide');
+    expect(n.effectivePoseSource).toBe('imu');
+    expect(n.fallbackToAr).toBe(false);
+    expect(n.canStart).toBe(true);
+  });
+
+  it('⚑ …so the lens is NOT reported as dropped on that route', () => {
+    // The 0.5× decoration keys on `fallbackToAr`. A route that really opens
+    // the ultra-wide must not tell the operator his lens was dropped.
+    const n = panoPlusArmNotice('imu', OK_PLAN, withBasis(), true, false, 'ultraWide');
+    expect(n.headline).not.toContain('0.5× UNAVAILABLE');
+  });
+
+  it('⚑ NEGATIVE CONTROL: tauUncorrected WITHOUT a basis still falls back', () => {
+    // τ=0 drops the TIMING correction, not the device→camera basis: without
+    // C the whole canvas is rotated by one of 24 signed permutations.
+    const n = panoPlusArmNotice('imu', OK_PLAN, calib(), true, false, 'ultraWide');
+    expect(n.effectivePoseSource).toBe('ar');
+    expect(n.fallbackToAr).toBe(true);
+    expect(n.headline).toContain('0.5× UNAVAILABLE');
+  });
+
+  it('⚑ NEGATIVE CONTROL: a basis WITHOUT tauUncorrected still falls back', () => {
+    // Which is the operator's shipped state, and why 0.5× does nothing today.
+    const n = panoPlusArmNotice('imu', OK_PLAN, withBasis(), false, false, 'ultraWide');
+    expect(n.effectivePoseSource).toBe('ar');
+    expect(n.fallbackToAr).toBe(true);
+  });
+});
