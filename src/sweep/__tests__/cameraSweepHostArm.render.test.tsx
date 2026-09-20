@@ -33,11 +33,6 @@ import { VisionCameraProxy } from 'react-native-vision-camera';
 // needs from the viewer is that it EXISTS and takes `onDismiss`, because the
 // subject is `<Camera>`'s decision to unmount the preview behind it, not the
 // viewer's own rendering (which `panoPlusResultView.render.test.tsx` owns).
-jest.mock('../PanoPlusResultView', () => ({
-  PanoPlusResultView: (props: { onDismiss: () => void }) =>
-    require('react').createElement('PanoPlusResultViewStub', props),
-}));
-
 import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
@@ -350,15 +345,20 @@ describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element
         summary: coercePanoPlusSummary({}),
       });
     });
-    // The viewer REPLACES the surface (it owns a camera, and leaving it
-    // mounted behind a review holds the device while the operator reads),
-    // so the surface's props are unreadable until dismissal.
+    // The surface unmounts behind the review (it owns a camera, and
+    // leaving it mounted while the operator reads holds the device), so
+    // its props are unreadable until the review closes.
     expect(cameraViews(tree)).toHaveLength(0);
 
+    // ⚠ THE SHARED REVIEW NOW, NOT A SWEEP-ONLY VIEWER. The sweep defers
+    // into `cropPending` exactly as a panorama does, so it is reviewed by
+    // the same `<RectCropPreview>` and Retake is possible for the first
+    // time. This case pins the CAMERA property across that cycle, which is
+    // unchanged; only the component that closes it moved.
     const viewer = tree.root.findAll(
-      (n) => typeof n.props?.onDismiss === 'function', { deep: true },
+      (n) => typeof n.props?.onRetake === 'function', { deep: true },
     )[0];
-    act(() => { (viewer.props.onDismiss as () => void)(); });
+    act(() => { (viewer.props.onRetake as () => void)(); });
     expect(cameraViews(tree)).toHaveLength(1);
 
     // ⚠ THE PRECONDITION THAT MAKES THIS CASE DISTINGUISHING, asserted on
@@ -505,6 +505,82 @@ describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
     expect(p.lens).toBe('wide');
     expect(p.vcPluginArm).toBe(false);      // the bag bought no ownership
     expect(p.frameSource).toBe('own');
+    act(() => { tree.unmount(); });
+  });
+});
+
+/**
+ * ── ONE RESULT CHANNEL ──────────────────────────────────────────────────
+ *
+ * The sweep used to fire `onCapture` FIRST and then show its own screen —
+ * so Retake was structurally impossible (the host already had the result)
+ * and five public `<Camera>` props did nothing on this engine. It now
+ * defers into `cropPending` exactly as a panorama does.
+ */
+describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
+  const RESULT = {
+    type: 'panoplus' as const,
+    uri: 'file:///x.jpg',
+    width: 4000,
+    height: 1200,
+    sessionDir: '/tmp/pp_1',
+    arms: { rectify: true, gainMatch: true },
+    summary: coercePanoPlusSummary({}),
+    capturedAt: '2026-09-19T00:00:00.000Z',
+  };
+  const review = (tree: ReactTestRenderer) => tree.root.findAll(
+    (n) => typeof n.props?.onRetake === 'function', { deep: true },
+  );
+
+  it('⚑ DEFERS the capture — onCapture does NOT fire before the review', async () => {
+    // The inversion that made Retake impossible.
+    const seen: unknown[] = [];
+    const tree = await render({ onCapture: (r: unknown) => { seen.push(r); } });
+    const onComplete = surfaceProps(tree).onComplete as (r: unknown) => void;
+    act(() => { onComplete(RESULT); });
+    expect(seen).toHaveLength(0);          // nothing emitted yet
+    expect(review(tree)).toHaveLength(1);  // …and the review is up
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ Confirm emits it, exactly once, with the panoplus discriminant', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = await render({
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    act(() => { (review(tree)[0].props.onUseOriginal as (u?: string) => void)(); });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].type).toBe('panoplus');
+    expect(seen[0].ok).toBe(true);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ Retake DISCARDS it — the capture never reaches the host', async () => {
+    // Impossible before: the host had the result the moment the sweep ended.
+    const seen: unknown[] = [];
+    const tree = await render({ onCapture: (r: unknown) => { seen.push(r); } });
+    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    act(() => { (review(tree)[0].props.onRetake as () => void)(); });
+    expect(seen).toHaveLength(0);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ a sweep is NEVER offered the crop editor', async () => {
+    // `cropQuad` rewrites the file in place, and the pack in `sessionDir`
+    // references that file — cropping desyncs the two.
+    const tree = await render({ rectCrop: true });
+    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    expect(review(tree)[0].props.showCropControls).toBe(false);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and the review appears even with rectCrop and showPreview both off', async () => {
+    // A sweep always had a review; deferring must not silently remove it
+    // for a host that opted out of pano's.
+    const tree = await render({ rectCrop: false, showPreview: false });
+    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    expect(review(tree)).toHaveLength(1);
     act(() => { tree.unmount(); });
   });
 });

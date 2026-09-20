@@ -90,8 +90,13 @@ import type {
   PanoPlusFailure,
   SweepSurfaceHandle,
 } from '../sweep/panoPlusTypes';
-import { PanoPlusResultView } from '../sweep/PanoPlusResultView';
 import { SWEEP_ENGINE_DEFAULTS } from '../sweep/sweepDefaults';
+import { loadVideoFileSystem } from '../sweep/fileSystem';
+import {
+  PANO_PLUS_VERDICT_FILE,
+  fileUri,
+  panoPlusVerdictSidecar,
+} from '../sweep/panoPlusModel';
 
 /**
  * Everything `engine="sweep"` accepts, which is everything the sweep surface
@@ -1733,9 +1738,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // The other engines review in `<CapturePreview>`; the sweep reviews here,
   // because the thing to review is a pack (canvas + strips + poses), not a
   // single JPEG. Both arrive at the host the same way, on `onCapture`.
-  const [sweepReview, setSweepReview] = useState<PanoPlusCaptureResult | null>(
-    null,
-  );
+  // ⚠ `sweepReview` IS GONE. The sweep used to review in its own screen,
+  // which is what made its result UI diverge from photo and pano. It now
+  // defers into `cropPending` like a panorama and is reviewed by the same
+  // `<RectCropPreview>`, so there is one review and one result channel.
 
   // ── THE SWEEP → VISION-CAMERA HANDOFF ───────────────────────────
   //
@@ -1835,7 +1841,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     uri: string;
     width: number;
     height: number;
-    captureResultObj: PanoramaCaptureResult;
+    /**
+     * ⚠ WIDENED FROM `PanoramaCaptureResult` so the SWEEP can use this same
+     * review. `onCapture` already carries the sweep as a third member
+     * (`type: 'panoplus'`), so no new result channel was needed — only this
+     * type and the emit order. `buildStitchDebugInfo` takes a structural,
+     * all-optional shape, so the `__DEV__` debug line still compiles and
+     * simply prints fewer fields for a sweep.
+     */
+    captureResultObj: Extract<CameraCaptureResult, { ok: true }>;
     /**
      * Item 2 — max-inscribed-rect seed for the crop quad (image-pixel
      * coords).  Undefined → RectCropPreview falls back to its 8 %-inset
@@ -3383,6 +3397,178 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     ) : null
   );
 
+  /**
+   * Write the sweep's verdict sidecar next to its pack.
+   *
+   * ⚠ THIS USED TO BE A MOUNT EFFECT ON `PanoPlusResultView`. That screen no
+   * longer mounts, and the evidence it wrote is not optional — deleting the
+   * screen without moving this would have silently stopped writing
+   * `host_verdict.json` for every sweep. Called before the review is
+   * stashed, so it happens even if the operator retakes.
+   */
+  const writeSweepVerdictSidecar = (result: PanoPlusCaptureResult): void => {
+    if (result.sessionDir === '') return;
+    const fs = loadVideoFileSystem();
+    if (fs == null) return;
+    const uri = `${fileUri(result.sessionDir).replace(/\/$/, '')}`
+      + `/${PANO_PLUS_VERDICT_FILE}`;
+    void fs
+      .writeAsStringAsync(uri, panoPlusVerdictSidecar(result))
+      .catch((e: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn('[pano+] verdict sidecar not written —', e);
+      });
+  };
+
+  /**
+   * The post-capture review surfaces, rendered by EVERY engine.
+   *
+   * ⚠ THESE USED TO LIVE ONLY IN THE KEYFRAME TREE, after the
+   * `engine === 'sweep'` early return — so on a sweep neither was in the
+   * tree and five public props did nothing at all: `capturePreview`,
+   * `capturePreviewActions`, `onCapturePreviewClose`, `rectCrop` and
+   * `showPreview`. The sweep showed its own screen instead, with one
+   * hairline "Close" and no host actions, and the operator reported the
+   * divergence.
+   *
+   * One helper, called from both trees, so they cannot drift again.
+   */
+  const renderReviewSurfaces = (): React.JSX.Element => (
+    <>
+    {/* v0.13.0 — built-in post-stitch / tap-to-preview modal.
+        Visible when the host supplies `capturePreview`.  When
+        undefined the modal stays hidden (visible=false) so it
+        doesn't intercept touches.  Host is expected to clear
+        `capturePreview` via `onCapturePreviewClose` on dismiss. */}
+    <CapturePreview
+      visible={capturePreview != null}
+      imageUri={capturePreview?.imageUri ?? ''}
+      imageWidth={capturePreview?.imageWidth}
+      imageHeight={capturePreview?.imageHeight}
+      title={capturePreview?.title}
+      actions={capturePreviewActions}
+      onClose={onCapturePreviewClose ?? noop}
+    />
+
+    {/* Post-capture review surface, shown after a panorama finalizes when
+        `rectCrop` OR `showPreview` is on (handleHoldEnd stashed the pending
+        result instead of emitting it).  `showCropControls={rectCrop}`:
+          - crop mode (rectCrop) → draggable quad seeded on the max-inscribed
+            rectangle; any capture warnings banner on top.
+              - Use original → emit the original, un-cropped panorama.
+              - Crop         → cropQuad (perspective-rectify when the quad
+                isn't axis-aligned) overwrites the file in place; emit with
+                the rectified dims + a cache-busting query so <Image> reloads
+                it.  On any crop failure, fall back to the original.
+          - preview-only mode (showPreview, no rectCrop) → bare image with
+            [Retake]/[Confirm]; Confirm routes through onUseOriginal. */}
+    <RectCropPreview
+      // Remount per capture so the dragged-quad + layout state re-seed to
+      // the new image (RectCropPreview seeds its quad once via useState).
+      key={cropPending?.uri ?? 'crop'}
+      visible={cropPending != null}
+      imageUri={cropPending?.uri ?? ''}
+      imageWidth={cropPending?.width ?? 0}
+      imageHeight={cropPending?.height ?? 0}
+      initialRect={cropPending?.initialRect}
+      warnings={cropPending?.warnings.map((w) => w.message) ?? []}
+      // ⚠ NEVER CROP A SWEEP. `cropQuad` rewrites the file IN PLACE
+      // (see onUseOriginal below), and a pano+ canvas is referenced
+      // by the pack in its `sessionDir` — cropping it desyncs the
+      // two, and every offline harness then reads a pack whose
+      // image is not the image that was measured. A sweep gets
+      // preview-only: the bare image with [Retake] / [Confirm],
+      // which is exactly what pano shows when `rectCrop` is off.
+      showCropControls={
+        rectCrop && cropPending?.captureResultObj.type !== 'panoplus'
+      }
+      topInset={insets.top}
+      bottomInset={insets.bottom}
+      copy={guidanceCopyResolved}
+      // Carry the live memory pill onto the preview too (same settings.debug
+      // gate as the camera), so the operator can watch the RSS spike when the
+      // on-demand high-level re-stitch fires.
+      showMemoryPill={settings.debug}
+      // DEV overlay — show the stitcher's runtime choices (pipeline / warper /
+      // route / seam / blend) + score / frames / size for this output, so the
+      // operator can see HOW it was built.  __DEV__ only.
+      debugInfo={
+        __DEV__ && cropPending
+          ? buildStitchDebugInfo(cropPending.captureResultObj)
+          : undefined
+      }
+      onUseOriginal={(altUri) => {
+        if (cropPending) {
+          // altUri set → the user picked the alt (manual) pipeline's output
+          // in the A/B toggle; emit THAT image (cache-bust for <Image>).
+          onCapture?.(
+            altUri
+              ? {
+                  ...cropPending.captureResultObj,
+                  uri: `${altUri}?t=${Date.now()}`,
+                }
+              : cropPending.captureResultObj,
+          );
+        }
+        setCropPending(null);
+      }}
+      onRetake={() => {
+        // Discard this capture entirely — no onCapture — and return to
+        // the live camera (statusPhase is already 'idle' post-finalize).
+        setCropPending(null);
+      }}
+      onConfirm={async ({ quad, perspective }) => {
+        if (!cropPending) return;
+        const pending = cropPending;
+        // perspective=true → rectify the dragged quad to an upright
+        // rectangle (cropToQuad).  perspective=false (the user dragged a
+        // ~rectangular quad) → crop to the quad's axis-aligned bounding box
+        // — a plain crop, no warp.
+        const xs = quad.map((p) => p.x);
+        const ys = quad.map((p) => p.y);
+        const cropPoints: Quad = perspective
+          ? quad
+          : [
+              { x: Math.min(...xs), y: Math.min(...ys) },
+              { x: Math.max(...xs), y: Math.min(...ys) },
+              { x: Math.max(...xs), y: Math.max(...ys) },
+              { x: Math.min(...xs), y: Math.max(...ys) },
+            ];
+        try {
+          // cropQuad takes a BARE path; the stashed uri is a file://
+          // URI.  Overwrites in place (pass the same path).
+          const cropped = await cropQuad(
+            toBareFilePath(pending.uri),
+            cropPoints,
+            undefined,
+            { quality: 90 },
+          );
+          onCapture?.({
+            ...pending.captureResultObj,
+            // Cache-bust so <Image> reloads the overwritten file.
+            uri: `${toFileUri(cropped.outputPath)}?t=${Date.now()}`,
+            width: cropped.width,
+            height: cropped.height,
+          });
+        } catch (err) {
+          onError?.(
+            new CameraError(
+              'OUTPUT_WRITE_FAILED',
+              err instanceof Error ? err.message : String(err),
+              err,
+            ),
+          );
+          // Fall back to the un-cropped panorama so the capture isn't
+          // lost on a crop failure.
+          onCapture?.(pending.captureResultObj);
+        } finally {
+          setCropPending(null);
+        }
+      }}
+    />
+    </>
+  );
+
   const renderHostPreview = (
     /** vision-camera lifecycle callbacks, owned by the calling cell. */
     lifecycle?: NonNullable<CameraViewProps['cameraProps']>,
@@ -3583,7 +3769,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // mount, by `hostPreviewLive` and by the clearing effect below.
   //
   // It was `mountHostPreview` in all three places while the element's real
-  // condition carried `&& sweepReview == null` — so the ONE unmount that
+  // condition carried `&& the review is closed` — so the ONE unmount that
   // happens on the dominant repeat path (sweep → review → dismiss → sweep)
   // was invisible to the effect. `onPreviewStopped`/`onStopped` do not fire
   // for an unmount either, so the flag stayed true, and the remounted
@@ -3591,7 +3777,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // as LIVE. Transparent root, explainer suppressed, black underneath: the
   // defect this rung is named after, on every capture after the first.
   const hostPreviewMounted =
-    engine === 'sweep' && mountHostPreview && sweepReview == null;
+    engine === 'sweep' && mountHostPreview && cropPending == null;
   // ⚠ NO DEPENDENCY ARRAY, DELIBERATELY — which normally reads as a
   // mistake, so: the edge-triggered form missed the case where the flag is
   // set WHILE `hostPreviewMounted` is already false (the keyframe tree's
@@ -3679,15 +3865,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               `${e?.code ?? 'unknown'}: ${e?.message ?? String(err)}`,
             );
           })}
-          {sweepReview != null ? (
-            // The viewer REPLACES the surface rather than covering it: the
-            // surface owns a camera, and leaving it mounted behind a review
-            // screen holds the device for as long as the operator reads.
-            <PanoPlusResultView
-              result={sweepReview}
-              onDismiss={() => { setSweepReview(null); }}
-            />
-          ) : (
+          {cropPending == null && (
+          // ⚠ THE SURFACE UNMOUNTS BEHIND THE REVIEW, and must keep doing
+          // so. It owns a camera; leaving it mounted behind the review
+          // holds ARKit/Camera2 for as long as the operator reads.
+          // `RectCropPreview` is a `<Modal>`, i.e. an overlay rather than a
+          // replacement, so this gate is what releases the device — keyed
+          // on `cropPending` now that the review is the shared one.
           <PanoPlusCaptureSurface
             ref={sweepRef}
             // ── THE CONTROLS ARE `<Camera>`'S, NOT A SECOND SET ──────────
@@ -3812,12 +3996,40 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               sweep?.onSweepingChange?.(sweeping);
             }}
             onComplete={(result: PanoPlusCaptureResult) => {
-              // BOTH, and in this order. The host hears about every capture
-              // on `onCapture` exactly as it does for a photo or a panorama;
-              // the viewer is what the OPERATOR gets, and a host that wants
-              // to skip it can unmount us from its own handler.
-              onCapture?.({ ...result, ok: true });
-              setSweepReview(result);
+              // ⚠ THE REVIEW IS A GATE, NOT A VIEWER — the panorama's shape,
+              // and the reason this changed.
+              //
+              // It used to fire `onCapture` FIRST and then mount a
+              // sweep-only screen, which made Retake structurally
+              // impossible (the host already had the result) and gave the
+              // operator a different review from photo and pano: a bare
+              // absolute `<View>` with one hairline "Close", no host
+              // actions, while `capturePreview`, `capturePreviewActions`,
+              // `onCapturePreviewClose`, `rectCrop` and `showPreview` were
+              // all silently inert on this engine.
+              //
+              // Now it stashes, exactly as `handleHoldEnd` does for a
+              // panorama, and `onCapture` fires from the review's Confirm —
+              // so Retake discards the capture and one result UI serves
+              // every engine.
+              const captureResultObj = { ...result, ok: true as const };
+              // The verdict sidecar used to be written by the review screen's
+              // mount effect. That screen no longer mounts, so the write
+              // moves here — before the stash, so it happens even if the
+              // operator retakes.
+              writeSweepVerdictSidecar(result);
+              if (result.width > 0 && result.height > 0) {
+                setCropPending({
+                  uri: result.uri,
+                  width: result.width,
+                  height: result.height,
+                  captureResultObj,
+                  warnings: [],
+                });
+              } else {
+                // No image to review — emit rather than strand the capture.
+                onCapture?.(captureResultObj);
+              }
             }}
             onFailure={(failure: PanoPlusFailure) => {
               onError?.(
@@ -3848,7 +4060,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               Rendered AFTER the surface so they sit above its HUD, and
               `pointerEvents="box-none"` so the surface's own shutter and
               gestures still receive touches through the container. */}
-          {sweepReview == null && (
+          {cropPending == null && (
             <>
               <View
                 style={[styles.pillStack, { top: pillStackTop }]}
@@ -3861,6 +4073,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               </View>
             </>
           )}
+
+          {/* ── THE SAME REVIEW SURFACES THE OTHER ENGINES USE ─────────
+              Rendered from one helper so the sweep cell and the main tree
+              cannot drift — which is exactly how they drifted before:
+              both of these lived only after the early return, so on a
+              sweep neither existed and five public props did nothing. */}
+          {renderReviewSurfaces()}
         </View>
       </HostJsLandscapeContext.Provider>
     );
@@ -4251,128 +4470,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         }}
       />
 
-      {/* v0.13.0 — built-in post-stitch / tap-to-preview modal.
-          Visible when the host supplies `capturePreview`.  When
-          undefined the modal stays hidden (visible=false) so it
-          doesn't intercept touches.  Host is expected to clear
-          `capturePreview` via `onCapturePreviewClose` on dismiss. */}
-      <CapturePreview
-        visible={capturePreview != null}
-        imageUri={capturePreview?.imageUri ?? ''}
-        imageWidth={capturePreview?.imageWidth}
-        imageHeight={capturePreview?.imageHeight}
-        title={capturePreview?.title}
-        actions={capturePreviewActions}
-        onClose={onCapturePreviewClose ?? noop}
-      />
-
-      {/* Post-capture review surface, shown after a panorama finalizes when
-          `rectCrop` OR `showPreview` is on (handleHoldEnd stashed the pending
-          result instead of emitting it).  `showCropControls={rectCrop}`:
-            - crop mode (rectCrop) → draggable quad seeded on the max-inscribed
-              rectangle; any capture warnings banner on top.
-                - Use original → emit the original, un-cropped panorama.
-                - Crop         → cropQuad (perspective-rectify when the quad
-                  isn't axis-aligned) overwrites the file in place; emit with
-                  the rectified dims + a cache-busting query so <Image> reloads
-                  it.  On any crop failure, fall back to the original.
-            - preview-only mode (showPreview, no rectCrop) → bare image with
-              [Retake]/[Confirm]; Confirm routes through onUseOriginal. */}
-      <RectCropPreview
-        // Remount per capture so the dragged-quad + layout state re-seed to
-        // the new image (RectCropPreview seeds its quad once via useState).
-        key={cropPending?.uri ?? 'crop'}
-        visible={cropPending != null}
-        imageUri={cropPending?.uri ?? ''}
-        imageWidth={cropPending?.width ?? 0}
-        imageHeight={cropPending?.height ?? 0}
-        initialRect={cropPending?.initialRect}
-        warnings={cropPending?.warnings.map((w) => w.message) ?? []}
-        showCropControls={rectCrop}
-        topInset={insets.top}
-        bottomInset={insets.bottom}
-        copy={guidanceCopyResolved}
-        // Carry the live memory pill onto the preview too (same settings.debug
-        // gate as the camera), so the operator can watch the RSS spike when the
-        // on-demand high-level re-stitch fires.
-        showMemoryPill={settings.debug}
-        // DEV overlay — show the stitcher's runtime choices (pipeline / warper /
-        // route / seam / blend) + score / frames / size for this output, so the
-        // operator can see HOW it was built.  __DEV__ only.
-        debugInfo={
-          __DEV__ && cropPending
-            ? buildStitchDebugInfo(cropPending.captureResultObj)
-            : undefined
-        }
-        onUseOriginal={(altUri) => {
-          if (cropPending) {
-            // altUri set → the user picked the alt (manual) pipeline's output
-            // in the A/B toggle; emit THAT image (cache-bust for <Image>).
-            onCapture?.(
-              altUri
-                ? {
-                    ...cropPending.captureResultObj,
-                    uri: `${altUri}?t=${Date.now()}`,
-                  }
-                : cropPending.captureResultObj,
-            );
-          }
-          setCropPending(null);
-        }}
-        onRetake={() => {
-          // Discard this capture entirely — no onCapture — and return to
-          // the live camera (statusPhase is already 'idle' post-finalize).
-          setCropPending(null);
-        }}
-        onConfirm={async ({ quad, perspective }) => {
-          if (!cropPending) return;
-          const pending = cropPending;
-          // perspective=true → rectify the dragged quad to an upright
-          // rectangle (cropToQuad).  perspective=false (the user dragged a
-          // ~rectangular quad) → crop to the quad's axis-aligned bounding box
-          // — a plain crop, no warp.
-          const xs = quad.map((p) => p.x);
-          const ys = quad.map((p) => p.y);
-          const cropPoints: Quad = perspective
-            ? quad
-            : [
-                { x: Math.min(...xs), y: Math.min(...ys) },
-                { x: Math.max(...xs), y: Math.min(...ys) },
-                { x: Math.max(...xs), y: Math.max(...ys) },
-                { x: Math.min(...xs), y: Math.max(...ys) },
-              ];
-          try {
-            // cropQuad takes a BARE path; the stashed uri is a file://
-            // URI.  Overwrites in place (pass the same path).
-            const cropped = await cropQuad(
-              toBareFilePath(pending.uri),
-              cropPoints,
-              undefined,
-              { quality: 90 },
-            );
-            onCapture?.({
-              ...pending.captureResultObj,
-              // Cache-bust so <Image> reloads the overwritten file.
-              uri: `${toFileUri(cropped.outputPath)}?t=${Date.now()}`,
-              width: cropped.width,
-              height: cropped.height,
-            });
-          } catch (err) {
-            onError?.(
-              new CameraError(
-                'OUTPUT_WRITE_FAILED',
-                err instanceof Error ? err.message : String(err),
-                err,
-              ),
-            );
-            // Fall back to the un-cropped panorama so the capture isn't
-            // lost on a crop failure.
-            onCapture?.(pending.captureResultObj);
-          } finally {
-            setCropPending(null);
-          }
-        }}
-      />
+      {renderReviewSurfaces()}
     </View>
     </HostJsLandscapeContext.Provider>
   );
