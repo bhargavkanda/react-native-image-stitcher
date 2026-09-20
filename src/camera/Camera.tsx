@@ -3261,14 +3261,34 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   );
 
   // ── Lens / AR-toggle handlers ───────────────────────────────────
+  /**
+   * A SWEEP IS IN FLIGHT — both pills are inert while it is.
+   *
+   * ⚠ THE SURFACE'S OWN HANDLERS HAD THIS GUARD AND IT DID NOT TRAVEL WITH
+   * THE PILLS. `onLensPill` and `onArToggle` both open
+   * `if (phaseRef.current !== 'idle') return;` under the note "Both taps are
+   * inert off-idle: the arm is latched for the sweep and the lens cannot
+   * change under one." `<Camera>`'s replacements were a bare `setLens` and a
+   * bare `setArPreference`.
+   *
+   * The reachable case is ordinary: the operator is mid-hold, panning with
+   * one hand, and his other thumb lands on the top-right pill. The arm is
+   * latched for the running sweep (`runningArm`), so the capture is not
+   * corrupted — but the chrome repaints to a state the sweep is not in, and
+   * a lens write mid-sweep is a request the recorder cannot honour.
+   */
+  const [sweepRunning, setSweepRunning] = useState(false);
+
   const handleLensChange = useCallback((next: CameraLens) => {
+    if (sweepRunning) return;
     setLens(next);
     onLensChange?.(next);
-  }, [onLensChange]);
+  }, [onLensChange, sweepRunning]);
 
   const handleARToggle = useCallback(() => {
+    if (sweepRunning) return;
     setArPreference((prev) => !prev);
-  }, []);
+  }, [sweepRunning]);
 
   // ── v0.13.0 — Flash control ─────────────────────────────────────
   //
@@ -3619,14 +3639,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         if (cropPending) {
           // altUri set → the user picked the alt (manual) pipeline's output
           // in the A/B toggle; emit THAT image (cache-bust for <Image>).
-          onCapture?.(
+          onCapture?.(emitUri(
             altUri
               ? {
                   ...cropPending.captureResultObj,
                   uri: `${altUri}?t=${Date.now()}`,
                 }
               : cropPending.captureResultObj,
-          );
+          ));
         }
         setCropPending(null);
       }}
@@ -4121,6 +4141,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               // last — see `sweepOwnershipLatch`. Set from the LIVE value,
               // not the latched one, or a latch could never be replaced.
               setSweepOwnershipLatch(sweeping ? hostOwnsSweepCameraLive : null);
+              // A SEPARATE boolean from the latch, deliberately: the latch
+              // answers "who owns the camera", which is `false` on the AR
+              // arm and null when idle — two different falsy meanings. The
+              // pills need the PHASE.
+              setSweepRunning(sweeping);
               sweepDriver.setActive(sweeping);
               sweep?.onSweepingChange?.(sweeping);
             }}
@@ -4147,7 +4172,18 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               // moves here — before the stash, so it happens even if the
               // operator retakes.
               writeSweepVerdictSidecar(result);
-              if (result.width > 0 && result.height > 0) {
+              // ⚠ THE SAME GATE THE KEYFRAME ENGINE USES (:3000), and it was
+              // the dims ALONE here. `engine` selects which engine the hold
+              // runs and changes nothing else — but a host using the
+              // DOCUMENTED defaults (`rectCrop` false, `showPreview` false,
+              // whose JSDoc says "with both off, `onCapture` fires
+              // immediately with no UI") got a full-screen review it never
+              // asked for the moment it flipped `engine`, and its
+              // auto-advance flow stalled behind a modal with no host-visible
+              // way to dismiss it. Both props were observably inert on the
+              // sweep's result path.
+              if ((rectCrop || showPreview)
+                  && result.width > 0 && result.height > 0) {
                 setCropPending({
                   // ⚠ SCHEMED HERE, NOT UPSTREAM. `panoPlusResultOf` returns
                   // `summary.canvasPath` VERBATIM — a bare native path
@@ -4172,7 +4208,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                 });
               } else {
                 // No image to review — emit rather than strand the capture.
-                onCapture?.(captureResultObj);
+                onCapture?.(emitUri(captureResultObj));
               }
             }}
             onFailure={(failure: PanoPlusFailure) => {
@@ -5041,6 +5077,33 @@ export function sweepEffectiveLens(
 ): CameraLens {
   if (arm == null || arm.resolving) return lens;
   return arm.poseSource === 'ar' ? '1x' : lens;
+}
+
+/**
+ * ONE `uri` CONVENTION AT THE EMIT BOUNDARY.
+ *
+ * ⚠ `<Camera>` HANDS THREE EMIT SITES TO ONE `onCapture`, AND THEY DISAGREED.
+ * A photo and a panorama emit a SCHEMED `file:///…`; a sweep emitted the bare
+ * `/data/user/0/…/canvas.jpg` that `panoPlusResultOf` returns verbatim. Same
+ * callback, two conventions — and a host cannot branch on the engine, because
+ * the whole point of `engine` is that it does not change anything else.
+ *
+ * The difference is not cosmetic: every `fs`-style API a host reaches for
+ * (`cv::imwrite`, `NSFileManager`, `BitmapFactory.decodeFile`) treats
+ * `file:///x.jpg` as a literal filename, and every RN `<Image>` needs the
+ * scheme. One of the two always breaks, silently, depending on which engine
+ * ran.
+ *
+ * Applied HERE and not in `panoPlusResultOf`, deliberately: the pack's own
+ * `canvasPath` and the `sessionDir` that references it must stay bare, and
+ * `PanoPlusCaptureResult` is a documented public shape. This schemes only
+ * what crosses `onCapture`. `toFileUri` is idempotent, so a site that already
+ * schemed is unchanged.
+ */
+function emitUri<T>(result: T): T {
+  const r = result as { uri?: unknown };
+  if (typeof r.uri !== 'string' || r.uri === '') return result;
+  return { ...result, uri: toFileUri(r.uri) };
 }
 
 /** Twin of `sweepMergedPoseSource` for the lens. */

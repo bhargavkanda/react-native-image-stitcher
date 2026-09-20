@@ -444,6 +444,36 @@ describe('<Camera engine="sweep">', () => {
   // avoid. Recorded here so the next reader knows it is a gap and not an
   // oversight.
 
+  it('⚑ both pills are INERT mid-sweep, as the surface\'s own were', async () => {
+    // The surface's handlers opened `if (phaseRef.current !== 'idle') return;`
+    // under "Both taps are inert off-idle: the arm is latched for the sweep
+    // and the lens cannot change under one." `<Camera>`'s replacements were a
+    // bare `setLens` and a bare `setArPreference`. Reachable the ordinary
+    // way: mid-hold, panning with one hand, the other thumb on the pill.
+    const tree = render({ engine: 'sweep' });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const sweeping = surfaceProps(tree).onSweepingChange as (b: boolean) => void;
+    const lensBefore = tree.root.findByType(LensChip).props.lens;
+    const arBefore = tree.root.findByType(ARToggle).props.arEnabled;
+
+    await act(async () => { sweeping(true); });
+    await act(async () => {
+      (tree.root.findByType(LensChip).props.onChange as (l: string) => void)('0.5x');
+      (tree.root.findByType(ARToggle).props.onToggle as () => void)();
+    });
+    expect(tree.root.findByType(LensChip).props.lens).toBe(lensBefore);
+    expect(tree.root.findByType(ARToggle).props.arEnabled).toBe(arBefore);
+
+    // NEGATIVE CONTROL — they work again once the hold ends, or the "fix"
+    // could be a pill that never does anything.
+    await act(async () => { sweeping(false); });
+    await act(async () => {
+      (tree.root.findByType(ARToggle).props.onToggle as () => void)();
+    });
+    expect(tree.root.findByType(ARToggle).props.arEnabled).toBe(!arBefore);
+    act(() => { tree.unmount(); });
+  });
+
   it('⚑ the chip paints the lens the ARM WILL OPEN, not the request', async () => {
     // FIELD DEFECT, 2026-09-19: "0.5x lens does not go to that camera — shows
     // the same view as 1x." Every layer below the chip was right. On iOS the

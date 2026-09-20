@@ -351,7 +351,11 @@ describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element
     //
     // The ownership round-trip case above cannot see this: ownership DOES
     // move there, so both the right and the wrong keying clear the flag.
-    const tree = await render();
+    //
+    // `showPreview` is explicit because the subject is the REVIEW CYCLE, and
+    // a sweep only opens a review when the host asked for one — the same
+    // `(rectCrop || showPreview)` gate the keyframe engine uses.
+    const tree = await render({ showPreview: true });
     act(() => {
       (cameraViews(tree)[0].props.cameraProps as {
         onPreviewStarted?: () => void;
@@ -585,7 +589,9 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
   it('⚑ DEFERS the capture — onCapture does NOT fire before the review', async () => {
     // The inversion that made Retake impossible.
     const seen: unknown[] = [];
-    const tree = await render({ onCapture: (r: unknown) => { seen.push(r); } });
+    const tree = await render({
+      showPreview: true, onCapture: (r: unknown) => { seen.push(r); },
+    });
     const onComplete = surfaceProps(tree).onComplete as (r: unknown) => void;
     act(() => { onComplete(RESULT); });
     expect(seen).toHaveLength(0);          // nothing emitted yet
@@ -605,6 +611,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
   it('⚑ Confirm emits it, exactly once, with the panoplus discriminant', async () => {
     const seen: Array<Record<string, unknown>> = [];
     const tree = await render({
+      showPreview: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
@@ -623,7 +630,9 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
   it('⚑ Retake DISCARDS it — the capture never reaches the host', async () => {
     // Impossible before: the host had the result the moment the sweep ended.
     const seen: unknown[] = [];
-    const tree = await render({ onCapture: (r: unknown) => { seen.push(r); } });
+    const tree = await render({
+      showPreview: true, onCapture: (r: unknown) => { seen.push(r); },
+    });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
     act(() => { (review(tree)[0].props.onRetake as () => void)(); });
     expect(seen).toHaveLength(0);
@@ -644,7 +653,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
 
   it('⚑ every sweep writes host_verdict.json into its own session dir', async () => {
     written.length = 0;
-    const tree = await render({});
+    const tree = await render({ showPreview: true });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
     await act(async () => { await Promise.resolve(); });
     const verdict = written.filter((w) => w.uri.endsWith('/host_verdict.json'));
@@ -661,7 +670,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // discarded sweep still leaves its evidence on disk. That is the whole
     // reason the call sits where it does.
     written.length = 0;
-    const tree = await render({});
+    const tree = await render({ showPreview: true });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
     await act(async () => { await Promise.resolve(); });
     act(() => { (review(tree)[0].props.onRetake as () => void)(); });
@@ -696,12 +705,47 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ …and the review appears even with rectCrop and showPreview both off', async () => {
-    // A sweep always had a review; deferring must not silently remove it
-    // for a host that opted out of pano's.
-    const tree = await render({ rectCrop: false, showPreview: false });
+  it('⚑ with rectCrop and showPreview both off there is NO review — as documented', async () => {
+    // ⚠ THIS CASE ASSERTED THE OPPOSITE, and the opposite was wrong.
+    //
+    // It read "a sweep always had a review; deferring must not silently
+    // remove it" — which describes the OLD screen, not the contract. Both
+    // props are public and documented: "with both off, `onCapture` fires
+    // immediately with no UI". On the keyframe engine the defer is gated
+    // `(rectCrop || showPreview) && …`; on the sweep it was gated on the
+    // dimensions ALONE, so a host on the documented defaults that flipped
+    // `engine` and nothing else got a full-screen review it never asked
+    // for, and its auto-advance flow stalled behind a modal it could not
+    // dismiss. `engine` changes what the hold RUNS and nothing else.
+    const seen: unknown[] = [];
+    const tree = await render({
+      rectCrop: false, showPreview: false,
+      onCapture: (r: unknown) => { seen.push(r); },
+    });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
-    expect(review(tree)).toHaveLength(1);
+    expect(review(tree)).toHaveLength(0);
+    expect(seen).toHaveLength(1);          // …and it emitted immediately
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ and the emitted uri is SCHEMED, like every other engine\'s', async () => {
+    // Three emit sites, one `onCapture`, and they disagreed: a photo and a
+    // panorama emit `file:///…`, a sweep emitted the bare native path that
+    // `panoPlusResultOf` returns verbatim. A host cannot branch on the
+    // engine, and every `fs`-style API treats `file:///x.jpg` as a literal
+    // filename while every `<Image>` needs the scheme — so one of the two
+    // always broke, depending on which engine ran.
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = await render({
+      rectCrop: false, showPreview: false,
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].uri).toBe(`file://${CANVAS}`);
+    // …and the PACK's own path is untouched, which is why the scheming
+    // happens at the emit boundary and not in `panoPlusResultOf`.
+    expect(RESULT.uri).toBe(CANVAS);
     act(() => { tree.unmount(); });
   });
 });
