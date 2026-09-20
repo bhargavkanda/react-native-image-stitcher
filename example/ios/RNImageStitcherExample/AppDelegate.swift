@@ -6,10 +6,19 @@ import RNImageStitcher  // v0.19.0 — RNISARPluginRegistry (AR plugin framework
 
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
+  /// Mirrored from the scene's window. RN's own `RCTKeyWindow()` is
+  /// scene-aware, but `RCTLogBoxView` still reaches for the app delegate's
+  /// `window` directly, and third-party code may too.
   var window: UIWindow?
 
   var reactNativeDelegate: ReactNativeDelegate?
   var reactNativeFactory: RCTReactNativeFactory?
+
+  /// Kept for `SceneDelegate`, which is what starts React Native under the
+  /// scene lifecycle. Only the APP delegate is handed these, so they have to
+  /// cross that gap — RN reads them for, among other things, the notification
+  /// that launched the app.
+  var launchOptions: [UIApplication.LaunchOptionsKey: Any]?
 
   func application(
     _ application: UIApplication,
@@ -21,6 +30,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     reactNativeDelegate = delegate
     reactNativeFactory = factory
+    self.launchOptions = launchOptions
 
     // v0.19.0 — register the sample native AR plugin to exercise the
     // `RNISARFramePlugin` framework end-to-end.  Its per-frame mean-luma
@@ -30,15 +40,78 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     // own plugin (e.g. OCR) the same way.
     RNISARPluginRegistry.shared.register(FrameBrightnessPlugin())
 
-    window = UIWindow(frame: UIScreen.main.bounds)
+    // ⚠ NO WINDOW AND NO `startReactNative` HERE — both live in
+    // `SceneDelegate` now.
+    //
+    // Building a window in `didFinishLaunchingWithOptions` is the pre-scene
+    // shape, and as of iOS 27 UIKit evaluates scene-lifecycle adoption when
+    // the first scene is created and TRAPS the process when it finds none:
+    // `__UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption`,
+    // EXC_BREAKPOINT/SIGTRAP, before a single line of JS runs. It presents as
+    // an instant white flash and quit, with nothing in the app's own log —
+    // the crash report is the only place it is visible
+    // (`devicectl device copy from --domain-type systemCrashLogs`).
+    //
+    // The factory and its delegate stay here: they are built once per
+    // PROCESS, not once per scene, so a second scene reuses them.
+    return true
+  }
+
+  // MARK: - Scene lifecycle
+
+  /// The one scene configuration this app offers.
+  ///
+  /// Declared in CODE rather than as `UISceneConfigurations` in Info.plist so
+  /// the delegate is a compile-checked type instead of a
+  /// `"$(PRODUCT_MODULE_NAME).SceneDelegate"` string that silently stops
+  /// matching if the module is renamed. Info.plist still needs
+  /// `UIApplicationSceneManifest` — that DECLARES adoption, this IMPLEMENTS
+  /// it, and ⚠ both are required: adding the manifest alone leaves the trap
+  /// in place (verified on device, the crash was byte-identical).
+  func application(
+    _ application: UIApplication,
+    configurationForConnecting connectingSceneSession: UISceneSession,
+    options: UIScene.ConnectionOptions
+  ) -> UISceneConfiguration {
+    let config = UISceneConfiguration(
+      name: "Default Configuration",
+      sessionRole: connectingSceneSession.role
+    )
+    config.delegateClass = SceneDelegate.self
+    return config
+  }
+}
+
+/// Starts React Native when the window scene connects.
+class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+  var window: UIWindow?
+
+  func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    guard
+      let windowScene = scene as? UIWindowScene,
+      let appDelegate = UIApplication.shared.delegate as? AppDelegate,
+      let factory = appDelegate.reactNativeFactory
+    else {
+      return
+    }
+
+    // `UIWindow(windowScene:)` — NOT `UIWindow(frame: UIScreen.main.bounds)`.
+    // A window built from the screen's bounds belongs to no scene, which is
+    // the same non-adoption UIKit traps on, and it takes the wrong size in
+    // any resized or multi-window context.
+    let window = UIWindow(windowScene: windowScene)
+    self.window = window
+    appDelegate.window = window
 
     factory.startReactNative(
       withModuleName: "RNImageStitcherExample",
       in: window,
-      launchOptions: launchOptions
+      launchOptions: appDelegate.launchOptions
     )
-
-    return true
   }
 }
 
