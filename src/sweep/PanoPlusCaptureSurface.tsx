@@ -2967,8 +2967,21 @@ export const PanoPlusCaptureSurface = forwardRef<
       finalize: () => undefined,
       holdStart,
       holdEnd,
+      // ⚠ DISCARD, NOT FINALIZE. `holdEnd` ships whatever has been painted;
+      // a guard rail that fires mid-sweep has decided the capture is not
+      // worth keeping, so it must be able to drop it. This is the path
+      // Pano's `incremental.cancel()` occupies on the keyframe engine.
+      abandon: (reason: string) => {
+        if (phaseRef.current === 'idle') return;
+        void cancelPanoPlus().catch(() => undefined);
+        setPhase('idle');
+        onFailure?.({
+          code: 'panoplus-abandoned',
+          message: `sweep abandoned: ${reason}`,
+        } as PanoPlusFailure);
+      },
     }),
-    [holdStart, holdEnd],
+    [holdStart, holdEnd, onFailure],
   );
   /** `busy` is `'finishing'` ONLY. Reporting `'sweeping'` would have
    *  `CameraShutter` paint its grey processing ring over the red one and

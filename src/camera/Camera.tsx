@@ -1822,6 +1822,24 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   );
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
   const [statusPhase, setStatusPhase] = useState<CaptureStatusPhase>('idle');
+  /**
+   * A SWEEP IS IN FLIGHT — both pills are inert while it is.
+   *
+   * ⚠ THE SURFACE'S OWN HANDLERS HAD THIS GUARD AND IT DID NOT TRAVEL WITH
+   * THE PILLS. `onLensPill` and `onArToggle` both open
+   * `if (phaseRef.current !== 'idle') return;` under the note "Both taps are
+   * inert off-idle: the arm is latched for the sweep and the lens cannot
+   * change under one." `<Camera>`'s replacements were a bare `setLens` and a
+   * bare `setArPreference`.
+   *
+   * The reachable case is ordinary: the operator is mid-hold, panning with
+   * one hand, and his other thumb lands on the top-right pill. The arm is
+   * latched for the running sweep (`runningArm`), so the capture is not
+   * corrupted — but the chrome repaints to a state the sweep is not in, and
+   * a lens write mid-sweep is a request the recorder cannot honour.
+   */
+  const [sweepRunning, setSweepRunning] = useState(false);
+
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(
     null,
   );
@@ -2315,7 +2333,32 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // The modal is informational only — by the time it renders, the
   // capture is already stopped.  No Continue/Resume affordance per
   // the engine spec.
-  const drift = useOrientationDrift(statusPhase === 'recording');
+  /**
+   * A CAPTURE IS IN FLIGHT ON **EITHER** ENGINE.
+   *
+   * ⚠ `statusPhase` NEVER REACHES 'recording' ON A SWEEP, and that single
+   * fact switched off Pano's whole guard-rail suite. `startPanorama` routes
+   * to `sweepRef.current?.holdStart?.()` and RETURNS before
+   * `handleHoldStartRef` (:2144) — correctly, because the keyframe hold must
+   * not run against a surface that is not mounted — so every guard gated on
+   * `statusPhase === 'recording'` is dead on the sweep: the orientation-drift
+   * detector, the REC banner, the wall-clock countdown, the auto-finalize and
+   * `onCaptureAbandoned`.
+   *
+   * Those are not individually missing features. They are one early return.
+   *
+   * ⚠ AND THIS IS DELIBERATELY *NOT* `setStatusPhase('recording')` ON A
+   * SWEEP. Ten sites read that value and they are two different kinds:
+   * GUARD RAILS, which belong on both engines, and KEYFRAME MACHINERY —
+   * `incremental.start()`'s re-entry guard (:2830), the keyframe-count
+   * auto-finalize (:3222), the k/n counter — which would then run against an
+   * engine that has no keyframes. Widening the phase would start the
+   * keyframe engine's internals during a sweep. So the phase stays honest
+   * and the GUARDS get their own predicate.
+   */
+  const captureRecording = statusPhase === 'recording' || sweepRunning;
+
+  const drift = useOrientationDrift(captureRecording);
   const [driftModalDismissed, setDriftModalDismissed] = useState(false);
   // Reset the modal flags when a new capture STARTS (statusPhase →
   // 'recording'), NOT when one stops.  v0.16 fix: the old "any non-recording
@@ -2326,15 +2369,25 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // stop until the user dismisses them, while still giving the next capture
   // a clean slate.
   useEffect(() => {
-    if (statusPhase === 'recording') {
+    if (captureRecording) {
       setDriftModalDismissed(false);
       setLateralStopVisible(false);
       setLateralWrongDirection(false);
     }
-  }, [statusPhase]);
+  }, [captureRecording]);
 
   useEffect(() => {
-    if (!drift.drifted || statusPhase !== 'recording') return;
+    if (!drift.drifted || !captureRecording) return;
+    // ⚠ THE SWEEP ABANDONS THROUGH ITS OWN HANDLE. `incremental.cancel()`
+    // below is the KEYFRAME engine's; calling it for a sweep would cancel an
+    // engine that was never started and leave the sweep running. The sweep's
+    // `abandon` discards the in-flight capture and reports it — the same
+    // shape as this path, through the other engine.
+    if (sweepRunning) {
+      sweepRef.current?.abandon?.('orientation-drift');
+      onCaptureAbandoned?.('orientation-drift');
+      return;
+    }
     // Auto-abandon the in-flight capture.  Order matches handleHoldEnd's
     // "stitch" path but skips finalize:
     //   1. Stop pumping frames so no new keyframes arrive mid-cancel.
@@ -3261,23 +3314,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   );
 
   // ── Lens / AR-toggle handlers ───────────────────────────────────
-  /**
-   * A SWEEP IS IN FLIGHT — both pills are inert while it is.
-   *
-   * ⚠ THE SURFACE'S OWN HANDLERS HAD THIS GUARD AND IT DID NOT TRAVEL WITH
-   * THE PILLS. `onLensPill` and `onArToggle` both open
-   * `if (phaseRef.current !== 'idle') return;` under the note "Both taps are
-   * inert off-idle: the arm is latched for the sweep and the lens cannot
-   * change under one." `<Camera>`'s replacements were a bare `setLens` and a
-   * bare `setArPreference`.
-   *
-   * The reachable case is ordinary: the operator is mid-hold, panning with
-   * one hand, and his other thumb lands on the top-right pill. The arm is
-   * latched for the running sweep (`runningArm`), so the capture is not
-   * corrupted — but the chrome repaints to a state the sweep is not in, and
-   * a lens write mid-sweep is a request the recorder cannot honour.
-   */
-  const [sweepRunning, setSweepRunning] = useState(false);
 
   const handleLensChange = useCallback((next: CameraLens) => {
     if (sweepRunning) return;

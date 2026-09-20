@@ -1868,6 +1868,20 @@ export interface SweepSurfaceHandle {
    */
   holdStart?: () => void;
   holdEnd?: () => void;
+  /**
+   * DISCARD an in-flight sweep without finalizing it.
+   *
+   * ⚠ NOT `holdEnd`. Release always FINALIZES — that is Pano's shutter
+   * vocabulary and the surface is built on it — so a guard rail that fires
+   * mid-sweep (the phone was rotated, the operator drifted sideways) has no
+   * way to stop the capture without also shipping the damaged panorama it
+   * just decided was not worth keeping.
+   *
+   * Pano abandons on exactly these conditions (`useOrientationDrift` →
+   * `incremental.cancel()` → `onCaptureAbandoned`), and the sweep could not,
+   * so those guards were unreachable here whatever else was wired.
+   */
+  abandon?: (reason: string) => void;
 }
 
 /** How that shutter should LOOK, reported up as the sweep changes state. */

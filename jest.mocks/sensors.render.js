@@ -23,8 +23,31 @@ const never = {
   pipe: () => never,
 };
 
+/**
+ * THE ACCELEROMETER IS DRIVABLE, because two guard rails hang off it.
+ *
+ * `useDeviceOrientation` subscribes here, and `useOrientationDrift` is built
+ * on that — the mid-capture rotation guard. A `never` stream means no test
+ * can make the phone turn, so the guard is unfalsifiable by construction,
+ * which is how it came to be silently dead on the sweep engine.
+ *
+ * `__emitAccelerometer({x, y, z})` pushes one sample to every live
+ * subscriber. `__resetAccelerometer()` drops them between cases.
+ */
+const accelSubs = new Set();
+const accelerometer = {
+  subscribe: (fn) => {
+    const cb = typeof fn === 'function' ? fn : (fn && fn.next);
+    if (cb) accelSubs.add(cb);
+    return { unsubscribe: () => { if (cb) accelSubs.delete(cb); } };
+  },
+  pipe: () => accelerometer,
+};
+
 module.exports = {
-  accelerometer: never,
+  accelerometer,
+  __emitAccelerometer: (s) => { accelSubs.forEach((f) => f(s)); },
+  __resetAccelerometer: () => { accelSubs.clear(); },
   gyroscope: never,
   magnetometer: never,
   barometer: never,

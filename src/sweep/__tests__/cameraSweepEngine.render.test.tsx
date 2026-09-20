@@ -26,6 +26,11 @@ import React from 'react';
 import { StyleSheet } from 'react-native';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const sensorsMock = require('react-native-sensors') as {
+  __emitAccelerometer: (s: { x: number; y: number; z: number }) => void;
+  __resetAccelerometer: () => void;
+};
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const safeAreaMock = require('react-native-safe-area-context') as {
   __setInsets: (
     v: { top: number; left: number; right: number; bottom: number } | null,
@@ -519,6 +524,66 @@ describe('<Camera engine="sweep">', () => {
     });
     expect(tree.root.findByType(ARToggle).props.arEnabled).toBe(!before);
     act(() => { tree.unmount(); });
+  });
+
+  it('⚑ GUARD RAIL: rotating the device mid-sweep ABANDONS the capture', async () => {
+    // ⚠ THIS WAS DEAD ON THE SWEEP, AND NOT BECAUSE ANYONE DISABLED IT.
+    // `startPanorama` returns before `handleHoldStartRef` on a sweep
+    // (Camera.tsx:2144), so `statusPhase` never reaches 'recording' — and
+    // `useOrientationDrift(statusPhase === 'recording')` was therefore never
+    // armed. The same one line switched off the REC banner, the wall-clock
+    // countdown, the auto-finalize and `onCaptureAbandoned`.
+    //
+    // The guards now read `captureRecording`, which is true on EITHER
+    // engine, while the keyframe MACHINERY keeps reading `statusPhase` —
+    // widening the phase itself would start `incremental`'s internals during
+    // a sweep.
+    const abandoned: string[] = [];
+    const tree = render({
+      engine: 'sweep',
+      onCaptureAbandoned: (r: string) => { abandoned.push(r); },
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    // Portrait first, so the drift detector has a reference to drift FROM.
+    await act(async () => { sensorsMock.__emitAccelerometer({ x: 0, y: 9.8, z: 0 }); });
+    await act(async () => {
+      (surfaceProps(tree).onSweepingChange as (b: boolean) => void)(true);
+    });
+    expect(abandoned).toHaveLength(0);
+
+    // …now turn the phone on its side, mid-sweep.
+    await act(async () => { sensorsMock.__emitAccelerometer({ x: 9.8, y: 0, z: 0 }); });
+    await act(async () => { await Promise.resolve(); });
+    expect(abandoned).toEqual(['orientation-drift']);
+    // ⚠ WHAT THIS DOES NOT PROVE, stated rather than implied: that the
+    // SWEEP itself stopped. Removing the sweep branch from the abandon
+    // effect leaves this case green — the keyframe path still notifies the
+    // host — so `onCaptureAbandoned` alone cannot tell an abandoned sweep
+    // from one silently still running. The surface's `abandon()` early-
+    // returns unless its OWN phase is non-idle, and this rig installs no
+    // native fakes, so the surface never leaves 'idle' here and the call is
+    // unobservable. It is covered by the arming half only.
+    act(() => { tree.unmount(); });
+    sensorsMock.__resetAccelerometer();
+  });
+
+  it('⚑ …and NOT while idle — a guard that fires off-capture is worse', async () => {
+    // Negative control: without it the case above passes for a detector
+    // wired to fire on any rotation at all, which would abandon captures
+    // that had not started.
+    const abandoned: string[] = [];
+    const tree = render({
+      engine: 'sweep',
+      onCaptureAbandoned: (r: string) => { abandoned.push(r); },
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { sensorsMock.__emitAccelerometer({ x: 0, y: 9.8, z: 0 }); });
+    await act(async () => { sensorsMock.__emitAccelerometer({ x: 9.8, y: 0, z: 0 }); });
+    await act(async () => { await Promise.resolve(); });
+    expect(abandoned).toHaveLength(0);
+    act(() => { tree.unmount(); });
+    sensorsMock.__resetAccelerometer();
   });
 
   it('⚑ the chip paints the lens the ARM WILL OPEN, not the request', async () => {
