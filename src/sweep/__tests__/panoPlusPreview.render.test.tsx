@@ -103,6 +103,8 @@ function installNative(): void {
 interface Rig {
   root: ReactTestRenderer['root'];
   has: (testID: string) => boolean;
+  /** Fire the surface root's `onLayout` with a measured box. */
+  layout: (width: number, height: number) => void;
   propsOf: (testID: string) => Record<string, unknown> | null;
   tap: (testID: string) => void;
   /** Pano's shutter held past the threshold — the sweep starts (2026-09-03). */
@@ -131,6 +133,18 @@ function mount(): Rig {
     renderer.root.findAllByProps({ testID })[0] ?? null;
   return {
     root: renderer.root,
+    layout: (width, height) => {
+      const root = renderer.root.findAll(
+        (n) => (n.type as unknown) === 'View'
+          && typeof n.props?.onLayout === 'function',
+        { deep: true },
+      )[0];
+      act(() => {
+        (root.props.onLayout as (e: unknown) => void)({
+          nativeEvent: { layout: { x: 0, y: 0, width, height } },
+        });
+      });
+    },
     has: (testID) => find(testID) != null,
     propsOf: (testID) =>
       (find(testID)?.props as Record<string, unknown> | undefined) ?? null,
@@ -316,6 +330,69 @@ describe('the memory budget crosses the bridge', () => {
     expect(startedWith?.previewMaxAlong).toBe(PANO_PLUS_ANDROID_PREVIEW_MAX_ALONG);
     expect(startedWith?.previewMaxCross).toBe(PANO_PLUS_ANDROID_PREVIEW_MAX_CROSS);
     expect(startedWith?.canvasMaxPixels).toBe(PANO_PLUS_ANDROID_CANVAS_MAX_PIXELS);
+    r.unmount();
+  });
+});
+
+// ── THE FRAMEBUFFER'S TURN FOLLOWS THE SCREEN, NOT THE MEASURED BOX ───────
+//
+// ⚠ ee38769 DECLARED THIS GAP UNREACHABLE AND IT IS NOT. That commit said
+// "jsLandscape only reaches pixels through the preview frame's image
+// rotation, and that frame mounts only once native publishes a preview,
+// which this harness cannot drive." THIS harness drives exactly that state
+// on every case above (`statusReply = sweepingStatus(); await poll()`), and
+// already asserts on `panoplus-preview-frame`. The reason given was wrong,
+// so the gap survived the commit that named it.
+describe('the upright bake reads the SCREEN, not the surface box', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const rnMock = require('react-native') as {
+    __setWindowDimensions: (w: number, h: number) => void;
+  };
+
+  /** The rotation the preview's inner container is drawn at. */
+  function rotateDeg(r: ReturnType<typeof mount>): string {
+    const inner = r.propsOf('panoplus-preview-inner');
+    const t = (inner?.style as { transform?: Array<{ rotate?: string }> })
+      ?.transform;
+    const found = (t ?? []).find((x) => x.rotate != null);
+    if (found?.rotate == null) throw new Error('no rotate on the inner box');
+    return found.rotate;
+  }
+
+  it('⚑ a landscape-shaped BOX in a portrait window does not flip the bake', async () => {
+    // A host that gives this surface a wide short area inside a portrait
+    // window. `jsLandscape` is a question about whether the OS turned the
+    // FRAMEBUFFER; the box's shape is the host's business and must not
+    // answer it.
+    const r = mount();
+    await settle();
+    r.hold();
+    await settle();
+    statusReply = sweepingStatus();
+    await poll();
+    const upright = rotateDeg(r);
+
+    r.layout(700, 300);            // landscape-shaped box, portrait window
+    await poll();
+    expect(rotateDeg(r)).toBe(upright);
+    r.unmount();
+  });
+
+  it('⚑ NEGATIVE CONTROL: a landscape WINDOW does flip it', async () => {
+    // Without this the case above passes for a rotation welded to a
+    // constant, which would break every genuinely landscape host.
+    const r = mount();
+    await settle();
+    r.hold();
+    await settle();
+    statusReply = sweepingStatus();
+    await poll();
+    const portrait = rotateDeg(r);
+
+    rnMock.__setWindowDimensions(844, 390);
+    await poll();
+    expect(rotateDeg(r)).not.toBe(portrait);
+    rnMock.__setWindowDimensions(390, 844);
     r.unmount();
   });
 });
