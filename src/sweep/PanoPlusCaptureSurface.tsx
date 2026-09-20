@@ -105,6 +105,8 @@ import {
   PANO_PLUS_NOTICE_FILE,
   PANO_PLUS_SWEEP_NOTICE_FILE,
   PANO_PLUS_IDLE_HEARTBEAT_MS,
+  PANO_PLUS_IDLE_REOPEN_MS,
+  PANO_PLUS_IDLE_REOPEN_TRIES,
   PANO_PLUS_STATUS_POLL_FAST_MS,
   PANO_PLUS_STATUS_POLL_MS,
   PANO_PLUS_SWAP_GRACE_MS,
@@ -2006,6 +2008,47 @@ export const PanoPlusCaptureSurface = forwardRef<
    * binary that predates the key, so reading it elsewhere would report a dead
    * feed on a live AVCaptureSession.
    */
+  /**
+   * RE-ASK AFTER A REFUSED OPEN — the handoff, not a loop.
+   *
+   * ⚠ THE HEARTBEAT BELOW CANNOT DO THIS. It is Android-only and gated on
+   * `idleFeedLive`, so it recovers a feed that WAS live and went away; a feed
+   * that never came up is outside it entirely. Turning AR off asks for the
+   * AVF session the instant `arArmed` drops, ARKit has not finished releasing
+   * the camera, native refuses — and on iOS nothing asked again, so "No live
+   * camera feed — ARKit is running" stayed up until some unrelated dep moved.
+   *
+   * Bounded on purpose (see `PANO_PLUS_IDLE_REOPEN_TRIES`): a handoff is a
+   * transient, and an unbounded retry would fight another app that is
+   * deliberately holding the camera.
+   */
+  const [handoffBudget, setHandoffBudget] = useState(0);
+  const prevArArmedRef = useRef(arArmed);
+  useEffect(() => {
+    const fell = prevArArmedRef.current && !arArmed;
+    prevArArmedRef.current = arArmed;
+    // ⚠ ONLY THE FALLING EDGE GRANTS A RETRY BUDGET, and that is the whole
+    // difference between this and a retry loop. A refusal with no ARKit
+    // teardown behind it is another app holding the camera, and the policy
+    // next door is explicit that re-asking there "would fight the other app
+    // the operator deliberately opened". The budget is granted by OUR OWN
+    // teardown and by nothing else.
+    if (fell) setHandoffBudget(PANO_PLUS_IDLE_REOPEN_TRIES);
+  }, [arArmed]);
+  useEffect(() => {
+    if (idleFeedLive || !avfIdleWanted) {
+      if (handoffBudget !== 0) setHandoffBudget(0);
+      return undefined;
+    }
+    if (handoffBudget <= 0) return undefined;
+    const t = setTimeout(() => {
+      if (!mountedRef.current) return;
+      setHandoffBudget((n) => n - 1);
+      setIdleRearm((n) => n + 1);
+    }, PANO_PLUS_IDLE_REOPEN_MS);
+    return () => { clearTimeout(t); };
+  }, [avfIdleWanted, idleFeedLive, handoffBudget]);
+
   useEffect(() => {
     if (armContract !== 'android-sensor') return undefined;
     // `idleFeedLive` is native's own `on: true`, which it only answers with a

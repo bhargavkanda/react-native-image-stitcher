@@ -120,6 +120,33 @@ export const PANO_PLUS_STATUS_POLL_FAST_MS = 125;
  */
 export const PANO_PLUS_IDLE_HEARTBEAT_MS = 1000;
 
+/**
+ * How long to keep re-asking for the idle viewfinder after a REFUSED open.
+ *
+ * ⚠ THIS EXISTS BECAUSE TURNING AR OFF LEFT THE SCREEN DEAD. The AVF idle
+ * session is asked for the moment `arArmed` goes false — but `<ARCameraView>`
+ * unmounting does not release ARKit's camera synchronously, so the first open
+ * is refused while the old session is still going down, and native's reason
+ * ("ARKit is running") is what the operator reads.
+ *
+ * Nothing then re-asked. The heartbeat next door is `armContract ===
+ * 'android-sensor'` only AND requires `idleFeedLive`, so it recovers a feed
+ * that WAS live and went away — it cannot recover one that never came up. On
+ * iOS there was no re-ask at all, so the notice stayed on screen until some
+ * other dep happened to change. Reported on the device, 2026-09-20:
+ * *"switching off AR gives — no live camera, ARKit running message for a long
+ * time."*
+ *
+ * ⚠ BOUNDED, DELIBERATELY. The idle effect's own note rules out a re-ask on a
+ * loop: "a re-open on a loop would reopen a camera the operator's other app is
+ * deliberately using." A handoff is a transient, so a handful of attempts over
+ * ~2 s covers it — this file measures the release itself at ~479 ms — and then
+ * it stops and the refusal stands with native's reason.
+ */
+export const PANO_PLUS_IDLE_REOPEN_MS = 400;
+/** Attempts after a refusal before the refusal is accepted. See above. */
+export const PANO_PLUS_IDLE_REOPEN_TRIES = 5;
+
 // ── Coercion helpers (bridge values are `unknown`, always) ──────────────────
 
 function num(v: unknown, fallback = 0): number {
