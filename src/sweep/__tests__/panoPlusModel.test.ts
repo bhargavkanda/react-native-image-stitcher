@@ -1810,6 +1810,60 @@ describe('the live preview geometry', () => {
       .toBe(panoPlusPreviewLayout(tall, screen, 'landscape-left').placement);
   });
 
+  // ── THE STRIP MUST NOT WALK WHILE IT GROWS ──────────────────────────────
+  //
+  // Field report, iPhone, 2026-09-19: "Once I start the sweep, everything
+  // drifts downward!"
+  //
+  // The ALONG axis was pinned in 2026-09-03 with the note "a centred image in
+  // a fixed strip would still drift as it grew" — correct, and applied to one
+  // axis. The CROSS axis is the one that actually shrinks: the along extent
+  // saturates at `inner`'s long side early, and after that a `contain` fit can
+  // only hold the aspect by THINNING the cross extent. Centred, that moves
+  // every publish; and the rotation container turns pre-rotation `left` into a
+  // screen-VERTICAL offset, which is why it read as downward drift.
+  it('⚑ the cross anchor does not move across a whole growing sweep', () => {
+    // A horizontal sweep on a portrait host: axis 1, transposed on the way
+    // out, so the oriented aspect is cross ÷ along and falls as it grows.
+    const at = (alongPx: number) => panoPlusPreviewLayout(
+      statusFixture({
+        axis: 1, axisLatched: true, sweepSign: 1,
+        paintedWidthPx: alongPx, canvasHeightPx: 1080,
+        previewW: 0, previewH: 0,
+      }),
+      screen,
+      'landscape-left',
+    );
+    const series = [1440, 3000, 6000, 9000, 14000, 20000].map(at);
+
+    // FIRST: the case is not vacuous — the strip really does thin, which is
+    // the whole reason a centred anchor moved. If a future change makes the
+    // cross extent constant this assertion fails and the test is retired
+    // deliberately rather than passing for a reason that stopped existing.
+    const cross = series.map((l) => l.content.width);
+    expect(cross[cross.length - 1]).toBeLessThan(cross[0] - 10);
+
+    // THEN: the anchor is nailed down anyway.
+    for (const l of series) expect(l.anchor.left).toBe(0);
+  });
+
+  it('⚑ …and the ALONG anchor still tracks the sweep sign', () => {
+    // The cross pin must not flatten the along pin it sits next to: a
+    // negative sweep mirrors the along axis, so the START edge is the other
+    // end and the growing edge must not be welded to the strip.
+    const at = (sign: 1 | -1) => panoPlusPreviewLayout(
+      statusFixture({
+        axis: 1, axisLatched: true, sweepSign: sign,
+        paintedWidthPx: 3000, canvasHeightPx: 1080,
+        previewW: 0, previewH: 0,
+      }),
+      screen,
+      'landscape-left',
+    );
+    expect(at(1).anchor.top).toBe(0);
+    expect(at(-1).anchor.top).toBeGreaterThan(0);
+  });
+
   it('is neutral before anything is painted, and never NaN', () => {
     expect(panoPlusPreviewAspect(null)).toBe(PANO_PLUS_DEFAULT_PREVIEW_ASPECT);
     const fresh = statusFixture({

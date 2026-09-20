@@ -2490,14 +2490,38 @@ export function panoPlusPreviewLayout(
     ? !usePanel
     : usePanel;
   const startAtAlongMax = status != null && status.axisLatched && status.sweepSign < 0;
+  //
+  // ── AND THE CROSS AXIS IS PINNED TOO, WHICH IT WAS NOT ───────────────────
+  //
+  // ⚠ THE NOTE ABOVE STATED THE RULE AND THEN APPLIED IT TO ONE AXIS. "A
+  // centred image in a fixed strip would still drift as it grew" is exactly
+  // right, and the cross axis is the one that actually shrinks: the ALONG
+  // extent saturates at `inner`'s long side early, and from then on a
+  // `contain` fit can only keep the aspect by THINNING the cross extent. A
+  // centred shrinking extent moves, every publish, for the rest of the sweep.
+  //
+  // Measured, iPhone 16 Pro band (`inner` 52 × 342), horizontal sweep:
+  //
+  //   along px │  1440  3000  6000  9000  14000
+  //   cross pt │  52.0  52.0  52.0  41.0   26.4
+  //   anchor   │   0.0   0.0   0.0   5.5   12.8   ← walks
+  //
+  // The rotation container turns pre-rotation `left` into a SCREEN-VERTICAL
+  // offset, so the operator sees the strip slide down the band for the whole
+  // second half of a long hold. Reported 2026-09-19: "Once I start the sweep,
+  // everything drifts downward!"
+  //
+  // Pinning costs nothing before the thinning starts — `content` fills the
+  // cross axis until then, so centred and pinned are the SAME number — and
+  // after it starts, the strip stays welded instead of sliding.
   const anchor = alongIsPixelY
     ? {
-        left: (inner.width - content.width) / 2,
+        left: 0,
         top: startAtAlongMax ? inner.height - content.height : 0,
       }
     : {
         left: startAtAlongMax ? inner.width - content.width : 0,
-        top: (inner.height - content.height) / 2,
+        top: 0,
       };
 
   return {
