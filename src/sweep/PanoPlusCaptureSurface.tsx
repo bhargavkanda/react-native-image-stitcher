@@ -749,6 +749,24 @@ export const PanoPlusCaptureSurface = forwardRef<
   // the surface is used in landscape, and a Dimensions.get() read taken at
   // mount would size the panel from the portrait screen it was mounted on.
   const window = useWindowDimensions();
+  /**
+   * The surface's OWN box, measured — not the window.
+   *
+   * ⚠ THESE DIFFER, AND THE DIFFERENCE HID THE LIVE PREVIEW. This surface
+   * is mounted INSIDE `<Camera>`, which a host commonly wraps in a
+   * `<SafeAreaView>`, so the box is shorter than the window (874 → 781 pt
+   * on the example app's iPhone). Placing the growing-canvas capsule
+   * against the WINDOW while living in the smaller box pushed it down by
+   * the difference, and its lower half landed under this surface's own
+   * shutter row. The operator reported it as "I do not see the preview
+   * with the expanding canvas as I take the capture" — it was on screen,
+   * behind the shutter.
+   *
+   * Falls back to the window until the first layout pass, which is the
+   * only frame where nothing is drawn against it yet.
+   */
+  const [surfaceBox, setSurfaceBox] = useState<{ width: number; height: number } | null>(null);
+  const box = surfaceBox ?? { width: window.width, height: window.height };
   // In LANDSCAPE the sensor housing is a bar down one SIDE — exactly where the
   // tall-panorama panel lives. The insets say which edge that is on this
   // device, so the layout never has to guess what `landscape-left` means.
@@ -2254,8 +2272,11 @@ export const PanoPlusCaptureSurface = forwardRef<
       // far, so nothing he has already seen changes.
       previewWindowCrossMult: panoPlusPreviewWindowMultiple(
         {
-          width: window.width,
-          height: window.height,
+          // The same measured box the layout below uses, so the knee that
+          // native sizes the preview against and the panel that displays
+          // it are derived from ONE usable area.
+          width: box.width,
+          height: box.height,
           insets: withHostChromeTop(safeAreaInsets, hostChromeTopPt),
           // The same reservation the layout is given below, so the knee and
           // the panel are derived from ONE usable box.
@@ -2601,8 +2622,8 @@ export const PanoPlusCaptureSurface = forwardRef<
     tauUncorrected,
     vcCameraId,
     vcPluginArm,
-    window.height,
-    window.width,
+    box.height,
+    box.width,
   ]);
 
   /** THE HUD'S OWN TEXT, LATCHED FOR THE PACK. `finish` is a `useCallback`
@@ -2881,8 +2902,9 @@ export const PanoPlusCaptureSurface = forwardRef<
   const previewLayout = panoPlusPreviewLayout(
     status,
     {
-      width: window.width,
-      height: window.height,
+      // ⚠ THE SURFACE'S BOX, NOT THE WINDOW — see `surfaceBox`.
+      width: box.width,
+      height: box.height,
       // `hostChromeTopPt` rides on the TOP inset because that is exactly what
       // it is to this surface: pixels at the top that belong to somebody else.
       // See the prop's own note for the overprint it ends.
@@ -3436,7 +3458,16 @@ export const PanoPlusCaptureSurface = forwardRef<
     //
     // The black stays on the OWN arm, where it is the backdrop behind this
     // surface's own viewfinder and there is nothing underneath to reveal.
-    <View style={[
+    <View
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        setSurfaceBox((prev) => (
+          prev != null && prev.width === width && prev.height === height
+            ? prev
+            : { width, height }
+        ));
+      }}
+      style={[
       styles.fill,
       // Transparent only when something is ACTUALLY drawing behind us. In
       // the handoff window the host says 'host' while mounting nothing, and

@@ -282,3 +282,51 @@ describe('start() fails closed rather than opening a camera the host holds', () 
     act(() => { tree.unmount(); });
   });
 });
+
+/**
+ * ── THE LIVE PREVIEW IS PLACED AGAINST THE SURFACE'S OWN BOX ────────────
+ *
+ * The growing-canvas capsule was laid out against `useWindowDimensions()`
+ * while this surface lives INSIDE `<Camera>` — which hosts commonly wrap in
+ * a `<SafeAreaView>`. The box is then shorter than the window, the capsule
+ * is pushed down by the difference, and its lower half lands under the
+ * surface's own shutter row. On screen, behind the chrome: the operator
+ * reported it as "I do not see the preview with the expanding canvas".
+ */
+describe('the live preview is laid out against the surface, not the window', () => {
+  /** Fire the root's onLayout with a box SHORTER than the window. */
+  function layout(tree: ReactTestRenderer, width: number, height: number): void {
+    const root = tree.root.findAll(
+      (n) => (n.type as unknown) === 'View'
+        && typeof n.props?.onLayout === 'function',
+      { deep: true },
+    )[0];
+    act(() => {
+      (root.props.onLayout as (e: unknown) => void)({
+        nativeEvent: { layout: { x: 0, y: 0, width, height } },
+      });
+    });
+  }
+
+  it('⚑ the root reports its measured box', () => {
+    // The seam itself: without an onLayout on the root there is nothing to
+    // measure against and the surface can only use the window.
+    const { tree } = mount({ frameSource: 'own' });
+    const withLayout = tree.root.findAll(
+      (n) => (n.type as unknown) === 'View'
+        && typeof n.props?.onLayout === 'function',
+      { deep: true },
+    );
+    expect(withLayout.length).toBeGreaterThan(0);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ measuring a shorter box does not throw and re-renders once', () => {
+    // The mock window is 390x844; a SafeAreaView host gives ~781.
+    const { tree } = mount({ frameSource: 'own' });
+    expect(() => layout(tree, 390, 781)).not.toThrow();
+    // Idempotent: the same box must not loop (the setter bails on equal).
+    expect(() => layout(tree, 390, 781)).not.toThrow();
+    act(() => { tree.unmount(); });
+  });
+});
