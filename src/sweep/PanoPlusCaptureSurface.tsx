@@ -628,6 +628,27 @@ export interface PanoPlusCaptureSurfaceProps {
     basisRoute: PanoPlusBasisRoute;
     /** The precondition read is in flight — nothing below is settled yet. */
     resolving: boolean;
+    /**
+     * THIS SURFACE HAS TAKEN THE SCREEN — the host must hide its own chrome.
+     *
+     * ⚠ THIS EXISTS BECAUSE A SUPPRESSION TERM DID NOT TRAVEL WITH THE PILLS.
+     * This surface removes BOTH of its own pills while the basis-acquisition
+     * overlay is up (`lensChipVisible`, `arPillVisible`), and the note beside
+     * that term spells out the hazard: "the suppression would summon the more
+     * damaging of the two controls." When `<Camera>` took the pills over it
+     * took the gate on `cropPending` and left this one behind — so its copies
+     * sat LIVE on top of the first-run calibration card, and one tap of the AR
+     * pill moved the arm to ARKit, which made `armWantsBasis` false and
+     * unmounted the overlay. The one-time measurement, cancelled by a control
+     * the surface had deliberately removed from that screen.
+     *
+     * Reported rather than re-derived: it is built here from six local facts
+     * (`armWantsBasis`, `armCanAcquireBasis`, `phase`, `calibRead`,
+     * `basisAcquired`, `needsGesture`), and a host reconstructing it from
+     * `basisRoute` alone would get a DIFFERENT boolean — which is how the
+     * first version of this class of fix goes wrong.
+     */
+    chromeSuppressed: boolean;
   }) => void;
 }
 
@@ -1569,12 +1590,16 @@ export const PanoPlusCaptureSurface = forwardRef<
       fallbackToAr: reportedArm.fallbackToAr,
       basisRoute: basisResolution.route,
       resolving: armResolving,
+      // The SAME boolean this surface gates its own two pills on, so the
+      // host's copies cannot disagree with them. See the prop's doc.
+      chromeSuppressed: basisGestureVisible,
     });
   }, [
     armResolving,
     reportedArm.poseSource,
     reportedArm.fallbackToAr,
     basisResolution.route,
+    basisGestureVisible,
     onEffectiveArmChange,
   ]);
   // A surface that goes away must not leave the shell believing a sweep is

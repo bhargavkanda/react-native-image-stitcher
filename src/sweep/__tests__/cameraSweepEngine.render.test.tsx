@@ -383,6 +383,67 @@ describe('<Camera engine="sweep">', () => {
     act(() => { docked.unmount(); });
   });
 
+  it('⚑ BLOCKER: the shared chrome hides while the surface owns the screen', async () => {
+    // FIRST RUN ON AN UNCALIBRATED PHONE. The surface puts up the
+    // basis-acquisition card and removes BOTH of its own pills — the note
+    // beside that term names the hazard: "the suppression would summon the
+    // more damaging of the two controls."
+    //
+    // That term did not travel when the pills moved to `<Camera>`. The
+    // copies here are rendered AFTER the surface, so they paint ON TOP of a
+    // full-screen overlay, and their ancestors are all `box-none` so they
+    // are live. One tap of the AR pill moved the arm to ARKit, which made
+    // `armWantsBasis` false and unmounted the card — the one-time basis
+    // measurement cancelled by a control that should not have been there.
+    const tree = render({ engine: 'sweep' });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const report = surfaceProps(tree).onEffectiveArmChange as (a: {
+      poseSource: 'ar' | 'imu'; fallbackToAr: boolean; basisRoute: string;
+      resolving: boolean; chromeSuppressed: boolean;
+    }) => void;
+    expect(typeof report).toBe('function');
+
+    // Before the overlay: the chrome is up, as it must be.
+    expect(tree.root.findAllByType(ARToggle)).toHaveLength(1);
+    expect(tree.root.findAllByType(LensChip)).toHaveLength(1);
+
+    await act(async () => {
+      report({ poseSource: 'imu', fallbackToAr: false,
+               basisRoute: 'gesture' as never, resolving: false,
+               chromeSuppressed: true });
+    });
+    expect(tree.root.findAllByType(ARToggle)).toHaveLength(0);
+    expect(tree.root.findAllByType(LensChip)).toHaveLength(0);
+
+    // …and it comes BACK when the surface releases the screen. Without this
+    // the fix could be "never draw the chrome on a sweep", which deletes the
+    // unification this whole rung is for.
+    await act(async () => {
+      report({ poseSource: 'imu', fallbackToAr: false,
+               basisRoute: 'stored' as never, resolving: false,
+               chromeSuppressed: false });
+    });
+    expect(tree.root.findAllByType(ARToggle)).toHaveLength(1);
+    expect(tree.root.findAllByType(LensChip)).toHaveLength(1);
+    act(() => { tree.unmount(); });
+  });
+
+  // ⚠ NOT TESTED, DELIBERATELY, AND THE GAP IS NAMED RATHER THAN HIDDEN.
+  //
+  // `sweepEffectiveArm` is now cleared when `engine` leaves 'sweep'
+  // (Camera.tsx), because the read is per-render but the STATE survived, so
+  // sweep → keyframe → tap 0.5× → sweep re-applied the previous sweep's arm
+  // and masked a lens the operator had legitimately chosen.
+  //
+  // The defect is a ONE-COMMIT transient and this rig cannot see it: on
+  // re-entry the surface's own effect re-reports the same declined arm
+  // before react-test-renderer flushes, so the stale value is replaced by an
+  // identical fresh one and the masked and unmasked trees are indistinguishable
+  // at every observable point. A case written anyway would pass whether the
+  // reset is there or not — which is the vacuous pass this file exists to
+  // avoid. Recorded here so the next reader knows it is a gap and not an
+  // oversight.
+
   it('⚑ the chip paints the lens the ARM WILL OPEN, not the request', async () => {
     // FIELD DEFECT, 2026-09-19: "0.5x lens does not go to that camera — shows
     // the same view as 1x." Every layer below the chip was right. On iOS the
@@ -414,10 +475,15 @@ describe('<Camera engine="sweep">', () => {
                basisRoute: 'none' as never, resolving: false });
     });
     expect(tree.root.findByType(LensChip).props.lens).toBe('1x');
-    // …and the AR pill comes back with it. A chip masked to `1×` while the
-    // pill stayed hidden (its gate is the lens being 1×) would strand the
-    // operator on a wide viewfinder reading `1×` with no way to see the arm.
-    expect(tree.root.findAllByType(ARToggle).length).toBe(1);
+    // ⚠ AND THE AR PILL STAYS HIDDEN, which is the opposite of what this
+    // case asserted when it was written. Opening the pill's gate on the
+    // MASKED lens builds a dead control: at raw 0.5× the arm cannot leave
+    // ARKit whatever `arPreference` says, because
+    // `deriveEffectiveCaptureSource` reads the RAW lens — so the pill would
+    // light up and move nothing, which is field defect #1 rebuilt. The chip
+    // names the GLASS and is masked; the pill names a SETTING and is gated
+    // on the raw lens, exactly as Pano gates it.
+    expect(tree.root.findAllByType(ARToggle)).toHaveLength(0);
     // ⚠ THE REQUEST IS UNTOUCHED. The mask is paint, not policy: if it fed
     // back into the request, 0.5× would never move the arm, the fallback
     // would never be evaluated, and this mask would have nothing to report.

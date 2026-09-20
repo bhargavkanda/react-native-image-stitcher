@@ -3413,10 +3413,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // would never be evaluated, and this mask would have nothing to report.
   // Request with the setting, paint with what came back.
   const [sweepEffectiveArm, setSweepEffectiveArm] =
-    useState<{ poseSource: 'ar' | 'imu'; resolving: boolean } | null>(null);
+    useState<{
+      poseSource: 'ar' | 'imu';
+      resolving: boolean;
+      fallbackToAr: boolean;
+      chromeSuppressed: boolean;
+    } | null>(null);
   const handleSweepEffectiveArm = useCallback((arm: {
     poseSource: 'ar' | 'imu';
     resolving: boolean;
+    fallbackToAr: boolean;
+    chromeSuppressed: boolean;
   }) => {
     // Bails on an equal answer: this is called from an effect in the child
     // whose deps include this callback, so an unconditional `setState` would
@@ -3425,10 +3432,26 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       prev != null
         && prev.poseSource === arm.poseSource
         && prev.resolving === arm.resolving
+        && prev.fallbackToAr === arm.fallbackToAr
+        && prev.chromeSuppressed === arm.chromeSuppressed
         ? prev
-        : { poseSource: arm.poseSource, resolving: arm.resolving }
+        : {
+            poseSource: arm.poseSource,
+            resolving: arm.resolving,
+            fallbackToAr: arm.fallbackToAr,
+            chromeSuppressed: arm.chromeSuppressed,
+          }
     ));
   }, []);
+  // ⚠ CLEARED WHEN THE SWEEP LEAVES, OR THE LAST SWEEP'S ARM PAINTS THE FIRST
+  // FRAME OF THE NEXT ONE. The read below is per-render
+  // (`engine === 'sweep' ? … : null`), which makes the mask inert on the
+  // keyframe engine — but the STATE survives, so sweep → keyframe → tap 0.5×
+  // → sweep re-applied a stale `'ar'` and masked a lens the operator had
+  // legitimately chosen, for the commit before the surface re-reported.
+  useEffect(() => {
+    if (engine !== 'sweep') setSweepEffectiveArm(null);
+  }, [engine]);
   // Derived, never stored per engine: a keyframe capture has no sweep arm, so
   // reading the state directly would let a stale answer from the last sweep
   // mask the chip after the engine flipped back.
@@ -3440,10 +3463,24 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   /** The AR pill, or null. The CONTAINER belongs to each tree — the
    *  keyframe tree stacks the flash pill under it, the sweep cell does not. */
   const renderSharedArPill = (): React.JSX.Element | null => (
-    // ⚠ `effectiveLens`, NOT `lens`, OR THE TWO CONTROLS CONTRADICT EACH
-    // OTHER. Pano's rule is that the pill hides at 0.5× — so a chip masked
-    // back to `1×` with the pill still hidden would leave the operator on a
-    // wide viewfinder, reading `1×`, with no way to see or change the arm.
+    // ⚠ THE RAW LENS BELOW, NOT `effectiveLens` — AND THE ROUND THAT USED
+    // `effectiveLens` HERE BUILT A DEAD CONTROL, which is the defect this
+    // whole rung exists to remove.
+    //
+    // `effectiveLens` is strictly weaker: it equals '1x' on every arm when
+    // the raw lens is '1x', so the ONLY state it newly admits is raw 0.5×
+    // with the arm declined to ARKit — the shipped state on an uncalibrated
+    // iPhone. There the pill RENDERS and pressing it moves nothing:
+    // `deriveEffectiveCaptureSource` answers 'non-ar' from the RAW lens
+    // whatever `arPreference` says, so the arm cannot leave ARKit while 0.5×
+    // is still being asked for. A pill that lights up and changes nothing is
+    // field defect #1, rebuilt one layer up.
+    //
+    // So Pano's rule is restored verbatim. The CHIP still paints
+    // `effectiveLens`, because a chip names the GLASS and must not claim a
+    // camera nothing opened; the PILL names a SETTING and must only be on
+    // screen where that setting can actually move. Different questions —
+    // which is the whole point of keeping the two rules apart.
     // ⚠ `hideBuiltInShutter` HIDES THE SHUTTER, NOT THE ARM CONTROL — and on
     // a sweep it is not even our shutter being hidden. The surface draws its
     // own, and pano+'s documented host config is exactly
@@ -3451,7 +3488,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // this term deleted the AR pill outright on the one host configuration
     // the sweep actually ships under — defect #1 rebuilt, one layer up.
     (!hideBuiltInShutter || engine === 'sweep')
-      && arAllowed && nonArAllowed && effectiveLens === '1x'
+      && arAllowed && nonArAllowed && lens === '1x'
       && isARSupportedOnDevice
       ? (
         <ARToggle
@@ -4166,8 +4203,26 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
 
               Rendered AFTER the surface so they sit above its HUD, and
               `pointerEvents="box-none"` so the surface's own shutter and
-              gestures still receive touches through the container. */}
-          {cropPending == null && (
+              gestures still receive touches through the container.
+
+              ⚠ AND THAT IS EXACTLY WHY `chromeSuppressed` IS IN THIS GATE.
+              "After the surface" means ON TOP OF IT, including on top of a
+              full-screen overlay the surface puts up. The surface removes
+              BOTH of its own pills while the first-run basis-acquisition
+              card is showing, and the note beside that term names the
+              hazard precisely: "the suppression would summon the more
+              damaging of the two controls."
+
+              That term did not travel when the pills moved here. Measured:
+              `<Camera engine="sweep" />` with default props on an
+              uncalibrated phone rendered the AR pill live on top of the
+              calibration card, and ONE tap moved the arm to ARKit, which
+              made `armWantsBasis` false and unmounted the overlay — the
+              one-time basis measurement cancelled by a control the surface
+              had deliberately taken off that screen. `hostChromeTopPt` was
+              the same class of miss, found one round earlier. */}
+          {cropPending == null
+            && !(sweepEffectiveArm?.chromeSuppressed ?? false) && (
             <>
               <View
                 // ⚠ CLEARS THE HOST'S OWN TOP CHROME TOO. The surface takes
