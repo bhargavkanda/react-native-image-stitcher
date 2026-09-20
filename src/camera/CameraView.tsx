@@ -150,6 +150,17 @@ export interface CameraViewProps {
   /** Pass-through to vision-camera for anything custom. */
   cameraProps?: Partial<CameraProps>;
   /**
+   * EVERY vision-camera error, including the transient lifecycle codes
+   * `onError` deliberately swallows (`system/camera-is-restricted`,
+   * `system/camera-has-been-disconnected`, `device/camera-already-in-use`).
+   *
+   * ⚠ THOSE THREE ARE EXACTLY THE ONES THAT LEAVE A DARK PREVIEW WITH NO
+   * EXPLANATION, so a caller that draws its own "why is this black" copy
+   * needs them even though a host crash reporter does not. Not a
+   * replacement for `onError`: both fire.
+   */
+  onAnyError?: (error: unknown) => void;
+  /**
    * Called when the user taps the preview.  Host apps may use this to
    * drive focus-on-tap, AE/AF lock, etc.  Not wired into vision-camera's
    * focus API by this component on purpose — host apps have different
@@ -210,6 +221,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     style,
     cameraProps,
     onError,
+    onAnyError,
   },
   ref,
 ): React.JSX.Element {
@@ -222,6 +234,13 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // is typed as a string; treat any non-string defensively as a
   // "forward it" so we don't accidentally swallow unknown errors.
   const handleVcError = (err: unknown): void => {
+    // ⚠ BEFORE THE FILTER, ALWAYS. The swallow list below exists so routine
+    // lock/app-switch churn does not reach the HOST as a crash — but a
+    // consumer inside this library may still need to know, and the three
+    // codes it swallows are precisely the ones that leave the preview dark
+    // with no other explanation. `onAnyError` is that seam; it is additive
+    // and does not change what `onError` sees.
+    onAnyError?.(err);
     const code = (err as { code?: unknown })?.code;
     if (typeof code === 'string' && VC_LIFECYCLE_ERROR_CODES.has(code)) {
       // eslint-disable-next-line no-console

@@ -69,6 +69,14 @@ module.exports = {
   TouchableOpacity: 'TouchableOpacity',
   Pressable: 'Pressable',
   ActivityIndicator: 'ActivityIndicator',
+  // ⚠ ADDED so the KEYFRAME tree can be mounted at all. Without it any
+  // render that reaches `PanoramaSettingsModal` dies with "Element type is
+  // invalid", which meant no suite in this package could mount `<Camera>`
+  // in its default (non-sweep) engine — and that gap hid a real defect: the
+  // keyframe cell's preview was writing the SWEEP's "is it drawing" flag,
+  // so sweep → keyframe → sweep reported a session-less preview as live.
+  // See `cameraSweepHostArm.render.test.tsx`.
+  Modal: 'Modal',
   Image: 'Image',
   ScrollView: 'ScrollView',
   StyleSheet,

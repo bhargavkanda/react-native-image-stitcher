@@ -13,10 +13,15 @@
  * is no error code. One of the two sessions is interrupted some moments
  * later and the operator sees a dead preview.
  *
- * That is a defect class no render test in this package can reach —
- * `<Camera>`'s vision-camera mocks cannot be driven into most of these
- * states — which is exactly the reason `cameraShouldUnmount` is also a pure
- * exported function with its own table. This is that table.
+ * ⚠ THIS FILE USED TO SAY "no render test in this package can reach" these
+ * states. That was FALSE, and believing it cost five review rounds:
+ * `src/sweep/__tests__/cameraSweepHostArm.render.test.tsx` overrides the
+ * pinned mocks in that one file and drives the Android host arm end to end.
+ *
+ * The table is still the right home for the rows a mounted tree cannot
+ * produce — every single-term mutation against an otherwise-true baseline,
+ * which needs eight independent inputs moved one at a time — and that is
+ * what it is for now. For the wired behaviour, read the render suite.
  *
  * Every FALSE row below is a state that was reachable before the collapse,
  * and each one names the collision it prevents.
@@ -73,6 +78,7 @@ import {
   type SweepHostOwnsCameraInput,
   _sweepHostOwnsCameraForTests as hostOwns,
   _sweepCameraHandoffForTests as handoff,
+  _sweepPreviewLiveForTests as previewLive,
   _sweepShouldSettleForTests as shouldSettle,
 } from '../Camera';
 
@@ -385,8 +391,10 @@ describe('sweepMergedPoseSource / sweepMergedLens — the bag wins, upstream', (
  *   * the multicam term read the MERGED lens instead of the one that
  *     actually selected the device, so a bag `lens` disarmed the guard.
  *
- * Those are the two rows below. A table over the predicate cannot see
- * either, which is the whole reason the assembly is its own function.
+ * Those are the two rows below. A table over the PREDICATE cannot see
+ * either — the defects are in what is handed to it — which is why the
+ * assembly is its own function. The end-to-end statement for the lens half
+ * also runs mounted, in `cameraSweepHostArm.render.test.tsx`.
  */
 describe('sweepOwnershipInput — every term takes the value it is about', () => {
   const SRC = {
@@ -454,5 +462,34 @@ describe('sweepOwnershipInput — every term takes the value it is about', () =>
     const input = sweepOwnershipInput(SRC) as unknown as Record<string, unknown>;
     const missing = SWEEP_HOST_OWNS_INPUT_KEYS.filter((k) => !(k in input));
     expect(missing).toEqual([]);
+  });
+});
+
+/**
+ * ── IS THE HOST'S PREVIEW DRAWING? ──────────────────────────────────────
+ *
+ * Two facts that this rung confused three times: the element is MOUNTED,
+ * and it has delivered a frame. The mounted suite drives the first three
+ * cells for real; this table exists for the fourth, which no tree can
+ * produce — `started` true while `mounted` is false — because that is
+ * exactly the state every one of those three defects put the app in.
+ */
+describe('sweepPreviewLive — mounted is not drawing', () => {
+  it('both: drawing', () => {
+    expect(previewLive({ mounted: true, started: true })).toBe(true);
+  });
+  it('mounted but no frame yet: NOT drawing (the session-open window)', () => {
+    expect(previewLive({ mounted: true, started: false })).toBe(false);
+  });
+  it('⚑ started but NOT mounted: not drawing — the stale-flag state', () => {
+    // Unreachable in a tree, and the one the app kept ending up in: a flag
+    // set by a previous element (the review cycle, the engine round trip,
+    // the keyframe tree's own preview) surviving into a new, session-less
+    // mount. Whoever clears it can regress; this row says what the answer
+    // must be regardless.
+    expect(previewLive({ mounted: false, started: true })).toBe(false);
+  });
+  it('neither', () => {
+    expect(previewLive({ mounted: false, started: false })).toBe(false);
   });
 });

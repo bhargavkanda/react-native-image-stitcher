@@ -108,57 +108,43 @@ describe('<Camera engine="sweep">', () => {
    * rounds treated it as. `cameraSweepHostArm.render.test.tsx` overrides
    * `Platform.OS` and the device hooks locally and drives the ANDROID host
    * arm end to end — preview lifecycle, review cycle, ownership handoff. If
-   * you are about to write "this cannot fail here", check there first: it is
-   * where six mutations that survived every earlier round now die.
+   * you are about to write "this cannot fail here", check there first. The
+   * mutations it kills that nothing else did: dropping the `started` term
+   * from `sweepPreviewLive`, deleting the ownership settle, mis-keying the
+   * clearing effect (the review cycle), and putting the sweep's lifecycle
+   * callbacks back on the shared preview element (the engine round trip).
    */
-  it('⚑ renders NO second camera on the sweep path', () => {
+  it('⚑ iOS: renders NO camera on the sweep path — the AVF arm owns it', () => {
+    // Not a style preference. On iOS `poseSource: 'imu'` starts
+    // `RNISPanoAvfSource`, which opens its own AVCaptureSession on a
+    // physical back device; a `<CameraView>` beside it is two stacks on one
+    // camera, and `canAddInput` will usually let that happen quietly.
+    //
+    // Non-vacuous as of the positive control below: the keyframe path in
+    // this same harness mounts one.
     const tree = render({ engine: 'sweep' });
     expect(tree.root.findAllByType(CameraView)).toHaveLength(0);
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ …AND THAT CASE IS VACUOUS IN THIS HARNESS. Here is the proof.', () => {
-    // Read this before trusting the line above.
+  it('⚑ POSITIVE CONTROL: the keyframe engine DOES mount one here', () => {
+    // ⚠ THIS CASE USED TO BE A DISCLAIMER. It read "…AND THAT CASE IS
+    // VACUOUS IN THIS HARNESS", and proved it by asserting that rendering
+    // the keyframe path THROWS — because `PanoramaSettingsModal` needed a
+    // `Modal` the render mock did not carry.
     //
-    // `toHaveLength(0)` is the shape that passes when the probe is broken,
-    // so it needs a positive control — and there ISN'T one here.
+    // That was true, and it was also a thing to fix rather than document:
+    // adding `Modal` to the mock (one line) makes the whole keyframe tree
+    // mountable, which turns the case above from vacuous into real — a
+    // second camera on the sweep path would now be visible against a
+    // control that genuinely shows one.
     //
-    // ⚠ AND THE REASON IS NOT THE ONE THIS COMMENT FIRST GAVE. It said the
-    // mount is gated on the device being non-null. It is not: the mount is
-    // gated on `hostOwnsSweepCamera`, and a null device only changes what
-    // `<CameraView>` renders internally. The device matters because it is
-    // one of that predicate's TERMS (`jest.mocks/vision-camera.render.js`
-    // pins `useCameraDevice: () => null` deliberately — "a mock that
-    // invented a device would make every no-device path untested"), and so
-    // is `Platform.OS`, pinned to 'ios'. Two independent terms are false in
-    // every render this suite can build.
-    //
-    // Two consequences, and the second is the point:
-    //
-    //  1. The case above passes for a reason that has nothing to do with
-    //     the sweep. Left unlabelled it would join this repo's long list of
-    //     assertions that were green before the code they "protect"
-    //     existed — the exact family the header of this file already warns
-    //     about twice.
-    //  2. The real question — WHICH platform and WHICH state may mount a
-    //     second camera — is not asked here, because the shared mocks pin
-    //     `Platform.OS = 'ios'`. It is asked in
-    //     `src/camera/__tests__/sweepHostOwnsCamera.test.ts` (every term, a
-    //     red-first mutation row) and, end to end on a real Android host
-    //     arm, in `cameraSweepHostArm.render.test.tsx`.
-    // The mock's own answer, asserted rather than described:
-    expect((require('react-native-vision-camera') as {
-      useCameraDevice: () => unknown;
-    }).useCameraDevice()).toBeNull();
-    // And the positive control cannot even be BUILT here: rendering the
-    // keyframe path throws before it reaches a camera, because
-    // `PanoramaSettingsModal` needs host components this project's
-    // react-native mock does not carry.
-    //
-    // What the case DOES still catch, and the reason it is kept rather than
-    // deleted: a predicate that becomes PERMISSIVE. Restoring the bare
-    // `!isAR` reddens it, because `isAR` is false on this default render.
-    expect(() => render({})).toThrow(/Element type is invalid/);
+    // It is the same lesson as `cameraSweepHostArm.render.test.tsx`: a
+    // harness limitation asserted rather than tested is itself a vacuous
+    // claim. Two of them were load-bearing for five review rounds.
+    const tree = render({});
+    expect(tree.root.findAllByType(CameraView).length).toBeGreaterThan(0);
+    act(() => { tree.unmount(); });
   });
 
   // ⚠ THE SURFACE-ROOT CASE THAT WAS HERE HAS MOVED, because it was reading

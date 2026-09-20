@@ -130,7 +130,7 @@ export type SweepOptions = Omit<
   | 'frameSource' | 'hostPreviewLive' | 'vcPluginArm' | 'vcCameraId'
 >;
 import { CameraShutter } from './CameraShutter';
-import { CameraView } from './CameraView';
+import { CameraView, type CameraViewProps } from './CameraView';
 import { CaptureHeader, type CaptureHeaderProps } from './CaptureHeader';
 import { CapturePreview, type CapturePreviewAction } from './CapturePreview';
 import {
@@ -3313,8 +3313,29 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // here so the two call sites cannot drift: ~25 props, several of them
   // load-bearing lifecycle (`isActive`, the background-release contract),
   // and a copy would be a second place to fix the next Samsung reclaim bug.
-  const hostPreviewElement = (
+  // ⚠ A FUNCTION, NOT A VALUE, AND THE PARAMETER IS THE WHOLE POINT.
+  //
+  // This element is rendered from TWO places — the sweep cell and the main
+  // keyframe tree — and it used to carry the sweep's `onPreviewStarted`
+  // handler in both. That handler writes a `<Camera>`-scoped flag meaning
+  // "the SWEEP's host preview is drawing", so the KEYFRAME preview set it
+  // too, and on sweep → keyframe → sweep the flag arrived already true for
+  // a brand-new, session-less element: transparent root, explainer
+  // suppressed, black underneath. Five rounds of this rung's history is
+  // that flag being written by something that does not own it.
+  //
+  // Now the lifecycle callbacks are passed IN by the call site that owns
+  // them, so the keyframe cell structurally cannot write the sweep's flag.
+  // One definition still, for the ~25 props and the background-release
+  // contract that must not drift between the two.
+  const renderHostPreview = (
+    /** vision-camera lifecycle callbacks, owned by the calling cell. */
+    lifecycle?: NonNullable<CameraViewProps['cameraProps']>,
+    /** EVERY vision-camera error, including the swallowed lifecycle codes. */
+    onAnyError?: (error: unknown) => void,
+  ): React.JSX.Element => (
     <CameraView
+        onAnyError={onAnyError}
         ref={visionCameraRef}
         device={capture.device}
         // Release the camera whenever the app is genuinely BACKGROUNDED, and
@@ -3378,25 +3399,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // in non-AR mode; AR mode uses ARCameraView which doesn't
         // expose a frame-processor seam.  See
         // docs/f8-frame-processor-plan.md.
+        // ⚠ THE LIFECYCLE CALLBACKS LAST, so a call site that owns them
+        // wins over anything above; a site that does not pass them gets a
+        // preview that reports to nobody, which is correct for the
+        // keyframe tree.
         cameraProps={{
           ...(effectiveFrameProcessor != null
             ? { frameProcessor: effectiveFrameProcessor }
             : {}),
-          // ⚠ `onPreviewStarted`, NOT `onStarted`. vision-camera documents
-          // `onStarted` as the SESSION-start event — "outputs can start
-          // receiving frames … but might not have received any yet" — so
-          // gating on it narrows the transparent-over-black window instead
-          // of closing it, which is the same mistake as gating on the
-          // render decision, one step later. `onPreviewStarted` is the
-          // first-frame event and is what "drawing" means. `onStopped` is
-          // kept as a belt for the `isActive={false}` teardown, which
-          // `onPreviewStopped` alone would not cover.
-          onPreviewStarted: () => {
-            setHostPreviewStarted(true);
-            setHostPreviewError('');
-          },
-          onPreviewStopped: () => { setHostPreviewStarted(false); },
-          onStopped: () => { setHostPreviewStarted(false); },
+          ...lifecycle,
         }}
         onError={(err) => {
           // CameraView already filters known transient lifecycle
@@ -3408,11 +3419,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           const e = err as { code?: string; message?: string };
           const codeStr = e?.code ?? 'unknown';
           const msg = e?.message ?? String(err);
-          // The sweep surface has no session of its own on the host arm, so
-          // this is the ONLY place its "why is the screen dark" answer can
-          // come from. Without it the handoff caption sits over a permission
-          // denial for ever.
-          setHostPreviewError(`${codeStr}: ${msg}`);
           onError?.(new CameraError(
             'VISION_CAMERA_RUNTIME',
             `${codeStr}: ${msg}`,
@@ -3428,8 +3434,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // surface "the host's preview is live" the instant we render the element
   // reopens the black-screen-with-no-explainer window for exactly that
   // latency — at first mount of the host arm, and again after every settle.
-  // vision-camera answers this itself with `onStarted`, which `cameraProps`
-  // passes straight through.
+  // vision-camera answers this itself with `onPreviewStarted` — the
+  // FIRST-FRAME event, passed in by the sweep cell alone (`onStarted` is
+  // the session event and is deliberately not used; see the call site).
   const [hostPreviewStarted, setHostPreviewStarted] = useState(false);
   /** vision-camera's own reason the host preview is not up, or `''`. Shown
    *  by the sweep surface instead of the transient handoff caption, which
@@ -3517,9 +3524,23 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // defect this rung is named after, on every capture after the first.
   const hostPreviewMounted =
     engine === 'sweep' && mountHostPreview && sweepReview == null;
+  // ⚠ NO DEPENDENCY ARRAY, DELIBERATELY — which normally reads as a
+  // mistake, so: the edge-triggered form missed the case where the flag is
+  // set WHILE `hostPreviewMounted` is already false (the keyframe tree's
+  // preview did exactly that), because the key never changed and the effect
+  // never re-ran. Clearing on every render while unmounted cannot miss a
+  // writer. React bails out of an identical `setState`, so this does not
+  // loop and costs nothing once settled.
+  //
+  // BOTH flags: an error string outlives its session otherwise, and
+  // `panoPlusCameraOffNotice` prints it BEFORE the handoff caption — so a
+  // resolved fault would caption the next handoff window.
   useEffect(() => {
-    if (!hostPreviewMounted) setHostPreviewStarted(false);
-  }, [hostPreviewMounted]);
+    if (!hostPreviewMounted) {
+      setHostPreviewStarted(false);
+      setHostPreviewError('');
+    }
+  });
 
   // ⚠ THE EARLY RETURN IS THE **AR** CELL ONLY (S7).
   //
@@ -3558,7 +3579,38 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               main tree would bring the settings modal, the thumbnail strip
               and the band overlay with it — keyframe furniture over a
               sweep. The sweep's own HUD is the surface's. */}
-          {hostPreviewMounted && hostPreviewElement}
+          {hostPreviewMounted && renderHostPreview({
+            // ⚠ ONLY THE SWEEP CELL PASSES THESE. They write state that
+            // means "the SWEEP's host preview is drawing", so the keyframe
+            // tree's copy of this element must not have them.
+            //
+            // `onPreviewStarted`, NOT `onStarted`: vision-camera documents
+            // the latter as the SESSION event — "outputs can start
+            // receiving frames … but might not have received any yet" — so
+            // gating on it narrows the transparent-over-black window rather
+            // than closing it. `onStopped` is kept as a belt for the
+            // `isActive={false}` teardown, which `onPreviewStopped` alone
+            // does not cover.
+            onPreviewStarted: () => {
+              setHostPreviewStarted(true);
+              setHostPreviewError('');
+            },
+            onPreviewStopped: () => { setHostPreviewStarted(false); },
+            onStopped: () => { setHostPreviewStarted(false); },
+            // EVERY error, including the three transient lifecycle codes
+            // `onError` deliberately swallows — which are exactly the ones
+            // that leave this preview dark with nothing else to say.
+            // Without them the handoff caption sits over a permission
+            // denial for ever. Passed as `onAnyError` (the second argument)
+            // rather than through `cameraProps.onError`, which would
+            // REPLACE `CameraView`'s own filter for the inner camera and
+            // change what the host sees.
+          }, (err: unknown) => {
+            const e = err as { code?: string; message?: string };
+            setHostPreviewError(
+              `${e?.code ?? 'unknown'}: ${e?.message ?? String(err)}`,
+            );
+          })}
           {sweepReview != null ? (
             // The viewer REPLACES the surface rather than covering it: the
             // surface owns a camera, and leaving it mounted behind a review
@@ -3761,7 +3813,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           overlays={overlays}
         />
       ) : (
-        hostPreviewElement
+        renderHostPreview()
       )}
 
       {/* REC banner + record border (during recording / stitching).  v0.16
@@ -4602,9 +4654,12 @@ export const _sweepHostOwnsCameraForTests = sweepHostOwnsCamera;
  * than the flip the window exists to smooth: it is the failure the latch was
  * added to prevent, arriving through the fix for a different one.
  *
- * Pure and exported because the render harness cannot move any of these
- * inputs — `Platform.OS` and the device are pinned in the mocks — so a
- * mounted test of this logic cannot fail. The table can.
+ * Pure and exported because a TABLE reaches rows a mounted test cannot —
+ * `{mounted: false, started: true}`, a latch against a contrary live value.
+ * ⚠ NOT because "the harness cannot move these inputs": that premise was
+ * false and cost five review rounds.
+ * `src/sweep/__tests__/cameraSweepHostArm.render.test.tsx` overrides the
+ * pinned mocks locally and drives this end to end on the Android host arm.
  */
 function sweepCameraHandoff(input: {
   /** What the predicate says right now. */
@@ -4650,9 +4705,13 @@ function sweepShouldSettle(input: {
  * with its explainer suppressed — which is the defect this whole rung is
  * named after, and which two successive "fixes" recreated.
  *
- * Pure and exported because the state is only reachable through
- * vision-camera's own callback: a render test can assert the prop is not a
- * constant, but only a table can assert the mapping.
+ * ⚠ THE COMMENT HERE USED TO SAY "only a table can assert the mapping".
+ * That was false in the same commit that wrote it:
+ * `cameraSweepHostArm.render.test.tsx` fires `onPreviewStarted` on the real
+ * mounted element and asserts all of it. The extraction is kept because the
+ * expression is the one place three separate defects landed and a named
+ * function is where its history can be written down — not because the
+ * mounted suite cannot reach it.
  */
 function sweepPreviewLive(input: {
   mounted: boolean;

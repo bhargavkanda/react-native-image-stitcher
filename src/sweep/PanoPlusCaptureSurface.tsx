@@ -2572,6 +2572,16 @@ export const PanoPlusCaptureSurface = forwardRef<
     // ran, so the A/B would have looked like it produced two identical arms.
     // Found while adding `poseSource` to the same list.  `lens` repeated the
     // same omission and was caught in the P5 review; `jogGuard` joins with it.
+    // ⚠ AND THE SAME OMISSION AGAIN, WITH THE S7 PROPS. `frameSource`,
+    // `vcPluginArm` and `vcCameraId` are all READ in this callback — by the
+    // fail-closed guard and by the start bag's arm — and all three were
+    // absent from these deps. A host arm that resolved AFTER the callback
+    // was last built (which is the normal order: the plugin handle and the
+    // ownership settle both land asynchronously) would have started the
+    // sweep on the captured values: the guard judging a stale
+    // `frameSource`, and the bag omitting an arm the recorder needed. The
+    // note above says this list has been short three times before.
+    frameSource,
     imuSidecar,
     jogGuard,
     lens,
@@ -2589,6 +2599,8 @@ export const PanoPlusCaptureSurface = forwardRef<
     rectify,
     safeAreaInsets,
     tauUncorrected,
+    vcCameraId,
+    vcPluginArm,
     window.height,
     window.width,
   ]);

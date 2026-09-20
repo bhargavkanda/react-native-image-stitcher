@@ -41,6 +41,7 @@ jest.mock('../PanoPlusResultView', () => ({
 import { Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { selectCaptureDevice } from '../../camera/selectCaptureDevice';
 import { coercePanoPlusSummary } from '../panoPlusModel';
 
 const vc = require('react-native-vision-camera') as {
@@ -97,6 +98,23 @@ function render(props: Record<string, unknown> = {}): ReactTestRenderer {
     );
   });
   return t;
+}
+
+/** Re-render the same tree with a different `engine`. */
+function setEngine(
+  tree: ReactTestRenderer,
+  engine: string,
+  props: Record<string, unknown> = {},
+): void {
+  act(() => {
+    tree.update(
+      <Camera
+        engine={engine as never}
+        defaultCaptureSource="non-ar"
+        {...(props as any)}
+      />,
+    );
+  });
 }
 const surfaceProps = (t: ReactTestRenderer): Record<string, unknown> =>
   t.root.findByType(PanoPlusCaptureSurface).props as Record<string, unknown>;
@@ -189,6 +207,68 @@ describe('⚑ AN UNMOUNT CLEARS "LIVE" — no callback fires for one', () => {
   });
 });
 
+describe('⚑ THE ERROR CHANNEL — driven through <Camera>, not just the pure fn', () => {
+  it('carries vision-camera\'s reason to the surface, INCLUDING the swallowed codes', () => {
+    // `CameraView` deliberately swallows three transient lifecycle codes so
+    // routine lock/app-switch churn is not reported to the host as a crash
+    // — and those three are exactly the ones that leave this preview dark
+    // with nothing else to say. The channel therefore hangs off the
+    // UNFILTERED seam; wiring it to the filtered `onError` would have
+    // delivered nothing for the cases it exists for.
+    const tree = render();
+    const view = cameraViews(tree)[0];
+    act(() => {
+      (view.props.onAnyError as (e: unknown) => void)({
+        code: 'device/camera-already-in-use',
+        message: 'another app has it',
+      });
+    });
+    const text = String(surfaceProps(tree).hostPreviewError ?? '');
+    expect(text).toContain('camera-already-in-use');
+    expect(text).toContain('another app has it');
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ and clears it the moment a frame actually arrives', () => {
+    const tree = render();
+    const view = cameraViews(tree)[0];
+    act(() => {
+      (view.props.onAnyError as (e: unknown) => void)({ code: 'x', message: 'y' });
+    });
+    expect(surfaceProps(tree).hostPreviewError).not.toBe('');
+    act(() => {
+      (view.props.cameraProps as { onPreviewStarted?: () => void })
+        .onPreviewStarted?.();
+    });
+    expect(surfaceProps(tree).hostPreviewError).toBe('');
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and does not let a resolved fault caption the NEXT session', () => {
+    // The error had exactly one reset — a first frame — which by definition
+    // cannot fire while the preview is down. So after any fault, every
+    // later reopen was captioned with the old one, and the notice prints
+    // the error BEFORE the handoff copy.
+    const tree = render();
+    act(() => {
+      (cameraViews(tree)[0].props.onAnyError as (e: unknown) => void)(
+        { code: 'device/fatal-error', message: 'gone' },
+      );
+    });
+    expect(surfaceProps(tree).hostPreviewError).not.toBe('');
+
+    const setArm = surfaceProps(tree).onPoseSourceChange as (s: string) => void;
+    act(() => { setArm('ar'); });
+    act(() => { jest.advanceTimersByTime(1000); });
+    act(() => { setArm('imu'); });
+    act(() => { jest.advanceTimersByTime(1000); });
+
+    expect(cameraViews(tree)).toHaveLength(1);
+    expect(surfaceProps(tree).hostPreviewError).toBe('');
+    act(() => { tree.unmount(); });
+  });
+});
+
 describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element goes', () => {
   it('a preview remounted after the result viewer is not reported as live', () => {
     // THE DISTINGUISHING PATH, and the one three drafts of this coverage
@@ -252,6 +332,65 @@ describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element
   });
 });
 
+describe('⚑ THE ENGINE ROUND TRIP — the keyframe preview is not the sweep\'s', () => {
+  it('sweep → keyframe → sweep does not inherit the keyframe preview\'s "drawing"', () => {
+    // THE SIXTH ROUND'S BLOCKER, and the fifth defect of this exact shape:
+    // one `<Camera>`-scoped flag written by an element rendered from TWO
+    // places. `hostPreviewElement` is mounted by the sweep cell AND by the
+    // main keyframe tree, and it carried the sweep's `onPreviewStarted` in
+    // both — so the KEYFRAME preview's first frame set a flag that means
+    // "the SWEEP's host preview is drawing", while the clearing effect,
+    // keyed on a value that was already false, never ran.
+    //
+    // Coming back to the sweep then handed a brand-new, session-less
+    // element the answer "live": transparent root, explainer suppressed,
+    // black underneath. The callbacks are now passed in by the owning cell,
+    // so the keyframe tree structurally cannot write it.
+    const tree = render();
+    expect(cameraViews(tree)).toHaveLength(1);
+
+    setEngine(tree, 'keyframe');
+    act(() => { jest.advanceTimersByTime(2000); });
+    const kf = cameraViews(tree);
+    expect(kf.length).toBeGreaterThan(0);
+    // The keyframe preview starts drawing — and must write nothing of ours.
+    act(() => {
+      (kf[0].props.cameraProps as { onPreviewStarted?: () => void })
+        .onPreviewStarted?.();
+    });
+
+    setEngine(tree, 'sweep');
+    act(() => { jest.advanceTimersByTime(2000); });
+    expect(cameraViews(tree)).toHaveLength(1);
+    // No `onPreviewStarted` has fired for THIS element.
+    expect(surfaceProps(tree).hostPreviewLive).toBe(false);
+
+    // …and it still reports correctly once it really does draw.
+    act(() => {
+      (cameraViews(tree)[0].props.cameraProps as {
+        onPreviewStarted?: () => void;
+      }).onPreviewStarted?.();
+    });
+    expect(surfaceProps(tree).hostPreviewLive).toBe(true);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ the keyframe cell is given NO sweep lifecycle callbacks at all', () => {
+    // The structural statement behind the case above, asserted directly so
+    // a future edit that re-adds them to the shared element fails here
+    // rather than in a capture session.
+    const tree = render();
+    setEngine(tree, 'keyframe');
+    act(() => { jest.advanceTimersByTime(2000); });
+    const props = cameraViews(tree)[0].props.cameraProps as
+      Record<string, unknown> | undefined;
+    expect(props?.onPreviewStarted).toBeUndefined();
+    expect(props?.onPreviewStopped).toBeUndefined();
+    expect(cameraViews(tree)[0].props.onAnyError).toBeUndefined();
+    act(() => { tree.unmount(); });
+  });
+});
+
 describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
   it('hands the camera over with NEITHER side holding one', () => {
     // The AR pill moves ownership at idle. Done in one commit, <CameraView>
@@ -291,6 +430,7 @@ describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
     // single-device hook, so overriding only the latter leaves
     // `captureMode` at 'wide-only' and the case asserts nothing about
     // multicam at all — which is exactly what the first draft did.
+    // eslint-disable-next-line @typescript-eslint/no-shadow
     const MULTICAM = {
       ...DEVICE,
       isMultiCam: true,
@@ -311,8 +451,14 @@ describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
       sweep: { lens: 'wide' as const },
     });
     const p = surfaceProps(tree);
-    // PRECONDITIONS: the body really is multicam and the device really is
-    // at 0.5×. Without these the assertion below passes on any tree.
+    // ⚠ THE PRECONDITION IS THE DEVICE, NOT THE PROP. An earlier draft
+    // asserted `p.lens === 'wide'` and called it "the body really is
+    // multicam and the device really is at 0.5×" — but `p.lens` is the
+    // MERGED lens, which is `'wide'` because the BAG said so, on any tree.
+    // The arrangement is asserted at its source instead.
+    expect(selectCaptureDevice([MULTICAM] as never, {
+      lens: '0.5x', platform: 'android',
+    } as never).mode).toBe('multicam');
     expect(p.lens).toBe('wide');
     expect(p.vcPluginArm).toBe(false);      // the bag bought no ownership
     expect(p.frameSource).toBe('own');
