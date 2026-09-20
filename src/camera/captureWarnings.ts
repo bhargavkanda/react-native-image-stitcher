@@ -29,7 +29,19 @@
 export type CaptureWarningCode =
   | 'LOW_FRAME_UTILIZATION'
   | 'LATERAL_DRIFT_FINALIZE'
-  | 'HIGH_PAN_SPEED';
+  | 'HIGH_PAN_SPEED'
+  /**
+   * THE SWEEP ENGINE'S VERDICT — holes along the sweep, or strips clipped
+   * off the canvas band.
+   *
+   * ⚠ ADDED BECAUSE THE CHANNEL WAS WIRED AND FED NOTHING. `<Camera>` stashed
+   * `warnings: []` for every sweep while the sweep already computed a far
+   * richer answer than any keyframe warning — `panoPlusIntegrity`, 352 lines
+   * of hole/seam/banding/clipping analysis that reached the pack and never
+   * reached the host. A host on `onCapture(result).warnings` got silence on
+   * one engine and warnings on the other, from the same callback.
+   */
+  | 'SWEEP_NOT_INTACT';
 
 export interface CaptureWarning {
   /** Stable, host-switchable code. */

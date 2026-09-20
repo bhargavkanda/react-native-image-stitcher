@@ -4564,6 +4564,41 @@ export const PANO_PLUS_VERDICT_FILE = 'host_verdict.json';
  * between v4 and v11; the numbers did not. Writing the sentences is what makes
  * the pack answer "what was this build's verdict on this sweep" a month later.
  */
+/**
+ * The sweep's verdict, as the SHARED capture-warning shape.
+ *
+ * ⚠ THE CHANNEL WAS ALREADY THERE AND ALREADY SHARED — `<Camera>` stashed
+ * `warnings: []` for every sweep. The sweep's own analysis is richer than
+ * anything the keyframe engine produces and it all went to the pack and
+ * nowhere else, so a host reading `onCapture(result).warnings` saw an empty
+ * array on one engine and real warnings on the other.
+ *
+ * Deliberately ONE warning rather than the residual paragraph: the crop
+ * banner is a banner. The full sentences stay in the pack sidecar, which is
+ * where a month-later reader looks.
+ */
+export function panoPlusCaptureWarnings(
+  summary: PanoPlusSummary,
+): Array<{ code: 'SWEEP_NOT_INTACT'; message: string }> {
+  const integrity = panoPlusIntegrity(summary);
+  // ⚠ NOT `!isIntact`, AND THE DIFFERENCE IS THE WHOLE POINT OF A BANNER.
+  // `isIntact` is false when the seams were merely NOT MEASURED — an
+  // absence of evidence, which is the right thing for the pack to record
+  // and the wrong thing to put in front of an operator on every single
+  // capture. A warning must name a DEFECT: a hole along the sweep, strips
+  // clipped off the band, a visible cut, banding.
+  const defective =
+    !integrity.holdsG1
+    || integrity.clippedFrames > 0
+    || integrity.hasCuts
+    || integrity.hasBanding;
+  if (!defective) return [];
+  return [{
+    code: 'SWEEP_NOT_INTACT',
+    message: panoPlusVerdictHeadline(integrity),
+  }];
+}
+
 export function panoPlusVerdictSidecar(
   result: PanoPlusCaptureResult,
   ctx?: { writtenAtMs?: number },

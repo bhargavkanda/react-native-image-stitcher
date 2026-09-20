@@ -710,6 +710,57 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { tree.unmount(); });
   });
 
+  it('⚑ the review carries the sweep\'s OWN verdict, not an empty array', async () => {
+    // ⚠ `warnings: []` WAS HARDCODED FOR EVERY SWEEP while `panoPlusIntegrity`
+    // — 352 lines of hole/seam/banding/clipping analysis — reached the pack
+    // and nothing else. The channel is shared and was already wired, so a
+    // host on `onCapture(result).warnings` got silence on one engine and
+    // real warnings on the other, through the same callback.
+    const holed = panoPlusResultOf(
+      coercePanoPlusSummary({
+        canvasPath: CANVAS,
+        sessionDir: '/data/user/0/com.x/files/panoplus/pp_1',
+        width: 4000, height: 1200,
+        // A hole along the sweep — the thing the verdict is about.
+        unpaintedColumns: 240,
+        unpaintedRuns: [{ from: 100, to: 340 }],
+        unpaintedRunsAxis: 'x',
+      }),
+      { rectify: true, gainMatch: true, packFrames: 'all', poseSource: 'imu' },
+      '2026-09-21T00:00:00.000Z',
+    );
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = await render({
+      showPreview: true,
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(holed); });
+    // The BANNER gets the message strings…
+    expect((review(tree)[0].props.warnings as string[]).join(' ')).not.toBe('');
+    // …and the HOST gets the coded warning on the result, which is the
+    // channel every other engine fills and the sweep left undefined.
+    act(() => { (review(tree)[0].props.onUseOriginal as () => void)(); });
+    expect((seen[0].warnings as Array<{ code: string }>).map((x) => x.code))
+      .toContain('SWEEP_NOT_INTACT');
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and an INTACT sweep carries none', async () => {
+    // Negative control: without it the case above passes for a warning
+    // emitted unconditionally, which would put a scary banner on every
+    // good panorama.
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = await render({
+      showPreview: true,
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    act(() => { (review(tree)[0].props.onUseOriginal as () => void)(); });
+    expect((seen[0].warnings as Array<{ code: string }>).map((x) => x.code))
+      .not.toContain('SWEEP_NOT_INTACT');
+    act(() => { tree.unmount(); });
+  });
+
   it('⚑ a sweep is NEVER offered the crop editor', async () => {
     // `cropQuad` rewrites the file in place, and the pack in `sessionDir`
     // references that file — cropping desyncs the two.

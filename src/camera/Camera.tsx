@@ -97,6 +97,7 @@ import {
   PANO_PLUS_VERDICT_FILE,
   fileUri,
   panoPlusVerdictSidecar,
+  panoPlusCaptureWarnings,
 } from '../sweep/panoPlusModel';
 
 /**
@@ -1839,6 +1840,31 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
    * a lens write mid-sweep is a request the recorder cannot honour.
    */
   const [sweepRunning, setSweepRunning] = useState(false);
+  /**
+   * A CAPTURE IS IN FLIGHT ON **EITHER** ENGINE.
+   *
+   * ⚠ `statusPhase` NEVER REACHES 'recording' ON A SWEEP, and that single
+   * fact switched off Pano's whole guard-rail suite. `startPanorama` routes
+   * to `sweepRef.current?.holdStart?.()` and RETURNS before
+   * `handleHoldStartRef` (:2144) — correctly, because the keyframe hold must
+   * not run against a surface that is not mounted — so every guard gated on
+   * `statusPhase === 'recording'` is dead on the sweep: the orientation-drift
+   * detector, the REC banner, the wall-clock countdown, the auto-finalize and
+   * `onCaptureAbandoned`.
+   *
+   * Those are not individually missing features. They are one early return.
+   *
+   * ⚠ AND THIS IS DELIBERATELY *NOT* `setStatusPhase('recording')` ON A
+   * SWEEP. Ten sites read that value and they are two different kinds:
+   * GUARD RAILS, which belong on both engines, and KEYFRAME MACHINERY —
+   * `incremental.start()`'s re-entry guard (:2830), the keyframe-count
+   * auto-finalize (:3222), the k/n counter — which would then run against an
+   * engine that has no keyframes. Widening the phase would start the
+   * keyframe engine's internals during a sweep. So the phase stays honest
+   * and the GUARDS get their own predicate.
+   */
+  const captureRecording = statusPhase === 'recording' || sweepRunning;
+
 
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(
     null,
@@ -1943,7 +1969,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Threshold` (if set) tunes the 'warn'→'bad' boundary; `lateralBudget-
   // Cm` tunes the drift latch (0 disables the latch in the hook).
   const panMotion = usePanMotion({
-    active: statusPhase === 'recording' && isNonAR,
+    // ⚠ EITHER ENGINE. This hook IS the sideways-drift measurement — it
+    // integrates cross-pan translation and latches `lateralExceeded` past
+    // `lateralBudgetCm`. On the sweep it was never active, so the operator's
+    // first named guard ("I want the sideways drift to be measured and
+    // stopped") had nothing measuring it at all.
+    //
+    // `isNonAR` stays: in AR the session's own tracking owns translation,
+    // and that is true of both engines.
+    active: captureRecording && isNonAR,
     warnMaxRadPerSec: panTooFastThreshold,
     lateralBudgetCm,
   });
@@ -2333,30 +2367,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // The modal is informational only — by the time it renders, the
   // capture is already stopped.  No Continue/Resume affordance per
   // the engine spec.
-  /**
-   * A CAPTURE IS IN FLIGHT ON **EITHER** ENGINE.
-   *
-   * ⚠ `statusPhase` NEVER REACHES 'recording' ON A SWEEP, and that single
-   * fact switched off Pano's whole guard-rail suite. `startPanorama` routes
-   * to `sweepRef.current?.holdStart?.()` and RETURNS before
-   * `handleHoldStartRef` (:2144) — correctly, because the keyframe hold must
-   * not run against a surface that is not mounted — so every guard gated on
-   * `statusPhase === 'recording'` is dead on the sweep: the orientation-drift
-   * detector, the REC banner, the wall-clock countdown, the auto-finalize and
-   * `onCaptureAbandoned`.
-   *
-   * Those are not individually missing features. They are one early return.
-   *
-   * ⚠ AND THIS IS DELIBERATELY *NOT* `setStatusPhase('recording')` ON A
-   * SWEEP. Ten sites read that value and they are two different kinds:
-   * GUARD RAILS, which belong on both engines, and KEYFRAME MACHINERY —
-   * `incremental.start()`'s re-entry guard (:2830), the keyframe-count
-   * auto-finalize (:3222), the k/n counter — which would then run against an
-   * engine that has no keyframes. Widening the phase would start the
-   * keyframe engine's internals during a sweep. So the phase stays honest
-   * and the GUARDS get their own predicate.
-   */
-  const captureRecording = statusPhase === 'recording' || sweepRunning;
 
   const drift = useOrientationDrift(captureRecording);
   const [driftModalDismissed, setDriftModalDismissed] = useState(false);
@@ -3183,12 +3193,28 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   useEffect(() => {
     if (
       !panMotion.lateralExceeded
-      || statusPhase !== 'recording'
+      || !captureRecording
       || lateralBudgetCm <= 0
     ) {
       return;
     }
     clearPanTimer();
+
+    // ⚠ THE SWEEP STOPS THROUGH ITS OWN SHUTTER. Everything below is the
+    // keyframe engine's: `acceptedKeyframeCount`, `incremental.cancel()`,
+    // `handleHoldEndRef`. A sweep has no keyframes to count and no
+    // `incremental` session to cancel.
+    //
+    // Release always FINALIZES on the sweep, which is pano's ">= 2
+    // keyframes" arm — keep what was captured and say why. The unusable
+    // case needs no branch here: the sweep's own `onComplete` already emits
+    // rather than reviewing when the canvas came back empty.
+    if (sweepRunning) {
+      setLateralWrongDirection(false);
+      setLateralStopVisible(true);
+      sweepRef.current?.holdEnd?.();
+      return;
+    }
 
     // #3 — if the user veered off before enough frames were captured to
     // stitch, finalizing would fail with a misleading "need more images"
@@ -4239,7 +4265,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               // panorama, and `onCapture` fires from the review's Confirm —
               // so Retake discards the capture and one result UI serves
               // every engine.
-              const captureResultObj = { ...result, ok: true as const };
+              // ⚠ THE WARNINGS RIDE THE RESULT, not just the review banner.
+              // `onCapture(result).warnings` is the host-facing channel and
+              // every other engine fills it; the sweep emitted a result with
+              // no `warnings` key at all, so a host reading it uniformly got
+              // `undefined` on one engine and an array on the others.
+              const sweepWarnings = panoPlusCaptureWarnings(result.summary);
+              const captureResultObj = {
+                ...result, ok: true as const, warnings: sweepWarnings,
+              };
               // The verdict sidecar used to be written by the review screen's
               // mount effect. That screen no longer mounts, so the write
               // moves here — before the stash, so it happens even if the
@@ -4277,7 +4311,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                   height: result.height,
                   // NOT re-schemed: the public result keeps the bare path.
                   captureResultObj,
-                  warnings: [],
+                  // ⚠ THE SWEEP'S OWN VERDICT, not an empty array. This was
+                  // `warnings: []` on every sweep while `panoPlusIntegrity`
+                  // — 352 lines of hole/seam/banding/clipping analysis —
+                  // reached the pack and nothing else. The channel is
+                  // shared and was already wired; the sweep fed it nothing,
+                  // so one engine warned and the other was silent through
+                  // the same `onCapture`.
+                  warnings: sweepWarnings,
                 });
               } else {
                 // No image to review — emit rather than strand the capture.
