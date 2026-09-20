@@ -83,6 +83,7 @@ import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 // bundle.
 import {
   PanoPlusCaptureSurface,
+  panoLensChipBottomPt,
   type PanoPlusCaptureSurfaceProps,
 } from '../sweep/PanoPlusCaptureSurface';
 import type {
@@ -133,6 +134,16 @@ export type SweepOptions = Omit<
   PanoPlusCaptureSurfaceProps,
   'onComplete' | 'onCancel' | 'onFailure'
   | 'frameSource' | 'hostPreviewLive' | 'vcPluginArm' | 'vcCameraId'
+  // ⚠ AND THE TWO PILL WRITERS. `<Camera>` draws the AR pill and the lens
+  // chip now, and the surface gates its own clones on these being non-null
+  // — so a bag carrying either one RE-CREATES the clone that produced two
+  // of the four field defects. Measured before this line existed: with
+  // `sweep={{onLensChange, onPoseSourceChange}}` the tree came back with
+  // TWO AR pills and TWO lens chips, and the whole suite stayed green.
+  //
+  // Omitted here so it cannot be written at all, and still assigned after
+  // the spread below — the same belt-and-braces the four above get.
+  | 'onPoseSourceChange' | 'onLensChange'
 >;
 import { CameraShutter } from './CameraShutter';
 import { CameraView, type CameraViewProps } from './CameraView';
@@ -3433,7 +3444,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // OTHER. Pano's rule is that the pill hides at 0.5× — so a chip masked
     // back to `1×` with the pill still hidden would leave the operator on a
     // wide viewfinder, reading `1×`, with no way to see or change the arm.
-    !hideBuiltInShutter && arAllowed && nonArAllowed && effectiveLens === '1x'
+    // ⚠ `hideBuiltInShutter` HIDES THE SHUTTER, NOT THE ARM CONTROL — and on
+    // a sweep it is not even our shutter being hidden. The surface draws its
+    // own, and pano+'s documented host config is exactly
+    // `bottomBarOffset: 150, hideBuiltInShutter` (panoPlusModel.ts:2149), so
+    // this term deleted the AR pill outright on the one host configuration
+    // the sweep actually ships under — defect #1 rebuilt, one layer up.
+    (!hideBuiltInShutter || engine === 'sweep')
+      && arAllowed && nonArAllowed && effectiveLens === '1x'
       && isARSupportedOnDevice
       ? (
         <ARToggle
@@ -3996,8 +4014,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // `Pressable`. `<Camera>`'s pills show the SETTING and always
             // move; what will actually run stays the arm notice's job, and
             // the surface still prints it.
-            onPoseSourceChange={undefined}
-            onLensChange={undefined}
+            // (assigned AFTER `{...sweep}` — see below.)
             // ⚠ DEFAULTS BEFORE THE SPREAD, SO THE HOST ALWAYS WINS.
             // The surface's own prop defaults were never a configuration
             // anyone ran — its one host passed everything off a flag store,
@@ -4006,6 +4023,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // the ARCore pose arm in a dim room and the sweep painted nothing
             // (see `sweepDefaults.ts` for the measurement).
             {...sweep}
+            // ⚠ THESE WERE ABOVE THE SPREAD AND THE COMMENT SAID
+            // "WITHHELD UNCONDITIONALLY", which was false: a bag carrying
+            // either writer overwrote the `undefined` and the surface drew
+            // its clone again. Moved down to the position the four props
+            // below already occupy, for the identical reason.
+            onPoseSourceChange={undefined}
+            onLensChange={undefined}
             // ── AFTER THE SPREAD, AND THE TYPE ALSO FORBIDS THEM ─────────
             // These are `<Camera>`'s ANSWER to "who holds the back camera",
             // not a host knob — `SweepOptions` omits all four, so the bag
@@ -4088,9 +4112,24 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               writeSweepVerdictSidecar(result);
               if (result.width > 0 && result.height > 0) {
                 setCropPending({
-                  uri: result.uri,
+                  // ⚠ SCHEMED HERE, NOT UPSTREAM. `panoPlusResultOf` returns
+                  // `summary.canvasPath` VERBATIM — a bare native path
+                  // (`/data/user/0/…/canvas.jpg`) — and that is the public
+                  // `PanoPlusCaptureResult.uri` contract, deliberately. But
+                  // `<Image>` needs a scheme, so the review that replaced
+                  // `PanoPlusResultView` has to do what that screen did:
+                  // it rendered `source={{ uri: fileUri(result.uri) }}`.
+                  //
+                  // Dropping this is why defect #4 ("the preview modal is not
+                  // the same as the one for photo and pano") was answered with
+                  // the right modal showing an EMPTY FRAME — Retake, Confirm,
+                  // the warnings and the debug pill all painted; the panorama
+                  // did not. The keyframe path has always schemed its own
+                  // (`toFileUri(result.panoramaPath)`); only this one did not.
+                  uri: toFileUri(result.uri),
                   width: result.width,
                   height: result.height,
+                  // NOT re-schemed: the public result keeps the bare path.
                   captureResultObj,
                   warnings: [],
                 });
@@ -4131,12 +4170,45 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           {cropPending == null && (
             <>
               <View
-                style={[styles.pillStack, { top: pillStackTop }]}
+                // ⚠ CLEARS THE HOST'S OWN TOP CHROME TOO. The surface takes
+                // `hostChromeTopPt` and adds it to the top inset for exactly
+                // this reason (`withHostChromeTop`) — a host with a docked
+                // banner draws over anything placed at the bare inset. The
+                // pill moved out of the surface and left that term behind,
+                // so on such a host it sits under the banner. `Math.max`
+                // rather than `+`: `pillStackTop` already clears `<Camera>`'s
+                // OWN header, and the two are alternatives, not a stack.
+                style={[styles.pillStack, {
+                  top: Math.max(pillStackTop, sweep?.hostChromeTopPt ?? 0),
+                }]}
                 pointerEvents="box-none"
               >
                 {renderSharedArPill()}
               </View>
-              <View style={styles.sweepLensChipDock} pointerEvents="box-none">
+              <View
+                // ⚠ DERIVED FROM THE SURFACE'S OWN ARITHMETIC, NOT A LITERAL.
+                // This was `bottom: 132` under a comment claiming the two
+                // sides agreed "by construction" through `bottomBarOffset`.
+                // Nothing connected them: the surface's slot is computed
+                // from the insets, `bottomBarOffset` and whether it draws
+                // the shutter, and a host setting any of the three slid its
+                // bar out from under a chip that did not move. A mutation
+                // to `bottom: 0` — the chip fully behind the shutter — left
+                // the entire suite green.
+                style={[styles.sweepLensChipDock, {
+                  // ONE inset source: the surface reads
+                  // `SafeAreaInsetsContext` and `<Camera>` reads
+                  // `useSafeAreaInsets()`, which is the same provider. (The
+                  // review measured the surface's as `undefined` — that is
+                  // the render harness having no provider, not a device
+                  // fact, and it is why the two agree here without a prop.)
+                  bottom: panoLensChipBottomPt(
+                    insets.bottom,
+                    sweep?.bottomBarOffset ?? 0,
+                    sweep?.hideBuiltInControls ?? false,
+                  ),
+                }]}
+                pointerEvents="box-none">
                 {renderSharedLensChip()}
               </View>
             </>
@@ -5206,7 +5278,8 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 132,
+    // `bottom` is supplied at the call site from `panoLensChipBottomPt` —
+    // deliberately absent here so a literal cannot creep back in.
     alignItems: 'center',
   },
 });

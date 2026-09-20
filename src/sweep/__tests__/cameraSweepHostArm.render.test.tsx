@@ -37,7 +37,7 @@ import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
 import { selectCaptureDevice } from '../../camera/selectCaptureDevice';
-import { coercePanoPlusSummary } from '../panoPlusModel';
+import { coercePanoPlusSummary, panoPlusResultOf } from '../panoPlusModel';
 
 const vc = require('react-native-vision-camera') as {
   useCameraDevice: unknown;
@@ -518,18 +518,40 @@ describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
  * defers into `cropPending` exactly as a panorama does.
  */
 describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
-  const RESULT = {
-    type: 'panoplus' as const,
-    uri: 'file:///x.jpg',
-    width: 4000,
-    height: 1200,
-    sessionDir: '/tmp/pp_1',
-    arms: { rectify: true, gainMatch: true },
-    summary: coercePanoPlusSummary({}),
-    capturedAt: '2026-09-19T00:00:00.000Z',
-  };
+  /**
+   * ⚠ BUILT BY THE PRODUCTION CONSTRUCTOR, NOT BY HAND.
+   *
+   * This fixture used to hand-write `uri: 'file:///x.jpg'` — a value
+   * `panoPlusResultOf` CANNOT produce. It returns `summary.canvasPath`
+   * verbatim (panoPlusModel.ts:3808), which native gives as a BARE path.
+   * A hand-written scheme is a fixture asserting the code is already
+   * correct, and it hid a blank review on every single sweep: the stash
+   * passed `result.uri` straight to `<Image>`, which needs a scheme.
+   */
+  const CANVAS = '/data/user/0/com.x/files/panoplus/pp_1/canvas.jpg';
+  const RESULT = panoPlusResultOf(
+    coercePanoPlusSummary({
+      canvasPath: CANVAS,
+      sessionDir: '/data/user/0/com.x/files/panoplus/pp_1',
+      width: 4000,
+      height: 1200,
+    }),
+    { rectify: true, gainMatch: true, packFrames: 'all', poseSource: 'imu' },
+    '2026-09-19T00:00:00.000Z',
+  );
+  /**
+   * ⚠ `visible === true`, NOT JUST "a node with an onRetake".
+   *
+   * The review surfaces are MOUNTED for the life of the screen and hidden
+   * by a prop, so the looser predicate is true of a bare `<Camera>` with no
+   * capture at all — measured: `render({})` with nothing taken answers 1.
+   * Two cases below were passing on that, and a mutation that deletes the
+   * whole defer block (a sweep emits immediately and never opens a review)
+   * left them green.
+   */
   const review = (tree: ReactTestRenderer) => tree.root.findAll(
-    (n) => typeof n.props?.onRetake === 'function', { deep: true },
+    (n) => typeof n.props?.onRetake === 'function' && n.props?.visible === true,
+    { deep: true },
   );
 
   it('⚑ DEFERS the capture — onCapture does NOT fire before the review', async () => {
@@ -540,6 +562,15 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { onComplete(RESULT); });
     expect(seen).toHaveLength(0);          // nothing emitted yet
     expect(review(tree)).toHaveLength(1);  // …and the review is up
+    // ⚠ AND IT IS SHOWING THE PANORAMA. `<Image>` renders nothing for a
+    // scheme-less path, so a review that opens with the bare native path is
+    // the right modal around an empty frame — which is how the operator's
+    // defect #4 was "fixed". The public result keeps the bare path; only
+    // what the viewer is handed is schemed.
+    expect(RESULT.uri).toBe(CANVAS);                       // bare, by contract
+    expect(review(tree)[0].props.imageUri).toBe(`file://${CANVAS}`);
+    // …and the surface is gone behind it, so two cameras cannot be open.
+    expect(tree.root.findAllByType(PanoPlusCaptureSurface)).toHaveLength(0);
     act(() => { tree.unmount(); });
   });
 
@@ -549,8 +580,13 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    // The emit must come from CONFIRM, not from `onComplete`. Without this
+    // the count of 1 cannot tell the fix from the emit-first defect it
+    // replaced — measured: a mutation restoring emit-first kept this green.
+    expect(review(tree)).toHaveLength(1);
     act(() => { (review(tree)[0].props.onUseOriginal as (u?: string) => void)(); });
     expect(seen).toHaveLength(1);
+    expect(review(tree)).toHaveLength(0);   // …and it closed
     expect(seen[0].type).toBe('panoplus');
     expect(seen[0].ok).toBe(true);
     act(() => { tree.unmount(); });
@@ -563,6 +599,9 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
     act(() => { (review(tree)[0].props.onRetake as () => void)(); });
     expect(seen).toHaveLength(0);
+    // …and the surface comes BACK, which is what makes a retake possible.
+    expect(review(tree)).toHaveLength(0);
+    expect(tree.root.findAllByType(PanoPlusCaptureSurface)).toHaveLength(1);
     act(() => { tree.unmount(); });
   });
 

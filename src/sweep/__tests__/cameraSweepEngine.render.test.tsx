@@ -23,6 +23,7 @@
  *    channel to use one engine.
  */
 import React from 'react';
+import { StyleSheet } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import {
@@ -276,6 +277,110 @@ describe('<Camera engine="sweep">', () => {
     // AR is PREFERRED and supported, but the lens forces the non-AR arm.
     expect(surfaceProps(tree).poseSource).toBe('imu');
     act(() => { tree.unmount(); });
+  });
+
+  it('⚑ a host BAG cannot bring the clone pills back', async () => {
+    // The writers were withheld ABOVE `{...sweep}`, under a comment reading
+    // "WITHHELD UNCONDITIONALLY". A bag carrying either one overwrote the
+    // `undefined` and the surface drew its own clone again — measured, before
+    // the fix, as TWO AR pills and TWO lens chips in one tree, with the whole
+    // suite green because no test rendered the bag route.
+    //
+    // `SweepOptions` now omits both, so this is a `as never` in the test and
+    // a compile error for a real host; the runtime assertion is the belt.
+    const tree = render({
+      engine: 'sweep',
+      sweep: { onLensChange: () => {}, onPoseSourceChange: () => {} } as never,
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(surfaceProps(tree).onLensChange).toBeUndefined();
+    expect(surfaceProps(tree).onPoseSourceChange).toBeUndefined();
+    // …and exactly one of each control in the whole tree.
+    expect(tree.root.findAllByType(LensChip)).toHaveLength(1);
+    expect(tree.root.findAllByType(ARToggle)).toHaveLength(1);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ hideBuiltInShutter does not delete the sweep\'s only AR control', async () => {
+    // pano+'s documented host config is exactly `bottomBarOffset: 150,
+    // hideBuiltInShutter` (panoPlusModel.ts:2149) — the surface draws the
+    // shutter, so `<Camera>`'s is hidden. That term also gated the AR pill,
+    // which deleted it outright on the one configuration the sweep ships
+    // under: defect #1 rebuilt one layer up, and no test rendered the flag.
+    const tree = render({ engine: 'sweep', hideBuiltInShutter: true });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(tree.root.findAllByType(ARToggle)).toHaveLength(1);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …but it still hides the KEYFRAME pill, which is what it is for', async () => {
+    // NEGATIVE CONTROL. Without it the case above passes for a term simply
+    // deleted, which would put an AR pill on a keyframe host that asked for
+    // a bare viewfinder.
+    const tree = render({ hideBuiltInShutter: true });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(tree.root.findAllByType(ARToggle)).toHaveLength(0);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ the chip dock tracks the surface\'s bottom slot, not a literal', async () => {
+    // It was `bottom: 132` under a comment claiming the two sides agreed
+    // "by construction" through `bottomBarOffset`. Nothing connected them,
+    // and a mutation to `bottom: 0` — the chip fully behind the shutter —
+    // left the whole suite green.
+    const dockBottom = (t: ReactTestRenderer): number => {
+      const chip = t.root.findByType(LensChip);
+      let n: typeof chip | null = chip.parent;
+      while (n != null) {
+        const st = StyleSheet.flatten(n.props?.style) as { bottom?: number } | undefined;
+        if (st?.bottom != null) return st.bottom;
+        n = n.parent;
+      }
+      throw new Error('no dock with a bottom above the lens chip');
+    };
+    const base = render({ engine: 'sweep' });
+    await act(async () => { await Promise.resolve(); });
+    const b0 = dockBottom(base);
+    act(() => { base.unmount(); });
+
+    // A host that lifts the surface's bar must lift the chip with it.
+    const lifted = render({ engine: 'sweep', sweep: { bottomBarOffset: 150 } });
+    await act(async () => { await Promise.resolve(); });
+    expect(dockBottom(lifted)).toBe(b0 + 150);
+    act(() => { lifted.unmount(); });
+
+    // …and a host that draws its own shutter reclaims that slot.
+    const bare = render({ engine: 'sweep', sweep: { hideBuiltInControls: true } });
+    await act(async () => { await Promise.resolve(); });
+    expect(dockBottom(bare)).toBeLessThan(b0);
+    act(() => { bare.unmount(); });
+  });
+
+  it('⚑ the AR pill clears the HOST\'s docked top chrome', async () => {
+    // The surface takes `hostChromeTopPt` and folds it into the top inset
+    // (`withHostChromeTop`) precisely because a host with a docked banner
+    // paints over anything placed at the bare inset. Moving the pill out of
+    // the surface left that term behind, so on such a host it sits under
+    // the banner — invisible to every component-counting assertion.
+    const pillTop = (t: ReactTestRenderer): number => {
+      let n: ReturnType<typeof t.root.findByType> | null =
+        t.root.findByType(ARToggle).parent;
+      while (n != null) {
+        const st = StyleSheet.flatten(n.props?.style) as { top?: number } | undefined;
+        if (st?.top != null) return st.top;
+        n = n.parent;
+      }
+      throw new Error('no container with a top above the AR pill');
+    };
+    const base = render({ engine: 'sweep' });
+    await act(async () => { await Promise.resolve(); });
+    const t0 = pillTop(base);
+    act(() => { base.unmount(); });
+
+    const docked = render({ engine: 'sweep', sweep: { hostChromeTopPt: t0 + 120 } });
+    await act(async () => { await Promise.resolve(); });
+    expect(pillTop(docked)).toBe(t0 + 120);
+    act(() => { docked.unmount(); });
   });
 
   it('⚑ the chip paints the lens the ARM WILL OPEN, not the request', async () => {

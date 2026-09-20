@@ -674,12 +674,36 @@ export function panoBottomChromePt(
   bottomBarOffset: number,
   hideBuiltInControls: boolean,
 ): number {
+  return panoLensChipBottomPt(insetBottom, bottomBarOffset, hideBuiltInControls)
+    + PANO_LENS_CHIP_HEIGHT
+    + 8;
+}
+
+/**
+ * Where the LENS CHIP's slot starts, in points from the bottom edge.
+ *
+ * ⚠ EXPORTED BECAUSE `<Camera>` NOW DRAWS THE CHIP AND WAS GUESSING. Its
+ * dock was a literal `bottom: 132` under a comment claiming the two sides
+ * "agree by construction" via `bottomBarOffset` — they did not agree and
+ * nothing connected them. A hardcoded offset against a slot computed from
+ * four variables is the lens chip landing on the shutter as soon as a host
+ * sets `bottomBarOffset`, and the mutation confirmed no test could see it:
+ * `bottom: 132` → `bottom: 0` (the chip fully under the shutter) left the
+ * whole suite green.
+ *
+ * `panoBottomChromePt` is now defined in terms of THIS, so the slot the HUD
+ * stays above and the slot the chip sits in cannot drift apart. The sum is
+ * unchanged — the terms were only reordered, and addition is commutative.
+ */
+export function panoLensChipBottomPt(
+  insetBottom: number,
+  bottomBarOffset: number,
+  hideBuiltInControls: boolean,
+): number {
   return insetBottom
     + PANO_BOTTOM_BAR_INSET
     + bottomBarOffset
-    + PANO_LENS_CHIP_HEIGHT
-    + (hideBuiltInControls ? 0 : PANO_SHUTTER_HEIGHT)
-    + 8;
+    + (hideBuiltInControls ? 0 : PANO_SHUTTER_HEIGHT);
 }
 
 /**
