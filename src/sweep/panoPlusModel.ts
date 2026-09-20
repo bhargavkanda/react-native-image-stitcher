@@ -2068,10 +2068,20 @@ export interface PanoPlusPreviewLayout {
    *  {@link inner}: the published preview `contain`-fitted into it. THIS is
    *  the thing that grows — the frame does not. */
   content: { width: number; height: number };
-  /** Where {@link content} sits inside {@link inner}. The sweep's START edge
-   *  is pinned and the cross axis is centred, so the image grows out of one
-   *  fixed end of a fixed strip — which is what answers "not knowing where the
-   *  pano starts", and what Pano does. */
+  /**
+   * Where the image sits inside `inner`, in pre-rotation coordinates.
+   *
+   * BOTH AXES ARE PINNED. The sweep's START edge is pinned along the growth
+   * axis (which end that is depends on `sweepSign`), and the CROSS axis is
+   * pinned to 0 rather than centred.
+   *
+   * ⚠ THIS DOC SAID "the cross axis is centred" UNTIL 2026-09-20, which was
+   * the behaviour ab16ba3 removed — and a stale contract on the type is how
+   * the along-pin note came to state the rule and apply it to one axis in the
+   * first place. A `contain` fit shrinks the cross extent as the panorama
+   * grows, so centring it moves the strip every publish; the 20-line
+   * derivation lives at the assignment site.
+   */
   anchor: { left: number; top: number };
   /** The quarter turn the `<Image>` carries — see
    *  {@link panoPlusImageRotationDeg}. */

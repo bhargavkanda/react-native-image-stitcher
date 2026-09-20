@@ -1890,6 +1890,39 @@ describe('the live preview geometry', () => {
     for (const l of series) expect(l.anchor.left).toBe(0);
   });
 
+  it('⚑ the PANEL arm is pinned too — both of its axes', () => {
+    // ⚠ ab16ba3 PINNED BOTH ARMS OF THE ANCHOR AND ONLY ONE WAS HELD DOWN.
+    // Reverting the panel arm's cross pin alone left the whole suite green,
+    // and it walks by the same mechanism the band arm was fixed for.
+    //
+    // Reached by a latched axis-0 (vertical) sweep on a portrait host, which
+    // takes the PANEL — so `alongIsPixelY` is false and the anchor's second
+    // branch runs. That is the operator's own phone on a vertical sweep.
+    const at = (alongPx: number, sign: 1 | -1 = 1) => panoPlusPreviewLayout(
+      statusFixture({
+        axis: 0, axisLatched: true, sweepSign: sign,
+        paintedWidthPx: alongPx, canvasHeightPx: 1080,
+        previewW: 0, previewH: 0,
+      }),
+      screen,
+      'landscape-left',
+    );
+    const series = [1440, 3000, 6000, 9000, 14000, 20000].map((n) => at(n));
+    expect(series.every((l) => l.placement === 'panel')).toBe(true);
+
+    // Non-vacuity FIRST: the cross extent really does shrink here, which is
+    // the only reason a centred anchor moved.
+    const cross = series.map((l) => l.content.height);
+    expect(cross[cross.length - 1]).toBeLessThan(cross[0] - 5);
+    // …then the pin.
+    for (const l of series) expect(l.anchor.top).toBe(0);
+
+    // And the ALONG pin on this arm still tracks the sweep sign, so the
+    // cross pin cannot be "fixed" by flattening both.
+    expect(at(3000, 1).anchor.left).toBe(0);
+    expect(at(3000, -1).anchor.left).toBeGreaterThan(0);
+  });
+
   it('⚑ …and the ALONG anchor still tracks the sweep sign', () => {
     // The cross pin must not flatten the along pin it sits next to: a
     // negative sweep mirrors the along axis, so the START edge is the other

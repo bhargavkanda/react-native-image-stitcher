@@ -24,6 +24,13 @@
  */
 import React from 'react';
 import { StyleSheet } from 'react-native';
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const safeAreaMock = require('react-native-safe-area-context') as {
+  __setInsets: (
+    v: { top: number; left: number; right: number; bottom: number } | null,
+  ) => void;
+};
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import {
@@ -338,22 +345,40 @@ describe('<Camera engine="sweep">', () => {
       }
       throw new Error('no dock with a bottom above the lens chip');
     };
+    // ⚠ AN ABSOLUTE NUMBER, NOT A DELTA FROM THE CODE UNDER TEST. The first
+    // version of this case read its own baseline out of the implementation
+    // and then asserted only `b0 + 150` and `< b0` — so every term the two
+    // renders SHARE was invisible to it, and `insets.bottom` could be
+    // dropped entirely with the suite green. On an iPhone that docks the
+    // chip at 100 instead of 134, inside the shutter's own [46,122] band.
+    //
+    // 34 (inset) + 12 (PANO_BOTTOM_BAR_INSET) + 0 (offset) + 88 (shutter).
+    safeAreaMock.__setInsets({ top: 47, left: 0, right: 0, bottom: 34 });
     const base = render({ engine: 'sweep' });
     await act(async () => { await Promise.resolve(); });
-    const b0 = dockBottom(base);
+    expect(dockBottom(base)).toBe(134);
     act(() => { base.unmount(); });
 
+    // The inset term specifically: drop the safe area and the dock drops 34.
+    safeAreaMock.__setInsets({ top: 0, left: 0, right: 0, bottom: 0 });
+    const flat = render({ engine: 'sweep' });
+    await act(async () => { await Promise.resolve(); });
+    expect(dockBottom(flat)).toBe(100);
+    act(() => { flat.unmount(); });
+
+    safeAreaMock.__setInsets({ top: 47, left: 0, right: 0, bottom: 34 });
     // A host that lifts the surface's bar must lift the chip with it.
     const lifted = render({ engine: 'sweep', sweep: { bottomBarOffset: 150 } });
     await act(async () => { await Promise.resolve(); });
-    expect(dockBottom(lifted)).toBe(b0 + 150);
+    expect(dockBottom(lifted)).toBe(284);
     act(() => { lifted.unmount(); });
 
-    // …and a host that draws its own shutter reclaims that slot.
+    // …and a host that draws its own shutter reclaims that slot (the 88).
     const bare = render({ engine: 'sweep', sweep: { hideBuiltInControls: true } });
     await act(async () => { await Promise.resolve(); });
-    expect(dockBottom(bare)).toBeLessThan(b0);
+    expect(dockBottom(bare)).toBe(46);
     act(() => { bare.unmount(); });
+    safeAreaMock.__setInsets(null);
   });
 
   it('⚑ the AR pill clears the HOST\'s docked top chrome', async () => {

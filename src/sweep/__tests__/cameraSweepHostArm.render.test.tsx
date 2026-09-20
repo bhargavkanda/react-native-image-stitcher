@@ -65,7 +65,11 @@ import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
 import { selectCaptureDevice } from '../../camera/selectCaptureDevice';
-import { coercePanoPlusSummary, panoPlusResultOf } from '../panoPlusModel';
+import {
+  coercePanoPlusSummary,
+  panoPlusResultOf,
+  panoPlusVerdictSidecar,
+} from '../panoPlusModel';
 
 const vc = require('react-native-vision-camera') as {
   useCameraDevice: unknown;
@@ -660,8 +664,18 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     expect(verdict).toHaveLength(1);
     expect(verdict[0].uri)
       .toBe(`file://${RESULT.sessionDir}/host_verdict.json`);
-    // …and it is the real sidecar, not an empty file.
-    expect(JSON.parse(verdict[0].body)).toEqual(expect.any(Object));
+    // …and it is the REAL sidecar, not an empty file.
+    //
+    // ⚠ THIS WAS `expect.any(Object)`, WHICH IS TRUE OF `{}` — and of
+    // `null`, since jest's Any(Object) tests `typeof other === 'object'`.
+    // Measured: replacing the payload with the literal string '{}' left the
+    // whole suite green, so every sweep could ship a `host_verdict.json`
+    // with no schema, no dimensions and no verdict while this case passed.
+    // Asserted against the producer, so a schema change cannot silently
+    // hollow it out.
+    expect(JSON.parse(verdict[0].body))
+      .toEqual(JSON.parse(panoPlusVerdictSidecar(RESULT)));
+    expect(Object.keys(JSON.parse(verdict[0].body)).length).toBeGreaterThan(2);
     act(() => { tree.unmount(); });
   });
 

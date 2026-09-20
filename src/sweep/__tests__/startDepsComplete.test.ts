@@ -51,12 +51,56 @@ describe("PanoPlusCaptureSurface start()'s deps", () => {
   const props: string[] = (() => {
     const from = src.indexOf('function PanoPlusCaptureSurface({');
     expect(from).toBeGreaterThan(-1);
-    const to = src.indexOf('}: PanoPlusCaptureSurfaceProps', from);
-    const block = to > -1 ? src.slice(from, to) : src.slice(from, from + 4000);
+    // ⚠ THIS ANCHORED ON '}: PanoPlusCaptureSurfaceProps', WHICH IS NEVER
+    // FOUND AFTER `from` — the type name appears in the `forwardRef<>`
+    // arguments ABOVE the function, not after its parameter list, which ends
+    // `}, ref): React.JSX.Element {`. So the search returned -1 every time
+    // and the extraction silently fell back to an ARBITRARY 4000-character
+    // window: a guard reading a block whose end it had never located, which
+    // is the same silent-degradation class it exists to catch.
+    const to = src.indexOf('}, ref)', from);
+    expect(to).toBeGreaterThan(from);
+    const block = src.slice(from, to);
+    // ⚠ THE FIRST VERSION OF THIS REGEX REQUIRED A TRAILING COMMA, A
+    // SINGLE-LINE DEFAULT AND NO RENAME — and silently yielded NO MATCH for
+    // three legal, type-clean shapes:
+    //
+    //   `liveTwinBudgetMs = 0`          the LAST entry, no trailing comma
+    //   `poseSource: pose,`             a renamed destructure
+    //   `box = { w: 1, h: 2 },`         a default containing a comma
+    //
+    // A prop it cannot see is a prop it cannot require, so the guard was
+    // open on exactly the shapes a future edit is most likely to use. Proved
+    // by adding a real prop in the last position and reading it inside
+    // `start()` without declaring it: tsc clean, 1253 cases green, all three
+    // of this file's own cases ticked.
+    //
+    // Now: split on commas at DEPTH ZERO so a default containing a comma
+    // cannot end an entry, tolerate a missing trailing comma on the last
+    // one, and take the LOCAL binding after a rename (that is the name the
+    // body reads and the deps must list).
+    const src2 = decomment(block);
+    const entries: string[] = [];
+    let depth = 0;
+    let cur = '';
+    for (const ch of src2.slice(src2.indexOf('{') + 1)) {
+      if ('([{'.includes(ch)) depth += 1;
+      else if (')]}'.includes(ch)) {
+        if (depth === 0) break;
+        depth -= 1;
+      }
+      if (ch === ',' && depth === 0) { entries.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    entries.push(cur);
     const out: string[] = [];
-    for (const line of decomment(block).split('\n')) {
-      const m = /^ {2}([A-Za-z_$][\w$]*)\s*(?:=[^,]*)?,\s*$/.exec(line);
-      if (m != null) out.push(m[1]);
+    for (const raw of entries) {
+      const head = raw.split('=')[0].trim();
+      // `a: b` binds the LOCAL name `b`; a bare `a` binds `a`.
+      const name = head.includes(':')
+        ? head.slice(head.lastIndexOf(':') + 1).trim()
+        : head;
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) out.push(name);
     }
     return out;
   })();
@@ -84,6 +128,17 @@ describe("PanoPlusCaptureSurface start()'s deps", () => {
     // — the way a source-reading test dies silently.
     expect(props.length).toBeGreaterThan(20);
     expect(props).toContain('lockCamera');
+    // ⚠ PER-SHAPE, NOT JUST AN AGGREGATE. A count and one known name are
+    // both satisfied while a whole SHAPE of entry is being dropped, which
+    // is how the old regex passed its own self-check while blind to three
+    // of them. These are the shapes actually present in the component.
+    expect(props).toContain('hostChromeTopPt');   // has a default
+    expect(props).toContain('onComplete');        // no default
+    expect(props).toContain('engineOptions');     // no default, mid-list
+    // …and the LAST entry, whatever it is, must have been seen: the
+    // component's destructuring ends with one, and a regex requiring a
+    // trailing comma silently loses it.
+    expect(props[props.length - 1]).toMatch(/^[A-Za-z_$][\w$]*$/);
     expect(body.length).toBeGreaterThan(2000);
     expect(deps.length).toBeGreaterThan(15);
   });
