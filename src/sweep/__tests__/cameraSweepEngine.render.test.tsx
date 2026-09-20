@@ -499,6 +499,28 @@ describe('<Camera engine="sweep">', () => {
     act(() => { tree.unmount(); });
   });
 
+  it('⚑ leaving the sweep mid-hold does not freeze the keyframe pills', async () => {
+    // `sweepRunning` gates BOTH shared handlers, and the pills are SHARED —
+    // the keyframe tree renders the same ones. Its only release on this path
+    // was the surface's own unmount cleanup, so a host flipping `engine`
+    // mid-hold left the keyframe engine's chrome permanently inert with
+    // nothing on screen to say why.
+    const tree = render({ engine: 'sweep' });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => {
+      (surfaceProps(tree).onSweepingChange as (b: boolean) => void)(true);
+    });
+    // Flip engines WITHOUT ending the hold.
+    await act(async () => { tree.update(<Camera />); });
+    await act(async () => { await Promise.resolve(); });
+    const before = tree.root.findByType(ARToggle).props.arEnabled;
+    await act(async () => {
+      (tree.root.findByType(ARToggle).props.onToggle as () => void)();
+    });
+    expect(tree.root.findByType(ARToggle).props.arEnabled).toBe(!before);
+    act(() => { tree.unmount(); });
+  });
+
   it('⚑ the chip paints the lens the ARM WILL OPEN, not the request', async () => {
     // FIELD DEFECT, 2026-09-19: "0.5x lens does not go to that camera — shows
     // the same view as 1x." Every layer below the chip was right. On iOS the

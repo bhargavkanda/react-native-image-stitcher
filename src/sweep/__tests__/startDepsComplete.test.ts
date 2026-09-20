@@ -58,9 +58,18 @@ describe("PanoPlusCaptureSurface start()'s deps", () => {
     // and the extraction silently fell back to an ARBITRARY 4000-character
     // window: a guard reading a block whose end it had never located, which
     // is the same silent-degradation class it exists to catch.
-    const to = src.indexOf('}, ref)', from);
-    expect(to).toBeGreaterThan(from);
-    const block = src.slice(from, to);
+    // ⚠ AND THE ANCHOR IS SEARCHED IN THE DECOMMENTED SOURCE. The previous
+    // version searched the RAW text and applied `decomment` only to the
+    // already-sliced block — so a COMMENT containing the literal `}, ref)`
+    // anywhere before the real parameter-list close truncates the props
+    // list, and every prop after it becomes invisible to the guard. In a
+    // file whose comments routinely quote code, that is not a remote shape.
+    const clean = decomment(src);
+    const cleanFrom = clean.indexOf('function PanoPlusCaptureSurface({');
+    expect(cleanFrom).toBeGreaterThan(-1);
+    const to = clean.indexOf('}, ref)', cleanFrom);
+    expect(to).toBeGreaterThan(cleanFrom);
+    const block = clean.slice(cleanFrom, to);
     // ⚠ THE FIRST VERSION OF THIS REGEX REQUIRED A TRAILING COMMA, A
     // SINGLE-LINE DEFAULT AND NO RENAME — and silently yielded NO MATCH for
     // three legal, type-clean shapes:
@@ -96,11 +105,48 @@ describe("PanoPlusCaptureSurface start()'s deps", () => {
     const out: string[] = [];
     for (const raw of entries) {
       const head = raw.split('=')[0].trim();
-      // `a: b` binds the LOCAL name `b`; a bare `a` binds `a`.
-      const name = head.includes(':')
-        ? head.slice(head.lastIndexOf(':') + 1).trim()
-        : head;
-      if (/^[A-Za-z_$][\w$]*$/.test(name)) out.push(name);
+      if (head === '') continue;
+      // ⚠ A REST ELEMENT IS A HARD FAILURE, NOT A SKIP. `...rest` binds
+      // every prop added after it, so a guard that silently drops it is
+      // blind to all of them from then on — permanently, and worse the
+      // longer it survives. There is no way to enumerate what it captures
+      // from the source, so the guard refuses to pretend it can.
+      if (head.startsWith('...')) {
+        throw new Error(
+          'the props destructuring uses a REST element (' + head + '). This '
+          + 'guard cannot see what it binds, so every prop arriving through '
+          + 'it would be unchecked. Destructure the props explicitly, or '
+          + 'teach this guard to resolve the rest element.',
+        );
+      }
+      // ⚠ A NESTED DESTRUCTURE BINDS THE INNER NAMES, NOT THE OUTER ONE.
+      // `probeNest: { inner: probeInner } = {}` binds `probeInner`, and
+      // taking the text after the last `:` gave `{ inner: probeInner }`,
+      // which fails the identifier test and was dropped — so the prop was
+      // invisible. Recurse into the braces and take every local binding.
+      const names: string[] = [];
+      const collect = (h: string): void => {
+        const t = h.trim();
+        const open = t.indexOf('{');
+        if (open === -1) {
+          const n = t.includes(':') ? t.slice(t.lastIndexOf(':') + 1).trim() : t;
+          if (/^[A-Za-z_$][\w$]*$/.test(n)) names.push(n);
+          return;
+        }
+        const close = t.lastIndexOf('}');
+        const innerSrc = close > open ? t.slice(open + 1, close) : '';
+        let d = 0;
+        let cur = '';
+        for (const ch of innerSrc) {
+          if ('([{'.includes(ch)) d += 1;
+          else if (')]}'.includes(ch)) d -= 1;
+          if (ch === ',' && d === 0) { collect(cur.split('=')[0]); cur = ''; continue; }
+          cur += ch;
+        }
+        collect(cur.split('=')[0]);
+      };
+      collect(head);
+      out.push(...names);
     }
     return out;
   })();

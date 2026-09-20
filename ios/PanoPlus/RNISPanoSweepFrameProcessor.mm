@@ -471,9 +471,16 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
     // container is wrong at 0.5×. `sweepHostOwnsCamera` refuses the arm on a
     // multicam body away from the 1× baseline, which is where that belongs —
     // it is a question about which device is mounted, not about a frame.
+    // ⚠ ONE CRITICAL SECTION FOR BOTH, because they are ONE fact. Reading
+    // the fx and the width it was baked from under separate locks lets a
+    // `kCameraIdNotification` land in between and pair camera A's fx with
+    // camera B's width — a ratio built from two different cameras, which is
+    // worse than either alone and would look like a plausible number.
     double fovFx = 0.0;
+    size_t bakedW = 0;
     [g_fovLock lock];
     fovFx = g_fovFx;
+    bakedW = g_fovWidth;
     [g_fovLock unlock];
     if (!(fovFx > 0.0)) {
       atomic_fetch_add(&g_refusedNoIntrinsics, 1);
@@ -486,24 +493,38 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
         @"refusedNoIntrinsics": @(atomic_load(&g_refusedNoIntrinsics)),
       };
     }
-    // ⚠ RESCALED TO THE DELIVERED BUFFER, NOT USED RAW. `g_fovFx` is baked
-    // once at arm time from the width JS sent; `cx`/`cy` below come from the
-    // buffer in hand. Taking the four numbers of one intrinsics set from two
-    // different widths is a canvas that paints at the wrong scale and
-    // reports success — the exact failure this whole refuse-or-derive policy
-    // exists to prevent. fx scales linearly with width at a fixed FOV.
-    size_t bakedW = 0;
-    [g_fovLock lock];
-    bakedW = g_fovWidth;
-    [g_fovLock unlock];
-    if (bakedW > 0 && bakedW != pxW) {
-      fovFx = fovFx * ((double)pxW / (double)bakedW);
+    // ⚠ RESCALED TO THE DELIVERED BUFFER, AND AGAINST ITS LONG EDGE.
+    //
+    // `g_fovFx` is baked once at arm time from the width JS sent; `cx`/`cy`
+    // below come from the buffer in hand. Taking the four numbers of one
+    // intrinsics set from two different widths is a canvas that paints at
+    // the wrong scale and reports success — the exact failure the
+    // refuse-or-derive policy exists to prevent.
+    //
+    // ⚠ AND IT IS THE LONG EDGE, NOT `pxW`. An earlier version of this block
+    // scaled by `pxW / bakedW` under a comment claiming it "absorbs the
+    // rotated case". It does not, and the comment was wrong. A focal length
+    // in PIXELS is invariant to rotating the buffer: the same capture
+    // delivered 1280x720 and 720x1280 has the same fx. Baked at 1920 with a
+    // 68° hFOV (fx 1423.26):
+    //
+    //   delivered 1280x720  -> 1423.26 * 1280/1920 = 948.84   ✓ (truth 948.84)
+    //   delivered 720x1280  -> 1423.26 *  720/1920 = 533.72   ✗ (truth 948.84)
+    //
+    // `videoFieldOfView` is the HORIZONTAL field of the sensor's native
+    // landscape frame, so the fx it yields belongs to the LONG edge. Scaling
+    // by `max(w, h)` is therefore right in both orientations, and `fy = fx`
+    // holds because the pixels are square.
+    const size_t pxH = CVPixelBufferGetHeight(pixelBuffer);
+    const size_t deliveredLong = (pxW > pxH) ? pxW : pxH;
+    if (bakedW > 0 && bakedW != deliveredLong) {
+      fovFx = fovFx * ((double)deliveredLong / (double)bakedW);
       atomic_fetch_add(&g_fovWidthRescaled, 1);
     }
     fx = fovFx;
     fy = fovFx;
     cx = (double)pxW * 0.5;
-    cy = (double)CVPixelBufferGetHeight(pixelBuffer) * 0.5;
+    cy = (double)pxH * 0.5;
     atomic_fetch_add(&g_fovDerived, 1);
   } else if (CFGetTypeID(matrixRef) != CFDataGetTypeID()) {
     atomic_fetch_add(&g_refusedBadMatrix, 1);

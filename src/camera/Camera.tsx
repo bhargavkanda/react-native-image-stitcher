@@ -3487,6 +3487,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   useEffect(() => {
     if (engine !== 'sweep') setSweepEffectiveArm(null);
   }, [engine]);
+  // ⚠ AND THE HOLD FLAG WITH IT, OR BOTH PILLS FREEZE ON THE OTHER ENGINE.
+  // `sweepRunning` gates `handleARToggle` and `handleLensChange`, and those
+  // are the SHARED handlers — the keyframe tree renders the same pills. Its
+  // only release on this path is the surface's own unmount cleanup, so a
+  // host flipping `engine` mid-hold (or a surface that unmounts without
+  // reporting) would leave the keyframe engine's AR pill and lens chip
+  // permanently inert, with nothing on screen to say why.
+  useEffect(() => {
+    if (engine !== 'sweep') setSweepRunning(false);
+  }, [engine]);
   // Derived, never stored per engine: a keyframe capture has no sweep arm, so
   // reading the state directly would let a stale answer from the last sweep
   // mask the chip after the engine flipped back.
