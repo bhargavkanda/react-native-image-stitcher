@@ -315,6 +315,22 @@ describe('the arm precondition is read for the lens the sweep will open', () => 
     r.unmount();
   });
 
+  // ⚠ THE PER-LENS CALIBRATION CACHE IS NOT TESTED, AND THE GAP IS NAMED.
+  //
+  // `armPendingForIdle` is `!calibRead` and `avfIdleWanted` ANDs
+  // `!armPendingForIdle`, so clearing the snapshot on a lens flip takes the
+  // idle viewfinder DOWN until a native round trip returns — the first link
+  // of the chain the operator sees as "the camera has not opened yet" for
+  // seconds on AR→0.5×. The surface now reuses a per-lens snapshot so a flip
+  // BACK keeps the viewfinder up.
+  //
+  // This rig cannot witness it. I tried, including holding the planner open
+  // with a deferred promise: the `on:true` for the returning lens arrives
+  // within the same `settle()` whether the cache is there or not, so the
+  // assertion passes under the mutation that removes the fix. A case that
+  // cannot fail is worse than none, so there is none — the gap is the
+  // TIMING, and the rig has no clock the surface is racing against.
+
   it('the availability probe asks BOTH lenses, in the flag spelling', async () => {
     // The chip's `has0_5x`. It is a hardware question, so it is asked once at
     // mount and not re-asked on a flip — and it is asked with the flag's

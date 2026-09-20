@@ -2198,11 +2198,43 @@ describe('the live preview geometry', () => {
   // reader could "fix" the sign handling to apply before the latch and move
   // the bootstrap frame for no reason.
   it('ignores the sweep sign until the axis has latched', () => {
-    const seed = statusFixture({
-      axisLatched: false, axis: 0, sweepSign: -1, previewW: 1920, previewH: 1080,
+    // The PROPERTY is unchanged — pre-latch there is no direction to honour,
+    // so both signs must give the same anchor. Only the DEFAULT moved, and
+    // the assertion below is the property rather than the number.
+    const seed = (sign: 1 | -1) => statusFixture({
+      axisLatched: false, axis: 0, sweepSign: sign, previewW: 1920, previewH: 1080,
     });
-    const l = panoPlusPreviewLayout(seed, screen, 'landscape-left');
-    expect(l.anchor.top).toBe(0);
+    const neg = panoPlusPreviewLayout(seed(-1), screen, 'landscape-left');
+    const pos = panoPlusPreviewLayout(seed(1), screen, 'landscape-left');
+    expect(neg.anchor).toEqual(pos.anchor);
+  });
+
+  it('⚑ …and the seed starts where the latch will put it, not at the far end', () => {
+    // ⚠ THIS CASE ASSERTED `anchor.top === 0` AND THAT NUMBER WAS THE DEFECT.
+    // Pre-latch, native has `sweepSign = 1` (`rnis_pano.cpp:1000`) and only
+    // resolves it at the latch (`:3870`), so along-MIN was pinned by default
+    // — which through the portrait band's quarter turn is the SCREEN-RIGHT
+    // end. The panorama then jumped to the other end when the sign became
+    // real. Reported: "in portrait from left to right, the preview first
+    // starts on the right extreme and then moves to left."
+    //
+    // All seven of the operator's horizontal packs latch `sweepSign: -1`, so
+    // the seed now defaults THERE and the common hold never jumps.
+    const seedL = statusFixture({
+      axisLatched: false, axis: 1, sweepSign: 1,
+      paintedWidthPx: 2000, canvasHeightPx: 1080, previewW: 0, previewH: 0,
+    });
+    const latched = statusFixture({
+      axisLatched: true, axis: 1, sweepSign: -1,
+      paintedWidthPx: 2000, canvasHeightPx: 1080, previewW: 0, previewH: 0,
+    });
+    const a = panoPlusPreviewLayout(seedL, screen, 'landscape-left');
+    const b = panoPlusPreviewLayout(latched, screen, 'landscape-left');
+    // Same end before and after the latch: no jump on the dominant hold.
+    expect(a.anchor.left).toBe(b.anchor.left);
+    expect(a.anchor.top).toBe(b.anchor.top);
+    // …and it is the along-MAX end, not 0 — the thing that was wrong.
+    expect(a.anchor.top).toBeGreaterThan(0);
   });
 
   // ── THE AXIS-0 FLIP IS KNOWN, ACCEPTED, AND PINNED HERE ────────────────────

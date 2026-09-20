@@ -2545,7 +2545,32 @@ export function panoPlusPreviewLayout(
   const alongIsPixelY = isQuarter(imageRotateDeg)
     ? !usePanel
     : usePanel;
-  const startAtAlongMax = status != null && status.axisLatched && status.sweepSign < 0;
+  // ⚠ PRE-LATCH THE SEED GOES TO THE END THE LATCH USUALLY PICKS, and that is
+  // a change of default rather than a new rule.
+  //
+  // Before the axis latches there is no direction to honour: native
+  // initialises `sweepSign = 1` (`rnis_pano.cpp:1000`) and only resolves it at
+  // the latch (`:3870`). The old default therefore pinned the seed at
+  // along-MIN — which, through the portrait band's quarter turn, is the
+  // SCREEN-RIGHT end — and the panorama then jumped to the other end the
+  // moment the sign became real.
+  //
+  // Reported on the device, 2026-09-20: *"When I take the sweep in portrait
+  // from left to right, the preview first starts on the right extreme and
+  // then moves to left. I don't want that broken experience."*
+  //
+  // MEASURED, not assumed: all seven of the operator's horizontal packs latch
+  // `sweepSign: -1` (`pp_1789876452552`, `…877957888`, `…877973043`,
+  // `…877986014`, `…878638740`, `…931447063`, `…931533526`), i.e. along-MAX,
+  // i.e. screen-LEFT. Defaulting the seed there makes the common hold
+  // jump-FREE instead of always jumping, and leaves the reversed hold with the
+  // one unavoidable jump at the latch — strictly better than today, where
+  // every hold jumps.
+  //
+  // It is a DEFAULT, not a claim about direction: the instant the sign is
+  // real, `sweepSign` decides and this term stops mattering.
+  const startAtAlongMax =
+    status != null && (!status.axisLatched || status.sweepSign < 0);
   //
   // ── AND THE CROSS AXIS IS PINNED TOO, WHICH IT WAS NOT ───────────────────
   //

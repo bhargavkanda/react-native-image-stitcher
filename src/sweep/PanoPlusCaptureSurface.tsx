@@ -1076,6 +1076,18 @@ export const PanoPlusCaptureSurface = forwardRef<
    */
   const [calibEpoch, setCalibEpoch] = useState(0);
   /**
+   * The per-lens calibration snapshot, so a lens FLIP does not black the
+   * viewfinder while a native round trip runs. Dropped on `calibEpoch`, which
+   * is the one thing that can change the store under us (the in-camera
+   * gesture and the gear both bump it). Keyed by lens because the snapshot is
+   * — τ is `model | lens | W×H | fps`.
+   */
+  const calibCacheRef = useRef(new Map<string, {
+    plan: CalibPlannedFormat | null;
+    snapshot: CalibSnapshot | null;
+  }>());
+  useEffect(() => { calibCacheRef.current.clear(); }, [calibEpoch]);
+  /**
    * The operator skipped the first-run basis gesture for THIS mounting.
    *
    * ⚠ NOT PERSISTED, and see `PanoPlusBasisResolutionInput.gestureDeclined` for
@@ -1182,9 +1194,30 @@ export const PanoPlusCaptureSurface = forwardRef<
     let live = true;
     // Re-entry (a lens flip) starts a FRESH read: the previous lens's
     // snapshot must not gate this lens's arm while the new read is in flight.
-    setCalibRead(false);
-    setPlan(null);
-    setCalib(null);
+    //
+    // ⚠ …UNLESS THIS LENS HAS ALREADY BEEN READ, because clearing then costs
+    // the operator a BLACK SCREEN and nothing else. `armPendingForIdle` is
+    // `!calibRead`, and `avfIdleWanted` ANDs `!armPendingForIdle` — so
+    // clearing the snapshot takes the idle viewfinder down and the camera is
+    // not even ASKED for until the native round trip returns. On the device
+    // that read is the first link of a serial chain the operator experiences
+    // as "the camera has not opened yet" for seconds on every AR→0.5× flip,
+    // where Pano's lens change is instant because it never closes a session.
+    //
+    // The snapshot is keyed by lens and the store only changes through the
+    // gear — which bumps `calibEpoch`, a dep of this effect, and the cache is
+    // dropped there. So a flip BACK to a lens already read reuses its answer,
+    // keeps the viewfinder up, and still re-reads in the background.
+    const cached = calibCacheRef.current.get(lens);
+    if (cached !== undefined) {
+      setPlan(cached.plan);
+      setCalib(cached.snapshot);
+      setCalibRead(true);
+    } else {
+      setCalibRead(false);
+      setPlan(null);
+      setCalib(null);
+    }
     // NEVER THROWS OUTWARD. A rejection here must degrade to "this build cannot
     // answer" — which `panoPlusArmNotice` renders as an explicit ARKit fallback
     // — and never to an unhandled rejection that leaves the button in a state
@@ -1192,6 +1225,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     void calibrationForPlannedFormat({ lens }).then(
       (r) => {
         if (!live) return;
+        calibCacheRef.current.set(lens, { plan: r.plan, snapshot: r.snapshot });
         setPlan(r.plan);
         setCalib(r.snapshot);
         setCalibRead(true);
