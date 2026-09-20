@@ -765,7 +765,22 @@ function App(): React.JSX.Element {
           capturePreview={capturePreviewPayload}
           capturePreviewActions={capturePreviewActions}
           onCapturePreviewClose={closePreview}
-          frameProcessor={exampleFrameProcessor}
+          // ⚠ NOT ON THE SWEEP, AND THIS IS WHY THE HOST ARM COULD NEVER
+          // ENGAGE. `<Camera>` accepts ONE frame processor, so the sweep's
+          // own worklet cannot coexist with a host's —
+          // `sweepHostOwnsCamera` refuses the host arm outright when
+          // `hostFrameProcessorPresent` is true (`Camera.tsx:3912`).
+          //
+          // This app passed one unconditionally, so on Android the sweep
+          // ALWAYS fell back to opening its own Camera2 session, and the
+          // one measurement that would retire that second stack
+          // (`vcFramesOffered > 0` WITH `counts.painted > 0`) was
+          // unobtainable here — for a reason that has nothing to do with
+          // the design being tested.
+          //
+          // It is also correct on its own terms: this processor is the
+          // KEYFRAME stitcher, which has no work to do during a sweep.
+          frameProcessor={engine === 'sweep' ? undefined : exampleFrameProcessor}
           onCapture={handleCapture}
           onCaptureSourceChange={handleCaptureSourceChange}
           onLensChange={handleLensChange}
