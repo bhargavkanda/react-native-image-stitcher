@@ -2486,6 +2486,11 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
                 @"tailFlush":      @{
                     @"attempted":  @(st.tailFlushAttempted),
                     @"flushed":    @(st.tailFlushed),
+                    // HOW MUCH OF THE PANORAMA IT OWNS. See
+                    // `SessionStats::tailFlushColumns`: one frame, one pose,
+                    // no per-strip registration, 13-24% of the deliverable on
+                    // the operator's own packs.
+                    @"columns":    @((NSInteger)st.tailFlushColumns),
                     @"error":      st.tailFlushError.empty()
                                        ? (id)[NSNull null]
                                        : [NSString stringWithUTF8String:
@@ -2616,6 +2621,7 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
                     // nobody opens until the next field trip.
                     @"tailFlushAttempted": @(st.tailFlushAttempted),
                     @"tailFlushed":     @(st.tailFlushed),
+                    @"tailFlushColumns": @((NSInteger)st.tailFlushColumns),
                     @"tailFlushError":  st.tailFlushError.empty()
                                             ? (id)[NSNull null]
                                             : [NSString stringWithUTF8String:

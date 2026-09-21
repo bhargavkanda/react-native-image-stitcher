@@ -1045,6 +1045,17 @@ std::string Session::finalizeSweep(bool* empty) {
 
     kvBool(s, "tailFlushAttempted", true);
     kvBool(s, "tailFlushed", tailFlushed);
+    // ⚠ HOW MUCH OF THE PANORAMA IT OWNS, not just that it ran. Measured on
+    // nine of the operator's packs: the lead-out spans 353 and 449 canvas
+    // columns where every incremental strip is 1-33 px wide — 13% and 24% of
+    // the deliverable, from ONE frame, with no per-strip registration, no
+    // gain chain and one pose. That is where the band collapses and where the
+    // boundary excursion lives, and it is his "broken parts towards the
+    // edges". `ledger.jsonl` has carried the extent all along and the summary
+    // never did, so the fact only reached a reader who joined the two by
+    // hand. See `SessionStats::tailFlushColumns`.
+    kvInt(s, "tailFlushColumns",
+          tailFlushed ? (int64_t)(tail.canvasX1 - tail.canvasX0) : 0);
     kv(s, "tailFlushError");
     if (tailErr.empty()) s += "null"; else jstr(s, tailErr);
 

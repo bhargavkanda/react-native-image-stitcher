@@ -1762,6 +1762,28 @@ export interface PanoPlusSummary {
    *  that predates the counters. */
   tailFlushAttempted: boolean;
   tailFlushed: boolean;
+  /**
+   * HOW MUCH OF THE PANORAMA THE LEAD-OUT OWNS — its along-axis extent in
+   * canvas px.
+   *
+   * ⚠ A QUALITY FACT, NOT A COUNTER, and the reason `tailFlushed` alone is
+   * not enough. Measured on nine iPhone packs (2026-09-20): the lead-out
+   * spans 353 and 449 canvas columns on canvases where every incremental
+   * strip is 1–33 px wide — 13% and 24% of the finished panorama, from ONE
+   * frame, with no per-strip registration, no gain chain and one pose. That
+   * region is where the band collapses (median thickness 952 px → 5 px) and
+   * where the top-edge boundary excursion lives (peaks 863 px, confined to
+   * columns 1413–1440 of 1441).
+   *
+   * It is the operator's "broken parts towards the edges", and it is NOT
+   * free to delete: measured both ways, dropping those columns costs 24% of
+   * kept pixels on one pack and buys 9 points of painted fraction on the
+   * other. It carries real image; its QUALITY is what is wrong.
+   *
+   * 0 on a binary that predates the field, and on a sweep whose lead-out did
+   * not run — read {@link tailFlushAttempted} alongside.
+   */
+  tailFlushColumns: number;
   tailFlushError: string | null;
   droppedQueue: number;
   droppedPack: number;

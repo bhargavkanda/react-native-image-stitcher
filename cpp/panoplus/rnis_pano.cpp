@@ -6227,6 +6227,12 @@ FrameOutcome Engine::finish() {
                               &clipCols))) {
                 row.canvasX0 = px0;
                 row.canvasX1 = px1;
+                // HOW MUCH OF THE DELIVERABLE THIS ONE BLOCK OWNS. The
+                // ledger has carried it since the lead-out existed and the
+                // SUMMARY never did, so the fact only reached a reader who
+                // joined `ledger.jsonl` back to the canvas by hand. See
+                // `SessionStats::tailFlushColumns`.
+                S.st.tailFlushColumns = (int64_t)std::max(0, px1 - px0);
                 row.gainStep = gs;
                 row.gainCum = S.gainCum;
                 // The tail flush paints a WHOLE footprint, so it is where the

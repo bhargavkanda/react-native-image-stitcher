@@ -3919,3 +3919,92 @@ describe('guidance rungs carry a stable code, and a host can replace them', () =
       .headline).toBe(panoPlusGuidance(s, 'sweeping').headline);
   });
 });
+
+// ── THE LEAD-OUT, ON THE RESULT SCREEN ────────────────────────────────────
+//
+// The operator, looking at his own output: "In the output, I want you to see
+// why there is some broken parts towards the edges."  The answer was already
+// in the pack and unreadable: `ledger.jsonl`'s `tail-flush` row carries a
+// single strip spanning 353 canvas columns (pack …447063) and 449 (…973043)
+// on canvases where every incremental strip is 1–33 px wide — 13% and 24% of
+// the finished panorama, from ONE frame, with no per-strip registration, no
+// gain chain and one pose. That region is where the band collapses (median
+// thickness 952 px → 5 px) and where the top-edge excursion lives (peaks
+// 863 px, confined to columns 1413–1440 of 1441).
+//
+// ⚠ IT IS REPORTED, NOT REMOVED, and that is a measured choice rather than a
+// deferral: dropping those columns costs 24% of kept pixels on one pack and
+// buys 9 points of painted fraction on the other. The lead-out carries real
+// scene. What is wrong is its QUALITY, so the operator is told what he is
+// looking at and the verdict does not pretend it is a fault.
+describe('the lead-out states its own extent', () => {
+  const withTail = (over: Record<string, unknown> = {}) =>
+    coercePanoPlusSummary({
+      width: 1441, height: 1026,
+      counts: { seen: 300, painted: 280 },
+      unpaintedRunsAxis: 'x',
+      tailFlushAttempted: true,
+      tailFlushed: true,
+      tailFlushColumns: 193,
+      ...over,
+    });
+
+  it('coerces the column count off the summary', () => {
+    expect(withTail().tailFlushColumns).toBe(193);
+    // A binary that predates the field reads 0, not NaN — every other
+    // consumer here divides by or compares against it.
+    expect(coercePanoPlusSummary({ tailFlushed: true }).tailFlushColumns).toBe(0);
+  });
+
+  it('names the extent AND the fraction, and says it is not a fault', () => {
+    const lines = panoPlusResidualLines(
+      withTail(), { rectify: true, gainMatch: true },
+    ).join(' | ');
+    expect(lines).toContain('LEAD-OUT');
+    expect(lines).toContain('193');
+    expect(lines).toContain('13%');            // 193 / 1441
+    expect(lines).toContain('column(s)');      // a horizontal sweep
+    expect(lines).toContain('not a fault');
+  });
+
+  it('⚑ says ROWS on a vertical sweep — the axis is transposed by the bake', () => {
+    // The along axis is the output's HEIGHT for `axis === 1`, so printing
+    // "columns" unconditionally is wrong half the time. `unpaintedRunsAxis`
+    // is the field that names which, and the fraction has to use the same
+    // one or a tall panorama reports a percentage of the wrong dimension.
+    const lines = panoPlusResidualLines(
+      withTail({ width: 555, height: 1165, unpaintedRunsAxis: 'y',
+                 tailFlushColumns: 233 }),
+      { rectify: true, gainMatch: true },
+    ).join(' | ');
+    expect(lines).toContain('row(s)');
+    expect(lines).not.toContain('column(s)');
+    expect(lines).toContain('20%');            // 233 / 1165, NOT 233 / 555
+  });
+
+  it('is SILENT when the lead-out did not run', () => {
+    // Negative control. Without it the cases above pass for a line emitted
+    // unconditionally, which would put a paragraph about a region that does
+    // not exist on every short sweep.
+    const lines = panoPlusResidualLines(
+      withTail({ tailFlushed: false, tailFlushColumns: 0 }),
+      { rectify: true, gainMatch: true },
+    ).join(' | ');
+    expect(lines).not.toContain('LEAD-OUT');
+  });
+
+  it('…and the FAILURE line is still its own, separate thing', () => {
+    // `attempted && !flushed` is a fault — the panorama is SHORT. The new
+    // line is about a lead-out that succeeded. The two must never collapse
+    // into one, because one of them means "look at the edge" and the other
+    // means "the edge is missing".
+    const lines = panoPlusResidualLines(
+      withTail({ tailFlushed: false, tailFlushColumns: 0,
+                 tailFlushError: 'cv::Exception: empty ROI' }),
+      { rectify: true, gainMatch: true },
+    ).join(' | ');
+    expect(lines).toContain('TAIL FLUSH FAILED');
+    expect(lines).toContain('empty ROI');
+    expect(lines).not.toContain('LEAD-OUT');
+  });
+});

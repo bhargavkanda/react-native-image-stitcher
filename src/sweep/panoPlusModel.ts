@@ -3257,6 +3257,7 @@ export function coercePanoPlusSummary(raw: unknown): PanoPlusSummary {
     previewError: nullableStr(s.previewError),
     tailFlushAttempted: bool(s.tailFlushAttempted),
     tailFlushed: bool(s.tailFlushed),
+    tailFlushColumns: num(s.tailFlushColumns),
     tailFlushError: nullableStr(s.tailFlushError),
     droppedQueue: num(s.droppedQueue),
     droppedPack: num(s.droppedPack),
@@ -3807,6 +3808,18 @@ export function panoPlusIntegrity(summary: PanoPlusSummary): PanoPlusIntegrity {
  * numbers that decide whether the attitude-rectification hypothesis held,
  * printed where he can read them on the phone before the pack ever leaves it.
  */
+/**
+ * The along-sweep extent the panorama actually covers, in canvas px.
+ *
+ * ⚠ IT IS THE SWEEP AXIS, NOT ALWAYS THE WIDTH. A vertical sweep is
+ * transposed by the finalize bake, so its along axis is the output's HEIGHT
+ * — `unpaintedRunsAxis` is the field that names which, and printing "columns"
+ * unconditionally is wrong half the time.
+ */
+function paintedAlongExtent(summary: PanoPlusSummary): number {
+  return summary.unpaintedRunsAxis === 'y' ? summary.height : summary.width;
+}
+
 export function panoPlusResidualLines(
   summary: PanoPlusSummary,
   arms: { rectify: boolean; gainMatch: boolean },
@@ -3985,6 +3998,34 @@ export function panoPlusResidualLines(
       + (summary.tailFlushError != null ? ` (${summary.tailFlushError})` : '')
       + '. On measured packs that strip is 29-48% of the panorama, so this '
       + 'image is SHORT at the end of the sweep.',
+    );
+  }
+  // ── AND THE LEAD-OUT THAT SUCCEEDED, WHICH IS THE OTHER HALF ───────────
+  //
+  // The clause above reports the lead-out FAILING. A lead-out that RAN is
+  // reported by nothing at all — and it is the answer to the operator's own
+  // question about the output ("I want you to see why there is some broken
+  // parts towards the edges"). One frame, one pose, no per-strip
+  // registration and no gain chain, painting up to a quarter of the
+  // deliverable: that region cannot line up with the chain beside it, and
+  // the band collapses inside it.
+  //
+  // A PLAIN STATEMENT OF EXTENT, NOT A VERDICT. It is not folded into
+  // `isIntact` and it gates nothing: the lead-out is how the panorama gets
+  // its last frame's worth of scene, and on measured packs removing it costs
+  // more pixels than it saves. The operator is told what he is looking at.
+  if (summary.tailFlushed && summary.tailFlushColumns > 0) {
+    const paintedExtent = paintedAlongExtent(summary);
+    const frac = paintedExtent > 0
+      ? summary.tailFlushColumns / paintedExtent
+      : 0;
+    lines.push(
+      `LEAD-OUT: the last ${summary.tailFlushColumns} `
+      + `${summary.unpaintedRunsAxis === 'y' ? 'row' : 'column'}(s)`
+      + (frac > 0 ? ` (${(frac * 100).toFixed(0)}% of the panorama)` : '')
+      + ' came from ONE frame in a single block — no per-strip registration, '
+      + 'no gain chain, one pose. It carries real scene and is not a fault; '
+      + 'it is where the edge of the image is least likely to line up.',
     );
   }
   if (summary.frameWriteFailed > 0) {
