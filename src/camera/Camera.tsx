@@ -365,13 +365,24 @@ export type CameraCaptureResult =
    *
    * ⚠ A THIRD SHAPE, NOT A WIDENED PANORAMA. A sweep is not a keyframe
    * panorama with different settings: it produces a pack directory, per-strip
-   * integrity counters and a residual verdict, and it has no `warnings`
-   * because nothing in its path emits one. Folding it into the `'panorama'`
-   * member would give every existing consumer a set of fields that are
-   * absent on every capture they have ever seen. `type: 'panoplus'` keeps the
-   * discriminant honest and leaves existing narrowing untouched.
+   * integrity counters and a residual verdict. Folding it into the
+   * `'panorama'` member would give every existing consumer a set of fields
+   * that are absent on every capture they have ever seen. `type: 'panoplus'`
+   * keeps the discriminant honest and leaves existing narrowing untouched.
+   *
+   * ⚠ AND IT CARRIES `warnings` — the paragraph above said it did not, and
+   * that stopped being true on 2026-09-20. A sweep's result now carries the
+   * engine's own integrity verdict (`SWEEP_NOT_INTACT`) AND the two
+   * `<Camera>` observes for either engine (`LATERAL_DRIFT_FINALIZE`,
+   * `HIGH_PAN_SPEED`). The RUNTIME value had them and the TYPE did not, so a
+   * host reading `result.warnings` uniformly across the three members got a
+   * compile error on the one member whose warnings are newest — which is the
+   * same defect as an empty channel, one layer up. Declared here rather than
+   * on `PanoPlusCaptureResult` because it is `<Camera>`'s contribution: the
+   * surface's own `onComplete` result has no warnings and should not claim
+   * any.
    */
-  | (PanoPlusCaptureResult & { ok: true })
+  | (PanoPlusCaptureResult & { ok: true; warnings: CaptureWarning[] })
   | {
       ok: false;
       /** Which capture path failed. */

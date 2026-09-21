@@ -487,24 +487,37 @@ function App(): React.JSX.Element {
     // v0.16 — onCapture now fires on failure too (ok:false), mirroring
     // onError.  The error handler already surfaces it, so just bail here.
     if (!result.ok) return;
-    // A SWEEP is the third result kind and it carries none of the panorama's
-    // frame bookkeeping — no `warnings`, no frame counts, because nothing in
-    // its path produces them. It writes a PACK; `sessionDir` is where the
-    // strips, the poses and the meta live, and that is what a host wants.
-    if (result.type === 'panoplus') {
-      // eslint-disable-next-line no-console
-      console.log(
-        `[example] sweep complete · ${result.width}×${result.height} · `
-        + `pack ${result.sessionDir}`,
-      );
-      return;
-    }
+    // ⚠ WARNINGS FIRST, AND A SWEEP HAS THEM NOW. This block used to sit
+    // BELOW the `panoplus` early return, under a comment claiming a sweep
+    // "carries none of the panorama's frame bookkeeping — no `warnings`".
+    // That stopped being true on 2026-09-20: a sweep's result carries the
+    // engine's own integrity verdict AND the two `<Camera>` observes for
+    // either engine (`LATERAL_DRIFT_FINALIZE`, `HIGH_PAN_SPEED`). The
+    // return above them made the array invisible on the one engine whose
+    // warnings are newest — so the channel looked empty rather than
+    // unread.
     if (result.warnings.length > 0) {
       // eslint-disable-next-line no-console
       console.warn(
         '[example] capture warnings',
         result.warnings.map((w) => `${w.code}: ${w.message}`),
       );
+    }
+    // A SWEEP is the third result kind. It writes a PACK; `sessionDir` is
+    // where the strips, the poses and the meta live, and that is what a host
+    // wants. `tailFlushColumns` is printed because it is the ONLY channel
+    // this app has for the lead-out's extent — `panoPlusResidualLines`'s
+    // LEAD-OUT sentence renders through `PanoPlusResultView`, which
+    // `<Camera>` no longer mounts, and `host_verdict.json` needs
+    // `expo-file-system`, which this example does not depend on.
+    if (result.type === 'panoplus') {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[example] sweep complete · ${result.width}×${result.height} · `
+        + `pack ${result.sessionDir} · lead-out `
+        + `${result.summary.tailFlushColumns} col(s)`,
+      );
+      return;
     }
     // Panoramas are reviewed IN the SDK's crop/preview surface (rectCrop or
     // showPreview) — that screen IS the preview, so don't pop a second
@@ -752,6 +765,21 @@ function App(): React.JSX.Element {
           panMode={panMode}
           rectCrop={rectCrop}
           showPreview={showPreview}
+          // ⚠ OPT IN TO THE WALL-CLOCK CAP, because its default is 0 = OFF
+          // and a demo that never sets it leaves the countdown pill and the
+          // cap itself unreachable — including on the sweep, where both
+          // arrived on 2026-09-20. 20 s is long enough not to interrupt a
+          // normal hold and short enough to reach deliberately.
+          maxPanDurationMs={20000}
+          // ⚠ THE CHANNEL EVERY GUARD RAIL REPORTS THROUGH, and it was wired
+          // to nothing. A rotation mid-capture and a sideways drift too
+          // short to stitch both end here — and since a guard-rail abandon
+          // is deliberately NOT routed to `onError` any more, this is the
+          // only way to see that the host was told at all.
+          onCaptureAbandoned={(reason) => {
+            // eslint-disable-next-line no-console
+            console.warn('[example] capture abandoned —', reason);
+          }}
           // Time-budget force-accept ON at 1.5 s — a keyframe is accepted on
           // that interval even if the novelty gate hasn't tripped, so slow/
           // static pans don't leave gaps.  Adjust via the ⚙️ Keyframe interval.
