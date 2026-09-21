@@ -213,6 +213,23 @@ internal object PanoPlusLiveNative {
         }
     }
 
+    /** The width of the last frame ANY arm handed the engine. 0 before the
+     *  first. See the note in [ingest]. */
+    @Volatile var deliveredW: Int = 0
+        private set
+
+    /** The height of the last frame ANY arm handed the engine. */
+    @Volatile var deliveredH: Int = 0
+        private set
+
+    /** Forget the latch between sweeps, so a pack can never report the
+     *  PREVIOUS sweep's frame size as its own. Called from the recorder's
+     *  start. */
+    fun resetDeliveredSize() {
+        deliveredW = 0
+        deliveredH = 0
+    }
+
     /**
      * One frame into the engine. ~30 ms on the A35; call it from the recorder's
      * engine thread and never from the camera callback.
@@ -251,6 +268,25 @@ internal object PanoPlusLiveNative {
         // a volatile read plus a branch that can only answer what `start`
         // already answered. A sweep whose start refused never reaches this.
         if (!loaded()) return PanoLiveFrameResult(0)
+        // ⚠ THE DELIVERED FRAME SIZE, LATCHED HERE BECAUSE THIS IS THE ONE
+        // PLACE EVERY ARM PASSES THROUGH.
+        //
+        // The pack reported frame dimensions from `outSize` — the RECORDER's
+        // own Camera2 choice — so on the two PLUGIN arms, where the recorder
+        // opens no camera, `capture.width`/`height` came out NULL. Measured
+        // on the operator's A35: three consecutive sweeps on the vc-plugin
+        // arm painted the MOST strips of any arm (125-131) and produced the
+        // SMALLEST canvases (331x422, 335x406, 533x336), and the pack could
+        // not say what resolution those frames were. "The output is 500x300,
+        // what resolution are the frames?" was unanswerable from the pack,
+        // which is the whole point of the pack.
+        //
+        // Latched at the ONE function all three call sites funnel through
+        // (the recorder's Camera2 path, `PanoPlusArFramePlugin`, and
+        // `PanoPlusVcFrameSink`) rather than at each of them, so a fourth arm
+        // reports its size without being told to.
+        deliveredW = width
+        deliveredH = height
         // A malformed quaternion is the IDENTITY, never a padded guess: three
         // numbers are not a rotation, and the engine's rectification would
         // silently apply whatever the padding happened to mean.

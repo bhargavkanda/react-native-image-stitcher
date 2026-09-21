@@ -2598,6 +2598,9 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
     // ════════════════════════════════════════════════════════════════════
 
     fun start(promise: Promise) {
+        // A latch from the PREVIOUS sweep must never be reported as this
+        // one's — see `PanoPlusLiveNative.deliveredW`.
+        PanoPlusLiveNative.resetDeliveredSize()
         state.set(ST_OPENING)
         startWallMs = System.currentTimeMillis().toDouble()
         startElapsedNs = SystemClock.elapsedRealtimeNanos()
@@ -5660,8 +5663,25 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             .b("opensCamera2Client", camera2RequestIntended)
             .s("cameraId", chosen?.id)
             .s("physicalId", boundPhysicalId)
+            // ⚠ `outSize` IS THE RECORDER'S OWN CAMERA2 CHOICE, so it is null
+            // on both plugin arms — where the recorder opens no camera. Those
+            // two keys therefore answer "what did the RECORDER pick", not
+            // "what resolution were the frames", and on the arms that paint
+            // the smallest canvases they answered nothing at all.
             .i("width", outSize?.width)
             .i("height", outSize?.height)
+            // …so the DELIVERED size is reported separately, latched inside
+            // `PanoPlusLiveNative.ingest` — the one function every arm's
+            // frames pass through. This is the number that, with
+            // `config.canvasScale`, actually bounds the output.
+            .i(
+                "deliveredFrameWidth",
+                PanoPlusLiveNative.deliveredW.takeIf { it > 0 },
+            )
+            .i(
+                "deliveredFrameHeight",
+                PanoPlusLiveNative.deliveredH.takeIf { it > 0 },
+            )
             .i("sensorOrientationDeg", sensorOrientation)
             .s("sizeChoiceReason", sizeChoiceReason)
             .s("fpsRange", fpsRange?.toString())
