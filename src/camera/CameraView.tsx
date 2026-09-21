@@ -436,13 +436,18 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // "size changed".  On iOS and on builds without the probe `pending` is
   // never true, so this is the existing `!device` placeholder and nothing
   // else.
-  if (!device || hardware.pending) {
-    return (
-      <View style={[styles.placeholder, style]} accessibilityLabel="Camera initialising">
-        <Text style={styles.placeholderText}>Initialising camera…</Text>
-      </View>
-    );
-  }
+  //
+  // ⚠ THE PLACEHOLDER LIVES INSIDE THE MEASURED ROOT, NOT INSTEAD OF IT.  It
+  // used to be its own root `<View>`; when the wait ended React reconciled
+  // that View INTO the real root (same type, same position) rather than
+  // remounting, `onLayout` arrived as a prop update, and RN only fires
+  // onLayout on a layout CHANGE — none came, `size` stayed null, and the
+  // "fill until the first onLayout" fallback below became permanent.  Seen
+  // on the A35 as a full-screen (2.09:1) non-AR sweep viewfinder where the
+  // 4:3 letterbox should have been.  With the hardware-list hold every cold
+  // Android mount takes this path, so the root and its onLayout must be the
+  // same element from the first render.
+  const ready = device != null && !hardware.pending;
 
   // Capture aspect ratio (W÷H) in the sensor's native landscape
   // orientation (so > 1).  Falls back to 4:3 until the format resolves.
@@ -471,6 +476,16 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
       heightIfFullWidth <= size.h
         ? { width: size.w, height: heightIfFullWidth }
         : { width: size.h * contentAspect, height: size.h };
+  }
+
+  if (!ready) {
+    return (
+      <View style={[styles.root, style]} onLayout={onRootLayout}>
+        <View style={styles.placeholder} accessibilityLabel="Camera initialising">
+          <Text style={styles.placeholderText}>Initialising camera…</Text>
+        </View>
+      </View>
+    );
   }
 
   return (

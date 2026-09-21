@@ -80,6 +80,29 @@ describe('<CameraView> mounted before its device arrives (the keyframe tree, the
     act(() => { tree.unmount(); });
   });
 
+  it('FAILS BEFORE: a layout measured WHILE the probe is pending still letterboxes to 4:3', async () => {
+    // On a phone the root is laid out once, during the wait, and never again
+    // at the same size. If the placeholder is a different root View, that
+    // layout is lost and the camera stays at the absoluteFill fallback —
+    // the full-screen sweep viewfinder the operator reported.
+    let resolveProbe!: (r: unknown) => void;
+    (NativeModules as Record<string, unknown>).RNSSweepProbe = {
+      probeCapabilities: () => new Promise((res) => { resolveProbe = res; }),
+    };
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<CameraView device={DEVICE as never} keyframeQualityCapture />); });
+    expect(inner(tree)).toHaveLength(0); // held
+    const root = tree.root.children[0] as { props: { onLayout?: (e: unknown) => void } };
+    expect(typeof root.props.onLayout).toBe('function'); // the root is the measured one, even now
+    act(() => { root.props.onLayout!({ nativeEvent: { layout: { width: 1080, height: 2254 } } }); });
+    await act(async () => { resolveProbe(HW_REPORT); await Promise.resolve(); await Promise.resolve(); });
+    // portrait container, 4:3 sensor → the largest 3:4 box: 1080 x 1440, not the full 2254
+    const style = inner(tree)[0].props.style as { width?: number; height?: number };
+    expect(style.width).toBe(1080);
+    expect(style.height).toBe(1440);
+    act(() => { tree.unmount(); });
+  });
+
   it('CHARACTERIZATION: with no probe module the device-arrival render mounts 640x480 and warns', () => {
     // Fail-open: no probe, no hold, the old pick, and the (true) warning.
     let tree!: ReactTestRenderer;
