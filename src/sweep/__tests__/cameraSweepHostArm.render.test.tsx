@@ -65,6 +65,7 @@ import { NativeModules } from 'react-native';
 
 import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
+import { __resetHardwareVideoSizesCache } from '../../camera/androidHardwareVideoSizes';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
 import { selectCaptureDevice } from '../../camera/selectCaptureDevice';
 import {
@@ -1008,6 +1009,102 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // …and the PACK's own path is untouched, which is why the scheming
     // happens at the emit boundary and not in `panoPlusResultOf`.
     expect(RESULT.uri).toBe(CANVAS);
+    act(() => { tree.unmount(); });
+  });
+});
+
+
+// ════════════════════════════════════════════════════════════════════════
+// ONE CAMERA, ONE FORMAT — pano and pano+ pick the SAME stream
+//
+// The objective is one `<Camera>` whose tap takes a photo through the session
+// the hold sweeps from. So the format the sweep cell's host preview gets must
+// be the format the keyframe cell gets, on the same device — and both must be
+// the hardware's 1440x1080, not vision-camera's 640x480. The picker's unit
+// tests prove the POLICY; this proves the WIRING reaches both cells.
+// ════════════════════════════════════════════════════════════════════════
+describe('⚑ one camera, one format — the hardware list reaches BOTH cells', () => {
+  const VC_FORMATS = ([[720, 480], [640, 480], [1280, 720], [1920, 1080], [3840, 2160]] as const)
+    .flatMap(([vw, vh]) => ([[4080, 3060], [1920, 1440], [1440, 1080]] as const)
+      .map(([pw, ph]) => ({
+        photoWidth: pw, photoHeight: ph, videoWidth: vw, videoHeight: vh,
+        maxFps: 30, supportsVideoHdr: false,
+      })));
+  const HW_REPORT = { cameras: { cameras: [{ id: 'back-0', streamConfig: { yuv420Sizes: [
+    { width: 1920, height: 1440, maxFps: 30 }, { width: 1440, height: 1080, maxFps: 30 },
+    { width: 960, height: 720, maxFps: 30 }, { width: 640, height: 480, maxFps: 30 },
+  ] } }] } };
+
+  const innerFormat = (t: ReactTestRenderer) => {
+    const inner = t.root.findAllByType(
+      (require('react-native-vision-camera') as { Camera: React.ComponentType }).Camera,
+    );
+    if (inner.length !== 1) throw new Error(`expected one vision-camera <Camera>, found ${inner.length}`);
+    return inner[0].props.format as { videoWidth: number; videoHeight: number; photoWidth: number; photoHeight: number };
+  };
+  const withProbe = (report: unknown) => {
+    (NativeModules as Record<string, unknown>).RNSSweepProbe = {
+      probeCapabilities: () => Promise.resolve(report),
+    };
+  };
+
+  beforeEach(() => {
+    __resetHardwareVideoSizesCache();
+    const withFormats = { ...DEVICE, formats: VC_FORMATS };
+    vc.useCameraDevice = () => withFormats;
+    vc.useCameraDevices = () => [withFormats];
+  });
+  afterEach(() => {
+    delete (NativeModules as Record<string, unknown>).RNSSweepProbe;
+    __resetHardwareVideoSizesCache();
+  });
+
+  it('FAILS BEFORE: the SWEEP cell picks the hardware 1440x1080 at 4:3', async () => {
+    withProbe(HW_REPORT);
+    const tree = await render();
+    await settle(50);
+    const fmt = innerFormat(tree);
+    expect([fmt.videoWidth, fmt.videoHeight]).toEqual([1440, 1080]);
+    expect(fmt.photoWidth / fmt.photoHeight).toBeCloseTo(4 / 3, 2);
+    act(() => { tree.unmount(); });
+  });
+
+  it('FAILS BEFORE: the KEYFRAME cell on the SAME device picks the SAME 1440x1080', async () => {
+    withProbe(HW_REPORT);
+    const tree = await render();
+    await setEngine(tree, 'keyframe');
+    act(() => { jest.advanceTimersByTime(2000); });
+    await settle(50);
+    expect(cameraViews(tree)).toHaveLength(1);
+    expect([innerFormat(tree).videoWidth, innerFormat(tree).videoHeight]).toEqual([1440, 1080]);
+    act(() => { tree.unmount(); });
+  });
+
+  it('CHARACTERIZATION: without the probe both cells stay on vision-camera\'s 640x480 — fail-open', async () => {
+    // No RNSSweepProbe in NativeModules: the list is as vision-camera gave it,
+    // the mount is not held, and the pick is the old one. Documents the
+    // fail-open contract rather than the fix.
+    const tree = await render();
+    expect([innerFormat(tree).videoWidth, innerFormat(tree).videoHeight]).toEqual([640, 480]);
+    await setEngine(tree, 'keyframe');
+    act(() => { jest.advanceTimersByTime(2000); });
+    expect([innerFormat(tree).videoWidth, innerFormat(tree).videoHeight]).toEqual([640, 480]);
+    act(() => { tree.unmount(); });
+  });
+
+  it('holds the mount until the probe answers, then mounts ONCE with the final format', async () => {
+    // A pick from the incomplete list followed by a re-pick would restart the
+    // session and make a sweep started in between refuse every frame.
+    let resolveProbe!: (r: unknown) => void;
+    (NativeModules as Record<string, unknown>).RNSSweepProbe = {
+      probeCapabilities: () => new Promise((res) => { resolveProbe = res; }),
+    };
+    const tree = await render();
+    expect(tree.root.findAllByType(
+      (require('react-native-vision-camera') as { Camera: React.ComponentType }).Camera,
+    )).toHaveLength(0);
+    await act(async () => { resolveProbe(HW_REPORT); await Promise.resolve(); await Promise.resolve(); });
+    expect([innerFormat(tree).videoWidth, innerFormat(tree).videoHeight]).toEqual([1440, 1080]);
     act(() => { tree.unmount(); });
   });
 });

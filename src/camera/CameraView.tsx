@@ -42,6 +42,10 @@ import {
   type CameraProps,
 } from 'react-native-vision-camera';
 
+import {
+  augmentFormatsWithHardwareSizes,
+  useAndroidHardwareVideoSizes,
+} from './androidHardwareVideoSizes';
 import { exposureCapToFps, pickCaptureFormatDetailed } from './pickCaptureFormat';
 
 
@@ -310,9 +314,19 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // 1920×1440 **@60 fps** one — visibly jittery.  Keyframes are clamped to
   // 640/1280 px before stitching, so the extra video resolution buys nothing
   // here; a 60 fps stream just looks right.  We opt the panorama camera in.
+  // ⚠ COMPLETE THE LIST BEFORE PICKING FROM IT.  On Android vision-camera's
+  // `formats` carries exactly one 4:3 video size (640x480, a CameraX
+  // constant) while the hardware offers 1440x1080 and above; the native side
+  // runs whatever size it is handed.  See androidHardwareVideoSizes.ts.  The
+  // hook fails open — iOS, no probe, probe error — to the list as given.
+  const hardware = useAndroidHardwareVideoSizes(device?.id);
   const formatPick = useMemo(
     () => {
-      const picked = pickCaptureFormatDetailed(device?.formats ?? [], {
+      const formats = augmentFormatsWithHardwareSizes(
+        device?.formats ?? [],
+        hardware.sizes,
+      );
+      const picked = pickCaptureFormatDetailed(formats, {
         // highResCapture (document scanning) raises the photo cap so the
         // device's largest 4:3 still is selected (e.g. 4080×3060 on the A35,
         // which 4032 was excluding).  preferHighFps stays on, so the chosen
@@ -340,7 +354,14 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
       });
       return picked;
     },
-    [device, highResCapture, captureDepthData, keyframeQualityCapture, exposureCapFps],
+    [
+      device,
+      hardware.sizes,
+      highResCapture,
+      captureDepthData,
+      keyframeQualityCapture,
+      exposureCapFps,
+    ],
   );
   const format = formatPick.format;
 
@@ -400,7 +421,14 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     );
   }, []);
 
-  if (!device) {
+  // The hardware probe is held for, once per camera, on builds that carry
+  // it: picking from the incomplete list and re-picking when the answer
+  // lands would RESTART the session (a format change is a reconfigure), and
+  // a sweep that started in between would refuse every frame as
+  // "size changed".  On iOS and on builds without the probe `pending` is
+  // never true, so this is the existing `!device` placeholder and nothing
+  // else.
+  if (!device || hardware.pending) {
     return (
       <View style={[styles.placeholder, style]} accessibilityLabel="Camera initialising">
         <Text style={styles.placeholderText}>Initialising camera…</Text>
