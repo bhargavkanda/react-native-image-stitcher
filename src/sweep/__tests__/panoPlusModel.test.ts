@@ -32,6 +32,7 @@ import {
   PANO_PLUS_PLUGIN_KEY,
   barePath,
   coercePanoPlusSummary,
+  panoPlusCaptureWarnings,
   fileUri,
   newPanoPlusSessionId,
   panoPlusCameraLockLine,
@@ -73,7 +74,7 @@ import {
   panoPlusStatusSessionId,
   readPanoPlusStatus,
 } from '../panoPlusModel';
-import type { PanoPlusStatus } from '../panoPlusTypes';
+import type { PanoPlusStatus, PanoPlusSummary } from '../panoPlusTypes';
 
 /** A healthy mid-sweep status, as native emits it.
  *
@@ -3712,5 +3713,209 @@ describe('the layout starts below the inset it is given', () => {
     );
     expect(big.hud.top).toBeGreaterThan(small.hud.top);
     expect(big.hud.top).toBeGreaterThanOrEqual(160);
+  });
+});
+
+// ── THE HOST WARNING CHANNEL — A DEFECT TEST, NOT A CONFIDENCE TEST ────────
+//
+// `panoPlusCaptureWarnings` is what puts a banner on the review screen and a
+// coded warning on `onCapture(result).warnings`. Its own header says a
+// warning "must name a DEFECT" and explicitly rules out NOT MEASURED — and
+// then it read `hasCuts` / `hasBanding`, which CARRY the not-measured clause
+// inside them (`breachesBars || (painted && !seamMeasured)`). So it did the
+// exact thing the paragraph forbids, in both directions at once, and nothing
+// in the suite could tell: every case fed it a pack that was either clean on
+// every axis or broken on the one being tested.
+//
+// Each case below is one cell of the truth table, and the four that are new
+// are the four the old predicate got wrong.
+describe('panoPlusCaptureWarnings — what reaches the host, and what must not', () => {
+  /** A pack that painted, with a fully-measured, in-bar seam block. */
+  const clean = (over: Record<string, unknown> = {}): PanoPlusSummary =>
+    coercePanoPlusSummary({
+      width: 4000,
+      height: 1200,
+      counts: { seen: 300, painted: 280, gapBreak: 0 },
+      unpaintedRuns: [],
+      unpaintedColumns: 0,
+      clipping: { frames: 0, columns: 0, maxTopPx: 0, maxBottomPx: 0, canvasH: 1200, heightGrowths: 0 },
+      seam: {
+        worstBandP50Px: 0.10, worstBandP95Px: 0.30, worstBandMaxPx: 0.80,
+        crossBandDivergenceNormPx: 0.4,
+        canvasJogP50Px: 0.10, canvasJogP95Px: 0.40, canvasJogMaxPx: 1.00,
+        boundaries: 279, coverageFrac: 1.0, canvasJogSamples: 280,
+        measured: true, integrityFailed: false,
+        photoStepP50DN: 0.2, photoStepP95DN: 0.4, photoStepMaxDN: 1.1,
+        photoSamples: 279, photoDriftLocalPct: 1.0, photoDriftTotalPct: 1.5,
+      },
+      gain: { cumEnd: 1.0, leak: 0, cumClamp: 0, localP2PPct: 1.0, rangePct: 2.0 },
+      ...over,
+    });
+  const codes = (s: PanoPlusSummary): string[] =>
+    panoPlusCaptureWarnings(s).map((w) => w.code);
+
+  it('a clean pack carries NOTHING', () => {
+    expect(codes(clean())).toEqual([]);
+  });
+
+  it('⚑ …and so does a SHORT one whose seams were never measured', () => {
+    // (a) THE FALSE POSITIVE. A short sweep ships `seam.boundaries === 0`, so
+    // `seamMeasured` is false, so `hasCuts` is TRUE with no cut anywhere —
+    // and a perfectly good panorama got `⚠ Seams NOT MEASURED — this pack
+    // cannot be called clean` on the review screen. `isIntact` is false here
+    // and SHOULD be: the pack cannot be CALLED clean. That is a statement
+    // about evidence, and it is not a defect to show an operator.
+    const short = clean({
+      seam: { boundaries: 0, canvasJogSamples: 0, measured: false, photoSamples: 0 },
+    });
+    expect(panoPlusIntegrity(short).isIntact).toBe(false);   // …still not "clean"
+    expect(panoPlusIntegrity(short).hasCuts).toBe(true);     // …the old predicate
+    expect(codes(short)).toEqual([]);                        // …and no banner
+  });
+
+  it('⚑ an EMPTY capture warns — the one pack with nothing in it said nothing', () => {
+    // (b) THE FALSE NEGATIVE. A session that painted no strips satisfies
+    // every clause below vacuously: no holes, nothing clipped, no boundaries
+    // to be out of bar. `isIntact` has the `!empty` clause; the host channel
+    // did not, so the capture with nothing in it at all was the one that
+    // warned about nothing at all.
+    const empty = clean({ counts: { seen: 40, painted: 0, gapBreak: 0 } });
+    expect(codes(empty)).toEqual(['SWEEP_NOT_INTACT']);
+    expect(panoPlusCaptureWarnings(empty)[0]!.message).toContain('Nothing was painted');
+  });
+
+  it('⚑ the ENGINE\'s own verdict warns — it saw the samples this layer does not', () => {
+    // (c) `seam.integrityFailed` is computed where the samples are and is
+    // folded into `isIntact`. It was unreachable from outside
+    // `panoPlusIntegrity`, so the host channel could not honour the one
+    // verdict with the whole picture.
+    const engineFailed = clean({
+      seam: {
+        worstBandP50Px: 0.10, worstBandP95Px: 0.30, worstBandMaxPx: 0.80,
+        crossBandDivergenceNormPx: 0.4,
+        canvasJogP50Px: 0.10, canvasJogP95Px: 0.40, canvasJogMaxPx: 1.00,
+        boundaries: 279, coverageFrac: 1.0, canvasJogSamples: 280,
+        measured: true, integrityFailed: true, integrityReason: 'engine says no',
+        photoStepP95DN: 0.4, photoStepMaxDN: 1.1, photoSamples: 279,
+        photoDriftLocalPct: 1.0,
+      },
+    });
+    expect(codes(engineFailed)).toEqual(['SWEEP_NOT_INTACT']);
+    expect(panoPlusCaptureWarnings(engineFailed)[0]!.message)
+      .toContain('engine reported');
+  });
+
+  it('a HOLE warns, and names the break', () => {
+    const holed = clean({
+      unpaintedColumns: 240,
+      unpaintedRuns: [[100, 340]],
+      unpaintedRunsAxis: 'x',
+    });
+    expect(codes(holed)).toEqual(['SWEEP_NOT_INTACT']);
+    expect(panoPlusCaptureWarnings(holed)[0]!.message).toContain('Breaks');
+  });
+
+  it('TRUNCATION warns, and names the lost height', () => {
+    const clipped = clean({
+      clipping: { frames: 12, columns: 300, maxTopPx: 40, maxBottomPx: 0, canvasH: 1200, heightGrowths: 0 },
+    });
+    expect(codes(clipped)).toEqual(['SWEEP_NOT_INTACT']);
+    expect(panoPlusCaptureWarnings(clipped)[0]!.message).toContain('Truncated');
+  });
+
+  it('a MEASURED cut warns — the half of hasCuts that is evidence', () => {
+    const cut = clean({
+      seam: {
+        worstBandP50Px: 4.0, worstBandP95Px: 9.0, worstBandMaxPx: 22.0,
+        crossBandDivergenceNormPx: 0.4,
+        canvasJogP50Px: 0.1, canvasJogP95Px: 0.4, canvasJogMaxPx: 1.0,
+        boundaries: 279, coverageFrac: 1.0, canvasJogSamples: 280,
+        measured: true, integrityFailed: false,
+        photoStepP95DN: 0.4, photoStepMaxDN: 1.1, photoSamples: 279,
+        photoDriftLocalPct: 1.0,
+      },
+    });
+    expect(codes(cut)).toEqual(['SWEEP_NOT_INTACT']);
+    expect(panoPlusCaptureWarnings(cut)[0]!.message).toContain('Cuts');
+  });
+
+  it('MEASURED banding warns — the half of hasBanding that is evidence', () => {
+    const banded = clean({
+      gain: { cumEnd: 1.0, leak: 0, cumClamp: 0, localP2PPct: 40.0, rangePct: 60.0 },
+    });
+    expect(codes(banded)).toEqual(['SWEEP_NOT_INTACT']);
+    expect(panoPlusCaptureWarnings(banded)[0]!.message).toContain('Banding');
+  });
+});
+
+// ── THE SWEEP HUD SPEAKS THE HOST'S LANGUAGE ──────────────────────────────
+//
+// `<Camera>` localises every capture-time string the KEYFRAME engine draws
+// through its `guidanceCopy` prop. On a sweep that prop reached the REC
+// banner and the two guard-rail modals — everything `<Camera>` draws itself —
+// and stopped at the surface's edge. The HUD, which is the text an operator
+// actually reads during a pano+ hold, was hardcoded English on a screen where
+// the rest was translated.
+//
+// The override is keyed by RUNG, not by prose, so a translation is not
+// silently orphaned the next time a sentence is reworded. That key is also
+// the first thing a test can pin about the ladder: every assertion about rung
+// ORDER here used to be a string match on the copy, so rewording a sentence
+// reddened cases that were not about wording.
+describe('guidance rungs carry a stable code, and a host can replace them', () => {
+  it('names the rung, not just the sentence', () => {
+    expect(panoPlusGuidance(null, 'starting').code).toBe('metering');
+    expect(panoPlusGuidance(null, 'finishing').code).toBe('finishing');
+    expect(panoPlusGuidance(null, 'sweeping').code).toBe('waiting-frames');
+    expect(panoPlusGuidance(statusFixture(), 'sweeping').code).toBe('panning');
+    expect(panoPlusGuidance(statusFixture({ speed: 'fast' }), 'sweeping').code)
+      .toBe('too-fast');
+    expect(panoPlusGuidance(statusFixture({ gapBreak: 3 }), 'sweeping').code)
+      .toBe('gap-break');
+  });
+
+  it('a host sentence REPLACES the default, per rung', () => {
+    const copy = { 'too-fast': { headline: 'Trop rapide — ralentissez' } };
+    const fast = panoPlusGuidance(
+      statusFixture({ speed: 'fast' }), 'sweeping', { copy },
+    );
+    expect(fast.headline).toBe('Trop rapide — ralentissez');
+    // PARTIAL AT BOTH LEVELS: a rung with only a headline keeps its default
+    // detail, so a host translating one sentence does not silently blank the
+    // paragraph under it.
+    expect(fast.detail).toBe(panoPlusGuidance(
+      statusFixture({ speed: 'fast' }), 'sweeping',
+    ).detail);
+    expect(fast.detail).not.toBe('');
+    // …and every OTHER rung is untouched.
+    expect(panoPlusGuidance(statusFixture(), 'sweeping', { copy }).headline)
+      .toBe(panoPlusGuidance(statusFixture(), 'sweeping').headline);
+  });
+
+  it('a rung reached through the ceiling decorator is overridable too', () => {
+    // ⚠ `withCeiling` REBUILT ITS OBJECT FIELD BY FIELD, so a field it did
+    // not know about was silently dropped — which for `code` would make
+    // every ceiling-noted rung unlocalisable AND unnameable in a test, and
+    // those are exactly the rungs that fire on the long aisle walk.
+    const near = statusFixture({
+      canvasHeightPx: 2040, gapBreak: 2, clippedFrames: 0,
+    });
+    const g = panoPlusGuidance(near, 'sweeping', {
+      canvasMaxHeightPx: 2048, canvasScale: 1,
+      copy: { 'gap-break': { headline: 'Rupture dans le panorama' } },
+    });
+    expect(g.code).toBe('gap-break');
+    expect(g.headline).toBe('Rupture dans le panorama');
+    // The ceiling note still rides on the detail — the override replaces the
+    // rung's own sentence, not the decoration the ladder added to it.
+    expect(g.detail.length).toBeGreaterThan(0);
+  });
+
+  it('no copy at all is byte-identical to before', () => {
+    const s = statusFixture({ speed: 'fast' });
+    expect(panoPlusGuidance(s, 'sweeping', {}))
+      .toEqual(panoPlusGuidance(s, 'sweeping', { copy: {} }));
+    expect(panoPlusGuidance(s, 'sweeping', { copy: { 'panning': { headline: 'x' } } })
+      .headline).toBe(panoPlusGuidance(s, 'sweeping').headline);
   });
 });

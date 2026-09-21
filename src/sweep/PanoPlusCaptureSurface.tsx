@@ -122,6 +122,7 @@ import {
   panoPlusFailureCopy,
   panoPlusGlyphRotationDeg,
   panoPlusGuidance,
+  type PanoPlusGuidanceContext,
   panoPlusHoldOf,
   panoPlusHudLine,
   panoPlusSweepFaults,
@@ -487,6 +488,20 @@ export interface PanoPlusCaptureSurfaceProps {
    */
   hostChromeTopPt?: number;
   /**
+   * HOST COPY FOR THE SWEEP HUD, keyed by guidance rung.
+   *
+   * `<Camera>` localises every capture-time string the KEYFRAME engine draws
+   * through its `guidanceCopy` prop, and on a sweep that prop reached the REC
+   * banner and the two guard-rail modals — everything `<Camera>` draws
+   * itself — and stopped at this surface's edge. The HUD, which is the text
+   * the operator actually reads during a pano+ hold, was hardcoded English on
+   * a screen where the rest was translated.
+   *
+   * Merged onto the defaults per rung inside `panoPlusGuidance`; absent ⇒
+   * byte-identical.
+   */
+  guidanceCopy?: PanoPlusGuidanceContext['copy'];
+  /**
    * P5b — invoked when the operator taps Pano's lens switcher. The chip
    * renders whenever this is provided, on BOTH arms (Pano's rule, 2026-09-03);
    * a tap mid-sweep is inert, because a lens cannot change under a live sweep
@@ -780,6 +795,7 @@ export const PanoPlusCaptureSurface = forwardRef<
   tauUncorrected = false,
   lens = 'ultraWide',
   hostChromeTopPt = 0,
+  guidanceCopy,
   onLensChange,
   onPoseSourceChange,
   hideBuiltInControls = false,
@@ -1038,6 +1054,25 @@ export const PanoPlusCaptureSurface = forwardRef<
    * its location, exactly as it would any other sweep too short to paint.
    */
   const stopOnStartRef = useRef(false);
+  /**
+   * The same latch for a GUARD RAIL that fires in the start window.
+   *
+   * ⚠ AND IT IS NOT `stopOnStartRef`. That one FINALIZES — it is the
+   * operator's release, and a release keeps what was painted. A guard rail
+   * has decided the capture is not worth keeping, so the start window's
+   * abandon must DISCARD. Holding both in one flag would have a rotation
+   * mid-open ship the near-empty pack as a panorama.
+   *
+   * Before this, `abandon()` in the `starting` phase called
+   * `cancelPanoPlus()` against a session native had not created yet — which
+   * rejects `panoplus-not-running`, is swallowed — set the phase to idle,
+   * and returned. The in-flight `start()` then resolved into the branch
+   * below, raised `sweepLiveRef` and set the phase back to `'sweeping'`:
+   * the guard rail reported the capture abandoned to the host and the sweep
+   * carried on painting behind it. Holds the reason so the discard reports
+   * the same one the caller passed.
+   */
+  const abandonOnStartRef = useRef<string | null>(null);
   /** Arms latched at START, so the result reports what the sweep ACTUALLY ran
    *  even if the host flips a pill mid-sweep.
    *
@@ -2263,6 +2298,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     if (busyRef.current || !available || documentDirectory == null) return;
     busyRef.current = true;
     stopOnStartRef.current = false;
+    abandonOnStartRef.current = null;
     setError(null);
     const { dirPath } = panoPlusSessionPaths(
       documentDirectory,
@@ -2669,6 +2705,30 @@ export const PanoPlusCaptureSurface = forwardRef<
           );
           return;
         }
+        // ⚠ A GUARD RAIL FIRED WHILE THE CAMERA WAS OPENING — DISCARD, and
+        // do it BEFORE ownership is taken. Raising `sweepLiveRef` first
+        // would make this a live sweep that something else has to stop, and
+        // the phase would flick through 'sweeping' on the way — which is
+        // the resurrection this latch exists to prevent. `stopOnStartRef`
+        // is cleared with it: a release and a rotation can land in the same
+        // window, and the guard rail wins (the operator's release keeps
+        // what was painted; the guard rail has already decided it is not
+        // worth keeping).
+        if (abandonOnStartRef.current != null) {
+          const reason = abandonOnStartRef.current;
+          abandonOnStartRef.current = null;
+          stopOnStartRef.current = false;
+          void cancelPanoPlus().catch(() => undefined);
+          setRunningArm(null);
+          setPhase('idle');
+          setCameraLock(null);   // see finish() — it dies with its sweep
+          liveSessionRef.current = null;
+          onFailure?.({
+            code: 'panoplus-abandoned',
+            message: `sweep abandoned: ${reason}`,
+          } as PanoPlusFailure);
+          return;
+        }
         // Ownership is ours from here: only finish / unmount may release it,
         // and each clears this flag before it acts.
         sweepLiveRef.current = true;
@@ -2973,6 +3033,14 @@ export const PanoPlusCaptureSurface = forwardRef<
       // Pano's `incremental.cancel()` occupies on the keyframe engine.
       abandon: (reason: string) => {
         if (phaseRef.current === 'idle') return;
+        // ⚠ THE START WINDOW IS NOT A LIVE SWEEP. `cancelPanoPlus()` here
+        // rejects `panoplus-not-running` and the in-flight `start()` then
+        // resolves and goes live behind us — see `abandonOnStartRef`, which
+        // carries the discard into that resolution instead.
+        if (phaseRef.current === 'starting') {
+          abandonOnStartRef.current = reason;
+          return;
+        }
         // ⚠ AND INERT ONCE `finish()` HAS TAKEN OWNERSHIP. `busyRef` is the
         // latch `finish` sets before awaiting native `stop()`; firing
         // `cancel()` against a session with `stop()` in flight leaves the
@@ -3019,8 +3087,9 @@ export const PanoPlusCaptureSurface = forwardRef<
       // which leaves the engine's own defaults in charge.
       canvasMaxPixels: engineOptions?.canvasMaxPixels,
       canvasGrowVertical: engineOptions?.canvasGrowVertical,
+      copy: guidanceCopy,
     }),
-    [orientation, window.width, window.height, engineOptions],
+    [orientation, window.width, window.height, engineOptions, guidanceCopy],
   );
   /** A SWEEP IS IN FLIGHT — the one gate the HUD's prose is scoped by since
    *  2026-09-03. `'finishing'` counts: the pack write is not a moment to put a

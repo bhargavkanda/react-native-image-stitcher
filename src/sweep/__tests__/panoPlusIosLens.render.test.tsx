@@ -71,6 +71,19 @@ let planKeys: Array<Record<string, unknown>> = [];
  * both lenses open, which is every phone this arm has run on.
  */
 let planRefuse: Partial<Record<Lens, string>> = {};
+/**
+ * HOLD THE PLANNER OPEN, so the window the calibration cache exists to close
+ * can actually be looked into.
+ *
+ * `plannedCaptureFormat` resolves synchronously in this rig, which collapses
+ * the exact interval under test: on a device that call is the first link of a
+ * serial native chain and the operator experiences it as "the camera has not
+ * opened yet" for SECONDS on every AR→0.5× flip. When this is set, the next
+ * planner calls hang and their resolvers land here for the test to fire by
+ * hand.
+ */
+let planPending: Array<() => void> = [];
+let planHangs = false;
 /** The options bag the last `start()` received. */
 let startedWith: Record<string, unknown> | null = null;
 
@@ -83,6 +96,8 @@ function installNative(): void {
   idleCalls = [];
   planKeys = [];
   planRefuse = {};
+  planPending = [];
+  planHangs = false;
   startedWith = null;
   NM.RNISPanoPlus = {
     start: (o: Record<string, unknown>) => {
@@ -152,14 +167,20 @@ function installNative(): void {
           tauKey: null, basisKey: 'iPhone17,1',
         });
       }
-      return Promise.resolve({
+      const answer = {
         ok: true,
         lens: DEVICE_TYPE[lens],
         lensRequested: lens,
         width: 1920, height: 1440, fps: 60,
         tauKey: `iPhone17,1|${DEVICE_TYPE[lens]}|1920x1440|60`,
         basisKey: 'iPhone17,1',
-      });
+      };
+      if (planHangs) {
+        return new Promise((resolve) => {
+          planPending.push(() => { resolve(answer); });
+        });
+      }
+      return Promise.resolve(answer);
     },
     // Calibrated for BOTH lenses, so the arm is usable on either and the idle
     // viewfinder is wanted on either.
@@ -281,6 +302,65 @@ describe('the idle viewfinder frames with the lens the flag named (iOS, decouple
     r.unmount();
   });
 
+  it('⚑ a flip BACK to a lens already read keeps the viewfinder up — no black screen', async () => {
+    // ⚠ THE GAP IS THE TIMING, AND THE TIMING IS OBSERVABLE. This fix was
+    // shipped with "no falsifiable test" written against it; that was wrong.
+    //
+    // `armPendingForIdle` is `!calibRead` and `avfIdleWanted` ANDs
+    // `!armPendingForIdle`, so clearing the snapshot on every flip took the
+    // idle viewfinder DOWN and did not even ASK for the camera again until
+    // the native round trip returned. On the device that chain is seconds,
+    // which is the operator's own report — "I saw the camera has not opened
+    // yet for ~5 sec going from AR to 0.5×; it is almost instant in pano".
+    //
+    // The snapshot is keyed by lens and the store only moves through the
+    // gear (which bumps `calibEpoch` and drops the cache), so a flip BACK to
+    // a lens already read can reuse its answer, keep the viewfinder up, and
+    // still re-read in the background.
+    const r = mount('wide');
+    await settle();
+    r.setLens('ultraWide');
+    await settle();          // both lenses are now in the cache
+
+    // Now make the native round trip take real time, as it does on a phone.
+    planHangs = true;
+    const before = idleCalls.length;
+    r.setLens('wide');
+    await settle();
+    const after = idleCalls.slice(before);
+
+    // WITH THE CACHE: the viewfinder is asked for immediately, on the new
+    // lens, while the planner is still out.
+    expect(planPending).toHaveLength(1);          // …and it genuinely IS out
+    const on = after.filter((c) => c.on);
+    expect(on).toHaveLength(1);
+    expect(on[0]!.options.lens).toBe('wide');
+    // …and the last thing native was told is not "off".
+    expect(after[after.length - 1]!.on).toBe(true);
+
+    // The background re-read still lands, and changes nothing the operator
+    // can see — the cache is a head start, not a replacement.
+    act(() => { planPending.forEach((f) => { f(); }); });
+    await settle();
+    expect(idleCalls.filter((c) => c.on).slice(-1)[0]!.options.lens).toBe('wide');
+    r.unmount();
+  });
+
+  it('⚑ …but a lens NEVER read still waits — the cache is not a guess', async () => {
+    // Negative control. Without it the case above passes for a build that
+    // simply stopped clearing the snapshot at all, which would show the idle
+    // viewfinder on an arm whose precondition has never been answered.
+    planHangs = true;
+    const r = mount('wide');
+    await settle();
+    expect(planPending).toHaveLength(1);
+    expect(idleCalls.filter((c) => c.on)).toHaveLength(0);
+    act(() => { planPending.forEach((f) => { f(); }); });
+    await settle();
+    expect(idleCalls.filter((c) => c.on)).toHaveLength(1);
+    r.unmount();
+  });
+
   it('releases the viewfinder on unmount', async () => {
     const r = mount('wide');
     await settle();
@@ -315,21 +395,16 @@ describe('the arm precondition is read for the lens the sweep will open', () => 
     r.unmount();
   });
 
-  // ⚠ THE PER-LENS CALIBRATION CACHE IS NOT TESTED, AND THE GAP IS NAMED.
-  //
-  // `armPendingForIdle` is `!calibRead` and `avfIdleWanted` ANDs
-  // `!armPendingForIdle`, so clearing the snapshot on a lens flip takes the
-  // idle viewfinder DOWN until a native round trip returns — the first link
-  // of the chain the operator sees as "the camera has not opened yet" for
-  // seconds on AR→0.5×. The surface now reuses a per-lens snapshot so a flip
-  // BACK keeps the viewfinder up.
-  //
-  // This rig cannot witness it. I tried, including holding the planner open
-  // with a deferred promise: the `on:true` for the returning lens arrives
-  // within the same `settle()` whether the cache is there or not, so the
-  // assertion passes under the mutation that removes the fix. A case that
-  // cannot fail is worse than none, so there is none — the gap is the
-  // TIMING, and the rig has no clock the surface is racing against.
+  // ⚠ THE CALIBRATION-CACHE GAP IS CLOSED — see the two ⚑ cases in the
+  // block above. It was recorded here as untestable ("the gap is the
+  // TIMING, and the rig has no clock the surface is racing against"), and
+  // that was wrong: the rig had no clock because its planner resolved
+  // SYNCHRONOUSLY, which collapsed the whole interval under test. Giving the
+  // planner fake a `planHangs` switch — one that makes it behave like the
+  // device, where it is the first link of a serial native chain — makes the
+  // window a test can look into, and both directions of the fix now die
+  // under mutation. A rig limitation is worth naming; it is not worth
+  // believing without trying to remove it.
 
   it('the availability probe asks BOTH lenses, in the flag spelling', async () => {
     // The chip's `has0_5x`. It is a hardware question, so it is asked once at

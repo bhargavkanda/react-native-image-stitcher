@@ -1019,7 +1019,43 @@ export function panoPlusCrossHeadroom(
  *  restarted; `warn` means correct NOW; `ok` means keep going. */
 export type PanoPlusTone = 'ok' | 'warn' | 'stop';
 
+/**
+ * The STABLE NAME of a guidance rung, independent of its English.
+ *
+ * Two jobs, and the second is why it is a union rather than a comment:
+ *   1. it is the key a host localises through
+ *      ({@link PanoPlusGuidanceContext.copy}), so a translation survives
+ *      every future edit to the sentence it replaces;
+ *   2. it is what a test can pin. Before this, every assertion about the
+ *      guidance ladder matched on prose, so rewording a sentence reddened
+ *      tests that were not about wording, and the rung ORDER — which the
+ *      block comment above calls "the contract" — could only be checked by
+ *      quoting the copy it produces.
+ */
+export type PanoPlusGuidanceCode =
+  | 'idle'
+  | 'upside-down'
+  | 'metering'
+  | 'finishing'
+  | 'waiting-frames'
+  | 'aborted'
+  | 'ar-not-started'
+  | 'ar-no-texture'
+  | 'ar-too-fast'
+  | 'ar-waiting'
+  | 'stalled'
+  | 'too-fast'
+  | 'no-motion'
+  | 'clipping'
+  | 'gap-break'
+  | 'backtrack'
+  | 'cross-ceiling'
+  | 'cross-near'
+  | 'panning';
+
 export interface PanoPlusGuidance {
+  /** Which rung this is, in a form that outlives its English. */
+  code: PanoPlusGuidanceCode;
   headline: string;
   detail: string;
   tone: PanoPlusTone;
@@ -1086,12 +1122,57 @@ export interface PanoPlusGuidanceContext {
    *  cannot grow at all, so the pre-loss warning has to fire immediately
    *  rather than never. */
   canvasGrowVertical?: boolean;
+  /**
+   * HOST COPY, BY RUNG. Every sentence this function produces was hardcoded
+   * English, while `<Camera>`'s keyframe engine localised every capture-time
+   * string it draws through `guidanceCopy` — so one engine spoke the host's
+   * language and the other did not, on the same screen, through the same
+   * prop.
+   *
+   * Keyed by {@link PanoPlusGuidanceCode} rather than by prose so a
+   * translation is not silently orphaned the next time a sentence is
+   * reworded. Partial at both levels: a rung with no entry keeps its
+   * default, and an entry with only `headline` keeps the default `detail`.
+   *
+   * ⚠ IT IS A REPLACEMENT, NOT A TEMPLATE. Several defaults interpolate
+   * measured values (the abort reason, the painted width, which dimension is
+   * being lost). A host that overrides one of those rungs gets a static
+   * sentence and loses the number, which is the honest trade — a format
+   * string with named slots is a bigger contract than this needs, and none
+   * of the numbers is the reason the rung fires.
+   */
+  copy?: Partial<Record<
+    PanoPlusGuidanceCode,
+    { headline?: string; detail?: string }
+  >>;
 }
 
 export function panoPlusGuidance(
   status: PanoPlusStatus | null,
   phase: 'idle' | 'starting' | 'sweeping' | 'finishing',
   ctx: PanoPlusGuidanceContext = {},
+): PanoPlusGuidance {
+  const g = panoPlusGuidanceDefault(status, phase, ctx);
+  // ⚠ A DECORATOR OVER THE WHOLE LADDER, not a lookup inside each rung. The
+  // rungs build their objects eighteen different ways — some literal, some
+  // interpolated, one of them passed through `withCeiling` — so a per-rung
+  // read would have to be written eighteen times and would be missing from
+  // the nineteenth. This is the same shape `panoPlusArmNotice` was
+  // restructured into after a sentence added to one branch shipped green and
+  // silent on the commonest one.
+  const over = ctx.copy?.[g.code];
+  if (over == null) return g;
+  return {
+    ...g,
+    headline: over.headline ?? g.headline,
+    detail: over.detail ?? g.detail,
+  };
+}
+
+function panoPlusGuidanceDefault(
+  status: PanoPlusStatus | null,
+  phase: 'idle' | 'starting' | 'sweeping' | 'finishing',
+  ctx: PanoPlusGuidanceContext,
 ): PanoPlusGuidance {
   // ONE DEFAULT, SHARED. This read `'landscape-left'` while
   // `panoPlusSweepDirection` defaulted to `'portrait'`, so a two-argument
@@ -1130,7 +1211,8 @@ export function panoPlusGuidance(
       // himself, and this rung never disabled anything. Only its coaching
       // tail (the standoff and the ONE-direction spec) went with the rest.
       return {
-        headline: 'Turn the phone the right way up',
+        code: 'upside-down',
+      headline: 'Turn the phone the right way up',
         detail:
           'Upside-down works, but your hand sits over the lens and the '
           + 'coaching arrows point backwards.',
@@ -1140,7 +1222,7 @@ export function panoPlusGuidance(
     // NOTHING TO SAY BEFORE THE SWEEP. Empty rather than a shorter sentence:
     // the surface gates the line on a non-empty headline, so this is what
     // draws no text at all — see `panoplus-guidance` in the capture surface.
-    return { headline: '', detail: '', tone: 'ok' };
+    return { code: 'idle', headline: '', detail: '', tone: 'ok' };
   }
   if (phase === 'starting') {
     // v6 — NAME THE METERING WAIT. `start()` locks AE/AWB/AF for the sweep,
@@ -1151,6 +1233,7 @@ export function panoPlusGuidance(
     // dropped on the floor. Saying so is the difference between a deliberate
     // wait and what looks like lag.
     return {
+      code: 'metering',
       headline: 'Metering — hold still',
       detail:
         'Locking exposure and focus for the sweep. Do not start panning until '
@@ -1160,6 +1243,7 @@ export function panoPlusGuidance(
   }
   if (phase === 'finishing') {
     return {
+      code: 'finishing',
       headline: 'Finishing the panorama…',
       detail: 'Writing the canvas and the pack. Do not leave this screen.',
       tone: 'ok',
@@ -1167,6 +1251,7 @@ export function panoPlusGuidance(
   }
   if (status == null) {
     return {
+      code: 'waiting-frames',
       headline: 'Waiting for frames…',
       detail:
         'No AR frame has reached the engine yet. If this persists, AR tracking '
@@ -1176,6 +1261,7 @@ export function panoPlusGuidance(
   }
   if (status.abort != null) {
     return {
+      code: 'aborted',
       headline: `Sweep stopped — ${status.abort}`,
       detail: abortDetail(status.abort),
       tone: 'stop',
@@ -1213,7 +1299,8 @@ export function panoPlusGuidance(
       // sharp, feature-rich room. Advising him to turn a light on could never
       // have worked.
       return {
-        headline: 'AR tracking did not start',
+        code: 'ar-not-started',
+      headline: 'AR tracking did not start',
         detail:
           'ARCore gives its motion tracking one short window at the start of '
           + 'the sweep and it missed it. This says nothing about the light. '
@@ -1223,7 +1310,8 @@ export function panoPlusGuidance(
     }
     if (why === 'INSUFFICIENT_FEATURES') {
       return {
-        headline: 'Not enough texture for AR',
+        code: 'ar-no-texture',
+      headline: 'Not enough texture for AR',
         detail:
           'ARCore has nothing to lock onto. Point at a shelf with product on '
           + 'it rather than a blank wall.',
@@ -1232,12 +1320,14 @@ export function panoPlusGuidance(
     }
     if (why === 'EXCESSIVE_MOTION') {
       return {
-        headline: 'Moving too fast for AR',
+        code: 'ar-too-fast',
+      headline: 'Moving too fast for AR',
         detail: 'Slow down — ARCore has lost the world while you pan.',
         tone: 'warn',
       };
     }
     return {
+      code: 'ar-waiting',
       headline: 'Waiting for AR tracking',
       detail: why !== ''
         // A reason ARCore gave that this build has no phrasing for. Printed raw
@@ -1251,6 +1341,7 @@ export function panoPlusGuidance(
   }
   if (status.stalled) {
     return {
+      code: 'stalled',
       headline: 'Lost the chain — slow down and re-approach',
       detail:
         'The match window refuses to widen (that is deliberate: a wider search '
@@ -1261,6 +1352,7 @@ export function panoPlusGuidance(
   }
   if (status.speed === 'fast') {
     return {
+      code: 'too-fast',
       headline: 'Too fast — slow down',
       detail: 'Keep the pan under a slow walking reach; the strip cannot keep up.',
       tone: 'warn',
@@ -1268,6 +1360,7 @@ export function panoPlusGuidance(
   }
   if (status.speed === 'no-motion' || status.outcome === 'skipped-no-advance') {
     return {
+      code: 'no-motion',
       headline: 'Keep panning',
       detail: 'No advance — the panorama is not growing.',
       tone: 'warn',
@@ -1305,7 +1398,11 @@ export function panoPlusGuidance(
     ceilingNote == null
       ? g
       : {
-          headline: g.headline,
+          // ⚠ SPREAD, so `code` travels. This decorator rebuilds the object
+          // field by field, and a field it does not know about is a field it
+          // silently drops — which for `code` would make every ceiling-noted
+          // rung unlocalisable and untestable by its own name.
+          ...g,
           detail: `${g.detail} ${ceilingNote}`,
           tone: g.tone === 'stop' ? 'stop' : 'warn',
         };
@@ -1316,6 +1413,7 @@ export function panoPlusGuidance(
       // the landscape one the operator actually shoots, which loses shelf
       // WIDTH off the left and right. The detail below it had already been
       // fixed; the headline, which is the half he reads, had not.
+      code: 'clipping',
       headline: `Losing ${crossDimension(coached)} — recentre the phone`,
       detail:
         `${status.clippedFrames} strip(s) have drifted off the ${crossEdges(coached)} of `
@@ -1339,6 +1437,7 @@ export function panoPlusGuidance(
   }
   if (status.gapBreak > 0) {
     return withCeiling({
+      code: 'gap-break',
       headline: 'Break in the panorama',
       detail:
         `${status.gapBreak} frame(s) could not reach back to the painted edge — `
@@ -1348,6 +1447,7 @@ export function panoPlusGuidance(
   }
   if (status.outcome === 'held-backtrack') {
     return withCeiling({
+      code: 'backtrack',
       headline: 'Going backwards — nothing lost',
       detail:
         'The frontier holds while you back up (no repainting, so no duplicated '
@@ -1357,6 +1457,7 @@ export function panoPlusGuidance(
   }
   if (headroom.level === 'full') {
     return {
+      code: 'cross-ceiling',
       headline: 'Canvas is at its cross-axis ceiling',
       detail:
         `The panorama has grown to ${headroom.canvasHeightPx} px across the `
@@ -1374,6 +1475,7 @@ export function panoPlusGuidance(
   }
   if (headroom.level === 'near') {
     return {
+      code: 'cross-near',
       headline: `Running out of room ${crossWord(coached)}`,
       detail:
         `${headroom.roomSourcePx} px of drift left before the panorama starts `
@@ -1395,7 +1497,8 @@ export function panoPlusGuidance(
   );
   const arrow = panoPlusSweepArrow(dir);
   return {
-    headline: arrow === '' ? 'Panning — keep it steady' : `Panning ${arrow} — keep it steady`,
+    code: 'panning',
+      headline: arrow === '' ? 'Panning — keep it steady' : `Panning ${arrow} — keep it steady`,
     detail: `Painted ${status.paintedWidthPx} px of canvas.`,
     tone: 'ok',
   };
@@ -3210,6 +3313,25 @@ export interface PanoPlusIntegrity {
    *  clean: {@link isIntact} is false whenever a pack painted strips and this
    *  is false. Every v4 pack is in that state. */
   seamMeasured: boolean;
+  /** `true` when the session painted NO strips at all — there is no panorama
+   *  here to be intact. Folded into {@link isIntact}; carried separately
+   *  because a consumer that must distinguish a DEFECT from an ABSENCE (the
+   *  host warning channel does) cannot recover it from `isIntact`. */
+  empty: boolean;
+  /** THE MEASURED half of {@link hasCuts}: a seam bar was actually breached.
+   *  `hasCuts` is this OR "painted but never measured", and the two are
+   *  different claims — one is evidence of a cut, the other is the absence of
+   *  evidence about cuts. Anything that puts a DEFECT in front of an operator
+   *  must read this one. */
+  breachesBars: boolean;
+  /** THE MEASURED half of {@link hasBanding}, for the same reason. */
+  breachesPhoto: boolean;
+  /** The ENGINE's own integrity verdict, verbatim from
+   *  `summary.seam.integrityFailed`. Folded into {@link isIntact} and, unlike
+   *  the bars above, computed where the samples are. Was reachable by nothing
+   *  outside this function, so the host warning channel could not honour the
+   *  one verdict that saw the data. */
+  engineIntegrityFailed: boolean;
   /** One sentence, safe to put straight on screen. */
   line: string;
   /** The perpendicular sentence, or `null` when nothing was truncated. */
@@ -3664,6 +3786,10 @@ export function panoPlusIntegrity(summary: PanoPlusSummary): PanoPlusIntegrity {
     hasBanding,
     seamMeasured,
     photoMeasured,
+    empty,
+    breachesBars,
+    breachesPhoto,
+    engineIntegrityFailed: seam.integrityFailed,
     line,
     clipLine,
     seamLine: seamLineOut,
@@ -4577,6 +4703,33 @@ export const PANO_PLUS_VERDICT_FILE = 'host_verdict.json';
  * banner is a banner. The full sentences stay in the pack sidecar, which is
  * where a month-later reader looks.
  */
+/**
+ * The headline for a warning BANNER — the defect ladder, not the verdict
+ * ladder.
+ *
+ * ⚠ IT IS NOT `panoPlusVerdictHeadline`, and the difference is the same one
+ * `panoPlusCaptureWarnings` turns on. The verdict ladder answers "can this
+ * pack be called clean?", so it (correctly) stops on NOT MEASURED. A banner
+ * answers "what is wrong with the picture you are looking at?", and
+ * "seams were not measured" is not an answer to that question — it is the
+ * reason there is no answer. Routing the verdict ladder into the banner put
+ * `⚠ Seams NOT MEASURED` on short sweeps that had nothing wrong with them.
+ *
+ * Every rung here is a MEASURED defect, in the order an operator would want
+ * to hear them.
+ */
+function panoPlusDefectHeadline(i: PanoPlusIntegrity): string {
+  if (i.empty) return '⚠ Nothing was painted — the sweep produced no panorama';
+  if (!i.holdsG1) return '⚠ Breaks in the panorama (G1 FAILED)';
+  if (i.clippedFrames > 0) return '⚠ Truncated — shelf height lost off the canvas band';
+  if (i.breachesBars) return '⚠ Cuts — the strips do not line up across the sweep';
+  if (i.breachesPhoto) return '⚠ Banding — the strips do not match in brightness';
+  // The engine failed the pack on samples this layer does not carry, so it
+  // cannot be more specific than the engine was. Said plainly rather than
+  // dressed as one of the clauses above.
+  return '⚠ The engine reported this panorama as not intact';
+}
+
 export function panoPlusCaptureWarnings(
   summary: PanoPlusSummary,
 ): Array<{ code: 'SWEEP_NOT_INTACT'; message: string }> {
@@ -4587,15 +4740,35 @@ export function panoPlusCaptureWarnings(
   // and the wrong thing to put in front of an operator on every single
   // capture. A warning must name a DEFECT: a hole along the sweep, strips
   // clipped off the band, a visible cut, banding.
+  //
+  // ⚠ AND `hasCuts` / `hasBanding` ARE NOT THAT TEST — they were read here
+  // as though they were, and they carry the not-measured clause INSIDE
+  // them (`breachesBars || (painted && !seamMeasured)`). So this predicate
+  // did the exact thing the paragraph above forbids, in both directions at
+  // once:
+  //
+  //   (a) it WARNED on absence — a short sweep ships `seam.boundaries === 0`,
+  //       so `seamMeasured` is false, so `hasCuts` is true with no cut
+  //       anywhere, and a perfectly good panorama got a banner;
+  //   (b) it stayed SILENT on two real defects `isIntact` does catch — a
+  //       session that painted nothing at all, and the ENGINE's own
+  //       `seam.integrityFailed`, which is the verdict computed where the
+  //       samples are.
+  //
+  // Reading the measured halves plus the two missing clauses is the
+  // predicate the paragraph describes, and it is the FIRST one that is a
+  // defect test rather than a confidence test.
   const defective =
-    !integrity.holdsG1
+    integrity.empty
+    || !integrity.holdsG1
     || integrity.clippedFrames > 0
-    || integrity.hasCuts
-    || integrity.hasBanding;
+    || integrity.breachesBars
+    || integrity.breachesPhoto
+    || integrity.engineIntegrityFailed;
   if (!defective) return [];
   return [{
     code: 'SWEEP_NOT_INTACT',
-    message: panoPlusVerdictHeadline(integrity),
+    message: panoPlusDefectHeadline(integrity),
   }];
 }
 
@@ -4661,6 +4834,11 @@ export function panoPlusVerdictSidecar(
  */
 export function panoPlusVerdictHeadline(i: PanoPlusIntegrity): string {
   if (i.isIntact) return '✓ Intact — no breaks, nothing truncated, seams inside bars';
+  // FIRST, because an empty pack satisfies most of the clauses below
+  // vacuously — no strips, so no holes, nothing clipped, no boundaries. It
+  // used to fall through to "Seams NOT MEASURED", which is true and is not
+  // the thing that went wrong.
+  if (i.empty) return '⚠ Nothing was painted — the sweep produced no panorama';
   if (!i.holdsG1) return '⚠ Breaks in the panorama (G1 FAILED)';
   if (i.clippedFrames > 0) return '⚠ Truncated — shelf height lost off the canvas band';
   // NOT MEASURED gets its own headline. It used to fall through to the green

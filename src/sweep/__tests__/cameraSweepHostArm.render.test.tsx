@@ -571,6 +571,21 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       sessionDir: '/data/user/0/com.x/files/panoplus/pp_1',
       width: 4000,
       height: 1200,
+      // ⚠ `counts.painted`, WITHOUT WHICH THIS FIXTURE IS NOT AN INTACT
+      // SWEEP — it is a sweep that painted NOTHING, and the negative control
+      // below was asserting that an empty capture carries no warning. It did
+      // not, which is the defect: `panoPlusCaptureWarnings` read `hasCuts` /
+      // `hasBanding` and neither of those clauses can see an empty pack, so
+      // the one capture with nothing in it at all was the one that warned
+      // about nothing at all. `isIntact` had the clause; the host channel
+      // did not.
+      //
+      // Left with no `seam` block ON PURPOSE as well: a short sweep ships
+      // `seam.boundaries === 0`, which makes `seamMeasured` false and
+      // `hasCuts` true from the ABSENCE of evidence. So this same fixture is
+      // also the negative control for that half — a good panorama whose
+      // seams were never measured must not carry a banner either.
+      counts: { seen: 120, painted: 96 },
     }),
     { rectify: true, gainMatch: true, packFrames: 'all', poseSource: 'imu' },
     '2026-09-19T00:00:00.000Z',

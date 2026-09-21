@@ -2003,9 +2003,27 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // first named guard ("I want the sideways drift to be measured and
     // stopped") had nothing measuring it at all.
     //
-    // `isNonAR` stays: in AR the session's own tracking owns translation,
-    // and that is true of both engines.
-    active: captureRecording && isNonAR,
+    // ⚠ AND ON EVERY ARM. `isNonAR` was here from the hook's first commit
+    // (edd443d), carried over from its sibling `useIMUTranslationGate` one
+    // screen up — where the term is CORRECT, because in AR the native side
+    // really does use pose-derived translation and really does ignore the
+    // JS integrator. This hook has no such substitute: nothing in this
+    // library consumes ARKit translation for a lateral budget, no ARKit pose
+    // stream reaches JS at all, and so on the AR arm the sideways-drift
+    // guard was not "owned by the session" — it was absent.
+    //
+    // That is the operator's own configuration. The iOS sweep runs ARKit
+    // (`poseSource` defaults to 'ar'), and the production host mounts
+    // `defaultCaptureSource="ar"`, so the guard he named first — "I want the
+    // sideways drift to be measured and stopped" — measured nothing at all
+    // on the platform he tests on, on EITHER engine.
+    //
+    // Nothing in this hook depends on the camera: it is one gyroscope and
+    // one accelerometer, and both run whether or not ARKit holds the
+    // session. Widening it also arms the too-fast cue on the AR arm, which
+    // is the same cue pano draws on its non-AR arm from the same gyro —
+    // this was off in AR for the same reason, and by the same accident.
+    active: captureRecording,
     warnMaxRadPerSec: panTooFastThreshold,
     lateralBudgetCm,
   });
@@ -2460,8 +2478,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     })();
     // Deps: re-run whenever drift latches OR recording state changes.
     // Other deps are stable refs / setters.
+    //
+    // ⚠ `captureRecording`, NOT `statusPhase` — this effect GATES on the
+    // former and a sweep never moves the latter, so naming `statusPhase`
+    // here declared a dependency on a value that is constant for half the
+    // cases the effect covers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drift.drifted, statusPhase]);
+  }, [drift.drifted, captureRecording]);
 
   // v0.8.0 Phase 5 / v0.11.0 — frameProcessor prop semantics:
   //
@@ -3276,8 +3299,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     handleHoldEndRef.current?.();
     // Deps mirror the drift effect: re-run when the latch trips or the
     // recording state changes.  Other reads are stable setters / refs.
+    // `captureRecording` for the reason stated there.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panMotion.lateralExceeded, statusPhase, lateralBudgetCm]);
+  }, [panMotion.lateralExceeded, captureRecording, lateralBudgetCm]);
 
   // ── Item 7 — auto-finalize when the configured keyframe count is hit ─
   // The engine caps accepted keyframes at `keyframeMaxCount`; once it
@@ -3375,13 +3399,43 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
    * fault, and the panorama painted so far is the deliverable. That is what
    * the keyframe engine's own `maxPanDurationMs` path does.
    */
+  //
+  // ⚠ TWO EFFECTS, NOT ONE, AND THE SPLIT IS THE POINT. Stamping the clock
+  // and arming the timer in one effect keyed on `[sweepRunning,
+  // maxPanDurationMs]` meant that ANY change to the cap mid-hold — a host
+  // re-rendering `maxPanDurationMs={settings.maxPanMs}` after a settings
+  // refetch, an inline object, a parent re-render that recomputes the prop —
+  // re-ran the whole body: the elapsed time was thrown away, the REC banner
+  // jumped back to 0:00, and a FULL-LENGTH timer was armed again. A host
+  // that re-rendered on a timer could hold the cap off forever, which is
+  // precisely the promise the cap exists to make.
+  //
+  // So the clock is stamped on the RISING EDGE of the hold and nothing else,
+  // and the timer is armed for whatever is LEFT of the cap measured from
+  // that stamp. A cap shortened mid-hold to a value already elapsed fires at
+  // once, which is the honest reading of "this hold may not exceed N".
+  const sweepClockRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!sweepRunning) return undefined;
-    setRecordingStartedAt(Date.now());
-    if (maxPanDurationMs <= 0) return undefined;
+    if (!sweepRunning) {
+      sweepClockRef.current = null;
+      return undefined;
+    }
+    const startedAt = Date.now();
+    sweepClockRef.current = startedAt;
+    setRecordingStartedAt(startedAt);
+    return undefined;
+  }, [sweepRunning]);
+  useEffect(() => {
+    if (!sweepRunning || maxPanDurationMs <= 0) return undefined;
+    // Declared after the clock effect, so on the rising edge React has
+    // already run that one in this same commit and the ref is this hold's.
+    // The `?? Date.now()` is the defensive reading for a future reorder, not
+    // a reachable state today.
+    const startedAt = sweepClockRef.current ?? Date.now();
+    const remainingMs = Math.max(0, startedAt + maxPanDurationMs - Date.now());
     const id = setTimeout(() => {
       sweepRef.current?.holdEnd?.();
-    }, maxPanDurationMs);
+    }, remainingMs);
     return () => { clearTimeout(id); };
   }, [sweepRunning, maxPanDurationMs]);
 
@@ -3858,6 +3912,60 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     </>
   );
 
+  /**
+   * The two guard-rail explainers, rendered by EVERY engine.
+   *
+   * ⚠ BOTH USED TO LIVE ONLY IN THE KEYFRAME TREE, after the
+   * `engine === 'sweep'` early return — the same miss that stranded the
+   * review surfaces, one screen later. The guards themselves were wired to
+   * the sweep in c935a6c and 358d434, so a sweep DID stop on a rotation and
+   * DID stop on sideways drift; it just did it into an empty screen. The
+   * operator saw the viewfinder return to idle with no panorama and no
+   * reason given, which is worse than not guarding at all.
+   *
+   * One helper, called from both trees, so they cannot drift again — the
+   * same shape as `renderReviewSurfaces` above.
+   */
+  const renderGuardModals = (): React.JSX.Element => (
+    <>
+    {/* v0.12.0 — Orientation drift modal.  Shows AFTER the SDK has
+        auto-abandoned the capture (the useEffect above stops the
+        engine + transitions to idle + fires onCaptureAbandoned).
+        Modal exists purely to explain WHY the capture was
+        cancelled.  Single OK button (no Continue) per the engine
+        spec on cross-mode capture being best-effort, not supported. */}
+    <OrientationDriftModal
+      visible={drift.drifted && !driftModalDismissed}
+      captureOrientation={drift.captureOrientation}
+      currentOrientation={drift.currentOrientation}
+      onAcknowledge={() => setDriftModalDismissed(true)}
+    />
+
+    {/* Item 6 — lateral-drift popup.  Latched true by the lateral
+        effect AFTER it finalizes the capture; informational only,
+        dismiss just clears the latch so the next capture starts
+        fresh. */}
+    <LateralMotionModal
+      visible={lateralStopVisible}
+      title={
+        lateralWrongDirection
+          ? guidanceCopyResolved.lateralWrongDirectionTitle
+          : guidanceCopyResolved.lateralStopTitle
+      }
+      body={
+        lateralWrongDirection
+          ? guidanceCopyResolved.lateralWrongDirectionBody
+          : guidanceCopyResolved.lateralStopBody
+      }
+      dismissLabel={guidanceCopyResolved.lateralStopDismiss}
+      onDismiss={() => {
+        setLateralStopVisible(false);
+        setLateralWrongDirection(false);
+      }}
+    />
+    </>
+  );
+
   const renderHostPreview = (
     /** vision-camera lifecycle callbacks, owned by the calling cell. */
     lifecycle?: NonNullable<CameraViewProps['cameraProps']>,
@@ -4238,6 +4346,29 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // below already occupy, for the identical reason.
             onPoseSourceChange={undefined}
             onLensChange={undefined}
+            // ⚠ `guidanceCopy` IS A MERGE, NOT AN OVERRIDE, and it is after
+            // the spread because the merge has to see the bag's value.
+            //
+            // `<Camera>`'s own `guidanceCopy` is the ONE prop a host already
+            // uses to localise capture-time text, and on a sweep it reached
+            // everything `<Camera>` draws (the REC banner, both guard-rail
+            // modals) and nothing the SURFACE draws — which is the text the
+            // operator actually reads during a pano+ hold. `tooFast` is the
+            // one sentence with a rung that means the same thing on both
+            // engines, so it is carried across by name; the other seventeen
+            // rungs have no keyframe counterpart and are addressed by rung
+            // through the bag.
+            //
+            // A bag entry for `'too-fast'` WINS, because it is the more
+            // specific statement of the same intent.
+            guidanceCopy={
+              guidanceCopy?.tooFast != null
+                ? {
+                    'too-fast': { headline: guidanceCopy.tooFast },
+                    ...(sweep?.guidanceCopy ?? {}),
+                  }
+                : sweep?.guidanceCopy
+            }
             // ── AFTER THE SPREAD, AND THE TYPE ALSO FORBIDS THEM ─────────
             // These are `<Camera>`'s ANSWER to "who holds the back camera",
             // not a host knob — `SweepOptions` omits all four, so the bag
@@ -4384,6 +4515,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               }
             }}
             onFailure={(failure: PanoPlusFailure) => {
+              // ⚠ A GUARD RAIL IS NOT A FAILURE, AND `onError` IS NOT ITS
+              // CHANNEL. `abandon()` emits `panoplus-abandoned` for every
+              // caller of the handle, but inside `<Camera>` the only caller
+              // is the rotation guard one screen up, and it has ALREADY told
+              // the host through `onCaptureAbandoned` — the same single
+              // channel, with the same reason, that the keyframe engine uses
+              // for the identical event. Letting it through as well gave a
+              // host that surfaces `onError` (a toast, a Sentry breadcrumb) a
+              // `PANORAMA_START_FAILED` for a capture that started fine, ran,
+              // and was deliberately stopped — with a code naming a phase it
+              // was nowhere near. On the keyframe engine the same rotation
+              // produces no `onError` at all.
+              if (failure.code === 'panoplus-abandoned') return;
               onError?.(
                 // A sweep refusal is a capture failure, not an engine one:
                 // the engine IS available here — this is the engine saying no
@@ -4509,6 +4653,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               cannot drift — which is exactly how they drifted before:
               both of these lived only after the early return, so on a
               sweep neither existed and five public props did nothing. */}
+          {renderGuardModals()}
           {renderReviewSurfaces()}
         </View>
       </HostJsLandscapeContext.Provider>
@@ -4864,41 +5009,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         }
       />
 
-      {/* v0.12.0 — Orientation drift modal.  Shows AFTER the SDK has
-          auto-abandoned the capture (the useEffect above stops the
-          engine + transitions to idle + fires onCaptureAbandoned).
-          Modal exists purely to explain WHY the capture was
-          cancelled.  Single OK button (no Continue) per the engine
-          spec on cross-mode capture being best-effort, not supported. */}
-      <OrientationDriftModal
-        visible={drift.drifted && !driftModalDismissed}
-        captureOrientation={drift.captureOrientation}
-        currentOrientation={drift.currentOrientation}
-        onAcknowledge={() => setDriftModalDismissed(true)}
-      />
-
-      {/* Item 6 — lateral-drift popup.  Latched true by the lateral
-          effect AFTER it finalizes the capture; informational only,
-          dismiss just clears the latch so the next capture starts
-          fresh. */}
-      <LateralMotionModal
-        visible={lateralStopVisible}
-        title={
-          lateralWrongDirection
-            ? guidanceCopyResolved.lateralWrongDirectionTitle
-            : guidanceCopyResolved.lateralStopTitle
-        }
-        body={
-          lateralWrongDirection
-            ? guidanceCopyResolved.lateralWrongDirectionBody
-            : guidanceCopyResolved.lateralStopBody
-        }
-        dismissLabel={guidanceCopyResolved.lateralStopDismiss}
-        onDismiss={() => {
-          setLateralStopVisible(false);
-          setLateralWrongDirection(false);
-        }}
-      />
+      {renderGuardModals()}
 
       {renderReviewSurfaces()}
     </View>

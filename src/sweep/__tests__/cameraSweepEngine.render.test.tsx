@@ -86,7 +86,19 @@ function names(tree: ReactTestRenderer): string[] {
 // names it, but only if you already suspect something. Fake timers make the
 // handle jest's to collect.
 beforeEach(() => { jest.useFakeTimers(); });
-afterEach(() => { jest.runOnlyPendingTimers(); jest.useRealTimers(); });
+// ⚠ THE SENSOR RESET BELONGS HERE, NOT AT THE END OF A CASE BODY. The
+// accelerometer mock's subscriber set is module-global, and two cases below
+// reset it as their last statement — which a case that THROWS never reaches.
+// Measured: with one rotation case failing, the next case started with five
+// live subscribers and a still-mounted tree receiving every sample, so a
+// FAILING case silently changed the behaviour of the ones after it. That is
+// the worst possible way for a suite to be wrong: the second failure is not
+// about the second case.
+afterEach(() => {
+  sensorsMock.__resetAccelerometer();
+  jest.runOnlyPendingTimers();
+  jest.useRealTimers();
+});
 
 function render(props: Record<string, unknown>): ReactTestRenderer {
   let t!: ReactTestRenderer;
@@ -567,27 +579,19 @@ describe('<Camera engine="sweep">', () => {
     // native fakes, so the surface never leaves 'idle' here and the call is
     // unobservable. It is covered by the arming half only.
     act(() => { tree.unmount(); });
-    sensorsMock.__resetAccelerometer();
   });
 
-  // ⚠ THE FINALIZE WINDOW IS FIXED BUT NOT TESTED, AND THE GAP IS NAMED.
+  // ⚠ THE FINALIZE WINDOW, AND "DID THE SWEEP ITSELF STOP", MOVED — they are
+  // in `sweepGuardRails.render.test.tsx`, which mounts a STUB surface with a
+  // spy imperative handle. Both gaps were real here and had the same cause:
+  // this rig drives a real surface with no native fakes, so it never leaves
+  // 'idle' and every call `<Camera>` makes through the ref is swallowed by a
+  // phase guard. Replacing the surface makes the calls themselves the
+  // observable, which is the only layer at which "the cap FINALIZES rather
+  // than abandoning" is a falsifiable sentence.
   //
-  // `sweepRunning` is `phase !== 'idle'`, which includes 'finishing' — the
-  // native `stop()` and the pack write, SECONDS on a device, during which
-  // the operator has already released and is looking at the result. A guard
-  // still armed there abandoned a FINISHED panorama, and because
-  // `onCaptureAbandoned` fires a line after the handle call, the host was
-  // told the capture was abandoned and then handed that same capture. An
-  // adversarial round reproduced it end to end; `captureRecording` now
-  // excludes the finalize window via `sweepFinalizing`, and `abandon()` is
-  // inert once `finish()` has latched `busyRef`.
-  //
-  // This rig cannot witness it. Driving `onControlsState` by hand does not
-  // work — the surface re-emits it on its next render and overwrites the
-  // value — so the surface has to reach a REAL 'finishing', which needs
-  // native fakes and a deferred `stop()` that this `<Camera>` rig does not
-  // install, plus a ref it does not expose. A case written on the
-  // hand-driven value passes whether the fix is present or not.
+  // What stays HERE is the arming half against the real component, which is
+  // the half that needs a real component.
 
   it('⚑ …and NOT while idle — a guard that fires off-capture is worse', async () => {
     // Negative control: without it the case above passes for a detector
@@ -604,7 +608,6 @@ describe('<Camera engine="sweep">', () => {
     await act(async () => { await Promise.resolve(); });
     expect(abandoned).toHaveLength(0);
     act(() => { tree.unmount(); });
-    sensorsMock.__resetAccelerometer();
   });
 
   it('⚑ the REC banner and the wall-clock cap reach the sweep', async () => {

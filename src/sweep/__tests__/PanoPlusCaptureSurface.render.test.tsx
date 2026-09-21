@@ -1002,7 +1002,9 @@ describe('the shell drives the sweep through the ref, with one shutter', () => {
   type Controls = SurfaceControlState;
   const last = (states: Controls[]): Controls | undefined => states[states.length - 1];
 
-  function mountUnified(): {
+  function mountUnified(extra: {
+    onFailure?: (f: PanoPlusFailure) => void;
+  } = {}): {
     ref: React.RefObject<Handle | null>;
     states: Controls[];
     has: (testID: string) => boolean;
@@ -1016,6 +1018,7 @@ describe('the shell drives the sweep through the ref, with one shutter', () => {
         <PanoPlusCaptureSurface
           ref={ref}
           onComplete={() => undefined}
+          onFailure={extra.onFailure}
           hideBuiltInControls
           onControlsState={(s) => { states.push(s); }}
           bottomBarOffset={150}
@@ -1097,6 +1100,108 @@ describe('the shell drives the sweep through the ref, with one shutter', () => {
     act(() => { u.ref.current!.holdEnd!(); });
     await settle();
     expect(calls).toEqual(['start', 'stop']);
+    u.unmount();
+  });
+
+  // ── `abandon()` — THE GUARD RAILS' PATH, WHICH HAD NO COVERAGE AT ALL ──
+  //
+  // `<Camera>`'s rotation guard reaches the sweep through this method and
+  // nothing else. Gutting it to `(reason: string) => { void reason; }` left
+  // the ENTIRE suite green while the host was told the capture was abandoned
+  // and the native sweep kept running and kept painting — which is the exact
+  // defect the method was added to prevent, rebuilt by deleting its body.
+  //
+  // It is DISCARD, not finalize: a guard rail has decided the capture is not
+  // worth keeping. That is `cancel`, never `stop`, and the difference is a
+  // pack on disk.
+  it('⚑ abandon() CANCELS the live sweep — discard, not finalize', async () => {
+    const failures: PanoPlusFailure[] = [];
+    const u = mountUnified({ onFailure: (f) => { failures.push(f); } });
+    act(() => { u.ref.current!.holdStart!(); });
+    await settle();
+    expect(calls).toEqual(['start']);
+
+    act(() => { u.ref.current!.abandon!('orientation-drift'); });
+    await settle();
+    expect(calls).toEqual(['start', 'cancel']);
+    expect(calls).not.toContain('stop');
+    expect(failures.map((f) => f.code)).toEqual(['panoplus-abandoned']);
+    expect(failures[0]!.message).toContain('orientation-drift');
+    u.unmount();
+  });
+
+  it('⚑ …and is INERT at idle — nothing to abandon, nothing to delete', async () => {
+    // Negative control. `cancelPanoPlus()` against no session rejects
+    // `panoplus-not-running`, which is swallowed — so without the phase guard
+    // this reads as harmless and is not: on a build where cancel deletes by
+    // path it is the previous sweep's pack.
+    const failures: PanoPlusFailure[] = [];
+    const u = mountUnified({ onFailure: (f) => { failures.push(f); } });
+    act(() => { u.ref.current!.abandon!('orientation-drift'); });
+    await settle();
+    expect(calls).toEqual([]);
+    expect(failures).toHaveLength(0);
+    u.unmount();
+  });
+
+  it('⚑ …and is INERT once finish() has taken ownership — a FINISHED pano is kept', async () => {
+    // `busyRef` is the latch `finish` sets before awaiting native `stop()`.
+    // Firing `cancel()` against a session with `stop()` in flight leaves the
+    // pending continuation untouched, so the surface still resolves
+    // `onComplete` afterwards: the host would be told the capture was
+    // abandoned AND THEN handed that same capture.
+    let finishStop!: (v: unknown) => void;
+    stopImpl = () => new Promise((resolve) => { finishStop = resolve; });
+    const failures: PanoPlusFailure[] = [];
+    const u = mountUnified({ onFailure: (f) => { failures.push(f); } });
+    act(() => { u.ref.current!.holdStart!(); });
+    await settle();
+    act(() => { u.ref.current!.holdEnd!(); });
+    expect(calls).toEqual(['start', 'stop']);
+
+    // The phone turns while the pack is being written.
+    act(() => { u.ref.current!.abandon!('orientation-drift'); });
+    await settle();
+    expect(calls).toEqual(['start', 'stop']);   // no cancel raced the stop
+    expect(failures).toHaveLength(0);
+    act(() => { finishStop({}); });
+    await settle();
+    u.unmount();
+  });
+
+  it('⚑ …and a guard rail in the START WINDOW discards rather than resurrecting', async () => {
+    // ⚠ THE START WINDOW IS NOT A LIVE SWEEP. `phase` is 'starting' — which
+    // `sweepRunning` already reports as recording — and `cancelPanoPlus()`
+    // there rejects `panoplus-not-running` and is swallowed. The in-flight
+    // `start()` then resolved, raised `sweepLiveRef` and set the phase to
+    // 'sweeping': the guard rail reported the capture abandoned to the host
+    // and the sweep carried on painting behind it, with nothing left that
+    // would ever stop it.
+    let resolveStart!: (v: unknown) => void;
+    startImpl = () => new Promise((resolve) => { resolveStart = resolve; });
+    const failures: PanoPlusFailure[] = [];
+    const u = mountUnified({ onFailure: (f) => { failures.push(f); } });
+    act(() => { u.ref.current!.holdStart!(); });
+    await settle();
+    expect(calls).toEqual(['start']);           // …and it has not resolved
+
+    // The operator turns the phone while the camera is still opening.
+    act(() => { u.ref.current!.abandon!('orientation-drift'); });
+    await settle();
+    // Nothing to cancel YET — the latch carries the discard into the
+    // resolution, which is the only place a session exists to cancel.
+    expect(calls).toEqual(['start']);
+
+    act(() => { resolveStart({ sessionDir: '/d/pp_1', startedAtMs: 1, pluginAvailable: true }); });
+    await settle();
+    expect(calls).toEqual(['start', 'cancel']);
+    expect(failures.map((f) => f.code)).toEqual(['panoplus-abandoned']);
+    // AND THE SWEEP IS NOT LIVE: a release now ends nothing, because there is
+    // nothing to end. This is the assertion that separates "discarded" from
+    // "discarded and then resurrected".
+    act(() => { u.ref.current!.holdEnd!(); });
+    await settle();
+    expect(calls).toEqual(['start', 'cancel']);
     u.unmount();
   });
 });
