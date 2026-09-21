@@ -384,6 +384,23 @@ struct SessionState {
     int64_t framesWritten = 0;
     int64_t engineFrames = 0;
     int64_t intrinsicsRescaled = 0;
+    /// ⚠ THE DELIVERED FRAME SIZE — the raster the engine actually got.
+    ///
+    /// iOS `meta.json` carried no frame size at all, so "the output is small,
+    /// what resolution are the frames?" had to be answered by inverting
+    /// `canvasH = canvasScale * crossDim + 2 * canvasPadPx` off the finished
+    /// canvas.  A pack that cannot state its own input is not a pack.
+    ///
+    /// This is the twin of Android's `PanoPlusLiveNative.deliveredW/H` and is
+    /// latched at the same place in the chain: the one point every arm's
+    /// frames funnel through on their way into `engine.ingest`.  It is the
+    /// BUFFER's size, not the declared `imageWidth`/`imageHeight` — those two
+    /// can disagree, which is what `intrinsicsRescaled` right above counts.
+    ///
+    /// No reset is needed as there is on Android: `S` is a fresh session per
+    /// sweep, so a previous sweep's value cannot survive into this one.
+    int     deliveredFrameW = 0;
+    int     deliveredFrameH = 0;
     bool    frameCapHit = false;
     double  lastPreviewMs = 0;
     /// The DUTY-THROTTLED interval actually in force (>= pack.previewIntervalMs).
@@ -1186,6 +1203,9 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
         }
         in.fx = kfx; in.fy = kfy; in.cx = kcx; in.cy = kcy;
         in.imageWidth = slot->w; in.imageHeight = slot->h;
+        // See the field's note: the raster the engine got, for the pack.
+        S->deliveredFrameW = slot->w;
+        S->deliveredFrameH = slot->h;
         for (int k = 0; k < 4; ++k) in.q[k] = slot->q[k];
         for (int k = 0; k < 3; ++k) in.t[k] = slot->t[k];
         in.tracking = slot->tracking;
@@ -2555,6 +2575,10 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
                 @"frameWriteFailed": @((NSInteger)S->frameWriteFailed.load()),
                 @"packBytes":      @((NSInteger)S->packBytes.load()),
                 @"intrinsicsRescaled": @((NSInteger)S->intrinsicsRescaled),
+                @"deliveredFrameWidth":  S->deliveredFrameW > 0
+                                            ? @(S->deliveredFrameW) : (id)[NSNull null],
+                @"deliveredFrameHeight": S->deliveredFrameH > 0
+                                            ? @(S->deliveredFrameH) : (id)[NSNull null],
                 @"packFrameCapHit": @(S->frameCapHit),
                 @"clocks":         @{@"startWallMs": jnum(S->startWallMs),
                                      @"endWallMs": jnum(wallEpochMs()),
@@ -2685,6 +2709,10 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
                     @"frameWriteFailed":@((NSInteger)S->frameWriteFailed.load()),
                     @"packBytes":       @((NSInteger)S->packBytes.load()),
                     @"intrinsicsRescaled": @((NSInteger)S->intrinsicsRescaled),
+                    @"deliveredFrameWidth":  S->deliveredFrameW > 0
+                                                ? @(S->deliveredFrameW) : (id)[NSNull null],
+                    @"deliveredFrameHeight": S->deliveredFrameH > 0
+                                                ? @(S->deliveredFrameH) : (id)[NSNull null],
                     @"packFrameCapHit": @(S->frameCapHit),
                     @"sweepMs":         jnum(sweepMs),
                     @"fpsMeasured":     jnum(fpsMeasured),
