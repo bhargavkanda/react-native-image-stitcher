@@ -1863,7 +1863,35 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
    * keyframe engine's internals during a sweep. So the phase stays honest
    * and the GUARDS get their own predicate.
    */
-  const captureRecording = statusPhase === 'recording' || sweepRunning;
+  /**
+   * THE SWEEP IS PAST THE OPERATOR'S CONTROL — `finish()` owns it now.
+   *
+   * ⚠ `sweepRunning` IS `phase !== 'idle'`, WHICH INCLUDES 'finishing'. That
+   * phase spans the native `stop()` and the pack write, seconds on a device,
+   * and the operator has already released the shutter and is looking at the
+   * result. A guard still armed there fires on a capture that is COMPLETE:
+   * turning the phone back to portrait after a landscape sweep abandoned a
+   * finished panorama, and because `onCaptureAbandoned` fires a line after
+   * the handle call, the host was told the capture was abandoned AND then
+   * handed that same capture.
+   *
+   * The keyframe predicate this replaced never had the problem —
+   * `statusPhase` goes 'recording' → 'stitching', and the guards only read
+   * 'recording'.
+   *
+   * ⚠ REPORTED SEPARATELY RATHER THAN NARROWING `onSweepingChange`. That
+   * boolean is deliberately every non-idle phase, and three other things
+   * read it: the ownership latch, the frame-processor worklet gate, and the
+   * HOST's own mode-switch guard, whose whole point is that a mode switch
+   * during the finalize window unmounts the surface mid-call. Narrowing it
+   * would re-open exactly that. `onControlsState.busy` is already
+   * `phase === 'finishing'`, so the guards get their own signal and the
+   * emitted value is untouched.
+   */
+  const [sweepFinalizing, setSweepFinalizing] = useState(false);
+
+  const captureRecording =
+    statusPhase === 'recording' || (sweepRunning && !sweepFinalizing);
 
 
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(
@@ -4259,6 +4287,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // landing on top would leave the gate shut for the whole sweep
             // and the engine would receive nothing, silently. The host's
             // own handler is still called — it is composed, not replaced.
+            onControlsState={(st: { busy: boolean }) => {
+              // `busy` is `phase === 'finishing'` — see `sweepFinalizing`.
+              setSweepFinalizing(st.busy);
+              sweep?.onControlsState?.(st as never);
+            }}
             onSweepingChange={(sweeping: boolean) => {
               // Latch ownership at the first edge and release it at the
               // last — see `sweepOwnershipLatch`. Set from the LIVE value,
@@ -4269,6 +4302,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               // arm and null when idle — two different falsy meanings. The
               // pills need the PHASE.
               setSweepRunning(sweeping);
+              if (!sweeping) setSweepFinalizing(false);
               sweepDriver.setActive(sweeping);
               sweep?.onSweepingChange?.(sweeping);
             }}

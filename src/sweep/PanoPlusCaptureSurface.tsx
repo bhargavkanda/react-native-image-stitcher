@@ -2973,6 +2973,13 @@ export const PanoPlusCaptureSurface = forwardRef<
       // Pano's `incremental.cancel()` occupies on the keyframe engine.
       abandon: (reason: string) => {
         if (phaseRef.current === 'idle') return;
+        // ⚠ AND INERT ONCE `finish()` HAS TAKEN OWNERSHIP. `busyRef` is the
+        // latch `finish` sets before awaiting native `stop()`; firing
+        // `cancel()` against a session with `stop()` in flight leaves the
+        // pending continuation untouched, so the surface still resolves
+        // `onComplete` afterwards — the host would be told the capture was
+        // abandoned and then handed that same capture.
+        if (busyRef.current) return;
         void cancelPanoPlus().catch(() => undefined);
         setPhase('idle');
         onFailure?.({

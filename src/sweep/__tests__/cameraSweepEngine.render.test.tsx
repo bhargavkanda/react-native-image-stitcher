@@ -570,6 +570,25 @@ describe('<Camera engine="sweep">', () => {
     sensorsMock.__resetAccelerometer();
   });
 
+  // ⚠ THE FINALIZE WINDOW IS FIXED BUT NOT TESTED, AND THE GAP IS NAMED.
+  //
+  // `sweepRunning` is `phase !== 'idle'`, which includes 'finishing' — the
+  // native `stop()` and the pack write, SECONDS on a device, during which
+  // the operator has already released and is looking at the result. A guard
+  // still armed there abandoned a FINISHED panorama, and because
+  // `onCaptureAbandoned` fires a line after the handle call, the host was
+  // told the capture was abandoned and then handed that same capture. An
+  // adversarial round reproduced it end to end; `captureRecording` now
+  // excludes the finalize window via `sweepFinalizing`, and `abandon()` is
+  // inert once `finish()` has latched `busyRef`.
+  //
+  // This rig cannot witness it. Driving `onControlsState` by hand does not
+  // work — the surface re-emits it on its next render and overwrites the
+  // value — so the surface has to reach a REAL 'finishing', which needs
+  // native fakes and a deferred `stop()` that this `<Camera>` rig does not
+  // install, plus a ref it does not expose. A case written on the
+  // hand-driven value passes whether the fix is present or not.
+
   it('⚑ …and NOT while idle — a guard that fires off-capture is worse', async () => {
     // Negative control: without it the case above passes for a detector
     // wired to fire on any rotation at all, which would abandon captures
