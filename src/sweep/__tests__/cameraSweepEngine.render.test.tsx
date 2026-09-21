@@ -597,6 +597,17 @@ describe('<Camera engine="sweep">', () => {
     // Negative control: without it the case above passes for a detector
     // wired to fire on any rotation at all, which would abandon captures
     // that had not started.
+    //
+    // ⚠ WHAT IT DOES **NOT** PIN, because the name reads as though it does:
+    // the `|| !captureRecording` term in the abandon effect. That term is
+    // defence in depth — `useOrientationDrift`'s own state machine already
+    // returns INITIAL_STATE whenever `active` is false, so deleting the
+    // effect's term leaves this case green. The guard it names is real and
+    // it is pinned, but ONE LAYER DOWN, by
+    // `useOrientationDrift.test.ts`'s three `!active` cases ("clears the
+    // snapshot", "clears the drift flag", "is idempotent"). This case pins
+    // the COMPOSITION: that `<Camera>` passes the right `active` and does
+    // not route an idle rotation to the host anyway.
     const abandoned: string[] = [];
     const tree = render({
       engine: 'sweep',

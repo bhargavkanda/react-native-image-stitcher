@@ -277,6 +277,12 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
     act(() => { tree.unmount(); });
   });
 
+  // ⚠ AND THE ROTATION GUARD'S OWN OFF-CAPTURE TERM IS PINNED ONE LAYER
+  // DOWN, not here. `useOrientationDrift` returns INITIAL_STATE whenever
+  // `active` is false, so the `|| !captureRecording` term in `<Camera>`'s
+  // abandon effect is defence in depth and deleting it reddens nothing at
+  // this level. Its three cases live in `useOrientationDrift.test.ts`.
+
   it('⚑ NEGATIVE CONTROL — no drift, no stop', async () => {
     const tree = render({ lateralBudgetCm: 1 });
     await settle();
