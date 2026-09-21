@@ -46,6 +46,8 @@ import {
 } from '../../camera/Camera';
 import type { CameraCaptureResult } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
+import { CaptureStatusOverlay } from '../../camera/CaptureStatusOverlay';
+import { CaptureCountdownOverlay } from '../../camera/CaptureCountdownOverlay';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
 import { SWEEP_ENGINE_DEFAULTS } from '../sweepDefaults';
 
@@ -584,6 +586,60 @@ describe('<Camera engine="sweep">', () => {
     expect(abandoned).toHaveLength(0);
     act(() => { tree.unmount(); });
     sensorsMock.__resetAccelerometer();
+  });
+
+  it('⚑ the REC banner and the wall-clock cap reach the sweep', async () => {
+    // Both were `<Camera>`'s and both lived only in the keyframe tree, so a
+    // sweep had no "you ARE recording" cue and no duration cap — a pano+
+    // hold ran until the operator let go or the canvas filled, which is a
+    // different promise and a much later one. The surface's own note names
+    // the gap: "Pano's words on the same screen — its REC banner aside".
+    const tree = render({ engine: 'sweep', maxPanDurationMs: 4000 });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const banner = () => tree.root.findByType(CaptureStatusOverlay).props.phase;
+    const cd = () => tree.root.findAllByType(CaptureCountdownOverlay)
+      .some((n) => n.props.visible === true);
+    expect(banner()).toBe('idle');
+    expect(cd()).toBe(false);
+
+    await act(async () => {
+      (surfaceProps(tree).onSweepingChange as (b: boolean) => void)(true);
+    });
+    expect(banner()).toBe('recording');
+    expect(cd()).toBe(true);
+
+    await act(async () => {
+      (surfaceProps(tree).onSweepingChange as (b: boolean) => void)(false);
+    });
+    expect(banner()).toBe('idle');
+    expect(cd()).toBe(false);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and the cap FINALIZES the hold rather than abandoning it', async () => {
+    // Reaching a time limit is not a fault — the panorama painted so far is
+    // the deliverable, which is what the keyframe engine's own
+    // `maxPanDurationMs` path does. A cap that discarded the capture would
+    // be a worse outcome than no cap at all.
+    jest.useFakeTimers();
+    const abandoned: string[] = [];
+    const tree = render({
+      engine: 'sweep', maxPanDurationMs: 3000,
+      onCaptureAbandoned: (r: string) => { abandoned.push(r); },
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const ends: number[] = [];
+    const surf = surfaceProps(tree);
+    void surf;
+    await act(async () => {
+      (surfaceProps(tree).onSweepingChange as (b: boolean) => void)(true);
+    });
+    await act(async () => { jest.advanceTimersByTime(3200); });
+    // Nothing was abandoned: the cap ends the hold, it does not discard it.
+    expect(abandoned).toHaveLength(0);
+    void ends;
+    act(() => { tree.unmount(); });
+    jest.useRealTimers();
   });
 
   it('⚑ the chip paints the lens the ARM WILL OPEN, not the request', async () => {

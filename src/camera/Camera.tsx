@@ -3326,13 +3326,37 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // is the `panDurationTimerRef` setTimeout, NOT this interval.  Skipped
   // when the countdown feature is disabled (`maxPanDurationMs <= 0`).
   useEffect(() => {
-    if (statusPhase !== 'recording' || maxPanDurationMs <= 0) return;
+    if (!captureRecording || maxPanDurationMs <= 0) return;
     const id = setInterval(() => setNowTick(Date.now()), 250);
     return () => clearInterval(id);
-  }, [statusPhase, maxPanDurationMs]);
+  }, [captureRecording, maxPanDurationMs]);
 
   // Whole seconds remaining for the countdown overlay (item 5).  Pure
   // helper; clamps to [0, round(maxPanDurationMs/1000)].
+  /**
+   * THE SWEEP'S RECORDING CLOCK AND ITS WALL-CLOCK CAP.
+   *
+   * ⚠ BOTH LIVED INSIDE THE KEYFRAME `startCapture`, so a sweep had neither.
+   * `recordingStartedAt` is what the REC banner counts up from and what the
+   * countdown counts down against, and the cap is Pano's promise that a hold
+   * cannot run forever. A pano+ hold could run until the operator let go, or
+   * until the canvas filled — which is a different promise and a much later
+   * one.
+   *
+   * The cap FINALIZES rather than abandoning: reaching a time limit is not a
+   * fault, and the panorama painted so far is the deliverable. That is what
+   * the keyframe engine's own `maxPanDurationMs` path does.
+   */
+  useEffect(() => {
+    if (!sweepRunning) return undefined;
+    setRecordingStartedAt(Date.now());
+    if (maxPanDurationMs <= 0) return undefined;
+    const id = setTimeout(() => {
+      sweepRef.current?.holdEnd?.();
+    }, maxPanDurationMs);
+    return () => { clearTimeout(id); };
+  }, [sweepRunning, maxPanDurationMs]);
+
   const countdownSeconds = countdownSecondsFrom(
     recordingStartedAt,
     nowTick,
@@ -4390,6 +4414,33 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               >
                 {renderSharedArPill()}
               </View>
+              {/* ⚠ THE REC BANNER AND THE COUNTDOWN, ON THE SWEEP TOO.
+                  Both are `<Camera>`'s and both lived only in the keyframe
+                  tree, so a sweep had no "you ARE recording" cue at all and
+                  no wall-clock cap — the surface's own note names the gap
+                  ("Pano's words on the same screen — its REC banner aside").
+
+                  `phase` is derived rather than read: `statusPhase` stays
+                  'idle' on a sweep by design (widening it would start the
+                  keyframe engine's internals), so the shared overlay is
+                  driven by the same `captureRecording` the guards use. */}
+              <CaptureStatusOverlay
+                phase={sweepRunning ? 'recording' : statusPhase}
+                topInset={insets.top}
+                recordingStartedAt={recordingStartedAt ?? undefined}
+                tooFast={recordingTooFast}
+                recordingMessage={
+                  recordingTooFast
+                    ? guidanceCopyResolved.tooFast
+                    : guidanceCopyResolved.statusRecording
+                }
+                stitchingMessage={guidanceCopyResolved.statusStitching}
+              />
+              <CaptureCountdownOverlay
+                visible={sweepRunning && maxPanDurationMs > 0}
+                secondsRemaining={countdownSeconds}
+                orientation={deviceOrientation}
+              />
               <View
                 // ⚠ DERIVED FROM THE SURFACE'S OWN ARITHMETIC, NOT A LITERAL.
                 // This was `bottom: 132` under a comment claiming the two
