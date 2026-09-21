@@ -93,47 +93,6 @@ export interface PickFormatOptions {
    * cap.  Default off (0).
    */
   minVideoLongEdge?: number;
-  /**
-   * SWEEP INGEST POLICY (`<Camera engine="sweep">`'s host preview).  Off by
-   * default; every other consumer keeps the aspect-first rule above.
-   *
-   * ⚠ WHY THIS EXISTS, MEASURED.  The `minVideoLongEdge` floor is applied
-   * AFTER the aspect filter and is SOFT, and on Android that makes it inert
-   * on every device, not just one.  vision-camera enumerates Android video
-   * sizes as `qualities.flatMap { it.typicalSizes }` over CameraX's quality
-   * ladder (`CameraDeviceDetails.kt:123`), and `androidx.camera.video.Quality`
-   * hard-codes those lists:
-   *
-   *     SD  = [720x480 (3:2), 640x480 (4:3)]      <- two entries
-   *     HD  = [1280x720]   FHD = [1920x1080]   UHD = [3840x2160]   (16:9)
-   *
-   * so `640x480` is the ONLY enumerated video size that can ever satisfy a
-   * 4:3 `matchesAspect`.  The hard aspect filter collapses `base` to it, the
-   * floor then finds nothing at/above 1280 within that set, and the soft
-   * fallback silently un-floors.  Measured on a Galaxy A35: the sweep's
-   * vision-camera arm was fed 640x480 and produced ~500x300 panoramas, while
-   * the SAME phone's Camera2 arm — which enumerates the real hardware list,
-   * including 4:3 at 1920x1440 and 1440x1080 — got 1440x1080.
-   *
-   * On this path the VIDEO stream IS the stitch source, so:
-   *
-   *  1. the floor is applied FIRST and outranks aspect;
-   *  2. 4:3 is still preferred, but only WITHIN the floored set (so a device
-   *     that does have a big 4:3 format still gets it — this must not become
-   *     "16:9 always");
-   *  3. aspect is matched on the VIDEO dims alone, because the video is what
-   *     is ingested; the photo aspect is demoted to a tie-break;
-   *  4. the sort takes the SMALLEST format clearing the floor, not the
-   *     largest.  Without that, fps ties (every CamcorderProfile rung on the
-   *     A35 is 30) and the existing `videoPixels` DESC sort asks for
-   *     3840x2160 — 27x the pixels per frame, on a phone already near its
-   *     per-frame budget.  The floor is the knob; raise it to ask for more.
-   *
-   * Still SOFT at every stage: a device with nothing above the floor, or no
-   * 4:3 above it, degrades instead of failing.  Read `floorCleared` from
-   * {@link pickCaptureFormatDetailed} to find out which happened.
-   */
-  videoFloorOutranksAspect?: boolean;
 }
 
 const DEFAULT_MAX_PHOTO_LONG_EDGE = 4032;
@@ -173,17 +132,15 @@ export interface PickFormatResult<F extends FormatLike> {
    * Did any candidate actually clear `floorRequested`?
    *
    * ⚠ `floorRequested > 0 && !floorCleared` is the INERT case: the caller
-   * asked for a resolution floor and the device answered with nothing above
-   * it, so the floor silently did nothing.  That state shipped undetected on
-   * every Android device — the option had no test and no runtime signal — so
-   * it is reported rather than inferred.  A flag is wired only when an
-   * outcome proves it, and this is the outcome.
+   * asked for a resolution floor and the enumerated list answered with
+   * nothing above it, so the floor silently did nothing.  That state shipped
+   * undetected on every Android device — the option had no test and no
+   * runtime signal — so it is reported rather than inferred.  A flag is wired
+   * only when an outcome proves it, and this is the outcome.
    */
   floorCleared: boolean;
   /** Does the CHOSEN format's VIDEO stream match the requested aspect? */
   videoAspectMatched: boolean;
-  /** Which pipeline ran.  See `videoFloorOutranksAspect`. */
-  policy: 'aspect-first' | 'floor-first';
 }
 
 /**
@@ -207,15 +164,12 @@ export function pickCaptureFormatDetailed<F extends FormatLike>(
   opts: PickFormatOptions = {},
 ): PickFormatResult<F> {
   const videoFloor = opts.minVideoLongEdge ?? 0;
-  const floorFirst = opts.videoFloorOutranksAspect === true && videoFloor > 0;
-
   if (!formats || formats.length === 0) {
     return {
       format: undefined,
       floorRequested: videoFloor,
       floorCleared: false,
       videoAspectMatched: false,
-      policy: floorFirst ? 'floor-first' : 'aspect-first',
     };
   }
 
@@ -228,81 +182,12 @@ export function pickCaptureFormatDetailed<F extends FormatLike>(
   // a chase for 120 fps, breaks the tie.
   const smoothness = (f: FormatLike): number => Math.min(f.maxFps, fpsTarget);
 
-  const videoLongEdge = (f: FormatLike): number =>
-    Math.max(f.videoWidth, f.videoHeight);
   const matchesVideoAspect = (f: FormatLike): boolean =>
     f.videoHeight > 0 && Math.abs(f.videoWidth / f.videoHeight - aspect) < tol;
   const matchesAspect = (f: FormatLike): boolean =>
     f.photoHeight > 0
     && Math.abs(f.photoWidth / f.photoHeight - aspect) < tol
     && matchesVideoAspect(f);
-
-  if (floorFirst) {
-    // ── SWEEP INGEST PIPELINE.  See `videoFloorOutranksAspect` for why the
-    //    stage order is inverted here and nowhere else. ──────────────────
-
-    // 1. THE FLOOR, FIRST — and still soft, so a device with nothing above
-    //    it degrades to its best rather than refusing to open a camera.
-    const cleared = formats.filter((f) => videoLongEdge(f) >= videoFloor);
-    const floorCleared = cleared.length > 0;
-    let base: F[] = floorCleared ? cleared : formats.slice();
-
-    // 2. 4:3 WITHIN the floored set, matched on the VIDEO dims alone — the
-    //    video is what gets ingested, and requiring the photo to agree is
-    //    what made the whole Android ladder unreachable.  Soft: a device
-    //    whose only big formats are 16:9 takes 16:9.
-    const fourThreeVideo = base.filter(matchesVideoAspect);
-    if (fourThreeVideo.length > 0) base = fourThreeVideo;
-
-    // 3. Depth, unchanged in meaning from the default path.
-    if (opts.preferDepthCapture) {
-      const withDepth = base.filter((f) => f.supportsDepthCapture === true);
-      if (withDepth.length > 0) base = withDepth;
-    }
-
-    // 4. Photo cap, soft as ever.
-    const withinCap =
-      cap > 0 ? base.filter((f) => longEdge(f) <= cap) : base.slice();
-    const candidates = withinCap.length > 0 ? withinCap : base;
-
-    // 5. fps FIRST (a sweep is a moving capture; frame rate is the motion-
-    //    blur defence, and the iOS sibling refuses to start rather than
-    //    trade it), then the SMALLEST stream that cleared the floor, then
-    //    the photo closest to `aspect` so the still this session can also
-    //    take does not silently change shape.
-    const photoAspectErr = (f: FormatLike): number =>
-      f.photoHeight > 0
-        ? Math.abs(f.photoWidth / f.photoHeight - aspect)
-        : Number.POSITIVE_INFINITY;
-
-    const format = candidates.slice().sort((a, b) => {
-      if (preferHighFps) {
-        const sa = smoothness(a);
-        const sb = smoothness(b);
-        if (sb !== sa) return sb - sa;
-      }
-      const va = videoPixels(a);
-      const vb = videoPixels(b);
-      if (va !== vb) return va - vb; // SMALLEST clearing the floor
-      const pa = photoAspectErr(a);
-      const pb = photoAspectErr(b);
-      if (pa !== pb) return pa - pb; // keep the still at `aspect`
-      if (longEdge(b) !== longEdge(a)) return longEdge(b) - longEdge(a);
-      return (a.supportsVideoHdr ? 1 : 0) - (b.supportsVideoHdr ? 1 : 0);
-    })[0];
-
-    return {
-      format,
-      floorRequested: videoFloor,
-      floorCleared,
-      videoAspectMatched: format ? matchesVideoAspect(format) : false,
-      policy: 'floor-first',
-    };
-  }
-
-  // ── DEFAULT PIPELINE — byte-for-byte the behaviour every non-sweep
-  //    consumer has always had.  Left structurally intact so it can be read
-  //    rather than re-derived. ────────────────────────────────────────────
 
   // Prefer 4:3 formats; if the device has none, consider all.
   const fourThree = formats.filter(matchesAspect);
@@ -322,14 +207,17 @@ export function pickCaptureFormatDetailed<F extends FormatLike>(
   // keeps the fps preference from landing a tiny 640×480 video stream that
   // becomes 0.3 MP pano keyframes.  Soft: no qualifying format → unfloored.
   //
-  // ⚠ ON ANDROID THIS IS ALWAYS THE UNFLOORED BRANCH, because `base` above
-  // has already collapsed to the single 4:3 entry CameraX publishes
-  // (640×480) and nothing in it clears 1280.  `floorCleared` says so.
+  // ⚠ SOFT MEANS IT CAN DO NOTHING, AND `floorCleared` SAYS WHEN.  The
+  // aspect filter above runs first, so the floor only ever sees the 4:3
+  // entries — and when the enumerated list's only 4:3 video size is 640×480
+  // (vision-camera's Android list, see `CameraView`), nothing here clears
+  // 1280 and the fallback quietly returns the VGA entry.  The floor was
+  // inert on every Android device for its whole life that way.
   let sizedBase = depthBase;
   let floorCleared = false;
   if (videoFloor > 0) {
     const bigEnough = depthBase.filter(
-      (f) => videoLongEdge(f) >= videoFloor,
+      (f) => Math.max(f.videoWidth, f.videoHeight) >= videoFloor,
     );
     floorCleared = bigEnough.length > 0;
     if (floorCleared) sizedBase = bigEnough;
@@ -365,6 +253,5 @@ export function pickCaptureFormatDetailed<F extends FormatLike>(
     floorRequested: videoFloor,
     floorCleared,
     videoAspectMatched: format ? matchesVideoAspect(format) : false,
-    policy: 'aspect-first',
   };
 }
