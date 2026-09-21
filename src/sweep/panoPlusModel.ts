@@ -3527,10 +3527,28 @@ export function panoPlusIntegrity(summary: PanoPlusSummary): PanoPlusIntegrity {
     || summary.gain.localP2PPct > PANOPLUS_PHOTO_APPLIED_BAND_BAR
     || summary.gain.rangePct > PANOPLUS_PHOTO_APPLIED_RANGE_BAR;
   const hasBanding = breachesPhoto || (painted && !photoMeasured);
-  // A session that painted NOTHING has no panorama to be intact. It used to
-  // satisfy every clause vacuously — no holes, nothing clipped, no seams — and
-  // render the green banner over an empty canvas.
-  const empty = !painted;
+  // A session that produced NO CANVAS has no panorama to be intact. It used
+  // to satisfy every clause vacuously — no holes, nothing clipped, no seams —
+  // and render the green banner over an empty canvas.
+  //
+  // ⚠ IT IS THE CANVAS, NOT THE STRIP COUNT, AND THE FIRST CUT GOT THAT
+  // WRONG. This read `!painted`, i.e. `counts.painted === 0` — and
+  // `counts.painted` counts STEADY-STATE INCREMENTAL STRIPS ONLY. The
+  // lead-out (`Engine::finish()`) commits its block without incrementing it,
+  // so a sweep that never left bootstrap still produces a real picture with
+  // `painted: 0`. Measured on the operator's own A35: TEN of fifteen packs
+  // on that phone are in exactly that state — `counts.painted: 0` with
+  // `outputW`/`outputH` non-zero — and every one of them would have been
+  // told `⚠ Nothing was painted — the sweep produced no panorama` over an
+  // image they were looking at. A verdict that contradicts the picture is
+  // the defect class this file exists to remove.
+  //
+  // `width`/`height` are 0 exactly when `finalCanvas()` declined, which is
+  // `!anyPainted` — no strip, no bootstrap frame and no lead-out committed
+  // anything. That is the honest test for "there is no panorama here", and
+  // it is the one the host gate already uses to decide whether to open a
+  // review at all (`Camera.tsx`: `result.width > 0 && result.height > 0`).
+  const empty = !(summary.width > 0 && summary.height > 0);
   // The engine ships its OWN verdict in `seam.integrityFailed`. Honour it as
   // well as the locally recomputed bars: two gates that can disagree is one
   // gate too many, and the engine is the one that saw the samples.
@@ -4806,6 +4824,99 @@ export type PanoPlusDefectCode =
   | 'cuts'
   | 'banding'
   | 'engine';
+
+/**
+ * THE BAR ABOVE WHICH THE LEAD-OUT STOPS BEING A TAIL.
+ *
+ * ⚠ THIS IS A JUDGEMENT, NOT A MEASUREMENT, AND SAYING SO IS THE POINT. The
+ * lead-out's share of the deliverable has been measured properly on exactly
+ * one corpus — nine iPhone packs, 2026-09-20, where it ran 13-24%. An
+ * attempt to measure the same thing across fifteen A35 packs on 2026-09-21
+ * produced numbers that had to be withdrawn: `meta.json` carries no `axis`,
+ * so every percentage was divided by the output's WIDTH, which is the CROSS
+ * dimension on a vertical sweep.
+ *
+ * So 0.5 is chosen to sit far above the one regime that IS measured (13-24%
+ * is comfortably a tail) rather than tuned to a distribution nobody has. It
+ * will be calibrated for real once packs carrying `tailFlushColumns` come
+ * back from both phones — that field shipped on 2026-09-20 and no pack on
+ * either device predates it.
+ *
+ * The other half of the predicate needs no bar at all and is the
+ * well-grounded one: see {@link panoPlusLeadOutWarning}.
+ */
+export const PANOPLUS_LEAD_OUT_DOMINANT_FRAC = 0.5;
+
+/**
+ * "Most of this panorama is one frame" — or `null` when the lead-out is the
+ * ordinary tail it usually is.
+ *
+ * ⚠ IT IS NOT A DEFECT, WHICH IS WHY IT IS NOT IN
+ * {@link panoPlusCaptureWarnings}. That function answers "what is WRONG with
+ * this picture" and was deliberately narrowed to measured defects; the
+ * lead-out runs on every sweep and carries real scene. This answers a
+ * different question — "how much of what you are looking at has no
+ * strip-to-strip alignment" — and only speaks when the answer is "most of
+ * it".
+ *
+ * TWO CLAUSES, and they are not equally grounded:
+ *
+ *   1. `counts.painted === 0` — THE MEASURED ONE. That counter counts
+ *      STEADY-STATE INCREMENTAL STRIPS ONLY: the bootstrap frames and the
+ *      lead-out commit without touching it. So zero means the sweep never
+ *      reached steady state and what is on screen was assembled without a
+ *      single registered strip-to-strip join. Ten of the fifteen packs on
+ *      the operator's A35 are in exactly this state, with a real canvas.
+ *   2. The fraction bar — a judgement; see
+ *      {@link PANOPLUS_LEAD_OUT_DOMINANT_FRAC}.
+ *
+ * `null` when the pack predates `tailFlushColumns` AND painted strips exist,
+ * so an old pack degrades to silence rather than to a warning built on a
+ * zero it has no opinion about.
+ */
+export function panoPlusLeadOutWarning(
+  summary: PanoPlusSummary,
+  /**
+   * The message template, with `{percent}` / `{columns}` / `{unit}`.
+   *
+   * ⚠ REQUIRED, AND THAT IS A LAYERING DECISION rather than an oversight.
+   * The English for every capture warning lives once, in
+   * `src/camera/captureWarnings.ts` (`DEFAULT_CAPTURE_WARNING_COPY`), and
+   * nothing in `src/sweep/` imports from `src/camera/` — this file is the
+   * pure data layer and is consumed by offline tooling that has no
+   * `<Camera>`. A default here would either duplicate that English (two
+   * spellings of one sentence, the drift this file warns about six times)
+   * or invert the dependency. The one caller already holds the resolved,
+   * host-localised copy.
+   */
+  template: string,
+): { code: 'SWEEP_LEAD_OUT'; message: string } | null {
+  // No canvas at all is `panoPlusIntegrity`'s `empty`, not this. Saying
+  // "most of this panorama" about a panorama that does not exist would be
+  // the same contradiction-with-the-picture this pair of functions exists
+  // to avoid, pointing the other way.
+  if (!(summary.width > 0 && summary.height > 0)) return null;
+  if (!summary.tailFlushed) return null;
+
+  const along = paintedAlongExtent(summary);
+  const cols = summary.tailFlushColumns;
+  const frac = along > 0 && cols > 0 ? cols / along : 0;
+  const neverSteadyState = summary.counts.painted === 0;
+  if (!neverSteadyState && frac <= PANOPLUS_LEAD_OUT_DOMINANT_FRAC) return null;
+
+  // The axis word, for the reason `paintedAlongExtent` states: a vertical
+  // sweep is transposed by the finalize bake, so "column" is wrong half the
+  // time.
+  const unit = summary.unpaintedRunsAxis === 'y' ? 'row' : 'column';
+  // A pack with no `tailFlushColumns` (pre-2026-09-20) that reaches here did
+  // so on clause 1, so it can state the CAUSE without inventing an extent.
+  const pct = frac > 0 ? Math.round(frac * 100) : 100;
+  const message = template
+    .replace(/\{percent\}/g, String(pct))
+    .replace(/\{columns\}/g, String(cols))
+    .replace(/\{unit\}/g, unit);
+  return { code: 'SWEEP_LEAD_OUT', message };
+}
 
 export function panoPlusCaptureWarnings(
   summary: PanoPlusSummary,

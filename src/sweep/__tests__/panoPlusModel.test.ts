@@ -33,6 +33,7 @@ import {
   barePath,
   coercePanoPlusSummary,
   panoPlusCaptureWarnings,
+  panoPlusLeadOutWarning,
   fileUri,
   newPanoPlusSessionId,
   panoPlusCameraLockLine,
@@ -3774,14 +3775,40 @@ describe('panoPlusCaptureWarnings — what reaches the host, and what must not',
   });
 
   it('⚑ an EMPTY capture warns — the one pack with nothing in it said nothing', () => {
-    // (b) THE FALSE NEGATIVE. A session that painted no strips satisfies
+    // (b) THE FALSE NEGATIVE. A session that produced no canvas satisfies
     // every clause below vacuously: no holes, nothing clipped, no boundaries
     // to be out of bar. `isIntact` has the `!empty` clause; the host channel
     // did not, so the capture with nothing in it at all was the one that
     // warned about nothing at all.
-    const empty = clean({ counts: { seen: 40, painted: 0, gapBreak: 0 } });
+    //
+    // ⚠ NO CANVAS, NOT NO STRIPS — and the first cut of this fixture had it
+    // wrong, which is the whole of the case below. `width: 0` is what
+    // `finalCanvas()` declining actually looks like.
+    const empty = clean({
+      width: 0, height: 0, counts: { seen: 40, painted: 0, gapBreak: 0 },
+    });
     expect(codes(empty)).toEqual(['SWEEP_NOT_INTACT']);
     expect(panoPlusCaptureWarnings(empty)[0]!.message).toContain('Nothing was painted');
+  });
+
+  it('⚑ …but `counts.painted: 0` WITH a canvas is NOT empty — the A35\'s commonest pack', () => {
+    // ⚠ THE MESSAGE THAT CONTRADICTED THE PICTURE. `empty` read
+    // `counts.painted === 0`, and that counter counts STEADY-STATE
+    // INCREMENTAL STRIPS ONLY — the bootstrap frames and the lead-out commit
+    // without touching it. So a sweep that never reached steady state still
+    // produces a real picture with `painted: 0`.
+    //
+    // Measured on the operator's own A35: TEN of fifteen packs on that phone
+    // are in exactly this state (`pp_1789764257113`: seen 83, painted 0,
+    // outputW 720, outputH 497, a visible panorama). Every one of them would
+    // have been handed `⚠ Nothing was painted — the sweep produced no
+    // panorama` over an image they were looking at.
+    const bootstrapOnly = clean({
+      width: 720, height: 497, counts: { seen: 83, painted: 0, gapBreak: 0 },
+    });
+    expect(panoPlusIntegrity(bootstrapOnly).empty).toBe(false);
+    expect(panoPlusCaptureWarnings(bootstrapOnly).map((w) => w.message).join(' '))
+      .not.toContain('Nothing was painted');
   });
 
   it('⚑ the ENGINE\'s own verdict warns — it saw the samples this layer does not', () => {
@@ -4015,8 +4042,10 @@ describe('the capture warning speaks the host language too', () => {
   // the two speaking French and the other not is the divergence at its most
   // visible — and this diff added a localisation channel for the sweep HUD
   // while leaving the warning beside it in English.
+  // `width: 0` is what an EMPTY capture is — see the case above; a pack with
+  // `painted: 0` and a real canvas is a bootstrap-only sweep, not an empty one.
   const empty = coercePanoPlusSummary({
-    width: 4000, height: 1200, counts: { seen: 40, painted: 0 },
+    width: 0, height: 0, counts: { seen: 40, painted: 0 },
   });
 
   it('defaults to the shipped English', () => {
@@ -4037,5 +4066,89 @@ describe('the capture warning speaks the host language too', () => {
     // implementation that returns the first override it is given.
     expect(panoPlusCaptureWarnings(empty, { cuts: 'Coupures' })[0]!.message)
       .toContain('Nothing was painted');
+  });
+});
+
+// ── "MOST OF THIS PANORAMA IS ONE FRAME" ──────────────────────────────────
+//
+// The operator, on his own output: "in the output, I want you to see why
+// there is some broken parts towards the edges." The lead-out is the answer,
+// and until now it reached no screen: the sentence renders through
+// `PanoPlusResultView`, which `<Camera>` no longer mounts, and
+// `host_verdict.json` needs a dependency the example does not have.
+//
+// ⚠ IT IS NOT IN `panoPlusCaptureWarnings`, AND THAT IS THE DESIGN. That
+// function was narrowed to measured DEFECTS; the lead-out runs on every
+// sweep and carries real scene, so folding it in would put a banner on every
+// capture and devalue the ones that mean something. This speaks only when
+// the lead-out stops being a tail.
+describe('panoPlusLeadOutWarning — the lead-out when it is no longer a tail', () => {
+  const TPL = 'LEADOUT {percent}% {columns} {unit}s';
+  const pack = (over: Record<string, unknown> = {}) =>
+    coercePanoPlusSummary({
+      width: 1441, height: 1026,
+      unpaintedRunsAxis: 'x',
+      counts: { seen: 200, painted: 150 },
+      tailFlushAttempted: true, tailFlushed: true, tailFlushColumns: 193,
+      ...over,
+    });
+
+  it('a NORMAL tail says nothing — 193 of 1441 is 13%', () => {
+    // The regime that IS measured: nine iPhone packs ran 13-24%. If this
+    // fired here it would fire on every working sweep.
+    expect(panoPlusLeadOutWarning(pack(), TPL)).toBeNull();
+  });
+
+  it('⚑ a sweep that never reached steady state DOES — the A35\'s commonest pack', () => {
+    // THE WELL-GROUNDED CLAUSE, and it needs no threshold. `counts.painted`
+    // counts steady-state incremental strips only, so 0 means what is on
+    // screen was assembled without a single registered strip-to-strip join.
+    // Ten of fifteen packs on the operator's A35 are in this state.
+    const w = panoPlusLeadOutWarning(
+      pack({ counts: { seen: 83, painted: 0 } }), TPL,
+    );
+    expect(w?.code).toBe('SWEEP_LEAD_OUT');
+    expect(w?.message).toContain('LEADOUT');
+  });
+
+  it('…and so does a lead-out past the bar, even with strips painted', () => {
+    const w = panoPlusLeadOutWarning(pack({ tailFlushColumns: 900 }), TPL);
+    expect(w?.message).toBe('LEADOUT 62% 900 columns');
+  });
+
+  it('⚑ says ROWS on a vertical sweep, and measures against the HEIGHT', () => {
+    // A vertical sweep is transposed by the finalize bake, so "column" is
+    // wrong half the time and so is a percentage taken against the width.
+    // That exact mistake — dividing by the width because no axis was found —
+    // is what invalidated a 15-pack measurement on 2026-09-21.
+    const w = panoPlusLeadOutWarning(
+      pack({ width: 555, height: 1165, unpaintedRunsAxis: 'y',
+             tailFlushColumns: 700 }),
+      TPL,
+    );
+    expect(w?.message).toBe('LEADOUT 60% 700 rows');   // 700/1165, NOT /555
+  });
+
+  it('is SILENT when there is no canvas — that is `empty`, not this', () => {
+    // Negative control. "Most of this panorama…" said about a panorama that
+    // does not exist is the same contradiction-with-the-picture, pointing
+    // the other way.
+    expect(panoPlusLeadOutWarning(
+      pack({ width: 0, height: 0, counts: { seen: 40, painted: 0 } }), TPL,
+    )).toBeNull();
+  });
+
+  it('is SILENT when the lead-out did not run at all', () => {
+    expect(panoPlusLeadOutWarning(
+      pack({ tailFlushed: false, tailFlushColumns: 0 }), TPL,
+    )).toBeNull();
+  });
+
+  it('takes the host template — it localises through the same channel', () => {
+    const w = panoPlusLeadOutWarning(
+      pack({ counts: { seen: 83, painted: 0 } }),
+      'Une seule image : {percent}% ({columns} {unit}s)',
+    );
+    expect(w?.message).toBe('Une seule image : 13% (193 columns)');
   });
 });

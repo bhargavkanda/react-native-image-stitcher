@@ -884,6 +884,50 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { tree.unmount(); });
   });
 
+  it('⚑ the LEAD-OUT reaches the REVIEW BANNER — the operator\'s own question, answered on screen', async () => {
+    // "In the output, I want you to see why there is some broken parts
+    // towards the edges." Until now the answer reached no screen:
+    // `panoPlusResidualLines`'s sentence renders through
+    // `PanoPlusResultView`, which `<Camera>` no longer mounts, and
+    // `host_verdict.json` needs a dependency the example does not have.
+    //
+    // Now it is a WARNING, on the same banner as every other one — which
+    // renders in preview-only mode too, not just with the crop controls.
+    const bootstrapOnly = panoPlusResultOf(
+      coercePanoPlusSummary({
+        canvasPath: CANVAS,
+        sessionDir: '/data/user/0/com.x/files/panoplus/pp_1',
+        // The operator's own A35 pack `pp_1789764257113`: 83 frames seen,
+        // ZERO steady-state strips, and a real 720×497 canvas.
+        width: 720, height: 497,
+        counts: { seen: 83, painted: 0 },
+        unpaintedRunsAxis: 'x',
+        tailFlushAttempted: true, tailFlushed: true, tailFlushColumns: 249,
+      }),
+      { rectify: true, gainMatch: true, packFrames: 'all', poseSource: 'imu' },
+      '2026-09-21T00:00:00.000Z',
+    );
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = await render({
+      showPreview: true,            // preview-only — NOT the crop editor
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    await act(async () => {
+      (surfaceProps(tree).onComplete as (r: unknown) => void)(bootstrapOnly);
+    });
+    // ON THE BANNER…
+    const banner = (review(tree)[0].props.warnings as string[]).join(' | ');
+    expect(banner).toContain('single frame');
+    // …and NOT the message that used to appear here, which contradicted the
+    // picture the operator was looking at.
+    expect(banner).not.toContain('Nothing was painted');
+    // …and on the HOST channel, with a code to branch on.
+    act(() => { (review(tree)[0].props.onUseOriginal as () => void)(); });
+    expect((seen[0]!.warnings as Array<{ code: string }>).map((w) => w.code))
+      .toContain('SWEEP_LEAD_OUT');
+    act(() => { tree.unmount(); });
+  });
+
   it('⚑ …and a STALE native is refused before it can overwrite the canvas', async () => {
     // ⚠ JS NEWER THAN NATIVE IS THE ROUTINE STATE HERE — a Metro reload
     // without a rebuild. Such a build ignores the unknown `outputPath` key

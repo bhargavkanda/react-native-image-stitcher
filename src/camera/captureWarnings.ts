@@ -41,7 +41,21 @@ export type CaptureWarningCode =
    * reached the host. A host on `onCapture(result).warnings` got silence on
    * one engine and warnings on the other, from the same callback.
    */
-  | 'SWEEP_NOT_INTACT';
+  | 'SWEEP_NOT_INTACT'
+  /**
+   * THE LEAD-OUT DOMINATES THIS PANORAMA — most of what you are looking at
+   * came from ONE frame at the end of the sweep, in a single block, with no
+   * per-strip registration, no gain chain and one pose.
+   *
+   * ⚠ IT IS NOT A DEFECT AND IT IS NOT `SWEEP_NOT_INTACT`. The lead-out runs
+   * on every sweep and carries real scene; a normal one is a tail. This code
+   * fires only when it is no longer a tail — when the sweep painted no
+   * incremental strips at all, or when the block is more than half the
+   * deliverable. That is the operator's own question answered ("why is there
+   * some broken parts towards the edges"), at the one time the answer is
+   * "because almost all of it is the edge".
+   */
+  | 'SWEEP_LEAD_OUT';
 
 export interface CaptureWarning {
   /** Stable, host-switchable code. */
@@ -81,6 +95,14 @@ export interface CaptureWarningCopy {
   lateralDriftFinalize: string;
   /** HIGH_PAN_SPEED. */
   highPanSpeed: string;
+  /**
+   * SWEEP_LEAD_OUT — template; `{columns}`, `{unit}`, `{percent}`.
+   *
+   * `{unit}` is already localised by the caller to the axis word ("column" /
+   * "row"), because a vertical sweep is transposed by the finalize bake and
+   * printing "columns" unconditionally is wrong half the time.
+   */
+  sweepLeadOut: string;
 }
 
 export const DEFAULT_CAPTURE_WARNING_COPY: CaptureWarningCopy = {
@@ -94,6 +116,11 @@ export const DEFAULT_CAPTURE_WARNING_COPY: CaptureWarningCopy = {
   highPanSpeed:
     'The capture was taken faster than the recommended pace — the result '
     + 'may not be the best. Pan more slowly next time.',
+  sweepLeadOut:
+    'Most of this panorama ({percent}%, {columns} {unit}s) came from a '
+    + 'single frame at the end of the sweep — that part has no strip-to-strip '
+    + 'alignment, so its edges may not line up. Pan further, and more slowly, '
+    + 'so the sweep paints the scene instead of the lead-out.',
 };
 
 /**

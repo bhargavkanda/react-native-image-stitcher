@@ -82,6 +82,11 @@ export interface GuidanceCopy {
   warnLateralDriftFinalize: string;
   /** HIGH_PAN_SPEED warning. */
   warnHighPanSpeed: string;
+  /**
+   * SWEEP_LEAD_OUT warning — template, with `{columns}`, `{unit}` and
+   * `{percent}` placeholders (substituted at runtime).
+   */
+  warnSweepLeadOut: string;
 }
 
 export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
@@ -108,6 +113,7 @@ export const DEFAULT_GUIDANCE_COPY: GuidanceCopy = {
   warnLowFrameUtilization: DEFAULT_CAPTURE_WARNING_COPY.lowFrameUtilization,
   warnLateralDriftFinalize: DEFAULT_CAPTURE_WARNING_COPY.lateralDriftFinalize,
   warnHighPanSpeed: DEFAULT_CAPTURE_WARNING_COPY.highPanSpeed,
+  warnSweepLeadOut: DEFAULT_CAPTURE_WARNING_COPY.sweepLeadOut,
 };
 
 /**
@@ -120,6 +126,7 @@ export function captureWarningCopyFrom(g: GuidanceCopy): CaptureWarningCopy {
     lowFrameUtilization: g.warnLowFrameUtilization,
     lateralDriftFinalize: g.warnLateralDriftFinalize,
     highPanSpeed: g.warnHighPanSpeed,
+    sweepLeadOut: g.warnSweepLeadOut,
   };
 }
 

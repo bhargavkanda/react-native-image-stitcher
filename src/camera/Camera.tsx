@@ -98,6 +98,7 @@ import {
   fileUri,
   panoPlusVerdictSidecar,
   panoPlusCaptureWarnings,
+  panoPlusLeadOutWarning,
 } from '../sweep/panoPlusModel';
 
 /**
@@ -4576,6 +4577,25 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                   highPanSpeed: wasFastPan,
                   copy: captureWarningCopyFrom(guidanceCopyResolved),
                 }),
+                // ⚠ "MOST OF THIS IS ONE FRAME" — the operator's own
+                // question ("why is there some broken parts towards the
+                // edges") answered on the screen he asks it in front of.
+                //
+                // It is SEPARATE from `panoPlusCaptureWarnings` on purpose:
+                // that function was narrowed to measured DEFECTS, and the
+                // lead-out is not one — it runs on every sweep and carries
+                // real scene. This speaks only when it stops being a tail,
+                // which is a different question with a different answer.
+                //
+                // Localised through the SAME channel as the three above, so
+                // a host that translates `guidanceCopy` gets all four.
+                ...(() => {
+                  const w = panoPlusLeadOutWarning(
+                    result.summary,
+                    guidanceCopyResolved.warnSweepLeadOut,
+                  );
+                  return w == null ? [] : [w];
+                })(),
                 // ⚠ LOCALISED, LIKE THE ONES ABOVE IT. Both halves land on
                 // the SAME banner and in the same `warnings` array, so one
                 // of them speaking the host's language and the other not is
