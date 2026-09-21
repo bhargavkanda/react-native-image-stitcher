@@ -197,36 +197,44 @@ export function __resetHardwareVideoSizesCache(): void {
   warnedProbe = false;
 }
 
+/** Synchronous view of the cache: the sizes if resolved, else null. */
+function peekHardwareVideoSizes(cameraId: string): HardwareVideoSize[] | null {
+  const hit = cache.get(cameraId);
+  return Array.isArray(hit) ? hit : null;
+}
+
 /**
  * The hardware video sizes for `cameraId`, and whether they are still on
  * their way.  `pending` is true ONLY while a real probe is in flight — never
  * on iOS, never without the module, never after the first answer — so a
  * caller that holds its mount on it holds exactly once per camera, and only
  * on a build that can answer.
+ *
+ * ⚠ `pending` IS DERIVED, NOT STORED.  vision-camera hands `<CameraView>` an
+ * undefined device on its first render and the real one later.  If `pending`
+ * lived in state it would still read the previous camera's answer on the very
+ * render the device arrives — false — and every consumer keyed on it (the
+ * mount hold, the inert-floor warning) would act on the incomplete list for
+ * one render before the effect below could correct it.  Seen on the A35:
+ * a false "inert floor" warning 300 ms before the 1440x1080 session.  So it
+ * is computed from the cache on every render, for the id THIS render has.
  */
 export function useAndroidHardwareVideoSizes(
   cameraId: string | null | undefined,
 ): { sizes: HardwareVideoSize[]; pending: boolean } {
-  const initial = cameraId != null ? readHardwareVideoSizes(cameraId) : [];
-  const [sizes, setSizes] = useState<HardwareVideoSize[] | null>(
-    Array.isArray(initial) ? initial : null,
-  );
+  const resolved = cameraId != null ? peekHardwareVideoSizes(cameraId) : [];
+  const pending = cameraId != null && resolved == null && probeModule() != null;
+  // Re-render when a read lands; the value itself is always read from the cache.
+  const [, bump] = useState(0);
 
   useEffect(() => {
-    if (cameraId == null) {
-      setSizes([]);
-      return;
-    }
+    if (cameraId == null) return;
     const r = readHardwareVideoSizes(cameraId);
-    if (Array.isArray(r)) {
-      setSizes(r);
-      return;
-    }
+    if (Array.isArray(r)) return;
     let live = true;
-    setSizes(null);
-    void r.then((s) => { if (live) setSizes(s); });
+    void r.then(() => { if (live) bump((n) => n + 1); });
     return () => { live = false; };
   }, [cameraId]);
 
-  return { sizes: sizes ?? [], pending: sizes == null };
+  return { sizes: resolved ?? [], pending };
 }
