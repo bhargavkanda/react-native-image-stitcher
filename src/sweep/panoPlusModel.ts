@@ -2648,32 +2648,44 @@ export function panoPlusPreviewLayout(
   const alongIsPixelY = isQuarter(imageRotateDeg)
     ? !usePanel
     : usePanel;
-  // ⚠ PRE-LATCH THE SEED GOES TO THE END THE LATCH USUALLY PICKS, and that is
-  // a change of default rather than a new rule.
+  // ── THE START EDGE COMES FROM THE HOLD, AND FROM NOTHING ELSE ───────────
   //
-  // Before the axis latches there is no direction to honour: native
-  // initialises `sweepSign = 1` (`rnis_pano.cpp:1000`) and only resolves it at
-  // the latch (`:3870`). The old default therefore pinned the seed at
-  // along-MIN — which, through the portrait band's quarter turn, is the
-  // SCREEN-RIGHT end — and the panorama then jumped to the other end the
-  // moment the sign became real.
+  // Operator's rule, given after this was got wrong twice: *"When phone is
+  // portrait it's a sideways sweep and the preview should start on the left,
+  // and when in landscape the sweep is going to be vertical and the preview
+  // should start on top."* That is the whole specification and it is better
+  // than what stood here.
   //
-  // Reported on the device, 2026-09-20: *"When I take the sweep in portrait
-  // from left to right, the preview first starts on the right extreme and
-  // then moves to left. I don't want that broken experience."*
+  // ⚠ WHAT IT REPLACES, AND WHY THAT KEPT BREAKING. This read
+  // `!status.axisLatched || status.sweepSign < 0` — i.e. it PREDICTED the end
+  // from the engine's sweep sign, and guessed a default for the window before
+  // the sign exists. The guess was `along-MAX`, justified by a measurement
+  // that only covered HORIZONTAL packs ("all seven of the operator's
+  // horizontal packs latch sweepSign: -1"), and then applied to both axes. On
+  // a LANDSCAPE hold along-MAX is the BOTTOM, so every vertical sweep started
+  // at the bottom and jumped to the top the instant the axis latched —
+  // regressing the one case the operator had explicitly said must not
+  // regress, in the commit that fixed the other one.
   //
-  // MEASURED, not assumed: all seven of the operator's horizontal packs latch
-  // `sweepSign: -1` (`pp_1789876452552`, `…877957888`, `…877973043`,
-  // `…877986014`, `…878638740`, `…931447063`, `…931533526`), i.e. along-MAX,
-  // i.e. screen-LEFT. Defaulting the seed there makes the common hold
-  // jump-FREE instead of always jumping, and leaves the reversed hold with the
-  // one unavoidable jump at the latch — strictly better than today, where
-  // every hold jumps.
+  // ⚠ AND ORIENTATION CANNOT CHANGE MID-HOLD, which is what makes this
+  // jump-free by construction rather than by luck. `useOrientationDrift`
+  // abandons the capture the moment the device turns (`Camera.tsx`'s rotation
+  // guard), so `orientation` is a constant for the life of a sweep. An anchor
+  // derived from it cannot move. An anchor derived from `sweepSign` MUST move
+  // once, because the sign does not exist when the first frame is published.
   //
-  // It is a DEFAULT, not a claim about direction: the instant the sign is
-  // real, `sweepSign` decides and this term stops mattering.
-  const startAtAlongMax =
-    status != null && (!status.axisLatched || status.sweepSign < 0);
+  // THE MAPPING, both halves pinned by cases below:
+  //   portrait  → horizontal sweep → screen-LEFT. The band is quarter-turned,
+  //               so the along axis is the JPEG's pixel-Y and RN's rotation
+  //               sends local +Y to screen LEFT; along-MIN therefore lands
+  //               screen-RIGHT and the left edge is along-MAX.
+  //   landscape → vertical sweep → screen-TOP, which is along-MIN.
+  //
+  // The sweep SIGN is deliberately not consulted. It describes which way the
+  // canvas was mirrored by `Engine::orient`, which is a fact about the
+  // published pixels, not about where the operator should look — and reading
+  // it here is what put a jump in every hold.
+  const startAtAlongMax = panoPlusHoldOf(orientation) !== 'landscape';
   //
   // ── AND THE CROSS AXIS IS PINNED TOO, WHICH IT WAS NOT ───────────────────
   //

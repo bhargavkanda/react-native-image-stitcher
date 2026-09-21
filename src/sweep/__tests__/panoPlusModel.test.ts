@@ -1919,16 +1919,25 @@ describe('the live preview geometry', () => {
     // …then the pin.
     for (const l of series) expect(l.anchor.top).toBe(0);
 
-    // And the ALONG pin on this arm still tracks the sweep sign, so the
-    // cross pin cannot be "fixed" by flattening both.
+    // And the ALONG pin is the HOLD's, so the cross pin cannot be "fixed" by
+    // flattening both. `landscape-left` ⇒ start at the along-MIN end; the
+    // sweep SIGN is deliberately not consulted, so both signs agree.
     expect(at(3000, 1).anchor.left).toBe(0);
-    expect(at(3000, -1).anchor.left).toBeGreaterThan(0);
+    expect(at(3000, -1).anchor.left).toBe(0);
   });
 
-  it('⚑ …and the ALONG anchor still tracks the sweep sign', () => {
-    // The cross pin must not flatten the along pin it sits next to: a
-    // negative sweep mirrors the along axis, so the START edge is the other
-    // end and the growing edge must not be welded to the strip.
+  it('⚑ …and the ALONG anchor does NOT track the sweep sign — the hold decides', () => {
+    // ⚠ THIS CASE ASSERTED THE OPPOSITE AND THE OPPOSITE WAS THE DEFECT.
+    // It read `at(1).anchor.top === 0` / `at(-1).anchor.top > 0`, i.e. the
+    // start edge followed `sweepSign`. That is a fact about which way
+    // `Engine::orient` mirrored the pixels, not about where the operator
+    // should look — and because the sign does not exist until the axis
+    // latches, honouring it here MUST move the picture once, mid-hold, on
+    // every capture.
+    //
+    // The operator's rule replaces it: portrait starts left, landscape
+    // starts top, full stop. Both signs therefore agree, and the anchor is
+    // a constant for the life of the hold.
     const at = (sign: 1 | -1) => panoPlusPreviewLayout(
       statusFixture({
         axis: 1, axisLatched: true, sweepSign: sign,
@@ -1939,7 +1948,7 @@ describe('the live preview geometry', () => {
       'landscape-left',
     );
     expect(at(1).anchor.top).toBe(0);
-    expect(at(-1).anchor.top).toBeGreaterThan(0);
+    expect(at(-1).anchor.top).toBe(0);
   });
 
   it('is neutral before anything is painted, and never NaN', () => {
@@ -2173,7 +2182,13 @@ describe('the live preview geometry', () => {
   //
   // It is in the operator's own data: the 2026-08-31T18-28-10 pack records
   // axis 1, sweepSign −1, 366 strips.
-  it('pins the START edge for BOTH sweep signs, not just the +1 one', () => {
+  it('⚑ pins the SAME edge for both sweep signs — a landscape hold starts at the TOP', () => {
+    // ⚠ THIS CASE USED TO ASSERT THE TWO SIGNS HANG FROM DIFFERENT ENDS, and
+    // that is what regressed the vertical sweep: pre-latch the sign is not
+    // real, so the seed guessed, and on a landscape hold the guess was the
+    // BOTTOM. The operator, having asked for exactly this not to happen:
+    // "in vertical sweep, the preview starts at bottom and then moves to
+    // top!"
     for (const [w, h] of [[718, 1400], [718, 3000]]) {
       const base = { axis: 1, axisLatched: true, previewW: w, previewH: h };
       const fwd = panoPlusPreviewLayout(
@@ -2181,17 +2196,15 @@ describe('the live preview geometry', () => {
       const rev = panoPlusPreviewLayout(
         statusFixture({ ...base, sweepSign: -1 }), screen, 'landscape-left');
 
-      // Same capsule, same fitted content — ONLY the end it hangs from moves.
+      // Same capsule, same fitted content, and now the same end too.
       expect(rev.frame).toEqual(fwd.frame);
       expect(rev.content).toEqual(fwd.content);
-      expect(rev.anchor.left).toBeCloseTo(fwd.anchor.left, 6);
-
+      expect(rev.anchor).toEqual(fwd.anchor);
+      // THE TOP, on a landscape hold, whichever way the sweep ran.
       expect(fwd.anchor.top).toBe(0);
-      expect(rev.anchor.top).toBeCloseTo(rev.inner.height - rev.content.height, 6);
-      // And the reversed one is genuinely a DIFFERENT place — a fixture whose
-      // content happened to fill the strip would make this vacuous.
-      expect(rev.anchor.top).toBeGreaterThan(0);
-      expect(rev.content.height).toBeLessThanOrEqual(rev.inner.height + 1e-9);
+      // Non-vacuity: the content does not fill the strip, so "top" is a
+      // genuine choice rather than the only place it could sit.
+      expect(rev.content.height).toBeLessThan(rev.inner.height - 1);
     }
   });
 
@@ -2211,32 +2224,83 @@ describe('the live preview geometry', () => {
     expect(neg.anchor).toEqual(pos.anchor);
   });
 
-  it('⚑ …and the seed starts where the latch will put it, not at the far end', () => {
-    // ⚠ THIS CASE ASSERTED `anchor.top === 0` AND THAT NUMBER WAS THE DEFECT.
-    // Pre-latch, native has `sweepSign = 1` (`rnis_pano.cpp:1000`) and only
-    // resolves it at the latch (`:3870`), so along-MIN was pinned by default
-    // — which through the portrait band's quarter turn is the SCREEN-RIGHT
-    // end. The panorama then jumped to the other end when the sign became
-    // real. Reported: "in portrait from left to right, the preview first
-    // starts on the right extreme and then moves to left."
+  it('⚑ THE ANCHOR NEVER MOVES ACROSS THE LATCH — in EITHER orientation', () => {
+    // ⚠ THE JUMP, KILLED AT ITS CAUSE, AND IN BOTH DIRECTIONS THIS TIME.
     //
-    // All seven of the operator's horizontal packs latch `sweepSign: -1`, so
-    // the seed now defaults THERE and the common hold never jumps.
-    const seedL = statusFixture({
-      axisLatched: false, axis: 1, sweepSign: 1,
-      paintedWidthPx: 2000, canvasHeightPx: 1080, previewW: 0, previewH: 0,
-    });
-    const latched = statusFixture({
-      axisLatched: true, axis: 1, sweepSign: -1,
-      paintedWidthPx: 2000, canvasHeightPx: 1080, previewW: 0, previewH: 0,
-    });
-    const a = panoPlusPreviewLayout(seedL, screen, 'landscape-left');
-    const b = panoPlusPreviewLayout(latched, screen, 'landscape-left');
-    // Same end before and after the latch: no jump on the dominant hold.
-    expect(a.anchor.left).toBe(b.anchor.left);
-    expect(a.anchor.top).toBe(b.anchor.top);
-    // …and it is the along-MAX end, not 0 — the thing that was wrong.
-    expect(a.anchor.top).toBeGreaterThan(0);
+    // Two previous cuts each fixed one orientation and broke the other,
+    // because both read the start edge off `sweepSign` — which does not
+    // exist until the axis latches, so SOMETHING had to be guessed for the
+    // first frames, and whichever way the guess went, the other hold jumped.
+    // The operator reported both ends of that: "the preview first starts on
+    // the right extreme and then moves to left" (portrait), then "in
+    // vertical sweep, the preview starts at bottom and then moves to top!"
+    //
+    // Orientation is a constant for the life of a hold — the rotation guard
+    // abandons the capture if the device turns — so an anchor derived from
+    // it CANNOT move. This case is that property, and it fails for any
+    // implementation that consults the sign.
+    const at = (
+      o: 'portrait' | 'landscape-left',
+      axisLatched: boolean,
+      sign: 1 | -1,
+      axis: number,
+    ) => panoPlusPreviewLayout(
+      statusFixture({
+        axisLatched, axis, sweepSign: sign,
+        paintedWidthPx: 2000, canvasHeightPx: 1080, previewW: 0, previewH: 0,
+      }),
+      screen, o,
+    );
+    // ⚠ AXIS 1 IN BOTH ROWS, AND THAT IS NOT A COPY-PASTE SLIP. `axis` here
+    // is the ENGINE's latched sweep axis, not the device's: axis 1 is the
+    // one that yields a TALL panorama, which is the landscape hold's
+    // vertical sweep AND — through the band's quarter turn — the portrait
+    // hold's sideways sweep as the strip sees it. The `portrait + axis 0`
+    // combination is excluded deliberately: it flips placement from BAND to
+    // PANEL at the latch (measured: anchor (0, 301.9) → (543.7, 0)), which
+    // is the pre-existing, documented capsule flip and not this property.
+    for (const o of ['portrait', 'landscape-left'] as const) {
+      const seed = at(o, false, 1, 1);             // pre-latch, sign not real
+      for (const sign of [1, -1] as const) {
+        expect(at(o, true, sign, 1).anchor).toEqual(seed.anchor);
+      }
+    }
+  });
+
+  it('⚑ …and it is the edge the OPERATOR named: portrait LEFT, landscape TOP', () => {
+    // His words: "When phone is portrait it's a sideways sweep and the
+    // preview should start on the left, and when in landscape the sweep is
+    // going to be vertical and the preview should start on top."
+    //
+    // The band is quarter-turned in portrait, so the along axis is the
+    // JPEG's pixel-Y and RN's rotation sends local +Y to screen LEFT —
+    // screen-LEFT is therefore the along-MAX end, and a non-zero `top` is
+    // what puts it there. In landscape there is no quarter turn and the top
+    // is along-MIN, i.e. `top: 0`.
+    const land = panoPlusPreviewLayout(
+      statusFixture({
+        axis: 1, axisLatched: true, sweepSign: 1,
+        previewW: 718, previewH: 3000,
+      }),
+      screen, 'landscape-left',
+    );
+    expect(land.anchor.top).toBe(0);                         // TOP
+    expect(land.content.height).toBeLessThan(land.inner.height - 1);  // non-vacuous
+
+    // …and the portrait hold hangs from the OTHER end of the same band —
+    // along-MAX, which the quarter turn puts at screen-LEFT. Measured on
+    // this fixture: (0, 233.7) in a 52 x 330 band.
+    const port = panoPlusPreviewLayout(
+      statusFixture({
+        axis: 1, axisLatched: true, sweepSign: 1,
+        paintedWidthPx: 2000, canvasHeightPx: 1080, previewW: 0, previewH: 0,
+      }),
+      screen, 'portrait',
+    );
+    expect(port.placement).toBe('band');
+    expect(port.anchor.top)
+      .toBeCloseTo(port.inner.height - port.content.height, 6);
+    expect(port.anchor.top).toBeGreaterThan(0);   // non-vacuous
   });
 
   // ── THE AXIS-0 FLIP IS KNOWN, ACCEPTED, AND PINNED HERE ────────────────────
@@ -4152,3 +4216,4 @@ describe('panoPlusLeadOutWarning — the lead-out when it is no longer a tail', 
     expect(w?.message).toBe('Une seule image : 13% (193 columns)');
   });
 });
+
