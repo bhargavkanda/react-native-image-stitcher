@@ -194,6 +194,15 @@ struct Session::Impl {
     std::FILE* ledgerFp = nullptr;
     long long  ledgerRows = 0;
 
+    // ⚠ THE FRAME SIZE THE ENGINE WAS ACTUALLY FED, recorded HERE and written
+    // at finalize — not by the host at start.  The Android host's `capture`
+    // block is a string composed inside start(), before any frame exists; a
+    // "delivered size" read there was null on every pack of every arm, and
+    // looked wired because the members were in the binary.  Every arm's
+    // frames pass through `ingest` below, so this is the one place that can
+    // answer, and it answers 0 when nothing ever reached the engine.
+    int deliveredW = 0, deliveredH = 0;
+
     double startedWallMs = 0.0;
     double startedMs = 0.0;
     double firstTsNs = 0.0, lastTsNs = 0.0;
@@ -431,6 +440,7 @@ IngestReport Session::ingest(const unsigned char* nv21, size_t len,
     fi.tsNs = in.tsNs;
     fi.fx = in.fx; fi.fy = in.fy; fi.cx = in.cx; fi.cy = in.cy;
     fi.imageWidth = in.width; fi.imageHeight = in.height;
+    S.deliveredW = in.width; S.deliveredH = in.height;   // see Impl::deliveredW
     for (int k = 0; k < 4; ++k) fi.q[k] = in.q[k];
     // ⚠ TRANSLATION IS IDENTICALLY ZERO on this arm, and that is a statement
     // about the producer, not a placeholder.  Camera2 + TYPE_ROTATION_VECTOR
@@ -1101,6 +1111,8 @@ std::string Session::finalizeSweep(bool* empty) {
     const double sweepMs = (S.lastTsNs > S.firstTsNs)
         ? (S.lastTsNs - S.firstTsNs) / 1e6 : 0.0;
     kvNum(s, "sweepMs", sweepMs);
+    kvInt(s, "deliveredFrameWidth", S.deliveredW);
+    kvInt(s, "deliveredFrameHeight", S.deliveredH);
     kvNum(s, "fpsMeasured",
           sweepMs > 0.0 ? (double)(S.engineFrames - 1) * 1000.0 / sweepMs : 0.0);
     kvNum(s, "finalizeMs", nowMs() - f0);
@@ -1138,6 +1150,12 @@ void Session::writeMeta(const SessionStats& st,
     kvStr(m, "arm", std::string("android-live"));
     kvNum(m, "startedAtMs", S.startedWallMs);
     kvNum(m, "sweepMs", sweepMs);
+    // The raster the engine ingested (0 = no frame ever reached it).  With
+    // `config.canvasScale` this is what bounds the output; on the vision-
+    // camera arm it is also the only way a pack can say whether CameraX
+    // honoured the requested size or downgraded it.
+    kvInt(m, "deliveredFrameWidth", S.deliveredW);
+    kvInt(m, "deliveredFrameHeight", S.deliveredH);
     kvInt(m, "outputW", outW);
     kvInt(m, "outputH", outH);
     // v14 — the upright bake that produced those dims.  `outputW/H` alone

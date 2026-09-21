@@ -297,6 +297,49 @@ TEST(PanoLiveSession, FinalizeWithoutStartIsRefusedNotCrashed) {
 
 // ── meta.json ↔ replay ──────────────────────────────────────────────────────
 
+// ── meta.json carries the frame size the engine was FED ─────────────────────
+//
+// The Android host used to write a "delivered size" into its start-time
+// `capture` block, read from a latch no frame had yet set: null on every pack
+// of every arm, while the members sat in the binary looking wired. The engine
+// is the one thing every arm feeds, so it records the size itself and writes
+// it at finalize. 0 means no frame ever reached it — reported, not omitted, so
+// "absent" can only mean an older binary.
+TEST(PanoLiveSession, MetaCarriesTheDeliveredFrameSize) {
+    const std::string dir = makeTempDir("delivered");
+    live::Session s;
+    live::Options o = optionsFor(dir);
+    o.poseSource = "imu";
+    ASSERT_TRUE(s.start(o).ok);
+
+    const int w = 320, h = 240;
+    for (int i = 0; i < 4; ++i) {
+        const std::vector<unsigned char> f = makeNv21(w, h, i * 6);
+        s.ingest(f.data(), f.size(), frameAt(w, h, i, 1.0e9 + i * 33.0e6));
+    }
+    bool empty = false;
+    s.finalizeSweep(&empty);
+
+    const std::string meta = readAll(dir + "/meta.json");
+    ASSERT_FALSE(meta.empty());
+    EXPECT_NE(meta.find("\"deliveredFrameWidth\":320"), std::string::npos) << meta.substr(0, 400);
+    EXPECT_NE(meta.find("\"deliveredFrameHeight\":240"), std::string::npos);
+}
+
+TEST(PanoLiveSession, MetaReportsZeroDeliveredSizeWhenNothingWasIngested) {
+    const std::string dir = makeTempDir("delivered0");
+    live::Session s;
+    live::Options o = optionsFor(dir);
+    o.poseSource = "imu";
+    ASSERT_TRUE(s.start(o).ok);
+    bool empty = false;
+    s.finalizeSweep(&empty);
+    const std::string meta = readAll(dir + "/meta.json");
+    ASSERT_FALSE(meta.empty());
+    EXPECT_NE(meta.find("\"deliveredFrameWidth\":0"), std::string::npos);
+    EXPECT_NE(meta.find("\"deliveredFrameHeight\":0"), std::string::npos);
+}
+
 TEST(PanoLiveSession, MetaCarriesAConfigBlockTheReplayReaderAdopts) {
     const std::string dir = makeTempDir("meta");
     live::Session s;
