@@ -46,6 +46,16 @@ RCT_EXTERN_METHOD(cropToQuad:(NSDictionary *)options
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// A MARKER, NOT AN OPERATION — its PRESENCE is the answer. `cropToQuad`
+// gained an `outputPath`; a native build that predates it ignores the key and
+// rewrites `imagePath` IN PLACE, which on the sweep path is the pack's
+// canvas.jpg. JS can see that from the missing echo in the RESULT, but only
+// AFTER the write. `typeof NativeModules.BatchStitcher.
+// cropToQuadAcceptsOutputPath === 'function'` is a synchronous preflight that
+// cannot be wrong. See the Kotlin twin in BatchStitcher.kt.
+RCT_EXTERN_METHOD(cropToQuadAcceptsOutputPath:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 RCT_EXTERN_METHOD(debugMaskOverlay:(NSDictionary *)options
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)

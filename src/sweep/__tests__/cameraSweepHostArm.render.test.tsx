@@ -111,6 +111,8 @@ const DEVICE = {
 const inscribedCalls: string[] = [];
 /** Every `cropToQuad` bag, so the DESTINATION is observable. */
 const cropCalls: Array<{ imagePath: string; outputPath?: string }> = [];
+/** When true the fake native predates `outputPath` — no marker method. */
+let staleNative = false;
 beforeEach(() => {
   jest.useFakeTimers();
   (Platform as { OS: string }).OS = 'android';
@@ -119,7 +121,20 @@ beforeEach(() => {
   proxy.initFrameProcessorPlugin = () => ({ call: () => undefined });
   inscribedCalls.length = 0;
   cropCalls.length = 0;
+  staleNative = false;
+  installBatchStitcher();
+});
+/** Rebuild the fake `BatchStitcher` — call after flipping `staleNative`. */
+function installBatchStitcher(): void {
   (NativeModules as Record<string, unknown>).BatchStitcher = {
+    // ⚠ THE CAPABILITY MARKER. `cropQuad` refuses a destination BEFORE
+    // calling native when this is absent, because a build that predates
+    // `outputPath` ignores the key and rewrites the source IN PLACE — and on
+    // the sweep path that source is the pack's canvas. Omitted when
+    // `staleNative`, which is the case below.
+    ...(staleNative
+      ? {}
+      : { cropToQuadAcceptsOutputPath: () => Promise.resolve(true) }),
     computeInscribedRect: (o: { imagePath: string }) => {
       inscribedCalls.push(o.imagePath);
       return Promise.resolve({
@@ -137,7 +152,7 @@ beforeEach(() => {
       return Promise.resolve({ width: 3600, height: 1100, outputPath: landed });
     },
   };
-});
+}
 afterEach(() => {
   delete (NativeModules as Record<string, unknown>).BatchStitcher;
   jest.runOnlyPendingTimers();
@@ -866,6 +881,45 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       .toBe('/data/user/0/com.x/files/panoplus/pp_1/canvas.cropped.jpg');
     // …and the HOST is handed the crop, not the canvas.
     expect(String(seen[0]!.uri)).toContain('canvas.cropped.jpg');
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and a STALE native is refused before it can overwrite the canvas', async () => {
+    // ⚠ JS NEWER THAN NATIVE IS THE ROUTINE STATE HERE — a Metro reload
+    // without a rebuild. Such a build ignores the unknown `outputPath` key
+    // and rewrites `imagePath` in place, and on this path `imagePath` IS the
+    // pack's `canvas.jpg`: the pack would keep its seam residuals, its
+    // coverage mask and its ledger while the image they describe was gone.
+    //
+    // `cropQuad` preflights on the presence of a marker METHOD, so the
+    // refusal lands before native is asked. `cropCalls` empty is the
+    // assertion that matters.
+    staleNative = true;
+    installBatchStitcher();
+    const seen: Array<Record<string, unknown>> = [];
+    const errs: unknown[] = [];
+    const tree = await render({
+      rectCrop: true,
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+      onError: (e: unknown) => { errs.push(e); },
+    });
+    await act(async () => {
+      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
+    });
+    await act(async () => {
+      (review(tree)[0].props.onConfirm as (q: unknown) => void)({
+        quad: [
+          { x: 12, y: 8 }, { x: 3612, y: 8 },
+          { x: 3612, y: 1108 }, { x: 12, y: 1108 },
+        ],
+      });
+    });
+    expect(cropCalls).toHaveLength(0);     // native was never asked
+    expect(errs).toHaveLength(1);          // …the host is told
+    // …and the capture is NOT lost: the un-cropped panorama is emitted, and
+    // it is SCHEMED, which the sweep's bare `canvasPath` is not.
+    expect(seen).toHaveLength(1);
+    expect(String(seen[0]!.uri)).toMatch(/^file:\/\//);
     act(() => { tree.unmount(); });
   });
 

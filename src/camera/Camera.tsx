@@ -2415,7 +2415,38 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // the engine spec.
 
   const drift = useOrientationDrift(captureRecording);
-  const [driftModalDismissed, setDriftModalDismissed] = useState(false);
+  /**
+   * ⚠ THE ROTATION EXPLAINER IS LATCHED IN `<Camera>`'s OWN STATE, and this
+   * is the second half of the fix that moved it into the sweep tree —
+   * without which the first half repaired nothing.
+   *
+   * It used to render `visible={drift.drifted && !driftModalDismissed}`, and
+   * `drift.drifted` is DERIVED FROM A HOOK THAT RESETS. The guard's own
+   * action turns the capture off: `abandon()` sets the surface's phase to
+   * 'idle' → `onSweepingChange(false)` → `sweepRunning` false →
+   * `captureRecording` false → `useOrientationDrift` sees `active` false and
+   * returns INITIAL_STATE, clearing `drifted` in the same flush. So the
+   * modal was true for one committed render and false again before the
+   * operator could see it: the capture was destroyed and the screen said
+   * nothing, which is verbatim the defect moving the modal was meant to fix.
+   * The keyframe engine has the identical shape (`setStatusPhase('idle')` in
+   * the abandon's `finally`), so this was never sweep-specific.
+   *
+   * The lateral rail was always right and is the template: `lateralStop-
+   * Visible` is `<Camera>`'s own state, set by the guard and cleared by the
+   * operator or by the next capture, so it survives the capture ending. The
+   * orientations are snapshotted with it for the same reason — `drift`'s
+   * copies are gone by the time the modal paints.
+   *
+   * Found by an adversarial round that ran a FAITHFUL stub (one whose
+   * `abandon` also reports `onSweepingChange(false)`); the suite's stub
+   * omitted exactly that transition, so the case asserting the modal shows
+   * was a vacuous pass of the shape this repo keeps paying for.
+   */
+  const [driftStop, setDriftStop] = useState<{
+    from: DeviceOrientation | undefined;
+    to: DeviceOrientation;
+  } | null>(null);
   // Reset the modal flags when a new capture STARTS (statusPhase →
   // 'recording'), NOT when one stops.  v0.16 fix: the old "any non-recording
   // state" condition cleared `lateralStopVisible` the instant a lateral stop
@@ -2426,7 +2457,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // a clean slate.
   useEffect(() => {
     if (captureRecording) {
-      setDriftModalDismissed(false);
+      setDriftStop(null);
       setLateralStopVisible(false);
       setLateralWrongDirection(false);
     }
@@ -2434,6 +2465,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
 
   useEffect(() => {
     if (!drift.drifted || !captureRecording) return;
+    // ⚠ LATCH THE EXPLAINER FIRST, BEFORE ANY STOP. Every path below ends
+    // the capture, and ending the capture resets the hook this state is
+    // read from — see `driftStop`. Snapshotting here is what makes the
+    // modal outlive the thing that triggered it.
+    setDriftStop({
+      from: drift.captureOrientation,
+      to: drift.currentOrientation,
+    });
     // ⚠ THE SWEEP ABANDONS THROUGH ITS OWN HANDLE. `incremental.cancel()`
     // below is the KEYFRAME engine's; calling it for a sweep would cancel an
     // engine that was never started and leave the sweep running. The sweep's
@@ -3263,6 +3302,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     if (sweepRunning) {
       setLateralWrongDirection(false);
       setLateralStopVisible(true);
+      // ⚠ AND THE RESULT HAS TO SAY WHY IT IS SHORT, on this engine too.
+      // The keyframe branch below sets this before `handleHoldEnd()` so the
+      // capture carries `LATERAL_DRIFT_FINALIZE` in `onCapture.warnings` and
+      // on the review banner; the sweep branch set nothing, so a host that
+      // branches on that code — to re-queue the capture, to flag the audit —
+      // saw the sweep as a normal completion. Consumed in the sweep's own
+      // `onComplete`, the same place `handleHoldEnd` consumes it.
+      lateralFinalizeRef.current = true;
       sweepRef.current?.holdEnd?.();
       return;
     }
@@ -3325,7 +3372,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Reset at capture start.
   const prevAcceptedForSpeedRef = useRef(0);
   useEffect(() => {
-    if (statusPhase !== 'recording') {
+    // ⚠ `captureRecording`, NOT `statusPhase` — the same term this file has
+    // now left behind three times. `statusPhase` never reaches 'recording'
+    // on a sweep, so the too-fast CUE went live on that engine (the banner
+    // reads `recordingTooFast`) while the LATCH behind it did not, and a
+    // sweep held at speed completed with no `HIGH_PAN_SPEED` warning. The
+    // keyframe term below stays: `acceptedKeyframeCount` is 0 throughout a
+    // sweep, so `newKeyframe` is false and only the live cue can latch,
+    // which is exactly right for an engine with no keyframes.
+    if (!captureRecording) {
       prevAcceptedForSpeedRef.current = acceptedKeyframeCount;
       return;
     }
@@ -3343,7 +3398,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       fastPanRef.current = true;
     }
   }, [
-    statusPhase,
+    captureRecording,
     recordingTooFast,
     acceptedKeyframeCount,
     panMotion.panSpeedBucket,
@@ -3905,7 +3960,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           );
           onCapture?.({
             ...pending.captureResultObj,
-            // Cache-bust so <Image> reloads the overwritten file.
+            // Cache-bust so <Image> reloads the file. Schemed HERE rather
+            // than through `emitUri` because the query has to ride the uri
+            // and `emitUri` would only re-scheme an already-schemed string.
             uri: `${toFileUri(cropped.outputPath)}?t=${Date.now()}`,
             width: cropped.width,
             height: cropped.height,
@@ -3920,7 +3977,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           );
           // Fall back to the un-cropped panorama so the capture isn't
           // lost on a crop failure.
-          onCapture?.(pending.captureResultObj);
+          //
+          // ⚠ THROUGH `emitUri`, LIKE EVERY OTHER EMIT ON THIS SCREEN. This
+          // was the ONE bare `onCapture` left, and it stopped being harmless
+          // the moment the sweep gained a crop editor: `panoPlusResultOf`
+          // returns `summary.canvasPath` VERBATIM by contract — a bare
+          // native path — so on the sweep's failure path the host got a
+          // scheme-less uri that `<Image>` renders as nothing. That is the
+          // same defect as the blank review, arriving through the one door
+          // that had no scheming on it, and only on the path where the crop
+          // ALSO failed — the hardest case to notice.
+          onCapture?.(emitUri(pending.captureResultObj));
         } finally {
           setCropPending(null);
         }
@@ -3952,10 +4019,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         cancelled.  Single OK button (no Continue) per the engine
         spec on cross-mode capture being best-effort, not supported. */}
     <OrientationDriftModal
-      visible={drift.drifted && !driftModalDismissed}
-      captureOrientation={drift.captureOrientation}
-      currentOrientation={drift.currentOrientation}
-      onAcknowledge={() => setDriftModalDismissed(true)}
+      visible={driftStop != null}
+      captureOrientation={driftStop?.from}
+      currentOrientation={driftStop?.to ?? drift.currentOrientation}
+      onAcknowledge={() => setDriftStop(null)}
     />
 
     {/* Item 6 — lateral-drift popup.  Latched true by the lateral
@@ -4476,7 +4543,37 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               // every other engine fills it; the sweep emitted a result with
               // no `warnings` key at all, so a host reading it uniformly got
               // `undefined` on one engine and an array on the others.
-              const sweepWarnings = panoPlusCaptureWarnings(result.summary);
+              // ⚠ TWO SOURCES, AND THE SWEEP ONLY EVER HAD ONE. The
+              // engine's integrity verdict is pano+'s own; `buildCapture-
+              // Warnings` carries the ones `<Camera>` observes for EITHER
+              // engine — the sideways-drift finalize and the too-fast latch.
+              // A sweep stopped by the lateral guard used to complete with
+              // no `LATERAL_DRIFT_FINALIZE` at all, so the one event whose
+              // whole point is "this capture is short, and here is why"
+              // reached the host as a normal completion.
+              //
+              // Consumed here, once, on BOTH exits — the same discipline
+              // `handleHoldEnd` applies to the same two refs — so a flag
+              // cannot leak into the next hold.
+              const wasLateral = lateralFinalizeRef.current;
+              lateralFinalizeRef.current = false;
+              const wasFastPan = fastPanRef.current;
+              fastPanRef.current = false;
+              const sweepWarnings = [
+                ...buildCaptureWarnings({
+                  lateralFinalize: wasLateral,
+                  highPanSpeed: wasFastPan,
+                  copy: captureWarningCopyFrom(guidanceCopyResolved),
+                }),
+                // ⚠ LOCALISED, LIKE THE ONES ABOVE IT. Both halves land on
+                // the SAME banner and in the same `warnings` array, so one
+                // of them speaking the host's language and the other not is
+                // the divergence at its most visible. Keyed by DEFECT rather
+                // than by prose, the same shape as the HUD's rung copy.
+                ...panoPlusCaptureWarnings(
+                  result.summary, sweep?.defectCopy,
+                ),
+              ];
               const captureResultObj = {
                 ...result, ok: true as const, warnings: sweepWarnings,
               };

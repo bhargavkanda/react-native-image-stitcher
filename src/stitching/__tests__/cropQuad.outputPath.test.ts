@@ -22,13 +22,24 @@ type Bag = { imagePath: string; quad: number[]; quality: number; outputPath?: st
 const calls: Bag[] = [];
 /** What the fake native echoes back — swapped per case. */
 let echoOutputPath = true;
+/**
+ * Does the fake native carry the MARKER method?
+ *
+ * `false` models a build that predates `outputPath` — the routine state when
+ * JS reloads through Metro and native does not. `cropQuad` must refuse
+ * BEFORE calling, because a stale native writes in place and the file it
+ * destroys on the sweep path is the pack's canvas.
+ */
+let hasMarker = true;
 
 const NM = NativeModules as Record<string, unknown>;
 
-beforeEach(() => {
-  calls.length = 0;
-  echoOutputPath = true;
+/** Rebuild the fake module — call after flipping `hasMarker`. */
+function installNative(): void {
   NM.BatchStitcher = {
+    ...(hasMarker
+      ? { cropToQuadAcceptsOutputPath: () => Promise.resolve(true) }
+      : {}),
     cropToQuad: (o: Bag) => {
       calls.push(o);
       const landed = (o.outputPath != null && o.outputPath !== '')
@@ -41,6 +52,13 @@ beforeEach(() => {
       });
     },
   };
+}
+
+beforeEach(() => {
+  calls.length = 0;
+  echoOutputPath = true;
+  hasMarker = true;
+  installNative();
 });
 afterEach(() => { delete NM.BatchStitcher; });
 
@@ -75,13 +93,33 @@ describe('cropQuad destination', () => {
     expect(r.height).toBe(50);
   });
 
-  it('⚑ an OLDER native that ignored the key THROWS, rather than lying', async () => {
-    // The silent failure the old throw existed to prevent, in the one form
-    // it can still take. Native ignored `outputPath`, wrote over
-    // `canvas.jpg`, and echoed no path — so this layer must not report a
-    // destination that has no file at it, and must not let a caller believe
-    // the pack's canvas survived. It did not.
+  it('⚑ an OLDER native REFUSES BEFORE THE WRITE, not after it', async () => {
+    // ⚠ THE ORDER IS THE WHOLE FINDING. The first cut checked native's echo
+    // in the RESULT — correct, and too late: native had already ignored the
+    // unknown key and rewritten `imagePath` in place, and on the sweep path
+    // that file is the pack's `canvas.jpg`. JS newer than native is the
+    // routine state here (a Metro reload without a rebuild), so it is not a
+    // rare race.
+    //
+    // The marker method's PRESENCE is the preflight. `calls` empty is the
+    // assertion that matters: native was never asked.
+    hasMarker = false;
     echoOutputPath = false;
+    installNative();
+    await expect(cropQuad(
+      '/d/pp_1/canvas.jpg', QUAD as never, '/d/pp_1/canvas.cropped.jpg',
+    )).rejects.toThrow(/does not honour outputPath/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('⚑ …and the post-hoc echo check is still there as a belt', async () => {
+    // A native that HAS the marker but still fails to honour the key — a
+    // half-applied patch, a build where only one platform was updated — is
+    // caught by the result check. Keeping both is cheap; the preflight is
+    // the one that saves the file, this one is the one that stops a lie.
+    hasMarker = true;
+    echoOutputPath = false;
+    installNative();
     await expect(cropQuad(
       '/d/pp_1/canvas.jpg', QUAD as never, '/d/pp_1/canvas.cropped.jpg',
     )).rejects.toThrow(/wrote IN PLACE/);
@@ -91,8 +129,11 @@ describe('cropQuad destination', () => {
     // Negative control: the guard above must key on the REQUEST, not on the
     // echo, or every pre-existing caller on an older native would start
     // throwing.
+    hasMarker = false;
     echoOutputPath = false;
+    installNative();
     const r = await cropQuad('/d/pano.jpg', QUAD as never);
     expect(r.outputPath).toBe('/d/pano.jpg');
+    expect(calls).toHaveLength(1);        // …and it really did run
   });
 });

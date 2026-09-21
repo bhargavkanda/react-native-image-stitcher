@@ -9,14 +9,20 @@
  * cheap `cropToRect`: it hands the 4 IMAGE-PIXEL corners to the native
  * `BatchStitcher.cropToQuad`, which runs
  * `cv::getPerspectiveTransform` + `cv::warpPerspective` to produce an
- * upright rectangle (averaged opposite-edge dimensions) and overwrites the
- * file in place.
+ * upright rectangle (averaged opposite-edge dimensions).
+ *
+ * ⚠ IT NO LONGER ALWAYS OVERWRITES IN PLACE. `outPath` sends the result
+ * somewhere else, because one deliverable must not be overwritten: a pano+
+ * canvas is referenced by its pack, so cropping it in place desyncs the pack
+ * from the image it describes. Omitted ⇒ in place, which is every caller
+ * before 2026-09 and is byte-identical for them. See {@link cropQuad} for
+ * the preflight that makes a destination safe against a native build that
+ * predates the option.
  *
  * This is the typed twin of the `cropToRect` call in
  * `example/InscribedRectDebug.tsx` — same native module (`BatchStitcher`),
- * same in-place overwrite + `{ width, height }` result contract, same
- * platform-availability fallback posture as
- * `src/quality/normaliseOrientation.ts`.
+ * same `{ width, height }` result contract, same platform-availability
+ * fallback posture as `src/quality/normaliseOrientation.ts`.
  *
  * Corner-order contract: `quadImagePoints` MUST be in canonical
  * [TL, TR, BR, BL] (clockwise from top-left) order — exactly what
@@ -43,9 +49,17 @@ export interface CropQuadOptions {
 /** Resolved result of a successful {@link cropQuad}. */
 export interface CropQuadResult {
   /**
-   * The file the rectified image was written to.  Equals the input
-   * `imagePath` (the native crop overwrites in place) — surfaced
-   * explicitly so callers don't have to assume the in-place contract.
+   * The file the rectified image was actually written to — READ IT rather
+   * than assuming, which is why it is here.
+   *
+   * ⚠ IT NO LONGER ALWAYS EQUALS `imagePath`. This said "Equals the input
+   * `imagePath` (the native crop overwrites in place)" while {@link cropQuad}
+   * sixty lines down had already gained a destination, and a host that took
+   * the IDE tooltip at face value and ran `uploadAndDelete(imagePath)` after
+   * a crop to a sibling would delete the source and leak the crop.
+   *
+   * With no `outPath`, or one equal to `imagePath`, it IS `imagePath` — the
+   * in-place contract every caller before 2026-09 had.
    */
   outputPath: string;
   /** Width of the rectified rectangle, in pixels. */
@@ -77,6 +91,30 @@ interface CropQuadNativeModule {
  * or `null` when the module / method isn't registered (e.g. an older native
  * build).  Same defensive lookup as `normaliseOrientation`.
  */
+/**
+ * Does the linked NATIVE build honour `outputPath`?
+ *
+ * ⚠ THE PRESENCE OF A MARKER METHOD, CHECKED BEFORE ANYTHING IS WRITTEN. A
+ * native build that predates the option ignores the unknown key and rewrites
+ * `imagePath` IN PLACE. Reading that back from the RESULT — which this module
+ * also does, as a belt — is too late: on the sweep path the file it just
+ * destroyed is the pack's `canvas.jpg`, and JS newer than native is the
+ * routine state in this project (a Metro reload without a rebuild).
+ *
+ * A react-native module's methods are enumerable from JS, so this is a
+ * synchronous answer with no bridge round trip and nothing to get wrong.
+ */
+export function cropQuadSupportsOutputPath(): boolean {
+  const native: unknown =
+    (NativeModules as Record<string, unknown>)['BatchStitcher'];
+  return (
+    native != null
+    && typeof native === 'object'
+    && typeof (native as { cropToQuadAcceptsOutputPath?: unknown })
+      .cropToQuadAcceptsOutputPath === 'function'
+  );
+}
+
 function resolveCropToQuad(): CropQuadNativeModule['cropToQuad'] | null {
   const native: unknown =
     (NativeModules as Record<string, unknown>)['BatchStitcher'];
@@ -151,6 +189,18 @@ export async function cropQuad(
 
   const quality = clampQuality(opts?.quality);
   const wantsElsewhere = outPath !== undefined && outPath !== imagePath;
+  // ⚠ REFUSE BEFORE NATIVE TOUCHES THE FILE, not after. The post-hoc echo
+  // check below is a belt; this is the braces, and it is the one that runs
+  // in time. Without it a stale native rewrote the source in place and JS
+  // only noticed from the missing echo — by which point, on the sweep path,
+  // the pack's `canvas.jpg` was already gone.
+  if (wantsElsewhere && !cropQuadSupportsOutputPath()) {
+    throw new Error(
+      `[capture-sdk] cropQuad: this native build does not honour outputPath `
+      + `(${String(outPath)}) and would overwrite ${imagePath} in place. `
+      + `Rebuild the native module, or pass no outPath.`,
+    );
+  }
   const dims = await fn({
     imagePath,
     quad: flattenQuad(quadImagePoints),

@@ -839,6 +839,11 @@ std::string Session::finalizeSweep(bool* empty) {
     // The batch stitcher has written this file since v0.15. pano+ wrote none,
     // so the sweep was the one engine cropping off a guess.
     //
+    // ⚠ ITS TWIN IS `ios/PanoPlus/RNISPanoCore.mm`'s, beside the canvas write
+    // in the finalize block, and the first cut of this shipped ONLY THIS ONE
+    // — on the leg that is not the one every number above was measured on.
+    // Both must exist or the iOS crop editor opens pre-seeded on the proxy.
+    //
     // ── THREE DELIBERATE CHOICES ──
     //
     // 1. PNG, and NOT `publishJpegAtomically`. That helper hard-codes ".jpg"
@@ -1043,7 +1048,16 @@ std::string Session::finalizeSweep(bool* empty) {
     kv(s, "previewFinalFlushError");
     if (previewFlushErr.empty()) s += "null"; else jstr(s, previewFlushErr);
 
-    kvBool(s, "tailFlushAttempted", true);
+    // ⚠ THE ENGINE'S OWN ANSWER, NOT A LITERAL `true`. This was hardcoded,
+    // which made the reading its own docstring prescribes impossible: "0 when
+    // the lead-out did not run … read `tailFlushAttempted` alongside" cannot
+    // distinguish anything when the field is true on every sweep, INCLUDING
+    // one that never latched an axis and had no lead-out to attempt. The
+    // engine sets `st.tailFlushAttempted` before the try precisely so that
+    // `attempted && !flushed` means "the lead-out threw" and nothing else —
+    // and this line was throwing that distinction away on the Android leg.
+    // iOS already forwarded `st.tailFlushAttempted`.
+    kvBool(s, "tailFlushAttempted", st.tailFlushAttempted);
     kvBool(s, "tailFlushed", tailFlushed);
     // ⚠ HOW MUCH OF THE PANORAMA IT OWNS, not just that it ran. Measured on
     // nine of the operator's packs: the lead-out spans 353 and 449 canvas
@@ -1054,8 +1068,15 @@ std::string Session::finalizeSweep(bool* empty) {
     // edges". `ledger.jsonl` has carried the extent all along and the summary
     // never did, so the fact only reached a reader who joined the two by
     // hand. See `SessionStats::tailFlushColumns`.
-    kvInt(s, "tailFlushColumns",
-          tailFlushed ? (int64_t)(tail.canvasX1 - tail.canvasX0) : 0);
+    //
+    // ⚠ THE ENGINE'S FIELD, not a second subtraction of the same two numbers.
+    // `st.tailFlushColumns` IS `px1 - px0` from the commit inside `finish()`,
+    // and `tail.canvasX1 - tail.canvasX0` is the same pair arriving by the
+    // other road. Two spellings of one decision is the drift this file's
+    // header warns about; the guard stays on the locally-derived
+    // `tailFlushed` because that is what the `flushed` key above reports and
+    // the two must agree.
+    kvInt(s, "tailFlushColumns", tailFlushed ? st.tailFlushColumns : 0);
     kv(s, "tailFlushError");
     if (tailErr.empty()) s += "null"; else jstr(s, tailErr);
 

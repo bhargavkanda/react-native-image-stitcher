@@ -1864,6 +1864,50 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
             }
         }
 
+        // ── THE COVERAGE SIDECAR: `canvas.jpg.coverage.png` ──────────────
+        //
+        // ⚠ THE TWIN OF `rnis_pano_live.cpp`'s, AND THE FIRST CUT SHIPPED
+        // ONLY THAT ONE. That file's own header states the rule — "every
+        // decision here has a twin in ios/RNISPanoCore.mm and the twin is
+        // named in the comment, because the two must not drift" — and the
+        // sidecar was written on the Android leg alone. The consequence was
+        // not a missing diagnostic: `<Camera>` also enabled the crop editor
+        // for the sweep in the same change, so on iOS the editor opened
+        // PRE-SEEDED on `computeInscribedRect`'s brightness-proxy fallback
+        // and one tap on Confirm cropped the deliverable to it. On the
+        // operator's own pack (`pp_1789931447063`) that proxy answers 24.3%
+        // of the canvas — a thin band across the ceiling — against a true
+        // 68.4%, because a black TV in the middle of the frame forces the
+        // rectangle above it. Every number in that change set was measured
+        // on iOS, and iOS was the platform it did not reach.
+        //
+        // The three rules the twin states, restated because they are the
+        // whole contract:
+        //   1. `finalCoverage` at the SAME `canvasCropPad` as `finalCanvas`
+        //      above — one geometry path, one crop, or the mask describes a
+        //      different picture and the crop lands on its boundary.
+        //   2. PNG. The readers threshold at `> 0`, so JPEG ringing would
+        //      leak non-zero into the unpainted region and widen the
+        //      rectangle past the real edge.
+        //   3. Best-effort and silent. The crop has a fallback; a sweep must
+        //      never fail because a mask could not be written, and every
+        //      reader re-checks the mask's dimensions before trusting it.
+        if (wrote) {
+            try {
+                cv::Mat cov;
+                if (S->engine.finalCoverage(cov, S->pack.canvasCropPad)
+                    && !cov.empty() && cov.size() == canvas.size()) {
+                    NSString *covPath =
+                        [canvasPath stringByAppendingString:@".coverage.png"];
+                    cv::imwrite(covPath.UTF8String, cov);
+                }
+            } catch (const cv::Exception& e) {
+                NSLog(@"[RNIS pano+] coverage sidecar not written: %s", e.what());
+            } catch (...) {
+                NSLog(@"[RNIS pano+] coverage sidecar not written");
+            }
+        }
+
         // ── v12: THE FINAL PREVIEW — republished from the FINISHED engine ──
         // `finish()` above just committed the tail flush, which is 24-30% of
         // the deliverable on the operator's packs — painted AFTER the last

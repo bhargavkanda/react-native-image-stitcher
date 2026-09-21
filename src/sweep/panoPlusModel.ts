@@ -4759,20 +4759,58 @@ export const PANO_PLUS_VERDICT_FILE = 'host_verdict.json';
  * Every rung here is a MEASURED defect, in the order an operator would want
  * to hear them.
  */
-function panoPlusDefectHeadline(i: PanoPlusIntegrity): string {
-  if (i.empty) return '⚠ Nothing was painted — the sweep produced no panorama';
-  if (!i.holdsG1) return '⚠ Breaks in the panorama (G1 FAILED)';
-  if (i.clippedFrames > 0) return '⚠ Truncated — shelf height lost off the canvas band';
-  if (i.breachesBars) return '⚠ Cuts — the strips do not line up across the sweep';
-  if (i.breachesPhoto) return '⚠ Banding — the strips do not match in brightness';
+function panoPlusDefectOf(i: PanoPlusIntegrity): PanoPlusDefectCode {
+  if (i.empty) return 'empty';
+  if (!i.holdsG1) return 'holes';
+  if (i.clippedFrames > 0) return 'truncated';
+  if (i.breachesBars) return 'cuts';
+  if (i.breachesPhoto) return 'banding';
   // The engine failed the pack on samples this layer does not carry, so it
-  // cannot be more specific than the engine was. Said plainly rather than
-  // dressed as one of the clauses above.
-  return '⚠ The engine reported this panorama as not intact';
+  // cannot be more specific than the engine was.
+  return 'engine';
 }
+
+/** The shipped English, by defect. */
+const PANO_PLUS_DEFECT_COPY: Record<PanoPlusDefectCode, string> = {
+  empty: '⚠ Nothing was painted — the sweep produced no panorama',
+  holes: '⚠ Breaks in the panorama (G1 FAILED)',
+  truncated: '⚠ Truncated — shelf height lost off the canvas band',
+  cuts: '⚠ Cuts — the strips do not line up across the sweep',
+  banding: '⚠ Banding — the strips do not match in brightness',
+  engine: '⚠ The engine reported this panorama as not intact',
+};
+
+function panoPlusDefectHeadline(
+  i: PanoPlusIntegrity,
+  copy?: Partial<Record<PanoPlusDefectCode, string>>,
+): string {
+  const code = panoPlusDefectOf(i);
+  return copy?.[code] ?? PANO_PLUS_DEFECT_COPY[code];
+}
+
+/**
+ * The STABLE NAME of a capture defect, independent of its English — the same
+ * discipline as {@link PanoPlusGuidanceCode}, and here for the same reason.
+ *
+ * `<Camera>` localises every capture-time string the KEYFRAME engine draws
+ * through `guidanceCopy`, including the warning banner on the crop editor
+ * (`captureWarningCopyFrom`). The sweep's own verdict went onto the SAME
+ * banner in hardcoded English, so a host running in French got a French
+ * banner on one engine and `⚠ Cuts — the strips do not line up across the
+ * sweep` on the other.
+ */
+export type PanoPlusDefectCode =
+  | 'empty'
+  | 'holes'
+  | 'truncated'
+  | 'cuts'
+  | 'banding'
+  | 'engine';
 
 export function panoPlusCaptureWarnings(
   summary: PanoPlusSummary,
+  /** Host copy by defect; absent ⇒ the shipped English, byte-identical. */
+  copy?: Partial<Record<PanoPlusDefectCode, string>>,
 ): Array<{ code: 'SWEEP_NOT_INTACT'; message: string }> {
   const integrity = panoPlusIntegrity(summary);
   // ⚠ NOT `!isIntact`, AND THE DIFFERENCE IS THE WHOLE POINT OF A BANNER.
@@ -4809,7 +4847,7 @@ export function panoPlusCaptureWarnings(
   if (!defective) return [];
   return [{
     code: 'SWEEP_NOT_INTACT',
-    message: panoPlusDefectHeadline(integrity),
+    message: panoPlusDefectHeadline(integrity, copy),
   }];
 }
 

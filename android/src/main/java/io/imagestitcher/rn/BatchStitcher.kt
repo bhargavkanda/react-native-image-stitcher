@@ -408,6 +408,29 @@ class BatchStitcher(reactContext: ReactApplicationContext)
         }
     }
 
+    /**
+     * A MARKER, NOT AN OPERATION — its PRESENCE is the answer.
+     *
+     * ⚠ IT EXISTS BECAUSE THE ALTERNATIVE CHECK CAME TOO LATE. `cropToQuad`
+     * gained an `outputPath`; a native build that predates it ignores the
+     * unknown key and rewrites `imagePath` IN PLACE. JS can notice that from
+     * the missing echo in the RESULT — but only after the write has already
+     * happened, and on the sweep path the file it just destroyed is the
+     * pack's `canvas.jpg`. JS newer than native is the routine state in this
+     * project (a Metro reload without a rebuild), so that is not a rare race.
+     *
+     * A react-native module's methods are enumerable from JS, so
+     * `typeof NativeModules.BatchStitcher.cropToQuadAcceptsOutputPath ===
+     * 'function'` is a SYNCHRONOUS preflight that cannot be wrong and costs
+     * no bridge round trip. Adding a capability CONSTANT would have needed
+     * `getConstants()` on both platforms and changes module init; a marker
+     * method changes nothing.
+     *
+     * Never call it. If you do, it resolves true.
+     */
+    @ReactMethod
+    fun cropToQuadAcceptsOutputPath(promise: Promise) = promise.resolve(true)
+
     /** Crop `imagePath` to `{ x, y, width, height }` in place; resolves `{ width, height }`. */
     @ReactMethod
     fun cropToRect(options: ReadableMap, promise: Promise) {

@@ -123,6 +123,7 @@ import {
   panoPlusGlyphRotationDeg,
   panoPlusGuidance,
   type PanoPlusGuidanceContext,
+  type PanoPlusDefectCode,
   panoPlusHoldOf,
   panoPlusHudLine,
   panoPlusSweepFaults,
@@ -502,6 +503,17 @@ export interface PanoPlusCaptureSurfaceProps {
    */
   guidanceCopy?: PanoPlusGuidanceContext['copy'];
   /**
+   * HOST COPY FOR THE CAPTURE WARNING, keyed by defect.
+   *
+   * ⚠ READ BY `<Camera>`, NOT BY THIS COMPONENT. It rides the `sweep` bag
+   * because that is the one channel a host already uses to configure the
+   * sweep, and the warning it localises is on `<Camera>`'s review banner and
+   * on `onCapture(result).warnings` — neither of which this surface draws.
+   * Declared here so `sweep={{ defectCopy }}` typechecks at the only place
+   * anyone would write it.
+   */
+  defectCopy?: Partial<Record<PanoPlusDefectCode, string>>;
+  /**
    * P5b — invoked when the operator taps Pano's lens switcher. The chip
    * renders whenever this is provided, on BOTH arms (Pano's rule, 2026-09-03);
    * a tap mid-sweep is inert, because a lens cannot change under a live sweep
@@ -796,6 +808,8 @@ export const PanoPlusCaptureSurface = forwardRef<
   lens = 'ultraWide',
   hostChromeTopPt = 0,
   guidanceCopy,
+  // Declared for the host's benefit and read by `<Camera>`; see the prop.
+  defectCopy: _defectCopy,
   onLensChange,
   onPoseSourceChange,
   hideBuiltInControls = false,
@@ -3049,6 +3063,24 @@ export const PanoPlusCaptureSurface = forwardRef<
         // abandoned and then handed that same capture.
         if (busyRef.current) return;
         void cancelPanoPlus().catch(() => undefined);
+        // ⚠ THE OWNERSHIP FLAGS COME DOWN WITH THE SESSION, and the first cut
+        // of this dropped them. A sweep is a HOLD: the operator is still
+        // pressing when a guard rail fires, and his release runs `holdEnd`
+        // one moment later. `holdEnd` early-returns only on
+        // `!sweepLiveRef.current` — so with the flag left raised it called
+        // `finish()` on a session that had just been cancelled, which
+        // `stop()`s a session that is not there, rejects `not-running` and
+        // CANCELS again: a second teardown against native, a second
+        // `onFailure`, and on a build where cancel deletes by path the
+        // NEXT sweep's directory is the one at risk.
+        //
+        // These are the same four `start()`'s own failure branch releases,
+        // for the same reason it releases them: no sweep is running, so a
+        // claim with no session behind it must not outlive it.
+        sweepLiveRef.current = false;
+        liveSessionRef.current = null;
+        setRunningArm(null);
+        setCameraLock(null);   // see finish() — it dies with its sweep
         setPhase('idle');
         onFailure?.({
           code: 'panoplus-abandoned',

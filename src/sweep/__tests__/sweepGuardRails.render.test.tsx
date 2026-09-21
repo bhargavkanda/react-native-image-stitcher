@@ -43,6 +43,7 @@ const sensorsMock = require('react-native-sensors') as {
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import type { SweepSurfaceHandle } from '../panoPlusTypes';
+import { coercePanoPlusSummary, panoPlusResultOf } from '../panoPlusModel';
 
 /** Every imperative call `<Camera>` made into the surface, in order. */
 const calls: string[] = [];
@@ -57,10 +58,41 @@ jest.mock('../PanoPlusCaptureSurface', () => {
     ReactLocal.useImperativeHandle(ref, () => ({
       capture: () => { calls.push('capture'); },
       finalize: () => { calls.push('finalize'); },
-      holdStart: () => { calls.push('holdStart'); },
-      holdEnd: () => { calls.push('holdEnd'); },
-      abandon: (reason: string) => { calls.push(`abandon:${reason}`); },
-    }), []);
+      holdStart: () => {
+        calls.push('holdStart');
+        props.onSweepingChange?.(true);
+      },
+      // ⚠ THESE TWO REPORT WHAT THE REAL SURFACE REPORTS, AND THE FIRST CUT
+      // OF THIS FILE DID NOT — which made the modal case a VACUOUS PASS of
+      // exactly the shape this repo keeps paying for.
+      //
+      // A stub is a contract, and a contract that omits the one transition
+      // the code under test reacts to is worse than no stub. `abandon()`
+      // ends with `setPhase('idle')`; the surface's `busy = phase !== 'idle'`
+      // then flips and `onSweepingChange(false)` reaches `<Camera>`. Leaving
+      // that out held the capture "recording" forever, so
+      // `useOrientationDrift` never reset and the rotation explainer stayed
+      // up in the test while it could NOT stay up on a phone — the modal was
+      // bound to `drift.drifted`, which the hook clears the moment the
+      // capture ends. An adversarial round found it by re-running this file
+      // against a faithful stub.
+      //
+      // Measured after the fix: restore the inert stub AND the old
+      // `visible={drift.drifted}` together and all 12 cases pass. That pair
+      // is the vacuous pass, and it is why the fidelity here is load-bearing
+      // rather than cosmetic.
+      //
+      // `holdEnd` likewise latches `busy` before the pack write, which is
+      // what `sweepFinalizing` reads.
+      holdEnd: () => {
+        calls.push('holdEnd');
+        props.onControlsState?.({ canCapture: true, canFinalize: false, busy: true });
+      },
+      abandon: (reason: string) => {
+        calls.push(`abandon:${reason}`);
+        props.onSweepingChange?.(false);
+      },
+    }), [props]);
     return null;
   });
   Stub.displayName = 'PanoPlusCaptureSurfaceStub';
@@ -96,6 +128,24 @@ afterEach(() => {
   jest.runOnlyPendingTimers();
   jest.useRealTimers();
 });
+
+/**
+ * A finished sweep, in the shape `PanoPlusCaptureSurface.onComplete` hands
+ * back. Painted and clean, so `panoPlusCaptureWarnings` contributes nothing
+ * and the only codes on the result are `<Camera>`'s own — which is what the
+ * two lateral cases are about.
+ */
+const SWEEP_RESULT = panoPlusResultOf(
+  coercePanoPlusSummary({
+    canvasPath: '/d/pp_1/canvas.jpg',
+    sessionDir: '/d/pp_1',
+    width: 4000,
+    height: 1200,
+    counts: { seen: 300, painted: 280 },
+  }),
+  { rectify: true, gainMatch: true, packFrames: 'all', poseSource: 'ar' },
+  '2026-09-21T00:00:00.000Z',
+);
 
 function render(props: Record<string, unknown>): ReactTestRenderer {
   let t!: ReactTestRenderer;
@@ -263,6 +313,56 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
     // painted is the deliverable. So the handle sees `holdEnd`.
     expect(calls).toContain('holdEnd');
     expect(calls.some((c) => c.startsWith('abandon:'))).toBe(false);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and the RESULT says why it is short — LATERAL_DRIFT_FINALIZE', async () => {
+    // ⚠ THE HALF A MODAL CANNOT CARRY. The keyframe engine attaches
+    // `LATERAL_DRIFT_FINALIZE` to `onCapture(result).warnings` so a host can
+    // branch on it — re-queue the capture, flag the audit, refuse the
+    // upload. The sweep branch showed the popup, called `holdEnd()` and set
+    // nothing, so the ONE event whose entire point is "this capture is
+    // short, and here is why" reached the host as a normal completion.
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = render({
+      lateralBudgetCm: 1,
+      showPreview: false,
+      rectCrop: false,
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    await settle();
+    await settleUpright();
+    await startSweep();
+    await slideSideways();
+    expect(calls).toContain('holdEnd');
+
+    // The surface finishes and reports the panorama.
+    await act(async () => {
+      (surfaceProps.onComplete as (r: unknown) => void)(SWEEP_RESULT);
+    });
+    const codes = (seen[0]?.warnings as Array<{ code: string }> | undefined)
+      ?.map((w) => w.code) ?? [];
+    expect(codes).toContain('LATERAL_DRIFT_FINALIZE');
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ NEGATIVE CONTROL — a sweep that did NOT drift carries no such code', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = render({
+      lateralBudgetCm: 1,
+      showPreview: false,
+      rectCrop: false,
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    await settle();
+    await settleUpright();
+    await startSweep();
+    await act(async () => {
+      (surfaceProps.onComplete as (r: unknown) => void)(SWEEP_RESULT);
+    });
+    const codes = (seen[0]?.warnings as Array<{ code: string }> | undefined)
+      ?.map((w) => w.code) ?? [];
+    expect(codes).not.toContain('LATERAL_DRIFT_FINALIZE');
     act(() => { tree.unmount(); });
   });
 

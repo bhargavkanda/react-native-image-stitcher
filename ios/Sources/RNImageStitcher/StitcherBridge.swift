@@ -316,6 +316,18 @@ public class StitcherBridge: NSObject {
   /// numbers `[tlX, tlY, trX, trY, brX, brY, blX, blY]` (ordered
   /// TL→TR→BR→BL by the JS editor) + optional `quality` (default 90).
   /// Resolves the rectified `{ width, height }`.
+  /// A MARKER, NOT AN OPERATION — its PRESENCE is the answer. See the
+  /// `RCT_EXTERN_METHOD` declaration in `StitcherBridge.m` and the Kotlin
+  /// twin `BatchStitcher.cropToQuadAcceptsOutputPath` for why a method
+  /// rather than a constant. Never call it; if you do, it resolves true.
+  @objc(cropToQuadAcceptsOutputPath:rejecter:)
+  public func cropToQuadAcceptsOutputPath(
+    resolver: @escaping RCTPromiseResolveBlock,
+    rejecter _: @escaping RCTPromiseRejectBlock
+  ) {
+    resolver(true)
+  }
+
   @objc(cropToQuad:resolver:rejecter:)
   public func cropToQuad(
     options: NSDictionary,

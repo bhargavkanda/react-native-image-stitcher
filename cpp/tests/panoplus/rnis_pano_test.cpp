@@ -12064,34 +12064,130 @@ TEST(PanoCoverage, MarksPaintedPixelsAndOnlyPaintedPixels) {
 }
 
 TEST(PanoCoverage, ABlackSCENEStillReadsAsPAINTED) {
-    // ⚠ THE WHOLE POINT, IN ONE CASE.  This is the operator's black TV: a
-    // scene with almost no luminance is exactly what a brightness threshold
-    // calls unpainted, and exactly what a COVERAGE mask must call painted.
-    // Without this the two masks agree on every fixture in this file, because
+    // ⚠ THE WHOLE POINT, IN ONE CASE — the operator's black TV.  A region
+    // with no luminance is exactly what a brightness threshold calls
+    // unpainted and exactly what a COVERAGE mask must call painted.  Without
+    // this the two masks agree on every other fixture in this file, because
     // every other fixture is a bright synthetic shelf.
+    //
+    // ⚠ AND THE FIRST CUT OF THIS CASE WAS A TAUTOLOGY.  It asserted
+    // `covPainted >= brightPainted` — but an UNPAINTED canvas pixel is
+    // always 0, so `threshold(gray, 1, …)` can only ever mark a SUBSET of
+    // the painted region.  `bright ⊆ coverage` holds for any correct mask on
+    // any scene, bright or dark, so the case could not fail for the bug it
+    // names: replacing `finalCoverage`'s body with the brightness proxy
+    // itself left it green.  Three review agents found it independently.
+    //
+    // What is falsifiable is the CONVERSE: there must be pixels the proxy
+    // calls unpainted that the engine knows it painted, and they must be the
+    // dark ones.  That is false for the proxy and true for a real mask.
     cv::Mat dark = makeShelf(9000, kFrameH);
-    // Crush it to near-black while keeping enough texture for the tracker to
-    // latch — the failure under test is about LEVEL, not about features.
-    dark.convertTo(dark, -1, 0.06, 0.0);
+    // A genuinely BLACK object in the middle of the scene, the height of the
+    // frame's centre band.  `convertTo(…, 0.06)` alone is not enough — it
+    // scales toward zero but leaves most pixels >= 1, which the threshold
+    // still accepts, and the case then measures nothing.
+    const int tvX = 3000, tvW = 900;
+    dark(cv::Rect(tvX, kFrameH / 4, tvW, kFrameH / 2)).setTo(cv::Scalar(0, 0, 0));
     SweepSpec spec; spec.xs = linearSweep(200, 20, 120);
     SweepResult r = runSweepSpec(dark, spec, testConfig());
     ASSERT_FALSE(r.canvas.empty());
     ASSERT_FALSE(r.coverage.empty());
 
-    // What a brightness mask would say about this canvas…
+    // What a brightness mask says about this canvas…
     cv::Mat gray, bright;
     cv::cvtColor(r.canvas, gray, cv::COLOR_BGR2GRAY);
     cv::threshold(gray, bright, 1, 255, cv::THRESH_BINARY);
     const int brightPainted = cv::countNonZero(bright);
     const int covPainted = cv::countNonZero(r.coverage);
-
-    // …against what the engine KNOWS it painted.  The coverage mask is the
-    // arbiter; the proxy is allowed to be anywhere at or below it, and on a
-    // dark scene it is below.
     EXPECT_GT(covPainted, 0);
-    EXPECT_GE(covPainted, brightPainted)
-        << "a brightness threshold found MORE painted pixels than the engine "
-           "committed — the coverage mask is not this canvas's";
+
+    // THE ASSERTION THAT CAN FAIL: the mask must claim STRICTLY more than the
+    // proxy, and the difference must be the black object rather than a
+    // rounding edge.  A `finalCoverage` that IS the proxy answers 0 here.
+    const int onlyCoverage = cv::countNonZero(r.coverage & ~bright);
+    EXPECT_GT(onlyCoverage, 20000)
+        << "the coverage mask adds " << onlyCoverage << " painted pixels over "
+           "a brightness threshold on a canvas with a black object in it — "
+           "that is proxy-shaped, and the proxy is what this exists to replace";
+    EXPECT_GT(covPainted, brightPainted);
+
+    // …and the pixels it adds really are DARK ones, not a halo.  Mean luma
+    // over the coverage-only set must sit near black; a mask that merely
+    // dilated the proxy would land at scene brightness.
+    const double meanOnlyCoverage = cv::mean(gray, r.coverage & ~bright)[0];
+    EXPECT_LT(meanOnlyCoverage, 8.0)
+        << "the pixels the coverage mask adds average " << meanOnlyCoverage
+        << " DN — they are not the dark content this case is about";
+}
+
+// ── THE LEAD-OUT'S OWN EXTENT ─────────────────────────────────────────────
+//
+// `SessionStats::tailFlushColumns` is what puts "the last N columns came from
+// ONE frame" on the result screen — the operator's "why is there some broken
+// parts towards the edges". The PRODUCER is one line inside `Engine::finish()`
+// and it had no test: every assertion about the field was against a JS fixture
+// that hand-wrote the value, so deleting the line, mis-scoping it into a
+// branch the lead-out does not take, or measuring the wrong pair would ship
+// green and the line would simply never print.
+TEST(PanoTailFlush, ReportsTheExtentTheLeadOutActuallyPainted) {
+    const cv::Mat shelf = makeShelf(9000, kFrameH);
+    SweepSpec spec; spec.xs = linearSweep(200, 20, 120);
+
+    rnis::pano::Engine eng;
+    auto cfg = testConfig();
+    std::string err;
+    ASSERT_TRUE(eng.configure(cfg, &err)) << err;
+    for (size_t i = 0; i < spec.xs.size(); ++i) {
+        const int x0 = (int)std::lround(spec.xs[i]);
+        cv::Mat crop = shelf(cv::Rect(x0, 0, kFrameW, kFrameH)).clone();
+        cv::Mat gray, grayWork;
+        cv::cvtColor(crop, gray, cv::COLOR_BGR2GRAY);
+        cv::resize(gray, grayWork, cv::Size(), cfg.workScale, cfg.workScale,
+                   cv::INTER_AREA);
+        rnis::pano::FrameInput in;
+        in.bgr = &crop; in.grayWork = &grayWork;
+        in.tsNs = 1e9 + (double)i * (1e9 / 30.0);
+        in.fx = kFx; in.fy = kFy; in.cx = kCx; in.cy = kCy;
+        in.imageWidth = kFrameW; in.imageHeight = kFrameH;
+        in.tracking = 2; in.seq = (int)i;
+        eng.ingest(in);
+    }
+    // THE LEAD-OUT ROW ITSELF — the only place the extent is observable
+    // independently of the field under test.
+    const rnis::pano::FrameOutcome tail = eng.finish();
+    const auto st = eng.stats();
+
+    ASSERT_TRUE(st.tailFlushAttempted);
+    ASSERT_TRUE(st.tailFlushed);
+    EXPECT_GT(tail.canvasX1, tail.canvasX0) << "the lead-out painted nothing";
+    // The field IS the row's extent. A producer that measured the wrong pair,
+    // or never ran, answers something else here.
+    EXPECT_EQ(st.tailFlushColumns, (int64_t)(tail.canvasX1 - tail.canvasX0));
+    EXPECT_GT(st.tailFlushColumns, 0);
+    // …and it is a real slice of the deliverable, not a rounding edge. On the
+    // operator's iPhone packs this is 13-24%; the bar here is only that it is
+    // BIG, because the fixture's geometry is not his.
+    cv::Mat canvas;
+    ASSERT_TRUE(eng.finalCanvas(canvas));
+    EXPECT_GT(st.tailFlushColumns * 200, (int64_t)canvas.cols)
+        << "the lead-out owns under 0.5% of the canvas — that is not the "
+           "block this field exists to report";
+}
+
+TEST(PanoTailFlush, AttemptedIsFalseWhenTheSweepNeverLatched) {
+    // ⚠ THE READING THE FIELD'S DOC PRESCRIBES, MADE POSSIBLE. `0 columns`
+    // means two different things — a lead-out that ran and painted nothing,
+    // and a sweep that never had one — and `tailFlushAttempted` is what
+    // separates them. Android's serialiser wrote a literal `true` here, so
+    // the distinction did not survive the trip to the pack.
+    rnis::pano::Engine eng;
+    std::string err;
+    ASSERT_TRUE(eng.configure(testConfig(), &err)) << err;
+    eng.finish();                       // nothing ingested, no axis latched
+    const auto st = eng.stats();
+    EXPECT_FALSE(st.tailFlushAttempted);
+    EXPECT_FALSE(st.tailFlushed);
+    EXPECT_EQ(st.tailFlushColumns, 0);
 }
 
 TEST(PanoCoverage, IsEmptyWhenNothingWasPainted) {

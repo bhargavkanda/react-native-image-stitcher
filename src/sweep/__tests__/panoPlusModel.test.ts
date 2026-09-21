@@ -4008,3 +4008,34 @@ describe('the lead-out states its own extent', () => {
     expect(lines).not.toContain('LEAD-OUT');
   });
 });
+
+describe('the capture warning speaks the host language too', () => {
+  // ⚠ IT LANDS ON THE SAME BANNER AS THE KEYFRAME ENGINE'S WARNINGS, which
+  // `<Camera>` already localises through `captureWarningCopyFrom`. One of
+  // the two speaking French and the other not is the divergence at its most
+  // visible — and this diff added a localisation channel for the sweep HUD
+  // while leaving the warning beside it in English.
+  const empty = coercePanoPlusSummary({
+    width: 4000, height: 1200, counts: { seen: 40, painted: 0 },
+  });
+
+  it('defaults to the shipped English', () => {
+    expect(panoPlusCaptureWarnings(empty)[0]!.message)
+      .toContain('Nothing was painted');
+  });
+
+  it('takes a host string BY DEFECT, not by prose', () => {
+    const out = panoPlusCaptureWarnings(empty, {
+      empty: 'Rien n’a été peint',
+    });
+    expect(out[0]!.message).toBe('Rien n’a été peint');
+    expect(out[0]!.code).toBe('SWEEP_NOT_INTACT');   // the CODE never moves
+  });
+
+  it('an override for a DIFFERENT defect leaves this one alone', () => {
+    // Negative control: without it the case above passes for an
+    // implementation that returns the first override it is given.
+    expect(panoPlusCaptureWarnings(empty, { cuts: 'Coupures' })[0]!.message)
+      .toContain('Nothing was painted');
+  });
+});

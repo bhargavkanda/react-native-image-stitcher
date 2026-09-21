@@ -260,11 +260,12 @@ export type {
 } from './camera/RectCropPreview';
 // Native perspective-rectify crop used by RectCropPreview's confirm
 // path; hosts driving their own crop UI call it directly.
-export { cropQuad } from './stitching/cropQuad';
+export { cropQuad, cropQuadSupportsOutputPath } from './stitching/cropQuad';
 export type { CropQuadOptions, CropQuadResult } from './stitching/cropQuad';
-// File copy — pairs with the in-place `cropQuad` so a host can crop a COPY of
-// a capture (preserving the original + landing the result on a fresh URI,
-// avoiding image-cache collisions).  `moveFile` + `getDefaultCaptureDir` let a
+// File copy — `cropQuad` takes an `outPath` since 2026-09 and writes there
+// directly, so this is no longer the only way to preserve an original; it is
+// still the cheaper answer when a host wants the copy for its own reasons
+// (a fresh URI to dodge an image-cache collision, a debug pack).  `moveFile` + `getDefaultCaptureDir` let a
 // host assemble a debug/output pack next to its captures (used by the example
 // app's auto A/B pack writer).
 export { copyFile, moveFile, getDefaultCaptureDir } from './utils/files';

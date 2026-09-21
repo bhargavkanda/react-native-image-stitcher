@@ -1127,6 +1127,18 @@ describe('the shell drives the sweep through the ref, with one shutter', () => {
     expect(calls).not.toContain('stop');
     expect(failures.map((f) => f.code)).toEqual(['panoplus-abandoned']);
     expect(failures[0]!.message).toContain('orientation-drift');
+
+    // ⚠ AND THE OPERATOR IS STILL HOLDING THE SHUTTER. A sweep is a HOLD, so
+    // his release lands one moment after the guard fired — and `holdEnd`
+    // early-returns only on `!sweepLiveRef.current`. With that flag left
+    // raised, `finish()` ran on a session that had just been cancelled:
+    // `stop()` against nothing, a `not-running` rejection, and a SECOND
+    // cancel, which on a build where cancel deletes by path puts the next
+    // sweep's directory at risk. The abandon must release the claim, not
+    // just the phase.
+    act(() => { u.ref.current!.holdEnd!(); });
+    await settle();
+    expect(calls).toEqual(['start', 'cancel']);
     u.unmount();
   });
 
