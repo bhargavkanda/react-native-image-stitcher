@@ -2412,10 +2412,30 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
                 // canvas.jpg's own pixels and `outputRotationCwDeg` is the
                 // quarter turn between the two — published so a pack reader
                 // can map the ledger onto the image instead of assuming.
+                //
+                // ⚠ ONE `@"canvas"` ENTRY, AND IT HAS TO STAY ONE.  The v12
+                // crop keys below arrived as a SECOND `@"canvas":` entry in
+                // this same literal, so the dictionary kept the first and
+                // dropped them — measured on all 37 iPhone packs on disk: 0
+                // carry `cropCrossLoPx`.  The compiler had been saying so the
+                // whole time (-Wobjc-dictionary-duplicate-keys) into a build
+                // log nobody read.  Add to this literal; never re-open the key.
+                //
+                // canvas.jpg's cross extent can differ from the canvas frame
+                // the ledger/meta coordinates live in (the pad trim).  Both
+                // the knob and the APPLIED offsets ride the pack so the two
+                // frames are reconcilable; offline tooling adds
+                // `cropCrossLoPx` to a canvas.jpg cross coordinate to get back
+                // to canvas-frame.  Without them an offline reader cannot map
+                // the ledger onto the image at all — which is exactly what
+                // "what resolution were these frames?" ran into on iOS.
                 @"canvas":         @{@"w": @(st.canvasW), @"h": @(st.canvasH),
                                      @"paintedW": @(st.paintedW),
                                      @"outputW": @(outW), @"outputH": @(outH),
-                                     @"outputRotationCwDeg": @(st.outputRotationCwDeg)},
+                                     @"outputRotationCwDeg": @(st.outputRotationCwDeg),
+                                     @"cropPadRows":   @(S->pack.canvasCropPad),
+                                     @"cropCrossLoPx": @(canvasCropLo),
+                                     @"cropCrossHiPx": @(canvasCropHi)},
                 @"maxAdvancePxResolved": jnum(st.maxAdvancePxResolved),
                 @"corrCentroidBoxResolved": @(st.corrCentroidBoxResolved),
                 @"corrWindowW":             @(st.corrWindowW),
@@ -2458,17 +2478,6 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
                 // rendered ~30 / published 0 / failed ~30 — and no pack could
                 // say it, which is why the bug survived eleven days and six
                 // green test runs.
-                // v12 review fix — canvas.jpg's cross extent can differ from
-                // the canvas frame the ledger/meta coordinates live in (the
-                // pad trim).  Both the knob and the APPLIED offsets ride the
-                // pack so the two frames are reconcilable; offline tooling
-                // adds cropCrossLoPx to a canvas.jpg cross coordinate to get
-                // back to canvas-frame.
-                @"canvas":         @{
-                    @"cropPadRows":    @(S->pack.canvasCropPad),
-                    @"cropCrossLoPx":  @(canvasCropLo),
-                    @"cropCrossHiPx":  @(canvasCropHi),
-                },
                 @"preview":        @{
                     // THE INTERVAL ACTUALLY IN FORCE at the end of the sweep.
                     // `config.pack.previewIntervalMs` is only the FLOOR; the
