@@ -340,6 +340,22 @@ TEST(PanoLiveSession, MetaCarriesAConfigBlockTheReplayReaderAdopts) {
     // harness in this repo opens meta.json first, so the marker lives there.
     EXPECT_NE(meta.find("\"poseSource\""), std::string::npos);
     EXPECT_NE(meta.find("\"translationAvailable\":false"), std::string::npos);
+
+    // ⚠ …AND IT MUST NOT NAME A CAMERA STACK IT CANNOT SEE.  The note opened
+    // "Camera2 + TYPE_ROTATION_VECTOR" and was written on EVERY android-live
+    // sweep — including the two plugin arms, which open no Camera2 client at
+    // all.  Whether the sweep painted from a client of ours or from a
+    // host-owned stream is exactly the question the S8 retirement decision
+    // turns on, and the one file every offline harness opens was answering it
+    // wrongly.  `captureJsonInline` states the rule one field down: the
+    // capture arm's provenance is "which this session cannot know and must
+    // not invent".
+    EXPECT_EQ(meta.find("Camera2"), std::string::npos)
+        << "meta.json names a camera stack this session is not told about";
+    // The half it CAN see is still said, or the fix is a deletion.
+    EXPECT_NE(meta.find("no translation channel"), std::string::npos);
+    EXPECT_NE(meta.find("capture.frameSource"), std::string::npos)
+        << "the note must point at the party that DOES know";
 }
 
 TEST(PanoLiveSession, ConfigJsonRoundTripsEveryKnobIncludingBoolsAndInts) {

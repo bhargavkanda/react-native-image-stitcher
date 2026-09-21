@@ -2420,6 +2420,31 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
      * `true` by default: the Camera2 arms are the ones that do build one.
      */
     @Volatile private var camera2RequestIntended = true
+    /**
+     * WHICH STACK DELIVERED THE PIXELS — the one fact the S8 retirement
+     * decision turns on, and the one the pack could not state.
+     *
+     * `meta.json` wrote `arm: "android-live"` (true of every arm) and a
+     * `poseSource.note` opening "Camera2 + TYPE_ROTATION_VECTOR" (false on
+     * both plugin arms, which open no Camera2 client at all). Everything else
+     * in the capture block is Camera2-shaped — `cameraId`, `physicalId`,
+     * `fpsRange`, `sensorOrientationDeg` — so on a plugin arm the block is a
+     * row of nulls with nothing saying WHY, which reads as a pack that failed
+     * to record its provenance rather than as a pack whose provenance is
+     * "the host owns the camera".
+     *
+     * Measured on the A35 (2026-09-20): the vc-plugin arm offered 103 frames
+     * and painted 67 in one run, 100 / 44 in another, with
+     * "VISION-CAMERA PLUGIN ARM … opens no Camera2 client" in logcat and zero
+     * dropped-busy — the gate S8 needs. None of that was self-evidencing in
+     * the pack, so the measurement lived only in a terminal scrollback.
+     *
+     * Set at the TOP of each start mode, beside [camera2RequestIntended] and
+     * for the same reason: a fourth arm is a one-line change at its own top,
+     * and forgetting it leaves the default, which names the arm that really
+     * does open a client.
+     */
+    @Volatile private var frameSourceArm = "camera2"
     /** The characteristics of the camera vision-camera opened, held so the
      *  intrinsics can be derived per frame size without an open session. */
     @Volatile private var vcChars: CameraCharacteristics? = null
@@ -3302,6 +3327,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         // Before anything else, and before `startLiveEngine()` builds the
         // provenance block: this arm opens no Camera2 client. See the field.
         camera2RequestIntended = false
+        frameSourceArm = "ar-plugin"
         if (!cfg.live) {
             return fail(
                 promise, "ar-plugin-needs-live",
@@ -3460,6 +3486,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         // Before anything else, and before `startLiveEngine()` builds the
         // provenance block: this arm opens no Camera2 client. See the field.
         camera2RequestIntended = false
+        frameSourceArm = "vc-plugin"
         if (!cfg.live) {
             return fail(
                 promise, "vc-plugin-needs-live",
@@ -3550,6 +3577,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         // none, which is the exact defect the flag was added to fix, left
         // standing on a third arm. See [camera2RequestIntended].
         camera2RequestIntended = false
+        frameSourceArm = "standalone"
         try { openPack() } catch (t: Throwable) {
             return fail(
                 promise, "pack-open-failed",
@@ -5620,6 +5648,16 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
      */
     private fun liveCaptureJson(): String = try {
         Jo()
+            // ⚠ FIRST, BECAUSE IT DECIDES HOW TO READ EVERY FIELD BELOW IT.
+            // On a plugin arm `cameraId`, `physicalId`, `fpsRange` and
+            // `sensorOrientationDeg` are all null — not because the pack
+            // failed to record them, but because no Camera2 client of ours
+            // was ever opened. Without this key those nulls are unreadable,
+            // and the one question S8 has to answer ("did the sweep paint
+            // from a host-owned stream?") is not answerable from the pack at
+            // all. See [frameSourceArm].
+            .s("frameSource", frameSourceArm)
+            .b("opensCamera2Client", camera2RequestIntended)
             .s("cameraId", chosen?.id)
             .s("physicalId", boundPhysicalId)
             .i("width", outSize?.width)

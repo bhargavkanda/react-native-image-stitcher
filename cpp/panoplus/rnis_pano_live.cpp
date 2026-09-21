@@ -1135,12 +1135,27 @@ void Session::writeMeta(const SessionStats& st,
         kv(m, "poseSource"); m += "{";
         kvStr(m, "kind", S.opt.poseSource);
         kvBool(m, "translationAvailable", false);
+        // ⚠ IT DOES NOT NAME THE CAMERA STACK ANY MORE, and that is the
+        // same rule `captureJsonInline` states one field down: "the capture
+        // arm's own provenance … which this session cannot know and must not
+        // invent". This note opened with "Camera2 + TYPE_ROTATION_VECTOR"
+        // and was written on EVERY android-live sweep — including the two
+        // plugin arms, which open no Camera2 client at all. That is not a
+        // cosmetic slip: whether the sweep ran on a Camera2 client of ours or
+        // on a host-owned stream is exactly the question the S8 retirement
+        // decision turns on, and the pack was answering it wrongly in the one
+        // file every offline harness reads. The frame source is reported by
+        // the party that knows it, in `capture.frameSource`.
+        //
+        // What stays is what this session CAN see: the translation channel is
+        // identically zero, whatever delivered the pixels.
         kvStr(m, "note", std::string(
-            "Camera2 + TYPE_ROTATION_VECTOR: attitude only. t == [0,0,0] on "
+            "Attitude only — no translation channel. t == [0,0,0] on "
             "every frame, so the pose-speed cage, the translation-jump "
             "session-restart detector and rotationFraction are INERT — their "
             "values describe the absence of a translation channel, not the "
-            "absence of translation."));
+            "absence of translation. Which stack delivered the frames is "
+            "`capture.frameSource`; this session is not told."));
         m += "}";
     }
     // THE CONFIG BLOCK, written through the SAME table the replay driver reads
