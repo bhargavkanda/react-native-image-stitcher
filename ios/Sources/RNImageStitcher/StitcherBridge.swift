@@ -336,6 +336,8 @@ public class StitcherBridge: NSObject {
     }
     let p = quad.map { $0.doubleValue }
     let quality = (options["quality"] as? NSNumber)?.intValue ?? 90
+    // Absent ⇒ in place, byte-identical for every caller before this.
+    let outputPath = options["outputPath"] as? String
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         let dims = try Stitcher.cropToQuad(
@@ -344,11 +346,16 @@ public class StitcherBridge: NSObject {
           trX: p[2], trY: p[3],
           brX: p[4], brY: p[5],
           blX: p[6], blY: p[7],
-          quality: quality
+          quality: quality,
+          outputPath: outputPath
         )
         resolver([
           "width": dims.width,
           "height": dims.height,
+          // The path it actually landed at, so a caller learns the in-place
+          // contract from the answer rather than from the docstring.
+          "outputPath":
+            (outputPath != nil && !outputPath!.isEmpty) ? outputPath! : imagePath,
         ])
       } catch let err as StitcherError {
         switch err {

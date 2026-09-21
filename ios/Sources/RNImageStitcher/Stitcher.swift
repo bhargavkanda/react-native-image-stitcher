@@ -287,7 +287,10 @@ public enum Stitcher {
     trX: Double, trY: Double,
     brX: Double, brY: Double,
     blX: Double, blY: Double,
-    quality: Int
+    quality: Int,
+    /// nil ⇒ in place. See `OpenCVStitcher.h` for the one caller that needs
+    /// a separate destination and why.
+    outputPath: String? = nil
   ) throws -> (width: Int, height: Int) {
     do {
       let d = try OpenCVStitcher.cropToQuad(
@@ -296,7 +299,8 @@ public enum Stitcher {
         trX: trX, trY: trY,
         brX: brX, brY: brY,
         blX: blX, blY: blY,
-        quality: quality
+        quality: quality,
+        outputPath: outputPath
       )
       return (width: d["width"]?.intValue ?? 0, height: d["height"]?.intValue ?? 0)
     } catch let nsError as NSError {

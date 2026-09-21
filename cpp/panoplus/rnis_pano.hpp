@@ -3723,6 +3723,39 @@ public:
                      int* cropCrossLoPx = nullptr,
                      int* cropCrossHiPx = nullptr) const;
 
+    /// THE COVERAGE MASK FOR THE FINISHED PANORAMA — CV_8UC1, 255 where a
+    /// frame committed a pixel, byte-aligned with {@link finalCanvas}'s
+    /// output at the SAME `cropPadRows`.
+    ///
+    /// ⚠ WHY THIS EXISTS AT ALL, when the engine already reports
+    /// {@link verticalEnvelope}: the envelope is per-column (top, bottom)
+    /// PRE-ORIENTATION and only its summary reaches `meta.json`, so no
+    /// consumer of `canvas.jpg` can reconstruct which pixels are painted.
+    /// The one that needs to is the maximum-inscribed-rectangle crop, and
+    /// without a mask it falls back to a BRIGHTNESS PROXY — which cannot
+    /// tell dark CONTENT from unpainted canvas. Measured on the operator's
+    /// own sweep (`pp_1789931447063`, 1441x1026): the brightness mask put
+    /// the largest rectangle at 24.3% of the canvas, a thin band across the
+    /// ceiling with the whole room excluded, because a black TV in the middle
+    /// of the frame forced the rectangle above it. The true answer on the
+    /// same image and the same algorithm is 68.4%. Border-connected
+    /// hole-filling — which both platforms already apply — recovers the TV
+    /// and still loses every dark object that TOUCHES the boundary, which on
+    /// that pack is a high chair on the left, a ceiling fan on the top and
+    /// the floor on the right.
+    ///
+    /// The batch stitcher has written this sidecar since v0.15 and both
+    /// platforms' `computeInscribedRect` already prefer it; pano+ wrote none,
+    /// so the sweep was the one engine on the proxy.
+    ///
+    /// ⚠ PASS THE SAME `cropPadRows` AS `finalCanvas`. The two are rendered
+    /// by one function through one geometry path, and this argument is the
+    /// only thing that can separate them. A mask of a different size is
+    /// refused by every consumer (they re-check dimensions), so the failure
+    /// mode is a silent fallback rather than a wrong crop — but it is still
+    /// a lost mask.
+    bool finalCoverage(cv::Mat& out, bool cropPadRows = false) const;
+
     SessionStats stats() const;
 
     /// Interior slices inside the painted extent that no frame ever owned, as

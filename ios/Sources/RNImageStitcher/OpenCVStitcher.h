@@ -234,9 +234,15 @@ extern NSString *const RNImageStitcherErrorDomain;
 /// item-7 — free-quad perspective crop.  Takes 4 IMAGE-PIXEL corners
 /// (ordered TL, TR, BR, BL) and rectifies the enclosed quadrilateral to
 /// an upright rectangle (cv::getPerspectiveTransform + warpPerspective),
-/// re-encodes at `quality`, overwrites in place.  Returns the rectified
-/// `{ width, height }`.  Rejects a degenerate / non-convex / out-of-bounds
-/// quad, and guards the output canvas with the shared canvasExceedsGuard.
+/// re-encodes at `quality`, and writes to `outputPath` — or IN PLACE when
+/// that is nil/empty, which is every caller before this and is
+/// byte-identical for them.  Returns the rectified `{ width, height }`.
+/// Rejects a degenerate / non-convex / out-of-bounds quad, and guards the
+/// output canvas with the shared canvasExceedsGuard.
+///
+/// `outputPath` exists for the one deliverable that must not be
+/// overwritten: a pano+ canvas is referenced by its pack, so cropping it in
+/// place desyncs the pack from the image it describes.
 + (nullable NSDictionary<NSString *, NSNumber *> *)cropToQuadAtPath:(NSString *)imagePath
                                                                tlX:(double)tlX
                                                                tlY:(double)tlY
@@ -247,6 +253,7 @@ extern NSString *const RNImageStitcherErrorDomain;
                                                                blX:(double)blX
                                                                blY:(double)blY
                                                            quality:(NSInteger)quality
+                                                        outputPath:(nullable NSString *)outputPath
                                                              error:(NSError **)error;
 
 /// v0.15 debug — write a red-tinted overlay JPEG (excluded / sub-threshold

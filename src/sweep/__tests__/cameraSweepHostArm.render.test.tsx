@@ -61,6 +61,8 @@ jest.mock(
 );
 (globalThis as unknown as { __hostArmWritten: unknown[] }).__hostArmWritten = written;
 
+import { NativeModules } from 'react-native';
+
 import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
@@ -97,14 +99,47 @@ const DEVICE = {
   name: 'back-0',
 };
 
+/**
+ * The crop seed comes from NATIVE. `computeInscribedRect` reads
+ * `<canvas>.coverage.png` — the sidecar the pano+ engine now writes beside
+ * the canvas — and falls back to a brightness threshold when it is absent.
+ * Neither exists in a render test, so the module is faked here and the
+ * answer is the one the operator's own pack measures
+ * (`pp_1789931447063`: 68.4% of canvas under a border-connected mask,
+ * against 24.3% under the brightness proxy the sidecar exists to replace).
+ */
+const inscribedCalls: string[] = [];
+/** Every `cropToQuad` bag, so the DESTINATION is observable. */
+const cropCalls: Array<{ imagePath: string; outputPath?: string }> = [];
 beforeEach(() => {
   jest.useFakeTimers();
   (Platform as { OS: string }).OS = 'android';
   vc.useCameraDevice = () => DEVICE;
   vc.useCameraDevices = () => [DEVICE];
   proxy.initFrameProcessorPlugin = () => ({ call: () => undefined });
+  inscribedCalls.length = 0;
+  cropCalls.length = 0;
+  (NativeModules as Record<string, unknown>).BatchStitcher = {
+    computeInscribedRect: (o: { imagePath: string }) => {
+      inscribedCalls.push(o.imagePath);
+      return Promise.resolve({
+        x: 12, y: 8, width: 3600, height: 1100,
+        imageWidth: 4000, imageHeight: 1200,
+      });
+    },
+    cropToQuad: (o: { imagePath: string; outputPath?: string }) => {
+      cropCalls.push(o);
+      // Native echoes where it wrote — in place when no destination was
+      // asked for, exactly as both platforms do.
+      const landed = (o.outputPath != null && o.outputPath !== '')
+        ? o.outputPath
+        : o.imagePath;
+      return Promise.resolve({ width: 3600, height: 1100, outputPath: landed });
+    },
+  };
 });
 afterEach(() => {
+  delete (NativeModules as Record<string, unknown>).BatchStitcher;
   jest.runOnlyPendingTimers();
   jest.useRealTimers();
   (Platform as { OS: string }).OS = 'ios';
@@ -776,12 +811,61 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ a sweep is NEVER offered the crop editor', async () => {
-    // `cropQuad` rewrites the file in place, and the pack in `sessionDir`
-    // references that file — cropping desyncs the two.
+  it('⚑ a sweep IS offered the crop editor, and is seeded from the coverage mask', async () => {
+    // ⚠ THIS CASE ASSERTED THE OPPOSITE, under the note "`cropQuad` rewrites
+    // the file in place, and the pack in `sessionDir` references that file —
+    // cropping desyncs the two". That was true and it was the wrong
+    // conclusion: the fix is to make the crop write ELSEWHERE, not to
+    // withhold the editor. Withholding it is the divergence the operator
+    // reported — one engine offering a crop preview and the other a bare
+    // image, when what he asked for was "the SAME EVERYTHING except for the
+    // underlying stitch mechanism".
+    //
+    // `cropQuad` now takes a destination (both natives) and `<Camera>` hands
+    // a pano+ crop a SIBLING of the canvas, so `canvas.jpg` is untouched.
     const tree = await render({ rectCrop: true });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
-    expect(review(tree)[0].props.showCropControls).toBe(false);
+    await act(async () => {
+      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
+    });
+    expect(review(tree)[0].props.showCropControls).toBe(true);
+    // …AND THE QUAD OPENS ON THE INSCRIBED RECTANGLE, which is the half the
+    // operator actually asked for ("cropped to the maximum inscribable
+    // rectangle — like we do in pano"). Without the seed the editor opens on
+    // a blind 8% inset, which is a crop preview that crops the wrong thing.
+    expect(review(tree)[0].props.initialRect)
+      .toEqual({ x: 12, y: 8, width: 3600, height: 1100 });
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and the crop lands on a SIBLING — canvas.jpg is never overwritten', async () => {
+    // ⚠ THE WHOLE REASON THE EDITOR WAS WITHHELD. A pano+ canvas is
+    // referenced by its pack, so an in-place crop leaves every offline
+    // harness reading a pack whose seam residuals, coverage mask and ledger
+    // describe a panorama that is no longer on disk. The pack would still
+    // look complete, which is what makes it dangerous.
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = await render({
+      rectCrop: true,
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    await act(async () => {
+      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
+    });
+    await act(async () => {
+      (review(tree)[0].props.onConfirm as (q: unknown) => void)({
+        quad: [
+          { x: 12, y: 8 }, { x: 3612, y: 8 },
+          { x: 3612, y: 1108 }, { x: 12, y: 1108 },
+        ],
+      });
+    });
+    expect(cropCalls).toHaveLength(1);
+    expect(cropCalls[0]!.imagePath)
+      .toBe('/data/user/0/com.x/files/panoplus/pp_1/canvas.jpg');
+    expect(cropCalls[0]!.outputPath)
+      .toBe('/data/user/0/com.x/files/panoplus/pp_1/canvas.cropped.jpg');
+    // …and the HOST is handed the crop, not the canvas.
+    expect(String(seen[0]!.uri)).toContain('canvas.cropped.jpg');
     act(() => { tree.unmount(); });
   });
 

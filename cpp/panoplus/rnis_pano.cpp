@@ -2743,10 +2743,22 @@ struct Engine::Impl {
         img = tmp;
     }
 
+    /// `src` selects WHICH canvas-frame raster is rendered — the pixels
+    /// (`canvas`, the default) or the coverage mask (`coverage`).
+    ///
+    /// ⚠ ONE GEOMETRY PATH, DELIBERATELY. The mask's only job is to say which
+    /// pixels of `canvas.jpg` were painted, which makes a mask that is
+    /// cropped, oriented or baked even slightly differently WORSE THAN NO
+    /// MASK: `computeInscribedRect` would then cut the deliverable along a
+    /// boundary that belongs to a different image, and it would look like a
+    /// plausible crop rather than like a bug. A second function that "does
+    /// the same thing" is exactly how the two would drift, so there is one
+    /// function and the only thing that varies is the source raster.
     bool renderOriented(cv::Mat& out, bool cropVertical,
                         bool cropPadRows = false,
                         int* cropCrossLoPx = nullptr,
-                        int* cropCrossHiPx = nullptr) const {
+                        int* cropCrossHiPx = nullptr,
+                        const cv::Mat* src = nullptr) const {
         if (cropCrossLoPx) *cropCrossLoPx = 0;
         if (cropCrossHiPx) *cropCrossHiPx = 0;
         cv::Rect roi;
@@ -2768,7 +2780,14 @@ struct Engine::Impl {
                 roi.y = v0; roi.height = v1 - v0;
             }
         }
-        orient(canvas(roi), out);
+        const cv::Mat& source = (src != nullptr) ? *src : canvas;
+        // A source that is not the canvas's twin cannot be cropped by the
+        // canvas's roi. Declining is the only safe answer: every consumer of
+        // the mask re-checks its dimensions and falls back, so an ABSENT
+        // sidecar degrades to the brightness proxy, while a MISALIGNED one
+        // would be trusted.
+        if (source.empty() || source.size() != canvas.size()) return false;
+        orient(source(roi), out);
         // v14 — THE ONE PLACE THE DELIVERABLE LEAVES THE RASTER FRAME.  After
         // the crop and after `orient`, so `cropCrossLo/HiPx` above stay in the
         // canvas frame they are documented in and a pack reader can still
@@ -6879,6 +6898,11 @@ bool Engine::finalCanvas(cv::Mat& out, bool cropPadRows,
                          int* cropCrossLoPx, int* cropCrossHiPx) const {
     return impl_->renderOriented(out, impl_->cfg.cropVertical, cropPadRows,
                                  cropCrossLoPx, cropCrossHiPx);
+}
+
+bool Engine::finalCoverage(cv::Mat& out, bool cropPadRows) const {
+    return impl_->renderOriented(out, impl_->cfg.cropVertical, cropPadRows,
+                                 nullptr, nullptr, &impl_->coverage);
 }
 
 SessionStats Engine::stats() const {

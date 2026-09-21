@@ -220,7 +220,7 @@ import { useFrameProcessorDriver } from '../stitching/useFrameProcessorDriver';
 import { useSweepWorklet } from '../sweep/useSweepWorklet';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
-import { toBareFilePath, toFileUri } from '../utils/paths';
+import { cropSiblingPath, toBareFilePath, toFileUri } from '../utils/paths';
 import { normaliseOrientation } from '../quality/normaliseOrientation';
 import {
   defaultPanoramaFilename,
@@ -3815,16 +3815,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       imageHeight={cropPending?.height ?? 0}
       initialRect={cropPending?.initialRect}
       warnings={cropPending?.warnings.map((w) => w.message) ?? []}
-      // ⚠ NEVER CROP A SWEEP. `cropQuad` rewrites the file IN PLACE
-      // (see onUseOriginal below), and a pano+ canvas is referenced
-      // by the pack in its `sessionDir` — cropping it desyncs the
-      // two, and every offline harness then reads a pack whose
-      // image is not the image that was measured. A sweep gets
-      // preview-only: the bare image with [Retake] / [Confirm],
-      // which is exactly what pano shows when `rectCrop` is off.
-      showCropControls={
-        rectCrop && cropPending?.captureResultObj.type !== 'panoplus'
-      }
+      // ⚠ A SWEEP CROPS TOO, NOW THAT IT CAN DO IT WITHOUT EATING ITS
+      // OWN PACK. This read `rectCrop && type !== 'panoplus'`, under a note
+      // that a pano+ canvas is referenced by its `sessionDir` and cropping
+      // it in place desyncs the pack from the image it describes. That was
+      // true, and the fix for it was to make the crop write ELSEWHERE — not
+      // to withhold the editor. Withholding it is exactly the divergence the
+      // operator reported: "I basically want the SAME EVERYTHING except for
+      // the underlying stitch mechanism", and one engine offering a crop
+      // preview while the other offers a bare image is not that.
+      //
+      // `cropQuad` now takes a destination (both natives), and the sweep
+      // passes a SIBLING of the canvas — see `onUseOriginal` below. The
+      // pack's `canvas.jpg` is never touched.
+      showCropControls={rectCrop}
       topInset={insets.top}
       bottomInset={insets.bottom}
       copy={guidanceCopyResolved}
@@ -3878,12 +3882,25 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               { x: Math.min(...xs), y: Math.max(...ys) },
             ];
         try {
-          // cropQuad takes a BARE path; the stashed uri is a file://
-          // URI.  Overwrites in place (pass the same path).
+          // cropQuad takes a BARE path; the stashed uri is a file:// URI.
+          const source = toBareFilePath(pending.uri);
+          // ⚠ A SWEEP IS CROPPED TO A SIBLING, NEVER IN PLACE. A pano+
+          // canvas is referenced by its pack (`sessionDir/canvas.jpg`), so
+          // overwriting it leaves every offline harness reading a pack whose
+          // image is not the image that was measured — the pack would still
+          // carry the seam residuals, the coverage mask and the ledger of a
+          // panorama nobody can look at any more.
+          //
+          // Every other engine keeps the in-place contract it has always
+          // had: its output is a standalone file with nothing referencing it.
+          const destination =
+            pending.captureResultObj.type === 'panoplus'
+              ? cropSiblingPath(source)
+              : undefined;
           const cropped = await cropQuad(
-            toBareFilePath(pending.uri),
+            source,
             cropPoints,
-            undefined,
+            destination,
             { quality: 90 },
           );
           onCapture?.({
@@ -4437,7 +4454,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               sweepDriver.setActive(sweeping);
               sweep?.onSweepingChange?.(sweeping);
             }}
-            onComplete={(result: PanoPlusCaptureResult) => {
+            onComplete={async (result: PanoPlusCaptureResult) => {
               // ⚠ THE REVIEW IS A GATE, NOT A VIEWER — the panorama's shape,
               // and the reason this changed.
               //
@@ -4480,6 +4497,54 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               // sweep's result path.
               if ((rectCrop || showPreview)
                   && result.width > 0 && result.height > 0) {
+                // ⚠ SEEDED FROM THE PANORAMA'S OWN COVERAGE, exactly as the
+                // keyframe path seeds its quad (:3123) — the operator asked
+                // for "the final output cropped to the maximum inscribable
+                // rectangle, like we do in pano", and without this the sweep
+                // opened the crop editor on a blind 8% inset while pano
+                // opened on the tightest clean rectangle.
+                //
+                // The engine now writes `<canvas>.coverage.png` beside the
+                // canvas, which is the sidecar both platforms' native
+                // `computeInscribedRect` already prefer. Without it they fall
+                // back to a brightness threshold that reads dark CONTENT as
+                // unpainted: on the operator's own pack that answered 24.3%
+                // of the canvas against a true 68.4%, and he named the
+                // objects it ate — "you are excluding high chair on the left,
+                // fan on the top and the floor on the right, just because
+                // they are black".
+                //
+                // AWAITED BEFORE THE STASH, not after: `RectCropPreview`
+                // seeds its quad ONCE in `useState` and is keyed by uri, so a
+                // rect that lands later is never read. Same order, and the
+                // same one-decode latency, as the keyframe engine.
+                //
+                // BEST-EFFORT: an older native build without the method, or
+                // a decode failure, leaves the default inset — which is what
+                // every sweep had before this.
+                //
+                // ⚠ GATED ON `rectCrop`, LIKE THE KEYFRAME PATH'S. In
+                // preview-only mode there is no quad to seed, so the decode
+                // would be latency spent on nothing — and, because an async
+                // function runs synchronously up to its first `await`, this
+                // gate is also what keeps the preview-only stash landing in
+                // the SAME tick it always did.
+                let sweepRect: ImageRect | undefined;
+                if (rectCrop) {
+                  try {
+                    const inscribed = await computeInscribedRect(result.uri);
+                    if (inscribed && inscribed.width > 0 && inscribed.height > 0) {
+                      sweepRect = {
+                        x: inscribed.x,
+                        y: inscribed.y,
+                        width: inscribed.width,
+                        height: inscribed.height,
+                      };
+                    }
+                  } catch {
+                    // No seed — RectCropPreview uses its default inset.
+                  }
+                }
                 setCropPending({
                   // ⚠ SCHEMED HERE, NOT UPSTREAM. `panoPlusResultOf` returns
                   // `summary.canvasPath` VERBATIM — a bare native path
@@ -4500,6 +4565,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                   height: result.height,
                   // NOT re-schemed: the public result keeps the bare path.
                   captureResultObj,
+                  initialRect: sweepRect,
                   // ⚠ THE SWEEP'S OWN VERDICT, not an empty array. This was
                   // `warnings: []` on every sweep while `panoPlusIntegrity`
                   // — 352 lines of hole/seam/banding/clipping analysis —

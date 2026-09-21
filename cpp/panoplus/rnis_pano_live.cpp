@@ -821,6 +821,54 @@ std::string Session::finalizeSweep(bool* empty) {
         if (!canvasWritten && canvasErr.empty()) canvasErr = err;
     }
 
+    // ── THE COVERAGE SIDECAR: `<canvas>.coverage.png` ────────────────────
+    //
+    // ⚠ WHAT THIS FIXES IS A CROP, NOT A DIAGNOSTIC. The operator asked for
+    // "the final output cropped to the maximum inscribable rectangle — like
+    // we do in pano". Both platforms already implement that crop and both
+    // already PREFER this sidecar; what they fall back to without it is a
+    // brightness threshold, which cannot tell dark CONTENT from unpainted
+    // canvas. On his own sweep (`pp_1789931447063`) that proxy answered
+    // 24.3% of the canvas — a thin band across the ceiling — against a true
+    // 68.4%, because a black TV in the middle of the frame pushed the
+    // rectangle above it. Border-connected hole filling recovers an interior
+    // TV and still loses every dark object that TOUCHES the boundary: on that
+    // pack a high chair on the left, a fan on the top and the floor on the
+    // right, which is exactly what he pointed at.
+    //
+    // The batch stitcher has written this file since v0.15. pano+ wrote none,
+    // so the sweep was the one engine cropping off a guess.
+    //
+    // ── THREE DELIBERATE CHOICES ──
+    //
+    // 1. PNG, and NOT `publishJpegAtomically`. That helper hard-codes ".jpg"
+    //    on purpose, and JPEG is the wrong container for a binary mask: the
+    //    readers threshold at `> 0`, so ringing around every painted edge
+    //    would leak non-zero into the unpainted region and quietly widen the
+    //    rectangle past the real boundary. A lossless mask or none.
+    // 2. `S.opt.canvasCropPad` — THE SAME ARGUMENT `finalCanvas` GOT, six
+    //    lines up. It is the one thing that can separate the two renders, and
+    //    a mask that is cropped differently from the image it describes is
+    //    worse than no mask at all: the crop would land on a boundary
+    //    belonging to a different picture and look like a plausible answer.
+    // 3. BEST-EFFORT AND SILENT ON FAILURE, like the batch stitcher's. The
+    //    sidecar is an accelerant for a crop that already has a fallback, and
+    //    a sweep must never fail because a mask could not be written. Every
+    //    reader re-checks the mask's dimensions against the image and falls
+    //    back when they disagree, so a missing file degrades to the proxy —
+    //    the behaviour of every build before this one.
+    if (canvasWritten) {
+        try {
+            cv::Mat cov;
+            if (S.engine.finalCoverage(cov, S.opt.canvasCropPad)
+                && !cov.empty() && cov.size() == canvas.size()) {
+                cv::imwrite(S.canvasPath + ".coverage.png", cov);
+            }
+        } catch (...) {
+            // see (3)
+        }
+    }
+
     // A sweep that painted nothing is EMPTY.  The pack still lands, and the
     // counters below are the evidence for why — a failed sweep with no
     // evidence is the outcome this programme refuses.

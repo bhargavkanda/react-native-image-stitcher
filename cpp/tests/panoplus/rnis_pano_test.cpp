@@ -180,7 +180,12 @@ struct SweepResult {
     std::vector<rnis::pano::FrameOutcome> rows;
     rnis::pano::SessionStats stats;
     cv::Mat canvas;
+    /// The coverage mask for `canvas` — CV_8UC1, 255 where a frame committed
+    /// a pixel. Byte-aligned with it by construction; the PanoCoverage block
+    /// is what holds that claim.
+    cv::Mat coverage;
     std::vector<std::pair<int, int>> holes;
+    std::vector<std::pair<int, int>> envelope;
 };
 
 /// Every number the PHOTOMETRIC clauses of `integrityFailed` read, as one
@@ -523,8 +528,13 @@ SweepResult runSweepSpec(const cv::Mat& shelf, const SweepSpec& spec,
     }
     out.rows.push_back(eng.finish());
     eng.finalCanvas(out.canvas);
+    // Rendered with the SAME `cropPadRows` as the canvas one line up — which
+    // is the only argument that can separate the two, and the reason
+    // `finalCoverage` takes it at all. See the PanoCoverage block.
+    eng.finalCoverage(out.coverage);
     out.stats = eng.stats();
     out.holes = eng.unpaintedRuns();
+    out.envelope = eng.verticalEnvelope();
     return out;
 }
 
@@ -1312,8 +1322,13 @@ SweepResult runProjectedSweep(const cv::Mat& shelf, const ProjSweepSpec& s,
     ingestProjectedSweep(eng, shelf, s, cfg, out);
     out.rows.push_back(eng.finish());
     eng.finalCanvas(out.canvas);
+    // Rendered with the SAME `cropPadRows` as the canvas one line up — which
+    // is the only argument that can separate the two, and the reason
+    // `finalCoverage` takes it at all. See the PanoCoverage block.
+    eng.finalCoverage(out.coverage);
     out.stats = eng.stats();
     out.holes = eng.unpaintedRuns();
+    out.envelope = eng.verticalEnvelope();
     return out;
 }
 
@@ -4543,8 +4558,13 @@ SweepResult runGestureSweep(const cv::Mat& shelf,
     }
     out.rows.push_back(eng.finish());
     eng.finalCanvas(out.canvas);
+    // Rendered with the SAME `cropPadRows` as the canvas one line up — which
+    // is the only argument that can separate the two, and the reason
+    // `finalCoverage` takes it at all. See the PanoCoverage block.
+    eng.finalCoverage(out.coverage);
     out.stats = eng.stats();
     out.holes = eng.unpaintedRuns();
+    out.envelope = eng.verticalEnvelope();
     return out;
 }
 
@@ -4915,8 +4935,13 @@ SweepResult runApproachSweep(const cv::Mat& shelf, int n, double dxPx,
     }
     out.rows.push_back(eng.finish());
     eng.finalCanvas(out.canvas);
+    // Rendered with the SAME `cropPadRows` as the canvas one line up — which
+    // is the only argument that can separate the two, and the reason
+    // `finalCoverage` takes it at all. See the PanoCoverage block.
+    eng.finalCoverage(out.coverage);
     out.stats = eng.stats();
     out.holes = eng.unpaintedRuns();
+    out.envelope = eng.verticalEnvelope();
     return out;
 }
 
@@ -7953,8 +7978,13 @@ SweepResult runDistortedSweep(const cv::Mat& shelf, const ProjSweepSpec& s,
     }
     out.rows.push_back(eng.finish());
     eng.finalCanvas(out.canvas);
+    // Rendered with the SAME `cropPadRows` as the canvas one line up — which
+    // is the only argument that can separate the two, and the reason
+    // `finalCoverage` takes it at all. See the PanoCoverage block.
+    eng.finalCoverage(out.coverage);
     out.stats = eng.stats();
     out.holes = eng.unpaintedRuns();
+    out.envelope = eng.verticalEnvelope();
     return out;
 }
 
@@ -9173,8 +9203,13 @@ SweepResult runSweepWithStamps(const cv::Mat& shelf,
     }
     out.rows.push_back(eng.finish());
     eng.finalCanvas(out.canvas);
+    // Rendered with the SAME `cropPadRows` as the canvas one line up — which
+    // is the only argument that can separate the two, and the reason
+    // `finalCoverage` takes it at all. See the PanoCoverage block.
+    eng.finalCoverage(out.coverage);
     out.stats = eng.stats();
     out.holes = eng.unpaintedRuns();
+    out.envelope = eng.verticalEnvelope();
     return out;
 }
 
@@ -9284,8 +9319,13 @@ SweepResult runStandoffHoldSweep(const cv::Mat& shelf, int n, double dxPx,
     }
     out.rows.push_back(eng.finish());
     eng.finalCanvas(out.canvas);
+    // Rendered with the SAME `cropPadRows` as the canvas one line up — which
+    // is the only argument that can separate the two, and the reason
+    // `finalCoverage` takes it at all. See the PanoCoverage block.
+    eng.finalCoverage(out.coverage);
     out.stats = eng.stats();
     out.holes = eng.unpaintedRuns();
+    out.envelope = eng.verticalEnvelope();
     return out;
 }
 
@@ -11940,4 +11980,128 @@ TEST(PanoCrossTraj, TheSeedTickResetsTheLeadOutFieldsTheTrajectoryTickFilled) {
     EXPECT_DOUBLE_EQ(w.leadTrajFan, fresh.leadTrajFan);
     EXPECT_EQ(w.leadPadTopPx, fresh.leadPadTopPx);
     EXPECT_EQ(w.leadPadBotPx, fresh.leadPadBotPx);
+}
+
+// ── THE COVERAGE MASK FOR THE DELIVERABLE ──────────────────────────────────
+//
+// WHY THIS BLOCK EXISTS.  The operator, on his own sweeps: "The final output
+// should be cropped to the maximum inscribable rectangle — like we do in
+// pano."  Both platforms already implement that crop, and both already PREFER
+// a `<image>.coverage.png` sidecar the batch stitcher has written since v0.15.
+// pano+ wrote none, so the sweep was the one engine cropping off a BRIGHTNESS
+// PROXY — which cannot tell dark CONTENT from unpainted canvas.
+//
+// Measured on his pack `pp_1789931447063` (1441x1026): the brightness mask put
+// the largest inscribed rectangle at 24.3% of the canvas, a thin band across
+// the ceiling with the whole room excluded, because a black TV in the middle
+// of the frame forced the rectangle above it.  The true answer on the same
+// image and the same algorithm is 68.4%.  Border-connected hole filling —
+// which both platforms already apply — recovers an interior TV and still loses
+// every dark object that TOUCHES the boundary; on that pack he named three:
+// "you are excluding high chair on the left, fan on the top and the floor on
+// the right, just because they are black".
+//
+// ⚠ THE ONLY THING THAT MAKES THE MASK USEFUL IS THAT IT IS THE SAME PICTURE.
+// A mask cropped, oriented or baked even slightly differently from the canvas
+// is WORSE than no mask: the crop would land on a boundary belonging to a
+// different image and look like a plausible answer rather than like a bug.
+// Every case here is that one property, under the transforms that could break
+// it.
+
+TEST(PanoCoverage, IsTheSAMESIZEAsTheDeliverable) {
+    const cv::Mat shelf = makeShelf(9000, kFrameH);
+    SweepSpec spec; spec.xs = linearSweep(200, 20, 120);
+    SweepResult r = runSweepSpec(shelf, spec, testConfig());
+
+    ASSERT_FALSE(r.canvas.empty());
+    ASSERT_FALSE(r.coverage.empty());
+    EXPECT_EQ(r.coverage.size(), r.canvas.size());
+    EXPECT_EQ(r.coverage.type(), CV_8UC1);
+}
+
+TEST(PanoCoverage, SurvivesTheTransposeOfAVerticalSweep) {
+    // ⚠ THE CASE THE MASK IS MOST LIKELY TO BE WRONG IN.  A vertical sweep is
+    // TRANSPOSED by the finalize bake (`orient`), so a mask rendered through
+    // any other path comes out with the canvas's dimensions swapped — which
+    // every consumer would reject on the size check, silently falling back to
+    // the proxy this file exists to replace.  A silent fallback is how a fix
+    // ships and does nothing.
+    cv::Mat tall = makeShelf(kFrameW, 5000);
+    SweepSpec spec;
+    spec.xs = std::vector<double>(120, 0.0);
+    spec.ys = linearSweep(200, 18, 120);
+    SweepResult r = runSweepSpec(tall, spec, testConfig());
+
+    ASSERT_EQ(r.stats.axis, 1);                 // it really is the vertical arm
+    ASSERT_FALSE(r.canvas.empty());
+    ASSERT_FALSE(r.coverage.empty());
+    EXPECT_GT(r.canvas.rows, r.canvas.cols);    // …and the canvas really is tall
+    EXPECT_EQ(r.coverage.size(), r.canvas.size());
+}
+
+TEST(PanoCoverage, MarksPaintedPixelsAndOnlyPaintedPixels) {
+    const cv::Mat shelf = makeShelf(9000, kFrameH);
+    SweepSpec spec; spec.xs = linearSweep(200, 20, 120);
+    SweepResult r = runSweepSpec(shelf, spec, testConfig());
+    ASSERT_FALSE(r.coverage.empty());
+
+    const int painted = cv::countNonZero(r.coverage);
+    const int total = r.coverage.rows * r.coverage.cols;
+    // A rectified sweep leaves a RAGGED cross edge, so the mask must be
+    // neither empty (it would crop to nothing) nor everything (it would be
+    // indistinguishable from having no mask, which is the bug).
+    EXPECT_GT(painted, 0);
+    EXPECT_LT(painted, total);
+    // The engine's own per-column envelope is the same fact from the other
+    // side: it reports a band for columns it painted, so a mask claiming
+    // FEWER painted pixels than the envelope's area would be missing content.
+    long long envArea = 0;
+    for (const auto& e : r.envelope) envArea += std::max(0, e.second - e.first);
+    EXPECT_GT(envArea, 0);
+    EXPECT_GE((long long)painted * 100, envArea * 50)
+        << "the mask has less than half the area the envelope reports painted "
+           "— it is not describing this canvas";
+}
+
+TEST(PanoCoverage, ABlackSCENEStillReadsAsPAINTED) {
+    // ⚠ THE WHOLE POINT, IN ONE CASE.  This is the operator's black TV: a
+    // scene with almost no luminance is exactly what a brightness threshold
+    // calls unpainted, and exactly what a COVERAGE mask must call painted.
+    // Without this the two masks agree on every fixture in this file, because
+    // every other fixture is a bright synthetic shelf.
+    cv::Mat dark = makeShelf(9000, kFrameH);
+    // Crush it to near-black while keeping enough texture for the tracker to
+    // latch — the failure under test is about LEVEL, not about features.
+    dark.convertTo(dark, -1, 0.06, 0.0);
+    SweepSpec spec; spec.xs = linearSweep(200, 20, 120);
+    SweepResult r = runSweepSpec(dark, spec, testConfig());
+    ASSERT_FALSE(r.canvas.empty());
+    ASSERT_FALSE(r.coverage.empty());
+
+    // What a brightness mask would say about this canvas…
+    cv::Mat gray, bright;
+    cv::cvtColor(r.canvas, gray, cv::COLOR_BGR2GRAY);
+    cv::threshold(gray, bright, 1, 255, cv::THRESH_BINARY);
+    const int brightPainted = cv::countNonZero(bright);
+    const int covPainted = cv::countNonZero(r.coverage);
+
+    // …against what the engine KNOWS it painted.  The coverage mask is the
+    // arbiter; the proxy is allowed to be anywhere at or below it, and on a
+    // dark scene it is below.
+    EXPECT_GT(covPainted, 0);
+    EXPECT_GE(covPainted, brightPainted)
+        << "a brightness threshold found MORE painted pixels than the engine "
+           "committed — the coverage mask is not this canvas's";
+}
+
+TEST(PanoCoverage, IsEmptyWhenNothingWasPainted) {
+    // Negative control: a mask must not exist for a canvas that does not.
+    // Without it every case above passes for a `finalCoverage` that returns
+    // a blank mat of the right size, which would crop to nothing.
+    rnis::pano::Engine eng;
+    std::string err;
+    ASSERT_TRUE(eng.configure(testConfig(), &err)) << err;
+    eng.finish();
+    cv::Mat cov;
+    EXPECT_FALSE(eng.finalCoverage(cov));
 }

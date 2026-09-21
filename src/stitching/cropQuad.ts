@@ -61,7 +61,14 @@ interface CropQuadNativeModule {
     imagePath: string;
     quad: number[];
     quality: number;
-  }) => Promise<{ width: number; height: number }>;
+    /** Absent ⇒ in place. Both platforms honour it; see {@link cropQuad}. */
+    outputPath?: string;
+  }) => Promise<{
+    width: number;
+    height: number;
+    /** Where it landed. Absent on a native build older than this option. */
+    outputPath?: string;
+  }>;
 }
 
 
@@ -100,25 +107,33 @@ export function flattenQuad(quad: Quad): number[] {
 
 /**
  * Perspective-rectify `quadImagePoints` out of `imagePath` into an upright
- * rectangle, overwriting the file in place, and resolve the output path +
- * rectified dimensions.
+ * rectangle and resolve the output path + rectified dimensions.
  *
  * @param imagePath        file:// URI (or bare path) of the image to crop.
  * @param quadImagePoints  the 4 corners in IMAGE-PIXEL space, canonically
  *                         ordered [TL, TR, BR, BL] (use
  *                         `orderQuadCorners`).  This is exactly
  *                         `RectCropResult.quad`.
- * @param outPath          where to write the result.  The native crop
- *                         OVERWRITES IN PLACE, so this currently MUST equal
- *                         `imagePath` (or be omitted — defaults to it).
- *                         Passing a different path throws, surfacing the
- *                         limitation rather than silently ignoring it; see
- *                         the integrator note in the item-7 handoff.
+ * @param outPath          where to write the result.  Omitted ⇒ IN PLACE,
+ *                         which is what every caller before 2026-09 did and
+ *                         is byte-identical for them.
+ *
+ *                         ⚠ IT USED TO THROW ON ANY OTHER VALUE, and that
+ *                         limitation had a cost the note recording it did
+ *                         not anticipate: the crop editor was disabled
+ *                         outright on the SWEEP engine, because a pano+
+ *                         canvas is referenced by its pack
+ *                         (`sessionDir/canvas.jpg`) and cropping it in
+ *                         place desyncs the two — every offline harness
+ *                         then reads a pack whose image is not the image
+ *                         that was measured.  So the operator got a crop
+ *                         preview on one engine and a bare image on the
+ *                         other, which he reported as a defect.  Both
+ *                         natives now take an `outputPath`.
  * @param opts             optional `{ quality }`.
  *
- * @throws if the native module isn't registered, if `outPath` differs from
- *         `imagePath`, or if the native crop rejects (degenerate quad,
- *         canvas guard, write failure).
+ * @throws if the native module isn't registered, or if the native crop
+ *         rejects (degenerate quad, canvas guard, write failure).
  */
 export async function cropQuad(
   imagePath: string,
@@ -126,16 +141,6 @@ export async function cropQuad(
   outPath?: string,
   opts?: CropQuadOptions,
 ): Promise<CropQuadResult> {
-  if (outPath !== undefined && outPath !== imagePath) {
-    // The native cropToQuad (like cropToRect) only overwrites in place.
-    // Fail loudly rather than silently writing to imagePath and returning
-    // a path the file isn't at.
-    throw new Error(
-      '[capture-sdk] cropQuad: native crop overwrites in place; '
-      + 'outPath must equal imagePath (or be omitted).',
-    );
-  }
-
   const fn = resolveCropToQuad();
   if (!fn) {
     throw new Error(
@@ -145,13 +150,32 @@ export async function cropQuad(
   }
 
   const quality = clampQuality(opts?.quality);
+  const wantsElsewhere = outPath !== undefined && outPath !== imagePath;
   const dims = await fn({
     imagePath,
     quad: flattenQuad(quadImagePoints),
     quality,
+    // Only sent when it differs, so a native build that predates the option
+    // sees the exact bag it has always seen.
+    ...(wantsElsewhere ? { outputPath: outPath } : {}),
   });
+  // ⚠ TRUST NATIVE'S ANSWER OVER OUR REQUEST WHEN IT GIVES ONE. A build that
+  // predates `outputPath` ignores the key and writes IN PLACE — and would
+  // then have this function report a path with no file at it, which is the
+  // silent failure the old throw existed to prevent. Both current natives
+  // echo where they wrote.
+  const landed = typeof dims.outputPath === 'string' && dims.outputPath !== ''
+    ? dims.outputPath
+    : imagePath;
+  if (wantsElsewhere && landed === imagePath) {
+    throw new Error(
+      `[capture-sdk] cropQuad: this native build wrote IN PLACE and ignored `
+      + `outputPath (${String(outPath)}). Update the native module, or pass `
+      + `no outPath.`,
+    );
+  }
   return {
-    outputPath: imagePath,
+    outputPath: landed,
     width: dims.width,
     height: dims.height,
   };

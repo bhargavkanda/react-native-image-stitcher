@@ -497,11 +497,29 @@ class BatchStitcher(reactContext: ReactApplicationContext)
             } else {
                 90
             }).coerceIn(1, 100)
+        // ── WHERE THE RECTIFIED IMAGE LANDS ─────────────────────────────
+        //
+        // Absent ⇒ IN PLACE, which is what every caller before this got and
+        // is byte-identical for them.
+        //
+        // It exists because one deliverable must NOT be overwritten: a pano+
+        // canvas is referenced by its pack (`sessionDir/canvas.jpg`), and
+        // cropping it in place desyncs the two — every offline harness then
+        // reads a pack whose image is not the image that was measured. That
+        // made the crop editor unavailable on the sweep engine altogether,
+        // which is a UI difference the operator reported as a defect ("I
+        // want the SAME EVERYTHING except the stitch mechanism").
+        //
+        // A sibling path rather than a temp dir, chosen by the caller: the
+        // crop is a deliverable, not scratch.
+        val outputPath = options.getString("outputPath")
         CoroutineScope(Dispatchers.Default).launch {
             val toRelease = mutableListOf<Mat>()
             try {
                 ensureOpenCv()
                 val cleaned = stripFileScheme(imagePath)
+                val destination =
+                    if (outputPath.isNullOrEmpty()) cleaned else stripFileScheme(outputPath)
                 if (!File(cleaned).exists()) {
                     promise.reject("read-failed", "Image not found: $imagePath")
                     return@launch
@@ -560,13 +578,17 @@ class BatchStitcher(reactContext: ReactApplicationContext)
                     return@launch
                 }
                 val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, quality)
-                if (!Imgcodecs.imwrite(cleaned, warped, params)) {
-                    promise.reject("write-failed", "Could not rewrite $imagePath")
+                if (!Imgcodecs.imwrite(destination, warped, params)) {
+                    promise.reject("write-failed", "Could not write $destination")
                     return@launch
                 }
                 promise.resolve(WritableNativeMap().apply {
                     putInt("width", warped.cols())
                     putInt("height", warped.rows())
+                    // THE PATH IT ACTUALLY LANDED AT, so a caller that passed
+                    // no `outputPath` still learns the in-place contract from
+                    // the answer rather than from the docstring.
+                    putString("outputPath", destination)
                 })
             } catch (t: Throwable) {
                 promise.reject("crop-to-quad-failed", t.message, t)

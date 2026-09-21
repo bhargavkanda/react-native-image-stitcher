@@ -1175,8 +1175,24 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
                                                       blX:(double)blX
                                                       blY:(double)blY
                                                   quality:(NSInteger)quality
+                                               outputPath:(nullable NSString *)outputPath
                                                     error:(NSError **)error {
   NSString *cleaned = normalizeImagePath(imagePath);
+  // ── WHERE THE RECTIFIED IMAGE LANDS ──────────────────────────────────
+  //
+  // nil / empty ⇒ IN PLACE, which is what every caller before this got and
+  // is byte-identical for them.
+  //
+  // It exists because one deliverable must NOT be overwritten: a pano+
+  // canvas is referenced by its pack (`sessionDir/canvas.jpg`), and cropping
+  // it in place desyncs the two — every offline harness then reads a pack
+  // whose image is not the image that was measured. That is why the crop
+  // editor was unavailable on the sweep engine at all, which the operator
+  // reported as a UI difference between the two engines.
+  NSString *destination =
+    (outputPath != nil && outputPath.length > 0)
+      ? normalizeImagePath(outputPath)
+      : cleaned;
   if (![[NSFileManager defaultManager] fileExistsAtPath:cleaned]) {
     if (error) {
       *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
@@ -1285,14 +1301,14 @@ cv::detail::CameraParams cameraParamsFromPose(NSDictionary *pose) {
   if (q < 1) { q = 1; }
   if (q > 100) { q = 100; }
   std::vector<int> writeParams = { cv::IMWRITE_JPEG_QUALITY, q };
-  bool ok = cv::imwrite(nativePath, warped, writeParams);
+  bool ok = cv::imwrite(std::string(destination.UTF8String), warped, writeParams);
   if (!ok) {
     if (error) {
       *error = [NSError errorWithDomain:RNImageStitcherErrorDomain
                                    code:1022
                                userInfo:@{
         NSLocalizedDescriptionKey:
-          [NSString stringWithFormat:@"Could not rewrite image at %@", imagePath],
+          [NSString stringWithFormat:@"Could not write image at %@", destination],
       }];
     }
     return nil;
