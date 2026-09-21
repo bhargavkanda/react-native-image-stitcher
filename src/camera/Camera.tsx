@@ -4067,9 +4067,24 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     lifecycle?: NonNullable<CameraViewProps['cameraProps']>,
     /** EVERY vision-camera error, including the swallowed lifecycle codes. */
     onAnyError?: (error: unknown) => void,
+    /**
+     * THIS PREVIEW'S STREAM IS THE SWEEP'S STITCH SOURCE.
+     *
+     * ⚠ A PARAMETER, NOT `engine === 'sweep'`.  There is exactly ONE
+     * `<CameraView>` element in this file and both cells render it, so the
+     * two consumers cannot be told apart by editing JSX.  `engine` alone is
+     * also the wrong question: it says a sweep is configured, not that THIS
+     * preview feeds it — the recorder opens its own Camera2 client whenever
+     * `sweepHostOwnsCamera` is false, and then these frames are a viewfinder
+     * and nothing more.  The sweep cell passes `true` under
+     * `hostPreviewMounted`, which already ANDs that predicate in, so the
+     * flag and the ownership answer cannot drift apart.
+     */
+    sweepIngestCapture: boolean = false,
   ): React.JSX.Element => (
     <CameraView
         onAnyError={onAnyError}
+        sweepIngestCapture={sweepIngestCapture}
         ref={visionCameraRef}
         device={capture.device}
         // Release the camera whenever the app is genuinely BACKGROUNDED, and
@@ -4357,7 +4372,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             setHostPreviewError(
               `${e?.code ?? 'unknown'}: ${e?.message ?? String(err)}`,
             );
-          })}
+          },
+          // ⚠ sweepIngestCapture — TRUE ONLY HERE.  `hostPreviewMounted`
+          // already requires `sweepHostOwnsCamera`, so reaching this call
+          // site is itself the proof that these frames ARE the sweep's
+          // ingest, which is what earns this preview the floored,
+          // video-aspect format policy.  The keyframe cell's bare
+          // `renderHostPreview()` at the bottom of the main tree omits it
+          // and keeps the 4:3-first rule.
+          true)}
           {cropPending == null && (
           // ⚠ THE SURFACE UNMOUNTS BEHIND THE REVIEW, and must keep doing
           // so. It owns a camera; leaving it mounted behind the review

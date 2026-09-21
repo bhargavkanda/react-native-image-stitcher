@@ -9,6 +9,7 @@
 import {
   exposureCapToFps,
   pickCaptureFormat,
+  pickCaptureFormatDetailed,
   type FormatLike,
 } from '../pickCaptureFormat';
 
@@ -284,5 +285,203 @@ describe('exposure cap picks a fast format AND the caller floors the ceiling', (
     expect(chosen!.maxFps).toBe(60);
     const sessionFps = Math.min(chosen!.maxFps, Math.max(60, exposureCapToFps(0)));
     expect(sessionFps).toBe(60);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// THE ANDROID FIXTURE, AND WHY IT LOOKS LIKE THIS
+//
+// Measured on a Galaxy A35 (SM-A356U1) on 2026-09-21, not invented.
+//
+// vision-camera builds an Android device's format list as the CROSS PRODUCT
+// of the JPEG photo sizes with `qualities.flatMap { it.typicalSizes }` over
+// CameraX's quality ladder (`CameraDeviceDetails.kt:123`).  Those typical
+// sizes are hard-coded in `androidx.camera.video.Quality` — read out of the
+// camera-video AAR's bytecode:
+//
+//     SD  = [720x480, 640x480]     HD  = [1280x720]
+//     FHD = [1920x1080]            UHD = [3840x2160]
+//
+// 720x480 is 1.5 and fails the 0.05 tolerance, so **640x480 is the only
+// video size on the whole ladder that can ever satisfy a 4:3 match** — on
+// every Android device, not just this one.  The phone's own hardware list
+// advertises 4:3 YUV at 1920x1440 and 1440x1080 (its Camera2 arm uses them
+// and gets 1440x1080); vision-camera never offers them.
+//
+// Every rung on this device is 30 fps, and 640x480 has no CamcorderProfile
+// at all so it inherits the device max — also 30.  So `preferHighFps` is a
+// dead tie here and the size term decides everything.  That is exactly why
+// the sweep policy must take the SMALLEST format above the floor: with the
+// default largest-wins sort it would ask for 3840x2160.
+const A35_PHOTO: Array<[number, number]> = [
+  [4080, 3060], [4080, 2296], [3056, 3056], [3840, 2160], [4080, 1884],
+  [2560, 1440], [1920, 1440], [2336, 1080], [1920, 1080], [1920, 886],
+  [1440, 1080], [1088, 1088], [1280, 720], [960, 720], [720, 480],
+  [640, 480], [640, 360], [352, 288], [320, 240], [256, 144], [176, 144],
+];
+const A35_VIDEO: Array<[number, number]> = [
+  [720, 480], [640, 480], [1280, 720], [1920, 1080], [3840, 2160],
+];
+const A35: FormatLike[] = A35_VIDEO.flatMap(([vw, vh]) =>
+  A35_PHOTO.map(([pw, ph]) => f(pw, ph, vw, vh, 30)),
+);
+
+/** What `CameraView` sends for a non-sweep consumer. */
+const SHARED = {
+  maxPhotoLongEdge: 4032,
+  aspect: 4 / 3,
+  preferHighFps: true,
+  fpsTarget: 60,
+} as const;
+
+describe('minVideoLongEdge on Android — the floor that was inert', () => {
+  // CHARACTERIZATION (passes before AND after). The shared picker's default
+  // path must not move: this is the executable proof, stronger than an
+  // argument about option defaults.
+  it('CHARACTERIZATION: default policy still picks 640x480 with no floor', () => {
+    const r = pickCaptureFormatDetailed(A35, { ...SHARED, minVideoLongEdge: 0 });
+    expect(r.format!.videoWidth).toBe(640);
+    expect(r.format!.videoHeight).toBe(480);
+    expect(r.policy).toBe('aspect-first');
+  });
+
+  // THE DEFECT ITSELF, pinned. Asking for the floor changes NOTHING under
+  // the default policy, because the aspect filter already collapsed the set
+  // to the single 4:3 entry CameraX publishes.
+  it('CHARACTERIZATION: a 1280 floor is INERT under the default policy', () => {
+    const r = pickCaptureFormatDetailed(A35, { ...SHARED, minVideoLongEdge: 1280 });
+    expect(r.format!.videoWidth).toBe(640);
+    expect(r.floorRequested).toBe(1280);
+    expect(r.floorCleared).toBe(false); // <- the whole bug, in one field
+  });
+
+  // FAILS BEFORE: there was no floor-first policy, and the pick was 640x480.
+  it('FAILS BEFORE: floor-first lifts the A35 sweep stream to 1280x720', () => {
+    const r = pickCaptureFormatDetailed(A35, {
+      ...SHARED,
+      minVideoLongEdge: 1280,
+      videoFloorOutranksAspect: true,
+    });
+    expect(r.format!.videoWidth).toBe(1280);
+    expect(r.format!.videoHeight).toBe(720);
+    expect(r.floorCleared).toBe(true);
+    expect(r.policy).toBe('floor-first');
+    expect(r.videoAspectMatched).toBe(false); // honestly reported: 16:9
+  });
+
+  // GUARD (passes before, against a plausible WRONG fix). Simply deleting the
+  // aspect stage would leave largest-video-wins and ask for 4K — 27x the
+  // pixels per frame on a phone already near its per-frame budget.
+  it('GUARD: floor-first takes the SMALLEST clearing format, never 3840x2160', () => {
+    const r = pickCaptureFormatDetailed(A35, {
+      ...SHARED,
+      minVideoLongEdge: 1280,
+      videoFloorOutranksAspect: true,
+    });
+    expect(r.format!.videoWidth).not.toBe(3840);
+    expect(r.format!.videoWidth * r.format!.videoHeight)
+      .toBeLessThan(1920 * 1080);
+  });
+
+  it('the floor is the knob: raising it to 1920 asks for 1920x1080', () => {
+    const r = pickCaptureFormatDetailed(A35, {
+      ...SHARED,
+      minVideoLongEdge: 1920,
+      videoFloorOutranksAspect: true,
+    });
+    expect(r.format!.videoWidth).toBe(1920);
+    expect(r.format!.videoHeight).toBe(1080);
+  });
+
+  // G2: the still must not silently change shape. `CameraHandle.takePhoto()`
+  // is NOT engine-gated, so a host can fire a still through this session.
+  it('keeps the STILL at 4:3 even when the video goes 16:9', () => {
+    const r = pickCaptureFormatDetailed(A35, {
+      ...SHARED,
+      minVideoLongEdge: 1280,
+      videoFloorOutranksAspect: true,
+    });
+    expect(r.format!.photoWidth / r.format!.photoHeight).toBeCloseTo(4 / 3, 2);
+  });
+
+  it('degrades instead of failing when NOTHING clears the floor', () => {
+    const r = pickCaptureFormatDetailed(A35, {
+      ...SHARED,
+      minVideoLongEdge: 9999,
+      videoFloorOutranksAspect: true,
+    });
+    expect(r.format).toBeDefined();
+    expect(r.format!.videoWidth).toBe(640); // the unfloored answer
+    expect(r.floorCleared).toBe(false);
+  });
+
+  // GUARD (passes before; the default path agrees on this fixture). The rule
+  // must be "4:3 WITHIN the floored set", not "16:9 always" — a device that
+  // does have a big 4:3 format must still get it. A smallest-wins sort with
+  // the aspect stage simply DELETED would take the 1280x720 here.
+  it('GUARD: prefers 4:3 INSIDE the floored set over a smaller 16:9', () => {
+    const formats = [
+      f(4032, 3024, 1600, 1200, 30), // 4:3, larger
+      f(4032, 2268, 1280, 720, 30), // 16:9, smaller
+    ];
+    const r = pickCaptureFormatDetailed(formats, {
+      ...SHARED,
+      minVideoLongEdge: 1280,
+      videoFloorOutranksAspect: true,
+    });
+    expect(r.format!.videoWidth).toBe(1600);
+    expect(r.videoAspectMatched).toBe(true);
+  });
+
+  // GUARD (passes before; the default sort also ranks fps first). A sweep is
+  // a moving capture and frame rate is the motion-blur defence — the iOS
+  // sibling refuses to START rather than trade it — so the smallest-wins
+  // term must never be allowed above fps. Inert on the A35 (every rung is
+  // 30 fps) and load-bearing on any device that is not the A35.
+  it('GUARD: ranks FPS above size — a 60 fps format beats a bigger 30 fps one', () => {
+    const formats = [
+      f(4032, 3024, 1920, 1080, 30),
+      f(4032, 3024, 1280, 720, 60),
+    ];
+    const r = pickCaptureFormatDetailed(formats, {
+      ...SHARED,
+      minVideoLongEdge: 1280,
+      videoFloorOutranksAspect: true,
+    });
+    expect(r.format!.maxFps).toBe(60);
+    expect(r.format!.videoWidth).toBe(1280);
+  });
+
+  it('the new option is inert without a floor (both halves required)', () => {
+    const withPolicy = pickCaptureFormat(A35, {
+      ...SHARED,
+      minVideoLongEdge: 0,
+      videoFloorOutranksAspect: true,
+    });
+    expect(withPolicy!.videoWidth).toBe(640);
+  });
+
+  it('pickCaptureFormat stays a thin wrapper over the detailed form', () => {
+    const opts = { ...SHARED, minVideoLongEdge: 1280, videoFloorOutranksAspect: true };
+    expect(pickCaptureFormat(A35, opts)).toBe(pickCaptureFormatDetailed(A35, opts).format);
+  });
+
+  it('reports the floor for the DEFAULT path too (the keyframe consumer)', () => {
+    // The keyframe/photo path evaporates its floor on the same devices, and
+    // that has to be visible to its caller as well.
+    const r = pickCaptureFormatDetailed(A35, { ...SHARED, minVideoLongEdge: 1280 });
+    expect(r.policy).toBe('aspect-first');
+    expect(r.floorRequested).toBe(1280);
+    expect(r.floorCleared).toBe(false);
+  });
+
+  it('an empty list answers undefined without claiming the floor cleared', () => {
+    const r = pickCaptureFormatDetailed([], {
+      ...SHARED,
+      minVideoLongEdge: 1280,
+      videoFloorOutranksAspect: true,
+    });
+    expect(r.format).toBeUndefined();
+    expect(r.floorCleared).toBe(false);
   });
 });

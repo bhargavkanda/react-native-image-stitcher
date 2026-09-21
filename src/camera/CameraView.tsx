@@ -22,6 +22,7 @@
 import React, {
   forwardRef,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -41,7 +42,7 @@ import {
   type CameraProps,
 } from 'react-native-vision-camera';
 
-import { exposureCapToFps, pickCaptureFormat } from './pickCaptureFormat';
+import { exposureCapToFps, pickCaptureFormatDetailed } from './pickCaptureFormat';
 
 
 /**
@@ -121,6 +122,28 @@ export interface CameraViewProps {
    * no qualifying format.  Default off.
    */
   keyframeQualityCapture?: boolean;
+  /**
+   * THIS PREVIEW'S VIDEO STREAM IS THE SWEEP'S STITCH SOURCE.
+   *
+   * Set by `<Camera engine="sweep">` at the one call site where its host
+   * preview is mounted, which is reached only when `sweepHostOwnsCamera` is
+   * true — so when this is set, the frames drawn here are literally the
+   * frames the engine ingests.  Never a host-settable prop: it must not be
+   * able to disagree with that predicate.
+   *
+   * Two effects, both scoped to that consumer:
+   *
+   *  - the format is picked with `videoFloorOutranksAspect`, and the floor is
+   *    requested on this path's OWN authority rather than inherited from
+   *    `keyframeQualityCapture` (which has no default at `<Camera>`, so the
+   *    sweep was not even asking for it);
+   *  - the letterbox is measured from the VIDEO aspect instead of the photo
+   *    aspect, because a floored pick can now pair a 16:9 video with a 4:3
+   *    still.  Sizing the box from the photo would letterbox the stream
+   *    inside a box of the wrong shape and show the operator less than is
+   *    being ingested.
+   */
+  sweepIngestCapture?: boolean;
   /**
    * v0.23 anti-blur EXPOSURE CAP (non-AR path): the maximum exposure time,
    * in milliseconds, to allow while capturing.  0 / omitted = don't cap
@@ -216,6 +239,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     highResCapture = false,
     captureDepthData = false,
     keyframeQualityCapture = false,
+    sweepIngestCapture = false,
     maxExposureMs = 0,
     guidance,
     style,
@@ -309,9 +333,9 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // 1920×1440 **@60 fps** one — visibly jittery.  Keyframes are clamped to
   // 640/1280 px before stitching, so the extra video resolution buys nothing
   // here; a 60 fps stream just looks right.  We opt the panorama camera in.
-  const format = useMemo(
+  const formatPick = useMemo(
     () => {
-      const picked = pickCaptureFormat(device?.formats ?? [], {
+      const picked = pickCaptureFormatDetailed(device?.formats ?? [], {
         // highResCapture (document scanning) raises the photo cap so the
         // device's largest 4:3 still is selected (e.g. 4080×3060 on the A35,
         // which 4032 was excluding).  preferHighFps stays on, so the chosen
@@ -333,14 +357,56 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         // keyframeQualityCapture: floor the VIDEO stream at 1280 long edge
         // so non-AR pano keyframes stop being 640×480 tiles; fps still
         // ranks within the floored set (see pickCaptureFormat).
-        minVideoLongEdge: keyframeQualityCapture
+        //
+        // ⚠ THE SWEEP ASKS FOR THE FLOOR ITSELF.  `keyframeQualityCapture`
+        // has no default at `<Camera>`, so a bare `<Camera engine="sweep">`
+        // was passing 0 here — the floor was not merely outranked on that
+        // path, it was never requested.  Two independent reasons for the
+        // same 640x480, so fixing only the ordering would have fixed
+        // nothing for that caller.
+        minVideoLongEdge: keyframeQualityCapture || sweepIngestCapture
           ? KEYFRAME_QUALITY_MIN_VIDEO_LONG_EDGE
           : 0,
+        // Sweep only.  See the prop doc and the option doc for why the
+        // stage order is inverted for this one consumer.
+        videoFloorOutranksAspect: sweepIngestCapture,
       });
       return picked;
     },
-    [device, highResCapture, captureDepthData, keyframeQualityCapture, exposureCapFps],
+    [
+      device,
+      highResCapture,
+      captureDepthData,
+      keyframeQualityCapture,
+      sweepIngestCapture,
+      exposureCapFps,
+    ],
   );
+  const format = formatPick.format;
+
+  // ⚠ SAY WHEN THE FLOOR DID NOTHING.  `minVideoLongEdge` shipped with no
+  // test and no runtime signal, and was inert on every Android device for
+  // its whole life because the aspect filter had already collapsed the set
+  // to the one 4:3 entry CameraX publishes.  A knob is wired only when an
+  // outcome proves it; this is the outcome, said out loud, for BOTH
+  // consumers — the keyframe path's floor evaporates the same way.
+  const floorInert = formatPick.floorRequested > 0 && !formatPick.floorCleared;
+  const warnedFloorRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!floorInert || !device) return;
+    const key = `${device.id}:${formatPick.floorRequested}`;
+    if (warnedFloorRef.current === key) return;
+    warnedFloorRef.current = key;
+    const sizes = Array.from(
+      new Set((device.formats ?? []).map((f) => `${f.videoWidth}x${f.videoHeight}`)),
+    ).join(', ');
+    console.warn(
+      `[CameraView] video floor ${formatPick.floorRequested}px requested but NO `
+      + `format cleared it — the floor is inert and the stream stays at `
+      + `${format?.videoWidth}x${format?.videoHeight}. Device ${device.id} `
+      + `offers: ${sizes}`,
+    );
+  }, [floorInert, device, formatPick.floorRequested, format?.videoWidth, format?.videoHeight]);
 
   // Pin the session frame rate to the format's max, capped at the fps ceiling.
   // Picking a fast format is necessary but NOT sufficient — without an explicit
@@ -385,9 +451,19 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
 
   // Capture aspect ratio (W÷H) in the sensor's native landscape
   // orientation (so > 1).  Falls back to 4:3 until the format resolves.
+  //
+  // ⚠ WHICH STREAM'S ASPECT.  The box is the PHOTO's everywhere except the
+  // sweep, and that was only ever safe because `matchesAspect` required the
+  // photo and the video to share one aspect — an accident of the filter,
+  // not a decision.  The sweep's floored pick can pair a 16:9 video with a
+  // 4:3 still, and it is the VIDEO that is drawn here and ingested, so on
+  // that path the box must follow the video or `resizeMode="contain"`
+  // letterboxes the stream a second time inside a 4:3 frame.
+  const aspectW = sweepIngestCapture ? format?.videoWidth : format?.photoWidth;
+  const aspectH = sweepIngestCapture ? format?.videoHeight : format?.photoHeight;
   const sensorAspect =
-    format && format.photoWidth > 0 && format.photoHeight > 0
-      ? format.photoWidth / format.photoHeight
+    aspectW != null && aspectH != null && aspectW > 0 && aspectH > 0
+      ? aspectW / aspectH
       : 4 / 3;
 
   // With outputOrientation="device", a portrait device displays the
