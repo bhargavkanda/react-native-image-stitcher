@@ -733,7 +733,35 @@ function App(): React.JSX.Element {
           //
           // The pack records `tauProvenance: uncorrected` and never claims a
           // τ it does not have.
-          sweep={{ tauUncorrected: true }}
+          sweep={{
+            tauUncorrected: true,
+            // ⚠ THE ANDROID AR ARM, TURNED ON — it was built for this exact
+            // complaint and had never once run.
+            //
+            // Operator, 2026-09-10: "I took an AR capture in pano with no
+            // issues!! Why can't we use the same for pano+ too?"
+            // `PanoPlusArFramePlugin` is the answer to that and shipped soon
+            // after: pano+ rides the stitcher's OWN ARCore session — the one
+            // `<ARCameraView>` starts on `onAttachedToWindow` — instead of
+            // opening a Camera2 client and bolting a SECOND ARCore session
+            // onto it in SHARED_CAMERA mode.
+            //
+            // But `arPluginArm` defaults to FALSE in the recorder
+            // (`PanoPlusAndroidRecorder.kt:787`) and NOTHING passed it, so
+            // `arArmed` stayed hard-false on Android, `<ARCameraView>` never
+            // mounted, and the arm was unreachable. Measured across all 16
+            // packs on the A35: `frameSource` is `camera2` every time. The
+            // arm has never run.
+            //
+            // Why it matters beyond tidiness: on the Camera2 arm ARCore is
+            // created when the HOLD starts, and it takes a fixed ~2 s to
+            // report whether it can track (measured: first INSUFFICIENT_LIGHT
+            // at row ~60, 2001-2062 ms in, on 13 of 13 failing packs). The
+            // operator pays that on every AR hold — "the sweep does not start
+            // for 2-3 secs after I start the hold". On THIS arm the session
+            // is already running and already tracking while he frames.
+            arPluginArm: true,
+          }}
           defaultLens="1x"
           enablePhotoMode
           enablePanoramaMode
