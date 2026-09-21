@@ -370,7 +370,15 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // its whole life because the aspect filter had already collapsed the set
   // to the one 4:3 entry vision-camera's list carries.  A knob is wired only
   // when an outcome proves it; this is the outcome, said out loud.
-  const floorInert = formatPick.floorRequested > 0 && !formatPick.floorCleared;
+  //
+  // ⚠ NOT WHILE THE HARDWARE LIST IS STILL ON ITS WAY.  The pick above runs
+  // on every render, including the ones the mount is held through, and on
+  // those it sees the incomplete list — so it would report "inert" and be
+  // disproved by the very next render.  Seen on the A35 at first launch:
+  // the warning at 13.797 s, the 1440x1080 session at 14.117 s.  A warning
+  // that lies is worse than none.
+  const floorInert =
+    !hardware.pending && formatPick.floorRequested > 0 && !formatPick.floorCleared;
   const warnedFloorRef = useRef<string | null>(null);
   useEffect(() => {
     if (!floorInert || !device) return;

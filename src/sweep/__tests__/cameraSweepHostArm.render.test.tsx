@@ -1092,6 +1092,39 @@ describe('⚑ one camera, one format — the hardware list reaches BOTH cells', 
     act(() => { tree.unmount(); });
   });
 
+  it('FAILS BEFORE: does not cry "inert floor" from the transient pre-probe pick', async () => {
+    // Seen on the A35: the warning fired at 13.797 s from the incomplete
+    // list, and the 1440x1080 session opened at 14.117 s. The pick runs on
+    // the held renders too, so the warning must wait for the probe.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      let resolveProbe!: (r: unknown) => void;
+      (NativeModules as Record<string, unknown>).RNSSweepProbe = {
+        probeCapabilities: () => new Promise((res) => { resolveProbe = res; }),
+      };
+      const tree = await render({ keyframeQualityCapture: true });
+      const floorWarnings = () =>
+        warn.mock.calls.filter((c) => String(c[0]).includes('video floor')).length;
+      expect(floorWarnings()).toBe(0); // pending: say nothing
+      await act(async () => { resolveProbe(HW_REPORT); await Promise.resolve(); await Promise.resolve(); });
+      expect(floorWarnings()).toBe(0); // answered, and it cleared: still nothing
+      act(() => { tree.unmount(); });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('CHARACTERIZATION: with no probe at all the inert-floor warning still fires', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const tree = await render({ keyframeQualityCapture: true });
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('video floor 1280px'))).toBe(true);
+      act(() => { tree.unmount(); });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('holds the mount until the probe answers, then mounts ONCE with the final format', async () => {
     // A pick from the incomplete list followed by a re-pick would restart the
     // session and make a sweep started in between refuse every frame.
