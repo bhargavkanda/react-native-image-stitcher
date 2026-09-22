@@ -2303,9 +2303,32 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
     private var sensorMgr: SensorManager? = null
     private var rotVec: Sensor? = null
     private var gameRotVec: Sensor? = null
+    /**
+     * THE TWO RAW CHANNELS. Neither drives anything — both exist so a pack can
+     * ANSWER a question the quaternion series structurally cannot.
+     *
+     * `gyro` (TYPE_GYROSCOPE, rad/s, mag-FREE): the shipped lateral guard
+     * (`usePanMotion.ts`) is an EMA of `|gyro.x|` fed from react-native-sensors
+     * in JS, and no pack has ever carried that stream — so what the guard
+     * actually saw on any capture is NOT MEASURABLE from a pack, and four
+     * independent reconstructions of one sweep's `emaMax` spanned 0.046 to
+     * 0.533. With this row the guard can be replayed exactly instead of
+     * reconstructed by differentiating quaternions.
+     *
+     * `magField` (TYPE_MAGNETIC_FIELD, microtesla): the whole cross-axis
+     * channel is magnetometer heading correction (see `attitudeMagFree`), so
+     * every threshold calibrated indoors carries an unproven assumption about
+     * the magnetic environment. Steel racking and freezer motors are exactly
+     * where that assumption breaks. Logging the field itself makes "does this
+     * transfer" a measurement rather than an argument.
+     */
+    private var gyro: Sensor? = null
+    private var magField: Sensor? = null
     private val imuLatest = AtomicReference<ImuSample?>(null)
     private val imuCount = AtomicLong(0)
     private val gameImuCount = AtomicLong(0)
+    private val gyroCount = AtomicLong(0)
+    private val magFieldCount = AtomicLong(0)
     private var imuFirstTsNs = 0L
     private var imuLastTsNs = 0L
     private val imuAccuracyHist = IntArray(8)     // index = accuracy+1, clamped
@@ -5197,6 +5220,45 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
     private val sensorListener = object : SensorEventListener {
         override fun onSensorChanged(e: SensorEvent) {
             try {
+                // ── RAW 3-AXIS CHANNELS ──────────────────────────────────
+                // Handled BEFORE the quaternion mapping below, because
+                // `getQuaternionFromVector` is meaningless on them and the
+                // `when` that follows drops every unrecognised type on the
+                // floor. These rows carry `v` (the raw triple) and never `q`,
+                // so a reader keys on `type` and any existing consumer that
+                // filters for the two rotation-vector types is unaffected.
+                val rawType = when (e.sensor.type) {
+                    Sensor.TYPE_GYROSCOPE -> "gyroscope"
+                    Sensor.TYPE_MAGNETIC_FIELD -> "magnetic-field"
+                    else -> null
+                }
+                if (rawType != null) {
+                    if (e.values.size < 3) return
+                    val rawDeliveredNs = SystemClock.elapsedRealtimeNanos()
+                    if (e.sensor.type == Sensor.TYPE_GYROSCOPE) {
+                        gyroCount.incrementAndGet()
+                    } else {
+                        magFieldCount.incrementAndGet()
+                    }
+                    sensorsW?.write(
+                        Jo().s("type", rawType)
+                            .i("tsNs", e.timestamp)
+                            .raw(
+                                "v",
+                                jarr(
+                                    e.values[0].toDouble(),
+                                    e.values[1].toDouble(),
+                                    e.values[2].toDouble(),
+                                ),
+                            )
+                            .n("tS", e.timestamp / 1e9)
+                            .i("accuracy", e.accuracy)
+                            .i("elapsedRealtimeNsAtDelivery", rawDeliveredNs)
+                            .end() + "\n",
+                    )
+                    if ((gyroCount.get() % 200L) == 0L) sensorsW?.flush()
+                    return
+                }
                 val type = when (e.sensor.type) {
                     Sensor.TYPE_ROTATION_VECTOR -> "rotation-vector"
                     Sensor.TYPE_GAME_ROTATION_VECTOR -> "game-rotation-vector"
@@ -5400,6 +5462,25 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                 sm.registerListener(
                     sensorListener, gameRotVec, SensorManager.SENSOR_DELAY_FASTEST, sensorH,
                 )
+            }
+            // ── THE TWO RAW WITNESSES (drive nothing; see their decls) ──
+            gyro = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+            magField = sm.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+            // FASTEST on the gyro so the row can be DOWNSAMPLED to whatever
+            // cadence the JS guard actually ran at. Logging it slower than the
+            // guard would make the replay an approximation, which is the exact
+            // failure this row exists to end.
+            if (gyro != null) {
+                sm.registerListener(sensorListener, gyro, SensorManager.SENSOR_DELAY_FASTEST, sensorH)
+            } else {
+                advise("TYPE_GYROSCOPE absent — the shipped lateral guard cannot be replayed from this pack")
+            }
+            // NORMAL on the field: it describes the ROOM, not the motion, and
+            // FASTEST would add tens of thousands of rows that say the same thing.
+            if (magField != null) {
+                sm.registerListener(sensorListener, magField, SensorManager.SENSOR_DELAY_NORMAL, sensorH)
+            } else {
+                advise("TYPE_MAGNETIC_FIELD absent — this pack cannot say what magnetic environment it was captured in")
             }
         } catch (t: Throwable) {
             advise("IMU registration threw ${t.javaClass.simpleName}: ${t.message}")
@@ -6362,6 +6443,16 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                         .b("gameRotationVectorPresent", gameRotVec != null)
                         .i("rotationVectorSamples", imuCount.get())
                         .i("gameRotationVectorSamples", gameImuCount.get())
+                        // ── THE RAW WITNESSES, AS COUNTS NOT AS FLAGS ───────
+                        // A `present` boolean says a sensor was FOUND; only a
+                        // non-zero count says rows were WRITTEN. Registration
+                        // can succeed and deliver nothing, and a pack that
+                        // merely claims to carry a gyro trace is worse than one
+                        // that admits it does not.
+                        .b("gyroscopePresent", gyro != null)
+                        .i("gyroscopeSamples", gyroCount.get())
+                        .b("magneticFieldPresent", magField != null)
+                        .i("magneticFieldSamples", magFieldCount.get())
                         // ── WHICH SERIES ACTUALLY DROVE THE GEOMETRY ────────
                         // Recorded because it was a HARDCODE until 2026-09-10
                         // and no pack could say which arm produced it. A canvas
