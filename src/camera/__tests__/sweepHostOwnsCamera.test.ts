@@ -403,7 +403,7 @@ describe('sweepOwnershipInput — every term takes the value it is about', () =>
     platformOS: 'android',
     cameraUnmounting: false,
     bagPoseSource: undefined as 'ar' | 'imu' | undefined,
-    arPreference: false,
+    arEffective: false,
     pluginReady: true,
     deviceId: 'back-0',
     captureMode: 'wide-only' as const,
@@ -422,6 +422,33 @@ describe('sweepOwnershipInput — every term takes the value it is about', () =>
     const input = sweepOwnershipInput({ ...SRC, bagPoseSource: 'ar' });
     expect(input.sweepPoseSource).toBe('ar');
     expect(hostOwns(input)).toBe(false);
+  });
+
+  it('⚑ THE AR TERM IS EFFECTIVE, NOT THE RAW TOGGLE: 0.5x + AR on still owns', () => {
+    // THE THIRD DEFECT OF THIS SHAPE, and the one this row exists for.
+    //
+    // `deriveEffectiveCaptureSource` forces 'non-ar' at 0.5x because no
+    // ARKit/ARCore session exposes the ultra-wide — WITHOUT mutating
+    // `arPreference`. So with the AR pill ON at 0.5x the surface merges
+    // against the effective value and runs the imu arm, while this input
+    // used to merge against the raw toggle and answer 'ar'. The predicate
+    // then returned false, the host never took the camera, and the sweep
+    // opened its own Camera2 session instead of the vc arm.
+    //
+    // FAILS BEFORE THE FIX: with `arEffective` reading the raw toggle this
+    // is `sweepPoseSource === 'ar'` and `hostOwns === false`.
+    const input = sweepOwnershipInput({
+      ...SRC,
+      // What `<Camera>` passes at 0.5x with the pill ON:
+      // `effectiveCaptureSource === 'ar'` is FALSE even though the user's
+      // preference is true.
+      arEffective: false,
+      lens: '0.5x',
+      captureMode: 'wide-only',
+      bagPoseSource: undefined,
+    });
+    expect(input.sweepPoseSource).toBe('imu');
+    expect(hostOwns(input)).toBe(true);
   });
 
   it('⚑ THE LENS IS NOT: a bag lens cannot disarm the multicam guard', () => {

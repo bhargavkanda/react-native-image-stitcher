@@ -4222,7 +4222,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       sweepHandoffPending,
     ),
     bagPoseSource: sweep?.poseSource,
-    arPreference,
+    // ⚠ EFFECTIVE, matching `sweepPoseSource` above. Passing the raw
+    // `arPreference` here is what silently downgraded every 0.5x sweep with
+    // the AR pill on from the vc arm to a self-opened Camera2 session.
+    arEffective: effectiveCaptureSource === 'ar',
     pluginReady: sweepDriver.isReady,
     deviceId: capture.device?.id ?? '',
     captureMode: capture.captureMode,
@@ -5500,8 +5503,20 @@ export function sweepOwnershipInput(src: {
   cameraUnmounting: boolean;
   /** `sweep?.poseSource` — the host's override, or undefined. */
   bagPoseSource: 'ar' | 'imu' | undefined;
-  /** `<Camera>`'s own AR toggle. */
-  arPreference: boolean;
+  /**
+   * ⚠ THE **EFFECTIVE** AR VALUE, NOT THE RAW TOGGLE — and the name says so
+   * because the raw one is what the third defect of this shape was made of.
+   *
+   * `deriveEffectiveCaptureSource` returns 'non-ar' at 0.5x (and on a device
+   * with no ARKit/ARCore) WITHOUT mutating `arPreference`. The surface three
+   * lines up already merges against the effective value; this term read the
+   * raw toggle, so with the AR pill ON at 0.5x the two disagreed: the surface
+   * ran the imu arm while the predicate judged 'ar', returned false, and the
+   * host never took the camera. The sweep then opened its own Camera2
+   * session instead of the vc arm — a silent DOWNGRADE, on every 0.5x sweep
+   * with AR on, with `tsc` clean and every predicate case green.
+   */
+  arEffective: boolean;
   pluginReady: boolean;
   deviceId: string;
   captureMode: CaptureDeviceMode;
@@ -5512,7 +5527,7 @@ export function sweepOwnershipInput(src: {
   return {
     isAR: src.isAR,
     // MERGED: this asks which arm the SURFACE will run.
-    sweepPoseSource: sweepMergedPoseSource(src.bagPoseSource, src.arPreference),
+    sweepPoseSource: sweepMergedPoseSource(src.bagPoseSource, src.arEffective),
     platformOS: src.platformOS,
     cameraUnmounting: src.cameraUnmounting,
     pluginReady: src.pluginReady,
