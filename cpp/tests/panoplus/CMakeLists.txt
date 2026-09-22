@@ -223,6 +223,14 @@ add_executable(rnis_pano_replay_tests
 )
 target_link_libraries(rnis_pano_replay_tests rnis_pano_replay GTest::gtest_main)
 
+# The DRIVER two source comments already name (rnis_pano.hpp, rnis_pano_test.cpp)
+# and that did not exist: replayPack with a main() around it, so a pack can be
+# re-run — and A/B'd against its own config — without a device.
+add_executable(rnis_replay_cli
+  ${CMAKE_CURRENT_LIST_DIR}/../../tools/rnis_replay_cli.cpp
+)
+target_link_libraries(rnis_replay_cli rnis_pano_replay)
+
 # ── decoupled-capture attitude seam (S2, 2026-08-30) ───────────────────────
 # A FOURTH separate library + runner.  cpp/rnis_pano_attitude.{hpp,cpp} is the
 # time-alignment policy the decoupled capture path rests on — tau application,
