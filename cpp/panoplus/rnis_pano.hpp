@@ -2968,6 +2968,31 @@ struct SessionStats {
     double  vShiftTotalPx = 0.0;
 
     int canvasW = 0, canvasH = 0;       // ALLOCATED canvas
+    /// THE VERTICAL HEADROOM THE BAND WAS BORN WITH: `canvasMaxHeightPx -
+    /// canvasH` at the axis latch, before any growth.
+    ///
+    /// ⚠ <= 0 MEANS VERTICAL GROWTH WAS DEAD FOR THE WHOLE SWEEP, and until
+    /// 2026-09-22 nothing said so.  `commitLatch` sizes the band from the
+    /// reference footprint and checks it against NEITHER ceiling;
+    /// `ensureCanvasBand` then computes the same `room`, returns false, and
+    /// that refusal is deliberately "not a failure — it is the point at which
+    /// clipping becomes REPORTED".  So a band born at or past the ceiling
+    /// surfaces only as per-frame `clippedFrames`, indistinguishable from a
+    /// band that grew normally and then ran out — two very different facts,
+    /// one of which is a configuration error the operator can act on.
+    ///
+    /// Lower than `128` (the growth step) means it could never grow even once.
+    int canvasBandRoomPx = 0;
+    /// The canvas WIDTH this band allows under `canvasMaxPixels`, in px —
+    /// `canvasMaxPixels / canvasH`, clamped to `canvasMaxWidthPx`.
+    ///
+    /// The memory ceiling binds on the PRODUCT, so a taller band buys its
+    /// height with reachable sweep extent: at the A35's 8e6 a 976-row band
+    /// allows 8196 columns and a 1216-row band only 6578.  `ensureCanvasWidth`
+    /// already enforces it (a refusal becomes CanvasFull, a visible stop), but
+    /// nothing reported the limit BEFORE the sweep ran into it — so "my sweep
+    /// stopped early" and "my band was too tall" could not be connected.
+    int canvasMaxWidthAtBand = 0;
     int paintedW = 0, paintedH = 0;     // painted extent (pre-orientation)
     int outputW = 0, outputH = 0;       // after finalCanvas()'s orientation bake
     /// v14 — the upright bake ACTUALLY APPLIED, echoed so a pack reader never

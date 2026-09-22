@@ -1011,6 +1011,12 @@ std::string Session::finalizeSweep(bool* empty) {
     kvNum(s, "maxTopPx", st.maxClipTopPx);
     kvNum(s, "maxBottomPx", st.maxClipBotPx);
     kvInt(s, "canvasH", st.canvasH);
+    // The two ceilings the band was born against.  `bandRoomPx <= 0` says
+    // vertical growth was dead from the latch — a fact that otherwise reaches
+    // the operator only as clipping, and that reads identically to a band
+    // that grew and then ran out.
+    kvInt(s, "canvasBandRoomPx", st.canvasBandRoomPx);
+    kvInt(s, "canvasMaxWidthAtBand", st.canvasMaxWidthAtBand);
     kvInt(s, "heightGrowths", st.canvasHeightGrowths);
     s += "}";
 

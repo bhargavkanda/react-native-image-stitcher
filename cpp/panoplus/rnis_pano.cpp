@@ -3941,6 +3941,19 @@ struct Engine::Impl {
             return false;
         }
         st.canvasH = canvasH;
+        // ⚠ COMPUTED HERE, at the ONE place `canvasH` is decided, and checked
+        // against both ceilings that `commitLatch` has never checked.  Neither
+        // is fatal and neither changes what is painted: a band with no room
+        // still sweeps, it just cannot follow a drifting frame, and the memory
+        // ceiling still stops the width where it always did.  What changes is
+        // that the pack can now SAY which limit it was under, instead of the
+        // operator inferring it from a clipped panorama.
+        st.canvasBandRoomPx = cfg.canvasMaxHeightPx - canvasH;
+        st.canvasMaxWidthAtBand =
+            (canvasH > 0)
+                ? (int)std::min((double)cfg.canvasMaxWidthPx,
+                                std::floor(cfg.canvasMaxPixels / (double)canvasH))
+                : 0;
 
         // Bootstrap paint: the reference frame's FULL footprint, with the
         // frontier set to its CENTRE so the sweep resumes immediately.

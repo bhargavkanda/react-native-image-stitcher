@@ -12201,3 +12201,58 @@ TEST(PanoCoverage, IsEmptyWhenNothingWasPainted) {
     cv::Mat cov;
     EXPECT_FALSE(eng.finalCoverage(cov));
 }
+
+// ── THE CANVAS CEILINGS THE LATCH NEVER CHECKED ─────────────────────────────
+//
+// `commitLatch` sizes the band from the reference footprint —
+// `ceil(footprintV) + 2*canvasPadPx` — and compares it to NEITHER
+// `canvasMaxHeightPx` NOR `canvasMaxPixels`.  When the result is already at or
+// past the height ceiling, `ensureCanvasBand` computes the same `room`,
+// returns false, and that refusal is documented as "not a failure — it is the
+// point at which clipping becomes REPORTED".  True per frame, and it means a
+// band that was DEAD ON ARRIVAL reaches the operator as ordinary clipping,
+// identical to a band that grew normally and then ran out.  One of those is a
+// configuration error he can act on; the other is the hand drifting.
+//
+// Both facts are now on SessionStats.  Neither changes a pixel.
+TEST(PanoCanvasCeiling, ABandBornPastTheHeightCeilingSaysSoInsteadOfOnlyClipping) {
+    const cv::Mat shelf = makeShelf(7000, 4200);
+    auto cfg = testConfig();
+    // Below the reference footprint (kFrameH * canvasScale + 2*pad), so the
+    // band is born with no room at all — the state the engine could not name.
+    cfg.canvasMaxHeightPx = 320;
+    const auto steps = walkWithTransversePitch(60, 8.0, [](int) { return 0.0; });
+    const SweepResult r = runGestureSweep(shelf, steps, cfg);
+
+    // EXACT, not `<= 0`: a field that is simply never written is also <= 0,
+    // and an assertion a zeroed field satisfies proves nothing about the
+    // computation. (Caught by mutating the assignment to a literal 0.)
+    EXPECT_EQ(r.stats.canvasBandRoomPx, cfg.canvasMaxHeightPx - r.stats.canvasH)
+        << "canvasH " << r.stats.canvasH << " vs ceiling " << cfg.canvasMaxHeightPx;
+    EXPECT_LT(r.stats.canvasBandRoomPx, 0) << "the band should be born past the ceiling";
+    // …and the height NEVER grew, which is the consequence that used to be
+    // visible only as clipping.
+    EXPECT_EQ(r.stats.canvasHeightGrowths, 0);
+}
+
+TEST(PanoCanvasCeiling, AHealthyBandReportsRealHeadroomAndAWidthCeiling) {
+    const cv::Mat shelf = makeShelf(7000, 4200);
+    const auto cfg = testConfig();
+    const auto steps = walkWithTransversePitch(60, 8.0, [](int) { return 0.0; });
+    const SweepResult r = runGestureSweep(shelf, steps, cfg);
+
+    // Room for at least one 128 px growth step: the band can follow a drift.
+    EXPECT_GT(r.stats.canvasBandRoomPx, 128)
+        << "canvasH " << r.stats.canvasH;
+    EXPECT_EQ(r.stats.canvasBandRoomPx, cfg.canvasMaxHeightPx - r.stats.canvasH);
+
+    // THE MEMORY CEILING BINDS ON THE PRODUCT, so the band's height is bought
+    // with reachable sweep extent.  This is the number that connects "my sweep
+    // stopped early" to "my band was tall", which nothing reported before.
+    ASSERT_GT(r.stats.canvasH, 0);
+    const int expect = (int)std::min(
+        (double)cfg.canvasMaxWidthPx,
+        std::floor(cfg.canvasMaxPixels / (double)r.stats.canvasH));
+    EXPECT_EQ(r.stats.canvasMaxWidthAtBand, expect);
+    EXPECT_GT(r.stats.canvasMaxWidthAtBand, 0);
+}
