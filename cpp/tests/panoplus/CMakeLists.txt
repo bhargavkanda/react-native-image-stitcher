@@ -231,6 +231,17 @@ add_executable(rnis_replay_cli
 )
 target_link_libraries(rnis_replay_cli rnis_pano_replay)
 
+# ── the drift detector, driven over a pack's LEDGER alone ──────────────────
+# `rnis_replay_cli` needs `frames/`; the drift detector needs four numbers the
+# ledger already carries. This target exists so the SHIPPED `DriftDetector`
+# can be calibrated against every pack ever captured, including the ones whose
+# frames were never pulled off the device — and so that calibration is never
+# done against a script's reimplementation of it.
+add_executable(rnis_drift_check
+  ${CMAKE_CURRENT_LIST_DIR}/../../tools/rnis_drift_check.cpp
+)
+target_link_libraries(rnis_drift_check rnis_pano)
+
 # ── decoupled-capture attitude seam (S2, 2026-08-30) ───────────────────────
 # A FOURTH separate library + runner.  cpp/rnis_pano_attitude.{hpp,cpp} is the
 # time-alignment policy the decoupled capture path rests on — tau application,

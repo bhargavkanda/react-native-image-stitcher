@@ -2302,6 +2302,65 @@ struct Config {
     // is REPORTED (verticalEnvelope()), not hidden.
     bool cropVertical = false;
 
+    // ── THE LATERAL-DRIFT DETECTOR (v15) ────────────────────────────────────
+    //
+    // It REPORTS. It never aborts. The engine measures; the host decides
+    // whether a warning or a stop is warranted, because only the host knows
+    // what a stop costs the operator standing in front of the shelf.
+    //
+    // WHY THREE ARMS. Measured over 73 A35 packs against operator labels,
+    // there are two unrelated failure modes and no single statistic separates
+    // either from a good sweep:
+    //   * ROTATION drift — the band leans; cross-axis excursion 15-35 deg.
+    //   * TRANSLATION drift — the operator walks sideways; posV wanders
+    //     22-29% of the band with cross rotation of only 5-10 deg.
+    // A pack with cross p95 = 19.3 deg is good; one with 4.5 deg must stop.
+    //
+    // WHY THE TERMS ARE RATIOS, NOT MAGNITUDES. `e/pan` is the keystone
+    // SLOPE: 15 deg of cross over 60 deg of pan is a gentle shear, the same
+    // 15 deg over 11 deg of pan is a ruined canvas. `e/tv` (net over total
+    // variation) is what shake cannot fake — shake adds path length and no
+    // net, so the ratio collapses; a lean keeps it near 1.
+    //
+    // ⚠ THE FLOORS ARE LOAD-BEARING, NOT COSMETIC. Without `panMin`/`nMin`
+    // the extremum anchor is a max-statistic over noise: it hunts the most
+    // extreme sample, and the short window from that sample to now is LOCALLY
+    // monotone, so the `e/tv` term is trivially satisfied. Measured with
+    // injected tremor at cross sigma = 2.0 deg: false fires on 71% of
+    // captures without the floors, 2% with them.
+    //
+    // ⚠⚠ AND THE HONEST LIMIT, recorded so nobody re-derives it as a
+    // surprise: on ANDROID `crossRectifyDeg` is ~90% MAGNETOMETER heading
+    // correction, not hand motion (decomposing the two logged attitude
+    // streams gives a rotation about the world vertical with |axis| =
+    // [0,0,1.0000] on every pack). Two deliberately drifted sweeps rotated
+    // 0.3 and 2.4 deg physically while the engine rectified 20.8 and 29.3.
+    // So arms 1-2 detect an OUTPUT WARP, which is real and worth warning
+    // about, but they are not a hand-motion sensor and their thresholds are
+    // calibrated in ONE magnetic environment. Arm 3 reads canvas placement
+    // from image registration and carries no such caveat — it is the only one
+    // fit to justify a STOP on Android today. On iOS both arms are mag-free
+    // (`.xArbitraryZVertical`; ARKit's default `.gravity`), so there arms 1-2
+    // do measure the hand.
+    bool   driftGuard        = true;   // compute + report; never aborts
+    double driftLeanDeg      = 5.0;    // absolute excursion floor, arm 1
+    double driftLeanRatio    = 0.55;   // e/pan
+    double driftLeanMono     = 0.65;   // e/tv
+    double driftLeanPanMinDeg = 5.0;   // eligibility: pan travelled
+    int    driftLeanMinRows  = 10;     // eligibility: rows since the extremum
+    double driftSteepDeg     = 4.0;    // arm 2 — a sharper turn over less pan
+    double driftSteepRatio   = 0.90;
+    double driftSteepMono    = 0.75;
+    double driftSteepPanMinDeg = 3.0;
+    int    driftSteepMinRows = 12;
+    double driftSlideDeadbandPx = 0.8; // arm 3 — below this a step is noise
+    double driftSlideBandFrac   = 0.06;// |accV| against the band height
+    // The WARN tier runs the same arms at a lower bar, so the operator can
+    // correct before anything is thrown away. Measured on the labelled packs,
+    // it lands 8-13 canvas-points ahead of the stop on the four captures
+    // where correction was still possible.
+    double driftWarnScale    = 0.62;   // warn bars = stop bars x this
+
     // ── THE UPRIGHT BAKE (v14) ──────────────────────────────────────────────
     //
     // THE DEFECT THIS CLOSES, stated as the operator saw it: "the output image
@@ -3650,6 +3709,169 @@ struct SessionStats {
     double      seedTrajRepaintPx = 0.0; // columns of the seed's rear half re-placed
 
     std::string abortReason;            // empty ⇒ clean
+
+    // ── LATERAL-DRIFT DETECTOR OUTCOME (v15) ────────────────────────────────
+    // 0 = clean, 1 = warn, 2 = stop-worthy. The engine NEVER acts on this; it
+    // is the host's to read. `driftArm` names which arm tripped so a pack can
+    // be argued about without re-deriving it, and `driftFiredAtRow` is the
+    // painted row it first tripped on — the number that answers "would this
+    // have fired early enough to matter", which is the whole operator
+    // complaint ("stopped much later after the drift already created a warped
+    // output and a bad canvas").
+    int         driftLevel = 0;
+    std::string driftArm;               // "lean" | "steep" | "slide" | ""
+    int         driftFiredAtRow = -1;   // painted-row index of the first STOP
+    int         driftWarnedAtRow = -1;  // …and of the first WARN
+    double      driftPeakLeanDeg = 0.0; // largest ELIGIBLE excursion seen
+    double      driftPeakSlideFrac = 0.0; // largest |accV| / band seen
+};
+
+// ── The lateral-drift detector ──────────────────────────────────────────────
+//
+// A STANDALONE STRUCT, not a lump of state inside the engine, and the reason
+// is testability: the thresholds here are the whole product, and they have to
+// be drivable over a REAL pack's ledger without a camera, a canvas or a
+// replay. `cpp/tools/rnis_drift_check.cpp` runs exactly this code over
+// `ledger.jsonl`, so what is validated is what ships rather than a
+// reimplementation of it that can silently disagree.
+//
+// It is O(1): every term is measured between the current row and a running
+// EXTREMUM of cross, so the only state worth keeping is the cross / psi /
+// total-variation values AT that extremum. See `Config`'s drift block for why
+// each term exists and for the magnetometer caveat that bounds what arms 1-2
+// can honestly claim.
+struct DriftDetector {
+    struct Anchor {
+        double cross = 0.0, psi = 0.0, tv = 0.0;
+        int    row = 0;
+        bool   set = false;
+    };
+    Anchor min_, max_;
+    double tv = 0.0, prevCross = 0.0;
+    bool   prevSet = false;
+    int    row = 0;
+    double accV = 0.0, accU = 0.0, prevPosV = 0.0, prevPosU = 0.0;
+    bool   posSet = false;
+
+    int         level = 0;
+    std::string arm;
+    int         firedAtRow = -1;
+    int         warnedAtRow = -1;
+    double      peakLeanDeg = 0.0;
+    double      peakSlideFrac = 0.0;
+
+    /// A relatch discards the canvas, so an excursion measured against the OLD
+    /// reference describes geometry nobody can see. The VERDICT deliberately
+    /// survives: a drift that already happened still happened.
+    void rebase() {
+        min_ = Anchor{}; max_ = Anchor{};
+        tv = 0.0; prevSet = false; row = 0;
+        accV = 0.0; accU = 0.0; posSet = false;
+    }
+
+    /// One painted row. Reports only — never aborts, rejects or paints.
+    /// ⚠ `vShiftPx` IS NOT OPTIONAL, and it is a parameter rather than a
+    /// caller's subtraction so it cannot be forgotten. `posV` is the strip's
+    /// canvas row INCLUDING any whole-band shift the engine applied when the
+    /// canvas grew — measured across the corpus, 7 packs carry a single
+    /// 0 -> 128 px step of it. That step is the canvas moving under the
+    /// strip, not the operator moving sideways, and reading raw `posV` made
+    /// arm 3 fire on SIX otherwise-clean packs: exactly the seven carrying the
+    /// step, less the one already labelled bad.
+    void observe(const Config& cfg, double crossDeg, double psiDeg,
+                 double posU, double posV, double vShiftPx, int canvasH) {
+        if (!cfg.driftGuard) return;
+        posV -= vShiftPx;
+
+        if (prevSet) tv += std::fabs(crossDeg - prevCross);
+        prevCross = crossDeg;
+        prevSet = true;
+
+        if (!min_.set || crossDeg < min_.cross) min_ = Anchor{crossDeg, psiDeg, tv, row, true};
+        if (!max_.set || crossDeg > max_.cross) max_ = Anchor{crossDeg, psiDeg, tv, row, true};
+
+        // An excursion that fails ANY term is not a smaller drift, it is a
+        // different shape — so it must not set the peak either.
+        auto tryArm = [&](const Anchor& a, double A, double R, double M,
+                          double panMin, int nMin) -> bool {
+            if (!a.set) return false;
+            if (row - a.row < nMin) return false;
+            const double e   = std::fabs(crossDeg - a.cross);
+            const double pan = std::fabs(psiDeg - a.psi);
+            if (pan < panMin) return false;
+            const double dtv = std::fabs(tv - a.tv);
+            if (dtv <= 0.0) return false;
+            if (e / pan <= R) return false;
+            if (e / dtv <= M) return false;
+            peakLeanDeg = std::max(peakLeanDeg, e);
+            return e > A;
+        };
+        auto bothAnchors = [&](double A, double R, double M, double panMin, int nMin) {
+            return tryArm(min_, A, R, M, panMin, nMin)
+                || tryArm(max_, A, R, M, panMin, nMin);
+        };
+
+        const double ws = cfg.driftWarnScale;
+        const bool stopLean  = bothAnchors(cfg.driftLeanDeg, cfg.driftLeanRatio,
+                                           cfg.driftLeanMono, cfg.driftLeanPanMinDeg,
+                                           cfg.driftLeanMinRows);
+        const bool stopSteep = bothAnchors(cfg.driftSteepDeg, cfg.driftSteepRatio,
+                                           cfg.driftSteepMono, cfg.driftSteepPanMinDeg,
+                                           cfg.driftSteepMinRows);
+        // ⚠ THE WARN TIER LOWERS THE MAGNITUDE BAR ONLY — never the shape.
+        // Scaling the ratio, the monotonicity and the floors down with it was
+        // measured to WARN on 3 of the 4 vouched-good packs, because those
+        // terms are what reject shake: at 0.62 the mono bar falls to 0.40,
+        // which an oscillation clears trivially. A warning that fires on a
+        // good capture is how operators learn to ignore warnings, so the warn
+        // tier is the SAME shape at a lower amplitude.
+        const bool warnLean  = bothAnchors(cfg.driftLeanDeg * ws, cfg.driftLeanRatio,
+                                           cfg.driftLeanMono, cfg.driftLeanPanMinDeg,
+                                           cfg.driftLeanMinRows);
+
+        // Arm 3 reads IMAGE REGISTRATION, not pose, so it carries none of the
+        // magnetometer caveat that bounds arms 1-2.
+        bool stopSlide = false, warnSlide = false;
+        if (posSet) {
+            const double dV = posV - prevPosV;
+            const double dU = posU - prevPosU;
+            if (std::fabs(dV) > cfg.driftSlideDeadbandPx) {
+                // A REAL REVERSAL RESTARTS THE RUN: wander-correct-wander is a
+                // corrected operator, not a drifting one.
+                if (accV != 0.0 && (dV > 0.0) != (accV > 0.0)) {
+                    accV = dV;
+                    accU = std::max(dU, 0.0);
+                } else {
+                    accV += dV;
+                    accU += std::max(dU, 0.0);
+                }
+            }
+            if (canvasH > 0) {
+                const double frac = std::fabs(accV) / static_cast<double>(canvasH);
+                peakSlideFrac = std::max(peakSlideFrac, frac);
+                // Sideways travel must exceed along-track travel — a normal pan
+                // moves far in U and little in V.
+                const bool sideways = std::fabs(accV) > accU;
+                stopSlide = frac > cfg.driftSlideBandFrac && sideways;
+                warnSlide = frac > cfg.driftSlideBandFrac * ws && sideways;
+            }
+        }
+        prevPosV = posV;
+        prevPosU = posU;
+        posSet = true;
+
+        if ((warnLean || warnSlide) && level < 1) {
+            level = 1;
+            warnedAtRow = row;
+            arm = warnSlide ? "slide" : "lean";
+        }
+        if ((stopLean || stopSteep || stopSlide) && level < 2) {
+            level = 2;
+            firedAtRow = row;
+            arm = stopSlide ? "slide" : (stopSteep ? "steep" : "lean");
+        }
+        ++row;
+    }
 };
 
 // ── The engine ──────────────────────────────────────────────────────────────

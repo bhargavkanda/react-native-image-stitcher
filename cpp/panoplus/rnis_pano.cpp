@@ -956,6 +956,12 @@ struct Engine::Impl {
     int64_t seamStripsCommitted = 0;   // denominator for seamCoverageFrac
     double maxCrossRectifyDeg = 0.0;
     double minPsiDeg = 0.0, maxPsiDeg = 0.0;
+
+    // ── LATERAL-DRIFT DETECTOR (v15) ────────────────────────────────────────
+    // The logic lives in `DriftDetector` (rnis_pano.hpp) so it can be driven
+    // over a real pack's ledger by `cpp/tools/rnis_drift_check.cpp` without a
+    // camera or a replay — what gets validated is what ships.
+    DriftDetector drift;
     /// THE PROJECTION SWITCH.  ψ is gated on the axis latch, so the frame
     /// before the latch is placed on the tangent (f·tan ψ) and the one after
     /// on the arc (f·ψ).  Bounded (pre-latch ψ is still inside the excursion
@@ -4211,6 +4217,15 @@ struct Engine::Impl {
         // the INPUT metadata's trustworthiness, not the delivered geometry.)
         corrOriginClamped = 0;
         minPsiDeg = 0.0; maxPsiDeg = 0.0;
+        // ⚠ THE DRIFT GUARD RE-BASES TOO. A relatch discards the canvas, so
+        // an excursion measured against the OLD reference describes geometry
+        // nobody can see — and carrying it across would make the first row
+        // after a relatch look like a 20 deg lean. Two packs in the labelled
+        // set relatch mid-capture, one of them a vouched-GOOD sweep, so this
+        // is the difference between a clean run and a false stop.
+        // The VERDICT is deliberately NOT cleared: a drift that already
+        // happened still happened, and the pack should say so.
+        drift.rebase();
         projectionSwitched = false;
         projectionSwitchSeq = -1;
         projectionSwitchStepPx = 0.0;
@@ -4860,6 +4875,8 @@ FrameOutcome Engine::ingest(const FrameInput& in) {
         S.maxCrossRectifyDeg = std::max(S.maxCrossRectifyDeg, crossDeg);
         S.minPsiDeg = std::min(S.minPsiDeg, row.psiDeg);
         S.maxPsiDeg = std::max(S.maxPsiDeg, row.psiDeg);
+        S.drift.observe(S.cfg, crossDeg, row.psiDeg, row.posU, row.posV,
+                        row.vShiftPx, S.canvasH);
 
         // THE EXCURSION GATE now bounds what the HOMOGRAPHY carries (the
         // cross part) and the sweep is bounded separately by sweepMaxDeg.
@@ -6963,6 +6980,15 @@ SessionStats Engine::stats() const {
     s.maxAreaScalePainted = S.maxAreaScalePainted;
     s.maxCrossRectifyDeg = S.maxCrossRectifyDeg;
     s.sweepDeg = S.maxPsiDeg - S.minPsiDeg;
+    // THE DRIFT VERDICT RIDES THE PACK, so a capture can be argued about from
+    // its own record instead of by re-deriving the analysis. It is a report:
+    // nothing in the engine reads these back.
+    s.driftLevel         = S.drift.level;
+    s.driftArm           = S.drift.arm;
+    s.driftFiredAtRow    = S.drift.firedAtRow;
+    s.driftWarnedAtRow   = S.drift.warnedAtRow;
+    s.driftPeakLeanDeg   = S.drift.peakLeanDeg;
+    s.driftPeakSlideFrac = S.drift.peakSlideFrac;
     // NO SORT, NO COPY, NO CACHE: the sample vectors are sorted at insert.
     // `maxOf` reads back() — which is the maximum because the vector really is
     // sorted, not because percentileOf happened to sort it on the line above

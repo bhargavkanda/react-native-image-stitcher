@@ -12256,3 +12256,150 @@ TEST(PanoCanvasCeiling, AHealthyBandReportsRealHeadroomAndAWidthCeiling) {
     EXPECT_EQ(r.stats.canvasMaxWidthAtBand, expect);
     EXPECT_GT(r.stats.canvasMaxWidthAtBand, 0);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  LATERAL-DRIFT DETECTOR
+//
+//  These pin the SHAPES, not the thresholds. The thresholds were calibrated
+//  against 85 real A35 packs with operator labels (7/7 STOP caught, 0 fires
+//  across 77 non-STOP), and that calibration is reproducible on any pack with
+//  `rnis_drift_check`. What a unit test can pin — and what reasoning at the
+//  keyboard gets wrong — is that a drift and a shake of the SAME AMPLITUDE
+//  are separated by construction, that the eligibility floors bite, and that
+//  the one correction the corpus forced (vShiftPx) cannot be dropped again.
+// ════════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+/// Feed a synthetic sweep through the SHIPPED detector.
+/// `posU` advances 10 px a row, which is what makes the slide arm's
+/// "sideways beats along-track" term a real test rather than a formality.
+rnis::pano::DriftDetector runDrift(
+    int rows, double panPerRow, const std::function<double(int)>& crossAt,
+    const std::function<double(int)>& posVAt = [](int) { return 0.0; },
+    const std::function<double(int)>& vShiftAt = [](int) { return 0.0; },
+    int canvasH = 1000) {
+    rnis::pano::Config cfg;
+    rnis::pano::DriftDetector d;
+    for (int i = 0; i < rows; ++i) {
+        d.observe(cfg, crossAt(i), i * panPerRow, /*posU=*/i * 10.0, posVAt(i),
+                  vShiftAt(i), canvasH);
+    }
+    return d;
+}
+
+}  // namespace
+
+TEST(PanoDrift, AMonotoneLeanFires) {
+    // 0.8 deg of cross per 1.0 deg of pan — a lean that eats the band.
+    const auto d = runDrift(40, 1.0, [](int i) { return 0.8 * i; });
+    EXPECT_EQ(d.level, 2);
+    EXPECT_EQ(d.arm, "lean");
+    EXPECT_GE(d.firedAtRow, 0);
+}
+
+TEST(PanoDrift, AShakeOfTheSameAmplitudeDoesNotFire) {
+    // ⚠ THE DISCRIMINATOR, and the whole reason the monotonicity term exists.
+    // Peak-to-peak is 20 deg here — LARGER than the lean above — but the net
+    // excursion is ~0 because it oscillates, so e/tv collapses. A detector
+    // built on peak-to-peak cannot tell these apart at all, which matters
+    // because `crossRectifyDeg` is UNSIGNED: max-minus-min of a magnitude
+    // conflates a 10 deg one-way lean with a +/-5 deg wobble.
+    const auto d = runDrift(40, 1.0, [](int i) {
+        return 10.0 * std::sin(static_cast<double>(i));
+    });
+    EXPECT_EQ(d.level, 0) << "an oscillation is not a drift";
+}
+
+TEST(PanoDrift, AShortPanCannotTripTheRatioAlone) {
+    // Without the pan floor this is the classic false positive: a tiny pan
+    // makes e/pan explode. Taken from a real clean 10.2 deg sweep whose raw
+    // cross/pan is 0.301 — above the 0.27 bar an earlier ratio-only rule used.
+    const auto d = runDrift(30, 0.05, [](int i) { return 0.10 * i; });
+    EXPECT_EQ(d.level, 0) << "the pan floor must reject a ratio spike over no pan";
+}
+
+TEST(PanoDrift, ASidewaysSlideFiresOnTheSlideArm) {
+    // posV walks 12 px a row against posU's 10 — sideways travel beating
+    // along-track travel — with NO cross rotation at all. This is the failure
+    // mode arms 1-2 are structurally blind to: in the corpus its two packs
+    // rotate 5-10 deg while wandering 22-29% of the band.
+    const auto d = runDrift(30, 0.2, [](int) { return 0.0; },
+                            [](int i) { return 12.0 * i; });
+    EXPECT_EQ(d.level, 2);
+    EXPECT_EQ(d.arm, "slide");
+}
+
+TEST(PanoDrift, ASweepThatMovesMostlyAlongTrackIsNotASlide) {
+    // The mirror of the above: posV drifts, but more slowly than posU
+    // advances. That is a slightly sloped pan, not an operator walking
+    // sideways, and `|accV| > accU` is what separates them.
+    const auto d = runDrift(30, 0.2, [](int) { return 0.0; },
+                            [](int i) { return 6.0 * i; });
+    EXPECT_LT(d.level, 2) << "along-track travel dominating is a pan, not a slide";
+}
+
+TEST(PanoDrift, ABoundedWanderNeverAccumulatesIntoASlide) {
+    // ⚠ WHAT THIS ACTUALLY GUARANTEES, stated honestly. The first draft of
+    // this test asserted that "wander, correct, wander" never fires — and it
+    // failed, correctly: each of its excursions was 180 px against a 60 px
+    // bar, so the FIRST wander is a slide on its own and the correction never
+    // gets a say. The rule does not forgive a large excursion because it was
+    // later undone, and it should not.
+    //
+    // The real invariant is that bounded hand movement never ACCUMULATES.
+    // Here posV oscillates +/-48 px against a 60 px bar, forever, while still
+    // out-pacing posU so the sideways term stays armed — the signed
+    // accumulator and the reversal restart together keep each run at its own
+    // amplitude instead of summing 12 excursions into 576 px of "drift".
+    const auto d = runDrift(96, 0.2, [](int) { return 0.0; }, [](int i) {
+        const int p = i % 8;
+        return (p < 4) ? 12.0 * p : 12.0 * (8 - p);
+    });
+    EXPECT_LT(d.level, 2) << "bounded oscillation must not sum into a slide";
+    EXPECT_LT(d.peakSlideFrac, 0.06);
+}
+
+TEST(PanoDrift, AWholeBandVShiftIsNotOperatorMotion) {
+    // ⚠ REGRESSION PIN, and it cost six false positives to find.
+    // `posV` is the strip's canvas row INCLUDING any whole-band shift applied
+    // when the canvas grew, and 7 packs in the corpus carry a single
+    // 0 -> 128 px step of it. Reading `posV` raw fired arm 3 on every one of
+    // them that was not already labelled bad. The canvas moved under the
+    // strip; the operator did not move. So the step appears in BOTH signals,
+    // exactly as the ledger records it, and must cancel.
+    const double kStep = 128.0;
+    const auto step = [&](int i) { return (i >= 20) ? kStep : 0.0; };
+    const auto d = runDrift(60, 0.2, [](int) { return 0.0; }, step, step);
+    EXPECT_EQ(d.level, 0) << "a band shift is not a slide";
+}
+
+TEST(PanoDrift, RebaseClearsTheRunButKeepsTheVerdict) {
+    // A relatch discards the canvas, so accumulated excursion describes
+    // geometry nobody can see and must be dropped — two packs in the labelled
+    // set relatch mid-capture, one of them vouched GOOD. But a drift that
+    // already happened still happened, so the VERDICT survives.
+    rnis::pano::Config cfg;
+    rnis::pano::DriftDetector d;
+    for (int i = 0; i < 40; ++i) {
+        d.observe(cfg, 0.8 * i, i * 1.0, i * 10.0, 0.0, 0.0, 1000);
+    }
+    ASSERT_EQ(d.level, 2);
+    const int firedAt = d.firedAtRow;
+    d.rebase();
+    EXPECT_EQ(d.level, 2) << "the verdict is history, not state";
+    EXPECT_EQ(d.firedAtRow, firedAt);
+    EXPECT_EQ(d.row, 0) << "but the run itself restarts";
+    EXPECT_FALSE(d.min_.set);
+}
+
+TEST(PanoDrift, TheGuardCanBeTurnedOffAndThenObservesNothing) {
+    rnis::pano::Config cfg;
+    cfg.driftGuard = false;
+    rnis::pano::DriftDetector d;
+    for (int i = 0; i < 40; ++i) {
+        d.observe(cfg, 0.8 * i, i * 1.0, i * 10.0, 0.0, 0.0, 1000);
+    }
+    EXPECT_EQ(d.level, 0);
+    EXPECT_EQ(d.row, 0);
+}

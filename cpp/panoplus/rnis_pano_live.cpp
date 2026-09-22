@@ -725,6 +725,18 @@ void Session::appendStatus(std::string& s, const FrameOutcome* row) const {
     kvBool(s, "integrityFailed", st.integrityFailed);
     kvInt(s, "projection", st.projection);
     kvNum(s, "maxCrossRectifyDeg", st.maxCrossRectifyDeg);
+    // ── THE LATERAL-DRIFT VERDICT, LIVE ──────────────────────────────────
+    // 0 clean / 1 warn / 2 stop-worthy. The engine does NOT act on it: only
+    // the host knows what a stop costs an operator standing at the shelf, and
+    // on Android arms 1-2 read a magnetometer-contaminated channel (see the
+    // Config block), so what is defensible there is a WARNING plus the
+    // mag-free slide arm. Shipping this as a silent engine abort would make
+    // that judgement in the wrong place.
+    kvInt(s, "driftLevel", st.driftLevel);
+    kvStr(s, "driftArm", st.driftArm);
+    kvInt(s, "driftFiredAtRow", st.driftFiredAtRow);
+    kvNum(s, "driftPeakLeanDeg", st.driftPeakLeanDeg);
+    kvNum(s, "driftPeakSlideFrac", st.driftPeakSlideFrac);
     // 1 = a pivot, 0 = a walk.  Until the axis latches this is the only signal
     // that says WHY nothing is painting.  ⚠ On this arm `t` is identically
     // zero, so it is 1.0 by construction — see the note in ingest().
