@@ -142,6 +142,30 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
     private var sessionDir: String = ""
     private var config: [String: Any] = [:]
 
+    /// ── THE RAW MOTION SERIES, WRITTEN TO `sensors.jsonl` ────────────────
+    ///
+    /// Android has written `sensors.jsonl` on every sweep for months; this arm
+    /// wrote NOTHING, so an iOS pack could not answer a question about its own
+    /// motion. The specific casualty: the shipped lateral guard
+    /// (`usePanMotion.ts`) is an EMA of `|gyro.x|` and it runs on iOS too, but
+    /// no iOS pack carried a gyro trace — so what the guard actually saw on a
+    /// capture was not measurable, only reconstructed. On Android four
+    /// independent reconstructions of ONE sweep spanned 0.046 to 0.533.
+    ///
+    /// `dm.rotationRate` is the quantity that guard consumes and it was
+    /// already in hand in the callback below, discarded every sample at 200 Hz.
+    ///
+    /// ⚠ NOT the magnetometer question. This arm is `.xArbitraryZVertical`
+    /// and ARKit's default is `.gravity`, so BOTH iOS arms are mag-free and
+    /// the compass contamination that makes Android's `crossRectifyDeg` ~90%
+    /// heading correction cannot occur here. There is no second stream to
+    /// difference because there is no compass term to remove — which is also
+    /// why `crossRectifyDeg` is a TRUSTWORTHY hand-motion signal on iOS and
+    /// not on Android.
+    private var sensorsFp: UnsafeMutablePointer<FILE>?
+    private var sensorRows: Int64 = 0
+    private var sensorWriteFailed = false
+
     /// Set once at configure; used for the fallback intrinsics and reported.
     private var fovFx: Double = 0
     private var frameW: Int = 0
@@ -1157,6 +1181,16 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         // was what produced a live preview that could never paint.
         guard motionManager.isDeviceMotionAvailable else { return }
         motionManager.deviceMotionUpdateInterval = 1.0 / Self.requestedMotionHz
+        // A FAILURE TO OPEN IS NEVER A FAILED SWEEP. The row is diagnostic;
+        // an operator in an aisle must not lose a capture because a log file
+        // could not be created. The refusal is recorded and the sweep runs.
+        if !sessionDir.isEmpty {
+            let path = (sessionDir as NSString).appendingPathComponent("sensors.jsonl")
+            sensorsFp = fopen(path, "w")
+            if sensorsFp == nil { sensorWriteFailed = true }
+        } else {
+            sensorWriteFailed = true
+        }
         let q = OperationQueue()
         q.maxConcurrentOperationCount = 1
         q.qualityOfService = .userInitiated
@@ -1181,6 +1215,39 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
             let q = dm.attitude.quaternion
             RNISPanoAttitude.pushSample(atTimeS: dm.timestamp,
                                         qx: q.x, qy: q.y, qz: q.z, qw: q.w)
+
+            // ── THE RAW ROW ──────────────────────────────────────────────
+            // FORMATTED BEFORE THE LOCK, for the same reason the sidecar does
+            // it: `String(format:)` allocates, and holding the motion lock
+            // across an allocation puts microseconds between this queue and a
+            // lock it wants 200 times a second. The hold below is one buffered
+            // `fputs`, i.e. a memcpy.
+            //
+            // `rotationRate` is the whole point — it is what `usePanMotion`
+            // consumes and what no iOS pack has ever carried. `userAccel` in
+            // m/s² to match `accelMps2` above, so the lurch cage can be
+            // re-run offline against the same quantity it uses live, rather
+            // than against CoreMotion's G-units.
+            let r = dm.rotationRate
+            let line = String(
+                format: "{\"type\":\"device-motion\",\"tsS\":%.9f,"
+                      + "\"q\":[%.9f,%.9f,%.9f,%.9f],"
+                      + "\"rotationRate\":[%.9f,%.9f,%.9f],"
+                      + "\"userAccelMps2\":[%.6f,%.6f,%.6f],"
+                      + "\"accelMagMps2\":%.6f}\n",
+                dm.timestamp, q.x, q.y, q.z, q.w,
+                r.x, r.y, r.z,
+                a.x * 9.80665, a.y * 9.80665, a.z * 9.80665, magMps2)
+            self.motionLock.lock()
+            if let f = self.sensorsFp {
+                fputs(line, f)
+                self.sensorRows += 1
+                // Flush on a cadence, not per row: a crash mid-sweep should
+                // still leave a readable file, but fsync at 200 Hz would be
+                // the most expensive thing on this queue.
+                if self.sensorRows % 200 == 0 { fflush(f) }
+            }
+            self.motionLock.unlock()
         }
     }
 
@@ -1369,6 +1436,15 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         // onto that queue is the cheapest correct fence.
         videoQueue.sync { }
 
+        // Closed AFTER `stopDeviceMotionUpdates()` and after the videoQueue
+        // fence, so no callback can still be holding the pointer. Under the
+        // lock because the motion queue writes through it.
+        motionLock.lock()
+        if let f = sensorsFp { fflush(f); fclose(f); sensorsFp = nil }
+        let sensorRowsSnapshot = sensorRows
+        let sensorWriteFailedSnapshot = sensorWriteFailed
+        motionLock.unlock()
+
         motionLock.lock()
         let motionSamplesSnapshot = motionSamples
         let motionSpan = lastMotionS - firstMotionS
@@ -1402,6 +1478,22 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         report["framesObservedUnlocked"] = framesObservedUnlocked
         report["ptsGapsOverTwoFrames"] = ptsGapsOverTwoFrames
         report["motionSamples"] = motionSamplesSnapshot
+        // ── THE SENSOR LOG, AS A COUNT NOT A CLAIM ─────────────────────
+        // A `present: true` says a file was opened; only a non-zero count says
+        // rows were WRITTEN. A pack that merely asserts it carries a gyro
+        // trace is worse than one that admits it does not, because the first
+        // gets replayed and the second gets recaptured.
+        report["sensorsJsonl"] = [
+            "rows": sensorRowsSnapshot,
+            "openFailed": sensorWriteFailedSnapshot,
+            "fields": "tsS, q[xyzw], rotationRate[xyz] rad/s, "
+                + "userAccelMps2[xyz], accelMagMps2",
+            "referenceFrame": "xArbitraryZVertical",
+            "note": "CoreMotion device-motion at the requested 200 Hz. "
+                + "rotationRate is the quantity usePanMotion's lateral guard "
+                + "consumes; before this it was discarded every sample and no "
+                + "iOS pack could say what that guard saw.",
+        ]
         // ── THE SESSION FAULT LEDGER ───────────────────────────────────
         // A sweep that stopped delivering because the phone rang and a sweep
         // that stopped delivering because the arm is broken produced BYTE-

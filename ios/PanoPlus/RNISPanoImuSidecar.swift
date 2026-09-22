@@ -357,10 +357,20 @@ public final class RNISPanoImuSidecar: NSObject, RNISARFramePlugin {
             // %.9f throughout: nanosecond resolution on an uptime-domain
             // timestamp, and 1e-9 on a unit quaternion is three orders below
             // the sensor's own noise floor.
+            // `rotationRate` added 2026-09-22: this row is the AR arm's only
+            // motion record, and the shipped lateral guard (`usePanMotion.ts`)
+            // is an EMA of `|gyro.x|` that runs on iOS too. Without the rate
+            // column the guard can only be RECONSTRUCTED from attitude
+            // differences — on Android four such reconstructions of one sweep
+            // disagreed by 10x (0.046 to 0.533). It costs three floats on a
+            // line that is already being formatted.
+            let rate = dm.rotationRate
             let line = String(
                 format: "{\"tsS\":%.9f,\"qx\":%.9f,\"qy\":%.9f,\"qz\":%.9f,"
-                      + "\"qw\":%.9f,\"accelMps2\":%.6f}\n",
-                dm.timestamp, quat.x, quat.y, quat.z, quat.w, accelMps2)
+                      + "\"qw\":%.9f,\"accelMps2\":%.6f,"
+                      + "\"rotationRate\":[%.9f,%.9f,%.9f]}\n",
+                dm.timestamp, quat.x, quat.y, quat.z, quat.w, accelMps2,
+                rate.x, rate.y, rate.z)
 
             self.lock.lock()
             guard self.armed, let f = self.fp else { self.lock.unlock(); return }
