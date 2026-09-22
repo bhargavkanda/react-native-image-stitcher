@@ -129,6 +129,49 @@ class ReactNativeDelegate: ReactNativeBridgeDelegate {
 
   override func bundleURL() -> URL? {
 #if DEBUG
+#if FIELD_BUILD
+    // ── FIELD BUILD: STANDALONE, BUT STILL A DEBUG BINARY ───────────────
+    // Built with
+    //   SWIFT_ACTIVE_COMPILATION_CONDITIONS="DEBUG FIELD_BUILD"
+    // so the app loads the `main.jsbundle` EMBEDDED in the .app instead of
+    // reaching for Metro, and runs with no Mac in sight.
+    //
+    // ⚠ WHY NOT JUST BUILD RELEASE. Two reasons, both load-bearing:
+    //   1. `__DEV__` would flip to false, and it gates real behaviour here —
+    //      the stitcher proxy install (`ensureStitcherProxyInstalled.ts:65`)
+    //      and the `[panMotion]` gyro logs (`usePanMotion.ts:565`) among
+    //      others. A Release binary is a DIFFERENT app from the one validated.
+    //   2. Capture packs live in the app container, and pulling them back
+    //      needs a development-signed build.
+    //
+    // RN's "Bundle React Native code and images" phase ALREADY bundles for a
+    // physical-device Debug build — `react-native-xcode.sh:45` bundles unless
+    // SKIP_BUNDLING is set — so the embedded bundle exists and carries
+    // `--dev true`. This branch only changes which URL is asked for.
+    //
+    // ⚠ VERIFY THE SHIPPED BUNDLE, NOT THE BUILT ONE. The Copy-Bundle-
+    // Resources phase skips on incremental builds often enough that it is the
+    // norm, not an edge case: md5 `Debug-iphoneos/main.jsbundle` against
+    // `RNImageStitcherExample.app/main.jsbundle` before installing.
+    //
+    // ⚠ CLEAR THE CACHED PACKAGER HOST, or startup eats a 20 s TCP timeout.
+    // This is a DEBUG binary, so `RCT_DEV` is on and RN still opens an
+    // inspector connection to the packager even though the bundle came from
+    // disk. That connection does NOT use the URL returned below — it uses
+    // `RCTBundleURLProvider`'s host, which persists in UserDefaults from
+    // whatever Metro session ran last. In the field that is a stale LAN IP
+    // that no longer answers, so the SYN goes unanswered and JS evaluation
+    // blocks for the full timeout before RN gives up.
+    //
+    // MEASURED on device before this line: `_setUpFeatureFlags` at
+    // 16:04:33.400, `evaluateJavaScript()` at 16:04:53.437 — a 20.04 s stall,
+    // immediately followed by "Couldn't connect to packager". Resetting
+    // `jsLocation` drops the host back to localhost, where nothing is
+    // listening and the connection is REFUSED instantly instead of hanging.
+    // The retry stays silent and harmless; only the stall goes away.
+    RCTBundleURLProvider.sharedSettings().jsLocation = nil
+    return Bundle.main.url(forResource: "main", withExtension: "jsbundle")
+#else
     // Pin Metro to port 8082 (project-wide convention; 8081 is held by Tug's
     // Expo dev server on this machine).  Mirrors the pin in
     // example/metro.config.js, example/package.json scripts, and
@@ -156,6 +199,7 @@ class ReactNativeDelegate: ReactNativeBridgeDelegate {
       ?? "192.168.68.92"  // last-resort; only hit if ip.txt isn't written
     provider.jsLocation = "\(host):8082"
     return provider.jsBundleURL(forBundleRoot: "index")
+#endif  // FIELD_BUILD
 #else
     return Bundle.main.url(forResource: "main", withExtension: "jsbundle")
 #endif

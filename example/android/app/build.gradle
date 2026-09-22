@@ -95,6 +95,31 @@ android {
         // applied directly in app/build.gradle is the
         // highest-priority source AGP honours.
         resValue "integer", "react_native_dev_server_port", "8082"
+
+        // ── FIELD BUILD: STANDALONE, BUT STILL DEBUGGABLE ────────────────
+        // `-PfieldBuild=true` makes the app load the JS bundle EMBEDDED in
+        // `assets/index.android.bundle` instead of reaching for Metro, so it
+        // runs with no Mac in sight.
+        //
+        // ⚠ IT MUST STAY A *DEBUG* BUILD, and that is not a stylistic
+        // preference. Capture packs are written to the app's INTERNAL
+        // storage, and the only way to get them off the phone is
+        // `adb exec-out run-as <pkg> tar cf - files/panoplus` — which
+        // Android refuses on a non-debuggable package ("run-as: package not
+        // debuggable"). Ship a Release APK to a field test and every pack
+        // captured that day is stranded on the device.
+        //
+        // The bundle must be built with `--dev true`: `__DEV__` gates real
+        // behaviour here, not just warnings — the stitcher proxy install
+        // (`ensureStitcherProxyInstalled.ts:65`) and the `[panMotion]` gyro
+        // logs (`usePanMotion.ts:565`) among others. A `--dev false` bundle
+        // is a DIFFERENT app from the one validated against Metro.
+        buildConfigField "boolean", "FIELD_BUILD",
+            (project.hasProperty("fieldBuild") && project.property("fieldBuild") == "true").toString()
+    }
+    buildFeatures {
+        // Required by AGP 8 before any custom `buildConfigField` is emitted.
+        buildConfig true
     }
     signingConfigs {
         debug {

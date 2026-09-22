@@ -15,6 +15,18 @@ class MainApplication : Application(), ReactApplication {
       context = applicationContext,
       packageList = PackageList(this).packages,
       jsMainModulePath = "index",
+      // ⚠ THE FIELD LEVER. `useDevSupport` defaults to `ReactBuildConfig.DEBUG`
+      // (DefaultReactHost.kt:69), and when it is true RN loads the bundle from
+      // Metro and has NO fallback to the embedded one — an unreachable dev
+      // server is a red screen, not a graceful degrade. Forcing it false on a
+      // `-PfieldBuild=true` build makes it load `assets/index.android.bundle`
+      // instead, so the app is standalone while the APK stays debuggable and
+      // `run-as` can still pull the capture packs back off the phone.
+      //
+      // `__DEV__` is NOT affected: it comes from the bundle's own `--dev`
+      // flag, not from this, so a `--dev true` bundle keeps every
+      // `__DEV__`-gated path alive exactly as it behaves under Metro.
+      useDevSupport = !BuildConfig.FIELD_BUILD,
     )
   }
 

@@ -65,3 +65,12 @@ docs/decisions/
 # not part of the release artifact.  See `docs/phase-7-parity-gate.md`.
 parity-baselines/
 *.parity-verification.md
+
+# Field-build artifacts (example app). `react-native bundle --assets-dest`
+# writes these into the Android source tree so `assembleDebug -PfieldBuild=true`
+# packages a standalone APK. They are BUILD OUTPUT regenerated on every field
+# build — committing them would put a 7 MB bundle and ~50 copied PNG/font
+# assets under version control and guarantee merge conflicts.
+example/android/app/src/main/assets/index.android.bundle
+example/android/app/src/main/res/drawable-*/
+example/android/app/src/main/res/raw/
