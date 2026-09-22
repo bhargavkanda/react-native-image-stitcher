@@ -87,6 +87,14 @@ import type { PanoPlusStatus, PanoPlusSummary } from '../panoPlusTypes';
 function statusFixture(over: Partial<PanoPlusStatus> = {}): PanoPlusStatus {
   const base: PanoPlusStatus = {
     running: true,
+    // The drift verdict a CLEAN sweep reports: level 0, no arm, never fired.
+    // Spelled out rather than defaulted so a test that means to exercise the
+    // guard has to say so.
+    driftLevel: 0,
+    driftArm: '',
+    driftFiredAtRow: -1,
+    driftPeakLeanDeg: 0,
+    driftPeakSlideFrac: 0,
     poseSourceRan: '',
     sessionDir: '/var/mobile/Documents/panoplus/pp_1',
     seq: 120,

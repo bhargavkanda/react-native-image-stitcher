@@ -1022,6 +1022,32 @@ export interface PanoPlusStatus {
   /** +1 / −1, latched from the first frames. */
   sweepSign: number;
   maxRectifyDeg: number;
+  /**
+   * THE LATERAL-DRIFT VERDICT — 0 clean · 1 warn · 2 stop-worthy.
+   *
+   * The engine REPORTS this and never acts on it, because only the host knows
+   * what a stop costs an operator standing at the shelf. Calibrated over 85
+   * labelled A35 packs: 7/7 of the operator's "should have been stopped"
+   * captures caught, 0 fires across 77 non-STOP packs, median firing at 31%
+   * of the sweep.
+   *
+   * ⚠ READ `driftArm` BEFORE ACTING ON A STOP ON ANDROID. Arms "lean" and
+   * "steep" read `crossRectifyDeg`, which on Android is ~90% MAGNETOMETER
+   * heading correction rather than hand motion — they detect a real output
+   * warp, but they are not a hand sensor and their thresholds are calibrated
+   * in one magnetic environment. Arm "slide" reads image registration and
+   * carries no such caveat. On iOS both attitude arms are magnetometer-free,
+   * so there all three measure the operator.
+   */
+  driftLevel: number;
+  /** "lean" | "steep" | "slide" | "" — which arm tripped. */
+  driftArm: string;
+  /** The painted row the STOP tier first tripped on, or -1. */
+  driftFiredAtRow: number;
+  /** Largest ELIGIBLE cross excursion seen, degrees. */
+  driftPeakLeanDeg: number;
+  /** Largest |signed posV run| as a fraction of the band. */
+  driftPeakSlideFrac: number;
   /** WHICH REGIME IS RUNNING, live: 1 ⇒ a pivot (the attitude carries the
    *  sweep), 0 ⇒ a walk (the correlation residual does). Before the axis
    *  latches this is the only signal that says WHY nothing is painting. */

@@ -99,3 +99,56 @@ describe('panoPlusSweepFaults — bars only, silent when healthy', () => {
     expect(out).toContain('WARP 6.4×');
   });
 });
+
+describe('panoPlusSweepFaults — lateral drift', () => {
+  const clean = { painted: 40, driftLevel: 0, driftArm: '' } as PanoPlusStatus;
+
+  it('says nothing on a clean sweep', () => {
+    expect(panoPlusSweepFaults(clean)).toBeNull();
+  });
+
+  it('WARNS in lower case and STOPS in upper, so the tier is legible at a glance', () => {
+    const warn = panoPlusSweepFaults({
+      ...clean, driftLevel: 1, driftArm: 'lean',
+    } as PanoPlusStatus)!;
+    const stop = panoPlusSweepFaults({
+      ...clean, driftLevel: 2, driftArm: 'lean',
+    } as PanoPlusStatus)!;
+    expect(warn).toContain('drift off-axis');
+    expect(stop).toContain('DRIFT off-axis');
+  });
+
+  it('names the SLIDE arm differently, because it is a different failure', () => {
+    // Arm 3 is an operator walking sideways; arms 1-2 are the band leaning.
+    // Telling him to stop leaning when he is sliding is the wrong cue.
+    expect(panoPlusSweepFaults({
+      ...clean, driftLevel: 2, driftArm: 'slide',
+    } as PanoPlusStatus)!).toContain('sliding');
+  });
+
+  it('⚑ PRESCRIBES NO DIRECTION — the guard cannot know one', () => {
+    // `crossRectifyDeg` is UNSIGNED (0 negatives in 10,678 ledger rows), so
+    // the guard structurally cannot say which way to correct. "hold square"
+    // is true of every breach; "drift left" would be invented.
+    const out = panoPlusSweepFaults({
+      ...clean, driftLevel: 2, driftArm: 'lean',
+    } as PanoPlusStatus)!;
+    expect(out).toContain('hold square to the shelf');
+    expect(out).not.toMatch(/\bleft\b|\bright\b|\bup\b|\bdown\b/i);
+  });
+
+  it('⚑ READS FIRST, ahead of faults with no mid-sweep cure', () => {
+    // SHEAR/CUTS/WARP report a sweep that is already degrading. Drift is the
+    // one fault here the operator can still act on, so it leads.
+    const out = panoPlusSweepFaults({
+      ...clean,
+      driftLevel: 2,
+      driftArm: 'lean',
+      crossBandDivergenceNormPx: 12.0,
+      integrityFailed: true,
+      seamWorstBandP95Px: 3.2,
+      maxAreaScale: 6.4,
+    } as PanoPlusStatus)!;
+    expect(out.indexOf('DRIFT')).toBeLessThan(out.indexOf('SHEAR'));
+  });
+});

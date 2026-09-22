@@ -390,6 +390,15 @@ export function coercePanoPlusStatus(raw: unknown): PanoPlusStatus | null {
     axis: num(s.axis),
     sweepSign: num(s.sweepSign, 1),
     maxRectifyDeg: num(s.maxRectifyDeg),
+    // ⚠ FAIL CLOSED ON AN ABSENT NATIVE ECHO. An older binary answers no
+    // drift fields at all, and defaulting a missing verdict to anything but
+    // 0 would invent a stop the engine never reported — the failure mode that
+    // put five inert flags into a build in one night.
+    driftLevel: num(s.driftLevel),
+    driftArm: str(s.driftArm),
+    driftFiredAtRow: num(s.driftFiredAtRow, -1),
+    driftPeakLeanDeg: num(s.driftPeakLeanDeg),
+    driftPeakSlideFrac: num(s.driftPeakSlideFrac),
     rotationFraction: num(s.rotationFraction),
     relatchCount: num(s.relatchCount),
     advanceRotPx: num(s.advanceRotPx),
@@ -1796,6 +1805,26 @@ export function panoPlusSweepFaults(status: PanoPlusStatus | null): string | nul
     bits.push(`CUTS p95 ${status.seamWorstBandP95Px.toFixed(2)}`);
   }
   if (status.maxAreaScale > 4) bits.push(`WARP ${status.maxAreaScale.toFixed(1)}×`);
+  // ── LATERAL DRIFT, the one fault here the operator can still act on ────
+  //
+  // FIRST IN THE LIST WHEN IT FIRES, because unlike SHEAR/CUTS/WARP this one
+  // has a cure that works mid-sweep: the capture is going off-axis and
+  // squaring up saves the rest of it. Calibrated over 85 labelled packs —
+  // 7/7 of the operator's "should have been stopped" captures, 0 fires across
+  // 77 others, median at 31% of the sweep, i.e. with two thirds still to go.
+  //
+  // ⚠ IT REPORTS THE CONDITION AND PRESCRIBES NOTHING SPECIFIC, for the same
+  // reason SHEAR above does not say "don't walk". `crossRectifyDeg` is
+  // UNSIGNED, so the guard structurally cannot say WHICH WAY to correct, and
+  // on Android the lean/steep arms read a channel that is ~90% magnetometer
+  // heading correction rather than hand motion. "Hold square to the shelf" is
+  // true of every breach; "you are drifting left" would not be.
+  if (status.driftLevel >= 1) {
+    const arm = status.driftArm === 'slide' ? 'sliding' : 'off-axis';
+    bits.unshift(
+      `${status.driftLevel >= 2 ? 'DRIFT' : 'drift'} ${arm} — hold square to the shelf`,
+    );
+  }
   // …then the PHOTOMETRIC one, which he cannot fix by moving but must know
   // about before he keeps the pack.
   if (status.photoDriftLocalPct > PANOPLUS_PHOTO_DRIFT_LOCAL_BAR) {

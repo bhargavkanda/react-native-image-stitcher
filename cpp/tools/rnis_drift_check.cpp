@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+//
 // rnis_drift_check — run the SHIPPED lateral-drift detector over a pack's
 // ledger and print its verdict.
 //
