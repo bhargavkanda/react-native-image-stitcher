@@ -589,7 +589,6 @@ interface NativeCalib {
   resolveBasisCalibration: (o: Record<string, unknown>) => Promise<Record<string, unknown>>;
   discardBasisCalibration: () => Promise<Record<string, unknown>>;
   combineTauRuns: (runs: unknown[]) => Promise<Record<string, unknown>>;
-  calibrationPolicy: () => Promise<Record<string, unknown>>;
   getCalibration: (o: Record<string, unknown>) => Promise<Record<string, unknown>>;
   saveTauCalibration: (o: Record<string, unknown>) => Promise<Record<string, unknown>>;
   saveBasisCalibration: (o: Record<string, unknown>) => Promise<Record<string, unknown>>;

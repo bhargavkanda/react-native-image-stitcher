@@ -172,15 +172,6 @@ public class PanoPlusCalibBridge: NSObject, RCTInvalidating {
         resolver(RNISPanoCalibCore.combineTauRuns((runs as? [Any]) ?? []))
     }
 
-    /// The bars, so a panel and a pack quote the same numbers.
-    @objc(calibrationPolicy:rejecter:)
-    public func calibrationPolicy(
-        resolver: @escaping RCTPromiseResolveBlock,
-        rejecter: @escaping RCTPromiseRejectBlock
-    ) {
-        resolver(RNISPanoCalibCore.policy())
-    }
-
     /// THE FORMAT AN IMU SWEEP WOULD OPEN ON THIS BODY, and therefore the key
     /// its τ must be stored under.
     ///

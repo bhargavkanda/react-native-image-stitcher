@@ -916,52 +916,6 @@ class PanoPlusLiveModule(
      * an engine query. It runs on RN's NativeModules queue thread and must
      * stay that way.
      */
-    /**
-     * ARM OR DISARM pano+ ON THE STITCHER'S OWN ARCore SESSION.
-     *
-     * ⚠ THIS IS THE ARM THE OPERATOR ASKED FOR: "I took an AR capture in pano
-     * with no issues!! Why can't we use the same for pano+ too?" On iOS pano+
-     * has always ridden Pano's ARKit session and iOS AR works in 278 of 278
-     * packs. On Android it opened its own camera and shared ARCore, and has
-     * never painted a strip in 23 packs since 2026-08-24.
-     *
-     * Registering is IDEMPOTENT by plugin name, so a JS reload cannot
-     * accumulate duplicates, and an UNARMED registered plugin is a cheap early
-     * return rather than an unregister — the AR view's mount/unmount cycle can
-     * therefore never leave a half-registered arm behind.
-     *
-     * The host must ALSO be mounting the stitcher's AR camera view; this method
-     * only decides whether pano+ consumes its frames. It deliberately does NOT
-     * start a camera: on this arm there is no Camera2 session at all, which is
-     * the whole point.
-     */
-    @ReactMethod
-    fun setArPluginArmed(armed: Boolean, promise: Promise) {
-        try {
-            // arm()/disarm() OWN the registration — see the plugin. Splitting
-            // them is what shipped an armed plugin the registry had never heard
-            // of, and a sweep that received zero frames.
-            if (armed) PanoPlusArFramePlugin.shared.arm()
-            else PanoPlusArFramePlugin.shared.disarm()
-            promise.resolve(PanoPlusArFramePlugin.shared.snapshot())
-        } catch (t: Throwable) {
-            // A host without the stitcher linked is a REFUSAL BY NAME, never a
-            // crash: this module also ships in builds that have no AR camera.
-            promise.reject(
-                "panoplus-ar-plugin-unavailable",
-                "could not ${if (armed) "register" else "unregister"} the pano+ AR frame " +
-                    "plugin: ${t.javaClass.simpleName}: ${t.message}. The stitcher's AR " +
-                    "plugin SPI is compileOnly here and is provided by the host app.",
-            )
-        }
-    }
-
-    /** What the AR-plugin arm did, for the panel and for device.json. */
-    @ReactMethod
-    fun getArPluginStatus(promise: Promise) {
-        promise.resolve(PanoPlusArFramePlugin.shared.snapshot())
-    }
-
     @ReactMethod
     fun getStatus(promise: Promise) {
         val json = PanoPlusLiveNative.statusJson()

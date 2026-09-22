@@ -54,9 +54,6 @@ RCT_EXTERN_METHOD(combineTauRuns:(NSArray *)runs
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
-RCT_EXTERN_METHOD(calibrationPolicy:(RCTPromiseResolveBlock)resolver
-                  rejecter:(RCTPromiseRejectBlock)rejecter)
-
 // The lens + format an IMU sweep WOULD open on this body, and the tau key that
 // follows from it.  `ok:false` carries the hardware reason instead.  Opens no
 // capture session, so it is safe to call while ARKit holds the camera.

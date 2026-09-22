@@ -396,12 +396,20 @@ export type {
 // half arrived as the `PanoPlus` subspec / `libimage_stitcher_panoplus.so`; this is its
 // JS surface.
 //
-// ⚠ IT IS A PEER OF `<Camera>` TODAY, NOT A MODE INSIDE IT.
-// `PanoPlusCaptureSurface` owns a full screen: its own `<ARCameraView>`, its
-// own HUD, its own result viewer. `<Camera engine="sweep">` is the intended
-// end state and is NOT wired yet — both natives still answer
-// `engine-unavailable`. Until it is, a host drives the sweep by mounting the
-// surface directly.
+// ⚠ `<Camera engine="sweep">` IS WIRED. This comment used to say it was the
+// "intended end state", "NOT wired yet", with "both natives still answering
+// `engine-unavailable`" — none of which is true any more, and leaving it
+// stated the OPPOSITE of the standing objective in the public API's own docs.
+// `Camera.tsx:4368` mounts the surface on every sweep, and
+// `cameraSweepEngine.render.test.tsx` pins the behaviour across 1,096 lines.
+//
+// `engine` is a PROP, not a screen: it changes ONLY what the hold runs. Tap
+// still takes a photo, hold still runs the sweep, and everything else about
+// the camera is the same on both engines.
+//
+// The surface remains exported because it is still a valid direct-mount
+// entry point for a host that wants the sweep WITHOUT `<Camera>`'s shutter
+// and chrome — but that is now a choice, not the only route.
 export { PanoPlusCaptureSurface } from './sweep/PanoPlusCaptureSurface';
 export type { PanoPlusCaptureSurfaceProps } from './sweep/PanoPlusCaptureSurface';
 export { PanoPlusResultView } from './sweep/PanoPlusResultView';

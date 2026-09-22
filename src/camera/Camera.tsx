@@ -4289,20 +4289,31 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     }
   });
 
-  // ⚠ THE EARLY RETURN IS THE **AR** CELL ONLY (S7).
+  // ⚠ THIS EARLY RETURN TAKES **BOTH** SWEEP ARMS TODAY — read the
+  // condition, not this comment's history.
   //
-  // On the AR arm the sweep surface mounts its own `<ARCameraView>`, and
-  // `<Camera>` mounts one too — two `RNSARSession.shared.start()` calls
-  // against one camera, with no compile error and a black preview on a
-  // phone. Returning early is still the only shape in which exactly one is
-  // alive, so that cell is unchanged.
+  // It used to say "the AR cell ONLY" and that the non-AR sweep "falls
+  // through to the main tree". That is step 6's END STATE written in the
+  // present tense, and the guard below is `engine === 'sweep'`, unqualified.
+  // A reader who trusted the old wording would conclude step 6 was done.
+  // It is not. Corrected 2026-09-22; the restructure itself is unapproved
+  // and needs a phone on both platforms.
   //
-  // The NON-AR sweep is the opposite problem: there the host's own
-  // `<CameraView>` IS the camera, and the sweep is fed from it by the
-  // `panoplus_sweep_ingest` frame processor. So it falls through to the
-  // main tree, where the viewfinder, the shutter and the chrome already
-  // exist — and the surface renders OVER it with `frameSource="host"`, as
-  // chrome with no camera of its own.
+  // WHY THE AR CELL MUST KEEP ITS EARLY RETURN, whatever step 6 does with
+  // the rest: on the AR arm the sweep surface mounts its own
+  // `<ARCameraView>` and `<Camera>` would mount a second one — two
+  // `RNSARSession.shared.start()` calls against one camera, no compile
+  // error, black preview on a phone. Returning early is the only shape in
+  // which exactly one is alive.
+  //
+  // WHY THE NON-AR ARM IS THE OPPOSITE PROBLEM, and why collapsing it is
+  // the actual goal: there the host's own `<CameraView>` IS the camera and
+  // the sweep is fed from it by the `panoplus_sweep_ingest` frame
+  // processor, so the viewfinder, shutter and chrome in the main tree would
+  // serve it directly. Substituting a second tree for it is what produced
+  // four device defects at once. The fix is to split this block by
+  // RESPONSIBILITY rather than by engine — make the furniture
+  // engine-conditional in the main tree — NOT to keep two trees.
   if (engine === 'sweep') {
     return (
       <HostJsLandscapeContext.Provider value={jsLandscape}>

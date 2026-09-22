@@ -111,7 +111,6 @@ function installNative(): void {
     resolveBasisCalibration: () => Promise.resolve({}),
     discardBasisCalibration: () => Promise.resolve({}),
     combineTauRuns: () => Promise.resolve({}),
-    calibrationPolicy: () => Promise.resolve({}),
     saveTauCalibration: () => Promise.resolve({}),
     saveBasisCalibration: () => Promise.resolve({}),
     clearCalibration: () => Promise.resolve({}),

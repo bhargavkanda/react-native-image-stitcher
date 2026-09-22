@@ -216,7 +216,6 @@ function installNative(): void {
     },
     saveTauCalibration: () => Promise.resolve({}),
     combineTauRuns: () => Promise.resolve({}),
-    calibrationPolicy: () => Promise.resolve({}),
     clearCalibration: () => Promise.resolve({}),
   };
 }
