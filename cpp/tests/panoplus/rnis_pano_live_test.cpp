@@ -295,6 +295,165 @@ TEST(PanoLiveSession, FinalizeWithoutStartIsRefusedNotCrashed) {
     EXPECT_NE(summary.find("\"ok\":false"), std::string::npos);
 }
 
+// ── track.jsonl: the REPLAY INPUT ───────────────────────────────────────────
+//
+// Until 2026-09-22 this layer computed `trackPath`, reported it, and never
+// wrote it.  The only writer was the Android recorder's `writeFrame`, reached
+// ONLY from the Camera2 `ImageReader` callback — so on the two arms that
+// actually ship (`vc-plugin`, `ar-plugin`) every pack carried a 0-BYTE
+// track.jsonl and not one capture from either could be replayed.  Measured:
+// 15 of 16 packs on the operator's A35, every date, both arms.
+TEST(PanoLiveSession, WriteTrackOffWritesNoTrackFileAndSaysSo) {
+    const std::string dir = makeTempDir("trackoff");
+    live::Session s;
+    live::Options o = optionsFor(dir);
+    o.poseSource = "imu";
+    const live::StartReport start = s.start(o);
+    ASSERT_TRUE(start.ok);
+    EXPECT_FALSE(start.writeTrack);
+
+    const int w = 320, h = 240;
+    for (int i = 0; i < 3; ++i) {
+        const std::vector<unsigned char> f = makeNv21(w, h, i * 6);
+        s.ingest(f.data(), f.size(), frameAt(w, h, i, 1.0e9 + i * 33.0e6));
+    }
+    bool empty = false;
+    const std::string summary = s.finalizeSweep(&empty);
+    // The OFF side of the gate, pinned: no rows, and the summary says zero
+    // rather than staying silent — "absent" must be able to mean only an
+    // older binary.
+    EXPECT_TRUE(readAll(start.trackPath).empty());
+    EXPECT_NE(summary.find("\"trackRows\":0"), std::string::npos) << summary.substr(0, 400);
+}
+
+TEST(PanoLiveSession, WriteTrackOnWritesOneReplayableRowPerIngest) {
+    const std::string dir = makeTempDir("trackon");
+    live::Session s;
+    live::Options o = optionsFor(dir);
+    o.poseSource = "imu";
+    o.writeTrack = true;
+    // PackFrames::None is the ANDROID DEFAULT and the case that matters: the
+    // rows must exist even when no JPEG does, because replay is row-driven
+    // and a pose-only pack is still a replayable pose ledger.
+    o.packFrames = live::PackFrames::None;
+    const live::StartReport start = s.start(o);
+    ASSERT_TRUE(start.ok);
+    EXPECT_TRUE(start.writeTrack);
+
+    const int w = 320, h = 240;
+    const int n = 5;
+    for (int i = 0; i < n; ++i) {
+        const std::vector<unsigned char> f = makeNv21(w, h, i * 6);
+        s.ingest(f.data(), f.size(), frameAt(w, h, i, 1.0e9 + i * 33.0e6));
+    }
+    bool empty = false;
+    const std::string summary = s.finalizeSweep(&empty);
+
+    const std::string track = readAll(start.trackPath);
+    ASSERT_FALSE(track.empty());
+    size_t rows = 0;
+    for (size_t i = 0; i < track.size(); ++i) if (track[i] == '\n') ++rows;
+    EXPECT_EQ(rows, (size_t)n);
+    EXPECT_NE(summary.find("\"trackRows\":5"), std::string::npos);
+
+    // EVERY row must satisfy the PARSER, not merely look like JSON: the
+    // writer lives beside it so the two cannot drift, and this is what holds
+    // that claim.  `trackingDefaulted` false is part of it — a writer that
+    // can supply `tracking` must never make a replay report it fell back.
+    size_t at = 0;
+    for (int i = 0; i < n; ++i) {
+        const size_t nl = track.find('\n', at);
+        ASSERT_NE(nl, std::string::npos);
+        const replay::TrackRow r = replay::parseTrackRow(track.substr(at, nl - at));
+        ASSERT_TRUE(r.ok) << "row " << i << ": " << r.why;
+        EXPECT_EQ(r.seq, (long long)i);
+        EXPECT_EQ(r.w, w);
+        EXPECT_EQ(r.h, h);
+        EXPECT_FALSE(r.trackingDefaulted);
+        at = nl + 1;
+    }
+}
+
+// THE NANOSECOND TRAP.  `tsNs` carries Android's SENSOR_TIMESTAMP (~1.7e14).
+// Through the `%.9g` every other double in this writer uses, that quantises
+// to the MILLISECOND — consecutive frames then compare EQUAL and the engine
+// refuses every one after the first as non-monotonic.  The value below is the
+// real device timestamp from the replay suite's own iOS fixture.
+TEST(PanoLiveSession, TrackTsNsSurvivesADeviceUptimeTimestamp) {
+    const std::string dir = makeTempDir("trackts");
+    live::Session s;
+    live::Options o = optionsFor(dir);
+    o.poseSource = "imu";
+    o.writeTrack = true;
+    o.packFrames = live::PackFrames::None;
+    const live::StartReport start = s.start(o);
+    ASSERT_TRUE(start.ok);
+
+    const int w = 320, h = 240;
+    const double t0 = 166487140096208.0;
+    for (int i = 0; i < 2; ++i) {
+        const std::vector<unsigned char> f = makeNv21(w, h, i * 6);
+        s.ingest(f.data(), f.size(), frameAt(w, h, i, t0 + (double)i * 33.0e6));
+    }
+    bool empty = false;
+    s.finalizeSweep(&empty);
+
+    const std::string track = readAll(start.trackPath);
+    ASSERT_FALSE(track.empty());
+    const size_t nl = track.find('\n');
+    ASSERT_NE(nl, std::string::npos);
+    const replay::TrackRow r0 = replay::parseTrackRow(track.substr(0, nl));
+    const size_t nl2 = track.find('\n', nl + 1);
+    ASSERT_NE(nl2, std::string::npos);
+    const replay::TrackRow r1 =
+        replay::parseTrackRow(track.substr(nl + 1, nl2 - nl - 1));
+    ASSERT_TRUE(r0.ok) << r0.why;
+    ASSERT_TRUE(r1.ok) << r1.why;
+    EXPECT_EQ((long long)std::llround(r0.tsNs), (long long)t0);
+    EXPECT_GT(r1.tsNs, r0.tsNs) << "quantised: consecutive frames are not monotonic";
+}
+
+// THE WHOLE POINT, END TO END: a pack this layer wrote must REPLAY.
+//
+// Every assertion above is about the file; this one is about the contract.
+// It is the host-side twin of the device proof — a sweep, then its own pack
+// handed straight back to `replayPack` with nothing in between.
+TEST(PanoLiveSession, ALiveTrackPackReplaysEndToEnd) {
+    const std::string dir = makeTempDir("trackreplay");
+    live::Session s;
+    live::Options o = optionsFor(dir);
+    o.poseSource = "imu";
+    o.writeTrack = true;
+    // Replay needs the PIXELS as well as the rows.
+    o.packFrames = live::PackFrames::All;
+    const live::StartReport start = s.start(o);
+    ASSERT_TRUE(start.ok);
+
+    const int w = 320, h = 240;
+    const int n = 8;
+    for (int i = 0; i < n; ++i) {
+        const std::vector<unsigned char> f = makeNv21(w, h, i * 6);
+        s.ingest(f.data(), f.size(), frameAt(w, h, i, 1.0e9 + i * 33.0e6));
+    }
+    bool empty = false;
+    s.finalizeSweep(&empty);
+
+    replay::ReplayOptions ro;
+    ro.packDir = start.packDir;
+    replay::ReplayReport rr;
+    ASSERT_TRUE(replay::replayPack(ro, &rr)) << rr.error;
+    EXPECT_TRUE(rr.ok) << rr.error;
+    EXPECT_EQ(rr.rowsTotal, n);
+    EXPECT_EQ(rr.rowsMalformed, 0);
+    // A row whose JPEG is missing is COUNTED and named; zero here is what
+    // says the rows and the frames are in lockstep, which is the reason the
+    // writer sits outside the frame gate rather than inside it.
+    EXPECT_EQ(rr.framesMissing, 0);
+    EXPECT_EQ(rr.framesIngested, n);
+    // The writer supplies `tracking`, so no replay may report it defaulted.
+    EXPECT_EQ(rr.rowsMissingTracking, 0);
+}
+
 // ── meta.json ↔ replay ──────────────────────────────────────────────────────
 
 // ── meta.json carries the frame size the engine was FED ─────────────────────

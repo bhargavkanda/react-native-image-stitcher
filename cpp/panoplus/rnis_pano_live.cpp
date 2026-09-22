@@ -193,6 +193,10 @@ struct Session::Impl {
 
     std::FILE* ledgerFp = nullptr;
     long long  ledgerRows = 0;
+    /// `track.jsonl` — the REPLAY INPUT.  Non-null only when the host handed
+    /// this layer ownership (`Options::writeTrack`).
+    std::FILE* trackFp = nullptr;
+    long long  trackRows = 0;
 
     // ⚠ THE FRAME SIZE THE ENGINE WAS ACTUALLY FED, recorded HERE and written
     // at finalize — not by the host at start.  The Android host's `capture`
@@ -237,11 +241,23 @@ struct Session::Impl {
     mutable std::mutex statusMu;
     std::string        statusCache;
 
-    void closeLedger() {
+    /// Every writer this session owns, closed together.
+    ///
+    /// ONE function for both handles because it has THREE call sites — the
+    /// destructor, `finalizeSweep` and `cancel` (the ABANDON path) — and a
+    /// second close that had to be added to each of them separately is a
+    /// leaked descriptor on whichever one a future change forgets.
+    /// Idempotent: every call is null-guarded.
+    void closeWriters() {
         if (ledgerFp != nullptr) {
             std::fflush(ledgerFp);
             std::fclose(ledgerFp);
             ledgerFp = nullptr;
+        }
+        if (trackFp != nullptr) {
+            std::fflush(trackFp);
+            std::fclose(trackFp);
+            trackFp = nullptr;
         }
     }
 
@@ -257,7 +273,7 @@ struct Session::Impl {
 Session::Session() : impl_(new Impl()) {}
 
 Session::~Session() {
-    if (impl_ != nullptr) impl_->closeLedger();
+    if (impl_ != nullptr) impl_->closeWriters();
 }
 
 StartReport Session::start(const Options& opt) {
@@ -329,6 +345,17 @@ StartReport Session::start(const Options& opt) {
             S.noteError("could not open " + S.ledgerPath + " for writing");
         }
     }
+    // The REPLAY INPUT, on the arms whose host does not write it itself.
+    // Same non-fatal policy and the same reason.  Opened HERE and not
+    // earlier: both of `start`'s preceding failure returns (the frames dir
+    // and a refused `configure`) run above this line, so there is no path
+    // that leaves a descriptor behind.
+    if (opt.writeTrack) {
+        S.trackFp = std::fopen(S.trackPath.c_str(), "wb");
+        if (S.trackFp == nullptr) {
+            S.noteError("could not open " + S.trackPath + " for writing");
+        }
+    }
 
     // ── Arm the preview pump ────────────────────────────────────────────
     // A pump that refuses is NOT a reason to refuse the sweep: the panorama is
@@ -363,6 +390,7 @@ StartReport Session::start(const Options& opt) {
     R.metaPath = S.metaPath;
     R.ledgerPath = S.ledgerPath;
     R.trackPath = S.trackPath;
+    R.writeTrack = opt.writeTrack;
     R.canvasMaxPixels = S.cfg.canvasMaxPixels;
     return R;
 }
@@ -550,6 +578,43 @@ IngestReport Session::ingest(const unsigned char* nv21, size_t len,
                 ++S.frameWriteFailed;
             }
         }
+    }
+
+    // ── Track row (the REPLAY INPUT) ────────────────────────────────────
+    //
+    // ⚠ OUTSIDE THE `wantFrame` GATE ABOVE, and that is the whole contract.
+    // Replay is ROW-DRIVEN: it walks `track.jsonl` and finds each frame by
+    // formatting the row's own `seq` into `frame_%06lld.jpg`, so a row with
+    // no JPEG is COUNTED and named (`framesMissing`) while a JPEG with no row
+    // is INVISIBLE.  Rows must be a superset of frames, never a subset —
+    // writing this inside the frame branch would reproduce today's zero-row
+    // pack on Android's `PackFrames::None` default, which is exactly the
+    // state that made the two shipping arms unreplayable.
+    //
+    // AFTER `engine.ingest` deliberately: every "the engine never saw this
+    // frame" early return above this point (null buffer, short buffer, a
+    // conversion that threw, an engine that threw) leaves no orphan row.
+    //
+    // `seq` is `in.seq` — the same value the frame writer formats — and never
+    // a writer-local counter, because it is the ONLY join between a row and
+    // its pixels.  The tail-flush row is ledger-only and keeps its reserved
+    // seq of -1; nothing here may emit it.
+    if (S.trackFp != nullptr) {
+        replay::TrackRow tr;
+        tr.seq = in.seq;
+        tr.tsNs = in.tsNs;
+        for (int k = 0; k < 4; ++k) tr.q[k] = in.q[k];
+        tr.fx = in.fx; tr.fy = in.fy; tr.cx = in.cx; tr.cy = in.cy;
+        tr.w = in.width; tr.h = in.height;
+        tr.tracking = in.tracking;
+        tr.expDurS = in.exposureDurationS;
+        tr.expISO = in.exposureISO;
+        std::string line;
+        replay::appendTrackRow(line, tr);
+        std::fwrite(line.data(), 1, line.size(), S.trackFp);
+        // iOS' rule and its reason: a background kill mid-sweep must not cost
+        // the ledger.  30 rows is ~half a second.
+        if ((++S.trackRows % 30) == 0) std::fflush(S.trackFp);
     }
 
     // ── Ledger row ──────────────────────────────────────────────────────
@@ -781,7 +846,7 @@ std::string Session::finalizeSweep(bool* empty) {
         replay::appendTailFlushLine(line, tail);
         std::fwrite(line.data(), 1, line.size(), S.ledgerFp);
     }
-    S.closeLedger();
+    S.closeWriters();
 
     // ── THE FINAL REPUBLISH ─────────────────────────────────────────────
     // AFTER `finish()` and before the pump is joined, so the last thing on
@@ -1099,6 +1164,11 @@ std::string Session::finalizeSweep(bool* empty) {
     kvInt(s, "droppedQueue", 0);
     kvInt(s, "droppedPack", S.droppedPack);
     kvInt(s, "framesWritten", S.framesWritten);
+    // The REPLAY INPUT's row count.  A COUNT, not a presence: `trackPath` is
+    // reported unconditionally (on the Camera2 arm the file exists and the
+    // host wrote it), so only this number distinguishes "this layer wrote N
+    // rows" from "this layer wrote nothing".
+    kvInt(s, "trackRows", S.trackRows);
     kvInt(s, "frameWriteFailed", S.frameWriteFailed);
     kvInt(s, "packBytes", S.packBytes);
     kvInt(s, "intrinsicsRescaled", 0);
@@ -1211,6 +1281,11 @@ void Session::writeMeta(const SessionStats& st,
     kvInt(m, "frameQuality", S.opt.packFrameQuality);
     kvInt(m, "maxFrames", S.opt.packMaxFrames);
     kvInt(m, "framesWritten", S.framesWritten);
+    // The REPLAY INPUT's row count.  A COUNT, not a presence: `trackPath` is
+    // reported unconditionally (on the Camera2 arm the file exists and the
+    // host wrote it), so only this number distinguishes "this layer wrote N
+    // rows" from "this layer wrote nothing".
+    kvInt(m, "trackRows", S.trackRows);
     kvInt(m, "frameWriteFailed", S.frameWriteFailed);
     kvBool(m, "frameCapHit", S.frameCapHit);
     kvInt(m, "bytes", S.packBytes);
@@ -1286,7 +1361,7 @@ void Session::writeMeta(const SessionStats& st,
 void Session::cancel() {
     Impl& S = *impl_;
     S.running = false;
-    S.closeLedger();
+    S.closeWriters();
     if (S.started) {
         try { S.engine.reset(); } catch (...) {}
         S.started = false;

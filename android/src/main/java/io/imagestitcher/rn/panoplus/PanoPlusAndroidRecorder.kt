@@ -16,7 +16,10 @@
 // nothing.
 //
 //   <sessionDir>/panoplus/frames/frame_%06d.jpg   pixels, indexed BY `seq`
-//   <sessionDir>/panoplus/track.jsonl             one row per WRITTEN frame
+//   <sessionDir>/panoplus/track.jsonl             one row per INGESTED frame
+//       ⚠ written by THIS file only on the Camera2 arm (writeFrame is reached
+//         only from onImages). The ar-plugin and vc-plugin arms get it from
+//         the live engine — see `writeTrack` at the startLiveEngine call.
 //   <sessionDir>/panoplus/sensors.jsonl           the attitude series, raw
 //   <sessionDir>/panoplus/device.json             the probe + what was applied
 //
@@ -4823,7 +4826,11 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             // "none": a 1920x1080 software JPEG is ~15-20 ms on the SAME thread
             // the engine just used, and doubling the per-frame cost halves the
             // sweep's frame rate. `track.jsonl` (the replay INPUT) is written
-            // on every mode regardless, so a "none" pack still carries the full
+            // on every mode regardless — but by THIS writer only on the
+            // Camera2 arm; the plugin arms get it from the live engine
+            // (`writeTrack`). Until 2026-09-22 they got nothing at all and
+            // their packs carried a 0-byte file. So a "none" pack still
+            // carries the full
             // pose ledger — what it cannot do is re-run the PIXELS offline.
             val wantJpeg = when (packFramesMode) {
                 PanoPlusLiveNative.PACK_FRAMES_NONE -> false
@@ -5605,6 +5612,25 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             previewCropPad = cfg.livePreviewCropPad,
             previewLeadOut = cfg.livePreviewLeadOut,
             writeLedger = cfg.liveWriteLedger,
+            // WHO OWNS track.jsonl — THE REPLAY INPUT — for this sweep.
+            //
+            // Exactly one process may write it. `writeFrame` (this file's own
+            // writer, and the only one until 2026-09-22) is reached ONLY from
+            // `onImages`, the Camera2 ImageReader callback — so on the
+            // ar-plugin and vc-plugin arms nothing wrote it and every pack
+            // carried a 0-BYTE file. Measured on the operator's A35: 15 of 16
+            // packs, every date, both shipping arms. Not one of those captures
+            // could be replayed.
+            //
+            // ⚠ KEYED ON `camera2RequestIntended`, NOT on an arm-active flag.
+            // The recorded trap one screen down (the vcPluginArmActive note)
+            // is exactly this: an arm flag is set AFTER `startLiveEngine`, so
+            // it reads false here on every arm and the line does not move.
+            // This field is set at the TOP of each start mode, before this
+            // call, and it already means precisely "the recorder opens the
+            // Camera2 client", which is the same condition as "writeFrame
+            // runs".
+            writeTrack = !camera2RequestIntended,
             // ⚠ THE ARM THAT RAN, not the one asked for. `meta.json`'s
             // `poseSource` is the field an RCA reads to know which series
             // painted the pixels, and a sweep whose ARCore channel refused
@@ -5765,10 +5791,26 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                     "extra files are not",
             )
         }
-        trackW = BufferedWriter(
-            OutputStreamWriter(FileOutputStream(File(packDir, "track.jsonl")), Charsets.UTF_8),
-            1 shl 16,
-        )
+        // ⚠ ONLY ON THE ARM THAT ACTUALLY WRITES IT.  `writeFrame` — the sole
+        // user of this handle — is reached only from `onImages`, the Camera2
+        // ImageReader callback.  Opening it unconditionally is what left a
+        // 0-BYTE track.jsonl in every ar-plugin and vc-plugin pack: a
+        // truncating open, and then nothing ever wrote a row.  A pack that
+        // carries an empty replay input is making a far worse claim than one
+        // that carries none — the same distinction this file already draws
+        // about attitude_arcore.jsonl one screen down.
+        //
+        // The live engine now writes the row for those arms (see
+        // `writeTrack` at the startLiveEngine call), so leaving this open
+        // would also put a live Kotlin descriptor on a file the C++ layer
+        // owns.  One writer per sweep, and this is the half of the gate that
+        // makes that true.
+        if (camera2RequestIntended) {
+            trackW = BufferedWriter(
+                OutputStreamWriter(FileOutputStream(File(packDir, "track.jsonl")), Charsets.UTF_8),
+                1 shl 16,
+            )
+        }
         sensorsW = BufferedWriter(
             OutputStreamWriter(FileOutputStream(File(packDir, "sensors.jsonl")), Charsets.UTF_8),
             1 shl 16,

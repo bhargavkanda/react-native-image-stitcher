@@ -862,6 +862,30 @@ void appendTailFlushLine(std::string& out, const FrameOutcome& tail) {
 
 // ── public: track row ───────────────────────────────────────────────────────
 
+void appendTrackRow(std::string& out, const TrackRow& r) {
+    out += "{\"seq\":";    appendInt(out, r.seq);
+    // %.17g, not %.9g — see the declaration.  A millisecond-quantised tsNs
+    // makes every frame after the first non-monotonic.
+    out += ",\"tsNs\":";   appendExact(out, r.tsNs);
+    out += ",\"q\":[";     appendNum(out, r.q[0]);
+    for (int k = 1; k < 4; ++k) { out += ","; appendNum(out, r.q[k]); }
+    out += "],\"t\":[";    appendNum(out, r.t[0]);
+    for (int k = 1; k < 3; ++k) { out += ","; appendNum(out, r.t[k]); }
+    out += "],\"fx\":";    appendNum(out, r.fx);
+    out += ",\"fy\":";     appendNum(out, r.fy);
+    out += ",\"cx\":";     appendNum(out, r.cx);
+    out += ",\"cy\":";     appendNum(out, r.cy);
+    out += ",\"w\":";      appendInt(out, r.w);
+    out += ",\"h\":";      appendInt(out, r.h);
+    // ALWAYS emitted.  `parseTrackRow` treats an absent `tracking` as a
+    // NAMED, COUNTED fallback (`trackingDefaulted`), and a writer that can
+    // supply the real value must never make a replay report it defaulted.
+    out += ",\"tracking\":"; appendInt(out, r.tracking);
+    out += ",\"expDurS\":";  appendNum(out, r.expDurS);
+    out += ",\"expISO\":";   appendNum(out, r.expISO);
+    out += "}\n";
+}
+
 TrackRow parseTrackRow(const std::string& line) {
     TrackRow r;
     mj::Span root;

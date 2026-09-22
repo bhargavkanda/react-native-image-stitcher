@@ -844,6 +844,7 @@ Java_io_imagestitcher_rn_panoplus_PanoPlusLiveNative_nativeLiveStart(
         jboolean previewCropPad,
         jboolean previewLeadOut,
         jboolean writeLedger,
+        jboolean writeTrack,
         jstring poseSource,
         jstring captureJson,
         jobjectArray overrideNames,
@@ -873,7 +874,8 @@ Java_io_imagestitcher_rn_panoplus_PanoPlusLiveNative_nativeLiveStart(
         opt.previewWindowAlongPx = (int)previewWindowAlongPx;
         opt.previewCropPad = (previewCropPad != JNI_FALSE);
         opt.previewLeadOut = (previewLeadOut != JNI_FALSE);
-        opt.writeLedger = (writeLedger != JNI_FALSE);
+opt.writeLedger = (writeLedger != JNI_FALSE);
+        opt.writeTrack = (writeTrack != JNI_FALSE);
         opt.poseSource = jstring_to_string(env, poseSource);
         opt.captureJsonInline = jstring_to_string(env, captureJson);
 
@@ -954,6 +956,11 @@ Java_io_imagestitcher_rn_panoplus_PanoPlusLiveNative_nativeLiveStart(
         s += ",\"metaPath\":" + str(R.metaPath);
         s += ",\"ledgerPath\":" + str(R.ledgerPath);
         s += ",\"trackPath\":" + str(R.trackPath);
+        // Whether THIS layer took ownership of it.  The path alone cannot say:
+        // on the Camera2 arm the file exists and the recorder wrote it.  A
+        // flag that crosses JNI with no compiler between the two sides has to
+        // be observable on arrival or it ships inert.
+        s += ",\"writeTrack\":" + std::string(R.writeTrack ? "true" : "false");
         s += ",\"canvasMaxPixels\":" + std::to_string(R.canvasMaxPixels);
         // The three knob buckets, by NAME.  A knob the operator set that this
         // engine build does not have must be visible on the panel — a sweep

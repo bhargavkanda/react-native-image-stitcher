@@ -96,6 +96,7 @@ internal object PanoPlusLiveNative {
         previewCropPad: Boolean,
         previewLeadOut: Boolean,
         writeLedger: Boolean,
+        writeTrack: Boolean,
         poseSource: String,
         captureJson: String,
         overrideNames: Array<String>,
@@ -185,6 +186,7 @@ internal object PanoPlusLiveNative {
         previewCropPad: Boolean,
         previewLeadOut: Boolean,
         writeLedger: Boolean,
+        writeTrack: Boolean,
         poseSource: String,
         captureJson: String,
         configOverrides: Map<String, String>,
@@ -201,7 +203,7 @@ internal object PanoPlusLiveNative {
                 previewIntervalMs, previewMaxDutyPct, previewQuality,
                 previewMaxAlong, previewMaxCross, previewWindowCrossMult,
                 previewWindowAlongPx, previewCropPad, previewLeadOut,
-                writeLedger, poseSource, captureJson,
+                writeLedger, writeTrack, poseSource, captureJson,
                 names.toTypedArray(), values.toTypedArray(),
             )
         } catch (t: Throwable) {

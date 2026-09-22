@@ -101,10 +101,16 @@ namespace live {
 /// 1920×1080 software JPEG costs ~15-20 ms on the A35, on the same thread as
 /// the engine step, and the operator's complaint is that the live arm does not
 /// exist — not that its replay twin is thin.  `track.jsonl` (the replay INPUT:
-/// poses, intrinsics, exposure, tracking) is written by the capture arm on
-/// every mode, so a `None` pack still carries the full pose ledger and this
-/// session's own `ledger.jsonl` decisions; what it cannot do is re-run the
-/// PIXELS offline.
+/// poses, intrinsics, exposure, tracking) is written on every mode, so a
+/// `None` pack still carries the full pose ledger and this session's own
+/// `ledger.jsonl` decisions; what it cannot do is re-run the PIXELS offline.
+///
+/// ⚠ THAT SENTENCE USED TO SAY "by the capture arm", AND IT WAS FALSE ON TWO
+/// ARMS OUT OF THREE.  The Android recorder's writer is reached only from the
+/// Camera2 `ImageReader` callback, so the `ar-plugin` and `vc-plugin` arms
+/// wrote no rows at all and left a 0-byte file — measured 2026-09-22 on 15 of
+/// 16 A35 packs, every date.  The row is now written HERE, under
+/// `Options::writeTrack`, which is the one point every arm funnels through.
 enum class PackFrames : int { All = 0, Painted = 1, None = 2 };
 
 struct Options {
@@ -160,6 +166,17 @@ struct Options {
     /// frame, in RNISPanoCore.mm's field order (this writes it through
     /// `rnis::pano::replay::appendLedgerLine`, so the two cannot drift).
     bool writeLedger = true;
+    /// Write `track.jsonl` — the REPLAY INPUT — from this layer.
+    ///
+    /// ⚠ DEFAULT FALSE, and it is a statement about ownership rather than
+    /// timidity: exactly one process may own this file per sweep, and this
+    /// layer cannot see the host descriptor it would collide with.  On
+    /// Android the Camera2 arm's recorder writes its own 46-key superset and
+    /// holds the handle, so it passes false; every other arm reaches the
+    /// engine WITHOUT passing through that writer and passes true.  Before
+    /// 2026-09-22 nobody passed anything and the two shipping arms left a
+    /// 0-byte file, so no capture from either could be replayed.
+    bool writeTrack = false;
 
     /// Engine knobs BY NAME, applied through
     /// `rnis::pano::replay::applyConfigOverride` — one table for meta.json
@@ -194,6 +211,11 @@ struct StartReport {
     /// The canvas ceiling actually in force, in PIXELS — the number the memory
     /// budget in this header is computed from.
     double canvasMaxPixels = 0.0;
+    /// Whether THIS layer took ownership of `track.jsonl` (see
+    /// `Options::writeTrack`).  Reported rather than inferred: the flag
+    /// crosses a JNI boundary with no compiler between the two sides, and an
+    /// arrival that cannot be observed is how a knob ships inert.
+    bool writeTrack = false;
 };
 
 /// One frame, as the capture arm knows it.

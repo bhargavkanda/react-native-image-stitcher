@@ -406,6 +406,27 @@ struct TrackRow {
 
 TrackRow parseTrackRow(const std::string& line);
 
+/// The WRITER for the row `parseTrackRow` above reads, in `RNISPanoCore.mm`'s
+/// field order.
+///
+/// ⚠ PUBLIC, AND BESIDE ITS PARSER ON PURPOSE — the same rule
+/// `appendLedgerLine` states below.  Until 2026-09-22 there were two writers
+/// of this file and neither was here: iOS built the line inline in
+/// `RNISPanoCore.mm` and Android built a 46-key superset in Kotlin, while the
+/// two arms that actually ship (`vc-plugin`, `ar-plugin`) wrote NOTHING and
+/// left a 0-byte `track.jsonl` behind — so not one capture from either arm
+/// could be replayed.  A third writer that drifted from this parser would be
+/// worse than none: a pack that parses but decodes differently is undiffable
+/// against the device it came from.  One function, next to the code that
+/// reads it.
+///
+/// Emits exactly the replay contract and nothing beyond it.  `tsNs` goes
+/// through `appendExact` (%.17g), NEVER the `%.9g` every other double uses:
+/// it carries Android's `SENSOR_TIMESTAMP` nanoseconds (~1.7e14), which %.9g
+/// quantises to the millisecond, and consecutive frames would then compare
+/// EQUAL and be refused as non-monotonic for the whole sweep.
+void appendTrackRow(std::string& out, const TrackRow& r);
+
 /// Adopt `meta.json`'s `config` object onto `cfg`.  Returns false only when
 /// the text is not an object with a `config` member; an individual knob that
 /// is absent or the wrong type leaves the field alone and lands in
