@@ -125,7 +125,24 @@ function App(): React.JSX.Element {
   // plain image preview with Retake/Confirm; both off → onCapture fires
   // immediately with no review screen.  showPreview defaults ON so the
   // post-capture preview (rRadians readout + projection comparison) mounts.
-  const [rectCrop, setRectCrop] = useState(false);
+  // 2026-09-22 — rectCrop now defaults ON.
+  //
+  // ⚠ THIS IS ALSO THE FIX FOR "the sweep gives the cropped output directly".
+  // With `rectCrop` OFF and `showPreview` ON, BOTH engines take the
+  // preview-only branch of `RectCropPreview` — a bare image with
+  // Retake/Confirm and NO draggable quad (`showCropControls={rectCrop}`,
+  // Camera.tsx:3898). That looked like a sweep-vs-keyframe divergence and is
+  // not one: the keyframe engine behaves identically in this configuration.
+  // The engines genuinely diverged here once — the render read
+  // `rectCrop && type !== 'panoplus'` — but that carve-out is gone.
+  //
+  // The example is the right place for this default, NOT the library: the
+  // public `rectCrop` default stays `false` (Camera.tsx:1702) because its
+  // JSDoc contract is "with both off, `onCapture` fires immediately with no
+  // UI", and a host relying on that would get an unasked-for modal that its
+  // auto-advance flow would stall behind — the exact defect that was fixed
+  // when `engine` started substituting the tree.
+  const [rectCrop, setRectCrop] = useState(true);
   const [showPreview, setShowPreview] = useState(true);
   // panMode flag (guidance item 1).  'vertical' (default) = landscape-only
   // (top→bottom): a portrait hold shows the rotate-to-landscape prompt.
@@ -138,6 +155,13 @@ function App(): React.JSX.Element {
   // the picked video format ≥1280.  The capture format is chosen at mount,
   // so we key the <Camera> on this to force a clean re-pick when flipped.
   const [kfQuality, setKfQuality] = useState(true);
+  // 2026-09-22 — WHICH ATTITUDE SERIES DRIVES THE GEOMETRY. OFF (default) =
+  // `TYPE_ROTATION_VECTOR`, magnetometer-fused, the shipped arm. ON =
+  // `TYPE_GAME_ROTATION_VECTOR`, magnetometer-FREE. This is a capture-
+  // MECHANISM flag — it changes the pose the engine rectifies against — so an
+  // honest A/B is two separate captures of the SAME scene, flipped between
+  // them. Android only; the iOS arm takes its attitude from ARKit/CoreMotion.
+  const [magFree, setMagFree] = useState(false);
   // v0.23 anti-blur — ONE high-level toggle.  This is a capture-MECHANISM
   // feature (it changes which frames the engine accepts), so an honest A/B
   // needs two separate captures — flip it, capture, flip back, capture.  ON =
@@ -734,6 +758,22 @@ function App(): React.JSX.Element {
           // The pack records `tauProvenance: uncorrected` and never claims a
           // τ it does not have.
           sweep={{
+            // ⚠ THE COMPASS A/B, REACHABLE AT LAST. Measured 2026-09-22 over
+            // 73 A35 packs: `crossRectifyDeg` — the quantity the rectifier
+            // turns into the canvas keystone — is ~90% MAGNETOMETER HEADING
+            // CORRECTION, not hand motion. Decomposing the two logged
+            // attitude streams gives a rotation about the world vertical with
+            // |axis| = [0,0,1.0000] on every pack, and on two deliberately
+            // drifted sweeps the phone physically rotated 0.3° and 2.4° about
+            // the cross axis while the engine rectified 20.8° and 29.3°.
+            //
+            // `attitudeMagFree` has existed since 2026-09-10 and NOTHING ever
+            // passed it, so the mag-free arm had never run on a real capture —
+            // the same shape of defect as `arPluginArm` below. A paired
+            // capture (flip, capture the same scene, flip back) is the only
+            // thing that turns the analytic 75% prediction into a measurement,
+            // and it matters most where the field is worst: steel racking.
+            attitudeMagFree: magFree,
             tauUncorrected: true,
             // ⚠ THE ANDROID AR ARM, TURNED ON — it was built for this exact
             // complaint and had never once run.
@@ -962,6 +1002,12 @@ function App(): React.JSX.Element {
                 help="OFF = 640 tiles · remounts the camera to re-pick the format"
                 value={kfQuality}
                 onValueChange={setKfQuality}
+              />
+              <DevSettingRow
+                label="Mag-free attitude (pano+)"
+                help="ON = TYPE_GAME_ROTATION_VECTOR · capture the SAME scene both ways"
+                value={magFree}
+                onValueChange={setMagFree}
               />
               <Pressable
                 style={styles.modalDoneBtn}
