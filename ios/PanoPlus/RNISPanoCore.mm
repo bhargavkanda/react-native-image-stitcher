@@ -1589,6 +1589,27 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
         @"integrityFailed":     @(st.integrityFailed),
         @"projection":          @((NSInteger)st.projection),
         @"maxCrossRectifyDeg":  jnum(st.maxCrossRectifyDeg),
+        // ── THE TWIN'S OTHER HALF ────────────────────────────────────
+        // The drift verdict and the provenance split are computed in the
+        // SHARED engine, so they exist on this arm already — they were just
+        // never surfaced here. `rnis_pano_live.cpp` is the Android twin of
+        // this dictionary, and a field added there and not here is silently
+        // iOS-invisible: the value is right, the pack simply never says it.
+        // That is how the drift detector shipped on 2026-09-22 and reached
+        // zero iPhone packs.
+        @"driftLevel":          @((NSInteger)st.driftLevel),
+        @"driftArm":            (st.driftArm.empty()
+                                    ? @"" : @(st.driftArm.c_str())),
+        @"driftFiredAtRow":     @((NSInteger)st.driftFiredAtRow),
+        @"driftPeakLeanDeg":    jnum(st.driftPeakLeanDeg),
+        @"driftPeakSlideFrac":  jnum(st.driftPeakSlideFrac),
+        // Where the delivered panorama came from, along the sweep axis.
+        // `alongAxisIsOutputY` says WHICH output axis these measure — the
+        // fact whose absence made a vertical sweep get split by columns.
+        @"provenanceSeedPx":    @((NSInteger)st.provenanceSeedPx),
+        @"provenanceStripPx":   @((NSInteger)st.provenanceStripPx),
+        @"provenanceTailPx":    @((NSInteger)st.provenanceTailPx),
+        @"alongAxisIsOutputY":  @(st.alongAxisIsOutputY),
         // Live regime read-out: 1 = a pivot, 0 = a walk.  Until the axis
         // latches this is the only signal that says WHY nothing is painting.
         @"rotationFraction":    jnum(st.rotationFraction),
@@ -2221,6 +2242,20 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
                 // at its own corner, which is the scale to read it against.
                 @"maxAreaScalePainted": jnum(st.maxAreaScalePainted),
                 @"maxCrossRectifyDeg":  jnum(st.maxCrossRectifyDeg),
+                // Same two blocks as the live dictionary above, for the same
+                // reason: a pack that cannot say how much of itself came from
+                // a single frame forces the question to be re-derived by
+                // hand, and that re-derivation has already been got wrong.
+                @"driftLevel":          @((NSInteger)st.driftLevel),
+                @"driftArm":            (st.driftArm.empty()
+                                            ? @"" : @(st.driftArm.c_str())),
+                @"driftFiredAtRow":     @((NSInteger)st.driftFiredAtRow),
+                @"driftPeakLeanDeg":    jnum(st.driftPeakLeanDeg),
+                @"driftPeakSlideFrac":  jnum(st.driftPeakSlideFrac),
+                @"provenanceSeedPx":    @((NSInteger)st.provenanceSeedPx),
+                @"provenanceStripPx":   @((NSInteger)st.provenanceStripPx),
+                @"provenanceTailPx":    @((NSInteger)st.provenanceTailPx),
+                @"alongAxisIsOutputY":  @(st.alongAxisIsOutputY),
                 @"sweepDeg":            jnum(st.sweepDeg),
                 @"crossScaleEnd":       jnum(st.crossScaleEnd),
                 @"crossScaleCagedFrames": @((NSInteger)st.crossScaleCagedFrames),
