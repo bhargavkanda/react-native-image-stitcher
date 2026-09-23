@@ -541,7 +541,19 @@ function App(): React.JSX.Element {
         + `pack ${result.sessionDir} · lead-out `
         + `${result.summary.tailFlushColumns} col(s)`,
       );
-      return;
+      // ⚠ NO `return` HERE ANY MORE — it was eating the thumbnail.
+      //
+      // Operator, 2026-09-22: "After a capture is done in sweep mode, it is
+      // not shown as thumbnail like it is in keyframe mode - it is lost."
+      // `setThumbnails` is ~25 lines below this block, so a sweep never
+      // reached it while photo and panorama fell through and got a tile.
+      //
+      // This is the THIRD field lost to this one early return. The comment
+      // above it already records the second: `warnings` was invisible on the
+      // sweep until 2026-09-20 — "the channel looked empty rather than
+      // unread" — and the fix then was to move `warnings` ABOVE the return
+      // rather than to question the return itself. Every block below is
+      // already guarded by `result.type`, so the return was buying nothing.
     }
     // Panoramas are reviewed IN the SDK's crop/preview surface (rectCrop or
     // showPreview) — that screen IS the preview, so don't pop a second
@@ -563,14 +575,29 @@ function App(): React.JSX.Element {
     // Dedup by uri — a capture-history strip should never show the same
     // capture twice, and a duplicate `id` (uri) throws React's "two children
     // with the same key".  Robust against any double onCapture delivery.
+    // ⚠ AND THE URI NEEDS A SCHEME, or the tile renders EMPTY.
+    //
+    // `CaptureThumbnailItem.uri` is documented as "`file://` or remote URI",
+    // and a photo's already is — but `panoPlusResultOf` returns
+    // `summary.canvasPath` VERBATIM, a bare native path, and that is the
+    // public `PanoPlusCaptureResult.uri` contract on purpose. `<Image>` needs
+    // the scheme. Dropping this is what made the sweep's review modal paint an
+    // empty frame with Retake, Confirm and the warnings all correct around it,
+    // and an empty thumbnail would have looked like the same "lost" capture
+    // the early return above was already causing.
+    const thumbUri = /^[a-z][a-z0-9+.-]*:/i.test(result.uri)
+      ? result.uri
+      : `file://${result.uri}`;
     setThumbnails((prev) =>
       prev.some((t) => t.id === result.uri)
         ? prev
         : [
             ...prev,
             {
+              // KEYED ON THE RAW URI so the dedup above matches what the
+              // result actually carries, while the rendered `uri` is schemed.
               id: result.uri,
-              uri: result.uri,
+              uri: thumbUri,
               width: result.width,
               height: result.height,
             },

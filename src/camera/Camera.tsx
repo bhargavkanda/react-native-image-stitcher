@@ -2406,6 +2406,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // auto-stop and can attach the LATERAL_DRIFT_FINALIZE warning.  Consumed
   // (reset) at the start of handleHoldEnd so it never leaks to the next pan.
   const lateralFinalizeRef = useRef(false);
+  /**
+   * A lateral stop is WAITING for `onComplete` to decide how to tell the
+   * operator — popup, or the review's own banner.
+   *
+   * Separate from `lateralFinalizeRef` because they answer different
+   * questions and are consumed in different places: that one decides whether
+   * the RESULT carries `LATERAL_DRIFT_FINALIZE`, this one decides whether a
+   * MODAL is raised. Folding them together is how the popup ended up racing
+   * the review surface it was supposed to sit beside.
+   */
+  const lateralStopPendingRef = useRef(false);
   // Item 4 — latched true if the pan ever exceeded the recommended pace (the
   // live "too fast" cue fired) during the capture, so the finalize attaches a
   // HIGH_PAN_SPEED warning.  Reset at capture start; consumed at finalize.
@@ -2472,6 +2483,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       setDriftStop(null);
       setLateralStopVisible(false);
       setLateralWrongDirection(false);
+      // ⚠ AND THE PENDING FLAG, on the SAME edge as the modal it decides.
+      // `onComplete` consumes it, but a sweep that ends through `onError` or
+      // a cancel never reaches `onComplete` — so without this a stopped-then-
+      // abandoned capture would leave it armed and the NEXT sweep would pop a
+      // lateral modal it never earned. Cleared on capture START for the same
+      // reason the flags above are: clearing on stop would race the stop that
+      // set it.
+      lateralStopPendingRef.current = false;
     }
   }, [captureRecording]);
 
@@ -3313,7 +3332,25 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // rather than reviewing when the canvas came back empty.
     if (sweepRunning) {
       setLateralWrongDirection(false);
-      setLateralStopVisible(true);
+      // ⚠ THE POPUP IS **NOT** RAISED HERE ANY MORE, and that is the fix for
+      // "the popup shows and then the screen goes blank" (iOS, operator
+      // 2026-09-22).
+      //
+      // Raising it here put TWO react-native `<Modal>`s up at once: this one,
+      // and the `<RectCropPreview>` the sweep's own `onComplete` stashes a
+      // moment later. On iOS a second simultaneous modal leaves an invisible,
+      // touch-swallowing orphan — the same defect fixed in 28d11df for a
+      // different pair — so dismissing this popup revealed nothing instead of
+      // the partial panorama that was sitting underneath it.
+      //
+      // The decision MOVES to `onComplete`, which is the only place that
+      // knows whether a review is being stashed at all. There the popup is
+      // raised ONLY when no review will mount, so it is a fallback rather
+      // than a competitor. When a review does mount, the reason is already on
+      // its banner as `LATERAL_DRIFT_FINALIZE` — wired deliberately so the
+      // result says why it is short — which makes the popup redundant as
+      // well as harmful.
+      lateralStopPendingRef.current = true;
       // ⚠ AND THE RESULT HAS TO SAY WHY IT IS SHORT, on this engine too.
       // The keyframe branch below sets this before `handleHoldEnd()` so the
       // capture carries `LATERAL_DRIFT_FINALIZE` in `onCapture.warnings` and
@@ -4637,8 +4674,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               // auto-advance flow stalled behind a modal with no host-visible
               // way to dismiss it. Both props were observably inert on the
               // sweep's result path.
-              if ((rectCrop || showPreview)
-                  && result.width > 0 && result.height > 0) {
+              // ⚠ THE POPUP IS A FALLBACK, NOT A COMPANION. Raised only
+              // when NO review will mount — otherwise it becomes a second
+              // simultaneous `<Modal>` and orphans the review on iOS.
+              // A review that does mount already carries the reason on its
+              // banner, so the operator is told either way and sees the
+              // partial panorama when there is one to see.
+              const willReview = (rectCrop || showPreview)
+                && result.width > 0 && result.height > 0;
+              if (lateralStopPendingRef.current) {
+                lateralStopPendingRef.current = false;
+                if (!willReview) setLateralStopVisible(true);
+              }
+              if (willReview) {
                 // ⚠ SEEDED FROM THE PANORAMA'S OWN COVERAGE, exactly as the
                 // keyframe path seeds its quad (:3123) — the operator asked
                 // for "the final output cropped to the maximum inscribable

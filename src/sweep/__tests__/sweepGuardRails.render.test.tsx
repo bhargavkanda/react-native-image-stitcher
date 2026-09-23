@@ -110,6 +110,7 @@ import { CaptureStatusOverlay } from '../../camera/CaptureStatusOverlay';
 // eslint-disable-next-line import/first
 import { OrientationDriftModal } from '../../camera/OrientationDriftModal';
 // eslint-disable-next-line import/first
+import { RectCropPreview } from '../../camera/RectCropPreview';
 import { LateralMotionModal } from '../../camera/LateralMotionModal';
 
 beforeEach(() => {
@@ -366,14 +367,48 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ …and the operator is TOLD, in the sweep tree', async () => {
-    const tree = render({ lateralBudgetCm: 1 });
+  it('⚑ …and the operator is TOLD, in the sweep tree — when nothing else will tell him', async () => {
+    // With `rectCrop` and `showPreview` both at their library defaults (false)
+    // NO review mounts, so the popup is the only channel and must fire.
+    //
+    // ⚠ IT FIRES ON COMPLETION, NOT ON THE TRIP. The decision moved into
+    // `onComplete` because that is the only place that knows whether a review
+    // is also about to mount — see the next test for why that matters.
+    const tree = render({ lateralBudgetCm: 1, rectCrop: false, showPreview: false });
     await settle();
     expect(tree.root.findByType(LateralMotionModal).props.visible).toBe(false);
     await settleUpright();
     await startSweep();
     await slideSideways();
+    await act(async () => {
+      (surfaceProps.onComplete as (r: unknown) => void)(SWEEP_RESULT);
+    });
     expect(tree.root.findByType(LateralMotionModal).props.visible).toBe(true);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …but NOT on top of the review — two modals orphan the one underneath', async () => {
+    // THE OPERATOR'S REPORT, 2026-09-22, on iOS: "the popup is shown … the
+    // screen goes blank. I thought the expected behaviour is show the preview
+    // till then". It was: `<RectCropPreview>` had the partial panorama and was
+    // orphaned by this popup stacking over it — two simultaneous react-native
+    // `<Modal>`s leave an invisible, touch-swallowing one on iOS, the same
+    // defect 28d11df fixed for a different pair.
+    //
+    // FAILS BEFORE THE FIX: the lateral effect raised the popup directly, so
+    // both were visible at once.
+    const tree = render({ lateralBudgetCm: 1, rectCrop: true, showPreview: true });
+    await settle();
+    await settleUpright();
+    await startSweep();
+    await slideSideways();
+    await act(async () => {
+      (surfaceProps.onComplete as (r: unknown) => void)(SWEEP_RESULT);
+    });
+    // The review mounts with the partial panorama…
+    expect(tree.root.findByType(RectCropPreview).props.visible).toBe(true);
+    // …and the popup stays down, because the reason is already on its banner.
+    expect(tree.root.findByType(LateralMotionModal).props.visible).toBe(false);
     act(() => { tree.unmount(); });
   });
 
