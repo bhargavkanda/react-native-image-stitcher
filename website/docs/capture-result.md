@@ -9,7 +9,16 @@ sidebar_position: 8
 ## `onCapture` always fires once per attempt
 
 As of **v0.16**, `onCapture` fires **exactly once for every capture
-attempt** — success *or* failure. The result is a discriminated union
+attempt** — success *or* failure — except for attempts that end with no
+output: a capture the library **abandons** (see
+[`onCaptureAbandoned`](#oncaptureabandoned--no-output-at-all) below), and one
+the user discards with **Retake** in a review surface (the crop editor,
+`rectCrop`, **on by default**; or `showPreview`). A **Crop** from the editor
+emits a `uri` with a `?t=<ms>` cache-busting query so an `<Image>` re-reads the
+file: the library's own `copyFile`, `moveFile`, `cropQuad` and
+`runQualityCheck` accept it as-is, and `toBareFilePath` (exported) turns it
+into a plain filesystem path for any other file API. The result is a
+discriminated union
 keyed first on `ok`, then on `type`:
 
 - `ok: true` — the output is present (an `uri`/`width`/`height` to read).

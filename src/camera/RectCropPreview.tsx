@@ -140,7 +140,7 @@ export interface RectCropPreviewProps {
    * quad + corner handles + the [Retake][Use original][Crop] bar — the full
    * crop editor.  `false` hides the quad and all crop affordances, showing
    * just the stitched image with a [Retake][Confirm] bar — a plain preview
-   * (`<Camera showPreview>` without `rectCrop`).  Confirm emits the image
+   * (`<Camera rectCrop={false} showPreview>`).  Confirm emits the image
    * un-cropped (same as "Use original").
    */
   showCropControls?: boolean;

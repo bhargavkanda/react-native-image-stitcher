@@ -644,7 +644,8 @@ export const DEFAULT_PANORAMA_SETTINGS: PanoramaSettings = {
     seamFinderType: 'voronoi',
     // v0.15 — inscribed-rect crop is OFF by default (bbox crop keeps all
     // stitched content).  Opt in with `maxInscribedRectCrop={true}` (or toggle
-    // it on in settings) for a clean-cornered rectangle — but it can shrink the
+    // it on in settings) — only with `rectCrop={false}`: the crop editor, on by
+    // default, forces this off at the native boundary — for a clean-cornered rectangle — but it can shrink the
     // output a lot on lopsided / ultra-wide masks, which is why it's opt-in.
     enableMaxInscribedRectCrop: false,
     // perf-3b — range-matcher ladder ON by default (2/2/3 schedule):

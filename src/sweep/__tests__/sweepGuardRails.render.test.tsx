@@ -368,8 +368,8 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
   });
 
   it('⚑ …and the operator is TOLD, in the sweep tree — when nothing else will tell him', async () => {
-    // With `rectCrop` and `showPreview` both at their library defaults (false)
-    // NO review mounts, so the popup is the only channel and must fire.
+    // With `rectCrop` and `showPreview` both OFF (passed explicitly below —
+    // `rectCrop` defaults ON since 2026-09-23) NO review mounts, so the popup is the only channel and must fire.
     //
     // ⚠ IT FIRES ON COMPLETION, NOT ON THE TRIP. The decision moved into
     // `onComplete` because that is the only place that knows whether a review

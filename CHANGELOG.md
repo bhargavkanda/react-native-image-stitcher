@@ -14,6 +14,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > during 0.x are bumped to a new MINOR (e.g., 0.1 → 0.2), and the
 > upgrade path is documented in this CHANGELOG.
 
+## [Unreleased]
+
+### Changed (BREAKING)
+
+- **`rectCrop` now defaults to `true`** (it was `false` through 0.26.x). After
+  every panorama — keyframe or sweep — `<Camera>` opens the draggable-quad
+  crop editor, seeded on the largest rectangle the panorama's painted pixels
+  fill, before `onCapture` fires. While the editor is on, the native auto-crop
+  is forced off whatever spelled it on (`maxInscribedRectCrop`, the
+  `stitcher={{ enableMaxInscribedRectCrop: true }}` recipe, or the settings
+  toggle), so the editor receives the full panorama.
+  **Upgrade:**
+  - a host that relied on `onCapture` firing immediately with no UI must pass
+    `rectCrop={false}` (and keep `showPreview={false}`);
+  - a host that passed only `showPreview` for the plain Retake/Confirm screen
+    must add `rectCrop={false}`;
+  - a host that passed only `maxInscribedRectCrop={true}` for a clean crop with
+    no UI must add `rectCrop={false}`;
+  - while a review is up, **Retake emits no `onCapture`** (the attempt is
+    discarded), and **Crop emits a `uri` with a `?t=<ms>` cache-busting
+    query**. The library's `copyFile`, `moveFile`, `cropQuad` and
+    `runQualityCheck` now accept that uri as-is; for any other file API use
+    `toBareFilePath` (now exported). Both behaviours were already true for
+    hosts that opted in; they are now the default.
+- **Sweep engine: the first frame's lead-in is trimmed where later frames
+  passed** (`Config::seedLeadTrim`, on by default; engine version 16). The
+  first frame is still painted whole at the latch, so the live preview is
+  unchanged; at finish, any of its pixels ahead of its centre that a later
+  frame passed without covering are cleared. That removes the faint line and
+  the doubled edges the first frame left beside the strips. It recovers no
+  content: those pixels were seen by the first frame alone, so they become
+  unpainted, and the crop editor's starting rectangle gets smaller on most
+  captures — over 93 replayed captures (iPhone and Galaxy A35): smaller on 57
+  (median 0.86 points of the canvas among those, worst 6.15), equal on 34,
+  larger on 2 (by under 0.25 points, where an emptied end row shortened the
+  canvas). A sweep with no strip after its first frame keeps the whole frame.
+  The count is reported as `seedLeadTrimPx` on the sweep's result summary
+  (typed on `PanoPlusSummary`) and in the pack's `meta.json` — under `counts`
+  on Android, under `projection` on iOS — and the arm as
+  `config.seedLeadTrim`. `sweep={{ engineOptions: { seedLeadTrim: false } }}`
+  selects the control arm on both platforms.
+
+### Fixed
+
+- **Keyframe lateral-drift stop no longer raises its popup under the review
+  screen.** The popup is now decided when the stitch lands and raised only
+  when no review screen will mount (the review banner already carries
+  `LATERAL_DRIFT_FINALIZE`), or when the stitch failed. Raising it at the stop
+  put the popup and the crop editor up at once — two RN `<Modal>`s, which on
+  iOS leaves an invisible window that swallows every touch: a dead shutter.
+  With `rectCrop` on by default every host could reach it. A capture no longer
+  inherits a stale lateral-drift tag from the one before it.
+- **The crop editor's `?t=<ms>` uri is readable by the library's own helpers.**
+  `copyFile`, `moveFile`, `cropQuad` and `runQualityCheck` strip that exact
+  trailing cache-buster before calling native (which strips only `file://`).
+  `toBareFilePath` is now exported and does the same; nothing else in a uri is
+  touched, so a path whose name contains `#` or `?` still round-trips through
+  `toFileUri`.
+- **The settings modal's "Inscribed-rect crop" switch says it is inactive
+  while the crop editor is on,** instead of showing a setting that cannot take
+  effect.
+
 ## [0.24.2] - 2026-08-11
 
 ### Fixed

@@ -120,16 +120,21 @@ warp. `maxInscribedRectCrop` chooses how that canvas is cropped at finalize:
   lopsided or ultra-wide pans — which is why it's **opt-in**.
 
 ```tsx
-// Default (false) — bounding-box crop, keeps every stitched pixel:
+// Default — the crop editor opens, seeded on the inscribed rectangle:
 <Camera onCapture={handleCapture} />
 
-// Opt in — clean inscribed rectangle, no black corners (may shrink the output):
-<Camera onCapture={handleCapture} maxInscribedRectCrop={true} />
+// No editor, bounding-box crop, keeps every stitched pixel:
+<Camera onCapture={handleCapture} rectCrop={false} />
+
+// No editor, clean inscribed rectangle (may shrink the output):
+<Camera onCapture={handleCapture} rectCrop={false} maxInscribedRectCrop={true} />
 ```
 
 :::caution `rectCrop` forces this off
-When the [`rectCrop`](#panorama-capture--guidance-v016) draggable-quad editor
-is enabled, the native auto-crop (`maxInscribedRectCrop`) is forced off — the
+The [`rectCrop`](#panorama-capture--guidance-v016) draggable-quad editor is
+**on by default** (since the release after 0.26.x), and while it is on the
+native auto-crop is forced off — whether it was spelled `maxInscribedRectCrop`,
+`stitcher={{ enableMaxInscribedRectCrop: true }}` or the settings toggle. The
 manual crop is the source of truth.
 :::
 
@@ -208,7 +213,8 @@ The prop JSDoc claims a default of `5`. The real component default is **`4`**
 
 ### `rectCrop`
 
-`boolean`, default **`false`**.
+`boolean`, default **`true`** (it was `false` through 0.26.x — pass
+`rectCrop={false}` for the old behaviour).
 
 Show the draggable-quad crop editor after a pano finalizes, **before**
 `onCapture` fires. With `true`, the user drags four corners and confirming
@@ -219,7 +225,8 @@ perspective-rectifies the stitch to a rectangle.
 `boolean`, default **`false`**.
 
 Show a plain review screen (Retake / Confirm, no crop box) after a pano
-finalizes. Ignored when `rectCrop` is on.
+finalizes. Ignored when `rectCrop` is on — and `rectCrop` is on by default, so
+this needs `rectCrop={false}`.
 
 ### How `rectCrop` and `showPreview` interact
 
@@ -430,7 +437,7 @@ fall back to `DEFAULT_GUIDANCE_COPY` (the defaults shown here).
 | `cropReset` | `Reset` | Reset-corners button on the crop editor. |
 | `cropUseOriginal` | `Use original` | "Emit the stitch un-cropped" button on the crop editor. |
 | `cropRetake` | `Retake` | Discard this capture and return to the camera. |
-| `previewConfirm` | `Confirm` | Accept button in preview-only mode (`showPreview` without `rectCrop`): confirms the stitched image as-is. |
+| `previewConfirm` | `Confirm` | Accept button in preview-only mode (`showPreview` with `rectCrop={false}`): confirms the stitched image as-is. |
 | `statusRecording` | `Hold steady — pan slowly` | `CaptureStatusOverlay` banner while a capture is recording (calm green state). |
 | `statusStitching` | `Stitching panorama…` | `CaptureStatusOverlay` banner while the panorama is being stitched after release. |
 | `warnLowFrameUtilization` | `Only {included} of {requested} captured frames ({percent}%) could be used — the panorama may be incomplete. Pan more slowly and steadily next time.` | `LOW_FRAME_UTILIZATION` warning. **Template** — keep the `{included}` / `{requested}` / `{percent}` placeholders. |

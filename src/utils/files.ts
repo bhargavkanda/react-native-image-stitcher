@@ -24,6 +24,8 @@
 
 import { NativeModules } from 'react-native';
 
+import { toBareFilePath } from './paths';
+
 
 interface FileUtilsBridge {
   moveFile(from: string, to: string): Promise<string>;
@@ -53,7 +55,9 @@ export async function moveFile(from: string, to: string): Promise<string> {
       + 'rebuilt against the latest pod/Gradle install.',
     );
   }
-  return b.moveFile(from, to);
+  // Normalised here, not in native: a `file://` uri may carry the crop
+  // editor's `?t=` cache-buster, which the native `stripFileScheme` keeps.
+  return b.moveFile(toBareFilePath(from), toBareFilePath(to));
 }
 
 
@@ -74,7 +78,7 @@ export async function copyFile(from: string, to: string): Promise<string> {
       + 'rebuilt against the latest pod/Gradle install.',
     );
   }
-  return b.copyFile(from, to);
+  return b.copyFile(toBareFilePath(from), toBareFilePath(to));
 }
 
 

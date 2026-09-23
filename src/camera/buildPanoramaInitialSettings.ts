@@ -108,6 +108,9 @@ export interface PanoramaPropOverrides {
    * v0.15 — initial value for `stitcher.enableMaxInscribedRectCrop`.
    * Maps from the standalone `maxInscribedRectCrop` <Camera> prop.
    * Omitted ⇒ the stitcher default (false = bounding-rect crop).
+   * ⚠ This is the SETTING; while `<Camera>`'s crop editor (`rectCrop`, on by
+   * default) is on, the value that reaches native is forced false at the
+   * native boundary (`stitcherForNative`), whichever spelling set it.
    */
   maxInscribedRectCrop?: boolean;
   /**

@@ -125,23 +125,18 @@ function App(): React.JSX.Element {
   // plain image preview with Retake/Confirm; both off → onCapture fires
   // immediately with no review screen.  showPreview defaults ON so the
   // post-capture preview (rRadians readout + projection comparison) mounts.
-  // 2026-09-22 — rectCrop now defaults ON.
+  // rectCrop defaults ON here AND, since 2026-09-23, in the library itself
+  // (`RECT_CROP_DEFAULT` in Camera.tsx) — the example passes its toggle
+  // explicitly, so switching it off here still reaches the library.
   //
   // ⚠ THIS IS ALSO THE FIX FOR "the sweep gives the cropped output directly".
   // With `rectCrop` OFF and `showPreview` ON, BOTH engines take the
   // preview-only branch of `RectCropPreview` — a bare image with
-  // Retake/Confirm and NO draggable quad (`showCropControls={rectCrop}`,
-  // Camera.tsx:3898). That looked like a sweep-vs-keyframe divergence and is
-  // not one: the keyframe engine behaves identically in this configuration.
-  // The engines genuinely diverged here once — the render read
+  // Retake/Confirm and NO draggable quad (`showCropControls={rectCrop}`).
+  // That looked like a sweep-vs-keyframe divergence and is not one: the
+  // keyframe engine behaves identically in this configuration. The engines
+  // genuinely diverged here once — the render read
   // `rectCrop && type !== 'panoplus'` — but that carve-out is gone.
-  //
-  // The example is the right place for this default, NOT the library: the
-  // public `rectCrop` default stays `false` (Camera.tsx:1702) because its
-  // JSDoc contract is "with both off, `onCapture` fires immediately with no
-  // UI", and a host relying on that would get an unasked-for modal that its
-  // auto-advance flow would stall behind — the exact defect that was fixed
-  // when `engine` started substituting the tree.
   const [rectCrop, setRectCrop] = useState(true);
   const [showPreview, setShowPreview] = useState(true);
   // panMode flag (guidance item 1).  'vertical' (default) = landscape-only

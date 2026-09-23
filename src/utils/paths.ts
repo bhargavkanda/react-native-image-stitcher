@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * Path normalisation helpers.  Internal — NOT re-exported from
- * `src/index.ts`; the public surface intentionally doesn't promise
- * these utilities to consumers (every host app has its own copy).
+ * Path normalisation helpers.  `toBareFilePath` is PUBLIC (re-exported from
+ * `src/index.ts`) since `rectCrop` went on by default: the crop editor's
+ * `?t=<ms>` uri reaches most hosts, and the documented way to turn it back
+ * into a readable path has to be importable.  The rest stay internal.
  *
  * Two shapes a file path can take when crossing the JS / native /
  * React layers in this library:
@@ -34,10 +35,42 @@ export function toFileUri(path: string | null | undefined): string {
   return `file://${path}`;
 }
 
-/** Strip the `file://` scheme from a URI, idempotently. */
+/**
+ * The cache-buster `<Camera>`'s crop editor appends to the uri it emits —
+ * `?t=<Date.now()>`, so an `<Image>` re-reads a file cropped in place.  ONLY
+ * this exact trailing shape: a `file://` uri built by {@link toFileUri} is a
+ * raw path (never percent-encoded), so a `#` or a `?` anywhere else in it is
+ * part of a directory or file NAME (`Store #12/`), not a URI delimiter, and
+ * must survive the round trip.
+ */
+const CROP_CACHE_BUSTER = /\?t=\d+$/;
+
+/**
+ * Drop the crop editor's `?t=<ms>` cache-buster from a uri, keeping the
+ * scheme.  For the path-taking helpers that hand a uri to native as-is
+ * (`cropQuad`, `runQualityCheck`), whose native side strips only `file://`.
+ */
+export function stripCropCacheBuster(uri: string | null | undefined): string {
+  if (!uri) return '';
+  return uri.replace(CROP_CACHE_BUSTER, '');
+}
+
+/**
+ * Strip the `file://` scheme from a URI, idempotently — and the crop editor's
+ * `?t=<ms>` cache-buster with it.
+ *
+ * With `rectCrop` on by default, `file://…jpg?t=<ms>` is the uri most hosts
+ * receive from a Crop, and kept, the `?t=` becomes part of a filename that
+ * does not exist — the the host app field failure "Panorama not found at path:
+ * …jpg?t=…" (2026-07-09).  Nothing else is touched: see
+ * {@link CROP_CACHE_BUSTER} for why a `#` or `?` elsewhere is a name.  A BARE
+ * path is returned as-is.
+ */
 export function toBareFilePath(path: string | null | undefined): string {
   if (!path) return '';
-  if (path.startsWith('file://')) return path.slice('file://'.length);
+  if (path.startsWith('file://')) {
+    return path.slice('file://'.length).replace(CROP_CACHE_BUSTER, '');
+  }
   return path;
 }
 

@@ -86,7 +86,7 @@ export function FullyLoadedCamera() {
       maxPanDurationMs={0}
       panTooFastThreshold={0.6}
       lateralBudgetCm={4}
-      rectCrop={false}
+      rectCrop={true}
       showPreview={false}
       guidanceCopy={{
         rotateToLandscape: 'Turn your phone sideways',
@@ -222,9 +222,11 @@ to `0` (disabled) — the keyframe-count cap is the primary auto-stop, and
 the time ceiling is opt-in. `lateralBudgetCm` (default `4`) finalizes the
 capture once sideways drift exceeds the budget; `0` disables it.
 `panTooFastThreshold` (resolves to `0.6` rad/s) flags an over-fast pan.
-`rectCrop` shows the draggable-quad perspective-crop editor after finalize
-and takes precedence over `showPreview` (a plain Retake/Confirm screen);
-with both off, `onCapture` fires immediately with no review UI. See the
+`rectCrop` (on by default since the release after 0.26.x) shows the
+draggable-quad perspective-crop editor after finalize and takes precedence
+over `showPreview` (a plain Retake/Confirm screen, which therefore needs
+`rectCrop={false}`); with both off, `onCapture` fires immediately with no
+review UI. See the
 [Panorama capture & guidance](./camera-api.md#panorama-capture--guidance-v016) section.
 
 For `guidanceCopy`, pass a `Partial<GuidanceCopy>` — only the keys you

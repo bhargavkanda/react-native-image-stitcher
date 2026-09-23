@@ -65,16 +65,18 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
       transient SLIDE registers; confirm that matches the intended feel.
 
 **Item 7 — Draggable-quad crop + perspective rectify**
-- [ ] With `rectCrop`, after a stitch the crop editor shows the result
+- [ ] With `rectCrop` (on by default since the unreleased change after
+      0.24.2 — no prop needed), after a stitch the crop editor shows the result
       with 4 draggable corners. Corners don't jump on first touch.
 - [ ] Drag into a skewed (non-rectangular) quad → Crop → output is a
       perspective-rectified upright rectangle (native `cropToQuad`).
 - [ ] Drag to an axis-aligned rectangle → Crop → a plain crop.
 - [ ] "Use original" → the original (un-cropped) panorama is emitted;
       "Retake" → no `onCapture`, back to the camera.
-- [ ] **`showPreview` (without `rectCrop`)** → same screen with NO quad/corners
+- [ ] **`showPreview` with `rectCrop={false}`** → same screen with NO quad/corners
       and a [Retake]/[Confirm] bar; Confirm emits the stitched image as-is.
-- [ ] **Both off** → `onCapture` fires immediately, no review screen.
+- [ ] **Both off** (`rectCrop={false}` explicitly) → `onCapture` fires
+      immediately, no review screen.
 - [ ] OOM watch: crop a very large panorama — the native warp is size-guarded
       (`canvasExceedsGuard`) but verify no jetsam/lmkd on a low-RAM device.
 

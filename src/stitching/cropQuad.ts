@@ -35,6 +35,7 @@
 import { NativeModules, Platform } from 'react-native';
 
 import type { Point, Quad } from '../camera/cropGeometry';
+import { stripCropCacheBuster } from '../utils/paths';
 
 
 /** Options for {@link cropQuad}. */
@@ -187,6 +188,11 @@ export async function cropQuad(
     );
   }
 
+  // The crop editor's `?t=<ms>` cache-buster is not part of the file: native
+  // strips only `file://`, so kept it looked for `…jpg?t=…` and refused with
+  // "Image not found" — the uri a default host now gets from every Crop.
+  imagePath = stripCropCacheBuster(imagePath);
+  if (outPath !== undefined) outPath = stripCropCacheBuster(outPath);
   const quality = clampQuality(opts?.quality);
   const wantsElsewhere = outPath !== undefined && outPath !== imagePath;
   // ⚠ REFUSE BEFORE NATIVE TOUCHES THE FILE, not after. The post-hoc echo

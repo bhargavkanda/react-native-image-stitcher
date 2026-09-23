@@ -409,8 +409,11 @@ describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element
     //
     // `showPreview` is explicit because the subject is the REVIEW CYCLE, and
     // a sweep only opens a review when the host asked for one — the same
-    // `(rectCrop || showPreview)` gate the keyframe engine uses.
-    const tree = await render({ showPreview: true });
+    // `(rectCrop || showPreview)` gate the keyframe engine uses. `rectCrop`
+    // is pinned OFF: it defaults ON since 2026-09-23, and the crop editor
+    // opens only after the inscribed-rect decode is awaited, so the
+    // preview-only branch (which stashes in the same tick) is the subject.
+    const tree = await render({ rectCrop: false, showPreview: true });
     act(() => {
       (cameraViews(tree)[0].props.cameraProps as {
         onPreviewStarted?: () => void;
@@ -660,7 +663,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // The inversion that made Retake impossible.
     const seen: unknown[] = [];
     const tree = await render({
-      showPreview: true, onCapture: (r: unknown) => { seen.push(r); },
+      rectCrop: false, showPreview: true, onCapture: (r: unknown) => { seen.push(r); },
     });
     const onComplete = surfaceProps(tree).onComplete as (r: unknown) => void;
     act(() => { onComplete(RESULT); });
@@ -681,7 +684,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
   it('⚑ Confirm emits it, exactly once, with the panoplus discriminant', async () => {
     const seen: Array<Record<string, unknown>> = [];
     const tree = await render({
-      showPreview: true,
+      rectCrop: false, showPreview: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
@@ -701,7 +704,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // Impossible before: the host had the result the moment the sweep ended.
     const seen: unknown[] = [];
     const tree = await render({
-      showPreview: true, onCapture: (r: unknown) => { seen.push(r); },
+      rectCrop: false, showPreview: true, onCapture: (r: unknown) => { seen.push(r); },
     });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
     act(() => { (review(tree)[0].props.onRetake as () => void)(); });
@@ -723,7 +726,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
 
   it('⚑ every sweep writes host_verdict.json into its own session dir', async () => {
     written.length = 0;
-    const tree = await render({ showPreview: true });
+    const tree = await render({ rectCrop: false, showPreview: true });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
     await act(async () => { await Promise.resolve(); });
     const verdict = written.filter((w) => w.uri.endsWith('/host_verdict.json'));
@@ -750,7 +753,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // discarded sweep still leaves its evidence on disk. That is the whole
     // reason the call sits where it does.
     written.length = 0;
-    const tree = await render({ showPreview: true });
+    const tree = await render({ rectCrop: false, showPreview: true });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
     await act(async () => { await Promise.resolve(); });
     act(() => { (review(tree)[0].props.onRetake as () => void)(); });
@@ -797,7 +800,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     );
     const seen: Array<Record<string, unknown>> = [];
     const tree = await render({
-      showPreview: true,
+      rectCrop: false, showPreview: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(holed); });
@@ -817,7 +820,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // good panorama.
     const seen: Array<Record<string, unknown>> = [];
     const tree = await render({
-      showPreview: true,
+      rectCrop: false, showPreview: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
@@ -910,7 +913,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     );
     const seen: Array<Record<string, unknown>> = [];
     const tree = await render({
-      showPreview: true,            // preview-only — NOT the crop editor
+      rectCrop: false, showPreview: true,            // preview-only — NOT the crop editor
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
     await act(async () => {
@@ -988,6 +991,25 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
     expect(review(tree)).toHaveLength(0);
     expect(seen).toHaveLength(1);          // …and it emitted immediately
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ rectCrop is ON by default — a host passing NEITHER review prop gets the crop editor', async () => {
+    // The operator's 2026-09-23 decision flipped the library default. A host
+    // that says nothing about review now gets exactly what `rectCrop: true`
+    // gives: the draggable quad, seeded on the inscribed rectangle, and
+    // nothing reaches `onCapture` until the operator acts. The "both off"
+    // case above is therefore opt-in: it has to say `rectCrop: false`.
+    const seen: unknown[] = [];
+    const tree = await render({ onCapture: (r: unknown) => { seen.push(r); } });
+    await act(async () => {
+      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
+    });
+    expect(review(tree)).toHaveLength(1);
+    expect(review(tree)[0].props.showCropControls).toBe(true);
+    expect(review(tree)[0].props.initialRect)
+      .toEqual({ x: 12, y: 8, width: 3600, height: 1100 });
+    expect(seen).toHaveLength(0);
     act(() => { tree.unmount(); });
   });
 

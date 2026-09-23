@@ -57,7 +57,7 @@ export interface GuidanceCopy {
   /** Item 7 — discard this capture and return to the camera. */
   cropRetake: string;
   /**
-   * Accept button in PREVIEW-ONLY mode (`showPreview` without `rectCrop`):
+   * Accept button in PREVIEW-ONLY mode (`showPreview` with `rectCrop={false}`):
    * the editor shows the stitched image with no crop box, and this confirms
    * it as-is.
    */

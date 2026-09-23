@@ -513,7 +513,8 @@ export interface CameraProps {
    * v0.16 — the stitch RECIPE as a JSON object (`stitchMode` / `warperType` /
    * `blenderType` / `enableMaxInscribedRectCrop` / `debugPack`).  Partial; wins
    * over the flat `default*` props.  v0.24 — the speed levers moved to {@link
-   * perf}. */
+   * perf}.  ⚠ `enableMaxInscribedRectCrop` is forced off while the crop editor
+   * ({@link rectCrop}, on by default) is on. */
   stitcher?: PanoramaPropOverrides['stitcher'];
   /**
    * v0.16 — the keyframe GATE as a JSON object (`mode` / `maxKeyframes` /
@@ -548,10 +549,15 @@ export interface CameraProps {
    * initial setting; the in-app settings modal can override it at
    * runtime. It changes image geometry (the crop), not encoding.
    *
-   * Since the default is `false`, only pass this prop to opt in:
+   * ⚠ Applies only with `rectCrop={false}`. The crop editor (`rectCrop`,
+   * **on by default**) owns cropping and forces this off so it gets the full
+   * panorama to seed its quad on — the editor opens on the largest clean
+   * inscribed rectangle (not necessarily the exact rectangle this native
+   * pass would ship: that one adds a morph-close, a 50% floor and a column
+   * pass). To get this native crop with no UI:
    * @example
-   * // Crop to a clean inscribed rectangle (no black corners):
-   * <Camera maxInscribedRectCrop={true} />
+   * // Crop to a clean inscribed rectangle (no black corners), no editor:
+   * <Camera rectCrop={false} maxInscribedRectCrop={true} />
    */
   maxInscribedRectCrop?: boolean;
 
@@ -1213,11 +1219,24 @@ export interface CameraProps {
 
   /**
    * Show the draggable-quad crop editor after a panorama finalizes, BEFORE
-   * emitting it via `onCapture`.  Default `false`.  When `true`, the user
-   * drags 4 corners over the stitched result; confirming crops in place
-   * (perspective-rectify when the quad isn't axis-aligned), "Use original"
-   * emits the un-cropped panorama, "Retake" discards it.  Takes precedence
-   * over {@link showPreview}.
+   * emitting it via `onCapture`.  **Default `true`** (it was `false` through
+   * 0.26.x).  The user drags 4 corners over the stitched result, which opens
+   * seeded on the largest rectangle the panorama's painted pixels fill;
+   * confirming crops in place (perspective-rectify when the quad isn't
+   * axis-aligned), "Use original" emits the un-cropped panorama, "Retake"
+   * discards it.  Same editor for both engines.  Takes precedence over
+   * {@link showPreview}, and forces the native auto-crop
+   * (`maxInscribedRectCrop`) off so the editor gets the full panorama.
+   *
+   * ⚠ A host that wants `onCapture` to fire immediately with no UI (an
+   * auto-advance flow) must now pass `rectCrop={false}` explicitly, along
+   * with `showPreview={false}`; a host that wants the plain Retake/Confirm
+   * preview must pass `rectCrop={false} showPreview`.  While a review is
+   * up, Retake emits NO `onCapture` (the attempt is discarded), and Crop
+   * emits a `uri` carrying a `?t=<ms>` cache-busting query — strip it
+   * with `toBareFilePath` (exported) before handing the uri to a file API
+   * of your own; the library's `copyFile` / `moveFile` / `cropQuad` /
+   * `runQualityCheck` accept it as-is.
    */
   rectCrop?: boolean;
 
@@ -1225,7 +1244,9 @@ export interface CameraProps {
    * Show a plain review screen after a panorama finalizes — the stitched
    * image with [Retake] / [Confirm] and NO crop box.  Default `false`.
    * Ignored when {@link rectCrop} is on (the crop editor is itself the
-   * preview).  With both off, `onCapture` fires immediately with no UI.
+   * preview) — and `rectCrop` is on by default, so this only matters with
+   * `rectCrop={false}`.  With both off, `onCapture` fires immediately with
+   * no UI.
    */
   showPreview?: boolean;
 
@@ -1577,6 +1598,38 @@ function deriveEffectiveCaptureSource(
 
 
 /**
+ * `rectCrop`'s default — ONE constant, because two places read it: the
+ * component's destructure and `extractPanoramaOverrides` (which decides
+ * whether the native auto-crop is forced off).  On since the operator's
+ * 2026-09-23 decision; see the prop's JSDoc.
+ */
+const RECT_CROP_DEFAULT = true;
+
+/**
+ * The ONE reading of `rectCrop`: omitted → {@link RECT_CROP_DEFAULT}, anything
+ * else → its truthiness.  A destructure default applies to `undefined` only
+ * while `??` also catches `null`, so using one in the component and the other
+ * in `extractPanoramaOverrides` made `rectCrop={null}` (an untyped JS host)
+ * mean "no editor" in one place and "force the native crop off" in the other.
+ */
+function resolveRectCrop(value: boolean | null | undefined): boolean {
+  return value === undefined ? RECT_CROP_DEFAULT : !!value;
+}
+
+/**
+ * The stitcher settings as they reach native: with the crop editor on, the
+ * native auto-crop is OFF whatever spelled it on (the flat prop, the
+ * `stitcher` recipe, the settings modal) — the editor needs the full
+ * panorama to seed and drag its quad on.
+ */
+function stitcherForNative<T extends { enableMaxInscribedRectCrop: boolean }>(
+  stitcher: T,
+  rectCrop: boolean,
+): T {
+  return rectCrop ? { ...stitcher, enableMaxInscribedRectCrop: false } : stitcher;
+}
+
+/**
  * Pluck the props that influence the initial PanoramaSettings tree.
  * Kept inline (vs. a wide structural type) so future Camera prop
  * additions don't accidentally widen the settings-translation
@@ -1613,7 +1666,12 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
     // panorama (black borders included) so the user can drag the inscribed-
     // rect seed outward to keep more content.  Letting the native auto-crop
     // pre-trim would leave nothing to adjust.
-    maxInscribedRectCrop: props.rectCrop
+    //
+    // ⚠ Through the SAME default the component destructures — reading the
+    // raw prop here would treat an omitted `rectCrop` as off while the
+    // component treats it as on, and the editor would open on a panorama the
+    // native auto-crop had already trimmed.
+    maxInscribedRectCrop: resolveRectCrop(props.rectCrop)
       ? false
       : props.maxInscribedRectCrop,
   };
@@ -1710,10 +1768,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     maxPanDurationMs = 0,
     panTooFastThreshold,
     lateralBudgetCm = 4,
-    rectCrop = false,
+    rectCrop: rectCropProp,
     showPreview = false,
     guidanceCopy,
   } = props;
+  const rectCrop = resolveRectCrop(rectCropProp);
 
   // Derived guidance state.  The landscape-only gate decision itself is
   // computed inline at the call sites via `shouldGateForPanMode(panMode,
@@ -2502,6 +2561,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // reason the flags above are: clearing on stop would race the stop that
       // set it.
       lateralStopPendingRef.current = false;
+      // …and the marker that tags a finalize as lateral-drift-triggered, for
+      // the same reason: a lateral trip whose finalize lost the race to a
+      // release (its `handleHoldEnd` call returned on the re-entrancy latch)
+      // left it set, and the NEXT capture was stamped LATERAL_DRIFT_FINALIZE.
+      lateralFinalizeRef.current = false;
     }
   }, [captureRecording]);
 
@@ -2904,7 +2968,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // cadence is 1, so the effective product cadence is unchanged. AR mode
         // keeps native-side decimation (AR frames never pass the worklet).
         config: panoramaSettingsToNativeConfig(
-          { ...settings, captureSource: effectiveCaptureSource },
+          {
+            ...settings,
+            captureSource: effectiveCaptureSource,
+            // ⚠ THE EDITOR OWNS CROPPING, WHATEVER SPELLED THE AUTO-CROP ON.
+            // `extractPanoramaOverrides` forces the flat `maxInscribedRectCrop`
+            // off, but that is the LOWEST-precedence slot: the documented
+            // `stitcher={{ enableMaxInscribedRectCrop: true }}` recipe and the
+            // settings-modal toggle both land after it, and the editor would
+            // then open on a panorama native had already trimmed. Forcing it
+            // here, at the one place settings reach native, covers every
+            // spelling.
+            stitcher: stitcherForNative(settings.stitcher, rectCrop),
+          },
           { frameSourceMode: isNonAR ? 'frameProcessor' : 'arSession' },
         ),
       });
@@ -2989,6 +3065,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     isNonAR,
     deviceOrientation,
     settings,
+    rectCrop,
     effectiveCaptureSource,
     imuGate,
     fpDriver,
@@ -3191,11 +3268,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // mount RectCropPreview (crop mode when `rectCrop`, preview-only when
       // just `showPreview`).  The modal's confirm / use-original / retake
       // decision emits the final result.  Otherwise emit immediately.
-      if (
-        (rectCrop || showPreview)
+      const willReview = (rectCrop || showPreview)
         && result.width > 0
-        && result.height > 0
-      ) {
+        && result.height > 0;
+      // The lateral-stop popup, decided here and only here (see the lateral
+      // effect): a FALLBACK when no review will mount, never a second modal.
+      if (lateralStopPendingRef.current) {
+        lateralStopPendingRef.current = false;
+        if (!willReview) setLateralStopVisible(true);
+      }
+      if (willReview) {
         // Crop mode only — seed the quad from the max-inscribed rectangle of
         // the (un-cropped) panorama so the editor opens on the tightest clean
         // rectangle, not a blind 8 % inset.  Best-effort: an absent native
@@ -3243,6 +3325,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // of a cpp throw can't silently drop the "pan more slowly" path.
       const code = classifyStitchError(message);
       const error = new CameraError(code, message, err);
+      // A lateral stop whose stitch then failed mounts no review, so the
+      // popup is the only place the operator learns why the capture ended.
+      if (lateralStopPendingRef.current) {
+        lateralStopPendingRef.current = false;
+        setLateralStopVisible(true);
+      }
       // v0.16 — surface the failure on BOTH callbacks: `onError` (unchanged
       // mirror) and `onCapture` (ok:false) so a host has one place to learn
       // the outcome.  A lateral-drift stop that then failed to stitch still
@@ -3399,7 +3487,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     }
 
     setLateralWrongDirection(false);
-    setLateralStopVisible(true);
+    // ⚠ THE POPUP IS DECIDED WHERE THE RESULT LANDS, as on the sweep (above).
+    // Raising it here put a `LateralMotionModal` up ~550 ms before the stitch
+    // finished and mounted `RectCropPreview` on top of it: two RN `<Modal>`s
+    // at once, which on iOS leaves an invisible window that swallows every
+    // touch — the dead-shutter RCA that main fixed in 28d11df
+    // (`modalPresentation.ts`), whose fix this branch does not carry. With
+    // `rectCrop` now ON by default every default host would reach it.
+    // `handleHoldEnd` consumes the flag: popup only when no review mounts
+    // (the review banner already carries `LATERAL_DRIFT_FINALIZE`), and on a
+    // failed stitch, where nothing else would tell the operator why.
+    lateralStopPendingRef.current = true;
     // Mark this finalize as lateral-drift-triggered so handleHoldEnd attaches
     // the LATERAL_DRIFT_FINALIZE warning to the result.
     lateralFinalizeRef.current = true;
@@ -4706,8 +4804,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               writeSweepVerdictSidecar(result);
               // ⚠ THE SAME GATE THE KEYFRAME ENGINE USES (:3000), and it was
               // the dims ALONE here. `engine` selects which engine the hold
-              // runs and changes nothing else — but a host using the
-              // DOCUMENTED defaults (`rectCrop` false, `showPreview` false,
+              // runs and changes nothing else — but a host that turned both
+              // review props off (`rectCrop={false}`, `showPreview={false}`,
               // whose JSDoc says "with both off, `onCapture` fires
               // immediately with no UI") got a full-screen review it never
               // asked for the moment it flipped `engine`, and its
@@ -5290,6 +5388,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         settings={settings}
         onChange={setSettings}
         onClose={() => setSettingsModalVisible(false)}
+        cropEditorOn={rectCrop}
       />
 
       {/* Item 1/2 — rotate prompt.  Shown while a gated hold is blocked on
@@ -5422,6 +5521,12 @@ function cameraShouldUnmount(
 
 /** @internal test-only — see `cameraShouldUnmount`. */
 export const _cameraShouldUnmountForTests = cameraShouldUnmount;
+
+/** @internal test-only — see `extractPanoramaOverrides` / `RECT_CROP_DEFAULT`. */
+export const _extractPanoramaOverridesForTests = extractPanoramaOverrides;
+
+/** @internal test-only — see `stitcherForNative`. */
+export const _stitcherForNativeForTests = stitcherForNative;
 
 /**
  * sweepHostOwnsCamera — on `engine="sweep"`, will the embedding `<Camera>`'s

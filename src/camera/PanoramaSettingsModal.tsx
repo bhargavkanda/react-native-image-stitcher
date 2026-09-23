@@ -96,6 +96,13 @@ export interface PanoramaSettingsModalProps {
   settings: PanoramaSettings;
   onChange: (next: PanoramaSettings) => void;
   onClose: () => void;
+  /**
+   * `<Camera>`'s resolved `rectCrop`. While the crop editor is on it owns
+   * cropping and the native auto-crop is forced OFF at the native boundary,
+   * so the "Inscribed-rect crop" switch below cannot take effect — the modal
+   * says so instead of showing a switch that silently does nothing.
+   */
+  cropEditorOn?: boolean;
 }
 
 
@@ -104,6 +111,7 @@ export function PanoramaSettingsModal({
   settings,
   onChange,
   onClose,
+  cropEditorOn = false,
 }: PanoramaSettingsModalProps): React.JSX.Element {
   // ─── Sub-tree update helpers ─────────────────────────────────────
   //
@@ -388,7 +396,9 @@ export function PanoramaSettingsModal({
                 onChange={(v) => updateStitcher({
                   enableMaxInscribedRectCrop: v === 'on',
                 })}
-                caption="off (default): crop to cv::boundingRect of non-black pixels — preserves all stitched content; may leave black corners.  on: run MaxInscribedRectFromMask + column-projection second-pass for a clean rectangle (can shrink output a lot if mask is lopsided / ultra-wide)."
+                caption={cropEditorOn
+                  ? "INACTIVE while the crop editor (rectCrop) is on — the editor owns cropping and opens on the largest clean inscribed rectangle, so the native auto-crop is forced off whatever this says.  Pass rectCrop={false} to use this switch."
+                  : "off (default): crop to cv::boundingRect of non-black pixels — preserves all stitched content; may leave black corners.  on: run MaxInscribedRectFromMask + column-projection second-pass for a clean rectangle (can shrink output a lot if mask is lopsided / ultra-wide)."}
               />
               <SectionHeader title="Compose-resolution adaptation" />
               <SegmentedControl

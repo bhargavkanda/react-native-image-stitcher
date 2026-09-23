@@ -16,6 +16,7 @@
 import { NativeModules, Platform } from 'react-native';
 
 import type { QualityIssue, QualityReport, QualityThresholds } from '../types';
+import { stripCropCacheBuster } from '../utils/paths';
 
 
 let warnedOnce = false;
@@ -55,7 +56,9 @@ export async function runQualityCheck(
   ) {
     const scores: NativeQualityScores =
       await (native as { measure: (path: string) => Promise<NativeQualityScores> })
-        .measure(imagePath);
+        // The crop editor's `?t=<ms>` is not part of the file (native strips
+        // only `file://`).
+        .measure(stripCropCacheBuster(imagePath));
     return scoreToReport(scores, thresholds);
   }
 

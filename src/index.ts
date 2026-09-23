@@ -269,6 +269,10 @@ export type { CropQuadOptions, CropQuadResult } from './stitching/cropQuad';
 // host assemble a debug/output pack next to its captures (used by the example
 // app's auto A/B pack writer).
 export { copyFile, moveFile, getDefaultCaptureDir } from './utils/files';
+// `toBareFilePath` — turn any uri `onCapture` emits back into a readable
+// filesystem path. Public because the crop editor (`rectCrop`, on by default)
+// emits `file://…jpg?t=<ms>`; this drops the scheme and that cache-buster.
+export { toBareFilePath } from './utils/paths';
 
 // ── Incremental stitching engine ──────────────────────────────────────
 // JS bindings around the native `IncrementalStitcher` module.  Use
