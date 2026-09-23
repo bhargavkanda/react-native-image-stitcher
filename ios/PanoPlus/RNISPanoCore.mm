@@ -796,6 +796,10 @@ static NSDictionary *panoConfigDict(const rnis::pano::Config& c,
     c.crossTrajRelaxPx     = numOr(options, @"crossTrajRelaxPx", c.crossTrajRelaxPx);
     c.leadOutFromFrontier  = boolOr(options, @"leadOutFromFrontier", c.leadOutFromFrontier);
     c.leadOutTraj          = boolOr(options, @"leadOutTraj", c.leadOutTraj);
+    // Config::seedLeadTrim — default ON; a host may still send false (the
+    // control arm). The same top-level key reaches Android through
+    // PanoPlusLiveModule's engineKnobKeys.
+    c.seedLeadTrim         = boolOr(options, @"seedLeadTrim", c.seedLeadTrim);
     // ── v6 ──────────────────────────────────────────────────────────────
     c.exposureNormalize    = boolOr(options, @"exposureNormalize", c.exposureNormalize);
     c.exposureGainClamp    = numOr(options, @"exposureGainClamp", c.exposureGainClamp);
@@ -2256,6 +2260,7 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
                 @"provenanceStripPx":   @((NSInteger)st.provenanceStripPx),
                 @"provenanceTailPx":    @((NSInteger)st.provenanceTailPx),
                 @"alongAxisIsOutputY":  @(st.alongAxisIsOutputY),
+                @"seedLeadTrimPx":      @((NSInteger)st.seedLeadTrimPx),
                 @"sweepDeg":            jnum(st.sweepDeg),
                 @"crossScaleEnd":       jnum(st.crossScaleEnd),
                 @"crossScaleCagedFrames": @((NSInteger)st.crossScaleCagedFrames),
@@ -2734,6 +2739,8 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
                     @"tailFlushAttempted": @(st.tailFlushAttempted),
                     @"tailFlushed":     @(st.tailFlushed),
                     @"tailFlushColumns": @((NSInteger)st.tailFlushColumns),
+                    // Twin of the Android finalize summary's field.
+                    @"seedLeadTrimPx":  @((NSInteger)st.seedLeadTrimPx),
                     @"tailFlushError":  st.tailFlushError.empty()
                                             ? (id)[NSNull null]
                                             : [NSString stringWithUTF8String:
@@ -2923,6 +2930,10 @@ static NSDictionary *panoConfigDict(const rnis::pano::Config &c, const PackOptio
         @"crossTrajRelaxPx":     @(c.crossTrajRelaxPx),
         @"leadOutFromFrontier":  @(c.leadOutFromFrontier),
         @"leadOutTraj":          @(c.leadOutTraj),
+        // Recorded because it is the first knob whose ABSENCE would make a
+        // replay differ from the device: the replay reads a missing
+        // seedLeadTrim as OFF (every pack before v16 was painted untrimmed).
+        @"seedLeadTrim":         @(c.seedLeadTrim),
         @"exposureNormalize":    @(c.exposureNormalize),
         @"exposureGainClamp":    @(c.exposureGainClamp),
         @"photoMinSamples":      @(c.photoMinSamples),

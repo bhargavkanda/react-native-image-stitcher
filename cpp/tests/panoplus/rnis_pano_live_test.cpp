@@ -485,6 +485,35 @@ TEST(PanoLiveSession, MetaCarriesTheDeliveredFrameSize) {
     EXPECT_NE(meta.find("\"deliveredFrameHeight\":240"), std::string::npos);
 }
 
+// ── The seed lead-in trim (engine v16) is recorded in the PACK ──────────────
+//
+// The count is decided inside finish(), so no live status can ever carry it,
+// and the finalize summary reaches JS and is then gone: without these keys an
+// Android pack said the flag was on and never what it cleared. Both are
+// written whatever the count — 0 is a measurement, not an absence.
+TEST(PanoLiveSession, MetaAndSummaryRecordTheSeedLeadTrim) {
+    const std::string dir = makeTempDir("seedtrim");
+    live::Session s;
+    live::Options o = optionsFor(dir);
+    o.poseSource = "imu";
+    ASSERT_TRUE(s.start(o).ok);
+    const int w = 320, h = 240;
+    for (int i = 0; i < 4; ++i) {
+        const std::vector<unsigned char> f = makeNv21(w, h, i * 6);
+        s.ingest(f.data(), f.size(), frameAt(w, h, i, 1.0e9 + i * 33.0e6));
+    }
+    bool empty = false;
+    const std::string summary = s.finalizeSweep(&empty);
+    EXPECT_NE(summary.find("\"seedLeadTrimPx\":"), std::string::npos) << summary.substr(0, 400);
+
+    const std::string meta = readAll(dir + "/meta.json");
+    ASSERT_FALSE(meta.empty());
+    EXPECT_NE(meta.find("\"seedLeadTrimPx\":"), std::string::npos)
+        << "meta.json must record what the trim cleared";
+    EXPECT_NE(meta.find("\"seedLeadTrim\":true"), std::string::npos)
+        << "meta.json must record the arm (the replay reads a missing key as OFF)";
+}
+
 TEST(PanoLiveSession, MetaReportsZeroDeliveredSizeWhenNothingWasIngested) {
     const std::string dir = makeTempDir("delivered0");
     live::Session s;

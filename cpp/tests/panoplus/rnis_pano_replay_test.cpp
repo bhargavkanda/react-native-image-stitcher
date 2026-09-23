@@ -632,6 +632,52 @@ TEST(PanoReplayOverrides, TheSeedFrontierMeetIsAKnobOnAllThreePaths) {
     EXPECT_TRUE(back.seedFrontierMeet);
 }
 
+// THE SEED LEAD-IN TRIM (engine v16) — the one knob whose ABSENT value is not
+// its Config default. Default ON; every pack written before v16 was painted
+// untrimmed, so a replay that fell back to the default applied a trim the
+// device never did (pp_1790172614759: 13,298 px the device kept). A pack
+// whose config does not name it must replay OFF — and still SAY it defaulted.
+TEST(PanoReplayOverrides, TheSeedLeadTrimIsAKnobOnAllThreePathsAndAbsentMeansOff) {
+    Config c;
+    EXPECT_TRUE(c.seedLeadTrim) << "the operator's default (2026-09-23): on";
+    EXPECT_EQ(rnis::pano::replay::applyConfigOverride(c, "seedLeadTrim", "0"), 1)
+        << "`seedLeadTrim=0` landed in overridesUnknown";
+    EXPECT_FALSE(c.seedLeadTrim);
+
+    // Named: honoured either way.
+    for (const bool v : {true, false}) {
+        Config named;
+        ASSERT_TRUE(rnis::pano::replay::applyMetaConfig(
+            std::string("{\"config\":{\"seedLeadTrim\":") + (v ? "true" : "false") + "}}",
+            named, nullptr, nullptr));
+        EXPECT_EQ(named.seedLeadTrim, v);
+    }
+
+    // Unnamed (a pre-v16 pack): OFF, and reported as not named.
+    Config old_;
+    std::vector<std::string> found, defaulted;
+    ASSERT_TRUE(rnis::pano::replay::applyMetaConfig(
+        "{\"config\":{\"workScale\":0.5}}", old_, &found, &defaulted));
+    EXPECT_FALSE(old_.seedLeadTrim)
+        << "a pack that predates the trim must replay untrimmed";
+    EXPECT_NE(std::find(defaulted.begin(), defaulted.end(),
+                        std::string("seedLeadTrim")), defaulted.end());
+
+    // An explicit override still wins over the absent-means-off rule.
+    EXPECT_EQ(rnis::pano::replay::applyConfigOverride(old_, "seedLeadTrim", "1"), 1);
+    EXPECT_TRUE(old_.seedLeadTrim);
+
+    // And a v16 pack names it, so it round-trips.
+    Config echoSrc;
+    std::string js;
+    rnis::pano::replay::appendConfigJson(js, echoSrc);
+    EXPECT_NE(js.find("\"seedLeadTrim\":true"), std::string::npos) << js;
+    Config back;
+    ASSERT_TRUE(rnis::pano::replay::applyMetaConfig("{\"config\":" + js + "}", back,
+                                                    nullptr, nullptr));
+    EXPECT_TRUE(back.seedLeadTrim);
+}
+
 // WHERE THE MEET IS ALLOWED TO MEASURE FROM — the second half of the knob.
 //
 // `Config::seedFrontierMeetPinMeasure` decides whether the meet also drags the

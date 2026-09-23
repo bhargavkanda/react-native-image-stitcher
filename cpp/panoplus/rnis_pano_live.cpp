@@ -741,6 +741,9 @@ void Session::appendStatus(std::string& s, const FrameOutcome* row) const {
     kvInt(s, "provenanceStripPx", st.provenanceStripPx);
     kvInt(s, "provenanceTailPx", st.provenanceTailPx);
     kvBool(s, "alongAxisIsOutputY", st.alongAxisIsOutputY);
+    // (No `seedLeadTrimPx` here: it is decided inside finish(), and no live
+    // status is ever built after finish — the key would read 0 on every tick
+    // of every sweep. It lives in the finalize summary and meta.json.)
     kvInt(s, "driftLevel", st.driftLevel);
     kvStr(s, "driftArm", st.driftArm);
     kvInt(s, "driftFiredAtRow", st.driftFiredAtRow);
@@ -1179,6 +1182,9 @@ std::string Session::finalizeSweep(bool* empty) {
     // `tailFlushed` because that is what the `flushed` key above reports and
     // the two must agree.
     kvInt(s, "tailFlushColumns", tailFlushed ? st.tailFlushColumns : 0);
+    // The same finish()-time decision as `tailFlushColumns`, on the summary
+    // for the same reason: Config::seedLeadTrim's count (also in meta.json).
+    kvInt(s, "seedLeadTrimPx", st.seedLeadTrimPx);
     kv(s, "tailFlushError");
     if (tailErr.empty()) s += "null"; else jstr(s, tailErr);
 
@@ -1351,6 +1357,11 @@ void Session::writeMeta(const SessionStats& st,
     kvInt(m, "clippedColumns", st.clippedColumns);
     kvInt(m, "unpaintedRuns", (long long)holes.size());
     kvInt(m, "envelopeColumns", (long long)env.size());
+    // Config::seedLeadTrim — what the trim did, in the PACK: the finalize
+    // summary reaches JS and is then gone, so without this an Android pack
+    // recorded that the flag was on (config.seedLeadTrim) and never what it
+    // cleared. iOS writes the same key into its projection block.
+    kvInt(m, "seedLeadTrimPx", st.seedLeadTrimPx);
     m += "}";
 
     S.engineMs.appendJson(m, "engineMs");

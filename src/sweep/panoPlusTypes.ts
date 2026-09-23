@@ -305,6 +305,16 @@ export interface PanoPlusEngineOptions {
    * is recorded here rather than left for someone to rediscover.
    */
   crossFitMinBandR2?: number;
+  /**
+   * Trim the FIRST frame's lead-in where later frames passed (engine v16,
+   * native default `true`): the seed frame is painted whole at the latch and
+   * the strips start at its centre, so ahead of that centre the seed survives
+   * only as a sliver past the strips' cross edge — the "faint line". At finish
+   * that sliver is cleared (it becomes unpainted; nothing is recovered), and
+   * the pack reports the count as `seedLeadTrimPx`. `false` is the control
+   * arm, byte-identical to engine v15.
+   */
+  seedLeadTrim?: boolean;
   /** Correlation windows across the sweep (native 3, odd). Slot (K−1)/2 is
    *  v4's window verbatim, so the value driving the chain is unchanged. */
   crossWindows?: number;
@@ -1810,6 +1820,14 @@ export interface PanoPlusSummary {
    * not run — read {@link tailFlushAttempted} alongside.
    */
   tailFlushColumns: number;
+  /**
+   * Canvas pixels of the FIRST frame's lead-in the engine cleared at finish
+   * (`Config::seedLeadTrim`, on by default from engine v16): the sliver of the
+   * seed frame left past the strips' cross edge — the "faint line" beside
+   * later content. 0 on a binary that predates it, when the trim is off, and
+   * legitimately on a sweep with no cross drift or no strip after its seed.
+   */
+  seedLeadTrimPx: number;
   tailFlushError: string | null;
   droppedQueue: number;
   droppedPack: number;

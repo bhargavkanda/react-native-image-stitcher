@@ -4053,6 +4053,12 @@ describe('the lead-out states its own extent', () => {
     // A binary that predates the field reads 0, not NaN — every other
     // consumer here divides by or compares against it.
     expect(coercePanoPlusSummary({ tailFlushed: true }).tailFlushColumns).toBe(0);
+    // The seed lead-in trim's count survives the coercion (it used to be
+    // DROPPED here — the summary is rebuilt key by key), and an absent key
+    // (a binary that predates it) reads as 0, never undefined.
+    expect(coercePanoPlusSummary({ seedLeadTrimPx: 13298 }).seedLeadTrimPx)
+      .toBe(13298);
+    expect(coercePanoPlusSummary({}).seedLeadTrimPx).toBe(0);
   });
 
   it('names the extent AND the fraction, and says it is not a fault', () => {

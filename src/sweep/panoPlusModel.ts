@@ -3299,6 +3299,7 @@ export function coercePanoPlusSummary(raw: unknown): PanoPlusSummary {
     tailFlushAttempted: bool(s.tailFlushAttempted),
     tailFlushed: bool(s.tailFlushed),
     tailFlushColumns: num(s.tailFlushColumns),
+    seedLeadTrimPx: num(s.seedLeadTrimPx),
     tailFlushError: nullableStr(s.tailFlushError),
     droppedQueue: num(s.droppedQueue),
     droppedPack: num(s.droppedPack),

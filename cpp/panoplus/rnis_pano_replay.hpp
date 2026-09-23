@@ -187,7 +187,9 @@ struct ReplayOptions {
     /// a replay a replay.  OFF runs the engine's compiled defaults, which is
     /// only useful for "what would today's defaults have done to this sweep".
     /// Either way `ReplayReport::configFound` / `configDefaulted` names every
-    /// knob, so a report never leaves the reader guessing which arm ran.
+    /// knob.  ⚠ One knob is not at the engine default when defaulted:
+    /// `seedLeadTrim`, which a pack whose `config` does not name it runs OFF
+    /// (see applyMetaConfig) — read `resolvedConfig.seedLeadTrim` for the arm.
     bool useMetaConfig = true;
 
     /// Config knobs to force AFTER the pack's own config is adopted, as
@@ -229,9 +231,10 @@ struct ReplayReport {
     std::string metaPath;          ///< empty when the pack had no meta.json
     bool haveMeta = false;
 
-    /// Config knob names read OUT of `meta.json` vs left at the engine
-    /// default.  A knob the pack does not carry is a real difference between
-    /// the device run and this one, so it is named, not counted.
+    /// Config knob names read OUT of `meta.json` vs NOT named by it (left at the
+    /// engine default — except `seedLeadTrim`, which runs OFF; see
+    /// applyMetaConfig).  A knob the pack does not carry is a real difference
+    /// between the device run and this one, so it is named, not counted.
     std::vector<std::string> configFound;
     std::vector<std::string> configDefaulted;
     std::vector<std::string> overridesApplied;
@@ -430,7 +433,10 @@ void appendTrackRow(std::string& out, const TrackRow& r);
 /// Adopt `meta.json`'s `config` object onto `cfg`.  Returns false only when
 /// the text is not an object with a `config` member; an individual knob that
 /// is absent or the wrong type leaves the field alone and lands in
-/// `defaulted`.  `text` is the whole file.
+/// `defaulted` — except an ABSENT `seedLeadTrim`, which is set OFF (every
+/// engine before v16 painted untrimmed; its Config default is ON).  With no
+/// parseable `config` at all nothing is adopted and every knob, this one
+/// included, runs at the binary's defaults.  `text` is the whole file.
 bool applyMetaConfig(const std::string& text, Config& cfg,
                      std::vector<std::string>* found,
                      std::vector<std::string>* defaulted);

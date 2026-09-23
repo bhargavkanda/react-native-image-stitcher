@@ -7764,7 +7764,10 @@ TEST(PanoCorr, TheDefaultPathIsLiterallyCvPhaseCorrelate) {
     // calibration row an ultra-wide sweep selects.  This test's Config names no
     // lens, and an unnamed lens still takes the body's first row exactly as
     // before, so the registration chain it pins is byte-identical.
-    EXPECT_EQ(rnis::pano::kEngineVersion, 15)
+    // v16 (2026-09-23) leaves it alone too: the seed lead-in trim runs at
+    // finish(), after every strip has registered, and only CLEARS pixels —
+    // placement, the ledger and the registration chain are untouched.
+    EXPECT_EQ(rnis::pano::kEngineVersion, 16)
         << "the engine version bumped without a behavioural change shipping";
 
     // The whole sweep, at defaults, must reproduce the pre-round engine.  The
@@ -8793,8 +8796,10 @@ TEST(PanoLens, TheEngineVersionCarriesTheChange) {
     // 0.5x sweep gains the distortion correction it was always supposed to have
     // (peak corner move 19.1 px) — different output PIXELS, which is the bar
     // v12 set for a bump.  Wide and unnamed-lens sweeps are byte-identical.
+    // v16 (2026-09-23): the seed lead-in trim goes default ON — different
+    // PIXELS on every sweep that paints a strip, the same bar.
     // See the version ledger in the header.
-    EXPECT_EQ(rnis::pano::kEngineVersion, 15)
+    EXPECT_EQ(rnis::pano::kEngineVersion, 16)
         << "a behavioural change shipped without a version bump";
 }
 
@@ -9751,6 +9756,17 @@ ProjSweepSpec leadInSweep(double dyPerFrame) {
 rnis::pano::Config leadInConfig(bool leadReplace) {
     auto c = testConfig();
     c.leadReplace = leadReplace;
+    // ⚠ PINNED OFF, and not to make these pass.  Every claim in this block is
+    // Option C measured AGAINST THE UNTRIMMED SEED — "takes delivered pixels
+    // back from the seed frame", "the fill lands where the seed's content
+    // is".  `seedLeadTrim` (default ON since 2026-09-23) removes that same
+    // remnant at finish by CLEARING it, in both arms, so with it on the
+    // control arm has no remnant to compare against: the ownership probe read
+    // 194400 -> 194400 and the misplacement bar compared fill content against
+    // black (128 DN).  The two mechanisms answer one question two ways
+    // (repaint vs clear); how they compose is pinned separately, in
+    // PanoSeedLeadTrim.OptionCRepaintsWhatTheTrimWouldOtherwiseClear.
+    c.seedLeadTrim = false;
     return c;
 }
 
@@ -10218,6 +10234,307 @@ TEST(PanoLeadReplace, TheChainedGainMovesOnlyBecauseItSamplesRepaintedCanvas) {
         << "the repaint must perturb the gain chain only through the canvas "
            "it legitimately repainted; worst relative gainCum excursion "
         << (100.0 * worstRel) << "%";
+}
+
+// ── THE SEED'S LEAD-IN, TRIMMED (Config::seedLeadTrim) ─────────────────────
+//
+// The seed is painted WHOLE at latch and the strips start at its centre, so
+// ahead of that centre the strips repaint every COLUMN — but only as far
+// ACROSS as their own frames reach.  What they miss survives as a sliver of
+// seed at the cross extreme: the operator's "faint line" on pp_1790172614759.
+// The trim marks the seed's lead-in pending (coverage 128), lets every later
+// paint overwrite the mark, and at finish clears whatever a later paint passed
+// but did not cover.  Default ON (operator, 2026-09-23); OFF is the control.
+//
+// ⚠ testConfig() leaves crossTraj at 0, which no host ships, and a pure
+// translation gets a BLOCK seed where every phone sweep gets the ARC seed —
+// so each contract below also runs the shipped engine options on a pivot.
+// Without that, resolving before the tail (86k surviving pixels changed on a
+// pivot at crossTraj 2) and an arc-slice mark bound that stopped after the
+// first slice both passed this whole file.
+namespace {
+
+rnis::pano::Config trimConfig(bool trim) {
+    auto c = testConfig();
+    c.seedLeadTrim = trim;
+    return c;
+}
+
+/// The engine options every host actually ships (src/sweep/sweepDefaults.ts
+/// SWEEP_ENGINE_DEFAULTS), on top of the suite's config.
+rnis::pano::Config shippedTrimConfig(bool trim) {
+    auto c = trimConfig(trim);
+    c.crossTraj = 2;
+    c.crossTrajRelaxPx = 100.0;
+    c.leadOutFromFrontier = true;
+    c.crossFitMode = 1;
+    c.crossFitDcRemove = 1;
+    c.crossScaleLeak = 0.005;
+    return c;
+}
+
+/// True when every coverage byte is 0 or 255 — i.e. no pending mark (128)
+/// escaped finish().
+bool coverageIsBinary(const cv::Mat& cov) {
+    for (int y = 0; y < cov.rows; ++y) {
+        const uchar* p = cov.ptr<uchar>(y);
+        for (int x = 0; x < cov.cols; ++x)
+            if (p[x] != 0 && p[x] != 255) return false;
+    }
+    return true;
+}
+
+/// THE WHOLE "ONLY CLEARS" CONTRACT, for any pair of runs that differ only in
+/// the trim: identical placement, the same raster, pixels go painted →
+/// unpainted and black and nowhere else, and the counter names exactly them.
+/// Returns the pixels cleared.
+int expectTrimOnlyClears(const SweepResult& off, const SweepResult& on) {
+    EXPECT_TRUE(coverageIsBinary(off.coverage));
+    EXPECT_TRUE(coverageIsBinary(on.coverage))
+        << "a pending seed mark (128) survived finish()";
+    EXPECT_EQ(off.rows.size(), on.rows.size());
+    for (size_t i = 0; i < std::min(off.rows.size(), on.rows.size()); ++i) {
+        EXPECT_EQ(off.rows[i].outcome, on.rows[i].outcome) << "row " << i;
+        EXPECT_EQ(off.rows[i].canvasX0, on.rows[i].canvasX0) << "row " << i;
+        EXPECT_EQ(off.rows[i].canvasX1, on.rows[i].canvasX1) << "row " << i;
+        EXPECT_DOUBLE_EQ(off.rows[i].highWater, on.rows[i].highWater) << "row " << i;
+    }
+    if (off.canvas.size() != on.canvas.size() ||
+        off.coverage.size() != on.coverage.size()) {
+        ADD_FAILURE() << "the trim changed the raster";
+        return -1;
+    }
+    int cleared = 0, gained = 0, changedSurvivors = 0, clearedNotBlack = 0;
+    for (int y = 0; y < on.canvas.rows; ++y) {
+        const uchar* co = off.coverage.ptr<uchar>(y);
+        const uchar* cn = on.coverage.ptr<uchar>(y);
+        const cv::Vec3b* po = off.canvas.ptr<cv::Vec3b>(y);
+        const cv::Vec3b* pn = on.canvas.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < on.canvas.cols; ++x) {
+            if (co[x] && !cn[x]) {
+                ++cleared;
+                if (pn[x] != cv::Vec3b(0, 0, 0)) ++clearedNotBlack;
+            } else if (!co[x] && cn[x]) {
+                ++gained;
+            } else if (cn[x] && pn[x] != po[x]) {
+                ++changedSurvivors;
+            }
+        }
+    }
+    EXPECT_EQ(gained, 0) << "the trim may never paint";
+    EXPECT_EQ(changedSurvivors, 0) << "a pixel the trim kept was altered";
+    EXPECT_EQ(clearedNotBlack, 0) << "a cleared pixel still carries content";
+    EXPECT_EQ((int64_t)cleared,
+              on.stats.seedLeadTrimPx - off.stats.seedLeadTrimPx)
+        << "the counter must describe exactly the pixels that changed";
+    return cleared;
+}
+
+}  // namespace
+
+// The operator's decision, pinned so a silent revert of the default is a red
+// test rather than a quietly different panorama.
+TEST(PanoSeedLeadTrim, IsOnByDefault) {
+    EXPECT_TRUE(rnis::pano::Config{}.seedLeadTrim)
+        << "the operator turned the seed lead-in trim ON by default "
+           "(2026-09-23); turning it off is a product decision, not a refactor";
+}
+
+// THE WHOLE CONTRACT, on the block seed AND on the shipped arc-seed pivot.
+TEST(PanoSeedLeadTrim, ClearsOnlyAndChangesNothingElse) {
+    const cv::Mat shelf = makeShelf(6000, 3400);
+    struct Case {
+        const char* name;
+        ProjSweepSpec spec;
+        rnis::pano::Config (*cfg)(bool);
+    };
+    // Perpendicular drift is what leaves a cross remnant at all — see
+    // PanoLeadReplace.ThereIsNothingToTakeBackWithoutPerpendicularDrift.
+    const Case cases[] = {
+        {"translation, suite config (block seed)", leadInSweep(4.0), &trimConfig},
+        {"translation, shipped options", leadInSweep(4.0), &shippedTrimConfig},
+        {"pivot, shipped options (arc seed, crossTraj 2)", leadInPivotSweep(),
+         &shippedTrimConfig},
+    };
+    for (const auto& k : cases) {
+        SCOPED_TRACE(k.name);
+        const SweepResult off = runProjectedSweep(shelf, k.spec, k.cfg(false));
+        const SweepResult on  = runProjectedSweep(shelf, k.spec, k.cfg(true));
+        ASSERT_TRUE(off.stats.axisLatched);
+        ASSERT_TRUE(on.stats.axisLatched);
+        EXPECT_EQ(off.stats.seedLeadTrimPx, 0) << "OFF must clear nothing";
+        EXPECT_GT(on.stats.seedLeadTrimPx, 0)
+            << "a drifting sweep leaves a remnant — a trim that cleared "
+               "nothing did not run";
+        expectTrimOnlyClears(off, on);
+    }
+}
+
+// EVERY CLEARED PIXEL WAS THE SEED'S, AND NO SEED PIXEL SURVIVES AHEAD OF ITS
+// CENTRE — measured with the sentinel owner probe, so both halves are facts
+// about the deliverable, not about the mask bookkeeping.  The second half is
+// the COMPLETENESS the rest of the suite cannot see: a mark that started 40
+// columns late left 3% of the remnant (the faint line itself) and passed
+// every other test.
+TEST(PanoSeedLeadTrim, EveryClearedPixelWasTheSeedsAndNoneSurvivesAhead) {
+    const cv::Mat shelf = makeShelf(6000, 3400);
+    const ProjSweepSpec s = leadInSweep(4.0);
+    const cv::Vec3b kSentinel(0, 255, 0);
+
+    auto probeCfg = [](bool trim) {
+        auto c = trimConfig(trim);
+        c.gainMatch = false;   // a scaled sentinel is no longer the sentinel
+        return c;
+    };
+    const SweepResult ref = runProjectedSweep(shelf, s, probeCfg(false));
+    const int64_t seed = bootstrapSeq(ref);
+    ASSERT_GE(seed, 0) << "no bootstrap row — the sweep never latched";
+    ASSERT_EQ(ref.stats.axis, 0) << "the column test below assumes a "
+                                    "horizontal sweep (along = output x)";
+    cv::Mat untinted;
+    ASSERT_EQ(seedTintOwnedPixels(shelf, s, probeCfg(false), -1, kSentinel,
+                                  &untinted), 0)
+        << "the sentinel occurs naturally in this shelf — pick another";
+
+    cv::Mat cOff, cOn;
+    const int ownedOff = seedTintOwnedPixels(shelf, s, probeCfg(false), seed,
+                                             kSentinel, &cOff);
+    const int ownedOn  = seedTintOwnedPixels(shelf, s, probeCfg(true), seed,
+                                             kSentinel, &cOn);
+    ASSERT_EQ(cOff.size(), cOn.size());
+    EXPECT_LT(ownedOn, ownedOff)
+        << "seed-owned delivered pixels: " << ownedOff << " -> " << ownedOn;
+
+    int differ = 0, differNotSeed = 0, differNotCleared = 0;
+    int lastSeedColOff = -1, lastSeedColOn = -1;
+    for (int y = 0; y < cOff.rows; ++y) {
+        const cv::Vec3b* a = cOff.ptr<cv::Vec3b>(y);
+        const cv::Vec3b* b = cOn.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < cOff.cols; ++x) {
+            if (a[x] == kSentinel) lastSeedColOff = std::max(lastSeedColOff, x);
+            if (b[x] == kSentinel) lastSeedColOn = std::max(lastSeedColOn, x);
+            if (a[x] == b[x]) continue;
+            ++differ;
+            if (a[x] != kSentinel) ++differNotSeed;
+            if (b[x] != cv::Vec3b(0, 0, 0)) ++differNotCleared;
+        }
+    }
+    EXPECT_GT(differ, 0);
+    EXPECT_EQ(differNotSeed, 0)
+        << "the trim changed a pixel the seed frame did not own";
+    EXPECT_EQ(differNotCleared, 0)
+        << "the trim changed a seed pixel into something other than unpainted";
+    EXPECT_EQ(ownedOff - ownedOn, differ)
+        << "every seed pixel that disappeared must be one the trim cleared";
+
+    // The delivered canvas starts at the seed's rear edge, so the seed's
+    // centre — where the strips begin — is half a footprint in.
+    const double centre = 0.5 * sweepFootprintPx(ref.stats, probeCfg(false).canvasScale);
+    EXPECT_GE(lastSeedColOff, (int)centre)
+        << "with the trim OFF the seed must survive ahead of its centre, or "
+           "this fixture has nothing to trim";
+    EXPECT_LT(lastSeedColOn, (int)centre)
+        << "a seed pixel survived at column " << lastSeedColOn
+        << ", ahead of the seed's centre (" << centre << ") — an under-trim";
+}
+
+// A SWEEP WITH NO STRIP AFTER ITS SEED KEEPS THE WHOLE SEED.  The only other
+// paint in its lead-in is the tail flush re-painting THE SEED FRAME ITSELF
+// under a slightly different law; counting that as a later view blackened
+// 1-2 edge columns of a one-frame panorama on a real pack (pp_1790172614759
+// truncated at its latch: 71 px).
+//
+// Under the suite config the tail re-paints the seed pixel-exactly, so there
+// is nothing to clear with or without the guard.  Under the SHIPPED options
+// the tail is re-placed through its trajectory and misses a few seed pixels —
+// 84 on this fixture without the `stripsSinceLatch` guard, 0 with it — which
+// is what makes this test see the guard, and what runs the keep branch.
+TEST(PanoSeedLeadTrim, ASweepWithNoStripKeepsTheWholeSeed) {
+    const cv::Mat shelf = makeShelf(6000, 3400);
+    ProjSweepSpec s;
+    s.n = 6;
+    s.pitchDeg = -0.6;   // attitude moves (arms the arc seed), motion does not latch
+    s.dx = 0.5;
+    for (auto cfg : {&trimConfig, &shippedTrimConfig}) {
+        SCOPED_TRACE(cfg == &trimConfig ? "suite config" : "shipped options");
+        const SweepResult off = runProjectedSweep(shelf, s, cfg(false));
+        const SweepResult on  = runProjectedSweep(shelf, s, cfg(true));
+        int painted = 0;
+        for (const auto& r : on.rows) {
+            if (r.outcome == rnis::pano::Outcome::Painted ||
+                r.outcome == rnis::pano::Outcome::GapExtended) ++painted;
+        }
+        ASSERT_EQ(painted, 0) << "the fixture painted a strip — it no longer "
+                                 "tests the no-strip path";
+        ASSERT_FALSE(on.canvas.empty()) << "finish() must still emit the seed";
+        EXPECT_EQ(on.stats.seedLeadTrimPx, 0)
+            << "a one-frame panorama lost pixels to its own tail flush";
+        EXPECT_TRUE(coverageIsBinary(on.coverage));
+        ASSERT_EQ(off.canvas.size(), on.canvas.size());
+        EXPECT_EQ(cv::norm(off.canvas, on.canvas, cv::NORM_INF), 0.0);
+        EXPECT_EQ(cv::norm(off.coverage, on.coverage, cv::NORM_INF), 0.0);
+    }
+}
+
+// THE PAINTED ROW UNION FOLLOWS THE TRIM, and never past it: with
+// `cropPadRows` the deliverable is cut to the rows something painted, so
+// neither end cross line may come out empty AND not one committed pixel may
+// be cut away (an over-shrink by one row at each end passed the end-line
+// check alone).  ⚠ No synthetic fixture found produces a seed-only edge row,
+// so the SHRINK itself is proven on the real pack (ios/pp_1790112505226: two
+// output rows whose only content was the seed's lead-in, 1013 -> 1011 rows).
+TEST(PanoSeedLeadTrim, TheCroppedDeliverableLosesNoPaintedPixel) {
+    const cv::Mat shelf = makeShelf(6000, 3400);
+    const ProjSweepSpec s = leadInSweep(4.0);
+    const auto cfg = trimConfig(true);
+    rnis::pano::Engine eng;
+    std::string err;
+    ASSERT_TRUE(eng.configure(cfg, &err)) << err;
+    SweepResult out;
+    ingestProjectedSweep(eng, shelf, s, cfg, out);
+    eng.finish();
+    ASSERT_GT(eng.stats().seedLeadTrimPx, 0);
+    cv::Mat cropped, full;
+    ASSERT_TRUE(eng.finalCoverage(cropped, /*cropPadRows=*/true));
+    ASSERT_TRUE(eng.finalCoverage(full, /*cropPadRows=*/false));
+    ASSERT_FALSE(cropped.empty());
+    EXPECT_TRUE(coverageIsBinary(cropped));
+    EXPECT_EQ(cv::countNonZero(cropped), cv::countNonZero(full))
+        << "the pad-row crop cut away committed pixels";
+    // Cross lines are output ROWS for a horizontal sweep, COLUMNS for a
+    // vertical one (`orient()` transposes).
+    const bool horizontal = eng.stats().axis == 0;
+    const cv::Mat first = horizontal ? cropped.row(0) : cropped.col(0);
+    const cv::Mat last  = horizontal ? cropped.row(cropped.rows - 1)
+                                     : cropped.col(cropped.cols - 1);
+    EXPECT_GT(cv::countNonZero(first), 0) << "an empty leading cross line";
+    EXPECT_GT(cv::countNonZero(last), 0) << "an empty trailing cross line";
+}
+
+// HOW THE TWO MECHANISMS COMPOSE.  Option C (`leadReplace`) REPAINTS the
+// remnant from later frames; the trim CLEARS whatever is left.  So with both
+// on, the deliverable must be Option C's own deliverable minus pure clears —
+// the same placement, nothing painted, nothing altered — and the trim must
+// clear strictly less than it does alone.
+TEST(PanoSeedLeadTrim, OptionCRepaintsWhatTheTrimWouldOtherwiseClear) {
+    const cv::Mat shelf = makeShelf(6000, 3400);
+    for (const auto& spec : {leadInSweep(4.0), leadInPivotSweep()}) {
+        SCOPED_TRACE(spec.pitchDeg != 0.0 ? "pivot" : "translation");
+        auto trimOnly = trimConfig(true);
+        auto cOnly = trimConfig(false);
+        cOnly.leadReplace = true;
+        auto both = trimConfig(true);
+        both.leadReplace = true;
+
+        const SweepResult a = runProjectedSweep(shelf, spec, trimOnly);
+        const SweepResult c = runProjectedSweep(shelf, spec, cOnly);
+        const SweepResult b = runProjectedSweep(shelf, spec, both);
+        ASSERT_GT(a.stats.seedLeadTrimPx, 0);
+        ASSERT_GT(b.stats.leadRepaintPx, 0.0) << "Option C filled nothing";
+        EXPECT_LT(b.stats.seedLeadTrimPx, a.stats.seedLeadTrimPx)
+            << "Option C repainted remnant the trim then cleared anyway";
+        expectTrimOnlyClears(c, b);
+    }
 }
 
 // ── THE SEED JUNCTION (Config::seedFrontierMeet) ────────────────────────────
@@ -12462,4 +12779,33 @@ TEST(PanoProvenance, TheAlongAxisIsReportedNotInferred) {
     const bool quarter = (cfg.outputRotationCwDeg == 90
                        || cfg.outputRotationCwDeg == 270);
     EXPECT_EQ(r.stats.alongAxisIsOutputY, (r.stats.axis == 1) != quarter);
+}
+
+// THE TRIM'S KEEP BRANCH, ON A SWEEP WITH STRIPS.  With the seed junction met
+// (`seedFrontierMeet`), the first strip starts at its OWN left edge rather
+// than at the seed's centre, so a band of lead-in columns right after the
+// centre is reached by no later frame at all — the seed is the only content
+// there and the trim must KEEP it.  A resolve that cleared every mark once
+// any strip existed (ignoring whether a later frame passed the column) left a
+// full-height black band of 19 columns at the junction here and passed every
+// other test in this file.
+TEST(PanoSeedLeadTrim, KeepsTheSeedWhereNoLaterFrameReachedEvenWithStrips) {
+    const cv::Mat shelf = makeShelf(6000, 3400);
+    auto cfg = seedMeetConfig(true);
+    ASSERT_TRUE(cfg.seedLeadTrim);
+    const SweepResult r = runProjectedSweep(shelf, seedMeetSweep(), cfg);
+    ASSERT_TRUE(r.stats.axisLatched);
+    ASSERT_FALSE(r.coverage.empty());
+    EXPECT_TRUE(r.holes.empty()) << r.holes.size() << " unpainted runs";
+    // Every along line of the delivered raster carries something.
+    const bool horizontal = r.stats.axis == 0;
+    const int lines = horizontal ? r.coverage.cols : r.coverage.rows;
+    int empty = 0;
+    for (int i = 0; i < lines; ++i) {
+        const cv::Mat line = horizontal ? r.coverage.col(i) : r.coverage.row(i);
+        if (cv::countNonZero(line) == 0) ++empty;
+    }
+    EXPECT_EQ(empty, 0)
+        << "the trim blanked " << empty << " whole lines — seed columns no "
+           "later frame reached were cleared instead of kept";
 }

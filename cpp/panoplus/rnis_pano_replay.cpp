@@ -544,6 +544,8 @@ const KnobNum kKnobs[] = {
      [](const Config& c) -> double { return c.seedArcSlicePx; }, KnobKind::Num},
     {"leadReplace",          [](Config& c, double v) { c.leadReplace = (v != 0.0); },
      [](const Config& c) -> double { return c.leadReplace ? 1.0 : 0.0; }, KnobKind::Bool},
+    {"seedLeadTrim",         [](Config& c, double v) { c.seedLeadTrim = (v != 0.0); },
+     [](const Config& c) -> double { return c.seedLeadTrim ? 1.0 : 0.0; }, KnobKind::Bool},
     {"seedFrontierMeet",     [](Config& c, double v) { c.seedFrontierMeet = (v != 0.0); },
      [](const Config& c) -> double { return c.seedFrontierMeet ? 1.0 : 0.0; }, KnobKind::Bool},
     {"seedFrontierMeetPinMeasure",
@@ -1009,6 +1011,18 @@ bool applyMetaConfig(const std::string& text, Config& cfg,
         } else if (defaulted) {
             defaulted->push_back(kKnobs[i].name);
         }
+    }
+    // ⚠ `seedLeadTrim` ABSENT MEANS OFF, not "the current default".  Every
+    // other knob defaults to what the packs that predate it ran with, so
+    // falling back to the Config default reproduces the device.  This one's
+    // default is ON (2026-09-23) and every pack written before it existed
+    // was painted with NO trim — replaying those at the default applied a
+    // trim the device never did (pp_1790172614759: 13,298 px the device
+    // kept).  A pack that names the key (both platforms record it from v16)
+    // is honoured above; an explicit override still wins, applied after this.
+    {
+        mj::Span v;
+        if (!mj::member(text, cfgSpan, "seedLeadTrim", &v)) cfg.seedLeadTrim = false;
     }
     for (size_t i = 0; i < kStrKnobCount; ++i) {
         mj::Span v;
@@ -1745,6 +1759,20 @@ bool replayPackBody(const ReplayOptions& opt, ReplayReport* R) {
                                                      opt.canvasQuality, &err);
             if (!R->canvasWritten) R->writeError = "canvas: " + err;
         }
+        // The coverage sidecar the device writes beside every canvas
+        // (rnis_pano_live.cpp, RNISPanoCore.mm) — same call, same crop, same
+        // best-effort silence — so an offline A/B can measure the mask the
+        // crop editor would read instead of inferring one from luminance.
+        if (R->canvasWritten) {
+            try {
+                cv::Mat cov;
+                if (engine.finalCoverage(cov, opt.canvasCropPad) &&
+                    !cov.empty() && cov.size() == canvas.size()) {
+                    cv::imwrite(R->canvasPath + ".coverage.png", cov);
+                }
+            } catch (...) {
+            }
+        }
         R->finalizeMs = nowMs() - t0;
     }
 
@@ -1988,6 +2016,8 @@ std::string reportToJson(const ReplayReport& r) {
     s += ",\"leadRepaintStrips\":";
     appendInt(s, (long long)r.stats.leadRepaintStrips);
     s += ",\"leadRepaintPx\":"; appendNum(s, r.stats.leadRepaintPx);
+    s += ",\"seedLeadTrimPx\":";
+    appendInt(s, (long long)r.stats.seedLeadTrimPx);
     // Trajectory continuation (Config::crossTraj) — the tail's and the seed's.
     s += ",\"tailTrajApplied\":"; s += (r.stats.tailTrajApplied ? "true" : "false");
     s += ",\"tailTrajSlope\":"; appendNum(s, r.stats.tailTrajSlope);

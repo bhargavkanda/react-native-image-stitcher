@@ -50,6 +50,23 @@ int main(int argc, char** argv) {
         }
         o.configOverrides.push_back(std::make_pair(kv.substr(0, e), kv.substr(e + 1)));
     }
+    // REFUSE A KNOB THE TABLE DOES NOT KNOW, before anything runs. The replay
+    // itself only lists it in `overridesUnknown`, which this tool never
+    // printed — so a misspelt `seedLeadTrm=0` ran the default, wrote a canvas
+    // and reported ok=1, and an A/B built on it compared a run with itself.
+    for (const auto& kv : o.configOverrides) {
+        rnis::pano::Config probe;
+        const int rc = applyConfigOverride(probe, kv.first, kv.second);
+        if (rc == 0) {
+            std::fprintf(stderr, "unknown knob: %s\n", kv.first.c_str());
+            return 2;
+        }
+        if (rc < 0) {
+            std::fprintf(stderr, "unparseable value for %s: %s\n",
+                         kv.first.c_str(), kv.second.c_str());
+            return 2;
+        }
+    }
 
     ReplayReport r;
     const bool ok = replayPack(o, &r);
@@ -65,6 +82,23 @@ int main(int argc, char** argv) {
                 r.framesMissing, r.framesIngested);
     std::printf("canvas=%dx%d painted=%d written=%d\n",
                 r.canvasW, r.canvasH, r.painted, (int)r.canvasWritten);
+    // Config::seedLeadTrim — WHICH ARM RAN, then its count. The count alone
+    // cannot say: 0 is also what a sweep with no cross drift clears, and a
+    // pack that does not name the knob runs it OFF while still listing it
+    // under configDefaulted below.
+    std::printf("seedLeadTrim=%d seedLeadTrimPx=%lld\n",
+                (int)r.resolvedConfig.seedLeadTrim,
+                (long long)r.stats.seedLeadTrimPx);
+    // Which knobs the pack's own meta.json did NOT name, so they ran at this
+    // binary's defaults (except `seedLeadTrim`, which a pack with a parseable
+    // `config` that does not name it runs OFF — see applyMetaConfig; a pack
+    // with no config at all runs everything at the defaults) — the list that
+    // says whether a replay can reproduce the device at all.
+    if (!r.configDefaulted.empty()) {
+        std::printf("configDefaulted=%zu:", r.configDefaulted.size());
+        for (const auto& k : r.configDefaulted) std::printf(" %s", k.c_str());
+        std::printf("\n");
+    }
     for (size_t i = 0; i < r.framesMissingExamples.size() && i < 3; ++i) {
         std::printf("  missing: %s\n", r.framesMissingExamples[i].c_str());
     }

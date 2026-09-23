@@ -235,6 +235,12 @@ class PanoPlusLiveModule(
         // through explicit configOverrides, which is exactly the "needs the
         // explicit route" case the header above describes.
         "crossFitMode", "crossFitDcRemove", "crossScaleLeak", "crossFitMinBandR2",
+        // THE SEED LEAD-IN TRIM (2026-09-23, engine v16). Default ON; a host
+        // sending `seedLeadTrim: false` gets the control arm — on iOS that
+        // top-level key is read directly (RNISPanoCore.mm), so without this
+        // entry the same options object ran the control arm on one platform
+        // and the trim on the other, with nothing reported.
+        "seedLeadTrim",
     )
 
     // ── ReadableMap accessors that DEGRADE ──────────────────────────────

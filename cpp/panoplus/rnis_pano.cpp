@@ -546,6 +546,12 @@ void buildExposureLut(double g, cv::Mat& lut) {
     }
 }
 
+/// Config::seedLeadTrim — the coverage value that marks a seed lead-in pixel
+/// no later frame has painted yet.  Nonzero, so every reader that asks
+/// "painted?" still says yes while the sweep runs; resolved to 255 or 0 by
+/// `resolveSeedLead()` at finish.
+constexpr uchar kSeedLeadCov = 128;
+
 double maskedMeanLuma(const cv::Mat& bgr, const cv::Mat& mask) {
     if (bgr.empty() || mask.empty()) return -1.0;
     if (cv::countNonZero(mask) < 16) return -1.0;
@@ -950,6 +956,18 @@ struct Engine::Impl {
     /// property is deliberate — a second bool with the same job is how two
     /// paths that must agree drift apart, which is the whole history here.
     bool   seedSlicing = false;
+    /// Config::seedLeadTrim.  True ONLY while `commitLatch` paints the seed —
+    /// `seedSlicing` cannot say this, because the arc TAIL shares it.
+    bool   paintingSeed = false;
+    /// The first canvas column of the seed's lead-in (the frontier the seed
+    /// hands the strips), or −1 when nothing is marked.  Set per latch,
+    /// consumed by `resolveSeedLead()`.
+    int    seedLeadU0 = -1;
+    /// One past the last column the seed actually MARKED — the scan's end.
+    /// Marks exist only in `[seedLeadU0, seedLeadU1)`, half a footprint, and
+    /// bounding by the painted extent instead scanned the whole sweep (the
+    /// finish row cost +18 ms at -O0 on a 4334-column canvas).
+    int    seedLeadU1 = -1;
     int    seedLensTally = 0;          // -1 fell back, +1 corrected, 0 neither
     double lastSeamLumaDN = 0.0;
     bool   lastSeamLumaValid = false;
@@ -1047,6 +1065,9 @@ struct Engine::Impl {
     // Canvas (internal coordinates)
     cv::Mat canvas;              // CV_8UC3
     cv::Mat coverage;            // CV_8UC1 — 255 where a frame committed a pixel
+                                 // (kSeedLeadCov: the seed's lead-in, pending —
+                                 // only under Config::seedLeadTrim, and never
+                                 // after finish(); every reader tests nonzero)
     int     canvasW = 0, canvasH = 0;
     double  originU = 0.0, originV = 0.0;
     double  highWater = 0.0;
@@ -1147,7 +1168,8 @@ struct Engine::Impl {
     /// gap rule is the FIRST one after a seed, which is the only place the
     /// seed junction exists (`Config::seedFrontierMeet`).  Re-based by every
     /// relatch, because a relatch re-seeds and the junction comes back with it.
-    /// Read only under that flag, so it costs nothing when the flag is off.
+    /// Read under that flag and by `resolveSeedLead()` (Config::seedLeadTrim,
+    /// default ON), which trims only when a strip followed the seed.
     int     stripsSinceLatch = 0;
     /// The REFERENCE frame's optical centre, in canvas px — the origin ψ is
     /// measured from, so `lastPaintedU - latchCentreU` is the frame-centre
@@ -2577,6 +2599,15 @@ struct Engine::Impl {
 
         roiBgr(sub).copyTo(canvas(dst), m);
         coverage(dst).setTo(cv::Scalar(255), m);
+        // Config::seedLeadTrim — the seed's pixels ahead of its own centre are
+        // PENDING until a later frame overwrites them (which writes 255 above).
+        if (paintingSeed && seedLeadU0 >= 0 && xEnd > seedLeadU0) {
+            const int lx0 = std::max(xStart, seedLeadU0);
+            const cv::Rect ld(lx0, 0, xEnd - lx0, canvasH);
+            const cv::Rect lm(lx0 - xStart, 0, xEnd - lx0, canvasH);
+            coverage(ld).setTo(cv::Scalar(kSeedLeadCov), m(lm));
+            seedLeadU1 = std::max(seedLeadU1, xEnd);
+        }
         // THE PAINTED ROW UNION (see minPaintedV).  A column-wise max reduces
         // the strip mask — a few px wide — to one column, and the scan is then
         // over `dst.height` bytes: microseconds, and the only way to know which
@@ -3909,6 +3940,82 @@ struct Engine::Impl {
         return painted;
     }
 
+    /// Config::seedLeadTrim — settle every pending seed lead-in pixel, once,
+    /// when nothing more will be painted.  Per COLUMN: if a later frame
+    /// painted the column (a 255 there — the seed's rear half never reaches a
+    /// lead-in column, and `repaintSeedRear` stops short of `seedLeadU0`),
+    /// the seed's survivors are cleared to unpainted; otherwise the seed is
+    /// the column's only content and is kept.  Returns the pixels cleared.
+    /// Idempotent: after it runs no pending mark is left anywhere.
+    ///
+    /// ⚠ A STRIP MUST HAVE FOLLOWED THE SEED.  With none
+    /// (`stripsSinceLatch == 0` — a sweep that ended at or before its latch),
+    /// the only 255s in the lead-in are the tail flush or the backfill
+    /// re-painting THE SEED FRAME ITSELF under a slightly different law, and
+    /// counting those blackened 1-2 edge columns of a one-frame panorama that
+    /// nothing else covers.  So there every mark is kept.  Once a strip
+    /// exists, ANY later 255 passes a column — on a short sweep most of the
+    /// lead-in is passed by the tail flush (the last strip's frame), which is
+    /// a later view like any strip.
+    ///
+    /// Row-major, over `[seedLeadU0, seedLeadU1)` only — the columns the
+    /// seed actually marked, about half a footprint.  The first cut walked
+    /// column-major to `canvasW`, i.e. the whole sweep plus the doubling
+    /// headroom `ensureCanvasWidth` leaves past it.
+    int64_t resolveSeedLead() {
+        const int u0 = std::max(0, seedLeadU0);
+        const bool marked = seedLeadU0 >= 0 && seedLeadU1 > seedLeadU0;
+        const int u1 = std::min(canvasW, seedLeadU1);
+        if (!marked || coverage.empty() || canvas.empty() || u1 <= u0 ||
+            canvasH <= 0) {
+            seedLeadU0 = seedLeadU1 = -1;
+            return 0;
+        }
+        const int n = u1 - u0;
+        // Allocated BEFORE the marks are released: were this to throw, the
+        // SettleSeedLead backstop in finish() still sees `seedLeadU0` and
+        // retries, instead of finding it spent and leaving 128s behind.
+        std::vector<uchar> passed((size_t)n, 0);
+        seedLeadU0 = seedLeadU1 = -1;
+        if (stripsSinceLatch > 0) {
+            for (int y = 0; y < canvasH; ++y) {
+                const uchar* c = coverage.ptr<uchar>(y) + u0;
+                for (int i = 0; i < n; ++i) {
+                    if (c[i] == 255) passed[(size_t)i] = 1;
+                }
+            }
+        }
+        int64_t cleared = 0;
+        for (int y = 0; y < canvasH; ++y) {
+            uchar* c = coverage.ptr<uchar>(y) + u0;
+            cv::Vec3b* px = canvas.ptr<cv::Vec3b>(y) + u0;
+            for (int i = 0; i < n; ++i) {
+                if (c[i] != kSeedLeadCov) continue;
+                if (passed[(size_t)i]) {
+                    c[i] = 0;
+                    px[i] = cv::Vec3b(0, 0, 0);
+                    ++cleared;
+                } else {
+                    c[i] = 255;
+                }
+            }
+        }
+        // THE PAINTED ROW UNION FOLLOWS THE COVERAGE (see minPaintedV: it may
+        // drop only rows NOTHING painted).  A cross-extreme row whose only
+        // content was the seed's lead-in is now such a row; left in the union
+        // it is carried into canvas.jpg as a black line.  Only the ENDS can
+        // change — clearing never empties a column, so it never shortens the
+        // along extent.
+        if (cleared > 0 && anyPaintedV) {
+            int v0 = std::max(0, minPaintedV);
+            int v1 = std::min(canvasH, maxPaintedV);
+            while (v0 < v1 && cv::countNonZero(coverage.row(v0)) == 0) ++v0;
+            while (v1 > v0 && cv::countNonZero(coverage.row(v1 - 1)) == 0) --v1;
+            if (v1 > v0) { minPaintedV = v0; maxPaintedV = v1; }
+        }
+        return cleared;
+    }
+
     // ── THE LATCH COMMIT ────────────────────────────────────────────────────
     // Adopt `axis`/`sweepSign`, size the canvas from the REFERENCE frame's own
     // footprint (its H_rect is the identity by construction, so the lead-in is
@@ -4059,19 +4166,42 @@ struct Engine::Impl {
         // at finalize under the law the sweep TURNED OUT to have; it is not
         // built here, and this is the open edge of this change.
         bool arced = false;
-        if (cfg.seedArcSlicePx > 0.0 && cfg.projection == 1 && cfg.rectify &&
-            maxRectifyDeg > 0.0) {
-            const char* seedFatal = nullptr;
-            arced = commitArcSeed(&px0, &px1, &clipCols, &seedFatal);
-            if (!arced && seedFatal != nullptr) { *fatal = seedFatal; return false; }
-        }
-        // The reference frame IS the exposure datum, so its own normalisation
-        // factor is 1.0 by definition — not "unknown".
-        if (!arced &&
-            !commitStrip(refBgr, Href, ru0, ru1, ru0, false, 1.0, 1.0, &gs,
-                         &px0, &px1, &clipCols)) {
-            *fatal = "canvas-full";
-            return false;
+        // Config::seedLeadTrim — everything the seed paints from its own
+        // centre forward is marked pending (see commitStrip).  `floor(ucx)` is
+        // the first column the strips paint (`paintLeft` starts at the
+        // frontier) and the first one `repaintSeedRear` leaves alone.  The
+        // flag is owned, not assigned, for SliceRun's reason: commitStrip can
+        // leave by an exception, and a `paintingSeed` left true would mark
+        // every later strip as seed.
+        seedLeadU0 = cfg.seedLeadTrim ? (int)std::floor(ucx) : -1;
+        seedLeadU1 = -1;
+        // Re-based WITH the marks, before the seed paint: a relatch whose seed
+        // paint fails must not leave marks judged against the discarded
+        // canvas's strip count (it is re-based again below, idempotently).
+        stripsSinceLatch = 0;
+        struct SeedPaint {
+            Impl& s;
+            explicit SeedPaint(Impl& impl) : s(impl) { s.paintingSeed = true; }
+            ~SeedPaint() { s.paintingSeed = false; }
+            SeedPaint(const SeedPaint&) = delete;
+            SeedPaint& operator=(const SeedPaint&) = delete;
+        };
+        {
+            SeedPaint seedPaint(*this);
+            if (cfg.seedArcSlicePx > 0.0 && cfg.projection == 1 && cfg.rectify &&
+                maxRectifyDeg > 0.0) {
+                const char* seedFatal = nullptr;
+                arced = commitArcSeed(&px0, &px1, &clipCols, &seedFatal);
+                if (!arced && seedFatal != nullptr) { *fatal = seedFatal; return false; }
+            }
+            // The reference frame IS the exposure datum, so its own normalisation
+            // factor is 1.0 by definition — not "unknown".
+            if (!arced &&
+                !commitStrip(refBgr, Href, ru0, ru1, ru0, false, 1.0, 1.0, &gs,
+                             &px0, &px1, &clipCols)) {
+                *fatal = "canvas-full";
+                return false;
+            }
         }
         if (clipCols > 0) {   // only reachable with canvasPadPx == 0
             row.clipped = true;
@@ -5827,6 +5957,24 @@ FrameOutcome Engine::ingest(const FrameInput& in) {
                     int bp0 = 0, bp1 = 0, bClip = 0;
                     double bgs = 1.0;
                     for (int k = 0; k < 4; ++k) S.curK[k] = S.lastK[k];
+                    // Config::seedLeadTrim — with no strip since the latch,
+                    // `lastBgr` IS the seed frame, so this backfill is the
+                    // seed repainted under the tangent law, not a later view.
+                    // Its pixels stay pending like the rest of the seed's
+                    // lead-in; left as 255 they "passed" their columns and
+                    // cleared the seed's own arc-slice survivors there.
+                    // (Unreachable under every shipped config — see above.)
+                    struct MarkAsSeed {
+                        Impl& s;
+                        const bool was;
+                        MarkAsSeed(Impl& impl, bool on)
+                            : s(impl), was(impl.paintingSeed) {
+                            if (on) s.paintingSeed = true;
+                        }
+                        ~MarkAsSeed() { s.paintingSeed = was; }
+                        MarkAsSeed(const MarkAsSeed&) = delete;
+                        MarkAsSeed& operator=(const MarkAsSeed&) = delete;
+                    } markAsSeed(S, S.stripsSinceLatch == 0 && S.seedLeadU0 >= 0);
                     if (S.commitStrip(S.lastBgr, S.lastHint, S.highWater, bx1,
                                       S.highWater, false, S.lastExpGain,
                                       S.lastExpResidual, &bgs, &bp0, &bp1,
@@ -6147,6 +6295,23 @@ FrameOutcome Engine::ingest(const FrameInput& in) {
 
 FrameOutcome Engine::finish() {
     Impl& S = *impl_;
+    // Config::seedLeadTrim — the pending seed marks are settled on EVERY exit.
+    // The two explicit calls below cover the normal paths (the second one
+    // right after the tail and the seed's re-placement — see there); this
+    // owner covers the one they cannot: `commitLatch` below runs outside the
+    // tail's try, so a throw from the seed paint of a sweep that never
+    // latched leaves finish() with the marks still down — and Android's
+    // finalize catches that throw and exports the coverage PNG anyway.  A
+    // no-op when the explicit call already ran (`seedLeadU0` is then −1).
+    struct SettleSeedLead {
+        Impl& s;
+        explicit SettleSeedLead(Impl& impl) : s(impl) {}
+        ~SettleSeedLead() {
+            try { s.st.seedLeadTrimPx += s.resolveSeedLead(); } catch (...) {}
+        }
+        SettleSeedLead(const SettleSeedLead&) = delete;
+        SettleSeedLead& operator=(const SettleSeedLead&) = delete;
+    } settleSeedLead(S);
     // Everything painted from here on is the lead-out: ONE frame, one pose,
     // no correlation. Marked before the first paint so the provenance split
     // attributes it correctly.
@@ -6174,6 +6339,10 @@ FrameOutcome Engine::finish() {
         }
     }
     if (!S.axisLatched || !S.lastValid || S.tailFlushed || S.lastBgr.empty()) {
+        // Nothing more is painted on this path either, so the pending seed
+        // lead-in (Config::seedLeadTrim) is settled here too — a pack must
+        // never carry a half-resolved coverage mask.
+        S.st.seedLeadTrimPx += S.resolveSeedLead();
         row.engineMs = nowMs() - t0;
         return row;
     }
@@ -6434,6 +6603,13 @@ FrameOutcome Engine::finish() {
     } catch (...) {
         S.st.tailFlushError = "unknown native failure";
     }
+    // Config::seedLeadTrim — AFTER the tail and the seed's re-placement: the
+    // seed's trajectory reads the canvas ahead of its centre and must read
+    // exactly what it reads with the flag off (measured: resolving before the
+    // tail changed 86k surviving pixels on a pivot at crossTraj 2). Its
+    // position against the band scan below does not matter — that scan reads
+    // `colScale`, never the canvas.
+    S.st.seedLeadTrimPx += S.resolveSeedLead();
     // FINAL FLUSH.  Mid-sweep the band scan deliberately stops at the frontier
     // because everything ahead of it is provisional and will be overwritten.
     // The sweep is over now, so whatever is still ahead of the frontier IS the

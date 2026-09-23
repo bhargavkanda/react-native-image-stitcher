@@ -486,7 +486,17 @@ namespace pano {
 //     unnamed lens still takes the body's first row, which is the wide row,
 //     which is the camera ARKit streams.  An unnamed lens is not an error and
 //     must not become one — every ARKit pack in the corpus depends on it.
-constexpr int kEngineVersion = 15;
+// v16 (2026-09-23) — THE SEED'S LEAD-IN IS TRIMMED BY DEFAULT
+//     (`Config::seedLeadTrim`).  Every sweep that paints a strip can now
+//     deliver different pixels — the seed's survivors past the strips' cross
+//     edge are cleared — and a canvas can lose an empty end row.  Packs from
+//     v16 record `config.seedLeadTrim` on both platforms and the count as
+//     `seedLeadTrimPx` (meta.json `counts` on Android, `projection` on iOS;
+//     top level of the result summary on both).  The replay reads a pack whose
+//     parseable `config` does not name the knob as trim OFF, which is what
+//     every earlier engine painted; a pack with no config at all runs every
+//     knob, this one included, at the binary's defaults.
+constexpr int kEngineVersion = 16;
 
 /// How far a frame timestamp may run BACKWARDS before the engine treats it as a
 /// new session timebase rather than a delivery hiccup.  0.25 s is ~15 frames at
@@ -1273,6 +1283,48 @@ struct Config {
     // `FrameOutcome::leadRepaintPx`, so the trade is a measurement rather than
     // an estimate.
     bool leadReplace = false;
+
+    // ── THE SEED'S LEAD-IN, TRIMMED WHERE THE STRIPS PASSED ────────────
+    // Default ON — the operator's decision (2026-09-23), taken after seeing it
+    // on pp_1790172614759 and its crop cost across the pack set below.  OFF is
+    // the control arm and is byte-identical to the engine before this flag
+    // existed (nothing marks, and nothing at finish resolves).
+    //
+    // WHAT IT REMOVES.  Along the sweep the strips repaint every column ahead
+    // of the seed's centre (see `leadReplace`: the seed keeps ZERO of them).
+    // ACROSS the sweep they do not: a strip reaches only as far as its own
+    // frame does, and the strips drift across the sweep while the seed is
+    // placed by a law of its own, so the seed's lead-in survives as a sliver
+    // at the cross extreme, beside content a whole sweep later.  On
+    // pp_1790172614759 that sliver is the "faint line" the operator
+    // annotated — the seed's edge still visible past the strips' edge.
+    //
+    // WHAT IT DOES.  The seed is still painted WHOLE at latch, so the live
+    // preview is unchanged.  Its lead-in pixels are marked in `coverage`
+    // (value 128, not 255), every later paint overwrites the mark with 255,
+    // and at finish each lead-in column is resolved: a column some later
+    // frame painted keeps only that frame's pixels (the seed's survivors are
+    // cleared to unpainted); a column no later frame reached keeps the seed,
+    // because there the seed is the only content the panorama has.  A sweep
+    // with NO strip after its seed keeps the whole seed: the only other paint
+    // in its lead-in is the tail flush (or backfill) re-painting the SEED
+    // FRAME ITSELF, which is not a later view of anything.
+    //
+    // ⚠ WHAT IT DOES *NOT* DO.  It recovers no content.  The cleared pixels
+    // were seen by the seed alone, so they become unpainted — the black notch
+    // below the seed grows up to the seed's centre instead of starting at the
+    // seed's far edge.  And it is NOT free on the crop: the seed overhangs the
+    // strips on BOTH cross edges, and wherever an overhang sat inside the
+    // flag-off inscribed rectangle, clearing it narrows that rectangle along
+    // the WHOLE sweep.  Measured over 93 replayed packs (iPhone and Galaxy
+    // A35): smaller on 57, equal on 34, larger on 2 (by < 0.25 pp, where an
+    // emptied end row shortened the canvas); among the 57, median −0.86 pp of
+    // canvas, worst −6.15 pp (A35 pp_1788401161774).  The worst iPhone pack,
+    // 09-02T22-50-04 (−4.46 pp), is one whose flag-off crop carried a doubled
+    // letter from the seed.  The operator took that trade: the lost pixels are
+    // one frame's misplaced copy, and on a shelf they can put a duplicated
+    // product edge INSIDE the crop.
+    bool seedLeadTrim = true;
 
     // ── THE SEED JUNCTION — the ~10 px hole between the seed block and the
     //    strip chain, and whether the two are made to MEET instead of bridged
@@ -3650,6 +3702,13 @@ struct SessionStats {
     /// off.
     int64_t     leadRepaintStrips = 0;
     double      leadRepaintPx = 0.0;
+    /// Config::seedLeadTrim: canvas pixels of the seed's lead-in cleared at
+    /// finish because a later frame had painted their column.  0 whenever the
+    /// flag is off — but 0 is NOT proof it was off: a sweep with no cross
+    /// drift (the strips and the tail cover every seed row) or with no strip
+    /// after its seed legitimately clears nothing.  `config.seedLeadTrim` in
+    /// the pack says whether it ran.
+    int64_t     seedLeadTrimPx = 0;
     /// Human-readable list of the clauses that fired ("" when none did), so a
     /// pack reader never has to re-derive which bar failed.
     std::string integrityReason;
