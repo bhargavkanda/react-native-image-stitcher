@@ -1184,6 +1184,18 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         // A FAILURE TO OPEN IS NEVER A FAILED SWEEP. The row is diagnostic;
         // an operator in an aisle must not lose a capture because a log file
         // could not be created. The refusal is recorded and the sweep runs.
+        // ⚠ RESET THE COUNTERS WITH THE FILE, NOT JUST THE FILE.
+        // `RNISPanoAvfSource` outlives a sweep, so a counter that is only ever
+        // incremented accumulates across captures while `fopen(..., "w")`
+        // truncates — and the pack then reports a row count larger than its
+        // own file. Measured on three consecutive iPhone sweeps before this
+        // line: reported 861 / 1298 / 1727 against 525 / 437 / 429 on disk,
+        // each report being the running total. A count that overstates is
+        // worse than no count, because the whole point of reporting rows
+        // rather than a `present` flag is to catch a channel that wrote less
+        // than it claimed.
+        sensorRows = 0
+        sensorWriteFailed = false
         if !sessionDir.isEmpty {
             let path = (sessionDir as NSString).appendingPathComponent("sensors.jsonl")
             sensorsFp = fopen(path, "w")

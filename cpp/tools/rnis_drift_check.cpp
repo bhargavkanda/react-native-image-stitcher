@@ -39,11 +39,22 @@ namespace {
 // numbers under known keys. `found` is reported so a MISSING field is never
 // silently read as 0.0 — a pack whose ledger predates a field would otherwise
 // look like a pack with no drift.
+// ⚠ WHITESPACE-TOLERANT, and that is not pedantry. The two platforms format
+// `meta.json` differently: Android writes `"canvasH":1216` and iOS writes
+// `"canvasH" : 1216`. A pattern of `"key":` matches the first and silently
+// misses the second, so this tool read canvasH = 0 on every iOS pack and
+// DISABLED THE SLIDE ARM without saying a word — the arm carrying no
+// magnetometer caveat, i.e. the one that matters most.
 bool numberField(const std::string& line, const char* key, double* out) {
-    const std::string pat = std::string("\"") + key + "\":";
-    const size_t k = line.find(pat);
+    const std::string pat = std::string("\"") + key + "\"";
+    size_t k = line.find(pat);
     if (k == std::string::npos) return false;
-    const char* p = line.c_str() + k + pat.size();
+    size_t i = k + pat.size();
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (i >= line.size() || line[i] != ':') return false;
+    ++i;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    const char* p = line.c_str() + i;
     char* end = nullptr;
     const double v = std::strtod(p, &end);
     if (end == p) return false;
@@ -52,10 +63,16 @@ bool numberField(const std::string& line, const char* key, double* out) {
 }
 
 bool stringField(const std::string& line, const char* key, std::string* out) {
-    const std::string pat = std::string("\"") + key + "\":\"";
+    const std::string pat = std::string("\"") + key + "\"";
     const size_t k = line.find(pat);
     if (k == std::string::npos) return false;
-    const size_t s = k + pat.size();
+    size_t i = k + pat.size();
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (i >= line.size() || line[i] != ':') return false;
+    ++i;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (i >= line.size() || line[i] != '"') return false;
+    const size_t s = i + 1;
     const size_t e = line.find('"', s);
     if (e == std::string::npos) return false;
     *out = line.substr(s, e - s);
@@ -105,9 +122,19 @@ int main(int argc, char** argv) {
         std::string all((std::istreambuf_iterator<char>(m)),
                         std::istreambuf_iterator<char>());
         double v = 0.0;
+        // `canvasH` is the ALLOCATED band the engine measures against;
+        // `outputH` is the delivered crop and is smaller. Prefer the former.
         if (numberField(all, "canvasH", &v) || numberField(all, "outputH", &v)) {
             canvasH = static_cast<int>(v);
         }
+    }
+    if (canvasH <= 0) {
+        // LOUD, not silent. With no band the slide arm cannot run at all, and
+        // a verdict computed from two of three arms must not be printed as if
+        // it were the whole answer.
+        std::fprintf(stderr,
+                     "%s: no canvasH/outputH in meta.json — SLIDE ARM DISABLED\n",
+                     dir.c_str());
     }
 
     std::ifstream f(dir + "/ledger.jsonl");
