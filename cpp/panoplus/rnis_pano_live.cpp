@@ -732,6 +732,15 @@ void Session::appendStatus(std::string& s, const FrameOutcome* row) const {
     // Config block), so what is defensible there is a WARNING plus the
     // mag-free slide arm. Shipping this as a silent engine abort would make
     // that judgement in the wrong place.
+    // ── WHERE THE DELIVERED PANORAMA CAME FROM ───────────────────────────
+    // Along-axis pixels by source. The seed and the tail flush are each ONE
+    // frame from ONE pose; only `provenanceStripPx` is genuinely slit-scanned.
+    // `alongAxisIsOutputY` says which output axis these measure, because
+    // `axis == 1` transposes and a reader who assumes columns is 90° wrong.
+    kvInt(s, "provenanceSeedPx", st.provenanceSeedPx);
+    kvInt(s, "provenanceStripPx", st.provenanceStripPx);
+    kvInt(s, "provenanceTailPx", st.provenanceTailPx);
+    kvBool(s, "alongAxisIsOutputY", st.alongAxisIsOutputY);
     kvInt(s, "driftLevel", st.driftLevel);
     kvStr(s, "driftArm", st.driftArm);
     kvInt(s, "driftFiredAtRow", st.driftFiredAtRow);

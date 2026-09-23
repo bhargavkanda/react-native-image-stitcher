@@ -3054,6 +3054,31 @@ struct SessionStats {
     int canvasMaxWidthAtBand = 0;
     int paintedW = 0, paintedH = 0;     // painted extent (pre-orientation)
     int outputW = 0, outputH = 0;       // after finalCanvas()'s orientation bake
+
+    // ── WHERE THE DELIVERED PANORAMA CAME FROM ──────────────────────────────
+    //
+    // The along-sweep axis of the OUTPUT, split by what painted it. These sum
+    // to the along extent, so a reader gets "how much of this panorama is one
+    // frame" without reconstructing anything.
+    //
+    // ⚠ STATED RATHER THAN RECONSTRUCTED, because reconstruction needs three
+    // facts that are easy to get wrong and fail silently: the seed's own
+    // footprint (it is NOT `firstStrip - frameWidth/2`), the along-axis crop,
+    // and WHICH OUTPUT AXIS the sweep lands on. That last one flips with
+    // `axis`: `orient()` transposes when `axis == 1`, so a vertical sweep's
+    // along axis is output **Y**, and splitting it by columns is 90° wrong.
+    // `alongAxisIsOutputY` says which, so nobody has to infer it from pixels —
+    // an inference that keeps getting contaminated by scene texture.
+    //
+    // WHY IT MATTERS: the seed and the tail flush are each ONE frame, placed
+    // from ONE pose with no registration and no gain chain behind them.
+    // Measured across 86 packs the tail flush alone is a median 30% of the
+    // output. They are where the band collapses, where the un-gain-matched
+    // seams live, and why the photometric metrics read badly at both ends.
+    int  provenanceSeedPx = 0;   // leading single frame, never overpainted
+    int  provenanceStripPx = 0;  // genuinely slit-scanned
+    int  provenanceTailPx = 0;   // the lead-out, one frame
+    bool alongAxisIsOutputY = false;
     /// v14 — the upright bake ACTUALLY APPLIED, echoed so a pack reader never
     /// has to infer it.  Everything else in this struct, in the ledger and in
     /// `unpaintedRuns()`/`verticalEnvelope()`/`PreviewWindow` is CANVAS-frame;

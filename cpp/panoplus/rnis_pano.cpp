@@ -1155,6 +1155,28 @@ struct Engine::Impl {
     /// every relatch, alongside the ψ bounds.  See tailArcRotationFraction.
     double  latchCentreU = 0.0;
     int     minPaintedU = 0, maxPaintedU = 0;
+    /// ── PROVENANCE OF THE DELIVERED ALONG AXIS ──────────────────────────
+    ///
+    /// The along-sweep span painted by REGISTERED STRIPS only — the part of
+    /// the panorama that is actually slit-scanned. Everything outside it is
+    /// one of the two single frames: the SEED below `stripMinU` (the first
+    /// frame is painted whole and strips then start at its CENTRE, so its
+    /// leading half is never overpainted) and the TAIL FLUSH above
+    /// `stripMaxU`.
+    ///
+    /// ⚠ RECORDED RATHER THAN RECONSTRUCTED, because reconstructing it from
+    /// the ledger requires knowing the seed's footprint, the along-axis crop
+    /// and which output axis the sweep maps to — and getting any of the three
+    /// wrong silently moves the answer. It was got wrong twice: once by
+    /// assuming the seed began at `firstStripU - frameWidth/2`, and once by
+    /// splitting the output along the WRONG AXIS entirely (`axis == 1`
+    /// transposes in `orient()`, so a vertical sweep lands on output Y).
+    int     stripMinU = -1, stripMaxU = -1;
+    /// ⚠ SET FOR THE DURATION OF THE TAIL FLUSH'S PAINT, and distinct from
+    /// `tailFlushed`, which is only set AFTER it completes (:6360). Using that
+    /// one here would classify the tail flush's own columns as registered
+    /// strips — the exact conflation this tracking exists to end.
+    bool    paintingTail = false;
     bool    anyPainted = false;
     /// THE ROWS ANY FRAME ACTUALLY PAINTED — the UNION, not the per-column
     /// common band `cropVertical` computes.
@@ -2641,6 +2663,18 @@ struct Engine::Impl {
         } else {
             minPaintedU = std::min(minPaintedU, xStart);
             maxPaintedU = std::max(maxPaintedU, xEnd);
+        }
+        // A REGISTERED strip is any paint that is neither the seed's slice run
+        // nor the tail flush. Both of those are ONE frame placed from one
+        // pose, with no correlation behind them, and conflating them with the
+        // slit-scan is what made "47-71% of the panorama comes from 2 frames"
+        // a thing that had to be rediscovered by measurement each time.
+        if (!seedSlicing && !paintingTail) {
+            if (stripMinU < 0) { stripMinU = xStart; stripMaxU = xEnd; }
+            else {
+                stripMinU = std::min(stripMinU, xStart);
+                stripMaxU = std::max(stripMaxU, xEnd);
+            }
         }
         *x0Out = xStart; *x1Out = xEnd;
         return true;
@@ -6113,6 +6147,10 @@ FrameOutcome Engine::ingest(const FrameInput& in) {
 
 FrameOutcome Engine::finish() {
     Impl& S = *impl_;
+    // Everything painted from here on is the lead-out: ONE frame, one pose,
+    // no correlation. Marked before the first paint so the provenance split
+    // attributes it correctly.
+    S.paintingTail = true;
     FrameOutcome row;
     row.outcome = Outcome::TailFlush;
     row.highWater = S.highWater;
@@ -7264,6 +7302,29 @@ SessionStats Engine::stats() const {
         // in a landscape box for the one frame before the real dims land.
         if (S.cfg.outputRotationCwDeg == 90 || S.cfg.outputRotationCwDeg == 270) {
             std::swap(s.outputW, s.outputH);
+        }
+        // ── THE PROVENANCE SPLIT ────────────────────────────────────────
+        // Measured in ALONG-AXIS pixels, which is what `paintedW` already is,
+        // so these sum to it exactly and need no crop correction.
+        if (S.stripMinU >= 0) {
+            s.provenanceSeedPx  = std::max(0, S.stripMinU - S.minPaintedU);
+            s.provenanceStripPx = std::max(0, S.stripMaxU - S.stripMinU);
+            s.provenanceTailPx  = std::max(0, S.maxPaintedU - S.stripMaxU);
+        } else {
+            // No registered strip ever committed: the whole panorama is the
+            // seed and/or the lead-out. Reported honestly rather than as a
+            // zero split, because "one frame" is the answer a reader needs.
+            s.provenanceSeedPx  = std::max(0, S.maxPaintedU - S.minPaintedU);
+            s.provenanceStripPx = 0;
+            s.provenanceTailPx  = 0;
+        }
+        // `orient()` transposes on axis 1, and the upright bake transposes
+        // again on a quarter turn — so the along axis lands on output Y when
+        // exactly ONE of those two happened.
+        {
+            const bool quarter = (S.cfg.outputRotationCwDeg == 90
+                               || S.cfg.outputRotationCwDeg == 270);
+            s.alongAxisIsOutputY = (S.axis == 1) != quarter;
         }
     }
     // Echoed unconditionally — including on a sweep that painted nothing, where

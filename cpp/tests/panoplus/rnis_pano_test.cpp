@@ -12403,3 +12403,63 @@ TEST(PanoDrift, TheGuardCanBeTurnedOffAndThenObservesNothing) {
     EXPECT_EQ(d.level, 0);
     EXPECT_EQ(d.row, 0);
 }
+
+// ── PROVENANCE OF THE DELIVERED ALONG AXIS ─────────────────────────────────
+//
+// These exist because the split was reconstructed by hand twice and got wrong
+// twice — once by assuming the seed began at `firstStrip - frameWidth/2`, and
+// once by splitting the output along the WRONG AXIS entirely. A number the
+// engine STATES cannot be got wrong by a reader; one it leaves to inference
+// will be.
+
+TEST(PanoProvenance, TheThreeSpansSumToTheAlongExtent) {
+    const cv::Mat shelf = makeShelf(7000, 4200);
+    const auto cfg = testConfig();
+    const auto steps = walkWithTransversePitch(60, 8.0, [](int) { return 0.0; });
+    const SweepResult r = runGestureSweep(shelf, steps, cfg);
+    ASSERT_GT(r.stats.paintedW, 0);
+    EXPECT_EQ(r.stats.provenanceSeedPx + r.stats.provenanceStripPx
+                  + r.stats.provenanceTailPx,
+              r.stats.paintedW)
+        << "a split that does not account for every along-axis pixel is not a "
+           "split, it is three unrelated numbers";
+}
+
+TEST(PanoProvenance, AHealthySweepIsNotAllOneFrame) {
+    // The negative control for the field itself: a `provenanceStripPx` stuck
+    // at zero would make every panorama look like one frame and be meaningless.
+    const cv::Mat shelf = makeShelf(7000, 4200);
+    const auto steps = walkWithTransversePitch(60, 8.0, [](int) { return 0.0; });
+    const SweepResult r = runGestureSweep(shelf, steps, testConfig());
+    EXPECT_GT(r.stats.provenanceStripPx, 0);
+}
+
+TEST(PanoProvenance, TheSeedAndTailAreCountedSeparatelyFromTheStrips) {
+    // The seed is painted WHOLE and the strips then begin at its CENTRE, so a
+    // leading span is never overpainted; the tail flush adds a trailing one.
+    // Both are ONE frame from ONE pose. If either were folded into the strip
+    // count, "how much of this is slit-scanned" would be unanswerable.
+    const cv::Mat shelf = makeShelf(7000, 4200);
+    const auto steps = walkWithTransversePitch(60, 8.0, [](int) { return 0.0; });
+    const SweepResult r = runGestureSweep(shelf, steps, testConfig());
+    EXPECT_GT(r.stats.provenanceSeedPx + r.stats.provenanceTailPx, 0)
+        << "every sweep has a seed; one with neither a seed nor a lead-out "
+           "span means the tracking is not running";
+    EXPECT_LT(r.stats.provenanceStripPx, r.stats.paintedW)
+        << "the strips cannot be the whole along extent";
+}
+
+TEST(PanoProvenance, TheAlongAxisIsReportedNotInferred) {
+    // ⚠ THE FIELD THAT MATTERS TO A READER. `orient()` transposes when
+    // `axis == 1`, so a VERTICAL sweep's along axis is output **Y** — and
+    // splitting such a panorama by COLUMNS is 90° wrong. Inferring it from
+    // pixels keeps failing because scene texture swamps every seam metric, so
+    // the engine says it outright.
+    const cv::Mat shelf = makeShelf(7000, 4200);
+    const auto cfg = testConfig();
+    const auto steps = walkWithTransversePitch(60, 8.0, [](int) { return 0.0; });
+    const SweepResult r = runGestureSweep(shelf, steps, cfg);
+    const bool quarter = (cfg.outputRotationCwDeg == 90
+                       || cfg.outputRotationCwDeg == 270);
+    EXPECT_EQ(r.stats.alongAxisIsOutputY, (r.stats.axis == 1) != quarter);
+}

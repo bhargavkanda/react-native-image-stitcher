@@ -623,8 +623,21 @@ TEST(PanoLiveSession, StatusAfterAFrameCarriesTheEnginesOwnCounters) {
     EXPECT_NE(st.find("\"clippedColumns\""), std::string::npos);
     // No bare NaN/Infinity anywhere: `JSON.parse` throws on both, three layers
     // from whoever wrote them.
-    EXPECT_EQ(st.find("nan"), std::string::npos) << st;
-    EXPECT_EQ(st.find("inf"), std::string::npos) << st;
+    //
+    // ⚠ MATCHED WHERE A VALUE CAN START, not anywhere in the string. The bare
+    // substring test failed the moment a field was named `provenanceSeedPx` —
+    // "prove-NAN-ceSeedPx" — and it would have failed on `maintenance` or
+    // `finance` too. A guard that fires on its own key names teaches people to
+    // rename the field rather than look at the number, which is the opposite
+    // of what it is for. A JSON value only ever begins after `:`, `,` or `[`,
+    // so those are the three places a bare NaN or Infinity can appear.
+    for (const char* lit : {"nan", "-nan", "inf", "-inf", "Infinity", "-Infinity"}) {
+        for (const char* lead : {":", ",", "["}) {
+            const std::string probe = std::string(lead) + lit;
+            EXPECT_EQ(st.find(probe), std::string::npos)
+                << "bare " << lit << " after '" << lead << "' in status: " << st;
+        }
+    }
 }
 
 TEST(PanoLiveSession, StatusAfterCancelSaysNotRunning) {
