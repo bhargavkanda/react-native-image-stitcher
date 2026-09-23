@@ -79,6 +79,13 @@ module.exports = {
   Modal: 'Modal',
   Image: 'Image',
   ScrollView: 'ScrollView',
+  // ⚠ THE SAME GAP AS `Modal` ABOVE, one component later. Without it any
+  // render reaching `CaptureThumbnailStrip` dies with the identical
+  // "Element type is invalid" — which is exactly how the sweep cell's
+  // MISSING thumbnail strip stayed invisible to the suite: the one test that
+  // mentioned the strip asserted it was ABSENT, so the mock gap and the
+  // product gap agreed with each other and neither was visible.
+  FlatList: 'FlatList',
   StyleSheet,
   Platform: { OS: 'ios', select: (o) => o.ios ?? o.default },
   Dimensions: { get: () => ({ width: 390, height: 844, scale: 3, fontScale: 1 }) },

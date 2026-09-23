@@ -1637,6 +1637,17 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
  * overlay methods); existing callers that don't pass a ref are unaffected
  * (`forwardRef` makes the ref optional).
  */
+/**
+ * How far ABOVE the sweep's lens chip the capture-history strip sits.
+ *
+ * The sweep cell has no bottom bar of its own — `PanoPlusCaptureSurface` owns
+ * the shutter on this engine — so the strip is anchored off the same
+ * `panoLensChipBottomPt` the chip uses, lifted clear of it. One source for
+ * the anchor means the two cannot drift apart when the surface's controls
+ * move.
+ */
+const SWEEP_THUMBNAIL_LIFT_PT = 56;
+
 export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   props: CameraProps,
   ref,
@@ -3880,6 +3891,35 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
    *
    * One helper, called from both trees, so they cannot drift again.
    */
+  /**
+   * The capture-history strip, from ONE definition so the two trees cannot
+   * drift — the same reason `renderGuardModals` and `renderReviewSurfaces`
+   * exist.
+   *
+   * ⚠ THIS IS THE FIFTH THING THE `engine === 'sweep'` EARLY RETURN ATE.
+   * Operator, 2026-09-22: "After a capture is done in sweep mode, it is not
+   * shown as thumbnail like it is in keyframe mode - it is lost." The strip
+   * was rendered once, deep in the main tree, and the sweep cell returns
+   * before reaching it — so the item was appended to state and had nothing to
+   * render it. Exactly how the crop editor, the review surface, the guard
+   * modals and the warnings channel each went missing on this engine before.
+   *
+   * `engine` is a PROP, not a screen: a capture is a capture on both engines,
+   * and the host's history strip must not care which one produced it.
+   */
+  const renderThumbnailStrip = (): React.JSX.Element | null => (
+    thumbnails != null && statusPhase !== 'recording' ? (
+      <CaptureThumbnailStrip
+        items={thumbnails}
+        minPhotos={thumbnailsMin}
+        maxPhotos={thumbnailsMax}
+        onItemPress={onThumbnailPress}
+        vertical={isSideEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}
+        contentRotation={contentRotation}
+      />
+    ) : null
+  );
+
   const renderReviewSurfaces = (): React.JSX.Element => (
     <>
     {/* v0.13.0 — built-in post-stitch / tap-to-preview modal.
@@ -4904,6 +4944,24 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             </>
           )}
 
+          {/* ── AND THE CAPTURE-HISTORY STRIP, for the same reason ────
+              It sat inline in the main tree only, so a sweep's capture was
+              appended to `thumbnails` and then had nothing to render it —
+              "it is lost", as the operator put it. Anchored above the
+              surface's own bottom controls, which own the shutter on this
+              engine. */}
+          <View
+            style={[styles.sweepThumbnailAnchor, {
+              bottom: panoLensChipBottomPt(
+                insets.bottom,
+                sweep?.bottomBarOffset ?? 0,
+                sweep?.hideBuiltInControls ?? false,
+              ) + SWEEP_THUMBNAIL_LIFT_PT,
+            }]}
+            pointerEvents="box-none">
+            {renderThumbnailStrip()}
+          </View>
+
           {/* ── THE SAME REVIEW SURFACES THE OTHER ENGINES USE ─────────
               Rendered from one helper so the sweep cell and the main tree
               cannot drift — which is exactly how they drifted before:
@@ -5139,23 +5197,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             it has room without overlap.  Strip is intrinsically
             horizontal; v0.13.1 will add orientation-aware rotation
             for the thumbnails + tablet "user-bottom" placement. */}
-        {thumbnails != null && statusPhase !== 'recording' && (
-          <CaptureThumbnailStrip
-            items={thumbnails}
-            minPhotos={thumbnailsMin}
-            maxPhotos={thumbnailsMax}
-            onItemPress={onThumbnailPress}
-            // v0.13.1 — stack the idle strip vertically when the
-            // home-indicator anchor is on a side edge (non-locked host
-            // in landscape), matching PanoramaBandOverlay's `vertical`
-            // so the strip rides the home-indicator edge instead of
-            // running horizontally across the rotated screen.
-            vertical={isSideEdge(homeIndicatorEdge(jsLandscape, deviceOrientation))}
-            // v0.13.1 — counter-rotate the thumbnail images so the
-            // captured scene reads upright in portrait-locked landscape.
-            contentRotation={contentRotation}
-          />
-        )}
+        {/* ONE definition, shared with the sweep cell — see
+            `renderThumbnailStrip`. Inlining it here is how it came to exist
+            on only one engine. */}
+        {renderThumbnailStrip()}
 
         {/* Shutter row.  Horizontal row when home-indicator is on
             top/bottom (lens left / shutter center / AR right);
@@ -5896,6 +5941,15 @@ function bottomBarStyleForEdge(edge: HomeIndicatorEdge): ViewStyle {
 
 
 const styles = StyleSheet.create({
+  /** Anchors the capture-history strip in the SWEEP cell, which has no
+   *  bottom bar of its own. `box-none` so it never eats a touch meant for
+   *  the surface's controls underneath. */
+  sweepThumbnailAnchor: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
   container: {
     flex: 1,
     backgroundColor: '#000',

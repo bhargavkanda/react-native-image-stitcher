@@ -995,13 +995,41 @@ describe('<Camera engine="sweep">', () => {
   });
 
   it('does not put the keyframe engine\'s chrome under a sweep', () => {
-    // Falling through to the main tree would bring the settings modal, the
-    // thumbnail strip and the band overlay with it — keyframe furniture
-    // over a sweep, which is the "why does the UI change?" complaint in
-    // the other direction.
+    // Falling through to the main tree would bring the settings modal and
+    // the band overlay with it — keyframe furniture over a sweep, which is
+    // the "why does the UI change?" complaint in the other direction.
+    //
+    // ⚠ THE THUMBNAIL STRIP USED TO BE ON THIS LIST AND WAS MOVED OFF IT.
+    // It is not keyframe furniture: it is CAPTURE HISTORY, and a capture is
+    // a capture on either engine. Operator, 2026-09-22: "After a capture is
+    // done in sweep mode, it is not shown as thumbnail like it is in
+    // keyframe mode - it is lost." Listing it here encoded the opposite of
+    // the standing rule that `engine` changes only what the HOLD runs.
     const names = namesOf(render({ engine: 'sweep' }));
-    expect(names).not.toContain('CaptureThumbnailStrip');
     expect(names).not.toContain('PanoramaSettingsModal');
+  });
+
+  it('⚑ DOES show the capture-history strip — a capture is a capture', () => {
+    // FAILS BEFORE THE FIX: the strip was inlined in the main tree only, and
+    // the `engine === 'sweep'` cell returns before reaching it — so the item
+    // was appended to `thumbnails` and had nothing to render it. The fifth
+    // thing that early return has eaten, after the crop editor, the review
+    // surface, the guard modals and the warnings channel.
+    const names = namesOf(render({
+      engine: 'sweep',
+      thumbnails: [{ id: '/d/pp_1/canvas.jpg', uri: 'file:///d/pp_1/canvas.jpg' }],
+    }));
+    expect(names).toContain('CaptureThumbnailStrip');
+  });
+
+  it('⚑ …and the keyframe engine still shows it, from the SAME definition', () => {
+    // The point of `renderThumbnailStrip` is that there is one definition.
+    // If this and the case above ever disagree, the trees have drifted again.
+    const names = namesOf(render({
+      engine: 'keyframe',
+      thumbnails: [{ id: '/d/a.jpg', uri: 'file:///d/a.jpg' }],
+    }));
+    expect(names).toContain('CaptureThumbnailStrip');
   });
 
   it('⚑ does not re-enter the host handler when that handler sets state', () => {
