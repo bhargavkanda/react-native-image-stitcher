@@ -79,7 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     build without the sweep's session module is refused as
     `ENGINE_UNAVAILABLE` (it used to do nothing) and leaves `takePhoto()`
     usable. The `panMode` gate does not apply to the internal DR-1a hatch,
-    whose old screen has no rotate prompt;
+    which has no rotate prompt;
   - `takePhoto()` while a panorama is recording or finishing, on either
     engine, is refused with the new `CAPTURE_IN_PROGRESS` code (D7);
   - switching the engine at idle no longer unmounts the camera;
@@ -118,8 +118,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keyframe host with its own shutter now shows it. The settings modal takes an
   `engine` prop: on the sweep, the keyframe-only sections give way to a note
   saying where the sweep's options are set. The internal
-  `sweep.frameSourceOverride: 'own'` (device round DR-1a only) still shows the
-  old sweep screen, on pano+'s old own camera.
+  `sweep.frameSourceOverride: 'own'` (device round DR-1a only) runs the sweep
+  on pano+'s old own camera, in an internal hatch view under `<Camera>`'s own
+  chrome and shutter (the old sweep screen is gone, see Removed).
 
 - **`<Camera engine="sweep">` runs on `<Camera>`'s own camera on iOS too.** A
   non-AR iPhone sweep used to open pano+'s own `AVCaptureSession` behind the
@@ -210,13 +211,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     stand-alone screen. The engine it drew is `<Camera engine="sweep">`; its
     options are `SweepOptions` (`<Camera sweep={…}>`).
   - Its clone chrome: its own AR pill, lens chip and built-in shutter. The
-    sweep uses `<Camera>`'s.
+    sweep uses `<Camera>`'s. `<Camera>`'s shutter does not grey on the sweep's
+    readiness, so on the internal DR-1a hatch a hold while the calibration
+    read is in flight is refused by name (`panoplus-not-ready`), and one in a
+    build without the sweep's session module is refused as
+    `ENGINE_UNAVAILABLE`. The old screen greyed its shutter instead.
   - `PanoPlusBasisOverlay` and `PanoPlusBasisOverlayProps`, the in-camera
     first-run basis gesture (D3(a)), with the model only it used:
     `panoPlusBasisGestureView`, `basisRefusalCoaching`,
-    `PANO_PLUS_BASIS_AXIS_BAR_DEG`, `REFERENCE_GRACE_S` and the
-    `PanoPlusBasisGesture*` types. The basis ladder (`resolvePanoPlusBasis`)
-    is unchanged.
+    `PANO_PLUS_BASIS_AXIS_BAR_DEG`, `REFERENCE_GRACE_S`,
+    `PanoPlusBasisAxisMeter` and the `PanoPlusBasisGesture*` types. The basis
+    ladder (`resolvePanoPlusBasis`) is unchanged.
   - The internal effective-arm feed and lens mask (`sweepEffectiveLens`,
     never exported). The lens chip paints `lens` on both engines.
 - **The sweep's second result viewer (M10).** `PanoPlusResultView` and

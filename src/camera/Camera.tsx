@@ -2114,11 +2114,13 @@ function extractPanoramaOverrides(props: CameraProps): PanoramaPropOverrides {
 /**
  * How far ABOVE the sweep's lens chip the capture-history strip sits.
  *
- * The sweep cell has no bottom bar of its own — `PanoPlusCaptureSurface` owns
- * the shutter on this engine — so the strip is anchored off the same
- * `panoLensChipBottomPt` the chip uses, lifted clear of it. One source for
- * the anchor means the two cannot drift apart when the surface's controls
- * move.
+ * The DR-1a hatch's tree has no bottom bar. `<Camera>` draws the shutter there
+ * directly (M10, `camera-hatch-shutter`) at `insets.bottom +
+ * PANO_BOTTOM_BAR_INSET + bottomBarOffset`, and docks the lens chip above it
+ * through `panoLensChipBottomPt`. The strip is anchored off that same
+ * `panoLensChipBottomPt`, lifted clear of the chip. One source for the anchor
+ * means the strip, the chip and the shutter cannot drift apart when a host
+ * moves them with `bottomBarOffset` or `hideBuiltInShutter`.
  */
 const SWEEP_THUMBNAIL_LIFT_PT = 56;
 
@@ -2290,16 +2292,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   //
   // So the gate below holds BOTH cameras unmounted for a settle window after
   // the sweep goes away — the same placeholder the AR/non-AR swap already
-  // uses for the same Camera2-in-use reason. The other direction needs
-  // nothing: the recorder already retries into a camera vision-camera is
-  // still releasing.
+  // uses for the same Camera2-in-use reason. It holds from the switch commit
+  // itself: `sweepHandoffNow`, beside `inFlightTransition`, opens it during
+  // render, and this state keeps it open. The other direction needs no
+  // settle of its own: the recorder already retries into a camera
+  // vision-camera is still releasing, and an AR session still being stopped
+  // is waited out through `hatchAwaitsArStop` (see there).
   const [sweepHandoffPending, setSweepHandoffPending] = useState(false);
   // M8 — the OWNERSHIP settle (the DR-1a hatch toggled; see
   // `sweepCameraHandoff`) holds `<Camera>`'s camera slot unmounted exactly as
   // the engine-switch settle does, so the two are ONE term wherever a camera
-  // may mount or a hold may start.
+  // may mount or a hold may start: `cameraHandoffPending`, composed below
+  // `inFlightTransition` once the live ownership answer is known. This state
+  // only keeps the window open for its 600 ms; the render term there opens it.
   const [ownershipSettling, setOwnershipSettling] = useState(false);
-  const cameraHandoffPending = sweepHandoffPending || ownershipSettling;
   // Was the last sweep on pano+'s OWN camera (the DR-1a hatch)? Only then does
   // leaving the sweep engine hand a camera back — see the effect below.
   const sweepOnOwnCameraRef = useRef(false);
@@ -2315,20 +2321,30 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const [sweepOwnershipLatch, setSweepOwnershipLatch] =
     useState<boolean | null>(null);
   const prevEngineRef = useRef(engine);
+  // ⚠ THE SETTLE'S TIMER IS NOT CLEARED BY THE NEXT ENGINE CHANGE (M10
+  // re-review). It was the effect's cleanup, and the effect re-runs on every
+  // `engine` change: hatch → keyframe → back to `'sweep'` inside the 600 ms
+  // cleared the timer, the re-run returned early (it was not leaving the
+  // sweep), and nothing ever lowered the flag. `cameraHandoffPending` then
+  // stayed true for good — every hold deferred and never resumed, and the
+  // main tree's camera slot stayed empty. The release the window waits for
+  // began at the switch and does not stop because the prop flipped back, so
+  // the window runs out; only an unmount clears the timer.
+  const sweepHandoffTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const was = prevEngineRef.current;
     prevEngineRef.current = engine;
-    if (was !== 'sweep' || engine === 'sweep') return undefined;
+    if (was !== 'sweep' || engine === 'sweep') return;
     // M8 — on every other cell the sweep ran on `<Camera>`'s OWN camera, so
     // leaving it hands nothing back: the camera stays mounted, and an idle
     // engine switch is not a camera switch (DR-2 I3/A7).
-    if (!sweepOnOwnCameraRef.current) return undefined;
+    if (!sweepOnOwnCameraRef.current) return;
     setSweepHandoffPending(true);
-    const t = setTimeout(
-      () => { setSweepHandoffPending(false); },
-      SWEEP_CAMERA_RELEASE_SETTLE_MS,
-    );
-    return () => { clearTimeout(t); };
+    if (sweepHandoffTimerRef.current != null) clearTimeout(sweepHandoffTimerRef.current);
+    sweepHandoffTimerRef.current = setTimeout(() => {
+      sweepHandoffTimerRef.current = null;
+      setSweepHandoffPending(false);
+    }, SWEEP_CAMERA_RELEASE_SETTLE_MS);
   }, [engine]);
 
   const [arPreference, setArPreference] = useState(
@@ -2639,6 +2655,89 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     settledIsARRef.current !== isAR
     || settledLensRef.current !== lens
     || cameraTransitioning;
+
+  // ── THE OWNERSHIP SETTLE OPENS IN THE FLIP COMMIT (M10 re-review) ──────
+  // Who owns the camera on the sweep arm — ONE boolean, so the preview and
+  // the native start options cannot disagree (see `sweepHostOwnsCamera`, and
+  // the call site of `sweepCameraHandoff` below).
+  //
+  // ⚠ THE SAME TRAP AS THE CAMERA HANDOFF GATE ABOVE, and the same fix.
+  // `ownershipSettling` is state, and only the settle effect (just above the
+  // `sweepCameraHandoff` call) sets it — AFTER the commit. While the window
+  // was read from that state alone, it was still closed on the commit where
+  // this answer flipped:
+  //   · into the DR-1a hatch (AR off, or 0.5× in AR) the engine was told
+  //     `'own'` in the same commit the host's `<ARCameraView>` unmounted, and
+  //     its idle effect asked native for pano+'s own viewfinder
+  //     (`setIdlePreview(true)`) while ARKit / ARCore was still letting go;
+  //     the next commit took it back and the settle's end asked again;
+  //   · out of the hatch `<CameraView>` mounted for that one commit (and the
+  //     engine was told `vcPluginArm: true`), then unmounted for the settle.
+  // So the flip is compared SYNCHRONOUSLY here, against the owner the settle
+  // effect last recorded (`prevOwnsRef`), with the same rule the effect uses
+  // (`sweepShouldSettle`: never under a running sweep's latch). The state
+  // then holds the window open for `SWEEP_CAMERA_RELEASE_SETTLE_MS`.
+  //
+  // ⚠ ON THE SWEEP ENGINE ONLY (M10 re-review). One of the two owners in this
+  // handoff is pano+'s own camera, which only the sweep engine opens: on
+  // `engine="keyframe"` the sweep hook is not selected and opens nothing. The
+  // window used to open there too, because the DR-1a flag rides the `sweep`
+  // bag on every engine: with it on, an AR toggle held the keyframe camera
+  // for 600 ms instead of the transition's 250 ms grace, and toggling the flag
+  // with AR off unmounted the keyframe viewfinder and mounted it again for no
+  // camera change at all. So neither this term nor the effect opens a window
+  // off the sweep engine. The effect still RECORDS the owner there, so a later
+  // switch to the sweep engine opens no window for a flip made before it. A
+  // window that is already open when the engine changes runs to its end,
+  // because the camera release it covers has already begun.
+  // (`hatchOwnershipSettle.render.test.tsx`)
+  const hostOwnsSweepCameraLive = sweepHostOwnsCamera({
+    isAR,
+    frameSourceOverride: sweep?.frameSourceOverride,
+  });
+  const prevOwnsRef = useRef(hostOwnsSweepCameraLive);
+  const ownershipSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ownershipSettlingNow = ownershipSettling || (engine === 'sweep' && sweepShouldSettle({
+    latch: sweepOwnershipLatch,
+    previous: prevOwnsRef.current,
+    live: hostOwnsSweepCameraLive,
+  }));
+  // THE ENGINE-SWITCH SETTLE OPENS IN THE SWITCH COMMIT TOO, for the same
+  // reason. `sweepHandoffPending` is set by its effect, after the commit, so
+  // on hatch → keyframe the switch commit mounted `<CameraView>` in the same
+  // commit that released pano+'s idle viewfinder, and the next commit
+  // unmounted it for the settle. Compared here instead: the effect has not
+  // recorded the new engine yet, so `prevEngineRef` still says `'sweep'`, and
+  // `sweepOnOwnCameraRef` still holds the last sweep render's answer (only a
+  // sweep render writes it).
+  const sweepHandoffNow = sweepHandoffPending || (
+    prevEngineRef.current === 'sweep'
+    && engine !== 'sweep'
+    && sweepOnOwnCameraRef.current
+  );
+  const cameraHandoffPending = sweepHandoffNow || ownershipSettlingNow;
+  // ── THE HATCH WAITS FOR AN AR SESSION THAT IS STILL STOPPING ──────────
+  // `settledIsARRef` still says AR from the render where AR went off until the
+  // camera-transition effect (further down) has stopped the AR session and
+  // waited out its 250 ms grace. If the hatch is the camera's next owner in
+  // that time, it must not open pano+'s own camera yet. On the sweep engine
+  // the ownership window above normally covers this, since turning AR off is
+  // itself an ownership flip. What it did not cover once the window was
+  // confined to the sweep engine: AR off on the KEYFRAME engine with the
+  // DR-1a flag on, then a switch into the hatch before the grace ends. The
+  // hatch was told `'own'` and asked for its idle viewfinder while ARKit /
+  // ARCore was still letting go. This term holds the hatch on `'host'` (open
+  // nothing) for exactly the AR stop's own lifetime, whichever engine AR was
+  // turned off on: the same wait the keyframe viewfinder gets. Never under a
+  // running sweep's latch.
+  // Only AR, not every camera transition. A lens swap on the hatch involves
+  // no second camera stack: the engine closes its own idle viewfinder and
+  // asks for it again on the new lens, and native keeps the two in order on
+  // one queue (`useSweepEngine`'s idle effect). Putting the hatch on `'host'`
+  // for the swap would only add a grace-long gap with no viewfinder.
+  const hatchAwaitsArStop = sweepOwnershipLatch === null
+    && !hostOwnsSweepCameraLive
+    && settledIsARRef.current !== isAR;
 
 
   // ── v0.13.1 — Android portrait lock ─────────────────────────────
@@ -2991,7 +3090,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   onErrorRef.current = onError;
   const holdStartDispatch = useCallback(() => { holdStartDispatchRef.current(); }, []);
   const holdEndDispatch = useCallback(() => { holdEndDispatchRef.current(); }, []);
-  /** The sweep surface's shutter handle, when `engine="sweep"`. */
+  /** The sweep engine's hold handle (`useSweepEngine`'s imperative ref), which
+   *  `<Camera>`'s shutter and `startPanorama` drive when `engine="sweep"`. */
   const sweepRef = useRef<SweepSurfaceHandle | null>(null);
   /** `engine` read from inside the imperative handle, whose deps are `[]` so
    *  it is built once and must not close over a stale prop. */
@@ -4014,9 +4114,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // decides WHETHER to start now.  Under Mode A in portrait it latches
   // `pendingPanStart` instead (item 1/2) and the resume effect below
   // starts the capture once the user rotates to landscape.
-  // M8 — the DR-1a hatch: a non-AR sweep on pano+'s OLD own camera. Its old
-  // screen has no rotate prompt and its own shutter never had the pan-mode
-  // gate, so the dispatcher leaves it ungated too (M8 review).
+  // M8 — the DR-1a hatch: a non-AR sweep on pano+'s OLD own camera. Its tree
+  // renders no rotate prompt, and the old screen's own shutter never had the
+  // pan-mode gate, so the dispatcher leaves the hatch ungated (M8 review) —
+  // which since M10 is `<Camera>`'s own hatch shutter's hold too.
   const sweepOnHatch = engine === 'sweep' && !isAR && sweep?.frameSourceOverride === 'own';
   // M8 — the sweep's hold-only readiness defer: see the dispatcher below.
   //
@@ -4913,12 +5014,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     //
     // So Pano's rule is restored verbatim: the PILL names a SETTING and must
     // only be on screen where that setting can actually move.
-    // ⚠ `hideBuiltInShutter` HIDES THE SHUTTER, NOT THE ARM CONTROL — and on
-    // a sweep it is not even our shutter being hidden. The surface draws its
-    // own, and pano+'s documented host config is exactly
-    // `bottomBarOffset: 150, hideBuiltInShutter` (panoPlusModel.ts:2149), so
-    // this term deleted the AR pill outright on the one host configuration
-    // the sweep actually ships under — defect #1 rebuilt, one layer up.
+    // ⚠ `hideBuiltInShutter` HIDES THE SHUTTER, NOT THE ARM CONTROL. It hides
+    // `<Camera>`'s own shutter on every tree, the DR-1a hatch included (M10:
+    // the hatch's shutter is `<Camera>`'s, `camera-hatch-shutter`). pano+'s
+    // documented host config is exactly `bottomBarOffset: 150,
+    // hideBuiltInShutter` (the note above `PREVIEW_BAND_THICKNESS` in
+    // panoPlusModel.ts), so a `hideBuiltInShutter` term here once deleted the
+    // AR pill outright on the one host configuration the sweep actually ships
+    // under — defect #1 rebuilt, one layer up.
     // D18 — no `hideBuiltInShutter` term, on either engine: the AR pill is a
     // CAMERA control, not shutter chrome, and a host that draws its own
     // shutter still needs it.
@@ -5366,8 +5469,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // phone where nothing is wrong but the ordering. So the loser releases
   // first and the winner waits; see `sweepCameraHandoff`.
 
-  // Who owns the camera on the sweep arm — ONE boolean, so the preview and
-  // the native start options cannot disagree.
+  // Who owns the camera on the sweep arm, `hostOwnsSweepCameraLive`, is
+  // computed further up, beside `inFlightTransition`: the ownership settle
+  // has to see its flip during render (see there). The notes below are about
+  // how it and the arm are assembled.
   //
   // ⚠ THE ASSEMBLY IS ITS OWN PURE FUNCTION, not an object literal here, and
   // that is a fix rather than tidiness. Three review rounds running, the
@@ -5394,11 +5499,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const sweepLens: 'wide' | 'ultraWide' = lens === '0.5x' ? 'ultraWide' : 'wide';
   // Asked once per mount: a binary's capabilities do not change under it.
   const nativeVcArmSupported = useMemo(() => panoPlusVcArmSupported(Platform.OS), []);
-  const hostOwnsSweepCameraLive = sweepHostOwnsCamera({
-    isAR,
-    frameSourceOverride: sweep?.frameSourceOverride,
-  });
-  // …and when the host camera cannot serve a hold right now, the hold is
+  // When the host camera cannot serve a hold right now, the hold is
   // REFUSED BY NAME rather than handed to another camera.
   const sweepHostRefusal = !hostOwnsSweepCameraLive ? null
     // M8 — on the AR kind the camera is `<Camera>`'s AR view; the only thing
@@ -5435,12 +5536,18 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // its plugin was never acquired, so every hold was refused as "still
   // loading" forever. The keyframe engine honours the prop; so does this, by
   // name, first — before any host-arm reason, because it is the one no wait
-  // can clear.
+  // can clear. And before the engine's own readiness: `useSweepEngine`'s
+  // `holdStart` answers this code ahead of its `canCapture` gate, so a hold
+  // while the iOS arm's calibration read is in flight gets this answer too,
+  // not "still loading" (M10 re-review; `hatchSettleHold.render.test.tsx`).
   const sweepHoldRefusal: SweepHostArmRefusal | null = !enablePanoramaMode
     ? SWEEP_PANORAMA_DISABLED
     : sweepHostRefusal;
 
-  const prevOwnsRef = useRef(hostOwnsSweepCameraLive);
+  // THE SETTLE'S TIMER. The window already OPENED during the flip's render
+  // (`ownershipSettlingNow`, beside `inFlightTransition`); this records the
+  // new owner, which closes that render term, and holds the window open with
+  // `ownershipSettling` for `SWEEP_CAMERA_RELEASE_SETTLE_MS`.
   useEffect(() => {
     // ⚠ NEVER WHILE A SWEEP IS RUNNING, AND THE EARLY RETURN MUST NOT
     // RECORD. `mountHostPreview` ANDs the latch with the window, so a settle
@@ -5452,20 +5559,35 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       latch: sweepOwnershipLatch,
       previous: prevOwnsRef.current,
       live: hostOwnsSweepCameraLive,
-    })) return undefined;
+    })) return;
     prevOwnsRef.current = hostOwnsSweepCameraLive;
+    // Recorded on every engine, opened on the sweep engine only (see the
+    // render term).
+    if (engine !== 'sweep') return;
     setOwnershipSettling(true);
-    const timer = setTimeout(
-      () => { setOwnershipSettling(false); },
-      SWEEP_CAMERA_RELEASE_SETTLE_MS,
-    );
-    return () => { clearTimeout(timer); };
-  }, [hostOwnsSweepCameraLive, sweepOwnershipLatch]);
+    // ⚠ A TIMER IN A REF, NOT THIS EFFECT'S CLEANUP. `engine` is a dep, so
+    // a cleanup would clear the timer when the engine switched mid-window;
+    // the re-run would find nothing new to record and return, and the flag
+    // would never come down (the engine-switch settle had exactly that
+    // defect). A new flip restarts the window; only an unmount clears it.
+    if (ownershipSettleTimerRef.current != null) clearTimeout(ownershipSettleTimerRef.current);
+    ownershipSettleTimerRef.current = setTimeout(() => {
+      ownershipSettleTimerRef.current = null;
+      setOwnershipSettling(false);
+    }, SWEEP_CAMERA_RELEASE_SETTLE_MS);
+  }, [engine, hostOwnsSweepCameraLive, sweepOwnershipLatch]);
+  // The two settle timers die with `<Camera>`, and only then.
+  useEffect(() => () => {
+    if (ownershipSettleTimerRef.current != null) clearTimeout(ownershipSettleTimerRef.current);
+    if (sweepHandoffTimerRef.current != null) clearTimeout(sweepHandoffTimerRef.current);
+  }, []);
 
   const { mountHostPreview, surfaceFrameSource } = sweepCameraHandoff({
     live: hostOwnsSweepCameraLive,
     latch: sweepOwnershipLatch,
-    settling: ownershipSettling,
+    // The render terms, not the state: the state is one commit late. And
+    // the hatch also waits for an AR session that is still stopping.
+    settling: ownershipSettlingNow || hatchAwaitsArStop,
     isAR,
   });
   // ── M8: ONE TREE, EXCEPT FOR THE DR-1a HATCH ─────────────────────────────
@@ -6104,20 +6226,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     return (
       <HostJsLandscapeContext.Provider value={jsLandscape}>
         <View style={[styles.container, style]}>
-          {/* ── THE NON-AR SWEEP RUNS ON THE HOST'S OWN PREVIEW (S7) ──
-              On the AR arm the surface mounts its own `<ARCameraView>` and
-              nothing else may; on the non-AR arm `<CameraView>` IS the
-              camera and the sweep is fed from it by the
-              `panoplus_sweep_ingest` frame processor. Same element the
-              keyframe engine uses — one definition, so the two cannot
-              drift.
-
-              ⚠ GATED ON THE OWNERSHIP ANSWER, NOT ON `!isAR`. The two are
-              not the same question: `!isAR` is "the sweep is not using
-              ARKit", and this needs "the sweep's native recorder will open
-              NOTHING". On iOS today the second is false however the first
-              reads, and mounting this there puts two sessions on one
-              camera.
+          {/* ── THE HATCH'S CAMERA IS PANO+'S OWN, NEVER `<CameraView>` ──
+              `SweepHatchScreen` draws it: the own arm's viewfinder (the
+              engine's idle feed, and then the sweep's own session), or its
+              own `<ARCameraView>` when the sweep's arm resolves to AR (the
+              fallback on an iPhone with no calibration for the IMU arm, for
+              one). `<Camera>`'s `<CameraView>` is never mounted
+              in this tree (`hostPreviewMounted` requires `!sweepLegacyTree`),
+              so a vision-camera session can never sit beside pano+'s on one
+              camera here. Feeding a sweep from `<CameraView>` through the
+              `panoplus_sweep_ingest` frame processor is the MAIN tree's
+              host arm.
 
               ⚠ THIS TREE CARRIES ONLY WHAT IT RENDERS BELOW (M8 review:
               this note said the thumbnail strip stayed out, and the strip is
@@ -6125,8 +6244,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               modal, and the band overlay — so `showSettingsButton` does
               nothing on the hatch. The hatch is the DR-1a reference arm and
               goes with it (M6a); the main tree is the product. */}
-          {/* M8 — NO HOST PREVIEW HERE. This tree is the DR-1a hatch's, whose
-              camera is pano+'s own; `<Camera>`'s preview is the main tree's. */}
           {cropPending == null && (
           // ⚠ THE SURFACE UNMOUNTS BEHIND THE REVIEW, and must keep doing
           // so. It owns a camera; leaving it mounted behind the review
@@ -6193,22 +6310,21 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                 orientation={deviceOrientation}
               />
               <View
-                // ⚠ DERIVED FROM THE SURFACE'S OWN ARITHMETIC, NOT A LITERAL.
-                // This was `bottom: 132` under a comment claiming the two
-                // sides agreed "by construction" through `bottomBarOffset`.
-                // Nothing connected them: the surface's slot is computed
-                // from the insets, `bottomBarOffset` and whether it draws
-                // the shutter, and a host setting any of the three slid its
-                // bar out from under a chip that did not move. A mutation
-                // to `bottom: 0` — the chip fully behind the shutter — left
-                // the entire suite green.
+                // ⚠ DERIVED FROM THE SHARED ARITHMETIC, NOT A LITERAL.
+                // This was `bottom: 132` under a comment claiming the chip
+                // and the old sweep screen's shutter agreed "by
+                // construction" through `bottomBarOffset`. Nothing connected
+                // them: a host setting the insets, `bottomBarOffset` or
+                // `hideBuiltInShutter` slid the bar out from under a chip
+                // that did not move. A mutation to `bottom: 0` — the chip
+                // fully behind the shutter — left the entire suite green.
+                // Since M10 the shutter below is `<Camera>`'s own
+                // (`camera-hatch-shutter`), placed from the same terms:
+                // `panoLensChipBottomPt` is that shutter's bottom plus its
+                // height whenever it is drawn.
                 style={[styles.sweepLensChipDock, {
-                  // ONE inset source: the surface reads
-                  // `SafeAreaInsetsContext` and `<Camera>` reads
-                  // `useSafeAreaInsets()`, which is the same provider. (The
-                  // review measured the surface's as `undefined` — that is
-                  // the render harness having no provider, not a device
-                  // fact, and it is why the two agree here without a prop.)
+                  // ONE inset source: `useSafeAreaInsets()`, the same
+                  // `insets` the shutter and the thumbnail strip read.
                   bottom: panoLensChipBottomPt(
                     insets.bottom,
                     bottomBarOffset,
@@ -6224,7 +6340,21 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                   (`panoLensChipBottomPt`). That screen is gone, so the
                   shutter is `<Camera>`'s, on the one dispatcher. A TAP is
                   inert on the hatch, as it was on the old screen: the camera
-                  is pano+'s own and has no photo path. */}
+                  is pano+'s own and has no photo path.
+
+                  ⚠ THE HOLD IS ALWAYS ARMED HERE, panorama on or off (M10
+                  review). The main tree gates it on `enablePanoramaMode`
+                  because there a hold would otherwise become a photo in a
+                  split Photo mode; the hatch has no photo, so that gate only
+                  made a hold with panorama off SILENT — no sweep, no photo,
+                  no report. Armed, the hold reaches the dispatcher, whose
+                  `!enablePanoramaMode` branch has the engine refuse it by
+                  name (`SWEEP_PANORAMA_DISABLED` → `onError` and
+                  `onCapture({ ok: false })`), exactly as `startPanorama()`
+                  is refused, and before the engine's own readiness, so an
+                  arm still resolving does not answer "still loading"
+                  instead. The release is harmless then: the engine's
+                  `holdEnd` ends nothing when no sweep is live. */}
               {!hideBuiltInShutter && (
                 <View
                   style={[styles.sweepLensChipDock, {
@@ -6234,9 +6364,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                   testID="camera-hatch-shutter">
                   <CameraShutter
                     onTap={noop}
-                    onHoldStart={enablePanoramaMode ? holdStartDispatch : noop}
-                    onHoldComplete={enablePanoramaMode ? holdEndDispatch : noop}
-                    holdEnabled={enablePanoramaMode}
+                    onHoldStart={holdStartDispatch}
+                    onHoldComplete={holdEndDispatch}
+                    holdEnabled
                     isProcessing={sweepFinalizing || sweepOutputPending}
                     disabled={sweepFinalizing || sweepOutputPending || shutterDisabled}
                   />
@@ -6248,9 +6378,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           {/* ── AND THE CAPTURE-HISTORY STRIP, for the same reason ────
               It sat inline in the main tree only, so a sweep's capture was
               appended to `thumbnails` and then had nothing to render it —
-              "it is lost", as the operator put it. Anchored above the
-              surface's own bottom controls, which own the shutter on this
-              engine. */}
+              "it is lost", as the operator put it. Anchored above
+              `<Camera>`'s own shutter and lens chip, which are the hatch's
+              bottom controls (M10) — see `SWEEP_THUMBNAIL_LIFT_PT`. */}
           <View
             style={[styles.sweepThumbnailAnchor, {
               bottom: panoLensChipBottomPt(
@@ -7136,8 +7266,13 @@ export const SWEEP_CAMERA_NOT_READY: SweepHostArmRefusal = {
  * So for the width of the window the surface is told `'host'` (whoever held
  * a camera lets go, and nobody opens one) while `mountHostPreview` stays
  * false (the winner waits). Neither side has a camera for 600 ms. That is
- * the correct state during a handoff, and the surface's own fail-closed
- * guard refuses a hold taken inside it rather than starting half-armed.
+ * the correct state during a handoff. A hold taken inside it is DEFERRED by
+ * `<Camera>`'s dispatcher (`holdShouldDeferForCamera(inFlightTransition ||
+ * cameraHandoffPending, …)`) and resumed in the commit where the window
+ * ends. The engine's own refusal of a `'host'` hold with no arm to send
+ * (`frameSource === 'host' && !willSendArm` in `useSweepEngine`'s `start`)
+ * is a backstop: inside the window every `<Camera>` path into the engine is
+ * either deferred or, with panorama capture off, refused by name before it.
  *
  * ⚠ AND THE LATCH OUTRANKS THE WINDOW. `latch` is non-null exactly while a
  * sweep is running, and `sweepShouldSettle` will not open a window under it —
@@ -7146,19 +7281,28 @@ export const SWEEP_CAMERA_NOT_READY: SweepHostArmRefusal = {
  * than the flip the window exists to smooth: it is the failure the latch was
  * added to prevent, arriving through the fix for a different one.
  *
- * Pure and exported because a TABLE reaches rows a mounted test cannot —
- * `{mounted: false, started: true}`, a latch against a contrary live value.
+ * Pure and exported so a table (`sweepHostOwnsCamera.test.ts`) can pin every
+ * row of it, including a latch against a contrary live value.
  * ⚠ NOT because "the harness cannot move these inputs": that premise was
  * false and cost five review rounds.
  * `src/sweep/__tests__/cameraSweepHostArm.render.test.tsx` overrides the
- * pinned mocks locally and drives this end to end on the Android host arm.
+ * pinned mocks locally and drives this end to end on the Android host arm,
+ * and `hatchOwnershipSettle.render.test.tsx` drives a latch against a
+ * contrary live value (the DR-1a flag added under a running sweep) through
+ * the mounted `<Camera>` on both platforms.
  */
 function sweepCameraHandoff(input: {
   /** What the predicate says right now. */
   live: boolean;
   /** The value latched at the start of a running sweep; null while idle. */
   latch: boolean | null;
-  /** A handoff is in flight. */
+  /**
+   * A handoff is in flight. ⚠ It must already be true on the render where
+   * `live` flips, or that commit is the unsettled handoff described above.
+   * `<Camera>` passes render-time terms, not the state its settle effect sets
+   * after the commit: `ownershipSettlingNow`, or `hatchAwaitsArStop` (the
+   * hatch is the next owner and the AR session is still being stopped).
+   */
   settling: boolean;
   /** M8 — `<Camera>`'s camera is its AR view (the engine is told 'host-ar'). */
   isAR: boolean;
@@ -7263,12 +7407,13 @@ const SWEEP_AR_META_INTERVAL_MS = 100;
  * `handleHoldStart` already rejects that phase outright rather than
  * queueing a deferred start.
  *
- * ⚠ THE CALL SITES PASS `inFlightTransition || sweepHandoffPending`. The
- * sweep→keyframe camera handoff is `cameraShouldUnmount`'s fourth term and
- * unmounts the camera just as surely, so the rule this predicate exists for —
- * every camera-absence term of the render gate except 'stitching' — needs it
- * too. It is composed at the call site rather than added here so this
- * predicate stays main's, and the handoff term goes with the handoff (M6a).
+ * ⚠ THE CALL SITES PASS `inFlightTransition || cameraHandoffPending`. The
+ * DR-1a hatch's two settles (leaving the sweep engine from the hatch, and an
+ * ownership flip onto or off it) are `cameraShouldUnmount`'s fourth term and
+ * unmount the camera just as surely, so the rule this predicate exists for —
+ * every camera-absence term of the render gate except 'stitching' — needs
+ * them too. They are composed at the call site rather than added here so this
+ * predicate stays main's, and the handoff terms go with the hatch (M6a).
  */
 function holdShouldDeferForCamera(
   inFlightTransition: boolean,
@@ -7368,9 +7513,9 @@ function bottomBarStyleForEdge(edge: HomeIndicatorEdge): ViewStyle {
 
 
 const styles = StyleSheet.create({
-  /** Anchors the capture-history strip in the SWEEP cell, which has no
-   *  bottom bar of its own. `box-none` so it never eats a touch meant for
-   *  the surface's controls underneath. */
+  /** Anchors the capture-history strip on the DR-1a hatch, whose tree has no
+   *  bottom bar. `box-none` so it never eats a touch meant for the hatch
+   *  screen underneath (its arm-notice toggle). */
   sweepThumbnailAnchor: {
     position: 'absolute',
     left: 0,
@@ -7455,20 +7600,21 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   /**
-   * Where `<Camera>`'s lens chip sits on the SWEEP cell.
+   * Where `<Camera>`'s lens chip AND its shutter sit on the DR-1a hatch.
    *
-   * The keyframe tree centres it in `bottomBarCenter`, above the shutter.
-   * The sweep surface draws its own shutter row, so the chip is docked
-   * just above that row instead of being laid out inside it — same
-   * control, same state, placed against the chrome that is actually on
-   * screen. `bottomBarOffset` (passed to the surface) is what reserves
-   * the room, so the two agree by construction.
+   * The keyframe tree centres the chip in `bottomBarCenter`, above the
+   * shutter. The hatch's tree has no bottom bar, so both are docked
+   * absolutely instead (M10): the shutter at `insets.bottom +
+   * PANO_BOTTOM_BAR_INSET + bottomBarOffset`, the chip above it at
+   * `panoLensChipBottomPt`, which counts the shutter's height whenever it is
+   * drawn — same controls, same state, one arithmetic for both.
    */
   sweepLensChipDock: {
     position: 'absolute',
     left: 0,
     right: 0,
-    // `bottom` is supplied at the call site from `panoLensChipBottomPt` —
+    // `bottom` is supplied at each call site (`panoLensChipBottomPt` for the
+    // chip, the same terms without the shutter's height for the shutter) —
     // deliberately absent here so a literal cannot creep back in.
     alignItems: 'center',
   },

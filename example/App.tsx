@@ -644,30 +644,32 @@ function App(): React.JSX.Element {
           // the key because they are mount-time native props.
           key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-ab${antiBlurOn ? 1 : 0}`}
           engine={engine}
-          // ⚠ THE ONLY ROUTE THAT DELIVERS 0.5× ON iOS TODAY.
+          // ── 0.5× ON iOS NEEDS NO CALIBRATION STEP FROM THIS APP.
           //
           // ARKit publishes no ultra-wide format at all (0 of 22 on
-          // iPhone17,1), so 0.5× needs the DECOUPLED arm — and that arm
-          // needs a calibration. It has two halves and only one of them is
-          // reachable from this package:
+          // iPhone17,1), so a 0.5× sweep runs on <Camera>'s own
+          // vision-camera camera with CoreMotion attitude (the decoupled
+          // arm). That arm needs two things, and neither is the host's job:
           //
-          //   BASIS  — the device→camera rotation. Measured ONCE per phone
-          //            by the first-run acquisition overlay, which IS in
-          //            this package and comes up automatically.
-          //   τ      — the rolling-shutter constant, keyed
-          //            `model | lens | W×H | fps`. Needs the gear's IMU cal
-          //            stage 1, which lives in the private shell, not here.
-          //            It was also MEASURED and deliberately not persisted:
-          //            8 of 12 runs scattered 5.03 ms, wider than the
-          //            3.08 ms it was meant to buy back.
-          //
-          // So τ=0 is not a degradation from a known-good τ — it is the
-          // state of the art on this arm, and `tauUncorrected` is the branch
-          // that runs it on a real basis. Without this the arm declines,
-          // falls back to ARKit, and 0.5× silently does nothing.
+          //   BASIS  — the device→camera rotation. DERIVED natively from the
+          //            open camera when the hold starts. A camera whose basis
+          //            has not been measured is refused THEN, by name
+          //            (`SWEEP_DEVICE_UNSUPPORTED`, on `onError` and on
+          //            `onCapture({ ok: false })`). There is no calibration
+          //            overlay or gesture in this package, and no fallback to
+          //            ARKit.
+          //   τ      — the rolling-shutter constant. The arm runs τ=0 by
+          //            default. τ was MEASURED and deliberately not persisted:
+          //            8 of 12 runs scattered 5.03 ms, wider than the 3.08 ms
+          //            it was meant to buy back. So τ=0 is not a degradation
+          //            from a known-good τ — it is the state of the art on
+          //            this arm. Android has no τ at all; every IMU sweep
+          //            there is τ=0 too.
           //
           // The pack records `tauProvenance: uncorrected` and never claims a
-          // τ it does not have.
+          // τ it does not have. That is also why this bag passes no
+          // `tauUncorrected`: the arm sets it itself, and on every route this
+          // app reaches the flag changes nothing.
           sweep={{
             // ⚠ THE COMPASS A/B, REACHABLE AT LAST. Measured 2026-09-22 over
             // 73 A35 packs: `crossRectifyDeg` — the quantity the rectifier
@@ -685,7 +687,6 @@ function App(): React.JSX.Element {
             // thing that turns the analytic 75% prediction into a measurement,
             // and it matters most where the field is worst: steel racking.
             attitudeMagFree: magFree,
-            tauUncorrected: true,
             // (The Android AR arm used to need `arPluginArm: true` here to run
             // on the stitcher's ARCore session; since M2 it is the only
             // Android AR arm, so there is nothing to pass.)

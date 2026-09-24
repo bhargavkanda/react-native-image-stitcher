@@ -652,8 +652,8 @@ class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext)
      *
      * The idle viewfinder has nothing to protect — no pack, no evidence, no
      * engine — and no claim on the camera at all when nothing is on screen. It
-     * also loses nothing by being torn down: the panel re-arms it on
-     * foreground (`PanoPlusCaptureSurface`'s AppState listener) and its idle
+     * also loses nothing by being torn down: the JS side re-arms it on
+     * foreground (`useSweepEngine`'s AppState listener) and its idle
      * heartbeat catches the case where that misses.
      *
      * ⚠ ASYNC, NOT `stopIdlePreview`. This is `@ThreadConfined(UI)`; the

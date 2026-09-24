@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * The sweep screen's layout constants and helpers (M7): shared by
- * `useSweepEngine` (the start bag's frontier-window knee and insets) and the
- * `PanoPlusCaptureSurface` composite. Moved verbatim.
+ * The sweep's layout constants and helpers (M7): shared by `useSweepEngine`
+ * (the start bag's frontier-window knee and the hold overlay's insets) and
+ * `<Camera>`, whose DR-1a hatch tree docks the lens chip and the thumbnail
+ * strip with `panoLensChipBottomPt`. Moved verbatim from the sweep's old
+ * screen, which M10 deleted.
  */
 import type { PanoPlusNoticePhase } from './panoPlusCameraOffNotice';
 
@@ -41,8 +43,9 @@ const PANO_SHUTTER_HEIGHT = 76 + 12;
 /**
  * Points of Pano's bottom stack the preview and HUD must stay above, from the
  * bottom edge of the window. The chip's slot is counted whether the chip is
- * shown or not, so toggling AR never moves the HUD; the built-in shutter is
- * counted only when this surface draws it.
+ * shown or not, so toggling AR never moves the HUD; the shutter row is
+ * counted only when `<Camera>` draws its built-in shutter
+ * (`hideBuiltInControls` is `<Camera>`'s `hideBuiltInShutter`).
  */
 export function panoBottomChromePt(
   insetBottom: number,

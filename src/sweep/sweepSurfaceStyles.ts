@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * The sweep screen's styles (M7) — shared by the `PanoPlusCaptureSurface`
- * composite and `SweepHoldOverlay`. Moved verbatim.
+ * The sweep's styles (M7) — shared by `SweepHoldOverlay` (the hold overlay,
+ * drawn in `<Camera>`'s own tree, or by the hatch view on the hatch) and
+ * `SweepHatchScreen` (the internal view the DR-1a hatch mounts). Not exported
+ * from the package.
+ *
+ * M10 deleted the entries only the second screen used: the transparent root
+ * over a host preview (`fillOverHost`), the lens-chip / shutter positions
+ * (`pillStack`, `bottomBar`, `shutterWrap`) and the "pano+ is not available"
+ * card (`unavailable*`). The shutter and the chip are `<Camera>`'s now, and a
+ * build without the sweep is refused by name (`panoplus-unavailable`).
  */
 import { StyleSheet } from 'react-native';
 
 
 // ⚠ `PREVIEW_MARKER_PX` LIVED HERE UNTIL 2026-09-03, with the frontier line.
 export const sweepSurfaceStyles = StyleSheet.create({
+  /** The hatch view's root: always opaque — see `SweepHatchScreen`. */
   fill: { flex: 1, backgroundColor: '#000' },
-  /** Host arm: the camera is a sibling BEHIND this surface — see the
-   *  root's comment. Opaque here means a black screen. */
-  fillOverHost: { backgroundColor: 'transparent' },
   cameraOff: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
@@ -106,47 +112,5 @@ export const sweepSurfaceStyles = StyleSheet.create({
     borderRadius: 4,
     overflow: 'hidden',
     alignSelf: 'flex-start',
-  },
-  // ── PANO'S CHROME POSITIONS, CITED ──────────────────────────────────────
-  /** The stitcher's `pillStack` (`Camera.tsx:3844-3849`): absolute, pinned
-   *  `right: 14`, a column so a second pill would stack under the first.
-   *  `top` is supplied inline from `pillStackTop`. */
-  pillStack: {
-    position: 'absolute',
-    right: 14,
-    alignItems: 'flex-end',
-    gap: 10,
-  },
-  /** The stitcher's `bottomBar` + `bottomBarCenter` (`Camera.tsx:3807-3821`)
-   *  collapsed to the centre column: lens chip above, shutter below. `bottom`
-   *  is supplied inline from `bottomBarBottom`. */
-  bottomBar: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    paddingHorizontal: 18,
-    alignItems: 'center',
-  },
-  /** `Camera.tsx:3826` — the gap between the chip and the shutter under it. */
-  shutterWrap: { marginTop: 12 },
-  unavailable: {
-    flex: 1,
-    backgroundColor: '#000',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 28,
-  },
-  unavailableTitle: {
-    color: '#ffcf6b',
-    fontSize: 17,
-    fontWeight: '700',
-    marginBottom: 10,
-  },
-  unavailableBody: {
-    color: '#c8c8c8',
-    fontSize: 12,
-    lineHeight: 18,
-    textAlign: 'center',
-    marginBottom: 22,
   },
 });

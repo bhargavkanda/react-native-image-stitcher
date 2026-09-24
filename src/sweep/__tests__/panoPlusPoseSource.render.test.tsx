@@ -27,9 +27,11 @@
 //
 //   · a HOLD is the handle's `holdStart` / `holdEnd` (what `<Camera>`'s
 //     shutter calls);
-//   · what the old shutter PAINTED (`disabled` / busy) is what the engine
-//     REPORTS to its host through `onControlsState`, which is where
-//     `<Camera>`'s shutter reads it from now;
+//   · what the old shutter PAINTED (`disabled` / busy) is now only what the
+//     engine REPORTS through `onControlsState`. `<Camera>` reads `busy` from
+//     that report and nothing else: its shutter does not grey on
+//     `canCapture`, so a hold the engine cannot take is refused by name
+//     (`panoplus-not-ready` / `panoplus-unavailable`) on `onFailure`;
 //   · an arm or lens change is a re-render with new props — what the deleted
 //     pill and chip used to write through their host (see the lens-rule and
 //     basis-ladder suites; nothing in this file needs one).
@@ -161,19 +163,18 @@ interface Rig {
   /**
    * Is `<ARCameraView>` mounted — i.e. is this engine starting ARKit?
    *
-   * ⚠ BY COMPONENT, NOT ONLY BY `ar-camera`. That testID is the render seam's
-   * (`jest.mocks/sweep-host-components.render.js`), which is mapped for the
-   * `../index` barrel; `SweepHatchScreen` imports `../camera/ARCameraView`
-   * directly, so under the harness the REAL view mounts and carries no such
-   * testID. Either identity is the mount, and the mount is the side effect.
+   * BY COMPONENT: `SweepHatchScreen` imports `../camera/ARCameraView` by
+   * module path and the render project stands nothing in for it, so the REAL
+   * view mounts under the harness. The mount is the side effect.
    */
   arView: () => boolean;
   /** What `<Camera>`'s shutter calls on a hold past the threshold. */
   hold: () => void;
   /** …and on the release that follows — the sweep finishes, pack kept. */
   release: () => void;
-  /** The LAST `onControlsState` report — what `<Camera>`'s shutter paints
-   *  from (it replaced the deleted shutter's `disabled` / busy). */
+  /** The LAST `onControlsState` report — the engine's own statement of
+   *  whether it can take a hold (`canCapture`) and whether it is finishing
+   *  (`busy`). `<Camera>`'s shutter paints `busy` only. */
   controls: () => SweepSurfaceState | undefined;
   /** Every `onFailure` the engine raised, in order. */
   failures: PanoPlusFailure[];
@@ -220,7 +221,7 @@ function mount(props: Props = {}): Rig {
     count: (testID) => renderer.root.findAllByProps({ testID }).length,
     root: () => renderer.root,
     arView: () => renderer.root.findAll(
-      (n) => n.type === ARCameraView || n.props?.testID === 'ar-camera',
+      (n) => n.type === ARCameraView,
     ).length > 0,
     tap: (testID) => {
       const node = renderer.root.findAllByProps({ testID })[0];
@@ -245,7 +246,8 @@ async function settle(): Promise<void> {
   });
 }
 
-/** What the old shutter's `{ disabled: false, busy: false }` is, reported. */
+/** The report of an engine that can take a hold and is not finishing (the
+ *  old screen painted it as `{ disabled: false, busy: false }`). */
 const READY: SweepSurfaceState = { canCapture: true, canFinalize: false, busy: false };
 
 beforeEach(() => {
@@ -271,7 +273,7 @@ describe('the ARKit arm is the default and is UNTOUCHED', () => {
     // entire programme.
     expect(calibCalls).toEqual([]);
     expect(r.has('panoplus-arm-headline')).toBe(false);
-    // The host's shutter, reported live.
+    // The engine reports it can take a hold.
     expect(r.controls()).toEqual(READY);
     r.unmount();
   });
@@ -484,14 +486,16 @@ describe('the IMU arm reads the store BEFORE it can capture', () => {
 
   it('reports the shutter NOT capturable, and refuses a hold BY NAME, while the read is in flight', () => {
     // M10 — converted from "greys the shutter out". The deleted screen's
-    // shutter painted `disabled`; the engine now REPORTS it
-    // (`onControlsState.canCapture`) for `<Camera>`'s shutter to paint — a
-    // hold that started a sweep now would start it on whichever arm the read
-    // happened to land on.
+    // shutter painted `disabled`; the engine now only REPORTS it
+    // (`onControlsState.canCapture`), and `<Camera>`'s shutter does not read
+    // that field, so on `<Camera>` the shutter stays live through this
+    // window. A hold that started a sweep now would start it on whichever arm
+    // the read happened to land on.
     //
-    // And the hold that arrives anyway is refused BY NAME. Inside `<Camera>`
-    // there is no card and the shutter is not the engine's, so a hold the
-    // engine declined used to do nothing and say nothing.
+    // So the contract is the refusal: the hold that arrives is refused BY
+    // NAME. Inside `<Camera>` there is no card and the shutter is not the
+    // engine's, so a hold the engine declined used to do nothing and say
+    // nothing.
     //
     // No `settle()` here on purpose — this is the in-flight frame.
     const r = mount({ poseSource: 'imu' });
@@ -509,12 +513,14 @@ describe('an UNCALIBRATED IMU selection is self-explaining, never opaque', () =>
     // overlay`, `MEASURING THE BASIS`). The card is deleted; what is left on
     // screen is the arm notice, and THAT is what must state the precondition.
     //
-    // ⚠ THE HEADLINE IS NOT PINNED WORD FOR WORD HERE, ON PURPOSE. The engine
-    // still feeds the notice `basisResolution.needsGesture`, so with no card
-    // anywhere it reads "MEASURING THE BASIS … by the guidance on screen" —
-    // guidance that no longer exists (reported with M10). What is pinned is
-    // what is true either way: the notice is up, it names what is missing,
-    // and the paragraph naming the fix is collapsed and one tap away.
+    // ⚠ THE HEADLINE IS NOT PINNED WORD FOR WORD HERE, ON PURPOSE. Its
+    // wording has moved with the basis card before: until M10 deleted the
+    // card, the engine could tell the notice a gesture was on offer, and it
+    // read "MEASURING THE BASIS … by the guidance on screen". The engine now
+    // says no gesture is offered, so the notice sends him to the gear. What
+    // is pinned is what is true either way: the notice is up, it names what
+    // is missing, and the paragraph naming the fix is collapsed and one tap
+    // away.
     const r = mount({ poseSource: 'imu' });
     await settle();
     expect(r.has('panoplus-arm-headline')).toBe(true);

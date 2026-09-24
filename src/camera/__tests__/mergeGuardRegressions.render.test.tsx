@@ -23,7 +23,7 @@
  */
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { NativeModules } from 'react-native';
+import { NativeModules, StyleSheet } from 'react-native';
 
 const g = globalThis as any;
 g.__kf = { state: { acceptedCount: 0 }, calls: [] as string[] };
@@ -103,6 +103,8 @@ jest.mock('../../sweep/useSweepEngine', () => {
     const enabled = options.enabled !== false;
     if (enabled) (globalThis as any).__sw.props = props;
     const inert = () => undefined;
+    // Is a sweep live? The real engine's `holdEnd` ends nothing without one.
+    const live = R.useRef(false);
     R.useImperativeHandle(ref, () => (!enabled ? {
       capture: inert, finalize: inert, holdStart: inert, holdEnd: inert, abandon: inert,
     } : {
@@ -110,16 +112,46 @@ jest.mock('../../sweep/useSweepEngine', () => {
       finalize: () => undefined,
       holdStart: () => {
         (globalThis as any).__sw.calls.push('holdStart');
+        // The real engine's ORDER — `useSweepEngine`'s `holdStart`, then its
+        // `start()` — which `hatchSettleHold.render.test.tsx` pins on the real
+        // hook. Each refusal goes to `onFailure`, and nothing starts:
+        //   1. the host's panorama-off refusal (`hostArmRefusal` with code
+        //      `panoplus-panorama-disabled`), before the engine's readiness;
+        //   2. the engine's readiness (`canCapture`): `__sw.notReady` stands in
+        //      for the iOS arm whose calibration read is still in flight;
+        //   3. any other named host refusal (`hostArmRefusal`), in `start()`.
+        // Every other case here runs with no refusal and a ready engine.
+        const refuse = (r: { code: string; message: string }) => {
+          props.onFailure?.({
+            code: r.code, message: r.message,
+            sessionDir: null, counts: null, abort: null,
+          });
+        };
+        const refusal = props.hostArmRefusal;
+        if (refusal?.code === 'panoplus-panorama-disabled') { refuse(refusal); return; }
+        if ((globalThis as any).__sw.notReady) {
+          refuse({
+            code: 'panoplus-not-ready',
+            message: 'This sweep cannot start yet: it is still loading. Try again in a moment.',
+          });
+          return;
+        }
+        if (refusal != null) { refuse(refusal); return; }
+        live.current = true;
         props.onSweepingChange?.(true);
       },
       holdEnd: () => {
         (globalThis as any).__sw.calls.push('holdEnd');
+        // Faithful to the real engine: a release with no live sweep (a
+        // refused start) ends nothing and reports nothing.
+        if (!live.current) return;
         props.onControlsState?.({ canCapture: true, canFinalize: false, busy: true });
       },
       // Faithful to the real surface: an abandon ends the sweep (phase idle)
       // and its live status, so progress reads 0 again.
       abandon: (reason: string) => {
         (globalThis as any).__sw.calls.push(`abandon:${reason}`);
+        live.current = false;
         props.onPaintedChange?.(0);
         props.onSweepingChange?.(false);
       },
@@ -140,13 +172,17 @@ jest.mock('../../sweep/SweepHatchScreen', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { Camera } from '../Camera';
+import { Camera, LensChip, SWEEP_PANORAMA_DISABLED } from '../Camera';
 // eslint-disable-next-line import/first
 import { LateralMotionModal } from '../LateralMotionModal';
 // eslint-disable-next-line import/first
 import { RotateToLandscapePrompt } from '../RotateToLandscapePrompt';
 // eslint-disable-next-line import/first
 import { CameraShutter } from '../CameraShutter';
+// eslint-disable-next-line import/first
+import { PANO_BOTTOM_BAR_INSET } from '../../sweep/sweepLayout';
+// eslint-disable-next-line import/first
+import { coercePanoPlusSummary, panoPlusResultOf } from '../../sweep/panoPlusModel';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -167,6 +203,7 @@ beforeEach(() => {
   g.__fp.failed = false;
   g.__sw.calls = [];
   g.__sw.props = {};
+  g.__sw.notReady = false;
   g.__ar.props = {};
   g.__ar.exceed = false;
 });
@@ -643,9 +680,61 @@ describe('M9 review T7 — every keyframe start failure reaches BOTH channels', 
 });
 
 describe('M10 — the DR-1a hatch has <Camera>\'s shutter (its own screen\'s is gone)', () => {
+  // The old screen's shutter was pinned on press, release, tap, busy,
+  // reachability and placement. M10 moved those cases onto the harness's
+  // `holdStart`/`holdEnd` handle, which skips this shutter entirely, so each
+  // is pinned again here, on the button a finger actually presses.
   const hatchShutter = (t: ReactTestRenderer) => t.root.findAll(
     (n: any) => n.props?.testID === 'camera-hatch-shutter',
   );
+  /** What the hatch shutter paints: greyed out, and the busy ring. */
+  const hatchState = (t: ReactTestRenderer) => {
+    const p = hatchShutter(t)[0].findByType(CameraShutter).props as {
+      disabled?: boolean; isProcessing?: boolean;
+    };
+    return { disabled: p.disabled === true, busy: p.isProcessing === true };
+  };
+  /** The REAL `Pressable` inside it — re-read on every use, because a press
+   *  re-renders it with fresh handlers. */
+  const hatchPressable = (t: ReactTestRenderer) => hatchShutter(t)[0]
+    .findByType(CameraShutter)
+    .findAll((n: any) => typeof n.props?.onPressIn === 'function')[0];
+  /** A finger on the real button: down, `ms` later up. Past the shutter's
+   *  250 ms threshold that is a hold and a release; under it, a tap. */
+  async function press(t: ReactTestRenderer, ms: number): Promise<void> {
+    await act(async () => { hatchPressable(t).props.onPressIn(); });
+    await act(async () => { await sleep(ms); });
+    await act(async () => { hatchPressable(t).props.onPressOut(); });
+    await act(async () => { await sleep(20); });
+  }
+  // A case that fails mid-way never reaches its own unmount, and its stub
+  // would keep overwriting `g.__sw.props` into the NEXT case — so every tree
+  // mounted here is also unmounted here.
+  const mounted: ReactTestRenderer[] = [];
+  afterEach(() => {
+    for (const m of mounted.splice(0)) {
+      try { act(() => m.unmount()); } catch { /* already unmounted */ }
+    }
+  });
+  async function mountHatch(props: Record<string, unknown> = {}) {
+    const ref = React.createRef<any>();
+    const errs: Array<{ code: string; message: string }> = [];
+    const caps: Array<Record<string, any>> = [];
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({
+        engine: 'sweep', defaultCaptureSource: 'non-ar', rectCrop: false,
+        showPreview: false, sweep: { frameSourceOverride: 'own' },
+        onError: (e: { code: string; message: string }) => { errs.push(e); },
+        onCapture: (r: Record<string, any>) => { caps.push(r); },
+        ...props,
+      }, ref));
+    });
+    mounted.push(t);
+    await act(async () => { await sleep(900); });
+    expect(hatchShutter(t).length).toBeGreaterThan(0);
+    return { t, errs, caps };
+  }
 
   it('a press on it runs the sweep, through the one dispatcher', async () => {
     const ref = React.createRef<any>();
@@ -663,6 +752,160 @@ describe('M10 — the DR-1a hatch has <Camera>\'s shutter (its own screen\'s is 
     expect(g.__sw.calls).toContain('holdStart');
     act(() => t.unmount());
   });
+
+  it('hold and RELEASE on the real button: the release finishes the sweep, and the shutter is busy while it does', async () => {
+    // Pins the hatch `CameraShutter`'s `onHoldComplete={holdEndDispatch}` and
+    // its `disabled` / `isProcessing` terms.
+    // MUTATIONS: `onHoldComplete={noop}` and `onHoldComplete=
+    // {holdStartDispatch}` → the engine hears `holdStart` only, and a real
+    // sweep would record until the pan cap. `disabled={false}` and
+    // `isProcessing={false}` → a finishing sweep leaves a live-looking
+    // shutter. All killed.
+    const { t } = await mountHatch();
+    expect(hatchState(t)).toEqual({ disabled: false, busy: false });
+    await press(t, 400);
+    expect(g.__sw.calls).toEqual(['holdStart', 'holdEnd']);
+    // The engine reported `busy` on the release (a finish in flight).
+    expect(hatchState(t)).toEqual({ disabled: true, busy: true });
+    act(() => t.unmount());
+  });
+
+  it('⚑ the shutter is busy while a finished sweep\'s OUTPUT is still being written', async () => {
+    // The output-pending latch (M9 review): the engine is already idle — so
+    // `sweepFinalizing` is down — while `<Camera>` copies the canvas to the
+    // output directory. A hold in that window would start a sweep under the
+    // review that is about to open.
+    // MUTATIONS: drop `sweepOutputPending` from the hatch shutter's
+    // `disabled` and `isProcessing` → both read false mid-copy; never lower
+    // the latch → the shutter stays dead after the copy. Both killed.
+    const fu = (NativeModules as any).RNImageStitcherFileUtils;
+    const realCopy = fu.copyFile;
+    const copy: { from: string | null; release: (() => void) | null } = {
+      from: null, release: null,
+    };
+    // The FIRST copy waits for the test; any after it (the coverage sidecar)
+    // lands at once.
+    fu.copyFile = (from: string, to: string) => (copy.release == null
+      ? new Promise<string>((r) => { copy.from = from; copy.release = () => r(to); })
+      : Promise.resolve(to));
+    try {
+      const { t } = await mountHatch();
+      const result = panoPlusResultOf(
+        coercePanoPlusSummary({
+          canvasPath: '/data/pp_1/canvas.jpg', sessionDir: '/data/pp_1',
+          width: 4000, height: 1200, counts: { seen: 120, painted: 96 },
+        }),
+        { rectify: true, gainMatch: true, packFrames: 'all', poseSource: 'imu' },
+        '2026-09-24T00:00:00.000Z',
+      );
+      const pending: { done: Promise<void> | void } = { done: undefined };
+      await act(async () => {
+        pending.done = (g.__sw.props.onComplete as (r: unknown) => Promise<void> | void)(result);
+        await Promise.resolve();
+      });
+      // The canvas's copy to the output directory is the one in flight.
+      expect(copy.from).toBe('/data/pp_1/canvas.jpg');
+      expect(hatchState(t)).toEqual({ disabled: true, busy: true });
+      await act(async () => { copy.release?.(); await pending.done; });
+      // …and down again once the output is written.
+      expect(hatchState(t)).toEqual({ disabled: false, busy: false });
+      act(() => t.unmount());
+    } finally {
+      fu.copyFile = realCopy;
+    }
+  });
+
+  it('a TAP is inert: nothing dispatched, no photo attempted, nothing reported', async () => {
+    // The hatch's camera is pano+'s own; `<Camera>` has no photo path here.
+    // MUTATIONS: `onTap={handleTap}` → a photo is attempted on a camera that
+    // is not mounted and fails on `onError`; `onTap={holdStartDispatch}` →
+    // a tap starts a sweep. Both killed.
+    const { t, errs, caps } = await mountHatch();
+    await press(t, 30);
+    expect({ engine: g.__sw.calls, errs, caps }).toEqual({ engine: [], errs: [], caps: [] });
+    act(() => t.unmount());
+  });
+
+  it('⚑ a finger can REACH it: no ancestor refuses touches', async () => {
+    // Replaces 'the shutter is reachable on both arms' (deleted with the old
+    // screen in M10): the hatch still has a shutter a finger must reach.
+    // MUTATION: the dock's `pointerEvents="box-none"` → "none". Killed.
+    const { t } = await mountHatch();
+    const blocked: string[] = [];
+    for (let n: any = hatchPressable(t).parent; n != null; n = n.parent) {
+      const pe = n.props?.pointerEvents;
+      if (pe === 'none' || pe === 'box-only') {
+        blocked.push(`${String(n.props?.testID ?? n.type?.displayName ?? n.type)}: ${pe}`);
+      }
+    }
+    expect(blocked).toEqual([]);
+    act(() => t.unmount());
+  });
+
+  it('⚑ it sits at the bar\'s bottom inset plus bottomBarOffset, BELOW the lens chip', async () => {
+    // Pins the dock's `bottom` and its relation to the chip's dock
+    // (`panoLensChipBottomPt`, which counts the shutter when it is drawn).
+    // MUTATIONS: the shutter dock's `bottom: 0` → the equality fails; the
+    // chip dock computed as if the shutter were hidden → the chip lands ON
+    // the shutter. Both killed.
+    const sac = require('react-native-safe-area-context') as {
+      __setInsets: (v: unknown) => void;
+    };
+    sac.__setInsets({ top: 0, left: 0, right: 0, bottom: 34 });
+    try {
+      const { t } = await mountHatch({ bottomBarOffset: 50 });
+      const shutterBottom = StyleSheet.flatten(hatchShutter(t)[0].props.style).bottom;
+      expect(shutterBottom).toBe(34 + PANO_BOTTOM_BAR_INSET + 50);
+      // The chip's dock: the lens chip's nearest ancestor with a `bottom`.
+      let dock: any = t.root.findAllByType(LensChip)[0].parent;
+      while (dock != null && StyleSheet.flatten(dock.props?.style)?.bottom == null) {
+        dock = dock.parent;
+      }
+      const chipBottom = StyleSheet.flatten(dock.props.style).bottom as number;
+      // The shutter's own rendered height — a zero would make the check
+      // below vacuous.
+      const shutterHeight = StyleSheet.flatten(hatchPressable(t).props.style).height as number;
+      expect(shutterHeight).toBeGreaterThan(0);
+      expect(chipBottom - (shutterBottom as number)).toBeGreaterThanOrEqual(shutterHeight);
+      act(() => t.unmount());
+    } finally {
+      sac.__setInsets(null);
+    }
+  });
+
+  for (const resolving of [false, true]) {
+    it(`⚑ panorama OFF: a hold is refused BY NAME — onError and onCapture({ ok: false }), no sweep${resolving ? ' — with the engine\'s arm still resolving too' : ''}`, async () => {
+      // The main tree gates the hold on `enablePanoramaMode` (there a hold
+      // would otherwise be a photo); the hatch has no photo, and the same gate
+      // made its hold SILENT — no sweep, no photo, no report. The hold now
+      // reaches the dispatcher, whose `!enablePanoramaMode` branch has the
+      // engine refuse it with `SWEEP_PANORAMA_DISABLED`.
+      // The engine answers that BEFORE its own readiness (M10 re-review,
+      // round 3). The stub models that order, and the second run of this case
+      // puts the stub where the real engine was when it said "still loading"
+      // instead; `hatchSettleHold.render.test.tsx` pins the order on the real
+      // hook. This file pins the dispatcher and the two channels.
+      // MUTATIONS: restore `holdEnabled={enablePanoramaMode}` with
+      // `onHoldStart={enablePanoramaMode ? holdStartDispatch : noop}` → nothing
+      // reaches the engine and both channels stay empty. In `onSweepFailure`,
+      // drop `onError`, drop `onCapture`, or hand `onCapture` a copy of the
+      // error → the matching line below fails. All killed.
+      g.__sw.notReady = resolving;
+      const { t, errs, caps } = await mountHatch({ enablePanoramaMode: false });
+      expect(g.__sw.props.hostArmRefusal).toEqual(SWEEP_PANORAMA_DISABLED);
+      await press(t, 400);
+      // Asked, refused; the release then ends nothing (no sweep is live).
+      expect(g.__sw.calls).toEqual(['holdStart', 'holdEnd']);
+      expect(errs.map((e) => [e.code, e.message])).toEqual([
+        ['PANORAMA_START_FAILED', SWEEP_PANORAMA_DISABLED.message],
+      ]);
+      expect(caps.map((r) => [r.ok, r.type, r.engine, r.error?.code])).toEqual([
+        [false, 'panorama', 'sweep', 'PANORAMA_START_FAILED'],
+      ]);
+      expect(caps[0].error).toBe(errs[0]);
+      act(() => t.unmount());
+    });
+  }
 
   it('⚑ NEGATIVE CONTROL: hideBuiltInShutter hides it, as it hides the main tree\'s', async () => {
     const ref = React.createRef<any>();

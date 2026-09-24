@@ -2,18 +2,20 @@
 /**
  * useSweepEngine — the sweep ENGINE, lifted out of its screen (M7).
  *
- * Everything `PanoPlusCaptureSurface` did that is not drawing: the arm and
+ * Everything the sweep's old screen did that is not drawing: the arm and
  * calibration read, start / finish / abandon, the status poll and push, the
- * pack sidecars and the teardown, and the imperative handle. MOVED VERBATIM —
- * this commit changes no behaviour; the surface is now a composite that calls
- * this hook and renders what it returns, and its render suites are the oracle.
+ * pack sidecars and the teardown, and the imperative handle. It was moved
+ * verbatim in M7; M10 deleted the screen it was lifted from.
  *
- * It takes the surface's props (so both the composite and, from M8,
- * `<Camera>` drive it with the same inputs) and never opens a camera: which
- * camera feeds it is the caller's `frameSource` / `poseSource`.
+ * INTERNAL: not exported from the package. Its one caller is `<Camera>`
+ * (and, in the suites, `SweepEngineHarness`). What it returns is drawn by
+ * `<Camera>` — its own tree plus `SweepHoldOverlay` — or, on the DR-1a hatch
+ * only, by `SweepHatchScreen`. It takes `SweepEngineProps` and never opens a
+ * camera: which camera feeds it is the caller's `frameSource` / `poseSource`.
  *
- * Must not import '../index' (the barrel re-exports the surface, and a cycle
- * through it is how a half-initialised module reaches a render).
+ * Must not import '../index': the barrel re-exports `<Camera>`, which imports
+ * this hook, and a cycle through it is how a half-initialised module reaches
+ * a render.
  */
 import type React from 'react';
 import {
@@ -136,6 +138,14 @@ export type PreviewSlot = {
 /** M8 — how often a finishing sweep asks whether the camera is released. */
 const PANO_PLUS_RELEASE_POLL_MS = 100;
 
+/**
+ * The `hostArmRefusal` code `<Camera>` sends when panorama capture is off
+ * (`SWEEP_PANORAMA_DISABLED` in Camera.tsx; this module does not import from
+ * Camera.tsx, which imports it). `holdStart` answers it before its own
+ * readiness gate.
+ */
+const PANORAMA_DISABLED_REFUSAL_CODE = 'panoplus-panorama-disabled';
+
 export function useSweepEngine(
   props: SweepEngineProps,
   ref: React.ForwardedRef<SurfaceControlHandle>,
@@ -223,16 +233,16 @@ export function useSweepEngine(
    * the flag could only be reached from a gear panel, and reaching that panel
    * meant leaving pano+ — so the prop only ever changed while this component
    * was unmounted and a bare derivation was safe by construction. The capture
-   * screen's AR pill removed that guarantee, and two failures follow from a
-   * derivation with no phase term:
+   * screen's AR pill removed that guarantee, and a derivation with no phase
+   * term fails:
    *
    *  · `arArmed` re-derives mid-sweep, so React UNMOUNTS `<ARCameraView>` under
    *    an ARKit sweep (that unmount IS `RNSARSession.shared.stop()`) or MOUNTS
    *    it on top of the decoupled arm's live AVCaptureSession. One body, two
    *    clients — the P0 this component already carried once.
-   *  · the reported effective arm changes, and the host's pill draws it. A pill
-   *    reading IMU over a sweep ARKit recorded is the one failure that leaves
-   *    no trace in the pixels.
+   *
+   * (It also fed the effective arm reported to a pill. That report went with
+   * the sweep's own chrome in M10: `<Camera>`'s AR pill paints the request.)
    *
    * It is the render-visible twin of `armsRef` — which latches the same answer
    * for the PACK — so the screen and the pack cannot disagree about the arm.
@@ -332,7 +342,8 @@ export function useSweepEngine(
    * for multiple sources or tiling; there is one source and contain is not
    * tiled), so the held slot survives the panorama growing.
    */
-  // (`PreviewSlot` — module scope, below the imports: the composite draws it.)
+  // (`PreviewSlot` — module scope, below the imports; `SweepHoldOverlay`
+  // draws it.)
   const [previewSlots, setPreviewSlots] = useState<{
     a: PreviewSlot | null;
     b: PreviewSlot | null;
@@ -555,8 +566,24 @@ export function useSweepEngine(
    * camera, τ is 0 by default and the basis is derived natively at the hold,
    * so none of the own-camera ladder applies: no calibration read, no basis
    * gesture, no ARKit fallback (`panoPlusIosVcHostArmNotice`).
+   *
+   * ⚠ REAL OWNERSHIP, NOT THE SETTLE'S PLACEHOLDER (M10 review). `<Camera>`
+   * also says `'host'` for the ~600 ms ownership settle, in EITHER direction,
+   * with `vcPluginArm` false (`sweepCameraHandoff`): "nobody opens a camera",
+   * not "the arm runs on mine". Keyed on `'host'` alone, a settle INTO the
+   * DR-1a hatch took the shortcut below and stored `plan = null`,
+   * `calib = null`, `calibRead = true` — and a hold deferred in that window
+   * is resumed by `<Camera>` in the commit the settle ends, BEFORE this
+   * hook's effects run. The start read that null snapshot as "THIS BUILD
+   * CANNOT ANSWER" and swept on ARKit. With `vcPluginArm` required, the
+   * settle keeps the hatch's own calibration answer. In the product the two
+   * cannot differ: without the hatch there is no settle, and `<Camera>` sends
+   * `vcPluginArm` exactly when it sends `'host'`.
+   * (`hatchSettleHold.render.test.tsx`)
    */
-  const vcHostArm = armContract === 'ios-coremotion' && frameSource === 'host';
+  const vcHostArm = armContract === 'ios-coremotion'
+    && frameSource === 'host'
+    && vcPluginArm === true;
 
   useEffect(() => {
     if (!enabled) return undefined;   // M8 — no native read for a hook not selected
@@ -715,8 +742,7 @@ export function useSweepEngine(
    *  read), so it has its own table — see `panoPlusAndroidArm.ts` for why that
    *  is a second POLICY rather than a second copy of one. Everything below this
    *  line reads `armNotice` and cannot tell which produced it, which is the
-   *  property that keeps the arm latch, the pack stamp and the host's pill on
-   *  one code path. */
+   *  property that keeps the arm latch and the pack stamp on one code path. */
   // ── M2: CAN ARCore RUN HERE? ─────────────────────────────────────────────
   // One probe per mount, Android only. The AR arm has no fallback since M2,
   // so the notice needs the answer to refuse by name, and the AR view is not
@@ -763,9 +789,8 @@ export function useSweepEngine(
           // basis is the gear's.
           false,
           // The lens the operator asked for, so a fallback can say what
-          // happened to it. `lens` and not `effectiveLens`: the mask is
-          // DERIVED from this notice's answer, so reading it back here would
-          // be circular and would silence the very sentence it needs.
+          // happened to it: the ARKit fallback runs 1× under a 0.5× request,
+          // and the notice then leads with "0.5× UNAVAILABLE".
           lens,
         )),
     [
@@ -849,23 +874,15 @@ export function useSweepEngine(
     if (!enabled) return;
     onPaintedChangeRef.current?.(livePainted);
   }, [livePainted, enabled]);
-  // Told on every change, INCLUDING the first resolve: the host's pill renders
-  // before the precondition read lands, so without the mount-time call it would
-  // show the requested arm until something else happened to change.
-  //
-  // ⚠ THE LATCHED ARM WINS WHILE ONE IS RUNNING. `armNotice` re-derives from
-  // the live `poseSource` prop, which the capture screen's own AR pill can move
-  // mid-sweep — and a pill that named the newly requested arm would be
-  // describing a sweep that is not happening. The pack says what `armsRef`
-  // latched; this says the same thing, so the two cannot disagree.
-  // ── THE ARM THE PILL SHOWS MUST BE THE ARM THAT IS RUNNING ──────────
+  // ── THE LATCHED ARM MUST BE THE ARM THAT IS RUNNING ─────────────────
   //
   // `runningArm` is latched from the REQUEST at start, which was the whole
   // truth while the arm could not change. It can now: the Android recorder
   // gives the ARCore arm up mid-sweep when ARCore reports it cannot track,
   // and finishes on the IMU ring. Native says so on every status poll via
-  // `poseSourceRan`; without reading it the AR pill keeps claiming "AR" for
-  // the rest of a sweep ARCore is no longer feeding.
+  // `poseSourceRan`; without reading it `runningArm` — and `androidArArm`,
+  // which reads it — keeps claiming AR for the rest of a sweep ARCore is no
+  // longer feeding.
   //
   // ⚠ ONE DIRECTION ONLY, MIRRORING THE RECORDER. The degrade is one-way
   // there, so this only ever moves 'ar' -> 'imu'. Accepting a move back
@@ -934,10 +951,9 @@ export function useSweepEngine(
   //
   // ⚠ ON ANDROID THIS IS ALWAYS FALSE, ON BOTH ARMS, AND THAT IS NOT A BUG.
   // `arArmed` does not mean "the sweep runs on the AR arm". It means "THIS
-  // SURFACE has mounted and owns an AR session" — it gates `<ARCameraView>`,
-  // it hides the AVF viewfinder, and it is what `arLive` reports. Those are
-  // iOS facts: there ARKit is the SDK's to start and the pixels arrive through
-  // the frame plugin.
+  // SURFACE has mounted and owns an AR session" — it gates `<ARCameraView>`
+  // and it hides the AVF viewfinder. Those are iOS facts: there ARKit is the
+  // SDK's to start and the pixels arrive through the frame plugin.
   //
   // On Android the ARCore session belongs to `PanoPlusAndroidRecorder`, which
   // opens it in SHARED-camera mode INSIDE the sweep (`arcoreReference:
@@ -951,8 +967,9 @@ export function useSweepEngine(
   // So the Android AR arm is selected through `poseSource` in the start bag
   // (`armNotice.effectivePoseSource`, which really can be `'ar'` since
   // 2026-09-02) and never through this flag. `runningArm.poseSource` still
-  // carries the truth for the host's pill; this constant is only about who owns
-  // a session. iOS keeps the expression it has always had, unchanged.
+  // carries the arm that is running (`androidArArm` reads it); this constant is
+  // only about who owns a session. iOS keeps the expression it has always had,
+  // unchanged.
   //
   // ── 2026-09-10: THE ANDROID EXCEPTION, AND WHY THE OBJECTION ABOVE NO
   //    LONGER APPLIES ──────────────────────────────────────────────────────
@@ -1024,17 +1041,11 @@ export function useSweepEngine(
    * ARKit and restarted it microseconds later with the grace already spent:
    * the very race, on this surface's own session instead of a neighbour's.
    *
-   * It also fixed `arLive` (`arArmed && arReady`) true on the commit the
-   * restart happened, and `PanoPlusBasisOverlayProps.arLive` forbids exactly
-   * that — its doc: "Starting before the session is up records a log with no
-   * reference in it, which the solve then correctly refuses — an operator
-   * performing a perfect gesture and being told it was not good enough."
-   *
    * ⚠ WHAT THIS DOES NOT BUY, stated so it is not read as more than it is: the
-   * grace is a gap BEFORE the mount, so `arLive` still goes true on the same
-   * commit ARKit starts, here and on a cold first mount alike. Warm-up after
-   * `start()` is covered by the overlay's own `REFERENCE_GRACE_S`, which is why
-   * a reference-less first second is coached rather than blamed on the hands.
+   * grace is a gap BEFORE the mount, so `arReady` still goes true on the
+   * commit ARKit is asked to start, not when it has warmed up. (The basis
+   * gesture overlay that read that as a live reference went with the
+   * in-camera basis card in M10.)
    */
   // ⚠ M2: AND ONLY ONCE THE PREVIOUS CAMERA OWNER HAS LET GO. Inside
   // `<Camera>`'s release window the surface is told `frameSource: 'host'` on
@@ -1579,15 +1590,12 @@ export function useSweepEngine(
     // with no correct action.
     //
     // ⚠ AND `<Camera>` CANNOT REACH IT ANY MORE — which is the point, not an
-    // argument for deleting this. Since M3 `sweepHostOwnsCamera` is
-    // `!isAR && <platform arm> && no DR-1a override`, and the pose arm it
-    // sends is `isAR ? 'ar' : 'imu'` from the SAME state, so a host-owned
-    // sweep is always an IMU sweep. This is what happens if that is ever
-    // relaxed.
-    //
-    // It also covers the case `<Camera>` is not: `PanoPlusCaptureSurface` is
-    // an exported component and a third-party host can set `frameSource` and
-    // `poseSource` inconsistently with no `<Camera>` in between.
+    // argument for deleting this. `<Camera>` says `'host'` only when `!isAR`
+    // (its AR view is `'host-ar'`), and the pose arm it sends is
+    // `isAR ? 'ar' : 'imu'` from the SAME state, so a `'host'` sweep is
+    // always an IMU sweep. This branch is a BACKSTOP for the day that is
+    // relaxed. Nothing else can reach it: this hook is not exported, and
+    // `<Camera>` is its only caller.
     //
     // Starting anyway opens a second Camera2 / AVCapture client against a
     // device vision-camera already holds. On Android that is
@@ -1684,9 +1692,9 @@ export function useSweepEngine(
     };
     // THE RENDER-VISIBLE TWIN OF THE LINE ABOVE, set in the same breath so the
     // two can never latch different answers. From here until the phase returns
-    // to idle, `arArmed` and the arm reported to the host both read THIS —
-    // never the `poseSource` prop, which the capture screen's AR pill can move
-    // under a live sweep.
+    // to idle, `arArmed` and `androidArArm` read THIS — never the
+    // `poseSource` prop, which the capture screen's AR pill can move under a
+    // live sweep.
     setRunningArm({
       poseSource: wantPoseSource,
       fallbackToAr: armNotice.fallbackToAr,
@@ -2113,7 +2121,7 @@ export function useSweepEngine(
         if (!mountedRef.current) return;
         // THE LATCH IS RELEASED ON EVERY RETURN TO IDLE, this one included: no
         // sweep is running, so the requested arm is once again the honest
-        // answer for both `arArmed` and the host's pill.
+        // answer for `arArmed`.
         setRunningArm(null);
         setPhase('idle');
         setCameraLock(null);  // see finish() — it dies with its sweep
@@ -2313,16 +2321,21 @@ export function useSweepEngine(
   startRef.current = start;
 
   /**
-   * SHOULD THE SHUTTER LOOK ENABLED — the gates the Start button used to
-   * carry by not rendering, now reported as a level (`SurfaceControlState`).
+   * CAN A HOLD START NOW — the gates the Start button used to carry by not
+   * rendering. `holdStart` enforces it, by NAME (`panoplus-unavailable` /
+   * `panoplus-not-ready`), and it is reported as a level on
+   * `onControlsState.canCapture`.
+   *
+   * ⚠ NOTHING PAINTS IT. `<Camera>` reads only `busy` from that report, and
+   * its shutter — the only shutter since M10, the hatch's included — has no
+   * `canCapture` term. So the shutter looks live while this is false, and the
+   * contract is the named refusal, not a grey ring.
    *
    * `armResolving`, not `armPending`: a running sweep is on a settled arm
    * whatever the prop has done since, and `armPending` CAN go true mid-sweep
-   * (the host's pill moves `poseSource`, the read restarts) — which would dim
-   * the red ring under the operator's finger for the width of a bridge call.
-   * The shutter's `disabled` only ever refuses a NEW press-in, and
-   * `CameraShutter` fires the release regardless. (M10: the basis-gesture
-   * term went with the gesture.)
+   * (the AR pill moves `poseSource`, the read restarts) — which would report a
+   * running sweep as not ready. (M10: the basis-gesture term went with the
+   * gesture.)
    *
    * NOT phase-gated. `'finishing'` is reported through `busy` (the grey ring)
    * and `'starting'`/`'sweeping'` have the finger already down.
@@ -2336,6 +2349,8 @@ export function useSweepEngine(
   nativeReadyRef.current = nativeReady;
   const onFailureRef = useRef(onFailure);
   onFailureRef.current = onFailure;
+  const hostArmRefusalRef = useRef(hostArmRefusal);
+  hostArmRefusalRef.current = hostArmRefusal;
 
   // ⚠ THERE IS NO `abandon()` ANY MORE (2026-09-03). It was the Discard
   // button's handler — `cancelPanoPlus` + `onCancel` — and Discard has no
@@ -2344,8 +2359,8 @@ export function useSweepEngine(
 
   // ── THE SHUTTER, MAPPED (2026-09-03) ─────────────────────────────────────
   //
-  // pano+ uses Pano's `CameraShutter` — the shell's in unified chrome, its own
-  // below otherwise — and Pano's press semantics drive the sweep:
+  // pano+ uses Pano's `CameraShutter` — `<Camera>`'s own, on every path, the
+  // DR-1a hatch included — and Pano's press semantics drive the sweep:
   //
   //   press-in < 250 ms, release  (onTap)          → INERT. Pano takes a photo;
   //                                                  pano+ has none, like the
@@ -2370,11 +2385,36 @@ export function useSweepEngine(
   //   Discard / cancel without a pack              → NO GESTURE. Pano has no
   //                                                  mid-hold discard either.
   const holdStart = useCallback(() => {
-    // The gates the Start BUTTON used to encode by not rendering: the arm
-    // precondition still resolving, or the basis gesture owning the screen.
-    // A hold that starts a sweep under the basis recorder would fit `C` from
-    // a log recorded during somebody's pan.
+    // The gates the Start BUTTON used to encode by not rendering: the sweep
+    // module missing (`available`), or the arm precondition still resolving
+    // (`armResolving`). (The third, the basis gesture owning the screen, went
+    // with the gesture in M10.)
     if (phaseRef.current !== 'idle') return;
+    // ⚠ PANORAMA OFF IS ANSWERED BEFORE THIS ENGINE'S OWN READINESS (M10
+    // re-review). `start()` reads the host's refusal first, but it runs only
+    // after the gate below, so while the iOS arm's calibration read was still
+    // in flight (on mount, on a first flip to a lens, or coming off AR) a hold
+    // with panorama capture turned off was refused as "still loading. Try
+    // again", and the retry then said "turned off". The host turned panorama
+    // capture off for this screen, and no wait can change that, so it is the
+    // answer in every state of the engine, a build without the session
+    // module included. Refused as `start()` refuses it: on screen and on
+    // `onFailure`. Only this code moves ahead of the gate. It says whether a
+    // hold means anything on this screen at all; every other refusal, the
+    // host's included, is about whether this hold can run now, and keeps its
+    // place (the gate below, then `start()`).
+    const hostRefusal = hostArmRefusalRef.current;
+    if (hostRefusal != null && hostRefusal.code === PANORAMA_DISABLED_REFUSAL_CODE) {
+      setError(hostRefusal.message);
+      onFailureRef.current?.({
+        code: hostRefusal.code,
+        message: hostRefusal.message,
+        sessionDir: null,
+        counts: null,
+        abort: null,
+      });
+      return;
+    }
     if (!canCaptureRef.current) {
       // ⚠ NEVER SILENT (M8 review). The standalone surface used to draw an
       // "unavailable" card and grey its own Start; inside `<Camera>` there is

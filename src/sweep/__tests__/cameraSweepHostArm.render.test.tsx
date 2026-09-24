@@ -27,7 +27,7 @@ jest.mock('../useSweepEngine', () =>
   require('./sweepEngineSpy').sweepEngineSpyFactory());
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { Platform } from 'react-native';
+import { Platform, StyleSheet } from 'react-native';
 import { VisionCameraProxy } from 'react-native-vision-camera';
 
 // ⚠ THE STUB THIS PARAGRAPH USED TO DESCRIBE IS GONE. `PanoPlusResultView`
@@ -68,6 +68,8 @@ import { NativeModules } from 'react-native';
 
 import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
+import { CameraShutter } from '../../camera/CameraShutter';
+import { SweepHoldOverlay } from '../SweepHoldOverlay';
 import { __resetHardwareVideoSizesCache } from '../../camera/androidHardwareVideoSizes';
 import { lastSweepEngineCall, lastSweepProps } from './sweepEngineSpy';
 import { selectCaptureDevice } from '../../camera/selectCaptureDevice';
@@ -1329,6 +1331,92 @@ describe('M3 — the frame processor vision-camera sees is one composed worklet'
     expect(fpOf(tree)).toBe(host);
     const surface = { props: lastSweepProps() as Record<string, any> };
     expect(surface.props.hostArmRefusal?.code).toBe('panoplus-refused-drawable-processor');
+    act(() => { tree.unmount(); });
+  });
+});
+
+// ── THE HOLD OVERLAY, OVER THE LIVE PREVIEW (M10 review) ────────────────────
+//
+// On this arm the viewfinder IS `<Camera>`'s `<CameraView>`, and while a sweep
+// is held `<Camera>` draws `SweepHoldOverlay` over it, in an absolute-fill
+// wrapper rendered after the preview. Anything between that overlay and the
+// preview that paints a background blacks the viewfinder out for the whole
+// hold. The cases that used to guard this ('is TRANSPARENT on the host arm',
+// panoPlusHostArm) check the hatch's own view, which `<Camera>` never mounts
+// over a live host preview — so this one checks the tree that ships.
+describe('⚑ the sweep\'s hold overlay paints NOTHING over the live preview', () => {
+  const NM = NativeModules as Record<string, unknown>;
+  beforeEach(() => {
+    // Just enough of the session module for the REAL engine to start a
+    // sweep and hold it: the overlay is drawn only while one is live.
+    NM.RNSSweepSession = {
+      start: (o: Record<string, unknown>) => Promise.resolve({
+        sessionDir: o.sessionDir, startedAtMs: 1, pluginAvailable: true,
+        poseSource: 'imu', frameSource: 'vc-plugin',
+      }),
+      stop: () => Promise.resolve({}),
+      cancel: () => Promise.resolve({ cancelled: true }),
+      getStatus: () => Promise.resolve({ running: true, seq: 1, painted: 5 }),
+      setIdlePreview: () => Promise.resolve({ on: false }),
+      getConstants: () => ({ documentDirectory: 'file:///data/files/', vcArmSupported: true }),
+      documentDirectory: 'file:///data/files/',
+      vcArmSupported: true,
+    };
+  });
+  afterEach(() => { delete NM.RNSSweepSession; });
+
+  /** Does this style paint anything? `transparent` and a zero alpha do not. */
+  const paints = (bg: unknown): boolean => bg != null
+    && bg !== 'transparent'
+    && !/^rgba\(.*,\s*0(\.0*)?\s*\)$/.test(String(bg));
+
+  it('no view between SweepHoldOverlay and the preview sets a background, while a sweep is held', async () => {
+    // MUTATIONS: the overlay's absolute-fill wrapper in `<Camera>`'s main tree
+    // given `backgroundColor: '#000'` → the viewfinder is black for every
+    // non-AR hold, and before this case the whole suite stayed green; the
+    // same wrapper given a translucent scrim → the preview is dimmed. Both
+    // killed.
+    // `panMode: 'both'`: the portrait-hold gate would otherwise park the hold
+    // behind a rotate prompt (this harness holds the phone in portrait).
+    const tree = await render({ panMode: 'both' });
+    // `findByType` throws unless there is exactly ONE of each.
+    act(() => {
+      (tree.root.findByType(CameraView).props.cameraProps as {
+        onPreviewStarted?: () => void;
+      }).onPreviewStarted?.();
+    });
+    // PRECONDITIONS: the preview is drawing, and a hold really started —
+    // without them there is nothing live to paint over, and no overlay.
+    expect(surfaceProps(tree).hostPreviewLive).toBe(true);
+    act(() => {
+      (tree.root.findByType(CameraShutter).props.onHoldStart as () => void)();
+    });
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => {
+        jest.advanceTimersByTime(300);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    }
+    const overlay = tree.root.findAllByType(SweepHoldOverlay);
+    expect(overlay).toHaveLength(1);
+    // The walk stops at the first view the PREVIEW also sits in: a background
+    // there (the container's own black) is painted BENEATH the preview.
+    const underPreview = new Set<unknown>();
+    for (let n = tree.root.findByType(CameraView).parent; n != null; n = n.parent) {
+      underPreview.add(n);
+    }
+    const painters: string[] = [];
+    for (let n = overlay[0].parent; n != null && !underPreview.has(n); n = n.parent) {
+      const bg = (StyleSheet.flatten(n.props?.style) as { backgroundColor?: unknown } | undefined)
+        ?.backgroundColor;
+      if (paints(bg)) {
+        const name = (n.type as { displayName?: string }).displayName ?? String(n.type);
+        painters.push(`${name}: ${String(bg)}`);
+      }
+    }
+    expect(painters).toEqual([]);
     act(() => { tree.unmount(); });
   });
 });

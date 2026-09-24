@@ -48,7 +48,6 @@ export function SweepHatchScreen({
 }): React.JSX.Element {
   const {
     frameSource = 'own',
-    hostPreviewLive = true,
     arSourceMaxLongEdge,
   } = props;
   const {
@@ -94,14 +93,15 @@ export function SweepHatchScreen({
             : { width, height }
         ));
       }}
-      style={[
-      styles.fill,
-      // Transparent only when something is ACTUALLY drawing behind us. In
-      // the handoff window the host says 'host' while mounting nothing, and
-      // a transparent root there is a window onto whatever the platform
-      // leaves behind rather than a viewfinder.
-      frameSource === 'host' && hostPreviewLive && styles.fillOverHost,
-    ]}>
+      // ALWAYS OPAQUE. This view is the only thing on screen whenever it is
+      // mounted: `<Camera>` draws it only on the hatch, where its own preview
+      // is never in the tree (`hostPreviewMounted` requires
+      // `!sweepLegacyTree`), so there is nothing behind it to show through.
+      // The transparent root for "the host is drawing behind us" was deleted
+      // in the M10 review: `<Camera>` never sent the hatch that state
+      // (`hostPreviewLive` is false there on every render), and the host
+      // arm's hold overlay is drawn in `<Camera>`'s own tree, not here.
+      style={styles.fill}>
       {/* Mounting this view IS what starts ARKit (didMoveToWindow →
           RNSARSession.shared.start()). `planeDetection="vertical"` costs
           nothing here — pano+ never reads a plane — but it keeps ARKit's
@@ -140,7 +140,7 @@ export function SweepHatchScreen({
       )}
       {/* v12 — THE DECOUPLED ARM'S VIEWFINDER. The arm's own capture session
           drawn straight to a layer: live during the sweep (it IS the sweep's
-          session) and, via the idle-preview effect above, live before it too
+          session) and, via the engine's idle-preview effect, live before it too
           — the operator could not FRAME the first shot on this arm, and the
           first frame anchors the whole canvas. Null on builds without the
           native view (and under Jest), where the explainer below keeps doing

@@ -24,11 +24,19 @@
  * The fail-closed guard in `start()` had nothing whatsoever: no test in the
  * package passed `frameSource: 'host'` into the surface.
  *
- * Both need the same arrangement — Android, native installed, the surface
+ * Both needed the same arrangement — Android, native installed, the engine
  * mounted directly — so they live here rather than being bolted onto a suite
- * about `<Camera>`'s delegation. Mounting the surface directly is also the
- * honest shape for these two: they are properties of the SURFACE's contract,
- * and a third-party host can reach them with no `<Camera>` in between.
+ * about `<Camera>`'s delegation.
+ *
+ * ⚠ SINCE M10 NO THIRD-PARTY HOST CAN REACH EITHER. The surface is deleted
+ * and neither `useSweepEngine` nor `SweepHatchScreen` is exported; the only
+ * caller is `<Camera>`. So the guard cases below pin a BACKSTOP behind
+ * `<Camera>`'s own gates (it defers a hold through its handoff window, and
+ * never sends a host-owned sweep the AR arm), and the root cases pin the
+ * hatch view — the one place the sweep still draws its own root. The
+ * black-screen property S7 was about now lives in `<Camera>`'s main tree,
+ * which draws the host arm's hold overlay over `<Camera>`'s own preview;
+ * nothing in this file reaches that tree.
  */
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
@@ -130,7 +138,7 @@ function rootBackground(tree: ReactTestRenderer): unknown {
   );
 }
 
-describe('the surface root does not paint over the host preview', () => {
+describe('the hatch view\'s root, and its explainer in the handoff', () => {
   // M10 — the precondition used to be "the arrangement gets past the
   // unavailable card"; the card is deleted. Its fact survives as the engine's
   // availability, which reaches the host as `canCapture`: this rig must be a
@@ -142,11 +150,12 @@ describe('the surface root does not paint over the host preview', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('is TRANSPARENT on the host arm — something else is drawing behind it', () => {
-    const { tree } = mount({ frameSource: 'host' });
-    expect(rootBackground(tree)).toBe('transparent');
-    act(() => { tree.unmount(); });
-  });
+  // ⚠ 'is TRANSPARENT on the host arm' WAS DELETED IN THE M10 REVIEW, with
+  // the branch it pinned. It mounted this view with `frameSource: 'host'` and
+  // a live host preview — a pair `<Camera>` never sends the hatch, whose own
+  // preview is never in the tree — so it checked code no product path ran.
+  // The hatch view's root is now opaque in every state, which the two cases
+  // below pin in the two states `<Camera>` does produce.
 
   it('stays BLACK on its own arm — it is the only thing on screen', () => {
     const { tree } = mount({ frameSource: 'own' });
@@ -154,13 +163,11 @@ describe('the surface root does not paint over the host preview', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ stays BLACK in the HANDOFF window — nothing is drawing behind us', () => {
-    // The third state, and the one the first version of this fix missed:
-    // `frameSource: 'host'` with no preview mounted. A transparent root
-    // there is not a viewfinder, it is a window onto whatever the platform
-    // leaves behind. Reverting the `hostPreviewLive` term in the root style
-    // leaves every OTHER case in the package green — measured — so this row
-    // is the only thing standing between that term and a silent deletion.
+  it('⚑ stays BLACK in the HANDOFF window — nothing is drawing behind it', () => {
+    // The state `<Camera>` does send the hatch for ~600 ms on every ownership
+    // flip: `frameSource: 'host'` with nothing mounted. A transparent root
+    // there would not be a viewfinder, it would be a window onto whatever
+    // the platform leaves behind.
     const { tree } = mount({ frameSource: 'host', hostPreviewLive: false });
     expect(rootBackground(tree)).toBe('#000');
     act(() => { tree.unmount(); });
@@ -180,7 +187,11 @@ describe('the surface root does not paint over the host preview', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ NEGATIVE CONTROL: with the preview live it says nothing at all', () => {
+  it('⚑ NEGATIVE CONTROL: the caption follows hostPreviewLive, not frameSource', () => {
+    // A control on the ENGINE's input, stated explicitly: `<Camera>` never
+    // sends the hatch a live host preview (the harness defaults it false for
+    // that reason). Without this, the case above passes for any reason the
+    // caption might always be drawn on `'host'`.
     const { tree } = mount({ frameSource: 'host', hostPreviewLive: true });
     expect(tree.root.findAll(
       (n) => n.props?.testID === 'panoplus-camera-off', { deep: true },

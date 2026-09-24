@@ -29,9 +29,6 @@ import type {
   PanoPlusStartOptions,
 } from './panoPlusTypes';
 
-/** The lens as the capture chrome names it. */
-export type PanoLens = '1x' | '0.5x';
-
 export interface SweepEngineProps {
   /** A finished sweep — canvas + the whole pack under `result.sessionDir`. */
   onComplete: (result: PanoPlusCaptureResult) => void;
@@ -162,6 +159,11 @@ export interface SweepEngineProps {
    * the host has told us it owns the camera but is deliberately mounting
    * nothing. Defaults TRUE, which is the historical behaviour for a host
    * that says `'host'` and means it.
+   *
+   * M10 review — its one reader now is the camera-off explainer
+   * (`panoPlusCameraOffNotice`), which only the hatch view draws; the
+   * transparent hatch root it also chose is deleted. `<Camera>` sends the
+   * hatch `false` on every render (its own preview is never mounted there).
    */
   hostPreviewLive?: boolean;
   /** S7 — vision-camera's own reason the host preview is not up, or `''`.
@@ -303,16 +305,17 @@ export interface SweepEngineProps {
    * assigned-or-deleted like `tauUncorrected`, and threaded into the idle
    * viewfinder so framing and capture use the SAME camera.
    *
-   * On screen it is Pano's lens switcher (`0.5× | 1×`, `PanoLensChip`), which
-   * is ALWAYS mounted — Pano's own rule, adopted by the owner 2026-09-03 —
-   * and the chip REALLY switches the camera: native's `pickCamera` honours the
-   * requested lens on both the sweep and the idle viewfinder, and the pack
-   * records the lens that ran.
-   *
-   * ⚠ WHAT THE CHIP PAINTS IS `effectiveLens`, NOT THIS PROP. On the AR arm
-   * this value is a request nothing will honour, so the chip paints `1×`
-   * there — the lens that actually runs. Tapping `0.5×` moves the ARM as well
-   * as the lens, which is how the two can never disagree; see `onLensPill`.
+   * M10 — ON SCREEN IT IS `<Camera>`'S LENS CHIP, the same chip on both
+   * engines. `<Camera>` passes `sweepLens`, derived from the `lens` that chip
+   * paints — the REQUEST, not a masked "effective" lens (the sweep's own chip
+   * and its mask went with its screen). On the host arm the chip has already
+   * chosen the camera the sweep is fed from; this value is what the IMU arm's
+   * start bag and pack record. Only the DR-1a hatch's own camera
+   * (`frameSourceOverride: 'own'`) opens a lens FROM it — native's
+   * `pickCamera`, for the sweep and the idle viewfinder alike. There an IMU
+   * arm that falls back to ARKit runs 1× under a 0.5× request: the arm notice
+   * says so ("0.5× UNAVAILABLE — …") while the chip still paints 0.5×. That
+   * arm is deleted in M6a.
    */
   lens?: 'ultraWide' | 'wide';
   /**
@@ -367,15 +370,25 @@ export interface SweepEngineProps {
    * own any more.
    */
   hideBuiltInControls?: boolean;
-  /** `<Camera>`'s own report of whether its shutter should look enabled /
-   *  busy (see {@link SurfaceControlState}). Internal: `SweepOptions` does not
-   *  carry it — a host follows `onSweepingChange`. */
+  /**
+   * The engine's controls report (see {@link SurfaceControlState}), for
+   * `<Camera>` alone: `SweepOptions` does not carry it — a host follows
+   * `onSweepingChange`.
+   *
+   * ⚠ `<Camera>` READS ONLY `busy` (the grey ring while a sweep finishes).
+   * `canCapture` is reported and NOT PAINTED: `<Camera>`'s shutter has no term
+   * for it, on the hatch too since M10, so a hold while it is false is refused
+   * by name (`panoplus-not-ready` / `panoplus-unavailable`) rather than
+   * prevented by a grey shutter.
+   */
   onControlsState?: (state: SurfaceControlState) => void;
   /**
-   * Points the shell's own bottom chrome (mode bar + shutter row) takes, so
-   * the lens chip lifts clear of it — the SAME number the shell passes to the
-   * stitcher's `<Camera bottomBarOffset>` for Pano's chip, which is what puts
-   * the two chips at the same height. 0 (default) is the stand-alone layout.
+   * LAYOUT ONLY: `<Camera>`'s own `bottomBarOffset`, passed through so the
+   * hold overlay and HUD stay above `<Camera>`'s bottom stack — a lens-chip
+   * slot and, unless {@link hideBuiltInControls}, the shutter row
+   * (`panoBottomChromePt`; on the hatch `<Camera>` docks its chip in that
+   * same slot, `panoLensChipBottomPt`). The sweep draws no chip of its own.
+   * 0 (default) reserves nothing beyond that stack.
    */
   bottomBarOffset?: number;
   /** v13 — the D-008 jog guard (see PanoPlusStartOptions.d8JogGuard). An

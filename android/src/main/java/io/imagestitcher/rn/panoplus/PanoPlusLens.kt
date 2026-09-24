@@ -44,7 +44,7 @@
 package io.imagestitcher.rn.panoplus
 
 /** The two lenses the chip can name. The SDK spells them `'ultraWide'` and
- *  `'wide'` (`PanoPlusCaptureSurfaceProps.lens`); iOS's AVF arm reads the same
+ *  `'wide'` (`SweepEngineProps.lens`); iOS's AVF arm reads the same
  *  two strings (`RNISPanoAvfSource.swift:367`). */
 internal enum class PanoPlusLens(val wire: String, val label: String) {
     ULTRA_WIDE("ultraWide", "0.5x"),

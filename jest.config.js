@@ -8,8 +8,8 @@
  *              `react-native` stub. Fast, no React, no renderer.
  *   `render` — component tests that MOUNT through react-test-renderer
  *              against a hand-written RN mock. They arrived with the sweep
- *              engine, whose surface is 4k lines of JSX and whose HUD is
- *              where its defects have historically hidden.
+ *              engine, whose HUD is where its defects have historically
+ *              hidden.
  *
  * Why no `preset: 'react-native'` for either: the RN preset pulls in
  * @react-native/babel-preset, jest-react-native and a metro module mapping.
@@ -98,24 +98,20 @@ const render = {
     '^react-native-sensors$': '<rootDir>/jest.mocks/sensors.render.js',
     '^react-native-worklets-core$':
       '<rootDir>/jest.mocks/worklets-core.render.js',
-    // ⚠ THE SWEEP'S OBSERVATION SEAM. Shadows the package barrel for the
-    // render project ONLY, re-exporting the real module and overriding five
-    // components so a test can drive `onArFrame` and read the HUD. See the
-    // mock's header for why it exists and when it should go.
-    // Both spellings reach it: the moved source now imports the barrel
-    // relatively, while the tests that came with it still `require` the old
-    // bare specifier. Mapping only one leaves half the suite on the real
-    // components and half on the seam, which is worse than either.
-    // `../index` from src/sweep/*, `../../index` from src/sweep/__tests__/*.
-    // Verified no other source file in the package imports the barrel
-    // relatively, so these two patterns cannot catch anything else.
-    '^\\.\\./index$': '<rootDir>/jest.mocks/sweep-host-components.render.js',
-    '^\\.\\./\\.\\./index$': '<rootDir>/jest.mocks/sweep-host-components.render.js',
     // M7 — the engine hook's direct import of the orientation hook, forwarded
-    // to the same seam (see the mock's header). Only src/sweep/useSweepEngine.ts
-    // imports it by this relative path.
+    // to the orientation seam below (see the mock's header). Only
+    // src/sweep/useSweepEngine.ts imports it by this relative path.
     '^\\.\\./camera/useDeviceOrientation$':
       '<rootDir>/jest.mocks/sweep-device-orientation.render.js',
+    // ⚠ THE ORIENTATION SEAM. Shadows the bare package specifier for the
+    // render project ONLY: the real barrel, plus a `useDeviceOrientation` a
+    // test sets with `__setOrientation`. A render test reaches it through
+    // `require('react-native-image-stitcher')`; no source file imports that
+    // specifier. The relative barrel spellings (`../index`, `../../index`) are
+    // NOT mapped: the sweep's own screen imported its components that way,
+    // and M10 deleted it with the component stand-ins this seam used to carry.
+    // Nothing in `src` imports the barrel relatively now, and a file that
+    // did would get the real package.
     '^react-native-image-stitcher$':
       '<rootDir>/jest.mocks/sweep-host-components.render.js',
   },

@@ -30,8 +30,10 @@
 // are deleted; the engine is mounted through `SweepEngineHarness` and the
 // shutter pressed through its handle. The two surviving forms of "the arm the
 // host sees" are the arm the RESULT carries (`result.arms.poseSource`, from
-// `armsRef`) and the shutter's `canCapture` (`onControlsState`), which is
-// where the old report's `resolving` term now lands.
+// `armsRef`) and the engine's `canCapture` report (`onControlsState`), which
+// is where the old report's `resolving` term now lands. `<Camera>`'s shutter
+// does not paint that report; what a host sees of it is the named refusal
+// (`panoplus-not-ready`) of a hold made while it is false.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -75,8 +77,9 @@ let startedWith: Record<string, unknown> | null = null;
  *  function rather than an inline `= null`, which would narrow the variable
  *  to `null` for the rest of the case.) */
 const clearStart = (): void => { startedWith = null; };
-/** Every `onControlsState` payload, in order — what the host's shutter paints.
- *  `canCapture: false` on a live module is the arm read still resolving. */
+/** Every `onControlsState` payload, in order — the engine's own report.
+ *  `canCapture: false` on a live module is the arm read still resolving.
+ *  (`<Camera>` reads only `busy` from it; its shutter does not grey here.) */
 let controls: SweepSurfaceState[] = [];
 /** Every `onFailure`, in order — a hold the engine declines is named here. */
 let failures: PanoPlusFailure[] = [];
@@ -306,21 +309,23 @@ describe('the arm is latched for the duration of a sweep', () => {
 //
 //  M10 — this used to be pinned on the arm REPORT's `resolving` flag
 //  (`onEffectiveArmChange`, deleted). The same fact (`armResolving`) now
-//  gates the engine's `canCapture` — the host's shutter greys — and a hold in
-//  that window is refused by name, `panoplus-not-ready`.
+//  gates the engine's `canCapture` report, which `<Camera>`'s shutter does
+//  NOT paint, so the contract a host sees is the refusal: a hold in that
+//  window is refused by name, `panoplus-not-ready`.
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('the shutter says when nothing is settled yet', () => {
+describe('the engine says when nothing is settled yet', () => {
   it('holds the IMU selection NOT READY until the precondition read lands', async () => {
     const r = mount('imu');
-    // Before the read resolves: the shutter is greyed, and a hold is refused
-    // by name rather than started on an unsettled arm.
+    // Before the read resolves: the engine reports it cannot take a hold, and
+    // a hold is refused by name rather than started on an unsettled arm.
     expect(controls[0]).toMatchObject({ canCapture: false });
     r.hold();
     expect(failures.map((f) => f.code)).toEqual(['panoplus-not-ready']);
     expect(startedWith).toBeNull();
     await settle();
-    // After: a settled, usable IMU arm — the shutter is live and a hold starts.
+    // After: a settled, usable IMU arm — the report is capturable and a hold
+    // starts.
     expect(controls[controls.length - 1]).toMatchObject({ canCapture: true });
     r.hold();
     await settle();
@@ -349,7 +354,7 @@ describe('the shutter says when nothing is settled yet', () => {
     const before = controls.length;
     // The flip RESETS the read (this lens was never read on the IMU arm), so
     // `armPending` goes true for the width of the round trip; the latched arm
-    // is what keeps the shutter live under the finger.
+    // is what keeps the report capturable under the finger.
     r.setArm('imu');
     await settle();
     const after = controls.slice(before);

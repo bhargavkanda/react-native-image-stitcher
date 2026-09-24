@@ -9,8 +9,10 @@
 // mounts the real hook through `SweepEngineHarness` (the hatch view: the
 // viewfinder / explainer / fallback `<ARCameraView>` and `SweepHoldOverlay`)
 // and presses the shutter through the handle — `holdStart` / `holdEnd` — which
-// is exactly how `<Camera>`'s shutter reaches the engine. What the shutter
-// would PAINT is the engine's `onControlsState` report.
+// is exactly how `<Camera>`'s shutter reaches the engine. The engine also
+// reports `onControlsState`; `<Camera>` reads only its `busy` (the shutter's
+// busy ring while a sweep finishes). `canCapture` paints nothing: a hold the
+// engine cannot take is refused by name on `onFailure`.
 //
 // WHY THIS FILE EXISTS AT ALL, and why the pure suite is not enough. The
 // 2026-07-22 field bugs (enforce-1D gating the box but not the shutter; the
@@ -84,10 +86,9 @@ import { SweepEngineHarness } from './sweepEngineHarness';
 import type { SweepEngineProps } from '../sweepEngineProps';
 import { panoBottomChromePt } from '../sweepLayout';
 import { panoPlusUnavailableDetail } from '../panoPlusAndroidArm';
-// The REAL `<ARCameraView>` — the hatch view imports it by module path, so the
-// seam's mock (which only shadows the package barrel) never sees it. A test
-// drives `onArFrame` off the mounted element's props, as `<Camera>`'s own
-// suites do.
+// The REAL `<ARCameraView>` — the hatch view imports it by module path and the
+// render project stands nothing in for it. A test drives `onArFrame` off the
+// mounted element's props, as `<Camera>`'s own suites do.
 import { ARCameraView } from '../../camera/ARCameraView';
 import {
   PANO_PLUS_PLUGIN_KEY,
@@ -102,10 +103,11 @@ import type {
   SweepSurfaceState as SurfaceControlState,
 } from '../panoPlusTypes';
 
-// TEST-ONLY export of the stitcher render MOCK (jest maps the module); the
-// real package's types do not carry it, so reach it through a require-cast.
-// `__setOrientation` is what the engine's `useDeviceOrientation` reports (the
-// render project forwards that hook to the seam).
+// TEST-ONLY export of the render project's orientation seam (jest maps the
+// bare package specifier to it); the real package's types do not carry it, so
+// reach it through a require-cast. `__setOrientation` is what the engine's
+// `useDeviceOrientation` reports (the render project forwards that hook to the
+// seam).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stitcherMock = require('react-native-image-stitcher') as {
   __setOrientation: (o: string) => void;
@@ -215,8 +217,9 @@ interface Rig {
   hold: () => void;
   /** …and released — `holdEnd`, the sweep FINISHES, pack kept. */
   release: () => void;
-  /** What the shutter would paint right now: the engine's last
-   *  `onControlsState` report. */
+  /** The engine's last `onControlsState` report. `<Camera>`'s shutter
+   *  paints its `busy` only; `canCapture` is the engine's statement of
+   *  whether a hold would be taken. */
   controls: () => SurfaceControlState | undefined;
   has: (testID: string) => boolean;
   frame: (status: Record<string, unknown> | null) => void;
@@ -347,7 +350,8 @@ describe('mount + the AR-session swap grace', () => {
   // ⚠ THE UNAVAILABLE CARD (testID panoplus-unavailable) — deleted in M10
   // with the screen that drew it. What it pinned still exists in another
   // form: a hold on a build without the module is REFUSED BY NAME through
-  // `onFailure`, and the shutter the engine reports is greyed out.
+  // `onFailure`, and the engine reports it cannot take one (`<Camera>`'s
+  // shutter does not grey on that report; the refusal is the contract).
   it('refuses a hold BY NAME — not a crash, not silence — with no native module', async () => {
     const { Platform } = require('react-native') as { Platform: { OS: string } };
     const seen: Record<string, string> = {};
@@ -358,7 +362,7 @@ describe('mount + the AR-session swap grace', () => {
         const failures: PanoPlusFailure[] = [];
         const r = mount({ onFailure: (f) => { failures.push(f); } });
         await settle();
-        // What `<Camera>`'s shutter paints: not a capture it can take.
+        // The engine's report: not a capture it can take.
         expect(r.controls()).toEqual({ canCapture: false, canFinalize: false, busy: false });
         r.hold();
         await settle();
@@ -443,8 +447,8 @@ describe('the engine takes EITHER hold', () => {
   // The engine never asked for landscape: `axisOverride` is 0 on all three
   // 2026-08-29 field packs and the axis latch votes on measured translation,
   // so a portrait left-to-right sweep is the SAME engine case as a landscape
-  // top-to-bottom one — and no hold greys the shutter.
-  it('reports a capturable, idle shutter in every hold', async () => {
+  // top-to-bottom one — and no hold is reported uncapturable.
+  it('reports capturable and idle in every hold', async () => {
     for (const o of [
       'portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right',
     ]) {
@@ -798,8 +802,9 @@ describe('start → sweep → done, the whole wire', () => {
     expect(r.shows('Sweep stopped — session-restart')).toBe(true);
     expect(r.shows('Finish (stopped)')).toBe(false);
     expect(r.shows('Discard')).toBe(false);
-    // The shutter the engine reports is still live and NOT busy — the finger
-    // is down on a red ring, and a grey one would refuse the release's twin.
+    // The engine still reports capturable and NOT busy — the finger is down
+    // on a red ring, and `busy` would paint `<Camera>`'s grey one, which
+    // refuses the release's twin.
     expect(r.controls()).toEqual({ canCapture: true, canFinalize: false, busy: false });
     r.release();
     await settle();
@@ -989,7 +994,7 @@ describe('the session must never outlive the surface', () => {
 // configures it — `hideBuiltInControls` and a `bottomBarOffset`, both layout
 // inputs only — and pin the handle contract itself: that the ref exposes the
 // hold pair and `abandon`, reads the LIVE phase rather than a stale closure,
-// and that the controls report is what `<Camera>`'s shutter should paint.
+// and what the controls report says (`<Camera>` reads its `busy` only).
 describe('<Camera> drives the sweep through the ref', () => {
   // The SHELL's types, not a local restatement: the point is that the shell's
   // contract is what the engine honours.
@@ -1060,7 +1065,7 @@ describe('<Camera> drives the sweep through the ref', () => {
     u.unmount();
   });
 
-  it('reports the shutter state the shell paints: enabled at idle, busy ONLY while finishing', async () => {
+  it('reports capturable at idle and busy ONLY while finishing — busy is what the shell paints', async () => {
     let finishStop!: (v: unknown) => void;
     stopImpl = () => new Promise((resolve) => { finishStop = resolve; });
     const u = mountUnified();

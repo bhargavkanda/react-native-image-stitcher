@@ -29,7 +29,9 @@
 // card, its clone AR pill / lens chip / shutter) is deleted. This suite now
 // mounts the ENGINE (`useSweepEngine`) through `SweepEngineHarness`, presses
 // the shutter through the engine's handle (`holdStart` / `holdEnd`), and
-// reads what the host's shutter would paint from `onControlsState`.
+// reads the engine's own `onControlsState` report. `<Camera>`'s shutter paints
+// only that report's `busy`, never `canCapture`, so a hold the engine cannot
+// take is pinned by its named refusal on `onFailure`.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -105,7 +107,8 @@ let calibCalls: string[] = [];
 let idleCalls: Array<{ on: boolean; options: Record<string, unknown> }> = [];
 /** Every `onFailure` the engine reported — a declined hold is named here. */
 let failures: PanoPlusFailure[] = [];
-/** Every `onControlsState` report — what the HOST's shutter paints. */
+/** Every `onControlsState` report — the engine's own statement of whether it
+ *  can take a hold. (`<Camera>`'s shutter paints its `busy` only.) */
 let controls: SweepSurfaceState[] = [];
 /** What native answers a `setIdlePreview(true)` with. */
 let idleAnswersOn = true;
@@ -183,11 +186,14 @@ interface Rig {
   hold: () => void;
   /** …and released — the engine's `holdEnd`. */
   release: () => void;
-  /** What the host's shutter would paint — the last `onControlsState`. */
-  shutter: () => { disabled: boolean; busy: boolean };
+  /** The engine's last `onControlsState` report: can it take a hold, and is
+   *  it finishing. Not a rendered shutter — `<Camera>`'s does not grey on
+   *  `canCapture`. */
+  controls: () => { canCapture: boolean; busy: boolean };
   has: (testID: string) => boolean;
   /** Is the stitcher's `<ARCameraView>` mounted? (The harness draws the real
-   *  component, so this finds it by TYPE rather than by the seam's testID.) */
+   *  component and the render project stands nothing in for it, so this finds
+   *  it by TYPE.) */
   hasArView: () => boolean;
   /**
    * Every `pointerEvents` value on the ANCESTOR CHAIN of `testID`, root-first.
@@ -281,10 +287,10 @@ function mount(
     },
     hold: () => press('holdStart'),
     release: () => press('holdEnd'),
-    shutter: () => {
+    controls: () => {
       const last = controls[controls.length - 1];
       if (last == null) throw new Error('the engine never reported its controls');
-      return { disabled: !last.canCapture, busy: last.busy };
+      return { canCapture: last.canCapture, busy: last.busy };
     },
     setLens: (lens) => { act(() => { renderer.update(element(lens)); }); },
     unmount: () => { act(() => { renderer.unmount(); }); },
@@ -332,7 +338,7 @@ describe('a hold on a build without the live module is refused by name', () => {
   it('is NOT refused on Android once the live module is registered', async () => {
     const r = mount();
     await settle();
-    expect(r.shutter().disabled).toBe(false);
+    expect(r.controls().canCapture).toBe(true);
     r.hold();
     await settle();
     expect(failures.map((f) => f.code)).not.toContain('panoplus-unavailable');
@@ -348,9 +354,10 @@ describe('a hold on a build without the live module is refused by name', () => {
     delete NM.RNISPanoPlus;
     const r = mount();
     await settle();
-    // The host's shutter greys…
-    expect(r.shutter().disabled).toBe(true);
-    // …and a hold anyway is refused, once, by name.
+    // The engine reports it cannot take a hold (`<Camera>`'s shutter does not
+    // grey on that report)…
+    expect(r.controls().canCapture).toBe(false);
+    // …so the contract is the refusal: a hold is refused, once, by name.
     r.hold();
     await settle();
     expect(failures.map((f) => f.code)).toEqual(['panoplus-unavailable']);
@@ -388,14 +395,14 @@ describe('the IMU arm on Android', () => {
     r.unmount();
   });
 
-  it('resolves to the IMU arm with no fallback, and the shutter is live', async () => {
+  it('resolves to the IMU arm with no fallback, and is capturable at once', async () => {
     // (The basis-overlay and lens-chip assertions that were here went with
     // those mechanisms — deleted in M10.) What is left is the engine's own
-    // answer: the arm settles synchronously on Android, so the shutter the
-    // host draws is live, not greyed on a read that was never going to run.
+    // answer: the arm settles synchronously on Android, so the engine reports
+    // it can take a hold, not waiting on a read that was never going to run.
     const r = mount('imu');
     await settle();
-    expect(r.shutter()).toEqual({ disabled: false, busy: false });
+    expect(r.controls()).toEqual({ canCapture: true, busy: false });
     r.hold();
     await settle();
     expect(failures).toEqual([]);
