@@ -687,38 +687,15 @@ function App(): React.JSX.Element {
             //
             // `attitudeMagFree` has existed since 2026-09-10 and NOTHING ever
             // passed it, so the mag-free arm had never run on a real capture —
-            // the same shape of defect as `arPluginArm` below. A paired
+            // the same shape of defect the Android AR-plugin arm had before M2. A paired
             // capture (flip, capture the same scene, flip back) is the only
             // thing that turns the analytic 75% prediction into a measurement,
             // and it matters most where the field is worst: steel racking.
             attitudeMagFree: magFree,
             tauUncorrected: true,
-            // ⚠ THE ANDROID AR ARM, TURNED ON — it was built for this exact
-            // complaint and had never once run.
-            //
-            // Operator, 2026-09-10: "I took an AR capture in pano with no
-            // issues!! Why can't we use the same for pano+ too?"
-            // `PanoPlusArFramePlugin` is the answer to that and shipped soon
-            // after: pano+ rides the stitcher's OWN ARCore session — the one
-            // `<ARCameraView>` starts on `onAttachedToWindow` — instead of
-            // opening a Camera2 client and bolting a SECOND ARCore session
-            // onto it in SHARED_CAMERA mode.
-            //
-            // But `arPluginArm` defaults to FALSE in the recorder
-            // (`PanoPlusAndroidRecorder.kt:787`) and NOTHING passed it, so
-            // `arArmed` stayed hard-false on Android, `<ARCameraView>` never
-            // mounted, and the arm was unreachable. Measured across all 16
-            // packs on the A35: `frameSource` is `camera2` every time. The
-            // arm has never run.
-            //
-            // Why it matters beyond tidiness: on the Camera2 arm ARCore is
-            // created when the HOLD starts, and it takes a fixed ~2 s to
-            // report whether it can track (measured: first INSUFFICIENT_LIGHT
-            // at row ~60, 2001-2062 ms in, on 13 of 13 failing packs). The
-            // operator pays that on every AR hold — "the sweep does not start
-            // for 2-3 secs after I start the hold". On THIS arm the session
-            // is already running and already tracking while he frames.
-            arPluginArm: true,
+            // (The Android AR arm used to need `arPluginArm: true` here to run
+            // on the stitcher's ARCore session; since M2 it is the only
+            // Android AR arm, so there is nothing to pass.)
           }}
           defaultLens="1x"
           enablePhotoMode

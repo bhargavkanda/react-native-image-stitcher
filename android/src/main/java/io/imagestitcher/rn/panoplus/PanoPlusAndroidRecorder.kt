@@ -787,7 +787,6 @@ class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext)
             settleCeilingMs = optDbl(options, "settleCeilingMs", 3000.0).coerceIn(0.0, 20000.0),
             lockCamera = optBool(options, "lockCamera", true),
             attitudeMagFree = optBool(options, "attitudeMagFree", false),
-            arPluginArm = optBool(options, "arPluginArm", false),
             vcPluginArm = optBool(options, "vcPluginArm", false),
             vcCameraId = optStr(options, "vcCameraId", "") ?: "",
             meteringMemoMaxAgeMs =
@@ -1625,18 +1624,6 @@ private class Config(
     val lockCamera: Boolean,
     val attitudeMagFree: Boolean,
     /**
-     * RIDE THE STITCHER'S OWN ARCore SESSION instead of opening a camera.
-     *
-     * The third start mode. The recorder opens NO Camera2 client and NO
-     * ARCore session of its own; the host mounts the stitcher's AR camera
-     * view and PanoPlusArFramePlugin feeds the engine from its frames, with
-     * the pose arriving alongside the pixels it belongs to.
-     *
-     * This is what iOS has always done (RNISARPluginRegistry). The Android
-     * SHARED_CAMERA arm it replaces has never painted a strip in 23 packs.
-     */
-    val arPluginArm: Boolean,
-    /**
      * S5 — the sweep runs on frames from the camera `<Camera>` owns, fed by
      * `PanoPlusSweepFrameProcessor`. The recorder opens NO Camera2 client.
      *
@@ -2287,6 +2274,10 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
     private var arcoreReason = "off (arcoreReference was not requested)"
     private var arcoreRowWriteFailed = 0L
     private var arcoreRowsAfterClose = 0L
+    /** Rows this recorder put in `attitude_arcore.jsonl` (either source). */
+    private var arcoreRowsWrittenHere = 0L
+    /** "ar-plugin" when the AR-plugin arm writes the sidecar, else null. */
+    private var arcoreSidecarSource: String? = null
 
     // ── The written-frame index the ARCore rows are matched against ──────
     // Only frames that REACHED DISK are in it: a frame dropped for encoder
@@ -2417,6 +2408,21 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
      * start(), so it cannot leak across sweeps by construction.
      */
     @Volatile private var arPluginArmActive = false
+    /**
+     * THE ARM THIS SWEEP RAN ON — "ar" or "imu" — set by each start mode
+     * before `startLiveEngine()` builds the provenance block.
+     *
+     * ⚠ NOT `arArmActive`. That flag is set only by pano+'s OWN shared-camera
+     * ARCore arm, which a live AR sweep no longer reaches (M2): the AR sweep
+     * runs on the stitcher's ARCore session through the plugin. Five sites
+     * reported the arm from `arArmActive` — meta `poseSource`, the pack's
+     * `arm.ran` / `qSource`, the live `poseSourceRan` and the start result —
+     * and would all have said "imu" for an AR-plugin sweep. The surface flips
+     * its running arm on the first such poll, drops `arArmed` and unmounts its
+     * AR view mid-sweep.
+     */
+    @Volatile private var armRan = ""
+    private fun ranArm(): String = if (armRan == "ar") "ar" else "imu"
     /** S5 — a vision-camera plugin is feeding this sweep. */
     @Volatile private var vcPluginArmActive = false
     /**
@@ -2629,6 +2635,27 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         startElapsedNs = SystemClock.elapsedRealtimeNanos()
         startUptimeNs = SystemClock.uptimeMillis() * 1_000_000L
 
+        // ── THE START MODE, DECIDED BEFORE ANYTHING OPENS (M2) ──────────
+        // A LIVE AR sweep runs on the stitcher's own ARCore session, through
+        // PanoPlusArFramePlugin, and nothing else: pano+ opens no ARCore
+        // Session and no Camera2 client for it. This used to be decided AFTER
+        // the ARCore block below, behind an `arPluginArm` flag the library
+        // never sent — so the library-default AR sweep reached pano+'s own
+        // SHARED_CAMERA arm (which has never painted a strip in 23 packs), and
+        // even the plugin arm opened pano+'s ARCore channel first.
+        when (panoStartMode(cfg.live, cfg.livePoseSource, cfg.arcoreReference, cfg.vcPluginArm)) {
+            PanoStartMode.AR_PLUGIN -> return startArPluginArm(promise)
+            PanoStartMode.REFUSE_OWN_ARCORE_ON_AR_ARM -> return fail(
+                promise, "ar-arm-no-own-arcore",
+                "a live AR sweep runs on the stitcher's ARCore session and opens none of its " +
+                    "own, so arcoreReference:'${cfg.arcoreReference.name.lowercase()}' cannot " +
+                    "apply to it. Send arcoreReference:'off' (the default), or record a " +
+                    "reference series on a non-live session.",
+            )
+            PanoStartMode.VC_PLUGIN -> return startVcPluginArm(promise)
+            PanoStartMode.RECORDER -> armRan = if (cfg.live) "imu" else ""
+        }
+
         // ── The ARCore reference channel, BEFORE the camera ─────────────
         // Order is load-bearing in shared mode: ARCore SELECTS the camera id
         // and the CPU image size, so the recorder's own selection has to run
@@ -2670,54 +2697,8 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             }
         }
 
-        // ── THE AR POSE ARM: ARM IT, OR SAY WHY NOT ─────────────────────
-        // Decided HERE, once, before the camera opens, because everything
-        // downstream — which ring a frame solves against, what `qSource` says,
-        // what the pack's `arm` block records — has to be one answer for the
-        // whole sweep. A sweep that switched arms mid-way would produce a
-        // quaternion series that is not comparable with itself.
-        if (cfg.live && cfg.livePoseSource == "ar") {
-            val ch = arcore
-            when {
-                ch == null -> {
-                    arArmReason =
-                        "the AR arm was REQUESTED and the ARCore channel did not open " +
-                            "($arcoreReason). The sweep runs on the IMU arm " +
-                            "(TYPE_ROTATION_VECTOR through the derived basis C) — a pack from " +
-                            "the other arm is still a pack, and losing the sweep to a " +
-                            "pose-arm refusal would be the worse trade."
-                    advise("pose arm: $arArmReason")
-                }
-                ch.modeRan != "shared" -> {
-                    // STANDALONE poses ARCore's OWN camera, and the recorder
-                    // opens none — there would be no pixels for the engine to
-                    // paint. Refusing here rather than at the first frame is
-                    // what keeps the failure attributable.
-                    arArmReason =
-                        "the AR arm was REQUESTED and ARCore came up in ${ch.modeRan.uppercase()} " +
-                            "mode, not SHARED. In that mode ARCore owns the camera and this " +
-                            "recorder opens none, so there are no pixels of ours to paint from. " +
-                            "The sweep runs on the IMU arm."
-                    advise("pose arm: $arArmReason")
-                }
-                else -> {
-                    ch.setPoseSink(arPoseSink)
-                    arArmActive = true
-                    arArmReason =
-                        "ARCore SHARED-camera poses feed the engine directly, with NO basis " +
-                            "(Camera.getPose() is already world<-camera in the engine's own " +
-                            "convention). COSTS, all measured and none hidden: ARCore chose " +
-                            "camera ${ch.forcedCameraId()} at ${ch.forcedImageSize()} from its " +
-                            "own CameraConfig list, so the ultra-wide and the maxWidth cap are " +
-                            "BOTH overridden; Session.resume() installs ARCore's repeating " +
-                            "request, so the AE/AWB lock is ARCore's to keep or drop (read " +
-                            "applied.exposureTimeNs — a spread means it dropped it); and the " +
-                            "pose series is ~30 Hz, joined by NEAREST-bracket + SLERP, never by " +
-                            "timestamp equality."
-                    advise("pose arm: AR (ARCore, shared camera). $arArmReason")
-                }
-            }
-        } else if (cfg.livePoseSource == "ar") {
+        // A live AR sweep never reaches here (see the start mode above).
+        if (!cfg.live && cfg.livePoseSource == "ar") {
             // `poseSource:'ar'` on a RECORDING (non-live) session. Nothing is
             // being painted, so there is no arm to switch; said rather than
             // ignored, because a silent no-op here is how a bag key gets
@@ -2726,33 +2707,6 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                 "poseSource 'ar' was sent to a RECORDING session (live:false). There is no " +
                     "engine to feed, so the option is inert; the ARCore channel, if requested, " +
                     "still writes its reference series."
-        }
-
-        // ── THE AR-PLUGIN ARM: no camera of ours, and no ARCore of ours ──
-        // The stitcher owns the ARCore session and the camera; we consume its
-        // frames through PanoPlusArFramePlugin. Checked BEFORE standalone
-        // because it needs neither an ARCore channel nor a Camera2 client, and
-        // reaching either branch below would open one.
-        //
-        // ⚠ AND ONLY ON THE AR POSE ARM. Shipped once without this second
-        // condition (2026-09-10) and it broke NON-AR capture outright: the
-        // field flag is on by default, so an IMU sweep also took this branch,
-        // opened no camera, and sat waiting for frames from a plugin whose AR
-        // view the surface had correctly declined to mount. The operator:
-        // "Even I switch off AR, I only see the AR tracking message and nothing
-        // gets captured!!!!" A flag that selects an ARM must be read together
-        // with the arm, never on its own.
-        if (cfg.arPluginArm && cfg.livePoseSource == "ar") {
-            return startArPluginArm(promise)
-        }
-
-        // ── S5: THE VISION-CAMERA PLUGIN ARM ────────────────────────────
-        // Same shape as the AR plugin arm and read the same way — WITH its
-        // pose arm, never on its own. The 2026-09-10 regression quoted above
-        // is what happens otherwise, and this flag can reach an IMU sweep
-        // exactly as that one did.
-        if (cfg.vcPluginArm && cfg.livePoseSource == "imu") {
-            return startVcPluginArm(promise)
         }
 
         // ── STANDALONE: no Camera2 client of ours at all ────────────────
@@ -3354,6 +3308,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         // provenance block: this arm opens no Camera2 client. See the field.
         camera2RequestIntended = false
         frameSourceArm = "ar-plugin"
+        armRan = "ar"
         if (!cfg.live) {
             return fail(
                 promise, "ar-plugin-needs-live",
@@ -3370,6 +3325,29 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             )
         }
         startImu()
+        // THE REFERENCE SERIES, FROM THE STITCHER'S SESSION. See
+        // PanoPlusArFramePlugin.poseRowSink: the basis run's input used to come
+        // from pano+'s own ARCore channel, which this arm does not open.
+        try {
+            synchronized(arcoreWLock) {
+                arcoreW = BufferedWriter(
+                    OutputStreamWriter(
+                        FileOutputStream(File(packDir, "attitude_arcore.jsonl")), Charsets.UTF_8,
+                    ),
+                    1 shl 16,
+                )
+            }
+            arcoreSidecarSource = "ar-plugin"
+            PanoPlusArFramePlugin.shared.poseRowSink = { tsNs, q, t, tracking ->
+                writeArCoreRow(panoArPluginPoseRow(tsNs, q, t, tracking))
+            }
+        } catch (t: Throwable) {
+            advise(
+                "attitude_arcore.jsonl could not be opened on the AR-plugin arm " +
+                    "(${t.javaClass.simpleName}: ${t.message}); this pack carries no reference " +
+                    "series, so the offline basis run cannot use it. The sweep is unaffected.",
+            )
+        }
         intrinsicsSource = "arcore-per-frame (the stitcher's session)"
         intrinsicsNote =
             "ARCore owns the camera on this arm and hands the engine its OWN per-frame " +
@@ -3513,6 +3491,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         // provenance block: this arm opens no Camera2 client. See the field.
         camera2RequestIntended = false
         frameSourceArm = "vc-plugin"
+        armRan = "imu"
         if (!cfg.live) {
             return fail(
                 promise, "vc-plugin-needs-live",
@@ -5649,8 +5628,8 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             try {
                 w.write(row)
                 w.write("\n")
-                val n = arcore?.rowsWritten() ?: 0L
-                if ((n % 60L) == 0L) w.flush()
+                arcoreRowsWrittenHere++
+                if ((arcoreRowsWrittenHere % 60L) == 0L) w.flush()
             } catch (t: Throwable) {
                 arcoreRowWriteFailed++
                 Log.w(TAG, "attitude_arcore.jsonl write threw", t)
@@ -5715,10 +5694,10 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             // ⚠ THE ARM THAT RAN, not the one asked for. `meta.json`'s
             // `poseSource` is the field an RCA reads to know which series
             // painted the pixels, and a sweep whose ARCore channel refused
-            // ran on the IMU whatever the bag said. `arArmActive` is already
-            // resolved by here — it is decided in `start()` before the camera
-            // opens, precisely so this line can be honest.
-            poseSource = if (arArmActive) "ar" else "imu",
+            // ran on the IMU whatever the bag said. `armRan` is already
+            // resolved by here — every start mode sets it before it starts the
+            // engine, precisely so this line can be honest.
+            poseSource = ranArm(),
             captureJson = liveCaptureJson(),
             configOverrides = cfg.liveConfigOverrides,
         )
@@ -6590,7 +6569,17 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                                 "holds that minus rowsProducedAfterLedgerClosed minus " +
                                 "rowWriteFailures. The file is authoritative.",
                         )
-                        .s("sidecar", if (arcore != null) "attitude_arcore.jsonl" else null)
+                        .s(
+                            "sidecar",
+                            if (arcore != null || arcoreSidecarSource == "ar-plugin")
+                                "attitude_arcore.jsonl" else null,
+                        )
+                        // WHICH SESSION the rows came from: pano+'s own channel
+                        // ("channel"), or the stitcher's session through the AR
+                        // frame plugin ("ar-plugin") — the only source on a live
+                        // AR sweep since M2. Rows carry the same `source` tag.
+                        .s("sidecarSource", if (arcore != null) "channel" else arcoreSidecarSource)
+                        .i("sidecarRowsWritten", arcoreRowsWrittenHere)
                         .raw("channel", arcore?.statusJson() ?: "null")
                         .s(
                             "joinRule",
@@ -6638,41 +6627,55 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                 .raw(
                     "arm", Jo()
                         .s("requested", cfg.livePoseSource)
-                        .s("ran", if (arArmActive) "ar" else "imu")
+                        .s("ran", ranArm())
                         .b("live", cfg.live)
                         .s("reason", arArmReason)
                         .s(
                             "qSource",
-                            if (arArmActive) PANO_Q_SOURCE_ARCORE
+                            if (ranArm() == "ar") PANO_Q_SOURCE_ARCORE
                             else basis?.authority?.qSource ?: PANO_Q_SOURCE_NONE,
                         )
                         .b("vcPluginArm", vcPluginArmActive)
-                        // The feeder's own evidence. `framesOffered == 0` on
-                        // a finished vc sweep means the arm was armed and
-                        // NOTHING FED IT — the failure the AR plugin arm
-                        // shipped once and could only be diagnosed from a
-                        // black canvas.
-                        .i("vcFramesOffered", PanoPlusVcFrameSink.framesOffered)
-                        .i("vcFramesDroppedBusy", PanoPlusVcFrameSink.framesDroppedBusy)
-                        .i("vcFramesRan", vcFramesRan.get())
-                        .i("vcFramesPainted", vcFramesPainted.get())
-                        // The engine's own verdict per frame. `ran` and
-                        // `painted` alone cannot separate the two likeliest
-                        // bring-up failures; the Outcome ordinal can.
-                        .raw(
-                            "vcOutcomes",
-                            vcOutcomeHist.entries.sortedBy { it.key }
-                                .joinToString(",", "{", "}") { "\"${it.key}\":${it.value}" },
-                        )
-                        .i("vcFramesRefusedPreOffer", PanoPlusVcFrameSink.framesRefusedPreOffer)
-                        // Split out so `vcFramesOffered` and the
-                        // refusals PARTITION what vision-camera
-                        // delivered instead of overlapping: three
-                        // branches refuse AFTER tryAcquire has already
-                        // counted the frame as offered, and booking
-                        // those pre-offer double-counted them.
-                        .i("vcFramesRefusedPostAcquire",
-                            PanoPlusVcFrameSink.framesRefusedPostAcquire)
+                        // ⚠ ONLY WHEN THIS SWEEP ARMED THE vc SINK. Its
+                        // counters are process-wide statics, so written on an
+                        // AR-plugin or recorder sweep they carried the previous
+                        // vc sweep's numbers (measured: an ar-plugin pack with
+                        // the prior vc pack's 346/52). Named, never omitted.
+                        .let { j ->
+                            if (!vcPluginArmActive) {
+                                j.s(
+                                    "vcCounters",
+                                    "not applicable — this sweep did not arm the vision-camera " +
+                                        "sink, whose counters are process-wide.",
+                                )
+                            } else j
+                            // The feeder's own evidence. `framesOffered == 0` on
+                            // a finished vc sweep means the arm was armed and
+                            // NOTHING FED IT — the failure the AR plugin arm
+                            // shipped once and could only be diagnosed from a
+                            // black canvas.
+                            .i("vcFramesOffered", PanoPlusVcFrameSink.framesOffered)
+                            .i("vcFramesDroppedBusy", PanoPlusVcFrameSink.framesDroppedBusy)
+                            .i("vcFramesRan", vcFramesRan.get())
+                            .i("vcFramesPainted", vcFramesPainted.get())
+                            // The engine's own verdict per frame. `ran` and
+                            // `painted` alone cannot separate the two likeliest
+                            // bring-up failures; the Outcome ordinal can.
+                            .raw(
+                                "vcOutcomes",
+                                vcOutcomeHist.entries.sortedBy { it.key }
+                                    .joinToString(",", "{", "}") { "\"${it.key}\":${it.value}" },
+                            )
+                            .i("vcFramesRefusedPreOffer", PanoPlusVcFrameSink.framesRefusedPreOffer)
+                            // Split out so `vcFramesOffered` and the
+                            // refusals PARTITION what vision-camera
+                            // delivered instead of overlapping: three
+                            // branches refuse AFTER tryAcquire has already
+                            // counted the frame as offered, and booking
+                            // those pre-offer double-counted them.
+                            .i("vcFramesRefusedPostAcquire",
+                                PanoPlusVcFrameSink.framesRefusedPostAcquire)
+                        }
                         .b("degradedFromAr", arArmDegraded)
                         // The SAME index track.jsonl carries, so the two join.
                         .i("degradedAtSeq", arArmDegradedAtSeq)
@@ -6908,7 +6911,14 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         // stitcher's ARCore frames can be traced to how it was made — and
         // so an arm that ingested NOTHING says so out loud rather than
         // looking like an arm that was never selected.
-        putMap("arPlugin", PanoPlusArFramePlugin.shared.snapshot())
+        // Only when THIS sweep armed the plugin: its counters are process-wide
+        // and zeroed only by arm(), so an IMU sweep after an AR one would
+        // otherwise poll the AR sweep's numbers as its own.
+        putMap(
+            "arPlugin",
+            if (arPluginArmActive) PanoPlusArFramePlugin.shared.snapshot()
+            else WritableNativeMap().apply { putBoolean("applicable", false) },
+        )
         // Polled LIVE by the panel so a sweep that can never latch is visible
         // while there is still time to re-run it, not only in device.json
         // afterwards. Read without a join, so it can lag the writer thread by a
@@ -6963,7 +6973,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         // from the outside: the canvas stops advancing because frames are
         // arriving with no pose to bracket them, not because the engine is
         // rejecting them.
-        putString("poseSourceRan", if (arArmActive) "ar" else "imu")
+        putString("poseSourceRan", ranArm())
         putDouble("poseSolved", arPoseSolved.get().toDouble())
         putDouble("poseWaited", arPoseWaited.get().toDouble())
         putDouble("poseWaitTimedOut", arPoseWaitTimedOut.get().toDouble())
@@ -7449,7 +7459,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                 // because ARCore refused has to learn it now, not from the
                 // pack.
                 putString("poseSourceRequested", cfg.livePoseSource)
-                putString("poseSourceRan", if (arArmActive) "ar" else "imu")
+                putString("poseSourceRan", ranArm())
                 putString("poseArmReason", arArmReason)
                 // ⚠ `attitudeMapActive` DESCRIBES THE IMU MAP AND ONLY IT. On
                 // the AR arm the engine is fed without a basis, so this can be
@@ -7461,7 +7471,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                 putString(
                     "qSource",
                     when {
-                        arArmActive -> PANO_Q_SOURCE_ARCORE
+                        ranArm() == "ar" -> PANO_Q_SOURCE_ARCORE
                         attitudeMapping -> basis?.authority?.qSource ?: PANO_Q_SOURCE_NONE
                         else -> PANO_Q_SOURCE_NONE
                     },

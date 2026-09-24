@@ -315,41 +315,18 @@ class PanoPlusLiveModule(
         bag.putString("packFrames", optStr(options, "packFrames", "none") ?: "none")
         bag.putBoolean("writeLedger", optBool(options, "writeLedger", true))
         // ── THE POSE ARM ─────────────────────────────────────────────
-        // Passed through rather than pinned. The recorder decides whether the
-        // AR arm can actually run (it needs a SHARED-camera ARCore channel)
-        // and reports what it did in `poseSourceRan` — deciding here would put
-        // the decision one layer away from the only object that can see the
-        // channel open.
+        // Passed through. A LIVE AR sweep is always the AR-plugin arm (see
+        // PanoPlusStartMode): it runs on the stitcher's ARCore session and
+        // opens no ARCore of pano+'s own, so nothing is injected here any more.
+        //
+        // ⚠ THIS USED TO INJECT `arcoreReference: 'shared'` FOR EVERY AR SWEEP,
+        // which opened pano+'s own ARCore channel — a second camera owner — in
+        // front of whichever arm then ran. A caller that explicitly asks for the
+        // reference channel on a live AR sweep is now refused by name by the
+        // recorder; on an IMU sweep it is still the basis-falsification run.
         val requestedPose = optStr(options, "poseSource", "imu") ?: "imu"
         bag.putString("poseSource", requestedPose)
-        if (requestedPose == "ar") {
-            // ⚠ SHARED, NEVER AUTO. `auto` silently downgrades to STANDALONE,
-            // in which ARCore owns the camera and this recorder opens none —
-            // an ARCore pose series with no pixels of ours to paint. For a
-            // REFERENCE channel that downgrade is a lesser answer; for the
-            // LIVE arm it is no answer at all, and the recorder refuses it by
-            // name rather than sweeping a camera it does not have.
-            //
-            // Overridable: a caller that explicitly sent `arcoreReference`
-            // keeps it, because the probe/basis flows use this same door.
-            if (!hasKeySafe(options, "arcoreReference")) {
-                bag.putString("arcoreReference", "shared")
-            } else {
-                bag.putString(
-                    "arcoreReference",
-                    optStr(options, "arcoreReference", "shared") ?: "shared",
-                )
-            }
-            bag.putDouble("arPoseWaitMs", optDbl(options, "arPoseWaitMs", 33.0))
-        } else if (hasKeySafe(options, "arcoreReference")) {
-            // An IMU sweep MAY still carry the reference channel — that is the
-            // basis-falsification run, and it is the one thing that can turn
-            // the derived `C` into a measured one.
-            bag.putString(
-                "arcoreReference",
-                optStr(options, "arcoreReference", "off") ?: "off",
-            )
-        }
+        bag.putString("arcoreReference", optStr(options, "arcoreReference", "off") ?: "off")
         bag.putInt("jpegQuality", optDbl(options, "packFrameQuality", 70.0).toInt())
         bag.putInt("maxFrames", optDbl(options, "packMaxFrames", 4000.0).toInt())
         bag.putInt("canvasQuality", optDbl(options, "canvasQuality", 92.0).toInt())
@@ -389,14 +366,6 @@ class PanoPlusLiveModule(
         // back locked. iOS has honoured it since v6.
         bag.putBoolean("lockCamera", optBool(options, "lockCamera", true))
         bag.putBoolean("attitudeMagFree", optBool(options, "attitudeMagFree", false))
-        // ⚠ THE THIRD START MODE, and it opens NOTHING. On this arm the
-        // stitcher owns the ARCore session and the camera; pano+ consumes
-        // its frames through PanoPlusArFramePlugin, so the recorder starts
-        // no Camera2 client, no ARCore session and no preview Surface. The
-        // host MUST be mounting the stitcher's AR camera view, or the
-        // engine starts and is fed nothing — which the pack reports as
-        // arPlugin.ingested = 0 rather than hiding.
-        bag.putBoolean("arPluginArm", optBool(options, "arPluginArm", false))
         // S5 — the vision-camera plugin arm, and the camera id it needs.
         // Forwarded unconditionally like every other bag key: the RECORDER
         // decides whether the arm applies (it reads the flag together with

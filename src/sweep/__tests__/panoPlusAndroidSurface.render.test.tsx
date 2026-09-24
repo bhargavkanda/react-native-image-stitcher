@@ -408,54 +408,47 @@ describe('the IMU arm on Android', () => {
 // through `C`, and its only ARCore code is the optional reference LOG channel).
 // Mounting `<ARCameraView>` for that request was not merely cosmetic: ARCore
 // then owns the back camera, and `PanoPlusAndroidRecorder` needs the same one.
-describe('the AR pill on Android arms the RECORDER\u2019s ARCore, never the surface\u2019s',
+describe('the AR pill on Android runs the sweep on the STITCHER\u2019s ARCore session (M2)',
   () => {
-    it('still leaves <ARCameraView> unmounted — there is one back camera',
+    it('mounts the stitcher\u2019s <ARCameraView> on the AR arm, and never on the IMU arm',
       async () => {
-        // ⚠ THE ASSERTION THAT DID NOT CHANGE ON 2026-09-02, AND IT IS THE ONE
-        // THAT MATTERS MOST. The AR arm is now real, but the ARCore session
-        // belongs to `PanoPlusAndroidRecorder`, which opens it in SHARED-camera
-        // mode inside the sweep. Mounting the surface's own AR view would be a
-        // SECOND ARCore client competing for the same camera — and it would
-        // unmount `RNISPanoPlusPreview`, which vends the Surface the
-        // recorder must claim before `createCaptureSession`, leaving the
-        // operator with no viewfinder on the arm he just selected.
-        const r = mount('ar');
+        // ⚠ THIS ASSERTED THE OPPOSITE UNTIL M2, AND FOR A REASON THAT NO
+        // LONGER HOLDS. The AR arm used to be pano+'s OWN shared-camera ARCore
+        // session inside the recorder, so a surface AR view would have been a
+        // second ARCore client. Since M2 a live AR sweep runs on the
+        // stitcher's session through PanoPlusArFramePlugin and the recorder
+        // opens no ARCore and no camera — so the AR view IS the camera and the
+        // viewfinder, one client, the arrangement iOS has always had.
+        const ar = mount('ar');
         await settle();
-        expect(r.has('ar-camera')).toBe(false);
-        r.unmount();
+        expect(ar.has('ar-camera')).toBe(true);
+        ar.unmount();
+        // The IMU arm still leaves it unmounted: there is one back camera.
+        const imu = mount('imu');
+        await settle();
+        expect(imu.has('ar-camera')).toBe(false);
+        imu.unmount();
       });
 
-    it('claims nothing about ARCore’s state at idle — on either arm', async () => {
+    it('claims nothing about ARCore\u2019s state at idle — on either arm', async () => {
       // ⚠ THIS TEST ASSERTED `shows('ARCore is UP')` UNTIL 2026-09-03, AND IT
-      // WAS GREEN WHILE THE SCREEN WAS LYING TO THE OPERATOR.
-      //
-      // The claim was reasoned from the arm rather than measured from the
-      // phone: "the AR arm means the recorder opened ARCore, so ARCore is up".
-      // At IDLE that is false — the recorder opens ARCore inside `start()`,
-      // and before Start nothing holds the camera at all. logcat on the
-      // operator's A35 showed the camera closing with no session running while
-      // this exact sentence was on screen.
-      //
-      // What the two arms must now agree on at idle is that neither of them
-      // narrates a session. They differ in the START LABEL and the arm
-      // headline (pinned by their own tests below), not in a status claim.
-      //
-      // ⚠ The MOUNT of `RNISPanoPlusPreview` itself cannot be asserted
-      // here: the native view is null under Jest (the surface falls back to
-      // this explainer), so what this pins is the branch, not the pixels. The
-      // viewfinder needs the phone.
+      // WAS GREEN WHILE THE SCREEN WAS LYING TO THE OPERATOR. Neither arm
+      // narrates a session at idle; they differ in the start label and the arm
+      // headline (pinned below), not in a status claim.
       for (const arm of ['ar', 'imu'] as const) {
         const r = mount(arm);
         await settle();
-        expect(r.has('panoplus-camera-off')).toBe(true);
         expect(r.shows('ARCore is UP')).toBe(false);
         expect(r.shows('is DOWN by design')).toBe(false);
-        // The one thing that IS true in this render env, and the reassurance
-        // the operator needs: no viewfinder here, the sweep still works.
-        expect(r.shows('No viewfinder in this build')).toBe(true);
         r.unmount();
       }
+      // The IMU arm's Camera2 viewfinder is null under Jest, so the surface
+      // falls back to its explainer — the reassurance the operator needs.
+      const imu = mount('imu');
+      await settle();
+      expect(imu.has('panoplus-camera-off')).toBe(true);
+      expect(imu.shows('No viewfinder in this build')).toBe(true);
+      imu.unmount();
     });
 
     it('names the arm and its price instead of ignoring the request', async () => {
@@ -766,7 +759,7 @@ describe('the arm notice collapses without losing its text', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('the idle viewfinder is asked for the arm the sweep will run', () => {
-  it('sends poseSource with the request, on both arms', async () => {
+  it('sends poseSource with the request on the IMU arm — and the AR arm asks for none', async () => {
     // ⚠ THE 1.60× FRAMING BUG, AS ONE ASSERTION. `setIdlePreview` carried only
     // `{lens}`, which the Android sweep ignores — so the idle session ran the
     // recorder's widest-FOV rule and opened the ULTRA-WIDE (camera 2, 96.2°)
@@ -774,15 +767,20 @@ describe('the idle viewfinder is asked for the arm the sweep will run', () => {
     // 69.7°). Measured on the A35 from an untouched phone pose: zero SIFT
     // matches between the two frames. The arm has to cross the bridge or the
     // viewfinder is a picture of a shot the operator will not get.
-    for (const arm of ['ar', 'imu'] as const) {
-      const r = mount(arm);
-      await settle();
-      const asked = idleCalls.filter((c) => c.on);
-      expect(asked.length).toBeGreaterThan(0);
-      expect(asked[asked.length - 1]!.options.poseSource).toBe(arm);
-      r.unmount();
-      idleCalls = [];
-    }
+    const r = mount('imu');
+    await settle();
+    const asked = idleCalls.filter((c) => c.on);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked[asked.length - 1]!.options.poseSource).toBe('imu');
+    r.unmount();
+    idleCalls = [];
+    // M2: on the AR arm the stitcher's AR view is the viewfinder, so the
+    // Camera2 idle viewfinder — a second camera owner — is never opened.
+    const ar = mount('ar');
+    await settle();
+    expect(idleCalls.filter((c) => c.on)).toEqual([]);
+    ar.unmount();
+    idleCalls = [];
   });
 });
 
@@ -796,17 +794,16 @@ describe('the idle viewfinder is asked to match the rate the sweep will pin', ()
     // the key, so the only reachable state was the unpinned one: the operator
     // framed through a HAL-default VARIABLE range that dims and stutters in a
     // dim aisle, and recorded through a pinned one.
-    for (const arm of ['ar', 'imu'] as const) {
-      const r = mount(arm);
-      await settle();
-      const asked = idleCalls.filter((c) => c.on);
-      expect(asked.length).toBeGreaterThan(0);
-      for (const call of asked) {
-        expect(call.options.pinPreviewFps).toBe(true);
-      }
-      r.unmount();
-      idleCalls = [];
+    // The IMU arm only — the AR arm opens no idle viewfinder (M2).
+    const r = mount('imu');
+    await settle();
+    const asked = idleCalls.filter((c) => c.on);
+    expect(asked.length).toBeGreaterThan(0);
+    for (const call of asked) {
+      expect(call.options.pinPreviewFps).toBe(true);
     }
+    r.unmount();
+    idleCalls = [];
   });
 
   it('says so on screen when the camera REFUSED the pin', async () => {

@@ -157,6 +157,22 @@ internal class PanoPlusArFramePlugin private constructor() : ARFramePlugin {
     /** True while an ingest is in flight. See the backpressure note in [process]. */
     private val busy = AtomicBoolean(false)
 
+    /**
+     * Every frame's ARCore pose, handed to the recorder for
+     * `attitude_arcore.jsonl` — the REFERENCE series the offline basis run
+     * (`arcoreBasisRun`, rnis_pano_android_s1) needs.
+     *
+     * ⚠ M2: pano+'s own ARCore channel used to write that file, and a live AR
+     * sweep no longer opens one — it runs on the stitcher's session through
+     * this plugin. Without this the basis tool would lose its only input on
+     * the only AR arm left. Called for EVERY frame, including non-tracking
+     * ones (the reader filters on `trackingState`), and before the busy gate,
+     * so a frame the engine drops is still a pose on disk. The same
+     * `camera.pose` the channel recorded (RNSARCameraView reads
+     * `camera.pose.rotationQuaternion`, not the display-oriented pose).
+     */
+    @Volatile var poseRowSink: ((tsNs: Double, q: DoubleArray, t: DoubleArray, tracking: String) -> Unit)? = null
+
     override fun name(): String = NAME
 
     /**
@@ -188,6 +204,7 @@ internal class PanoPlusArFramePlugin private constructor() : ARFramePlugin {
      * plugin left registered and armed would keep feeding a finished engine.
      */
     fun disarm() {
+        poseRowSink = null
         // state.disarm() makes verdict() refuse every subsequent frame, so no
         // NEW work can be submitted after this line.
         //
@@ -231,6 +248,13 @@ internal class PanoPlusArFramePlugin private constructor() : ARFramePlugin {
     }
 
     override fun process(context: ARFrameContext): WritableMap? {
+        poseRowSink?.let { sink ->
+            try {
+                sink(context.timestampNs, context.poseRotation, context.poseTranslation, context.trackingState)
+            } catch (t: Throwable) {
+                state.recordThrew("poseRow:" + t.javaClass.simpleName)
+            }
+        }
         val verdict = state.verdict(
             context.trackingState, context.width, context.height, context.fx, context.fy,
         )

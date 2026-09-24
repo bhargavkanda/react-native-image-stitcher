@@ -448,23 +448,24 @@ describe('sweep-level arms actually reach the native start options', () => {
 // AR tracking message and nothing gets captured!!!!"
 //
 // A flag that selects an arm must be gated on that arm at BOTH ends.
-describe('arPluginArm is sent only when the AR view is actually mounted', () => {
+describe('the Android AR arm is the AR-plugin arm, with no flag to forget (M2)', () => {
   const src = require('fs').readFileSync(
     require('path').join(__dirname, '..', 'PanoPlusCaptureSurface.tsx'),
     'utf8',
   ) as string;
 
-  it('the surface conditions it on arArmed, not on the prop alone', () => {
-    // `arArmed` is the one fact that says this surface mounted the AR view.
-    expect(src).toContain('arPluginArm === true && arArmed');
-    // The unguarded form must never come back.
-    expect(src).not.toContain('...(arPluginArm != null ? { arPluginArm } : {})');
+  it('the surface sends no arm-selecting flag at all', () => {
+    // The recorder takes the AR-plugin arm for every live AR sweep
+    // (PanoPlusStartMode.kt), so there is no flag to send — and no flag that
+    // could reach the wrong arm, which is how this shipped broken once.
+    expect(src).not.toMatch(/arPluginArm\s*[:?]/);
+    expect(src).not.toContain('{ arPluginArm');
   });
 
-  it('arArmed itself still requires the AR pose source on Android', () => {
+  it('arArmed on Android still requires the AR pose source', () => {
     // Mounting the AR view on an IMU sweep would take the one back camera from
-    // the arm that needs it — the original reason the flag was hard-false.
-    expect(src).toMatch(/arPluginArm === true\s*\n\s*&& \(runningArm != null/);
+    // the arm that needs it.
+    expect(src).toMatch(/\? \(runningArm != null\s*\n\s*\? runningArm\.poseSource !== 'imu'/);
   });
 });
 
@@ -494,9 +495,6 @@ describe('every sweep-level arm actually reaches the bridge', () => {
     expect(surface).toContain('...(attitudeMagFree != null ? { attitudeMagFree } : {})');
   });
 
-  it('arPluginArm is forwarded only with its arm', () => {
-    expect(surface).toContain('arPluginArm === true && arArmed');
-  });
 });
 
 // ── THE SCREEN MUST NOT ROTATE (2026-09-10) ──────────────────────────────────

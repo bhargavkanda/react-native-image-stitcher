@@ -269,29 +269,6 @@ export interface PanoPlusCaptureSurfaceProps {
    */
   attitudeMagFree?: boolean;
   /**
-   * ANDROID ONLY. Run the sweep on the STITCHER'S OWN ARCore session instead of
-   * opening a camera and inviting ARCore in as a second client.
-   *
-   * ⚠ THIS IS THE ARM iOS HAS ALWAYS USED. On iOS pano+ registers into
-   * `RNISARPluginRegistry` and rides Pano's ARKit session; iOS AR works in 278
-   * of 278 packs. Android opened its own Camera2 session and bolted ARCore on
-   * in SHARED_CAMERA mode, and that arm has never painted a strip in 23 packs
-   * since 2026-08-24. The operator: "I took an AR capture in pano with no
-   * issues!! Why can't we use the same for pano+ too?"
-   *
-   * ON ⇒ this surface mounts `<ARCameraView>` on Android (the objection that
-   * kept `arArmed` hard-false there was a SECOND ARCore client and a lost
-   * preview Surface — both premised on the recorder running, and on this arm it
-   * does not), and the recorder opens no camera, no ARCore session and no
-   * preview. Frames reach the engine with the pose already attached, which
-   * deletes the pose ring, the bracket tolerance and the whole handover.
-   *
-   * If the AR view is somehow not mounted the engine receives nothing, and the
-   * pack says so as `arPlugin.ingested = 0` rather than failing silently — the
-   * exact ambiguity that let the shared arm ship broken for eighteen days.
-   */
-  arPluginArm?: boolean;
-  /**
    * S5 — run the sweep on frames from the camera the HOST already owns,
    * via the `panoplus_sweep_ingest` vision-camera Frame Processor. Android,
    * IMU arm only. The recorder opens no Camera2 client.
@@ -799,7 +776,6 @@ export const PanoPlusCaptureSurface = forwardRef<
   packFrames = 'all',
   engineOptions,
   attitudeMagFree,
-  arPluginArm,
   vcPluginArm,
   vcCameraId,
   frameSource = 'own',
@@ -1786,16 +1762,20 @@ export const PanoPlusCaptureSurface = forwardRef<
   // one viewfinder, which is the arrangement iOS has always had and the one
   // Pano's own AR capture uses successfully in this operator's room.
   //
-  // Gated on the PROP, not on the pose source: a host that has not opted in
-  // keeps today's behaviour byte-for-byte.
+  // ── M2: THE AR-PLUGIN ARM IS THE ONLY ANDROID AR ARM ───────────────────
+  // It used to be gated on an `arPluginArm` prop the library never sent, so
+  // the library-default Android AR sweep ran on pano+'s OWN shared-camera
+  // ARCore arm — a second camera owner that never painted a strip in 23
+  // packs. The recorder now takes the plugin arm for EVERY live AR sweep
+  // (PanoPlusStartMode.kt), so this surface mounts the stitcher's AR view
+  // whenever the sweep runs on AR.
   const arArmed = armContract === 'android-sensor'
     // The same test `androidArArm` makes, inlined because that constant is
     // declared BELOW this one and reordering would move a value other effects
     // key on. `armContract` is already 'android-sensor' in this branch.
-    ? arPluginArm === true
-      && (runningArm != null
-        ? runningArm.poseSource !== 'imu'
-        : armNotice.effectivePoseSource !== 'imu')
+    ? (runningArm != null
+      ? runningArm.poseSource !== 'imu'
+      : armNotice.effectivePoseSource !== 'imu')
     : runningArm != null
       ? runningArm.poseSource !== 'imu'
       : poseSource !== 'imu'
@@ -2252,7 +2232,6 @@ export const PanoPlusCaptureSurface = forwardRef<
       // which is what `idlePin` carries below.
       pinPreviewFps,
     attitudeMagFree,
-    arPluginArm,
     }).then((res) => {
       // REVIEW FIX — the resolved answer is kept, not discarded: a refused
       // open (ARKit up, camera busy, older native) re-shows the explainer
@@ -2525,12 +2504,6 @@ export const PanoPlusCaptureSurface = forwardRef<
       // path feeds the engine, not what the engine computes. Sent only when the
       // host actually set it, so an unset prop leaves the native default alone.
       ...(attitudeMagFree != null ? { attitudeMagFree } : {}),
-      // The third start mode. Sent only when the host set it AND this surface
-      // has actually mounted the AR view — `arArmed` is the one fact that says
-      // so. Sending it on an IMU sweep tells the recorder to open no camera and
-      // wait for frames that can never arrive, which is exactly how this
-      // shipped broken the first time.
-      ...(arPluginArm === true && arArmed ? { arPluginArm: true } : {}),
       // S5 — the same rule as the line above, for the same reason. Sent
       // ONLY when the host both asked for it AND supplied the camera id,
       // and only on the IMU arm: the recorder reads the flag together with
@@ -2796,17 +2769,17 @@ export const PanoPlusCaptureSurface = forwardRef<
   }, [
     // ⚠ THE FOURTH ROUND OF THIS LIST BEING SHORT, and the note below already
     // records three. All four are READ in this callback — `hostChromeTopPt`
-    // by `withHostChromeTop` (the start bag's insets), `attitudeMagFree`,
-    // `arPluginArm` and `arArmed` by the start bag's arm keys — and all four
-    // resolve ASYNCHRONOUSLY relative to the last time it was built:
-    // `arArmed` re-derives when `<ARCameraView>` mounts, `arPluginArm` when
-    // the plugin handle lands, `hostChromeTopPt` when the host lays out. A
+    // by `withHostChromeTop` (the start bag's insets), `attitudeMagFree`
+    // and `arArmed` by the start bag's arm keys — and they resolve
+    // ASYNCHRONOUSLY relative to the last time it was built: `arArmed`
+    // re-derives when `<ARCameraView>` mounts, `hostChromeTopPt` when the host
+    // lays out. (`arPluginArm` was the fourth until M2 made the AR-plugin arm
+    // the only Android AR arm.) A
     // sweep started from a stale closure would send the arm keys for the
     // previous frame's arm, and the pack would record them as though they had
     // been chosen — which is the same failure the S7 note describes, one
     // release later.
     arArmed,
-    arPluginArm,
     attitudeMagFree,
     hostChromeTopPt,
     armContract,
