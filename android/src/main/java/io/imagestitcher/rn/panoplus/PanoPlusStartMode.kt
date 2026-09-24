@@ -62,7 +62,9 @@ internal fun panoStartMode(
     poseSource: String,
     arcoreReference: ArCoreRefMode,
     vcPluginArm: Boolean,
-    allowOwnCamera: Boolean = false,
+    /** NO DEFAULT (M3 review): every call site states it, so dropping it at
+     *  the recorder is a compile error rather than a silent refusal. */
+    allowOwnCamera: Boolean,
     /** `readArCoreAvailability(...).supported`; null = not asked (non-AR). */
     arcoreSupported: Boolean? = null,
 ): PanoStartMode = when {

@@ -74,6 +74,7 @@ import {
   SWEEP_HOST_OWNS_INPUT_KEYS,
   sweepEffectiveLens,
   sweepHostArmRefusal,
+  sweepFailureCameraCode,
   type SweepHostArmRefusalInput,
   type SweepHostOwnsCameraInput,
   _sweepHostOwnsCameraForTests as hostOwns,
@@ -147,7 +148,7 @@ describe('sweepHostArmRefusal — each old fallback is now a NAMED refusal', () 
   const cases: Array<[string, Partial<SweepHostArmRefusalInput>, string]> = [
     ['a drawable (Skia) host processor', { hostProcessorDrawable: true }, 'panoplus-refused-drawable-processor'],
     ['multicam at 0.5× (D13 — which lens is unknown)', { captureMode: 'multicam', lens: '0.5x' }, 'panoplus-refused-zoom-lens'],
-    ['the plugin is not in this build', { pluginReady: false, pluginUnavailable: true }, 'panoplus-unavailable'],
+    ['the plugin is not in this build', { pluginReady: false, pluginUnavailable: true }, 'panoplus-plugin-unavailable'],
     ['the plugin is still loading', { pluginReady: false }, 'panoplus-not-ready'],
     ['the camera is in transition', { cameraUnmounting: true }, 'panoplus-camera-not-ready'],
     ['no device id yet', { deviceId: '' }, 'panoplus-camera-not-ready'],
@@ -179,7 +180,21 @@ describe('sweepHostArmRefusal — each old fallback is now a NAMED refusal', () 
     expect(sweepHostArmRefusal({ ...all, hostProcessorDrawable: false })?.code)
       .toBe('panoplus-refused-zoom-lens');
     expect(sweepHostArmRefusal({ ...all, hostProcessorDrawable: false, lens: '1x' })?.code)
-      .toBe('panoplus-unavailable');
+      .toBe('panoplus-plugin-unavailable');
+  });
+});
+
+describe('sweepFailureCameraCode — only a missing plugin is a BUILD failure', () => {
+  it('the plugin-missing refusal reaches the host as ENGINE_UNAVAILABLE', () => {
+    expect(sweepFailureCameraCode('panoplus-plugin-unavailable')).toBe('ENGINE_UNAVAILABLE');
+  });
+  it('every other refusal is this attempt failing', () => {
+    for (const c of ['panoplus-not-ready', 'panoplus-camera-not-ready',
+      'panoplus-refused-zoom-lens', 'panoplus-refused-drawable-processor',
+      'panoplus-panorama-disabled', 'panoplus-busy', 'panoplus-unavailable',
+      'panoplus-io', '', null, undefined]) {
+      expect(sweepFailureCameraCode(c as string | null | undefined)).toBe('PANORAMA_START_FAILED');
+    }
   });
 });
 

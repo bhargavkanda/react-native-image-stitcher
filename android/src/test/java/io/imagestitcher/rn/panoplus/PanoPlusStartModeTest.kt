@@ -17,12 +17,12 @@ class PanoPlusStartModeTest {
     fun `a live AR sweep is ALWAYS the AR-plugin arm — no flag decides it`() {
         assertEquals(
             PanoStartMode.AR_PLUGIN,
-            panoStartMode(live = true, poseSource = "ar", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = false),
+            panoStartMode(live = true, poseSource = "ar", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = false, allowOwnCamera = false),
         )
         // The vc flag cannot pull an AR sweep onto the vc arm either.
         assertEquals(
             PanoStartMode.AR_PLUGIN,
-            panoStartMode(live = true, poseSource = "ar", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = true),
+            panoStartMode(live = true, poseSource = "ar", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = true, allowOwnCamera = false),
         )
     }
 
@@ -31,7 +31,7 @@ class PanoPlusStartModeTest {
         for (ref in listOf(ArCoreRefMode.SHARED, ArCoreRefMode.STANDALONE, ArCoreRefMode.AUTO)) {
             assertEquals(
                 PanoStartMode.REFUSE_OWN_ARCORE_ON_AR_ARM,
-                panoStartMode(live = true, poseSource = "ar", arcoreReference = ref, vcPluginArm = false),
+                panoStartMode(live = true, poseSource = "ar", arcoreReference = ref, vcPluginArm = false, allowOwnCamera = false),
             )
         }
     }
@@ -42,15 +42,13 @@ class PanoPlusStartModeTest {
             PanoStartMode.REFUSE_AR_UNAVAILABLE,
             panoStartMode(
                 live = true, poseSource = "ar", arcoreReference = ArCoreRefMode.OFF,
-                vcPluginArm = false, arcoreSupported = false,
-            ),
+                vcPluginArm = false, arcoreSupported = false, allowOwnCamera = false),
         )
         assertEquals(
             PanoStartMode.AR_PLUGIN,
             panoStartMode(
                 live = true, poseSource = "ar", arcoreReference = ArCoreRefMode.OFF,
-                vcPluginArm = false, arcoreSupported = true,
-            ),
+                vcPluginArm = false, arcoreSupported = true, allowOwnCamera = false),
         )
     }
 
@@ -59,7 +57,7 @@ class PanoPlusStartModeTest {
         for (ref in listOf(ArCoreRefMode.SHARED, ArCoreRefMode.STANDALONE, ArCoreRefMode.AUTO)) {
             assertEquals(
                 PanoStartMode.REFUSE_OWN_ARCORE_ON_VC_ARM,
-                panoStartMode(live = true, poseSource = "imu", arcoreReference = ref, vcPluginArm = true),
+                panoStartMode(live = true, poseSource = "imu", arcoreReference = ref, vcPluginArm = true, allowOwnCamera = false),
             )
         }
     }
@@ -68,7 +66,7 @@ class PanoPlusStartModeTest {
     fun `the vc arm is read WITH the IMU pose arm, never alone`() {
         assertEquals(
             PanoStartMode.VC_PLUGIN,
-            panoStartMode(live = true, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = true),
+            panoStartMode(live = true, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = true, allowOwnCamera = false),
         )
     }
 
@@ -79,7 +77,7 @@ class PanoPlusStartModeTest {
         // pano+'s own Camera2 client would be a second camera owner.
         assertEquals(
             PanoStartMode.REFUSE_LIVE_WITHOUT_CAMERA,
-            panoStartMode(live = true, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = false),
+            panoStartMode(live = true, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = false, allowOwnCamera = false),
         )
         // A surface that OWNS its camera (standalone, or the DR-1a hatch) may.
         assertEquals(
@@ -92,7 +90,7 @@ class PanoPlusStartModeTest {
         // Recording sessions are untouched.
         assertEquals(
             PanoStartMode.RECORDER,
-            panoStartMode(live = false, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = false),
+            panoStartMode(live = false, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = false, allowOwnCamera = false),
         )
     }
 
@@ -100,7 +98,7 @@ class PanoPlusStartModeTest {
     fun `a RECORDING session keeps the reference channel — that is the basis-falsification run`() {
         assertEquals(
             PanoStartMode.RECORDER,
-            panoStartMode(live = false, poseSource = "ar", arcoreReference = ArCoreRefMode.SHARED, vcPluginArm = false),
+            panoStartMode(live = false, poseSource = "ar", arcoreReference = ArCoreRefMode.SHARED, vcPluginArm = false, allowOwnCamera = false),
         )
     }
 
@@ -119,6 +117,26 @@ class PanoPlusStartModeTest {
         assertTrue("start() must consult panoStartMode", mode >= 0)
         assertTrue("panoStartMode must precede openArCoreChannel", channel < 0 || mode < channel)
         assertTrue("panoStartMode must precede the camera service", cameraService < 0 || mode < cameraService)
+    }
+
+    @Test
+    fun `M3 review — allowOwnCamera is parsed, forwarded and passed to the rule, end to end`() {
+        // Structural, like the order check above: dropping any ONE link makes
+        // every standalone hold refused (or, sent unconditionally, switches the
+        // backstop off) with every JVM and jest test still green.
+        val rec = File("src/main/java/io/imagestitcher/rn/panoplus/PanoPlusAndroidRecorder.kt").readText()
+        val live = File("src/main/java/io/imagestitcher/rn/panoplus/PanoPlusLiveModule.kt").readText()
+        assertTrue(
+            "the recorder must parse allowOwnCamera from the bag",
+            rec.contains("allowOwnCamera = optBool(options, \"allowOwnCamera\""),
+        )
+        val start = rec.substring(rec.indexOf("    fun start(promise: Promise) {"))
+        val call = start.substring(start.indexOf("panoStartMode("), start.indexOf("panoStartMode(") + 300)
+        assertTrue("start() must pass cfg.allowOwnCamera to panoStartMode", call.contains("cfg.allowOwnCamera"))
+        assertTrue(
+            "the live module must forward allowOwnCamera",
+            live.contains("bag.putBoolean(\"allowOwnCamera\""),
+        )
     }
 
     @Test

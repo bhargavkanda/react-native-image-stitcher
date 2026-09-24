@@ -104,6 +104,12 @@ function unavailable(): Error & { code: string } {
  * ordering is native's problem, not the caller's. But the caller MUST have the
  * AR session live (an `<ARCameraView>` mounted) or no frame ever arrives and
  * `stop()` will reject `panoplus-not-running`.
+ *
+ * ⚠ ANDROID, SINCE M3: a live IMU start (the Android default `poseSource`)
+ * needs a camera arm — `vcPluginArm` + `vcCameraId` when `<Camera>`'s
+ * vision-camera owns the camera, or `allowOwnCamera: true` when the caller
+ * wants pano+'s own camera. With neither it is refused with
+ * `live-sweep-without-camera` rather than opening a second camera.
  */
 export function startPanoPlus(
   options: PanoPlusStartOptions,

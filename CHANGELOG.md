@@ -18,6 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (BREAKING)
 
+- **`<Camera engine="sweep">` never opens a second camera on Android.** A
+  non-AR sweep runs on `<Camera>`'s own vision-camera `<CameraView>`, always;
+  an AR sweep runs on the stitcher's AR session. When that camera cannot
+  serve a hold, the hold is REFUSED by name (on screen, on the sweep's
+  `onFailure`, and on `<Camera>`'s `onError`) instead of falling back to the
+  sweep's own Camera2 client: `panoplus-refused-drawable-processor` (a Skia
+  `frameProcessor` is on the screen), `panoplus-refused-zoom-lens` (0.5× on a
+  phone whose ultra-wide is reached by zooming a combined camera),
+  `panoplus-plugin-unavailable` (surfaced as `ENGINE_UNAVAILABLE`),
+  `panoplus-not-ready`, `panoplus-camera-not-ready`, and
+  `panoplus-panorama-disabled` (`enablePanoramaMode={false}`, either arm).
+  - `SweepOptions` no longer carries `poseSource` or `lens`: the pose arm
+    follows the AR pill and the lens follows the lens chip.
+  - A host `frameProcessor` now runs ALONGSIDE the sweep instead of sending it
+    to another camera.
+  - `startPanoPlus` on Android: a live IMU start needs `vcPluginArm` +
+    `vcCameraId`, or `allowOwnCamera: true`; with neither it is refused with
+    `live-sweep-without-camera`. All four keys are now typed on
+    `PanoPlusStartOptions`.
 - **`react-native-vision-camera` peer range narrowed to `>=4.7.0 <5`.** 5.x
   removes the Frame Processor plugin interface the keyframe and sweep plugins
   use. A host on 5.x now fails at install (`ERESOLVE`) rather than at run time.

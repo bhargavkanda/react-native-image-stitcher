@@ -4162,6 +4162,12 @@ export function panoPlusFailureCopy(f: PanoPlusFailure): string {
   switch (f.code) {
     case 'panoplus-unavailable':
       return 'pano+ is not in this build — the AR frame-plugin framework is not linked.';
+    case 'panoplus-plugin-unavailable':
+      return (
+        'The sweep cannot run on this screen\'s camera: its frame processor '
+        + '(panoplus_sweep_ingest) is not in this build. '
+        + f.message
+      );
     case 'panoplus-busy':
       return 'A pano+ sweep is already running. Finish or cancel it first.';
     case 'invalid-options':

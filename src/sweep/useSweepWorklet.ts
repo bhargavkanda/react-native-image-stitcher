@@ -146,8 +146,11 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
     }
   }
   useEffect(() => {
-    // A switch back INTO the sweep is a fresh question: the registry may
-    // have come up since. Re-open the budget, once, on that edge.
+    // `enabled` going back on is a fresh question: the registry may have come
+    // up since. Re-open the budget, once, on that edge. (Since M3 `<Camera>`
+    // passes `enablePanoramaMode` — an ENGINE switch no longer toggles it, so
+    // a plugin that is not in the build after the first 1.5 s stays refused
+    // by name for the life of the mount, which is the honest answer.)
     if (!enabled) { acquireGaveUpRef.current = false; setGaveUp(false); return undefined; }
     if (plugin != null) return undefined;
     let cancelled = false;

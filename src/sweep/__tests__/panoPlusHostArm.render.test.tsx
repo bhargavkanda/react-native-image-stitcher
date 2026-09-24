@@ -279,6 +279,35 @@ describe('start() fails closed rather than opening a camera the host holds', () 
     // collision the guard exists to prevent, arriving through the front door.
     expect(bag.vcPluginArm).toBe(true);
     expect(bag.vcCameraId).toBe('2');
+    // M3 review — the host arm never asks native for a camera of its own.
+    expect('allowOwnCamera' in bag).toBe(false);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M3 review: only a surface that OWNS its camera sends allowOwnCamera', () => {
+    // The native backstop refuses a live sweep with no arm unless this is
+    // set; dropping it refuses every standalone hold, and sending it
+    // unconditionally switches the backstop off. Both used to pass CI.
+    const { tree, handle } = mount({ frameSource: 'own', poseSource: 'imu' });
+    act(() => { handle.current?.holdStart(); });
+    act(() => { jest.advanceTimersByTime(1500); });
+    expect(startedWith).not.toBeNull();
+    const bag = startedWith as Record<string, unknown>;
+    expect(bag.allowOwnCamera).toBe(true);
+    expect('vcPluginArm' in bag).toBe(false);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M3 review: a host key in engineOptions cannot claim ownership either way', () => {
+    const { tree, handle } = mount({
+      frameSource: 'host', poseSource: 'imu', vcPluginArm: true, vcCameraId: '2',
+      engineOptions: { allowOwnCamera: true, vcCameraId: 'spoofed' },
+    });
+    act(() => { handle.current?.holdStart(); });
+    act(() => { jest.advanceTimersByTime(1500); });
+    const bag = startedWith as Record<string, unknown>;
+    expect('allowOwnCamera' in bag).toBe(false);
+    expect(bag.vcCameraId).toBe('2');
     act(() => { tree.unmount(); });
   });
 });

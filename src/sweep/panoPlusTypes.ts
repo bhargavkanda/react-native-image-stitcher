@@ -796,6 +796,33 @@ export interface PanoPlusStartOptions
    * against a real lurch.
    */
   lurchAccelMps2?: number;
+  /**
+   * The sweep rides the camera ANOTHER component opened — vision-camera's
+   * `<CameraView>` inside `<Camera>` — and native opens NO camera of its own:
+   * frames arrive through the `panoplus_sweep_ingest` frame processor. Read
+   * only together with `poseSource: 'imu'` and a non-empty {@link vcCameraId}.
+   */
+  vcPluginArm?: boolean;
+  /**
+   * The id of the camera vision-camera opened (`CameraDevice.id` — the
+   * `AVCaptureDevice.uniqueID` on iOS, the Camera2 id on Android). Native
+   * derives intrinsics, the lens and (iOS) the basis from it.
+   */
+  vcCameraId?: string;
+  /**
+   * Android — the React tag of vision-camera's `<CameraView>`, so native can
+   * lock AE/AWB and stabilisation on the camera vision-camera opened.
+   */
+  vcViewTag?: number;
+  /**
+   * Android — THIS caller owns no camera arm and wants pano+ to open its own
+   * (the standalone `PanoPlusCaptureSurface`). Since M3 a live Android sweep
+   * with neither a plugin arm ({@link vcPluginArm}, or an AR sweep on the
+   * stitcher's AR session) nor this flag is REFUSED with
+   * `live-sweep-without-camera`, so a host that lost its arm never opens a
+   * second camera behind the one on screen. Ignored on iOS.
+   */
+  allowOwnCamera?: boolean;
 }
 
 /**

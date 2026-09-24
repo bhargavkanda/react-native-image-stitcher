@@ -317,9 +317,11 @@ export interface PanoPlusCaptureSurfaceProps {
    *  guessing a focal length. */
   vcCameraId?: string;
   /**
-   * M3 — when the host owns the camera and a hold cannot be served by it
-   * right now, the NAMED reason (from `<Camera>`'s `sweepHostArmRefusal`). A
-   * hold is then refused with it, on screen and on `onFailure`, instead of
+   * M3 — the NAMED reason the embedding host refuses a hold right now, or
+   * null. From `<Camera>`: `sweepHostArmRefusal` when its camera cannot serve
+   * the hold, and `panoplus-panorama-disabled` on EITHER arm when the host
+   * turned panorama capture off. A hold is then refused with it, on screen
+   * and on `onFailure`, instead of starting — and on the host arm instead of
    * the recorder opening a camera of its own.
    */
   hostArmRefusal?: { code: string; message: string } | null;
@@ -2381,13 +2383,11 @@ export const PanoPlusCaptureSurface = forwardRef<
     // with no correct action.
     //
     // ⚠ AND `<Camera>` CANNOT REACH IT ANY MORE — which is the point, not an
-    // argument for deleting this. `sweepHostOwnsCamera` requires Android AND
-    // a MERGED pose source of `'imu'`, and on Android `panoPlusAndroidArm`
-    // answers `'ar'` only when `'ar'` was asked, with `fallbackToAr: false`
-    // in every branch. The ARKit `fallbackToAr` that an earlier version of
-    // this comment cited is iOS-only, and iOS never takes the host arm. Both
-    // of those are load-bearing terms upstream; this is what happens if
-    // either is ever relaxed.
+    // argument for deleting this. Since M3 `sweepHostOwnsCamera` is
+    // `!isAR && <platform arm> && no DR-1a override`, and the pose arm it
+    // sends is `isAR ? 'ar' : 'imu'` from the SAME state, so a host-owned
+    // sweep is always an IMU sweep. This is what happens if that is ever
+    // relaxed.
     //
     // It also covers the case `<Camera>` is not: `PanoPlusCaptureSurface` is
     // an exported component and a third-party host can set `frameSource` and
@@ -2407,8 +2407,10 @@ export const PanoPlusCaptureSurface = forwardRef<
     // an absent plugin handle and an empty camera id, and a fourth arrives
     // with `<Camera>`'s ownership settle window, in which the surface is
     // told `'host'` on purpose while neither side may open a camera yet.
-    // Every one of them lands in the same place: no viewfinder here, no
-    // instruction to native, and a recorder that opens its own client. So
+    // Every one of them lands in the same place: no viewfinder here and no
+    // instruction to native — which native now refuses by name
+    // (`live-sweep-without-camera`, the M3 backstop) rather than opening its
+    // own client, but a refusal from there says less than one from here. So
     // the guard is derived from the same expression the bag uses, and the
     // two cannot drift.
     // ⚠ M3: A NAMED REFUSAL FROM THE HOST COMES FIRST. `<Camera>` knows WHY
@@ -2416,7 +2418,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     // only 0.5× lens, a drawable host processor, the camera still opening);
     // saying so beats every generic message below, and it reaches the host
     // on `onFailure` as well as the screen.
-    if (frameSource === 'host' && hostArmRefusal != null) {
+    if (hostArmRefusal != null) {
       busyRef.current = false;
       setError(hostArmRefusal.message);
       onFailure?.({
@@ -2573,38 +2575,8 @@ export const PanoPlusCaptureSurface = forwardRef<
       // path feeds the engine, not what the engine computes. Sent only when the
       // host actually set it, so an unset prop leaves the native default alone.
       ...(attitudeMagFree != null ? { attitudeMagFree } : {}),
-      // S5 — the same rule as the line above, for the same reason. Sent
-      // ONLY when the host both asked for it AND supplied the camera id,
-      // and only on the IMU arm: the recorder reads the flag together with
-      // the pose arm, and a flag that reaches the other arm tells it to
-      // open no camera and wait for a feeder that is not there.
-      //
-      // ⚠ `frameSource === 'host'` IS IN THE CONDITION TOO, and it is not
-      // redundant with `vcPluginArm`. They are two props and a host can set
-      // them inconsistently; when it does, the one that decides whether a
-      // VIEWFINDER is drawn must also decide whether native opens a camera,
-      // or the screen shows nothing while two stacks fight over the device.
-      // The `wantPoseSource` term cannot now be false here — the guard at
-      // the top of `start` refuses that state outright — but it stays as
-      // the local statement of the recorder's actual gate
-      // (`cfg.vcPluginArm && cfg.livePoseSource == "imu"`), so this line
-      // reads correctly on its own.
-      // ⚠ THE SAME `willSendArm` THE GUARD ABOVE TESTED, not a second copy
-      // of its terms. A guard that computes "will the arm be sent" and a bag
-      // that decides it independently is the two-places-one-fact shape this
-      // whole rung exists to remove. `frameSource === 'host'` stays as a
-      // separate term because the guard only runs on the host arm, and this
-      // line must also be correct on the own arm.
-      ...(willSendArm && frameSource === 'host'
-        ? { vcPluginArm: true, vcCameraId, ...(vcViewTag != null ? { vcViewTag } : {}) }
-        : {}),
-      // M3 — the recorder's backstop refuses a live sweep that neither runs
-      // on a plugin arm nor was explicitly given its own camera. Only a
-      // surface that OWNS its camera (`frameSource: 'own'` — a standalone
-      // mount, or `<Camera>`'s DR-1a reference hatch) says so; a host-camera
-      // sweep that somehow lost its arm is then refused natively rather than
-      // opening a second camera.
-      ...(frameSource === 'own' ? { allowOwnCamera: true } : {}),
+      // The camera arm (`vcPluginArm` / `vcCameraId` / `vcViewTag` /
+      // `allowOwnCamera`) is ASSIGNED below the literal — see there.
       ...(meteringSettleMs != null ? { meteringSettleMs } : {}),
       // WHICH PRODUCER. Sent last, with the other sweep-level arms, and it is
       // `armNotice.effectivePoseSource` rather than the raw prop: when the IMU
@@ -2639,6 +2611,28 @@ export const PanoPlusCaptureSurface = forwardRef<
     // been honest and the screen would not, and this surface's job is that they
     // agree. `poseSource` is immune only because it is ASSIGNED after the
     // spreads; this now is too.
+    // ── THE CAMERA ARM — ASSIGNED, NOT SPREAD (M3 review) ──────────────────
+    // `vcPluginArm` / `vcCameraId` / `vcViewTag` / `allowOwnCamera` are typed
+    // `PanoPlusStartOptions` keys, assigned after the escape-hatch spreads so
+    // tsc checks their spelling and a host key cannot override ownership:
+    //   · the host arm (`frameSource === 'host'`) sends the plugin arm — the
+    //     SAME `willSendArm` the guard at the top of `start` tested, so the
+    //     guard and the bag cannot drift;
+    //   · only a surface that OWNS its camera (`frameSource: 'own'` — a
+    //     standalone mount, or `<Camera>`'s DR-1a reference hatch) sends
+    //     `allowOwnCamera`; a host-camera sweep that somehow lost its arm is
+    //     then refused natively (`live-sweep-without-camera`) rather than
+    //     opening a second camera.
+    delete startOptions.vcPluginArm;
+    delete startOptions.vcCameraId;
+    delete startOptions.vcViewTag;
+    delete startOptions.allowOwnCamera;
+    if (willSendArm && frameSource === 'host') {
+      startOptions.vcPluginArm = true;
+      startOptions.vcCameraId = vcCameraId;
+      if (vcViewTag != null) startOptions.vcViewTag = vcViewTag;
+    }
+    if (frameSource === 'own') startOptions.allowOwnCamera = true;
     if (wantPoseSource === 'imu' && tauUncorrected) {
       startOptions.tauUncorrected = true;
     } else {

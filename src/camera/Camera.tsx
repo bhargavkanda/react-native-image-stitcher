@@ -129,9 +129,10 @@ import {
  * one predicate together with the preview mount. An answer is not a knob.
  * A host that wants the other arm turns AR on, or picks a different engine.
  *
- * `poseSource` and `lens` STAY, because those really are the operator's — but
- * `<Camera>` now merges them BEFORE computing ownership rather than after, so
- * the predicate sees what the surface will see. See `hostOwnsSweepCamera`.
+ * `poseSource` and `lens` are NOT in the bag either (D9, M3): the pose arm
+ * follows `<Camera>`'s AR pill (`isAR ? 'ar' : 'imu'`) and the lens its lens
+ * chip — the same state that decides who owns the camera, so the two cannot
+ * disagree. See `sweepHostOwnsCamera`.
  */
 export type SweepOptions = Omit<
   PanoPlusCaptureSurfaceProps,
@@ -746,7 +747,7 @@ export interface CameraProps {
    *
    * ⚠ ONE BAG RATHER THAN ~20 LOOSE PROPS, and the reason is that they are
    * not camera props. `rectify`, `gainMatch`, `attitudeMagFree`,
-   * `poseSource`, `jogGuard` and the rest configure a slit-scan ENGINE; they
+   * `jogGuard` and the rest configure a slit-scan ENGINE; they
    * have no meaning for a keyframe panorama or a photo, and putting them on
    * `CameraProps` would grow the component's public surface by a third with
    * fields that are undefined in every other mode.
@@ -3277,11 +3278,55 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     }
     (sweepCall as unknown as (f: unknown) => void)(frame);
   }, [hostWorklet, keyframeCall, sweepCall]);
+  // ⚠ PRESENT FOR THE LIFE OF THE MOUNT, whatever `enablePanoramaMode` says
+  // (M3 review). Keyed on that prop it went composed → undefined → composed
+  // on every Photo↔Pano flip of a warm `<Camera>` (the host app's split mode
+  // does exactly that), and each flip toggled vision-camera's
+  // `enableFrameProcessor` — the rebind this composition exists to remove.
+  // Before M3 the keyframe processor was attached whatever the prop said, so
+  // this is the pre-M3 per-frame cost and nothing more: both worklets are
+  // no-ops unless their own capture is live.
   const effectiveFrameProcessor = hostFrameProcessor?.type === 'drawable-skia'
     ? hostFrameProcessor
-    : (enablePanoramaMode || hostFrameProcessor != null)
-      ? composedFrameProcessor
-      : undefined;
+    : composedFrameProcessor;
+
+  // ── AN ENGINE SWITCH ENDS AN IN-FLIGHT KEYFRAME CAPTURE (M3 review) ─────
+  // The composed processor feeds the keyframe engine whenever ITS gate is
+  // open, whatever `engine` says — and nothing closed that gate on a
+  // keyframe→sweep switch. So a keyframe hold still recording when the host
+  // flipped the prop went on ingesting on the sweep screen until its
+  // pan-duration timer finalized it, and a sweep started in that window fed
+  // every frame into BOTH engines. The switch now cancels it: the same
+  // sequence as the drift abandon, minus the host callback — the host moved
+  // the engine itself, and `onCaptureAbandoned`'s reasons are the guard
+  // rails', not the host's own actions.
+  const prevEngineForKeyframeRef = useRef(engine);
+  useEffect(() => {
+    const was = prevEngineForKeyframeRef.current;
+    prevEngineForKeyframeRef.current = engine;
+    if (was === 'sweep' || engine !== 'sweep') return;
+    if (statusPhase !== 'recording') return;
+    clearPanTimer();
+    fpDriver.stop();
+    void (async () => {
+      try {
+        await incremental.cancel();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        onError?.(new CameraError(
+          'PANORAMA_FINALIZE_FAILED',
+          `cancel after an engine switch failed: ${message}`,
+          err,
+        ));
+      } finally {
+        setStatusPhase('idle');
+        setRecordingStartedAt(null);
+      }
+    })();
+    // Deps: the ENGINE edge only. `statusPhase` is read as it stands at that
+    // edge; re-running on its own changes would cancel captures the switch
+    // did not interrupt.
+  }, [engine]);
 
   // ── Keyframe thumbnails ──────────────────────────────────────────────
   // perf-3a change 4: Camera.tsx no longer keeps its OWN
@@ -5102,6 +5147,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     })
     : null;
 
+  // ── PANORAMA OFF REFUSES THE SWEEP HOLD TOO, ON EITHER ARM (M3 review) ──
+  // `enablePanoramaMode={false}` used to leave the sweep's shutter live while
+  // its plugin was never acquired, so every hold was refused as "still
+  // loading" forever. The keyframe engine honours the prop; so does this, by
+  // name, first — before any host-arm reason, because it is the one no wait
+  // can clear.
+  const sweepHoldRefusal: SweepHostArmRefusal | null = !enablePanoramaMode
+    ? SWEEP_PANORAMA_DISABLED
+    : sweepHostRefusal;
+
   const prevOwnsRef = useRef(hostOwnsSweepCameraLive);
   useEffect(() => {
     // ⚠ NEVER WHILE A SWEEP IS RUNNING, AND THE EARLY RETURN MUST NOT
@@ -5141,8 +5196,29 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // `<CameraView>` — a brand-new instance with no session yet — was reported
   // as LIVE. Transparent root, explainer suppressed, black underneath: the
   // defect this rung is named after, on every capture after the first.
+  //
+  // ⚠ AND IT HOLDS BACK THROUGH A CAMERA TRANSITION, EXACTLY AS THE KEYFRAME
+  // TREE DOES (M3 review). M3 moved `cameraShouldUnmount` out of the
+  // ownership predicate and into the hold refusal, which only stops a HOLD —
+  // so the preview mounted in the same commit the AR view unmounted (before
+  // the transition effect had stopped the AR session), mounted for the whole
+  // AR-support probe on a host that prefers AR, and swapped its `device` in
+  // place on a lens change. On Android vision-camera v4 races the new
+  // session's open against the old one's teardown in exactly those windows
+  // ("Maximum cameras in use"). The surface is still told `'host'`, so
+  // nobody opens a camera of its own while the preview waits.
+  //
+  // The latch outranks it: under a RUNNING sweep the preview is the engine's
+  // feed and must never be unmounted (the pills are disabled then anyway).
   const hostPreviewMounted =
-    engine === 'sweep' && mountHostPreview && cropPending == null;
+    engine === 'sweep' && mountHostPreview && cropPending == null
+    && (sweepOwnershipLatch != null
+      || !cameraShouldUnmount(
+        inFlightTransition,
+        arSupportPending,
+        statusPhase,
+        sweepHandoffPending,
+      ));
   // ⚠ NO DEPENDENCY ARRAY, DELIBERATELY — which normally reads as a
   // mistake, so: the edge-triggered form missed the case where the flag is
   // set WHILE `hostPreviewMounted` is already false (the keyframe tree's
@@ -5267,29 +5343,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // on one engine is still in force on the other. Two surfaces
             // with two independent copies of "AR on" is how an operator ends
             // up reading one and getting the other.
-            //
-            // ⚠ UNLESS THE HOST PINS ONE THROUGH THE BAG — see the handlers
-            // below, which are withheld in that case so the pill is absent
-            // rather than dead.
+
             // ── S5: ASK FOR THE VISION-CAMERA ARM ───────────────────────
             // Same boolean that chose the preview above, deliberately: the
             // declaration "the host owns the camera" and the request "do
             // not open one" have to be the same fact, or the surface draws
             // no viewfinder while native takes the device. See
             // `hostOwnsSweepCamera` for what each of its terms prevents.
-            // ── A PILL THE HOST HAS PINNED IS NOT SHOWN AT ALL ──────────
-            // The surface gates each pill on its callback being non-null —
-            // "a host that does not pass them gets NO pill rather than a
-            // dead one", which is its own doctrine and the right default.
-            //
-            // ⚠ AND A BAG-PINNED VALUE MAKES THE PILL DEAD, which the
-            // comment above this block used to deny: it said the pills are
-            // wired to `<Camera>`'s own `arPreference` and `lens`. They
-            // are — but the VALUE handed back is the merged one, and the
-            // bag wins, so with `sweep.poseSource` set the handler runs,
-            // the state moves, the prop does not, and the pill snaps back
-            // under the operator's finger. A control that visibly refuses
-            // its own input is worse than an absent one.
             // ⚠ WITHHELD UNCONDITIONALLY — `<Camera>` DRAWS THESE NOW.
             //
             // The surface gates each of its own pills on the matching
@@ -5380,7 +5440,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // The NAMED reason a hold on the host camera cannot start now —
             // the surface refuses with it rather than opening a camera of
             // its own. See `sweepHostArmRefusal`.
-            hostArmRefusal={sweepHostRefusal}
+            hostArmRefusal={sweepHoldRefusal}
             poseSource={sweepPoseSource}
             lens={sweepLens}
             // ⚠ THE ARM THAT WILL REALLY RUN, COMING BACK UP. The fallback is
@@ -5647,14 +5707,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               onError?.(
                 // A sweep refusal is a capture failure, not an engine one:
                 // the engine IS available here — this is the engine saying no
-                // to this attempt. `ENGINE_UNAVAILABLE` would send a reader
-                // to the build, which is the wrong place.
+                // to this attempt — EXCEPT for the refusals that are about the
+                // BUILD or the DEVICE, which `sweepFailureCameraCode` names.
                 //
                 // The original failure rides on `cause`, so the sweep's own
                 // code (`panoplus-busy`, `panoplus-io`, …) and its counters
                 // survive the hop instead of being flattened to a string.
                 new CameraError(
-                  'PANORAMA_START_FAILED',
+                  sweepFailureCameraCode(failure.code),
                   failure.message ?? String(failure.code ?? 'sweep failed'),
                   failure,
                 ),
@@ -6402,6 +6462,29 @@ export interface SweepHostArmRefusalInput {
 }
 
 /**
+ * The `CameraErrorCode` a sweep failure reaches the host under.
+ *
+ * `PANORAMA_START_FAILED` for everything that is this attempt failing. The
+ * one BUILD-level refusal — the sweep's frame-processor plugin is not in this
+ * binary — is `ENGINE_UNAVAILABLE`, the code the keyframe engine already uses
+ * for "this build cannot run the engine you asked for" (M3 review).
+ */
+export function sweepFailureCameraCode(code: string | null | undefined): CameraErrorCode {
+  switch (code) {
+    case 'panoplus-plugin-unavailable':
+      return 'ENGINE_UNAVAILABLE';
+    default:
+      return 'PANORAMA_START_FAILED';
+  }
+}
+
+/** The hold refusal for `enablePanoramaMode={false}` on the sweep engine. */
+export const SWEEP_PANORAMA_DISABLED: SweepHostArmRefusal = {
+  code: 'panoplus-panorama-disabled',
+  message: 'Panorama capture is turned off on this screen.',
+};
+
+/**
  * sweepHostArmRefusal — the NAMED reason a sweep hold on the host camera must
  * be refused, or null when it can run.
  *
@@ -6433,7 +6516,10 @@ export function sweepHostArmRefusal(
   }
   if (i.pluginUnavailable) {
     return {
-      code: 'panoplus-unavailable',
+      // ITS OWN CODE (M3 review): `panoplus-unavailable` is the session
+      // module's "pano+ is not in this build", and a host reading `cause.code`
+      // must be able to tell a missing vision-camera plugin from that.
+      code: 'panoplus-plugin-unavailable',
       message: 'This sweep cannot start: its frame processor '
         + '(panoplus_sweep_ingest) is not in this build.',
     };
