@@ -154,6 +154,64 @@ describe('M5 — the iOS host arm', () => {
     act(() => { tree.unmount(); });
   });
 
+  it('⚑ the refused sweep stays BUSY until native\'s stop settles, and the next hold then starts', async () => {
+    let resolveStop!: (v: unknown) => void;
+    (NM.RNSSweepSession as Record<string, unknown>).stop = () => {
+      calls.push('stop');
+      return new Promise((res) => { resolveStop = res; });
+    };
+    const sweeping: boolean[] = [];
+    const controls: Array<{ busy: boolean }> = [];
+    const { tree, handle } = mount({
+      ...HOST_ARM,
+      onSweepingChange: (v: boolean) => { sweeping.push(v); },
+      onControlsState: (c: { busy: boolean }) => { controls.push(c); },
+    });
+    await hold(handle);
+    const dir = (startedWith as Record<string, unknown>).sessionDir as string;
+    let seq = 0;
+    statusAnswer = () => { seq += 1; return { running: true, sessionDir: dir, seq, vcDeviceRefusal: 'zoom-not-1' }; };
+    await act(async () => { jest.advanceTimersByTime(400); await Promise.resolve(); await Promise.resolve(); });
+    expect(calls).toEqual(['start', 'stop']);
+    // Native is still finalizing: the host must still see a busy sweep.
+    expect(sweeping[sweeping.length - 1]).toBe(true);
+    expect(controls[controls.length - 1].busy).toBe(true);
+    // A release and a new hold in that window start nothing — and the shutter
+    // said so (busy), rather than looking free.
+    act(() => { handle.current?.holdEnd(); });
+    statusAnswer = () => ({ running: false });
+    await hold(handle);
+    expect(calls).toEqual(['start', 'stop']);
+    // Native settles: idle, and the next hold starts.
+    await act(async () => { resolveStop({}); await Promise.resolve(); await Promise.resolve(); });
+    expect(sweeping[sweeping.length - 1]).toBe(false);
+    expect(controls[controls.length - 1].busy).toBe(false);
+    act(() => { handle.current?.holdEnd(); });
+    await hold(handle);
+    expect(calls.filter((c) => c === 'start')).toHaveLength(2);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ ANDROID: the same mid-sweep refusal ends the vc-plugin sweep by name — finalized, not cancelled', async () => {
+    (Platform as { OS: string }).OS = 'android';
+    const failures: Array<{ code: string }> = [];
+    const { tree, handle } = mount({
+      ...HOST_ARM,
+      vcCameraId: '0',
+      onFailure: (f: { code: string }) => failures.push(f),
+    });
+    await hold(handle);
+    expect(calls).toEqual(['start']);
+    const dir = (startedWith as Record<string, unknown>).sessionDir as string;
+    let seq = 0;
+    statusAnswer = () => { seq += 1; return { running: true, sessionDir: dir, seq, vcDeviceRefusal: 'mirrored-buffer' }; };
+    await act(async () => { jest.advanceTimersByTime(400); await Promise.resolve(); await Promise.resolve(); });
+    expect(calls).toContain('stop');
+    expect(calls).not.toContain('cancel');
+    expect(failures.map((f) => f.code)).toEqual(['panoplus-vc-device-unsupported']);
+    act(() => { tree.unmount(); });
+  });
+
   it('⚑ NEGATIVE CONTROL: a status with no refusal leaves the sweep running', async () => {
     const failures: unknown[] = [];
     const { tree, handle } = mount({ ...HOST_ARM, onFailure: (f: unknown) => failures.push(f) });

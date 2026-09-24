@@ -2622,19 +2622,18 @@ export function useSweepEngine(
     if (phaseRef.current !== 'sweeping' || busyRef.current || !sweepLiveRef.current) return;
     busyRef.current = true;
     const named = panoPlusVcDeviceRefusalFailure(vcDeviceRefusal);
-    void stopPanoPlus().then(
-      () => { busyRef.current = false; },
-      (e: unknown) => {
-        busyRef.current = false;
-        if (panoPlusErrorInfo(e).code === 'panoplus-not-running') void cancelPanoPlus();
-      },
-    );
+    // ⚠ THE SHAPE OF `finish()`, NOT OF AN ABANDON (M5 review). Native's stop
+    // is a finalize and a pack write — seconds on a device — and until it
+    // settles this sweep still owns the camera. Going 'idle' at once reported
+    // `busy` false while native was still tearing down: the shutter looked
+    // free and the next hold was silently swallowed by `start()`'s `busyRef`
+    // return, and `<Camera>`'s ownership latch and the host's mode-switch
+    // guard came down early. So: ownership passes to this call synchronously
+    // (late status ticks are dropped), the refusal is reported at once, and
+    // the phase is 'finishing' until stop settles.
     sweepLiveRef.current = false;
     liveSessionRef.current = null;
-    setRunningArm(null);
-    setCameraLock(null);
-    setStatus(null);
-    setPhase('idle');
+    setPhase('finishing');
     const info = {
       code: named.code,
       message: named.message,
@@ -2644,6 +2643,18 @@ export function useSweepEngine(
     } as PanoPlusFailure;
     setError(panoPlusFailureCopy(info));
     onFailure?.(info);
+    const settle = (): void => {
+      busyRef.current = false;
+      if (!mountedRef.current) return;
+      setRunningArm(null);
+      setCameraLock(null);
+      setStatus(null);
+      setPhase('idle');
+    };
+    void stopPanoPlus().then(settle, (e: unknown) => {
+      if (panoPlusErrorInfo(e).code === 'panoplus-not-running') void cancelPanoPlus();
+      settle();
+    });
   }, [vcDeviceRefusal, statusSessionDir, onFailure]);
   /** `busy` is `'finishing'` ONLY. Reporting `'sweeping'` would have
    *  `CameraShutter` paint its grey processing ring over the red one and

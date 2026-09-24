@@ -183,4 +183,27 @@ class PanoPlusVcFrameSinkTest {
         armed = null
         assertEquals(0, PanoPlusVcFrameSink.pooledBuffersForTest())
     }
+
+    // M5 review — the device refusal the status carries. The sink is a
+    // process-wide singleton that outlives sweeps: if `arm()` stopped clearing
+    // the first refusal, every sweep after one that saw a rotated buffer would
+    // stop on its first status poll.
+    @Test
+    fun `the FIRST device refusal is kept, each one is counted pre-offer, and arming clears both`() {
+        val h = FakeHost()
+        PanoPlusVcFrameSink.arm(h)
+        armed = h
+        assertNull(PanoPlusVcFrameSink.firstDeviceRefusal)
+        val before = PanoPlusVcFrameSink.framesRefusedPreOffer
+        PanoPlusVcFrameSink.noteDeviceRefusal("rotated-buffer")
+        PanoPlusVcFrameSink.noteDeviceRefusal("mirrored-buffer")
+        assertEquals("rotated-buffer", PanoPlusVcFrameSink.firstDeviceRefusal)
+        assertEquals(before + 2, PanoPlusVcFrameSink.framesRefusedPreOffer)
+        PanoPlusVcFrameSink.disarm(h)
+        val next = FakeHost()
+        PanoPlusVcFrameSink.arm(next)
+        armed = next
+        assertNull(PanoPlusVcFrameSink.firstDeviceRefusal)
+        assertEquals(0L, PanoPlusVcFrameSink.framesRefusedPreOffer)
+    }
 }

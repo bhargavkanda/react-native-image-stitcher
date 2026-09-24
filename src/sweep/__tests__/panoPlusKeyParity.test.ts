@@ -301,9 +301,50 @@ function iosProducedPaths(src: string): { status: Set<string>; summary: Set<stri
  * M5 — status keys the iOS BRIDGE adds on top of RNISPanoCore's literal, each
  * with the exact form that puts it in `getStatus`'s answer.
  */
-const IOS_BRIDGE_STATUS: Record<string, [string, string]> = {
-  vcDeviceRefusal: ['ios/PanoPlus/PanoPlusBridge.swift', 'st["vcDeviceRefusal"] = r'],
+/**
+ * Status keys the Swift BRIDGE adds on top of the core's dictionary, by
+ * [file, function, the assignment, the variable the function resolves].
+ *
+ * ⚠ SCOPED TO THE FUNCTION, WITH COMMENTS STRIPPED, AND ORDERED (M5 review).
+ * A whole-file substring stayed green when `getStatus` resolved the core's
+ * status directly with the assignment left behind, and when the assignment
+ * was commented out — the same trap the Kotlin chains' slicer exists for.
+ */
+const IOS_BRIDGE_STATUS: Record<string, [string, string, string, string]> = {
+  vcDeviceRefusal: ['ios/PanoPlus/PanoPlusBridge.swift', 'getStatus', 'st["vcDeviceRefusal"] = r', 'st'],
 };
+
+/** Swift source with `//` and `/* *\/` comments removed (strings are not parsed). */
+function stripSwiftComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
+/** The brace-matched body of `func name(` in Swift `src`, comments stripped. */
+function swiftFunctionBody(src: string, name: string): string {
+  const code = stripSwiftComments(src);
+  const at = code.search(new RegExp(`\\bfunc ${name}\\(`));
+  if (at < 0) throw new Error(`no func ${name}`);
+  const open = code.indexOf('{', at);
+  let depth = 0;
+  for (let i = open; i < code.length; i += 1) {
+    if (code[i] === '{') depth += 1;
+    else if (code[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return code.slice(open + 1, i);
+    }
+  }
+  throw new Error(`unbalanced func ${name}`);
+}
+
+/** Does `fn` in this Swift source assign `form` and then resolve `v` unreassigned? */
+function swiftBridgeCarries(src: string, fn: string, form: string, v: string): boolean {
+  const body = swiftFunctionBody(src, fn);
+  const set = body.indexOf(form);
+  if (set < 0) return false;
+  const resolve = body.indexOf(`resolver(${v})`, set);
+  if (resolve < 0) return false;
+  return !new RegExp(`\\b${v}\\s*=[^=]`).test(body.slice(set + form.length, resolve));
+}
 
 /** Blocks built at run time in Swift: checked by leaf, in their own producer only. */
 const IOS_RUNTIME_BLOCKS: Record<string, string> = {
@@ -311,12 +352,16 @@ const IOS_RUNTIME_BLOCKS: Record<string, string> = {
   'exposure.ar.probe': 'ios/PanoPlus/RNISArExposureProbe.swift',
 };
 
-function iosMissing(read: string[], produced: Set<string>): string[] {
+function iosMissing(
+  read: string[],
+  produced: Set<string>,
+  bridgeSrc: (file: string) => string = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8'),
+): string[] {
   return read.filter((k) => {
     if (covered(k, IOS_NOT_APPLICABLE)) return false;
     const bridge = IOS_BRIDGE_STATUS[k];
     if (bridge != null) {
-      return !fs.readFileSync(path.join(ROOT, bridge[0]), 'utf8').includes(bridge[1]);
+      return !swiftBridgeCarries(bridgeSrc(bridge[0]), bridge[1], bridge[2], bridge[3]);
     }
     const block = Object.keys(IOS_RUNTIME_BLOCKS).find((b) => k.startsWith(`${b}.`));
     if (block != null) {
@@ -392,6 +437,24 @@ describe('iOS — RNISPanoCore.mm\'s own dictionary literals', () => {
 
   it('emits every summary key the TypeScript reads', () => {
     expect(iosMissing(SUMMARY_READ, IOS_PRODUCED.summary)).toEqual([]);
+  });
+
+  it('⚑ NEGATIVE CONTROL — a bridge key resolved around, or commented out, fails it (M5 review)', () => {
+    const bridgeFile = IOS_BRIDGE_STATUS.vcDeviceRefusal![0];
+    const real = fs.readFileSync(path.join(ROOT, bridgeFile), 'utf8');
+    expect(real.split('resolver(st)').length - 1).toBeGreaterThanOrEqual(1);
+    const mutants = [
+      real.replace('resolver(st)', 'resolver(RNISPanoCore.status() ?? ["running": false])'),
+      real.replace('st["vcDeviceRefusal"] = r', '// st["vcDeviceRefusal"] = r'),
+      real.replace('resolver(st)', 'st = ["running": false]\n        resolver(st)'),
+    ];
+    for (const mutant of mutants) {
+      expect(mutant).not.toBe(real);
+      expect(iosMissing(['vcDeviceRefusal'], new Set(), (f) => (f === bridgeFile ? mutant : real)))
+        .toEqual(['vcDeviceRefusal']);
+    }
+    // …and the real source passes the same check.
+    expect(iosMissing(['vcDeviceRefusal'], new Set())).toEqual([]);
   });
 
   it('⚑ NEGATIVE CONTROL — blanking the status literal fails it', () => {
