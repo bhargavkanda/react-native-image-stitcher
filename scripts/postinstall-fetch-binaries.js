@@ -216,6 +216,22 @@ async function main() {
     return;
   }
 
+  // v0.24.4 — bring-your-own-OpenCV.  A host that already ships OpenCV
+  // (see website/docs/sharing-opencv.md — an app must contain exactly
+  // ONE) supplies it via `$RNISHostOpenCV = true` in its Podfile or
+  // RNIS_HOST_OPENCV=1.  In that mode our ~27 MB download is pure waste:
+  // the podspec will depend on the host's pod rather than vendoring ours,
+  // so skip the fetch entirely.  Explicit opt-in only, never inferred.
+  if (process.env.RNIS_HOST_OPENCV === '1') {
+    log(
+      'RNIS_HOST_OPENCV=1 set — this app supplies its own OpenCV, so the '
+      + 'vendored binaries are not needed.  Skipping the download '
+      + '(remember to set `$RNISHostOpenCV = true` in your Podfile, and '
+      + 'ensure your OpenCV includes the stitching module).',
+    );
+    return;
+  }
+
   if (alreadyFetched()) {
     log(`OpenCV ${VERSION} already on disk; skipping fetch.`);
     return;

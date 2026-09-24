@@ -25,9 +25,9 @@ Uncontrolled — read once at mount.
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `defaultCaptureSource` | `CaptureSource` (`'ar' \| 'non-ar'`) | `'non-ar'` | Initial capture source, read once at mount (uncontrolled). Clamped by `captureSources`: `'ar'` forces it on, `'non-ar'` forces it off, `'both'` uses this value. |
+| `defaultCaptureSource` | `CaptureSource` (`'ar' \| 'non-ar'`) | `'non-ar'` | Initial capture source, read once at mount (uncontrolled). **Consider `'ar'`**: AR feeds the engine natively, so it is immune to the frame-processor build failure described in [Host integration](./host-integration.md#frame-processors--the-non-ar-capture-prerequisite) (caveats: on Android a device without Google Play Services for AR shows a blank AR preview with no automatic downgrade today; AR tap-photos use the AR video stream, no flash, no iOS depth sidecar). Clamped by `captureSources`. |
 | `defaultLens` | `CameraLens` (`'1x' \| '0.5x'`) | `'1x'` | Initial physical lens. When `captureSources='ar'` the lens is forced to `'1x'` — the ultra-wide isn't usable in AR. |
-| `captureSources` | `CaptureSourcesMode` (`'ar' \| 'non-ar' \| 'both'`) | `'both'` | Which capture sources the host allows. `'both'` shows the AR toggle; `'ar'` is AR-only (toggle **and** 0.5× chooser hidden); `'non-ar'` hides the toggle. A single source overrides a conflicting `defaultCaptureSource`. |
+| `captureSources` | `CaptureSourcesMode` (`'ar' \| 'non-ar' \| 'both'`) | `'both'` | Which capture sources the host allows. `'both'` shows the AR toggle; `'ar'` is AR-only (toggle **and** 0.5× chooser hidden); `'non-ar'` hides the toggle. A single source overrides a conflicting `defaultCaptureSource`. **Use `'ar'` to lock captures to AR and hide the AR pill so users can't flip modes.** |
 | `engine` | `'batch-keyframe'` | `'batch-keyframe'` | Which stitcher engine to drive. Only `'batch-keyframe'` is supported and is the default. |
 
 See [Flash & lenses](./flash-and-lenses.md) for how lens selection, device
@@ -169,9 +169,13 @@ wrong — it is a live prop and defaults to `true`.
 Master switch for the in-capture pan-guidance surfaces: the rotate prompt,
 the pan how-to animation/hint, the "too fast" pill, and the blinking
 countdown. Set `false` to suppress **all** of them. Note that the lateral-drift
-finalize ([`lateralBudgetCm`](#lateralbudgetcm)) and the post-stitch crop
-preview ([`rectCrop`](#rectcrop) / [`showPreview`](#showpreview)) have their
-own independent props and are **not** governed by `panGuidance`.
+stop ([`lateralBudgetCm`](#lateralbudgetcm) /
+[`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes)) and the
+post-stitch review surface ([`rectCrop`](#rectcrop) /
+[`showPreview`](#showpreview)) have their own props and are **not** governed
+by `panGuidance`. They are not independent of each other, though: a review
+surface **suppresses** the popup a finalized lateral stop would otherwise
+show — see [what shows after a lateral-drift stop](#what-shows-after-a-lateral-drift-stop).
 
 ### `maxPanDurationMs`
 
@@ -199,17 +203,159 @@ The prop JSDoc claims a default of `1.0 rad/s`. The real fallback literal is
 
 ### `lateralBudgetCm`
 
-`number`, default **`4`**.
+`number`, default **`8`** (v0.25.3 — was `4`).
 
 Cross-pan (lateral / sideways) drift budget in cm. Once integrated sideways
-translation exceeds this for the grace window, the capture **finalizes** with
-whatever was captured before the drift (carrying the `LATERAL_DRIFT_FINALIZE`
-warning). Set `0` to disable the lateral-drift stop.
+translation exceeds this for the grace window, the capture is **stopped**. Set
+`0` to disable the lateral-drift stop entirely.
 
-:::caution Stale JSDoc
-The prop JSDoc claims a default of `5`. The real component default is **`4`**
-(`usePanMotion`'s own `DEFAULT_LATERAL_BUDGET_CM` is also `4`).
+This is the **sensitivity** knob — how much drift is tolerated before a stop
+happens at all. What happens *at* that stop (finalize the partial sweep, or
+discard it) is a separate decision, controlled by
+[`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes). If operators
+report the stop firing too eagerly, raise this; if they report stopped captures
+being thrown away, lower that one.
+
+v0.25.3 raised the default after field reports of the stop firing on minor
+drift. **v0.26.0 fixed the underlying detector** — see
+[`lateralMotionModel`](#lateralmotionmodel). The budget stays at 8 so the
+detector change and the threshold do not move in the same release.
+
+:::warning `lateralBudgetCm` is not the only lateral trigger
+The capture is also stopped by an independent **cross-pan rotation** trigger,
+[`lateralTurnRateRadPerSec`](#lateralturnrateradpersec) — historically the
+primary one. `lateralBudgetCm` does not affect it. If operators report eager
+stops, read `latch=gyro|accel` in the `[panMotion]` telemetry
+([`panMotionDebug`](#panmotiondebug)) to find out which trigger is firing
+before tuning either. Setting `lateralBudgetCm={0}` disables **both**.
 :::
+
+Whether that stop KEEPS what was captured (finalize + stitch, carrying the
+`LATERAL_DRIFT_FINALIZE` warning) or throws it away is a separate decision —
+see [`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes) below. At
+its default the capture is kept only when at least 5 keyframes were accepted
+— a change from the 2 this budget used to imply.
+
+
+### `lateralTurnRateRadPerSec`
+
+`number`, default **`0.15`** (rad/s ≈ 8.6 °/s) — unchanged from earlier
+versions; exposed as a prop in v0.26.0.
+
+The **second, independent** lateral trigger: an EMA (τ ≈ 0.4 s) of the
+cross-pan gyroscope rate. Historically this has been the *primary* trigger in
+practice — it fires on sustained cross-axis rotation regardless of
+`lateralBudgetCm`.
+
+It was tuned against a single field trace (a straight pan smoothed to ~0.04
+rad/s; two deliberate cross-turns to ~0.3 and ~0.7). Raise it if operators are
+stopped while panning normally; lower it to catch gentler veering.
+
+Because both triggers set the same flag, a stop you attribute to "drifting
+sideways" may in fact be this one. Check `latch=` in the telemetry first.
+
+`0` disables **this** trigger only. `lateralBudgetCm={0}` disables **both**.
+
+### `lateralMotionModel`
+
+`'fused' | 'legacy'`, default **`'fused'`** (v0.26.0).
+
+Which physics the **displacement** (accelerometer) trigger runs.
+
+- **`'fused'`** — subtract the device's *fused gravity vector* per sample, then
+  high-pass the residual; derive `dt` from each sample's own sensor timestamp;
+  time-normalise every filter coefficient so the detector behaves the same at
+  any sensor cadence.
+- **`'legacy'`** — the ≤0.25.3 behaviour bit-for-bit: a per-sample IIR gravity
+  estimate and a hardcoded 20 ms `dt`.
+
+`'legacy'` **cannot tell a wrist tilt from a sideways slide** — a re-projection
+of gravity onto the cross-pan axis is arithmetically identical to real
+acceleration. Measured on an 8 s sweep with *zero* real translation, 6° of
+wrist roll read 5.18 cm, while a real 100 cm slide read 2.00 cm. It is an
+escape hatch for reproducing an old capture, not a rollout gate.
+
+Falls back to `'legacy'` **automatically and per sample** whenever the gravity
+sensor is absent, errored, warming up, stale, or reporting an implausible
+magnitude — so a device without a usable gravity sensor is never worse off.
+
+### `panMotionDebug`
+
+`boolean`, default **`__DEV__`**.
+
+Emit the throttled `[panMotion]` diagnostics (~2.5 Hz). Pass `true` to keep
+them in a **release** build while diagnosing a field report without shipping a
+new version; pass `false` to silence them in development.
+
+The lines carry `latch=gyro|accel`, `gSrc=`, `lat=…cm`, `budget=`, `crossEma=`,
+`thresh=`, per-sample `dt` statistics, and both the fused and IIR estimates of
+the same quantity — enough to attribute a stop to a trigger and a cause from a
+Metro log.
+
+### `lateralStopFinalizeMinFrames`
+
+`number`, default **`5`**.
+
+The accepted-keyframe count at or above which a lateral-drift stop
+**finalizes** the capture: the partial sweep is stitched and delivered to
+`onCapture` with a `LATERAL_DRIFT_FINALIZE` warning. Below the threshold the
+capture is **discarded** instead — the engine is cancelled, nothing is
+stitched, and [`onCaptureAbandoned('lateral-drift')`](./capture-result.md#oncaptureabandoned--no-output-at-all)
+fires.
+
+| Value | Behaviour |
+|---|---|
+| `0` | **ALWAYS DISCARD** — a laterally-drifted sweep is never kept, whatever was captured. |
+| `N >= 1` | Finalize iff `acceptedKeyframeCount >= N`, otherwise discard. |
+| `2` | Reproduces the previously hardcoded behaviour exactly (keep anything stitchable). |
+| `5` (default) | Keep only a real sweep; 2-4 keyframes discard. |
+
+:::danger Behaviour change
+The default of `5` is **not** the `2` the SDK used to hardcode. A capture that
+accepted 2, 3 or 4 keyframes before drifting used to finalize and reach
+`onCapture`; it now abandons and fires
+[`onCaptureAbandoned('lateral-drift')`](./capture-result.md#oncaptureabandoned--no-output-at-all)
+instead. For shelf capture that remnant is not a usable panorama — it is waste
+that still costs a stitch, a file, and an operator's attention on output that
+has to be rejected downstream.
+
+**Pass `lateralStopFinalizeMinFrames={2}` to restore the previous behaviour.**
+:::
+
+:::warning `0` is a special case, not arithmetic
+`0` means *always discard*. It has to be guarded explicitly, because the
+natural `acceptedKeyframeCount >= minFrames` comparison is unconditionally
+**true** at `0` — which would silently mean the exact opposite, "always
+finalize".
+:::
+
+Negative, `NaN` and infinite values normalise back to the default, so a broken
+host config degrades to the standard behaviour rather than to "throw every
+capture away". Fractional values round **up** (`2.5` needs 3 frames) — the prop
+counts whole frames.
+
+Why it exists: a hardcoded threshold is a product judgement the SDK is not
+entitled to make. A shelf-audit host wants the 3-frame partial panorama; a host
+feeding a downstream vision pipeline treats any laterally-drifted sweep as
+garbage, and keeping it only costs a stitch, a file, and an operator's
+attention on output they will bin.
+
+The discard path shows its own popup state, whose copy does not promise a
+stitch — [`lateralStopDiscardedTitle` / `lateralStopDiscardedBody`](#guidancecopy-keys).
+Below 2 accepted keyframes nothing stitchable existed in the first place, so
+the popup keeps the pre-existing "follow the arrow" wrong-direction copy
+regardless of this threshold.
+
+A discarded capture **always** shows its popup: nothing was kept, no review
+surface follows, and the popup is the only feedback there is. A *finalized*
+stop is the asymmetric case — it shows no popup at all when a review surface
+follows. See [what shows after a lateral-drift
+stop](#what-shows-after-a-lateral-drift-stop).
+
+```tsx
+// Never keep a drifted sweep — the pipeline downstream would reject it anyway.
+<Camera lateralStopFinalizeMinFrames={0} onCaptureAbandoned={handleAbandon} />
+```
 
 ### `rectCrop`
 
@@ -239,11 +385,47 @@ Both props control the post-finalize UI, and **`rectCrop` takes precedence**:
 | `true` | `false` | Draggable-quad crop editor (drag 4 corners, confirm rectifies). |
 | `true` | `true` | Crop editor wins — `showPreview` is ignored. |
 
+These two props are also what decides whether a **finalized** lateral-drift
+stop shows its popup: the first row is the only configuration in which it
+does, because it is the only one where no review surface follows. See [what
+shows after a lateral-drift stop](#what-shows-after-a-lateral-drift-stop).
+
 When `rectCrop` is on, the native auto-crop (`maxInscribedRectCrop`) is forced
 off so the manual crop is the single source of truth. The crop editor's button
 labels and the preview's confirm label are all overridable via
 [`guidanceCopy`](#guidancecopy-keys) (`cropConfirm`, `cropReset`,
 `cropUseOriginal`, `cropRetake`, `previewConfirm`).
+
+### What shows after a lateral-drift stop
+
+Only **one** of `<Camera>`'s capture-flow modals is ever on screen at a time.
+On iOS each one is a real `UIViewController` presentation, and a controller can
+present only one child: a second present is refused and leaves an invisible
+window in the hierarchy that swallows every touch. That was the 0.25.1
+dead-shutter bug, and the rule below is what prevents it.
+
+So a host can predict exactly what the operator sees:
+
+| Stop outcome | `rectCrop` / `showPreview` | What appears |
+|---|---|---|
+| **Finalized** | either is on | **Review surface only.** No popup — the surface's own banner already carries the same `LATERAL_DRIFT_FINALIZE` warning. |
+| **Finalized** | both off | **Popup only** — [`lateralStopTitle` / `lateralStopBody`](#guidancecopy-keys). No review surface follows, so the popup is the only feedback. |
+| **Discarded** by [`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes) | any | **Popup only** — [`lateralStopDiscardedTitle` / `lateralStopDiscardedBody`](#guidancecopy-keys). Nothing was kept, so there is nothing to review. |
+| **Too few frames** to stitch anything | any | **Popup only** — [`lateralWrongDirectionTitle` / `lateralWrongDirectionBody`](#guidancecopy-keys). |
+
+The review surface additionally **waits** while any guidance popup is up
+(including the orientation-drift popup) and mounts when that popup is
+dismissed. The pending result is held in state meanwhile, so nothing is lost —
+it costs a beat, not a capture.
+
+:::note Changed in 0.25.1
+Before 0.25.1 a finalized stop showed the popup **and** then tried to open the
+review surface over it, which is the clash described above. If your host
+relied on the popup appearing after a *finalized* lateral stop, it is now
+suppressed whenever a review surface follows — the warning is in that
+surface's banner instead. Discard outcomes are unaffected and still show
+their popup.
+:::
 
 ### `guidanceCopy`
 
@@ -259,7 +441,7 @@ for the full key list and defaults.
 <Camera
   panMode="vertical"
   panGuidance
-  lateralBudgetCm={4}
+  lateralBudgetCm={8}
   rectCrop
   guidanceCopy={{
     rotateToLandscape: 'Turn your phone sideways',
@@ -341,9 +523,9 @@ absorbed into it.
 | `onCapture` | `(result: CameraCaptureResult) => void` | **Always** fires once per capture attempt (v0.16). Carries `ok: true` (output present, with `warnings[]`) or `ok: false` (carrying the `CameraError`). Gate on `ok` before reading `uri` / `width` / `height`. See [Capture result & errors](./capture-result.md). |
 | `onCaptureSourceChange` | `(source: CaptureSource) => void` | The effective capture source changes (AR ↔ non-AR). |
 | `onLensChange` | `(lens: CameraLens) => void` | The selected physical lens changes (1× ↔ 0.5×). |
-| `onFramesDropped` | `(info: FramesDroppedInfo) => void` | Fires once per panorama capture if the progressive-confidence retry loop inside `cv::Stitcher` dropped one or more input frames. `info` is `{ requested: number; included: number }`. |
+| `onFramesDropped` | `(info: FramesDroppedInfo) => void` | Fires once per panorama capture if `cv::Stitcher`'s confidence filtering (inside the winning retry-ladder rung, v0.25) dropped one or more input frames. `info` is `{ requested: number; included: number }`. |
 | `onError` | `(err: CameraError) => void` | Fires on failure — an unchanged mirror of the `ok: false` `onCapture` result, so existing error handling keeps working. See [Capture result & errors](./capture-result.md). |
-| `onCaptureAbandoned` | `(reason: 'orientation-drift' \| 'lateral-drift') => void` | Fires when the SDK auto-abandons an in-progress capture **without** producing output. `'orientation-drift'` = cross-mode rotation mid-capture; `'lateral-drift'` (v0.16) = sideways move before enough frames. No `onCapture` fires for an abandoned capture. |
+| `onCaptureAbandoned` | `(reason: 'orientation-drift' \| 'lateral-drift') => void` | Fires when the SDK auto-abandons an in-progress capture **without** producing output. `'orientation-drift'` = cross-mode rotation mid-capture; `'lateral-drift'` (v0.16) = a sideways drift that [`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes) declined to finalize (by default, fewer than 5 accepted keyframes). No `onCapture` fires for an abandoned capture. |
 
 ## Output
 
@@ -386,9 +568,9 @@ the settings tree these fields sit under.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `captureSource` | `'ar' \| 'non-ar'` | `'ar'` | Which camera + tracking source feeds the engine. `'ar'` = ARKit/ARCore pose (real translation); `'non-ar'` = vision-camera gyro yaw+pitch only, with the JS IMU gate filling translation. (Settings-tree default; the component prop default for `defaultCaptureSource` is `'non-ar'`.) |
+| `captureSource` | `'ar' \| 'non-ar'` | `'ar'` | Which camera + tracking source feeds the engine. `'ar'` = ARKit/ARCore pose (real translation); `'non-ar'` = vision-camera gyro yaw+pitch only, with the JS IMU gate filling translation. (Settings-tree default; the component prop default for `defaultCaptureSource` is `'non-ar'` — the component's runtime-derived source always wins.) |
 | `debug` | `boolean` | `false` | Show the lib's built-in diagnostic overlay (memory / keyframe / orientation pills, stitch-stats toast, metrics block). |
-| `stitchMode` | `'auto' \| 'panorama' \| 'scans'` | `'auto'` | `cv::Stitcher` pipeline mode. `'auto'` picks panorama/scans at finalize from the translation/rotation ratio; `'panorama'` = rotation-only (ORB + BA-Ray + Spherical); `'scans'` = affine (Affine + BA-Affine + Plane). Both platforms retry with the opposite mode on degenerate params. |
+| `stitchMode` | `'auto' \| 'panorama' \| 'scans'` | `'auto'` | `cv::Stitcher` pipeline mode. `'auto'` picks panorama/scans at finalize from the translation/rotation ratio; `'panorama'` = rotation-only (ORB + BA-Ray + Spherical); `'scans'` = affine (Affine + BA-Affine + Plane). On failure the flat retry ladder (v0.25) falls back to the opposite mode automatically on both platforms. |
 | `warperType` | `'plane' \| 'cylindrical' \| 'spherical'` | `'plane'` | Output projection. PANORAMA mode uses it directly; SCANS hard-wires `PlaneWarper` and ignores it. v0.16 reverted from `'spherical'` to `'plane'`. |
 | `blenderType` | `'multiband' \| 'feather'` | `'multiband'` | Pixel blender. `'multiband'` = cleaner seams, holds all warped frames in memory; `'feather'` = streams, lower peak memory. |
 | `seamFinderType` | `'graphcut' \| 'skip'` | `'graphcut'` | Seam-finder strategy. `'graphcut'` finds optimal seams (pair with `multiband`); `'skip'` streams warp+feed (pair with `feather`, lowest memory). |
@@ -428,11 +610,13 @@ fall back to `DEFAULT_GUIDANCE_COPY` (the defaults shown here).
 | `rotateToPortrait` | `Rotate to portrait` | Caption pill while waiting for the user to rotate to portrait (`panMode: 'horizontal'`). |
 | `panHint` | `Pan slowly top to bottom` | Short hint shown with the how-to-pan animation. |
 | `tooFast` | `Moving too fast — slow down` | Transient warning when the pan is too fast. |
-| `lateralStopTitle` | `Keep the pan straight` | Popup title when the user drifts laterally (cross-axis). |
-| `lateralStopBody` | `You moved sideways. Pan in one direction only — we stitched what you captured.` | Popup body / guidance for the lateral-drift stop (capture was finalized). |
-| `lateralStopDismiss` | `Got it` | Popup dismiss button label. |
-| `lateralWrongDirectionTitle` | `Follow the arrow` | Popup title when lateral drift stopped the capture before enough frames to stitch (nothing produced). |
+| `lateralStopTitle` | `Keep the pan straight` | Popup title for a lateral stop that was **finalized** (capture kept + stitched). Reachable only when **no** review surface follows — with `rectCrop` or `showPreview` on, no popup is shown and the warning appears in that surface's banner instead. See [what shows after a lateral-drift stop](#what-shows-after-a-lateral-drift-stop). |
+| `lateralStopBody` | `You moved sideways. Pan in one direction only — we stitched what you captured.` | Popup body for the **finalized** lateral stop. Shown only when output actually exists **and** no review surface follows — see the discarded pair below, and See [what shows after a lateral-drift stop](#what-shows-after-a-lateral-drift-stop). |
+| `lateralStopDismiss` | `Got it` | Popup dismiss button label — used by whichever popup state is showing. |
+| `lateralWrongDirectionTitle` | `Follow the arrow` | Popup title when lateral drift stopped the capture before enough frames to stitch anything (nothing produced). |
 | `lateralWrongDirectionBody` | `You moved the phone the wrong way. Pan slowly in the direction the arrow shows, in one straight line.` | Popup body for the too-few-frames wrong-direction stop. |
+| `lateralStopDiscardedTitle` | `Capture discarded` | Popup title for the third state: enough frames to stitch, but [`lateralStopFinalizeMinFrames`](#lateralstopfinalizeminframes) discarded the capture. At the default threshold this is the 2-to-4-keyframe band, so it is reachable out of the box. |
+| `lateralStopDiscardedBody` | `You moved sideways, so this capture was discarded. Shoot it again, panning in one straight line.` | Popup body for the discarded-by-policy stop. Deliberately does **not** promise a stitch — no output was produced. |
 | `cropConfirm` | `Crop` | Confirm button on the crop editor. |
 | `cropReset` | `Reset` | Reset-corners button on the crop editor. |
 | `cropUseOriginal` | `Use original` | "Emit the stitch un-cropped" button on the crop editor. |

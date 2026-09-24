@@ -131,6 +131,7 @@ describe('panoramaSettingsToNativeConfig', () => {
         maxKeyframes: 8,
         overlapThreshold: 0.15,
         maxKeyframeIntervalMs: 1500,
+        timeIntervalCanFinalize: true,
         // flow omitted — legal per the optional `?` in the type
       },
     };
@@ -172,6 +173,7 @@ describe('panoramaSettingsToNativeConfig', () => {
       'frameSelectionMode',
       'keyframeMaxCount',
       'keyframeOverlapThreshold',
+      'keyframeTimeIntervalCanFinalize',
       'maxKeyframeIntervalMs',
       'seamFinderType',
       'sharpnessWindow',
@@ -208,6 +210,7 @@ describe('panoramaSettingsToNativeConfig', () => {
         maxKeyframes: 6,
         overlapThreshold: 0.20,
         maxKeyframeIntervalMs: 1500,
+        timeIntervalCanFinalize: true,
         // antiBlur omitted — legal per the optional `?`
       },
     };
@@ -272,6 +275,7 @@ describe('panoramaSettingsToNativeConfig', () => {
         maxKeyframes: 6,
         overlapThreshold: 0.20,
         maxKeyframeIntervalMs: 1500,
+        timeIntervalCanFinalize: true,
         // sharpnessWindow omitted — legal per the optional `?`
       },
     };

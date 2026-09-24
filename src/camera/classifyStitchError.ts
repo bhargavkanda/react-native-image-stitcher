@@ -61,7 +61,13 @@ export function classifyStitchError(message: string): CameraErrorCode {
   // OOM, including the pre-stitch headroom abort ("pre-stitch memory abort"
   // / "memory abort") that fires when even the minimal streaming config
   // won't fit — same user remedy (shorter sweep), so same code.
-  if (/out of memory|oom|memory abort/i.test(message)) {
+  // v0.24.7 — caught native allocation failures added: BOTH shapes the C++
+  // catch ladder produces (std::bad_alloc, and cv::Exception StsNoMem whose
+  // what() reads "(-4:Insufficient memory) Failed to allocate N bytes")
+  // previously fell through to the generic code, so a real OOM showed the
+  // host's catch-all message instead of "Try a shorter sweep".
+  if (/out of memory|oom|memory abort|bad_alloc|insufficient memory|failed to allocate/i
+    .test(message)) {
     return 'STITCH_OOM';
   }
   return 'PANORAMA_FINALIZE_FAILED';

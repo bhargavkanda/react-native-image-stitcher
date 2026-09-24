@@ -62,6 +62,14 @@ import { DEFAULT_GUIDANCE_COPY } from './cameraGuidanceCopy';
 
 export interface LateralMotionModalProps {
   /**
+   * v0.25 — counter-rotation (degrees) so the popup reads upright at the
+   * PHYSICAL device orientation even though the camera window is
+   * portrait-locked.  Pass `contentRotationDeg(jsLandscape,
+   * deviceOrientation)` (what <Camera> uses for its control content);
+   * 0/undefined = no rotation (legacy).
+   */
+  contentRotationDeg?: number;
+  /**
    * Show / hide.  In the `<Camera>` integration this is driven by the
    * latched lateral-stop flag (capture already finalized when true).
    */
@@ -99,6 +107,7 @@ export function LateralMotionModal(
 ): React.JSX.Element {
   const {
     visible,
+    contentRotationDeg = 0,
     title = DEFAULT_GUIDANCE_COPY.lateralStopTitle,
     body = DEFAULT_GUIDANCE_COPY.lateralStopBody,
     dismissLabel = DEFAULT_GUIDANCE_COPY.lateralStopDismiss,
@@ -125,7 +134,13 @@ export function LateralMotionModal(
       ]}
     >
       <View style={styles.backdrop}>
-        <View style={styles.card}>
+        <View
+          style={[
+            styles.card,
+            contentRotationDeg !== 0
+              && { transform: [{ rotate: `${contentRotationDeg}deg` }] },
+          ]}
+        >
           <Text style={styles.title} accessibilityRole="header">
             {title}
           </Text>

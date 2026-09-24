@@ -1229,6 +1229,17 @@ public final class IncrementalStitcher: NSObject {
         } else {
             self.keyframeGate.maxKeyframeIntervalMs = 1500.0
         }
+        // v0.25 — may a keep-alive accept be the one that REACHES the cap
+        // and so auto-finalize the capture?  Defaults to true (pre-0.25
+        // behaviour) when the key is absent.  See
+        // `timeBudgetMayForceAccept` in cpp/keyframe_gate.hpp.
+        if let v = configOverrides["keyframeTimeIntervalCanFinalize"] as? Bool {
+            self.keyframeGate.timeIntervalCanFinalize = v
+        } else if let v = configOverrides["keyframeTimeIntervalCanFinalize"] as? NSNumber {
+            self.keyframeGate.timeIntervalCanFinalize = v.boolValue
+        } else {
+            self.keyframeGate.timeIntervalCanFinalize = true
+        }
         // V16 — novelty aggregation percentile.  Clamp at start to
         // [0.5, 0.99]; the bridge re-clamps but matching it here
         // means our state stays in-range for logging.  Default 0.85
@@ -1817,14 +1828,21 @@ public final class IncrementalStitcher: NSObject {
                             seamFinderType: payload.batchSeamFinderType,
                             captureOrientation: payload.captureOrientation,
                             useInscribedRectCrop: payload.batchEnableInscribedRectCrop,
-                            // 2026-06-16 — HIGH-LEVEL ACROSS THE BOARD (mirrors
-                            // Android): always cv::Stitcher PANORAMA with the
-                            // tree-chosen warper (payload.batchWarperType is now
-                            // highLevelWarper).  The manual path's OOM hardening
-                            // was ported to high-level (catch ladder + two-phase
-                            // canvas guard + RAM-aware compositingResol + spherical
-                            // rescue), so this is now memory-safe.
-                            stitchMode: "panorama",
+                            // v0.25 — HONOR THE RESOLVED MODE (jetsam RCA
+                            // durable fix): the auto-resolver classifies
+                            // translation-dominant captures as "scans" from
+                            // real pose/IMU data, and this dispatch used to
+                            // compute that verdict and then hardcode
+                            // "panorama" anyway — sending shelf translations
+                            // through the rotation model, whose failure walked
+                            // the multi-stitch rescue ladder (the memory-peak
+                            // path).  SCANS-classified captures now run the
+                            // affine model FIRST; the ladder (incl. the
+                            // reverse PANORAMA rescue) remains for
+                            // misclassified captures.  Hosts can force the old
+                            // behaviour with stitcher.stitchMode='panorama'
+                            // (this only changes what 'auto' does).
+                            stitchMode: payload.batchStitchModeResolved,
                             useManualPipeline: false
                         )
                         // V16 fix-attempt 9 (verified on device,
@@ -1874,11 +1892,12 @@ public final class IncrementalStitcher: NSObject {
                         // Keep saved keyframes on disk for post-hoc
                         // re-processing (the maintainer's request).  Cleanup is
                         // a follow-up debug-menu task.
-                        // 2026-05-16 (Issue 5) — surface C+D
-                        // progressive-confidence retry telemetry to JS
-                        // so the host can render a debug toast.  -1
-                        // sentinels = "no retry data" (early-return
-                        // success paths bypass the retry loop).
+                        // 2026-05-16 (Issue 5) — surface stitch-retry
+                        // telemetry (the flattened ladder's winning
+                        // rung since 2026-08-17) to JS so the host can
+                        // render a debug toast.  -1 sentinels = "no
+                        // retry data" (early-return success paths
+                        // bypass the ladder).
                         var batchDict: [String: Any] = [
                             "panoramaPath": r.outputPath,
                             "width": Int(r.width),
@@ -2653,6 +2672,23 @@ public final class IncrementalStitcher: NSObject {
         // keyframes, which would defeat the gate entirely.
         let throttledThisFrame = gateActive && !cadenceFires
         if shouldEvaluateGate {
+            // v0.25 — pose trust.  The gate's two POSE-DRIVEN
+            // force-accepts (translation budget + angular fallback)
+            // accept a frame regardless of what the IMAGE shows, so they
+            // are only sound while the pose they difference is sound.
+            // ARKit reports `.limited` while initialising and during
+            // relocalisation, when the world transform slides/snaps by
+            // metres between consecutive frames — which those two paths
+            // read as real camera motion and burst-accept to the
+            // keyframe cap, auto-finalising the operator's hold in as
+            // little as ~415 ms (v0.24.x field RCA).  Every AR capture
+            // starts next to a session (re)start — finalize stops and
+            // restarts the session — so this is the NORM at hold start,
+            // not an edge case.  Non-AR poses are gyro-synthesised and
+            // carry `.tracking` verbatim from the JS driver, so this is
+            // a no-op there (they already opt out via
+            // disableAngularFallback).
+            self.keyframeGate.poseTrusted = (pose.trackingState == .tracking)
             let plane = RNSARSession.shared.latchedPlaneTransform()
             // V16 A2 — call the pixel-buffer-aware overload so Flow
             // strategy gets the image content.  Pose strategy is
@@ -3439,6 +3475,45 @@ public final class IncrementalStitcher: NSObject {
     /// inputs (nil poses, no motion either source) default to
     /// "panorama" (safer for pure-rotation captures; SCANS on a
     /// translation-free input produces unbounded canvas growth).
+    /// Minimum ABSOLUTE translation before the auto-resolver may choose SCANS.
+    ///
+    /// `ratio` is scale-free and therefore cannot tell a 30 cm shelf scan from
+    /// a 5 cm wrist pivot — see `resolveStitchModeAuto` for the derivation
+    /// showing the pan angle cancels out of it entirely.  This floor supplies
+    /// the absolute scale the ratio lacks.
+    ///
+    /// 0.25 m sits below the 30 cm shelf scan the resolver targets.  Used ONLY
+    /// on the degenerate no-pose branch, where `rRadians` is unavailable so no
+    /// ratio can be formed and absolute distance is the only signal left.
+    private static let kScansMinTranslationMetres = 0.25
+
+    /// Minimum motion-shape ratio before the auto-resolver may choose SCANS.
+    ///
+    /// `ratio` == r/(r+0.10) with r the PIVOT RADIUS, so this is really a
+    /// statement about anatomy: 0.93 => r >= 1.33 m, further back than any
+    /// person can pivot (wrist ~15, elbow ~35, extended shoulder ~60-80 cm),
+    /// and well below the metres genuine translation yields.
+    ///
+    /// The usable corridor is NARROW and both walls are measured: the worst
+    /// real hand-held sweep observed sits at 0.889 (r = 80 cm), and the 30 cm
+    /// / 10 deg shelf scan this resolver targets sits at 0.946.  0.93 is very
+    /// nearly the midpoint.  0.95 was tried and rejected — it excludes that
+    /// 0.946 scan outright.
+    ///
+    /// WHY ERR HIGH.  The two failure directions are not symmetric.  Too LOW
+    /// affine-warps an ordinary rotation capture, and that is terminal — the
+    /// ladder short-circuits on the scans rung and never tries panorama.  Too
+    /// HIGH merely starts a genuine scan panorama-primary; it registers poorly
+    /// and the ladder's own scans@1.00 / scans@0.50 rungs recover it, costing
+    /// rungs rather than correctness.  So overshoot, within reason.
+    ///
+    /// The ceiling is ~0.97, above which the 30 cm / 10 deg shelf scan this
+    /// resolver exists to catch (0.967) would start being excluded.
+    ///
+    /// The old 0.55 meant r >= 12.2 cm — shorter than a wrist — so every
+    /// hand-held pan was classified as a scan.
+    private static let kScansMinRatio = 0.93
+
     private func resolveStitchModeAuto(
         first: [Double]?,
         last:  [Double]?,
@@ -3446,10 +3521,19 @@ public final class IncrementalStitcher: NSObject {
     ) -> (mode: String, rRadians: Double, tMeters: Double, ratio: Double) {
         guard let firstPose = first, firstPose.count == 7,
               let lastPose  = last,  lastPose.count == 7  else {
-            // No pose data at all — fall back on whichever signal we
-            // do have.  imuTranslationMetres > 0 hints "scans"; 0
-            // hints "panorama".  rRadians 0.0 — no gyro signal.
-            return (imuTranslationMetres > 0.05 ? "scans" : "panorama", 0.0, 0.0, 0.0)
+            // No pose data at all — the only signal left is the
+            // double-integrated accelerometer, measured on 2026-08-26 at
+            // r = -0.28 against this stitcher's own image-derived translation
+            // (15x spread in the error; the capture with the LEAST real
+            // translation produced the HIGHEST reading).  The old 0.05 m trip
+            // sat INSIDE that channel's noise floor — ordinary captures in the
+            // session read 0.02-0.05 m while translating far less — so this
+            // path routed routine pans to SCANS on noise alone.  Hold it to the
+            // same absolute floor as the pose path: on an unusable signal, fail
+            // to PANORAMA (the safer default per this function's docstring;
+            // SCANS on a rotation-only capture grows the canvas unboundedly).
+            return (imuTranslationMetres >= Self.kScansMinTranslationMetres
+                    ? "scans" : "panorama", 0.0, 0.0, 0.0)
         }
         // Translation magnitude (Euclidean, in metres).
         let dtx = lastPose[0] - firstPose[0]
@@ -3484,11 +3568,77 @@ public final class IncrementalStitcher: NSObject {
         // scans (low rotation, large real translation) skip this and still
         // reach SCANS via the ratio.
         let lowRotationGuard = rRadians > 0.35 && tMeters < 0.25
-        let mode = (!lowRotationGuard && ratio >= 0.55) ? "scans" : "panorama"
+
+        // 2026-08-26 — ABSOLUTE TRANSLATION FLOOR.  `ratio` alone cannot
+        // discriminate a shelf scan from an ordinary hand-held pan, because it
+        // is not measuring what it appears to.  Substituting the arc a pan
+        // traces when it pivots `r` behind the lens, `tMeters = r * rRadians`:
+        //
+        //     ratio = (r*rRad/0.10) / (r*rRad/0.10 + rRad) = r / (r + 0.10)
+        //
+        // THE PAN ANGLE CANCELS.  `ratio >= 0.55` reduces to `r >= 0.122 m`,
+        // i.e. the verdict depends only on how far behind the lens the operator
+        // pivots — wrist ~15 cm, forearm ~25 cm, elbow ~35 cm, shoulder ~60 cm.
+        // Every hand-held pan clears it; only rotating the phone about its own
+        // body does not.  Verified against a 2026-08-26 device session: the
+        // closed form reproduced all six observed ratios to three decimals.
+        //
+        // `lowRotationGuard` was therefore doing all the real work, and only
+        // above 0.35 rad — so pans SHORTER than ~20 deg fell through to SCANS
+        // regardless of how little they translated.  Two such captures (16.9
+        // and 15.7 deg, 4.4 and 4.9 cm) shipped as SCANS; re-running them
+        // through `cv::detail::BestOf2NearestMatcher` — the finalize matcher
+        // itself — scored the HOMOGRAPHY model 40-53 % higher than affine
+        // (mean pair confidence 1.27 vs 0.83 / 0.91), and more than halved the
+        // count of pairs above the `leaveBiggestComponent` threshold under
+        // affine.  Both stitched cleanly as panoramas from the same keyframes.
+        //
+        // A genuine shelf scan is characterised by LARGE ABSOLUTE translation —
+        // this function's own worked example uses 30 cm — not by a ratio any
+        // arm movement satisfies.  Requiring the absolute floor admits that
+        // case and excludes hand-held pans (measured 2-10 cm).
+        //
+        // It also fixes NON-AR, where `tPose` is 0 so `tMeters` is 100 % the
+        // double-integrated accelerometer — measured at r = -0.28 against this
+        // stitcher's own image-derived estimate, i.e. ANTI-correlated with the
+        // quantity it stands in for.  That signal cannot support any threshold;
+        // the floor makes non-AR fail to PANORAMA, which this function's
+        // docstring already calls the safer default.  A host that genuinely
+        // wants SCANS pins it via `stitchMode`.
+        // The threshold is the whole fix.  `ratio` is exactly r/(r+0.10) where
+        // r = tMeters/rRadians is the PIVOT RADIUS — how far behind the lens
+        // the operator turned.  It already accounts for rotation correctly: the
+        // SAME 49.5 cm of travel reads r = inf (SCANS) with no rotation and
+        // r = 59 cm (panorama) through a 47.7 deg arc.  What was wrong was
+        // 0.55, which corresponds to r >= 12.2 cm — SHORTER THAN A HUMAN WRIST,
+        // so every hand-held pan cleared it.
+        //
+        // 0.93 corresponds to r >= 1.33 m: clear air above anything a person
+        // can pivot about, and far below the metres genuine bodily translation
+        // produces.  Measured on 2026-08-26, a real arm sweep reached
+        // r = 80 cm (ratio 0.889) — which is why 0.90 is too tight — while the
+        // shelf scan this resolver targets (30 cm / 10 deg) sits at 0.967.
+        //
+        // Erring toward PANORAMA is deliberate: a missed scan still reaches
+        // the affine model via the ladder's scans rungs, whereas a wrongly
+        // affine-warped rotation capture is the visible quality regression
+        // that was actually reported.
+        //
+        // This supersedes the absolute translation floor tried first, which
+        // could not work: it never looks at rotation, so it cannot separate a
+        // 49.5 cm straight slide from a 49.5 cm arm sweep — and the arm sweep
+        // is exactly what slipped through it at conf=0.500.
+        let mode = (!lowRotationGuard && ratio >= Self.kScansMinRatio)
+            ? "scans" : "panorama"
         os_log(.fault, log: Self.diagLog,
-               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f rotGuard=%d → %{public}@",
-               tPose, imuTranslationMetres, rRadians, ratio,
-               lowRotationGuard ? 1 : 0, mode)
+               "[stitchMode.auto] tPose=%.3fm tImu=%.3fm r=%.3frad ratio=%.3f thresh=%.2f rotGuard=%d rEff=%.3fm → %{public}@",
+               tPose, imuTranslationMetres, rRadians, ratio, Self.kScansMinRatio,
+               lowRotationGuard ? 1 : 0,
+               // Effective PIVOT RADIUS = tMeters / rRadians.  ratio is exactly
+               // rEff/(rEff+0.10), so logging rEff makes the verdict physically
+               // readable: wrist ~0.15 m, elbow ~0.35 m, extended shoulder
+               // ~0.60-0.80 m, genuine bodily translation metres.
+               rRadians > 1e-6 ? tMeters / rRadians : 0.0, mode)
         return (mode, rRadians, tMeters, ratio)
     }
 

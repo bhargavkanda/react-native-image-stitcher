@@ -7,12 +7,13 @@
  * ⚠ WHY THIS EXISTS. The lateral popup used to be raised AT the stop, and
  * ~550 ms later the finished stitch mounted `RectCropPreview` on top of it:
  * two RN `<Modal>`s at once, which on iOS leaves an invisible window that
- * swallows every touch — a dead shutter (main's 28d11df RCA). With `rectCrop`
- * ON by default since 2026-09-23, every default host reaches that path. The
- * popup is now decided where the result lands. Every sweep-engine guard-rail
- * test mounts `engine="sweep"`, so before this file nothing covered the
- * keyframe branch: restoring the old `setLateralStopVisible(true)` at the stop
- * passed the whole suite.
+ * swallows every touch — a dead shutter (28d11df). With `rectCrop` ON by
+ * default since 2026-09-23, every default host reaches that path.
+ * `modalPresentation.ts` now decides the popup up front — a finalized stop
+ * that opens a review shows none — and `lateralStopPolicy.ts` decides whether
+ * the stop keeps anything (default floor: 5 keyframes). Every sweep-engine
+ * guard-rail test mounts `engine="sweep"`, so this file is what covers the
+ * keyframe branch through the real `<Camera>`.
  */
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
@@ -79,6 +80,8 @@ import { Camera } from '../Camera';
 import { RectCropPreview } from '../RectCropPreview';
 // eslint-disable-next-line import/first
 import { LateralMotionModal } from '../LateralMotionModal';
+// eslint-disable-next-line import/first
+import { DEFAULT_GUIDANCE_COPY } from '../cameraGuidanceCopy';
 
 const OK_RESULT = {
   panoramaPath: '/d/p.jpg', width: 400, height: 100,
@@ -129,7 +132,7 @@ describe('keyframe lateral stop — never two modals at once', () => {
   it('with the crop editor (the default): no popup, ever — the review banner carries the reason', async () => {
     const seen: any[] = [];
     const { t, rerender } = await setup({ onCapture: (r: any) => seen.push(r) });
-    await tripLateral(rerender, 3);
+    await tripLateral(rerender, 5);
     // The instant of the stop is where the old code raised it.
     expect(vis(t, LateralMotionModal)).toBe(false);
     await act(async () => { await sleep(120); });
@@ -145,7 +148,7 @@ describe('keyframe lateral stop — never two modals at once', () => {
   it('with no review surface: the popup is the fallback, and onCapture says why', async () => {
     const seen: any[] = [];
     const { t, rerender } = await setup({ rectCrop: false, onCapture: (r: any) => seen.push(r) });
-    await tripLateral(rerender, 3);
+    await tripLateral(rerender, 5);
     await act(async () => { await sleep(120); });
     expect(vis(t, LateralMotionModal)).toBe(true);
     expect(vis(t, RectCropPreview)).toBe(false);
@@ -153,15 +156,39 @@ describe('keyframe lateral stop — never two modals at once', () => {
     act(() => t.unmount());
   });
 
-  it('when the stitch fails: the popup, because nothing else will say why', async () => {
+  it('when the stitch fails with a review configured: no popup, and BOTH callbacks say why', async () => {
+    // `lateralPopupShouldShow`'s documented edge case: the popup is decided up
+    // front from the host's configuration, so a finalized stop on a host with
+    // a review surface shows none even when the stitch then fails. Biasing
+    // the other way would reinstate the two-modal clash for every normal
+    // capture. The failure reaches the host on `onError` AND `onCapture`, and
+    // the latter still carries the cause.
     g.__kf.finalizeImpl = async () => { throw new Error('boom'); };
     const seen: any[] = [];
-    const { t, rerender } = await setup({ onCapture: (r: any) => seen.push(r), onError: () => {} });
+    const errors: unknown[] = [];
+    const { t, rerender } = await setup({
+      onCapture: (r: any) => seen.push(r), onError: (e: unknown) => errors.push(e),
+    });
+    await tripLateral(rerender, 5);
+    await act(async () => { await sleep(120); });
+    expect(vis(t, LateralMotionModal)).toBe(false);
+    expect(vis(t, RectCropPreview)).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(seen[0].ok).toBe(false);
+    expect(seen[0].warnings.map((w: any) => w.code)).toContain('LATERAL_DRIFT_FINALIZE');
+    act(() => t.unmount());
+  });
+
+  it('2 to 4 keyframes under the default floor of 5: DISCARDED — abandon, the discard copy, no finalize', async () => {
+    const ab: string[] = [];
+    const { t, rerender } = await setup({ onCaptureAbandoned: (r: string) => ab.push(r) });
     await tripLateral(rerender, 3);
     await act(async () => { await sleep(120); });
     expect(vis(t, LateralMotionModal)).toBe(true);
-    expect(vis(t, RectCropPreview)).toBe(false);
-    expect(seen[0].ok).toBe(false);
+    expect(t.root.findByType(LateralMotionModal).props.title)
+      .toBe(DEFAULT_GUIDANCE_COPY.lateralStopDiscardedTitle);
+    expect(g.__kf.calls).not.toContain('finalize');
+    expect(ab).toEqual(['lateral-drift']);
     act(() => t.unmount());
   });
 
@@ -179,7 +206,7 @@ describe('keyframe lateral stop — never two modals at once', () => {
   it('the next capture carries no stale lateral state', async () => {
     const seen: any[] = [];
     const { t, rerender, ref } = await setup({ rectCrop: false, onCapture: (r: any) => seen.push(r) });
-    await tripLateral(rerender, 3);
+    await tripLateral(rerender, 5);
     await act(async () => { await sleep(120); });
     g.__pm.lateralExceeded = false;
     g.__kf.state = { acceptedCount: 0 };

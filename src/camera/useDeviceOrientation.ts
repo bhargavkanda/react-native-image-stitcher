@@ -115,8 +115,38 @@ function classify(
 }
 
 
-export function useDeviceOrientation(): DeviceOrientation {
-  const [orientation, setOrientation] = useState<DeviceOrientation>('portrait');
+/**
+ * v0.25 — orientation WITH a measurement-status flag.
+ *
+ * `orientation` initialises to `'portrait'` before any accelerometer
+ * sample arrives — a FABRICATED default, indistinguishable from a real
+ * portrait reading to callers of the scalar hook.  That mattered in the
+ * field: on a host whose react-native-sensors event delivery was broken
+ * or laggy (bridgeless RN; "…no listeners registered" warnings), a
+ * landscape capture started while the hook still reported the
+ * fabricated `'portrait'`; the first REAL sample then flipped it
+ * mid-capture, which `useOrientationDrift` read as the user rotating
+ * the device and auto-abandoned the capture — every time, but only in
+ * landscape (a portrait hold can never disagree with a portrait
+ * default).
+ *
+ * `settled` is `false` until the first accelerometer sample that
+ * yields a classification (face-up/face-down samples keep it false —
+ * they carry no orientation information).  Consumers making
+ * IRREVERSIBLE decisions (abandoning a capture, gating a hold) must
+ * treat `settled === false` as "unknown", never as "portrait".
+ */
+export interface DeviceOrientationStatus {
+  orientation: DeviceOrientation;
+  /** True once at least one REAL classified sample has arrived. */
+  settled: boolean;
+}
+
+export function useDeviceOrientationStatus(): DeviceOrientationStatus {
+  const [status, setStatus] = useState<DeviceOrientationStatus>({
+    orientation: 'portrait',
+    settled: false,
+  });
 
   useEffect(() => {
     setUpdateIntervalForType(SensorTypes.accelerometer, SAMPLE_INTERVAL_MS);
@@ -126,7 +156,7 @@ export function useDeviceOrientation(): DeviceOrientation {
       ? DOMINANT_AXIS_THRESHOLD_ANDROID
       : DOMINANT_AXIS_THRESHOLD_IOS;
 
-    let last: DeviceOrientation = 'portrait';
+    let last: DeviceOrientation | null = null;
     const sub = accelerometer.subscribe(({ x, y }) => {
       // Normalise Android reaction-force convention to iOS gravity
       // convention by flipping signs.  No-op on iOS.
@@ -135,11 +165,19 @@ export function useDeviceOrientation(): DeviceOrientation {
       const next = classify(gx, gy, threshold);
       if (next && next !== last) {
         last = next;
-        setOrientation(next);
+        setStatus({ orientation: next, settled: true });
       }
     });
     return () => sub.unsubscribe();
   }, []);
 
-  return orientation;
+  return status;
+}
+
+export function useDeviceOrientation(): DeviceOrientation {
+  // Scalar back-compat wrapper.  Existing display-oriented consumers
+  // (overlay placement, bake rotation) are fine with the portrait
+  // default — a mis-rotated first frame of UI is recoverable.  Only
+  // irreversible-decision consumers need the `settled` flag above.
+  return useDeviceOrientationStatus().orientation;
 }

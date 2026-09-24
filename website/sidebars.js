@@ -25,9 +25,13 @@ const sidebars = {
     'i18n',
     {
       type: 'category',
-      label: 'OpenCV',
+      label: 'Native / OpenCV',
       collapsed: false,
-      items: ['sharing-opencv', 'bring-your-own-opencv'],
+      items: [
+        'sharing-opencv',
+        'bring-your-own-opencv',
+        'android-abi-support',
+      ],
     },
     'troubleshooting',
   ],

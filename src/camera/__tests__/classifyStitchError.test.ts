@@ -73,6 +73,14 @@ describe('classifyStitchError', () => {
       'STITCH_OOM',
     );
     expect(classifyStitchError('cv::OutOfMemoryError / OOM')).toBe('STITCH_OOM');
+    // v0.24.7 — CAUGHT native allocation failures surface in the
+    // UnknownCvException message as either std::bad_alloc or cv StsNoMem;
+    // both must classify as OOM, not generic.
+    expect(classifyStitchError('Stitcher threw: std::bad_alloc')).toBe('STITCH_OOM');
+    expect(classifyStitchError(
+      'high-level cv::Exception (uncaught): OpenCV(4.10.0) error: '
+      + '(-4:Insufficient memory) Failed to allocate 158398464 bytes',
+    )).toBe('STITCH_OOM');
   });
 
   describe('post-stitch validator → STITCH_LOW_QUALITY (v0.16)', () => {

@@ -108,6 +108,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { Platform } from 'react-native';
 import {
   gyroscope,
   setUpdateIntervalForType,
@@ -241,6 +242,17 @@ export interface StitcherWorkletHandle {
    * `<Camera>` falls back gracefully.
    */
   isReady: boolean;
+
+  /**
+   * v0.24.3 — `true` once the SDK has determined the
+   * `cv_flow_gate_process_frame` plugin can NEVER be acquired in this
+   * build (vision-camera reported frame processors disabled, or the
+   * plugin never registered within ~3 s).  Distinguishes a permanent
+   * build defect from the normal ~1-frame acquisition window, so callers
+   * can fail a non-AR capture fast instead of running one that cannot
+   * ingest frames.  See the console.error this flag is set alongside.
+   */
+  acquisitionFailed: boolean;
 }
 
 
@@ -263,22 +275,95 @@ export function useStitcherWorklet(
   // `initFrameProcessorPlugin` can return `undefined` if called
   // before vision-camera's plugin registry has finished initialising
   // (race observed in F8.1.a).  Mount-once useEffect with a 16ms
-  // retry until success.  Verbatim from `useFrameProcessorDriver`.
+  // retry until success.
+  //
+  // v0.24.3 — LOUD failure.  A healthy app resolves the plugin within
+  // ~1 frame of mount; if it's still null after ~3 s the registration
+  // almost certainly does not exist in this build, and every non-AR
+  // panorama capture is doomed to ingest ZERO frames (the historical
+  // symptom: a running capture whose band thumbnail never fills, then
+  // `PANORAMA_FINALIZE_FAILED: 0 keyframes saved`).  The native plugin
+  // (`KeyframeGateFrameProcessor`) is compiled out entirely when
+  // `<VisionCamera/FrameProcessorPlugin.h>` isn't visible at pod build
+  // time, so this is a BUILD-time defect of the host app that only
+  // manifests at runtime — hence the explicit console.error with the
+  // known causes.  After the error we keep retrying at 1 s (not 16 ms)
+  // so a genuinely late registry can still recover without spamming.
   const [plugin, setPlugin] = useState<FrameProcessorPlugin | null>(null);
+  // v0.24.3 — sticky "this build can NEVER acquire the plugin" flag.  The
+  // difference between "not yet" (healthy mount, resolves in ~1 frame) and
+  // "never" (plugin absent from the build) is what lets `<Camera>` fail a
+  // capture fast without false-positiving on the mount window.
+  const [acquisitionFailed, setAcquisitionFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
     let timerId: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
+    let warned = false;
+    const remediation =
+      Platform.OS === 'android'
+        ? '  1. react-native-vision-camera >= 4.7 is installed;\n'
+          + '  2. react-native-worklets-core is installed (vision-camera '
+          + 'compiles its frame-processor subsystem only when Gradle can '
+          + 'resolve worklets-core at build time);\n'
+          + '  3. after fixing either, run a CLEAN rebuild '
+          + '(`cd android && ./gradlew clean`) — the frame-processor '
+          + 'decision is baked into the built AAR.'
+        : '  1. react-native-vision-camera >= 4.7 is installed;\n'
+          + '  2. react-native-worklets-core was present in node_modules '
+          + 'BEFORE `pod install` ran (vision-camera compiles its frame-'
+          + 'processor subsystem only when it can see worklets-core);\n'
+          + '  3. the Podfile does not set $VCEnableFrameProcessors = '
+          + 'false;\n'
+          + '  4. with use_frameworks!, <VisionCamera/FrameProcessorPlugin.h> '
+          + 'must be visible to the RNImageStitcher pod at compile time;\n'
+          + '  5. after any of the above, re-run `pod install` and rebuild.';
+    const fail = (detail: string): void => {
+      if (warned) return;
+      warned = true;
+      setAcquisitionFailed(true);
+      // eslint-disable-next-line no-console
+      console.error(
+        '[react-native-image-stitcher] The "cv_flow_gate_process_frame" '
+        + 'frame-processor plugin is unavailable — non-AR panorama capture '
+        + 'CANNOT ingest frames in this build (captures fail with "0 '
+        + 'keyframes saved"; photos and AR-mode capture are unaffected).  '
+        + `This is a build-time integration issue in the HOST app (${detail}).  `
+        + 'Check:\n' + remediation + '\n'
+        + 'See the docs: Host integration -> "Frame processors".',
+      );
+    };
     const tryAcquire = () => {
       if (cancelled) return;
-      const p = VisionCameraProxy.initFrameProcessorPlugin(
-        'cv_flow_gate_process_frame',
-        {},
-      );
+      let p: FrameProcessorPlugin | undefined;
+      try {
+        p = VisionCameraProxy.initFrameProcessorPlugin(
+          'cv_flow_gate_process_frame',
+          {},
+        );
+      } catch (err) {
+        // vision-camera replaces VisionCameraProxy with a THROWING STUB
+        // when it was built without frame processors, so this throw is a
+        // definitive diagnosis — no need to wait out the 3 s timer, and
+        // retrying can never recover.
+        fail(
+          err instanceof Error && err.message
+            ? `vision-camera reports frame processors are disabled: ${err.message}`
+            : 'vision-camera was built without frame-processor support',
+        );
+        return;
+      }
       if (p != null) {
         setPlugin(p);
         return;
       }
-      timerId = setTimeout(tryAcquire, 16);
+      attempts += 1;
+      // ~3 s at 16 ms cadence: a healthy app resolves within ~1 frame, so
+      // this long without a registration means it is not in the build.
+      if (attempts >= 188) {
+        fail('the plugin never registered with vision-camera');
+      }
+      timerId = setTimeout(tryAcquire, warned ? 1000 : 16);
     };
     tryAcquire();
     return () => {
@@ -483,5 +568,9 @@ export function useStitcherWorklet(
     sharedFyNumerator,
   ]);
 
-  return { call, reset, setActive, resetCadence, isReady: plugin != null };
+  return {
+    call, reset, setActive, resetCadence,
+    isReady: plugin != null,
+    acquisitionFailed,
+  };
 }

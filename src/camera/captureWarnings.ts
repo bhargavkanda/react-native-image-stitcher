@@ -55,7 +55,16 @@ export type CaptureWarningCode =
    * some broken parts towards the edges"), at the one time the answer is
    * "because almost all of it is the edge".
    */
-  | 'SWEEP_LEAD_OUT';
+  | 'SWEEP_LEAD_OUT'
+  /**
+   * v0.25 — the capture finalized with fewer keyframes than
+   * `minPanoramaKeyframes`.  A one-keyframe capture still SUCCEEDS and
+   * still returns that frame (it is a valid one-shot capture), but it is
+   * no longer silent: previously the SDK reported a hold that had ended
+   * after a single frame as an ordinary panorama, which is why the AR
+   * self-ending-hold failures were reported as stitching bugs.
+   */
+  | 'CAPTURE_TOO_SHORT';
 
 export interface CaptureWarning {
   /** Stable, host-switchable code. */
@@ -103,6 +112,8 @@ export interface CaptureWarningCopy {
    * printing "columns" unconditionally is wrong half the time.
    */
   sweepLeadOut: string;
+  /** CAPTURE_TOO_SHORT — template; `{included}` is the keyframe count. */
+  captureTooShort: string;
 }
 
 export const DEFAULT_CAPTURE_WARNING_COPY: CaptureWarningCopy = {
@@ -121,6 +132,10 @@ export const DEFAULT_CAPTURE_WARNING_COPY: CaptureWarningCopy = {
     + 'single frame at the end of the sweep — that part has no strip-to-strip '
     + 'alignment, so its edges may not line up. Pan further, and more slowly, '
     + 'so the sweep paints the scene instead of the lead-out.',
+  captureTooShort:
+    'Only {included} frame(s) were captured, so this is a single shot '
+    + 'rather than a panorama. Hold the shutter and pan steadily across '
+    + 'the scene.',
 };
 
 /**
@@ -149,6 +164,20 @@ export interface BuildCaptureWarningsInput {
   /** Override the LOW_FRAME_UTILIZATION trip point (fraction in (0, 1]). */
   lowFrameUtilizationThreshold?: number;
   /**
+   * v0.25 — warn with CAPTURE_TOO_SHORT when `framesRequested` is below
+   * this.  Default `1`, i.e. never warns; `2` treats a single-frame
+   * capture as too short to be a panorama.
+   *
+   * Read from the FINALIZE RESULT deliberately, not from the live
+   * accepted-keyframe count.  The live count excludes any keyframe whose
+   * anti-blur sharpness window is still open at release — which is the
+   * trailing keyframe of essentially every capture — and it means
+   * different things on iOS and Android.  Judging "too short" from it
+   * would misfire constantly.  By finalize time native has drained the
+   * window, so the count is true and identical on both platforms.
+   */
+  minPanoramaKeyframes?: number;
+  /**
    * Localised / re-worded warning messages.  Missing keys fall back to
    * {@link DEFAULT_CAPTURE_WARNING_COPY}.  `<Camera>` threads the resolved
    * `guidanceCopy` here so the crop-banner warnings honour the host's i18n.
@@ -170,6 +199,7 @@ export function buildCaptureWarnings(
     lateralFinalize = false,
     highPanSpeed = false,
     lowFrameUtilizationThreshold = LOW_FRAME_UTILIZATION_THRESHOLD,
+    minPanoramaKeyframes = 1,
   } = input;
   const copy: CaptureWarningCopy = {
     ...DEFAULT_CAPTURE_WARNING_COPY,
@@ -177,6 +207,22 @@ export function buildCaptureWarnings(
   };
 
   const warnings: CaptureWarning[] = [];
+
+  // v0.25 — listed first: "the capture was too short" is the CAUSE of any
+  // utilization/coverage symptom below it, same ordering rationale as
+  // lateral-drift.
+  if (
+    minPanoramaKeyframes > 1
+    && typeof framesRequested === 'number'
+    && framesRequested < minPanoramaKeyframes
+  ) {
+    warnings.push({
+      code: 'CAPTURE_TOO_SHORT',
+      message: copy.captureTooShort.replace('{included}', String(framesRequested)),
+      framesRequested,
+      framesIncluded,
+    });
+  }
 
   if (lateralFinalize) {
     warnings.push({

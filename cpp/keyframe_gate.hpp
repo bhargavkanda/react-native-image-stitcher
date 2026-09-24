@@ -116,6 +116,51 @@ inline bool timeBudgetCrossed(double intervalMs, int64_t lastAcceptMs, int64_t n
         && static_cast<double>(nowMs - lastAcceptMs) >= intervalMs;
 }
 
+/// v0.25 — may the time-budget force-accept fire RIGHT NOW?
+///
+/// The time budget exists so a slow or static pan still gets a keyframe
+/// every N ms.  But those keep-alive accepts count toward `maxCount`
+/// exactly like novelty accepts do, and the host auto-finalizes the
+/// capture the moment that count is reached (Camera.tsx's
+/// `acceptedKeyframeCount >= keyframeMaxCount`).  So a perfectly
+/// stationary hold marches to the cap on the clock alone — at the
+/// defaults (maxKeyframes 6, interval 1500 ms) it self-finalizes in
+/// ~7.5 s having captured nothing new.  Combined with the AR failure
+/// this release is about, it is a second way a hold ends itself.
+///
+/// The fix is NOT to stop counting them.  `acceptedCount` is not the
+/// number the host actually finalizes on — the host counts keyframes
+/// SAVED TO DISK (Android exclusively so), which no C++ counter change
+/// can influence.  And genuinely exempting them would remove the last
+/// bound on a stationary capture: `maxPanDurationMs` defaults to 0
+/// (disabled), the drift finalizers are motion-triggered, and nothing
+/// caps the saved-keyframe list — a long static hold would fill the
+/// disk and then fail or OOM in cv::Stitcher.
+///
+/// Instead: let keep-alive accepts count, but never let one be the
+/// accept that REACHES the cap.  The gate stalls at `maxCount - 1`,
+/// no frame is saved, both platforms' counters stall with it, and the
+/// host's auto-finalize is simply never satisfied by keep-alives.
+/// Bounded by construction — `acceptedCount` still cannot exceed
+/// `maxCount` — and it needs no new counter, wire field or host change.
+///
+/// `canFinalize == true` (the default) reproduces the old behaviour
+/// bit-for-bit.  Note `maxCount` is clamped to >= 3 by both hosts, so
+/// at least two slots remain for novelty accepts and this path can
+/// never be the reason a capture ends up with one frame.  A direct C++
+/// caller passing maxCount <= 1 makes the predicate permanently false,
+/// which is the safe direction (the budget simply never fires).
+inline bool timeBudgetMayForceAccept(double intervalMs,
+                                     int64_t lastAcceptMs,
+                                     int64_t nowMs,
+                                     int32_t acceptedCount,
+                                     int32_t maxCount,
+                                     bool canFinalize) {
+    if (!timeBudgetCrossed(intervalMs, lastAcceptMs, nowMs)) return false;
+    if (canFinalize) return true;
+    return acceptedCount + 1 < maxCount;
+}
+
 struct KeyframeGateDecision {
     bool       accept;
     KeyframeGateDecisionReason reason;
@@ -149,7 +194,23 @@ public:
     /// frame even if novelty < threshold — a "don't go longer than N ms
     /// without a keyframe" guarantee for slow / static pans.  Counts toward
     /// maxCount (respects the cap).  Default 0.0 = disabled; clamped to ≥ 0.
+    ///
+    /// v0.25: whether such an accept may be the one that REACHES maxCount
+    /// is controlled separately — see setTimeIntervalCanFinalize.
     void setMaxKeyframeIntervalMs(double ms);
+    /// v0.25 — may a time-budget (keep-alive) accept be the accept that
+    /// reaches maxCount, and therefore end the capture via the host's
+    /// count-based auto-finalize?  Default `true` = pre-0.25 behaviour.
+    ///
+    /// Set `false` so a stationary hold cannot self-finalize on the clock:
+    /// keep-alive accepts still happen and still count, but the gate stalls
+    /// at maxCount - 1 rather than tripping the host's auto-stop.  See the
+    /// long rationale on `timeBudgetMayForceAccept` above.
+    ///
+    /// CAUTION: with this `false`, a capture that never pans has no
+    /// count-based auto-stop left.  Pair it with `maxPanDurationMs > 0`
+    /// unless the shutter release is genuinely the only intended end.
+    void setTimeIntervalCanFinalize(bool canFinalize);
     void markNextFrameAsLast();                    // one-shot, consumed by next evaluate()
     void reset();                                  // clears acceptedCount, lastCorners, planeCached AND flow state
 
@@ -199,6 +260,34 @@ public:
     /// angular calc would produce nonsense in that environment.
     /// Default `false` (back-compat — AR mode uses the fallback).
     void setDisableAngularFallback(bool disabled);
+
+    /// v0.25 — POSE TRUST, set per frame from the platform's AR tracking
+    /// state (`ARCamera.trackingState == .normal` on iOS /
+    /// `TrackingState.TRACKING` on Android).
+    ///
+    /// Why this exists: the two POSE-DRIVEN force-accepts —
+    /// {@link setFlowMaxTranslationM}'s translation budget and the
+    /// angular-delta fallback — accept a frame REGARDLESS of image
+    /// novelty.  Both are sound only while the pose they difference is
+    /// sound.  While ARKit / ARCore is initialising or relocalising, the
+    /// world transform slides and snaps by metres/radians between
+    /// consecutive frames, so both paths fire on a camera that has not
+    /// actually moved: measured on-device, a capture starting next to a
+    /// session (re)start burst-accepted to the keyframe cap in ~415 ms
+    /// and auto-finalised the user's hold (v0.24.x field RCA).
+    ///
+    /// When `false`, this gate suppresses BOTH pose-driven force-accepts
+    /// for that frame, leaving the strategy's own image-derived novelty
+    /// and the wall-clock time budget as the only accept paths — exactly
+    /// the configuration non-AR captures have always run.  It never
+    /// suppresses an accept the IMAGE justified, so a genuinely moving
+    /// capture is unaffected.
+    ///
+    /// Default `true` (back-compat: callers that never set it behave
+    /// exactly as before).  Non-AR callers leave it `true` and rely on
+    /// {@link setDisableAngularFallback} as before; their poses carry no
+    /// translation, so the translation budget cannot fire anyway.
+    void setPoseTrusted(bool trusted);
 
     // ── Per-frame evaluation ──────────────────────────────────────
     //

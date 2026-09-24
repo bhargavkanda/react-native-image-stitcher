@@ -199,6 +199,35 @@ inline bool stitchOutputUnderutilized(
   return (totalCoveredArea / canvasArea) < minUtilization;
 }
 
+// COLLAPSED-placement guard — the third leg of the post-stitch validator.
+// 2026-08-17 field evidence: scans@0.3 squeezed a 10-frame lateral pan into
+// a 722×718 canvas (~0.5 MP) that PASSED both checks above — one connected
+// blob (not disjoint) filling most of its canvas (not underutilized) — yet
+// was garbage: ten distinct keyframes stacked into barely more area than
+// one frame.  Keyframes are motion-gated at capture (each admitted frame
+// moved meaningfully past the previous one), so N frames cannot
+// legitimately cover less than one frame's area plus a minimum growth per
+// additional frame.  10 % per frame is deliberately far below the ~40-60 %
+// per-frame growth a real pan produces, so a heavy-overlap-but-valid
+// capture never trips; only a placement collapse does.
+//
+// Areas must be in the SAME pixel space: `totalCoveredArea` comes from the
+// compose-scale coverage mask, so `singleFrameAreaPx` must be the frame's
+// area AT COMPOSE SCALE (min(composeMP, input area) — the caller computes
+// it).  0 (or negative) frame area disables the check — for callers that
+// can't supply compose-scale dims.
+constexpr double kMinCoverageGrowthPerFrame = 0.10;
+
+inline bool stitchOutputCollapsed(
+    double totalCoveredArea, double singleFrameAreaPx, int numFrames,
+    double minGrowthPerFrame = kMinCoverageGrowthPerFrame) {
+  if (numFrames < 2) return false;
+  if (singleFrameAreaPx <= 0.0 || totalCoveredArea <= 0.0) return false;
+  const double minArea =
+      singleFrameAreaPx * (1.0 + minGrowthPerFrame * (numFrames - 1));
+  return totalCoveredArea < minArea;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Issue 6 — headroom-based memory gating (pure).
 //

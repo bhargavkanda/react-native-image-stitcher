@@ -85,7 +85,8 @@ export function FullyLoadedCamera() {
       panGuidance={true}
       maxPanDurationMs={0}
       panTooFastThreshold={0.6}
-      lateralBudgetCm={4}
+      lateralBudgetCm={8}
+      lateralStopFinalizeMinFrames={5}
       rectCrop={true}
       showPreview={false}
       guidanceCopy={{
@@ -219,8 +220,12 @@ pan how-to, too-fast pill, blinking countdown).
 
 The auto-stop levers are worth understanding: `maxPanDurationMs` defaults
 to `0` (disabled) — the keyframe-count cap is the primary auto-stop, and
-the time ceiling is opt-in. `lateralBudgetCm` (default `4`) finalizes the
-capture once sideways drift exceeds the budget; `0` disables it.
+the time ceiling is opt-in. `lateralBudgetCm` (default `8`) stops the
+capture once sideways drift exceeds the budget; `0` disables it, and
+`lateralStopFinalizeMinFrames` (default `5`) decides whether that stop keeps
+and stitches the partial sweep or discards it outright. The default discards
+anything under 5 keyframes — a behaviour change from the previously hardcoded
+2 — so pass `2` for the old rule, or `0` so a drifted capture is never kept.
 `panTooFastThreshold` (resolves to `0.6` rad/s) flags an over-fast pan.
 `rectCrop` (on by default since the release after 0.26.x) shows the
 draggable-quad perspective-crop editor after finalize and takes precedence
@@ -292,7 +297,7 @@ section. `capturePreviewActions` adds buttons along the bottom of that modal.
 when `ok` is `false`. `onError` still fires on failure as an unchanged
 mirror. The rest are notifications: `onCaptureSourceChange` /
 `onLensChange` for the AR-toggle and lens-chip; `onFramesDropped` when
-cv::Stitcher's confidence-retry loop dropped input frames; and
+cv::Stitcher's confidence filtering dropped input frames; and
 `onCaptureAbandoned` when the SDK auto-cancels an in-flight capture
 without producing output (`'orientation-drift'` or `'lateral-drift'` — no
 `onCapture` fires for an abandoned capture). The full result union and

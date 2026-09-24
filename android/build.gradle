@@ -40,18 +40,135 @@ def reactNativeRoot = rootProject.findProperty("reactNativeRoot") ?: project.fil
 // release, the build would explode with a confusing CMake "static
 // archive not found" error.  Better to fail FAST here with a clear
 // message pointing at the actual cause.
+// ── Bring-your-own-OpenCV (v0.24.4) ──────────────────────────────────
+//
+// An app must contain exactly ONE OpenCV.  A host that already ships
+// its own (an enterprise wrapper SDK, a native CV pipeline of their
+// own) previously had no way to say so: this AAR unconditionally
+// compiled `org.opencv.*` into itself AND packaged
+// libopencv_java4.so, so the host's build died on `Duplicate class
+// org.opencv.core.Mat` or "More than one file was found with OS
+// independent path 'lib/arm64-v8a/libopencv_java4.so'".  The iOS side
+// gained `$RNISHostOpenCV` in this same release; these are its Android
+// counterpart.
+//
+// Two knobs, because there are two genuinely different situations:
+//
+//   rnisHostOpenCVSdkDir   (String path, opt-in)
+//     Path to the host's OpenCV Android SDK — the directory that
+//     contains `java/`, `native/libs/` and `native/jni/`.  We use it
+//     in place of our vendored copy for the Java sources, the
+//     jniLibs, the resources AND the CMake link.  Net effect: one
+//     OpenCV, contributed by us, built from the host's tree.  Skips
+//     our ~90 MB download and eliminates version skew.
+//     REQUIREMENT: it must be built with `BUILD_opencv_stitching=ON`
+//     (stock upstream releases are NOT — see the note below), and it
+//     must include arm64-v8a.
+//
+//   rnisHostOpenCVPackagedByHost   (boolean, default false)
+//     Set when the host ALREADY packages OpenCV's Java classes and
+//     .so into the APK itself (their own AAR / Gradle module).  We
+//     then contribute nothing — no java srcDir, no jniLibs, no res —
+//     and merely compile against the host's dependency, declared as
+//     `rnisHostOpenCVDependency` (a Maven coordinate string or a
+//     `project(':x')` handle).  `rnisHostOpenCVSdkDir` is still
+//     required in this mode: CMake needs real headers and a real
+//     .so to link the JNI shim against.
+//
+// Both are read from rootProject.ext first (so a host can set them in
+// its own build.gradle) and then from Gradle properties (so they can
+// live in gradle.properties or come from -P on the command line).
+def rnisProp = { String name ->
+    if (rootProject.ext.has(name)) return rootProject.ext.get(name)
+    if (rootProject.hasProperty(name)) return rootProject.property(name)
+    return null
+}
+
+def hostOpenCVSdkDirRaw = rnisProp('rnisHostOpenCVSdkDir')
+def hostOpenCVPackagedByHost =
+    Boolean.parseBoolean(String.valueOf(rnisProp('rnisHostOpenCVPackagedByHost') ?: 'false'))
+def hostOpenCVDependency = rnisProp('rnisHostOpenCVDependency')
+
+//   rnisHostOpenCVProducerTask   (String task path, optional)
+//     Set when the host's OpenCV SDK is PRODUCED BY A GRADLE TASK rather
+//     than just being present on disk — e.g. a task that downloads and
+//     extracts it at build time, which is the common arrangement for an
+//     SDK fetched from a private artifact repository.
+//
+//     Without it Gradle 8 fails configuration outright:
+//
+//       Task ':react-native-image-stitcher:generateDebugResources' uses
+//       this output of task ':their-lib:downloadOpenCV' without
+//       declaring an explicit or implicit dependency.
+//
+//     which is correct and worth failing on — we read `java/`, `res/`
+//     and `native/libs/` out of that directory, so if their download
+//     task has not run yet we would silently compile against nothing.
+//     Naming the task lets us wire the edge instead:
+//
+//       rnisHostOpenCVProducerTask=:their-lib:downloadOpenCV
+//
+//     Not needed when the SDK is simply checked in or pre-extracted.
+def hostOpenCVProducerTask = rnisProp('rnisHostOpenCVProducerTask')
+
 def opencvVendorDir = file("$projectDir/vendor")
-def opencvSdkDir = file("$opencvVendorDir/OpenCV-android-sdk/sdk")
-if (!opencvSdkDir.exists()) {
-    throw new GradleException(
-        "OpenCV custom SDK missing at ${opencvSdkDir.absolutePath}.\n" +
-        "Did `npm install` succeed?  The package's postinstall script\n" +
-        "(scripts/postinstall-fetch-binaries.js) downloads the binaries\n" +
-        "from GitHub Releases on install.  Recovery:\n" +
-        "  - `npm install --force` to re-run postinstall\n" +
-        "  - Or set OPENCV_BINARY_BASE_URL env var to an internal mirror\n" +
-        "  - Or run `SKIP_OPENCV_FETCH=1 npm install` and stage the SDK manually"
+def opencvSdkDir
+def usingHostOpenCV = hostOpenCVSdkDirRaw != null
+
+if (usingHostOpenCV) {
+    opencvSdkDir = file(String.valueOf(hostOpenCVSdkDirRaw))
+    if (!opencvSdkDir.exists()) {
+        throw new GradleException(
+            "react-native-image-stitcher: rnisHostOpenCVSdkDir points at\n" +
+            "  ${opencvSdkDir.absolutePath}\n" +
+            "which does not exist.  It must be the `sdk` directory of an\n" +
+            "OpenCV Android SDK (the one containing java/, native/libs/ and\n" +
+            "native/jni/).  Unset the property to use our vendored copy."
+        )
+    }
+    def stitchingArchive =
+        file("$opencvSdkDir/native/staticlibs/arm64-v8a/libopencv_stitching.a")
+    if (!stitchingArchive.exists()) {
+        throw new GradleException(
+            "react-native-image-stitcher: the OpenCV SDK at\n" +
+            "  ${opencvSdkDir.absolutePath}\n" +
+            "has no arm64-v8a libopencv_stitching.a.  Stock OpenCV Android\n" +
+            "releases are built WITHOUT the stitching module, so panorama\n" +
+            "compositing cannot link against them.  Rebuild OpenCV with\n" +
+            "`-DBUILD_opencv_stitching=ON`, or unset rnisHostOpenCVSdkDir to\n" +
+            "use the copy this package ships (which already has it)."
+        )
+    }
+    if (hostOpenCVPackagedByHost && hostOpenCVDependency == null) {
+        throw new GradleException(
+            "react-native-image-stitcher: rnisHostOpenCVPackagedByHost=true\n" +
+            "requires rnisHostOpenCVDependency — the Maven coordinate or\n" +
+            "project handle that puts org.opencv.* on the compile classpath.\n" +
+            "In that mode we deliberately compile no OpenCV Java sources of\n" +
+            "our own, so without it this module cannot compile."
+        )
+    }
+    logger.lifecycle(
+        "react-native-image-stitcher: using HOST OpenCV at ${opencvSdkDir}" +
+        (hostOpenCVPackagedByHost ? " (host packages it; we contribute none)" : "")
     )
+} else {
+    // ── Vendored OpenCV (default) ───────────────────────────────────
+    opencvSdkDir = file("$opencvVendorDir/OpenCV-android-sdk/sdk")
+    if (!opencvSdkDir.exists()) {
+        throw new GradleException(
+            "OpenCV custom SDK missing at ${opencvSdkDir.absolutePath}.\n" +
+            "Did `npm install` succeed?  The package's postinstall script\n" +
+            "(scripts/postinstall-fetch-binaries.js) downloads the binaries\n" +
+            "from GitHub Releases on install.  Recovery:\n" +
+            "  - `npm install --force` to re-run postinstall\n" +
+            "  - Or set OPENCV_BINARY_BASE_URL env var to an internal mirror\n" +
+            "  - Or run `SKIP_OPENCV_FETCH=1 npm install` and stage the SDK manually\n" +
+            "  - Or, if your app already ships OpenCV, set\n" +
+            "    `rootProject.ext.rnisHostOpenCVSdkDir` to your SDK's `sdk`\n" +
+            "    directory (see docs/bring-your-own-opencv.md)"
+        )
+    }
 }
 
 android {
@@ -87,7 +204,11 @@ android {
         // OpenCV (with stitching symbols) so the shim can link.
         externalNativeBuild {
             cmake {
-                arguments "-DOPENCV_ANDROID_SDK=${file("$projectDir/vendor/OpenCV-android-sdk").absolutePath}",
+                // CMakeLists.txt appends `sdk/native/...` itself, so this
+                // is the PARENT of the `sdk` directory — for the host
+                // OpenCV path that's whatever contains the dir the host
+                // named in `rnisHostOpenCVSdkDir`.
+                arguments "-DOPENCV_ANDROID_SDK=${opencvSdkDir.parentFile.absolutePath}",
                           // v0.8.0 Phase 3 — switched from c++_static
                           // to c++_shared.  Required for linking
                           // ReactAndroid::jsi (RN's prefab uses
@@ -180,23 +301,40 @@ android {
 
     sourceSets {
         main {
-            // OpenCV ships its Java side as plain source files (not
-            // a pre-built JAR) under sdk/java/src/, so we compile it
-            // into our own AAR alongside the Kotlin code.  The
-            // pre-built .so libraries live under sdk/native/libs/
-            // and ride along as jniLibs.
-            java.srcDirs += [
-                "$opencvSdkDir/java/src",
-            ]
-            jniLibs.srcDirs = [
-                "$opencvSdkDir/native/libs",
-            ]
-            // OpenCV references some resources (logos, drawables)
-            // from its old wrapper; pointing res at the SDK keeps
-            // them available without copying.
-            res.srcDirs += [
-                "$opencvSdkDir/java/res",
-            ]
+            if (hostOpenCVPackagedByHost) {
+                // v0.24.4 BYO-OpenCV, "host packages it" mode.  We
+                // contribute NO OpenCV Java classes, NO .so and NO
+                // resources — the host's own AAR/module already puts all
+                // three in the APK, and shipping a second copy is a hard
+                // build failure (`Duplicate class org.opencv.core.Mat`,
+                // and the jniLibs merge conflict on
+                // lib/arm64-v8a/libopencv_java4.so).  org.opencv.* reaches
+                // our compile classpath through `rnisHostOpenCVDependency`
+                // in the dependencies block below.  The JNI shim still
+                // links against the host's SDK via -DOPENCV_ANDROID_SDK.
+                logger.lifecycle(
+                    "react-native-image-stitcher: contributing no OpenCV " +
+                    "java/jniLibs/res (host packages OpenCV)"
+                )
+            } else {
+                // OpenCV ships its Java side as plain source files (not
+                // a pre-built JAR) under sdk/java/src/, so we compile it
+                // into our own AAR alongside the Kotlin code.  The
+                // pre-built .so libraries live under sdk/native/libs/
+                // and ride along as jniLibs.
+                java.srcDirs += [
+                    "$opencvSdkDir/java/src",
+                ]
+                jniLibs.srcDirs = [
+                    "$opencvSdkDir/native/libs",
+                ]
+                // OpenCV references some resources (logos, drawables)
+                // from its old wrapper; pointing res at the SDK keeps
+                // them available without copying.
+                res.srcDirs += [
+                    "$opencvSdkDir/java/res",
+                ]
+            }
         }
     }
 
@@ -226,6 +364,47 @@ android {
     }
 }
 
+// ── Host-OpenCV producer-task wiring (v0.24.5) ───────────────────────
+//
+// When the host's OpenCV SDK is generated by one of their Gradle tasks,
+// every task of ours that READS that directory needs an explicit
+// dependency edge on it.  Gradle 8 detects the missing edge and fails
+// configuration rather than racing — see `rnisHostOpenCVProducerTask`
+// above for the exact error.
+//
+// The consumers are the AGP tasks that walk our `sourceSets`: resource
+// generation/merging (java/res), the Kotlin/Java compiles (java/src),
+// and the jniLib packaging (native/libs).  Matching by name prefix
+// covers every build type and variant without hardcoding a list that
+// AGP would later rename underneath us.
+if (usingHostOpenCV && hostOpenCVProducerTask) {
+    def producer = String.valueOf(hostOpenCVProducerTask)
+    logger.lifecycle(
+        "react-native-image-stitcher: host OpenCV is produced by ${producer}; " +
+        "wiring task dependencies"
+    )
+    // Matched by BOTH task type and name.  The name prefixes alone were
+    // not enough: the CMake tasks are named `configureCMakeDebug[arm64-v8a]`
+    // / `buildCMakeDebug[...]` / `externalNativeBuildDebug`, none of which
+    // start with any of them — and those are the tasks that consume the SDK
+    // FIRST, via -DOPENCV_ANDROID_SDK, and are UPSTREAM of the merge tasks
+    // that did get the edge.  Gradle was therefore still free to run the
+    // native build before the host's download, configuring CMake against a
+    // missing or half-extracted SDK.
+    //
+    // Type matching covers the native tasks robustly (they are renamed per
+    // ABI and per variant); the name prefixes cover the source-set
+    // consumers (resources, Kotlin/Java compile, jniLibs packaging).
+    tasks.configureEach { t ->
+        def isNative = t.class.name.contains('ExternalNativeBuild')
+        def isConsumer = t.name ==~ /^(generate|merge|package|compile|bundle|extract|map|process).*/
+        def isCMake = t.name.toLowerCase().contains('cmake')
+        if (isNative || isCMake || isConsumer) {
+            t.dependsOn producer
+        }
+    }
+}
+
 repositories {
     google()
     mavenCentral()
@@ -243,6 +422,14 @@ dependencies {
     // OpenCV is wired in via sourceSets above (java/src compiled
     // alongside Kotlin, native/libs surfaced as jniLibs).  No
     // Maven coordinate needed.
+    //
+    // …except in v0.24.4's `rnisHostOpenCVPackagedByHost` mode, where
+    // the host packages OpenCV and we compile against it instead.
+    // `compileOnly` is deliberate: the classes must NOT be packaged
+    // again by us — that's the whole point of the mode.
+    if (hostOpenCVPackagedByHost) {
+        compileOnly hostOpenCVDependency
+    }
 
     // Kotlin stdlib + coroutines for the background-queue dispatch
     // pattern that matches the iOS DispatchQueue.global(.userInitiated).

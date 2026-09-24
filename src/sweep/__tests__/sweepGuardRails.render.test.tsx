@@ -112,6 +112,8 @@ import { OrientationDriftModal } from '../../camera/OrientationDriftModal';
 // eslint-disable-next-line import/first
 import { RectCropPreview } from '../../camera/RectCropPreview';
 import { LateralMotionModal } from '../../camera/LateralMotionModal';
+// eslint-disable-next-line import/first
+import { DEFAULT_GUIDANCE_COPY } from '../../camera/cameraGuidanceCopy';
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -157,9 +159,19 @@ function render(props: Record<string, unknown>): ReactTestRenderer {
 async function settle(): Promise<void> {
   await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 }
-/** Put the sweep into the recording state the guards gate on. */
-async function startSweep(): Promise<void> {
+/**
+ * Put the sweep into the recording state the guards gate on, with `painted`
+ * strips already down.
+ *
+ * ⚠ THE PAINTED COUNT IS PART OF THE CONTRACT, as the real surface reports it
+ * (`onPaintedChange`, from its live status). `<Camera>`'s lateral-stop policy
+ * counts the engine's own progress — keyframes on one engine, strips on this
+ * one — and arms the IMU guard only once there are 2. A stub that never
+ * reported progress would hold every sweep at "nothing captured yet".
+ */
+async function startSweep(painted = 30): Promise<void> {
   await act(async () => { (surfaceProps.onSweepingChange as (b: boolean) => void)(true); });
+  await act(async () => { (surfaceProps.onPaintedChange as (n: number) => void)(painted); });
 }
 /** What the surface reports while `finish()` writes the pack. */
 async function setBusy(busy: boolean): Promise<void> {
@@ -371,9 +383,10 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
     // With `rectCrop` and `showPreview` both OFF (passed explicitly below —
     // `rectCrop` defaults ON since 2026-09-23) NO review mounts, so the popup is the only channel and must fire.
     //
-    // ⚠ IT FIRES ON COMPLETION, NOT ON THE TRIP. The decision moved into
-    // `onComplete` because that is the only place that knows whether a review
-    // is also about to mount — see the next test for why that matters.
+    // ⚠ DECIDED UP FRONT, BY `modalPresentation`: with no review surface
+    // configured the popup is the only channel, so it latches on the trip and
+    // is still up when the sweep completes — see the next test for the case
+    // where a review follows and the popup must stay down.
     const tree = render({ lateralBudgetCm: 1, rectCrop: false, showPreview: false });
     await settle();
     expect(tree.root.findByType(LateralMotionModal).props.visible).toBe(false);
@@ -384,6 +397,56 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
       (surfaceProps.onComplete as (r: unknown) => void)(SWEEP_RESULT);
     });
     expect(tree.root.findByType(LateralMotionModal).props.visible).toBe(true);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ ONE POLICY, BOTH ENGINES — a sweep stopped at 3 strips is DISCARDED under the default floor of 5', async () => {
+    // `lateralStopFinalizeMinFrames` counts the engine's own progress. On a
+    // sweep that is strips painted, so a trip at 3 strips lands in the same
+    // band as a keyframe capture at 3 keyframes: stitchable, but binned by
+    // the default floor of 5.
+    const abandoned: string[] = [];
+    const tree = render({
+      lateralBudgetCm: 1,
+      onCaptureAbandoned: (r: string) => { abandoned.push(r); },
+    });
+    await settle();
+    await settleUpright();
+    await startSweep(3);
+    await slideSideways();
+    expect(calls).toContain('abandon:lateral-drift');
+    expect(calls).not.toContain('holdEnd');
+    expect(abandoned).toEqual(['lateral-drift']);
+    // A discard shows the popup — nothing was kept and no review follows —
+    // with the DISCARD copy, never the "we stitched what you captured" one.
+    const modal = tree.root.findByType(LateralMotionModal);
+    expect(modal.props.visible).toBe(true);
+    expect(modal.props.title).toBe(DEFAULT_GUIDANCE_COPY.lateralStopDiscardedTitle);
+    expect(modal.props.body).toBe(DEFAULT_GUIDANCE_COPY.lateralStopDiscardedBody);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and the host can move the floor — lateralStopFinalizeMinFrames={2} keeps the same 3-strip sweep', async () => {
+    const tree = render({ lateralBudgetCm: 1, lateralStopFinalizeMinFrames: 2 });
+    await settle();
+    await settleUpright();
+    await startSweep(3);
+    await slideSideways();
+    expect(calls).toContain('holdEnd');
+    expect(calls.some((c) => c.startsWith('abandon:'))).toBe(false);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …and a sweep with fewer than 2 strips never arms the IMU guard at all', async () => {
+    // Same warm-up rule as keyframes: stopping a capture that has nothing to
+    // protect cannot save it, and it is the path that produced the misleading
+    // "follow the arrow" popup.
+    const tree = render({ lateralBudgetCm: 1 });
+    await settle();
+    await settleUpright();
+    await startSweep(1);
+    await slideSideways();
+    expect(calls.filter((c) => c === 'holdEnd' || c.startsWith('abandon:'))).toEqual([]);
     act(() => { tree.unmount(); });
   });
 

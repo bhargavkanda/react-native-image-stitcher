@@ -193,6 +193,48 @@ final class KeyframeGate {
         didSet { bridge.setDisableAngularFallback(disableAngularFallback) }
     }
 
+    /// v0.25 — per-frame AR tracking trust; see `KeyframeGateBridge.h`.
+    /// `false` suppresses the gate's two POSE-DRIVEN force-accepts
+    /// (translation budget + angular fallback) for the frames it covers,
+    /// so an initialising / relocalising ARKit pose can no longer
+    /// burst-accept a stationary capture to the keyframe cap.  Set from
+    /// `ARCamera.trackingState` on every consumed AR frame.  Default
+    /// `true` (back-compat).  Write-only; no read accessor on C++.
+    ///
+    /// DELIBERATELY UNGUARDED — writes through on every assignment, like
+    /// `disableAngularFallback` above.  An earlier v0.25 draft skipped
+    /// redundant bridge hops with `guard poseTrusted != oldValue`, which
+    /// silently broke the fix from the SECOND capture onward:
+    /// `KeyframeGate::reset()` sets the C++ flag back to `true` at
+    /// capture start, but this Swift mirror is a member of a
+    /// process-lifetime gate and kept whatever value the previous
+    /// capture left.  If capture A ended while tracking was degraded the
+    /// mirror held `false`, so capture B's per-frame `= false` matched
+    /// `oldValue` and never reached C++ — leaving pose-driven accepts
+    /// live through exactly the initialising window this exists to
+    /// protect.  Self-perpetuating, because that burst then finalizes
+    /// while tracking is still degraded.
+    ///
+    /// A bool across the bridge is trivial next to the evaluate() that
+    /// follows it, so there is nothing to optimise here.
+    var poseTrusted: Bool = true {
+        didSet { bridge.setPoseTrusted(poseTrusted) }
+    }
+
+    /// v0.25 — may a keep-alive (time-budget) accept be the accept that
+    /// REACHES `maxCount`, and so end the capture via the host's
+    /// count-based auto-finalize?  Default `true` = pre-0.25 behaviour.
+    ///
+    /// `false` stops a stationary hold self-finalizing on the clock: the
+    /// gate stalls at maxCount - 1 instead of tripping the auto-stop.
+    /// Set once per capture from settings, not per frame.
+    var timeIntervalCanFinalize: Bool = true {
+        didSet {
+            guard timeIntervalCanFinalize != oldValue else { return }
+            bridge.setTimeIntervalCanFinalize(timeIntervalCanFinalize)
+        }
+    }
+
 
     /// One-shot flag: when set to `true`, the very next evaluate()
     /// accepts unconditionally and the flag self-resets.  Set by JS

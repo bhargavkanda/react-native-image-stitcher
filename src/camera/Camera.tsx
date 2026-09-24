@@ -191,14 +191,38 @@ import {
   gateTargetOrientation,
   type PanMode,
 } from './panModeGate';
+import { cameraTransitionAction } from './cameraTransitionGate';
 import { countdownSecondsFrom } from './captureCountdown';
-import { usePanMotion } from './usePanMotion';
+import {
+  usePanMotion,
+  DEFAULT_LATERAL_BUDGET_CM,
+  DEFAULT_LATERAL_MOTION_MODEL,
+} from './usePanMotion';
+import type { LateralMotionModel } from './usePanMotion';
+/** Dwell before the AR drift stop latches, ms — matches the IMU triggers. */
+const AR_LATERAL_GRACE_MS = 500;
+
+import {
+  _freshArDriftState, _advanceArDrift, _resetArDriftState,
+  DEFAULT_AR_LATERAL_BUDGET_CM, DEFAULT_AR_LATERAL_ROT_DEG,
+  DEFAULT_AR_LATERAL_RATIO, DEFAULT_AR_LATERAL_MAX_CM,
+} from './arLateralDrift';
 import type { Quad } from './cropGeometry';
 import {
   mergeGuidanceCopy,
   captureWarningCopyFrom,
+  lateralStopCopyFor,
   type GuidanceCopy,
 } from './cameraGuidanceCopy';
+import {
+  lateralStopOutcome as classifyLateralStop,
+  MIN_STITCHABLE_KEYFRAMES,
+  type LateralStopOutcome,
+} from './lateralStopPolicy';
+import {
+  lateralPopupShouldShow,
+  reviewSurfaceShouldShow,
+} from './modalPresentation';
 import { RotateToLandscapePrompt } from './RotateToLandscapePrompt';
 import { PanHowToOverlay } from './PanHowToOverlay';
 import { CaptureCountdownOverlay } from './CaptureCountdownOverlay';
@@ -472,8 +496,9 @@ export class CameraError extends Error {
 
 /**
  * Frames-dropped info delivered via `onFramesDropped`.  Fires once
- * per panorama capture if the C+D progressive-confidence retry loop
- * inside cv::Stitcher dropped one or more input frames.
+ * per panorama capture if the native stitch retry (the flattened
+ * 4-rung mode/threshold ladder since 2026-08-17) promoted a result
+ * that dropped one or more input frames.
  */
 export interface FramesDroppedInfo {
   requested: number;
@@ -487,6 +512,27 @@ export interface FramesDroppedInfo {
  */
 export interface CameraProps {
   // ── Initial values (uncontrolled — read once at mount) ────────────
+  /**
+   * Initial capture source.  Default `'non-ar'`.
+   *
+   * `'ar'` feeds the engine natively from the ARKit/ARCore session, so
+   * it does NOT depend on the vision-camera frame-processor chain that
+   * non-AR capture requires (see the "Frame processors" section of the
+   * host-integration docs).  If your fleet is AR-capable, opting in with
+   * `defaultCaptureSource="ar"` — or locking it with `captureSources="ar"`,
+   * which also hides the runtime AR toggle — avoids that whole class of
+   * build-time integration failure.
+   *
+   * Caveats when choosing AR: on Android, devices without "Google Play
+   * Services for AR" installed are prompted to install it, and a declined
+   * install currently leaves the AR preview blank (no automatic downgrade
+   * — fixed in a later release); AR tap-photos also come from the AR video
+   * stream rather than the full-resolution still pipeline, the flash is
+   * unavailable, and the iOS depth sidecar is not produced.
+   *
+   * Devices without AR support (and the 0.5× lens) always resolve to
+   * non-AR regardless of this value.
+   */
   defaultCaptureSource?: CaptureSource;
   defaultLens?: CameraLens;
   defaultStitchMode?: StitchMode;
@@ -1211,11 +1257,232 @@ export interface CameraProps {
   /**
    * Cross-pan (lateral) drift budget in CENTIMETRES (item 6).  Once the
    * operator's integrated sideways translation exceeds this for the
-   * hook's grace window, the capture FINALIZES what was captured and a
-   * one-button popup explains why.  Default `5`.  `0` disables the
-   * lateral-drift stop entirely.
+   * hook's grace window, the capture is STOPPED.
+   *
+   * **Default `8`** (v0.25.3 — was `4`).  `0` disables the lateral-drift
+   * stop entirely.
+   *
+   * This is the SENSITIVITY knob: it decides how much sideways drift is
+   * tolerated before a capture is stopped at all.  What HAPPENS at that
+   * stop — finalize the partial sweep, or discard it — is a separate
+   * decision controlled by `lateralStopFinalizeMinFrames`.  The two are
+   * easy to confuse when tuning: if operators complain the stop fires
+   * too eagerly, raise this; if they complain that stopped captures are
+   * thrown away, lower that one.
+   *
+   * v0.25.3 raised the default from `4` after field reports of the stop
+   * firing on minor drift.  4 cm of integrated sideways translation is
+   * a small movement to hold to over a hand-held sweep — comfortably
+   * inside the natural arc of pivoting on the spot — so it tripped on
+   * captures the operator considered fine.  The detector itself is
+   * unchanged; only the budget it is measured against moved.
    */
   lateralBudgetCm?: number;
+
+  /**
+   * Cross-pan ROTATION rate, rad/s, above which the capture is stopped
+   * for lateral drift.  Defaults to `DEFAULT_LATERAL_TURN_RAD_PER_SEC`
+   * (0.15 rad/s ≈ 8.6 °/s) — unset reproduces today's behaviour.
+   *
+   * `lateralBudgetCm` is NOT the only lateral trigger.  This gyro EMA
+   * is a second, independent one, and historically the primary.  A stop
+   * you attribute to "drifting sideways" may be this rotation trigger
+   * instead — check `latch=gyro|accel` in the `[panMotion]` telemetry
+   * (see `panMotionDebug`) before tuning either number.
+   *
+   * `0` (or negative) disables THIS trigger only; `lateralBudgetCm={0}`
+   * disables both.
+   */
+  lateralTurnRateRadPerSec?: number;
+
+  /**
+   * Continuous over-threshold dwell, ms, before the ROTATION trigger stops the
+   * capture.  Default 500 ms — matching the displacement trigger, which has
+   * always had one.
+   *
+   * Before v0.26.0 the rotation trigger latched on the FIRST sample over
+   * threshold, so one brief wobble ended a capture permanently.  `0` comes as
+   * close to restoring that as the shared latch helper allows — it still costs
+   * one gyro sample (~33 ms), because the dwell clock starts on the first
+   * over-threshold sample and latches only on a later one.
+   */
+  lateralTurnGraceMs?: number;
+
+  /**
+   * Absolute cross-pan ANGLE, DEGREES, at which the capture is stopped.
+   * Default 25; `0` disables while still measuring.  Works in BOTH AR and
+   * non-AR (gyro-integrated), unlike `arLateralRotDeg` which needs the pose.
+   *
+   * Catches the slow pivot `lateralTurnRateRadPerSec` cannot: that is a rate
+   * gate, so 6 deg/s turns 90 degrees over 15 s without tripping it.
+   */
+  lateralTurnAngleDeg?: number;
+
+  /**
+   * ABSOLUTE cross-pan drift budget in CENTIMETRES, measured from the AR
+   * camera POSE.  AR captures only.  Default 8 cm; `0` disables the stop
+   * while still measuring and logging the distance.
+   *
+   * A genuine displacement, unlike `lateralBudgetCm`, which gates a
+   * high-passed rate proxy.  Recovering distance from an accelerometer needs
+   * double integration, whose bias growth must be high-passed away — and that
+   * same high-pass removes slow real motion, so the IMU guard structurally
+   * cannot see slow sideways drift however it is tuned.  ARKit's VIO position
+   * needs no integration, so it can; and tilt cannot masquerade as
+   * translation, because a position is not an acceleration.
+   *
+   * The axis is chosen so the sweep's own ARC never projects onto it — a
+   * vertical pan measures the horizontal cross-view direction, a horizontal
+   * pan measures world up — so an operator pivoting cleanly in place reads ~0
+   * regardless of sweep angle or arm length (measured < 5 mm over an 0.8 rad
+   * sweep at pivot radii of 15-60 cm).
+   */
+  arLateralBudgetCm?: number;
+
+  /**
+   * ABSOLUTE cross-pan ROTATION budget in DEGREES, from the AR camera pose.
+   * AR captures only.  Default 25 deg; `0` disables the stop while still
+   * measuring.
+   *
+   * Closes the slow-pivot hole.  `lateralTurnRateRadPerSec` is a RATE gate
+   * (0.15 rad/s = 8.6 deg/s), so it cannot see a slow turn however far it
+   * goes: 6 deg/s accumulates 90 DEGREES of yaw over 15 s and never trips it.
+   * That is the rotation twin of the slow-translation blind spot — a rate gate
+   * measures how FAST you turn, never how FAR you have turned.
+   *
+   * Measured on the camera's forward VECTOR, so the intended sweep contributes
+   * nothing (a vertical pan measures azimuth, a horizontal pan elevation) and
+   * ROLL about the view axis contributes nothing either — roll does not change
+   * where the camera points, and it is already the motion that corrupted the
+   * accelerometer channel.
+   */
+  arLateralRotDeg?: number;
+  /**
+   * Cross-pan allowance as a RATIO of along-pan travel (AR only).
+   *
+   * A fixed centimetre budget cannot distinguish 6 cm of drift across a 60 cm
+   * sweep (10 % — still overwhelmingly a pan, and about as straight as a hand
+   * gets over half a metre) from the same 6 cm across a 10 cm one (60 % — not
+   * a pan at all).  The effective budget is therefore
+   * `clamp(ratio * alongPanDistance, arLateralBudgetCm, arLateralMaxCm)`.
+   *
+   * `arLateralBudgetCm` becomes the FLOOR: short sweeps, and the opening of
+   * every capture where along-pan travel is still ~0, keep exactly the old
+   * absolute behaviour.  `<= 0` disables the proportional term entirely.
+   */
+  arLateralRatio?: number;
+  /** Ceiling on the ratio allowance, CENTIMETRES.  `<= 0` = uncapped. */
+  arLateralMaxCm?: number;
+
+  /**
+   * Which lateral-drift physics to run.  Default `'fused'`.
+   *
+   * `'fused'` subtracts the device's FUSED GRAVITY SENSOR from each
+   * accelerometer sample and derives the integration step from the
+   * sample's own timestamp.  `'legacy'` restores the pre-0.25.4
+   * behaviour bit-for-bit: an IIR gravity estimate and a hardcoded
+   * 20 ms step.
+   *
+   * You almost certainly want the default.  The legacy estimator cannot
+   * distinguish a wrist TILT from a sideways SLIDE — a change in how
+   * gravity projects onto the cross-pan axis is arithmetically
+   * identical to real lateral acceleration — so it fabricates ~1.1 cm
+   * of drift per degree of net tilt and latches the stop on ordinary
+   * hand movement.  This prop exists as an ESCAPE HATCH so a host that
+   * hits an unexpected device-specific regression can back out without
+   * pinning an old version of the library, not as an opt-in gate.
+   *
+   * Degrades on its own: if the device has no fused gravity sensor, or
+   * it stops delivering mid-capture, the hook falls back to the legacy
+   * estimator automatically for exactly as long as it needs to.
+   */
+  lateralMotionModel?: LateralMotionModel;
+
+  /**
+   * Emit the throttled `[panMotion.*]` diagnostic logs.  Default
+   * `__DEV__`, i.e. unset behaves exactly as before.  Set `true` to keep
+   * them in a release build while diagnosing a field report — they are
+   * the intended instrument for tuning `lateralBudgetCm` against real
+   * captures.
+   */
+  panMotionDebug?: boolean;
+
+  /**
+   * The accepted-keyframe count at or above which a lateral-drift stop
+   * (item 6) FINALIZES the capture: the partial sweep is stitched and handed
+   * to `onCapture` with a `LATERAL_DRIFT_FINALIZE` warning.  BELOW it the
+   * capture is DISCARDED instead — the engine is cancelled, nothing is
+   * stitched, and `onCaptureAbandoned('lateral-drift')` fires.
+   *
+   * **Default `5`.  This is a BEHAVIOUR CHANGE, not a no-op** — the SDK used
+   * to hardcode `2`, so captures that accepted 2-4 keyframes previously
+   * finalized and now DISCARD.  That is intentional: a 2-to-4-frame remnant
+   * of a sweep the operator drifted out of is not a usable shelf panorama,
+   * and asking for a clean re-shoot beats handing a host output it has to
+   * detect and reject downstream.  **Pass `2` to restore the old
+   * behaviour exactly.**
+   *
+   *   - `0` — **ALWAYS DISCARD**, however many keyframes were accepted.  This
+   *     is a genuine special case and NOT the `count >= 0` the arithmetic
+   *     would otherwise give you (that is unconditionally true, i.e. the
+   *     opposite).  For hosts whose downstream pipeline treats any drifted
+   *     sweep as garbage, discarding costs nothing and saves the stitch, the
+   *     file, and the operator's attention on output they will bin anyway.
+   *   - `N >= 1` — finalize iff `acceptedKeyframeCount >= N`.
+   *   - `2` — the pre-policy behaviour: keep anything stitchable.
+   *
+   * Negative, `NaN` and infinite values normalise to the default, so a broken
+   * host config degrades to the standard threshold rather than to "throw
+   * every capture away"; fractional values round UP, as the prop counts whole
+   * frames.
+   *
+   * The discard path shows a THIRD popup state whose copy does not promise a
+   * stitch — `lateralStopDiscardedTitle` / `lateralStopDiscardedBody` in
+   * {@link guidanceCopy}.  At the default that state covers the 2-to-4
+   * keyframe band.  Below 2 accepted keyframes nothing stitchable was
+   * captured at all, so the popup keeps the existing "follow the arrow"
+   * wrong-direction copy regardless of this threshold.
+   */
+  lateralStopFinalizeMinFrames?: number;
+
+  /**
+   * v0.25 — whether a mid-capture device rotation auto-ABANDONS the
+   * in-flight panorama (the OrientationDriftModal explains it to the
+   * user).  Default `true` (the behaviour since v0.12).  Set `false`
+   * to disable the guard entirely: the capture then continues across a
+   * rotation and the output is best-effort (cross-mode captures can
+   * stitch malformed — see `incremental.ts` stitch-mode notes).
+   *
+   * The detector itself is sensor-trust hardened as of v0.25: it never
+   * snapshots or compares orientation until the accelerometer has
+   * delivered a real sample, so hosts with broken/laggy
+   * react-native-sensors delivery no longer see phantom "rotation"
+   * abandons (field RCA: landscape captures auto-abandoning after one
+   * frame while portrait worked).
+   */
+  orientationDriftAbandon?: boolean;
+
+  /**
+   * v0.25 — the keyframe count below which a finished capture is flagged
+   * with the `CAPTURE_TOO_SHORT` capture WARNING.  **Default `1`, which
+   * never warns** and reproduces the previous behaviour exactly.
+   *
+   * Set `2` to be told when a capture produced a single frame.  The
+   * capture still SUCCEEDS and still returns that frame — a one-shot
+   * capture is a legitimate result — but it is no longer silent.  That
+   * silence is why the AR self-ending-hold failures were reported as
+   * stitching bugs: the SDK returned the lone frame as an ordinary
+   * panorama with `singleKeyframe: true` that nothing read.
+   *
+   * Evaluated from the FINALIZE RESULT, not from the live accepted count.
+   * The live count omits any keyframe whose anti-blur sharpness window is
+   * still open at release — the trailing keyframe of nearly every capture
+   * — and it means different things on iOS and Android, so judging
+   * "too short" from it would misfire constantly.  An earlier draft of
+   * this feature did exactly that and would have destroyed valid
+   * captures; adversarial review caught it.
+   */
+  minPanoramaKeyframes?: number;
 
   /**
    * Show the draggable-quad crop editor after a panorama finalizes, BEFORE
@@ -1304,6 +1571,26 @@ export interface CameraHandle extends AROverlayMethods {
    * no-op when nothing is recording). Resolves once the stop is dispatched.
    */
   stopPanorama(): Promise<void>;
+  /**
+   * Set the preferred capture source — for hosts that render their own chrome.
+   *
+   * `hideBuiltInShutter` hides the built-in shutter AND the AR toggle, on the
+   * documented premise that the host draws its own capture controls.  But
+   * before v0.26.0 the host had no way to DRIVE the AR toggle: `arPreference`
+   * was internal state with no prop and no handle method.  So such a host
+   * could replace the shutter (this handle covers capture) and could NOT
+   * replace the AR control — leaving it locked to whatever
+   * `defaultCaptureSource` resolved to at mount, with no indicator and no
+   * switch.  That is exactly what shipped in a field build.
+   *
+   * Sets the same PREFERENCE the built-in pill flips, so host chrome and the
+   * built-in control are interchangeable rather than competing sources of
+   * truth.  The EFFECTIVE source is still clamped by `captureSources`, by
+   * device AR support, and by the 0.5x lens (ARKit/ARCore cannot drive the
+   * ultra-wide) — so requesting `'ar'` on an unsupported device stays non-AR.
+   * Subscribe to `onCaptureSourceChange` for what actually took effect.
+   */
+  setCaptureSource(source: CaptureSource): void;
 }
 
 
@@ -1767,7 +2054,22 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     panGuidance = true,
     maxPanDurationMs = 0,
     panTooFastThreshold,
-    lateralBudgetCm = 4,
+    lateralBudgetCm = DEFAULT_LATERAL_BUDGET_CM,
+    lateralTurnRateRadPerSec,
+    lateralTurnGraceMs,
+    lateralTurnAngleDeg,
+    arLateralBudgetCm = DEFAULT_AR_LATERAL_BUDGET_CM,
+    arLateralRotDeg = DEFAULT_AR_LATERAL_ROT_DEG,
+    arLateralRatio = DEFAULT_AR_LATERAL_RATIO,
+    arLateralMaxCm = DEFAULT_AR_LATERAL_MAX_CM,
+    lateralMotionModel = DEFAULT_LATERAL_MOTION_MODEL,
+    panMotionDebug,
+    // No destructuring default on purpose: `undefined` → default is owned by
+    // `normaliseLateralStopFinalizeMinFrames`, alongside the negative/NaN
+    // normalisation, so the default lives in exactly one place.
+    lateralStopFinalizeMinFrames,
+    orientationDriftAbandon = true,
+    minPanoramaKeyframes = 1,
     rectCrop: rectCropProp,
     showPreview = false,
     guidanceCopy,
@@ -1971,6 +2273,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
    * emitted value is untouched.
    */
   const [sweepFinalizing, setSweepFinalizing] = useState(false);
+  /**
+   * THE SWEEP'S PROGRESS, for the guards that key on how much a capture has
+   * got — the keyframe engine's `acceptedCount`, in the sweep's own unit
+   * (strips painted). `sweepPaintedRef` is exact and read inside the lateral
+   * stop; `sweepProgress` is clamped at the highest ARMING threshold so the
+   * surface's ~20 Hz status does not re-render this component per strip.
+   */
+  const sweepPaintedRef = useRef(0);
+  const [sweepProgress, setSweepProgress] = useState(0);
+  const onSweepPainted = useCallback((painted: number) => {
+    sweepPaintedRef.current = painted;
+    setSweepProgress(Math.min(painted, MIN_STITCHABLE_KEYFRAMES));
+  }, []);
 
   const captureRecording =
     statusPhase === 'recording' || (sweepRunning && !sweepFinalizing);
@@ -1987,13 +2302,29 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Latches when the user holds the shutter in portrait under Mode A;
   // an effect below resumes the capture the instant they rotate.
   const [pendingPanStart, setPendingPanStart] = useState(false);
-  // Item 6 — the latched lateral-drift popup (capture already finalized
-  // by the time it shows).
-  const [lateralStopVisible, setLateralStopVisible] = useState(false);
-  // Item 6 — true when the lateral stop happened with too few frames to
-  // stitch (the user veered off almost immediately): the popup then shows
-  // the "follow the arrow" copy and the capture is abandoned, not finalized.
-  const [lateralWrongDirection, setLateralWrongDirection] = useState(false);
+  // Item 6 — the latched lateral-drift popup.  `null` = hidden; a non-null
+  // value both SHOWS the popup and says which of the three outcomes fired,
+  // so the visibility latch and the copy selection can never disagree:
+  //
+  //   'finalized'       capture kept + stitched (the historical default path)
+  //   'discarded'       stitchable, but `lateralStopFinalizeMinFrames` binned
+  //                     it — capture abandoned, no output.  At the default
+  //                     threshold of 5 this is the 2-to-4-keyframe band.
+  //   'wrong-direction' too few frames to stitch anything — capture abandoned
+  //
+  // Replaces the previous `lateralStopVisible` + `lateralWrongDirection`
+  // boolean pair (a third state would have needed a third boolean, and three
+  // booleans encode five combinations that cannot happen).
+  const [lateralStop, setLateralStop] =
+    useState<LateralStopOutcome | null>(null);
+  // Title/body for whichever outcome latched.  Resolved once here rather
+  // than twice in the modal's JSX; the `?? 'finalized'` is inert (the modal
+  // is hidden while `lateralStop` is null) and only keeps the copy helper
+  // total.
+  const lateralStopCopy = lateralStopCopyFor(
+    lateralStop ?? 'finalized',
+    guidanceCopyResolved,
+  );
   // Item 3 — the brief pan how-to overlay shown at the start of a
   // recording, auto-dismissed after a timeout.
   const [howToVisible, setHowToVisible] = useState(false);
@@ -2073,42 +2404,24 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const deviceOrientation = useDeviceOrientation();
 
   // ── Panorama GUIDANCE — shared motion signals (item 3/4/6) ──────
-  // One gyro + one accelerometer subscription, live only while a non-AR
-  // capture is recording.  Feeds the too-fast pill (`panSpeedBucket`)
-  // and the lateral-drift FINALIZE (`lateralExceeded`).  `panTooFast-
-  // Threshold` (if set) tunes the 'warn'→'bad' boundary; `lateralBudget-
-  // Cm` tunes the drift latch (0 disables the latch in the hook).
-  const panMotion = usePanMotion({
-    // ⚠ EITHER ENGINE. This hook IS the sideways-drift measurement — it
-    // integrates cross-pan translation and latches `lateralExceeded` past
-    // `lateralBudgetCm`. On the sweep it was never active, so the operator's
-    // first named guard ("I want the sideways drift to be measured and
-    // stopped") had nothing measuring it at all.
-    //
-    // ⚠ AND ON EVERY ARM. `isNonAR` was here from the hook's first commit
-    // (edd443d), carried over from its sibling `useIMUTranslationGate` one
-    // screen up — where the term is CORRECT, because in AR the native side
-    // really does use pose-derived translation and really does ignore the
-    // JS integrator. This hook has no such substitute: nothing in this
-    // library consumes ARKit translation for a lateral budget, no ARKit pose
-    // stream reaches JS at all, and so on the AR arm the sideways-drift
-    // guard was not "owned by the session" — it was absent.
-    //
-    // That is the operator's own configuration. The iOS sweep runs ARKit
-    // (`poseSource` defaults to 'ar'), and the production host mounts
-    // `defaultCaptureSource="ar"`, so the guard he named first — "I want the
-    // sideways drift to be measured and stopped" — measured nothing at all
-    // on the platform he tests on, on EITHER engine.
-    //
-    // Nothing in this hook depends on the camera: it is one gyroscope and
-    // one accelerometer, and both run whether or not ARKit holds the
-    // session. Widening it also arms the too-fast cue on the AR arm, which
-    // is the same cue pano draws on its non-AR arm from the same gyro —
-    // this was off in AR for the same reason, and by the same accident.
-    active: captureRecording,
-    warnMaxRadPerSec: panTooFastThreshold,
-    lateralBudgetCm,
-  });
+  // One gyro + one accelerometer subscription, live while a capture is
+  // recording.  Feeds the too-fast pill (`panSpeedBucket`) and the lateral-
+  // drift FINALIZE (`lateralExceeded`).  `panTooFastThreshold` (if set) tunes
+  // the 'warn'→'bad' boundary; `lateralBudgetCm` tunes the drift latch (0
+  // disables the latch in the hook).
+  //
+  // v0.24.5 — was gated `&& isNonAR`, which silently dropped BOTH pan warnings
+  // ("keep the pan straight" + "moving too fast") for AR captures.  Hosts that
+  // default to AR (captureSources="ar") therefore lost all pan guidance.  The
+  // gyro/accel are hardware sensors independent of the frame source (AR frames
+  // come from ARKit/ARCore, but device rotation is measured the same way), so
+  // the guidance is now active for AR captures too — the axis mapping already
+  // keys off deviceOrientation, not the capture source.
+  //
+  // ⚠ ENGINE-NEUTRAL: `active` is `captureRecording`, not `statusPhase` —
+  // a sweep never moves `statusPhase` to 'recording', so keying this on the
+  // phase switched both pan cues and the lateral latch off for the sweep.
+
 
   // v0.13.1 — counter-rotation for control CONTENT (AR toggle, lens
   // pill, flash icon, thumbnails) so their labels read upright relative
@@ -2281,6 +2594,177 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     return () => sub.remove();
   }, []);
   const incremental = useIncrementalStitcher();
+
+  // The IMU guard's cm readout is a DOUBLE integration of the accelerometer,
+  // which cannot separate a tilt from a translation: re-projected gravity is
+  // arithmetically identical to real acceleration on the cross axis.  Measured
+  // 2026-08-26: a 6 deg wrist roll reads 5.18 cm while STATIONARY, and a real
+  // 100 cm slide reads 2.00 cm -- anti-correlated with the truth (r = -0.28).
+  //
+  // Two consequences, both fixed here:
+  //
+  //  1. In AR, ARKit's VIO pose measures the same quantity directly, and the
+  //     AR guard below enforces it.  Running the IMU guard as well lets the
+  //     WORSE sensor veto the better one -- and because it has no warm-up
+  //     gate it fired within the first second, at 0-1 keyframes, which is
+  //     exactly the `wrong-direction` ("follow the arrow") bucket.  So the
+  //     IMU distance guard is OFF in AR; pose-based guards do that job.
+  //
+  //  2. In non-AR there is no pose to fall back on, so the guard stays -- but
+  //     only once the capture HAS something to protect.  Stopping at 0-1
+  //     keyframes cannot save a sweep that does not exist yet, and it is the
+  //     one path that produces the misleading "follow the arrow" popup.
+  //     Arming at MIN_STITCHABLE_KEYFRAMES also re-seeds the accumulator (the
+  //     hook resets on a budget change), so the phantom drift banked during
+  //     warm-up is discarded rather than counted against the operator.
+  //
+  // `0` is the hook's existing "disabled" value for ALL THREE IMU/gyro
+  // triggers (distance, turn rate, turn angle), so no new prop is needed.
+  //
+  // ⚠ BOTH GATES READ THE ENGINE'S OWN PROGRESS: accepted keyframes, or the
+  // strips a sweep has painted (`sweepProgress`, clamped — only the arming
+  // thresholds read it). And the IMU guard stays on for an AR SWEEP: the
+  // sweep still draws its own AR view, so no pose reaches `handleArFrame`
+  // below and the pose guard sees nothing on that engine. When the collapse
+  // (M8) routes the sweep's AR frames through `<Camera>`'s view, this term
+  // goes and AR is pose-guarded on both engines.
+  const captureProgress = engine === 'sweep'
+    ? sweepProgress
+    : (incremental.state?.acceptedCount ?? 0);
+  const imuGuardArmed = captureProgress >= MIN_STITCHABLE_KEYFRAMES;
+  const poseGuardOwnsLateral = isAR && engine !== 'sweep';
+  const effectiveLateralBudgetCm =
+    poseGuardOwnsLateral || !imuGuardArmed ? 0 : lateralBudgetCm;
+  const panMotion = usePanMotion({
+    active: captureRecording,
+    warnMaxRadPerSec: panTooFastThreshold,
+    lateralBudgetCm: effectiveLateralBudgetCm,
+    lateralTurnRateRadPerSec,
+    lateralTurnGraceMs,
+    lateralTurnAngleDeg,
+    lateralMotionModel,
+    panMotionDebug,
+  });
+
+  // ── AR ABSOLUTE cross-pan drift ────────────────────────────────────
+  // Measured from ARKit's VIO POSE, not the accelerometer.  The IMU guard
+  // above cannot see slow drift by construction (its bias high-pass removes
+  // exactly the slow band real drift lives in), and on a 2026-08-26 device
+  // session its readings correlated with the stitcher's own image-derived
+  // translation at r = -0.28 — anti-correlated.  A position needs no
+  // integration, so this one sees arbitrarily slow movement.
+  const arDriftRef = useRef(_freshArDriftState());
+  const [arDriftExceeded, setArDriftExceeded] = useState(false);
+  // ARM ON THE FIRST KEYFRAME, NOT ON THE HOLD.
+  //
+  // Field report: in AR, a minute lateral movement BEFORE the first frame
+  // lands immediately shows the "follow the arrow" copy, and feels far more
+  // sensitive than the same movement mid-capture.
+  //
+  // It is more consequential, not more sensitive.  The detection threshold is
+  // identical; what differs is the OUTCOME, because `lateralStopOutcome` keys
+  // on keyframe count: 0-1 keyframes => 'wrong-direction' (the arrow copy),
+  // 2-4 => 'discarded', 5+ => 'finalized'.  Any trip before the first frame
+  // therefore lands in the harshest bucket.
+  //
+  // And that window is not short in AR.  Finalize restarts the AR session, so
+  // every capture opens with ARKit relocalising; the native gate sets
+  // `poseTrusted = (trackingState == .tracking)` per frame, and while it is
+  // false the translation-budget accept is gated off entirely
+  // (`keyframe_gate.cpp`: `translationBudgetCrossed` requires
+  // `s.poseTrusted`).  So the first AR keyframe waits for tracking to settle —
+  // exactly the interval the operator is holding still and being judged in.
+  //
+  // Stopping a capture for drift before it has captured ANYTHING is also
+  // pointless: there is no sweep to protect.  Arming on the first accepted
+  // keyframe seeds the origin where the pan actually begins, and has the side
+  // effect that a stop can no longer land in the 0-keyframe bucket from the
+  // warm-up alone.
+  const arDriftArmed = isAR
+    && captureRecording
+    && captureProgress > 0;
+
+  // Reset on CAPTURE START, not on arming.  `arDriftExceeded` is a latch that
+  // stops the capture, and it used to be cleared only here, gated on
+  // `arDriftArmed` -- which requires `acceptedCount > 0`.  That is a deadlock:
+  // once the latch is set, the NEXT capture is stopped before it can accept a
+  // keyframe, so `arDriftArmed` never goes true, so the latch is never
+  // cleared, so the next capture is stopped... Device trace 2026-08-26:
+  //
+  //   01:28:15  rot 30.8deg > 25deg budget      -> latched
+  //   01:28:18  ONE gyro sample, no keyframes   -> dead on arrival
+  //   01:28:21  ONE gyro sample, no keyframes   -> dead on arrival
+  //   (only a JS reload cleared it)
+  //
+  // Keying the reset to capture start (`captureRecording`, which a sweep
+  // reaches too — `statusPhase` never does on that engine) means every new capture
+  // starts from a clean latch whether or not the previous one produced
+  // frames.  The ORIGIN still re-seeds lazily from the first TRUSTED pose
+  // inside `_advanceArDrift` (finalize restarts the AR session, so a capture
+  // opens with the tracker relocalising and those poses must not be anchored
+  // to) -- that part was never the problem, only the latch was.
+  useEffect(() => {
+    if (!isAR || !captureRecording) return;
+    _resetArDriftState(arDriftRef.current);
+    setArDriftExceeded(false);
+  }, [isAR, captureRecording]);
+
+  const arLastEmitRef = useRef(0);
+  const handleArFrame = useCallback((meta: ARFrameMeta) => {
+    if (arDriftArmed && meta.pose) {
+      const s = _advanceArDrift(
+        arDriftRef.current,
+        meta.pose.rotation as unknown as readonly [number, number, number, number],
+        meta.pose.translation as unknown as readonly [number, number, number],
+        meta.trackingState,
+        panMode === 'horizontal' ? 'horizontal' : 'vertical',
+        arLateralBudgetCm / 100.0,
+        // Same dwell as both IMU triggers, so a momentary pose glitch or a
+        // brief lean does not end a capture.
+        AR_LATERAL_GRACE_MS,
+        Date.now(),
+        // ROTATION budget, but only when the pan axis is KNOWN.  The guard
+        // measures azimuth for a vertical sweep and elevation for a
+        // horizontal one -- whichever axis the pan is NOT meant to move
+        // along.  Under `panMode: 'both'` there is no such axis, and the
+        // ternary above silently resolves 'both' to 'vertical', so a
+        // deliberate left-to-right sweep reads as pure off-course rotation
+        // and gets stopped for doing exactly what it was told to do.
+        // Measured 2026-08-26: a real horizontal sweep ramps azimuth
+        // smoothly to 28.5 deg while a vertical sweep holds it under 2 deg
+        // -- indistinguishable from the rotation alone without knowing
+        // which the operator intended.  So 'both' disables the rotation
+        // trigger (0 = off) and leaves the axis-agnostic DISTANCE guard.
+        panMode === 'both' ? 0 : (arLateralRotDeg * Math.PI) / 180,
+        arLateralRatio,
+        arLateralMaxCm / 100.0,
+      );
+      if (s.exceeded) setArDriftExceeded((p) => (p ? p : true));
+      const now = Date.now();
+      if (now - arLastEmitRef.current >= 250) {
+        arLastEmitRef.current = now;
+        if (panMotionDebug ?? __DEV__) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[panMotion.ar] drift=${(s.driftM * 100).toFixed(1)}cm `
+            + `peak=${(s.peakM * 100).toFixed(1)}cm `
+            + `long=${(s.longM * 100).toFixed(1)}cm `
+            + `allow=${(s.allowanceM * 100).toFixed(1)}cm `
+            + `floor=${arLateralBudgetCm}cm ratio=${arLateralRatio} `
+            + `rot=${(s.rotRad * 180 / Math.PI).toFixed(1)}deg `
+            + `peakRot=${(s.peakRotRad * 180 / Math.PI).toFixed(1)}deg `
+            + `rotBudget=${arLateralRotDeg}deg by=${s.latchedBy} `
+            + `mode=${panMode} track=${meta.trackingState} `
+            + `untracked=${s.untrackedCount} degenerate=${s.degenerateCount} `
+            + `exceeded=${s.exceeded}`,
+          );
+        }
+      }
+    }
+    onArFrame?.(meta);
+  }, [arDriftArmed, panMode, arLateralBudgetCm, arLateralRotDeg,
+    arLateralRatio, arLateralMaxCm,
+    onArFrame, panMotionDebug]);
   const visionCameraRef = useRef<VisionCamera | null>(null);
   const arViewRef = useRef<ARCameraViewHandle | null>(null);
   // Latest `handleTap` (the shutter handler), kept in a ref so the imperative
@@ -2332,6 +2816,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       handleHoldEndRef.current?.();
       return Promise.resolve();
     },
+    // Same state the built-in AR pill flips — see the interface docs.
+    setCaptureSource: (source) => setArPreference(source === 'ar'),
   }), []);
 
   // Effect that does the async transition work whenever the settled
@@ -2348,8 +2834,58 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   //      time to fully release the handle).
   //   4. Update settled refs + clear cameraTransitioning together so
   //      the gate opens on the same commit.
+  //
+  // v0.25.1 — LATCH FIX.  The settled/stuck/start decision is now the
+  // pure `cameraTransitionAction` (see cameraTransitionGate.ts); this
+  // effect only executes it.  What it fixes: the old code early-returned
+  // whenever the refs already matched, which a flip-BACK inside the
+  // 250 ms grace turns into a permanent wedge —
+  //   1. Lens 1x -> 0.5x: refs still say 1x, so the gate closes
+  //      (cameraTransitioning = true) and finishTransition is scheduled
+  //      for +250 ms.  The refs are NOT updated until that callback.
+  //   2. Inside that window the lens goes BACK 0.5x -> 1x.  The cleanup
+  //      sets cancelled = true, so the pending finishTransition no-ops
+  //      and never reaches its setCameraTransitioning(false).
+  //   3. The effect re-runs, the (never-updated) refs now MATCH the
+  //      current lens, and the old code early-returned.
+  // `setCameraTransitioning(false)` exists at exactly ONE site — inside
+  // the callback step 2 just cancelled — so nothing recovers the flag.
+  // It latches true forever: cameraShouldUnmount() stays true (the live
+  // camera never remounts; stuck on "Switching camera…") and
+  // holdShouldDeferForCamera() stays true (every hold defers into
+  // pendingPanStart, which handleHoldEnd cancels on release) — i.e. a
+  // permanently dead shutter.
+  //
+  // FOUND BY INSPECTION, NOT FIELD-REPRODUCED: the operator tried to
+  // wedge it by hand and could not — the flip-back must land inside the
+  // ~250 ms window, which is hard to hit deliberately on a lens chip.
+  // The failure sequence is a code-reading result, sound as an argument
+  // but unconfirmed on-device; the tests are what pin it.
+  //
+  // DEPS STAY [isAR, lens] — deliberately, even though the body now
+  // reads `cameraTransitioning`.  The stuck state is only ever REACHED
+  // by an isAR/lens change that flips back to the settled value, so the
+  // effect is guaranteed to re-run at the exact moment recovery is
+  // needed, with the flag still true in that render's closure.  Adding
+  // `cameraTransitioning` would be a REGRESSION, not a safety net: the
+  // start path sets it true, which would re-run this effect, cancel the
+  // settle it just scheduled, re-issue RNSARSession.stop() and restart
+  // the 250 ms grace on every transition.  Clearing the flag re-renders
+  // but does NOT re-run the effect (neither dep changed), so recovery
+  // converges in exactly one extra commit and stops.
   useEffect(() => {
-    if (settledIsARRef.current === isAR && settledLensRef.current === lens) {
+    const action = cameraTransitionAction(
+      settledIsARRef.current,
+      settledLensRef.current,
+      isAR,
+      lens,
+      cameraTransitioning,
+    );
+    if (action !== 'start-transition') {
+      // 'clear-stuck-flag' — a cancelled settle left the gate latched
+      // closed; this is the only exit.  'noop' writes NOTHING: an
+      // unconditional clear here would set state on every settled run.
+      if (action === 'clear-stuck-flag') setCameraTransitioning(false);
       return undefined;
     }
     setCameraTransitioning(true);
@@ -2476,17 +3012,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // auto-stop and can attach the LATERAL_DRIFT_FINALIZE warning.  Consumed
   // (reset) at the start of handleHoldEnd so it never leaks to the next pan.
   const lateralFinalizeRef = useRef(false);
-  /**
-   * A lateral stop is WAITING for `onComplete` to decide how to tell the
-   * operator — popup, or the review's own banner.
-   *
-   * Separate from `lateralFinalizeRef` because they answer different
-   * questions and are consumed in different places: that one decides whether
-   * the RESULT carries `LATERAL_DRIFT_FINALIZE`, this one decides whether a
-   * MODAL is raised. Folding them together is how the popup ended up racing
-   * the review surface it was supposed to sit beside.
-   */
-  const lateralStopPendingRef = useRef(false);
   // Item 4 — latched true if the pan ever exceeded the recommended pace (the
   // live "too fast" cue fired) during the capture, so the finalize attaches a
   // HIGH_PAN_SPEED warning.  Reset at capture start; consumed at finalize.
@@ -2540,29 +3065,36 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     from: DeviceOrientation | undefined;
     to: DeviceOrientation;
   } | null>(null);
+
+  // 2026-08-18 field RCA — these three surfaces are RN <Modal>s, and on iOS
+  // only ONE view-controller presentation can be in flight at a time.  A
+  // second overlapping present is REFUSED and leaves an invisible host window
+  // that eats every touch (the dead-shutter bug: the review surface mounted
+  // ~550 ms after the lateral popup latched).  modalPresentation.ts owns the
+  // arbitration; these are the only three `visible` inputs, so the invariant
+  // is enforced in one place rather than at each call site.
+  const reviewSurfaceEnabled = rectCrop || showPreview;
+  const lateralPopupVisible =
+    lateralPopupShouldShow(lateralStop, reviewSurfaceEnabled);
+  // `driftStop`, not `drift.drifted` — see the latch above: the hook resets
+  // the moment the abandon ends the capture.
+  const driftPopupVisible = driftStop != null;
+  const guidanceModalVisible = lateralPopupVisible || driftPopupVisible;
+
   // Reset the modal flags when a new capture STARTS (statusPhase →
   // 'recording'), NOT when one stops.  v0.16 fix: the old "any non-recording
-  // state" condition cleared `lateralStopVisible` the instant a lateral stop
-  // moved statusPhase out of 'recording' — so the popup was hidden before it
-  // could ever show (the user only saw the downstream error).  Clearing on
-  // capture START instead lets the lateral / drift popups persist after the
-  // stop until the user dismisses them, while still giving the next capture
-  // a clean slate.
+  // state" condition cleared the lateral-stop latch the instant a lateral
+  // stop moved statusPhase out of 'recording' — so the popup was hidden
+  // before it could ever show (the user only saw the downstream error).
+  // Clearing on capture START instead lets the lateral / drift popups persist
+  // after the stop until the user dismisses them, while still giving the next
+  // capture a clean slate.
   useEffect(() => {
     if (captureRecording) {
       setDriftStop(null);
-      setLateralStopVisible(false);
-      setLateralWrongDirection(false);
-      // ⚠ AND THE PENDING FLAG, on the SAME edge as the modal it decides.
-      // `onComplete` consumes it, but a sweep that ends through `onError` or
-      // a cancel never reaches `onComplete` — so without this a stopped-then-
-      // abandoned capture would leave it armed and the NEXT sweep would pop a
-      // lateral modal it never earned. Cleared on capture START for the same
-      // reason the flags above are: clearing on stop would race the stop that
-      // set it.
-      lateralStopPendingRef.current = false;
-      // …and the marker that tags a finalize as lateral-drift-triggered, for
-      // the same reason: a lateral trip whose finalize lost the race to a
+      setLateralStop(null);
+      // The marker that tags a finalize as lateral-drift-triggered is cleared
+      // on the same edge: a lateral trip whose finalize lost the race to a
       // release (its `handleHoldEnd` call returned on the re-entrancy latch)
       // left it set, and the NEXT capture was stamped LATERAL_DRIFT_FINALIZE.
       lateralFinalizeRef.current = false;
@@ -2570,6 +3102,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   }, [captureRecording]);
 
   useEffect(() => {
+    // v0.25 — host opt-out (`orientationDriftAbandon={false}`): skip the
+    // auto-abandon entirely; the capture continues best-effort across a
+    // rotation, and no explainer is latched — the modal explains an abandon
+    // that did not happen.  The detector itself is separately sensor-trust
+    // hardened (no snapshot/compare before the first real accelerometer
+    // sample).
+    if (!orientationDriftAbandon) return;
     if (!drift.drifted || !captureRecording) return;
     // ⚠ LATCH THE EXPLAINER FIRST, BEFORE ANY STOP. Every path below ends
     // the capture, and ending the capture resets the hook this state is
@@ -2629,7 +3168,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // here declared a dependency on a value that is constant for half the
     // cases the effect covers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drift.drifted, captureRecording]);
+  }, [drift.drifted, captureRecording, orientationDriftAbandon]);
 
   // v0.8.0 Phase 5 / v0.11.0 — frameProcessor prop semantics:
   //
@@ -2882,6 +3421,42 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // line is the item-5 auto-finalize timer scheduled right after
   // `setRecordingStartedAt`.
   const startCapture = useCallback(async () => {
+    // v0.24.3 guard — a NON-AR capture ingests frames ONLY through the
+    // vision-camera frame-processor worklet.  When the
+    // `cv_flow_gate_process_frame` plugin can never be acquired in this
+    // build, the capture would run its whole UI lifecycle with ZERO
+    // frames and die at finalize with a misleading "0 keyframes saved".
+    // Fail fast BEFORE the recording UI mounts, naming the real problem.
+    //
+    // Two deliberate details:
+    //   - keyed on the DRIVER's acquisition state, not on
+    //     `effectiveFrameProcessor`: a host that supplies its own
+    //     `frameProcessor` prop still depends on the same plugin (its
+    //     `stitcher.call()` is a no-op without it), so checking the
+    //     composed prop would let exactly the broken build through;
+    //   - gated on `acquisitionFailed` (PERMANENT) rather than "plugin
+    //     not resolved yet": the plugin resolves ~1 frame after mount in
+    //     healthy apps, and a capture started in that window succeeds —
+    //     erroring there would regress programmatic `startPanorama()`
+    //     calls fired from a host mount effect.
+    // AR captures are unaffected (the AR session feeds the engine natively).
+    if (isNonAR && fpDriver.acquisitionFailed) {
+      onError?.(
+        new CameraError(
+          'PANORAMA_START_FAILED',
+          'Non-AR panorama capture cannot start: the frame-processor '
+          + 'worklet is unavailable — the "cv_flow_gate_process_frame" '
+          + 'vision-camera plugin is not present in this build, so no '
+          + 'camera frames can reach the stitching engine.  Check '
+          + 'vision-camera >= 4.7 with frame processors enabled '
+          + '(react-native-worklets-core installed before the native '
+          + 'build), then rebuild.  See the console error from '
+          + '[react-native-image-stitcher] and the docs: Host '
+          + 'integration -> "Frame processors".',
+        ),
+      );
+      return;
+    }
     try {
       // perf-3a change 4 — thumbnails + engine state are cleared inside the
       // hook's start() (resetCoalescer + setState(null)) BEFORE its native
@@ -2891,6 +3466,19 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // post-await reset. So no synchronous clear is needed here.
       // Item 4 — fresh capture: clear the latched too-fast flag.
       fastPanRef.current = false;
+      // Item 6 — and the AR drift latch, SYNCHRONOUSLY, batched with the
+      // phase change below.  Clearing it from an effect keyed on
+      // `statusPhase === 'recording'` is one render too late: the lateral-stop
+      // effect reads `arDriftExceeded` on the very render that turns
+      // `statusPhase` to 'recording', sees the PREVIOUS capture's latch, and
+      // ends this one before the reset effect has run.  Device trace
+      // 2026-08-26 -- after each stop, exactly one capture died on arrival
+      // (a single sensor sample, no keyframes, no AR frames) and the one
+      // after it succeeded, which is the signature of a one-render stale read
+      // rather than a stuck latch.  Batching it here means the render that
+      // first sees 'recording' also sees a cleared latch.
+      _resetArDriftState(arDriftRef.current);
+      setArDriftExceeded(false);
       setStatusPhase('recording');
       setRecordingStartedAt(Date.now());
       // Item 5 — schedule the hard-ceiling auto-finalize.  Fires
@@ -3128,6 +3716,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       setPendingPanStart(true);
       return;
     }
+    // v0.24.3 — no camera is mounted while the AR-support probe is still
+    // resolving (the v0.14.2 handoff guard renders the "Switching camera…"
+    // placeholder instead).  Starting here would run a capture against no
+    // frame source and finalize with "0 keyframes saved".  DEFER like the
+    // rotate gate: `pendingPanStart` resumes the start the moment the
+    // probe settles (the resume effect below re-evaluates both gates).
+    // v0.25 — ALSO defer while a camera transition is in flight.  The
+    // render gate already unmounts the camera for `inFlightTransition`;
+    // starting a capture here anyway is what produced the resumed-into-
+    // a-dead-window failure described on `holdShouldDeferForCamera`.
+    if (holdShouldDeferForCamera(inFlightTransition, arSupportPending)) {
+      setPendingPanStart(true);
+      return;
+    }
     void startCapture();
   }, [
     enablePanoramaMode,
@@ -3135,6 +3737,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     statusPhase,
     onError,
     panMode,
+    arSupportPending,
+    // v0.25 — read by holdShouldDeferForCamera above; without it this
+    // callback closes over a stale `false` and the new gate never fires.
+    inFlightTransition,
     deviceOrientation,
     startCapture,
   ]);
@@ -3145,11 +3751,24 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Invoked through `startCaptureRef` (kept current above) so this
   // effect's deps don't churn on every recording re-render.
   useEffect(() => {
-    if (pendingPanStart && !shouldGateForPanMode(panMode, deviceOrientation)) {
+    if (
+      pendingPanStart
+      && !shouldGateForPanMode(panMode, deviceOrientation)
+      // v0.24.3 — also the "camera still initialising" defer (above).
+      // v0.25 — and the in-flight transition, without which this effect
+      // resumed the capture at the exact moment the camera unmounted.
+      && !holdShouldDeferForCamera(inFlightTransition, arSupportPending)
+    ) {
       setPendingPanStart(false);
       startCaptureRef.current?.();
     }
-  }, [pendingPanStart, deviceOrientation, panMode]);
+  }, [
+    pendingPanStart,
+    deviceOrientation,
+    panMode,
+    arSupportPending,
+    inFlightTransition,
+  ]);
 
   const handleHoldEnd = useCallback(async () => {
     // Item 5 exit path #1 — always kill the auto-finalize timer on
@@ -3235,6 +3854,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       const warnings = buildCaptureWarnings({
         framesRequested: result.framesRequested,
         framesIncluded: result.framesIncluded,
+        // v0.25 — judged from the FINALIZE result, not the live accepted
+        // count: the live count omits any keyframe whose sharpness window
+        // is still open at release (the trailing keyframe of nearly every
+        // capture) and differs between iOS and Android.
+        minPanoramaKeyframes,
         lateralFinalize: wasLateralFinalize,
         highPanSpeed: wasFastPan,
         copy: captureWarningCopyFrom(guidanceCopyResolved),
@@ -3271,12 +3895,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       const willReview = (rectCrop || showPreview)
         && result.width > 0
         && result.height > 0;
-      // The lateral-stop popup, decided here and only here (see the lateral
-      // effect): a FALLBACK when no review will mount, never a second modal.
-      if (lateralStopPendingRef.current) {
-        lateralStopPendingRef.current = false;
-        if (!willReview) setLateralStopVisible(true);
-      }
       if (willReview) {
         // Crop mode only — seed the quad from the max-inscribed rectangle of
         // the (un-cropped) panorama so the editor opens on the tightest clean
@@ -3325,12 +3943,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // of a cpp throw can't silently drop the "pan more slowly" path.
       const code = classifyStitchError(message);
       const error = new CameraError(code, message, err);
-      // A lateral stop whose stitch then failed mounts no review, so the
-      // popup is the only place the operator learns why the capture ended.
-      if (lateralStopPendingRef.current) {
-        lateralStopPendingRef.current = false;
-        setLateralStopVisible(true);
-      }
       // v0.16 — surface the failure on BOTH callbacks: `onError` (unchanged
       // mirror) and `onCapture` (ok:false) so a host has one place to learn
       // the outcome.  A lateral-drift stop that then failed to stitch still
@@ -3412,65 +4024,70 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // its ref.  Gated off when the budget is disabled (`<= 0`).
   useEffect(() => {
     if (
-      !panMotion.lateralExceeded
+      !(panMotion.lateralExceeded || arDriftExceeded)
       || !captureRecording
       || lateralBudgetCm <= 0
+      // v0.24.6 port — orientation-drift auto-cancel wins.  A physical ~90°
+      // turn trips BOTH latches from the same accelerometer excursion; if this
+      // lateral FINALIZE also fired, the racing statusPhase
+      // recording→stitching→idle churn unmounts+remounts the live camera
+      // (cameraShouldUnmount is true for 'stitching') faster than the native
+      // camera can hand off — wedging the pipeline into an ANR (the field
+      // "freezes, nothing works" bug).  Deferred ONLY when the drift-abandon
+      // effect will actually run (host hasn't opted out via
+      // orientationDriftAbandon={false}); with the opt-out active the drift
+      // latch must not suppress the lateral stop, or a turned capture would
+      // have no stop at all.  See the mid-capture-freeze RCA.
+      || (orientationDriftAbandon && drift.drifted)
     ) {
       return;
     }
     clearPanTimer();
 
-    // ⚠ THE SWEEP STOPS THROUGH ITS OWN SHUTTER. Everything below is the
-    // keyframe engine's: `acceptedKeyframeCount`, `incremental.cancel()`,
-    // `handleHoldEndRef`. A sweep has no keyframes to count and no
-    // `incremental` session to cancel.
+    // Whether a lateral stop KEEPS what was captured is the HOST's call, via
+    // `lateralStopFinalizeMinFrames`.  Its default is 5, NOT the 2 this
+    // branch used to hardcode as MIN_STITCHABLE_KEYFRAMES: a 2-to-4-frame
+    // remnant of a drifted sweep is waste for shelf capture, so it now
+    // discards.  The arithmetic lives in lateralStopPolicy.ts — including
+    // the `0` = ALWAYS-DISCARD special case, which is emphatically NOT the
+    // `count >= 0` a naive comparison would give — so it is unit-testable
+    // without mounting a render.  Three outcomes:
     //
-    // Release always FINALIZES on the sweep, which is pano's ">= 2
-    // keyframes" arm — keep what was captured and say why. The unusable
-    // case needs no branch here: the sweep's own `onComplete` already emits
-    // rather than reviewing when the canvas came back empty.
+    //   'finalized'       keep + stitch the partial sweep; handleHoldEnd
+    //                     attaches the LATERAL_DRIFT_FINALIZE warning.
+    //   'discarded'       stitchable, but policy binned it (at the default
+    //                     threshold of 5: the 2-to-4-keyframe band).
+    //   'wrong-direction' #3 — the user veered off before enough frames were
+    //                     captured to stitch anything.  Finalizing that would
+    //                     fail with a misleading "need more images" error,
+    //                     which is why this branch predates the policy.
+    //
+    // BOTH discard outcomes take the identical ABANDON path (no stitch → no
+    // error) and must NOT set `lateralFinalizeRef`: there is no result to
+    // hang a warning on, and a leaked flag would mislabel the NEXT capture.
+    //
+    // ⚠ ONE POLICY, BOTH ENGINES. The count is the engine's own progress:
+    // accepted keyframes, or the strips the sweep has painted. The sweep
+    // stops and abandons through its own handle — `incremental` and
+    // `handleHoldEndRef` are the keyframe engine's.
+    const outcome = classifyLateralStop(
+      engine === 'sweep' ? sweepPaintedRef.current : acceptedKeyframeCount,
+      lateralStopFinalizeMinFrames,
+    );
+    setLateralStop(outcome);
     if (sweepRunning) {
-      setLateralWrongDirection(false);
-      // ⚠ THE POPUP IS **NOT** RAISED HERE ANY MORE, and that is the fix for
-      // "the popup shows and then the screen goes blank" (iOS, operator
-      // 2026-09-22).
-      //
-      // Raising it here put TWO react-native `<Modal>`s up at once: this one,
-      // and the `<RectCropPreview>` the sweep's own `onComplete` stashes a
-      // moment later. On iOS a second simultaneous modal leaves an invisible,
-      // touch-swallowing orphan — the same defect fixed in 28d11df for a
-      // different pair — so dismissing this popup revealed nothing instead of
-      // the partial panorama that was sitting underneath it.
-      //
-      // The decision MOVES to `onComplete`, which is the only place that
-      // knows whether a review is being stashed at all. There the popup is
-      // raised ONLY when no review will mount, so it is a fallback rather
-      // than a competitor. When a review does mount, the reason is already on
-      // its banner as `LATERAL_DRIFT_FINALIZE` — wired deliberately so the
-      // result says why it is short — which makes the popup redundant as
-      // well as harmful.
-      lateralStopPendingRef.current = true;
-      // ⚠ AND THE RESULT HAS TO SAY WHY IT IS SHORT, on this engine too.
-      // The keyframe branch below sets this before `handleHoldEnd()` so the
-      // capture carries `LATERAL_DRIFT_FINALIZE` in `onCapture.warnings` and
-      // on the review banner; the sweep branch set nothing, so a host that
-      // branches on that code — to re-queue the capture, to flag the audit —
-      // saw the sweep as a normal completion. Consumed in the sweep's own
-      // `onComplete`, the same place `handleHoldEnd` consumes it.
+      if (outcome !== 'finalized') {
+        sweepRef.current?.abandon?.('lateral-drift');
+        onCaptureAbandoned?.('lateral-drift');
+        return;
+      }
+      // Consumed in the sweep's own `onComplete`, as `handleHoldEnd`
+      // consumes it, so the result carries LATERAL_DRIFT_FINALIZE.
       lateralFinalizeRef.current = true;
       sweepRef.current?.holdEnd?.();
       return;
     }
-
-    // #3 — if the user veered off before enough frames were captured to
-    // stitch, finalizing would fail with a misleading "need more images"
-    // error.  Instead ABANDON the capture (no stitch → no error) and show
-    // the "follow the arrow" popup.  Otherwise FINALIZE what was captured
-    // (a usable partial pano) and show the "keep it straight" popup.
-    const MIN_STITCHABLE_KEYFRAMES = 2;
-    if (acceptedKeyframeCount < MIN_STITCHABLE_KEYFRAMES) {
-      setLateralWrongDirection(true);
-      setLateralStopVisible(true);
+    if (outcome !== 'finalized') {
       void (async () => {
         fpDriver.stop();
         try {
@@ -3486,27 +4103,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       return;
     }
 
-    setLateralWrongDirection(false);
-    // ⚠ THE POPUP IS DECIDED WHERE THE RESULT LANDS, as on the sweep (above).
-    // Raising it here put a `LateralMotionModal` up ~550 ms before the stitch
-    // finished and mounted `RectCropPreview` on top of it: two RN `<Modal>`s
-    // at once, which on iOS leaves an invisible window that swallows every
-    // touch — the dead-shutter RCA that main fixed in 28d11df
-    // (`modalPresentation.ts`), whose fix this branch does not carry. With
-    // `rectCrop` now ON by default every default host would reach it.
-    // `handleHoldEnd` consumes the flag: popup only when no review mounts
-    // (the review banner already carries `LATERAL_DRIFT_FINALIZE`), and on a
-    // failed stitch, where nothing else would tell the operator why.
-    lateralStopPendingRef.current = true;
     // Mark this finalize as lateral-drift-triggered so handleHoldEnd attaches
     // the LATERAL_DRIFT_FINALIZE warning to the result.
     lateralFinalizeRef.current = true;
     handleHoldEndRef.current?.();
     // Deps mirror the drift effect: re-run when the latch trips or the
-    // recording state changes.  Other reads are stable setters / refs.
-    // `captureRecording` for the reason stated there.
+    // recording state changes.  Other reads are stable setters / refs, plus
+    // two deliberate non-deps — `acceptedKeyframeCount` and
+    // `lateralStopFinalizeMinFrames`.  The effect BODY is rebuilt every
+    // render, so the run that the latch triggers already closes over the
+    // current values of both; listing them would instead let a mid-capture
+    // prop/count change re-enter this stop and abandon twice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panMotion.lateralExceeded, captureRecording, lateralBudgetCm]);
+  }, [panMotion.lateralExceeded, arDriftExceeded, captureRecording, lateralBudgetCm,
+      drift.drifted, orientationDriftAbandon]);
 
   // ── Item 7 — auto-finalize when the configured keyframe count is hit ─
   // The engine caps accepted keyframes at `keyframeMaxCount`; once it
@@ -4051,7 +4661,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // Remount per capture so the dragged-quad + layout state re-seed to
       // the new image (RectCropPreview seeds its quad once via useState).
       key={cropPending?.uri ?? 'crop'}
-      visible={cropPending != null}
+      // Deferred behind any guidance modal — never a second presentation
+      // (modalPresentation.ts, the dead-shutter RCA).
+      visible={reviewSurfaceShouldShow(
+        cropPending != null,
+        guidanceModalVisible,
+      )}
       imageUri={cropPending?.uri ?? ''}
       imageWidth={cropPending?.width ?? 0}
       imageHeight={cropPending?.height ?? 0}
@@ -4206,33 +4821,26 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         cancelled.  Single OK button (no Continue) per the engine
         spec on cross-mode capture being best-effort, not supported. */}
     <OrientationDriftModal
-      visible={driftStop != null}
+      visible={driftPopupVisible}
+      contentRotationDeg={contentRotationDegree}
       captureOrientation={driftStop?.from}
       currentOrientation={driftStop?.to ?? drift.currentOrientation}
       onAcknowledge={() => setDriftStop(null)}
     />
 
-    {/* Item 6 — lateral-drift popup.  Latched true by the lateral
-        effect AFTER it finalizes the capture; informational only,
-        dismiss just clears the latch so the next capture starts
-        fresh. */}
+    {/* Item 6 — lateral-drift popup.  Latched by the lateral effect AFTER
+        it has already finalized OR abandoned the capture; informational
+        only, and dismiss just clears the latch so the next capture starts
+        fresh.  Which of the three outcomes fired picks the copy — see
+        `lateralStopCopyFor`, which exists so the "we stitched what you
+        captured" body can never be paired with a discarded capture. */}
     <LateralMotionModal
-      visible={lateralStopVisible}
-      title={
-        lateralWrongDirection
-          ? guidanceCopyResolved.lateralWrongDirectionTitle
-          : guidanceCopyResolved.lateralStopTitle
-      }
-      body={
-        lateralWrongDirection
-          ? guidanceCopyResolved.lateralWrongDirectionBody
-          : guidanceCopyResolved.lateralStopBody
-      }
+      visible={lateralPopupVisible}
+      contentRotationDeg={contentRotationDegree}
+      title={lateralStopCopy.title}
+      body={lateralStopCopy.body}
       dismissLabel={guidanceCopyResolved.lateralStopDismiss}
-      onDismiss={() => {
-        setLateralStopVisible(false);
-        setLateralWrongDirection(false);
-      }}
+      onDismiss={() => setLateralStop(null)}
     />
     </>
   );
@@ -4720,8 +5328,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               setSweepRunning(sweeping);
               if (!sweeping) setSweepFinalizing(false);
               sweepDriver.setActive(sweeping);
+              // A new sweep starts from zero progress; the surface's own
+              // report follows as its status arrives.
+              if (sweeping) onSweepPainted(0);
               sweep?.onSweepingChange?.(sweeping);
             }}
+            onPaintedChange={onSweepPainted}
             onComplete={async (result: PanoPlusCaptureResult) => {
               // ⚠ THE REVIEW IS A GATE, NOT A VIEWER — the panorama's shape,
               // and the reason this changed.
@@ -4812,18 +5424,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               // auto-advance flow stalled behind a modal with no host-visible
               // way to dismiss it. Both props were observably inert on the
               // sweep's result path.
-              // ⚠ THE POPUP IS A FALLBACK, NOT A COMPANION. Raised only
-              // when NO review will mount — otherwise it becomes a second
-              // simultaneous `<Modal>` and orphans the review on iOS.
-              // A review that does mount already carries the reason on its
-              // banner, so the operator is told either way and sees the
-              // partial panorama when there is one to see.
+              // The lateral popup is decided up front by `modalPresentation`
+              // (`lateralPopupShouldShow`), for this engine as for the
+              // keyframe one: a finalized stop that opens a review shows no
+              // popup, because the review's banner carries the reason.
               const willReview = (rectCrop || showPreview)
                 && result.width > 0 && result.height > 0;
-              if (lateralStopPendingRef.current) {
-                lateralStopPendingRef.current = false;
-                if (!willReview) setLateralStopVisible(true);
-              }
               if (willReview) {
                 // ⚠ SEEDED FROM THE PANORAMA'S OWN COVERAGE, exactly as the
                 // keyframe path seeds its quad (:3123) — the operator asked
@@ -5119,7 +5725,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           enableMesh={enableMesh}
           enableFeaturePoints={enableFeaturePoints}
           planeDetection={planeDetection}
-          onArFrame={onArFrame}
+          // Composed: drives the internal AR drift guard AND forwards to the
+          // host.  Native emission is gated on this prop being set, so the
+          // guard would never receive a frame if we only passed the host's
+          // callback through.
+          onArFrame={isAR ? handleArFrame : onArFrame}
           arFrameMetaInterval={arFrameMetaInterval}
           onArPluginResult={onArPluginResult}
           overlays={overlays}
@@ -5960,6 +6570,37 @@ const SWEEP_CAMERA_RELEASE_SETTLE_MS = 600;
 
 
 /**
+ * v0.25 — must a hold DEFER because there is no camera to capture from?
+ *
+ * This is deliberately the first two terms of `cameraShouldUnmount`
+ * above, and that is the whole point: the render gate and the hold gate
+ * were reading different conditions, so a hold could start a capture
+ * against a camera the renderer had just deliberately unmounted.
+ *
+ * The hole this closes: `arSupportPending` clears in the SAME render
+ * that flips `isAR` false→true, which makes `inFlightTransition` true,
+ * unmounts the camera and (on iOS) stops the AR session with a 250 ms
+ * grace before the AR view may mount again.  The v0.24.3 defer resumed
+ * on `!arSupportPending` alone — i.e. at exactly the moment the
+ * transition BEGAN — so the resumed capture ran against no frame source
+ * and finalized with "0 keyframes saved".
+ *
+ * `statusPhase === 'stitching'` is intentionally NOT included:
+ * `handleHoldStart` already rejects that phase outright rather than
+ * queueing a deferred start.
+ */
+function holdShouldDeferForCamera(
+  inFlightTransition: boolean,
+  arSupportPending: boolean,
+): boolean {
+  return inFlightTransition || arSupportPending;
+}
+
+/** @internal test-only — see `holdShouldDeferForCamera`. */
+export const _holdShouldDeferForCameraForTests = holdShouldDeferForCamera;
+
+
+/**
  * v0.12.0 — bottom-controls outer container positioning.  Anchors
  * to the home-indicator JS edge with the appropriate flex direction
  * so the band sits on the viewport side of the shutter (toward the
@@ -6089,6 +6730,19 @@ const styles = StyleSheet.create({
   bottomBarCenter: {
     flex: 1,
     alignItems: 'center',
+    // v0.25.2 — CROSS-AXIS vs MAIN-AXIS.  `alignItems` centres on the cross
+    // axis, which is horizontal while this slot lays out as a column — so on
+    // its own it left-right centres the cluster and leaves the vertical
+    // (main) axis at the default `flex-start`.  In the SIDE-EDGE layout
+    // (bottomBarStyleForEdge -> flexDirection 'column' for a left/right home
+    // indicator) the three flex:1 slots split the height into thirds and the
+    // cluster pinned to the TOP of the middle third, i.e. from 33% rather
+    // than centred on 50%.  The displacement scales with height, so it read
+    // as centred on an iPhone (~390-430pt landscape) and visibly high on an
+    // iPad (~834-1024pt) — the field report.  A no-op in the row layout:
+    // there the parent's `alignItems: 'center'` sizes this slot to its
+    // content height, leaving no free space to distribute.
+    justifyContent: 'center',
   },
   bottomBarRight: {
     flex: 1,

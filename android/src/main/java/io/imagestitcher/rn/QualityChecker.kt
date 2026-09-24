@@ -265,7 +265,14 @@ class QualityChecker(reactContext: ReactApplicationContext)
             // uses.  System.loadLibrary is idempotent, so loading
             // image_stitcher here (it dynamically links opencv_java4)
             // and opencv_java4 again in ensureOpenCv() is safe.
-            System.loadLibrary("image_stitcher")
+            //
+            // v0.24.4 — via NativeLibraryLoader.tryLoad(), which never
+            // throws.  RNImageStitcherPackage.createNativeModules()
+            // constructs this module during bridge startup, so a
+            // throwing static initialiser took the whole app down
+            // before any JS ran.  Individual methods surface the
+            // failure through their own promise rejections instead.
+            NativeLibraryLoader.tryLoad()
         }
 
         @Volatile

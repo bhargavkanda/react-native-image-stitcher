@@ -588,6 +588,46 @@ class IncrementalStitcher(
             // AR-mode behaviour (the production <Camera> always sets
             // 'arSession' explicitly for AR captures anyway).
             val frameSourceMode = options.getString("frameSourceMode") ?: "arSession"
+            // v0.25 — DIAGNOSTIC ONLY on Android.  Deliberately NOT a
+            // rejection, and deliberately NOT iOS parity.
+            //
+            // iOS refuses to start an AR capture with no live session
+            // (IncrementalStitcherBridge.swift rejects
+            // "ar-session-not-running"), and an earlier draft of this
+            // release copied that here for parity.  Adversarial review
+            // showed the platforms' session LIFETIMES are not equivalent,
+            // so the same guard does not mean the same thing:
+            //
+            //   On Android the AR view owns the session.  Every capture
+            //   ends with statusPhase 'stitching', which unmounts
+            //   <ARCameraView>; onDetachedFromWindow calls stopForView(),
+            //   which nulls sessionRef.  On remount the session is
+            //   RECONSTRUCTED — several hundred ms on a mid-tier device,
+            //   and legitimately deferred entirely when currentActivity
+            //   is null.  So "no live session" is a NORMAL transient
+            //   after every single capture here.
+            //
+            // Rejecting would have turned that ordinary timing into a
+            // hard user-facing failure for an operator who holds the
+            // shutter straight after a stitch — a new regression, and a
+            // worse one than the silence it was meant to fix.  The
+            // dead-session capture is already surfaced: it accepts no
+            // frames, so it hits the 0-keyframe error or the v0.25
+            // CAPTURE_TOO_SHORT warning.
+            //
+            // Closing this properly needs the JS hold gate to WAIT for
+            // session readiness (poll RNSARSession.getState()) rather
+            // than native refusing after the fact — that is device-
+            // validation work, deliberately not shipped unvalidated.
+            if (frameSourceMode == "arSession" && RNSARSession.instance?.hasLiveSession() != true) {
+                android.util.Log.w(
+                    "IncrementalStitcher",
+                    "start(): AR capture starting with no live ARCore session "
+                        + "(view remounting after a stitch, or activity not ready). "
+                        + "Frames will be ingested once the session comes up; if "
+                        + "none arrive this capture will report too few keyframes.",
+                )
+            }
             frameProcessorIngestEnabled.set(frameSourceMode == "frameProcessor")
             val rotation = options.getIntOrDefault("frameRotationDegrees", 90)
             val composeW = options.getIntOrDefault("composeWidth",  960)
@@ -694,6 +734,13 @@ class IncrementalStitcher(
             val maxKfIntervalMs = configOverrides
                 ?.getDoubleOrDefault("maxKeyframeIntervalMs", 1500.0) ?: 1500.0
             keyframeGate.maxKeyframeIntervalMs = maxKfIntervalMs.coerceAtLeast(0.0)
+            // v0.25 — may a keep-alive accept be the one that REACHES the
+            // cap and so auto-finalize the capture?  Defaults to true
+            // (pre-0.25 behaviour) when the key is absent.  iOS parity:
+            // IncrementalStitcher.swift keyframeTimeIntervalCanFinalize.
+            keyframeGate.timeIntervalCanFinalize = configOverrides
+                ?.takeIf { it.hasKey("keyframeTimeIntervalCanFinalize") }
+                ?.getBoolean("keyframeTimeIntervalCanFinalize") ?: true
             // 2026-05-22 (audit F5) — flow-strategy Shi-Tomasi
             // tunables.  Pre-audit, Android had no JNI for these
             // (iOS-only via KeyframeGateBridge); JS Settings sliders
@@ -1300,7 +1347,13 @@ class IncrementalStitcher(
                         captureOrientationSnapshot,
                         useInscribedRectCropSnapshot,
                         compositingResolMP = adaptiveComposeMP,  // perf-4a (1.0 unless adapted)
-                        stitchMode = "panorama",         // always high-level PANORAMA
+                        // v0.25 — honor the resolved mode (jetsam RCA durable
+                        // fix): translation-classified captures run the affine
+                        // SCANS model FIRST instead of failing PANORAMA and
+                        // walking the rescue ladder.  stitcher.stitchMode=
+                        // 'panorama' forces the old behaviour (this only
+                        // changes what 'auto' resolves to).  Mirrors iOS.
+                        stitchMode = stitchModeResolved,
                         useManualPipeline = false,       // high level across the board
                         rangeMatcherWidth = stitchRangeMatcherWidth,  // perf-3b (0 = off)
                         numThreads = stitchNumThreads,   // perf-3b item 1 (0 = auto-multi)
@@ -1318,6 +1371,16 @@ class IncrementalStitcher(
                     // safe 1.0 default forever. Intended: its cost is scene-driven
                     // registration retries, which a compositing cut does not
                     // reduce — the fallback is conservative, never a wrong result.
+                    // KNOWN LIMITATION (2026-08-17 flattened ladder): dims[4] now
+                    // reports the WINNING RUNG's threshold and no longer encodes
+                    // attempt count — a capture that failed its pan rungs and won
+                    // at scans@1.00 reports 1000 here even though stitchWallMs
+                    // covers the whole multi-rung ladder, so such runs are
+                    // over-counted as "default speed" samples. A ladder-aware
+                    // escalation signal (rung index / mode-switch flag surfaced
+                    // from native) is the follow-up; until then the samples skew
+                    // slower-than-device only on misclassified captures, and the
+                    // PROBE_EVERY/0.8x hysteresis keeps the cut recoverable.
                     if (adaptiveStitchMode == "measured" && adaptiveComposeMP >= 1.0) {
                         val threshMilli = if (dims.size > 4) dims[4] else 1000
                         val escalated = threshMilli < 1000
@@ -1736,6 +1799,18 @@ class IncrementalStitcher(
             // this fell back to Pose strategy because the JS-bridge
             // path supplied no pixel data — same bug as the iOS
             // non-AR path; both fixed in v0.3).
+            // v0.25 — pose trust (iOS parity: IncrementalStitcher.swift's
+            // `keyframeGate.poseTrusted` assignment).  ARCore reports
+            // non-TRACKING while initialising and during relocalisation,
+            // when the world transform slides/snaps by metres between
+            // consecutive frames.  The gate's two POSE-DRIVEN
+            // force-accepts (translation budget + angular fallback)
+            // accept regardless of image content, so on those frames they
+            // fire on a camera that never moved and burst-accept to the
+            // keyframe cap — auto-finalising the operator's hold.
+            // `trackingPoor` is already threaded in from the AR camera
+            // view, so this costs nothing extra.
+            keyframeGate.poseTrusted = !trackingPoor
             val decision = keyframeGate.evaluateWithFrame(
                 pose, planeMatrix,
                 grayData, grayWidth, grayHeight, grayStride,
@@ -3357,11 +3432,11 @@ class IncrementalStitcher(
             // No pose data at all — fall back on the IMU signal.  IMU
             // > 5 cm hints SCANS; everything else hints PANORAMA.
             return StitchModeResolution(
-                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0, 0.0, 0.0)
+                if (imuTranslationMetres >= kScansMinTranslationMetres) "scans" else "panorama", 0.0, 0.0, 0.0)
         }
         if (firstPose.size != 7 || lastPose.size != 7) {
             return StitchModeResolution(
-                if (imuTranslationMetres > 0.05) "scans" else "panorama", 0.0, 0.0, 0.0)
+                if (imuTranslationMetres >= kScansMinTranslationMetres) "scans" else "panorama", 0.0, 0.0, 0.0)
         }
 
         // Translation magnitude (Euclidean, in metres) — pose-derived.
@@ -3406,14 +3481,39 @@ class IncrementalStitcher(
         // reach SCANS via the ratio.  (Conservative: keeps the tMeters cap so a
         // genuine large-translation capture isn't forced to PANORAMA.)
         val lowRotationGuard = rRadians > 0.35 && tMeters < 0.25
-        val mode = if (!lowRotationGuard && ratio >= 0.55) "scans" else "panorama"
+        // 2026-08-26 — ABSOLUTE TRANSLATION FLOOR.  See the iOS twin
+        // (IncrementalStitcher.swift resolveStitchModeAuto) for the full
+        // derivation.  In short: substituting the arc a pan traces when it
+        // pivots `r` behind the lens, tMeters = r * rRadians, gives
+        //     ratio = (r*rRad/0.10) / (r*rRad/0.10 + rRad) = r / (r + 0.10)
+        // so THE PAN ANGLE CANCELS and `ratio >= 0.55` reduces to r >= 0.122 m.
+        // Every hand-held pan pivots further back than that (wrist ~15 cm,
+        // elbow ~35 cm, shoulder ~60 cm), so the ratio cannot discriminate a
+        // shelf scan from an ordinary pan; `lowRotationGuard` was doing all the
+        // work, and only above 0.35 rad, leaving sub-20-degree pans exposed.
+        // A genuine shelf scan is defined by LARGE ABSOLUTE translation (~30 cm
+        // per the worked example above), which the floor captures directly.
+        // The THRESHOLD is the fix.  `ratio` is exactly r/(r+0.10) where
+        // r = tMeters/rRadians is the PIVOT RADIUS — how far behind the lens
+        // the operator turned — so rotation is already accounted for: the SAME
+        // 49.5 cm of travel reads r = infinity (SCANS) with no rotation and
+        // r = 59 cm (panorama) through a 47.7 deg arc.  What was wrong was
+        // 0.55, i.e. r >= 12.2 cm, SHORTER THAN A HUMAN WRIST, so every
+        // hand-held pan cleared it.  See the iOS twin for the full derivation.
+        val mode = if (!lowRotationGuard && ratio >= kScansMinRatio)
+            "scans" else "panorama"
         android.util.Log.i(
             "IncrementalStitcher",
             "stitch-mode auto: tPose=${"%.3f".format(tPose)}m " +
                 "tImu=${"%.3f".format(imuTranslationMetres)}m " +
                 "r=${"%.3f".format(rRadians)}rad " +
                 "ratio=${"%.3f".format(ratio)} " +
-                "rotGuard=$lowRotationGuard → $mode",
+                "rotGuard=$lowRotationGuard thresh=$kScansMinRatio " +
+                // Effective pivot radius = tMeters/rRadians; the ratio is
+                // exactly rEff/(rEff+0.10), so this makes the verdict
+                // readable directly (>0.122 m => ratio alone says SCANS).
+                "rEff=${"%.3f".format(if (rRadians > 1e-6) tMeters / rRadians else 0.0)}m " +
+                "→ $mode",
         )
         return StitchModeResolution(mode, rRadians, tMeters, ratio)
     }
@@ -3518,12 +3618,56 @@ class IncrementalStitcher(
     }
 
     companion object {
+        /**
+         * Minimum ABSOLUTE translation (metres) before the auto-resolver may
+         * choose SCANS.
+         *
+         * `ratio` is scale-free and so cannot tell a 30 cm shelf scan from a
+         * 5 cm wrist pivot — the pan angle cancels out of it entirely (see
+         * [resolveStitchModeAuto]).  This floor supplies the absolute scale
+         * the ratio lacks: below the 30 cm shelf scan the resolver targets,
+         * and well above every hand-held pan measured on device (2-10 cm).
+         */
+        private const val kScansMinTranslationMetres = 0.25
+
+        /**
+         * Minimum motion-shape ratio before the auto-resolver may choose SCANS.
+         *
+         * `ratio` == r/(r+0.10) with r the PIVOT RADIUS, so this is really a
+         * statement about anatomy: 0.93 => r >= 1.33 m, further back than any
+         * person can pivot (wrist ~15, elbow ~35, shoulder ~60-80 cm).
+         *
+         * The corridor is NARROW and both walls are measured: the worst real
+         * hand-held sweep observed is 0.889 (r = 80 cm); the 30 cm / 10 deg
+         * shelf scan this resolver targets is 0.946.  0.93 is ~the midpoint.
+         * 0.95 was tried and rejected — it excludes that 0.946 scan.
+         *
+         * WHY ERR HIGH: the failure directions are not symmetric.  Too LOW
+         * affine-warps an ordinary rotation capture and is TERMINAL (the
+         * ladder short-circuits on the scans rung, never trying panorama);
+         * too HIGH merely starts a genuine scan panorama-primary and the
+         * ladder's own scans rungs recover it.  Ceiling is ~0.97, above which
+         * the 30 cm / 10 deg scan this resolver targets (0.967) is excluded.  A real
+         * arm sweep measured on 2026-08-26 reached r = 80 cm (ratio 0.889),
+         * which is why 0.90 would be too tight; the 30 cm / 10 deg shelf scan
+         * this resolver targets sits at 0.967.
+         *
+         * The old 0.55 meant r >= 12.2 cm — shorter than a wrist.
+         */
+        private const val kScansMinRatio = 0.93
+
         init {
             // v0.21 — nativeSharpnessScore lives in libimage_stitcher.so
             // (the same JNI shim KeyframeGate and QualityChecker load).
             // System.loadLibrary is idempotent; loading here removes any
             // dependence on KeyframeGate's class-initialisation order.
-            System.loadLibrary("image_stitcher")
+            //
+            // v0.24.4 — via NativeLibraryLoader.tryLoad(), which never
+            // throws.  This module is constructed eagerly during bridge
+            // startup by RNImageStitcherPackage.createNativeModules(),
+            // so a throwing static initialiser crashed the host app at
+            // launch on any ABI this AAR doesn't ship.
+            NativeLibraryLoader.tryLoad()
         }
 
         @JvmStatic

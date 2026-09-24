@@ -76,6 +76,1062 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while the crop editor is on,** instead of showing a setting that cannot take
   effect.
 
+## [0.26.0] - 2026-08-26 (lateral-drift guard: a pose-derived signal, and a budget that scales)
+
+**The root cause behind the 0.25.3 tuning change.** 0.25.3 raised
+`lateralBudgetCm` 4 → 8 to suppress a field report of the lateral-drift
+stop firing on minor movement. That treated the symptom. This release
+fixes the detector.
+
+### The defect
+
+The cross-pan estimator double-integrated the **raw** accelerometer
+device-Y axis and removed gravity with a per-sample IIR (α = 0.9,
+τ ≈ 190 ms). There was **no gyroscope or attitude input anywhere in that
+path**, so a change in how the gravity vector *projects* onto device-Y is
+arithmetically identical to real lateral acceleration.
+
+Replayed through the shipped integrator — an 8 s landscape vertical sweep
+(`panMode: 'vertical'`), **zero real translation**, only wrist roll about
+the camera axis:
+
+| wrist roll | reported |
+|---|---|
+| 3° | 2.59 cm |
+| 6° | **5.18 cm** — trips a 4 cm budget |
+| 12° | 10.31 cm |
+
+And in the same harness, real translation was nearly invisible, because a
+190 ms IIR absorbs any *sustained* acceleration as "gravity":
+
+| real sideways slide | reported |
+|---|---|
+| 20 cm | 0.40 cm |
+| **100 cm** | **2.00 cm** — never trips even 4 cm |
+
+The discrimination was not merely noisy, it was **inverted**: the guard
+fired on ordinary wrist movement and ignored the failure it exists to
+catch.
+
+### The fix
+
+1. **Stage 1 — true gravity subtraction.** Subtract the *fused* gravity
+   vector per sample (iOS `CMDeviceMotion.gravity`, Android
+   `TYPE_GRAVITY`). A tilt changes `a` and `g` by the same amount and
+   they cancel exactly. Wrist roll now reads **< 0.05 cm at any angle**.
+2. **Stage 2 — residual high-pass (τ = 0.5 s).** Stage 1 has *no* DC
+   rejection, so a persistent accel-vs-gravity residual would ramp
+   position without bound (0.02 m/s² reaches 14.9 cm in 20 s of doing
+   nothing). τ = 0.5 s is the largest value for which an Android OEM
+   whose `TYPE_GRAVITY` is a low-passed accelerometer still reads *below*
+   the old behaviour.
+3. **Real per-sample `dt`.** Both platforms already sent a per-sample
+   `timestamp`; it was discarded for a hardcoded 20 ms. Every filter
+   coefficient is now re-expressed as `k ** (dt / nominal)` so the
+   **time constant** is held fixed rather than the per-sample
+   coefficient — otherwise a real `dt` would make sensitivity linear in
+   the device's delivery cadence, which is worse than the bug. Measured
+   spread across a 20× cadence range: **1.07×**. Bit-exact at 20 ms.
+
+Absent, errored, warming-up, stale, or implausible gravity falls back
+**per sample** to the legacy IIR, which is kept warm as a shadow estimate
+so failover is stepless.
+
+### Diagnosability
+
+This class of bug previously left **no trace in a release build**. Now:
+
+- **`latch=gyro|accel`** in the `[panMotion]` telemetry.
+  `lateralExceeded` has **two independent triggers** — the cross-pan gyro
+  EMA and the displacement integrator — and no log said which fired, so a
+  field report could not be attributed to either.
+- **`panMotionDebug`** keeps the diagnostics in a release build without a
+  version bump.
+
+### New props
+
+| prop | default | effect |
+|---|---|---|
+| `lateralMotionModel` | `'fused'` | `'legacy'` restores the ≤0.25.3 physics bit-for-bit |
+| `lateralTurnRateRadPerSec` | `0.15` (unchanged) | exposes the **gyro** trigger's threshold, previously hardcoded and untunable despite being the historically primary trigger |
+| `panMotionDebug` | `__DEV__` | force diagnostics on/off |
+
+> [!IMPORTANT]
+> **`lateralMotionModel` defaults to `'fused'`** — a deliberate exception
+> to the "new behaviour is opt-in" rule. This is a defect fix: the old
+> model's discrimination is inverted, so no consumer can prefer it; and
+> at the shipped 8 cm budget the fused model's peak reading is at or
+> below the legacy model's for every profile except a genuine slide, so
+> **it cannot increase the stop rate**. Pass `'legacy'` to reproduce an
+> old capture or back out a device-specific regression.
+
+### Fixed — panorama/SCANS routing sent ordinary pans to SCANS
+
+**This is the output-quality regression**, and it is independent of the
+lateral-guard work above. It affects **AR and non-AR alike**.
+
+`resolveStitchModeAuto` chose SCANS when
+`ratio = tScore/(tScore+rScore) >= 0.55`, with `tScore = tMeters/0.10` and
+`rScore = rRadians`. Substituting the arc a pan traces when it pivots `r`
+behind the lens (`tMeters = r * rRadians`):
+
+```
+ratio = (r*rRad/0.10) / (r*rRad/0.10 + rRad)  =  r / (r + 0.10)
+```
+
+**The pan angle cancels.** `ratio >= 0.55` reduces to `r >= 0.122 m` — so
+the verdict depended only on how far behind the lens the operator pivoted.
+Wrist ~15 cm, forearm ~25 cm, elbow ~35 cm, shoulder ~60 cm: **every
+hand-held pan clears it.** Only rotating the phone about its own body did
+not. Verified against a 2026-08-26 device session — the closed form
+reproduced all six observed ratios to three decimals.
+
+`lowRotationGuard` (`rRadians > 0.35 && tMeters < 0.25`) was therefore
+doing all the real work, and only above 0.35 rad — leaving pans **shorter
+than ~20°** with no protection at all. Two captures at 16.9° and 15.7°
+(translating just 4.4 and 4.9 cm) shipped as SCANS.
+
+Re-running those keyframes through `cv::detail::BestOf2NearestMatcher` —
+the finalize matcher itself — scored the **homography model 40–53 % higher
+than affine** (mean pair confidence 1.27 vs 0.83 / 0.91) and showed affine
+more than halving the pairs above the `leaveBiggestComponent` threshold
+(7 → 3). Both stitched cleanly as panoramas from the same frames. The
+shipped SCANS outputs came back at `finalConfidenceThresh = 0.500` where
+every correctly-routed capture scored `1.000`.
+
+**Fix (superseded — see below):** an absolute translation floor
+of `0.25 m` (`kScansMinTranslationMetres`). A genuine shelf scan is
+defined by large absolute translation — this function's own worked example
+uses 30 cm — not by a ratio any arm movement satisfies. Replayed over
+every logged capture: **2 wrongly-SCANS captures flip to panorama, 0
+regressions**, and synthetic shelf scans (26–40 cm) still route to SCANS.
+
+The same floor also repairs the **non-AR** path, where `tPose` is 0 and
+`tMeters` is 100 % the double-integrated accelerometer — measured at
+**r = −0.28** against this stitcher's own image-derived estimate, i.e.
+anti-correlated with the quantity it stands in for. No threshold can work
+on that signal, so the floor makes non-AR fail to PANORAMA, which the
+resolver's own docstring already calls the safer default. Hosts wanting
+SCANS pin it explicitly via `stitchMode`.
+
+The degenerate no-pose branch had the same defect at an even lower trip
+(`imuTranslationMetres > 0.05`, inside the noise floor) and now uses the
+same constant.
+
+### Fixed — the SCANS threshold was shorter than a human wrist
+
+The absolute-translation floor above was the wrong fix, and device data
+showed why. It never looks at ROTATION, so it cannot distinguish a 49.5 cm
+straight slide from a 49.5 cm arm sweep — and the arm sweep is exactly what
+slipped through it, arriving at `conf=0.500`.
+
+`ratio` never had that blind spot. It is algebraically `r/(r+0.10)` where
+`r = tMeters/rRadians` is the **pivot radius** — how far behind the lens the
+operator turned — so rotation is fully accounted for. The same 49.5 cm reads
+`r = ∞` (SCANS) with no rotation and `r = 59 cm` (panorama) through a 47.7°
+arc.
+
+**Its only defect was the threshold.** `ratio >= 0.55` means `r >= 12.2 cm`
+— *shorter than a human wrist* — so every hand-held pan cleared it, and
+`lowRotationGuard` was accidentally the only thing keeping captures on the
+panorama path.
+
+Six AR captures measured on 2026-08-26, every one an ordinary sweep and
+every one wrongly routed to SCANS:
+
+| r_eff | ratio | old | new |
+|---|---|---|---|
+| 41 cm | 0.803 | scans | panorama |
+| 59 cm | 0.856 | scans | panorama |
+| 60 cm | 0.857 | scans | panorama |
+| 67 cm | 0.870 | scans | panorama |
+| **80 cm** | **0.889** | scans | panorama |
+
+**The threshold is now 0.93** (`r >= 1.33 m`) — clear air above anything a
+person can pivot about (wrist ~15, elbow ~35, extended shoulder ~60–80 cm),
+and far below the metres genuine bodily translation produces. The 80 cm
+sweep at 0.889 is why 0.90 would have been too tight.
+
+Genuine scans still route correctly: 30 cm / 10° → 0.967; 50 cm / 5° →
+0.983; a pure slide → 1.000. Across every capture measured: **0 of 6 real
+pans wrongly SCANS, 0 of 3 genuine scans missed.**
+
+Erring toward PANORAMA is deliberate — a missed scan still reaches the
+affine model through the ladder's `scans` rungs, whereas a wrongly
+affine-warped rotation capture is the visible regression that was reported.
+
+The absolute floor survives only on the degenerate no-pose branch, where
+`rRadians` is unavailable so no ratio can be formed.
+
+### Fixed — stale translation-budget documentation
+
+`useIMUTranslationGate.ts` claimed `flowMaxTranslationCm` defaults to `8`
+and, in the same comment, "0.40 m / 40 cm". Both were wrong and they
+contradicted each other: the real default is **50 cm**
+(`PanoramaSettings.ts`). `8` is `lateralBudgetCm` — a **different knob on
+the orthogonal axis** (cross-pan drift, which stops the capture, versus
+along-pan translation, which forces a keyframe). At the real default this
+gate effectively never fires on hand-held capture: the device session
+peaked at 2.39 cm of cross-pan drift, ~20× below the budget.
+
+### Also fixed
+
+- **`lateralBudgetCm={0}` now genuinely disables the displacement stop.**
+  It only ever disabled the *gyro* trigger. The accelerometer path passed
+  the literal `0` into the latch predicate `Math.abs(pos) > budgetM`,
+  which any non-zero value satisfies — so on a **motionless phone**
+  sensor noise alone latched ~540 ms into every capture (measured:
+  0.0025 cm of drift). `<Camera>` masked this because its finalize effect
+  carries its own `lateralBudgetCm <= 0` guard, but `usePanMotion` is
+  exported and `lateralExceeded` still flipped for anyone driving the
+  hook directly or rendering guidance from it. Found by adversarial
+  review of this release.
+
+### Known limitation — DEVICE-VERIFIED, read this before tuning
+
+**This release does not stop the false lateral trips reported from the
+field, and is not intended to.** A device session on 2026-08-26 (iPhone
+16 Pro, 24 captures across two runs, telemetry preserved) established
+why, using the stitcher's own image-derived translation estimate
+(`tMeters`) as ground truth:
+
+| capture | real translation (`tM`) | what the IMU reported | outcome |
+|---|---|---|---|
+| 8 | 4.3 cm | 1.55 cm | passed |
+| 9 | **10.4 cm** | **1.55 cm** | passed |
+| 10 | 9.9 cm | 1.61 cm | passed |
+
+**A 2.4× difference in real translation produced an identical IMU
+reading.** The accelerometer channel is not merely attenuated — over a
+multi-second capture it is uncorrelated with the quantity it claims to
+measure, so *no* value of `lateralBudgetCm` can separate drifted captures
+from clean ones. An earlier draft of this entry claimed a brisk
+20 cm/1 s slide reads ~5.5 cm; that figure came from a synthetic profile
+and the device data does not support it.
+
+Meanwhile the **gyro cross-EMA at 0.15 rad/s is the operative trigger**,
+and it fires on rotation with almost no translation — measured stops at
+`lat=0.12 cm`, `0.62 cm` and `1.48 cm`, one of them on a **0.7 %**
+threshold overshoot — while the 10.4 cm capture above went untouched. It
+also has **no dwell requirement**, unlike the displacement trigger's
+500 ms grace window, so a single ~400 ms excursion ends a capture
+permanently.
+
+Every capture in the session stitched at `finalConfidenceThresh = 1.000`
+with zero dropped frames, including both ~10 cm ones — i.e. **the
+stitcher tolerated far more drift than the guard is configured to
+allow.**
+
+Why this cannot be fixed by tuning: absolute centimetre accuracy from IMU
+dead-reckoning is not physically achievable over a multi-second capture —
+0.25° of attitude error alone fabricates ~32 cm over 20 s. Stage 2's
+high-pass is mandatory to bound that, and it necessarily also removes
+slow real motion. Sensitivity to slow drift and immunity to slow sensor
+error are the same knob. The reading is a *drift-rate proxy*, never a
+displacement measurement.
+
+**The real fix is a camera-derived signal**, which is tracked separately.
+`tMeters` demonstrates the pipeline already computes a usable
+image-derived translation estimate at finalize.
+
+If you must tune today, use `latch=gyro|accel` to find out which trigger
+is actually firing for your users first — the answer is very likely
+`gyro`, which `lateralBudgetCm` does not affect.
+
+### The camera-derived signal, delivered
+
+The section above ends by saying the real fix is a camera-derived signal
+"tracked separately". It is now here. In **AR** captures the guard no longer
+uses the accelerometer at all: cross-pan displacement and cross-pan rotation
+are both read from ARKit's VIO **pose**, which measures metres and radians
+rather than a high-passed rate proxy.
+
+Consequently the IMU distance guard is **disabled entirely in AR**. Running
+both let the worse sensor veto the better one, and because the IMU channel had
+no warm-up gate it latched within the first second — at 0-1 keyframes, which
+is exactly the `wrong-direction` ("follow the arrow") bucket. That is what
+made the popup appear before a capture had really begun.
+
+### The budget scales with the sweep
+
+A fixed centimetre cap asks the wrong question. Sideways travel only means
+something *relative* to how far the sweep has gone: 6 cm across a 60 cm
+top-to-bottom pan is 10 % — still overwhelmingly a pan, and about as straight
+as a hand gets over half a metre. The same 6 cm across a 10 cm pan is 60 %,
+which is a slide. The effective budget is now
+
+    clamp(arLateralRatio * alongPanTravel, arLateralBudgetCm, arLateralMaxCm)
+
+so `arLateralBudgetCm` is a **floor**, not a ceiling. The floor also covers the
+opening of every capture, where along-pan travel is ~0 and a pure ratio would
+evaluate to 0 and stop everything.
+
+Defaults: ratio **0.40**, floor **10 cm**, cap **40 cm**. Device traces showed
+cross-pan excursion of ~8-11 cm largely *independent* of sweep length, so a
+lower floor stopped captures for being SHORT rather than crooked — and since a
+stop truncates the sweep, along-pan travel never accumulated enough for the
+ratio to rescue it. `arLateralRatio: 0` restores pure absolute behaviour.
+
+### Slow pivots
+
+Both modes gained an **absolute cross-pan angle** trigger. The pre-existing
+`lateralTurnRateRadPerSec` is a *rate* gate at 0.15 rad/s, so it cannot see a
+slow pivot at all: 6°/s reaches 90° of yaw in 15 s without ever crossing it. A
+rate gate measures how fast you are turning, never how far you have turned.
+AR reads the angle from the pose; non-AR integrates the gyro once (single
+integration, so a 0.05°/s bias is 0.5° after 10 s — unlike the double
+integration that made the distance channel unusable).
+
+### Two latch defects
+
+- **The AR latch could never clear itself.** Its only reset required a capture
+  to accept a keyframe — but the latch stopped the next capture *before* it
+  could accept one. Once set, every subsequent capture died on arrival and only
+  a reload recovered it. Reported as "after the error happens once, it happens
+  for every capture".
+- **And then cleared one render too late.** Moving the reset into an effect
+  keyed on the recording phase fixed the deadlock but left a stale read: the
+  stop-check runs during the render that flips the phase, effects run after it.
+  Exactly one capture per stop still died. Now cleared synchronously at hold
+  start, batched with the phase change.
+
+### Also
+
+- `panMode: 'both'` silently resolved to `'vertical'` in the AR guard, so a
+  deliberate left-to-right sweep read as pure off-course rotation and was
+  stopped for doing what it was told. `'both'` now disables the rotation
+  trigger — with no known pan axis, rotation cannot be separated from drift —
+  and leaves the axis-agnostic distance guard to work.
+- **`CameraHandle.setCaptureSource(source)`** — hosts that render their own
+  chrome (`hideBuiltInShutter`) had no way to drive the AR toggle.
+- Ordinary hand-held pans were routed to SCANS: the resolver's ratio reduces
+  to `r/(r+0.10)`, so the pan angle cancels and every hand-held pan looks like
+  translation. The threshold was shorter than a human wrist.
+
+### New props
+
+`arLateralRatio`, `arLateralMaxCm`, `arLateralBudgetCm`, `arLateralRotDeg`,
+`lateralTurnAngleDeg`, `lateralTurnGraceMs`, `lateralMotionModel`,
+`panMotionDebug`. All default to the behaviour described above; each guard
+channel is disabled independently by setting its own prop to `0`.
+
+`[panMotion.ar]` telemetry now carries `drift=`, `long=`, `allow=`, `rot=` and
+`by=`, so the thresholds can be tuned from captures rather than guessed.
+
+## [0.25.3] - 2026-08-19 (lateral-drift budget raised to 8 cm)
+
+A tuning change, from a field report that the lateral-drift stop fires
+on minor sideways movement.
+
+**The detector did not change.** `usePanMotion.ts` — which owns the
+drift integration and the `lateralExceeded` latch — is byte-identical
+from v0.24.3 through v0.25.2, and the budget it measures against had
+been `4` cm that whole time. What changed for operators in v0.25.1 was
+the CONSEQUENCE of a stop, not its sensitivity: the discard band widened
+from "fewer than 2 keyframes" to "fewer than 5", and discards keep their
+popup while finalized stops no longer show one. A drift early in a sweep
+that previously delivered a panorama with a warning now discards the
+capture and shows a popup — which reads as the guard having become
+trigger-happy.
+
+Raising the budget addresses the underlying complaint anyway: 4 cm of
+integrated sideways translation is comfortably inside the natural arc of
+a hand-held sweep, so the stop was reachable on captures the operator
+considered fine.
+
+### Changed
+
+- **`lateralBudgetCm` default `4` -> `8`.** Twice the sideways drift is
+  tolerated before a capture is stopped. Hosts pinning the old value
+  pass `lateralBudgetCm={4}`; `0` still disables the stop entirely.
+
+  The prop itself is not new — it has been public and host-settable
+  since the guidance work landed. Only its default moved.
+
+- **The default now lives in one place.** It was written twice, as a
+  literal in `usePanMotion` and again as the `<Camera>` prop default;
+  `<Camera>` now imports the exported `DEFAULT_LATERAL_BUDGET_CM`. Two
+  independent copies of a tuning value diverge the moment one is
+  edited, and this one has now been edited.
+
+### Fixed (documentation)
+
+- **`lateralBudgetCm`'s docblock said "Default `5`"** — a value the SDK
+  has never shipped. The internal pano-UX QA checklist said `5` too.
+  Both now say `8`, and the QA line notes that its own "does a normal
+  straight pan false-trigger?" check is the gate this field report went
+  through.
+- **It also claimed a stop "FINALIZES what was captured"**, which
+  v0.25.1 made untrue for captures below the finalize threshold — those
+  discard. The docs now separate the two knobs explicitly: this one is
+  SENSITIVITY (does a stop happen), `lateralStopFinalizeMinFrames` is
+  POLICY (what happens at one). Confusing them sends a host tuning the
+  wrong value.
+
+### Added
+
+- A test pinning `DEFAULT_LATERAL_BUDGET_CM`. Nothing pinned it before,
+  so a product-tuning value that had already caused a field issue could
+  move in either direction without CI noticing.
+
+## [0.25.2] - 2026-08-18 (shutter centring in the side-edge layout)
+
+A one-property layout fix, reported from the field on an iPad: in a
+landscape capture the lens chip + shutter sat visibly HIGH instead of
+centred. It only appears on a device whose interface **actually
+rotates** — an iPad, or any non-portrait-locked iOS host. No API
+change, no new props, no behaviour change outside that layout, and
+nothing to migrate.
+
+### Fixed
+
+- **The shutter cluster now centres vertically in the side-edge
+  (landscape) control layout.** When the home indicator lands on a LEFT
+  or RIGHT edge, `bottomBarStyleForEdge` lays the control cluster out as
+  a **column** so the three slots stack along the narrow side strip. The
+  centre slot set only `alignItems: 'center'` — and `alignItems` centres
+  on the **cross** axis, which is HORIZONTAL once the parent is a
+  column, leaving the **main** (vertical) axis at its default
+  `flex-start`. The three slots are each `flex: 1`, so they split the
+  strip's height into thirds and the lens chip + shutter pinned to the
+  TOP of the middle third: starting at **33%** of the height instead of
+  centred on **50%**. Adding `justifyContent: 'center'` centres the
+  cluster on the main axis of its third.
+
+- **Why one device showed it and the other did not.** The displacement
+  is a fraction of screen height, not a fixed offset, so it scales with
+  the device: ~390-430pt of landscape height on an iPhone hides it,
+  ~834-1024pt on an iPad makes it obvious. A portrait-locked iPhone host
+  never reaches the column branch at all — the framebuffer rotates under
+  the UI and the home indicator stays on the JS bottom edge — which is
+  why the bug survived on the device most captures are shot on.
+
+- **A no-op in the row layout.** With the home indicator on the top or
+  bottom edge (every portrait capture, and landscape capture on a
+  portrait-locked host), the parent's `alignItems: 'center'` sizes the
+  centre slot to its content height, so there is no free space for
+  `justifyContent` to distribute and those hosts render identically to
+  0.25.1. Which edge the controls anchor to is unchanged — only where
+  the cluster sits along that edge.
+
+## [0.25.1] - 2026-08-18 (dead-shutter fix + lateral-stop policy)
+
+The headline is a **dead shutter**, reported from the field and fixed
+here: after a lateral-drift stop that finalized, the shutter stopped
+responding entirely and the capture flow could not be restarted.
+
+Device instrumentation showed **zero `pressIn` events** reaching the
+button while every gate in the capture state machine sat open and idle
+— the touches were never arriving at all, which is what ruled out the
+gates and pointed at the view hierarchy.
+
+The cause is an **iOS two-modal presentation clash**.
+`LateralMotionModal` latched visible at the stop, and roughly 550 ms
+later the finished stitch mounted the review surface
+(`RectCropPreview`) on top of it. Both are React Native `<Modal>`s,
+i.e. real `UIViewController` presentations on iOS — and **a view
+controller can present only one child at a time**. The second present
+is REFUSED, leaving a host window in the hierarchy that was never
+presented: invisible, and swallowing every touch. Dismissing the popup
+underneath left the orphan window in place, so the shutter stayed dead.
+
+The same clash explains the two quieter symptoms reported alongside it:
+**no review surface and no thumbnail**. The review surface holds the
+capture result until the operator confirms it, so when it failed to
+present, `onCapture` never fired and nothing downstream ever saw the
+capture.
+
+Also in this release: the lateral-stop finalize/discard threshold
+becomes a host-controlled policy (a **breaking behaviour change** — see
+*Changed*), and a latch in the camera-transition gate that could wedge
+the shutter permanently is closed.
+
+### Fixed — the dead shutter (iOS two-modal presentation clash)
+
+- **A capture guidance popup and the review surface can no longer be
+  presented at the same time.** On iOS the second presentation was
+  refused and left an invisible, touch-swallowing window over the whole
+  capture UI; the observable result was a shutter that received no
+  `pressIn` events at all, no review surface, and no thumbnail.
+
+- The invariant now lives in one place,
+  `src/camera/modalPresentation.ts`, rather than being re-derived at
+  each call site. Three rules:
+
+  - **A finalized stop shows NO popup.** The review surface it opens
+    already renders the same `LATERAL_DRIFT_FINALIZE` warning in its
+    own banner, so the popup was duplicate information as well as a
+    presentation conflict. It is suppressed up front rather than
+    dismissed on arrival, because present-then-dismiss-then-present is
+    the same clash by a slower route.
+  - **The review surface DEFERS while any guidance modal is up** and
+    mounts when that modal is dismissed. Deferring the newcomer avoids
+    asking iOS to dismiss and present within one commit.
+  - **Discard outcomes KEEP their popup.** Nothing was kept and no
+    review surface follows, so the popup is the only feedback there is.
+
+- Note for hosts that drive their own UI from these events: after a
+  lateral-drift stop that finalizes, the popup no longer appears — the
+  review surface with its warning banner is what the operator sees.
+
+### Changed — lateral-stop finalize/discard policy (BREAKING)
+
+- **BREAKING (behaviour): a lateral-drift stop now DISCARDS a capture that
+  accepted fewer than 5 keyframes, where it previously kept anything with
+  2 or more.**  Captures that accepted 2, 3 or 4 keyframes used to finalize
+  and be delivered through `onCapture` with a `LATERAL_DRIFT_FINALIZE`
+  warning; they now abandon, firing
+  `onCaptureAbandoned('lateral-drift')` and producing no output at all.
+
+  Why: for shelf capture — the primary use case — a two-to-four-frame
+  remnant of a sweep the operator drifted out of is not a usable panorama.
+  It is waste that still costs a stitch, a file, and an operator's
+  attention on output that has to be detected and rejected downstream.
+  Asking for a clean re-shoot is the better trade.
+
+  **Hosts that want the previous behaviour pass
+  `lateralStopFinalizeMinFrames={2}`** — the old rule is fully reachable,
+  it is just no longer the default.  Hosts that already handle
+  `onCaptureAbandoned('lateral-drift')` need no change beyond expecting it
+  more often.
+
+- The lateral-stop decision moved out of `<Camera>` into a pure,
+  OpenCV-free `src/camera/lateralStopPolicy.ts`
+  (`shouldFinalizeLateralStop` / `lateralStopOutcome`), unit-tested in the
+  node jest env the same way `panModeGate.ts` is.
+
+### Added
+
+- **`lateralStopFinalizeMinFrames`** on `<Camera>` (default `5`) — the
+  accepted-keyframe count at or above which a lateral-drift stop
+  FINALIZES the capture (stitches the partial sweep and delivers it via
+  `onCapture` with the `LATERAL_DRIFT_FINALIZE` warning).  Below the
+  threshold the capture is DISCARDED instead: the engine is cancelled,
+  nothing is stitched, and `onCaptureAbandoned('lateral-drift')` fires.
+
+  Until now that threshold was a hardcoded `MIN_STITCHABLE_KEYFRAMES = 2`
+  inside `<Camera>` — a product judgement the SDK is not entitled to make
+  on a host's behalf, and one that made the wrong call for shelf capture
+  (see the behaviour change above).
+
+  - **`0` means ALWAYS DISCARD**, however many keyframes were accepted.
+    It is special-cased on purpose: the natural `count >= minFrames`
+    comparison is unconditionally TRUE at `0`, which would silently mean
+    the exact opposite ("always finalize").
+  - `N >= 1` finalizes iff `acceptedKeyframeCount >= N`.
+  - `2` restores the pre-policy behaviour exactly.
+  - Negative, `NaN` and infinite values normalise to the default, so a
+    broken host config degrades to the standard threshold rather than to
+    "throw every capture away".  Fractional values round up.
+
+- **`lateralStopDiscardedTitle` / `lateralStopDiscardedBody`** guidance-copy
+  keys, for the third lateral-stop popup state: enough frames to stitch,
+  but policy discarded the capture.  At the default threshold this is the
+  2-to-4-keyframe band, so it is reachable out of the box.  The existing
+  `lateralStopBody` promises a stitch ("we stitched what you captured"),
+  which is a lie for a discarded capture and sends the operator hunting
+  for a file that was never written; the new copy asks for a re-shoot in
+  one straight line instead.  Localisable like every other guidance string
+  via `guidanceCopy`.  Below 2 accepted keyframes the popup still shows the
+  pre-existing "follow the arrow" wrong-direction copy.
+
+### Fixed — camera-transition latch (found by inspection, NOT field-reproduced)
+
+> [!NOTE]
+> **This one was found by reading the code, not by hitting it on a
+> device.** The operator tried to wedge it by hand and could not: the
+> flip-back has to land inside a ~250 ms window, which is hard to hit
+> deliberately on a lens chip. The failure sequence below is a
+> code-reading result — sound as an argument, unconfirmed as a field
+> observation. It is shipped on the strength of the reasoning and the
+> tests, and is called out here so it is not mistaken for a
+> reproduced-and-verified fix like the dead shutter above.
+
+- **The camera-handoff gate could latch closed forever, permanently
+  killing the shutter.** The AR↔non-AR / 1x↔0.5x handoff holds its gate
+  closed with refs carrying the last SETTLED identity plus a
+  `cameraTransitioning` flag covering the async settle. The effect
+  early-returned whenever the refs already matched — and a flip-BACK
+  inside the 250 ms grace breaks that assumption:
+
+  1. Lens 1x → 0.5x. The refs still say 1x, so the gate closes and the
+     settle is scheduled for +250 ms. The refs are not updated until
+     that callback runs.
+  2. Inside that window the lens goes BACK 0.5x → 1x. The cleanup marks
+     the pending settle cancelled, so it no-ops and never reaches its
+     `setCameraTransitioning(false)`.
+  3. The effect re-runs, the never-updated refs now MATCH the current
+     lens, and the old code early-returned.
+
+  `setCameraTransitioning(false)` existed at exactly ONE site — inside
+  the callback step 2 had just cancelled — so nothing could recover the
+  flag. The consequences were total: the live camera never remounted
+  (stuck on the "Switching camera…" placeholder) and every shutter hold
+  deferred and was then cancelled on release, i.e. a dead shutter with
+  no recovery short of remounting `<Camera>`.
+
+- The settled/stuck/start decision moved into a pure, dependency-free
+  `src/camera/cameraTransitionGate.ts` as a **total** function, so there
+  is no longer an early-return path that can silently skip the flag. On
+  the already-settled path a still-set flag is cleared; a clear flag
+  writes nothing, so the recovery converges in one extra commit and
+  cannot re-trigger itself. Tests execute the real state machine and
+  reproduce the pre-fix wedge before asserting the fix clears it.
+
+## [0.25.0] - 2026-08-18 (flattened stitch ladder + AR hardening)
+
+Two field failures drive this release.
+
+The first is the stitch-retry wedge: a failed finalize could chain
+rescues — mode flips, threshold drops to `scans@0.3`, a wrapper-level
+full re-run, a second in-place compose — each of which could itself
+fail and rescue again. Measured in the field on an A35: a 4 m 41 s
+capture followed by roughly half an hour wedged in the rescue chain.
+The chain is replaced outright by a **flattened four-rung ladder** (see
+*Changed*); the same inputs now stitch in under a second, verified on
+the A35 and an iPhone.
+
+The second is the field failure where a panorama hold **ends itself in
+under a second and finalizes a single keyframe as the "panorama."**
+Three independent mechanisms were found that can each produce exactly
+that symptom, which is why it survived several rounds of diagnosis —
+fixing one left the others.
+
+> [!IMPORTANT]
+> **Some AR capture behaviour changes on upgrade, with no flag to turn
+> it off.** An earlier draft of this entry claimed everything was
+> flag-gated at today's default; that was wrong, and adversarial review
+> caught it. The honest split:
+>
+> **Live by default — no opt-in, no opt-out:**
+> - AR pose-driven force-accepts (translation budget + angular fallback)
+>   are suppressed whenever ARKit/ARCore is not fully tracking.
+> - The translation force-accept is additionally suppressed when
+>   per-evaluation step speed exceeds 3.0 m/s.
+> - An angular ACCEPT now re-detects KLT features, which changes which
+>   subsequent frames are accepted.
+> - A hold now DEFERS while a camera transition is in flight, instead of
+>   starting a capture against a camera the renderer has unmounted.
+> - The orientation-drift detector no longer acts before the
+>   accelerometer has delivered a real sample.
+>
+> These are the fixes. Gating them off by default would have shipped a
+> release that changes nothing, and each one is a case where the old
+> behaviour is simply wrong.
+>
+> **Opt-in, default reproduces today's behaviour exactly:**
+> - `frameSelection.timeIntervalCanFinalize` (default `true`)
+> - `minPanoramaKeyframes` (default `1` — never warns)
+>
+> None of this has yet been validated on a device that reproduces the
+> original failure. That validation is the remaining gate on flipping
+> the default capture source to AR.
+
+### Changed — the stitch retry ladder (production high-level path)
+
+- **The recursive rescue chain is gone.** Finalize now runs a flat,
+  fixed ladder of four rungs — `pan@1.0 → pan@0.3 → scans@1.0 →
+  scans@0.5` — reordered so the motion resolver's verdict mode runs
+  first. Rungs vary the confidence threshold only; no rung re-enters
+  the pipeline, flips modes mid-rung, or schedules further rescues.
+- **`scans@0.3` is eliminated** — the rung behind the collapsed
+  outputs (10 frames stacked into a 722×718 footprint). SCANS rungs
+  additionally gained a collapsed-placement guard that rejects a
+  degenerate affine placement instead of returning it as a result.
+- **OOM is terminal.** A caught native OOM (`std::bad_alloc` /
+  `StsNoMem`) stops the ladder instead of relaunching a full stitch
+  into a just-OOM'd process — the relaunch is what re-peaked memory
+  and produced the observed jetsam kill. An exception backstop
+  guarantees no native throw can escape the ladder unclassified.
+- **One capped spherical extra rung** replaces both deleted spherical
+  rescues (the wrapper-level full re-run and the in-place re-compose,
+  which was UB — OpenCV 4.10 clears `seam_est_imgs_` after the first
+  compose). PANORAMA rungs only, on `LowQualityStitch`/`WarpFailed`
+  only, at most one per ladder, same reservation gate and budget as
+  every other rung.
+- **Fast paths.** A validated rung that retained all but one frame is
+  accepted immediately (the dominant field partial — one blurred
+  boundary keyframe — no longer costs up to three more full stitches),
+  and a rung whose estimate cannot beat the best partial so far skips
+  its compose stage entirely.
+- **120 s wall-clock budget** across the whole ladder; on expiry the
+  best partial already composed is returned instead of starting
+  another rung.
+- **Per-rung tmp isolation + orphan sweep.** Each rung writes to its
+  own `.tmp` output; only the promoted rung's file is moved into
+  place, and stale rung temporaries are swept — an aborted rung can
+  never poison a later one's output.
+- **The manual opt-in path (`useManualPipeline: true`) is
+  byte-identical**, including its high-level SCANS dispatch (which
+  keeps the legacy multi-attempt schedule). The ladder governs the
+  production high-level path only.
+- **Example app:** the post-capture A/B re-stitch suite (`legacy` /
+  `singlethread` / `voronoi` / `lowres` / `rc-all` full re-runs after
+  every panorama) no longer auto-runs; the live capture result
+  display is unchanged.
+
+### Added
+
+- **`setPoseTrusted(bool)` on the C++ keyframe gate** (iOS + Android
+  bridges). While AR tracking is not `normal`/`TRACKING` — initialising,
+  relocalising — ARKit/ARCore emit pose deltas that are pure drift. The
+  gate's two POSE-DRIVEN force-accepts (the translation budget and the
+  angular fallback) read those as real motion and burst-accept frames
+  from a stationary device, racing to the keyframe cap in a few hundred
+  milliseconds; hitting the cap auto-finalizes and ends the operator's
+  hold. Pose-driven accepts are now suppressed while pose is untrusted.
+  Flow (KLT) accepts are unaffected — optical flow does not lie when the
+  tracker is confused.
+- **Per-evaluation speed plausibility guard** (`3.0 m/s`) on the
+  translation budget. A VIO slide shows up as an implausible jump
+  between consecutive evaluations; a real pan does not. Replaces an
+  earlier distance-since-accept clamp that was too loose to catch the
+  measured 0.5 m slides.
+- **`useDeviceOrientationStatus()`** — returns `{ orientation, settled }`
+  instead of a bare orientation. `useDeviceOrientation()` is unchanged
+  and still returns the scalar.
+- **`orientationDriftAbandon`** on `<Camera>` (default `true`) — set
+  `false` to disable mid-capture rotation abandonment entirely.
+- **`frameSelection.timeIntervalCanFinalize`** (default `true`) — set
+  `false` so a keep-alive keyframe can never be the accept that reaches
+  `maxKeyframes` and auto-finalizes a stationary hold.
+- **`minPanoramaKeyframes`** on `<Camera>` (default `1`) — set `2` to get
+  the new `CAPTURE_TOO_SHORT` capture WARNING when a capture finishes
+  with fewer keyframes than that. The capture still succeeds and still
+  returns its frame; it is simply no longer silent.
+- **`CAPTURE_TOO_SHORT`** capture warning + the `warnCaptureTooShort`
+  guidance-copy key for i18n.
+- **Shutter diagnostics** — `onTouchCancel` / `onTouchEnd` now log how
+  each hold ended. Warn-level and not `__DEV__`-gated, because
+  integrators hit this in release-ish builds and this one line is the
+  difference between a one-log diagnosis and days of guessing.
+
+### Fixed
+
+- **Phantom rotation abandons from an unsettled sensor.**
+  `useDeviceOrientation()` fabricates `'portrait'` before the
+  accelerometer's first sample. The drift detector snapshotted that
+  fabricated value at capture start, so a capture begun in landscape
+  compared `landscape-left` against a `'portrait'` that was never
+  observed — and abandoned on the first real sample. The detector now
+  takes no snapshot and makes no comparison until the sensor has
+  delivered something real. This is why the failure was **landscape-only
+  and disappeared when the device was locked to portrait**: in portrait,
+  the fabricated value happened to be correct.
+- **A hold no longer starts a capture against an unmounted camera.** The
+  RENDER gate unmounted the camera for `inFlightTransition`, but the HOLD
+  gate checked only `arSupportPending` — and those clear in the SAME
+  render, because resolving the AR probe is what flips `isAR` and starts
+  the transition. So v0.24.3's defer resumed at exactly the moment the
+  camera unmounted and the AR session stopped, starting a capture against
+  no frame source. Both gates now read one shared predicate.
+- **Keep-alive keyframes can no longer end a capture.** Time-budget
+  accepts counted toward `maxKeyframes` exactly like novelty accepts, so
+  a perfectly stationary hold marched to the cap on the clock alone —
+  ~7.5 s at the defaults, having captured nothing new. They still count,
+  but can no longer be the accept that REACHES the cap, so the capture
+  cannot end itself without new content.
+- **A one-keyframe capture is no longer silent.** It was returned as an
+  ordinary successful panorama carrying a `singleKeyframe: true` flag
+  that no consumer read — which is precisely why these AR failures were
+  reported as stitching bugs rather than capture bugs. Opt in with
+  `minPanoramaKeyframes`.
+- **The angular fallback no longer degrades permanently.** An angular
+  ACCEPT now refreshes the KLT feature set, instead of leaving flow
+  tracking against a stale reference for the rest of the capture.
+
+### Docs
+
+- **Six stale pipeline-routing comment sites corrected** (Android JNI,
+  shared C++ `stitcher.{cpp,hpp}`, iOS `OpenCVStitcher.{h,mm}`,
+  `src/stitching/incremental.ts`). They still claimed production
+  finalize runs the manual `cv::detail` pipeline, or that Android
+  always runs PANORAMA — both false since the 2026-06-16
+  high-level-across-the-board switch, and both repeat offenders in
+  misdiagnosis. Comments now match the code: every production caller
+  on both platforms passes `useManualPipeline=false`; manual is an
+  explicit opt-in; `'auto'` can resolve SCANS-first.
+
+### Also in this release
+
+- **v0.24.5 merged** — the SCANS affine rescue for translation captures,
+  and pan guidance restored under AR (`usePanMotion` was gated
+  `&& isNonAR`, so hosts defaulting to AR silently lost both the "keep
+  the pan straight" and "moving too fast" warnings).
+- **Android bring-your-own-OpenCV: producer-task support.** A host whose
+  OpenCV SDK is DOWNLOADED by a Gradle task — the normal arrangement for
+  an SDK from a private artifact repository — hit a hard Gradle 8
+  undeclared-dependency failure. `rnisHostOpenCVProducerTask` names the
+  producing task so the edge can be wired. Covers the CMake/native tasks,
+  which consume the SDK first.
+- **Android no longer rejects an AR capture when no ARCore session is
+  live** — it logs instead. Unlike iOS, the Android AR view OWNS the
+  session: every stitch unmounts the view, which stops the session, and
+  remount reconstructs it over several hundred ms. "No live session" is
+  a normal transient there, and refusing turned it into a hard failure
+  for anyone holding the shutter right after a stitch.
+- **`KeyframeGate` unit tests** for the OpenCV-free gate predicates
+  (121 C++ tests), including that the keep-alive guard's default is
+  bit-identical to the old behaviour across the whole counts matrix.
+
+### Deliberately NOT in this release
+
+- **AR failure auto-downgrade.** Not part of the verified RCA fix plan,
+  and it carries the highest false-positive risk of anything considered:
+  iOS `finalize` stops the AR session for the whole 2–5 s stitch, and
+  Android's `isRunning` is `sessionRef != null`, which stays true through
+  a dead session. Get the grace-timer re-arm wrong and it downgrades
+  after every SUCCESSFUL panorama. Unverifiable without a device, and it
+  buys resilience rather than correctness.
+- **Flipping the default capture source to AR.** v0.24.5 cleared one
+  prerequisite (pan guidance); the rest, plus device validation of
+  everything above, remain.
+- **A JS-side wait for AR session readiness.** The correct fix for the
+  post-stitch remount window, and device-validation work.
+- **`shutterCancelGraceMs`.** Drafted, then removed: React Native
+  dispatches `onPressOut` BEFORE `onTouchCancel`, so it could never fire
+  — and the RCA had already refuted gesture/touch-steal as a cause. The
+  `onTouchCancel`/`onTouchEnd` diagnostics are kept.
+## [0.24.8] - 2026-08-17
+
+### Changed
+- Docs-only release: restores the release-notes trail for 0.24.5-0.24.7 and
+  the 0.16.x maintenance line below. No code changes vs 0.24.7.
+
+## [0.24.7] - 2026-08-17
+
+### Fixed
+- **Jetsam/OOM mitigation for the stitch rescue ladder.** Every rescue launch
+  (spherical / SCANS / manual fallback) is now headroom-gated against the
+  measured process footprint; the pre-stitch memory abort is two-stage (before
+  AND after frame decode); a caught native OOM no longer triggers a full
+  re-stitch; caught `bad_alloc` / OpenCV `StsNoMem` failures now surface the
+  "Try a shorter sweep" guidance instead of a generic error. A capture that
+  previously could kill the app mid-"Stitching panorama" now returns an
+  actionable error dialog.
+- Ships the field-user capture SOP (`docs/panorama-capture-sop.md`).
+
+## [0.24.6] - 2026-08-17
+
+### Fixed
+- **Mid-capture phone-turn freeze.** A physical ~90° rotation tripped both the
+  orientation-drift auto-cancel AND the lateral-drift auto-finalize from one
+  accelerometer excursion; the racing recording→stitching→idle churn unmounted
+  and remounted the live camera faster than it could hand off, wedging the app
+  (ANR). Orientation-drift now deterministically preempts the lateral finalize.
+
+## [0.24.5] - 2026-08-14
+
+### Fixed
+- **Translation captures: high-level SCANS (affine) rescue.** A translating
+  sweep that fails the rotation-model PANORAMA estimate is retried with
+  `cv::Stitcher::SCANS` — the correct model for translation — instead of
+  returning a hard "need more images" error. Pure last-resort rescue: runs only
+  after PANORAMA (and the spherical rescue) already failed.
+- **Pan guidance in AR capture.** The "keep the pan straight" and "moving too
+  fast" warnings were gyro-driven but gated non-AR-only; hosts defaulting to AR
+  capture had no pan guidance. The gate is removed — warnings fire in both
+  modes.
+
+## Maintenance line 0.16.x (`maintenance-016` dist-tag)
+
+- **[0.16.10] - 2026-08-17** — the 0.24.7 jetsam mitigation, backported.
+- **[0.16.9] - 2026-08-17** — the 0.24.6 phone-turn freeze fix, backported.
+- **[0.16.8] - 2026-08-14** — the 0.24.5 SCANS translation rescue, backported.
+
+## [0.24.4] - 2026-08-13
+
+Build-integration release. Every item here is a defect that produced a
+**silent or misleading failure** — a build that succeeded and then broke
+at runtime, an app that wouldn't launch with no clue why, or an error
+message pointing hundreds of lines away from its cause. Several had
+integrators shipping hand-written `sed` patch scripts against this
+package; those patches are no longer needed and should be removed.
+
+No API changes. No behaviour changes for a correctly-building
+integration.
+
+> [!NOTE]
+> **Drop-in upgrade.** Nothing in this release can break a build that
+> works today. Declaring ARCore's `<meta-data>` from the SDK's own
+> manifest was considered and **deliberately rejected**: an app already
+> declaring `com.google.ar.core` with a different value (e.g.
+> `required`) would have had its build stopped by the manifest merger,
+> and shipping a build break to integrators who already did the right
+> thing is worse than the one manifest line they add today. It stays a
+> host declaration — see
+> [Troubleshooting → ARCore meta-data](https://bhargavkanda.github.io/react-native-image-stitcher/docs/troubleshooting).
+
+### Added
+
+- **Bring-your-own-OpenCV, on both platforms.** Documented as "not
+  currently supported" through 0.24.3; now implemented. An app must
+  contain exactly one OpenCV, and a host that already ships one had no
+  supported way to say so.
+  - **iOS** — `$RNISHostOpenCV = true` in the Podfile (or
+    `RNIS_HOST_OPENCV=1` in the environment). The `OpenCV` subspec then
+    depends on the host's pod — `$RNISHostOpenCVPod`, default `opencv2`
+    — instead of vendoring ours, and the npm postinstall skips the
+    ~27 MB download entirely. Opt-in **only**: a missing framework is
+    never inferred as host mode, because that is precisely the signature
+    of a *failed download*.
+  - **Android** — `rnisHostOpenCVSdkDir` points the Gradle module at the
+    host's OpenCV Android SDK. Add `rnisHostOpenCVPackagedByHost = true`
+    (plus `rnisHostOpenCVDependency`) when the host's own AAR already
+    packages OpenCV, in which case this AAR contributes no Java sources,
+    no jniLibs and no resources — avoiding the `Duplicate class
+    org.opencv.core.Mat` and duplicate-`.so` merge failures that made
+    such an integration impossible before.
+  - Both platforms validate at **configure time**, naming the cause: a
+    path that doesn't exist, or an OpenCV built without
+    `BUILD_opencv_stitching=ON` (which stock releases are — the single
+    most common way a BYO attempt fails).
+- **New docs**: [Android ABI support](https://bhargavkanda.github.io/react-native-image-stitcher/docs/android-abi-support),
+  and a rewritten [Bring your own OpenCV](https://bhargavkanda.github.io/react-native-image-stitcher/docs/bring-your-own-opencv).
+  Troubleshooting gained the `'opencv2/core.hpp' file not found` cause
+  list, offline/air-gapped install, the ARCore `<meta-data>` your app
+  must declare, and the
+  `jcenter()` failure from `react-native-sensors@7.3.6`.
+
+### Fixed
+
+- **The host app no longer fails to launch when the native library is
+  missing for the running ABI (Android).** Seven classes called
+  `System.loadLibrary` from a **static initialiser**, and four of those
+  are constructed eagerly by `RNImageStitcherPackage.createNativeModules()`
+  during bridge startup. A throwing static initialiser becomes an
+  `ExceptionInInitializerError` that propagates out of
+  `createNativeModules()`, so the **entire app** died at launch — every
+  screen, not just the camera — before any JS ran, with a stack trace
+  naming neither ABIs nor OpenCV. This AAR ships **arm64-v8a only**, so
+  every x86_64 emulator hit exactly this path; running a new dependency
+  on an emulator is the first thing most integrators do. Loading now
+  goes through `NativeLibraryLoader`, whose `tryLoad()` never throws and
+  logs one actionable message naming the device's ABIs; features that
+  need the library fail at their own call sites via `require()`.
+- **The `cv_flow_gate_process_frame` frame-processor plugin now
+  registers under `use_frameworks!` (iOS).** The plugin's entire body is
+  guarded by `#if __has_include(<VisionCamera/FrameProcessorPlugin.h>)`,
+  and the podspec declared no VisionCamera dependency — so the header
+  was visible only in the default CocoaPods layout, where public headers
+  are flattened into `Pods/Headers/Public`. Under `use_frameworks!`
+  module visibility requires the declared dependency; the guard
+  evaluated **false**, the plugin compiled to an **empty translation
+  unit**, and non-AR capture ingested **zero frames**, failing at
+  finalize with the misleading `0 keyframes saved` — no build error, no
+  warning. Now declared conditionally (detected by walking up for
+  `node_modules/react-native-vision-camera`, so hoisted/pnpm/monorepo
+  layouts work), preserving the AR-only-without-vision-camera
+  configuration. Autolinking already installs the pod when the package
+  is present, so this pulls in nothing new.
+- **…and now survives dead-stripping.** Same symptom, second cause: the
+  plugin registers from `+ (void)load` and nothing references its class
+  by symbol, so a static link may drop the object file — it compiles
+  correctly and *still* never registers. The podspec now sets
+  `OTHER_LDFLAGS = $(inherited) -ObjC` on the consuming target.
+- **`pod install` fails loudly when the OpenCV xcframework is absent**,
+  naming the likely causes (`--ignore-scripts`, a stale CI cache, a
+  blocked download, a leftover `SKIP_OPENCV_FETCH`) and both remedies.
+  Previously it succeeded and the build died hundreds of lines later
+  with `'opencv2/core.hpp' file not found`, which points nowhere near
+  the actual problem. (The postinstall script exits 0 on failure by
+  design, so nothing upstream of the Xcode build ever complained.)
+- **The iOS simulator slice is back in the shipped xcframework.**
+  v0.7.1 stripped it unconditionally to save ~17 MB, reasoning that
+  "consumers never run the lib in the simulator." That was true of the
+  *camera* and false of the *build*: a host app links this framework, so
+  a device-only slice made the **entire host app** fail to build for the
+  simulator (`building for iOS Simulator, but linking in object file
+  built for iOS`) — on every screen, for every developer on the team,
+  for v0.7.1 through v0.24.3. The strip is still available opt-in via
+  `RNIS_STRIP_SIM_SLICE=1`, and the default path now *asserts* the slice
+  is present rather than silently shipping without it. The simulator
+  slice is **arm64-only**: OpenCV's builder cannot configure an x86_64
+  simulator slice on an arm64 machine, and an Intel Mac cannot run an
+  arm64 iOS simulator regardless.
+- **worklets-core headers are found via a resolved path, not a guessed
+  one.** `HEADER_SEARCH_PATHS` contained
+  `${PODS_ROOT}/../node_modules/react-native-worklets-core/cpp` — one
+  `..` short, since `PODS_ROOT` is `<host>/ios/Pods`. The entry named a
+  directory that exists in no layout. Now resolved by walking up for
+  `node_modules` (with the corrected relative form kept as a fallback),
+  so monorepo and pnpm layouts work too.
+- **The release workflow refuses to publish a version/tag mismatch.**
+  The postinstall derives its binary download URL from
+  `package.json.version` while CI attaches the binaries under the pushed
+  **tag**; when the two disagreed everything went green and the failure
+  landed entirely on consumers as a permanent 404. A new `verify-version`
+  job asserts tag == `v${package.json.version}` (and that
+  `package-lock.json` agrees — 0.24.2 shipped with its lock still reading
+  0.24.0) before the 60/90-minute binary builds start.
+- Removed the ignored `package=` attribute from the library manifest,
+  silencing AGP 8's removal recommendation on every build.
+
+## [0.24.3] - 2026-08-12
+
+Hardening release from a field RCA: an integrator's non-AR panorama
+captures ran their whole UI lifecycle with ZERO frames (band thumbnail
+never filled) and died with `PANORAMA_FINALIZE_FAILED: 0 keyframes
+saved`, because the `cv_flow_gate_process_frame` vision-camera plugin was
+compiled out of their build (frame processors disabled at pod-install
+time) — and the SDK failed **silently**: the plugin-acquisition loop
+retried forever without a word. Photos worked throughout, which made the
+failure look like a stitcher bug instead of a build defect.
+
+No behaviour changes for working integrations; this release only makes
+the broken-build case diagnosable.
+
+### Added
+
+- **Loud frame-processor diagnostics.** The SDK now detects that the
+  `cv_flow_gate_process_frame` plugin can never be acquired — either
+  because vision-camera reports frame processors disabled (its proxy
+  throws) or because nothing registered within ~3 s — and logs a
+  `console.error` with **platform-correct** remediation (iOS: pod-install
+  order, `$VCEnableFrameProcessors`, `use_frameworks!` header visibility;
+  Android: worklets-core resolvable at Gradle build time + clean
+  rebuild). Previously it retried silently forever.
+- **Fail-fast at capture start.** A non-AR hold in a build where the
+  plugin is permanently unavailable now fails immediately with an
+  actionable `PANORAMA_START_FAILED` BEFORE the recording UI mounts,
+  instead of running a doomed capture that ends in the misleading
+  `0 keyframes saved`. Keyed on the plugin's *permanent* acquisition
+  failure (not "not resolved yet"), so programmatic `startPanorama()`
+  during the normal ~1-frame mount window still works; and keyed on the
+  driver's state rather than the composed `frameProcessor` prop, so hosts
+  running their own worklet are covered too.
+- **`acquisitionFailed`** on `useStitcherWorklet()` /
+  `useFrameProcessorDriver()` — distinguishes "plugin missing from this
+  build" (permanent) from the normal acquisition window, for hosts that
+  want to gate their own UI.
+
+### Fixed
+
+- **Hold during AR-support probe no longer starts a frameless capture.**
+  A shutter hold (or `startPanorama()`) while the AR-capability probe is
+  still resolving — when no camera is mounted yet — is now DEFERRED and
+  resumes once the probe settles, the same way the rotate-to-landscape
+  gate works. Previously it started a capture with no frame source and
+  finalized with `0 keyframes saved`.
+
+### Docs
+
+- New **"Frame processors — the non-AR capture prerequisite"** section in
+  Host integration: install-order warning, the 4-point checklist, a
+  manual diagnostic snippet, and the host-`frameProcessor` composition
+  trap. New troubleshooting entry for the `0 keyframes saved` symptom.
+  Peer-deps corrected to `react-native-vision-camera ^4.7.0` +
+  `react-native-worklets-core ^1.3.0` (the omission of worklets-core from
+  the documented deps is itself a cause of this failure class).
+- `defaultCaptureSource` JSDoc now explains **when to opt into AR**
+  (`defaultCaptureSource="ar"`, or `captureSources="ar"` to lock it and
+  hide the runtime AR pill): AR ingests frames natively and is immune to
+  this whole failure class. Making `'ar'` the DEFAULT was evaluated for
+  this release and deferred to 0.25.0 — it needs an AR-session-failure →
+  auto-downgrade path first (an Android device without Google Play
+  Services for AR currently shows a blank AR preview with no fallback),
+  plus AR-mode photo-capture parity (resolution / flash / depth sidecar).
+
 ## [0.24.2] - 2026-08-11
 
 ### Fixed

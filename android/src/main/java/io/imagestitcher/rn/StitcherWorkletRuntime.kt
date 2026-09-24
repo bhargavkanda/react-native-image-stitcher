@@ -333,6 +333,12 @@ object StitcherWorkletRuntime {
         // load it again here defensively in case
         // `StitcherWorkletRuntime` is referenced before the install
         // module — `System.loadLibrary` is idempotent.
-        System.loadLibrary("image_stitcher")
+        //
+        // v0.24.4 — require() rather than a bare loadLibrary: this is
+        // an INSTANCE init (not a static one), so throwing here is
+        // safe and correct — it fails at the point of use with a
+        // message naming the ABI mismatch, instead of an
+        // UnsatisfiedLinkError from the first worklet call.
+        NativeLibraryLoader.require()
     }
 }

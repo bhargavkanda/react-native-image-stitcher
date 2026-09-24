@@ -618,6 +618,13 @@ export interface PanoPlusCaptureSurfaceProps {
    */
   onSweepingChange?: (sweeping: boolean) => void;
   /**
+   * THE STRIPS PAINTED SO FAR, for a host whose guards key on how much a
+   * capture has got — `<Camera>`'s lateral-stop policy counts keyframes on the
+   * other engine and strips on this one. Reported on every change of the
+   * live status's `painted`, and 0 whenever no sweep is live.
+   */
+  onPaintedChange?: (painted: number) => void;
+  /**
    * 2026-09-01 — THE ARM THAT WILL ACTUALLY RUN, for a host that draws its own
    * arm control.
    *
@@ -819,6 +826,7 @@ export const PanoPlusCaptureSurface = forwardRef<
   imuSidecar = false,
   packOptions,
   onSweepingChange,
+  onPaintedChange,
   onEffectiveArmChange,
 }, ref): React.JSX.Element {
   const orientation = useDeviceOrientation();
@@ -1628,6 +1636,14 @@ export const PanoPlusCaptureSurface = forwardRef<
   useEffect(() => {
     onSweepingChangeRef.current?.(busy);
   }, [busy]);
+  // Same ref shape, for the same reason: `painted` is what changed or nothing
+  // did. `status` is null whenever no sweep is live, which reports 0.
+  const onPaintedChangeRef = useRef(onPaintedChange);
+  onPaintedChangeRef.current = onPaintedChange;
+  const livePainted = status?.painted ?? 0;
+  useEffect(() => {
+    onPaintedChangeRef.current?.(livePainted);
+  }, [livePainted]);
   // Told on every change, INCLUDING the first resolve: the host's pill renders
   // before the precondition read lands, so without the mount-time call it would
   // show the requested arm until something else happened to change.

@@ -27,6 +27,10 @@ package io.imagestitcher.rn
  */
 internal class SharpnessWindow : AutoCloseable {
 
+    // v0.24.4 — see KeyframeGate: fail legibly at construction rather
+    // than with a bare UnsatisfiedLinkError from nativeCreate().
+    init { NativeLibraryLoader.require() }
+
     private val nativeHandle: Long = nativeCreate()
 
     @Volatile private var closed: Boolean = false
@@ -197,7 +201,8 @@ internal class SharpnessWindow : AutoCloseable {
         init {
             // Same shim KeyframeGate loads; System.loadLibrary is
             // idempotent so class-init order doesn't matter.
-            System.loadLibrary("image_stitcher")
+            // v0.24.4 — non-throwing; the instance init requires it.
+            NativeLibraryLoader.tryLoad()
         }
     }
 }

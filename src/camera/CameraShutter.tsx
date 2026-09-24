@@ -267,6 +267,44 @@ export const CameraShutter = forwardRef<CameraShutterHandle, CameraShutterProps>
         disabled={disabled || isProcessing}
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}
+        // v0.25 diagnostics — name HOW each hold ended.  `onTouchCancel`
+        // fires on NATIVE cancellation (interface rotation, an ancestor
+        // scrollable claiming the drag via responder termination, a Modal
+        // mounting, a remount) — cases React Native's `Pressable` otherwise
+        // folds into `onPressOut` indistinguishably from the user lifting
+        // their finger.
+        //
+        // Diagnostics ONLY.  An earlier v0.25 draft also added a
+        // `cancelGraceMs` that tried to keep a capture alive across a
+        // cancelled touch.  It was removed: the RCA for the self-ending
+        // hold explicitly REFUTED gesture/touch-steal as a cause ("the
+        // shutter is provably mode-independent"), and adversarial review
+        // then showed the guard could never fire anyway — RN dispatches
+        // `onPressOut` BEFORE `onTouchCancel`, so the flag it consulted
+        // was always still false.  It also risked hanging a capture if the
+        // component unmounted mid-grace.  If a future device log DOES show
+        // holds ending by CANCEL, these two lines are what will prove it,
+        // and any fix must account for that dispatch order.
+        //
+        // Warn-level and not __DEV__-gated: integrators hit this in
+        // release-ish builds, and this line is the difference between a
+        // one-log diagnosis and days of guessing.
+        onTouchCancel={() => {
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[react-native-image-stitcher] shutter touch CANCELLED by '
+            + `the system (phase=${phaseRef.current}). If a recording `
+            + 'just ended, the user did NOT release — something stole '
+            + 'the touch (interface rotation, a parent ScrollView '
+            + 'claiming the pan drag, or a Modal mount).',
+          );
+        }}
+        onTouchEnd={() => {
+          if (phaseRef.current === 'holding') {
+            // eslint-disable-next-line no-console
+            console.log('[react-native-image-stitcher] shutter released by user (holding → end)');
+          }
+        }}
         style={[styles.outer, disabled && styles.disabled, style]}
       >
         <View style={styles.ring} />

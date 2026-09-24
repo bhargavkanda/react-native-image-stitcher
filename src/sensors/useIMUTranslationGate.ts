@@ -20,7 +20,8 @@
 // JS-side IIR low-pass to estimate the gravity vector.  The IIR
 // version is noisier — expect a few extra cm of apparent drift on a
 // stationary phone over several seconds — but the budget threshold
-// (~8 cm at default `flowMaxTranslationCm = 8`) and the anchor
+// (50 cm at default `flowMaxTranslationCm = 50` — NOT 8; 8 is
+// `lateralBudgetCm`, a DIFFERENT knob on the orthogonal axis) and the anchor
 // resets (every accepted keyframe + recording start) keep the
 // per-interval drift window short enough that the budget still
 // meaningfully discriminates real translation from noise.
@@ -83,8 +84,19 @@ export interface UseIMUTranslationGateOptions {
 
   /**
    * Translation budget in METRES along the device-X (pan) axis.
-   * Default 0.40 m / 40 cm.  Callers in `<Camera>` typically pass
-   * `panoramaSettings.flowMaxTranslationCm / 100.0` (default 8 cm).
+   *
+   * Callers in `<Camera>` pass `panoramaSettings.flowMaxTranslationCm / 100.0`,
+   * whose default is **50 cm** (`PanoramaSettings.ts` `maxTranslationCm: 50`).
+   *
+   * DO NOT CONFUSE THIS WITH `lateralBudgetCm` (default 8 cm).  They measure
+   * orthogonal axes and drive different actions:
+   *   - this one  — ALONG-pan translation  -> forces a keyframe accept
+   *   - lateral   — CROSS-pan drift        -> STOPS the capture
+   * Earlier revisions of this comment claimed both "0.40 m / 40 cm" and
+   * "default 8 cm" in the same breath; both were wrong and they contradicted
+   * each other.  A 2026-08-26 device session peaked at 2.39 cm of measured
+   * cross-pan drift, i.e. ~20x below this budget, so at the real default this
+   * gate effectively never fires on hand-held capture.
    */
   budgetMeters?: number;
 

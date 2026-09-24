@@ -56,7 +56,10 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
       STOPS, **finalizes what was captured** (you get a panorama), and the
       "Keep the pan straight" popup shows.
 - [ ] A normal straight pan (with natural wobble) does NOT false-trigger. This
-      is the critical tuning gate — adjust `lateralBudgetCm` (default 5).
+      is the critical tuning gate — adjust `lateralBudgetCm` (default 8
+      as of v0.25.3; was 4, and this doc previously said 5, which was never
+      the shipped value). Field reports of false triggering at 4 are what
+      prompted the raise.
 - [ ] **Assumption to confirm (`usePanMotion.ts`):** the cross-pan axis is
       assumed to be device-**Y**. If sideways motion does NOT trip it but
       forward/back does, swap the integrated accelerometer axis `y`→`x` in

@@ -19,6 +19,89 @@ fuller table mapping crashes to missing config.
 | **`flash-not-available` error** | You forced flash on a device with no torch on the active lens. `<Camera>` normally hides the flash pill in this case — only happens if you drive `flash` controlled. See [Flash & lenses](./flash-and-lenses.md). |
 | **0.5× shows the same FOV as 1×** | The device has no usable ultra-wide, or (pre-0.14) the single-lens picker mis-selected. v0.14's capability-aware selection fixes this; the chooser hides when no ultra-wide exists. |
 | **AR photo is sideways in landscape** | Pre-0.14 Android bug (window-rotation vs device-orientation). Fixed in 0.14. |
+| **Shutter goes dead after a lateral-drift stop (iOS); no review screen, no thumbnail** | Pre-0.25.1 bug. The guidance popup and the post-stitch review surface were presented at once; iOS refuses the second presentation and leaves an invisible window that swallows every touch (device logs show **zero** `pressIn` events). Fixed in 0.25.1 — a finalized stop now shows no popup when a review surface follows. **Upgrade to 0.25.1+.** See [what shows after a lateral-drift stop](./camera-api.md#what-shows-after-a-lateral-drift-stop). |
+| **Shutter dead + stuck on "Switching camera…" after toggling the lens** | Pre-0.25.1 latch: flipping the lens back within ~250 ms of flipping it could leave the camera-transition gate closed forever, so the camera never remounted and every hold was deferred then cancelled. Fixed in 0.25.1. **Upgrade to 0.25.1+.** |
+
+## Lateral-drift stop fires on tiny movement
+
+**Symptom:** the "you drifted sideways" stop fires during an ordinary sweep,
+often repeatedly, and (at the default `lateralStopFinalizeMinFrames = 5`)
+discards a short capture outright.
+
+**Cause, pre-0.26.0:** the cross-pan estimator integrated the **raw**
+accelerometer with an IIR gravity estimate and no gyro input, so it could not
+distinguish a **wrist tilt** from a **sideways slide** — a re-projection of
+gravity onto the cross-pan axis is arithmetically identical to real lateral
+acceleration. On an 8 s landscape sweep with *zero* real translation, 6° of
+wrist roll read 5.18 cm (enough to trip a 4 cm budget), while a real **1 metre**
+slide read 2.00 cm and never tripped. The discrimination was inverted.
+
+**Fix:** upgrade to **0.26.0+**, which subtracts the device's fused gravity
+vector per sample and high-passes the residual. Wrist roll now reads < 0.05 cm
+at any angle.
+
+**If it still fires on 0.26.0+,** it is probably the *other* trigger. There are
+two, both setting the same flag:
+
+| trigger | prop | what it measures |
+|---|---|---|
+| rotation | `lateralTurnRateRadPerSec` (default `0.15` rad/s ≈ 8.6 °/s) | sustained cross-pan **rotation** |
+| displacement | `lateralBudgetCm` (default `8`) | integrated sideways **translation** |
+
+Turn on `panMotionDebug` and read **`latch=gyro|accel`** in the `[panMotion]`
+lines to see which one fired before tuning either. `lateralBudgetCm={0}`
+disables both.
+
+## "0 keyframes saved" — panorama captures zero frames, photos work
+
+**Symptom:** the hold-to-pan capture UI runs normally, but the band
+overlay's first thumbnail never fills; on release every attempt fails
+with `PANORAMA_FINALIZE_FAILED — Batch-keyframe finalize: 0 keyframes
+saved`. Single-photo capture works. 100 % reproducible.
+
+**Cause:** the capture ran in **non-AR mode** and the vision-camera
+frame-processor chain that feeds it is dead in your build — the SDK's
+`cv_flow_gate_process_frame` plugin never registered, so zero frames
+ever reached the stitching engine. Photos are unaffected because
+`takePhoto()` doesn't use frame processors.
+
+There are **three** distinct ways the plugin fails to register, all with
+this identical symptom and none of which produce a build error:
+
+1. **Frame processors compiled out of vision-camera itself** — disabled
+   at the time the native build ran, or vision-camera < 4.7.
+2. **Header invisible on iOS under `use_frameworks!`** — the plugin's
+   body is wrapped in
+   `#if __has_include(<VisionCamera/FrameProcessorPlugin.h>)`. Without a
+   declared pod dependency that header is visible only in the default
+   CocoaPods layout, where public headers are flattened into
+   `Pods/Headers/Public`. Under `use_frameworks!` (static *or* dynamic)
+   the guard evaluates false and the plugin compiles to an **empty
+   translation unit**. **Fixed in v0.24.4** — the podspec now declares
+   `VisionCamera` conditionally.
+3. **Dead-stripped on iOS** — the plugin registers from `+ (void)load`
+   and nothing references its class by symbol, so a static link is free
+   to drop the object file: it compiles correctly and *still* never
+   registers. **Fixed in v0.24.4** — the podspec now sets `-ObjC` on the
+   consuming target. If you carry a custom xcconfig that overrides
+   `OTHER_LDFLAGS` without `$(inherited)`, you will reintroduce this.
+
+On **v0.24.3 and earlier** the usual workaround was a hand-written `sed`
+patch on the podspec. Upgrade instead — the patch is no longer needed and
+will conflict.
+
+**Fix:** work through the
+[frame-processor checklist](./host-integration.md#frame-processors--the-non-ar-capture-prerequisite),
+then rebuild (iOS: re-run `pod install`; Android: clean Gradle build).
+On v0.24.3+ the SDK diagnoses
+this itself: a `console.error` (immediately if vision-camera reports
+frame processors disabled, else ~3 s after mount) with platform-specific
+remediation, plus a fail-fast `PANORAMA_START_FAILED` at capture start
+instead of the misleading 0-keyframes error at the end.  Opting into AR
+capture (`defaultCaptureSource="ar"`) sidesteps this failure class
+entirely — see the caveats in the [`<Camera>` API](./camera-api.md). Also check you're not passing a custom
+`frameProcessor` prop without composing `stitcher.call(frame)` — same
+symptom, different cause.
 
 ## Stitching
 
@@ -35,8 +118,9 @@ friendly, action-guiding copy ("pan more slowly", "pivot in place") instead of
 the raw `cv::Stitcher` diagnostic, pass `err.code` to the SDK's
 [`userFacingStitchError`](./capture-result.md#friendly-copy-for-recoverable-failures--userfacingstitcherror)
 helper in your `onError` handler. Wide / 0.5× ultra-wide panoramas that used to
-fail with `STITCH_CAMERA_PARAMS_FAIL` now auto-retry with a cylindrical warp and
-usually complete (v0.15).
+fail with `STITCH_CAMERA_PARAMS_FAIL` are retried down the flat stitch ladder —
+lower-threshold and SCANS rungs, plus one capped spherical extra rung for warp
+failures — and usually complete (v0.25).
 
 ## Orientation
 
@@ -52,6 +136,85 @@ usually complete (v0.15).
 |---|---|
 | **OpenCV binaries missing** | The `postinstall` fetch failed. Re-run `npm install`, or stage binaries and set `SKIP_OPENCV_FETCH=1`. |
 | **RN 0.84 build errors** | Apply the required `patch-package` patches — see [Host integration](./host-integration.md). |
+| **`'opencv2/core.hpp' file not found`** | The xcframework was never downloaded. See below. |
+| **`building for iOS Simulator, but linking in object file built for iOS`** | You're on v0.7.1–v0.24.3, which shipped a device-only framework. Upgrade to v0.24.4+ (both slices are back), or build for a device. |
+| **App won't launch at all on an emulator (Android)** | The AAR is `arm64-v8a` only. Use an arm64 AVD or a physical device — see [Android ABI support](./android-abi-support.md). v0.24.4+ degrades gracefully instead of crashing. |
+| **`FatalException: Application manifest must contain meta-data com.google.ar.core`** | Add the ARCore `<meta-data>` to your app's manifest — see below. |
+| **`Could not find method jcenter()`** (via `react-native-sensors`) | `react-native-sensors@7.3.6`'s `build.gradle` still calls the removed `jcenter()`. Patch it to `mavenCentral()` with `patch-package`, or pin a newer version. |
+
+### `'opencv2/core.hpp' file not found`
+
+The OpenCV xcframework is **not** in the npm tarball — `postinstall`
+downloads it from the matching GitHub Release. When that download is
+skipped or blocked, `pod install` used to succeed and the failure landed
+hundreds of lines into the Xcode build with this message, which points
+nowhere near the cause.
+
+**v0.24.4+** fails fast: `pod install` itself raises, names the likely
+cause, and gives you the fix. The causes are:
+
+- `npm install --ignore-scripts` (common in locked-down CI, and the
+  default for some monorepo tooling)
+- a restored CI cache that predates the dependency
+- a proxy or firewall blocking `objects.githubusercontent.com`
+- `SKIP_OPENCV_FETCH=1` left set from an earlier experiment
+
+Recover with any of:
+
+```bash
+# Re-run the fetch
+npm rebuild react-native-image-stitcher   # or: npm install --force
+
+# Point at an internal mirror
+OPENCV_BINARY_BASE_URL=https://mirror.internal/rnis npm install
+
+# Or: your app already ships OpenCV — don't download ours at all
+RNIS_HOST_OPENCV=1 npm install
+```
+
+The last one is **[Bring your own OpenCV](./bring-your-own-opencv.md)**.
+
+### Installing offline / in an air-gapped CI
+
+Stage the binaries yourself and tell `postinstall` to stand down:
+
+```bash
+# On a machine with network access, from the matching release:
+#   RNImageStitcher-v<version>-ios.zip     → node_modules/react-native-image-stitcher/ios/Frameworks/
+#   RNImageStitcher-v<version>-android.zip → node_modules/react-native-image-stitcher/android/vendor/
+SKIP_OPENCV_FETCH=1 npm ci
+```
+
+The version in the asset name **must** match the installed package
+version exactly — the postinstall URL is derived from
+`package.json.version`.
+
+### ARCore meta-data (you must declare it)
+
+This AAR pulls in `com.google.ar:core`, and ARCore throws
+`FatalException: Application manifest must contain meta-data
+com.google.ar.core` on its **first call** — before any availability
+check, so there is nothing the SDK can do to defend against it at
+runtime. Add it inside `<application>` in your app's manifest:
+
+```xml
+<application …>
+    <meta-data android:name="com.google.ar.core" android:value="optional" />
+</application>
+```
+
+Use `optional` unless your product is AR-only: `required` makes the Play
+Store filter your app to AR-capable devices. The SDK degrades on its own
+when ARCore is unavailable, falling back to the vision-camera +
+gyroscope non-AR capture path.
+
+:::note Why the SDK doesn't declare this for you
+It could — manifest merging would propagate it automatically — but an
+app that already declares the key with a *different* value would then
+have its build stopped by the merger, needing a `tools:replace`. Shipping
+a build break to integrators who already did the right thing is worse
+than the one manifest line.
+:::
 
 Still stuck? Open an issue:
 [github.com/bhargavkanda/react-native-image-stitcher/issues](https://github.com/bhargavkanda/react-native-image-stitcher/issues).
