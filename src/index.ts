@@ -425,8 +425,6 @@ export type {
 // and chrome — but that is now a choice, not the only route.
 export { PanoPlusCaptureSurface } from './sweep/PanoPlusCaptureSurface';
 export type { PanoPlusCaptureSurfaceProps } from './sweep/PanoPlusCaptureSurface';
-export { PanoPlusResultView } from './sweep/PanoPlusResultView';
-export type { PanoPlusResultViewProps } from './sweep/PanoPlusResultView';
 export { PanoPlusBasisOverlay } from './sweep/PanoPlusBasisOverlay';
 export type { PanoPlusBasisOverlayProps } from './sweep/PanoPlusBasisOverlay';
 export * from './sweep/panoPlusTypes';

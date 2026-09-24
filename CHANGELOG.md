@@ -203,6 +203,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `config.seedLeadTrim`. `sweep={{ engineOptions: { seedLeadTrim: false } }}`
   selects the control arm on both platforms.
 
+### Removed (BREAKING)
+- **The sweep's second result viewer (M10).** `PanoPlusResultView` and
+  `PanoPlusResultViewProps` are no longer exported, and the component is
+  deleted with the three modules only it used (`PinchZoomView`,
+  `zoomTransform`, `packStatus`). A sweep's result is reviewed on the same
+  review surface as a keyframe panorama (M9), and a host that reopens a
+  capture uses that review too.
+
 ### Fixed
 
 - **The sweep engine's guard rails follow the keyframe engine's lateral-stop
