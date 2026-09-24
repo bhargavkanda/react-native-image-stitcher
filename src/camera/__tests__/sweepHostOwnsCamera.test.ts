@@ -74,6 +74,7 @@ import {
   SWEEP_HOST_OWNS_INPUT_KEYS,
   sweepEffectiveLens,
   sweepHostArmRefusal,
+  colourLensTypeCount,
   sweepFailureCameraCode,
   type SweepHostArmRefusalInput,
   type SweepHostOwnsCameraInput,
@@ -135,6 +136,8 @@ const READY: SweepHostArmRefusalInput = {
   nativeVcArm: true,
   cameraUnmounting: false,
   deviceId: 'back-0',
+  colourLensTypes: 1,
+  depthMount: false,
 };
 
 describe('sweepHostArmRefusal — each old fallback is now a NAMED refusal', () => {
@@ -150,6 +153,7 @@ describe('sweepHostArmRefusal — each old fallback is now a NAMED refusal', () 
     ['the plugin is still loading', { pluginReady: false }, 'panoplus-not-ready'],
     ['the camera is in transition', { cameraUnmounting: true }, 'panoplus-camera-not-ready'],
     ['no device id yet', { deviceId: '' }, 'panoplus-camera-not-ready'],
+    ['M5 review: an iOS mount combining two colour lenses', { colourLensTypes: 2 }, 'panoplus-vc-device-unsupported'],
   ];
   for (const [what, over, code] of cases) {
     it(`${what}: ${code}`, () => {
@@ -174,12 +178,43 @@ describe('sweepHostArmRefusal — each old fallback is now a NAMED refusal', () 
       nativeVcArm: false,
       cameraUnmounting: true,
       deviceId: '',
+      colourLensTypes: 2,
+      depthMount: true,
     };
     expect(sweepHostArmRefusal(all)?.code).toBe('panoplus-refused-drawable-processor');
     expect(sweepHostArmRefusal({ ...all, hostProcessorDrawable: false })?.code)
       .toBe('panoplus-refused-zoom-lens');
+    // The multi-lens mount outranks the build faults: the operator can act on
+    // it (AR or 0.5×) where a missing plugin needs a rebuild.
     expect(sweepHostArmRefusal({ ...all, hostProcessorDrawable: false, lens: '1x' })?.code)
-      .toBe('panoplus-plugin-unavailable');
+      .toBe('panoplus-vc-device-unsupported');
+    expect(sweepHostArmRefusal({
+      ...all, hostProcessorDrawable: false, lens: '1x', colourLensTypes: 1,
+    })?.code).toBe('panoplus-plugin-unavailable');
+  });
+});
+
+describe('the iOS multi-lens mount (M5 review) — refused before the hold, by its cause', () => {
+  // vision-camera's `physicalDevices` for the mounts `selectCaptureDevice`
+  // makes with photo depth on: LiDAR (iPhone Pro), Dual Wide (non-LiDAR with
+  // an ultra-wide), Dual (wide + tele). The LiDAR sensor is reported as
+  // `wide-angle-camera` — vision-camera's fallback for an unknown type.
+  it.each([
+    ['LiDAR depth camera', ['wide-angle-camera', 'wide-angle-camera'], 1],
+    ['Dual Wide', ['ultra-wide-angle-camera', 'wide-angle-camera'], 2],
+    ['Dual', ['wide-angle-camera', 'telephoto-camera'], 2],
+    ['Triple', ['ultra-wide-angle-camera', 'wide-angle-camera', 'telephoto-camera'], 3],
+    ['a physical wide', ['wide-angle-camera'], 1],
+  ] as const)('%s → %i distinct colour lens(es)', (_n, devices, n) => {
+    expect(colourLensTypeCount([...devices])).toBe(n);
+  });
+  it('the LiDAR mount sweeps; Dual Wide is refused naming photo depth; off iOS nothing is counted', () => {
+    expect(sweepHostArmRefusal({ ...READY, colourLensTypes: 1, depthMount: true })).toBeNull();
+    const r = sweepHostArmRefusal({ ...READY, colourLensTypes: 2, depthMount: true });
+    expect(r?.code).toBe('panoplus-vc-device-unsupported');
+    expect(r?.message).toMatch(/photo depth/);
+    expect(sweepFailureCameraCode(r?.code)).toBe('SWEEP_DEVICE_UNSUPPORTED');
+    expect(sweepHostArmRefusal({ ...READY, colourLensTypes: null })).toBeNull();
   });
 });
 

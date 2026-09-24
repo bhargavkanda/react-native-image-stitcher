@@ -28,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     camera whose basis has not been measured is refused;
   - **named refusals** instead of any fallback, on `onError`:
     `SWEEP_DEVICE_UNSUPPORTED` (front camera, a camera combining several
-    lenses, an unmeasured basis, a mirrored/rotated buffer mid-sweep),
+    lenses — refused before the hold, naming photo depth when that is what
+    mounted a two-lens camera at 1× — an unmeasured basis, a mirrored/rotated
+    buffer mid-sweep),
     `SWEEP_FORMAT_BELOW_30FPS`, `SWEEP_ZOOM_NOT_1`, and `ENGINE_UNAVAILABLE`
     for a native build that predates the arm (`vcArmSupported`);
   - the camera's configuration (format, fps, zoom, torch, orientation)

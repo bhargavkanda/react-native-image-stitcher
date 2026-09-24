@@ -5207,6 +5207,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         sweepHandoffPending,
       ),
       deviceId: capture.device?.id ?? '',
+      colourLensTypes: Platform.OS === 'ios'
+        ? colourLensTypeCount(capture.device?.physicalDevices)
+        : null,
+      depthMount: Platform.OS === 'ios' && captureDepthData === true,
     })
     : null;
 
@@ -6525,6 +6529,30 @@ export interface SweepHostArmRefusalInput {
   cameraUnmounting: boolean;
   /** `capture.device?.id ?? ''`. */
   deviceId: string;
+  /**
+   * iOS only (null elsewhere): how many DISTINCT colour lenses the mounted
+   * device combines — `colourLensTypeCount(device.physicalDevices)`. The
+   * native vc arm refuses a virtual camera with more than one (D5); this
+   * refuses the same mount before the hold, and says why.
+   */
+  colourLensTypes: number | null;
+  /** iOS `captureDepthData` is on — the usual reason a 1× mount is multi-lens. */
+  depthMount: boolean;
+}
+
+/**
+ * The number of DISTINCT colour lenses in vision-camera's `physicalDevices`.
+ *
+ * ⚠ DISTINCT, NOT A COUNT. vision-camera 4.7.3 names every constituent it
+ * does not recognise — the LiDAR depth sensor among them — `wide-angle-camera`
+ * (`AVCaptureDevice.DeviceType+physicalDeviceDescriptor.swift`), so the
+ * single-colour LiDAR depth camera arrives as two `wide-angle-camera` entries.
+ * Distinct types match the native rule on every iPhone mount: LiDAR depth 1,
+ * Dual Wide / Dual 2, Triple 3.
+ */
+export function colourLensTypeCount(physicalDevices: readonly string[] | null | undefined): number {
+  const colour = new Set(['wide-angle-camera', 'ultra-wide-angle-camera', 'telephoto-camera']);
+  return new Set((physicalDevices ?? []).filter((t) => colour.has(t))).size;
 }
 
 /**
@@ -6591,6 +6619,23 @@ export function sweepHostArmRefusal(
       message: 'This sweep cannot start at 0.5× on this phone: its ultra-wide '
         + 'is reached by zooming a combined camera, and the sweep cannot yet '
         + 'tell which lens a frame came from. Switch to 1× for the sweep.',
+    };
+  }
+  if (i.colourLensTypes != null && i.colourLensTypes > 1) {
+    // M5 review — a mount the native vc arm refuses (D5), refused before the
+    // hold with the reason the operator can act on. On a non-LiDAR iPhone
+    // photo depth mounts Dual Wide (ultra-wide + wide) at 1×, so EVERY 1×
+    // non-AR sweep would otherwise end in the native refusal.
+    return {
+      code: 'panoplus-vc-device-unsupported',
+      message: i.depthMount
+        ? 'This sweep cannot start at 1× on this phone: photo depth is on, and '
+          + 'the camera that delivers depth here combines two lenses, which '
+          + 'switch between each other without notice. Use AR or 0.5× for the '
+          + 'sweep, or turn photo depth off.'
+        : `This sweep cannot start: the camera on screen combines `
+          + `${i.colourLensTypes} lenses, which switch between each other without `
+          + 'notice. Use a single-lens camera for the sweep.',
     };
   }
   if (i.pluginUnavailable) {

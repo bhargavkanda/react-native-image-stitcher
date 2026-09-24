@@ -149,3 +149,34 @@ describe('<Camera> discards a capture the camera stopped under', () => {
     act(() => { t.unmount(); });
   });
 });
+
+describe('<Camera> refuses an iOS multi-lens mount before the hold (M5 review)', () => {
+  const mountOn = async (physicalDevices: string[], depth: boolean) => {
+    (Platform as { OS: string }).OS = 'ios';
+    const dev = { ...DEVICE, id: 'virtual-0', physicalDevices, isMultiCam: physicalDevices.length > 1 };
+    vc.useCameraDevice = () => dev;
+    vc.useCameraDevices = () => [dev];
+    let t!: ReactTestRenderer;
+    act(() => {
+      t = create(<Camera engine="sweep" defaultCaptureSource="non-ar" captureDepthData={depth} />);
+    });
+    await flush();
+    await act(async () => { jest.advanceTimersByTime(1000); await Promise.resolve(); });
+    return t;
+  };
+
+  it('photo depth on a Dual Wide mount: the hold is refused by name, and the message says why', async () => {
+    const t = await mountOn(['ultra-wide-angle-camera', 'wide-angle-camera'], true);
+    const refusal = surface(t).props.hostArmRefusal as { code: string; message: string } | null;
+    expect(refusal?.code).toBe('panoplus-vc-device-unsupported');
+    expect(refusal?.message).toMatch(/photo depth/);
+    act(() => { t.unmount(); });
+  });
+
+  it('⚑ NEGATIVE CONTROL: the LiDAR depth mount (its sensor reported as a second wide) is not refused for it', async () => {
+    const t = await mountOn(['wide-angle-camera', 'wide-angle-camera'], true);
+    const refusal = surface(t).props.hostArmRefusal as { code: string } | null;
+    expect(refusal?.code).not.toBe('panoplus-vc-device-unsupported');
+    act(() => { t.unmount(); });
+  });
+});
