@@ -15,6 +15,13 @@
  *   finishing, not released    | yes            | idle
  *   finishing, released        | NO             | stitching
  *   finish resolved            | yes            | idle
+ *
+ * M8 review — the rows the table left out:
+ *
+ *   engine deselected while stitching | yes, at once | idle, and the capture
+ *                                     |              | still reaches the host
+ *   finish resolves into the review   | yes, behind  | idle, same tick
+ *   native never names the field      | yes          | idle (older binary)
  */
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
@@ -52,7 +59,7 @@ const DEVICE = {
   isMultiCam: false, supportsFocus: true, name: 'back-0',
 };
 
-let released = false;
+let released: boolean | undefined = false;
 let resolveStop: ((v: unknown) => void) | null = null;
 let sessionDir = '';
 
@@ -106,6 +113,24 @@ async function tick(ms: number): Promise<void> {
 }
 
 const cameraMounted = (t: ReactTestRenderer) => t.root.findAllByType(CameraView).length === 1;
+
+/** Start a sweep, stop it, and let native pass the release point. */
+async function toStitching(ref: React.RefObject<any>): Promise<void> {
+  await act(async () => { ref.current.startPanorama(); });
+  await tick(300);
+  await act(async () => { await ref.current.stopPanorama(); });
+  await tick(300);
+  released = true;
+  await tick(300);
+}
+
+async function resolveFinish(): Promise<void> {
+  await act(async () => {
+    resolveStop?.({ width: 100, height: 50, sessionDir, counts: {}, abort: null });
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
 const overlayPhase = (t: ReactTestRenderer) =>
   t.root.findAllByType(CaptureStatusOverlay)[0]?.props.phase as string;
 
@@ -165,6 +190,99 @@ describe('M8 — a sweep\'s finish releases the camera natively BEFORE <Camera> 
     await tick(300);
     await act(async () => { await ref.current.stopPanorama(); });
     await tick(2000);
+    expect(cameraMounted(tree)).toBe(true);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M8 review: the release poll keeps ONE read in flight — a native answer that never comes does not pile reads up', async () => {
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => {
+      tree = create(
+        <Camera ref={ref} engine="sweep" defaultCaptureSource="non-ar" panMode="both"
+          rectCrop={false} showPreview={false} />,
+      );
+    });
+    await tick(0);
+    await act(async () => { ref.current.startPanorama(); });
+    await tick(300);
+    // From the stop on, native's status queue is wedged (the Android shape
+    // before the lock-free read: a status call queued behind the finalize).
+    const session = NM.RNSSweepSession as Record<string, unknown>;
+    let reads = 0;
+    session.getStatus = () => { reads += 1; return new Promise(() => undefined); };
+    await act(async () => { await ref.current.stopPanorama(); });
+    await tick(2000);   // twenty poll intervals
+    expect(reads).toBe(1);
+    expect(cameraMounted(tree)).toBe(true);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ an OLDER binary that never names `cameraReleased` keeps the camera up throughout', async () => {
+    released = undefined;   // the status answer carries no such field
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => {
+      tree = create(
+        <Camera ref={ref} engine="sweep" defaultCaptureSource="non-ar" panMode="both"
+          rectCrop={false} showPreview={false} />,
+      );
+    });
+    await tick(0);
+    await act(async () => { ref.current.startPanorama(); });
+    await tick(300);
+    await act(async () => { await ref.current.stopPanorama(); });
+    await tick(2000);
+    expect(cameraMounted(tree)).toBe(true);
+    expect(overlayPhase(tree)).toBe('idle');
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M8 review: the engine deselected WHILE STITCHING brings the camera back at once, and the capture still lands', async () => {
+    const captures: Array<{ ok?: boolean }> = [];
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    const el = (engine: 'sweep' | 'keyframe') => (
+      <Camera ref={ref} engine={engine} defaultCaptureSource="non-ar" panMode="both"
+        rectCrop={false} showPreview={false}
+        onCapture={(r: { ok?: boolean }) => { captures.push(r); }} />
+    );
+    act(() => { tree = create(el('sweep')); });
+    await tick(0);
+    await toStitching(ref);
+    expect(cameraMounted(tree)).toBe(false);
+    expect(overlayPhase(tree)).toBe('stitching');
+
+    act(() => { tree.update(el('keyframe')); });
+    await tick(0);
+    // The keyframe screen is not left without a camera, or stuck on
+    // "stitching", for a finish that belongs to another engine.
+    expect(cameraMounted(tree)).toBe(true);
+    expect(overlayPhase(tree)).toBe('idle');
+
+    // …and the sweep the operator made is not lost: the finish still reports.
+    await resolveFinish();
+    await tick(100);
+    expect(captures.filter((c) => c.ok !== false)).toHaveLength(1);
+    expect(cameraMounted(tree)).toBe(true);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M8 review: a finish that opens the review brings the camera back in the SAME tick, behind it', async () => {
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => {
+      tree = create(
+        <Camera ref={ref} engine="sweep" defaultCaptureSource="non-ar" panMode="both"
+          rectCrop={false} showPreview />,
+      );
+    });
+    await tick(0);
+    await toStitching(ref);
+    expect(cameraMounted(tree)).toBe(false);
+    // No timer advance: the resolution alone must end "stitching".
+    await resolveFinish();
+    expect(overlayPhase(tree)).not.toBe('stitching');
     expect(cameraMounted(tree)).toBe(true);
     act(() => { tree.unmount(); });
   });

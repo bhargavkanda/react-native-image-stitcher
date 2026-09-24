@@ -28,9 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     flight, **the `panMode` gate** (a host that sweeps in portrait passes
     `panMode="both"`; the default `'vertical'` is a landscape hold) and no
     camera transition in flight. A sweep hold before its frame-processor
-    plugin lands is deferred and resumed, not refused; if the plugin never
-    lands (1.5 s) it is refused as `ENGINE_UNAVAILABLE`. A release while a
-    hold is deferred abandons it;
+    plugin lands is deferred (with no rotate prompt) and resumed through the
+    whole dispatcher, not refused; if the plugin never lands (1.5 s) it is
+    refused as `ENGINE_UNAVAILABLE`. A release while a hold is deferred
+    abandons it, and so does an engine switch. Only the plugin lookup is
+    waited on: a hold with no camera device is refused at once. A hold in a
+    build without the sweep's session module is refused as
+    `ENGINE_UNAVAILABLE` (it used to do nothing) and leaves `takePhoto()`
+    usable. The `panMode` gate does not apply to the internal DR-1a hatch,
+    whose old screen has no rotate prompt;
   - `takePhoto()` while a panorama is recording or finishing, on either
     engine, is refused with the new `CAPTURE_IN_PROGRESS` code (D7);
   - switching the engine at idle no longer unmounts the camera;
@@ -42,7 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the rest of the finish and the status overlay reads "Stitching". It
     mounts again when the finish ends;
   - AR sweeps are pose-guarded against sideways drift, like AR keyframe
-    captures; the IMU guard no longer stands in for them;
+    captures; the IMU guard no longer stands in for them. Under
+    `panMode="both"` the sweep's axis is not known in advance, so the pose
+    guard stands down for a sweep there and the IMU guard keeps it;
+  - on `<Camera>`'s AR view the sweep may only run the AR arm: a start
+    native answers with any other arm, or with none, is cancelled and
+    refused as `ENGINE_UNAVAILABLE`;
+  - `sweep.onPaintedChange` is called (it was silently replaced);
   - at idle the sweep draws nothing of its own over the viewfinder; its
     growing panorama, headline, hard faults and τ chip appear during a sweep;
   - the settings gear and modal show on both engines.
@@ -50,13 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `keyframeQualityCapture` defaults to `enablePanoramaMode`, the new
   `arSourceMaxLongEdge` sets its CPU-image cap, `arFrameMetaInterval` is at
   most 100 ms while panorama capture is on, and all three are held while a
-  capture records. New `topChromeInset` moves the top-right pills clear of a
+  capture records — and, for a sweep, through its finish until native
+  releases the camera (the vision-camera config is held the same way). New `topChromeInset` moves the top-right pills clear of a
   host's docked banner on both engines. **`SweepOptions` is now an explicit
-  allow-list** of the engine's own options. The chrome keys
-  (`hostChromeTopPt`, `bottomBarOffset`, `hideBuiltInControls`,
-  `onControlsState`) and `arSourceMaxLongEdge` are `<Camera>` props now
-  (`topChromeInset`, `bottomBarOffset`, `hideBuiltInShutter`,
-  `arSourceMaxLongEdge`). The AR pill no longer hides under
+  allow-list** of the engine's own options. Four bag keys moved to
+  `<Camera>` props: `hostChromeTopPt` → `topChromeInset`, `bottomBarOffset` →
+  `bottomBarOffset`, `hideBuiltInControls` → `hideBuiltInShutter`,
+  `arSourceMaxLongEdge` → `arSourceMaxLongEdge`. **`sweep.onControlsState` is
+  removed with no replacement**: a host that draws its own shutter follows
+  `sweep.onSweepingChange`, which is true through every non-idle phase. The AR pill no longer hides under
   `hideBuiltInShutter` on either engine (D18). It is a camera control, so a
   keyframe host with its own shutter now shows it. The settings modal takes an
   `engine` prop: on the sweep, the keyframe-only sections give way to a note

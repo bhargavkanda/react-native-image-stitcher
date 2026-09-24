@@ -229,6 +229,10 @@ describe('sweepFailureCameraCode — only a missing plugin is a BUILD failure', 
   it('the plugin-missing refusal reaches the host as ENGINE_UNAVAILABLE', () => {
     expect(sweepFailureCameraCode('panoplus-plugin-unavailable')).toBe('ENGINE_UNAVAILABLE');
     expect(sweepFailureCameraCode('panoplus-vc-arm-unavailable')).toBe('ENGINE_UNAVAILABLE');
+    // M8 review — the session module itself missing (JS synthesises it; the
+    // Android module says it of a missing engine). Every emitter means "not
+    // in this build", and since M8 a hold reports it instead of dying silent.
+    expect(sweepFailureCameraCode('panoplus-unavailable')).toBe('ENGINE_UNAVAILABLE');
   });
   it('M5: a camera that cannot carry a sweep is named by what is wrong with it', () => {
     expect(sweepFailureCameraCode('panoplus-vc-device-unsupported')).toBe('SWEEP_DEVICE_UNSUPPORTED');
@@ -241,7 +245,7 @@ describe('sweepFailureCameraCode — only a missing plugin is a BUILD failure', 
   it('every other refusal is this attempt failing', () => {
     for (const c of ['panoplus-not-ready', 'panoplus-camera-not-ready',
       'panoplus-refused-drawable-processor',
-      'panoplus-panorama-disabled', 'panoplus-busy', 'panoplus-unavailable',
+      'panoplus-panorama-disabled', 'panoplus-busy',
       'panoplus-io', '', null, undefined]) {
       expect(sweepFailureCameraCode(c as string | null | undefined)).toBe('PANORAMA_START_FAILED');
     }

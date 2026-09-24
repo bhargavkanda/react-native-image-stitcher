@@ -141,7 +141,9 @@ export interface ARCameraViewProps {
   keyframeQualityCapture?: boolean;
   /**
    * Long-edge budget (px) the `keyframeQualityCapture` image pick is made
-   * against. Omit for the 1920 default — today's behaviour exactly.
+   * against. OMITTED: no budget is pushed, so the session keeps whatever budget
+   * it last had — 1920 only if nothing has set one in this process (M8
+   * review; this said "omit for the 1920 default").
    *
    * Exists because the CPU image is repacked to NV21 on the GL RENDER THREAD
    * every tick, before any plugin is asked whether it wants the frame, so a

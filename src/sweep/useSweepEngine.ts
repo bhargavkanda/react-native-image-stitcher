@@ -2163,9 +2163,12 @@ export function useSweepEngine(
         // left running as a second camera.
         // ⚠ M8 — AND ON THE HOST'S AR SESSION, NATIVE MUST HAVE RUN THE AR ARM.
         // Any other arm under `'host-ar'` is one that opened a camera of its
-        // own behind `<Camera>`'s AR view.
-        const wrongHostArm = frameSource === 'host-ar'
-          && started.poseSource != null && started.poseSource !== 'ar';
+        // own behind `<Camera>`'s AR view. FAIL CLOSED on an ABSENT echo too
+        // (M8 review), as the vision-camera arm does: both platforms have
+        // answered `poseSource` on every start since the engine moved into
+        // this package, and on both a live 'ar' answer is the arm that reads
+        // the stitcher's own AR session (Android: `PanoStartMode.AR_PLUGIN`).
+        const wrongHostArm = frameSource === 'host-ar' && started.poseSource !== 'ar';
         if ((vcHostArm && started.frameSource !== 'vc-plugin') || wrongHostArm) {
           void cancelPanoPlus().catch(() => undefined);
           stopOnStartRef.current = false;
@@ -2539,6 +2542,14 @@ export function useSweepEngine(
   const canCapture = available && !armResolving && !basisGestureVisible;
   const canCaptureRef = useRef(canCapture);
   canCaptureRef.current = canCapture;
+  const availableRef = useRef(available);
+  availableRef.current = available;
+  const nativeReadyRef = useRef(nativeReady);
+  nativeReadyRef.current = nativeReady;
+  const onFailureRef = useRef(onFailure);
+  onFailureRef.current = onFailure;
+  const basisGestureVisibleRef = useRef(basisGestureVisible);
+  basisGestureVisibleRef.current = basisGestureVisible;
 
   // ⚠ THERE IS NO `abandon()` ANY MORE (2026-09-03). It was the Discard
   // button's handler — `cancelPanoPlus` + `onCancel` — and Discard has no
@@ -2578,7 +2589,34 @@ export function useSweepEngine(
     // A hold that starts a sweep under the basis recorder would fit `C` from
     // a log recorded during somebody's pan.
     if (phaseRef.current !== 'idle') return;
-    if (!canCaptureRef.current) return;
+    if (!canCaptureRef.current) {
+      // ⚠ NEVER SILENT (M8 review). The standalone surface used to draw an
+      // "unavailable" card and grey its own Start; inside `<Camera>` there is
+      // no such card and the shutter is `<Camera>`'s, so a hold declined here
+      // did nothing and said nothing. It is refused by name instead: a build
+      // without the sweep module (or with nowhere to write the pack) is
+      // `panoplus-unavailable` — a build fault, ENGINE_UNAVAILABLE to a
+      // `<Camera>` host — and a hold while the arm is still resolving is
+      // `panoplus-not-ready`.
+      const unavailable = !availableRef.current;
+      onFailureRef.current?.({
+        code: unavailable ? 'panoplus-unavailable' : 'panoplus-not-ready',
+        message: unavailable
+          ? (nativeReadyRef.current
+            ? 'The sweep cannot start: its session module reports no document '
+              + 'directory and this host has no expo-file-system, so there is '
+              + 'nowhere to put the pack. Rebuild the app against this version '
+              + 'of react-native-image-stitcher.'
+            : panoPlusUnavailableDetail(Platform.OS))
+          : basisGestureVisibleRef.current
+            ? 'Finish the calibration gesture on screen before starting a sweep.'
+            : 'This sweep cannot start yet: it is still loading. Try again in a moment.',
+        sessionDir: null,
+        counts: null,
+        abort: null,
+      });
+      return;
+    }
     startRef.current();
   }, []);
   const holdEnd = useCallback(() => {
@@ -2738,10 +2776,17 @@ export function useSweepEngine(
     }
     if (!enabled || cameraReleased) return undefined;
     let live = true;
+    // ONE READ IN FLIGHT AT A TIME (M8 review): a tick that fires while the
+    // last is still unanswered is skipped, so a slow native answer can never
+    // pile reads up on the native module queue.
+    let inFlight = false;
     const id = setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
       void getPanoPlusStatus().then((s) => {
+        inFlight = false;
         if (live && mountedRef.current && s?.cameraReleased === true) setCameraReleased(true);
-      });
+      }, () => { inFlight = false; });
     }, PANO_PLUS_RELEASE_POLL_MS);
     return () => { live = false; clearInterval(id); };
   }, [phase, enabled, cameraReleased]);

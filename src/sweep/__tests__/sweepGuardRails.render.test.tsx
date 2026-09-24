@@ -453,6 +453,22 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
     act(() => { tree.unmount(); });
   });
 
+  it('⚑ …but under panMode "both" (axis unknown) the IMU guard keeps the AR sweep (M8 review)', async () => {
+    // The pose guard would measure a portrait sweep on the landscape axis, so
+    // it stands down there and the IMU guard that held AR sweeps through
+    // M0–M7 does the job.
+    const tree = render({
+      captureSources: 'both', defaultCaptureSource: 'ar', lateralBudgetCm: 1, panMode: 'both',
+    });
+    await settle();
+    expect(surfaceProps.poseSource).toBe('ar');
+    await settleUpright();
+    await startSweep();
+    await slideSideways();
+    expect(calls).toContain('holdEnd');
+    act(() => { tree.unmount(); });
+  });
+
   it('⚑ …and the RESULT says why it is short — LATERAL_DRIFT_FINALIZE', async () => {
     // ⚠ THE HALF A MODAL CANNOT CARRY. The keyframe engine attaches
     // `LATERAL_DRIFT_FINALIZE` to `onCapture(result).warnings` so a host can

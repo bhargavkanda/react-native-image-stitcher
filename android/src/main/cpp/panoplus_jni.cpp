@@ -1074,7 +1074,19 @@ Java_io_imagestitcher_rn_panoplus_PanoPlusLiveNative_nativeLiveStatusJson(
         JNIEnv* env, jobject /*thiz*/) {
     std::string s;
     try {
-        std::shared_lock<std::shared_mutex> lock(g_panoLiveMu);
+        // ⚠ NEVER WAIT FOR THE LOCK (M8 review). `nativeLiveFinalize` holds it
+        // EXCLUSIVELY for the whole canvas render and JPEG encode — SECONDS —
+        // and this runs on RN's one NativeModules queue thread, polled every
+        // 100 ms through a finish (the camera-release poll). Waiting here
+        // wedged every legacy native module call for the length of every
+        // Android finalize, and delivered `cameraReleased` only after it. The
+        // other exclusive holders (start, cancel) are momentary, and ingest
+        // takes the lock SHARED, so a busy lock never hides a live sweep.
+        std::shared_lock<std::shared_mutex> lock(g_panoLiveMu, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            s = "{\"running\":false,\"finalizing\":true}";
+            return newJsonString(env, s);
+        }
         std::shared_ptr<rnis::pano::live::Session> sess = panoLiveSession();
         if (sess == nullptr) {
             s = "{\"running\":false}";

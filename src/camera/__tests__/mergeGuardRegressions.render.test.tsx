@@ -124,6 +124,8 @@ jest.mock('../../sweep/PanoPlusCaptureSurface', () => {
 import { Camera } from '../Camera';
 // eslint-disable-next-line import/first
 import { LateralMotionModal } from '../LateralMotionModal';
+// eslint-disable-next-line import/first
+import { RotateToLandscapePrompt } from '../RotateToLandscapePrompt';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -276,6 +278,10 @@ describe('a hold during the sweep→keyframe camera handoff waits for the camera
       ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
     });
     expect(g.__kf.calls).not.toContain('start');
+    // Waiting for a CAMERA is not the pan-mode gate: no rotate prompt
+    // (panMode 'both' never gates). M8 review — it used to show here.
+    expect(t.root.findAllByType(RotateToLandscapePrompt)
+      .some((p: any) => p.props.visible === true)).toBe(false);
     await act(async () => { await sleep(900); });
     expect(placeholder(t)).toBe(false);
     expect(g.__kf.calls).toContain('start');
@@ -307,8 +313,10 @@ describe('M8 — an AR SWEEP is pose-guarded through <Camera>\'s own AR view', (
     let t!: ReactTestRenderer;
     const abandoned: string[] = [];
     await act(async () => {
+      // A KNOWN axis: 'horizontal' is the portrait hold. Under 'both' the
+      // pose guard stands down on a sweep (see the case below).
       t = create(el({
-        engine: 'sweep', defaultCaptureSource: 'ar', rectCrop: false,
+        engine: 'sweep', defaultCaptureSource: 'ar', rectCrop: false, panMode: 'horizontal',
         onCaptureAbandoned: (r: string) => abandoned.push(r),
       }, ref));
     });
@@ -333,11 +341,36 @@ describe('M8 — an AR SWEEP is pose-guarded through <Camera>\'s own AR view', (
     act(() => t.unmount());
   });
 
-  it('⚑ NEGATIVE CONTROL: no drift, no stop', async () => {
+  it('⚑ M8 review: under panMode "both" the axis is unknown, so the pose guard stands down on a sweep', async () => {
+    // It would measure a portrait sweep on the landscape axis: no guard when
+    // level, a false stop part-way through a yaw sweep when tilted. The IMU
+    // guard keeps the sweep instead, as through M0–M7.
     const ref = React.createRef<any>();
     let t!: ReactTestRenderer;
     await act(async () => {
       t = create(el({ engine: 'sweep', defaultCaptureSource: 'ar', rectCrop: false }, ref));
+    });
+    await act(async () => { await sleep(400); });
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    await act(async () => { g.__sw.props.onPaintedChange(30); });
+    g.__ar.exceed = true;
+    await act(async () => {
+      g.__ar.props.onArFrame({
+        pose: { rotation: [0, 0, 0, 1], translation: [0, 0, 0] }, trackingState: 'normal',
+      });
+    });
+    await act(async () => { await sleep(50); });
+    expect(g.__sw.calls).not.toContain('holdEnd');
+    act(() => t.unmount());
+  });
+
+  it('⚑ NEGATIVE CONTROL: no drift, no stop', async () => {
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({ engine: 'sweep', defaultCaptureSource: 'ar', rectCrop: false, panMode: 'horizontal' }, ref));
     });
     await act(async () => { await sleep(400); });
     await act(async () => {
@@ -351,6 +384,116 @@ describe('M8 — an AR SWEEP is pose-guarded through <Camera>\'s own AR view', (
     });
     await act(async () => { await sleep(50); });
     expect(g.__sw.calls).not.toContain('holdEnd');
+    act(() => t.unmount());
+  });
+});
+
+describe('M8 review — the DR-1a hatch keeps its old, UNGATED shutter', () => {
+  // The hatch renders pano+'s old screen, which has no rotate prompt and whose
+  // own Start never had the pan-mode gate. Routing its hold through the one
+  // dispatcher must not add one: a portrait-gated hold there would latch a
+  // prompt that screen cannot show, and the operator would hold a dead button.
+  const prompt = (t: ReactTestRenderer) =>
+    t.root.findAllByType(RotateToLandscapePrompt).some((p: any) => p.props.visible === true);
+
+  it('a hatch hold under a pan mode that gates this orientation starts at once', async () => {
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({
+        engine: 'sweep', defaultCaptureSource: 'non-ar', rectCrop: false,
+        panMode: 'vertical', sweep: { frameSourceOverride: 'own' },
+      }, ref));
+    });
+    await act(async () => { await sleep(900); });
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    await act(async () => { await sleep(50); });
+    // Mutation-proven (2026-09-24): with the gate applied to the hatch in the
+    // dispatcher AND in the resume effect, the hold latches and never starts
+    // — and the old screen renders no prompt to say why.
+    expect(g.__sw.calls).toContain('holdStart');
+    expect(prompt(t)).toBe(false);
+    act(() => t.unmount());
+  });
+
+  it('⚑ NEGATIVE CONTROL: the same hold on <Camera>\'s own camera IS gated', async () => {
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({
+        engine: 'sweep', defaultCaptureSource: 'non-ar', rectCrop: false, panMode: 'vertical',
+      }, ref));
+    });
+    await act(async () => { await sleep(400); });
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    expect(g.__sw.calls).not.toContain('holdStart');
+    expect(prompt(t)).toBe(true);
+    act(() => t.unmount());
+  });
+});
+
+describe('M8 review — the host\'s sweep callbacks are composed, never replaced', () => {
+  it('sweep.onPaintedChange hears every count <Camera> hears', async () => {
+    const painted: number[] = [];
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({
+        engine: 'sweep', defaultCaptureSource: 'non-ar', rectCrop: false,
+        sweep: { onPaintedChange: (n: number) => painted.push(n) },
+      }, ref));
+    });
+    await act(async () => { await sleep(400); });
+    await act(async () => { g.__sw.props.onPaintedChange(7); });
+    await act(async () => { g.__sw.props.onPaintedChange(30); });
+    expect(painted).toEqual([7, 30]);
+    act(() => t.unmount());
+  });
+});
+
+describe('D7 — takePhoto() in the SAME tick as startPanorama() is refused, on both engines', () => {
+  // The sweep row is on AR: on the vision-camera kind a hold first waits for
+  // the frame-processor plugin (cameraSweepHoldDefer), and a hold that is only
+  // WAITING has not begun a capture.
+  for (const [engine, src] of [['keyframe', 'non-ar'], ['sweep', 'ar']] as const) {
+    it(`${engine} (${src}): the latch is raised before any state lands`, async () => {
+      const errors: string[] = [];
+      const ref = React.createRef<any>();
+      let t!: ReactTestRenderer;
+      await act(async () => {
+        t = create(el({
+          engine, defaultCaptureSource: src, rectCrop: false,
+          onError: (e: { code: string }) => errors.push(e.code),
+        }, ref));
+      });
+      await act(async () => { await sleep(400); });
+      await act(async () => {
+        ref.current.startPanorama();
+        void ref.current.takePhoto();   // same tick: no render in between
+        await Promise.resolve();
+      });
+      expect(errors).toContain('CAPTURE_IN_PROGRESS');
+      act(() => t.unmount());
+    });
+  }
+
+  it('⚑ NEGATIVE CONTROL: takePhoto() alone is not refused as busy', async () => {
+    const errors: string[] = [];
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({
+        engine: 'keyframe', defaultCaptureSource: 'non-ar', rectCrop: false,
+        onError: (e: { code: string }) => errors.push(e.code),
+      }, ref));
+    });
+    await act(async () => { await sleep(400); });
+    await act(async () => { void ref.current.takePhoto(); await Promise.resolve(); });
+    expect(errors).not.toContain('CAPTURE_IN_PROGRESS');
     act(() => t.unmount());
   });
 });

@@ -151,8 +151,12 @@ export type SweepOptions = Pick<
   //   · the pose arm, the lens and their pill writers (D9) — `<Camera>`'s AR
   //     pill and lens chip;
   //   · the chrome (`hostChromeTopPt`, `bottomBarOffset`,
-  //     `hideBuiltInControls`, `onControlsState`) — `<Camera>`'s own, set on
-  //     `<Camera>` (`topChromeInset`, `bottomBarOffset`, `hideBuiltInShutter`);
+  //     `hideBuiltInControls`) — `<Camera>`'s own, set on `<Camera>`
+  //     (`topChromeInset`, `bottomBarOffset`, `hideBuiltInShutter`);
+  //   · `onControlsState` — REMOVED, with no replacement: the handler is
+  //     `<Camera>`'s alone. A host drawing its own shutter reads
+  //     `sweep.onSweepingChange`, which is true through every non-idle phase
+  //     (starting, sweeping, finishing);
   //   · `arSourceMaxLongEdge` — `<Camera arSourceMaxLongEdge>`, one AR session
   //     config for both engines (D15);
   //   · `onEffectiveArmChange` — internal wiring.
@@ -677,13 +681,14 @@ export interface CameraProps {
   enablePhotoMode?: boolean;
   enablePanoramaMode?: boolean;
   /**
-   * Hide the built-in shutter + AR-toggle so a HOST can render its own capture
-   * controls and drive capture through the imperative handle
+   * Hide the built-in SHUTTER so a HOST can render its own capture control and
+   * drive capture through the imperative handle
    * ({@link CameraHandle.takePhoto} / {@link CameraHandle.startPanorama} /
-   * {@link CameraHandle.stopPanorama}). The lens chip is KEPT — it is a lens
-   * selector, not a capture control, and the whole point is that the library
-   * still owns lens selection. Default `false` (built-in shutter shown, every
-   * existing consumer unchanged).
+   * {@link CameraHandle.stopPanorama}), on both engines. The lens chip and
+   * the AR pill are KEPT — they are camera controls, not capture controls
+   * (M8, D18: the AR pill used to hide with the shutter; a host that draws its
+   * own AR control as well should expect the built-in pill to stay). Default
+   * `false` (built-in shutter shown, every existing consumer unchanged).
    */
   hideBuiltInShutter?: boolean;
   /**
@@ -1115,18 +1120,21 @@ export interface CameraProps {
    * lifted keyframe encode budget (640 → 1280) so stitches stop being
    * assembled from 0.3 MP tiles on devices whose sole 4:3 config is tiny
    * (e.g. Galaxy A35).  Costs stitch memory (~4× pixels per keyframe).
-   * Default `false`.  No-op on iOS (native-res keyframes already) and on
-   * older binaries.
+   * No-op on iOS (native-res keyframes already) and on older binaries.
    *
-   * M8 (D15) — the AR view is ONE session config for both engines: unset, it
-   * follows `enablePanoramaMode` (a panorama needs the larger CPU image on
-   * either engine), and it is held while a capture records.
+   * UNSET (M8, D15): the AR view follows `enablePanoramaMode` — so it is ON by
+   * default for a panorama-capable `<Camera>`, on both engines (a panorama
+   * needs the larger CPU image on either). The non-AR video floor and the
+   * `<Camera>`-level encode-budget hold stay off unless this is `true`. The
+   * AR session config is held while a capture records, and through a sweep's
+   * finish until native releases the camera.
    */
   keyframeQualityCapture?: boolean;
   /**
    * M8 (D15) — the AR CPU image's long-edge cap under `keyframeQualityCapture`
    * (`ARCameraView.keyframeQualitySourceMaxLongEdge`). The same value on both
-   * engines. Unset: the view's own default.
+   * engines. UNSET: no budget is pushed, so the AR session keeps whatever
+   * budget it last had — 1920 only if nothing has set one in this process.
    */
   arSourceMaxLongEdge?: number;
   /**
@@ -1226,7 +1234,13 @@ export interface CameraProps {
 
   /**
    * v0.18.0 — throttle interval (ms) for {@link onArFrame}.  Default `100`
-   * (≈ 10 Hz).  No effect unless `onArFrame` is provided.
+   * (≈ 10 Hz).
+   *
+   * M8 (D15): while `enablePanoramaMode` is on (the default), the value is
+   * CAPPED at 100 ms on both engines — the sweep's AR arm reads its status
+   * off the same per-frame meta, and the AR session config must not depend on
+   * the engine. A keyframe host asking for 500 ms therefore gets `onArFrame`
+   * at up to 10 Hz. Held while a capture records.
    */
   arFrameMetaInterval?: number;
 
@@ -1651,9 +1665,10 @@ export interface CameraHandle extends AROverlayMethods {
   /**
    * Set the preferred capture source — for hosts that render their own chrome.
    *
-   * `hideBuiltInShutter` hides the built-in shutter AND the AR toggle, on the
-   * documented premise that the host draws its own capture controls.  But
-   * before v0.26.0 the host had no way to DRIVE the AR toggle: `arPreference`
+   * Since M8 (D18) `hideBuiltInShutter` hides only the shutter; the built-in
+   * AR pill stays on screen, and this method lets host chrome drive the SAME
+   * preference it flips.  History: `hideBuiltInShutter` used to hide the AR
+   * toggle too, and before v0.26.0 the host had no way to DRIVE it: `arPreference`
    * was internal state with no prop and no handle method.  So such a host
    * could replace the shutter (this handle covers capture) and could NOT
    * replace the AR control — leaving it locked to whatever
@@ -2386,6 +2401,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
 
   const captureRecording =
     statusPhase === 'recording' || (sweepRunning && !sweepFinalizing);
+  // ── THE CAMERA'S CONFIGURATION IS HELD UNTIL NATIVE LETS GO (M8 review) ──
+  // NOT `captureRecording`: that goes false when a sweep starts FINISHING, and
+  // the camera is still mounted then — native tears the sweep's arm down and
+  // only afterwards says `cameraReleased`. A host prop landing in that window
+  // (a new source size, a new format) reconfigured the camera under a session
+  // that was still stopping. `sweepRunning` stays true until the sweep has
+  // fully ended. The keyframe engine has no such window: its stitch unmounts
+  // the camera at once.
+  const cameraConfigLatched = statusPhase === 'recording' || sweepRunning;
 
 
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(
@@ -2399,6 +2423,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Latches when the user holds the shutter in portrait under Mode A;
   // an effect below resumes the capture the instant they rotate.
   const [pendingPanStart, setPendingPanStart] = useState(false);
+  // M8 review — a sweep hold DEFERRED for the engine's own readiness (its
+  // plugin still being looked up). Its own state, NOT `pendingPanStart`: that
+  // one is the rotate prompt's visibility, and a readiness wait told the
+  // operator to rotate a phone that needed no rotating.
+  const [sweepHoldPending, setSweepHoldPending] = useState(false);
   // Item 6 — the latched lateral-drift popup.  `null` = hidden; a non-null
   // value both SHOWS the popup and says which of the three outcomes fired,
   // so the visibility latch and the copy selection can never disagree:
@@ -2730,7 +2759,18 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     ? sweepProgress
     : (incremental.state?.acceptedCount ?? 0);
   const imuGuardArmed = captureProgress >= MIN_STITCHABLE_KEYFRAMES;
-  const poseGuardOwnsLateral = isAR;
+  //
+  // ⚠ EXCEPT A SWEEP UNDER panMode='both' (M8 review). The pose guard needs
+  // the pan axis: `handleArFrame` maps 'both' to the LANDSCAPE axis, and the
+  // pose is in the sensor frame, so a PORTRAIT sweep — the hold a sweep uses,
+  // and 'both' is how a host lets it through the pan-mode gate — was measured
+  // on the wrong axis: no guard at all when held level, and a false lateral
+  // stop part-way through an ordinary yaw sweep when tilted a few degrees
+  // (simulated: 6° of roll at a 0.3 m pivot stopped it at 30° of yaw). Until
+  // the pose guard is told the sweep's own axis, such a sweep keeps the IMU
+  // guard it had through M0–M7. (The keyframe engine's AR capture under
+  // 'both' has the same axis limit; that predates M8.)
+  const poseGuardOwnsLateral = isAR && !(engine === 'sweep' && panMode === 'both');
   const effectiveLateralBudgetCm =
     poseGuardOwnsLateral || !imuGuardArmed ? 0 : lateralBudgetCm;
   const panMotion = usePanMotion({
@@ -2778,7 +2818,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // keyframe seeds the origin where the pan actually begins, and has the side
   // effect that a stop can no longer land in the 0-keyframe bucket from the
   // warm-up alone.
-  const arDriftArmed = isAR
+  // M8 review — armed exactly where the pose guard OWNS lateral drift, so a
+  // sweep under 'both' (IMU-guarded, see `poseGuardOwnsLateral`) is never
+  // also measured on the wrong axis here.
+  const arDriftArmed = poseGuardOwnsLateral
     && captureRecording
     && captureProgress > 0;
 
@@ -2832,7 +2875,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // smoothly to 28.5 deg while a vertical sweep holds it under 2 deg
         // -- indistinguishable from the rotation alone without knowing
         // which the operator intended.  So 'both' disables the rotation
-        // trigger (0 = off) and leaves the axis-agnostic DISTANCE guard.
+        // trigger (0 = off) and leaves the DISTANCE guard — which is NOT
+        // axis-agnostic: 'both' falls back to the landscape ('vertical') axis
+        // above, so a portrait capture under 'both' is measured on the wrong
+        // one. A sweep there keeps the IMU guard instead (`poseGuardOwnsLateral`).
         panMode === 'both' ? 0 : (arLateralRotDeg * Math.PI) / 180,
         arLateralRatio,
         arLateralMaxCm / 100.0,
@@ -2886,6 +2932,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // A release while the hold is still DEFERRED abandons it, exactly as
       // `handleHoldEnd` does for the keyframe engine.
       setPendingPanStart(false);
+      setSweepHoldPending(false);
       sweepRef.current?.holdEnd?.();
       return;
     }
@@ -3914,12 +3961,23 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // decides WHETHER to start now.  Under Mode A in portrait it latches
   // `pendingPanStart` instead (item 1/2) and the resume effect below
   // starts the capture once the user rotates to landscape.
+  // M8 — the DR-1a hatch: a non-AR sweep on pano+'s OLD own camera. Its old
+  // screen has no rotate prompt and its own shutter never had the pan-mode
+  // gate, so the dispatcher leaves it ungated too (M8 review).
+  const sweepOnHatch = engine === 'sweep' && !isAR && sweep?.frameSourceOverride === 'own';
   // M8 — the sweep's hold-only readiness defer: see the dispatcher below.
+  //
+  // ⚠ ONLY THE PLUGIN LOOKUP (M8 review), which is BOUNDED: it gives up at
+  // 1.5 s. A missing device id used to defer too, with no bound — the hold
+  // hung silently where it had been refused by name. Once the lookup settles
+  // the hold goes through, and the engine refuses whatever is still wrong by
+  // name (`sweepHostArmRefusal`: no device → SWEEP_CAMERA_NOT_READY, no plugin
+  // → ENGINE_UNAVAILABLE).
   const sweepHoldShouldDefer = engine === 'sweep'
     && !isAR
-    && sweep?.frameSourceOverride !== 'own'
-    && ((!sweepDriver.isReady && !sweepDriver.unavailable)
-      || (capture.device?.id ?? '') === '');
+    && !sweepOnHatch
+    && !sweepDriver.isReady
+    && !sweepDriver.unavailable;
   const handleHoldStart = useCallback(() => {
     // Gate symmetrically with handleTap (shutterDisabled) AND guard
     // re-entrancy: the built-in shutter's phase machine prevents a
@@ -3965,7 +4023,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       );
       return;
     }
-    if (shouldGateForPanMode(panMode, deviceOrientation)) {
+    if (!sweepOnHatch && shouldGateForPanMode(panMode, deviceOrientation)) {
       // Mode-A + portrait — block the start and show the rotate prompt.
       // The resume effect picks this up the instant the device rotates.
       setPendingPanStart(true);
@@ -3997,7 +4055,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // gives up at 1.5 s and the resumed hold is then refused by name
     // (`panoplus-plugin-unavailable` → ENGINE_UNAVAILABLE).
     if (sweepHoldShouldDefer) {
-      setPendingPanStart(true);
+      setSweepHoldPending(true);
       return;
     }
     captureBusyRef.current = true;   // D7 — before any state lands
@@ -4011,6 +4069,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     engine,
     sweepRunning,
     sweepHoldShouldDefer,
+    sweepOnHatch,
     panMode,
     arSupportPending,
     // v0.25 — read by holdShouldDeferForCamera above; without it this
@@ -4020,6 +4079,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     deviceOrientation,
     startCapture,
   ]);
+  // Current DURING RENDER, not only from the effect further down: the
+  // readiness-wait resume below re-enters the dispatcher from an effect that
+  // runs BEFORE that one in the same commit, and would otherwise call the
+  // previous render's closure — which still says "wait", re-latches the wait
+  // to the value it already has, and so schedules no render to retry.
+  handleHoldStartRef.current = handleHoldStart;
 
   // ── Rotate-to-landscape resume (item 1/2) ───────────────────────
   // When a hold was gated (`pendingPanStart`) and the user has since
@@ -4029,17 +4094,21 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   useEffect(() => {
     if (
       pendingPanStart
-      && !shouldGateForPanMode(panMode, deviceOrientation)
+      && (sweepOnHatch || !shouldGateForPanMode(panMode, deviceOrientation))
       // v0.24.3 — also the "camera still initialising" defer (above).
       // v0.25 — and the in-flight transition, without which this effect
       // resumed the capture at the exact moment the camera unmounted.
       && !holdShouldDeferForCamera(
         inFlightTransition || cameraHandoffPending, arSupportPending,
       )
-      && !sweepHoldShouldDefer
     ) {
       setPendingPanStart(false);
-      // M8 — resume the SELECTED engine's start.
+      // M8 — resume the SELECTED engine's start. A sweep whose plugin is
+      // still being looked up moves on to ITS wait (no prompt) instead.
+      if (engineRef.current === 'sweep' && sweepHoldShouldDefer) {
+        setSweepHoldPending(true);
+        return;
+      }
       captureBusyRef.current = true;
       if (engineRef.current === 'sweep') sweepRef.current?.holdStart?.();
       else startCaptureRef.current?.();
@@ -4052,7 +4121,26 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     inFlightTransition,
     cameraHandoffPending,
     sweepHoldShouldDefer,
+    sweepOnHatch,
   ]);
+
+  // M8 review — the sweep's readiness wait resumes the moment the plugin
+  // lookup settles, either way (the engine then refuses by name if it gave
+  // up), and dies with the engine.
+  //
+  // It resumes through the WHOLE dispatcher, not straight into the engine: the
+  // wait can outlive the conditions it was checked under (the AR pill flipped,
+  // a camera transition began, the pan-mode gate changed with the host's
+  // prop), and every gate must see the hold again. It cannot loop: the
+  // dispatcher only waits here again while the lookup is still pending, and
+  // this effect only resumes once it is not.
+  useEffect(() => {
+    if (!sweepHoldPending) return;
+    if (engine !== 'sweep') { setSweepHoldPending(false); return; }
+    if (sweepHoldShouldDefer) return;
+    setSweepHoldPending(false);
+    handleHoldStartRef.current?.();
+  }, [sweepHoldPending, sweepHoldShouldDefer, engine]);
 
   const handleHoldEnd = useCallback(async () => {
     // Item 5 exit path #1 — always kill the auto-finalize timer on
@@ -5187,7 +5275,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // buffer. Engine-neutral: the keyframe capture gets the same
         // stability. The frame processor is NOT held (a new identity is a
         // JSI swap, not a rebind) — see `CameraViewProps.latched`.
-        latched={captureRecording}
+        latched={cameraConfigLatched}
         // iOS depth sidecar for tap photos (non-AR only): turns on
         // vision-camera depth delivery + the depth-capable format bias;
         // useCapture (threaded above) extracts the sidecar before the
@@ -5588,11 +5676,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // would silently lose the other six, including the trajectory
     // continuation that removes the elbow. Host keys still win.
     engineOptions: { ...SWEEP_ENGINE_DEFAULTS, ...sweep?.engineOptions },
-    // ⚠ AFTER THE SPREAD, LIKE `engineOptions`, AND FOR THE SAME
-    // REASON. This gates the frame-processor worklet: a host copy
-    // landing on top would leave the gate shut for the whole sweep
-    // and the engine would receive nothing, silently. The host's
-    // own handler is still called — it is composed, not replaced.
+    // `<Camera>`'s ALONE (M8 review: this note said a host copy was still
+    // composed). `SweepOptions` no longer carries `onControlsState`, so there
+    // is no host copy to call; a host shutter follows `onSweepingChange`.
     onControlsState: (st: { busy: boolean }) => {
       // `busy` is `phase === 'finishing'` — see `sweepFinalizing`.
       setSweepFinalizing(st.busy);
@@ -5629,7 +5715,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       }
       sweep?.onSweepingChange?.(sweeping);
     },
-    onPaintedChange: onSweepPainted,
+    // Composed, like `onSweepingChange` (M8 review): `SweepOptions` lists
+    // `onPaintedChange`, so the host's copy must be called, after `<Camera>`'s
+    // own bookkeeping.
+    onPaintedChange: (painted: number) => {
+      onSweepPainted(painted);
+      sweep?.onPaintedChange?.(painted);
+    },
     onComplete: async (result: PanoPlusCaptureResult) => {
       // ⚠ THE REVIEW IS A GATE, NOT A VIEWER — the panorama's shape,
       // and the reason this changed.
@@ -5826,6 +5918,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       }
     },
     onFailure: (failure: PanoPlusFailure) => {
+      // D7 — a hold the engine REFUSED from idle never became a capture, and
+      // a refusal may change no `<Camera>` state, so no render would
+      // recompute the latch the dispatcher raised: lower it here. Only from
+      // idle — a failure out of a live sweep or a finish is followed by the
+      // engine's own phase change, whose render recomputes the latch from
+      // what is actually still running.
+      if (sweepPhaseRef.current === 'idle') captureBusyRef.current = false;
       // ⚠ A GUARD RAIL IS NOT A FAILURE, AND `onError` IS NOT ITS
       // CHANNEL. `abandon()` emits `panoplus-abandoned` for every
       // caller of the handle, but inside `<Camera>` the only caller
@@ -5859,6 +5958,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const sweepEngine = useSweepEngine(sweepSurfaceProps, sweepRef, {
     enabled: engine === 'sweep' && cropPending == null,
   });
+  // The engine's phase as of the last render, for its callbacks (above).
+  const sweepPhaseRef = useRef(sweepEngine.phase);
+  sweepPhaseRef.current = sweepEngine.phase;
   const cameraKind = cameraKindFor(
     cameraShouldUnmount(inFlightTransition, arSupportPending, cameraPhase, cameraHandoffPending),
     isAR,
@@ -5878,7 +5980,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // held while a capture records. The sweep's AR arm reads frames from this
   // same session through the plugin registry, and its status rides
   // `onArFrame`, composed below.
-  const arViewConfig = useLatchedWhile(captureRecording, {
+  const arViewConfig = useLatchedWhile(cameraConfigLatched, {
     keyframeQualityCapture: keyframeQualityCapture ?? enablePanoramaMode,
     keyframeQualitySourceMaxLongEdge: arSourceMaxLongEdge,
     arFrameMetaInterval: enablePanoramaMode
@@ -5930,10 +6032,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               reads, and mounting this there puts two sessions on one
               camera.
 
-              ⚠ AND THE KEYFRAME CHROME STAYS OUT. Falling through to the
-              main tree would bring the settings modal, the thumbnail strip
-              and the band overlay with it — keyframe furniture over a
-              sweep. The sweep's own HUD is the surface's. */}
+              ⚠ THIS TREE CARRIES ONLY WHAT IT RENDERS BELOW (M8 review:
+              this note said the thumbnail strip stayed out, and the strip is
+              rendered further down). Not here: the settings gear and its
+              modal, and the band overlay — so `showSettingsButton` does
+              nothing on the hatch. The hatch is the DR-1a reference arm and
+              goes with it (M6a); the main tree is the product. */}
           {/* M8 — NO HOST PREVIEW HERE. This tree is the DR-1a hatch's, whose
               camera is pano+'s own; `<Camera>`'s preview is the main tree's. */}
           {cropPending == null && (
@@ -6458,7 +6562,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           a gated panMode would block the hold with a dead, silent shutter.
           `panGuidance` governs only the cosmetic in-capture overlays. */}
       <RotateToLandscapePrompt
-        visible={pendingPanStart}
+        // Only when the GATE is why the hold waits (M8 review). `pendingPanStart`
+        // also holds a start deferred for a camera transition or the AR probe,
+        // and asking the operator to rotate a phone that is already the right
+        // way round — for a quarter-second camera switch — is a wrong
+        // instruction, on either engine.
+        visible={pendingPanStart && shouldGateForPanMode(panMode, deviceOrientation)}
         target={gateTargetOrientation(panMode) ?? 'landscape'}
         copy={
           gateTargetOrientation(panMode) === 'portrait'
@@ -6787,14 +6896,19 @@ export function colourLensTypeCount(physicalDevices: readonly string[] | null | 
  * The `CameraErrorCode` a sweep failure reaches the host under.
  *
  * `PANORAMA_START_FAILED` for everything that is this attempt failing. The
- * one BUILD-level refusal — the sweep's frame-processor plugin is not in this
- * binary — is `ENGINE_UNAVAILABLE`, the code the keyframe engine already uses
- * for "this build cannot run the engine you asked for" (M3 review).
+ * BUILD-level refusals — the sweep's frame-processor plugin is not in this
+ * binary, its native module predates the vision-camera arm, or the session
+ * module itself is missing (`panoplus-unavailable`, M8 review) — are
+ * `ENGINE_UNAVAILABLE`, the code the keyframe engine already uses for "this
+ * build cannot run the engine you asked for" (M3 review).
  */
 export function sweepFailureCameraCode(code: string | null | undefined): CameraErrorCode {
   switch (code) {
     case 'panoplus-plugin-unavailable':
     case 'panoplus-vc-arm-unavailable':
+    // M8 review — the sweep's session module is not in this build (or has
+    // nowhere to write), refused by name at the hold.
+    case 'panoplus-unavailable':
       return 'ENGINE_UNAVAILABLE';
     // M5 — the camera on screen cannot carry a sweep; refused by name, never
     // answered with another camera.

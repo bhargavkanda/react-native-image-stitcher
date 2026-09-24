@@ -176,14 +176,29 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
     /// unmounts it for the rest of the finish — the keyframe engine's
     /// stitching rule — so nothing native still reads the camera it unmounts.
     /// False from every start; true from the teardown of a stop or cancel.
+    ///
+    /// ⚠ GENERATION-SCOPED (M8 review). A stop or cancel runs its teardown
+    /// on a global queue; a cancel followed at once by a new start would
+    /// otherwise land its "released" AFTER the new start cleared it, and the
+    /// new sweep's finish would unmount the camera before native let go. So
+    /// each start opens a generation, a stop/cancel captures the generation
+    /// it belongs to on the bridge queue, and only the CURRENT one counts.
     private static let releaseLock = NSLock()
-    private static var cameraReleasedFlag = false
-    private static func setCameraReleased(_ v: Bool) {
-        releaseLock.lock(); cameraReleasedFlag = v; releaseLock.unlock()
+    private static var releaseGen: UInt64 = 0
+    private static var releasedGen: UInt64 = .max
+    private static func beginRelease() {
+        releaseLock.lock(); releaseGen &+= 1; releaseLock.unlock()
+    }
+    private static func currentReleaseGen() -> UInt64 {
+        releaseLock.lock(); defer { releaseLock.unlock() }
+        return releaseGen
+    }
+    private static func markReleased(_ g: UInt64) {
+        releaseLock.lock(); if g == releaseGen { releasedGen = g }; releaseLock.unlock()
     }
     private static func cameraReleased() -> Bool {
         releaseLock.lock(); defer { releaseLock.unlock() }
-        return cameraReleasedFlag
+        return releasedGen == releaseGen
     }
 
     /// ── ONE CLAIM, TAKEN ONCE, WITH A GENERATION (M5 review) ─────────────
@@ -336,7 +351,7 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
             rejecter("invalid-options", "sessionDir must be a non-empty string", nil)
             return
         }
-        Self.setCameraReleased(false)
+        Self.beginRelease()
         let preferHighFps = (options["preferHighFps"] as? Bool) ?? true
         // Default ON.  A feature shipped OFF in the field build has not been
         // tested, and this one is the fix for a defect the operator has
@@ -983,9 +998,10 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
+        let releaseGen = Self.currentReleaseGen()
         DispatchQueue.global(qos: .userInitiated).async {
             Self.teardownPlugin()
-            Self.setCameraReleased(true)   // M8 — before the finalize
+            Self.markReleased(releaseGen)   // M8 — before the finalize
             // `isRunning` tracks the SESSION, not the engine: an engine abort
             // (tracking-lost, chain-lost) leaves the session running and its
             // painted content is exactly what the operator wants to see, so
@@ -1017,9 +1033,10 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
+        let releaseGen = Self.currentReleaseGen()
         DispatchQueue.global(qos: .userInitiated).async {
             Self.teardownPlugin()
-            Self.setCameraReleased(true)
+            Self.markReleased(releaseGen)
             RNISPanoCore.cancel()
             resolver(["cancelled": true])
         }
