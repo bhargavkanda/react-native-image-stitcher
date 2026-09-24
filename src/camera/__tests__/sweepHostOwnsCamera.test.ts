@@ -83,10 +83,9 @@ import {
   _sweepShouldSettleForTests as shouldSettle,
 } from '../Camera';
 
-/** The state in which the host owns the camera: Android, non-AR, no hatch. */
+/** The state in which the host owns the camera: non-AR, no hatch (M5: both platforms). */
 const OK: SweepHostOwnsCameraInput = {
   isAR: false,
-  platformOS: 'android',
   frameSourceOverride: undefined,
 };
 
@@ -100,18 +99,16 @@ const OK: SweepHostOwnsCameraInput = {
  * ⇒ the host's `<CameraView>`, always.
  */
 describe('sweepHostOwnsCamera — the camera state alone decides', () => {
-  it('Android, non-AR: the host owns it', () => {
+  it('non-AR: the host owns it — on BOTH platforms since M5', () => {
     expect(hostOwns(OK)).toBe(true);
   });
 
-  it('the full truth table — true only on Android, non-AR, no hatch', () => {
+  it('the full truth table — true exactly when non-AR and no hatch', () => {
     for (const isAR of [true, false]) {
-      for (const platformOS of ['android', 'ios']) {
-        for (const frameSourceOverride of [undefined, 'own' as const]) {
-          const want = !isAR && platformOS === 'android' && frameSourceOverride !== 'own';
-          expect({ isAR, platformOS, frameSourceOverride, owns: hostOwns({ isAR, platformOS, frameSourceOverride }) })
-            .toEqual({ isAR, platformOS, frameSourceOverride, owns: want });
-        }
+      for (const frameSourceOverride of [undefined, 'own' as const]) {
+        const want = !isAR && frameSourceOverride !== 'own';
+        expect({ isAR, frameSourceOverride, owns: hostOwns({ isAR, frameSourceOverride }) })
+          .toEqual({ isAR, frameSourceOverride, owns: want });
       }
     }
   });
@@ -119,7 +116,6 @@ describe('sweepHostOwnsCamera — the camera state alone decides', () => {
   it('⚑ every input key has a value that flips the answer, on its own', () => {
     const flip: { [K in keyof SweepHostOwnsCameraInput]: SweepHostOwnsCameraInput[K] } = {
       isAR: true,
-      platformOS: 'ios',
       frameSourceOverride: 'own',
     };
     for (const key of SWEEP_HOST_OWNS_INPUT_KEYS) {
@@ -136,6 +132,7 @@ const READY: SweepHostArmRefusalInput = {
   lens: '1x',
   pluginReady: true,
   pluginUnavailable: false,
+  nativeVcArm: true,
   cameraUnmounting: false,
   deviceId: 'back-0',
 };
@@ -149,6 +146,7 @@ describe('sweepHostArmRefusal — each old fallback is now a NAMED refusal', () 
     ['a drawable (Skia) host processor', { hostProcessorDrawable: true }, 'panoplus-refused-drawable-processor'],
     ['multicam at 0.5× (D13 — which lens is unknown)', { captureMode: 'multicam', lens: '0.5x' }, 'panoplus-refused-zoom-lens'],
     ['the plugin is not in this build', { pluginReady: false, pluginUnavailable: true }, 'panoplus-plugin-unavailable'],
+    ['M5: the native module predates the vc arm', { nativeVcArm: false }, 'panoplus-vc-arm-unavailable'],
     ['the plugin is still loading', { pluginReady: false }, 'panoplus-not-ready'],
     ['the camera is in transition', { cameraUnmounting: true }, 'panoplus-camera-not-ready'],
     ['no device id yet', { deviceId: '' }, 'panoplus-camera-not-ready'],
@@ -173,6 +171,7 @@ describe('sweepHostArmRefusal — each old fallback is now a NAMED refusal', () 
       lens: '0.5x',
       pluginReady: false,
       pluginUnavailable: true,
+      nativeVcArm: false,
       cameraUnmounting: true,
       deviceId: '',
     };
@@ -187,10 +186,19 @@ describe('sweepHostArmRefusal — each old fallback is now a NAMED refusal', () 
 describe('sweepFailureCameraCode — only a missing plugin is a BUILD failure', () => {
   it('the plugin-missing refusal reaches the host as ENGINE_UNAVAILABLE', () => {
     expect(sweepFailureCameraCode('panoplus-plugin-unavailable')).toBe('ENGINE_UNAVAILABLE');
+    expect(sweepFailureCameraCode('panoplus-vc-arm-unavailable')).toBe('ENGINE_UNAVAILABLE');
+  });
+  it('M5: a camera that cannot carry a sweep is named by what is wrong with it', () => {
+    expect(sweepFailureCameraCode('panoplus-vc-device-unsupported')).toBe('SWEEP_DEVICE_UNSUPPORTED');
+    expect(sweepFailureCameraCode('panoplus-vc-basis-unverified')).toBe('SWEEP_DEVICE_UNSUPPORTED');
+    expect(sweepFailureCameraCode('panoplus-refused-zoom-lens')).toBe('SWEEP_DEVICE_UNSUPPORTED');
+    expect(sweepFailureCameraCode('panoplus-vc-format-below-30fps')).toBe('SWEEP_FORMAT_BELOW_30FPS');
+    expect(sweepFailureCameraCode('panoplus-vc-zoom-not-1')).toBe('SWEEP_ZOOM_NOT_1');
+    expect(sweepFailureCameraCode('panoplus-camera-inactive')).toBe('CAPTURE_INTERRUPTED');
   });
   it('every other refusal is this attempt failing', () => {
     for (const c of ['panoplus-not-ready', 'panoplus-camera-not-ready',
-      'panoplus-refused-zoom-lens', 'panoplus-refused-drawable-processor',
+      'panoplus-refused-drawable-processor',
       'panoplus-panorama-disabled', 'panoplus-busy', 'panoplus-unavailable',
       'panoplus-io', '', null, undefined]) {
       expect(sweepFailureCameraCode(c as string | null | undefined)).toBe('PANORAMA_START_FAILED');

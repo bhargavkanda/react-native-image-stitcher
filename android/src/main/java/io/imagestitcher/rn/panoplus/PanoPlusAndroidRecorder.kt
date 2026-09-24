@@ -7189,6 +7189,12 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         // was in the pack all along and reached the screen never. Empty while
         // tracking is fine, so the panel branches on presence.
         putString("arTrackingFailure", arcore?.latestTrackingFailure ?: "")
+        // M5 — the vc arm's first device-level refusal (null when none, and on
+        // every other arm), so the host can discard the sweep by name.
+        putString(
+            "vcDeviceRefusal",
+            if (vcPluginArmActive) PanoPlusVcFrameSink.firstDeviceRefusal else null,
+        )
         // The AR-PLUGIN arm's own counters, so a canvas made from the
         // stitcher's ARCore frames can be traced to how it was made — and
         // so an arm that ingested NOTHING says so out loud rather than

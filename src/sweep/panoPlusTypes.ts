@@ -882,6 +882,17 @@ export interface PanoPlusStarted {
   sessionDir: string;
   startedAtMs: number;
   pluginAvailable: boolean;
+  /**
+   * WHICH CAMERA FEEDS THE SWEEP, stated by native — `'vc-plugin'` (the camera
+   * `<Camera>` opened), or absent on a producer that does not say. On the iOS
+   * host arm an absent answer is an old binary that opened its own camera, and
+   * the surface refuses it (M5).
+   */
+  frameSource?: string;
+  /** iOS — false on the vision-camera arm: pano+ opened no AVCaptureSession. */
+  opensAvCaptureSession?: boolean;
+  /** iOS vision-camera arm — the arm's start report (device, basis, lock). */
+  vcArm?: Record<string, unknown>;
   /** v6 — surfaced at START so the surface can warn the operator immediately
    *  that a sweep is running unlocked, instead of the pack saying so after. */
   cameraLock?: PanoPlusCameraLock;
@@ -1244,6 +1255,14 @@ export interface PanoPlusStatus {
    */
   viewfinderAttached: boolean;
   viewfinderNote: string;
+  /**
+   * M5 — iOS vision-camera arm only: the FIRST device-level refusal the frame
+   * processor made (`mirrored-buffer`, `rotated-buffer`,
+   * `orientation-changed`, `zoom-not-1`), or null. The frames are refused, so
+   * the sweep cannot paint; the surface discards it by name the moment this
+   * appears rather than letting it run on showing nothing.
+   */
+  vcDeviceRefusal: string | null;
   droppedQueue: number;
   droppedPack: number;
   engineMs: number;

@@ -118,6 +118,8 @@ import {
   panoPlusViewfinderNotice,
   panoPlusDropLine,
   panoPlusArmNotice,
+  panoPlusIosVcHostArmNotice,
+  panoPlusVcDeviceRefusalFailure,
   panoPlusErrorInfo,
   panoPlusFailureCopy,
   panoPlusGlyphRotationDeg,
@@ -1219,6 +1221,13 @@ export const PanoPlusCaptureSurface = forwardRef<
    * test can reach. See `panoPlusAndroidArm.ts` for the whole argument.
    */
   const armContract = useMemo(() => panoPlusArmContract(Platform.OS), []);
+  /**
+   * M5 — THE iOS ARM ON THE HOST'S CAMERA. `<Camera>`'s vision-camera owns the
+   * camera, τ is 0 by default and the basis is derived natively at the hold,
+   * so none of the own-camera ladder applies: no calibration read, no basis
+   * gesture, no ARKit fallback (`panoPlusIosVcHostArmNotice`).
+   */
+  const vcHostArm = armContract === 'ios-coremotion' && frameSource === 'host';
 
   useEffect(() => {
     if (poseSource !== 'imu') return undefined;
@@ -1237,7 +1246,9 @@ export const PanoPlusCaptureSurface = forwardRef<
     // question in flight, so `armPending` must never be true here — a spinner
     // over a decision already made is the flash the Start button's own
     // `resolving` guard exists to prevent.
-    if (armContract === 'android-sensor') {
+    if (armContract === 'android-sensor' || vcHostArm) {
+      // M5 — the iOS host arm reads no store either: τ is 0 by default and
+      // the basis is derived natively from the open camera at the hold.
       setPlan(null);
       setCalib(null);
       setCalibRead(true);
@@ -1296,7 +1307,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     // basis through native, and nothing else would tell this component.
     // `armContract` is a dep (2026-09-02) only to satisfy exhaustive-deps —
     // it is fixed for the life of the process.
-  }, [poseSource, lens, calibEpoch, armContract]);
+  }, [poseSource, lens, calibEpoch, armContract, vcHostArm]);
 
   /**
    * WHICH LENSES THIS BODY CAN ACTUALLY OPEN — pano+'s answer to Pano's
@@ -1344,6 +1355,10 @@ export const PanoPlusCaptureSurface = forwardRef<
     // flag nor the arm can change it. (`askedRef` rather than `lensAvail !=
     // null` because null is also the legitimate "not ours to answer" answer.)
     if (poseSource !== 'imu' || !calibRead) return undefined;
+    // M5 — not on the iOS host arm either: the question asks pano+'s OWN
+    // camera planner which lenses IT could open, and on this arm pano+ opens
+    // none — `<Camera>`'s lens chip owns the lens.
+    if (vcHostArm) return undefined;
     if (lensAvailAskedRef.current) return undefined;
     lensAvailAskedRef.current = true;
     // ⚠ `mountedRef`, NOT A PER-RUN `live` FLAG, and the once-only latch is
@@ -1359,7 +1374,7 @@ export const PanoPlusCaptureSurface = forwardRef<
       () => undefined,
     );
     return undefined;
-  }, [poseSource, calibRead]);
+  }, [poseSource, calibRead, vcHostArm]);
 
   // ── WHERE THE BASIS COMES FROM, AND WHETHER TO ASK FOR IT ────────────────
   //
@@ -1471,6 +1486,8 @@ export const PanoPlusCaptureSurface = forwardRef<
           basis: basisResolution,
           arcoreAvailable,
         })
+      : vcHostArm
+        ? panoPlusIosVcHostArmNotice(poseSource)
       : panoPlusArmNotice(
           poseSource, plan, calib, tauUncorrected,
           // The copy for a missing basis has to say WHERE the fix is, and since
@@ -1495,6 +1512,7 @@ export const PanoPlusCaptureSurface = forwardRef<
       plan,
       poseSource,
       tauUncorrected,
+      vcHostArm,
     ],
   );
   /** TRUE while this surface will actually run the uncorrected experiment.
@@ -1574,6 +1592,8 @@ export const PanoPlusCaptureSurface = forwardRef<
   const basisGestureVisible =
     armWantsBasis
     && armCanAcquireBasis
+    // M5 — the host arm derives the basis natively; there is nothing to measure.
+    && !vcHostArm
     && phase === 'idle'
     && calibRead
     && !basisAcquired
@@ -2633,7 +2653,9 @@ export const PanoPlusCaptureSurface = forwardRef<
       if (vcViewTag != null) startOptions.vcViewTag = vcViewTag;
     }
     if (frameSource === 'own') startOptions.allowOwnCamera = true;
-    if (wantPoseSource === 'imu' && tauUncorrected) {
+    // M5 — the iOS host arm runs τ = 0 by default (D2); sent so the bag, the
+    // chip and the pack all state it, rather than leaving native to default.
+    if (wantPoseSource === 'imu' && (tauUncorrected || vcHostArm)) {
       startOptions.tauUncorrected = true;
     } else {
       delete startOptions.tauUncorrected;
@@ -2690,6 +2712,33 @@ export const PanoPlusCaptureSurface = forwardRef<
     void startPanoPlus(startOptions).then(
       (started) => {
         busyRef.current = false;
+        // ⚠ M5 — FAIL CLOSED ON AN ABSENT ECHO. On the iOS host arm native
+        // must SAY it ran on vision-camera's camera. A binary that did not is
+        // one that ignored `vcPluginArm` and opened its own AVCaptureSession
+        // behind the preview — stopped at once and refused by name, never
+        // left running as a second camera.
+        if (vcHostArm && started.frameSource !== 'vc-plugin') {
+          void cancelPanoPlus().catch(() => undefined);
+          stopOnStartRef.current = false;
+          abandonOnStartRef.current = null;
+          if (!mountedRef.current) return;
+          setRunningArm(null);
+          setPhase('idle');
+          setCameraLock(null);
+          liveSessionRef.current = null;
+          const info = {
+            code: 'panoplus-vc-arm-unavailable',
+            message: 'native did not confirm the sweep ran on the camera on screen '
+              + `(frameSource: ${String(started.frameSource ?? 'absent')}); it was `
+              + 'cancelled rather than left running on a camera of its own.',
+            sessionDir: null,
+            counts: null,
+            abort: null,
+          } as PanoPlusFailure;
+          setError(panoPlusFailureCopy(info));
+          onFailure?.(info);
+          return;
+        }
         // THE ARM NATIVE REPORTED, over the one we asked for. Native answers
         // `poseSource` on BOTH branches; if a build ever answers neither, the
         // requested value stands and the pack's own `pose_source.json` remains
@@ -2853,6 +2902,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     attitudeMagFree,
     hostChromeTopPt,
     armContract,
+    vcHostArm,
     // ⚠️ THE WHOLE NOTICE, not two of its fields. The sidecar writes
     // `headline`/`detail`/`tone`/`startLabel`, so pinning only the two fields
     // the start bag reads would let a stale closure write the PREVIOUS arm's
@@ -3155,6 +3205,44 @@ export const PanoPlusCaptureSurface = forwardRef<
     }),
     [holdStart, holdEnd, onFailure],
   );
+
+  // ── M5: A DEVICE-LEVEL REFUSAL MID-SWEEP ENDS IT, BY NAME ────────────────
+  // The iOS vision-camera arm refuses frames it cannot paint correctly (a
+  // mirrored or rotated buffer, a changed orientation, a zoom) and the bridge's
+  // status names the first one. Letting the sweep run on would show a canvas
+  // that never grows and end in "too short"; it is stopped the moment the
+  // status says so — FINALIZED rather than cancelled, because the pack is the
+  // evidence of what the camera did — and reported with the refusal's code.
+  const vcDeviceRefusal = status?.vcDeviceRefusal ?? null;
+  const statusSessionDir = status?.sessionDir ?? null;
+  useEffect(() => {
+    if (vcDeviceRefusal == null) return;
+    if (phaseRef.current !== 'sweeping' || busyRef.current || !sweepLiveRef.current) return;
+    busyRef.current = true;
+    const named = panoPlusVcDeviceRefusalFailure(vcDeviceRefusal);
+    void stopPanoPlus().then(
+      () => { busyRef.current = false; },
+      (e: unknown) => {
+        busyRef.current = false;
+        if (panoPlusErrorInfo(e).code === 'panoplus-not-running') void cancelPanoPlus();
+      },
+    );
+    sweepLiveRef.current = false;
+    liveSessionRef.current = null;
+    setRunningArm(null);
+    setCameraLock(null);
+    setStatus(null);
+    setPhase('idle');
+    const info = {
+      code: named.code,
+      message: named.message,
+      sessionDir: statusSessionDir,
+      counts: null,
+      abort: null,
+    } as PanoPlusFailure;
+    setError(panoPlusFailureCopy(info));
+    onFailure?.(info);
+  }, [vcDeviceRefusal, statusSessionDir, onFailure]);
   /** `busy` is `'finishing'` ONLY. Reporting `'sweeping'` would have
    *  `CameraShutter` paint its grey processing ring over the red one and
    *  refuse the press-in it is already inside (`CameraShutter.tsx:184,

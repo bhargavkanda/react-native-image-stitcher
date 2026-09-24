@@ -18,6 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (BREAKING)
 
+- **`<Camera engine="sweep">` runs on `<Camera>`'s own camera on iOS too.** A
+  non-AR iPhone sweep used to open pano+'s own `AVCaptureSession` behind the
+  preview, and fall back to ARKit when its calibration was missing. It now
+  runs on vision-camera's camera — pano+ opens none — with:
+  - **τ = 0 by default** (no camera-to-IMU timing correction, as on Android);
+  - **the device-to-camera basis derived from the open camera** at the hold
+    (Apple's mounting angle, through the same derivation Android uses) — a
+    camera whose basis has not been measured is refused;
+  - **named refusals** instead of any fallback, on `onError`:
+    `SWEEP_DEVICE_UNSUPPORTED` (front camera, a camera combining several
+    lenses, an unmeasured basis, a mirrored/rotated buffer mid-sweep),
+    `SWEEP_FORMAT_BELOW_30FPS`, `SWEEP_ZOOM_NOT_1`, and `ENGINE_UNAVAILABLE`
+    for a native build that predates the arm (`vcArmSupported`);
+  - the camera's configuration (format, fps, zoom, torch, orientation, frame
+    processor) **held while any capture records**, on both engines, and a
+    capture the camera stopped under (the app backgrounded) discarded with
+    `CAPTURE_INTERRUPTED`.
+  A host that needs pano+'s own AVF camera for a reference capture uses the
+  internal `sweep.frameSourceOverride: 'own'` (device rounds only).
 - **`<Camera engine="sweep">` never opens a second camera on Android.** A
   non-AR sweep runs on `<Camera>`'s own vision-camera `<CameraView>`, always;
   an AR sweep runs on the stitcher's AR session. When that camera cannot

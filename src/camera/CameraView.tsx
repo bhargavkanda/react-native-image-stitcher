@@ -74,6 +74,16 @@ const KEYFRAME_QUALITY_MIN_VIDEO_LONG_EDGE = 1280;
 export interface CameraViewProps {
   /** Output of ``useCapture().device``.  If null, a placeholder is shown. */
   device: CameraDevice | null | undefined;
+  /**
+   * M5 — while true, everything vision-camera REBUILDS its session for is
+   * held at its value from the moment this became true: the format, the fps,
+   * the zoom, the torch, the output orientation and the frame processor's
+   * identity. vision-camera resets AE and focus to continuous on a format,
+   * fps or orientation change and rebinds its outputs on a new frame
+   * processor — mid-capture that voids an exposure lock and can hand the
+   * capture a different buffer. `<Camera>` sets it for the life of a capture.
+   */
+  latched?: boolean;
   /** Flash / torch state from ``useCapture().flash``. */
   flash?: 'off' | 'on';
   /**
@@ -222,6 +232,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     captureDepthData = false,
     keyframeQualityCapture = false,
     maxExposureMs = 0,
+    latched = false,
     guidance,
     style,
     cameraProps,
@@ -478,6 +489,18 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         : { width: size.h * contentAspect, height: size.h };
   }
 
+  // ── THE LATCH (M5) — see `latched`. The snapshot is taken on the render
+  // the latch rises and returned unchanged until it falls; the live values
+  // take over again on the render it falls.
+  const held = useLatchedWhile(latched, {
+    format,
+    fps,
+    zoom,
+    torch: (flash === 'on' ? 'on' : 'off') as 'on' | 'off',
+    outputOrientation: (highResCapture ? 'preview' : 'device') as 'preview' | 'device',
+    frameProcessor: cameraProps?.frameProcessor,
+  });
+
   if (!ready) {
     return (
       <View style={[styles.root, style]} onLayout={onRootLayout}>
@@ -501,11 +524,11 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         photo
         video={video}
         // Pin preview + photo to the same 4:3 format (WYSIWYG capture).
-        format={format}
+        format={held.format}
         // Run the session at the format's fps (≤60) for a smooth pan preview.
-        {...(fps != null ? { fps } : {})}
+        {...(held.fps != null ? { fps: held.fps } : {})}
         // v0.13.2 — multi-cam lens switch via zoom (undefined = default).
-        {...(zoom != null ? { zoom } : {})}
+        {...(held.zoom != null ? { zoom: held.zoom } : {})}
         // Orient the captured pixels.  Default `"device"` follows the
         // accelerometer — but when the phone is held FLAT over a document
         // (scanning), the device orientation is ambiguous, so the first shot
@@ -513,7 +536,7 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         // we use `"preview"`, which matches the on-screen PREVIEW/UI
         // orientation (stable, what the user actually sees) instead of the
         // accelerometer — "what you see is what was taken", deterministically.
-        outputOrientation={highResCapture ? 'preview' : 'device'}
+        outputOrientation={held.outputOrientation}
         // Show the full camera FOV — no cropping.  'contain' maps to
         // AVLayerVideoGravity.resizeAspect on iOS and the equivalent
         // on Android, letterboxing the preview to the sensor's exact
@@ -546,9 +569,14 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         {...(captureDepthData && Platform.OS === 'ios'
           ? { enableDepthData: true }
           : {})}
-        torch={flash === 'on' ? 'on' : 'off'}
+        torch={held.torch}
         onError={handleVcError}
         {...cameraProps}
+        // AFTER the spread: while latched, the processor vision-camera runs is
+        // the one it had when the capture began.
+        {...(latched && held.frameProcessor != null
+          ? { frameProcessor: held.frameProcessor }
+          : {})}
       />
       {guidance ? (
         <View style={styles.guidance} pointerEvents="none" accessible accessibilityRole="text">
@@ -601,3 +629,17 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
 });
+
+/**
+ * `value` while `latched` is false; while it is true, the `value` from the
+ * render on which it became true. Exported for tests.
+ */
+export function useLatchedWhile<T>(latched: boolean, value: T): T {
+  const ref = useRef<{ v: T } | null>(null);
+  if (!latched) {
+    ref.current = null;
+    return value;
+  }
+  if (ref.current == null) ref.current = { v: value };
+  return ref.current.v;
+}

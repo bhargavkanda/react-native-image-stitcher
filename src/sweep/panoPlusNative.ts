@@ -80,6 +80,33 @@ export function panoPlusIsAvailable(): boolean {
   return getModule() != null;
 }
 
+/**
+ * M5 — can this binary run a sweep on `<Camera>`'s own vision-camera camera?
+ *
+ * Android: the live module has taken the plugin arm since S5 (a build without
+ * the plugin is refused by the plugin acquisition instead). iOS: the native
+ * module must SAY so — `vcArmSupported`, exported since M5 — because an older
+ * iOS binary IGNORES `vcPluginArm` and opens its own `AVCaptureSession` behind
+ * the preview. So an absent answer is NO, and the hold is refused by name.
+ */
+export function panoPlusVcArmSupported(platformOS: string): boolean {
+  if (platformOS === 'android') return true;
+  const m = getModule() as unknown as
+    | { vcArmSupported?: unknown; getConstants?: () => unknown }
+    | null;
+  if (m == null) return false;
+  if (m.vcArmSupported === true) return true;
+  if (typeof m.getConstants === 'function') {
+    try {
+      const c = m.getConstants() as { vcArmSupported?: unknown } | null;
+      return c?.vcArmSupported === true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 /** Thrown (as a rejection) when the module is absent, with the same `code`
  *  shape a native rejection carries so ONE `panoPlusErrorInfo` handles both. */
 function unavailable(): Error & { code: string } {
@@ -155,6 +182,17 @@ export function startPanoPlus(
         : {}),
       ...(r.avfSource != null && typeof r.avfSource === 'object'
         ? { avfSource: r.avfSource as Record<string, unknown> }
+        : {}),
+      // ── M5: WHICH CAMERA FED IT ─────────────────────────────────────────
+      // Kept, because the iOS host arm FAILS CLOSED on its absence: a binary
+      // that does not say `'vc-plugin'` opened a camera of its own. Dropping
+      // it here would cancel every real sweep on that arm.
+      ...(typeof r.frameSource === 'string' ? { frameSource: r.frameSource } : {}),
+      ...(typeof r.opensAvCaptureSession === 'boolean'
+        ? { opensAvCaptureSession: r.opensAvCaptureSession }
+        : {}),
+      ...(r.vcArm != null && typeof r.vcArm === 'object'
+        ? { vcArm: r.vcArm as Record<string, unknown> }
         : {}),
       ...(r.cameraLock != null && typeof r.cameraLock === 'object'
         ? { cameraLock: r.cameraLock as PanoPlusStarted['cameraLock'] }

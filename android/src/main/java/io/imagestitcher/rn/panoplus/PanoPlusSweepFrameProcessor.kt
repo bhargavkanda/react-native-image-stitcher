@@ -149,7 +149,10 @@ class PanoPlusSweepFrameProcessor(
         // check passing. Refused by name instead.
         val orient = bufferOrientation(frame)
         if (orient != null) {
-            PanoPlusVcFrameSink.notePreOfferRefusal()
+            // Named for the live status (M5) — the same names the iOS arm uses.
+            PanoPlusVcFrameSink.noteDeviceRefusal(
+                if (orient.startsWith("buffer mirrored")) "mirrored-buffer" else "rotated-buffer",
+            )
             return mapOf("ingested" to false, "why" to orient)
         }
         val out = PanoPlusVcFrameSink.acquireBuffer(w * h * 3 / 2)

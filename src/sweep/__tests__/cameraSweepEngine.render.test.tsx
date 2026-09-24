@@ -146,16 +146,16 @@ describe('<Camera engine="sweep">', () => {
    * clearing effect (the review cycle), and putting the sweep's lifecycle
    * callbacks back on the shared preview element (the engine round trip).
    */
-  it('⚑ iOS: renders NO camera on the sweep path — the AVF arm owns it', () => {
-    // Not a style preference. On iOS `poseSource: 'imu'` starts
-    // `RNISPanoAvfSource`, which opens its own AVCaptureSession on a
-    // physical back device; a `<CameraView>` beside it is two stacks on one
-    // camera, and `canAddInput` will usually let that happen quietly.
-    //
-    // Non-vacuous as of the positive control below: the keyframe path in
-    // this same harness mounts one.
+  it('⚑ iOS (M5): the sweep runs on <Camera>\'s OWN camera — one <CameraView>, and the surface owns none', async () => {
+    // Until M5 an iOS non-AR sweep opened pano+'s OWN AVCaptureSession
+    // (`RNISPanoAvfSource`) and this case pinned ZERO previews beside it. Now
+    // vision-camera owns the camera on both platforms and the sweep is fed from
+    // it; the surface is told the host owns it and asks native to open nothing.
     const tree = render({ engine: 'sweep' });
-    expect(tree.root.findAllByType(CameraView)).toHaveLength(0);
+    // The AR-support probe holds the preview back until it settles.
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(tree.root.findAllByType(CameraView)).toHaveLength(1);
+    expect(surfaceProps(tree).frameSource).toBe('host');
     act(() => { tree.unmount(); });
   });
 
@@ -819,34 +819,17 @@ describe('<Camera engine="sweep">', () => {
   //  S7 — WHO OWNS THE CAMERA
   // ══════════════════════════════════════════════════════════════════
 
-  it('⚑ keeps the surface OWNING the camera when the host cannot serve it', () => {
-    // ⚠ THIS CASE ASSERTED `'host'` WHEN S7 SHIPPED, AND THAT WAS THE BUG.
-    //
-    // `frameSource` is not "is this the non-AR arm?" — it is "will the
-    // native recorder open NOTHING?", and on the non-AR arm those are
-    // different questions. Two independent reasons make the answer `'own'`
-    // in this harness, and each one is a real device state:
-    //
-    //   * `Platform.OS === 'ios'` (pinned by the render mock). Nothing under
-    //     `ios/` reads `vcPluginArm`; `poseSource: 'imu'` starts
-    //     `RNISPanoAvfSource`, which opens its OWN AVCaptureSession. Saying
-    //     `'host'` there mounts `<CameraView>` beside that session, and
-    //     because `canAddInput` tests configuration compatibility rather
-    //     than runtime exclusivity the second open usually SUCCEEDS — no
-    //     error, just one of the two interrupted moments later.
-    //   * `useCameraDevice()` returns null (also pinned, also deliberate),
-    //     so there is no device id for the recorder to read intrinsics from.
-    //
-    // The failure the original comment described is real and still guarded —
-    // a surface that opens its AVF idle viewfinder while `<CameraView>` holds
-    // the back camera takes ERROR_CAMERA_IN_USE at MOUNT, before any hold.
-    // It is guarded by the predicate, whose rows are in
-    // `sweepHostOwnsCamera.test.ts`; what this case pins is that the fallback
-    // direction is the SAFE one. Both arms owning nothing is a black screen;
-    // both arms owning their own camera is merely the pre-S7 behaviour.
+  it('⚑ M5: when the host camera cannot serve a hold, the hold is REFUSED — the surface never takes a camera', () => {
+    // This case used to pin `'own'` on iOS: the fallback direction was "the
+    // surface opens pano+'s own camera". Since M5 there is no such direction
+    // on the non-AR arm. This harness's native module predates the iOS
+    // vision-camera arm (no `vcArmSupported` constant) — the exact binary that
+    // would open a second AVCaptureSession if sent the arm — so the hold is
+    // refused by name, and ownership stays with `<Camera>`.
     const tree = render({ engine: 'sweep' });   // defaultCaptureSource is non-AR
-    expect(surfaceProps(tree).frameSource).toBe('own');
-    expect(surfaceProps(tree).vcPluginArm).toBe(false);
+    const p = surfaceProps(tree);
+    expect(p.frameSource).toBe('host');
+    expect((p.hostArmRefusal as { code: string } | null)?.code).toBe('panoplus-vc-arm-unavailable');
     act(() => { tree.unmount(); });
   });
 
@@ -916,14 +899,14 @@ describe('<Camera engine="sweep">', () => {
     // `SweepOptions` now omits all three, so this no longer type-checks —
     // hence the cast, which is what an untyped JS host effectively does.
     const hostile = {
-      frameSource: 'host',
-      vcPluginArm: true,
+      frameSource: 'own',
+      vcPluginArm: false,
       vcCameraId: 'HOST-SUPPLIED-99',
     } as unknown as Record<string, unknown>;
     const p = surfaceProps(render({ engine: 'sweep', sweep: hostile }));
-    expect(p.frameSource).toBe('own');        // <Camera>'s answer, not the bag's
-    expect(p.vcPluginArm).toBe(false);
-    expect(p.vcCameraId).toBe('');
+    expect(p.frameSource).toBe('host');       // <Camera>'s answer, not the bag's
+    expect(p.vcPluginArm).toBe(true);
+    expect(p.vcCameraId).toBe('');            // the device's id (none here), not the bag's
   });
 
   it('⚑ D9: a bag poseSource cannot pull the arm away from the camera the predicate judged', () => {
@@ -934,10 +917,9 @@ describe('<Camera engine="sweep">', () => {
       engine: 'sweep', sweep: { poseSource: 'ar' } as never,
     }));
     expect(p.poseSource).toBe('imu');
-    // iOS (this harness): the vision-camera arm lands with M5, so the surface
-    // still owns its camera here.
-    expect(p.frameSource).toBe('own');
-    expect(p.vcPluginArm).toBe(false);
+    // M5: the non-AR arm is `<Camera>`'s camera on iOS too.
+    expect(p.frameSource).toBe('host');
+    expect(p.vcPluginArm).toBe(true);
   });
 
   it('⚑ never declares host ownership without also asking for the arm', () => {
@@ -958,14 +940,13 @@ describe('<Camera engine="sweep">', () => {
     ]) {
       const tree = render(props);
       const p = surfaceProps(tree);
-      // The predicate's answer for the state this harness pins: iOS, whose
-      // vision-camera arm lands with M5.
+      // The predicate's answer for the state this harness pins on its first
+      // render: non-AR (the AR probe has not answered yet), no hatch.
       const owns = hostOwns({
         isAR: false,
-        platformOS: 'ios',
         frameSourceOverride: undefined,
       });
-      expect(owns).toBe(false);
+      expect(owns).toBe(true);
       expect(p.frameSource).toBe(owns ? 'host' : 'own');
       expect(p.vcPluginArm).toBe(owns);
       expect(p.vcCameraId).toBe('');
@@ -985,7 +966,13 @@ describe('<Camera engine="sweep">', () => {
     // for the wrong reason on the non-AR arm.
     const tree = render({ engine: 'sweep', defaultCaptureSource: 'ar' });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    // M5: until the probe answers the arm is non-AR (the host's camera); the
+    // flip to AR is a HANDOFF, so the surface takes its camera only after the
+    // settle window — and <Camera> mounts no preview meanwhile.
+    expect(tree.root.findAllByType(CameraView)).toHaveLength(0);
+    act(() => { jest.advanceTimersByTime(1000); });
     expect(surfaceProps(tree).frameSource).toBe('own');
+    expect(tree.root.findAllByType(CameraView)).toHaveLength(0);
     act(() => { tree.unmount(); });
   });
 

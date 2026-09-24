@@ -462,6 +462,7 @@ export function coercePanoPlusStatus(raw: unknown): PanoPlusStatus | null {
     // drive stays silent because it is gated on the NOTE, never on `!attached`.
     viewfinderAttached: s.viewfinderAttached === true,
     viewfinderNote: str(s.viewfinderNote),
+    vcDeviceRefusal: nullableStr(s.vcDeviceRefusal),
     droppedQueue: num(s.droppedQueue),
     droppedPack: num(s.droppedPack),
     engineMs: num(s.engineMs),
@@ -4162,6 +4163,21 @@ export function panoPlusFailureCopy(f: PanoPlusFailure): string {
   switch (f.code) {
     case 'panoplus-unavailable':
       return 'pano+ is not in this build — the AR frame-plugin framework is not linked.';
+    // ── M5: THE iOS VISION-CAMERA ARM'S REFUSALS ─────────────────────────────
+    // Each names what is wrong with THIS camera; none falls back to another.
+    case 'panoplus-vc-arm-unavailable':
+      return (
+        'This build cannot sweep on the camera on screen: its native module '
+        + 'predates the vision-camera arm. Rebuild the app. '
+        + f.message
+      );
+    case 'panoplus-vc-device-unsupported':
+    case 'panoplus-vc-basis-unverified':
+      return `The sweep cannot run on this camera. ${f.message}`;
+    case 'panoplus-vc-format-below-30fps':
+      return `The camera is running too slowly for a sweep. ${f.message}`;
+    case 'panoplus-vc-zoom-not-1':
+      return `Zoom back to 1× for the sweep. ${f.message}`;
     case 'panoplus-plugin-unavailable':
       return (
         'The sweep cannot run on this screen\'s camera: its frame processor '
@@ -4570,6 +4586,86 @@ function panoPlusArmNoticeForArm(
  * `fallbackToAr: false` and really does run the requested lens on the
  * decoupled arm.
  */
+/**
+ * M5 — THE iOS ARM ON `<Camera>`'S OWN CAMERA (vision-camera).
+ *
+ * The ladder above belongs to pano+'s own AVF camera: it reads a calibration
+ * store for τ and the basis and, when either is missing, falls back to ARKit —
+ * a different camera behind the one on screen. None of that applies here:
+ *
+ *   · τ is 0 by default on this arm (D2) — the same as every Android IMU
+ *     sweep — so there is nothing to measure before Start;
+ *   · the basis is DERIVED natively from the open camera when the hold starts
+ *     (D3), and a camera whose basis has not been measured is refused THEN, by
+ *     name;
+ *   · there is no fallback: the device-level refusals (a front or multi-lens
+ *     camera, a zoom, a slow format) are named rejections of the hold.
+ *
+ * So the notice is a statement, not a precondition, and it goes to the pack
+ * (`packOnly`) rather than over the viewfinder.
+ */
+export function panoPlusIosVcHostArmNotice(
+  poseSource: PanoPlusPoseSource,
+): PanoPlusArmNotice {
+  if (poseSource !== 'imu') {
+    return {
+      tone: 'ok',
+      headline: 'Sweep on ARKit',
+      detail: 'The AR arm runs on the stitcher\'s ARKit session.',
+      canStart: true,
+      effectivePoseSource: 'ar',
+      fallbackToAr: false,
+      startLabel: 'Start sweep (ARKit)',
+    };
+  }
+  return {
+    tone: 'ok',
+    headline: 'Sweep on this camera',
+    detail:
+      'The sweep runs on the camera on screen (vision-camera) with CoreMotion '
+      + 'attitude, and pano+ opens no camera of its own. τ=0: no camera↔IMU '
+      + 'timing correction, the default on this arm. The device-to-camera basis '
+      + 'is derived from this camera when the hold starts; a camera whose basis '
+      + 'has not been measured is refused by name then.',
+    canStart: true,
+    effectivePoseSource: 'imu',
+    fallbackToAr: false,
+    tauUncorrectedRun: true,
+    packOnly: true,
+    startLabel: 'Start sweep',
+  };
+}
+
+/**
+ * M5 — the named failure for a device-level refusal the iOS vision-camera
+ * arm's frame processor reported mid-sweep (`PanoPlusStatus.vcDeviceRefusal`).
+ */
+export function panoPlusVcDeviceRefusalFailure(
+  refusal: string,
+): { code: string; message: string } {
+  if (refusal === 'zoom-not-1') {
+    return {
+      code: 'panoplus-vc-zoom-not-1',
+      message: 'The camera was zoomed during the sweep. The sweep derives its '
+        + 'focal length from the unzoomed lens, so it was discarded rather '
+        + 'than painted at the wrong scale.',
+    };
+  }
+  const what = refusal === 'mirrored-buffer'
+    ? 'mirrored'
+    : refusal === 'rotated-buffer'
+      ? 'not the camera\'s landscape sensor raster'
+      : refusal === 'orientation-changed'
+        ? 're-oriented part-way through'
+        : `refused (${refusal})`;
+  return {
+    code: 'panoplus-vc-device-unsupported',
+    message: `The camera's frames were ${what}, so the device-to-camera basis `
+      + 'no longer described them. The sweep was discarded rather than painted '
+      + 'on the wrong basis.',
+  };
+}
+
 export function panoPlusArmNotice(
   poseSource: PanoPlusPoseSource,
   plan: Parameters<typeof panoPlusArmNoticeForArm>[1],
@@ -5019,6 +5115,61 @@ export function panoPlusCaptureWarnings(
   }];
 }
 
+/**
+ * D3 — THE IMAGE-SIDE CHECK OF THE DEVICE-TO-CAMERA BASIS.
+ *
+ * The latch records two motion vectors at the moment it decided the sweep's
+ * axis: `rotationPx`, the motion the IMU attitude PREDICTS through the basis
+ * C, and `totalPx`, the motion the IMAGE registration measured. On a correct
+ * basis and a sweep that is mostly rotation they point the same way; a wrong
+ * basis (a quarter turn, a flipped axis) makes the prediction point
+ * elsewhere, and the residual channel quietly makes up the difference. They
+ * were recorded on every pack and read by nothing.
+ *
+ * ADVISORY — it gates nothing. `not-measurable` when the image moved too
+ * little, or when rotation explains too little of the motion (a walk, where
+ * translation dominates and the prediction is small by nature). The
+ * thresholds are first estimates; the offline negative control (a replay with
+ * a deliberately wrong basis) is what calibrates them.
+ */
+export interface PanoPlusBasisImageCheck {
+  verdict: 'agrees' | 'disagrees' | 'not-measurable';
+  /** cos of the angle between the two vectors; null when not measurable. */
+  cos: number | null;
+  rotationPx: number;
+  totalPx: number;
+}
+
+export const PANO_PLUS_BASIS_CHECK = {
+  /** Below this image motion (canvas px) the direction is noise. */
+  minTotalPx: 40,
+  /** Rotation must explain at least this share of the motion's length. */
+  minRotationShare: 0.25,
+  /** cos 45°: the prediction and the measurement point the same way. */
+  agreeCos: 0.707,
+} as const;
+
+export function panoPlusBasisImageCheck(
+  latch: { rotationPx: [number, number]; totalPx: [number, number] } | null | undefined,
+): PanoPlusBasisImageCheck {
+  const r = latch?.rotationPx ?? [0, 0];
+  const t = latch?.totalPx ?? [0, 0];
+  const rot = Math.hypot(r[0], r[1]);
+  const tot = Math.hypot(t[0], t[1]);
+  if (!Number.isFinite(rot) || !Number.isFinite(tot)
+    || tot < PANO_PLUS_BASIS_CHECK.minTotalPx
+    || rot < PANO_PLUS_BASIS_CHECK.minRotationShare * tot) {
+    return { verdict: 'not-measurable', cos: null, rotationPx: rot, totalPx: tot };
+  }
+  const cos = (r[0] * t[0] + r[1] * t[1]) / (rot * tot);
+  return {
+    verdict: cos >= PANO_PLUS_BASIS_CHECK.agreeCos ? 'agrees' : 'disagrees',
+    cos,
+    rotationPx: rot,
+    totalPx: tot,
+  };
+}
+
 export function panoPlusVerdictSidecar(
   result: PanoPlusCaptureResult,
   ctx?: { writtenAtMs?: number },
@@ -5057,6 +5208,8 @@ export function panoPlusVerdictSidecar(
         ].filter((s): s is string => s != null && s !== ''),
       },
       residuals,
+      // D3 — the image-side check of the basis the sweep ran on. Advisory.
+      basisImageCheck: panoPlusBasisImageCheck(result.summary.latch),
       // WHY THIS FILE EXISTS, inside the file. A sidecar whose purpose lives
       // only in the commit that added it is a sidecar the next reader deletes.
       note:

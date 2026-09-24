@@ -137,6 +137,19 @@ internal object PanoPlusVcFrameSink {
     val framesRefusedPreOffer: Long get() = refusedPreOffer.get()
     val framesRefusedPostAcquire: Long get() = refusedPostAcquire.get()
     fun notePreOfferRefusal() { refusedPreOffer.incrementAndGet() }
+
+    /**
+     * M5 — the FIRST device-level refusal of this sweep (`rotated-buffer` /
+     * `mirrored-buffer`), for the live status: the frames are refused, so the
+     * sweep cannot paint, and the host discards it by name the moment the
+     * status carries this — the same key the iOS arm reports.
+     */
+    @Volatile var firstDeviceRefusal: String? = null
+        private set
+    fun noteDeviceRefusal(name: String) {
+        refusedPreOffer.incrementAndGet()
+        if (firstDeviceRefusal == null) firstDeviceRefusal = name
+    }
     fun notePostAcquireRefusal() { refusedPostAcquire.incrementAndGet() }
 
     /** Bumped on every arm, so a plugin can re-latch its frame size per sweep. */
@@ -164,6 +177,7 @@ internal object PanoPlusVcFrameSink {
             superseded.set(0)
             droppedAtDisarm.set(0)
             refusedPreOffer.set(0)
+            firstDeviceRefusal = null
             refusedPostAcquire.set(0)
             seq.set(0)
             generation.incrementAndGet()

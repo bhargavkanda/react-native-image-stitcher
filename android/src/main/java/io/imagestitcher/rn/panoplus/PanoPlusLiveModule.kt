@@ -956,6 +956,7 @@ class PanoPlusLiveModule(
             // instead of guessing. See the recorder's own note.
             copyString(rec, out, "arTrackingFailure")
             copyString(rec, out, "poseSourceRan")
+            copyString(rec, out, "vcDeviceRefusal")
             out.putDouble("poseSolved", optDbl(rec, "poseSolved", 0.0))
             out.putDouble("poseWaited", optDbl(rec, "poseWaited", 0.0))
             out.putDouble("poseWaitTimedOut", optDbl(rec, "poseWaitTimedOut", 0.0))

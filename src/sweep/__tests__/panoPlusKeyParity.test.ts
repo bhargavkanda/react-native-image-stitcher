@@ -96,6 +96,10 @@ const KOTLIN_CHAINS: Record<'status' | 'summary', Record<string, Array<[string, 
       ['PanoPlusAndroidRecorder.kt', 'statusMap', 'putString("arTrackingFailure"'],
       ['PanoPlusLiveModule.kt', 'getStatus', 'copyString(rec, out, "arTrackingFailure")'],
     ],
+    vcDeviceRefusal: [
+      ['PanoPlusAndroidRecorder.kt', 'statusMap', 'putString(\n            "vcDeviceRefusal"'],
+      ['PanoPlusLiveModule.kt', 'getStatus', 'copyString(rec, out, "vcDeviceRefusal")'],
+    ],
   },
   summary: {},
 };
@@ -293,6 +297,14 @@ function iosProducedPaths(src: string): { status: Set<string>; summary: Set<stri
   return { status, summary };
 }
 
+/**
+ * M5 — status keys the iOS BRIDGE adds on top of RNISPanoCore's literal, each
+ * with the exact form that puts it in `getStatus`'s answer.
+ */
+const IOS_BRIDGE_STATUS: Record<string, [string, string]> = {
+  vcDeviceRefusal: ['ios/PanoPlus/PanoPlusBridge.swift', 'st["vcDeviceRefusal"] = r'],
+};
+
 /** Blocks built at run time in Swift: checked by leaf, in their own producer only. */
 const IOS_RUNTIME_BLOCKS: Record<string, string> = {
   'exposure.lock': 'ios/PanoPlus/RNISPanoCameraLock.swift',
@@ -302,6 +314,10 @@ const IOS_RUNTIME_BLOCKS: Record<string, string> = {
 function iosMissing(read: string[], produced: Set<string>): string[] {
   return read.filter((k) => {
     if (covered(k, IOS_NOT_APPLICABLE)) return false;
+    const bridge = IOS_BRIDGE_STATUS[k];
+    if (bridge != null) {
+      return !fs.readFileSync(path.join(ROOT, bridge[0]), 'utf8').includes(bridge[1]);
+    }
     const block = Object.keys(IOS_RUNTIME_BLOCKS).find((b) => k.startsWith(`${b}.`));
     if (block != null) {
       return !literalsIn([path.join(ROOT, IOS_RUNTIME_BLOCKS[block]!)]).has(k.split('.').pop()!);

@@ -259,6 +259,7 @@ import {
 } from '../stitching/incremental';
 import { useFrameProcessorDriver } from '../stitching/useFrameProcessorDriver';
 import { useSweepWorklet } from '../sweep/useSweepWorklet';
+import { panoPlusVcArmSupported } from '../sweep/panoPlusNative';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
 import { cropSiblingPath, toBareFilePath, toFileUri } from '../utils/paths';
@@ -495,6 +496,24 @@ export type CameraErrorCode =
    * object is on `.cause` for inspection.
    */
   | 'VISION_CAMERA_RUNTIME'
+  /**
+   * M5 — a sweep hold refused because the camera on screen cannot carry one:
+   * a front camera, a camera that combines several lenses (its focal length
+   * changes under zoom without notice), or — on iOS — a camera whose
+   * device-to-camera basis has not been measured. The sweep's own code is on
+   * `.cause`. Never answered by opening another camera.
+   */
+  | 'SWEEP_DEVICE_UNSUPPORTED'
+  /** M5 — the camera is running below 30 fps; a sweep would smear. */
+  | 'SWEEP_FORMAT_BELOW_30FPS'
+  /** M5 — the camera is zoomed; the sweep's focal length is the 1× lens's. */
+  | 'SWEEP_ZOOM_NOT_1'
+  /**
+   * M5 — the camera went inactive (the app was backgrounded) while a capture
+   * was recording, so the capture was discarded rather than finished on a
+   * camera that had stopped delivering frames.
+   */
+  | 'CAPTURE_INTERRUPTED'
   | 'UNKNOWN';
 
 
@@ -3328,6 +3347,40 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // did not interrupt.
   }, [engine]);
 
+  // ── M5: THE CAMERA WENT INACTIVE MID-CAPTURE — DISCARDED, BY NAME ────────
+  // `isActive` follows `appActive`, so a backgrounded app stops the camera the
+  // capture is being fed from. Finishing that capture would ship whatever was
+  // painted before the camera stopped as if it were complete; the capture is
+  // discarded on either engine and the host is told why.
+  const prevAppActiveRef = useRef(appActive);
+  useEffect(() => {
+    const was = prevAppActiveRef.current;
+    prevAppActiveRef.current = appActive;
+    if (!was || appActive || !captureRecording) return;
+    if (sweepRunning) {
+      sweepRef.current?.abandon?.('camera-inactive');
+    } else if (statusPhase === 'recording') {
+      clearPanTimer();
+      fpDriver.stop();
+      void (async () => {
+        try {
+          await incremental.cancel();
+        } catch {
+          // the discard below is the outcome either way
+        } finally {
+          setStatusPhase('idle');
+          setRecordingStartedAt(null);
+        }
+      })();
+    }
+    onError?.(new CameraError(
+      'CAPTURE_INTERRUPTED',
+      'The camera went inactive while a capture was recording, so the capture '
+        + 'was discarded rather than finished on a camera that had stopped.',
+    ));
+    // Deps: the appActive EDGE only, like the engine switch above.
+  }, [appActive]);
+
   // ── Keyframe thumbnails ──────────────────────────────────────────────
   // perf-3a change 4: Camera.tsx no longer keeps its OWN
   // `subscribeIncrementalState` + `incrementalState` useState (the SECOND
@@ -5007,6 +5060,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // permission/Face-ID prompt, the app-switcher peek), which would
         // black-flash the preview mid-capture. See the `appActive` note.
         isActive={appActive}
+        // M5 — THE CAMERA'S CONFIGURATION IS HELD FOR THE LIFE OF A CAPTURE.
+        // vision-camera rebuilds its session — and resets AE and focus to
+        // continuous — on any format, fps or orientation change, and a new
+        // frame-processor identity rebinds its outputs. Mid-capture that
+        // voids the exposure lock and can hand the sweep a different buffer.
+        // Engine-neutral: the keyframe capture gets the same stability.
+        latched={captureRecording}
         // iOS depth sidecar for tap photos (non-AR only): turns on
         // vision-camera depth delivery + the depth-capable format bias;
         // useCapture (threaded above) extracts the sidecar before the
@@ -5123,9 +5183,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // `sweepHostOwnsCamera`.
   const sweepPoseSource: 'ar' | 'imu' = isAR ? 'ar' : 'imu';
   const sweepLens: 'wide' | 'ultraWide' = lens === '0.5x' ? 'ultraWide' : 'wide';
+  // Asked once per mount: a binary's capabilities do not change under it.
+  const nativeVcArmSupported = useMemo(() => panoPlusVcArmSupported(Platform.OS), []);
   const hostOwnsSweepCameraLive = sweepHostOwnsCamera({
     isAR,
-    platformOS: Platform.OS,
     frameSourceOverride: sweep?.frameSourceOverride,
   });
   // …and when the host camera cannot serve a hold right now, the hold is
@@ -5137,6 +5198,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       lens,
       pluginReady: sweepDriver.isReady,
       pluginUnavailable: sweepDriver.unavailable,
+      nativeVcArm: nativeVcArmSupported,
       cameraUnmounting: cameraShouldUnmount(
         inFlightTransition,
         arSupportPending,
@@ -6318,7 +6380,7 @@ export const _stitcherForNativeForTests = stitcherForNative;
  * sweepHostOwnsCamera — on `engine="sweep"`, is `<Camera>`'s own
  * `<CameraView>` the camera the sweep runs on?
  *
- * ── M3 (2026-09-24): ON ANDROID NON-AR, ALWAYS ─────────────────────────
+ * ── M3 (2026-09-24) / M5: NON-AR, ALWAYS, ON BOTH PLATFORMS ─────────────
  *
  * It used to answer "no" whenever any of six conditions failed — the plugin
  * not yet acquired, no device id, the multicam 0.5× lens, a host frame
@@ -6330,7 +6392,9 @@ export const _stitcherForNativeForTests = stitcherForNative;
  * `<Camera>`'s own state and nothing else:
  *
  *   · AR     → the stitcher's AR session (this predicate is not asked);
- *   · non-AR → vision-camera's `<CameraView>` — on Android now, on iOS with M5.
+ *   · non-AR → vision-camera's `<CameraView>`, on Android (M3) and iOS (M5).
+ *     A binary that cannot run that arm is REFUSED by name
+ *     (`panoplus-vc-arm-unavailable`), never handed pano+'s own camera.
  *
  * The pose arm follows the same state: `isAR` ⇒ 'ar', else 'imu' (D9 — the
  * host bag's `poseSource`/`lens` overrides are gone; they made `<Camera>`'s AR
@@ -6343,8 +6407,6 @@ export const _stitcherForNativeForTests = stitcherForNative;
  */
 export interface SweepHostOwnsCameraInput {
   isAR: boolean;
-  /** `Platform.OS`. */
-  platformOS: string;
   /** `sweep?.frameSourceOverride` — the DR-1a reference hatch, or undefined. */
   frameSourceOverride: 'own' | undefined;
 }
@@ -6352,7 +6414,6 @@ export interface SweepHostOwnsCameraInput {
 /** The keys at RUNTIME, for the truth table; exhaustiveness enforced by tsc. */
 export const SWEEP_HOST_OWNS_INPUT_KEYS = [
   'isAR',
-  'platformOS',
   'frameSourceOverride',
 ] as const;
 
@@ -6365,9 +6426,7 @@ const _sweepOwnsKeysAreExhaustive: _SweepOwnsKeysAreExhaustive = true;
 void _sweepOwnsKeysAreExhaustive;
 
 function sweepHostOwnsCamera(input: SweepHostOwnsCameraInput): boolean {
-  return !input.isAR
-    && input.platformOS === 'android'
-    && input.frameSourceOverride !== 'own';
+  return !input.isAR && input.frameSourceOverride !== 'own';
 }
 
 /** @internal test-only — see `sweepHostOwnsCamera`. */
@@ -6455,6 +6514,12 @@ export interface SweepHostArmRefusalInput {
   pluginReady: boolean;
   /** Acquisition gave up: the plugin is not in this build. */
   pluginUnavailable: boolean;
+  /**
+   * M5 — the native module can run the vision-camera arm
+   * (`panoPlusVcArmSupported`). An older iOS binary ignores the arm and opens
+   * its own AVCaptureSession, so false is refused rather than sent.
+   */
+  nativeVcArm: boolean;
   /** `cameraShouldUnmount(...)` — a switch, probe or stitch is in flight. */
   cameraUnmounting: boolean;
   /** `capture.device?.id ?? ''`. */
@@ -6472,7 +6537,20 @@ export interface SweepHostArmRefusalInput {
 export function sweepFailureCameraCode(code: string | null | undefined): CameraErrorCode {
   switch (code) {
     case 'panoplus-plugin-unavailable':
+    case 'panoplus-vc-arm-unavailable':
       return 'ENGINE_UNAVAILABLE';
+    // M5 — the camera on screen cannot carry a sweep; refused by name, never
+    // answered with another camera.
+    case 'panoplus-vc-device-unsupported':
+    case 'panoplus-vc-basis-unverified':
+    case 'panoplus-refused-zoom-lens':
+      return 'SWEEP_DEVICE_UNSUPPORTED';
+    case 'panoplus-vc-format-below-30fps':
+      return 'SWEEP_FORMAT_BELOW_30FPS';
+    case 'panoplus-vc-zoom-not-1':
+      return 'SWEEP_ZOOM_NOT_1';
+    case 'panoplus-camera-inactive':
+      return 'CAPTURE_INTERRUPTED';
     default:
       return 'PANORAMA_START_FAILED';
   }
@@ -6522,6 +6600,14 @@ export function sweepHostArmRefusal(
       code: 'panoplus-plugin-unavailable',
       message: 'This sweep cannot start: its frame processor '
         + '(panoplus_sweep_ingest) is not in this build.',
+    };
+  }
+  if (!i.nativeVcArm) {
+    return {
+      code: 'panoplus-vc-arm-unavailable',
+      message: 'This sweep cannot start: this app\'s native module predates '
+        + 'sweeping on the camera on screen, and it would open a second camera '
+        + 'of its own. Rebuild the app.',
     };
   }
   if (!i.pluginReady) {
